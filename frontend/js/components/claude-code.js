@@ -10,6 +10,10 @@
   var S = App.state;
   var U = App.utils;
 
+  // ── Agent/task tool detection sets ──
+  var AGENT_TOOLS = { Agent: 1, SendMessage: 1, TeamCreate: 1 };
+  var TASK_TOOLS = { TaskCreate: 1, TaskUpdate: 1, TaskGet: 1, TaskList: 1, TaskStop: 1, TaskOutput: 1 };
+
   App.claudeCode = {
     // Check if a model ID is a Claude subscription model
     isClaudeCodeModel: function(modelId) {
@@ -117,6 +121,8 @@
       var buffer = '';
       var pendingPermission = null;
       var toolPanels = {};
+      var agentPanels = {};  // toolId → { panel, contentArea, taskList }
+      var taskItems = {};    // taskId → { element, status }
       var startTime = performance.now();
       var timerInterval = null;
 
@@ -147,7 +153,7 @@
 
             try {
               var evt = JSON.parse(payload);
-              App.claudeCode._handleEvent(evt, contentEl, assistantEl, toolPanels, {
+              App.claudeCode._handleEvent(evt, contentEl, assistantEl, toolPanels, agentPanels, taskItems, {
                 cleared: cleared,
                 setClear: function() { cleared = true; },
                 appendText: function(text) { fullContent += text; },
@@ -172,29 +178,40 @@
       return { content: fullContent, pendingPermission: pendingPermission };
     },
 
+    // Resolve the target container — if event has parent_tool_use_id pointing
+    // to an agent panel, render inside that agent's content area instead.
+    _resolveTarget: function(evt, contentEl, agentPanels) {
+      var parentId = evt.parent_tool_use_id;
+      if (parentId && agentPanels[parentId]) {
+        return agentPanels[parentId].contentArea;
+      }
+      return contentEl;
+    },
+
     // Handle a single NDJSON event from the Claude Code stream
-    _handleEvent: function(evt, contentEl, assistantEl, toolPanels, ctx) {
+    _handleEvent: function(evt, contentEl, assistantEl, toolPanels, agentPanels, taskItems, ctx) {
       var evtType = evt.type || '';
+      var target = App.claudeCode._resolveTarget(evt, contentEl, agentPanels);
 
       switch (evtType) {
         case 'stream_event':
-          App.claudeCode._handleStreamEvent(evt, contentEl, ctx);
+          App.claudeCode._handleStreamEvent(evt, target, ctx);
           break;
 
         case 'assistant':
           // Complete assistant turn — may contain tool_use blocks
-          App.claudeCode._handleAssistantMessage(evt, contentEl, toolPanels, ctx);
+          App.claudeCode._handleAssistantMessage(evt, target, toolPanels, agentPanels, taskItems, ctx);
           break;
 
         case 'user':
           // Tool results
           if (evt.message && evt.message.content) {
-            App.claudeCode._handleToolResult(evt, contentEl, toolPanels);
+            App.claudeCode._handleToolResult(evt, target, toolPanels, agentPanels, taskItems);
           }
           break;
 
         case 'control_request':
-          App.claudeCode._handlePermissionRequest(evt, contentEl, ctx);
+          App.claudeCode._handlePermissionRequest(evt, target, ctx);
           break;
 
         case 'result':
@@ -204,12 +221,12 @@
         case 'system':
           // api_retry, compact_boundary — show status
           if (evt.subtype === 'api_retry') {
-            App.claudeCode._showStatus(contentEl, I18n.t('claude_code.retrying', { attempt: evt.attempt || 1 }));
+            App.claudeCode._showStatus(target, I18n.t('claude_code.retrying', { attempt: evt.attempt || 1 }));
           }
           break;
 
         case 'error':
-          App.claudeCode._showStatus(contentEl, evt.message || 'Unknown error', true);
+          App.claudeCode._showStatus(target, evt.message || 'Unknown error', true);
           break;
       }
     },
@@ -256,7 +273,7 @@
     },
 
     // Handle complete assistant message (may contain tool_use)
-    _handleAssistantMessage: function(evt, contentEl, toolPanels, ctx) {
+    _handleAssistantMessage: function(evt, contentEl, toolPanels, agentPanels, taskItems, ctx) {
       var msg = evt.message || {};
       var content = msg.content || [];
       if (!Array.isArray(content)) return;
@@ -277,7 +294,14 @@
           }
         } else if (block.type === 'tool_use') {
           if (!ctx.cleared) { contentEl.textContent = ''; ctx.setClear(); }
-          App.claudeCode._renderToolCall(contentEl, block, toolPanels);
+          var toolName = block.name || '';
+          if (AGENT_TOOLS[toolName]) {
+            App.claudeCode._renderAgentCall(contentEl, block, agentPanels);
+          } else if (TASK_TOOLS[toolName]) {
+            App.claudeCode._renderTaskCall(contentEl, block, toolPanels, taskItems);
+          } else {
+            App.claudeCode._renderToolCall(contentEl, block, toolPanels);
+          }
         }
       });
       App.chat.scrollToBottom();
@@ -323,8 +347,116 @@
       toolPanels[toolId] = panel;
     },
 
+    // Render an Agent/SendMessage/TeamCreate tool call as a collapsible sub-agent panel
+    _renderAgentCall: function(contentEl, block, agentPanels) {
+      var toolId = block.id || '';
+      var toolName = block.name || 'Agent';
+      var input = block.input || {};
+
+      var panel = document.createElement('details');
+      panel.className = 'cc-agent-panel';
+      panel.setAttribute('data-tool-id', toolId);
+      panel.open = true;
+
+      var desc = input.description || input.prompt || '';
+      if (desc.length > 120) desc = desc.substring(0, 117) + '...';
+
+      var agentType = input.subagent_type || '';
+      var model = input.model || '';
+      var targetName = input.to || input.name || '';
+
+      var icon = '🤖';
+      if (toolName === 'SendMessage') icon = '💬';
+      else if (toolName === 'TeamCreate') icon = '👥';
+
+      var metaParts = [];
+      if (agentType) metaParts.push(U.escapeHtml(agentType));
+      if (model) metaParts.push(U.escapeHtml(model));
+      if (targetName) metaParts.push(U.escapeHtml(targetName));
+      var metaHtml = metaParts.length ? '<span class="cc-agent-meta">' + metaParts.join(' · ') + '</span>' : '';
+
+      var summary = document.createElement('summary');
+      summary.className = 'cc-agent-header';
+      summary.innerHTML =
+        '<span class="cc-agent-icon">' + icon + '</span>' +
+        '<span class="cc-agent-label">' + U.escapeHtml(I18n.t('claude_code.agent_spawned')) + '</span>' +
+        metaHtml +
+        '<span class="cc-tool-status pending">' + U.escapeHtml(I18n.t('claude_code.running')) + '</span>';
+      panel.appendChild(summary);
+
+      if (desc) {
+        var descEl = document.createElement('div');
+        descEl.className = 'cc-agent-desc';
+        descEl.textContent = desc;
+        panel.appendChild(descEl);
+      }
+
+      // Content area where nested sub-agent events will render
+      var contentArea = document.createElement('div');
+      contentArea.className = 'cc-agent-content';
+      panel.appendChild(contentArea);
+
+      contentEl.appendChild(panel);
+      agentPanels[toolId] = { panel: panel, contentArea: contentArea };
+    },
+
+    // Render TaskCreate/TaskUpdate/TaskGet as compact task items
+    _renderTaskCall: function(contentEl, block, toolPanels, taskItems) {
+      var toolId = block.id || '';
+      var toolName = block.name || '';
+      var input = block.input || {};
+
+      // Find or create task list container
+      var taskList = contentEl.querySelector('.cc-task-list');
+      if (!taskList) {
+        taskList = document.createElement('div');
+        taskList.className = 'cc-task-list';
+        taskList.innerHTML = '<div class="cc-task-list-header">' +
+          '<span class="cc-task-list-icon">📋</span>' +
+          '<span class="cc-task-list-label">' + U.escapeHtml(I18n.t('claude_code.task_list')) + '</span>' +
+          '</div>';
+        contentEl.appendChild(taskList);
+      }
+
+      if (toolName === 'TaskCreate') {
+        var item = document.createElement('div');
+        item.className = 'cc-task-item cc-task-pending';
+        item.setAttribute('data-tool-id', toolId);
+        var subject = input.subject || input.description || '';
+        item.innerHTML =
+          '<span class="cc-task-check">○</span>' +
+          '<span class="cc-task-subject">' + U.escapeHtml(subject) + '</span>';
+        taskList.appendChild(item);
+        // We'll match by tool_result to get the actual taskId later
+        toolPanels[toolId] = item;
+      } else if (toolName === 'TaskUpdate') {
+        var taskId = input.taskId || '';
+        var status = input.status || '';
+        // Update existing task item if we have it
+        if (taskItems[taskId]) {
+          var el = taskItems[taskId].element;
+          if (status === 'completed') {
+            el.className = 'cc-task-item cc-task-completed';
+            el.querySelector('.cc-task-check').textContent = '✓';
+          } else if (status === 'in_progress') {
+            el.className = 'cc-task-item cc-task-in-progress';
+            el.querySelector('.cc-task-check').textContent = '◉';
+          } else if (status === 'deleted') {
+            el.className = 'cc-task-item cc-task-deleted';
+            el.querySelector('.cc-task-check').textContent = '✗';
+          }
+          taskItems[taskId].status = status;
+        }
+        // Also track tool panel for the result
+        toolPanels[toolId] = taskList;
+      } else {
+        // TaskGet, TaskList, TaskStop, TaskOutput — just track for result
+        toolPanels[toolId] = taskList;
+      }
+    },
+
     // Handle tool result
-    _handleToolResult: function(evt, contentEl, toolPanels) {
+    _handleToolResult: function(evt, contentEl, toolPanels, agentPanels, taskItems) {
       var msg = evt.message || {};
       var content = msg.content || [];
       if (!Array.isArray(content)) {
@@ -336,14 +468,52 @@
       content.forEach(function(block) {
         if (block.type !== 'tool_result') return;
         var toolId = block.tool_use_id || '';
-        var panel = toolPanels[toolId];
 
-        // Update status to done
-        if (panel) {
-          var statusEl = panel.querySelector('.cc-tool-status');
+        // ── Agent result — mark panel done, collapse ──
+        if (agentPanels[toolId]) {
+          var agentInfo = agentPanels[toolId];
+          var statusEl = agentInfo.panel.querySelector('.cc-tool-status');
           if (statusEl) {
             statusEl.textContent = I18n.t('claude_code.done');
             statusEl.className = 'cc-tool-status done';
+          }
+          // Show summary of agent output
+          var resultText = typeof block.content === 'string' ? block.content : '';
+          if (resultText) {
+            var summaryEl = document.createElement('div');
+            summaryEl.className = 'cc-agent-summary';
+            if (resultText.length > 500) resultText = resultText.substring(0, 497) + '...';
+            summaryEl.textContent = resultText;
+            agentInfo.contentArea.appendChild(summaryEl);
+          }
+          // Collapse after completion
+          agentInfo.panel.open = false;
+          App.chat.scrollToBottom();
+          return;
+        }
+
+        // ── TaskCreate result — capture the real taskId ──
+        var panel = toolPanels[toolId];
+        if (panel && panel.classList && panel.classList.contains('cc-task-item')) {
+          // TaskCreate result — try to parse taskId from content
+          var resultStr = typeof block.content === 'string' ? block.content : '';
+          var idMatch = resultStr.match(/#(\d+)/);
+          if (idMatch) {
+            var realTaskId = idMatch[1];
+            taskItems[realTaskId] = { element: panel, status: 'pending' };
+          }
+          // Mark as acknowledged (no visual change for create)
+          App.chat.scrollToBottom();
+          return;
+        }
+
+        // ── Standard tool result ──
+        // Update status to done
+        if (panel) {
+          var statusEl2 = panel.querySelector('.cc-tool-status');
+          if (statusEl2) {
+            statusEl2.textContent = I18n.t('claude_code.done');
+            statusEl2.className = 'cc-tool-status done';
           }
         }
 
@@ -377,7 +547,7 @@
           resultEl.innerHTML = '<pre class="cc-tool-output">' + U.escapeHtml(text) + '</pre>';
         }
 
-        if (panel) {
+        if (panel && panel.appendChild) {
           panel.appendChild(resultEl);
         } else {
           contentEl.appendChild(resultEl);
@@ -497,7 +667,17 @@
         WebSearch: '🌐',
         WebFetch: '🌐',
         Agent: '🤖',
+        SendMessage: '💬',
+        TeamCreate: '👥',
+        TaskCreate: '📋',
+        TaskUpdate: '📋',
+        TaskGet: '📋',
+        TaskList: '📋',
+        TaskStop: '🛑',
+        TaskOutput: '📋',
         TodoWrite: '📋',
+        LSP: '🔗',
+        NotebookEdit: '📓',
       };
       return icons[name] || '⚡';
     },

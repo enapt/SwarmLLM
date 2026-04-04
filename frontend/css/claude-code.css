@@ -67,6 +67,41 @@
 .cc-status { margin: 4px 0; padding: 4px 8px; font-size: 0.72rem; color: var(--text-secondary); font-style: italic; }
 .cc-status-error { color: var(--red); font-style: normal; }
 
+/* ─── Sub-Agent Panels ─── */
+.cc-agent-panel { margin: 10px 0; border: 1px solid rgba(139,92,246,0.25); border-radius: var(--radius); border-left: 3px solid #8b5cf6; background: rgba(139,92,246,0.04); overflow: hidden; }
+.cc-agent-panel[open] { background: rgba(139,92,246,0.06); }
+.cc-agent-header { display: flex; align-items: center; gap: 6px; padding: 8px 10px; font-size: 0.78rem; cursor: pointer; list-style: none; flex-wrap: wrap; }
+.cc-agent-header::-webkit-details-marker { display: none; }
+.cc-agent-header::before { content: '▸'; color: var(--text-muted); font-size: 0.7rem; transition: transform 0.15s; }
+.cc-agent-panel[open] > .cc-agent-header::before { transform: rotate(90deg); }
+.cc-agent-icon { font-size: 1rem; flex-shrink: 0; }
+.cc-agent-label { font-weight: 700; color: #8b5cf6; font-family: var(--font-mono); white-space: nowrap; }
+.cc-agent-meta { font-size: 0.68rem; color: var(--text-muted); font-family: var(--font-mono); background: rgba(139,92,246,0.1); padding: 1px 6px; border-radius: 3px; white-space: nowrap; }
+.cc-agent-desc { padding: 4px 10px 6px; font-size: 0.75rem; color: var(--text-secondary); border-top: 1px solid rgba(139,92,246,0.12); }
+.cc-agent-content { padding: 4px 10px 8px; }
+.cc-agent-content:empty { display: none; }
+.cc-agent-content .cc-tool-call { border-color: rgba(139,92,246,0.15); background: rgba(139,92,246,0.03); border-left-color: #8b5cf6; }
+.cc-agent-summary { margin-top: 6px; padding: 6px 8px; background: var(--bg-secondary); border-radius: var(--radius); font-size: 0.72rem; color: var(--text-primary); font-family: var(--font-mono); white-space: pre-wrap; word-break: break-word; max-height: 200px; overflow-y: auto; }
+
+/* Nested agent panels (agent-in-agent) */
+.cc-agent-content .cc-agent-panel { border-color: rgba(139,92,246,0.15); margin: 6px 0; }
+
+/* ─── Task List ─── */
+.cc-task-list { margin: 8px 0; padding: 6px 10px; background: var(--bg-tertiary); border: 1px solid var(--border); border-radius: var(--radius); border-left: 3px solid #3b82f6; }
+.cc-task-list-header { display: flex; align-items: center; gap: 6px; font-size: 0.75rem; font-weight: 600; color: #3b82f6; margin-bottom: 4px; }
+.cc-task-list-icon { font-size: 0.85rem; }
+.cc-task-list-label { font-family: var(--font-mono); }
+.cc-task-item { display: flex; align-items: center; gap: 6px; padding: 3px 0; font-size: 0.72rem; font-family: var(--font-mono); }
+.cc-task-check { width: 14px; text-align: center; flex-shrink: 0; font-size: 0.75rem; }
+.cc-task-subject { color: var(--text-primary); }
+.cc-task-pending .cc-task-check { color: var(--text-muted); }
+.cc-task-in-progress .cc-task-check { color: var(--orange); }
+.cc-task-in-progress .cc-task-subject { color: var(--orange); }
+.cc-task-completed .cc-task-check { color: var(--green); }
+.cc-task-completed .cc-task-subject { color: var(--text-secondary); text-decoration: line-through; text-decoration-color: rgba(var(--text-secondary-rgb, 128,128,128), 0.4); }
+.cc-task-deleted .cc-task-check { color: var(--red); }
+.cc-task-deleted .cc-task-subject { color: var(--text-muted); text-decoration: line-through; }
+
 /* ─── Live Timer ─── */
 .cc-live-timer { color: var(--orange); font-family: var(--font-mono); animation: cc-pulse 1.5s infinite; }
 @keyframes cc-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }

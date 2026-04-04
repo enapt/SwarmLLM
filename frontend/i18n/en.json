@@ -728,6 +728,8 @@
   "claude_code.perm_bypass": "Bypass (Dangerous)",
   "claude_code.perm_plan": "Plan Mode",
   "claude_code.permission_tip": "Controls when Claude asks for permission before running tools",
+  "claude_code.agent_spawned": "Sub-agent",
+  "claude_code.task_list": "Tasks",
   "settings.test_btn": "Test",
   "settings.get_key": "Get key →",
   "settings.advanced": "Advanced Settings",

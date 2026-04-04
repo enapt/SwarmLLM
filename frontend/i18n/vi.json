@@ -917,5 +917,7 @@
   "claude_code.perm_default": "Ask Permission",
   "claude_code.perm_bypass": "Bypass (Dangerous)",
   "claude_code.perm_plan": "Plan Mode",
-  "claude_code.permission_tip": "Controls when Claude asks for permission before running tools"
+  "claude_code.permission_tip": "Controls when Claude asks for permission before running tools",
+  "claude_code.agent_spawned": "Tác tử phụ",
+  "claude_code.task_list": "Nhiệm vụ"
 }
