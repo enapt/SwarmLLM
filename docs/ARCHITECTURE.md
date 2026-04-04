@@ -1101,6 +1101,18 @@ When a requested model isn't available locally or on the swarm, requests can opt
 - Provider health probes with per-model availability checking
 - Admin API: `GET/PUT /api/admin/providers` — view/configure provider API keys
 
+### Claude Subscription Provider (Optional, feature-gated)
+Routes Claude model requests through a locally-authenticated `claude` CLI subprocess, using the user's existing Pro/Max/Team/Enterprise subscription — no API key or per-token charges needed.
+
+- **Feature flag:** `--features claude-subscription` (compile-time opt-in, isolated for easy removal)
+- **How it works:** Spawns `claude -p --output-format stream-json` per request, parses NDJSON stdout, translates to OpenAI/Anthropic SSE or JSON responses
+- **Multi-turn:** Full conversation serialized per request using XML tags (`<system>`, `<previous_response>`) — stateless, no server-side session state required
+- **Routing priority:** Claude subscription (if enabled) > Anthropic API key > error. Configured via `providers.claude_subscription.enabled`
+- **Concurrency:** Semaphore-limited (default 3 concurrent subprocesses) to respect subscription rate limits
+- **Working directory:** Defaults to `/tmp` for clean context (no project hooks/CLAUDE.md). Configurable via `working_dir` for project-aware completions
+- **Admin API:** `GET /api/admin/claude-subscription/status` — CLI detection, version, subscription type, rate limit tier
+- **Dashboard:** Settings → Cloud Providers → Claude Subscription card with step-by-step setup guide, status detection, enable/disable toggle
+
 ### Admin API (CORS-protected, no Bearer auth)
 - `GET/PUT /api/admin/config` — Configuration read/update
 - `GET     /api/admin/stats` — Node statistics + hardware info

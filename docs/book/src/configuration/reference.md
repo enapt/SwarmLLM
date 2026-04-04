@@ -145,3 +145,16 @@ Every configuration option, organized by section.
 | Option | Type | Default | Description |
 |---|---|---|---|
 | `region` | string | none | Country code for network map (e.g., `"US"`) |
+
+## `[providers.claude_subscription]` — Claude Subscription (feature-gated)
+
+> Requires `--features claude-subscription` at build time. Managed via the dashboard or `PUT /api/admin/providers`.
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `enabled` | boolean | `false` | Route `claude-*` model requests through the local CLI |
+| `claude_binary` | string | `"claude"` | Path to the `claude` binary |
+| `default_model` | string | none | Override model for all requests |
+| `max_concurrent` | integer | `3` | Maximum concurrent subprocess invocations |
+| `timeout_secs` | integer | `300` | Per-request timeout in seconds |
+| `working_dir` | string | *(temp dir)* | Working directory for the subprocess. Empty or `"none"` uses system temp dir (recommended for API proxy use). Set to a project path for context-aware responses. |

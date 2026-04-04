@@ -61,7 +61,7 @@ swarmllm/
 │   ├── identity/  (keypair, nickname)
 │   ├── crypto/    (session, pipeline_seal, gossip_seal, key_rotation, provider_keys)
 │   ├── pool/      (types, crypto, manager, forward)
-│   ├── api/       (server, openai, anthropic, mcp, admin, admin_hf, admin_models, admin_providers, websocket, middleware, identity, pool, metrics, providers)
+│   ├── api/       (server, openai, anthropic, mcp, admin, admin_hf, admin_models, admin_providers, websocket, middleware, identity, pool, metrics, providers, claude_sub*)
 │   ├── storage/   (db)
 │   └── health/    (monitor, rebalancer)
 ├── frontend/      (index.html + 13 HTML templates, css/, js/{core/3,components/13,init.js,i18n.js,providers.js,neural-bg.js,topojson-client.min.js}, i18n/)
@@ -131,7 +131,7 @@ libp2p 0.55 (pin to 0.55.x), axum 0.7, candle-core/candle-transformers (CUDA), e
 
 ## Testing
 
-- 653 tests total, all passing, clippy clean
+- 657 tests total, all passing, clippy clean
 - Unit tests: in-module `#[cfg(test)]` blocks
 - Integration tests: `tests/integration/` — multi-node simulations with `--test-threads=1`
 - Test model: `tests/fixtures/tiny_model/` — 2-layer, 128 hidden dim, ~1MB, 2 shards

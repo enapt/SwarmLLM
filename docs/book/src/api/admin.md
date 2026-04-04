@@ -243,6 +243,35 @@ Response:
 
 Status values: `up`, `rate_limited`, `not_found`, `unavailable`, `timeout`, `error`.
 
+## Claude Subscription (feature-gated)
+
+> Requires building with `--features claude-subscription`. When the feature is not enabled, these endpoints return `{"error": "claude-subscription feature not enabled"}`.
+
+### GET /api/admin/claude-subscription/status
+
+Detect whether the `claude` CLI is installed and authenticated on this machine. Reads version from `claude --version` and subscription info from `~/.claude/.credentials.json` (read-only).
+
+Response:
+```json
+{
+  "cli_installed": true,
+  "cli_version": "2.1.92 (Claude Code)",
+  "authenticated": true,
+  "subscription_type": "max",
+  "rate_limit_tier": "default_claude_max_5x"
+}
+```
+
+### PUT /api/admin/providers (claude_subscription_enabled field)
+
+Enable or disable the Claude subscription provider. Pass `claude_subscription_enabled` alongside other provider key updates.
+
+```json
+{ "claude_subscription_enabled": true }
+```
+
+When enabled, `claude-*` model requests are routed through the local CLI subprocess instead of the Anthropic API key. The Anthropic API key (if configured) is used as fallback when disabled.
+
 ## Updates
 
 ### GET /api/admin/version

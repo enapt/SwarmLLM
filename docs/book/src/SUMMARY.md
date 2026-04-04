@@ -36,6 +36,7 @@
 - [Anthropic Messages API](./api/anthropic.md)
 - [MCP Server](./api/mcp.md)
 - [Admin API](./api/admin.md)
+- [Claude Subscription](./api/claude-subscription.md)
 - [Identity & Pool API](./api/identity-pool.md)
 - [Prometheus Metrics](./api/metrics.md)
 
