@@ -555,14 +555,14 @@
   "dashboard.missing_warning": "⚠ {files}が不足",
   "dashboard.unload_tip": "メモリからすべてのパートをアンロード——RAM/VRAMを解放しますがファイルはディスクに残ります",
   "dashboard.cloud_models_count": "{count}個のモデル",
-  "dashboard.cloud_connected": "接続済み",
+  "dashboard.cloud_connected": "API Key",
   "dashboard.cloud_search": "モデルを検索…",
   "dashboard.cloud_sort_newest": "最新",
   "dashboard.cloud_sort_ctx_desc": "コンテキスト ↓",
   "dashboard.cloud_sort_ctx_asc": "コンテキスト ↑",
   "dashboard.cloud_sort_ping": "Ping ↓",
   "dashboard.cloud_no_match": "一致するモデルがありません",
-  "dashboard.cloud_note": "{provider} APIへのリクエスト——スウォームネットワークで共有されません",
+  "dashboard.cloud_note": "Requests routed via {provider} API key — billed per token",
   "dashboard.shard_verified": "検証済み、ローカルに保存",
   "dashboard.shard_verifying": "ダウンロード済み、検証中（BLAKE3）...",
   "dashboard.shard_queued": "ダウンロード待機中",
@@ -896,5 +896,9 @@
   "settings.check_status_btn": "Check Status",
   "settings.cli_version": "CLI version",
   "settings.plan": "Plan",
-  "settings.rate_tier": "Rate tier"
+  "settings.rate_tier": "Rate tier",
+  "dashboard.cloud_subscription": "Subscription",
+  "dashboard.cloud_sub_note": "Routed through Claude Code CLI — uses your subscription, no per-token charges",
+  "mode.subscription": "SUBSCRIPTION",
+  "mode.claude_sub_tip": "Claude models routed through your Claude Code subscription — no per-token API charges"
 }

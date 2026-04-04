@@ -556,14 +556,14 @@
   "dashboard.missing_warning": "⚠ Hilang {files}",
   "dashboard.unload_tip": "Turunkan semua bagian dari memori — membebaskan RAM/VRAM tapi file tetap di disk",
   "dashboard.cloud_models_count": "{count} model",
-  "dashboard.cloud_connected": "Terhubung",
+  "dashboard.cloud_connected": "API Key",
   "dashboard.cloud_search": "Cari model…",
   "dashboard.cloud_sort_newest": "Terbaru",
   "dashboard.cloud_sort_ctx_desc": "Konteks ↓",
   "dashboard.cloud_sort_ctx_asc": "Konteks ↑",
   "dashboard.cloud_sort_ping": "Ping ↓",
   "dashboard.cloud_no_match": "Tidak ada model yang cocok",
-  "dashboard.cloud_note": "Permintaan diteruskan ke {provider} API — tidak dibagikan di jaringan swarm",
+  "dashboard.cloud_note": "Requests routed via {provider} API key — billed per token",
   "dashboard.shard_verified": "Terverifikasi, disimpan lokal",
   "dashboard.shard_verifying": "Diunduh, memverifikasi (BLAKE3)...",
   "dashboard.shard_queued": "Antre untuk diunduh",
@@ -896,5 +896,9 @@
   "settings.check_status_btn": "Check Status",
   "settings.cli_version": "CLI version",
   "settings.plan": "Plan",
-  "settings.rate_tier": "Rate tier"
+  "settings.rate_tier": "Rate tier",
+  "dashboard.cloud_subscription": "Subscription",
+  "dashboard.cloud_sub_note": "Routed through Claude Code CLI — uses your subscription, no per-token charges",
+  "mode.subscription": "SUBSCRIPTION",
+  "mode.claude_sub_tip": "Claude models routed through your Claude Code subscription — no per-token API charges"
 }

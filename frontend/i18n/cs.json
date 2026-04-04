@@ -556,14 +556,14 @@
   "dashboard.missing_warning": "⚠ Chybí {files}",
   "dashboard.unload_tip": "Uvolnit všechny části z paměti — uvolní RAM/VRAM, ale soubory zůstanou na disku",
   "dashboard.cloud_models_count": "{count} model(ů)",
-  "dashboard.cloud_connected": "Připojeno",
+  "dashboard.cloud_connected": "API Key",
   "dashboard.cloud_search": "Hledat modely…",
   "dashboard.cloud_sort_newest": "Nejnovější",
   "dashboard.cloud_sort_ctx_desc": "Kontext ↓",
   "dashboard.cloud_sort_ctx_asc": "Kontext ↑",
   "dashboard.cloud_sort_ping": "Ping ↓",
   "dashboard.cloud_no_match": "Žádné modely neodpovídají",
-  "dashboard.cloud_note": "Požadavky směrovány na {provider} API — nesdíleno v swarm síti",
+  "dashboard.cloud_note": "Requests routed via {provider} API key — billed per token",
   "dashboard.shard_verified": "Ověřeno, uloženo lokálně",
   "dashboard.shard_verifying": "Staženo, ověřování (BLAKE3)...",
   "dashboard.shard_queued": "Ve frontě ke stažení",
@@ -896,5 +896,9 @@
   "settings.check_status_btn": "Check Status",
   "settings.cli_version": "CLI version",
   "settings.plan": "Plan",
-  "settings.rate_tier": "Rate tier"
+  "settings.rate_tier": "Rate tier",
+  "dashboard.cloud_subscription": "Subscription",
+  "dashboard.cloud_sub_note": "Routed through Claude Code CLI — uses your subscription, no per-token charges",
+  "mode.subscription": "SUBSCRIPTION",
+  "mode.claude_sub_tip": "Claude models routed through your Claude Code subscription — no per-token API charges"
 }

@@ -1996,6 +1996,7 @@ select.swarm-model-sort:focus { border-color: var(--accent); }
 }
 .cloud-provider-name { font-weight: 700; font-size: 0.95rem; display: inline-flex; align-items: center; gap: 7px; }
 .cloud-status-ok { color: var(--green); font-weight: 600; font-size: 0.78rem; margin-left: 8px; }
+.cloud-status-sub { color: #D97757; font-weight: 700; font-size: 0.72rem; margin-left: 8px; background: rgba(217,119,87,0.12); border: 1px solid rgba(217,119,87,0.3); border-radius: var(--radius-lg); padding: 1px 8px; letter-spacing: 0.03em; text-transform: uppercase; }
 .cloud-card-controls { display: flex; align-items: center; gap: 6px; margin-bottom: 8px; width: 100%; }
 input.cloud-model-filter { flex: 1 1 0%; min-width: 0; padding: 6px 10px; font-size: 13px; background: var(--bg-tertiary); border: 1px solid var(--border); border-radius: 5px; color: var(--text-primary); outline: none; box-sizing: border-box; }
 input.cloud-model-filter::placeholder { color: var(--text-muted); }
@@ -2679,9 +2680,10 @@ select.cloud-model-sort { flex: 0 0 88px; width: 88px; padding: 6px 6px; font-si
 }
 .mode-detail .mode-stat { font-family: var(--font-mono); font-size: 0.74rem; color: var(--text-secondary); }
 .mode-detail .mode-stat strong { color: var(--text-primary); font-weight: 600; }
-.mode-detail .mode-claude-badge { display: inline-flex; align-items: center; gap: 4px; color: var(--purple); }
-.mode-detail .mode-claude-badge strong { color: var(--purple); }
+.mode-detail .mode-claude-badge { display: inline-flex; align-items: center; gap: 5px; color: #D97757; font-family: var(--font-mono); font-size: 0.74rem; background: rgba(217,119,87,0.12); border: 1px solid rgba(217,119,87,0.35); border-radius: var(--radius-lg); padding: 2px 8px 2px 5px; }
+.mode-detail .mode-claude-badge strong { color: #D97757; font-weight: 700; letter-spacing: 0.01em; }
 .mode-detail .mode-claude-badge img { vertical-align: -2px; }
+.mode-detail .claude-sub-label { font-size: 0.58rem; text-transform: uppercase; letter-spacing: 0.06em; color: #3ddc84; font-weight: 700; background: rgba(61,220,132,0.12); border-radius: 4px; padding: 1px 5px; margin-left: 2px; }
 .mode-separator { color: var(--text-muted); font-size: 0.65rem; opacity: 0.35; }
 .mode-detail .mode-action { color: var(--text-muted); font-size: 0.74rem; cursor: pointer; text-decoration: underline; text-decoration-style: dotted; text-underline-offset: 2px; }
 .mode-detail .mode-action:hover { color: var(--accent); }

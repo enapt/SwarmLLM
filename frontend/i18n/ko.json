@@ -555,14 +555,14 @@
   "dashboard.missing_warning": "⚠ {files} 없음",
   "dashboard.unload_tip": "메모리에서 모든 파트를 언로드합니다 — RAM/VRAM을 해제하지만 파일은 디스크에 유지됩니다",
   "dashboard.cloud_models_count": "모델 {count}개",
-  "dashboard.cloud_connected": "연결됨",
+  "dashboard.cloud_connected": "API Key",
   "dashboard.cloud_search": "모델 검색…",
   "dashboard.cloud_sort_newest": "최신순",
   "dashboard.cloud_sort_ctx_desc": "컨텍스트 ↓",
   "dashboard.cloud_sort_ctx_asc": "컨텍스트 ↑",
   "dashboard.cloud_sort_ping": "핑 ↓",
   "dashboard.cloud_no_match": "일치하는 모델 없음",
-  "dashboard.cloud_note": "{provider} API로 요청 라우팅됨 — 스웜 네트워크에서 공유되지 않습니다",
+  "dashboard.cloud_note": "Requests routed via {provider} API key — billed per token",
   "dashboard.shard_verified": "검증됨, 로컬에 저장됨",
   "dashboard.shard_verifying": "다운로드됨, 검증 중 (BLAKE3)...",
   "dashboard.shard_queued": "다운로드 대기 중",
@@ -896,5 +896,9 @@
   "settings.check_status_btn": "Check Status",
   "settings.cli_version": "CLI version",
   "settings.plan": "Plan",
-  "settings.rate_tier": "Rate tier"
+  "settings.rate_tier": "Rate tier",
+  "dashboard.cloud_subscription": "Subscription",
+  "dashboard.cloud_sub_note": "Routed through Claude Code CLI — uses your subscription, no per-token charges",
+  "mode.subscription": "SUBSCRIPTION",
+  "mode.claude_sub_tip": "Claude models routed through your Claude Code subscription — no per-token API charges"
 }

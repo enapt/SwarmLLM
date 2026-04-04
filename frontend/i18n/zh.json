@@ -555,14 +555,14 @@
   "dashboard.missing_warning": "⚠ 缺失 {files}",
   "dashboard.unload_tip": "从内存卸载所有部分——释放 RAM/VRAM 但保留磁盘文件",
   "dashboard.cloud_models_count": "{count} 个模型",
-  "dashboard.cloud_connected": "已连接",
+  "dashboard.cloud_connected": "API Key",
   "dashboard.cloud_search": "搜索模型…",
   "dashboard.cloud_sort_newest": "最新",
   "dashboard.cloud_sort_ctx_desc": "上下文 ↓",
   "dashboard.cloud_sort_ctx_asc": "上下文 ↑",
   "dashboard.cloud_sort_ping": "延迟 ↓",
   "dashboard.cloud_no_match": "无匹配模型",
-  "dashboard.cloud_note": "请求路由到 {provider} API——不在群集网络上共享",
+  "dashboard.cloud_note": "Requests routed via {provider} API key — billed per token",
   "dashboard.shard_verified": "已验证，本地存储",
   "dashboard.shard_verifying": "已下载，正在验证（BLAKE3）...",
   "dashboard.shard_queued": "已排队下载",
@@ -896,5 +896,9 @@
   "settings.check_status_btn": "Check Status",
   "settings.cli_version": "CLI version",
   "settings.plan": "Plan",
-  "settings.rate_tier": "Rate tier"
+  "settings.rate_tier": "Rate tier",
+  "dashboard.cloud_subscription": "Subscription",
+  "dashboard.cloud_sub_note": "Routed through Claude Code CLI — uses your subscription, no per-token charges",
+  "mode.subscription": "SUBSCRIPTION",
+  "mode.claude_sub_tip": "Claude models routed through your Claude Code subscription — no per-token API charges"
 }

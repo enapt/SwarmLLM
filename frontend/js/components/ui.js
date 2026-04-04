@@ -216,9 +216,13 @@
       if (requests > 0) parts.push('<span class="mode-stat"><strong>' + requests + '</strong> ' + I18n.t('mode.stat_requests', { count: requests }).replace(/^\d+\s*/, '') + '</span>');
       if (served > 0) parts.push('<span class="mode-stat"><strong>' + served + '</strong> ' + I18n.t('mode.stat_served', { count: served }).replace(/^\d+\s*/, '') + '</span>');
 
-      // Claude Code badge when subscription active
+      // Claude Code subscription badge — prominent, unmistakable
       if (claudeSubEnabled) {
-        parts.push('<span class="mode-stat mode-claude-badge">' + providerIconHtml('claude_subscription', 13) + ' <strong>Claude Code</strong></span>');
+        parts.push('<span class="mode-claude-badge" title="' + U.escapeHtml(I18n.t('mode.claude_sub_tip')) + '">' +
+          providerIconHtml('claude_subscription', 14) +
+          ' <strong>Claude Code</strong>' +
+          '<span class="claude-sub-label">' + I18n.t('mode.subscription') + '</span>' +
+          '</span>');
       }
 
       var detailHtml;

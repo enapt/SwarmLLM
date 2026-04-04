@@ -556,14 +556,14 @@
   "dashboard.missing_warning": "⚠ गायब {files}",
   "dashboard.unload_tip": "सभी भाग मेमोरी से अनलोड करें — RAM/VRAM मुक्त होता है लेकिन फ़ाइलें डिस्क पर रहती हैं",
   "dashboard.cloud_models_count": "{count} मॉडल",
-  "dashboard.cloud_connected": "जुड़ा हुआ",
+  "dashboard.cloud_connected": "API Key",
   "dashboard.cloud_search": "मॉडल खोजें…",
   "dashboard.cloud_sort_newest": "नवीनतम",
   "dashboard.cloud_sort_ctx_desc": "संदर्भ ↓",
   "dashboard.cloud_sort_ctx_asc": "संदर्भ ↑",
   "dashboard.cloud_sort_ping": "पिंग ↓",
   "dashboard.cloud_no_match": "कोई मॉडल मेल नहीं खाता",
-  "dashboard.cloud_note": "अनुरोध {provider} API को भेजे जाते हैं — स्वार्म नेटवर्क पर साझा नहीं",
+  "dashboard.cloud_note": "Requests routed via {provider} API key — billed per token",
   "dashboard.shard_verified": "सत्यापित, स्थानीय रूप से संग्रहीत",
   "dashboard.shard_verifying": "डाउनलोड हुआ, सत्यापन हो रहा है (BLAKE3)...",
   "dashboard.shard_queued": "डाउनलोड के लिए कतार में",
@@ -896,5 +896,9 @@
   "settings.check_status_btn": "Check Status",
   "settings.cli_version": "CLI version",
   "settings.plan": "Plan",
-  "settings.rate_tier": "Rate tier"
+  "settings.rate_tier": "Rate tier",
+  "dashboard.cloud_subscription": "Subscription",
+  "dashboard.cloud_sub_note": "Routed through Claude Code CLI — uses your subscription, no per-token charges",
+  "mode.subscription": "SUBSCRIPTION",
+  "mode.claude_sub_tip": "Claude models routed through your Claude Code subscription — no per-token API charges"
 }

@@ -11,7 +11,7 @@ var _ICON_MAP = {
   // Cloud providers
   openai:     'openai',
   anthropic:  'anthropic',
-  claude_subscription: 'claude-color',
+  claude_subscription: 'claude-code',
   deepseek:   'deepseek-color',
   mistral:    'mistral-color',
   groq:       'groq',

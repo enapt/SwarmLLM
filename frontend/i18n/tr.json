@@ -556,14 +556,14 @@
   "dashboard.missing_warning": "⚠ Eksik {files}",
   "dashboard.unload_tip": "Tüm parçaları bellekten kaldır — RAM/VRAM'i serbest bırakır ama dosyalar diskte kalır",
   "dashboard.cloud_models_count": "{count} model",
-  "dashboard.cloud_connected": "Bağlandı",
+  "dashboard.cloud_connected": "API Key",
   "dashboard.cloud_search": "Model ara…",
   "dashboard.cloud_sort_newest": "En yeni",
   "dashboard.cloud_sort_ctx_desc": "Bağlam ↓",
   "dashboard.cloud_sort_ctx_asc": "Bağlam ↑",
   "dashboard.cloud_sort_ping": "Ping ↓",
   "dashboard.cloud_no_match": "Eşleşen model yok",
-  "dashboard.cloud_note": "İstekler {provider} API'sine yönlendirildi — swarm ağında paylaşılmıyor",
+  "dashboard.cloud_note": "Requests routed via {provider} API key — billed per token",
   "dashboard.shard_verified": "Doğrulandı, yerel olarak depolandı",
   "dashboard.shard_verifying": "İndirildi, doğrulanıyor (BLAKE3)...",
   "dashboard.shard_queued": "İndirme kuyruğunda",
@@ -896,5 +896,9 @@
   "settings.check_status_btn": "Check Status",
   "settings.cli_version": "CLI version",
   "settings.plan": "Plan",
-  "settings.rate_tier": "Rate tier"
+  "settings.rate_tier": "Rate tier",
+  "dashboard.cloud_subscription": "Subscription",
+  "dashboard.cloud_sub_note": "Routed through Claude Code CLI — uses your subscription, no per-token charges",
+  "mode.subscription": "SUBSCRIPTION",
+  "mode.claude_sub_tip": "Claude models routed through your Claude Code subscription — no per-token API charges"
 }

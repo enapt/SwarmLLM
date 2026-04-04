@@ -556,14 +556,14 @@
   "dashboard.missing_warning": "⚠ Thiếu {files}",
   "dashboard.unload_tip": "Gỡ tất cả phần khỏi bộ nhớ — giải phóng RAM/VRAM nhưng giữ tệp trên đĩa",
   "dashboard.cloud_models_count": "{count} mô hình",
-  "dashboard.cloud_connected": "Đã kết nối",
+  "dashboard.cloud_connected": "API Key",
   "dashboard.cloud_search": "Tìm mô hình…",
   "dashboard.cloud_sort_newest": "Mới nhất",
   "dashboard.cloud_sort_ctx_desc": "Ngữ cảnh ↓",
   "dashboard.cloud_sort_ctx_asc": "Ngữ cảnh ↑",
   "dashboard.cloud_sort_ping": "Ping ↓",
   "dashboard.cloud_no_match": "Không có mô hình phù hợp",
-  "dashboard.cloud_note": "Yêu cầu được định tuyến đến API {provider} — không chia sẻ trên mạng swarm",
+  "dashboard.cloud_note": "Requests routed via {provider} API key — billed per token",
   "dashboard.shard_verified": "Đã xác minh, lưu trữ cục bộ",
   "dashboard.shard_verifying": "Đã tải, đang xác minh (BLAKE3)...",
   "dashboard.shard_queued": "Đang chờ tải",
@@ -896,5 +896,9 @@
   "settings.check_status_btn": "Check Status",
   "settings.cli_version": "CLI version",
   "settings.plan": "Plan",
-  "settings.rate_tier": "Rate tier"
+  "settings.rate_tier": "Rate tier",
+  "dashboard.cloud_subscription": "Subscription",
+  "dashboard.cloud_sub_note": "Routed through Claude Code CLI — uses your subscription, no per-token charges",
+  "mode.subscription": "SUBSCRIPTION",
+  "mode.claude_sub_tip": "Claude models routed through your Claude Code subscription — no per-token API charges"
 }

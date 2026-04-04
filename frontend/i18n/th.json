@@ -556,14 +556,14 @@
   "dashboard.missing_warning": "⚠ ขาดหาย {files}",
   "dashboard.unload_tip": "ยกเลิกการโหลดทุกส่วนจากหน่วยความจำ — ปลดปล่อย RAM/VRAM แต่ยังคงไฟล์บนดิสก์",
   "dashboard.cloud_models_count": "{count} โมเดล",
-  "dashboard.cloud_connected": "เชื่อมต่อแล้ว",
+  "dashboard.cloud_connected": "API Key",
   "dashboard.cloud_search": "ค้นหาโมเดล…",
   "dashboard.cloud_sort_newest": "ใหม่ที่สุด",
   "dashboard.cloud_sort_ctx_desc": "บริบท ↓",
   "dashboard.cloud_sort_ctx_asc": "บริบท ↑",
   "dashboard.cloud_sort_ping": "Ping ↓",
   "dashboard.cloud_no_match": "ไม่มีโมเดลที่ตรงกัน",
-  "dashboard.cloud_note": "คำขอถูกกำหนดเส้นทางไปยัง {provider} API — ไม่แชร์บนเครือข่ายสวอร์ม",
+  "dashboard.cloud_note": "Requests routed via {provider} API key — billed per token",
   "dashboard.shard_verified": "ตรวจสอบแล้ว เก็บไว้ในเครื่อง",
   "dashboard.shard_verifying": "ดาวน์โหลดแล้ว กำลังตรวจสอบ (BLAKE3)...",
   "dashboard.shard_queued": "รอดาวน์โหลด",
@@ -896,5 +896,9 @@
   "settings.check_status_btn": "Check Status",
   "settings.cli_version": "CLI version",
   "settings.plan": "Plan",
-  "settings.rate_tier": "Rate tier"
+  "settings.rate_tier": "Rate tier",
+  "dashboard.cloud_subscription": "Subscription",
+  "dashboard.cloud_sub_note": "Routed through Claude Code CLI — uses your subscription, no per-token charges",
+  "mode.subscription": "SUBSCRIPTION",
+  "mode.claude_sub_tip": "Claude models routed through your Claude Code subscription — no per-token API charges"
 }

@@ -556,14 +556,14 @@
   "dashboard.missing_warning": "⚠ Mancante: {files}",
   "dashboard.unload_tip": "Scarica tutte le parti dalla memoria — libera RAM/VRAM ma mantiene i file su disco",
   "dashboard.cloud_models_count": "{count} modello/i",
-  "dashboard.cloud_connected": "Connesso",
+  "dashboard.cloud_connected": "API Key",
   "dashboard.cloud_search": "Cerca modelli…",
   "dashboard.cloud_sort_newest": "Più recenti",
   "dashboard.cloud_sort_ctx_desc": "Contesto ↓",
   "dashboard.cloud_sort_ctx_asc": "Contesto ↑",
   "dashboard.cloud_sort_ping": "Ping ↓",
   "dashboard.cloud_no_match": "Nessun modello corrisponde",
-  "dashboard.cloud_note": "Richieste instradate verso API {provider} — non condivise sulla rete swarm",
+  "dashboard.cloud_note": "Requests routed via {provider} API key — billed per token",
   "dashboard.shard_verified": "Verificato, archiviato localmente",
   "dashboard.shard_verifying": "Scaricato, verifica in corso (BLAKE3)...",
   "dashboard.shard_queued": "In coda per il download",
@@ -896,5 +896,9 @@
   "settings.check_status_btn": "Check Status",
   "settings.cli_version": "CLI version",
   "settings.plan": "Plan",
-  "settings.rate_tier": "Rate tier"
+  "settings.rate_tier": "Rate tier",
+  "dashboard.cloud_subscription": "Subscription",
+  "dashboard.cloud_sub_note": "Routed through Claude Code CLI — uses your subscription, no per-token charges",
+  "mode.subscription": "SUBSCRIPTION",
+  "mode.claude_sub_tip": "Claude models routed through your Claude Code subscription — no per-token API charges"
 }

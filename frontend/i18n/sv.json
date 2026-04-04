@@ -556,14 +556,14 @@
   "dashboard.missing_warning": "⚠ Saknar {files}",
   "dashboard.unload_tip": "Avlasta alla delar från minnet — frigör RAM/VRAM men behåller filer på disk",
   "dashboard.cloud_models_count": "{count} modell(er)",
-  "dashboard.cloud_connected": "Ansluten",
+  "dashboard.cloud_connected": "API Key",
   "dashboard.cloud_search": "Sök modeller…",
   "dashboard.cloud_sort_newest": "Nyaste",
   "dashboard.cloud_sort_ctx_desc": "Kontext ↓",
   "dashboard.cloud_sort_ctx_asc": "Kontext ↑",
   "dashboard.cloud_sort_ping": "Ping ↓",
   "dashboard.cloud_no_match": "Inga modeller matchar",
-  "dashboard.cloud_note": "Förfrågningar dirigeras till {provider} API — delas inte i svärmsnätverket",
+  "dashboard.cloud_note": "Requests routed via {provider} API key — billed per token",
   "dashboard.shard_verified": "Verifierad, lagrad lokalt",
   "dashboard.shard_verifying": "Nedladdad, verifierar (BLAKE3)...",
   "dashboard.shard_queued": "Köad för nedladdning",
@@ -896,5 +896,9 @@
   "settings.check_status_btn": "Check Status",
   "settings.cli_version": "CLI version",
   "settings.plan": "Plan",
-  "settings.rate_tier": "Rate tier"
+  "settings.rate_tier": "Rate tier",
+  "dashboard.cloud_subscription": "Subscription",
+  "dashboard.cloud_sub_note": "Routed through Claude Code CLI — uses your subscription, no per-token charges",
+  "mode.subscription": "SUBSCRIPTION",
+  "mode.claude_sub_tip": "Claude models routed through your Claude Code subscription — no per-token API charges"
 }

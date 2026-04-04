@@ -965,7 +965,9 @@
               '<span class="cloud-provider-name">' + (cardIconHtml ? cardIconHtml + ' ' : '') + U.escapeHtml(pLabel) + '</span>' +
               '<span>' +
                 '<span class="badge badge-cloud">' + I18n.t('dashboard.cloud_models_count', { count: pModels.length }) + '</span>' +
-                '<span class="cloud-status-ok">\u25cf ' + U.escapeHtml(I18n.t('dashboard.cloud_connected')) + '</span>' +
+                (p === 'claude_subscription'
+                  ? '<span class="cloud-status-sub">\u25cf ' + U.escapeHtml(I18n.t('dashboard.cloud_subscription')) + '</span>'
+                  : '<span class="cloud-status-ok">\u25cf ' + U.escapeHtml(I18n.t('dashboard.cloud_connected')) + '</span>') +
               '</span>' +
             '</div>' +
             '<div class="cloud-card-controls">' +
@@ -979,7 +981,11 @@
               '</select>' +
             '</div>' +
             '<div class="cloud-model-list" id="' + listId + '"></div>' +
-            '<div class="cloud-card-note">' + U.escapeHtml(I18n.t('dashboard.cloud_note', { provider: pLabel })) + '</div>';
+            '<div class="cloud-card-note">' + U.escapeHtml(
+              p === 'claude_subscription'
+                ? I18n.t('dashboard.cloud_sub_note')
+                : I18n.t('dashboard.cloud_note', { provider: pLabel })
+            ) + '</div>';
 
           cloudBody.appendChild(card);
 
