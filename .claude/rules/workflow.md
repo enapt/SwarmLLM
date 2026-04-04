@@ -2,10 +2,12 @@
 
 ## Context Window
 
-Main session runs Opus 4.6 with 1M context window. Default effort: medium. Escalate to high effort for complex tasks (multi-file refactors, architecture changes, debugging cross-system issues). This means:
+Main session runs Opus 4.6 with 1M context window (Claude Code v2.1.92). Default effort: medium. Escalate to high effort for complex tasks (multi-file refactors, architecture changes, debugging cross-system issues). This means:
 - You have massive context — use it. Don't compact prematurely.
 - Subagents should use the cheapest model that works: haiku for search/commands, sonnet for review/design, opus for complex implementation.
 - Compact at ~70% usage (not 50%) since we have 1M tokens.
+- Note: thinking summaries disabled by default since v2.1.89 (set `showThinkingSummaries: true` to restore).
+- Note: autocompact has thrash-loop detection since v2.1.89 — stops after 3x refill-to-limit cycles.
 
 ## Commit and Push After Each Task
 

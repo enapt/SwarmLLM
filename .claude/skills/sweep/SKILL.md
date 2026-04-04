@@ -2,7 +2,7 @@
 name: sweep
 description: Deploy parallel agents to scan the entire codebase for dead code, duplication, inconsistencies, and stale references
 user-invocable: true
-allowed-tools: Read, Grep, Glob, Bash, Task, Agent
+allowed-tools: Read, Write, Grep, Glob, Bash, Task, Agent
 model: opus
 effort: high
 ---
@@ -11,7 +11,30 @@ effort: high
 
 Deploy 4 parallel review agents to scan the entire SwarmLLM codebase for issues. Each agent focuses on a different category. All findings are collected, deduplicated, and presented as a prioritized action list.
 
-## Agents to Deploy (in parallel)
+## Pre-Sweep: Load Prior Findings
+
+Before launching agents, check if `.claude/sweep-log.jsonl` exists. If it does:
+1. Read its contents — each line is a JSON object: `{"file":"...","line":N,"kind":"...","summary":"...","status":"fixed|wontfix|deferred","date":"YYYY-MM-DD"}`
+2. Extract all entries where `status` is `"fixed"` or `"wontfix"` — these are KNOWN issues
+3. Pass the known-issues list to EACH agent with explicit instructions: "Do NOT re-report any of these known issues. Focus on finding NEW issues not in this list."
+
+If the file doesn't exist, proceed normally (first sweep).
+
+## File Rotation Strategy
+
+To avoid always scanning files in the same order (which causes convergence):
+
+1. Get the list of all `.rs` files: `find src/ -name '*.rs' | sort`
+2. Get the list of all `.js` files: `find frontend/js/ -name '*.js' | sort`
+3. Pick a rotation offset based on the current sweep count (line count of sweep-log.jsonl ÷ 10, modulo file count)
+4. Tell Agent 1+3 to start from offset N in the Rust file list, wrapping around
+5. Tell Agent 2+4 to start from offset N in the JS/frontend file list, wrapping around
+
+This ensures each sweep round examines files in a different order.
+
+## Agents to Deploy (in parallel, with isolation: "worktree")
+
+IMPORTANT: Launch all agents with `isolation: "worktree"` so they get clean context without session history pollution.
 
 ### Agent 1: Dead Code + Stale References (model: sonnet, type: code-reviewer)
 - pub functions with zero external callers
@@ -42,11 +65,24 @@ Deploy 4 parallel review agents to scan the entire SwarmLLM codebase for issues.
 ## After Agents Return
 
 1. Deduplicate findings across agents
-2. Rate each by priority (CRITICAL > HIGH > MEDIUM > LOW) and effort (small/medium/large)
-3. Present as a ranked action list
-4. Ask user which items to fix, then execute
+2. Compare against known issues from sweep-log.jsonl — drop any re-reports
+3. Rate each NEW finding by priority (CRITICAL > HIGH > MEDIUM > LOW) and effort (small/medium/large)
+4. Present as a ranked action list showing only genuinely new findings
+5. Ask user which items to fix, then execute
+
+## After Fixes Are Applied
+
+For every finding that was addressed (fixed, deferred, or won't-fix), append a line to `.claude/sweep-log.jsonl`:
+```json
+{"file":"src/api/server.rs","line":42,"kind":"dead_code","summary":"unused handle_legacy() function","status":"fixed","date":"2026-04-04"}
+```
+
+This log ensures future sweeps skip known issues and focus on genuinely new problems.
 
 ## Rules
 - Every finding must include: file, line, what's wrong, confidence (80%+ only)
 - Do NOT report items that are intentionally deferred (check CLAUDE.md deferred list)
 - Do NOT report test-only code as dead (check if it's used in #[cfg(test)] blocks)
+- Do NOT re-report anything already in sweep-log.jsonl
+- Each agent MUST scan its full assigned file range, not just "interesting" files
+- If a sweep round finds 0 new issues, report that clearly — don't manufacture findings

@@ -91,6 +91,7 @@
     "PostToolUse": [
       {
         "matcher": "Edit|Write",
+        "if": "Edit(*.rs)|Write(*.rs)",
         "hooks": [
           {
             "type": "command",

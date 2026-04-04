@@ -161,18 +161,20 @@ libp2p 0.55 (pin to 0.55.x), axum 0.7, candle-core/candle-transformers (CUDA), e
 | `/test-module <mod>` | haiku | forked | Run tests for a specific module — report-only, cheap |
 | `/review [file]` | sonnet | forked | Review code against spec — spawns code-reviewer (haiku) for security analysis |
 | `/simplify` | (built-in) | inline | Review changed code for reuse, quality, and efficiency — built into Claude Code |
-| `/reload-plugins` | — | inline | Activate pending plugin changes without restarting (built-in, v2.1.69+) |
 | `/loop <interval> <cmd>` | — | inline | Run a prompt or slash command on a recurring interval (e.g., `/loop 5m /check`) |
 | `/plan <desc>` | — | inline | Enter plan mode and start immediately with description (v2.1.72+) |
 | `/branch` | — | inline | Fork conversation into a new branch (renamed from `/fork` in v2.1.77, `/fork` still works) |
 | `/copy [N]` | — | inline | Copy latest (or Nth-latest) assistant response to clipboard (v2.1.77+) |
+| `/powerup` | — | inline | Interactive lessons teaching Claude Code features with animated demos (v2.1.90+) |
+| `/release-notes` | — | inline | Interactive version picker showing changelog (v2.1.92+) |
+| `/schedule` | — | inline | Create/manage scheduled remote agents (cron triggers) |
 
-> Claude Code v2.1.83. Opus 4.6 with 1M context. Agent teams enabled. Default effort: medium, high for complex tasks.
+> Claude Code v2.1.92. Opus 4.6 with 1M context. Agent teams enabled. Default effort: medium, high for complex tasks.
 
 ### Agent Model Strategy
 
 Use the cheapest model that can handle each task to minimize cost and latency.
-Current model family: Claude 4.5/4.6 (v2.1.76) — Opus 4.6 (`claude-opus-4-6[1m]`), Sonnet 4.6 (`claude-sonnet-4-6`), Haiku 4.5 (`claude-haiku-4-5-20251001`). All support 1M context window.
+Current model family: Claude 4.5/4.6 — Opus 4.6 (`claude-opus-4-6[1m]`), Sonnet 4.6 (`claude-sonnet-4-6`), Haiku 4.5 (`claude-haiku-4-5-20251001`). All support 1M context window. Default model overrides via `ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU}_MODEL` env vars (v2.1.84+).
 
 | Task Type | Model | Rationale |
 |---|---|---|
@@ -203,10 +205,12 @@ For larger sessions: `/build-phase 1` will implement an entire phase end-to-end 
 
 ### Hooks (configured in `.claude/settings.json`)
 
-- **PreToolUse(Edit)**: Blocks edits to spec documents
+- **PreToolUse(Edit)**: Blocks edits to spec documents (supports `if` conditional field, v2.1.85+)
 - **PostToolUse(Edit|Write)**: `cargo check` on .rs files — errors fed back immediately
 - **PreCompact**: Blocks compaction if uncommitted changes or build failures
 - **Stop**: Session summary + integrity checks logged to `.claude/logs/`
+- **TaskCreated** (available, v2.1.84+): Fires when tasks created via TaskCreate
+- **PermissionDenied** (available, v2.1.89+): Fires after auto mode denials, can retry
 
 ### Teams & Permissions
 
