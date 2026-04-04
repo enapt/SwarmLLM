@@ -280,20 +280,67 @@
           <input type="text" id="provider-filter" data-i18n-placeholder="settings.filter_providers" placeholder="Filter providers..." style="flex:1;min-width:150px;font-size:0.8rem;padding:6px 10px;background:var(--bg-tertiary);border:1px solid var(--border);border-radius:var(--radius);color:var(--text-primary)">
         </div>
         <div id="provider-cards" class="mt-2">
-          <div class="provider-card" id="claude-subscription-card" style="background:var(--bg-tertiary);border-radius:var(--radius);padding:10px;margin-bottom:8px;border:1px solid var(--border);display:none">
+          <div class="provider-card" id="claude-subscription-card" style="background:var(--bg-tertiary);border-radius:var(--radius);padding:12px;margin-bottom:8px;border:1px solid var(--border);display:none">
             <div class="flex-between mb-1">
               <strong style="font-size:0.85rem" data-i18n="settings.claude_subscription">Claude Subscription</strong>
               <span class="badge" id="claude-subscription-status" style="font-size:0.7rem" data-i18n="settings.badge_not_set">Not set</span>
             </div>
-            <div style="font-size:0.78rem;color:var(--text-secondary);margin-bottom:6px" data-i18n="settings.claude_subscription_desc">Route Claude models through your local CLI subscription (Pro/Max/Team). Requires <code>claude</code> CLI installed and logged in.</div>
-            <div style="display:flex;align-items:center;gap:8px">
-              <label style="font-size:0.8rem;display:flex;align-items:center;gap:6px;cursor:pointer">
-                <input type="checkbox" id="claude-subscription-toggle">
-                <span data-i18n="settings.claude_subscription_enable">Enable</span>
-              </label>
-              <button class="btn btn-sm" id="claude-subscription-detect" data-i18n="settings.detect_btn">Detect</button>
+            <div style="font-size:0.78rem;color:var(--text-secondary);margin-bottom:8px" data-i18n="settings.claude_sub_intro">Use your existing Claude Pro, Max, Team, or Enterprise subscription to access Claude models — no API key or per-token charges needed.</div>
+
+            <!-- Step-by-step setup guide -->
+            <div id="claude-sub-setup-guide" style="font-size:0.78rem;margin-bottom:10px;padding:8px 10px;background:var(--bg-secondary);border-radius:var(--radius);border:1px solid var(--border)">
+              <div style="font-weight:600;margin-bottom:6px" data-i18n="settings.claude_sub_setup_title">Setup Guide</div>
+
+              <div style="display:flex;align-items:flex-start;gap:8px;margin-bottom:6px">
+                <span id="claude-sub-step1-icon" style="flex-shrink:0;width:20px;height:20px;border-radius:50%;background:var(--bg-tertiary);border:1px solid var(--border);display:flex;align-items:center;justify-content:center;font-size:0.7rem;font-weight:600">1</span>
+                <div>
+                  <div data-i18n="settings.claude_sub_step1">Install the Claude CLI</div>
+                  <div style="color:var(--text-secondary);font-size:0.72rem">
+                    <span data-i18n="settings.claude_sub_step1_detail">Open a terminal and run:</span>
+                    <code style="display:block;margin-top:3px;padding:4px 8px;background:var(--bg-tertiary);border-radius:4px;font-size:0.72rem;user-select:all">npm install -g @anthropic-ai/claude-code</code>
+                  </div>
+                </div>
+              </div>
+
+              <div style="display:flex;align-items:flex-start;gap:8px;margin-bottom:6px">
+                <span id="claude-sub-step2-icon" style="flex-shrink:0;width:20px;height:20px;border-radius:50%;background:var(--bg-tertiary);border:1px solid var(--border);display:flex;align-items:center;justify-content:center;font-size:0.7rem;font-weight:600">2</span>
+                <div>
+                  <div data-i18n="settings.claude_sub_step2">Log in with your subscription</div>
+                  <div style="color:var(--text-secondary);font-size:0.72rem">
+                    <span data-i18n="settings.claude_sub_step2_detail">Run this command and follow the browser login:</span>
+                    <code style="display:block;margin-top:3px;padding:4px 8px;background:var(--bg-tertiary);border-radius:4px;font-size:0.72rem;user-select:all">claude login</code>
+                  </div>
+                </div>
+              </div>
+
+              <div style="display:flex;align-items:flex-start;gap:8px;margin-bottom:6px">
+                <span id="claude-sub-step3-icon" style="flex-shrink:0;width:20px;height:20px;border-radius:50%;background:var(--bg-tertiary);border:1px solid var(--border);display:flex;align-items:center;justify-content:center;font-size:0.7rem;font-weight:600">3</span>
+                <div>
+                  <div data-i18n="settings.claude_sub_step3">Click "Check Status" below to verify</div>
+                </div>
+              </div>
+
+              <div style="display:flex;align-items:flex-start;gap:8px">
+                <span id="claude-sub-step4-icon" style="flex-shrink:0;width:20px;height:20px;border-radius:50%;background:var(--bg-tertiary);border:1px solid var(--border);display:flex;align-items:center;justify-content:center;font-size:0.7rem;font-weight:600">4</span>
+                <div>
+                  <div data-i18n="settings.claude_sub_step4">Enable the toggle to start routing Claude requests</div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Status + controls -->
+            <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+              <button class="btn btn-sm" id="claude-subscription-detect" style="min-width:100px" data-i18n="settings.check_status_btn">Check Status</button>
               <span id="claude-subscription-info" style="font-size:0.75rem;color:var(--text-secondary)"></span>
             </div>
+            <div id="claude-sub-status-detail" style="display:none;margin-top:8px;padding:6px 10px;background:var(--bg-secondary);border-radius:var(--radius);font-size:0.75rem"></div>
+            <div style="margin-top:8px;display:flex;align-items:center;gap:8px">
+              <label style="font-size:0.8rem;display:flex;align-items:center;gap:6px;cursor:pointer">
+                <input type="checkbox" id="claude-subscription-toggle">
+                <span data-i18n="settings.claude_sub_enable_routing">Route Claude models through subscription</span>
+              </label>
+            </div>
+            <div style="font-size:0.7rem;color:var(--text-secondary);margin-top:4px" data-i18n="settings.claude_sub_note">When enabled, Claude model requests use your subscription instead of an API key. Your existing Anthropic API key (if set) is used as fallback when disabled.</div>
           </div>
           <div class="provider-card" style="background:var(--bg-tertiary);border-radius:var(--radius);padding:10px;margin-bottom:8px;border:1px solid var(--border)">
             <div class="flex-between mb-1">

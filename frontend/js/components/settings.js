@@ -89,22 +89,77 @@
       if (csDetect) {
         csDetect.addEventListener('click', async function() {
           var info = document.getElementById('claude-subscription-info');
+          var detail = document.getElementById('claude-sub-status-detail');
           if (info) info.textContent = I18n.t('settings.detecting');
+          if (detail) detail.style.display = 'none';
+          csDetect.disabled = true;
           try {
             var resp = await App.authFetch('/api/admin/claude-subscription/status');
             var data = await resp.json();
-            if (data.cli_installed) {
-              var parts = [data.cli_version || 'installed'];
-              if (data.subscription_type) parts.push(data.subscription_type);
-              if (data.authenticated) parts.push(I18n.t('settings.authenticated'));
-              if (info) info.textContent = parts.join(' · ');
+            App.settings._updateClaudeSubSteps(data);
+            if (data.cli_installed && data.authenticated) {
+              var planLabel = data.subscription_type
+                ? data.subscription_type.charAt(0).toUpperCase() + data.subscription_type.slice(1)
+                : '';
+              if (info) info.textContent = I18n.t('settings.claude_sub_ready');
+              info.style.color = 'var(--green)';
+              if (detail) {
+                var parts = [];
+                parts.push(I18n.t('settings.cli_version') + ': ' + (data.cli_version || '?'));
+                if (planLabel) parts.push(I18n.t('settings.plan') + ': ' + planLabel);
+                if (data.rate_limit_tier) parts.push(I18n.t('settings.rate_tier') + ': ' + data.rate_limit_tier);
+                detail.innerHTML = parts.join('<span style="margin:0 6px;opacity:0.4">|</span>');
+                detail.style.display = '';
+                detail.style.color = 'var(--text-secondary)';
+              }
+            } else if (data.cli_installed && !data.authenticated) {
+              if (info) info.textContent = I18n.t('settings.claude_sub_not_logged_in');
+              info.style.color = 'var(--orange)';
+              if (detail) {
+                detail.textContent = I18n.t('settings.claude_sub_login_hint');
+                detail.style.display = '';
+                detail.style.color = 'var(--orange)';
+              }
             } else {
               if (info) info.textContent = I18n.t('settings.cli_not_found');
+              info.style.color = 'var(--red)';
+              if (detail) {
+                detail.textContent = I18n.t('settings.claude_sub_install_hint');
+                detail.style.display = '';
+                detail.style.color = 'var(--text-secondary)';
+              }
             }
           } catch (e) {
-            if (info) info.textContent = I18n.t('common.request_failed');
+            if (info) { info.textContent = I18n.t('common.request_failed'); info.style.color = 'var(--red)'; }
           }
+          csDetect.disabled = false;
         });
+      }
+    },
+
+    _updateClaudeSubSteps: function(data) {
+      var checkStyle = 'background:var(--green);color:#fff;border-color:var(--green)';
+      var pendingStyle = 'background:var(--bg-tertiary);color:var(--text-primary);border-color:var(--border)';
+      var step1 = document.getElementById('claude-sub-step1-icon');
+      var step2 = document.getElementById('claude-sub-step2-icon');
+      var step3 = document.getElementById('claude-sub-step3-icon');
+      var step4 = document.getElementById('claude-sub-step4-icon');
+      var toggle = document.getElementById('claude-subscription-toggle');
+      if (step1) {
+        if (data.cli_installed) { step1.textContent = '\u2713'; step1.style.cssText = checkStyle; }
+        else { step1.textContent = '1'; step1.style.cssText = pendingStyle; }
+      }
+      if (step2) {
+        if (data.authenticated) { step2.textContent = '\u2713'; step2.style.cssText = checkStyle; }
+        else { step2.textContent = '2'; step2.style.cssText = pendingStyle; }
+      }
+      if (step3) {
+        if (data.cli_installed) { step3.textContent = '\u2713'; step3.style.cssText = checkStyle; }
+        else { step3.textContent = '3'; step3.style.cssText = pendingStyle; }
+      }
+      if (step4 && toggle) {
+        if (toggle.checked) { step4.textContent = '\u2713'; step4.style.cssText = checkStyle; }
+        else { step4.textContent = '4'; step4.style.cssText = pendingStyle; }
       }
     },
 
