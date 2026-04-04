@@ -126,6 +126,8 @@ pub mod admin_models;
 pub mod admin_providers;
 pub mod anthropic;
 #[cfg(feature = "claude-subscription")]
+pub mod claude_session;
+#[cfg(feature = "claude-subscription")]
 pub mod claude_sub;
 pub mod identity;
 pub mod mcp;

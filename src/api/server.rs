@@ -213,6 +213,40 @@ pub fn build_router(state: AppState) -> Router {
                 }
             }),
         )
+        // Claude Code sessions (feature-gated — all routes added only when feature is enabled)
+        .merge({
+            #[cfg(feature = "claude-subscription")]
+            {
+                use axum::routing::{get, post};
+                Router::new()
+                    .route(
+                        "/api/claude-code/sessions",
+                        get(crate::api::claude_session::list_sessions_handler),
+                    )
+                    .route(
+                        "/api/claude-code/session",
+                        post(crate::api::claude_session::create_session_handler),
+                    )
+                    .route(
+                        "/api/claude-code/session/:id",
+                        get(crate::api::claude_session::get_session_handler)
+                            .delete(crate::api::claude_session::close_session_handler),
+                    )
+                    .route(
+                        "/api/claude-code/session/:id/message",
+                        post(crate::api::claude_session::send_message_handler),
+                    )
+                    .route(
+                        "/api/claude-code/session/:id/permission",
+                        post(crate::api::claude_session::permission_handler),
+                    )
+                    .with_state(state.clone())
+            }
+            #[cfg(not(feature = "claude-subscription"))]
+            {
+                Router::new()
+            }
+        })
         // Version & Updates
         .route("/api/admin/version", get(admin::version_info))
         .route("/api/admin/update/check", post(admin::check_update))
