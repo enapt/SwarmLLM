@@ -556,7 +556,7 @@
   "dashboard.missing_warning": "⚠ गायब {files}",
   "dashboard.unload_tip": "सभी भाग मेमोरी से अनलोड करें — RAM/VRAM मुक्त होता है लेकिन फ़ाइलें डिस्क पर रहती हैं",
   "dashboard.cloud_models_count": "{count} मॉडल",
-  "dashboard.cloud_connected": "API Key",
+  "dashboard.cloud_connected": "API KEY",
   "dashboard.cloud_search": "मॉडल खोजें…",
   "dashboard.cloud_sort_newest": "नवीनतम",
   "dashboard.cloud_sort_ctx_desc": "संदर्भ ↓",

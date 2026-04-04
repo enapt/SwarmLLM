@@ -555,7 +555,7 @@
   "dashboard.missing_warning": "⚠ مفقود {files}",
   "dashboard.unload_tip": "إلغاء تحميل جميع الأجزاء من الذاكرة — يُحرر RAM/VRAM ولكن يحتفظ بالملفات على القرص",
   "dashboard.cloud_models_count": "{count} نماذج",
-  "dashboard.cloud_connected": "API Key",
+  "dashboard.cloud_connected": "API KEY",
   "dashboard.cloud_search": "بحث عن النماذج…",
   "dashboard.cloud_sort_newest": "الأحدث",
   "dashboard.cloud_sort_ctx_desc": "السياق ↓",

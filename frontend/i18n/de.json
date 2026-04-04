@@ -556,7 +556,7 @@
   "dashboard.missing_warning": "⚠ Fehlend: {files}",
   "dashboard.unload_tip": "Alle Teile aus dem Speicher entladen — gibt RAM/VRAM frei, Dateien bleiben auf Datenträger",
   "dashboard.cloud_models_count": "{count} Modell(e)",
-  "dashboard.cloud_connected": "API Key",
+  "dashboard.cloud_connected": "API KEY",
   "dashboard.cloud_search": "Modelle suchen…",
   "dashboard.cloud_sort_newest": "Neueste",
   "dashboard.cloud_sort_ctx_desc": "Kontext ↓",

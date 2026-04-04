@@ -556,7 +556,7 @@
   "dashboard.missing_warning": "⚠ Missing {files}",
   "dashboard.unload_tip": "Unload all parts from memory — frees RAM/VRAM but keeps files on disk",
   "dashboard.cloud_models_count": "{count} model(s)",
-  "dashboard.cloud_connected": "API Key",
+  "dashboard.cloud_connected": "API KEY",
   "dashboard.cloud_subscription": "Subscription",
   "dashboard.cloud_search": "Search models…",
   "dashboard.cloud_sort_newest": "Newest",

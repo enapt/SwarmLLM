@@ -556,7 +556,7 @@
   "dashboard.missing_warning": "⚠ Ontbreekt: {files}",
   "dashboard.unload_tip": "Alle delen uit geheugen verwijderen — maakt RAM/VRAM vrij maar behoudt bestanden op schijf",
   "dashboard.cloud_models_count": "{count} model(len)",
-  "dashboard.cloud_connected": "API Key",
+  "dashboard.cloud_connected": "API KEY",
   "dashboard.cloud_search": "Modellen zoeken…",
   "dashboard.cloud_sort_newest": "Nieuwste",
   "dashboard.cloud_sort_ctx_desc": "Context ↓",

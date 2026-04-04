@@ -216,14 +216,8 @@
       if (requests > 0) parts.push('<span class="mode-stat"><strong>' + requests + '</strong> ' + I18n.t('mode.stat_requests', { count: requests }).replace(/^\d+\s*/, '') + '</span>');
       if (served > 0) parts.push('<span class="mode-stat"><strong>' + served + '</strong> ' + I18n.t('mode.stat_served', { count: served }).replace(/^\d+\s*/, '') + '</span>');
 
-      // Claude Code subscription badge — prominent, unmistakable
-      if (claudeSubEnabled) {
-        parts.push('<span class="mode-claude-badge" title="' + U.escapeHtml(I18n.t('mode.claude_sub_tip')) + '">' +
-          providerIconHtml('claude_subscription', 14) +
-          ' <strong>Claude Code</strong>' +
-          '<span class="claude-sub-label">' + I18n.t('mode.subscription') + '</span>' +
-          '</span>');
-      }
+      // Claude Code subscription — no badge in mode indicator text,
+      // it appears in the provider strip below instead
 
       var detailHtml;
       if (parts.length > 0) {
@@ -248,6 +242,34 @@
         S._cachedProviderData = providerData;
       } catch (e) {}
       App.modeIndicator.update(statsData, providerData);
+      App.modeIndicator.updateClaudeCodeBadge(providerData);
+    },
+
+    updateClaudeCodeBadge: function(providerData) {
+      var strip = document.getElementById('claude-code-badge');
+      if (!strip) return;
+      var sub = providerData && providerData.claude_subscription;
+      if (!sub || !sub.enabled) {
+        strip.classList.add('hidden');
+        return;
+      }
+      strip.classList.remove('hidden');
+      // Fetch detailed status for plan label
+      var planEl = document.getElementById('cc-plan-label');
+      if (planEl && !planEl.textContent) {
+        App.authFetch('/api/admin/claude-subscription/status').then(function(r) {
+          return r.json();
+        }).then(function(data) {
+          if (data.subscription_type) {
+            planEl.textContent = data.subscription_type.charAt(0).toUpperCase() + data.subscription_type.slice(1) + ' plan';
+          }
+          if (data.cli_version) {
+            planEl.textContent = (planEl.textContent ? planEl.textContent + ' · ' : '') + data.cli_version.replace(' (Claude Code)', '');
+          }
+        }).catch(function() {});
+      }
+      // Click navigates to settings
+      strip.onclick = function() { App.ui.openSettings(true); };
     }
   };
 })();

@@ -556,7 +556,7 @@
   "dashboard.missing_warning": "⚠ Отсутствует: {files}",
   "dashboard.unload_tip": "Выгрузить все части из памяти — освобождает RAM/VRAM, но файлы остаются на диске",
   "dashboard.cloud_models_count": "{count} модел(и)",
-  "dashboard.cloud_connected": "API Key",
+  "dashboard.cloud_connected": "API KEY",
   "dashboard.cloud_search": "Поиск моделей…",
   "dashboard.cloud_sort_newest": "Новейшие",
   "dashboard.cloud_sort_ctx_desc": "Контекст ↓",

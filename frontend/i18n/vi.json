@@ -556,7 +556,7 @@
   "dashboard.missing_warning": "⚠ Thiếu {files}",
   "dashboard.unload_tip": "Gỡ tất cả phần khỏi bộ nhớ — giải phóng RAM/VRAM nhưng giữ tệp trên đĩa",
   "dashboard.cloud_models_count": "{count} mô hình",
-  "dashboard.cloud_connected": "API Key",
+  "dashboard.cloud_connected": "API KEY",
   "dashboard.cloud_search": "Tìm mô hình…",
   "dashboard.cloud_sort_newest": "Mới nhất",
   "dashboard.cloud_sort_ctx_desc": "Ngữ cảnh ↓",

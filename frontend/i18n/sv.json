@@ -556,7 +556,7 @@
   "dashboard.missing_warning": "⚠ Saknar {files}",
   "dashboard.unload_tip": "Avlasta alla delar från minnet — frigör RAM/VRAM men behåller filer på disk",
   "dashboard.cloud_models_count": "{count} modell(er)",
-  "dashboard.cloud_connected": "API Key",
+  "dashboard.cloud_connected": "API KEY",
   "dashboard.cloud_search": "Sök modeller…",
   "dashboard.cloud_sort_newest": "Nyaste",
   "dashboard.cloud_sort_ctx_desc": "Kontext ↓",

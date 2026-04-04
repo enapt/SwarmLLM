@@ -2680,10 +2680,17 @@ select.cloud-model-sort { flex: 0 0 88px; width: 88px; padding: 6px 6px; font-si
 }
 .mode-detail .mode-stat { font-family: var(--font-mono); font-size: 0.74rem; color: var(--text-secondary); }
 .mode-detail .mode-stat strong { color: var(--text-primary); font-weight: 600; }
-.mode-detail .mode-claude-badge { display: inline-flex; align-items: center; gap: 5px; color: #D97757; font-family: var(--font-mono); font-size: 0.74rem; background: rgba(217,119,87,0.12); border: 1px solid rgba(217,119,87,0.35); border-radius: var(--radius-lg); padding: 2px 8px 2px 5px; }
-.mode-detail .mode-claude-badge strong { color: #D97757; font-weight: 700; letter-spacing: 0.01em; }
-.mode-detail .mode-claude-badge img { vertical-align: -2px; }
-.mode-detail .claude-sub-label { font-size: 0.58rem; text-transform: uppercase; letter-spacing: 0.06em; color: #3ddc84; font-weight: 700; background: rgba(61,220,132,0.12); border-radius: 4px; padding: 1px 5px; margin-left: 2px; }
+/* Provider badges row — contains Claude Code badge + API provider badges inline */
+.provider-strip-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-bottom: 6px; }
+.provider-strip-row .provider-strip { margin-bottom: 0; }
+/* Claude Code subscription badge — sits alongside provider health badges */
+.claude-code-indicator { display: inline-flex; align-items: center; gap: 6px; padding: 5px 12px 5px 8px; background: rgba(217,119,87,0.08); border: 1px solid rgba(217,119,87,0.3); border-radius: var(--radius-lg); cursor: pointer; transition: border-color 0.2s; }
+.claude-code-indicator:hover { border-color: rgba(217,119,87,0.5); }
+.claude-code-indicator .cc-icon { flex-shrink: 0; vertical-align: middle; }
+.claude-code-indicator .cc-name { font-family: var(--font-mono); font-size: 0.78rem; font-weight: 700; color: #D97757; letter-spacing: 0.01em; }
+.claude-code-indicator .cc-status-dot { width: 7px; height: 7px; border-radius: 50%; background: #3ddc84; box-shadow: 0 0 6px rgba(61,220,132,0.5); flex-shrink: 0; }
+.claude-code-indicator .cc-plan { font-size: 0.68rem; color: var(--text-secondary); font-family: var(--font-mono); }
+.claude-code-indicator .cc-tag { font-size: 0.56rem; text-transform: uppercase; letter-spacing: 0.06em; color: #3ddc84; font-weight: 700; background: rgba(61,220,132,0.12); border: 1px solid rgba(61,220,132,0.25); border-radius: 4px; padding: 1px 5px; }
 .mode-separator { color: var(--text-muted); font-size: 0.65rem; opacity: 0.35; }
 .mode-detail .mode-action { color: var(--text-muted); font-size: 0.74rem; cursor: pointer; text-decoration: underline; text-decoration-style: dotted; text-underline-offset: 2px; }
 .mode-detail .mode-action:hover { color: var(--accent); }

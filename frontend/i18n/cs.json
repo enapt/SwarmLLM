@@ -556,7 +556,7 @@
   "dashboard.missing_warning": "⚠ Chybí {files}",
   "dashboard.unload_tip": "Uvolnit všechny části z paměti — uvolní RAM/VRAM, ale soubory zůstanou na disku",
   "dashboard.cloud_models_count": "{count} model(ů)",
-  "dashboard.cloud_connected": "API Key",
+  "dashboard.cloud_connected": "API KEY",
   "dashboard.cloud_search": "Hledat modely…",
   "dashboard.cloud_sort_newest": "Nejnovější",
   "dashboard.cloud_sort_ctx_desc": "Kontext ↓",

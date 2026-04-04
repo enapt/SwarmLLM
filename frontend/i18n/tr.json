@@ -556,7 +556,7 @@
   "dashboard.missing_warning": "⚠ Eksik {files}",
   "dashboard.unload_tip": "Tüm parçaları bellekten kaldır — RAM/VRAM'i serbest bırakır ama dosyalar diskte kalır",
   "dashboard.cloud_models_count": "{count} model",
-  "dashboard.cloud_connected": "API Key",
+  "dashboard.cloud_connected": "API KEY",
   "dashboard.cloud_search": "Model ara…",
   "dashboard.cloud_sort_newest": "En yeni",
   "dashboard.cloud_sort_ctx_desc": "Bağlam ↓",

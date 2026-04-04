@@ -555,7 +555,7 @@
   "dashboard.missing_warning": "⚠ Manquants : {files}",
   "dashboard.unload_tip": "Décharger toutes les parties de la mémoire — libère la RAM/VRAM mais conserve les fichiers sur le disque",
   "dashboard.cloud_models_count": "{count} modèle(s)",
-  "dashboard.cloud_connected": "API Key",
+  "dashboard.cloud_connected": "API KEY",
   "dashboard.cloud_search": "Rechercher des modèles…",
   "dashboard.cloud_sort_newest": "Plus récent",
   "dashboard.cloud_sort_ctx_desc": "Contexte ↓",

@@ -556,7 +556,7 @@
   "dashboard.missing_warning": "⚠ Hilang {files}",
   "dashboard.unload_tip": "Turunkan semua bagian dari memori — membebaskan RAM/VRAM tapi file tetap di disk",
   "dashboard.cloud_models_count": "{count} model",
-  "dashboard.cloud_connected": "API Key",
+  "dashboard.cloud_connected": "API KEY",
   "dashboard.cloud_search": "Cari model…",
   "dashboard.cloud_sort_newest": "Terbaru",
   "dashboard.cloud_sort_ctx_desc": "Konteks ↓",

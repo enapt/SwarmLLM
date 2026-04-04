@@ -555,7 +555,7 @@
   "dashboard.missing_warning": "⚠ 缺失 {files}",
   "dashboard.unload_tip": "从内存卸载所有部分——释放 RAM/VRAM 但保留磁盘文件",
   "dashboard.cloud_models_count": "{count} 个模型",
-  "dashboard.cloud_connected": "API Key",
+  "dashboard.cloud_connected": "API KEY",
   "dashboard.cloud_search": "搜索模型…",
   "dashboard.cloud_sort_newest": "最新",
   "dashboard.cloud_sort_ctx_desc": "上下文 ↓",

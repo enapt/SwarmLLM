@@ -555,7 +555,7 @@
   "dashboard.missing_warning": "⚠ {files} 없음",
   "dashboard.unload_tip": "메모리에서 모든 파트를 언로드합니다 — RAM/VRAM을 해제하지만 파일은 디스크에 유지됩니다",
   "dashboard.cloud_models_count": "모델 {count}개",
-  "dashboard.cloud_connected": "API Key",
+  "dashboard.cloud_connected": "API KEY",
   "dashboard.cloud_search": "모델 검색…",
   "dashboard.cloud_sort_newest": "최신순",
   "dashboard.cloud_sort_ctx_desc": "컨텍스트 ↓",

@@ -555,7 +555,7 @@
   "dashboard.missing_warning": "⚠ {files}が不足",
   "dashboard.unload_tip": "メモリからすべてのパートをアンロード——RAM/VRAMを解放しますがファイルはディスクに残ります",
   "dashboard.cloud_models_count": "{count}個のモデル",
-  "dashboard.cloud_connected": "API Key",
+  "dashboard.cloud_connected": "API KEY",
   "dashboard.cloud_search": "モデルを検索…",
   "dashboard.cloud_sort_newest": "最新",
   "dashboard.cloud_sort_ctx_desc": "コンテキスト ↓",

@@ -555,7 +555,7 @@
   "dashboard.missing_warning": "⚠ Відсутнє {files}",
   "dashboard.unload_tip": "Вивантажити всі частини з пам'яті — звільняє RAM/VRAM, але зберігає файли на диску",
   "dashboard.cloud_models_count": "{count} модель/моделей",
-  "dashboard.cloud_connected": "API Key",
+  "dashboard.cloud_connected": "API KEY",
   "dashboard.cloud_search": "Пошук моделей…",
   "dashboard.cloud_sort_newest": "Найновіші",
   "dashboard.cloud_sort_ctx_desc": "Контекст ↓",

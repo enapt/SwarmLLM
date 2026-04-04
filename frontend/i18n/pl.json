@@ -555,7 +555,7 @@
   "dashboard.missing_warning": "⚠ Brakuje {files}",
   "dashboard.unload_tip": "Wyładuj wszystkie części z pamięci — zwalnia RAM/VRAM, ale pliki pozostają na dysku",
   "dashboard.cloud_models_count": "{count} model(e)",
-  "dashboard.cloud_connected": "API Key",
+  "dashboard.cloud_connected": "API KEY",
   "dashboard.cloud_search": "Szukaj modeli…",
   "dashboard.cloud_sort_newest": "Najnowsze",
   "dashboard.cloud_sort_ctx_desc": "Kontekst ↓",

@@ -715,8 +715,17 @@
             </div>
           </div>
 
-          <!-- Cloud provider badges — visible when at least one provider configured -->
-          <div class="provider-strip hidden" id="provider-badges"></div>
+          <!-- Provider badges strip — health-probed API providers + Claude Code subscription -->
+          <div class="provider-strip-row">
+            <div class="claude-code-indicator hidden" id="claude-code-badge">
+              <img src="/static/icons/claude-code.svg" width="18" height="18" alt="" class="cc-icon">
+              <span class="cc-name">Claude Code</span>
+              <span class="cc-status-dot"></span>
+              <span class="cc-plan" id="cc-plan-label"></span>
+              <span class="cc-tag" data-i18n="mode.subscription">SUBSCRIPTION</span>
+            </div>
+            <div class="provider-strip hidden" id="provider-badges"></div>
+          </div>
 
 
           <div class="grid grid-2">
