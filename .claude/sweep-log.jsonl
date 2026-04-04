@@ -1,0 +1,10 @@
+{"file":"src/api/admin.rs","line":275,"kind":"error_type_misuse","summary":"SwarmError::Config propagated to API client in reload_config — mapped to Internal","status":"fixed","date":"2026-04-04"}
+{"file":"src/network/manager.rs","line":1646,"kind":"unstructured_tracing","summary":"PEX rate limit log used positional format arg instead of structured fields","status":"fixed","date":"2026-04-04"}
+{"file":"src/inference/router.rs","line":488,"kind":"unstructured_tracing","summary":"Router unhandled message log used positional format arg instead of structured field","status":"fixed","date":"2026-04-04"}
+{"file":"src/api/pool.rs","line":107,"kind":"unstructured_tracing","summary":"pool_invite DIAG log missing invitee structured field","status":"fixed","date":"2026-04-04"}
+{"file":"src/api/admin_models.rs","line":188,"kind":"duplication","summary":"ShardState-to-display-string match duplicated between build_shard_detail and shard_storage — extracted shard_download_json()","status":"fixed","date":"2026-04-04"}
+{"file":"src/api/admin_models.rs","line":217,"kind":"duplication","summary":"peer download serialization duplicated between build_shard_detail and shard_storage — extracted peer_downloads_json()","status":"fixed","date":"2026-04-04"}
+{"file":"src/api/admin_models.rs","line":168,"kind":"duplication","summary":"locked_shards read pattern duplicated (too small to extract — kept as-is)","status":"wontfix","date":"2026-04-04"}
+{"file":"frontend/i18n/*.json","line":0,"kind":"i18n_consolidation","summary":"10 duplicate dashboard keys consolidated to existing keys, 8 unused keys deleted (890→872)","status":"fixed","date":"2026-04-04"}
+{"file":"frontend/i18n/*.json","line":0,"kind":"i18n_untranslated","summary":"~750 untranslated stubs across 20 languages — translation in progress","status":"fixed","date":"2026-04-04"}
+{"file":"CLAUDE.md","line":124,"kind":"doc_mismatch","summary":"i18n key count said 889 but actual was 890 (now 872 after consolidation)","status":"fixed","date":"2026-04-04"}
