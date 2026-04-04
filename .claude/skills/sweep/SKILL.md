@@ -67,8 +67,11 @@ IMPORTANT: Launch all agents with `isolation: "worktree"` so they get clean cont
 1. Deduplicate findings across agents
 2. Compare against known issues from sweep-log.jsonl — drop any re-reports
 3. Rate each NEW finding by priority (CRITICAL > HIGH > MEDIUM > LOW) and effort (small/medium/large)
-4. Present as a ranked action list showing only genuinely new findings
-5. Ask user which items to fix, then execute
+4. **Triage into two buckets:**
+   - **Auto-fix** (do immediately, no prompting): dead code removal, unused imports, stale comments, dead CSS/JS, missing i18n keys, hardcoded strings, duplicate code extraction, stale doc updates, magic number constants, simple consistency fixes. Anything where the correct fix is obvious and low-risk.
+   - **Needs discussion** (present to user): architectural changes, behavior changes, ambiguous deletions (might be used via reflection/macros), security-sensitive fixes, anything touching the inference hot path, changes that affect the public API contract, or findings where you're <90% confident in the fix.
+5. Fix everything in the auto-fix bucket immediately — commit as you go
+6. Present only the "needs discussion" items to the user, if any
 
 ## After Fixes Are Applied
 
