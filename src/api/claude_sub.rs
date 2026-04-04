@@ -39,6 +39,11 @@ pub struct ClaudeSubscriptionConfig {
     /// Timeout in seconds per request (default: 300 = 5 min).
     #[serde(default)]
     pub timeout_secs: Option<u64>,
+    /// Working directory for the CLI subprocess (default: system temp dir).
+    /// Set to a project path to give Claude project context (CLAUDE.md, etc.).
+    /// Use "none" or leave empty for a clean context (recommended for API proxy use).
+    #[serde(default)]
+    pub working_dir: Option<String>,
 }
 
 impl ClaudeSubscriptionConfig {
@@ -122,18 +127,21 @@ fn put_session(key: String, session_id: String) {
 }
 
 /// Build a session cache key from model + conversation history prefix.
-/// Uses the first and last user messages to create a stable key across turns.
-fn session_key(model: &str, messages: &[serde_json::Value]) -> String {
+/// Only produces a key for multi-turn conversations (2+ messages).
+/// Single-turn requests return None — no session reuse.
+fn session_key(model: &str, messages: &[serde_json::Value]) -> Option<String> {
+    // Only create session keys for multi-turn conversations
+    if messages.len() < 2 {
+        return None;
+    }
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     // Hash all messages except the last (the new user message) to identify the conversation
-    if messages.len() > 1 {
-        for msg in &messages[..messages.len() - 1] {
-            msg.to_string().hash(&mut hasher);
-        }
+    for msg in &messages[..messages.len() - 1] {
+        msg.to_string().hash(&mut hasher);
     }
     model.hash(&mut hasher);
-    format!("claude_sub:{model}:{:x}", hasher.finish())
+    Some(format!("claude_sub:{model}:{:x}", hasher.finish()))
 }
 
 /// Periodic cleanup of expired sessions (call from a background task or lazily).
@@ -259,68 +267,66 @@ fn build_cli_args<'a>(
     args
 }
 
-/// Extract user-facing prompt text from OpenAI-format messages.
+/// Extract text content from a message value (handles both string and array formats).
+fn extract_content_text(msg: &serde_json::Value) -> String {
+    match msg.get("content") {
+        Some(serde_json::Value::String(s)) => s.clone(),
+        Some(serde_json::Value::Array(parts)) => parts
+            .iter()
+            .filter_map(|p| {
+                if p["type"].as_str() == Some("text") {
+                    p["text"].as_str().map(String::from)
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+        _ => String::new(),
+    }
+}
+
+/// Serialize messages to a single prompt string for `claude -p`.
+///
+/// Uses the production-proven format from claude-max-api-proxy-rs:
+/// - system messages → `<system>...</system>` (also extracted as --system-prompt)
+/// - assistant messages → `<previous_response>...</previous_response>`
+/// - user messages → bare text
+/// - tool_use/tool_result → tagged blocks
+///
+/// For single-turn (1 user message), just returns the raw message text.
+/// For multi-turn, serializes the full conversation every invocation (stateless).
 fn extract_openai_prompt(messages: &[serde_json::Value]) -> (String, Option<String>) {
     let mut system_prompt = None;
-    let mut conversation_parts = Vec::new();
+    let mut parts: Vec<String> = Vec::new();
 
     for msg in messages {
         let role = msg["role"].as_str().unwrap_or("user");
-        let content = match msg.get("content") {
-            Some(serde_json::Value::String(s)) => s.clone(),
-            Some(serde_json::Value::Array(parts)) => {
-                // Multi-part content (text + images) — extract text parts
-                parts
-                    .iter()
-                    .filter_map(|p| {
-                        if p["type"].as_str() == Some("text") {
-                            p["text"].as_str().map(String::from)
-                        } else {
-                            None
-                        }
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n")
+        let text = extract_content_text(msg);
+        if text.is_empty() {
+            continue;
+        }
+        match role {
+            "system" => {
+                system_prompt = Some(text.clone());
+                parts.push(format!("<system>\n{text}\n</system>"));
             }
-            _ => continue,
-        };
-
-        if role == "system" {
-            system_prompt = Some(content);
-        } else {
-            conversation_parts.push(format!("{}: {}", role, content));
+            "assistant" => {
+                parts.push(format!("<previous_response>\n{text}\n</previous_response>"));
+            }
+            _ => {
+                // user, tool, function — pass as bare text
+                parts.push(text);
+            }
         }
     }
 
-    // For single-turn, just use the last user message
-    // For multi-turn with session resume, also use just the last user message
-    let prompt = messages
-        .iter()
-        .rev()
-        .find(|m| m["role"].as_str() == Some("user"))
-        .and_then(|m| match m.get("content") {
-            Some(serde_json::Value::String(s)) => Some(s.clone()),
-            Some(serde_json::Value::Array(parts)) => Some(
-                parts
-                    .iter()
-                    .filter_map(|p| {
-                        if p["type"].as_str() == Some("text") {
-                            p["text"].as_str().map(String::from)
-                        } else {
-                            None
-                        }
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n"),
-            ),
-            _ => None,
-        })
-        .unwrap_or_default();
-
+    let prompt = parts.join("\n\n").trim().to_string();
     (prompt, system_prompt)
 }
 
-/// Extract user-facing prompt text from Anthropic-format messages.
+/// Serialize Anthropic-format messages to a single prompt string.
+/// Same stateless approach as OpenAI: full conversation every invocation.
 fn extract_anthropic_prompt(
     messages: &[serde_json::Value],
     system: Option<&serde_json::Value>,
@@ -337,30 +343,30 @@ fn extract_anthropic_prompt(
         _ => None,
     });
 
-    // Last user message as the prompt
-    let prompt = messages
-        .iter()
-        .rev()
-        .find(|m| m["role"].as_str() == Some("user"))
-        .and_then(|m| match m.get("content") {
-            Some(serde_json::Value::String(s)) => Some(s.clone()),
-            Some(serde_json::Value::Array(parts)) => Some(
-                parts
-                    .iter()
-                    .filter_map(|p| {
-                        if p["type"].as_str() == Some("text") {
-                            p["text"].as_str().map(String::from)
-                        } else {
-                            None
-                        }
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n"),
-            ),
-            _ => None,
-        })
-        .unwrap_or_default();
+    let mut parts: Vec<String> = Vec::new();
 
+    // Include system prompt in the serialized conversation
+    if let Some(ref sys) = system_prompt {
+        parts.push(format!("<system>\n{sys}\n</system>"));
+    }
+
+    for msg in messages {
+        let role = msg["role"].as_str().unwrap_or("user");
+        let text = extract_content_text(msg);
+        if text.is_empty() {
+            continue;
+        }
+        match role {
+            "assistant" => {
+                parts.push(format!("<previous_response>\n{text}\n</previous_response>"));
+            }
+            _ => {
+                parts.push(text);
+            }
+        }
+    }
+
+    let prompt = parts.join("\n\n").trim().to_string();
     (prompt, system_prompt)
 }
 
@@ -390,8 +396,19 @@ async fn spawn_and_stream(
         "DIAG: claude_sub spawning subprocess"
     );
 
+    // Default to /tmp to avoid loading the current project's CLAUDE.md, hooks,
+    // MCP servers, and skills — we just want raw inference, not agent mode.
+    // Users can override via working_dir config to give Claude project context.
+    let cwd = config
+        .working_dir
+        .as_ref()
+        .filter(|d| !d.is_empty() && *d != "none")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
+
     let mut child = Command::new(binary)
         .args(&args)
+        .current_dir(&cwd)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -431,9 +448,9 @@ pub async fn proxy_via_subprocess_openai(
 
     let (prompt, system_prompt) = extract_openai_prompt(&messages);
 
-    // Session management: check for cached session for multi-turn
+    // Session management: check for cached session for multi-turn (only for 2+ messages)
     let sess_key = session_key(model, &messages);
-    let cached_session = get_session(&sess_key);
+    let cached_session = sess_key.as_ref().and_then(|k| get_session(k));
 
     let (mut child, mut lines) = spawn_and_stream(
         config,
@@ -530,8 +547,8 @@ pub async fn proxy_via_subprocess_openai(
                             }
                             "result" => {
                                 // Cache session_id for multi-turn
-                                if let Some(sid) = parsed["session_id"].as_str() {
-                                    put_session(sk.clone(), sid.to_string());
+                                if let (Some(ref key), Some(sid)) = (&sk, parsed["session_id"].as_str()) {
+                                    put_session(key.clone(), sid.to_string());
                                 }
                                 // Usage info (optional — not all clients use it)
                                 let usage = &parsed["usage"];
@@ -594,8 +611,10 @@ pub async fn proxy_via_subprocess_openai(
         let result = collect_result(&mut lines, timeout, &mut child).await?;
 
         // Cache session for multi-turn
-        if let Some(sid) = result.get("session_id").and_then(|v| v.as_str()) {
-            put_session(sess_key, sid.to_string());
+        if let (Some(key), Some(sid)) =
+            (sess_key, result.get("session_id").and_then(|v| v.as_str()))
+        {
+            put_session(key, sid.to_string());
         }
 
         let content = result["result"].as_str().unwrap_or("");
@@ -647,9 +666,9 @@ pub async fn proxy_via_subprocess_anthropic(
 
     let (prompt, system_prompt) = extract_anthropic_prompt(&messages, req.get("system"));
 
-    // Session management
+    // Session management (multi-turn only)
     let sess_key = session_key(model, &messages);
-    let cached_session = get_session(&sess_key);
+    let cached_session = sess_key.as_ref().and_then(|k| get_session(k));
 
     let (mut child, mut lines) = spawn_and_stream(
         config,
@@ -736,8 +755,8 @@ pub async fn proxy_via_subprocess_anthropic(
                                 }
                             }
                             "result" => {
-                                if let Some(sid) = parsed["session_id"].as_str() {
-                                    put_session(sk.clone(), sid.to_string());
+                                if let (Some(ref key), Some(sid)) = (&sk, parsed["session_id"].as_str()) {
+                                    put_session(key.clone(), sid.to_string());
                                 }
                                 break;
                             }
@@ -773,8 +792,10 @@ pub async fn proxy_via_subprocess_anthropic(
         // Non-streaming: collect and return Anthropic JSON
         let result = collect_result(&mut lines, timeout, &mut child).await?;
 
-        if let Some(sid) = result.get("session_id").and_then(|v| v.as_str()) {
-            put_session(sess_key, sid.to_string());
+        if let (Some(key), Some(sid)) =
+            (sess_key, result.get("session_id").and_then(|v| v.as_str()))
+        {
+            put_session(key, sid.to_string());
         }
 
         let content = result["result"].as_str().unwrap_or("");
@@ -933,7 +954,15 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_openai_prompt() {
+    fn test_extract_openai_prompt_single_turn() {
+        let messages = vec![serde_json::json!({"role": "user", "content": "Hello"})];
+        let (prompt, system) = extract_openai_prompt(&messages);
+        assert_eq!(prompt, "Hello");
+        assert!(system.is_none());
+    }
+
+    #[test]
+    fn test_extract_openai_prompt_multi_turn() {
         let messages = vec![
             serde_json::json!({"role": "system", "content": "You are helpful"}),
             serde_json::json!({"role": "user", "content": "What is 2+2?"}),
@@ -941,7 +970,11 @@ mod tests {
             serde_json::json!({"role": "user", "content": "And 3+3?"}),
         ];
         let (prompt, system) = extract_openai_prompt(&messages);
-        assert_eq!(prompt, "And 3+3?");
+        assert!(prompt.contains("<system>"));
+        assert!(prompt.contains("You are helpful"));
+        assert!(prompt.contains("<previous_response>"));
+        assert!(prompt.contains("4"));
+        assert!(prompt.contains("And 3+3?"));
         assert_eq!(system.unwrap(), "You are helpful");
     }
 
@@ -961,6 +994,16 @@ mod tests {
         let key2 = session_key("claude-sonnet-4-6", &msgs2);
         // Same prefix (first 2 messages), different last message — same session key
         assert_eq!(key1, key2);
+        // Both should be Some (multi-turn)
+        assert!(key1.is_some());
+    }
+
+    #[test]
+    fn test_session_key_single_turn_none() {
+        let msgs = vec![serde_json::json!({"role": "user", "content": "Hi"})];
+        let key = session_key("claude-sonnet-4-6", &msgs);
+        // Single-turn requests should NOT produce a session key
+        assert!(key.is_none());
     }
 
     #[test]
