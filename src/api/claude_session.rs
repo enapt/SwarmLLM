@@ -52,6 +52,12 @@ pub enum SessionState {
     Expired,
 }
 
+/// Shared stdin handle — can be written to without holding the session lock.
+/// This is critical for the permission flow: the SSE loop holds the session
+/// lock while reading stdout, and the permission handler must write to stdin
+/// concurrently.
+pub type StdinHandle = std::sync::Arc<Mutex<Option<tokio::process::ChildStdin>>>;
+
 /// A single Claude Code session backed by a live subprocess.
 pub struct ClaudeSession {
     /// SwarmLLM session ID (from frontend chat.js).
@@ -60,8 +66,9 @@ pub struct ClaudeSession {
     pub claude_session_id: Option<String>,
     /// Subprocess handle.
     child: Option<tokio::process::Child>,
-    /// Stdin writer for sending messages and control responses.
-    stdin: Option<tokio::process::ChildStdin>,
+    /// Stdin writer — behind its own lock to allow concurrent writes
+    /// while the SSE loop holds the session lock for stdout reads.
+    stdin: StdinHandle,
     /// Buffered stdout reader for NDJSON events.
     stdout: Option<tokio::io::Lines<BufReader<tokio::process::ChildStdout>>>,
     /// Working directory the subprocess runs in.
@@ -101,14 +108,13 @@ impl ClaudeSession {
         self.last_active.elapsed().as_secs()
     }
 
+    /// Get a cloned handle to the stdin writer (for concurrent access).
+    pub fn stdin_handle(&self) -> StdinHandle {
+        self.stdin.clone()
+    }
+
     /// Send a user message to the subprocess via stdin.
     pub async fn send_user_message(&mut self, content: &str) -> Result<(), ApiError> {
-        let stdin = self.stdin.as_mut().ok_or_else(|| {
-            ApiError(crate::error::SwarmError::Internal(
-                "Claude session: subprocess stdin not available".into(),
-            ))
-        })?;
-
         let session_id = self.claude_session_id.clone().unwrap_or_default();
         let msg = serde_json::json!({
             "type": "user",
@@ -120,24 +126,7 @@ impl ClaudeSession {
             "session_id": session_id
         });
 
-        let mut line = serde_json::to_string(&msg).map_err(|e| {
-            ApiError(crate::error::SwarmError::Internal(format!(
-                "Failed to serialize message: {e}"
-            )))
-        })?;
-        line.push('\n');
-
-        stdin.write_all(line.as_bytes()).await.map_err(|e| {
-            ApiError(crate::error::SwarmError::Internal(format!(
-                "Failed to write to subprocess stdin: {e}"
-            )))
-        })?;
-        stdin.flush().await.map_err(|e| {
-            ApiError(crate::error::SwarmError::Internal(format!(
-                "Failed to flush subprocess stdin: {e}"
-            )))
-        })?;
-
+        write_to_stdin(&self.stdin, &msg).await?;
         self.touch();
         Ok(())
     }
@@ -149,12 +138,6 @@ impl ClaudeSession {
         allow: bool,
         deny_message: Option<&str>,
     ) -> Result<(), ApiError> {
-        let stdin = self.stdin.as_mut().ok_or_else(|| {
-            ApiError(crate::error::SwarmError::Internal(
-                "Claude session: subprocess stdin not available".into(),
-            ))
-        })?;
-
         let response = if allow {
             serde_json::json!({
                 "type": "control_response",
@@ -174,19 +157,7 @@ impl ClaudeSession {
             })
         };
 
-        let mut line = serde_json::to_string(&response).map_err(|e| {
-            ApiError(crate::error::SwarmError::Internal(format!(
-                "Failed to serialize permission response: {e}"
-            )))
-        })?;
-        line.push('\n');
-
-        stdin.write_all(line.as_bytes()).await.map_err(|e| {
-            ApiError(crate::error::SwarmError::Internal(format!(
-                "Failed to write permission response: {e}"
-            )))
-        })?;
-        stdin.flush().await.ok();
+        write_to_stdin(&self.stdin, &response).await?;
         self.touch();
         Ok(())
     }
@@ -210,12 +181,14 @@ impl ClaudeSession {
                     }
                 }
                 Ok(None) => {
-                    // EOF — subprocess exited
-                    self.state = SessionState::Suspended;
+                    // EOF — subprocess exited unexpectedly
+                    self.state = SessionState::Expired;
+                    self.claude_session_id = None;
                     return None;
                 }
                 Err(_) => {
-                    self.state = SessionState::Suspended;
+                    self.state = SessionState::Expired;
+                    self.claude_session_id = None;
                     return None;
                 }
             }
@@ -224,8 +197,11 @@ impl ClaudeSession {
 
     /// Gracefully stop the subprocess (close stdin, wait for exit).
     pub async fn suspend(&mut self) {
-        if let Some(stdin) = self.stdin.take() {
-            drop(stdin); // closes stdin → signals EOF to subprocess
+        {
+            let mut stdin_guard = self.stdin.lock().await;
+            if let Some(stdin) = stdin_guard.take() {
+                drop(stdin); // closes stdin → signals EOF to subprocess
+            }
         }
         if let Some(mut child) = self.child.take() {
             // Give it a few seconds to exit gracefully
@@ -243,13 +219,45 @@ impl ClaudeSession {
 
     /// Kill the subprocess immediately.
     pub async fn kill(&mut self) {
-        self.stdin = None;
+        {
+            let mut stdin_guard = self.stdin.lock().await;
+            *stdin_guard = None;
+        }
         self.stdout = None;
         if let Some(mut child) = self.child.take() {
             let _ = child.kill().await;
         }
         self.state = SessionState::Expired;
     }
+}
+
+/// Write a JSON message to the subprocess stdin handle.
+async fn write_to_stdin(handle: &StdinHandle, msg: &serde_json::Value) -> Result<(), ApiError> {
+    let mut guard = handle.lock().await;
+    let stdin = guard.as_mut().ok_or_else(|| {
+        ApiError(crate::error::SwarmError::Internal(
+            "Claude session: subprocess stdin not available".into(),
+        ))
+    })?;
+
+    let mut line = serde_json::to_string(msg).map_err(|e| {
+        ApiError(crate::error::SwarmError::Internal(format!(
+            "Failed to serialize message: {e}"
+        )))
+    })?;
+    line.push('\n');
+
+    stdin.write_all(line.as_bytes()).await.map_err(|e| {
+        ApiError(crate::error::SwarmError::Internal(format!(
+            "Failed to write to subprocess stdin: {e}"
+        )))
+    })?;
+    stdin.flush().await.map_err(|e| {
+        ApiError(crate::error::SwarmError::Internal(format!(
+            "Failed to flush subprocess stdin: {e}"
+        )))
+    })?;
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -373,7 +381,7 @@ impl SessionManager {
             id: session_id.clone(),
             claude_session_id: resume_claude_id,
             child: Some(child),
-            stdin: Some(stdin),
+            stdin: std::sync::Arc::new(Mutex::new(Some(stdin))),
             stdout: Some(lines),
             working_dir,
             model,
@@ -641,7 +649,7 @@ pub async fn create_session_handler(
                 Err(_) => {
                     // Timeout
                     return Err(ApiError(crate::error::SwarmError::Internal(
-                        "Timeout waiting for Claude CLI init (30s)".into(),
+                        "Timeout waiting for Claude CLI init (120s)".into(),
                     )));
                 }
             }
@@ -717,13 +725,11 @@ pub async fn send_message_handler(
                         break;
                     }
 
-                    // Also stop if we get a control_request (permission prompt)
-                    // — the frontend needs to handle it before the stream can continue
-                    if evt_type == "control_request" {
-                        // Don't send [DONE] — the turn isn't complete,
-                        // just paused for permission
-                        break;
-                    }
+                    // control_request (permission prompt): keep the SSE stream open.
+                    // The subprocess blocks waiting for the permission response on stdin.
+                    // The frontend sends a concurrent POST to /permission which writes
+                    // to stdin, the subprocess resumes, and events continue flowing
+                    // through this still-open stream.
                 }
                 None => {
                     // EOF — subprocess exited
@@ -752,6 +758,10 @@ pub async fn send_message_handler(
 }
 
 /// POST /api/claude-code/session/:id/permission — Respond to a tool permission prompt.
+///
+/// Uses the stdin handle directly (not the session lock) to avoid deadlock:
+/// the SSE loop holds the session lock while reading stdout, and this handler
+/// must write to stdin concurrently.
 pub async fn permission_handler(
     axum::extract::Path(session_id): axum::extract::Path<String>,
     Json(req): Json<PermissionRequest>,
@@ -764,10 +774,32 @@ pub async fn permission_handler(
             )))
         })?;
 
-    let mut session = session_arc.lock().await;
-    session
-        .send_permission_response(&req.request_id, req.allow, req.message.as_deref())
-        .await?;
+    // Grab the stdin handle without holding the session lock.
+    let stdin_handle = {
+        let session = session_arc.lock().await;
+        session.stdin_handle()
+    };
+
+    let response = if req.allow {
+        serde_json::json!({
+            "type": "control_response",
+            "request_id": req.request_id,
+            "response": {
+                "behavior": "allow"
+            }
+        })
+    } else {
+        serde_json::json!({
+            "type": "control_response",
+            "request_id": req.request_id,
+            "response": {
+                "behavior": "deny",
+                "message": req.message.as_deref().unwrap_or("User denied this action")
+            }
+        })
+    };
+
+    write_to_stdin(&stdin_handle, &response).await?;
 
     Ok(Json(serde_json::json!({"status": "ok"})))
 }

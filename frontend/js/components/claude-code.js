@@ -463,11 +463,12 @@
         content = [{ type: 'tool_result', tool_use_id: '', content: String(msg.content || '') }];
       }
 
-      var toolResult = evt.tool_use_result || {};
-
       content.forEach(function(block) {
         if (block.type !== 'tool_result') return;
         var toolId = block.tool_use_id || '';
+
+        // Extract text from block.content (string or array of content blocks)
+        var blockText = App.claudeCode._extractResultText(block.content);
 
         // ── Agent result — mark panel done, collapse ──
         if (agentPanels[toolId]) {
@@ -477,16 +478,13 @@
             statusEl.textContent = I18n.t('claude_code.done');
             statusEl.className = 'cc-tool-status done';
           }
-          // Show summary of agent output
-          var resultText = typeof block.content === 'string' ? block.content : '';
-          if (resultText) {
+          if (blockText) {
             var summaryEl = document.createElement('div');
             summaryEl.className = 'cc-agent-summary';
-            if (resultText.length > 500) resultText = resultText.substring(0, 497) + '...';
-            summaryEl.textContent = resultText;
+            var summaryText = blockText.length > 500 ? blockText.substring(0, 497) + '...' : blockText;
+            summaryEl.textContent = summaryText;
             agentInfo.contentArea.appendChild(summaryEl);
           }
-          // Collapse after completion
           agentInfo.panel.open = false;
           App.chat.scrollToBottom();
           return;
@@ -495,20 +493,15 @@
         // ── TaskCreate result — capture the real taskId ──
         var panel = toolPanels[toolId];
         if (panel && panel.classList && panel.classList.contains('cc-task-item')) {
-          // TaskCreate result — try to parse taskId from content
-          var resultStr = typeof block.content === 'string' ? block.content : '';
-          var idMatch = resultStr.match(/#(\d+)/);
+          var idMatch = blockText.match(/#(\d+)/);
           if (idMatch) {
-            var realTaskId = idMatch[1];
-            taskItems[realTaskId] = { element: panel, status: 'pending' };
+            taskItems[idMatch[1]] = { element: panel, status: 'pending' };
           }
-          // Mark as acknowledged (no visual change for create)
           App.chat.scrollToBottom();
           return;
         }
 
         // ── Standard tool result ──
-        // Update status to done
         if (panel) {
           var statusEl2 = panel.querySelector('.cc-tool-status');
           if (statusEl2) {
@@ -517,34 +510,13 @@
           }
         }
 
-        // Render result
+        // Render result as text (Claude CLI returns tool results as plain text)
         var resultEl = document.createElement('div');
         resultEl.className = 'cc-tool-result';
 
-        // Check for git diff (Edit/Write results)
-        if (toolResult.gitDiff && toolResult.gitDiff.patch) {
-          resultEl.className += ' cc-diff';
-          var diffHtml = '<div class="cc-diff-header">' +
-            '<span class="cc-diff-file">' + U.escapeHtml(toolResult.gitDiff.filename || '') + '</span>' +
-            '<span class="cc-diff-stats">+' + (toolResult.gitDiff.additions || 0) + ' -' + (toolResult.gitDiff.deletions || 0) + '</span>' +
-            '</div>';
-          diffHtml += '<pre class="cc-diff-content">' + App.claudeCode._formatDiff(toolResult.gitDiff.patch) + '</pre>';
-          resultEl.innerHTML = diffHtml;
-        } else if (toolResult.stdout !== undefined || toolResult.stderr !== undefined) {
-          // Bash result
-          resultEl.className += ' cc-bash';
-          var output = (toolResult.stdout || '') + (toolResult.stderr ? '\n' + toolResult.stderr : '');
-          if (output.length > 2000) output = output.substring(0, 2000) + '\n... (truncated)';
-          resultEl.innerHTML = '<pre class="cc-bash-output">' + U.escapeHtml(output) + '</pre>';
-        } else if (toolResult.filenames) {
-          // Glob/Grep result
-          var count = toolResult.numFiles || (toolResult.filenames || []).length || 0;
-          resultEl.innerHTML = '<div class="cc-file-summary">' + count + ' file(s) found</div>';
-        } else if (typeof block.content === 'string' && block.content.length > 0) {
-          // Generic text result
-          var text = block.content;
-          if (text.length > 1500) text = text.substring(0, 1500) + '\n... (truncated)';
-          resultEl.innerHTML = '<pre class="cc-tool-output">' + U.escapeHtml(text) + '</pre>';
+        if (blockText.length > 0) {
+          var displayText = blockText.length > 2000 ? blockText.substring(0, 2000) + '\n... (truncated)' : blockText;
+          resultEl.innerHTML = '<pre class="cc-tool-output">' + U.escapeHtml(displayText) + '</pre>';
         }
 
         if (panel && panel.appendChild) {
@@ -640,6 +612,19 @@
       contentEl.appendChild(el);
     },
 
+    // Extract text from a tool_result content field (string or array of blocks).
+    _extractResultText: function(content) {
+      if (typeof content === 'string') return content;
+      if (Array.isArray(content)) {
+        return content.map(function(part) {
+          if (typeof part === 'string') return part;
+          if (part && part.type === 'text' && part.text) return part.text;
+          return '';
+        }).filter(Boolean).join('\n');
+      }
+      return String(content || '');
+    },
+
     // Format a unified diff patch into HTML with color highlighting
     _formatDiff: function(patch) {
       if (!patch) return '';
@@ -714,17 +699,6 @@
 
     // Initialize event bindings
     init: function() {
-      // Quick chat button
-      var quickBtn = document.getElementById('cc-quick-chat-btn');
-      if (quickBtn) {
-        quickBtn.addEventListener('click', function() {
-          var dirInput = document.getElementById('cc-dir-input');
-          if (dirInput) dirInput.value = '';
-          // Will be created on first send()
-          App.claudeCode.updateProjectBar();
-        });
-      }
-
       // Permission mode selector
       var permSelect = document.getElementById('cc-permission-mode');
       if (permSelect) {

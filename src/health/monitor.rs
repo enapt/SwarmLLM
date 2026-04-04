@@ -110,6 +110,11 @@ impl HealthMonitor {
                     // Clean up stale AllReduce/RingChunk entries (receiver dropped/timed out)
                     self.shared_state.allreduce_registry.cleanup_stale();
                     self.shared_state.ring_chunk_registry.cleanup_stale();
+                    // Suspend idle Claude Code sessions and warn about upcoming timeouts
+                    #[cfg(feature = "claude-subscription")]
+                    crate::api::claude_session::SessionManager::global()
+                        .cleanup_stale(&self.shared_state)
+                        .await;
                 }
             }
         }
