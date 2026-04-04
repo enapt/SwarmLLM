@@ -518,7 +518,7 @@
 
         // Gear + info buttons
         var gearHtml = '<button class="model-gear-btn" data-am-gear="' + U.escapeHtml(m.id) + '" title="' + U.escapeHtml(I18n.t('dashboard.gear_title')) + '">&#9881;</button>';
-        var metaBtnHtml = m.has_header ? '<button class="model-meta-btn" data-meta-toggle="' + U.escapeHtml(m.id) + '" title="' + U.escapeHtml(I18n.t('dashboard.meta_title')) + '">&#9432;</button>' : '';
+        var metaBtnHtml = m.has_header ? '<button class="model-meta-btn" data-meta-toggle="' + U.escapeHtml(m.id) + '" title="' + U.escapeHtml(I18n.t('models.metadata_header')) + '">&#9432;</button>' : '';
 
         // Shard grid
         var shardHtml = '';
@@ -572,7 +572,7 @@
               }
             }
 
-            var title = I18n.t('dashboard.shard_part', { n: s.index + 1 }) + (s.size_bytes ? ' (' + U.formatBytes(s.size_bytes) + ')' : '');
+            var title = I18n.t('shard.part_n', { n: s.index + 1 }) + (s.size_bytes ? ' (' + U.formatBytes(s.size_bytes) + ')' : '');
             if (cls === 'local vram') title += ' \u2014 ' + I18n.t(S._gpuInference ? 'shard.tooltip_active_vram' : 'shard.tooltip_active_ram');
             else if (cls === 'local') title += ' \u2014 ' + I18n.t('shard.tooltip_on_disk');
             else if (cls === 'peer') title += ' \u2014 ' + I18n.t('shard.tooltip_peer_available', { count: s.holders });
@@ -774,7 +774,7 @@
               var bytes = s.download.downloaded_bytes || 0;
               var total = s.download.total_bytes || s.size_bytes || 0;
               perShardDlHtml += '<div class="per-shard-dl-row">' +
-                '<span class="per-shard-dl-label">' + U.escapeHtml(I18n.t('dashboard.shard_part', { n: s.index + 1 })) + '</span>' +
+                '<span class="per-shard-dl-label">' + U.escapeHtml(I18n.t('shard.part_n', { n: s.index + 1 })) + '</span>' +
                 '<div class="per-shard-dl-bar"><div class="per-shard-dl-fill" style="width:' + pct2 + '%"></div></div>' +
                 '<span class="per-shard-dl-pct">' + U.formatBytes(bytes) + '/' + U.formatBytes(total) + ' (' + pct2 + '%)</span>' +
                 '</div>';
@@ -817,7 +817,7 @@
         } else if (isReady) {
           actionHtml = '<button class="btn btn-sm btn-primary" data-select-model="' + U.escapeHtml(m.id) + '">' + U.escapeHtml(I18n.t('dashboard.btn_use')) + '</button>';
         } else if (isDownloading) {
-          actionHtml = '<button class="shard-cancel-btn" data-cancel-download="' + U.escapeHtml(m.id) + '" title="' + U.escapeHtml(I18n.t('dashboard.cancel_download')) + '">&times; ' + U.escapeHtml(I18n.t('actions.cancel')) + '</button>';
+          actionHtml = '<button class="shard-cancel-btn" data-cancel-download="' + U.escapeHtml(m.id) + '" title="' + U.escapeHtml(I18n.t('shard.cancel_download')) + '">&times; ' + U.escapeHtml(I18n.t('actions.cancel')) + '</button>';
         } else if (m.source === 'network' || m.status === 'available' || m.status === 'partial') {
           actionHtml = '<button class="btn btn-sm" data-request-model="' + U.escapeHtml(m.id) + '">' + U.escapeHtml(I18n.t('models.download')) + '</button>';
         }
@@ -939,7 +939,7 @@
         var cloudMeta = I18n.t('dashboard.providers_count', { count: providerCount, models: cloudModels.length });
         cloudSection.innerHTML = '<summary class="models-section-header">' +
           '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true" class="models-section-logo" style="flex-shrink:0"><path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z" fill="var(--accent)"/></svg>' +
-          '<span class="models-section-title">' + U.escapeHtml(I18n.t('dashboard.cloud_providers')) + '</span>' +
+          '<span class="models-section-title">' + U.escapeHtml(I18n.t('settings.cloud_providers')) + '</span>' +
           '<span class="models-section-count">' + cloudMeta + '</span>' +
           '</summary>';
         var cloudBody = document.createElement('div');
@@ -1081,13 +1081,13 @@
                 cell.style.removeProperty('--dl-pct');
               }
 
-              var title = I18n.t('dashboard.shard_part', { n: sd.index + 1 });
+              var title = I18n.t('shard.part_n', { n: sd.index + 1 });
               if (newClass === 'local') title += ' \u2014 ' + I18n.t('dashboard.shard_verified');
               else if (newClass === 'verifying') title += ' \u2014 ' + I18n.t('dashboard.shard_verifying');
-              else if (newClass === 'downloading') title += ' \u2014 ' + I18n.t('dashboard.shard_dl_pct', { pct: dlPct });
+              else if (newClass === 'downloading') title += ' \u2014 ' + I18n.t('shard.tooltip_downloading', { pct: dlPct });
               else if (newClass === 'queued') title += ' \u2014 ' + I18n.t('dashboard.shard_queued');
               else if (sd.state === 'failed') title += ' \u2014 ' + I18n.t('dashboard.shard_failed');
-              else title += ' \u2014 ' + I18n.t('dashboard.shard_unavailable');
+              else title += ' \u2014 ' + I18n.t('shard.tooltip_unavailable');
               cell.setAttribute('title', title);
               cell.setAttribute('aria-label', title);
             }
@@ -1154,7 +1154,7 @@
           if (summaryEl && shardDetails.length > 0) {
             var summParts = [];
             if (localCount > 0) summParts.push('<span class="shard-sum-item shard-sum-local"><span class="shard-sum-dot"></span>' + I18n.t('dashboard.summary_local', { count: localCount }) + '</span>');
-            if (peerCount > 0) summParts.push('<span class="shard-sum-item shard-sum-peer"><span class="shard-sum-dot"></span>' + I18n.t('dashboard.summary_peers', { count: peerCount }) + '</span>');
+            if (peerCount > 0) summParts.push('<span class="shard-sum-item shard-sum-peer"><span class="shard-sum-dot"></span>' + I18n.t('dashboard.peer_count', { count: peerCount }) + '</span>');
             if (dlCount > 0) summParts.push('<span class="shard-sum-item shard-sum-dl"><span class="shard-sum-dot"></span>' + I18n.t('dashboard.summary_downloading', { count: dlCount }) + '</span>');
             if (peerDlCount > 0) summParts.push('<span class="shard-sum-item shard-sum-peer-dl"><span class="shard-sum-dot"></span>' + I18n.t('dashboard.summary_peer_dl', { count: peerDlCount }) + '</span>');
             if (queuedCount > 0) summParts.push('<span class="shard-sum-item shard-sum-queued"><span class="shard-sum-dot"></span>' + I18n.t('dashboard.summary_queued', { count: queuedCount }) + '</span>');
@@ -1194,12 +1194,12 @@
                 setTimeout(function() { cell.classList.remove('shard-transitioning'); }, 1500);
               }
               var vramCls = s.in_vram ? 'local vram' : 'local';
-              var vramLabel = s.in_vram ? I18n.t('dashboard.shard_active_vram', { mem: S._gpuInference ? 'VRAM' : 'RAM' }) : I18n.t('dashboard.shard_on_disk_label');
+              var vramLabel = s.in_vram ? I18n.t('dashboard.shard_active_vram', { mem: S._gpuInference ? 'VRAM' : 'RAM' }) : I18n.t('shard.tooltip_on_disk');
               cell.className = 'shard-cell ' + vramCls + preserve;
               // Preserve inner elements (holder badge, endpoint tag)
               Array.from(cell.childNodes).forEach(function(n) { if (n.nodeType === 3) n.textContent = ''; });
               cell.insertBefore(document.createTextNode('' + (s.index + 1)), cell.firstChild);
-              cell.setAttribute('title', I18n.t('dashboard.shard_part', { n: s.index + 1 }) + ' \u2014 ' + vramLabel);
+              cell.setAttribute('title', I18n.t('shard.part_n', { n: s.index + 1 }) + ' \u2014 ' + vramLabel);
               // Only log the first time a shard becomes local (not on vram toggle)
               // Shard state logging handled by backend activity_event
             } else if (s.holders > 0 && current.indexOf('peer') < 0) {
@@ -1450,7 +1450,7 @@
       }
 
       var speedStr = speed > 0 ? ' - ' + U.formatSpeed(speed) : '';
-      var cancelBtn = '<button class="btn btn-sm" style="padding:1px 6px;font-size:0.7rem;line-height:1.2" data-cancel-download="' + U.escapeHtml(modelId) + '" title="' + U.escapeHtml(I18n.t('dashboard.cancel_download')) + '">&times; ' + U.escapeHtml(I18n.t('dashboard.cancel_label')) + '</button>';
+      var cancelBtn = '<button class="btn btn-sm" style="padding:1px 6px;font-size:0.7rem;line-height:1.2" data-cancel-download="' + U.escapeHtml(modelId) + '" title="' + U.escapeHtml(I18n.t('shard.cancel_download')) + '">&times; ' + U.escapeHtml(I18n.t('actions.cancel')) + '</button>';
       var rightText3 = U.formatDlProgress(dlBytes, totalBytes, pct) + speedStr;
       var wrapper = document.createElement('div');
       wrapper.innerHTML = _buildProgressBar({ safeId: safeId, pct: pct, label: U.escapeHtml(I18n.t('dashboard.downloading_data')), rightText: rightText3, cancelBtn: cancelBtn });
