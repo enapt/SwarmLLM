@@ -486,8 +486,8 @@ impl InferenceRouter {
             }
             other => {
                 tracing::trace!(
-                    "Router ignoring unhandled network message: {:?}",
-                    std::mem::discriminant(&other)
+                    kind = ?std::mem::discriminant(&other),
+                    "Router ignoring unhandled network message"
                 );
             }
         }

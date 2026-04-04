@@ -272,7 +272,11 @@ pub async fn reload_config(
         "Config reload requested via API"
     );
 
-    let params = crate::config::reload_operational_params(&config_path).map_err(ApiError)?;
+    let params = crate::config::reload_operational_params(&config_path).map_err(|e| {
+        ApiError(crate::error::SwarmError::Internal(format!(
+            "Config file unreadable or invalid: {e}"
+        )))
+    })?;
 
     let old = crate::config::OperationalParams::from_config(&state.config);
     let changed = params != old;

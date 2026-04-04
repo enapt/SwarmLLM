@@ -24,6 +24,37 @@ pub(crate) fn validate_model_id(model_id: &str) -> Result<(), ApiError> {
     Ok(())
 }
 
+/// Build a shard download progress JSON value from a ShardProgress entry.
+/// Returns None if the shard is in a terminal state (Complete/Failed).
+fn shard_download_json(sp: &crate::model::acquisition::ShardProgress) -> Option<serde_json::Value> {
+    let state_str = match sp.state {
+        crate::model::acquisition::ShardState::Downloading => "Downloading",
+        crate::model::acquisition::ShardState::Verifying => "Verifying",
+        crate::model::acquisition::ShardState::Pending => "Queued",
+        _ => return None,
+    };
+    let pct = crate::model::acquisition::shard_pct(sp.downloaded_bytes, sp.total_bytes);
+    Some(serde_json::json!({
+        "state": state_str,
+        "progress_pct": pct,
+        "downloaded_bytes": sp.downloaded_bytes,
+        "total_bytes": sp.total_bytes,
+    }))
+}
+
+/// Serialize peer download progress for a shard into JSON values.
+fn peer_downloads_json(peers: &[(crate::types::NodeId, u32)]) -> Vec<serde_json::Value> {
+    peers
+        .iter()
+        .map(|(nid, pct)| {
+            serde_json::json!({
+                "node_id": format!("{}", nid),
+                "progress_pct": pct,
+            })
+        })
+        .collect()
+}
+
 /// Serialize an acquisition progress entry to JSON. Used by both REST download_queue
 /// and WebSocket build_stats_message. Caller can extend with extra fields.
 pub fn serialize_acquisition_to_json(
@@ -142,105 +173,75 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
         };
 
     // Helper: build per-shard detail for a manifest, including download state
-    let build_shard_detail = |m: &crate::types::ModelManifest,
-                              state: &AppState|
-     -> Vec<serde_json::Value> {
-        let acq = state.shared_state.models.acquisition_progress.get(&m.id);
-        m.shards
-            .iter()
-            .map(|s| {
-                let shard_id = crate::types::ShardId {
-                    model_id: m.id.clone(),
-                    index: s.index,
-                };
-                let holders = state.shared_state.model_registry.shard_holders(&shard_id);
-                let local = holders.contains(&local_node_id);
+    let build_shard_detail =
+        |m: &crate::types::ModelManifest, state: &AppState| -> Vec<serde_json::Value> {
+            let acq = state.shared_state.models.acquisition_progress.get(&m.id);
+            m.shards
+                .iter()
+                .map(|s| {
+                    let shard_id = crate::types::ShardId {
+                        model_id: m.id.clone(),
+                        index: s.index,
+                    };
+                    let holders = state.shared_state.model_registry.shard_holders(&shard_id);
+                    let local = holders.contains(&local_node_id);
 
-                // Check if this shard is currently loaded in memory (VRAM or RAM).
-                // Check subprocess pool and split_models DashMap.
-                // Also check direct executor — but only if its loaded model matches this model.
-                let in_vram = if local {
-                    state.shared_state.is_shard_in_vram(&m.id, s.index)
-                } else {
-                    false
-                };
+                    // Check if this shard is currently loaded in memory (VRAM or RAM).
+                    // Check subprocess pool and split_models DashMap.
+                    // Also check direct executor — but only if its loaded model matches this model.
+                    let in_vram = if local {
+                        state.shared_state.is_shard_in_vram(&m.id, s.index)
+                    } else {
+                        false
+                    };
 
-                let locked = state
-                    .shared_state
-                    .models
-                    .locked_shards
-                    .get(&shard_id)
-                    .map(|v| *v)
-                    .unwrap_or(false);
+                    let locked = state
+                        .shared_state
+                        .models
+                        .locked_shards
+                        .get(&shard_id)
+                        .map(|v| *v)
+                        .unwrap_or(false);
 
-                let mut shard_json = serde_json::json!({
-                    "index": s.index,
-                    "size_bytes": s.size_bytes,
-                    "local": local,
-                    "holders": holders.len(),
-                    "in_vram": in_vram,
-                    "locked": locked,
-                });
+                    let mut shard_json = serde_json::json!({
+                        "index": s.index,
+                        "size_bytes": s.size_bytes,
+                        "local": local,
+                        "holders": holders.len(),
+                        "in_vram": in_vram,
+                        "locked": locked,
+                    });
 
-                // Attach per-shard download state if downloading
-                if let Some(ref p) = acq {
-                    if let Some(sp) = p.shard_progress.get(&s.index) {
-                        let dl_state = match sp.state {
-                            crate::model::acquisition::ShardState::Downloading => {
-                                Some("Downloading")
+                    // Attach per-shard download state if downloading
+                    if let Some(ref p) = acq {
+                        if let Some(sp) = p.shard_progress.get(&s.index) {
+                            if let Some(dl) = shard_download_json(sp) {
+                                if let Some(obj) = shard_json.as_object_mut() {
+                                    obj.insert("download".to_string(), dl);
+                                }
                             }
-                            crate::model::acquisition::ShardState::Verifying => Some("Verifying"),
-                            crate::model::acquisition::ShardState::Pending => Some("Queued"),
-                            _ => None,
-                        };
-                        if let Some(state_str) = dl_state {
-                            let pct = crate::model::acquisition::shard_pct(
-                                sp.downloaded_bytes,
-                                sp.total_bytes,
-                            );
+                        }
+                    }
+
+                    // Attach peer download state
+                    if let Some(peer_dl) = state
+                        .shared_state
+                        .models
+                        .peer_shard_downloads
+                        .get(&shard_id)
+                    {
+                        let peers = peer_downloads_json(peer_dl.value());
+                        if !peers.is_empty() {
                             if let Some(obj) = shard_json.as_object_mut() {
-                                obj.insert(
-                                    "download".to_string(),
-                                    serde_json::json!({
-                                        "state": state_str,
-                                        "progress_pct": pct,
-                                        "downloaded_bytes": sp.downloaded_bytes,
-                                        "total_bytes": sp.total_bytes,
-                                    }),
-                                );
+                                obj.insert("peer_downloads".to_string(), serde_json::json!(peers));
                             }
                         }
                     }
-                }
 
-                // Attach peer download state
-                if let Some(peer_dl) = state
-                    .shared_state
-                    .models
-                    .peer_shard_downloads
-                    .get(&shard_id)
-                {
-                    let peers: Vec<serde_json::Value> = peer_dl
-                        .value()
-                        .iter()
-                        .map(|(nid, pct)| {
-                            serde_json::json!({
-                                "node_id": format!("{}", nid),
-                                "progress_pct": pct,
-                            })
-                        })
-                        .collect();
-                    if !peers.is_empty() {
-                        if let Some(obj) = shard_json.as_object_mut() {
-                            obj.insert("peer_downloads".to_string(), serde_json::json!(peers));
-                        }
-                    }
-                }
-
-                shard_json
-            })
-            .collect()
-    };
+                    shard_json
+                })
+                .collect()
+        };
 
     // Helper: check encrypted pipeline status for a model.
     // Returns (effective_flag, has_first_shard, has_last_shard).
@@ -716,25 +717,14 @@ pub async fn shard_storage(State(state): State<AppState>) -> Json<serde_json::Va
             let download_state = acq_progress.as_ref().and_then(|p| {
                 let p = p.value();
                 if let Some(sp) = p.shard_progress.get(&shard.index) {
-                    let dl_state = match sp.state {
-                        crate::model::acquisition::ShardState::Downloading => {
-                            Some("Downloading")
-                        }
-                        crate::model::acquisition::ShardState::Verifying => Some("Verifying"),
-                        crate::model::acquisition::ShardState::Pending => Some("Queued"),
-                        _ => None,
-                    };
-                    if let Some(state_str) = dl_state {
+                    let dl = shard_download_json(sp);
+                    if dl.is_some() {
                         any_downloading = true;
-                        return Some(serde_json::json!({
-                            "state": state_str,
-                            "progress_pct": crate::model::acquisition::shard_pct(sp.downloaded_bytes, sp.total_bytes),
-                            "downloaded_bytes": sp.downloaded_bytes,
-                            "total_bytes": sp.total_bytes,
-                        }));
                     }
+                    dl
+                } else {
+                    None
                 }
-                None
             });
 
             // Also check peer download states (from gossip)
@@ -743,12 +733,7 @@ pub async fn shard_storage(State(state): State<AppState>) -> Json<serde_json::Va
                 .models
                 .peer_shard_downloads
                 .get(&shard_id)
-                .map(|entry| {
-                    let peers: Vec<serde_json::Value> = entry.value().iter().map(|(nid, pct)| {
-                        serde_json::json!({ "node_id": format!("{}", nid), "progress_pct": pct })
-                    }).collect();
-                    peers
-                });
+                .map(|entry| peer_downloads_json(entry.value()));
 
             let locked = state
                 .shared_state

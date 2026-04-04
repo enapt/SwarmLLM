@@ -104,7 +104,7 @@ pub async fn pool_invite(
     Json(body): Json<PoolInviteRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let node_id = parse_node_id(&body.node_id)?;
-    tracing::debug!("DIAG: pool_invite request");
+    tracing::debug!(invitee = %node_id, "DIAG: pool_invite request");
     let (tx, rx) = tokio::sync::oneshot::channel();
 
     send_pool_command(

@@ -1643,7 +1643,7 @@ impl NetworkManager {
                         self.pex_inbound_timestamps
                             .retain(|t| now_pex.duration_since(*t) < PEX_WINDOW);
                         if self.pex_inbound_timestamps.len() >= PEX_MAX_PER_WINDOW {
-                            tracing::debug!(%peer, "PEX rate limit exceeded ({PEX_MAX_PER_WINDOW}/{}s), dropping request", PEX_WINDOW.as_secs());
+                            tracing::debug!(%peer, limit = PEX_MAX_PER_WINDOW, window_secs = PEX_WINDOW.as_secs(), "PEX rate limit exceeded, dropping request");
                             let _ = self
                                 .swarm
                                 .behaviour_mut()
