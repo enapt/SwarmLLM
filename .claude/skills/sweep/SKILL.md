@@ -70,8 +70,14 @@ IMPORTANT: Launch all agents with `isolation: "worktree"` so they get clean cont
 4. **Triage into two buckets:**
    - **Auto-fix** (do immediately, no prompting): dead code removal, unused imports, stale comments, dead CSS/JS, missing i18n keys, hardcoded strings, duplicate code extraction, stale doc updates, magic number constants, simple consistency fixes. Anything where the correct fix is obvious and low-risk.
    - **Needs discussion** (present to user): architectural changes, behavior changes, ambiguous deletions (might be used via reflection/macros), security-sensitive fixes, anything touching the inference hot path, changes that affect the public API contract, or findings where you're <90% confident in the fix.
-5. Fix everything in the auto-fix bucket immediately — commit as you go
-6. Present only the "needs discussion" items to the user, if any
+5. **Research before fixing** — Before implementing any non-trivial fix, WebSearch for:
+   - Latest docs/best practices for the relevant library or pattern (e.g., libp2p API changes, axum middleware patterns, candle tensor ops)
+   - Similar open-source projects solving the same problem — check how they handle it
+   - GitHub issues/discussions if the fix involves a known library quirk
+   - Even for fixes you're confident about, a quick search often reveals a better idiomatic approach
+   - Skip research only for truly mechanical fixes (deleting dead code, removing unused imports, fixing typos)
+6. Fix everything in the auto-fix bucket immediately — commit as you go
+7. Present only the "needs discussion" items to the user, if any
 
 ## After Fixes Are Applied
 
