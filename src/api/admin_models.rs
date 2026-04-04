@@ -24,6 +24,17 @@ pub(crate) fn validate_model_id(model_id: &str) -> Result<(), ApiError> {
     Ok(())
 }
 
+/// Validate model ID path param and reject the mmproj sentinel shard index.
+pub(crate) fn validate_shard_params(model_id: &str, shard_index: u32) -> Result<(), ApiError> {
+    validate_model_id(model_id)?;
+    if shard_index == u32::MAX {
+        return Err(ApiError(crate::error::SwarmError::Validation(
+            "Reserved shard index".into(),
+        )));
+    }
+    Ok(())
+}
+
 /// Build a shard download progress JSON value from a ShardProgress entry.
 /// Returns None if the shard is in a terminal state (Complete/Failed).
 fn shard_download_json(sp: &crate::model::acquisition::ShardProgress) -> Option<serde_json::Value> {
@@ -1049,13 +1060,7 @@ pub async fn unload_shard(
     State(state): State<AppState>,
     Path((model_id, shard_index)): Path<(String, u32)>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    validate_model_id(&model_id)?;
-    // SEC: Reject mmproj sentinel index
-    if shard_index == u32::MAX {
-        return Err(ApiError(crate::error::SwarmError::Validation(
-            "Reserved shard index".into(),
-        )));
-    }
+    validate_shard_params(&model_id, shard_index)?;
     let mid = crate::types::ModelId(model_id.clone());
     let shared = &state.shared_state;
 
@@ -1163,13 +1168,7 @@ pub async fn load_shard(
     State(state): State<AppState>,
     Path((model_id, shard_index)): Path<(String, u32)>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    validate_model_id(&model_id)?;
-    // SEC: Reject mmproj sentinel index
-    if shard_index == u32::MAX {
-        return Err(ApiError(crate::error::SwarmError::Validation(
-            "Reserved shard index".into(),
-        )));
-    }
+    validate_shard_params(&model_id, shard_index)?;
     let mid = crate::types::ModelId(model_id.clone());
     let shared = &state.shared_state;
 
@@ -1268,12 +1267,7 @@ pub async fn delete_shard(
     State(state): State<AppState>,
     Path((model_id, shard_index)): Path<(String, u32)>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    validate_model_id(&model_id)?;
-    if shard_index == u32::MAX {
-        return Err(ApiError(crate::error::SwarmError::Validation(
-            "Reserved shard index".into(),
-        )));
-    }
+    validate_shard_params(&model_id, shard_index)?;
     let safe_model_id = crate::model::shard::sanitize_path_component(&model_id);
     let mid = crate::types::ModelId(model_id.clone());
     let shared = &state.shared_state;
@@ -1441,12 +1435,7 @@ pub async fn download_shard(
     State(state): State<AppState>,
     Path((model_id, shard_index)): Path<(String, u32)>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    validate_model_id(&model_id)?;
-    if shard_index == u32::MAX {
-        return Err(ApiError(crate::error::SwarmError::Validation(
-            "Reserved shard index".into(),
-        )));
-    }
+    validate_shard_params(&model_id, shard_index)?;
     let mid = crate::types::ModelId(model_id.clone());
     let shared = &state.shared_state;
 

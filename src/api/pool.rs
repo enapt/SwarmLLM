@@ -513,7 +513,8 @@ pub async fn pool_rates_set(
             .unwrap_or(current.penalty_serve_failure),
     };
 
-    // Validate: reward rates must be positive, penalty must be negative
+    // Validate: all rates must be positive (penalty is stored as a positive magnitude,
+    // negated at the point of use in router.rs via `apply_credit_direct(..., -penalty, ...)`)
     let positive_rates = [
         ("inference_serve", new_rates.inference_serve),
         ("inference_consume", new_rates.inference_consume),
@@ -528,14 +529,14 @@ pub async fn pool_rates_set(
             ))));
         }
     }
-    if new_rates.penalty_serve_failure >= 0 {
+    if new_rates.penalty_serve_failure <= 0 {
         return Err(ApiError(crate::error::SwarmError::Validation(format!(
-            "penalty_serve_failure must be negative (got {})",
+            "penalty_serve_failure must be positive (got {})",
             new_rates.penalty_serve_failure
         ))));
     }
 
-    // Validate: no reward rate exceeds 10x the default, penalty within 10x magnitude
+    // Validate: no rate exceeds 10x the default
     let default_positive = [
         ("inference_serve", defaults.inference_serve),
         ("inference_consume", defaults.inference_consume),
@@ -551,7 +552,7 @@ pub async fn pool_rates_set(
             ))));
         }
     }
-    if new_rates.penalty_serve_failure < defaults.penalty_serve_failure * 10 {
+    if new_rates.penalty_serve_failure > defaults.penalty_serve_failure * 10 {
         return Err(ApiError(crate::error::SwarmError::Validation(format!(
             "penalty_serve_failure cannot exceed 10x the default ({}) — got {}",
             defaults.penalty_serve_failure * 10,

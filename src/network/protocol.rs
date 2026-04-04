@@ -40,6 +40,9 @@ const MAX_JSON_MSG_SIZE: usize = 4 * 1024 * 1024;
 /// Maximum activation payload size in layer results (128 MB).
 const MAX_ACTIVATION_SIZE: usize = 128 * 1024 * 1024;
 
+/// Maximum token count in a single layer result (OOM guard).
+const MAX_RESULT_TOKENS: usize = 65536;
+
 /// Codec for SwarmLLM request/response protocol using serde_json.
 /// When `compress_tensors` is true, tensor payloads above `compress_threshold`
 /// bytes are zstd-compressed on the wire (tag 0x02). Decompression of incoming
@@ -636,10 +639,10 @@ pub fn decode_layer_result(data: &[u8]) -> Result<LayerResult, SwarmError> {
     ) as usize;
 
     // SECURITY: Cap num_tokens to prevent OOM from crafted messages
-    if num_tokens > 65536 {
-        return Err(SwarmError::Network(
-            "num_tokens exceeds maximum (65536)".into(),
-        ));
+    if num_tokens > MAX_RESULT_TOKENS {
+        return Err(SwarmError::Network(format!(
+            "num_tokens exceeds maximum ({MAX_RESULT_TOKENS})"
+        )));
     }
 
     let tokens_end = 20 + num_tokens * 4;

@@ -645,6 +645,19 @@ fn validate_chat_request(
     Ok(())
 }
 
+/// Try proxying a chat completion request to a configured cloud provider.
+async fn try_cloud_proxy(
+    state: &AppState,
+    req: &ChatCompletionRequest,
+) -> Result<Option<axum::response::Response>, ApiError> {
+    let body = serde_json::to_value(req).map_err(|e| {
+        ApiError(crate::error::SwarmError::Validation(format!(
+            "serialize request: {e}"
+        )))
+    })?;
+    crate::api::providers::try_proxy_openai(state, &body, req.stream).await
+}
+
 pub async fn chat_completions(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
@@ -822,17 +835,8 @@ pub async fn chat_completions(
 
         // Cloud provider fast-path: if the model matches a configured cloud provider,
         // route immediately without cold-start waiting. Cloud models are never local.
-        {
-            let body = serde_json::to_value(&req).map_err(|e| {
-                ApiError(crate::error::SwarmError::Validation(format!(
-                    "serialize request: {e}"
-                )))
-            })?;
-            if let Some(response) =
-                crate::api::providers::try_proxy_openai(&state, &body, req.stream).await?
-            {
-                return Ok(response);
-            }
+        if let Some(response) = try_cloud_proxy(&state, &req).await? {
+            return Ok(response);
         }
 
         // Fast-reject: if the model has no manifest but other models ARE registered,
@@ -931,14 +935,7 @@ pub async fn chat_completions(
         }
 
         // Cloud provider fallback: proxy to configured cloud provider if model matches
-        let body = serde_json::to_value(&req).map_err(|e| {
-            ApiError(crate::error::SwarmError::Validation(format!(
-                "serialize request: {e}"
-            )))
-        })?;
-        if let Some(response) =
-            crate::api::providers::try_proxy_openai(&state, &body, req.stream).await?
-        {
+        if let Some(response) = try_cloud_proxy(&state, &req).await? {
             return Ok(response);
         }
 

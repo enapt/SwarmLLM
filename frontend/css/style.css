@@ -1815,7 +1815,6 @@ kbd {
 .health-good .shard-health-label { color: var(--accent); background: var(--accent-glow); }
 .health-partial .shard-health-label { color: var(--orange); background: rgba(245,158,11,0.15); }
 .health-low .shard-health-label { color: var(--red, #ef4444); background: var(--red-dim, rgba(239,68,68,0.15)); }
-.health-none .shard-health-label { color: var(--text-muted); background: var(--bg-tertiary); }
 .shard-health-detail { color: var(--text-muted); font-size: 0.62rem; }
 
 /* Per-model activity ticker */
@@ -2835,7 +2834,6 @@ select.cloud-model-sort { flex: 0 0 88px; width: 88px; padding: 6px 6px; font-si
 .session-item:hover .session-title { text-decoration-style: dotted; text-decoration-line: underline; text-underline-offset: 2px; }
 
 /* #15: Shard legend above grid */
-.shard-legend-mini { font-size: 0.65rem; margin-bottom: 4px; opacity: 0.8; }
 
 /* Reasoning block (DeepSeek R1 / thinking models) */
 .reasoning-block {
