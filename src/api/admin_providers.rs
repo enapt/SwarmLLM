@@ -189,6 +189,19 @@ pub async fn update_providers(
             enabled,
             "Claude subscription provider toggled via admin API"
         );
+        let msg = if enabled {
+            "Claude Code subscription provider enabled"
+        } else {
+            "Claude Code subscription provider disabled"
+        };
+        state.shared_state.emit_activity(
+            crate::daemon::state::ActivityEvent::new(
+                "provider",
+                "claude_subscription",
+                msg.to_string(),
+            )
+            .with_toast(if enabled { "info" } else { "warning" }, 3000),
+        );
     }
 
     // Update key source mode if provided
@@ -395,6 +408,33 @@ async fn fetch_provider_models_inner(state: &AppState) -> Vec<serde_json::Value>
                 "name": model,
                 "provider": custom.name,
             }));
+        }
+    }
+
+    // Claude subscription: add Claude models when enabled (uses CLI, not API key)
+    #[cfg(feature = "claude-subscription")]
+    if let Some(ref sub_config) = config.claude_subscription {
+        if sub_config.enabled {
+            let provider_label = "claude_subscription";
+            for (id, name, ctx) in [
+                ("claude-opus-4-6", "Claude Opus 4.6", "1M"),
+                ("claude-sonnet-4-6", "Claude Sonnet 4.6", "200K"),
+                ("claude-haiku-4-5-20251001", "Claude Haiku 4.5", "200K"),
+            ] {
+                // Don't duplicate if already present from Anthropic API key
+                if !models
+                    .iter()
+                    .any(|m| m.get("id").and_then(|v| v.as_str()) == Some(id))
+                {
+                    models.push(serde_json::json!({
+                        "id": id,
+                        "name": name,
+                        "provider": provider_label,
+                        "context_length": ctx,
+                        "source": "subscription",
+                    }));
+                }
+            }
         }
     }
 

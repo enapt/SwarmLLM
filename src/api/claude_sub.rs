@@ -911,6 +911,33 @@ pub async fn get_status(
     drop(config);
 
     let status = detect_cli(&binary).await;
+
+    // Emit activity event with detection result
+    if status.cli_installed && status.authenticated {
+        let plan = status.subscription_type.as_deref().unwrap_or("unknown");
+        state.shared_state.emit_activity(
+            crate::daemon::state::ActivityEvent::new(
+                "provider",
+                "claude_detected",
+                format!(
+                    "Claude Code CLI detected — {} plan, {}",
+                    plan,
+                    status.cli_version.as_deref().unwrap_or("unknown version")
+                ),
+            )
+            .with_toast("info", 3000),
+        );
+    } else if status.cli_installed {
+        state.shared_state.emit_activity(
+            crate::daemon::state::ActivityEvent::new(
+                "provider",
+                "claude_detected",
+                "Claude Code CLI found but not authenticated — run 'claude login'".to_string(),
+            )
+            .with_toast("warning", 4000),
+        );
+    }
+
     Ok(axum::Json(status))
 }
 

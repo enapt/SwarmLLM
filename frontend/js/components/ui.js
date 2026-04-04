@@ -155,6 +155,7 @@
       var cloudCount = 0;
       var cloudDown = 0;
       var seen = {};
+      var claudeSubEnabled = false;
       if (providerData && providerData.providers) {
         providerData.providers.forEach(function(p) {
           if (!p.configured) return;
@@ -172,6 +173,11 @@
         if (isHealthy) cloudCount++;
         else cloudDown++;
       });
+      // Claude subscription counts as a provider
+      if (providerData && providerData.claude_subscription && providerData.claude_subscription.enabled) {
+        claudeSubEnabled = true;
+        cloudCount++;
+      }
 
       if (indicator) indicator.className = 'mode-indicator mb-2';
 
@@ -209,6 +215,11 @@
       if (active > 0) parts.push('<span class="mode-stat" style="color:var(--orange)"><strong>' + active + '</strong> ' + I18n.t('mode.stat_active', { count: active }).replace(/^\d+\s*/, '') + '</span>');
       if (requests > 0) parts.push('<span class="mode-stat"><strong>' + requests + '</strong> ' + I18n.t('mode.stat_requests', { count: requests }).replace(/^\d+\s*/, '') + '</span>');
       if (served > 0) parts.push('<span class="mode-stat"><strong>' + served + '</strong> ' + I18n.t('mode.stat_served', { count: served }).replace(/^\d+\s*/, '') + '</span>');
+
+      // Claude Code badge when subscription active
+      if (claudeSubEnabled) {
+        parts.push('<span class="mode-stat mode-claude-badge">' + providerIconHtml('claude_subscription', 13) + ' <strong>Claude Code</strong></span>');
+      }
 
       var detailHtml;
       if (parts.length > 0) {

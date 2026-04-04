@@ -2679,6 +2679,9 @@ select.cloud-model-sort { flex: 0 0 88px; width: 88px; padding: 6px 6px; font-si
 }
 .mode-detail .mode-stat { font-family: var(--font-mono); font-size: 0.74rem; color: var(--text-secondary); }
 .mode-detail .mode-stat strong { color: var(--text-primary); font-weight: 600; }
+.mode-detail .mode-claude-badge { display: inline-flex; align-items: center; gap: 4px; color: var(--purple); }
+.mode-detail .mode-claude-badge strong { color: var(--purple); }
+.mode-detail .mode-claude-badge img { vertical-align: -2px; }
 .mode-separator { color: var(--text-muted); font-size: 0.65rem; opacity: 0.35; }
 .mode-detail .mode-action { color: var(--text-muted); font-size: 0.74rem; cursor: pointer; text-decoration: underline; text-decoration-style: dotted; text-underline-offset: 2px; }
 .mode-detail .mode-action:hover { color: var(--accent); }
