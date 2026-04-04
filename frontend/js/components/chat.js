@@ -229,6 +229,21 @@
           div.querySelector('.session-enc-lock').removeAttribute('hidden');
         }
 
+        // Claude Code badge
+        if (App.claudeCode) {
+          var ccBadge = App.claudeCode.getSessionBadge(s);
+          if (ccBadge) {
+            var ccEl = document.createElement('span');
+            ccEl.className = 'session-cc-badge';
+            ccEl.title = ccBadge.dir;
+            ccEl.textContent = ccBadge.dir;
+            var stateClass = ccBadge.state === 'active' ? 'cc-active' : ccBadge.state === 'suspended' ? 'cc-suspended' : '';
+            if (stateClass) ccEl.classList.add(stateClass);
+            var titleRow = div.querySelector('.session-title');
+            if (titleRow && titleRow.parentNode) titleRow.parentNode.insertBefore(ccEl, titleRow.nextSibling);
+          }
+        }
+
         // Delete button
         div.querySelector('.session-delete').setAttribute('data-delete-session', s.id);
 
@@ -446,17 +461,21 @@
       if (App.claudeCode && App.claudeCode.isClaudeCodeModel(model)) {
         try {
           var cc = App.claudeCode.getSessionCC(session);
-          // Create backend session if not active
+          // Create or resume backend session if not active
           if (!cc.active) {
             var dirInput = document.getElementById('cc-dir-input');
             var permSelect = document.getElementById('cc-permission-mode');
-            var workDir = dirInput ? dirInput.value.trim() : '';
-            var permMode = permSelect ? permSelect.value : 'acceptEdits';
+            var workDir = cc.working_dir || (dirInput ? dirInput.value.trim() : '');
+            var permMode = cc.permission_mode || (permSelect ? permSelect.value : 'acceptEdits');
             cc.permission_mode = permMode;
             await App.claudeCode.createSession(session.id, model, workDir, permMode);
             App.claudeCode.updateProjectBar();
           }
-          var result = await App.claudeCode.sendMessage(session.id, displayText, contentEl, assistantEl);
+          // Translate slash commands
+          var ccText = displayText;
+          var translated = App.claudeCode.translateSlashCommand(displayText);
+          if (translated) ccText = translated;
+          var result = await App.claudeCode.sendMessage(session.id, ccText, contentEl, assistantEl);
           if (result.content) {
             session.messages.push({ role: 'assistant', content: result.content, encrypted: false });
             App.chat.saveSessions();

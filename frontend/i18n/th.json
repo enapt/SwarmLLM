@@ -919,5 +919,9 @@
   "claude_code.perm_plan": "Plan Mode",
   "claude_code.permission_tip": "Controls when Claude asks for permission before running tools",
   "claude_code.agent_spawned": "ตัวแทนย่อย",
-  "claude_code.task_list": "งาน"
+  "claude_code.task_list": "งาน",
+  "claude_code.agents_running": "ตัวแทนกำลังทำงาน",
+  "claude_code.agents_background": "ในพื้นหลัง",
+  "claude_code.background_agents": "พื้นหลัง",
+  "claude_code.mcp_connected_tip": "MCP เชื่อมต่อ SwarmLLM — Claude สามารถสอบถามโมเดลอื่นได้"
 }

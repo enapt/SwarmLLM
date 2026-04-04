@@ -919,5 +919,9 @@
   "claude_code.perm_plan": "Plan Mode",
   "claude_code.permission_tip": "Controls when Claude asks for permission before running tools",
   "claude_code.agent_spawned": "子代理",
-  "claude_code.task_list": "任务"
+  "claude_code.task_list": "任务",
+  "claude_code.agents_running": "个代理运行中",
+  "claude_code.agents_background": "在后台",
+  "claude_code.background_agents": "后台",
+  "claude_code.mcp_connected_tip": "MCP 已连接到 SwarmLLM — Claude 可以查询其他模型"
 }

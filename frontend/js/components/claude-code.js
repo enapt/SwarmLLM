@@ -87,6 +87,7 @@
           cc.claude_session_id = data.claude_session_id || null;
           cc.tools_available = data.tools || [];
           cc.state = data.status || 'active';
+          cc.mcp_connected = data.mcp_connected || false;
           App.chat.saveSessions();
         }
 
@@ -347,6 +348,37 @@
       toolPanels[toolId] = panel;
     },
 
+    // Update the running agents summary bar
+    _updateAgentSummary: function(contentEl, agentPanels) {
+      var running = 0;
+      var bg = 0;
+      for (var id in agentPanels) {
+        var p = agentPanels[id];
+        var statusEl = p.panel.querySelector('.cc-tool-status');
+        if (statusEl && statusEl.classList.contains('pending')) {
+          if (p.background) bg++; else running++;
+        }
+      }
+      var bar = contentEl.querySelector('.cc-agents-summary');
+      if (running + bg > 1) {
+        if (!bar) {
+          bar = document.createElement('div');
+          bar.className = 'cc-agents-summary';
+          // Insert before first agent panel
+          var firstAgent = contentEl.querySelector('.cc-agent-panel');
+          if (firstAgent) contentEl.insertBefore(bar, firstAgent);
+          else contentEl.appendChild(bar);
+        }
+        var parts = [];
+        if (running > 0) parts.push(running + ' ' + I18n.t('claude_code.agents_running'));
+        if (bg > 0) parts.push(bg + ' ' + I18n.t('claude_code.agents_background'));
+        bar.textContent = parts.join(' · ');
+        bar.style.display = '';
+      } else if (bar) {
+        bar.style.display = 'none';
+      }
+    },
+
     // Render an Agent/SendMessage/TeamCreate tool call as a collapsible sub-agent panel
     _renderAgentCall: function(contentEl, block, agentPanels) {
       var toolId = block.id || '';
@@ -396,8 +428,24 @@
       contentArea.className = 'cc-agent-content';
       panel.appendChild(contentArea);
 
-      contentEl.appendChild(panel);
-      agentPanels[toolId] = { panel: panel, contentArea: contentArea };
+      var isBg = input.run_in_background === true;
+      if (isBg) {
+        panel.classList.add('cc-agent-bg');
+        panel.open = false; // collapsed by default for background agents
+        // Add to background tray instead of main content
+        var tray = contentEl.querySelector('.cc-bg-tray');
+        if (!tray) {
+          tray = document.createElement('div');
+          tray.className = 'cc-bg-tray';
+          tray.innerHTML = '<div class="cc-bg-tray-label">' + U.escapeHtml(I18n.t('claude_code.background_agents')) + '</div>';
+          contentEl.appendChild(tray);
+        }
+        tray.appendChild(panel);
+      } else {
+        contentEl.appendChild(panel);
+      }
+      agentPanels[toolId] = { panel: panel, contentArea: contentArea, background: isBg };
+      App.claudeCode._updateAgentSummary(contentEl, agentPanels);
     },
 
     // Render TaskCreate/TaskUpdate/TaskGet as compact task items
@@ -470,7 +518,7 @@
         // Extract text from block.content (string or array of content blocks)
         var blockText = App.claudeCode._extractResultText(block.content);
 
-        // ── Agent result — mark panel done, collapse ──
+        // ── Agent result — mark panel done, collapse/expand ──
         if (agentPanels[toolId]) {
           var agentInfo = agentPanels[toolId];
           var statusEl = agentInfo.panel.querySelector('.cc-tool-status');
@@ -485,7 +533,14 @@
             summaryEl.textContent = summaryText;
             agentInfo.contentArea.appendChild(summaryEl);
           }
-          agentInfo.panel.open = false;
+          // Background agents: expand briefly to show completion
+          if (agentInfo.background) {
+            agentInfo.panel.open = true;
+            agentInfo.panel.classList.add('cc-agent-bg-done');
+          } else {
+            agentInfo.panel.open = false;
+          }
+          App.claudeCode._updateAgentSummary(contentEl, agentPanels);
           App.chat.scrollToBottom();
           return;
         }
@@ -667,6 +722,58 @@
       return icons[name] || '⚡';
     },
 
+    // Slash command translation map (Phase 5)
+    _slashCommands: {
+      '/commit': 'Look at my staged changes and create an appropriate git commit with a descriptive message',
+      '/review': 'Review the recent changes in this project for bugs, security issues, and code quality',
+      '/test': 'Run the test suite and report results',
+      '/fix': 'Fix this issue: ',
+      '/explain': 'Explain what this file does and how it works: ',
+      '/refactor': 'Refactor this to improve code quality while preserving behavior: ',
+      '/search': 'Search the codebase for: ',
+      '/deps': 'Analyze the dependency graph and identify any issues',
+      '/todo': 'Find all TODO, FIXME, and HACK comments in the codebase and summarize them',
+    },
+
+    // Translate a slash command to a natural language prompt. Returns null if not a slash command.
+    translateSlashCommand: function(text) {
+      if (!text || text.charAt(0) !== '/') return null;
+      var parts = text.split(/\s+/);
+      var cmd = parts[0].toLowerCase();
+      var args = parts.slice(1).join(' ');
+
+      var template = App.claudeCode._slashCommands[cmd];
+      if (!template) return null;
+
+      // Commands that take args: append them
+      if (cmd === '/fix' || cmd === '/explain' || cmd === '/refactor' || cmd === '/search') {
+        return args ? template + args : null; // require args for these
+      }
+      // Commands with optional args
+      return args ? template + ' ' + args : template;
+    },
+
+    // Get autocomplete suggestions for slash commands
+    getSlashSuggestions: function(partial) {
+      if (!partial || partial.charAt(0) !== '/') return [];
+      var lower = partial.toLowerCase();
+      return Object.keys(App.claudeCode._slashCommands).filter(function(cmd) {
+        return cmd.indexOf(lower) === 0;
+      });
+    },
+
+    // Check backend session status. Returns 'active', 'suspended', 'expired', or null.
+    checkSessionStatus: async function(sessionId) {
+      try {
+        var resp = await App.authFetch('/api/claude-code/session/' + encodeURIComponent(sessionId), {
+          method: 'GET', _timeout: 5000,
+        });
+        if (!resp.ok) return null;
+        var data = await resp.json();
+        return data.state || null;
+      } catch (_e) { return null; }
+    },
+
     // Update the project picker bar visibility based on current model
     updateProjectBar: function() {
       var session = S.currentSessionId ? S.sessions[S.currentSessionId] : null;
@@ -676,25 +783,54 @@
 
       if (App.claudeCode.isClaudeCodeModel(model)) {
         bar.style.display = '';
-        // If session already has CC active, show working dir
-        if (session && session.claude_code && session.claude_code.active) {
-          var dirLabel = document.getElementById('cc-working-dir-label');
-          if (dirLabel) {
-            dirLabel.textContent = session.claude_code.working_dir || I18n.t('claude_code.quick_chat');
-          }
-          var picker = document.getElementById('cc-dir-picker');
+        var cc = session ? (session.claude_code || null) : null;
+        var picker = document.getElementById('cc-dir-picker');
+        var info = document.getElementById('cc-session-info');
+        var dirLabel = document.getElementById('cc-working-dir-label');
+        var dot = info ? info.querySelector('.cc-state-dot') : null;
+        var mcpBadge = document.getElementById('cc-mcp-badge');
+
+        if (cc && cc.active) {
+          // Active or resumed session
+          if (dirLabel) dirLabel.textContent = cc.working_dir || I18n.t('claude_code.quick_chat');
           if (picker) picker.style.display = 'none';
-          var info = document.getElementById('cc-session-info');
           if (info) info.style.display = '';
+          // State dot color
+          if (dot) {
+            var state = cc.state || 'active';
+            dot.style.background = state === 'active' ? '#3ddc84' : state === 'suspended' ? 'var(--orange)' : 'var(--red)';
+            dot.title = state;
+          }
+          // MCP badge
+          if (mcpBadge) mcpBadge.style.display = cc.mcp_connected ? '' : 'none';
+        } else if (cc && cc.claude_session_id && !cc.active) {
+          // Suspended — show resume prompt
+          if (dirLabel) dirLabel.textContent = cc.working_dir || I18n.t('claude_code.quick_chat');
+          if (picker) picker.style.display = 'none';
+          if (info) info.style.display = '';
+          if (dot) { dot.style.background = 'var(--orange)'; dot.title = 'suspended'; }
+          if (mcpBadge) mcpBadge.style.display = 'none';
         } else {
-          var picker = document.getElementById('cc-dir-picker');
+          // New session — show picker
           if (picker) picker.style.display = '';
-          var info = document.getElementById('cc-session-info');
           if (info) info.style.display = 'none';
         }
       } else {
         bar.style.display = 'none';
       }
+    },
+
+    // Get session list badge info for a CC session
+    getSessionBadge: function(session) {
+      if (!session.claude_code) return null;
+      var cc = session.claude_code;
+      var dir = cc.working_dir;
+      var short = dir ? dir.split('/').pop() || dir : null;
+      return {
+        isCC: true,
+        dir: short || I18n.t('claude_code.quick_chat'),
+        state: cc.state || (cc.active ? 'active' : cc.claude_session_id ? 'suspended' : 'new'),
+      };
     },
 
     // Initialize event bindings
@@ -707,6 +843,41 @@
           if (session && session.claude_code) {
             session.claude_code.permission_mode = permSelect.value;
             App.chat.saveSessions();
+          }
+        });
+      }
+
+      // Slash command autocomplete
+      var chatInput = document.getElementById('chat-input');
+      var acContainer = document.getElementById('cc-slash-autocomplete');
+      if (chatInput && acContainer) {
+        chatInput.addEventListener('input', function() {
+          var val = chatInput.value;
+          var session = S.currentSessionId ? S.sessions[S.currentSessionId] : null;
+          if (!session || !App.claudeCode.isClaudeCodeModel(session.model)) {
+            acContainer.style.display = 'none';
+            return;
+          }
+          var word = val.split(/\s/)[0];
+          var suggestions = App.claudeCode.getSlashSuggestions(word);
+          if (suggestions.length > 0 && val === word) {
+            acContainer.innerHTML = suggestions.map(function(cmd) {
+              return '<div class="cc-slash-item" data-cmd="' + U.escapeHtml(cmd) + '">' +
+                '<span class="cc-slash-cmd">' + U.escapeHtml(cmd) + '</span>' +
+                '</div>';
+            }).join('');
+            acContainer.style.display = '';
+          } else {
+            acContainer.style.display = 'none';
+          }
+        });
+        acContainer.addEventListener('click', function(e) {
+          var item = e.target.closest('.cc-slash-item');
+          if (item) {
+            var cmd = item.getAttribute('data-cmd');
+            chatInput.value = cmd + ' ';
+            chatInput.focus();
+            acContainer.style.display = 'none';
           }
         });
       }

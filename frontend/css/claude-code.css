@@ -102,6 +102,30 @@
 .cc-task-deleted .cc-task-check { color: var(--red); }
 .cc-task-deleted .cc-task-subject { color: var(--text-muted); text-decoration: line-through; }
 
+/* ─── Running Agents Summary Bar ─── */
+.cc-agents-summary { margin: 6px 0; padding: 4px 10px; font-size: 0.72rem; font-weight: 600; color: #8b5cf6; background: rgba(139,92,246,0.08); border-radius: var(--radius); font-family: var(--font-mono); text-align: center; }
+
+/* ─── Background Agent Tray ─── */
+.cc-bg-tray { margin: 8px 0; padding: 6px; background: rgba(139,92,246,0.03); border: 1px dashed rgba(139,92,246,0.2); border-radius: var(--radius); }
+.cc-bg-tray-label { font-size: 0.68rem; color: var(--text-muted); font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 4px; }
+.cc-agent-bg { opacity: 0.7; margin: 4px 0; }
+.cc-agent-bg-done { opacity: 1; border-color: rgba(61,220,132,0.3); }
+
+/* ─── MCP Badge ─── */
+.cc-mcp-badge { font-size: 0.62rem; font-weight: 700; padding: 1px 5px; background: rgba(59,130,246,0.15); color: #3b82f6; border-radius: 3px; font-family: var(--font-mono); letter-spacing: 0.03em; }
+
+/* ─── Slash Command Autocomplete ─── */
+.cc-slash-autocomplete { max-width: 740px; margin: 0 auto; background: var(--bg-secondary); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; font-size: 0.78rem; }
+.cc-slash-item { padding: 6px 12px; cursor: pointer; display: flex; align-items: center; gap: 8px; }
+.cc-slash-item:hover { background: var(--bg-tertiary); }
+.cc-slash-cmd { font-family: var(--font-mono); font-weight: 600; color: var(--accent); }
+
+/* ─── Session List CC Badge ─── */
+.session-cc-badge { display: inline-block; font-size: 0.6rem; padding: 0 4px; background: rgba(217,119,87,0.12); color: #D97757; border-radius: 3px; font-family: var(--font-mono); max-width: 80px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: middle; margin-left: 4px; }
+.session-cc-badge.cc-active::before { content: ''; display: inline-block; width: 5px; height: 5px; border-radius: 50%; background: #3ddc84; margin-right: 3px; vertical-align: middle; }
+.session-cc-badge.cc-suspended { opacity: 0.6; }
+.session-cc-badge.cc-suspended::before { content: ''; display: inline-block; width: 5px; height: 5px; border-radius: 50%; background: var(--orange); margin-right: 3px; vertical-align: middle; }
+
 /* ─── Live Timer ─── */
 .cc-live-timer { color: var(--orange); font-family: var(--font-mono); animation: cc-pulse 1.5s infinite; }
 @keyframes cc-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }

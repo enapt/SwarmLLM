@@ -306,6 +306,7 @@ impl SessionManager {
         resume_claude_id: Option<String>,
         permission_mode: Option<String>,
         config: &super::claude_sub::ClaudeSubscriptionConfig,
+        mcp_url: Option<String>,
     ) -> Result<(), ApiError> {
         // Check concurrent limit
         if self.active_count() >= config.concurrency_limit() {
@@ -334,6 +335,16 @@ impl SessionManager {
             "--permission-mode".to_string(),
             permission_mode,
         ];
+
+        // Connect SwarmLLM's MCP server so Claude can query other models
+        if let Some(ref url) = mcp_url {
+            let mcp_config = serde_json::json!({
+                "name": "swarmllm",
+                "url": url
+            });
+            args.push("--mcp-server".to_string());
+            args.push(mcp_config.to_string());
+        }
 
         // Resume from a previous CLI session if available
         if let Some(ref claude_id) = resume_claude_id {
@@ -579,6 +590,10 @@ pub async fn create_session_handler(
         ))));
     }
 
+    // Build MCP URL for SwarmLLM's MCP server
+    let listen_port = state.shared_state.config.node.listen_port;
+    let mcp_url = format!("http://127.0.0.1:{listen_port}/mcp");
+
     SessionManager::global()
         .create_session(
             req.session_id.clone(),
@@ -587,6 +602,7 @@ pub async fn create_session_handler(
             req.resume_claude_session_id,
             Some(req.permission_mode),
             &sub_config,
+            Some(mcp_url),
         )
         .await?;
 
@@ -636,6 +652,9 @@ pub async fn create_session_handler(
                         init_info["tools"] = serde_json::json!(session.tools);
                         init_info["model"] = serde_json::json!(evt["model"]);
                         init_info["status"] = serde_json::json!("active");
+                        // Check if MCP tools are present (swarmllm MCP server connected)
+                        let has_mcp = session.tools.iter().any(|t| t.contains("swarmllm"));
+                        init_info["mcp_connected"] = serde_json::json!(has_mcp);
                         break;
                     }
                     // Skip hook messages, continue waiting for init

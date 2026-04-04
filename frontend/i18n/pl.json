@@ -919,5 +919,9 @@
   "claude_code.perm_plan": "Plan Mode",
   "claude_code.permission_tip": "Controls when Claude asks for permission before running tools",
   "claude_code.agent_spawned": "Sub-agent",
-  "claude_code.task_list": "Zadania"
+  "claude_code.task_list": "Zadania",
+  "claude_code.agents_running": "agent(ów) działa",
+  "claude_code.agents_background": "w tle",
+  "claude_code.background_agents": "Tło",
+  "claude_code.mcp_connected_tip": "MCP połączony ze SwarmLLM — Claude może odpytywać inne modele"
 }

@@ -919,5 +919,9 @@
   "claude_code.perm_plan": "Plan Mode",
   "claude_code.permission_tip": "Controls when Claude asks for permission before running tools",
   "claude_code.agent_spawned": "उप-एजेंट",
-  "claude_code.task_list": "कार्य"
+  "claude_code.task_list": "कार्य",
+  "claude_code.agents_running": "एजेंट चल रहे हैं",
+  "claude_code.agents_background": "पृष्ठभूमि में",
+  "claude_code.background_agents": "पृष्ठभूमि",
+  "claude_code.mcp_connected_tip": "MCP SwarmLLM से जुड़ा — Claude अन्य मॉडलों से पूछ सकता है"
 }

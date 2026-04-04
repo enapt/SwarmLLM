@@ -919,5 +919,9 @@
   "claude_code.perm_plan": "Plan Mode",
   "claude_code.permission_tip": "Controls when Claude asks for permission before running tools",
   "claude_code.agent_spawned": "Alt ajan",
-  "claude_code.task_list": "Görevler"
+  "claude_code.task_list": "Görevler",
+  "claude_code.agents_running": "ajan çalışıyor",
+  "claude_code.agents_background": "arka planda",
+  "claude_code.background_agents": "Arka plan",
+  "claude_code.mcp_connected_tip": "MCP SwarmLLM'e bağlı — Claude diğer modelleri sorgulayabilir"
 }
