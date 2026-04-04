@@ -653,6 +653,11 @@ pub struct ProvidersConfig {
     #[serde(default)]
     pub custom: Vec<CustomProvider>,
 
+    /// Claude subscription: proxy through locally-authenticated `claude` CLI subprocess.
+    #[cfg(feature = "claude-subscription")]
+    #[serde(default)]
+    pub claude_subscription: Option<crate::api::claude_sub::ClaudeSubscriptionConfig>,
+
     /// Tracks which providers were loaded from environment variables / .env file.
     /// Not persisted — runtime only. Used by the UI to show source attribution.
     #[serde(skip)]

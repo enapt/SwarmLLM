@@ -104,6 +104,7 @@ hex = "0.4"
 base64 = "0.22"
 dirs = "6"
 bytes = "1"
+async-stream = "0.3"
 # include_dir moved to swarmllm-frontend crate
 sysinfo = "0.38"
 half = "2"
@@ -160,6 +161,11 @@ windows-gpu = ["llama-vulkan", "candle-cuda-static"]
 # Uncomment when candle gains a stable wgpu backend:
 # candle-wgpu = ["candle-core/wgpu", "candle-nn/wgpu", "candle-transformers/wgpu"]
 # windows-gpu-full = ["llama-vulkan", "candle-wgpu"]
+
+# --- Optional provider integrations ---
+# Claude Subscription: proxy Claude model requests through a locally-authenticated `claude` CLI
+# subprocess (Pro/Max/Team/Enterprise subscription). Isolated for easy removal.
+claude-subscription = []
 
 [dev-dependencies]
 tempfile = "3"

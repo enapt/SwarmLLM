@@ -280,6 +280,21 @@
           <input type="text" id="provider-filter" data-i18n-placeholder="settings.filter_providers" placeholder="Filter providers..." style="flex:1;min-width:150px;font-size:0.8rem;padding:6px 10px;background:var(--bg-tertiary);border:1px solid var(--border);border-radius:var(--radius);color:var(--text-primary)">
         </div>
         <div id="provider-cards" class="mt-2">
+          <div class="provider-card" id="claude-subscription-card" style="background:var(--bg-tertiary);border-radius:var(--radius);padding:10px;margin-bottom:8px;border:1px solid var(--border);display:none">
+            <div class="flex-between mb-1">
+              <strong style="font-size:0.85rem" data-i18n="settings.claude_subscription">Claude Subscription</strong>
+              <span class="badge" id="claude-subscription-status" style="font-size:0.7rem" data-i18n="settings.badge_not_set">Not set</span>
+            </div>
+            <div style="font-size:0.78rem;color:var(--text-secondary);margin-bottom:6px" data-i18n="settings.claude_subscription_desc">Route Claude models through your local CLI subscription (Pro/Max/Team). Requires <code>claude</code> CLI installed and logged in.</div>
+            <div style="display:flex;align-items:center;gap:8px">
+              <label style="font-size:0.8rem;display:flex;align-items:center;gap:6px;cursor:pointer">
+                <input type="checkbox" id="claude-subscription-toggle">
+                <span data-i18n="settings.claude_subscription_enable">Enable</span>
+              </label>
+              <button class="btn btn-sm" id="claude-subscription-detect" data-i18n="settings.detect_btn">Detect</button>
+              <span id="claude-subscription-info" style="font-size:0.75rem;color:var(--text-secondary)"></span>
+            </div>
+          </div>
           <div class="provider-card" style="background:var(--bg-tertiary);border-radius:var(--radius);padding:10px;margin-bottom:8px;border:1px solid var(--border)">
             <div class="flex-between mb-1">
               <strong style="font-size:0.85rem">Anthropic</strong>

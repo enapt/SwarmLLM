@@ -872,5 +872,14 @@
   "models.max_tokens_label": "{n} max",
   "models.pricing_in": "${price}/1K in",
   "models.pricing_out": "${price}/1K out",
-  "errors.request_timeout": "अनुरोध का समय समाप्त — सर्वर व्यस्त या अनुपलब्ध हो सकता है"
+  "errors.request_timeout": "अनुरोध का समय समाप्त — सर्वर व्यस्त या अनुपलब्ध हो सकता है",
+  "settings.claude_subscription": "Claude Subscription",
+  "settings.claude_subscription_desc": "Route Claude models through your local CLI subscription (Pro/Max/Team). Requires claude CLI installed and logged in.",
+  "settings.claude_subscription_enable": "Enable",
+  "settings.claude_subscription_disabled": "Disabled",
+  "settings.claude_subscription_toggled": "Claude subscription setting updated",
+  "settings.detect_btn": "Detect",
+  "settings.detecting": "Detecting...",
+  "settings.authenticated": "authenticated",
+  "settings.cli_not_found": "claude CLI not found"
 }

@@ -872,5 +872,14 @@
   "models.pricing_in": "${price}/1K entrée",
   "models.pricing_out": "${price}/1K sortie",
   "errors.request_timeout": "Délai d'attente dépassé — le serveur est peut-être occupé ou inaccessible",
-  "activity.download_slow": "Le téléchargement est lent ({detail}) — cela arrive avec les modèles populaires. Il continuera."
+  "activity.download_slow": "Le téléchargement est lent ({detail}) — cela arrive avec les modèles populaires. Il continuera.",
+  "settings.claude_subscription": "Claude Subscription",
+  "settings.claude_subscription_desc": "Route Claude models through your local CLI subscription (Pro/Max/Team). Requires claude CLI installed and logged in.",
+  "settings.claude_subscription_enable": "Enable",
+  "settings.claude_subscription_disabled": "Disabled",
+  "settings.claude_subscription_toggled": "Claude subscription setting updated",
+  "settings.detect_btn": "Detect",
+  "settings.detecting": "Detecting...",
+  "settings.authenticated": "authenticated",
+  "settings.cli_not_found": "claude CLI not found"
 }

@@ -872,5 +872,14 @@
   "models.pricing_in": "${price}/1K 입력",
   "models.pricing_out": "${price}/1K 출력",
   "errors.request_timeout": "요청 시간 초과 — 서버가 바쁘거나 연결할 수 없을 수 있습니다",
-  "activity.download_slow": "다운로드가 느립니다 ({detail}) — 인기 모델에서 발생할 수 있습니다. 계속 진행됩니다."
+  "activity.download_slow": "다운로드가 느립니다 ({detail}) — 인기 모델에서 발생할 수 있습니다. 계속 진행됩니다.",
+  "settings.claude_subscription": "Claude Subscription",
+  "settings.claude_subscription_desc": "Route Claude models through your local CLI subscription (Pro/Max/Team). Requires claude CLI installed and logged in.",
+  "settings.claude_subscription_enable": "Enable",
+  "settings.claude_subscription_disabled": "Disabled",
+  "settings.claude_subscription_toggled": "Claude subscription setting updated",
+  "settings.detect_btn": "Detect",
+  "settings.detecting": "Detecting...",
+  "settings.authenticated": "authenticated",
+  "settings.cli_not_found": "claude CLI not found"
 }

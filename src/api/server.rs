@@ -195,6 +195,24 @@ pub fn build_router(state: AppState) -> Router {
             "/api/admin/provider-model-status",
             post(admin::provider_model_status),
         )
+        // Claude subscription status (feature-gated)
+        .route(
+            "/api/admin/claude-subscription/status",
+            get({
+                #[cfg(feature = "claude-subscription")]
+                {
+                    crate::api::claude_sub::get_status
+                }
+                #[cfg(not(feature = "claude-subscription"))]
+                {
+                    || async {
+                        axum::Json(
+                            serde_json::json!({"error": "claude-subscription feature not enabled"}),
+                        )
+                    }
+                }
+            }),
+        )
         // Version & Updates
         .route("/api/admin/version", get(admin::version_info))
         .route("/api/admin/update/check", post(admin::check_update))

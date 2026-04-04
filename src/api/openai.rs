@@ -650,6 +650,30 @@ async fn try_cloud_proxy(
     state: &AppState,
     req: &ChatCompletionRequest,
 ) -> Result<Option<axum::response::Response>, ApiError> {
+    // Claude subscription: proxy through local CLI subprocess (higher priority than API key)
+    #[cfg(feature = "claude-subscription")]
+    {
+        let lower = req.model.to_lowercase();
+        if lower.starts_with("claude-") || lower.starts_with("claude3") {
+            let config = state.shared_state.metrics.providers_config.read().await;
+            if let Some(ref sub_config) = config.claude_subscription {
+                if sub_config.enabled {
+                    let sub_config = sub_config.clone();
+                    drop(config);
+                    tracing::info!(model = %req.model, "DIAG: openai proxying via claude subscription subprocess");
+                    let body = serde_json::to_value(req).map_err(|e| {
+                        ApiError(crate::error::SwarmError::Validation(format!(
+                            "serialize request: {e}"
+                        )))
+                    })?;
+                    return crate::api::claude_sub::proxy_via_subprocess_openai(&sub_config, &body)
+                        .await
+                        .map(Some);
+                }
+            }
+        }
+    }
+
     let body = serde_json::to_value(req).map_err(|e| {
         ApiError(crate::error::SwarmError::Validation(format!(
             "serialize request: {e}"

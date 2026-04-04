@@ -65,6 +65,47 @@
           I18n.setLang(this.value);
         });
       }
+
+      // Claude subscription toggle
+      var csToggle = document.getElementById('claude-subscription-toggle');
+      if (csToggle) {
+        csToggle.addEventListener('change', async function() {
+          try {
+            await App.authFetch('/api/admin/providers', {
+              method: 'PUT',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ claude_subscription_enabled: csToggle.checked }),
+            });
+            App.settings.loadProviders();
+            App.ui.showBanner('success', I18n.t('settings.claude_subscription_toggled'));
+          } catch (e) {
+            App.ui.showBanner('error', I18n.t('common.request_failed'));
+          }
+        });
+      }
+
+      // Claude subscription detect button
+      var csDetect = document.getElementById('claude-subscription-detect');
+      if (csDetect) {
+        csDetect.addEventListener('click', async function() {
+          var info = document.getElementById('claude-subscription-info');
+          if (info) info.textContent = I18n.t('settings.detecting');
+          try {
+            var resp = await App.authFetch('/api/admin/claude-subscription/status');
+            var data = await resp.json();
+            if (data.cli_installed) {
+              var parts = [data.cli_version || 'installed'];
+              if (data.subscription_type) parts.push(data.subscription_type);
+              if (data.authenticated) parts.push(I18n.t('settings.authenticated'));
+              if (info) info.textContent = parts.join(' · ');
+            } else {
+              if (info) info.textContent = I18n.t('settings.cli_not_found');
+            }
+          } catch (e) {
+            if (info) info.textContent = I18n.t('common.request_failed');
+          }
+        });
+      }
     },
 
     load: async function() {
@@ -225,6 +266,23 @@
         if (data.key_source) {
           var sel = document.getElementById('provider-key-source');
           if (sel) sel.value = data.key_source;
+        }
+        // Claude subscription UI
+        if (data.claude_subscription !== undefined) {
+          var card = document.getElementById('claude-subscription-card');
+          if (card) card.style.display = '';
+          var toggle = document.getElementById('claude-subscription-toggle');
+          if (toggle) toggle.checked = !!(data.claude_subscription && data.claude_subscription.enabled);
+          var badge = document.getElementById('claude-subscription-status');
+          if (badge && data.claude_subscription && data.claude_subscription.enabled) {
+            badge.textContent = I18n.t('settings.badge_active');
+            badge.className = 'badge provider-badge-active';
+            if (card) card.classList.add('provider-active');
+          } else if (badge) {
+            badge.textContent = I18n.t('settings.claude_subscription_disabled');
+            badge.className = 'badge';
+            if (card) card.classList.remove('provider-active');
+          }
         }
       } catch (e) {
         App.ui.showBanner('error', I18n.t('settings.providers_load_failed'));

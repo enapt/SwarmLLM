@@ -103,6 +103,8 @@ pub struct ProviderInfo {
     pub base_url: String,
     pub api_key: String,
     pub is_anthropic: bool,
+    /// True for subprocess-based providers (e.g. claude-subscription).
+    pub is_subprocess: bool,
 }
 
 /// Resolve a model name to a cloud provider.
@@ -128,6 +130,23 @@ fn resolve_provider_inner(model: &str, config: &ProvidersConfig) -> Option<Provi
 
     // Model prefix routing
     let lower = model.to_lowercase();
+
+    // Claude subscription: route through local CLI subprocess (higher priority than API key)
+    #[cfg(feature = "claude-subscription")]
+    if lower.starts_with("claude-") || lower.starts_with("claude3") {
+        if let Some(ref sub_config) = config.claude_subscription {
+            if sub_config.enabled {
+                return Some(ProviderInfo {
+                    name: "claude_subscription".into(),
+                    base_url: String::new(),
+                    api_key: String::new(),
+                    is_anthropic: true,
+                    is_subprocess: true,
+                });
+            }
+        }
+    }
+
     if lower.starts_with("claude-") || lower.starts_with("claude3") {
         return resolve_by_name("anthropic", config);
     }
@@ -185,6 +204,7 @@ fn make_provider(name: &str, entry: &ProviderEntry, is_anthropic: bool) -> Provi
         base_url: provider_base_url(name).expect("known provider").into(),
         api_key: entry.api_key.clone(),
         is_anthropic,
+        is_subprocess: false,
     }
 }
 
@@ -249,6 +269,7 @@ pub fn resolve_by_name(name: &str, config: &ProvidersConfig) -> Option<ProviderI
                     base_url: c.base_url.clone(),
                     api_key: c.api_key.clone(),
                     is_anthropic: false,
+                    is_subprocess: false,
                 })
         }
     }

@@ -61,7 +61,21 @@ pub async fn get_providers(State(state): State<AppState>) -> Json<serde_json::Va
         crate::config::ProviderKeySource::Dashboard => "dashboard",
     };
 
-    Json(serde_json::json!({ "providers": providers, "key_source": key_source }))
+    #[allow(unused_mut)]
+    let mut result = serde_json::json!({ "providers": providers, "key_source": key_source });
+
+    // Claude subscription status (feature-gated)
+    #[cfg(feature = "claude-subscription")]
+    {
+        if let Some(ref sub_config) = config.claude_subscription {
+            result["claude_subscription"] = serde_json::json!({
+                "enabled": sub_config.enabled,
+                "binary": sub_config.binary(),
+            });
+        }
+    }
+
+    Json(result)
 }
 
 #[derive(Debug, Deserialize)]
@@ -93,6 +107,9 @@ pub struct ProvidersUpdate {
     /// Key source mode: "auto", "env", or "dashboard".
     #[serde(default)]
     pub key_source: Option<String>,
+    /// Claude subscription: enable/disable (feature-gated).
+    #[serde(default)]
+    pub claude_subscription_enabled: Option<bool>,
 }
 
 /// PUT /api/admin/providers — Update provider API keys. Empty string = remove key.
@@ -160,6 +177,19 @@ pub async fn update_providers(
     update_entry(&mut new_config.together, body.together_key);
     update_entry(&mut new_config.deepinfra, body.deepinfra_key);
     update_entry(&mut new_config.moonshot, body.moonshot_key);
+
+    // Update claude subscription toggle (feature-gated)
+    #[cfg(feature = "claude-subscription")]
+    if let Some(enabled) = body.claude_subscription_enabled {
+        let sub = new_config
+            .claude_subscription
+            .get_or_insert_with(Default::default);
+        sub.enabled = enabled;
+        tracing::info!(
+            enabled,
+            "Claude subscription provider toggled via admin API"
+        );
+    }
 
     // Update key source mode if provided
     if let Some(ref ks) = body.key_source {
