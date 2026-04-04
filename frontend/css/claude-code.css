@@ -1,0 +1,72 @@
+/* ============================================================================
+   SwarmLLM — Claude Code Integration Styles
+   Tool calls, diffs, bash output, permissions, project picker
+   ============================================================================ */
+
+/* ─── Project Picker Bar ─── */
+.cc-project-bar { max-width: 740px; margin: 0 auto 6px; padding: 8px 12px; background: rgba(217,119,87,0.06); border: 1px solid rgba(217,119,87,0.2); border-radius: var(--radius-lg); font-size: 0.78rem; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.cc-project-bar .cc-bar-icon { flex-shrink: 0; }
+.cc-project-bar .cc-bar-label { color: #D97757; font-weight: 600; font-family: var(--font-mono); white-space: nowrap; }
+.cc-project-bar input[type="text"] { flex: 1; min-width: 150px; padding: 4px 8px; background: var(--bg-tertiary); border: 1px solid var(--border); border-radius: var(--radius); color: var(--text-primary); font-family: var(--font-mono); font-size: 0.75rem; }
+.cc-project-bar .btn { font-size: 0.72rem; padding: 3px 10px; }
+.cc-project-bar select { font-size: 0.72rem; padding: 3px 6px; background: var(--bg-tertiary); border: 1px solid var(--border); border-radius: var(--radius); color: var(--text-primary); }
+
+/* Session info (shown when CC session is active) */
+.cc-session-info { display: flex; align-items: center; gap: 6px; font-size: 0.72rem; color: var(--text-secondary); font-family: var(--font-mono); }
+.cc-session-info .cc-dir-badge { color: #D97757; font-weight: 600; }
+.cc-session-info .cc-state-dot { width: 6px; height: 6px; border-radius: 50%; background: #3ddc84; display: inline-block; }
+
+/* ─── Tool Call Blocks ─── */
+.cc-tool-call { margin: 8px 0; padding: 8px 10px; background: var(--bg-tertiary); border: 1px solid var(--border); border-radius: var(--radius); border-left: 3px solid var(--accent); }
+.cc-tool-header { display: flex; align-items: center; gap: 6px; font-size: 0.78rem; flex-wrap: wrap; }
+.cc-tool-icon { font-size: 0.9rem; flex-shrink: 0; }
+.cc-tool-name { font-weight: 700; color: var(--accent); font-family: var(--font-mono); }
+.cc-tool-file { color: var(--text-secondary); font-family: var(--font-mono); font-size: 0.72rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 300px; }
+.cc-tool-status { font-size: 0.68rem; margin-left: auto; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; }
+.cc-tool-status.pending { color: var(--orange); }
+.cc-tool-status.done { color: var(--green); }
+.cc-tool-input { margin-top: 6px; padding: 6px 8px; background: var(--bg-secondary); border-radius: var(--radius); font-size: 0.72rem; font-family: var(--font-mono); color: var(--text-secondary); overflow-x: auto; max-height: 100px; white-space: pre-wrap; word-break: break-all; }
+.cc-bash-cmd { color: var(--green); }
+
+/* ─── Tool Result Blocks ─── */
+.cc-tool-result { margin-top: 6px; }
+.cc-tool-output { padding: 6px 8px; background: var(--bg-secondary); border-radius: var(--radius); font-size: 0.72rem; font-family: var(--font-mono); color: var(--text-primary); max-height: 300px; overflow: auto; white-space: pre-wrap; word-break: break-all; }
+
+/* ─── Diff Display ─── */
+.cc-diff .cc-diff-header { display: flex; align-items: center; gap: 8px; padding: 4px 8px; background: var(--bg-secondary); border-radius: var(--radius) var(--radius) 0 0; border: 1px solid var(--border); border-bottom: none; font-size: 0.72rem; font-family: var(--font-mono); }
+.cc-diff .cc-diff-file { color: var(--text-primary); font-weight: 600; }
+.cc-diff .cc-diff-stats { color: var(--text-secondary); margin-left: auto; }
+.cc-diff .cc-diff-content { margin: 0; padding: 6px 8px; background: var(--bg-secondary); border-radius: 0 0 var(--radius) var(--radius); border: 1px solid var(--border); font-size: 0.72rem; font-family: var(--font-mono); overflow-x: auto; max-height: 400px; overflow-y: auto; line-height: 1.5; }
+.diff-add { color: #3ddc84; background: rgba(61,220,132,0.08); display: block; }
+.diff-del { color: #ef4444; background: rgba(239,68,68,0.08); display: block; }
+.diff-hunk { color: var(--accent); opacity: 0.7; display: block; }
+
+/* ─── Bash Output ─── */
+.cc-bash .cc-bash-output { padding: 6px 8px; background: #0d1117; border-radius: var(--radius); font-size: 0.72rem; font-family: var(--font-mono); color: #c9d1d9; max-height: 300px; overflow: auto; white-space: pre-wrap; word-break: break-all; border: 1px solid rgba(255,255,255,0.05); }
+.cc-file-summary { padding: 4px 8px; font-size: 0.72rem; color: var(--text-secondary); }
+
+/* ─── Permission Prompt ─── */
+.cc-permission-prompt { margin: 8px 0; padding: 10px 12px; background: rgba(245,158,11,0.08); border: 1px solid rgba(245,158,11,0.3); border-radius: var(--radius); border-left: 3px solid var(--orange); }
+.cc-perm-header { font-size: 0.78rem; font-weight: 600; color: var(--orange); margin-bottom: 6px; }
+.cc-perm-tool { font-size: 0.75rem; font-family: var(--font-mono); color: var(--text-primary); margin-bottom: 8px; display: flex; align-items: center; gap: 4px; }
+.cc-perm-actions { display: flex; gap: 8px; }
+.cc-perm-actions .cc-perm-allow { background: var(--green); color: #fff; border: none; cursor: pointer; }
+.cc-perm-actions .cc-perm-allow:hover { opacity: 0.9; }
+.cc-perm-actions .cc-perm-deny { background: transparent; color: var(--red); border: 1px solid var(--red); cursor: pointer; }
+.cc-perm-actions .cc-perm-deny:hover { background: rgba(239,68,68,0.1); }
+.cc-perm-resolved { font-size: 0.75rem; font-weight: 600; }
+.cc-permission-prompt.cc-perm-allowed { border-color: rgba(34,197,94,0.3); background: rgba(34,197,94,0.05); }
+.cc-permission-prompt.cc-perm-allowed .cc-perm-resolved { color: var(--green); }
+.cc-permission-prompt.cc-perm-denied { border-color: rgba(239,68,68,0.3); background: rgba(239,68,68,0.05); }
+.cc-permission-prompt.cc-perm-denied .cc-perm-resolved { color: var(--red); }
+
+/* ─── Cost Info ─── */
+.cc-cost-info { margin-top: 6px; padding: 3px 8px; font-size: 0.68rem; color: var(--text-muted); font-family: var(--font-mono); }
+
+/* ─── Status Messages ─── */
+.cc-status { margin: 4px 0; padding: 4px 8px; font-size: 0.72rem; color: var(--text-secondary); font-style: italic; }
+.cc-status-error { color: var(--red); font-style: normal; }
+
+/* ─── Live Timer ─── */
+.cc-live-timer { color: var(--orange); font-family: var(--font-mono); animation: cc-pulse 1.5s infinite; }
+@keyframes cc-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }

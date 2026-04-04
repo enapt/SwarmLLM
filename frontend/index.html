@@ -7,6 +7,7 @@
   <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
   <title>SwarmLLM — Join the Swarm</title>
   <link rel="stylesheet" href="/static/css/style.css">
+  <link rel="stylesheet" href="/static/css/claude-code.css">
 </head>
 <body>
   <!-- WebSocket reconnect banner -->
@@ -623,6 +624,24 @@
             </div>
           </div>
           <div class="chat-input-area">
+            <!-- Claude Code project picker (shown when Claude subscription model selected) -->
+            <div class="cc-project-bar" id="cc-project-bar" style="display:none">
+              <img src="/static/icons/claude-code.svg" width="16" height="16" alt="" class="cc-bar-icon">
+              <span class="cc-bar-label">Claude Code</span>
+              <div id="cc-dir-picker" style="display:flex;align-items:center;gap:6px;flex:1;flex-wrap:wrap">
+                <input type="text" id="cc-dir-input" data-i18n-placeholder="claude_code.dir_placeholder" placeholder="/path/to/project (or leave empty for quick chat)">
+                <select id="cc-permission-mode" data-i18n-title="claude_code.permission_tip" title="Permission mode for tool calls">
+                  <option value="acceptEdits" data-i18n="claude_code.perm_accept_edits">Accept Edits</option>
+                  <option value="default" data-i18n="claude_code.perm_default">Ask Permission</option>
+                  <option value="bypassPermissions" data-i18n="claude_code.perm_bypass">Bypass (Dangerous)</option>
+                  <option value="plan" data-i18n="claude_code.perm_plan">Plan Mode</option>
+                </select>
+              </div>
+              <div class="cc-session-info" id="cc-session-info" style="display:none">
+                <span class="cc-state-dot"></span>
+                <span class="cc-dir-badge" id="cc-working-dir-label"></span>
+              </div>
+            </div>
             <div id="image-preview-area" style="display:none;max-width:740px;margin:0 auto 6px;padding:6px;background:var(--bg-tertiary);border-radius:8px;"></div>
             <div class="chat-input-wrap">
               <input type="file" id="image-upload-input" accept="image/*" multiple style="display:none">
@@ -1361,6 +1380,7 @@
   <script src="/static/js/components/ui.js"></script>
   <script src="/static/js/components/notifications.js"></script>
   <script src="/static/js/components/chat.js"></script>
+  <script src="/static/js/components/claude-code.js"></script>
   <script src="/static/js/components/dashboard.js"></script>
   <script src="/static/js/components/models.js"></script>
   <script src="/static/js/components/shard-menu.js"></script>

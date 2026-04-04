@@ -267,6 +267,8 @@
       var header = document.getElementById('chat-session-header');
       var encBanner = document.getElementById('chat-enc-banner');
       if (!header) return;
+      // Update Claude Code project bar
+      if (App.claudeCode) App.claudeCode.updateProjectBar();
       if (!S.currentSessionId || !S.sessions[S.currentSessionId]) {
         header.classList.remove('visible');
         header.innerHTML = '';
@@ -439,6 +441,37 @@
         App.chat.updateChatHeader();
         App.chat.renderSessionList();
       }
+
+      // ── Claude Code session path ──
+      if (App.claudeCode && App.claudeCode.isClaudeCodeModel(model)) {
+        try {
+          var cc = App.claudeCode.getSessionCC(session);
+          // Create backend session if not active
+          if (!cc.active) {
+            var dirInput = document.getElementById('cc-dir-input');
+            var permSelect = document.getElementById('cc-permission-mode');
+            var workDir = dirInput ? dirInput.value.trim() : '';
+            var permMode = permSelect ? permSelect.value : 'acceptEdits';
+            cc.permission_mode = permMode;
+            await App.claudeCode.createSession(session.id, model, workDir, permMode);
+            App.claudeCode.updateProjectBar();
+          }
+          var result = await App.claudeCode.sendMessage(session.id, displayText, contentEl, assistantEl);
+          if (result.content) {
+            session.messages.push({ role: 'assistant', content: result.content, encrypted: false });
+            App.chat.saveSessions();
+          }
+        } catch (e) {
+          contentEl.textContent = e.message || I18n.t('chat.connection_failed');
+          contentEl.classList.add('chat-error');
+        }
+        S.isStreaming = false;
+        var _sendBtnCC = document.getElementById('send-btn');
+        if (_sendBtnCC) _sendBtnCC.disabled = false;
+        return;
+      }
+
+      // ── Standard OpenAI chat completions path ──
       var recentMessages = session.messages.slice(-50).map(function(m) {
         if (m.images && m.images.length > 0) {
           return { role: m.role, content: buildMessageContent(m.content, m.images.map(function(url) { return { data_url: url }; })) };

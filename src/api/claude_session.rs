@@ -597,8 +597,9 @@ pub async fn create_session_handler(
         "working_dir": working_dir.display().to_string(),
     });
 
-    // Read events until we get the init message (with timeout)
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+    // Read events until we get the init message.
+    // Hooks (SessionStart) can take 30-60s+ to run, so use a generous timeout.
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(120);
     {
         let mut session = session_arc.lock().await;
         loop {
