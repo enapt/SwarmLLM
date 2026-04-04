@@ -8,3 +8,12 @@
 {"file":"frontend/i18n/*.json","line":0,"kind":"i18n_consolidation","summary":"10 duplicate dashboard keys consolidated to existing keys, 8 unused keys deleted (890→872)","status":"fixed","date":"2026-04-04"}
 {"file":"frontend/i18n/*.json","line":0,"kind":"i18n_untranslated","summary":"~750 untranslated stubs across 20 languages — translation in progress","status":"fixed","date":"2026-04-04"}
 {"file":"CLAUDE.md","line":124,"kind":"doc_mismatch","summary":"i18n key count said 889 but actual was 890 (now 872 after consolidation)","status":"fixed","date":"2026-04-04"}
+{"file":"src/api/pool.rs","line":531,"kind":"validation_bug","summary":"penalty_serve_failure sign check inverted — rejected all valid positive values, making PUT /api/admin/pools/:id/rates always 400","status":"fixed","date":"2026-04-04"}
+{"file":"src/api/openai.rs","line":826,"kind":"duplication","summary":"Cloud proxy serialization+call duplicated at lines 826 and 934 — extracted try_cloud_proxy() helper","status":"fixed","date":"2026-04-04"}
+{"file":"src/api/admin_models.rs","line":1063,"kind":"duplication","summary":"validate_model_id+mmproj sentinel guard duplicated across 4 shard handlers — extracted validate_shard_params()","status":"fixed","date":"2026-04-04"}
+{"file":"src/network/protocol.rs","line":639,"kind":"magic_number","summary":"Bare 65536 in num_tokens OOM guard — replaced with named MAX_RESULT_TOKENS constant","status":"fixed","date":"2026-04-04"}
+{"file":"CLAUDE.md","line":60,"kind":"stale_doc","summary":"identity module listed keystore which doesn't exist — removed","status":"fixed","date":"2026-04-04"}
+{"file":"CLAUDE.md","line":124,"kind":"doc_mismatch","summary":"i18n key count said 872 but actual is 874 — updated","status":"fixed","date":"2026-04-04"}
+{"file":"docs/ARCHITECTURE.md","line":1212,"kind":"doc_mismatch","summary":"i18n key count said 906 but actual is 874 — updated","status":"fixed","date":"2026-04-04"}
+{"file":"frontend/css/style.css","line":1818,"kind":"dead_css","summary":".health-none selector never applied — healthClass only assigns health-low/partial/full/good","status":"fixed","date":"2026-04-04"}
+{"file":"frontend/css/style.css","line":2838,"kind":"dead_css","summary":".shard-legend-mini class never referenced in JS or HTML — removed","status":"fixed","date":"2026-04-04"}
