@@ -514,8 +514,7 @@ manifest.name, budget - total_after
                 h.iter().any(|e| {
                     e.kind == "model_loaded"
                         && e.model_id.as_deref() == Some(&model_id.0)
-                        && e.detail_str.as_deref()
-                            == Some(&format!("[{}..{})", layer_start, layer_end))
+                        && e.detail_str.as_deref() == Some(shard_label.as_str())
                 })
             })
             .unwrap_or(false);
@@ -524,7 +523,8 @@ manifest.name, budget - total_after
                 crate::daemon::state::ActivityEvent::new("model", "model_loaded", load_msg)
                     .with_model(model_id.0.clone())
                     .with_model_name(manifest.name.clone())
-                    .with_detail_num((layer_end - layer_start) as i64),
+                    .with_detail_num((layer_end - layer_start) as i64)
+                    .with_detail_str(shard_label.clone()),
             );
         }
     }

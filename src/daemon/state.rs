@@ -896,20 +896,38 @@ impl SharedState {
         match window {
             Some(w) => w.contains(&shard_index),
             None => {
-                self.model_process_pool.is_loaded(model_id)
-                    || self.has_split_model(model_id)
-                    || (self.model_loaded.load(std::sync::atomic::Ordering::Relaxed)
-                        && self
-                            .loaded_model_info
-                            .try_read()
-                            .map(|info| {
-                                info.as_ref().is_some_and(|i| {
-                                    model_id
-                                        .0
-                                        .contains(&i.name.to_lowercase().replace([' ', '_'], "-"))
-                                })
+                // Check if the process pool has this model loaded (without shard window info)
+                if self.model_process_pool.is_loaded(model_id) {
+                    return true;
+                }
+                // Check if the shard's layer range overlaps with any loaded split model segment
+                if let Some(manifest) = self.model_registry.get_manifest(model_id) {
+                    if let Some(shard_info) =
+                        manifest.shards.iter().find(|s| s.index == shard_index)
+                    {
+                        let (sl, se) = shard_info.layer_range;
+                        let (sl, se) = (sl as usize, se as usize);
+                        if let Some(ranges) = self.split_model_index.get(model_id) {
+                            return ranges.iter().any(|&(ls, le)| {
+                                // Shard's layer range overlaps with this loaded segment
+                                sl < le && se > ls
+                            });
+                        }
+                    }
+                }
+                // Legacy fallback: check loaded_model_info for --model flag loaded models
+                self.model_loaded.load(std::sync::atomic::Ordering::Relaxed)
+                    && self
+                        .loaded_model_info
+                        .try_read()
+                        .map(|info| {
+                            info.as_ref().is_some_and(|i| {
+                                model_id
+                                    .0
+                                    .contains(&i.name.to_lowercase().replace([' ', '_'], "-"))
                             })
-                            .unwrap_or(false))
+                        })
+                        .unwrap_or(false)
             }
         }
     }

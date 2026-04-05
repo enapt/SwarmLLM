@@ -197,7 +197,7 @@
   "activity.hf_download_failed": "Download failed: {detail}",
   "activity.download_slow": "Download is slow ({detail}) — this can happen with popular models. It will keep going.",
   "activity.model_download_complete": "All shards of {model} ready",
-  "activity.model_loaded": "Loaded {model} into memory",
+  "activity.model_loaded": "Loaded {model} into memory — {detail}",
   "activity.model_load_skipped": "Skipped loading {model}",
   "activity.model_unloaded": "Unloaded {model}",
   "activity.shard_loaded_memory": "Loaded shard {shard} of {model}",
