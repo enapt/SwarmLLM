@@ -103,6 +103,12 @@ struct SessionEntry {
 /// Session TTL — expire after 10 minutes of inactivity (matches KV-cache TTL).
 const SESSION_TTL: std::time::Duration = std::time::Duration::from_secs(600);
 
+/// Maximum entries in SESSION_CACHE before forced cleanup.
+const MAX_SESSION_CACHE_SIZE: usize = 200;
+
+/// Maximum per-line size in subprocess output (1MB — matches claude_session.rs).
+const MAX_RESPONSE_LINE: usize = 1024 * 1024;
+
 /// Get a cached session ID for multi-turn, if one exists and is fresh.
 fn get_session(key: &str) -> Option<String> {
     if let Some(entry) = SESSION_CACHE.get(key) {
@@ -117,6 +123,19 @@ fn get_session(key: &str) -> Option<String> {
 
 /// Store a session ID for multi-turn reuse.
 fn put_session(key: String, session_id: String) {
+    // Lazy cleanup on every insert to bound cache size
+    cleanup_expired_sessions();
+    if SESSION_CACHE.len() >= MAX_SESSION_CACHE_SIZE {
+        // Emergency eviction: remove oldest entries
+        let mut oldest: Vec<(String, std::time::Instant)> = SESSION_CACHE
+            .iter()
+            .map(|e| (e.key().clone(), e.value().last_used))
+            .collect();
+        oldest.sort_by_key(|(_, t)| *t);
+        for (k, _) in oldest.iter().take(oldest.len() / 2) {
+            SESSION_CACHE.remove(k);
+        }
+    }
     SESSION_CACHE.insert(
         key,
         SessionEntry {
@@ -129,24 +148,39 @@ fn put_session(key: String, session_id: String) {
 /// Build a session cache key from model + conversation history prefix.
 /// Only produces a key for multi-turn conversations (2+ messages).
 /// Single-turn requests return None — no session reuse.
+/// Uses BLAKE3 (cryptographic) to prevent collision-based session confusion.
 fn session_key(model: &str, messages: &[serde_json::Value]) -> Option<String> {
-    // Only create session keys for multi-turn conversations
     if messages.len() < 2 {
         return None;
     }
-    use std::hash::{Hash, Hasher};
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    // Hash all messages except the last (the new user message) to identify the conversation
+    let mut hasher = blake3::Hasher::new();
     for msg in &messages[..messages.len() - 1] {
-        msg.to_string().hash(&mut hasher);
+        hasher.update(msg.to_string().as_bytes());
     }
-    model.hash(&mut hasher);
-    Some(format!("claude_sub:{model}:{:x}", hasher.finish()))
+    hasher.update(model.as_bytes());
+    Some(format!(
+        "claude_sub:{model}:{}",
+        &hasher.finalize().to_hex()[..16]
+    ))
 }
 
 /// Periodic cleanup of expired sessions (call from a background task or lazily).
 pub fn cleanup_expired_sessions() {
     SESSION_CACHE.retain(|_, entry| entry.last_used.elapsed() < SESSION_TTL);
+}
+
+/// Validate model name: must be ≤128 chars, safe characters only.
+fn validate_model_name(model: &str) -> Result<(), ApiError> {
+    if model.len() > 128
+        || !model
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.' || c == '_' || c == ':')
+    {
+        return Err(ApiError(crate::error::SwarmError::Validation(
+            "Invalid model name for Claude subscription".into(),
+        )));
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -443,6 +477,7 @@ pub async fn proxy_via_subprocess_openai(
 
     let model = req["model"].as_str().unwrap_or("claude-sonnet-4-6");
     let model = config.default_model.as_deref().unwrap_or(model);
+    validate_model_name(model)?;
     let stream = req["stream"].as_bool().unwrap_or(false);
     let messages: Vec<serde_json::Value> = req["messages"].as_array().cloned().unwrap_or_default();
 
@@ -661,6 +696,7 @@ pub async fn proxy_via_subprocess_anthropic(
 
     let model = req["model"].as_str().unwrap_or("claude-sonnet-4-6");
     let model = config.default_model.as_deref().unwrap_or(model);
+    validate_model_name(model)?;
     let stream = req["stream"].as_bool().unwrap_or(false);
     let messages: Vec<serde_json::Value> = req["messages"].as_array().cloned().unwrap_or_default();
 
@@ -845,6 +881,13 @@ async fn collect_result(
             Ok(Ok(Some(line))) => {
                 if line.trim().is_empty() {
                     continue;
+                }
+                // Security: cap per-line size to prevent OOM from misbehaving subprocess
+                if line.len() > MAX_RESPONSE_LINE {
+                    let _ = child.kill().await;
+                    return Err(ApiError(crate::error::SwarmError::Internal(
+                        "Claude CLI response line too large (>1MB)".into(),
+                    )));
                 }
                 let parsed: serde_json::Value = match serde_json::from_str(&line) {
                     Ok(v) => v,

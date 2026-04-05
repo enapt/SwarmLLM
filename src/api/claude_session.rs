@@ -22,6 +22,12 @@ use tokio::sync::Mutex;
 use crate::api::server::AppState;
 use crate::error::ApiError;
 
+/// Allowed permission modes — `bypassPermissions` is never allowed via API.
+const ALLOWED_PERMISSION_MODES: &[&str] = &["default", "acceptEdits", "plan"];
+
+/// Maximum concurrent sessions (hard ceiling regardless of config).
+const MAX_SESSIONS_HARD_LIMIT: usize = 20;
+
 /// Maximum JSON buffer size (1MB) — matches the official SDK.
 const MAX_JSON_BUFFER: usize = 1024 * 1024;
 
@@ -251,18 +257,8 @@ impl ClaudeSession {
             match tokio::time::timeout(std::time::Duration::from_secs(5), child.wait()).await {
                 Ok(_) => {} // exited gracefully
                 Err(_) => {
-                    // Step 3: send SIGTERM (Unix) or kill (Windows)
-                    #[cfg(unix)]
-                    if let Some(pid) = child.id() {
-                        // SAFETY: sending SIGTERM to a known child process
-                        let _ = std::process::Command::new("kill")
-                            .args(["-TERM", &pid.to_string()])
-                            .status();
-                    }
-                    #[cfg(not(unix))]
-                    {
-                        let _ = child.kill().await;
-                    }
+                    // Step 3: start_kill is async-safe (no subprocess spawn)
+                    let _ = child.start_kill();
                     // Step 4: wait 5s after SIGTERM
                     match tokio::time::timeout(std::time::Duration::from_secs(5), child.wait())
                         .await
@@ -640,7 +636,7 @@ pub struct CreateSessionRequest {
 }
 
 fn default_permission_mode() -> String {
-    "bypassPermissions".to_string()
+    "acceptEdits".to_string()
 }
 
 #[derive(Debug, Deserialize)]
@@ -683,6 +679,54 @@ pub async fn create_session_handler(
         )));
     }
 
+    // --- Security: validate permission_mode against allowlist ---
+    if !ALLOWED_PERMISSION_MODES.contains(&req.permission_mode.as_str()) {
+        return Err(ApiError(crate::error::SwarmError::Validation(format!(
+            "Invalid permission_mode '{}'. Allowed: {}",
+            req.permission_mode,
+            ALLOWED_PERMISSION_MODES.join(", ")
+        ))));
+    }
+
+    // --- Security: validate model name format ---
+    if req.model.len() > 128
+        || !req
+            .model
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.' || c == '_' || c == ':')
+    {
+        return Err(ApiError(crate::error::SwarmError::Validation(
+            "Invalid model name: must be ≤128 chars, alphanumeric with -._: only".into(),
+        )));
+    }
+
+    // --- Security: validate session_id format (prevent path traversal) ---
+    if req.session_id.len() > 128
+        || req.session_id.contains('/')
+        || req.session_id.contains('\\')
+        || req.session_id.contains("..")
+    {
+        return Err(ApiError(crate::error::SwarmError::Validation(
+            "Invalid session_id: must be ≤128 chars, no path separators".into(),
+        )));
+    }
+
+    // --- Security: validate resume_claude_session_id as UUID ---
+    if let Some(ref resume_id) = req.resume_claude_session_id {
+        if uuid::Uuid::parse_str(resume_id).is_err() {
+            return Err(ApiError(crate::error::SwarmError::Validation(
+                "resume_claude_session_id must be a valid UUID".into(),
+            )));
+        }
+    }
+
+    // --- Security: enforce hard session limit ---
+    if SessionManager::global().sessions.len() >= MAX_SESSIONS_HARD_LIMIT {
+        return Err(ApiError(crate::error::SwarmError::Validation(
+            "Maximum session limit reached. Close existing sessions first.".into(),
+        )));
+    }
+
     let working_dir = if let Some(dir) = req.working_dir.as_deref().filter(|d| !d.is_empty()) {
         let p = PathBuf::from(dir);
         if !p.is_dir() {
@@ -690,6 +734,16 @@ pub async fn create_session_handler(
                 "Working directory does not exist: {}",
                 p.display()
             ))));
+        }
+        // --- Security: restrict working_dir to user home subtree ---
+        // Reject system directories, root, and paths outside home.
+        let canonical = p.canonicalize().unwrap_or_else(|_| p.clone());
+        let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/nonexistent"));
+        let tmp = std::env::temp_dir();
+        if !canonical.starts_with(&home) && !canonical.starts_with(&tmp) {
+            return Err(ApiError(crate::error::SwarmError::Validation(
+                "working_dir must be under the user's home directory or temp directory".into(),
+            )));
         }
         p
     } else {
