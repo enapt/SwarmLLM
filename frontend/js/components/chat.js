@@ -468,6 +468,9 @@
             var workDir = cc.working_dir || (dirInput ? dirInput.value.trim() : '');
             var permMode = cc.permission_mode || (permSelect ? permSelect.value : 'bypassPermissions');
             cc.permission_mode = permMode;
+            // Show init status while CLI boots (hooks can take 5-15s)
+            contentEl.innerHTML = '<span class="typing-indicator">' +
+              U.escapeHtml(I18n.t('claude_code.initializing')) + '</span>';
             await App.claudeCode.createSession(session.id, model, workDir, permMode);
             App.claudeCode.updateProjectBar();
           }
