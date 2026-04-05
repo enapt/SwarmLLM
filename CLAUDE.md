@@ -230,8 +230,10 @@ All 20 build phases complete. All subsystems wired — no stubs. 653 tests passi
 ## Common Commands
 
 ```bash
-cargo build --no-default-features --features dev  # Dev build (live frontend)
+cargo build --no-default-features --features dev,claude-subscription  # Dev build (live frontend + Claude Code)
 cargo fmt && cargo clippy --all-targets -- -D warnings  # Lint (MUST pass before push)
 cargo test                           # All tests
 cargo run -- run -p 8800 -v          # Start daemon
 ```
+
+**Note:** Always include `claude-subscription` feature when testing Claude Code integration. Bare `--features dev` omits the Claude subscription provider.
