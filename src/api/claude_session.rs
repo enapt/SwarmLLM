@@ -324,12 +324,17 @@ impl SessionManager {
         let binary = config.binary();
         let permission_mode = permission_mode.unwrap_or_else(|| "acceptEdits".to_string());
         let mut args = vec![
+            "-p".to_string(),
+            String::new(), // empty initial prompt — messages sent via stdin
             "--input-format".to_string(),
             "stream-json".to_string(),
             "--output-format".to_string(),
             "stream-json".to_string(),
             "--verbose".to_string(),
-            "--include-partial-messages".to_string(),
+            // Skip slash commands and auto-discovered MCP servers for faster init.
+            // We provide our MCP config explicitly via --mcp-config below.
+            // Note: NOT using --bare because it skips OAuth (breaks subscription auth).
+            "--disable-slash-commands".to_string(),
             "--model".to_string(),
             model.clone(),
             "--permission-mode".to_string(),
@@ -610,7 +615,9 @@ pub async fn create_session_handler(
         )
         .await?;
 
-    // Wait for init message to capture claude_session_id
+    // Wait for init message to capture claude_session_id.
+    // Take the stdout reader out of the session so we don't hold the session
+    // lock during the potentially long init wait (hooks can take 30-60s+).
     let session_arc = SessionManager::global()
         .get_session(&req.session_id)
         .ok_or_else(|| {
@@ -619,62 +626,95 @@ pub async fn create_session_handler(
             ))
         })?;
 
+    let mut stdout_reader = {
+        let mut session = session_arc.lock().await;
+        session.stdout.take()
+    };
+
     let mut init_info = serde_json::json!({
         "status": "created",
         "session_id": req.session_id,
         "working_dir": working_dir.display().to_string(),
     });
 
-    // Read events until we get the init message.
-    // Hooks (SessionStart) can take 30-60s+ to run, so use a generous timeout.
+    // Read events without the session lock held.
+    // Hooks (SessionStart) can take 30-60s+, so use a generous timeout.
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(120);
-    {
-        let mut session = session_arc.lock().await;
+    let init_result: Result<serde_json::Value, ApiError> = async {
+        let reader = stdout_reader.as_mut().ok_or_else(|| {
+            ApiError(crate::error::SwarmError::Internal(
+                "Claude session: stdout not available".into(),
+            ))
+        })?;
         loop {
-            let event =
-                tokio::time::timeout_at(deadline, async { session.read_event().await }).await;
-
-            match event {
-                Ok(Some(evt)) => {
+            let line = tokio::time::timeout_at(deadline, reader.next_line()).await;
+            match line {
+                Ok(Ok(Some(text))) => {
+                    let trimmed = text.trim();
+                    if trimmed.is_empty() {
+                        continue;
+                    }
+                    let evt: serde_json::Value = match serde_json::from_str(trimmed) {
+                        Ok(v) => v,
+                        Err(_) => continue,
+                    };
                     let evt_type = evt["type"].as_str().unwrap_or("");
                     let evt_subtype = evt["subtype"].as_str().unwrap_or("");
-
                     if evt_type == "system" && evt_subtype == "init" {
-                        let cli_session_id = evt["session_id"].as_str().map(String::from);
-                        session.claude_session_id = cli_session_id.clone();
-                        session.state = SessionState::Active;
-
-                        // Capture available tools
-                        if let Some(tools) = evt["tools"].as_array() {
-                            session.tools = tools
-                                .iter()
-                                .filter_map(|t| t.as_str().map(String::from))
-                                .collect();
-                        }
-
-                        init_info["claude_session_id"] = serde_json::json!(cli_session_id);
-                        init_info["tools"] = serde_json::json!(session.tools);
-                        init_info["model"] = serde_json::json!(evt["model"]);
-                        init_info["status"] = serde_json::json!("active");
-                        // Check if MCP tools are present (swarmllm MCP server connected)
-                        let has_mcp = session.tools.iter().any(|t| t.contains("swarmllm"));
-                        init_info["mcp_connected"] = serde_json::json!(has_mcp);
-                        break;
+                        return Ok(evt);
                     }
                     // Skip hook messages, continue waiting for init
                 }
-                Ok(None) => {
-                    // EOF before init
+                Ok(Ok(None)) => {
                     return Err(ApiError(crate::error::SwarmError::Internal(
                         "Claude CLI exited before sending init message".into(),
                     )));
                 }
+                Ok(Err(e)) => {
+                    return Err(ApiError(crate::error::SwarmError::Internal(format!(
+                        "Error reading Claude CLI stdout: {e}"
+                    ))));
+                }
                 Err(_) => {
-                    // Timeout
                     return Err(ApiError(crate::error::SwarmError::Internal(
                         "Timeout waiting for Claude CLI init (120s)".into(),
                     )));
                 }
+            }
+        }
+    }
+    .await;
+
+    // Put the stdout reader back and update session state
+    {
+        let mut session = session_arc.lock().await;
+        session.stdout = stdout_reader;
+
+        match init_result {
+            Ok(evt) => {
+                let cli_session_id = evt["session_id"].as_str().map(String::from);
+                session.claude_session_id = cli_session_id.clone();
+                session.state = SessionState::Active;
+
+                if let Some(tools) = evt["tools"].as_array() {
+                    session.tools = tools
+                        .iter()
+                        .filter_map(|t| t.as_str().map(String::from))
+                        .collect();
+                }
+
+                init_info["claude_session_id"] = serde_json::json!(cli_session_id);
+                init_info["tools"] = serde_json::json!(session.tools);
+                init_info["model"] = serde_json::json!(evt["model"]);
+                init_info["status"] = serde_json::json!("active");
+                let has_mcp = session.tools.iter().any(|t| t.contains("swarmllm"));
+                init_info["mcp_connected"] = serde_json::json!(has_mcp);
+            }
+            Err(e) => {
+                session.state = SessionState::Expired;
+                // Kill the subprocess on init failure
+                session.kill().await;
+                return Err(e);
             }
         }
     }
