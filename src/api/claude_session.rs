@@ -629,7 +629,7 @@ pub struct CreateSessionRequest {
 }
 
 fn default_permission_mode() -> String {
-    "acceptEdits".to_string()
+    "bypassPermissions".to_string()
 }
 
 #[derive(Debug, Deserialize)]
@@ -672,20 +672,27 @@ pub async fn create_session_handler(
         )));
     }
 
-    let working_dir = req
-        .working_dir
-        .as_deref()
-        .filter(|d| !d.is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir);
-
-    // Validate working directory exists
-    if !working_dir.is_dir() {
-        return Err(ApiError(crate::error::SwarmError::Validation(format!(
-            "Working directory does not exist: {}",
-            working_dir.display()
-        ))));
-    }
+    let working_dir = if let Some(dir) = req.working_dir.as_deref().filter(|d| !d.is_empty()) {
+        let p = PathBuf::from(dir);
+        if !p.is_dir() {
+            return Err(ApiError(crate::error::SwarmError::Validation(format!(
+                "Working directory does not exist: {}",
+                p.display()
+            ))));
+        }
+        p
+    } else {
+        // Create a unique temp directory per session to avoid collisions
+        let dir = std::env::temp_dir().join(format!("swarmllm-chat-{}", &req.session_id));
+        if !dir.exists() {
+            std::fs::create_dir_all(&dir).map_err(|e| {
+                ApiError(crate::error::SwarmError::Internal(format!(
+                    "Failed to create temp directory: {e}"
+                )))
+            })?;
+        }
+        dir
+    };
 
     // Build MCP URL for SwarmLLM's MCP server
     let listen_port = state.shared_state.config.node.listen_port;

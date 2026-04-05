@@ -30,7 +30,7 @@
           working_dir: null,
           claude_session_id: null,
           tools_available: [],
-          permission_mode: 'acceptEdits',
+          permission_mode: 'bypassPermissions',
           state: null,
         };
       }
@@ -55,7 +55,7 @@
         session_id: sessionId,
         model: model,
         working_dir: workingDir || '',
-        permission_mode: permissionMode || 'acceptEdits',
+        permission_mode: permissionMode || 'bypassPermissions',
       };
 
       // Check if we have a stored claude_session_id for resume

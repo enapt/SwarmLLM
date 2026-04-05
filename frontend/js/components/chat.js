@@ -466,7 +466,7 @@
             var dirInput = document.getElementById('cc-dir-input');
             var permSelect = document.getElementById('cc-permission-mode');
             var workDir = cc.working_dir || (dirInput ? dirInput.value.trim() : '');
-            var permMode = cc.permission_mode || (permSelect ? permSelect.value : 'acceptEdits');
+            var permMode = cc.permission_mode || (permSelect ? permSelect.value : 'bypassPermissions');
             cc.permission_mode = permMode;
             await App.claudeCode.createSession(session.id, model, workDir, permMode);
             App.claudeCode.updateProjectBar();

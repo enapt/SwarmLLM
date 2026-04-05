@@ -637,12 +637,13 @@
                   <input type="text" id="cc-dir-input" data-i18n-placeholder="claude_code.dir_placeholder" placeholder="Paste a folder path, or leave empty to just chat">
                 </div>
                 <div class="cc-perm-row">
-                  <label class="cc-field-label" data-i18n="claude_code.safety_label">Safety level</label>
+                  <label class="cc-field-label" data-i18n="claude_code.safety_label">Permission mode</label>
                   <select id="cc-permission-mode" data-i18n-title="claude_code.permission_tip" title="How much freedom Claude has to make changes">
-                    <option value="acceptEdits" data-i18n="claude_code.perm_accept_edits">Auto-approve file edits</option>
-                    <option value="default" data-i18n="claude_code.perm_default">Ask before each action</option>
-                    <option value="bypassPermissions" data-i18n="claude_code.perm_bypass">Full auto (use with caution)</option>
-                    <option value="plan" data-i18n="claude_code.perm_plan">Plan only (no changes)</option>
+                    <option value="bypassPermissions" data-i18n="claude_code.perm_bypass">Full auto — no prompts</option>
+                    <option value="auto" data-i18n="claude_code.perm_auto">Auto — prompt for risky actions</option>
+                    <option value="acceptEdits" data-i18n="claude_code.perm_accept_edits">Accept edits — prompt for commands</option>
+                    <option value="default" data-i18n="claude_code.perm_default">Manual — ask before every action</option>
+                    <option value="plan" data-i18n="claude_code.perm_plan">Plan only — no file changes</option>
                   </select>
                 </div>
               </div>
