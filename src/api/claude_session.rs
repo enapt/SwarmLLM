@@ -699,9 +699,10 @@ pub async fn create_session_handler(
         )
         .await?;
 
-    // Wait for init message to capture claude_session_id.
-    // Take the stdout reader out of the session so we don't hold the session
-    // lock during the potentially long init wait (hooks can take 30-60s+).
+    // Initialize using the SDK control protocol:
+    // 1. Send control_request/initialize on stdin
+    // 2. Read stdout until we get system/init AND control_response
+    // 3. Then mark session active
     let session_arc = SessionManager::global()
         .get_session(&req.session_id)
         .ok_or_else(|| {
@@ -710,6 +711,23 @@ pub async fn create_session_handler(
             ))
         })?;
 
+    // Step 1: Send control_request/initialize (matches SDK query.initialize())
+    let init_request_id = format!("req_1_{}", hex::encode(&rand::random::<[u8; 4]>()));
+    {
+        let session = session_arc.lock().await;
+        let init_request = serde_json::json!({
+            "type": "control_request",
+            "request_id": init_request_id,
+            "request": {
+                "subtype": "initialize",
+                "hooks": null,
+                "agents": null
+            }
+        });
+        write_to_stdin(&session.stdin, &init_request).await?;
+    }
+
+    // Step 2: Take stdout reader out of session (avoids holding lock during wait)
     let mut stdout_reader = {
         let mut session = session_arc.lock().await;
         session.stdout.take()
@@ -721,8 +739,9 @@ pub async fn create_session_handler(
         "working_dir": working_dir.display().to_string(),
     });
 
-    // Read events without the session lock held.
-    // Hooks (SessionStart) can take 30-60s+, so use a generous timeout.
+    // Step 3: Read events until we get system/init (session info).
+    // Also consume control_response for our initialize request.
+    // Hooks (SessionStart) can take 30-60s+, MCP servers add more. 120s generous.
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(120);
     let init_result: Result<serde_json::Value, ApiError> = async {
         let reader = stdout_reader.as_mut().ok_or_else(|| {
@@ -730,7 +749,15 @@ pub async fn create_session_handler(
                 "Claude session: stdout not available".into(),
             ))
         })?;
+        let mut system_init_evt: Option<serde_json::Value> = None;
+        let mut got_control_response = false;
         loop {
+            // Done when we have both
+            if let Some(ref evt) = system_init_evt {
+                if got_control_response {
+                    return Ok(evt.clone());
+                }
+            }
             let line = tokio::time::timeout_at(deadline, reader.next_line()).await;
             match line {
                 Ok(Ok(Some(text))) => {
@@ -738,7 +765,6 @@ pub async fn create_session_handler(
                     if trimmed.is_empty() {
                         continue;
                     }
-                    // Skip non-JSON lines (e.g. [SandboxDebug])
                     if !trimmed.starts_with('{') {
                         continue;
                     }
@@ -748,12 +774,26 @@ pub async fn create_session_handler(
                     };
                     let evt_type = evt["type"].as_str().unwrap_or("");
                     let evt_subtype = evt["subtype"].as_str().unwrap_or("");
+
                     if evt_type == "system" && evt_subtype == "init" {
-                        return Ok(evt);
+                        system_init_evt = Some(evt);
+                    } else if evt_type == "control_response" {
+                        // Match our request_id
+                        let resp_req_id = evt["response"]["request_id"]
+                            .as_str()
+                            .unwrap_or("");
+                        if resp_req_id == init_request_id {
+                            got_control_response = true;
+                        }
                     }
-                    // Skip hook messages, continue waiting for init
+                    // Skip hook messages, continue waiting
                 }
                 Ok(Ok(None)) => {
+                    // If we already got system/init, that's good enough
+                    // (older CLI versions may not send control_response)
+                    if let Some(evt) = system_init_evt {
+                        return Ok(evt);
+                    }
                     return Err(ApiError(crate::error::SwarmError::Internal(
                         "Claude CLI exited before sending init message".into(),
                     )));
@@ -764,6 +804,14 @@ pub async fn create_session_handler(
                     ))));
                 }
                 Err(_) => {
+                    // Timeout — if we got system/init, proceed anyway
+                    // (control_response may not come on older CLI versions)
+                    if let Some(evt) = system_init_evt {
+                        tracing::warn!(
+                            "Timed out waiting for control_response but got system/init — proceeding"
+                        );
+                        return Ok(evt);
+                    }
                     return Err(ApiError(crate::error::SwarmError::Internal(
                         "Timeout waiting for Claude CLI init (120s)".into(),
                     )));
@@ -773,7 +821,7 @@ pub async fn create_session_handler(
     }
     .await;
 
-    // Put the stdout reader back and update session state
+    // Step 4: Put stdout reader back and update session state
     {
         let mut session = session_arc.lock().await;
         session.stdout = stdout_reader;
@@ -800,7 +848,6 @@ pub async fn create_session_handler(
             }
             Err(e) => {
                 session.state = SessionState::Expired;
-                // Kill the subprocess on init failure
                 session.kill().await;
                 return Err(e);
             }
