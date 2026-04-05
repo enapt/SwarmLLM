@@ -647,15 +647,17 @@
       if (evt.is_error) {
         App.claudeCode._showStatus(contentEl, evt.result || 'Error', true);
       }
-      // Cost info
-      if (evt.total_cost_usd) {
-        var costEl = document.createElement('div');
-        costEl.className = 'cc-cost-info';
-        costEl.textContent = I18n.t('claude_code.cost', {
-          cost: '$' + evt.total_cost_usd.toFixed(4),
-          turns: evt.num_turns || 1,
-        });
-        contentEl.appendChild(costEl);
+      // Show turns + duration (skip cost for subscription — it's not real API billing)
+      var turns = evt.num_turns || 1;
+      var duration = evt.duration_ms ? (evt.duration_ms / 1000).toFixed(1) + 's' : '';
+      if (turns > 0 || duration) {
+        var infoEl = document.createElement('div');
+        infoEl.className = 'cc-cost-info';
+        var parts = [];
+        if (turns > 1) parts.push(turns + ' turns');
+        if (duration) parts.push(duration);
+        if (parts.length) infoEl.textContent = parts.join(' · ');
+        if (infoEl.textContent) contentEl.appendChild(infoEl);
       }
     },
 

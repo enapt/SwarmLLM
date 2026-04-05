@@ -409,6 +409,9 @@ impl SessionManager {
             "--output-format".to_string(),
             "stream-json".to_string(),
             "--verbose".to_string(),
+            // Stream partial messages so frontend gets text deltas as they're generated
+            // instead of waiting for complete assistant turns (prevents "Thinking..." stalls)
+            "--include-partial-messages".to_string(),
             "--model".to_string(),
             model.clone(),
             "--permission-mode".to_string(),
