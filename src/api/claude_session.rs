@@ -339,10 +339,14 @@ impl SessionManager {
         // Connect SwarmLLM's MCP server so Claude can query other models
         if let Some(ref url) = mcp_url {
             let mcp_config = serde_json::json!({
-                "name": "swarmllm",
-                "url": url
+                "mcpServers": {
+                    "swarmllm": {
+                        "type": "http",
+                        "url": url
+                    }
+                }
             });
-            args.push("--mcp-server".to_string());
+            args.push("--mcp-config".to_string());
             args.push(mcp_config.to_string());
         }
 
