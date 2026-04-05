@@ -844,6 +844,7 @@ pub async fn create_session_handler(
                 init_info["claude_session_id"] = serde_json::json!(cli_session_id);
                 init_info["tools"] = serde_json::json!(session.tools);
                 init_info["model"] = serde_json::json!(evt["model"]);
+                init_info["slash_commands"] = evt["slash_commands"].clone();
                 init_info["status"] = serde_json::json!("active");
                 let has_mcp = session.tools.iter().any(|t| t.contains("swarmllm"));
                 init_info["mcp_connected"] = serde_json::json!(has_mcp);

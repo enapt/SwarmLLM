@@ -86,6 +86,7 @@
           cc.working_dir = workingDir || data.working_dir || null;
           cc.claude_session_id = data.claude_session_id || null;
           cc.tools_available = data.tools || [];
+          cc.slash_commands = data.slash_commands || [];
           cc.state = data.status || 'active';
           cc.mcp_connected = data.mcp_connected || false;
           App.chat.saveSessions();
@@ -740,44 +741,26 @@
       return icons[name] || '⚡';
     },
 
-    // Slash command translation map (Phase 5)
-    _slashCommands: {
-      '/commit': 'Look at my staged changes and create an appropriate git commit with a descriptive message',
-      '/review': 'Review the recent changes in this project for bugs, security issues, and code quality',
-      '/test': 'Run the test suite and report results',
-      '/fix': 'Fix this issue: ',
-      '/explain': 'Explain this project/codebase — its architecture, key components, and how it works',
-      '/refactor': 'Refactor this to improve code quality while preserving behavior: ',
-      '/search': 'Search the codebase for: ',
-      '/deps': 'Analyze the dependency graph and identify any issues',
-      '/todo': 'Find all TODO, FIXME, and HACK comments in the codebase and summarize them',
-    },
-
-    // Translate a slash command to a natural language prompt. Returns null if not a slash command.
+    // Pass slash commands directly to Claude Code CLI — it has its own
+    // built-in commands (/compact, /cost, /review, etc.) plus user-configured
+    // skills. The system/init event lists all available slash_commands.
+    // Returns the text unchanged if it's a slash command, null otherwise.
     translateSlashCommand: function(text) {
       if (!text || text.charAt(0) !== '/') return null;
-      var parts = text.split(/\s+/);
-      var cmd = parts[0].toLowerCase();
-      var args = parts.slice(1).join(' ');
-
-      var template = App.claudeCode._slashCommands[cmd];
-      if (!template) return null;
-
-      // Commands that require args
-      if (cmd === '/fix' || cmd === '/refactor' || cmd === '/search') {
-        return args ? template + args : null;
-      }
-      // Commands with optional args
-      return args ? template + ' ' + args : template;
+      return text; // pass through as-is to the CLI
     },
 
     // Get autocomplete suggestions for slash commands
     getSlashSuggestions: function(partial) {
       if (!partial || partial.charAt(0) !== '/') return [];
-      var lower = partial.toLowerCase();
-      return Object.keys(App.claudeCode._slashCommands).filter(function(cmd) {
-        return cmd.indexOf(lower) === 0;
-      });
+      var lower = partial.toLowerCase().substring(1); // strip leading /
+      // Use slash commands from the CLI's system/init event if available
+      var session = S.currentSessionId ? S.sessions[S.currentSessionId] : null;
+      var cc = session && session.claude_code;
+      var commands = (cc && cc.slash_commands) || [];
+      return commands.filter(function(cmd) {
+        return cmd.toLowerCase().indexOf(lower) === 0;
+      }).map(function(cmd) { return '/' + cmd; });
     },
 
     // Check backend session status. Returns 'active', 'suspended', 'expired', or null.
