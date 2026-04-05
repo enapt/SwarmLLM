@@ -703,8 +703,8 @@ pub async fn create_session_handler(
         )
         .await?;
 
-    // Wait for system/init from the CLI.
-    // -p "" triggers the CLI to start a session and emit system/init after hooks run.
+    // The CLI with -p "" + --input-format stream-json waits for a stdin message
+    // before emitting system/init. Write an empty user message to trigger init.
     let session_arc = SessionManager::global()
         .get_session(&req.session_id)
         .ok_or_else(|| {
@@ -712,6 +712,18 @@ pub async fn create_session_handler(
                 "Session created but not found".into(),
             ))
         })?;
+
+    // Write empty user message to trigger CLI initialization
+    {
+        let session = session_arc.lock().await;
+        let trigger_msg = serde_json::json!({
+            "type": "user",
+            "message": { "role": "user", "content": "" },
+            "session_id": "",
+            "parent_tool_use_id": null
+        });
+        write_to_stdin(&session.stdin, &trigger_msg).await?;
+    }
 
     // Take stdout reader out of session (avoids holding lock during init wait)
     let mut stdout_reader = {
