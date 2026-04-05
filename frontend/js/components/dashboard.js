@@ -665,7 +665,8 @@
 
           // Health label based on network replication quality
           var healthLabel, healthClass;
-          if (networkMissing > 0) { healthLabel = I18n.t('dashboard.health_at_risk'); healthClass = 'health-low'; }
+          if (networkMissing === totalShards) { healthLabel = I18n.t('dashboard.health_unavailable_label'); healthClass = 'health-low'; }
+          else if (networkMissing > 0) { healthLabel = I18n.t('dashboard.health_incomplete'); healthClass = 'health-low'; }
           else if (fragile > 0) { healthLabel = I18n.t('dashboard.health_fragile'); healthClass = 'health-partial'; }
           else if (avgHolders >= 2) { healthLabel = I18n.t('dashboard.health_healthy'); healthClass = 'health-full'; }
           else { healthLabel = I18n.t('dashboard.health_good'); healthClass = 'health-good'; }
@@ -717,6 +718,8 @@
             healthDetail = I18n.t('dashboard.health_distributed', { count: totalShards });
           } else if (fragile > 0) {
             healthDetail = I18n.t('dashboard.health_under_replicated', { count: fragile });
+          } else if (networkMissing === totalShards) {
+            healthDetail = I18n.t('dashboard.health_no_shards_available');
           } else if (networkMissing > 0) {
             healthDetail = I18n.t('dashboard.health_missing', { count: networkMissing });
           }
