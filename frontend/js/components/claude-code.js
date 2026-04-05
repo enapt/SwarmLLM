@@ -128,15 +128,15 @@
       var startTime = performance.now();
       var timerInterval = null;
 
-      // Live elapsed timer
+      // Live elapsed timer — replaced by result info (turns + duration) when done
       var timerEl = document.createElement('div');
       timerEl.className = 'msg-timer cc-live-timer';
       var timerTarget = assistantEl.querySelector('.msg-bubble') || assistantEl;
       timerTarget.appendChild(timerEl);
       timerInterval = setInterval(function() {
-        var elapsed = ((performance.now() - startTime) / 1000).toFixed(1);
+        var elapsed = ((performance.now() - startTime) / 1000).toFixed(0);
         timerEl.textContent = elapsed + 's';
-      }, 100);
+      }, 1000);
 
       try {
         while (true) {
@@ -171,10 +171,12 @@
         }
       } finally {
         clearInterval(timerInterval);
-        // Final timer
-        var elapsed = ((performance.now() - startTime) / 1000).toFixed(2);
-        timerEl.textContent = I18n.t('chat.response_time', { seconds: elapsed });
         timerEl.classList.remove('cc-live-timer');
+        // If _handleResult didn't set final text, use elapsed time
+        if (!timerEl.dataset.final) {
+          var elapsed = ((performance.now() - startTime) / 1000).toFixed(1);
+          timerEl.textContent = elapsed + 's';
+        }
       }
 
       return { content: fullContent, pendingPermission: pendingPermission };
@@ -664,17 +666,16 @@
         App.claudeCode._showStatus(contentEl, resultText || 'Error', true);
       }
 
-      // Show turns + duration (skip cost for subscription — it's not real API billing)
-      var turns = evt.num_turns || 1;
-      var duration = evt.duration_ms ? (evt.duration_ms / 1000).toFixed(1) + 's' : '';
-      if (turns > 0 || duration) {
-        var infoEl = document.createElement('div');
-        infoEl.className = 'cc-cost-info';
+      // Update the live timer with final info (turns + duration)
+      var timerEl = contentEl.closest('.msg-row') && contentEl.closest('.msg-row').querySelector('.msg-timer');
+      if (timerEl) {
         var parts = [];
+        var turns = evt.num_turns || 1;
         if (turns > 1) parts.push(turns + ' turns');
+        var duration = evt.duration_ms ? (evt.duration_ms / 1000).toFixed(1) + 's' : '';
         if (duration) parts.push(duration);
-        if (parts.length) infoEl.textContent = parts.join(' · ');
-        if (infoEl.textContent) contentEl.appendChild(infoEl);
+        timerEl.textContent = parts.join(' \u00b7 ') || '';
+        timerEl.dataset.final = '1';
       }
     },
 
