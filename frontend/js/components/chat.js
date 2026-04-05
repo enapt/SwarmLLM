@@ -111,6 +111,30 @@
     toggleChatLayout: toggleChatLayout,
     initChatLayout: initChatLayout,
 
+    // Flash a session sidebar item to indicate new activity
+    flashSession: function(sessionId) {
+      var el = document.querySelector('.session-item[data-session-id="' + sessionId + '"]');
+      if (!el) {
+        // Session items may not have data-session-id; find by position
+        var list = document.getElementById('session-list');
+        if (!list) return;
+        var items = list.querySelectorAll('.session-item');
+        var sorted = Object.values(S.sessions).sort(function(a, b) { return b.created - a.created; });
+        for (var i = 0; i < sorted.length && i < items.length; i++) {
+          if (sorted[i].id === sessionId) { el = items[i]; break; }
+        }
+      }
+      if (!el) return;
+      // Flash animation
+      el.classList.remove('cc-new-response');
+      void el.offsetWidth; // force reflow to restart animation
+      el.classList.add('cc-new-response');
+      // Mark unseen if not the active session
+      if (sessionId !== S.currentSessionId) {
+        el.classList.add('cc-unseen');
+      }
+    },
+
     handleKey: function(e) {
       if (e.key === 'Enter' && !e.shiftKey) {
         e.preventDefault();
@@ -151,6 +175,20 @@
       if (!S.sessions[id]) return;
       S.currentSessionId = id;
       localStorage.setItem(App.ACTIVE_SESSION_KEY, id);
+      // Clear unseen indicator for this session
+      var items = document.querySelectorAll('.session-item.cc-unseen');
+      items.forEach(function(el) {
+        // Find matching item and clear
+        var sorted = Object.values(S.sessions).sort(function(a, b) { return b.created - a.created; });
+        var list = document.getElementById('session-list');
+        if (!list) return;
+        var allItems = list.querySelectorAll('.session-item');
+        for (var i = 0; i < sorted.length && i < allItems.length; i++) {
+          if (sorted[i].id === id && allItems[i] === el) {
+            el.classList.remove('cc-unseen');
+          }
+        }
+      });
 
       var s = S.sessions[id];
       if (s.model) {
@@ -499,6 +537,7 @@
           if (result.content) {
             session.messages.push({ role: 'assistant', content: result.content, encrypted: false, duration: result.duration });
             App.chat.saveSessions();
+            App.chat.flashSession(session.id);
           }
         } catch (e) {
           contentEl.textContent = e.message || I18n.t('chat.connection_failed');
@@ -633,6 +672,7 @@
       if (fullContent) {
         session.messages.push({ role: 'assistant', content: fullContent, encrypted: msgEncrypted, duration: elapsed });
         App.chat.saveSessions();
+        App.chat.flashSession(session.id);
       }
 
       S.isStreaming = false;

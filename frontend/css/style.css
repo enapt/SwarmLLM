@@ -414,6 +414,10 @@ a:hover { color: var(--accent-hover); }
 }
 .session-item:hover { background: var(--bg-tertiary); }
 .session-item.active { background: var(--accent-glow); border-left-color: var(--accent); }
+.session-item.cc-new-response { animation: cc-pulse 1.5s ease-out; }
+.session-item.cc-unseen { border-left-color: var(--accent); }
+.session-item.cc-unseen .session-title { color: var(--accent); font-weight: 700; }
+@keyframes cc-pulse { 0% { background: var(--accent-glow); } 100% { background: transparent; } }
 
 .session-info { display: flex; flex-direction: column; overflow: hidden; flex: 1; gap: 3px; }
 .session-meta { font-size: 0.6rem; color: var(--text-muted); display: flex; align-items: center; gap: 6px; }
