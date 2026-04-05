@@ -75,12 +75,12 @@ fn acquire_permit(
     // Enforce configured limit by checking available permits.
     let available = SUBPROCESS_SEMAPHORE.available_permits();
     if available <= (8 - limit) {
-        return Err(ApiError(crate::error::SwarmError::Internal(
+        return Err(ApiError(crate::error::SwarmError::ServiceUnavailable(
             "Claude subscription: too many concurrent requests, try again later".into(),
         )));
     }
     SUBPROCESS_SEMAPHORE.try_acquire().map_err(|_| {
-        ApiError(crate::error::SwarmError::Internal(
+        ApiError(crate::error::SwarmError::ServiceUnavailable(
             "Claude subscription: concurrency limit reached".into(),
         ))
     })

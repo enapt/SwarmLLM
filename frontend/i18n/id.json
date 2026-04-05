@@ -930,5 +930,6 @@
   "claude_code.mcp_connected_tip": "MCP terhubung ke SwarmLLM — Claude dapat menanyakan model lain",
   "claude_code.bar_subtitle": "AI yang dapat membaca, menulis, dan menjalankan kode di komputer Anda",
   "claude_code.project_label": "Folder proyek",
-  "claude_code.safety_label": "Mode izin"
+  "claude_code.safety_label": "Mode izin",
+  "claude_code.turns_count": "{count} turns"
 }

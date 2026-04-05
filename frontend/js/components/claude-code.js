@@ -672,7 +672,7 @@
       if (timerEl) {
         var parts = [];
         var turns = evt.num_turns || 1;
-        if (turns > 1) parts.push(turns + ' turns');
+        if (turns > 1) parts.push(I18n.t('claude_code.turns_count', { count: turns }));
         var duration = evt.duration_ms ? (evt.duration_ms / 1000).toFixed(1) + 's' : '';
         if (duration) parts.push(duration);
         timerEl.textContent = parts.join(' \u00b7 ') || '';
@@ -699,21 +699,6 @@
         }).filter(Boolean).join('\n');
       }
       return String(content || '');
-    },
-
-    // Format a unified diff patch into HTML with color highlighting
-    _formatDiff: function(patch) {
-      if (!patch) return '';
-      return patch.split('\n').map(function(line) {
-        if (line.startsWith('+') && !line.startsWith('+++')) {
-          return '<span class="diff-add">' + U.escapeHtml(line) + '</span>';
-        } else if (line.startsWith('-') && !line.startsWith('---')) {
-          return '<span class="diff-del">' + U.escapeHtml(line) + '</span>';
-        } else if (line.startsWith('@@')) {
-          return '<span class="diff-hunk">' + U.escapeHtml(line) + '</span>';
-        }
-        return U.escapeHtml(line);
-      }).join('\n');
     },
 
     // Get an icon for a tool name

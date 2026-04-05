@@ -930,5 +930,6 @@
   "claude_code.mcp_connected_tip": "MCP SwarmLLM'e bağlı — Claude diğer modelleri sorgulayabilir",
   "claude_code.bar_subtitle": "Bilgisayarınızda kod okuyabilen, yazabilen ve çalıştırabilen yapay zeka",
   "claude_code.project_label": "Proje klasörü",
-  "claude_code.safety_label": "İzin modu"
+  "claude_code.safety_label": "İzin modu",
+  "claude_code.turns_count": "{count} turns"
 }

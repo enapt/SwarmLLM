@@ -501,11 +501,7 @@ manifest.name, budget - total_after
             "{} (layers {}-{} of {})",
             shard_label, layer_start, layer_end, total_layers
         );
-        let mem_type = if shared.gpu_info.is_some() {
-            "VRAM"
-        } else {
-            "RAM"
-        };
+        let mem_type = shared.memory_type_label();
         // Only emit once per model+range to avoid spamming on repeated check_and_load_model calls
         let load_msg = format!(
             "Loaded {} into {} — {} ready for inference",

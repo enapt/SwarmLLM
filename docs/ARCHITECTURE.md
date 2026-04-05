@@ -1205,6 +1205,7 @@ Routes Claude model requests through a locally-authenticated `claude` CLI subpro
   - `frontend/js/core/data.js` — data store with in-flight deduplication, `authFetch` wrapper
   - `frontend/js/components/ui.js` — tab switching, banners, mode indicator, sidebar
   - `frontend/js/components/chat.js` — sessions, messages, SSE streaming, image upload, layout toggle
+  - `frontend/js/components/claude-code.js` — Claude Code interactive sessions (subprocess, permission flow, SSE)
   - `frontend/js/components/dashboard.js` — stats, hardware, model cards, peers, shard grid live updates
   - `frontend/js/components/models.js` — model dropdown, HF search/download, auto-manage, metadata panel
   - `frontend/js/components/shard-menu.js` — per-shard context menu (load/unload/delete/lock)

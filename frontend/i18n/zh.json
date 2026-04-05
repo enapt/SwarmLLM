@@ -930,5 +930,6 @@
   "claude_code.mcp_connected_tip": "MCP 已连接到 SwarmLLM — Claude 可以查询其他模型",
   "claude_code.bar_subtitle": "可以在您的电脑上读取、编写和运行代码的AI",
   "claude_code.project_label": "项目文件夹",
-  "claude_code.safety_label": "权限模式"
+  "claude_code.safety_label": "权限模式",
+  "claude_code.turns_count": "{count} turns"
 }

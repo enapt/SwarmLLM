@@ -930,5 +930,6 @@
   "claude_code.mcp_connected_tip": "MCP SwarmLLM से जुड़ा — Claude अन्य मॉडलों से पूछ सकता है",
   "claude_code.bar_subtitle": "AI जो आपके कंप्यूटर पर कोड पढ़, लिख और चला सकता है",
   "claude_code.project_label": "प्रोजेक्ट फ़ोल्डर",
-  "claude_code.safety_label": "अनुमति मोड"
+  "claude_code.safety_label": "अनुमति मोड",
+  "claude_code.turns_count": "{count} turns"
 }

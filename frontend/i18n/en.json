@@ -743,6 +743,7 @@
   "claude_code.agents_background": "in background",
   "claude_code.background_agents": "Background",
   "claude_code.mcp_connected_tip": "MCP connected to SwarmLLM \u2014 Claude can query other models",
+  "claude_code.turns_count": "{count} turns",
   "settings.test_btn": "Test",
   "settings.get_key": "Get key →",
   "settings.advanced": "Advanced Settings",

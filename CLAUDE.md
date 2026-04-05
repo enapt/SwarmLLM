@@ -113,9 +113,9 @@ libp2p 0.55 (pin to 0.55.x), axum 0.7, candle-core/candle-transformers (CUDA), e
 ### Frontend
 - Vanilla HTML/CSS/JS — no framework, no Node.js build step
 - Embedded into binary via `include_dir!` macro at compile time
-- Component architecture: `App` global namespace, 21 JS files (3 core + 13 components + init.js + 4 standalone utilities)
+- Component architecture: `App` global namespace, 22 JS files (3 core + 14 components + init.js + 4 standalone utilities)
   - `js/core/` — state.js (namespace + shared state + storage keys), utils.js (format helpers, DOM builders, getApiErrorMessage), data.js (data store + authFetch + dedup)
-  - `js/components/` — ui.js, chat.js, dashboard.js, models.js, shard-menu.js, settings.js, setup.js, downloads.js, notifications.js, identity.js, network-map.js, compare.js, pool.js
+  - `js/components/` — ui.js, chat.js, claude-code.js, dashboard.js, models.js, shard-menu.js, settings.js, setup.js, downloads.js, notifications.js, identity.js, network-map.js, compare.js, pool.js
   - `js/init.js` — event binding, initialization, public API export
   - `js/i18n.js`, `js/providers.js`, `js/neural-bg.js`, `js/topojson-client.min.js` — standalone utilities (loaded before App)
 - 13 HTML `<template>` elements for repeating UI structures (session items, chat messages, toasts, model cards, etc.)
@@ -225,7 +225,7 @@ Agent teams enabled (`CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1`, `teammateMode: "t
 
 ## Status
 
-All 20 build phases complete. All subsystems wired — no stubs. 653 tests passing. Deferred items in `docs/ARCHITECTURE.md` § "Deferred Items".
+All 20 build phases complete. All subsystems wired — no stubs. 657 tests passing. Deferred items in `docs/ARCHITECTURE.md` § "Deferred Items".
 
 ## Common Commands
 

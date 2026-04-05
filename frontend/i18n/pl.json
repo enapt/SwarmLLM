@@ -930,5 +930,6 @@
   "claude_code.mcp_connected_tip": "MCP połączony ze SwarmLLM — Claude może odpytywać inne modele",
   "claude_code.bar_subtitle": "AI, która może czytać, pisać i uruchamiać kod na Twoim komputerze",
   "claude_code.project_label": "Folder projektu",
-  "claude_code.safety_label": "Tryb uprawnień"
+  "claude_code.safety_label": "Tryb uprawnień",
+  "claude_code.turns_count": "{count} turns"
 }

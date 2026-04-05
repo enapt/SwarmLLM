@@ -930,5 +930,6 @@
   "claude_code.mcp_connected_tip": "MCP가 SwarmLLM에 연결됨 — Claude가 다른 모델을 쿼리할 수 있음",
   "claude_code.bar_subtitle": "컴퓨터에서 코드를 읽고, 쓰고, 실행할 수 있는 AI",
   "claude_code.project_label": "프로젝트 폴더",
-  "claude_code.safety_label": "권한 모드"
+  "claude_code.safety_label": "권한 모드",
+  "claude_code.turns_count": "{count} turns"
 }

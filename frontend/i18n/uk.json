@@ -930,5 +930,6 @@
   "claude_code.mcp_connected_tip": "MCP підключено до SwarmLLM — Claude може запитувати інші моделі",
   "claude_code.bar_subtitle": "ШІ, який може читати, писати та запускати код на вашому комп'ютері",
   "claude_code.project_label": "Папка проєкту",
-  "claude_code.safety_label": "Режим дозволів"
+  "claude_code.safety_label": "Режим дозволів",
+  "claude_code.turns_count": "{count} turns"
 }

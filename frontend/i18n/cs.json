@@ -930,5 +930,6 @@
   "claude_code.mcp_connected_tip": "MCP připojeno k SwarmLLM — Claude může dotazovat jiné modely",
   "claude_code.bar_subtitle": "AI, která může číst, psát a spouštět kód na vašem počítači",
   "claude_code.project_label": "Složka projektu",
-  "claude_code.safety_label": "Režim oprávnění"
+  "claude_code.safety_label": "Režim oprávnění",
+  "claude_code.turns_count": "{count} turns"
 }

@@ -930,5 +930,6 @@
   "claude_code.mcp_connected_tip": "MCP เชื่อมต่อ SwarmLLM — Claude สามารถสอบถามโมเดลอื่นได้",
   "claude_code.bar_subtitle": "AI ที่สามารถอ่าน เขียน และรันโค้ดบนคอมพิวเตอร์ของคุณ",
   "claude_code.project_label": "โฟลเดอร์โปรเจกต์",
-  "claude_code.safety_label": "โหมดสิทธิ์"
+  "claude_code.safety_label": "โหมดสิทธิ์",
+  "claude_code.turns_count": "{count} turns"
 }

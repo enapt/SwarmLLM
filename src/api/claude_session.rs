@@ -39,8 +39,6 @@ const MAX_JSON_BUFFER: usize = 1024 * 1024;
 const DEFAULT_IDLE_TIMEOUT_SECS: u64 = 4 * 3600; // 4 hours
 /// Warning sent to frontend this many seconds before idle timeout.
 const IDLE_WARNING_BEFORE_SECS: u64 = 15 * 60; // 15 minutes
-/// Maximum concurrent active subprocesses (used by concurrency_limit fallback).
-const _DEFAULT_MAX_ACTIVE_SESSIONS: usize = 3;
 
 // ---------------------------------------------------------------------------
 // Session state
@@ -383,7 +381,7 @@ impl SessionManager {
     ) -> Result<(), ApiError> {
         // Check concurrent limit
         if self.active_count() >= config.concurrency_limit() {
-            return Err(ApiError(crate::error::SwarmError::Internal(
+            return Err(ApiError(crate::error::SwarmError::ServiceUnavailable(
                 "Too many active Claude Code sessions. Close or suspend one first.".into(),
             )));
         }

@@ -930,5 +930,6 @@
   "claude_code.mcp_connected_tip": "MCP подключён к SwarmLLM — Claude может запрашивать другие модели",
   "claude_code.bar_subtitle": "ИИ, который может читать, писать и запускать код на вашем компьютере",
   "claude_code.project_label": "Папка проекта",
-  "claude_code.safety_label": "Режим разрешений"
+  "claude_code.safety_label": "Режим разрешений",
+  "claude_code.turns_count": "{count} turns"
 }

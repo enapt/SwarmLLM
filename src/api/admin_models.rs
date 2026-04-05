@@ -1132,11 +1132,7 @@ pub async fn unload_shard(
                     "Unloaded shard {} of {} from {} — {}",
                     shard_index + 1,
                     display,
-                    if shared.gpu_info.is_some() {
-                        "VRAM"
-                    } else {
-                        "RAM"
-                    },
+                    shared.memory_type_label(),
                     remaining
                 ),
             )
@@ -1232,11 +1228,7 @@ pub async fn load_shard(
                     "Loaded {} — {} now in {}",
                     display,
                     window_label,
-                    if shared.gpu_info.is_some() {
-                        "VRAM"
-                    } else {
-                        "RAM"
-                    }
+                    shared.memory_type_label()
                 ),
             )
             .with_model(model_id.clone())

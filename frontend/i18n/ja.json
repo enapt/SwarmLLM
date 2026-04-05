@@ -930,5 +930,6 @@
   "claude_code.mcp_connected_tip": "MCP が SwarmLLM に接続 — Claude は他のモデルにクエリ可能",
   "claude_code.bar_subtitle": "コンピュータ上でコードの読み書き・実行ができるAI",
   "claude_code.project_label": "プロジェクトフォルダ",
-  "claude_code.safety_label": "権限モード"
+  "claude_code.safety_label": "権限モード",
+  "claude_code.turns_count": "{count} turns"
 }
