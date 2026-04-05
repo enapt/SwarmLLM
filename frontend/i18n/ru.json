@@ -913,10 +913,11 @@
   "claude_code.denied": "Denied",
   "claude_code.retrying": "Retrying (attempt {attempt})...",
   "claude_code.cost": "{cost} · {turns} turn(s)",
-  "claude_code.perm_accept_edits": "Автоодобрение правок файлов",
-  "claude_code.perm_default": "Спрашивать перед каждым действием",
-  "claude_code.perm_bypass": "Полный автомат (осторожно)",
-  "claude_code.perm_plan": "Только план (без изменений)",
+  "claude_code.perm_accept_edits": "Принимать правки \u2014 спрашивать для команд",
+  "claude_code.perm_default": "Ручной \u2014 спрашивать перед каждым действием",
+  "claude_code.perm_bypass": "Полный автомат \u2014 без подтверждений",
+  "claude_code.perm_auto": "Автоматический \u2014 спрашивать для рискованных действий",
+  "claude_code.perm_plan": "Только план \u2014 без изменений файлов",
   "claude_code.permission_tip": "Сколько свободы у Claude для внесения изменений",
   "claude_code.agent_spawned": "Суб-агент",
   "claude_code.task_list": "Задачи",
@@ -926,5 +927,5 @@
   "claude_code.mcp_connected_tip": "MCP подключён к SwarmLLM — Claude может запрашивать другие модели",
   "claude_code.bar_subtitle": "ИИ, который может читать, писать и запускать код на вашем компьютере",
   "claude_code.project_label": "Папка проекта",
-  "claude_code.safety_label": "Уровень безопасности"
+  "claude_code.safety_label": "Режим разрешений"
 }

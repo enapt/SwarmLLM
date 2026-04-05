@@ -913,10 +913,11 @@
   "claude_code.denied": "Denied",
   "claude_code.retrying": "Retrying (attempt {attempt})...",
   "claude_code.cost": "{cost} · {turns} turn(s)",
-  "claude_code.perm_accept_edits": "อนุมัติการแก้ไขไฟล์อัตโนมัติ",
-  "claude_code.perm_default": "ถามก่อนทุกการกระทำ",
-  "claude_code.perm_bypass": "อัตโนมัติเต็มรูปแบบ (ใช้อย่างระมัดระวัง)",
-  "claude_code.perm_plan": "วางแผนเท่านั้น (ไม่เปลี่ยนแปลง)",
+  "claude_code.perm_accept_edits": "ยอมรับการแก้ไข \u2014 ถามเมื่อมีคำสั่ง",
+  "claude_code.perm_default": "ด้วยตนเอง \u2014 ถามก่อนทุกการกระทำ",
+  "claude_code.perm_bypass": "อัตโนมัติเต็มรูปแบบ \u2014 ไม่ต้องยืนยัน",
+  "claude_code.perm_auto": "อัตโนมัติ \u2014 ถามเมื่อมีการกระทำที่เสี่ยง",
+  "claude_code.perm_plan": "วางแผนเท่านั้น \u2014 ไม่เปลี่ยนแปลงไฟล์",
   "claude_code.permission_tip": "ระดับอิสระของ Claude ในการเปลี่ยนแปลง",
   "claude_code.agent_spawned": "ตัวแทนย่อย",
   "claude_code.task_list": "งาน",
@@ -926,5 +927,5 @@
   "claude_code.mcp_connected_tip": "MCP เชื่อมต่อ SwarmLLM — Claude สามารถสอบถามโมเดลอื่นได้",
   "claude_code.bar_subtitle": "AI ที่สามารถอ่าน เขียน และรันโค้ดบนคอมพิวเตอร์ของคุณ",
   "claude_code.project_label": "โฟลเดอร์โปรเจกต์",
-  "claude_code.safety_label": "ระดับความปลอดภัย"
+  "claude_code.safety_label": "โหมดสิทธิ์"
 }

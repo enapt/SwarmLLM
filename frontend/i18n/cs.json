@@ -913,10 +913,11 @@
   "claude_code.denied": "Denied",
   "claude_code.retrying": "Retrying (attempt {attempt})...",
   "claude_code.cost": "{cost} · {turns} turn(s)",
-  "claude_code.perm_accept_edits": "Automaticky schválit úpravy souborů",
-  "claude_code.perm_default": "Zeptat se před každou akcí",
-  "claude_code.perm_bypass": "Plně automaticky (opatrně)",
-  "claude_code.perm_plan": "Pouze plán (žádné změny)",
+  "claude_code.perm_accept_edits": "Přijmout úpravy \u2014 ptát se na příkazy",
+  "claude_code.perm_default": "Ruční \u2014 zeptat se před každou akcí",
+  "claude_code.perm_bypass": "Plně automaticky \u2014 bez potvrzení",
+  "claude_code.perm_auto": "Automaticky \u2014 ptát se na riskantní akce",
+  "claude_code.perm_plan": "Pouze plán \u2014 žádné změny souborů",
   "claude_code.permission_tip": "Kolik svobody má Claude k provádění změn",
   "claude_code.agent_spawned": "Sub-agent",
   "claude_code.task_list": "Úkoly",
@@ -926,5 +927,5 @@
   "claude_code.mcp_connected_tip": "MCP připojeno k SwarmLLM — Claude může dotazovat jiné modely",
   "claude_code.bar_subtitle": "AI, která může číst, psát a spouštět kód na vašem počítači",
   "claude_code.project_label": "Složka projektu",
-  "claude_code.safety_label": "Úroveň bezpečnosti"
+  "claude_code.safety_label": "Režim oprávnění"
 }

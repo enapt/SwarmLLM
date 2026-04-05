@@ -913,10 +913,11 @@
   "claude_code.denied": "Denied",
   "claude_code.retrying": "Retrying (attempt {attempt})...",
   "claude_code.cost": "{cost} · {turns} turn(s)",
-  "claude_code.perm_accept_edits": "Otomatis setujui edit file",
-  "claude_code.perm_default": "Tanya sebelum setiap tindakan",
-  "claude_code.perm_bypass": "Otomatis penuh (gunakan hati-hati)",
-  "claude_code.perm_plan": "Hanya rencana (tanpa perubahan)",
+  "claude_code.perm_accept_edits": "Terima edit \u2014 tanya untuk perintah",
+  "claude_code.perm_default": "Manual \u2014 tanya sebelum setiap tindakan",
+  "claude_code.perm_bypass": "Otomatis penuh \u2014 tanpa konfirmasi",
+  "claude_code.perm_auto": "Otomatis \u2014 tanya untuk tindakan berisiko",
+  "claude_code.perm_plan": "Hanya rencana \u2014 tanpa perubahan file",
   "claude_code.permission_tip": "Seberapa banyak kebebasan Claude untuk melakukan perubahan",
   "claude_code.agent_spawned": "Sub-agen",
   "claude_code.task_list": "Tugas",
@@ -926,5 +927,5 @@
   "claude_code.mcp_connected_tip": "MCP terhubung ke SwarmLLM — Claude dapat menanyakan model lain",
   "claude_code.bar_subtitle": "AI yang dapat membaca, menulis, dan menjalankan kode di komputer Anda",
   "claude_code.project_label": "Folder proyek",
-  "claude_code.safety_label": "Tingkat keamanan"
+  "claude_code.safety_label": "Mode izin"
 }

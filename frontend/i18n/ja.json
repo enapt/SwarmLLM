@@ -913,10 +913,11 @@
   "claude_code.denied": "Denied",
   "claude_code.retrying": "Retrying (attempt {attempt})...",
   "claude_code.cost": "{cost} · {turns} turn(s)",
-  "claude_code.perm_accept_edits": "ファイル編集を自動承認",
-  "claude_code.perm_default": "各アクションの前に確認",
-  "claude_code.perm_bypass": "完全自動（注意して使用）",
-  "claude_code.perm_plan": "計画のみ（変更なし）",
+  "claude_code.perm_accept_edits": "編集を承認 \u2014 コマンドは確認",
+  "claude_code.perm_default": "手動 \u2014 各アクションの前に確認",
+  "claude_code.perm_bypass": "完全自動 \u2014 確認なし",
+  "claude_code.perm_auto": "自動 \u2014 リスクのあるアクションは確認",
+  "claude_code.perm_plan": "計画のみ \u2014 ファイル変更なし",
   "claude_code.permission_tip": "Claudeが変更を行う自由度",
   "claude_code.agent_spawned": "サブエージェント",
   "claude_code.task_list": "タスク",
@@ -926,5 +927,5 @@
   "claude_code.mcp_connected_tip": "MCP が SwarmLLM に接続 — Claude は他のモデルにクエリ可能",
   "claude_code.bar_subtitle": "コンピュータ上でコードの読み書き・実行ができるAI",
   "claude_code.project_label": "プロジェクトフォルダ",
-  "claude_code.safety_label": "安全レベル"
+  "claude_code.safety_label": "権限モード"
 }

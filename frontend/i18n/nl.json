@@ -913,10 +913,11 @@
   "claude_code.denied": "Denied",
   "claude_code.retrying": "Retrying (attempt {attempt})...",
   "claude_code.cost": "{cost} · {turns} turn(s)",
-  "claude_code.perm_accept_edits": "Bewerkingen automatisch goedkeuren",
-  "claude_code.perm_default": "Vragen voor elke actie",
-  "claude_code.perm_bypass": "Volledig automatisch (voorzichtig)",
-  "claude_code.perm_plan": "Alleen plannen (geen wijzigingen)",
+  "claude_code.perm_accept_edits": "Bewerkingen accepteren \u2014 vragen voor opdrachten",
+  "claude_code.perm_default": "Handmatig \u2014 vragen voor elke actie",
+  "claude_code.perm_bypass": "Volledig automatisch \u2014 geen bevestigingen",
+  "claude_code.perm_auto": "Automatisch \u2014 vragen voor riskante acties",
+  "claude_code.perm_plan": "Alleen plan \u2014 geen bestandswijzigingen",
   "claude_code.permission_tip": "Hoeveel vrijheid Claude heeft om wijzigingen aan te brengen",
   "claude_code.agent_spawned": "Sub-agent",
   "claude_code.task_list": "Taken",
@@ -926,5 +927,5 @@
   "claude_code.mcp_connected_tip": "MCP verbonden met SwarmLLM — Claude kan andere modellen bevragen",
   "claude_code.bar_subtitle": "AI die code kan lezen, schrijven en uitvoeren op uw computer",
   "claude_code.project_label": "Projectmap",
-  "claude_code.safety_label": "Veiligheidsniveau"
+  "claude_code.safety_label": "Toestemmingsmodus"
 }

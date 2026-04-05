@@ -913,10 +913,11 @@
   "claude_code.denied": "Denied",
   "claude_code.retrying": "Retrying (attempt {attempt})...",
   "claude_code.cost": "{cost} · {turns} turn(s)",
-  "claude_code.perm_accept_edits": "Godkänn filändringar automatiskt",
-  "claude_code.perm_default": "Fråga före varje åtgärd",
-  "claude_code.perm_bypass": "Helt automatiskt (var försiktig)",
-  "claude_code.perm_plan": "Bara planera (inga ändringar)",
+  "claude_code.perm_accept_edits": "Acceptera ändringar \u2014 fråga för kommandon",
+  "claude_code.perm_default": "Manuell \u2014 fråga före varje åtgärd",
+  "claude_code.perm_bypass": "Helt automatiskt \u2014 inga bekräftelser",
+  "claude_code.perm_auto": "Automatiskt \u2014 fråga för riskfyllda åtgärder",
+  "claude_code.perm_plan": "Bara plan \u2014 inga filändringar",
   "claude_code.permission_tip": "Hur mycket frihet Claude har att göra ändringar",
   "claude_code.agent_spawned": "Underagent",
   "claude_code.task_list": "Uppgifter",
@@ -926,5 +927,5 @@
   "claude_code.mcp_connected_tip": "MCP ansluten till SwarmLLM — Claude kan fråga andra modeller",
   "claude_code.bar_subtitle": "AI som kan läsa, skriva och köra kod på din dator",
   "claude_code.project_label": "Projektmapp",
-  "claude_code.safety_label": "Säkerhetsnivå"
+  "claude_code.safety_label": "Behörighetsläge"
 }

@@ -913,10 +913,11 @@
   "claude_code.denied": "Denied",
   "claude_code.retrying": "Retrying (attempt {attempt})...",
   "claude_code.cost": "{cost} · {turns} turn(s)",
-  "claude_code.perm_accept_edits": "Tự động duyệt chỉnh sửa file",
-  "claude_code.perm_default": "Hỏi trước mỗi hành động",
-  "claude_code.perm_bypass": "Tự động hoàn toàn (dùng cẩn thận)",
-  "claude_code.perm_plan": "Chỉ lập kế hoạch (không thay đổi)",
+  "claude_code.perm_accept_edits": "Chấp nhận chỉnh sửa \u2014 hỏi khi có lệnh",
+  "claude_code.perm_default": "Thủ công \u2014 hỏi trước mỗi hành động",
+  "claude_code.perm_bypass": "Tự động hoàn toàn \u2014 không cần xác nhận",
+  "claude_code.perm_auto": "Tự động \u2014 hỏi khi có hành động rủi ro",
+  "claude_code.perm_plan": "Chỉ lập kế hoạch \u2014 không thay đổi file",
   "claude_code.permission_tip": "Mức tự do Claude có để thực hiện thay đổi",
   "claude_code.agent_spawned": "Tác tử phụ",
   "claude_code.task_list": "Nhiệm vụ",
@@ -926,5 +927,5 @@
   "claude_code.mcp_connected_tip": "MCP kết nối SwarmLLM — Claude có thể truy vấn các mô hình khác",
   "claude_code.bar_subtitle": "AI có thể đọc, viết và chạy mã trên máy tính của bạn",
   "claude_code.project_label": "Thư mục dự án",
-  "claude_code.safety_label": "Mức an toàn"
+  "claude_code.safety_label": "Chế độ quyền"
 }
