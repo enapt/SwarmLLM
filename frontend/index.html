@@ -626,16 +626,25 @@
           <div class="chat-input-area">
             <!-- Claude Code project picker (shown when Claude subscription model selected) -->
             <div class="cc-project-bar" id="cc-project-bar" style="display:none">
-              <img src="/static/icons/claude-code.svg" width="16" height="16" alt="" class="cc-bar-icon">
-              <span class="cc-bar-label">Claude Code</span>
-              <div id="cc-dir-picker" style="display:flex;align-items:center;gap:6px;flex:1;flex-wrap:wrap">
-                <input type="text" id="cc-dir-input" data-i18n-placeholder="claude_code.dir_placeholder" placeholder="/path/to/project (or leave empty for quick chat)">
-                <select id="cc-permission-mode" data-i18n-title="claude_code.permission_tip" title="Permission mode for tool calls">
-                  <option value="acceptEdits" data-i18n="claude_code.perm_accept_edits">Accept Edits</option>
-                  <option value="default" data-i18n="claude_code.perm_default">Ask Permission</option>
-                  <option value="bypassPermissions" data-i18n="claude_code.perm_bypass">Bypass (Dangerous)</option>
-                  <option value="plan" data-i18n="claude_code.perm_plan">Plan Mode</option>
-                </select>
+              <div class="cc-bar-title-row">
+                <img src="/static/icons/claude-code.svg" width="16" height="16" alt="" class="cc-bar-icon">
+                <span class="cc-bar-label">Claude Code</span>
+                <span class="cc-bar-subtitle" data-i18n="claude_code.bar_subtitle">AI assistant that can read, write, and run code on your computer</span>
+              </div>
+              <div id="cc-dir-picker" class="cc-dir-picker">
+                <div class="cc-dir-row">
+                  <label class="cc-field-label" data-i18n="claude_code.project_label">Project folder</label>
+                  <input type="text" id="cc-dir-input" data-i18n-placeholder="claude_code.dir_placeholder" placeholder="Paste a folder path, or leave empty to just chat">
+                </div>
+                <div class="cc-perm-row">
+                  <label class="cc-field-label" data-i18n="claude_code.safety_label">Safety level</label>
+                  <select id="cc-permission-mode" data-i18n-title="claude_code.permission_tip" title="How much freedom Claude has to make changes">
+                    <option value="acceptEdits" data-i18n="claude_code.perm_accept_edits">Auto-approve file edits</option>
+                    <option value="default" data-i18n="claude_code.perm_default">Ask before each action</option>
+                    <option value="bypassPermissions" data-i18n="claude_code.perm_bypass">Full auto (use with caution)</option>
+                    <option value="plan" data-i18n="claude_code.perm_plan">Plan only (no changes)</option>
+                  </select>
+                </div>
               </div>
               <div class="cc-session-info" id="cc-session-info" style="display:none">
                 <span class="cc-state-dot"></span>

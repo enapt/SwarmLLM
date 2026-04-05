@@ -4,12 +4,18 @@
    ============================================================================ */
 
 /* ─── Project Picker Bar ─── */
-.cc-project-bar { max-width: 740px; margin: 0 auto 6px; padding: 8px 12px; background: rgba(217,119,87,0.06); border: 1px solid rgba(217,119,87,0.2); border-radius: var(--radius-lg); font-size: 0.78rem; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.cc-project-bar { max-width: 740px; margin: 0 auto 6px; padding: 10px 14px; background: rgba(217,119,87,0.06); border: 1px solid rgba(217,119,87,0.2); border-radius: var(--radius-lg); font-size: 0.78rem; }
+.cc-bar-title-row { display: flex; align-items: center; gap: 6px; margin-bottom: 8px; }
 .cc-project-bar .cc-bar-icon { flex-shrink: 0; }
-.cc-project-bar .cc-bar-label { color: #D97757; font-weight: 600; font-family: var(--font-mono); white-space: nowrap; }
-.cc-project-bar input[type="text"] { flex: 1; min-width: 150px; padding: 4px 8px; background: var(--bg-tertiary); border: 1px solid var(--border); border-radius: var(--radius); color: var(--text-primary); font-family: var(--font-mono); font-size: 0.75rem; }
+.cc-project-bar .cc-bar-label { color: #D97757; font-weight: 700; font-family: var(--font-mono); white-space: nowrap; font-size: 0.82rem; }
+.cc-bar-subtitle { color: var(--text-muted); font-size: 0.7rem; margin-left: 4px; }
+.cc-dir-picker { display: flex; flex-direction: column; gap: 6px; }
+.cc-dir-row, .cc-perm-row { display: flex; align-items: center; gap: 8px; }
+.cc-field-label { font-size: 0.7rem; color: var(--text-secondary); font-weight: 600; min-width: 85px; flex-shrink: 0; }
+.cc-project-bar input[type="text"] { flex: 1; min-width: 150px; padding: 5px 10px; background: var(--bg-tertiary); border: 1px solid var(--border); border-radius: var(--radius); color: var(--text-primary); font-size: 0.75rem; }
+.cc-project-bar input[type="text"]::placeholder { color: var(--text-muted); font-size: 0.72rem; }
 .cc-project-bar .btn { font-size: 0.72rem; padding: 3px 10px; }
-.cc-project-bar select { font-size: 0.72rem; padding: 3px 6px; background: var(--bg-tertiary); border: 1px solid var(--border); border-radius: var(--radius); color: var(--text-primary); }
+.cc-project-bar select { font-size: 0.72rem; padding: 4px 8px; background: var(--bg-tertiary); border: 1px solid var(--border); border-radius: var(--radius); color: var(--text-primary); flex: 1; }
 
 /* Session info (shown when CC session is active) */
 .cc-session-info { display: flex; align-items: center; gap: 6px; font-size: 0.72rem; color: var(--text-secondary); font-family: var(--font-mono); }
