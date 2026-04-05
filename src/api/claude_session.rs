@@ -902,46 +902,11 @@ pub async fn send_message_handler(
     }
 
     // Stream events back as SSE.
-    //
-    // Slash commands (like /explain) trigger multi-phase execution:
-    // Phase 1: CLI acknowledges the command → quick `result` event
-    // Phase 2: Skill runs (many turns) → final `result` event
-    //
-    // We can't break on the first `result` — we'd miss the real work.
-    // Strategy: after seeing `result`, peek for more events with a short
-    // timeout. If more come (e.g. another `system/init`), keep streaming.
-    // If nothing comes within the timeout, we're truly done.
+    // The SDK spec confirms: exactly one `result` event per query.
+    // Break immediately on `result` — it's always the final event.
     let stream = async_stream::stream! {
-        let mut last_result: Option<serde_json::Value> = None;
         loop {
-            // If we just saw a `result`, check if more events follow.
-            // Skill dispatches emit a new `system/init` within ~500ms.
-            let event = if last_result.is_some() {
-                let peek = tokio::time::timeout(
-                    std::time::Duration::from_secs(2),
-                    async {
-                        let mut session = session_arc.lock().await;
-                        session.read_event().await
-                    }
-                ).await;
-                match peek {
-                    Ok(Some(evt)) => {
-                        // More events — skill is running. Reset and continue.
-                        last_result = None;
-                        Some(evt)
-                    }
-                    Ok(None) => {
-                        // EOF after result — truly done
-                        yield Ok::<_, std::io::Error>(bytes::Bytes::from("data: [DONE]\n\n"));
-                        break;
-                    }
-                    Err(_) => {
-                        // Timeout — no more events after result. Done.
-                        yield Ok(bytes::Bytes::from("data: [DONE]\n\n"));
-                        break;
-                    }
-                }
-            } else {
+            let event = {
                 let mut session = session_arc.lock().await;
                 session.read_event().await
             };
@@ -956,9 +921,10 @@ pub async fn send_message_handler(
                         bytes::Bytes::from(format!("data: {}\n\n", data))
                     );
 
+                    // result = query complete (one per query, always final)
                     if evt_type == "result" {
-                        // Don't break yet — peek for more events (skill dispatch)
-                        last_result = Some(evt);
+                        yield Ok(bytes::Bytes::from("data: [DONE]\n\n"));
+                        break;
                     }
                     // control_request (permission prompt): keep the SSE stream open.
                 }

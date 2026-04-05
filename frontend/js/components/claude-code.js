@@ -645,9 +645,24 @@
 
     // Handle final result event
     _handleResult: function(evt, contentEl) {
-      if (evt.is_error) {
-        App.claudeCode._showStatus(contentEl, evt.result || 'Error', true);
+      // If no text was streamed, show the result text as the response
+      // (happens when Claude only uses thinking/tools with no visible text output)
+      var resultText = evt.result || '';
+      if (resultText && !contentEl.querySelector('.response-text') && !contentEl.querySelector('.cc-tool-call')) {
+        // Clear the "Thinking..." indicator
+        var typing = contentEl.querySelector('.typing-indicator');
+        if (typing) typing.remove();
+        contentEl.textContent = '';
+        var textNode = document.createElement('div');
+        textNode.className = 'response-text';
+        textNode.textContent = resultText;
+        contentEl.appendChild(textNode);
       }
+
+      if (evt.is_error) {
+        App.claudeCode._showStatus(contentEl, resultText || 'Error', true);
+      }
+
       // Show turns + duration (skip cost for subscription — it's not real API billing)
       var turns = evt.num_turns || 1;
       var duration = evt.duration_ms ? (evt.duration_ms / 1000).toFixed(1) + 's' : '';
