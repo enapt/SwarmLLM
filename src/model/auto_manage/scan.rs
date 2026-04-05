@@ -496,6 +496,11 @@ manifest.name, budget - total_after
                 covering_shards.last().unwrap()
             )
         };
+        let total_layers = manifest.num_layers;
+        let detail_label = format!(
+            "{} (layers {}-{} of {})",
+            shard_label, layer_start, layer_end, total_layers
+        );
         let mem_type = if shared.gpu_info.is_some() {
             "VRAM"
         } else {
@@ -503,8 +508,8 @@ manifest.name, budget - total_after
         };
         // Only emit once per model+range to avoid spamming on repeated check_and_load_model calls
         let load_msg = format!(
-            "Loaded {} into {} — {} (layers {}-{}) ready for inference",
-            manifest.name, mem_type, shard_label, layer_start, layer_end
+            "Loaded {} into {} — {} ready for inference",
+            manifest.name, mem_type, detail_label
         );
         let already_emitted = shared
             .events
@@ -514,7 +519,7 @@ manifest.name, budget - total_after
                 h.iter().any(|e| {
                     e.kind == "model_loaded"
                         && e.model_id.as_deref() == Some(&model_id.0)
-                        && e.detail_str.as_deref() == Some(shard_label.as_str())
+                        && e.detail_str.as_deref() == Some(detail_label.as_str())
                 })
             })
             .unwrap_or(false);
@@ -524,7 +529,7 @@ manifest.name, budget - total_after
                     .with_model(model_id.0.clone())
                     .with_model_name(manifest.name.clone())
                     .with_detail_num((layer_end - layer_start) as i64)
-                    .with_detail_str(shard_label.clone()),
+                    .with_detail_str(detail_label.clone()),
             );
         }
     }
