@@ -746,7 +746,7 @@
       '/review': 'Review the recent changes in this project for bugs, security issues, and code quality',
       '/test': 'Run the test suite and report results',
       '/fix': 'Fix this issue: ',
-      '/explain': 'Explain what this file does and how it works: ',
+      '/explain': 'Explain this project/codebase — its architecture, key components, and how it works',
       '/refactor': 'Refactor this to improve code quality while preserving behavior: ',
       '/search': 'Search the codebase for: ',
       '/deps': 'Analyze the dependency graph and identify any issues',
@@ -763,9 +763,9 @@
       var template = App.claudeCode._slashCommands[cmd];
       if (!template) return null;
 
-      // Commands that take args: append them
-      if (cmd === '/fix' || cmd === '/explain' || cmd === '/refactor' || cmd === '/search') {
-        return args ? template + args : null; // require args for these
+      // Commands that require args
+      if (cmd === '/fix' || cmd === '/refactor' || cmd === '/search') {
+        return args ? template + args : null;
       }
       // Commands with optional args
       return args ? template + ' ' + args : template;
