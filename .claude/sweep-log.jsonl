@@ -44,3 +44,14 @@
 {"file":"src/inference/vision.rs","line":711,"kind":"assert_panic","summary":"assert_eq! in production load_from_mmproj_gguf can panic on malformed GGUF — runs in subprocess so crash-safe but ideally should return error","status":"deferred","date":"2026-04-05"}
 {"file":"src/api/claude_sub.rs","line":200,"kind":"security_info","summary":"read_credential_info returns subscription_type/rate_limit_tier — behind auth, acceptable","status":"wontfix","date":"2026-04-05"}
 {"file":"src/api/claude_session.rs","line":393,"kind":"security_high","summary":"session ID collision — any auth'd client can access another's session. Single-operator use acceptable for now.","status":"deferred","date":"2026-04-05"}
+{"file":"src/api/claude_sub.rs","line":77,"kind":"integer_underflow","summary":"8 - limit underflows when max_concurrent > 8 — fixed with saturating_sub","status":"fixed","date":"2026-04-05"}
+{"file":"src/api/claude_sub.rs","line":263,"kind":"dead_code","summary":"build_cli_args unused binary parameter with let _ = suppression — removed param","status":"fixed","date":"2026-04-05"}
+{"file":"src/api/claude_sub.rs","line":148,"kind":"dead_code","summary":"cleanup_expired_sessions was pub with no external callers — made private","status":"fixed","date":"2026-04-05"}
+{"file":"src/api/claude_session.rs","line":151,"kind":"dead_code","summary":"send_permission_response never called (handler uses stdin_handle directly) — removed","status":"fixed","date":"2026-04-05"}
+{"file":"src/api/claude_session.rs","line":630,"kind":"stale_doc","summary":"doc comment listed bypassPermissions as valid — updated to match allowlist","status":"fixed","date":"2026-04-05"}
+{"file":"src/api/claude_session.rs","line":954,"kind":"error_type_misuse","summary":"SwarmError::Internal for suspended session → Validation + removed // TODO","status":"fixed","date":"2026-04-05"}
+{"file":"src/api/middleware.rs","line":138,"kind":"security_medium","summary":"/api/claude-code/ routes not rate-limited — added to Admin bucket","status":"fixed","date":"2026-04-05"}
+{"file":"CLAUDE.md","line":67,"kind":"doc_mismatch","summary":"components/13 → 14 in repo structure","status":"fixed","date":"2026-04-05"}
+{"file":"CLAUDE.md","line":124,"kind":"doc_mismatch","summary":"i18n key count 874 → 934","status":"fixed","date":"2026-04-05"}
+{"file":"frontend/i18n/*.json","line":0,"kind":"i18n_missing","summary":"3 keys missing from 20 non-English files — added","status":"fixed","date":"2026-04-05"}
+{"file":"src/api/claude_session.rs","line":722,"kind":"design_review","summary":"MAX_SESSIONS_HARD_LIMIT counts suspended sessions — acceptable, documents memory cap intent","status":"wontfix","date":"2026-04-05"}
