@@ -199,15 +199,27 @@
       avatarEl.appendChild(userImg);
     }
 
-    // Role label + source badge + encryption lock
+    // Role label + model badge
     var roleEl = div.querySelector('.msg-role');
-    roleEl.textContent = role === 'user' ? I18n.t('chat.role_user') : I18n.t('chat.role_assistant');
-    if (role === 'assistant') {
-      var sourceLabel = source === 'local' ? I18n.t('chat.source_local') : source === 'cloud' ? I18n.t('chat.source_cloud') : I18n.t('chat.source_network');
-      var sourceBadge = document.createElement('span');
-      sourceBadge.className = 'msg-source-badge source-' + source;
-      sourceBadge.textContent = sourceLabel;
-      roleEl.appendChild(sourceBadge);
+    if (role === 'user') {
+      roleEl.textContent = I18n.t('chat.role_user');
+    } else {
+      // Show model name instead of generic "Assistant"
+      var modelId = (opts && opts.model) || '';
+      var modelDisplay = modelId ? formatModelDisplayName(modelId) : 'AI';
+      roleEl.textContent = modelDisplay;
+      // Source badge (local/network — skip "cloud" since model name already implies it)
+      if (source === 'local') {
+        var sourceBadge = document.createElement('span');
+        sourceBadge.className = 'msg-source-badge source-local';
+        sourceBadge.textContent = I18n.t('chat.source_local');
+        roleEl.appendChild(sourceBadge);
+      } else if (source === 'network') {
+        var netBadge = document.createElement('span');
+        netBadge.className = 'msg-source-badge source-network';
+        netBadge.textContent = I18n.t('chat.source_network');
+        roleEl.appendChild(netBadge);
+      }
     }
     if (opts && opts.encrypted) {
       var lockSpan = document.createElement('span');

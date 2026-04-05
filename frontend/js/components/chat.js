@@ -420,7 +420,7 @@
       }
 
       msgs.forEach(function(msg) {
-        var msgOpts = { encrypted: !!msg.encrypted };
+        var msgOpts = { encrypted: !!msg.encrypted, model: msg.model || '' };
         var el;
         if (msg.images && msg.images.length > 0) {
           var html = '<div style="margin-bottom:6px;">';
@@ -496,7 +496,7 @@
       userHtml += U.escapeHtml(displayText);
       U.appendMessageToDOM('user', userHtml, true, { encrypted: msgEncrypted });
 
-      var assistantEl = U.appendMessageToDOM('assistant', '', false, { encrypted: msgEncrypted });
+      var assistantEl = U.appendMessageToDOM('assistant', '', false, { encrypted: msgEncrypted, model: model });
       var contentEl = assistantEl.querySelector('.msg-content');
       contentEl.innerHTML = '<span class="typing-indicator">' + U.escapeHtml(I18n.t('chat.thinking')) + '</span>';
 
@@ -535,7 +535,7 @@
           if (translated) ccText = translated;
           var result = await App.claudeCode.sendMessage(session.id, ccText, contentEl, assistantEl);
           if (result.content) {
-            session.messages.push({ role: 'assistant', content: result.content, encrypted: false, duration: result.duration });
+            session.messages.push({ role: 'assistant', content: result.content, encrypted: false, duration: result.duration, model: model });
             App.chat.saveSessions();
             App.chat.flashSession(session.id);
           }
@@ -670,7 +670,7 @@
       timerTarget.appendChild(timerEl);
 
       if (fullContent) {
-        session.messages.push({ role: 'assistant', content: fullContent, encrypted: msgEncrypted, duration: elapsed });
+        session.messages.push({ role: 'assistant', content: fullContent, encrypted: msgEncrypted, duration: elapsed, model: model });
         App.chat.saveSessions();
         App.chat.flashSession(session.id);
       }
