@@ -159,7 +159,25 @@
     },
 
     updateFull: function(data) {
-      if (data.node_id) document.getElementById('node-id').textContent = data.node_id;
+      if (data.node_id) {
+        var el = document.getElementById('node-id');
+        var short = data.node_id.substring(0, 8);
+        el.textContent = short;
+        el.title = data.node_id;
+        el.dataset.fullId = data.node_id;
+        el.style.cursor = 'pointer';
+        if (!el.dataset.bound) {
+          el.dataset.bound = '1';
+          el.addEventListener('click', function() {
+            var fullId = el.dataset.fullId;
+            navigator.clipboard.writeText(fullId).then(function() {
+              var s = el.textContent;
+              el.textContent = I18n.t('nav.copied') || 'Copied!';
+              setTimeout(function() { el.textContent = s; }, 1200);
+            });
+          });
+        }
+      }
       if (data.version) document.getElementById('version').textContent = 'v' + data.version;
       if (data.uptime_seconds !== undefined) document.getElementById('uptime').textContent = U.formatUptime(data.uptime_seconds);
       if (data.tier) {
