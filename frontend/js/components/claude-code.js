@@ -194,6 +194,7 @@
       var evtType = evt.type || '';
       var target = App.claudeCode._resolveTarget(evt, contentEl, agentPanels);
 
+
       switch (evtType) {
         case 'stream_event':
           App.claudeCode._handleStreamEvent(evt, target, ctx);

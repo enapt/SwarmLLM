@@ -901,10 +901,47 @@ pub async fn send_message_handler(
         session.send_user_message(&req.content).await?;
     }
 
-    // Stream events back as SSE
+    // Stream events back as SSE.
+    //
+    // Slash commands (like /explain) trigger multi-phase execution:
+    // Phase 1: CLI acknowledges the command → quick `result` event
+    // Phase 2: Skill runs (many turns) → final `result` event
+    //
+    // We can't break on the first `result` — we'd miss the real work.
+    // Strategy: after seeing `result`, peek for more events with a short
+    // timeout. If more come (e.g. another `system/init`), keep streaming.
+    // If nothing comes within the timeout, we're truly done.
     let stream = async_stream::stream! {
+        let mut last_result: Option<serde_json::Value> = None;
         loop {
-            let event = {
+            // If we just saw a `result`, check if more events follow.
+            // Skill dispatches emit a new `system/init` within ~500ms.
+            let event = if last_result.is_some() {
+                let peek = tokio::time::timeout(
+                    std::time::Duration::from_secs(2),
+                    async {
+                        let mut session = session_arc.lock().await;
+                        session.read_event().await
+                    }
+                ).await;
+                match peek {
+                    Ok(Some(evt)) => {
+                        // More events — skill is running. Reset and continue.
+                        last_result = None;
+                        Some(evt)
+                    }
+                    Ok(None) => {
+                        // EOF after result — truly done
+                        yield Ok::<_, std::io::Error>(bytes::Bytes::from("data: [DONE]\n\n"));
+                        break;
+                    }
+                    Err(_) => {
+                        // Timeout — no more events after result. Done.
+                        yield Ok(bytes::Bytes::from("data: [DONE]\n\n"));
+                        break;
+                    }
+                }
+            } else {
                 let mut session = session_arc.lock().await;
                 session.read_event().await
             };
@@ -919,17 +956,11 @@ pub async fn send_message_handler(
                         bytes::Bytes::from(format!("data: {}\n\n", data))
                     );
 
-                    // Stop streaming on result event (turn complete)
                     if evt_type == "result" {
-                        yield Ok(bytes::Bytes::from("data: [DONE]\n\n"));
-                        break;
+                        // Don't break yet — peek for more events (skill dispatch)
+                        last_result = Some(evt);
                     }
-
                     // control_request (permission prompt): keep the SSE stream open.
-                    // The subprocess blocks waiting for the permission response on stdin.
-                    // The frontend sends a concurrent POST to /permission which writes
-                    // to stdin, the subprocess resumes, and events continue flowing
-                    // through this still-open stream.
                 }
                 None => {
                     // EOF — subprocess exited
