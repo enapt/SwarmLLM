@@ -6,6 +6,7 @@
 //!
 //! Feature-gated behind `claude-subscription`.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::LazyLock;
 use std::time::Instant;
@@ -20,6 +21,9 @@ use tokio::sync::Mutex;
 
 use crate::api::server::AppState;
 use crate::error::ApiError;
+
+/// Maximum JSON buffer size (1MB) — matches the official SDK.
+const MAX_JSON_BUFFER: usize = 1024 * 1024;
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -85,14 +89,22 @@ pub struct ClaudeSession {
     pub tools: Vec<String>,
     /// Configured idle timeout in seconds.
     pub idle_timeout_secs: u64,
+    /// Tracks the last process exit error (for better diagnostics).
+    exit_error: Option<String>,
 }
 
 impl ClaudeSession {
     /// Check if the subprocess is still alive.
     pub fn is_alive(&self) -> bool {
-        self.child.is_some()
-            && self.state != SessionState::Suspended
-            && self.state != SessionState::Expired
+        if self.state == SessionState::Suspended || self.state == SessionState::Expired {
+            return false;
+        }
+        // Check if child process has exited
+        if let Some(ref child) = self.child {
+            child.id().is_some() // None means already exited
+        } else {
+            false
+        }
     }
 
     /// Touch the session to reset idle timer.
@@ -163,8 +175,12 @@ impl ClaudeSession {
     }
 
     /// Read the next NDJSON event from stdout. Returns None on EOF.
+    ///
+    /// Matches SDK behavior: skips non-JSON lines (e.g. `[SandboxDebug]`),
+    /// accumulates partial JSON across lines with a 1MB buffer limit.
     pub async fn read_event(&mut self) -> Option<serde_json::Value> {
         let stdout = self.stdout.as_mut()?;
+        let mut json_buffer = String::new();
         loop {
             match stdout.next_line().await {
                 Ok(Some(line)) => {
@@ -172,41 +188,94 @@ impl ClaudeSession {
                     if trimmed.is_empty() {
                         continue;
                     }
-                    match serde_json::from_str(trimmed) {
+                    // Skip non-JSON lines when not mid-parse (matches SDK behavior).
+                    // Lines like [SandboxDebug] would corrupt the buffer.
+                    if json_buffer.is_empty() && !trimmed.starts_with('{') {
+                        tracing::trace!("Skipping non-JSON line from CLI stdout");
+                        continue;
+                    }
+                    json_buffer.push_str(trimmed);
+                    if json_buffer.len() > MAX_JSON_BUFFER {
+                        tracing::warn!(
+                            "JSON buffer exceeded {}B limit, discarding",
+                            MAX_JSON_BUFFER
+                        );
+                        json_buffer.clear();
+                        continue;
+                    }
+                    match serde_json::from_str(&json_buffer) {
                         Ok(val) => {
+                            json_buffer.clear();
                             self.touch();
                             return Some(val);
                         }
-                        Err(_) => continue, // skip non-JSON lines
+                        Err(_) => {
+                            // Speculatively accumulate — may be partial JSON
+                            continue;
+                        }
                     }
                 }
                 Ok(None) => {
-                    // EOF — subprocess exited unexpectedly
+                    // EOF — subprocess exited
                     self.state = SessionState::Expired;
-                    self.claude_session_id = None;
+                    self.exit_error = Some("Claude CLI subprocess exited (EOF on stdout)".into());
                     return None;
                 }
-                Err(_) => {
+                Err(e) => {
                     self.state = SessionState::Expired;
-                    self.claude_session_id = None;
+                    self.exit_error = Some(format!("Error reading CLI stdout: {e}"));
                     return None;
                 }
             }
         }
     }
 
-    /// Gracefully stop the subprocess (close stdin, wait for exit).
+    /// Gracefully stop the subprocess.
+    ///
+    /// Matches the official SDK shutdown sequence:
+    /// 1. Close stdin (signal EOF — lets CLI flush session files)
+    /// 2. Wait 5s for graceful exit
+    /// 3. SIGTERM (not available on all platforms, fall back to kill)
+    /// 4. Wait 5s
+    /// 5. SIGKILL (force)
     pub async fn suspend(&mut self) {
+        // Step 1: close stdin
         {
             let mut stdin_guard = self.stdin.lock().await;
             if let Some(stdin) = stdin_guard.take() {
-                drop(stdin); // closes stdin → signals EOF to subprocess
+                drop(stdin);
             }
         }
         if let Some(mut child) = self.child.take() {
-            // Give it a few seconds to exit gracefully
-            let _ = tokio::time::timeout(std::time::Duration::from_secs(5), child.wait()).await;
-            let _ = child.kill().await; // force kill if still alive
+            // Step 2: wait 5s for graceful exit after stdin EOF
+            match tokio::time::timeout(std::time::Duration::from_secs(5), child.wait()).await {
+                Ok(_) => {} // exited gracefully
+                Err(_) => {
+                    // Step 3: send SIGTERM (Unix) or kill (Windows)
+                    #[cfg(unix)]
+                    if let Some(pid) = child.id() {
+                        // SAFETY: sending SIGTERM to a known child process
+                        let _ = std::process::Command::new("kill")
+                            .args(["-TERM", &pid.to_string()])
+                            .status();
+                    }
+                    #[cfg(not(unix))]
+                    {
+                        let _ = child.kill().await;
+                    }
+                    // Step 4: wait 5s after SIGTERM
+                    match tokio::time::timeout(std::time::Duration::from_secs(5), child.wait())
+                        .await
+                    {
+                        Ok(_) => {}
+                        Err(_) => {
+                            // Step 5: force kill
+                            let _ = child.kill().await;
+                            let _ = child.wait().await;
+                        }
+                    }
+                }
+            }
         }
         self.stdout = None;
         self.state = SessionState::Suspended;
@@ -232,11 +301,15 @@ impl ClaudeSession {
 }
 
 /// Write a JSON message to the subprocess stdin handle.
+///
+/// Matches SDK behavior: acquires lock, checks readiness, writes + flushes.
+/// On write failure, marks the handle as closed (takes it) so subsequent
+/// writes fail immediately with a clear error.
 async fn write_to_stdin(handle: &StdinHandle, msg: &serde_json::Value) -> Result<(), ApiError> {
     let mut guard = handle.lock().await;
     let stdin = guard.as_mut().ok_or_else(|| {
         ApiError(crate::error::SwarmError::Internal(
-            "Claude session: subprocess stdin not available".into(),
+            "Claude session: subprocess stdin not available (process may have exited)".into(),
         ))
     })?;
 
@@ -247,16 +320,19 @@ async fn write_to_stdin(handle: &StdinHandle, msg: &serde_json::Value) -> Result
     })?;
     line.push('\n');
 
-    stdin.write_all(line.as_bytes()).await.map_err(|e| {
-        ApiError(crate::error::SwarmError::Internal(format!(
+    if let Err(e) = stdin.write_all(line.as_bytes()).await {
+        // Mark stdin as dead so future writes fail immediately
+        *guard = None;
+        return Err(ApiError(crate::error::SwarmError::Internal(format!(
             "Failed to write to subprocess stdin: {e}"
-        )))
-    })?;
-    stdin.flush().await.map_err(|e| {
-        ApiError(crate::error::SwarmError::Internal(format!(
+        ))));
+    }
+    if let Err(e) = stdin.flush().await {
+        *guard = None;
+        return Err(ApiError(crate::error::SwarmError::Internal(format!(
             "Failed to flush subprocess stdin: {e}"
-        )))
-    })?;
+        ))));
+    }
     Ok(())
 }
 
@@ -323,18 +399,12 @@ impl SessionManager {
 
         let binary = config.binary();
         let permission_mode = permission_mode.unwrap_or_else(|| "acceptEdits".to_string());
+        // Match the official SDK's argument construction:
+        // claude --output-format stream-json --verbose [options] --input-format stream-json
         let mut args = vec![
-            "-p".to_string(),
-            String::new(), // empty initial prompt — messages sent via stdin
-            "--input-format".to_string(),
-            "stream-json".to_string(),
             "--output-format".to_string(),
             "stream-json".to_string(),
             "--verbose".to_string(),
-            // Skip slash commands and auto-discovered MCP servers for faster init.
-            // We provide our MCP config explicitly via --mcp-config below.
-            // Note: NOT using --bare because it skips OAuth (breaks subscription auth).
-            "--disable-slash-commands".to_string(),
             "--model".to_string(),
             model.clone(),
             "--permission-mode".to_string(),
@@ -361,6 +431,10 @@ impl SessionManager {
             args.push(claude_id.clone());
         }
 
+        // SDK adds --input-format last (always uses streaming mode)
+        args.push("--input-format".to_string());
+        args.push("stream-json".to_string());
+
         tracing::info!(
             session_id = %session_id,
             model = %model,
@@ -369,9 +443,18 @@ impl SessionManager {
             "Creating Claude Code session"
         );
 
+        // Build environment matching the official SDK:
+        // - Set CLAUDE_CODE_ENTRYPOINT to identify our spawned processes
+        // - Filter out CLAUDECODE to prevent nested subprocess confusion
+        let mut env: HashMap<String, String> = std::env::vars()
+            .filter(|(k, _)| k != "CLAUDECODE")
+            .collect();
+        env.insert("CLAUDE_CODE_ENTRYPOINT".to_string(), "swarmllm".to_string());
+
         let mut child = Command::new(binary)
             .args(&args)
             .current_dir(&working_dir)
+            .envs(&env)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
@@ -410,6 +493,7 @@ impl SessionManager {
             last_active: now,
             tools: Vec::new(),
             idle_timeout_secs: config.timeout_secs.unwrap_or(DEFAULT_IDLE_TIMEOUT_SECS),
+            exit_error: None,
         };
 
         self.sessions
@@ -652,6 +736,10 @@ pub async fn create_session_handler(
                 Ok(Ok(Some(text))) => {
                     let trimmed = text.trim();
                     if trimmed.is_empty() {
+                        continue;
+                    }
+                    // Skip non-JSON lines (e.g. [SandboxDebug])
+                    if !trimmed.starts_with('{') {
                         continue;
                     }
                     let evt: serde_json::Value = match serde_json::from_str(trimmed) {
