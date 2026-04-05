@@ -383,15 +383,24 @@
 
       msgs.forEach(function(msg) {
         var msgOpts = { encrypted: !!msg.encrypted };
+        var el;
         if (msg.images && msg.images.length > 0) {
           var html = '<div style="margin-bottom:6px;">';
           msg.images.forEach(function(url) {
             html += '<img src="' + U.escapeHtml(url) + '" style="max-height:120px;max-width:200px;border-radius:8px;margin-right:4px;" />';
           });
           html += '</div>' + U.escapeHtml(msg.content);
-          U.appendMessageToDOM(msg.role, html, true, msgOpts);
+          el = U.appendMessageToDOM(msg.role, html, true, msgOpts);
         } else {
-          U.appendMessageToDOM(msg.role, msg.content, false, msgOpts);
+          el = U.appendMessageToDOM(msg.role, msg.content, false, msgOpts);
+        }
+        // Restore response time for assistant messages
+        if (el && msg.role === 'assistant' && msg.duration) {
+          var timerEl = document.createElement('div');
+          timerEl.className = 'msg-timer';
+          timerEl.textContent = I18n.t('chat.response_time', { seconds: msg.duration });
+          var target = el.querySelector('.msg-bubble') || el;
+          target.appendChild(timerEl);
         }
       });
       App.chat.scrollToBottom();
@@ -488,7 +497,7 @@
           if (translated) ccText = translated;
           var result = await App.claudeCode.sendMessage(session.id, ccText, contentEl, assistantEl);
           if (result.content) {
-            session.messages.push({ role: 'assistant', content: result.content, encrypted: false });
+            session.messages.push({ role: 'assistant', content: result.content, encrypted: false, duration: result.duration });
             App.chat.saveSessions();
           }
         } catch (e) {
@@ -622,7 +631,7 @@
       timerTarget.appendChild(timerEl);
 
       if (fullContent) {
-        session.messages.push({ role: 'assistant', content: fullContent, encrypted: msgEncrypted });
+        session.messages.push({ role: 'assistant', content: fullContent, encrypted: msgEncrypted, duration: elapsed });
         App.chat.saveSessions();
       }
 

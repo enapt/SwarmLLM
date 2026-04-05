@@ -179,7 +179,8 @@
         }
       }
 
-      return { content: fullContent, pendingPermission: pendingPermission };
+      var elapsedSec = ((performance.now() - startTime) / 1000).toFixed(2);
+      return { content: fullContent, pendingPermission: pendingPermission, duration: elapsedSec };
     },
 
     // Resolve the target container — if event has parent_tool_use_id pointing
