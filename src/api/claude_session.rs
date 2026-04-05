@@ -23,7 +23,7 @@ use crate::api::server::AppState;
 use crate::error::ApiError;
 
 /// Allowed permission modes — `bypassPermissions` is never allowed via API.
-const ALLOWED_PERMISSION_MODES: &[&str] = &["default", "acceptEdits", "plan"];
+const ALLOWED_PERMISSION_MODES: &[&str] = &["default", "acceptEdits", "auto", "plan"];
 
 /// Maximum concurrent sessions (hard ceiling regardless of config).
 const MAX_SESSIONS_HARD_LIMIT: usize = 20;

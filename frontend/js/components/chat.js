@@ -521,7 +521,7 @@
             var dirInput = document.getElementById('cc-dir-input');
             var permSelect = document.getElementById('cc-permission-mode');
             var workDir = cc.working_dir || (dirInput ? dirInput.value.trim() : '');
-            var permMode = cc.permission_mode || (permSelect ? permSelect.value : 'bypassPermissions');
+            var permMode = cc.permission_mode || (permSelect ? permSelect.value : 'acceptEdits');
             cc.permission_mode = permMode;
             // Show init status while CLI boots (hooks can take 5-15s)
             contentEl.innerHTML = '<span class="typing-indicator">' +
