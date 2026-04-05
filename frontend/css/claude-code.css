@@ -117,7 +117,8 @@
 .cc-agent-bg { opacity: 0.7; margin: 4px 0; }
 .cc-agent-bg-done { opacity: 1; border-color: rgba(61,220,132,0.3); }
 
-/* ─── MCP Badge ─── */
+/* ─── Session Badges ─── */
+.cc-sub-badge { font-size: 0.62rem; font-weight: 700; padding: 1px 5px; background: rgba(168,85,247,0.15); color: #a855f7; border-radius: 3px; font-family: var(--font-mono); letter-spacing: 0.03em; }
 .cc-mcp-badge { font-size: 0.62rem; font-weight: 700; padding: 1px 5px; background: rgba(59,130,246,0.15); color: #3b82f6; border-radius: 3px; font-family: var(--font-mono); letter-spacing: 0.03em; }
 
 /* ─── Slash Command Autocomplete ─── */

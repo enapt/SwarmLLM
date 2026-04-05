@@ -383,6 +383,7 @@ impl SessionManager {
         permission_mode: Option<String>,
         config: &super::claude_sub::ClaudeSubscriptionConfig,
         mcp_url: Option<String>,
+        mcp_api_key: Option<String>,
     ) -> Result<(), ApiError> {
         // Check concurrent limit
         if self.active_count() >= config.concurrency_limit() {
@@ -420,12 +421,19 @@ impl SessionManager {
 
         // Connect SwarmLLM's MCP server so Claude can query other models
         if let Some(ref url) = mcp_url {
+            let mut server_config = serde_json::json!({
+                "type": "http",
+                "url": url
+            });
+            // Add Bearer auth so the MCP server accepts our requests
+            if let Some(ref key) = mcp_api_key {
+                server_config["headers"] = serde_json::json!({
+                    "Authorization": format!("Bearer {key}")
+                });
+            }
             let mcp_config = serde_json::json!({
                 "mcpServers": {
-                    "swarmllm": {
-                        "type": "http",
-                        "url": url
-                    }
+                    "swarmllm": server_config
                 }
             });
             args.push("--mcp-config".to_string());
@@ -697,9 +705,10 @@ pub async fn create_session_handler(
         dir
     };
 
-    // Build MCP URL for SwarmLLM's MCP server
+    // Build MCP URL + auth for SwarmLLM's MCP server
     let listen_port = state.shared_state.config.node.listen_port;
     let mcp_url = format!("http://127.0.0.1:{listen_port}/mcp");
+    let mcp_api_key = state.shared_state.api_key.clone();
 
     SessionManager::global()
         .create_session(
@@ -710,6 +719,7 @@ pub async fn create_session_handler(
             Some(req.permission_mode),
             &sub_config,
             Some(mcp_url),
+            Some(mcp_api_key),
         )
         .await?;
 

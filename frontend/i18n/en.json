@@ -722,6 +722,7 @@
   "claude_code.allowed": "Allowed",
   "claude_code.denied": "Denied",
   "claude_code.initializing": "Starting Claude Code session\u2026",
+  "claude_code.subscription_tip": "Using Claude subscription (no API costs)",
   "claude_code.retrying": "Retrying (attempt {attempt})...",
   "claude_code.cost": "{cost} \u00b7 {turns} turn(s)",
   "claude_code.perm_accept_edits": "Accept edits \u2014 prompt for commands",
