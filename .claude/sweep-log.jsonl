@@ -55,3 +55,8 @@
 {"file":"CLAUDE.md","line":124,"kind":"doc_mismatch","summary":"i18n key count 874 → 934","status":"fixed","date":"2026-04-05"}
 {"file":"frontend/i18n/*.json","line":0,"kind":"i18n_missing","summary":"3 keys missing from 20 non-English files — added","status":"fixed","date":"2026-04-05"}
 {"file":"src/api/claude_session.rs","line":722,"kind":"design_review","summary":"MAX_SESSIONS_HARD_LIMIT counts suspended sessions — acceptable, documents memory cap intent","status":"wontfix","date":"2026-04-05"}
+{"file":"frontend/js/components/claude-code.js","line":33,"kind":"regression","summary":"frontend defaulted to bypassPermissions which backend now rejects — changed to acceptEdits","status":"fixed","date":"2026-04-05"}
+{"file":"frontend/index.html","line":642,"kind":"regression","summary":"HTML dropdown had bypassPermissions option (blocked by backend) — removed, reordered","status":"fixed","date":"2026-04-05"}
+{"file":"frontend/js/components/chat.js","line":524,"kind":"regression","summary":"chat.js fallback was bypassPermissions — changed to acceptEdits","status":"fixed","date":"2026-04-05"}
+{"file":"src/api/claude_session.rs","line":26,"kind":"security_medium","summary":"ALLOWED_PERMISSION_MODES missing 'auto' (valid CLI mode used in UI dropdown) — added","status":"fixed","date":"2026-04-05"}
+{"file":"docs/ARCHITECTURE.md","line":1225,"kind":"doc_mismatch","summary":"i18n key count 874 → 934","status":"fixed","date":"2026-04-05"}
