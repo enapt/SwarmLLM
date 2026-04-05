@@ -725,8 +725,10 @@ pub async fn create_session_handler(
         "working_dir": working_dir.display().to_string(),
     });
 
-    // Read events until we get system/init.
-    // Hooks (SessionStart) can take 30-60s+, MCP servers add more. 120s generous.
+    // Read events until we get system/init, then drain through the `result` event
+    // from the empty -p "" prompt. Without this drain, the buffered result event
+    // would be read by the first SSE stream, which would interpret it as the
+    // user's response and immediately close with [DONE].
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(120);
     let init_result: Result<serde_json::Value, ApiError> = async {
         let reader = stdout_reader.as_mut().ok_or_else(|| {
@@ -734,6 +736,7 @@ pub async fn create_session_handler(
                 "Claude session: stdout not available".into(),
             ))
         })?;
+        let mut init_evt: Option<serde_json::Value> = None;
         loop {
             let line = tokio::time::timeout_at(deadline, reader.next_line()).await;
             match line {
@@ -751,12 +754,27 @@ pub async fn create_session_handler(
                     };
                     let evt_type = evt["type"].as_str().unwrap_or("");
                     let evt_subtype = evt["subtype"].as_str().unwrap_or("");
+
                     if evt_type == "system" && evt_subtype == "init" {
-                        return Ok(evt);
+                        init_evt = Some(evt);
+                        // Don't return yet — keep draining until we consume the
+                        // `result` event from the empty -p "" prompt.
+                        continue;
                     }
-                    // Skip hook messages, continue waiting for init
+
+                    if init_evt.is_some() && evt_type == "result" {
+                        // Consumed the empty prompt's result. Session is now
+                        // fully idle and ready for user messages.
+                        tracing::debug!("Drained empty-prompt result event during init");
+                        return Ok(init_evt.unwrap());
+                    }
+                    // Skip hook messages, assistant messages from empty prompt, etc.
                 }
                 Ok(Ok(None)) => {
+                    // EOF — if we got init, proceed (CLI may have exited after empty prompt)
+                    if let Some(evt) = init_evt {
+                        return Ok(evt);
+                    }
                     return Err(ApiError(crate::error::SwarmError::Internal(
                         "Claude CLI exited before sending init message".into(),
                     )));
@@ -767,6 +785,13 @@ pub async fn create_session_handler(
                     ))));
                 }
                 Err(_) => {
+                    // Timeout — if we have init, proceed (result may not come)
+                    if let Some(evt) = init_evt {
+                        tracing::warn!(
+                            "Timed out waiting for empty-prompt result, proceeding with init"
+                        );
+                        return Ok(evt);
+                    }
                     return Err(ApiError(crate::error::SwarmError::Internal(
                         "Timeout waiting for Claude CLI init (120s)".into(),
                     )));
