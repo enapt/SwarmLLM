@@ -135,7 +135,7 @@ impl RateLimiter {
             || ((path == "/api/admin/providers" || path == "/api/admin/api-key") && is_mutating)
         {
             (BucketKind::SensitiveAdmin, SENSITIVE_ADMIN_RPM)
-        } else if path.starts_with("/api/admin/") {
+        } else if path.starts_with("/api/admin/") || path.starts_with("/api/claude-code/") {
             (BucketKind::Admin, self.admin_rpm)
         } else if path.starts_with("/v1/") || path.starts_with("/api/chat") || path == "/mcp" {
             (BucketKind::Api, self.rpm)

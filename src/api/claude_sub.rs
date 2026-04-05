@@ -74,7 +74,7 @@ fn acquire_permit(
     let limit = config.concurrency_limit();
     // Enforce configured limit by checking available permits.
     let available = SUBPROCESS_SEMAPHORE.available_permits();
-    if available <= (8 - limit) {
+    if available <= 8usize.saturating_sub(limit) {
         return Err(ApiError(crate::error::SwarmError::ServiceUnavailable(
             "Claude subscription: too many concurrent requests, try again later".into(),
         )));
@@ -164,8 +164,8 @@ fn session_key(model: &str, messages: &[serde_json::Value]) -> Option<String> {
     ))
 }
 
-/// Periodic cleanup of expired sessions (call from a background task or lazily).
-pub fn cleanup_expired_sessions() {
+/// Periodic cleanup of expired sessions — called lazily from `put_session()`.
+fn cleanup_expired_sessions() {
     SESSION_CACHE.retain(|_, entry| entry.last_used.elapsed() < SESSION_TTL);
 }
 
@@ -260,12 +260,11 @@ fn read_credential_info() -> (bool, Option<String>, Option<String>) {
 // ---------------------------------------------------------------------------
 
 /// Build CLI args for `claude -p`.
-fn build_cli_args<'a>(
-    binary: &'a str,
-    model: &'a str,
-    prompt: &'a str,
-    system_prompt: Option<&'a str>,
-    session_id: Option<&'a str>,
+fn build_cli_args(
+    model: &str,
+    prompt: &str,
+    system_prompt: Option<&str>,
+    session_id: Option<&str>,
     stream: bool,
 ) -> Vec<String> {
     let mut args = vec![
@@ -297,7 +296,6 @@ fn build_cli_args<'a>(
     }
     // Prompt is the final positional argument
     args.push(prompt.to_string());
-    let _ = binary; // binary is used by caller for Command::new
     args
 }
 
@@ -420,7 +418,7 @@ async fn spawn_and_stream(
     ApiError,
 > {
     let binary = config.binary();
-    let args = build_cli_args(binary, model, prompt, system_prompt, session_id, stream);
+    let args = build_cli_args(model, prompt, system_prompt, session_id, stream);
 
     tracing::info!(
         binary = binary,
@@ -994,7 +992,7 @@ mod tests {
 
     #[test]
     fn test_build_cli_args_basic() {
-        let args = build_cli_args("claude", "claude-sonnet-4-6", "Hello", None, None, true);
+        let args = build_cli_args("claude-sonnet-4-6", "Hello", None, None, true);
         assert!(args.contains(&"--print".to_string()));
         assert!(args.contains(&"stream-json".to_string()));
         assert!(args.contains(&"--model".to_string()));
@@ -1007,7 +1005,6 @@ mod tests {
     #[test]
     fn test_build_cli_args_with_session() {
         let args = build_cli_args(
-            "claude",
             "claude-opus-4-6",
             "Follow up",
             Some("Be helpful"),

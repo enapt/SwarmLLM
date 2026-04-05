@@ -931,5 +931,8 @@
   "claude_code.bar_subtitle": "AI yang dapat membaca, menulis, dan menjalankan kode di komputer Anda",
   "claude_code.project_label": "Folder proyek",
   "claude_code.safety_label": "Mode izin",
-  "claude_code.turns_count": "{count} turns"
+  "claude_code.turns_count": "{count} turns",
+  "claude_code.initializing": "Starting Claude Code session…",
+  "claude_code.subscription_tip": "Using Claude subscription (no API costs)",
+  "nav.copied": "Copied!"
 }

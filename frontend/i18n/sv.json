@@ -931,5 +931,8 @@
   "claude_code.bar_subtitle": "AI som kan läsa, skriva och köra kod på din dator",
   "claude_code.project_label": "Projektmapp",
   "claude_code.safety_label": "Behörighetsläge",
-  "claude_code.turns_count": "{count} turns"
+  "claude_code.turns_count": "{count} turns",
+  "claude_code.initializing": "Starting Claude Code session…",
+  "claude_code.subscription_tip": "Using Claude subscription (no API costs)",
+  "nav.copied": "Copied!"
 }

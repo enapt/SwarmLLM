@@ -931,5 +931,8 @@
   "claude_code.bar_subtitle": "IA che può leggere, scrivere ed eseguire codice sul tuo computer",
   "claude_code.project_label": "Cartella del progetto",
   "claude_code.safety_label": "Modalità permessi",
-  "claude_code.turns_count": "{count} turns"
+  "claude_code.turns_count": "{count} turns",
+  "claude_code.initializing": "Starting Claude Code session…",
+  "claude_code.subscription_tip": "Using Claude subscription (no API costs)",
+  "nav.copied": "Copied!"
 }

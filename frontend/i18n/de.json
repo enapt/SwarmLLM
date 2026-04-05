@@ -931,5 +931,8 @@
   "claude_code.bar_subtitle": "KI, die Code auf Ihrem Computer lesen, schreiben und ausführen kann",
   "claude_code.project_label": "Projektordner",
   "claude_code.safety_label": "Berechtigungsmodus",
-  "claude_code.turns_count": "{count} turns"
+  "claude_code.turns_count": "{count} turns",
+  "claude_code.initializing": "Starting Claude Code session…",
+  "claude_code.subscription_tip": "Using Claude subscription (no API costs)",
+  "nav.copied": "Copied!"
 }

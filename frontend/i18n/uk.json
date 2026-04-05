@@ -931,5 +931,8 @@
   "claude_code.bar_subtitle": "ШІ, який може читати, писати та запускати код на вашому комп'ютері",
   "claude_code.project_label": "Папка проєкту",
   "claude_code.safety_label": "Режим дозволів",
-  "claude_code.turns_count": "{count} turns"
+  "claude_code.turns_count": "{count} turns",
+  "claude_code.initializing": "Starting Claude Code session…",
+  "claude_code.subscription_tip": "Using Claude subscription (no API costs)",
+  "nav.copied": "Copied!"
 }

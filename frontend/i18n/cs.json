@@ -931,5 +931,8 @@
   "claude_code.bar_subtitle": "AI, která může číst, psát a spouštět kód na vašem počítači",
   "claude_code.project_label": "Složka projektu",
   "claude_code.safety_label": "Režim oprávnění",
-  "claude_code.turns_count": "{count} turns"
+  "claude_code.turns_count": "{count} turns",
+  "claude_code.initializing": "Starting Claude Code session…",
+  "claude_code.subscription_tip": "Using Claude subscription (no API costs)",
+  "nav.copied": "Copied!"
 }

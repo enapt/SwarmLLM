@@ -147,37 +147,6 @@ impl ClaudeSession {
         Ok(())
     }
 
-    /// Send a permission response (allow/deny) to the subprocess.
-    pub async fn send_permission_response(
-        &mut self,
-        request_id: &str,
-        allow: bool,
-        deny_message: Option<&str>,
-    ) -> Result<(), ApiError> {
-        let response = if allow {
-            serde_json::json!({
-                "type": "control_response",
-                "request_id": request_id,
-                "response": {
-                    "behavior": "allow"
-                }
-            })
-        } else {
-            serde_json::json!({
-                "type": "control_response",
-                "request_id": request_id,
-                "response": {
-                    "behavior": "deny",
-                    "message": deny_message.unwrap_or("User denied this action")
-                }
-            })
-        };
-
-        write_to_stdin(&self.stdin, &response).await?;
-        self.touch();
-        Ok(())
-    }
-
     /// Read the next NDJSON event from stdout. Returns None on EOF.
     ///
     /// Matches SDK behavior: skips non-JSON lines (e.g. `[SandboxDebug]`),
@@ -627,8 +596,8 @@ pub struct CreateSessionRequest {
     /// If set, resume a previous CLI session instead of starting fresh.
     #[serde(default)]
     pub resume_claude_session_id: Option<String>,
-    /// Permission mode: "default", "acceptEdits", "bypassPermissions", "plan".
-    /// Default: "acceptEdits".
+    /// Permission mode: "default", "acceptEdits", "plan".
+    /// Default: "acceptEdits". "bypassPermissions" is blocked for security.
     #[serde(default = "default_permission_mode")]
     pub permission_mode: String,
 }
@@ -951,8 +920,7 @@ pub async fn send_message_handler(
         let session = session_arc.lock().await;
         if session.state == SessionState::Suspended {
             drop(session);
-            // TODO: auto-resume by re-creating with --resume
-            return Err(ApiError(crate::error::SwarmError::Internal(
+            return Err(ApiError(crate::error::SwarmError::Validation(
                 "Session is suspended. Send a create request with resume_claude_session_id to resume.".into(),
             )));
         }
