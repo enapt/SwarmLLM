@@ -142,6 +142,10 @@ a:hover { color: var(--accent-hover); }
 .header-left { flex: 0 0 auto; }
 .header-center { flex: 0 0 auto; }
 .header-right { flex: 0 0 auto; gap: 12px; }
+.header-right > .btn-ghost.btn-sm { font-size: 1.25rem; padding: 4px 8px; min-width: 34px; min-height: 34px; display: inline-flex; align-items: center; justify-content: center; }
+.header-right > .btn-ghost.btn-sm svg { width: 20px; height: 20px; }
+.share-btn-wrap .btn-ghost.btn-sm { font-size: 1.25rem; }
+.share-btn-wrap .btn-ghost.btn-sm svg { width: 20px; height: 20px; }
 
 .app-header .logo {
   font-family: var(--font-mono);
