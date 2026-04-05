@@ -17,3 +17,30 @@
 {"file":"docs/ARCHITECTURE.md","line":1212,"kind":"doc_mismatch","summary":"i18n key count said 906 but actual is 874 — updated","status":"fixed","date":"2026-04-04"}
 {"file":"frontend/css/style.css","line":1818,"kind":"dead_css","summary":".health-none selector never applied — healthClass only assigns health-low/partial/full/good","status":"fixed","date":"2026-04-04"}
 {"file":"frontend/css/style.css","line":2838,"kind":"dead_css","summary":".shard-legend-mini class never referenced in JS or HTML — removed","status":"fixed","date":"2026-04-04"}
+{"file":"src/api/claude_session.rs","line":642,"kind":"security_critical","summary":"default_permission_mode returned bypassPermissions instead of acceptEdits","status":"fixed","date":"2026-04-05"}
+{"file":"src/api/claude_session.rs","line":638,"kind":"security_critical","summary":"permission_mode accepted arbitrary strings including bypassPermissions — added allowlist validation","status":"fixed","date":"2026-04-05"}
+{"file":"src/api/claude_session.rs","line":686,"kind":"security_critical","summary":"working_dir accepted arbitrary paths — restricted to home/tmp directory subtree","status":"fixed","date":"2026-04-05"}
+{"file":"src/api/claude_session.rs","line":444,"kind":"security_critical","summary":"resume_claude_session_id passed unvalidated — added UUID format check","status":"fixed","date":"2026-04-05"}
+{"file":"src/api/claude_session.rs","line":377,"kind":"security_high","summary":"session_id from client not validated — added length/path-separator checks","status":"fixed","date":"2026-04-05"}
+{"file":"src/api/claude_session.rs","line":389,"kind":"security_high","summary":"no hard cap on total sessions — added MAX_SESSIONS_HARD_LIMIT=20","status":"fixed","date":"2026-04-05"}
+{"file":"src/api/claude_session.rs","line":417,"kind":"security_medium","summary":"model name passed to CLI without validation — added format check","status":"fixed","date":"2026-04-05"}
+{"file":"src/api/claude_session.rs","line":258,"kind":"security_low","summary":"suspend() used blocking std::process::Command for kill — switched to async start_kill()","status":"fixed","date":"2026-04-05"}
+{"file":"src/api/claude_sub.rs","line":138,"kind":"security_medium","summary":"session_key used DefaultHasher (non-crypto) — switched to BLAKE3","status":"fixed","date":"2026-04-05"}
+{"file":"src/api/claude_sub.rs","line":119,"kind":"security_high","summary":"SESSION_CACHE unbounded — added lazy cleanup + MAX_SESSION_CACHE_SIZE=200 + emergency eviction","status":"fixed","date":"2026-04-05"}
+{"file":"src/api/claude_sub.rs","line":843,"kind":"security_high","summary":"collect_result() no per-line size limit — added MAX_RESPONSE_LINE=1MB cap","status":"fixed","date":"2026-04-05"}
+{"file":"src/api/claude_sub.rs","line":444,"kind":"security_medium","summary":"model name not validated in proxy paths — added validate_model_name()","status":"fixed","date":"2026-04-05"}
+{"file":"src/api/claude_sub.rs","line":78,"kind":"error_type_misuse","summary":"SwarmError::Internal for rate limit → ServiceUnavailable (503 with message)","status":"fixed","date":"2026-04-05"}
+{"file":"src/api/claude_session.rs","line":390,"kind":"error_type_misuse","summary":"SwarmError::Internal for session limit → ServiceUnavailable","status":"fixed","date":"2026-04-05"}
+{"file":"src/api/admin.rs","line":276,"kind":"error_type_misuse","summary":"SwarmError::Internal for config parse → Config (400 with message)","status":"fixed","date":"2026-04-05"}
+{"file":"src/api/admin_models.rs","line":1135,"kind":"duplication","summary":"3x inline gpu_info.is_some() replaced with memory_type_label()","status":"fixed","date":"2026-04-05"}
+{"file":"frontend/js/components/claude-code.js","line":675,"kind":"hardcoded_english","summary":"turns display hardcoded — replaced with I18n.t('claude_code.turns_count')","status":"fixed","date":"2026-04-05"}
+{"file":"frontend/js/components/claude-code.js","line":705,"kind":"dead_code","summary":"_formatDiff method never called — removed","status":"fixed","date":"2026-04-05"}
+{"file":"CLAUDE.md","line":228,"kind":"doc_mismatch","summary":"test count 653 → 657 to match Testing section","status":"fixed","date":"2026-04-05"}
+{"file":"CLAUDE.md","line":116,"kind":"doc_mismatch","summary":"component count 13→14, added claude-code.js to list (also ARCHITECTURE.md)","status":"fixed","date":"2026-04-05"}
+{"file":"src/api/claude_session.rs","line":37,"kind":"dead_code","summary":"_DEFAULT_MAX_ACTIVE_SESSIONS unused constant — removed","status":"fixed","date":"2026-04-05"}
+{"file":"src/api/claude_sub.rs","line":148,"kind":"dead_code","summary":"cleanup_expired_sessions was never called — now wired into put_session()","status":"fixed","date":"2026-04-05"}
+{"file":"src/error.rs","line":66,"kind":"dead_code","summary":"SwarmError::InsufficientDisk never constructed in production — deferred feature for disk check","status":"deferred","date":"2026-04-05"}
+{"file":"src/api/admin_models.rs","line":938,"kind":"duplication","summary":"evict_split_models+unload_and_clear_window always called together (4x) — architectural extraction deferred","status":"deferred","date":"2026-04-05"}
+{"file":"src/inference/vision.rs","line":711,"kind":"assert_panic","summary":"assert_eq! in production load_from_mmproj_gguf can panic on malformed GGUF — runs in subprocess so crash-safe but ideally should return error","status":"deferred","date":"2026-04-05"}
+{"file":"src/api/claude_sub.rs","line":200,"kind":"security_info","summary":"read_credential_info returns subscription_type/rate_limit_tier — behind auth, acceptable","status":"wontfix","date":"2026-04-05"}
+{"file":"src/api/claude_session.rs","line":393,"kind":"security_high","summary":"session ID collision — any auth'd client can access another's session. Single-operator use acceptable for now.","status":"deferred","date":"2026-04-05"}
