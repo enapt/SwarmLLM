@@ -305,11 +305,19 @@
       var countLabel = msgCount === 0 ? I18n.t('chat.count_new') : (msgCount === 1 ? I18n.t('chat.count_one') : I18n.t('chat.count_many', { count: msgCount }));
       var countClass = 'chat-session-count' + (msgCount === 0 ? ' is-new' : '');
       var safeModelId = U.escapeHtml(s.model || '');
+      // Subscription/API badge for the model
+      var authBadge = '';
+      if (headerModelItem && headerModelItem.group === 'claude_subscription') {
+        authBadge = ' <span class="cc-auth-badge cc-auth-sub" title="' + U.escapeHtml(I18n.t('claude_code.subscription_tip')) + '">Sub</span>';
+      } else if (headerSource === 'cloud') {
+        authBadge = ' <span class="cc-auth-badge cc-auth-api">API</span>';
+      }
+
       header.classList.add('visible');
       header.innerHTML =
         '<span class="chat-session-title" id="chat-header-title" title="' + U.escapeHtml(I18n.t('chat.rename_title')) + '">' + U.escapeHtml(s.title) + '</span>' +
         '<span class="' + countClass + '">' + U.escapeHtml(countLabel) + '</span>' +
-        '<span class="' + badgeClass + '" title="' + U.escapeHtml(badgeTitle) + '">' + (hdrIconHtml ? hdrIconHtml + ' ' : '') + U.escapeHtml(modelName) + (available ? '' : ' ' + U.escapeHtml(I18n.t('chat.model_unavailable_suffix'))) + '</span>';
+        '<span class="' + badgeClass + '" title="' + U.escapeHtml(badgeTitle) + '">' + (hdrIconHtml ? hdrIconHtml + ' ' : '') + U.escapeHtml(modelName) + authBadge + (available ? '' : ' ' + U.escapeHtml(I18n.t('chat.model_unavailable_suffix'))) + '</span>';
 
       if (encBanner) {
         var modelData = s.model ? (App.data.cache.models || []).find(function(m) { return m.id === s.model; }) : null;

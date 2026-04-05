@@ -1208,6 +1208,9 @@ input[type="range"]::-webkit-slider-thumb {
   background: color-mix(in srgb, var(--red, #f44) 10%, transparent);
   border-color: color-mix(in srgb, var(--red, #f44) 30%, transparent);
 }
+.cc-auth-badge { font-size: 0.58rem; font-weight: 700; padding: 0 4px; border-radius: 3px; letter-spacing: 0.03em; vertical-align: middle; }
+.cc-auth-sub { background: rgba(168,85,247,0.2); color: #a855f7; }
+.cc-auth-api { background: rgba(59,130,246,0.2); color: #3b82f6; }
 .chat-session-count {
   font-size: 0.68rem;
   color: var(--text-muted);
