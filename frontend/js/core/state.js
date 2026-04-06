@@ -55,9 +55,6 @@ window.App = {
   MODEL_STATUS_KEY: 'swarmllm_model_status',
   ACTIVITY_KEY: 'swarmllm_activity',
   NETWORK_LOG_KEY: 'swarmllm_network_log',
-  MODEL_EVENTS_KEY: 'swarmllm_model_events',
-  MODEL_NET_EVENTS_KEY: 'swarmllm_model_net_events',
-  BOOT_EPOCH_KEY: 'swarmllm_boot_epoch',
 
   // --- Component namespaces (populated by component files) ---
   // ui, chat, dashboard, hf, settings, setup, identity, networkMap,

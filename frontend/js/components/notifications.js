@@ -359,8 +359,7 @@
         App.dashboard.loadInitial();
         App.providerHealth.startHealthPolling();
       } else {
-        // First connect this page load — clear stale global activity (per-model events
-        // are validated against boot_epoch in dashboard.js _validateSession)
+        // First connect this page load — clear stale global activity
         _activityEntries = [];
         _networkEntries = [];
         _persistActivity();
