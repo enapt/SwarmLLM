@@ -620,7 +620,9 @@ pub struct SessionInfo {
 
 #[derive(Debug, Deserialize)]
 pub struct CreateSessionRequest {
-    pub session_id: String,
+    /// Client-provided session ID. If omitted, the server generates a UUID.
+    #[serde(default)]
+    pub session_id: Option<String>,
     pub model: String,
     #[serde(default)]
     pub working_dir: Option<String>,
@@ -698,16 +700,19 @@ pub async fn create_session_handler(
         )));
     }
 
-    // --- Security: validate session_id format (prevent path traversal) ---
-    if req.session_id.len() > 128
-        || req.session_id.contains('/')
-        || req.session_id.contains('\\')
-        || req.session_id.contains("..")
-    {
-        return Err(ApiError(crate::error::SwarmError::Validation(
-            "Invalid session_id: must be ≤128 chars, no path separators".into(),
-        )));
-    }
+    // Generate or validate session_id
+    let session_id = if let Some(ref id) = req.session_id {
+        // Client-provided: validate format (prevent path traversal)
+        if id.len() > 128 || id.contains('/') || id.contains('\\') || id.contains("..") {
+            return Err(ApiError(crate::error::SwarmError::Validation(
+                "Invalid session_id: must be ≤128 chars, no path separators".into(),
+            )));
+        }
+        id.clone()
+    } else {
+        // Server-generated UUID — prevents session ID guessing
+        uuid::Uuid::new_v4().to_string()
+    };
 
     // --- Security: validate resume_claude_session_id as UUID ---
     if let Some(ref resume_id) = req.resume_claude_session_id {
@@ -746,7 +751,7 @@ pub async fn create_session_handler(
         p
     } else {
         // Create a unique temp directory per session to avoid collisions
-        let dir = std::env::temp_dir().join(format!("swarmllm-chat-{}", &req.session_id));
+        let dir = std::env::temp_dir().join(format!("swarmllm-chat-{}", &session_id));
         if !dir.exists() {
             std::fs::create_dir_all(&dir).map_err(|e| {
                 ApiError(crate::error::SwarmError::Internal(format!(
@@ -764,7 +769,7 @@ pub async fn create_session_handler(
 
     SessionManager::global()
         .create_session(
-            req.session_id.clone(),
+            session_id.clone(),
             req.model,
             working_dir.clone(),
             req.resume_claude_session_id,
@@ -778,7 +783,7 @@ pub async fn create_session_handler(
     // The CLI with -p "" + --input-format stream-json waits for a stdin message
     // before emitting system/init. Write an empty user message to trigger init.
     let session_arc = SessionManager::global()
-        .get_session(&req.session_id)
+        .get_session(&session_id)
         .ok_or_else(|| {
             ApiError(crate::error::SwarmError::Internal(
                 "Session created but not found".into(),
@@ -805,7 +810,7 @@ pub async fn create_session_handler(
 
     let mut init_info = serde_json::json!({
         "status": "created",
-        "session_id": req.session_id,
+        "session_id": session_id,
         "working_dir": working_dir.display().to_string(),
     });
 
@@ -1005,15 +1010,7 @@ pub async fn send_message_handler(
     };
 
     let body = axum::body::Body::from_stream(stream);
-    axum::response::Response::builder()
-        .header("content-type", "text/event-stream")
-        .header("cache-control", "no-cache")
-        .body(body)
-        .map_err(|e| {
-            ApiError(crate::error::SwarmError::Internal(format!(
-                "Failed to build SSE response: {e}"
-            )))
-        })
+    super::providers::build_sse_response(body)
 }
 
 /// POST /api/claude-code/session/:id/permission — Respond to a tool permission prompt.

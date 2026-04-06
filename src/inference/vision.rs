@@ -708,12 +708,12 @@ pub fn load_from_mmproj_gguf(
         // we need to reshape to (hidden_size, patch_dim) for our manual patch projection.
         // GGUF stores [kH, kW, C_in, C_out] which may be loaded as 2D [kH, kW*C_in*C_out]
         // or 4D. Either way, total elements = hidden_size * patch_dim.
-        assert_eq!(
-            total_elements,
-            hidden_size * patch_dim,
-            "patch_embd size mismatch: {total_elements} vs {}",
-            hidden_size * patch_dim
-        );
+        if total_elements != hidden_size * patch_dim {
+            return Err(SwarmError::Inference(format!(
+                "patch_embd size mismatch: {total_elements} vs {}",
+                hidden_size * patch_dim
+            )));
+        }
         patch_proj_raw
             .reshape(&[hidden_size, patch_dim])
             .map_err(|e| SwarmError::Inference(format!("patch_embd reshape: {e}")))?

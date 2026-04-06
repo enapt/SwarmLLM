@@ -1757,6 +1757,42 @@ mod tests {
     use super::*;
     use crate::types::{ChatMessage, ModelId, PriorityTier, Role, SamplingParams};
 
+    fn make_test_shared_state(
+        config: crate::config::Config,
+    ) -> (
+        std::sync::Arc<crate::daemon::SharedState>,
+        tempfile::TempDir,
+    ) {
+        use crate::identity::Identity;
+        use crate::inference::executor::ModelExecutor;
+        use crate::storage::db::Database;
+        use std::sync::Arc;
+        use tokio::sync::Mutex;
+
+        let identity = Identity::generate();
+        let temp = tempfile::tempdir().unwrap();
+        let db = Database::open(temp.path()).unwrap();
+        let executor = Arc::new(Mutex::new(ModelExecutor::new()));
+        let (shared_state, _, _) = SharedState::new(config, identity, db, executor, None);
+        (shared_state, temp)
+    }
+
+    fn make_test_router(
+        config: crate::config::Config,
+    ) -> (
+        InferenceRouter,
+        mpsc::Sender<RouterCommand>,
+        tempfile::TempDir,
+    ) {
+        let (shared_state, temp) = make_test_shared_state(config);
+        let (cmd_tx, cmd_rx) = mpsc::channel(64);
+        let (net_tx, _net_rx) = mpsc::channel(64);
+        let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+        let router =
+            InferenceRouter::new(shared_state, cmd_rx, cmd_tx.clone(), net_tx, shutdown_rx);
+        (router, cmd_tx, temp)
+    }
+
     fn make_request(priority: PriorityTier) -> InferenceRequest {
         InferenceRequest {
             id: uuid::Uuid::new_v4(),
@@ -1829,27 +1865,9 @@ mod tests {
 
     #[test]
     fn collect_batch_groups_same_model() {
-        use crate::config::Config;
-        use crate::identity::Identity;
-        use crate::inference::executor::ModelExecutor;
-        use crate::storage::db::Database;
-        use std::sync::Arc;
-        use tokio::sync::Mutex;
-
-        let mut config = Config::default();
+        let mut config = crate::config::Config::default();
         config.inference.max_batch_size = 4;
-        let identity = Identity::generate();
-        let temp = tempfile::tempdir().unwrap();
-        let db = Database::open(temp.path()).unwrap();
-        let executor = Arc::new(Mutex::new(ModelExecutor::new()));
-        let (shared_state, _, _) = SharedState::new(config, identity, db, executor, None);
-
-        let (cmd_tx, cmd_rx) = mpsc::channel(64);
-        let (net_tx, _net_rx) = mpsc::channel(64);
-        let (shutdown_tx, shutdown_rx) = watch::channel(false);
-        let _ = shutdown_tx;
-
-        let mut router = InferenceRouter::new(shared_state, cmd_rx, cmd_tx, net_tx, shutdown_rx);
+        let (mut router, _cmd_tx, _temp) = make_test_router(config);
 
         // Add 3 requests for model "alpha", 2 for model "beta"
         for _ in 0..3 {
@@ -1880,26 +1898,8 @@ mod tests {
 
     #[test]
     fn collect_batch_single_returns_one() {
-        use crate::config::Config;
-        use crate::identity::Identity;
-        use crate::inference::executor::ModelExecutor;
-        use crate::storage::db::Database;
-        use std::sync::Arc;
-        use tokio::sync::Mutex;
-
-        let config = Config::default(); // max_batch_size = 1
-        let identity = Identity::generate();
-        let temp = tempfile::tempdir().unwrap();
-        let db = Database::open(temp.path()).unwrap();
-        let executor = Arc::new(Mutex::new(ModelExecutor::new()));
-        let (shared_state, _, _) = SharedState::new(config, identity, db, executor, None);
-
-        let (_cmd_tx, cmd_rx) = mpsc::channel(64);
-        let (net_tx, _net_rx) = mpsc::channel(64);
-        let (_shutdown_tx, shutdown_rx) = watch::channel(false);
-
-        let mut router =
-            InferenceRouter::new(shared_state, cmd_rx, _cmd_tx.clone(), net_tx, shutdown_rx);
+        let config = crate::config::Config::default(); // max_batch_size = 1
+        let (mut router, _cmd_tx, _temp) = make_test_router(config);
 
         // Add 3 requests
         for _ in 0..3 {
@@ -1919,27 +1919,9 @@ mod tests {
 
     #[test]
     fn collect_batch_respects_max_size() {
-        use crate::config::Config;
-        use crate::identity::Identity;
-        use crate::inference::executor::ModelExecutor;
-        use crate::storage::db::Database;
-        use std::sync::Arc;
-        use tokio::sync::Mutex;
-
-        let mut config = Config::default();
+        let mut config = crate::config::Config::default();
         config.inference.max_batch_size = 2;
-        let identity = Identity::generate();
-        let temp = tempfile::tempdir().unwrap();
-        let db = Database::open(temp.path()).unwrap();
-        let executor = Arc::new(Mutex::new(ModelExecutor::new()));
-        let (shared_state, _, _) = SharedState::new(config, identity, db, executor, None);
-
-        let (_cmd_tx, cmd_rx) = mpsc::channel(64);
-        let (net_tx, _net_rx) = mpsc::channel(64);
-        let (_shutdown_tx, shutdown_rx) = watch::channel(false);
-
-        let mut router =
-            InferenceRouter::new(shared_state, cmd_rx, _cmd_tx.clone(), net_tx, shutdown_rx);
+        let (mut router, _cmd_tx, _temp) = make_test_router(config);
 
         // Add 5 requests all same model
         for _ in 0..5 {
@@ -1959,26 +1941,7 @@ mod tests {
 
     #[test]
     fn collect_batch_empty_queue() {
-        use crate::config::Config;
-        use crate::identity::Identity;
-        use crate::inference::executor::ModelExecutor;
-        use crate::storage::db::Database;
-        use std::sync::Arc;
-        use tokio::sync::Mutex;
-
-        let config = Config::default();
-        let identity = Identity::generate();
-        let temp = tempfile::tempdir().unwrap();
-        let db = Database::open(temp.path()).unwrap();
-        let executor = Arc::new(Mutex::new(ModelExecutor::new()));
-        let (shared_state, _, _) = SharedState::new(config, identity, db, executor, None);
-
-        let (_cmd_tx, cmd_rx) = mpsc::channel(64);
-        let (net_tx, _net_rx) = mpsc::channel(64);
-        let (_shutdown_tx, shutdown_rx) = watch::channel(false);
-
-        let mut router =
-            InferenceRouter::new(shared_state, cmd_rx, _cmd_tx.clone(), net_tx, shutdown_rx);
+        let (mut router, _cmd_tx, _temp) = make_test_router(crate::config::Config::default());
 
         let batch = router.collect_batch(4);
         assert!(batch.is_empty());

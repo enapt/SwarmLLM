@@ -1021,6 +1021,15 @@ impl SharedState {
         self.index_split_model_remove_all(model_id);
     }
 
+    /// Evict cached split model entries AND kill the worker subprocess for a model.
+    /// Use this when fully unloading a model (delete, unload, shard removal with no remaining shards).
+    pub async fn evict_and_unload(&self, model_id: &crate::types::ModelId) {
+        self.evict_split_models(model_id);
+        self.model_process_pool
+            .unload_and_clear_window(model_id)
+            .await;
+    }
+
     /// Emit a rich activity event to the dashboard.
     /// Lightweight fire-and-forget — if no WebSocket subscribers, the event is dropped.
     pub fn emit_activity(&self, event: ActivityEvent) {

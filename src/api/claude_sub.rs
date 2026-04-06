@@ -450,7 +450,6 @@ struct ProxySetup {
     lines: tokio::io::Lines<tokio::io::BufReader<tokio::process::ChildStdout>>,
     model: String,
     stream: bool,
-    system_prompt: Option<String>,
     sess_key: Option<String>,
     timeout: std::time::Duration,
     _permit: tokio::sync::SemaphorePermit<'static>,
@@ -484,12 +483,14 @@ async fn prepare_proxy(
     )
     .await?;
 
+    // system_prompt already consumed by build_cli_args — not needed in result
+    let _ = system_prompt;
+
     Ok(ProxySetup {
         child,
         lines,
         model: model.to_string(),
         stream,
-        system_prompt,
         sess_key,
         timeout: config.timeout(),
         _permit: permit,
@@ -506,7 +507,7 @@ pub async fn proxy_via_subprocess_openai(
         mut lines,
         model,
         stream,
-        system_prompt: _,
+
         sess_key,
         timeout,
         _permit,
@@ -647,15 +648,7 @@ pub async fn proxy_via_subprocess_openai(
         };
 
         let body = axum::body::Body::from_stream(stream);
-        axum::response::Response::builder()
-            .header("content-type", "text/event-stream")
-            .header("cache-control", "no-cache")
-            .body(body)
-            .map_err(|e| {
-                ApiError(crate::error::SwarmError::Internal(format!(
-                    "Failed to build SSE response: {e}"
-                )))
-            })
+        super::providers::build_sse_response(body)
     } else {
         // Non-streaming: collect full response
         let result = collect_result(&mut lines, timeout, &mut child).await?;
@@ -712,7 +705,7 @@ pub async fn proxy_via_subprocess_anthropic(
         mut lines,
         model,
         stream,
-        system_prompt: _,
+
         sess_key,
         timeout,
         _permit,
@@ -816,15 +809,7 @@ pub async fn proxy_via_subprocess_anthropic(
         };
 
         let body = axum::body::Body::from_stream(stream);
-        axum::response::Response::builder()
-            .header("content-type", "text/event-stream")
-            .header("cache-control", "no-cache")
-            .body(body)
-            .map_err(|e| {
-                ApiError(crate::error::SwarmError::Internal(format!(
-                    "Failed to build SSE response: {e}"
-                )))
-            })
+        super::providers::build_sse_response(body)
     } else {
         // Non-streaming: collect and return Anthropic JSON
         let result = collect_result(&mut lines, timeout, &mut child).await?;

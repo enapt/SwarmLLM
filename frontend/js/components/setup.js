@@ -92,7 +92,7 @@
           App.setup._joinedPeer = true;
           document.getElementById('setup-invite-code').value = '';
         } else {
-          status.textContent = result.error ? result.error.message : I18n.t('setup.failed_connect');
+          status.textContent = U.extractErrorMessage(result, I18n.t('setup.failed_connect'));
           status.style.color = 'var(--red)';
         }
       } catch (e) {

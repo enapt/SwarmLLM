@@ -16,15 +16,7 @@ pub async fn build_passthrough_response(
     if stream {
         let byte_stream = resp.bytes_stream();
         let body = axum::body::Body::from_stream(byte_stream);
-        axum::response::Response::builder()
-            .header("content-type", "text/event-stream")
-            .header("cache-control", "no-cache")
-            .body(body)
-            .map_err(|e| {
-                ApiError(crate::error::SwarmError::Internal(format!(
-                    "Failed to build response: {e}"
-                )))
-            })
+        build_sse_response(body)
     } else {
         let body = resp.text().await.unwrap_or_default();
         axum::response::Response::builder()
@@ -36,6 +28,20 @@ pub async fn build_passthrough_response(
                 )))
             })
     }
+}
+
+/// Build an SSE response from a body stream.
+/// Shared helper used by claude_sub, claude_session, and passthrough responses.
+pub fn build_sse_response(body: axum::body::Body) -> Result<axum::response::Response, ApiError> {
+    axum::response::Response::builder()
+        .header("content-type", "text/event-stream")
+        .header("cache-control", "no-cache")
+        .body(body)
+        .map_err(|e| {
+            ApiError(crate::error::SwarmError::Internal(format!(
+                "Failed to build SSE response: {e}"
+            )))
+        })
 }
 
 /// Extract a friendly error message from a provider error response body.

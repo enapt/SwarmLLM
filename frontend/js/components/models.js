@@ -643,7 +643,7 @@
           });
           if (!encResp.ok) {
             var encData = await encResp.json().catch(function() { return {}; });
-            encErr = encData.error ? encData.error.message : I18n.t('models.enc_pipeline_save_failed');
+            encErr = U.extractErrorMessage(encData, I18n.t('models.enc_pipeline_save_failed'));
           }
         }
 
@@ -656,7 +656,7 @@
           var errMsg = encErr || '';
           if (!amResp.ok) {
             var errData = await amResp.json().catch(function() { return {}; });
-            errMsg = errData.error ? errData.error.message : I18n.t('models.save_failed');
+            errMsg = U.extractErrorMessage(errData, I18n.t('models.save_failed'));
           }
           App.ui.showBanner('error', errMsg);
         }

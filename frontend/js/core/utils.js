@@ -418,14 +418,21 @@
 
   // --- Extract error message string from a failed response ---
   // Parses the JSON body and returns the error message string, or fallback.
+  // Extract error message from a parsed API response body.
+  // Usage: var msg = App.utils.extractErrorMessage(data, 'Fallback');
+  function extractErrorMessage(data, fallback) {
+    if (data && data.error) {
+      return data.error.message || data.error || fallback;
+    }
+    return fallback;
+  }
+
   // Usage: var msg = await App.utils.getApiErrorMessage(resp, 'Action failed');
   async function getApiErrorMessage(resp, fallback) {
     var msg = fallback || I18n.t('common.request_failed');
     try {
       var body = await resp.json();
-      if (body && body.error) {
-        msg = body.error.message || body.error || msg;
-      }
+      msg = extractErrorMessage(body, msg);
     } catch (e) {}
     return msg;
   }
@@ -454,6 +461,7 @@
     updateTokenCounter: updateTokenCounter,
     updateChatAvailability: updateChatAvailability,
     updateChatDownloadProgress: updateChatDownloadProgress,
+    extractErrorMessage: extractErrorMessage,
     getApiErrorMessage: getApiErrorMessage,
     modelApiUrl: function(modelId) {
       var parts = Array.prototype.slice.call(arguments, 1);

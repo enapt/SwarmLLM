@@ -148,7 +148,7 @@
           } else if (dlData.status === 'already_local') {
             App.ui.showBanner('info', I18n.t('shard.already_local', { idx: idx + 1 }));
           } else {
-            App.ui.showBanner('error', dlData.error ? dlData.error.message : I18n.t('shard.download_unavailable'));
+            App.ui.showBanner('error', U.extractErrorMessage(dlData, I18n.t('shard.download_unavailable')));
           }
         } catch (e) {
           App.ui.showBanner('error', I18n.t('shard.download_failed', { error: e.message }));

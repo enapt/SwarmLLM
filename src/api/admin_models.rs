@@ -35,6 +35,38 @@ pub(crate) fn validate_shard_params(model_id: &str, shard_index: u32) -> Result<
     Ok(())
 }
 
+/// Resolve a shard's model ID, shard ID, and local node ID from path params.
+/// Returns an error if the shard is not held locally.
+fn resolve_local_shard(
+    shared: &crate::daemon::SharedState,
+    model_id: &str,
+    shard_index: u32,
+) -> Result<
+    (
+        crate::types::ModelId,
+        crate::types::ShardId,
+        crate::types::NodeId,
+    ),
+    ApiError,
+> {
+    let mid = crate::types::ModelId(model_id.to_string());
+    let shard_id = crate::types::ShardId {
+        model_id: mid.clone(),
+        index: shard_index,
+    };
+    let local_node_id = shared.identity.node_id().clone();
+    if !shared
+        .model_registry
+        .shard_holders(&shard_id)
+        .contains(&local_node_id)
+    {
+        return Err(ApiError(crate::error::SwarmError::Validation(
+            "Shard is not held locally".into(),
+        )));
+    }
+    Ok((mid, shard_id, local_node_id))
+}
+
 /// Build a shard download progress JSON value from a ShardProgress entry.
 /// Returns None if the shard is in a terminal state (Complete/Failed).
 fn shard_download_json(sp: &crate::model::acquisition::ShardProgress) -> Option<serde_json::Value> {
@@ -64,6 +96,64 @@ fn peer_downloads_json(peers: &[(crate::types::NodeId, u32)]) -> Vec<serde_json:
             })
         })
         .collect()
+}
+
+/// Build per-shard JSON with common fields (index, size, local, holders, locked, download, peer_downloads).
+/// Used by both `build_shard_detail` and `shard_storage` to avoid duplicating ~30 lines.
+fn build_shard_json(
+    shard: &crate::types::ShardInfo,
+    shared: &crate::daemon::SharedState,
+    model_id: &crate::types::ModelId,
+    local_node_id: &crate::types::NodeId,
+    acq: Option<&crate::model::acquisition::AcquisitionStatus>,
+) -> (serde_json::Value, bool, bool) {
+    let shard_id = crate::types::ShardId {
+        model_id: model_id.clone(),
+        index: shard.index,
+    };
+    let holders = shared.model_registry.shard_holders(&shard_id);
+    let is_local = holders.contains(local_node_id);
+    let locked = shared
+        .models
+        .locked_shards
+        .get(&shard_id)
+        .map(|v| *v)
+        .unwrap_or(false);
+
+    let mut shard_json = serde_json::json!({
+        "index": shard.index,
+        "size_bytes": shard.size_bytes,
+        "local": is_local,
+        "holders": holders.len(),
+        "locked": locked,
+    });
+
+    let mut any_downloading = false;
+
+    // Attach per-shard download state if downloading
+    if let Some(p) = acq {
+        if let Some(sp) = p.shard_progress.get(&shard.index) {
+            if let Some(dl) = shard_download_json(sp) {
+                any_downloading = true;
+                if let Some(obj) = shard_json.as_object_mut() {
+                    obj.insert("download".to_string(), dl);
+                }
+            }
+        }
+    }
+
+    // Attach peer download state
+    if let Some(peer_dl) = shared.models.peer_shard_downloads.get(&shard_id) {
+        let peers = peer_downloads_json(peer_dl.value());
+        if !peers.is_empty() {
+            any_downloading = true;
+            if let Some(obj) = shard_json.as_object_mut() {
+                obj.insert("peer_downloads".to_string(), serde_json::json!(peers));
+            }
+        }
+    }
+
+    (shard_json, is_local, any_downloading)
 }
 
 /// Serialize an acquisition progress entry to JSON. Used by both REST download_queue
@@ -183,72 +273,29 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
             (local_count, global_count)
         };
 
-    // Helper: build per-shard detail for a manifest, including download state
+    // Helper: build per-shard detail for a manifest, including download state + in_vram
     let build_shard_detail =
         |m: &crate::types::ModelManifest, state: &AppState| -> Vec<serde_json::Value> {
             let acq = state.shared_state.models.acquisition_progress.get(&m.id);
             m.shards
                 .iter()
                 .map(|s| {
-                    let shard_id = crate::types::ShardId {
-                        model_id: m.id.clone(),
-                        index: s.index,
-                    };
-                    let holders = state.shared_state.model_registry.shard_holders(&shard_id);
-                    let local = holders.contains(&local_node_id);
-
-                    // Check if this shard is currently loaded in memory (VRAM or RAM).
-                    // Check subprocess pool and split_models DashMap.
-                    // Also check direct executor — but only if its loaded model matches this model.
-                    let in_vram = if local {
+                    let (mut shard_json, is_local, _) = build_shard_json(
+                        s,
+                        &state.shared_state,
+                        &m.id,
+                        &local_node_id,
+                        acq.as_deref(),
+                    );
+                    // Add in_vram field (only for model detail, not storage view)
+                    let in_vram = if is_local {
                         state.shared_state.is_shard_in_vram(&m.id, s.index)
                     } else {
                         false
                     };
-
-                    let locked = state
-                        .shared_state
-                        .models
-                        .locked_shards
-                        .get(&shard_id)
-                        .map(|v| *v)
-                        .unwrap_or(false);
-
-                    let mut shard_json = serde_json::json!({
-                        "index": s.index,
-                        "size_bytes": s.size_bytes,
-                        "local": local,
-                        "holders": holders.len(),
-                        "in_vram": in_vram,
-                        "locked": locked,
-                    });
-
-                    // Attach per-shard download state if downloading
-                    if let Some(ref p) = acq {
-                        if let Some(sp) = p.shard_progress.get(&s.index) {
-                            if let Some(dl) = shard_download_json(sp) {
-                                if let Some(obj) = shard_json.as_object_mut() {
-                                    obj.insert("download".to_string(), dl);
-                                }
-                            }
-                        }
+                    if let Some(obj) = shard_json.as_object_mut() {
+                        obj.insert("in_vram".to_string(), serde_json::json!(in_vram));
                     }
-
-                    // Attach peer download state
-                    if let Some(peer_dl) = state
-                        .shared_state
-                        .models
-                        .peer_shard_downloads
-                        .get(&shard_id)
-                    {
-                        let peers = peer_downloads_json(peer_dl.value());
-                        if !peers.is_empty() {
-                            if let Some(obj) = shard_json.as_object_mut() {
-                                obj.insert("peer_downloads".to_string(), serde_json::json!(peers));
-                            }
-                        }
-                    }
-
                     shard_json
                 })
                 .collect()
@@ -701,10 +748,7 @@ pub async fn shard_storage(State(state): State<AppState>) -> Json<serde_json::Va
         let mut local_bytes = 0u64;
         let mut shard_details: Vec<serde_json::Value> = Vec::new();
 
-        // Check if any shards are currently being downloaded
         let mut any_downloading = false;
-
-        // Get per-shard download progress for this model (if any)
         let acq_progress = state
             .shared_state
             .models
@@ -712,66 +756,19 @@ pub async fn shard_storage(State(state): State<AppState>) -> Json<serde_json::Va
             .get(&manifest.id);
 
         for shard in &manifest.shards {
-            let shard_id = crate::types::ShardId {
-                model_id: manifest.id.clone(),
-                index: shard.index,
-            };
-            let holders = state.shared_state.model_registry.shard_holders(&shard_id);
-            let is_local = holders.contains(&local_node_id);
-
+            let (shard_json, is_local, downloading) = build_shard_json(
+                shard,
+                &state.shared_state,
+                &manifest.id,
+                &local_node_id,
+                acq_progress.as_deref(),
+            );
             if is_local {
                 local_shards += 1;
                 local_bytes += shard.size_bytes;
             }
-
-            // Attach download state — check all in-progress states (not just Downloading)
-            let download_state = acq_progress.as_ref().and_then(|p| {
-                let p = p.value();
-                if let Some(sp) = p.shard_progress.get(&shard.index) {
-                    let dl = shard_download_json(sp);
-                    if dl.is_some() {
-                        any_downloading = true;
-                    }
-                    dl
-                } else {
-                    None
-                }
-            });
-
-            // Also check peer download states (from gossip)
-            let peer_downloading = state
-                .shared_state
-                .models
-                .peer_shard_downloads
-                .get(&shard_id)
-                .map(|entry| peer_downloads_json(entry.value()));
-
-            let locked = state
-                .shared_state
-                .models
-                .locked_shards
-                .get(&shard_id)
-                .map(|v| *v)
-                .unwrap_or(false);
-            let mut shard_json = serde_json::json!({
-                "index": shard.index,
-                "size_bytes": shard.size_bytes,
-                "local": is_local,
-                "holders": holders.len(),
-                "locked": locked,
-            });
-            if let Some(dl) = download_state {
-                if let Some(obj) = shard_json.as_object_mut() {
-                    obj.insert("download".to_string(), dl);
-                }
-            }
-            if let Some(peers_dl) = peer_downloading {
-                if !peers_dl.is_empty() {
-                    if let Some(obj) = shard_json.as_object_mut() {
-                        obj.insert("peer_downloads".to_string(), serde_json::json!(peers_dl));
-                    }
-                    any_downloading = true;
-                }
+            if downloading {
+                any_downloading = true;
             }
             shard_details.push(shard_json);
         }
@@ -934,14 +931,8 @@ pub async fn delete_model(
     // Remove from hf_sources
     shared.models.hf_sources.remove(&mid);
 
-    // Remove split models for this model
-    shared.evict_split_models(&mid);
-
-    // Kill the worker subprocess to free GPU memory
-    shared
-        .model_process_pool
-        .unload_and_clear_window(&mid)
-        .await;
+    // Evict cached segments and kill worker subprocess
+    shared.evict_and_unload(&mid).await;
 
     // Broadcast shard removal via GossipSub
     if let Some(ref ntx) = state.network_tx {
@@ -996,13 +987,7 @@ pub async fn unload_model(
         .iter()
         .filter(|e| e.key().0 == mid)
         .count() as u32;
-    shared.evict_split_models(&mid);
-
-    // Kill the worker subprocess to free GPU memory
-    shared
-        .model_process_pool
-        .unload_and_clear_window(&mid)
-        .await;
+    shared.evict_and_unload(&mid).await;
 
     // Clear loaded model info if it matches this model
     {
@@ -1061,24 +1046,8 @@ pub async fn unload_shard(
     Path((model_id, shard_index)): Path<(String, u32)>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     validate_shard_params(&model_id, shard_index)?;
-    let mid = crate::types::ModelId(model_id.clone());
     let shared = &state.shared_state;
-
-    // Validate shard is local
-    let local_node_id = shared.identity.node_id().clone();
-    let shard_id = crate::types::ShardId {
-        model_id: mid.clone(),
-        index: shard_index,
-    };
-    if !shared
-        .model_registry
-        .shard_holders(&shard_id)
-        .contains(&local_node_id)
-    {
-        return Err(ApiError(crate::error::SwarmError::Validation(
-            "Shard is not held locally".into(),
-        )));
-    }
+    let (mid, _shard_id, local_node_id) = resolve_local_shard(shared, &model_id, shard_index)?;
 
     // Get current shard window (or all local shard indices if no window set)
     let current_window = shared.model_process_pool.get_shard_window(&mid);
@@ -1091,11 +1060,7 @@ pub async fn unload_shard(
 
     if new_window.is_empty() {
         // Unloading the last shard = unload the model entirely
-        shared
-            .model_process_pool
-            .unload_and_clear_window(&mid)
-            .await;
-        shared.evict_split_models(&mid);
+        shared.evict_and_unload(&mid).await;
     } else {
         // Narrow window and restart worker — next inference request
         // respawns loading only the remaining shards
@@ -1164,24 +1129,8 @@ pub async fn load_shard(
     Path((model_id, shard_index)): Path<(String, u32)>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     validate_shard_params(&model_id, shard_index)?;
-    let mid = crate::types::ModelId(model_id.clone());
     let shared = &state.shared_state;
-
-    // Verify the shard exists on disk
-    let shard_id = crate::types::ShardId {
-        model_id: mid.clone(),
-        index: shard_index,
-    };
-    let local_node_id = shared.identity.node_id().clone();
-    if !shared
-        .model_registry
-        .shard_holders(&shard_id)
-        .contains(&local_node_id)
-    {
-        return Err(ApiError(crate::error::SwarmError::Validation(
-            "Shard is not on disk — download it first".into(),
-        )));
-    }
+    let (mid, _shard_id, local_node_id) = resolve_local_shard(shared, &model_id, shard_index)?;
 
     // Expand the shard window to include this shard.
     // If no window exists, start from all local shards (same as unload_shard).
@@ -1302,15 +1251,8 @@ pub async fn delete_shard(
         ]));
     }
 
-    // Evict any cached split model segments that included this shard
-    shared.evict_split_models(&mid);
-
-    // Kill the worker subprocess to free GPU memory and clear the shard window
-    // so next spawn doesn't try to load the deleted shard
-    shared
-        .model_process_pool
-        .unload_and_clear_window(&mid)
-        .await;
+    // Evict cached segments and kill worker subprocess
+    shared.evict_and_unload(&mid).await;
 
     // Broadcast updated ShardAnnounce with remaining held shards
     if let Some(ref ntx) = state.network_tx {

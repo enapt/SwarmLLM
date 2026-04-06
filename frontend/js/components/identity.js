@@ -144,7 +144,7 @@
           App.notifications.showToast(I18n.t('identity.peer_connected'), 'success');
           setTimeout(function() { App.networkCode.load(); }, 2000);
         } else {
-          if (status) { status.textContent = (data.error ? (data.error.message || data.error) : I18n.t('identity.failed_to_join')); status.style.color = 'var(--red, #ff6464)'; }
+          if (status) { status.textContent = U.extractErrorMessage(data, I18n.t('identity.failed_to_join')); status.style.color = 'var(--red, #ff6464)'; }
         }
       } catch (e) {
         if (status) { status.textContent = I18n.t('identity.network_error'); status.style.color = 'var(--red, #ff6464)'; }

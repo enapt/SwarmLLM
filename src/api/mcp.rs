@@ -708,8 +708,9 @@ async fn tool_chat(state: &AppState, id: Option<Value>, args: Value) -> JsonRpcR
     }
 }
 
-async fn tool_models(state: &AppState, id: Option<Value>) -> JsonRpcResponse {
-    let mut models = vec![];
+/// Enumerate all available models across sources (local, network, cloud), deduped by ID.
+async fn enumerate_models(state: &AppState) -> Vec<(String, String, &'static str)> {
+    let mut results = vec![];
     let mut seen = std::collections::HashSet::new();
 
     // Local loaded model
@@ -717,37 +718,42 @@ async fn tool_models(state: &AppState, id: Option<Value>) -> JsonRpcResponse {
         let slug = crate::types::slugify_model_name(&info.name);
         seen.insert(slug.clone());
         seen.insert(info.name.clone());
-        models.push(json!({
-            "id": slug,
-            "name": info.name,
-            "source": "local",
-        }));
+        results.push((slug, info.name.clone(), "local"));
     }
 
     // Registry models
     for manifest in state.shared_state.model_registry.models() {
         if !seen.contains(&manifest.id.0) {
             seen.insert(manifest.id.0.clone());
-            models.push(json!({
-                "id": manifest.id.0,
-                "name": manifest.name,
-                "source": "network",
-            }));
+            results.push((manifest.id.0.clone(), manifest.name.clone(), "network"));
         }
     }
 
     // Cloud provider models
-    for entry in state.shared_state.metrics.provider_model_map.iter() {
-        let model_id = entry.key().clone();
+    let mut cloud: Vec<String> = state
+        .shared_state
+        .metrics
+        .provider_model_map
+        .iter()
+        .map(|e| e.key().clone())
+        .collect();
+    cloud.sort();
+    for model_id in cloud {
         if !seen.contains(&model_id) {
             seen.insert(model_id.clone());
-            models.push(json!({
-                "id": model_id,
-                "name": model_id,
-                "source": "cloud",
-            }));
+            results.push((model_id.clone(), model_id, "cloud"));
         }
     }
+
+    results
+}
+
+async fn tool_models(state: &AppState, id: Option<Value>) -> JsonRpcResponse {
+    let models: Vec<Value> = enumerate_models(state)
+        .await
+        .into_iter()
+        .map(|(id, name, source)| json!({ "id": id, "name": name, "source": source }))
+        .collect();
 
     JsonRpcResponse::success(
         id,
@@ -1508,45 +1514,38 @@ async fn resource_status(state: &AppState, id: Option<Value>) -> JsonRpcResponse
 }
 
 async fn resource_models(state: &AppState, id: Option<Value>) -> JsonRpcResponse {
-    let mut models = Vec::new();
+    let base = enumerate_models(state).await;
+    let mut models = Vec::with_capacity(base.len());
 
-    // Local loaded model
-    if let Some(info) = state.shared_state.loaded_model_info.read().await.as_ref() {
-        let slug = crate::types::slugify_model_name(&info.name);
-        models.push(json!({
-            "id": slug,
-            "name": info.name,
-            "source": "local",
-            "size_bytes": info.size_bytes,
-            "status": "loaded",
-        }));
-    }
-
-    // Registry models
-    for manifest in state.shared_state.model_registry.models() {
-        models.push(json!({
-            "id": manifest.id.0,
-            "name": manifest.name,
-            "source": "network",
-            "shards": manifest.shards.len(),
-            "architecture": format!("{:?}", manifest.architecture),
-        }));
-    }
-
-    // Cloud provider models
-    let mut cloud: Vec<String> = state
-        .shared_state
-        .metrics
-        .provider_model_map
-        .iter()
-        .map(|e| e.key().clone())
-        .collect();
-    cloud.sort();
-    for model_id in cloud {
-        models.push(json!({
-            "id": model_id,
-            "source": "cloud",
-        }));
+    for (model_id, name, source) in base {
+        let mut entry = json!({ "id": model_id, "name": name, "source": source });
+        match source {
+            "local" => {
+                if let Some(info) = state.shared_state.loaded_model_info.read().await.as_ref() {
+                    if let Some(obj) = entry.as_object_mut() {
+                        obj.insert("size_bytes".to_string(), json!(info.size_bytes));
+                        obj.insert("status".to_string(), json!("loaded"));
+                    }
+                }
+            }
+            "network" => {
+                if let Some(manifest) = state
+                    .shared_state
+                    .model_registry
+                    .get_manifest(&crate::types::ModelId(model_id))
+                {
+                    if let Some(obj) = entry.as_object_mut() {
+                        obj.insert("shards".to_string(), json!(manifest.shards.len()));
+                        obj.insert(
+                            "architecture".to_string(),
+                            json!(format!("{:?}", manifest.architecture)),
+                        );
+                    }
+                }
+            }
+            _ => {}
+        }
+        models.push(entry);
     }
 
     JsonRpcResponse::success(

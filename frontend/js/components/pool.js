@@ -10,7 +10,7 @@
 
   function _hasError(data) {
     if (data && data.error) {
-      var msg = data.error.message || data.error;
+      var msg = U.extractErrorMessage(data, I18n.t('pool.failed_generic', { error: '' }));
       App.notifications.showToast(I18n.t('pool.failed_generic', { error: msg }), 'error');
       return true;
     }
@@ -75,7 +75,7 @@
           body: JSON.stringify({ code: code })
         }).then(function (r) { return r.json(); }).then(function (data) {
           if (data.error) {
-            if (status) { status.textContent = (data.error && data.error.message) || data.error || I18n.t('pool.join_failed'); status.style.color = 'var(--red)'; }
+            if (status) { status.textContent = U.extractErrorMessage(data, I18n.t('pool.join_failed')); status.style.color = 'var(--red)'; }
           } else {
             if (status) { status.textContent = I18n.t('pool.link_sent'); status.style.color = 'var(--green)'; }
             if (input) input.value = '';
