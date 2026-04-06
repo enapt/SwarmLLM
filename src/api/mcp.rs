@@ -20,16 +20,20 @@ use super::{DEFAULT_MAX_TOKENS, DEFAULT_TOP_K};
 use crate::api::server::AppState;
 
 /// Collect results from spawned JoinHandles, converting join errors to error JSON.
+/// Per-task timeout for MCP multi-model calls (matches tool_chat's 120s).
+const MCP_TASK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
 async fn collect_handle_results(
     handles: Vec<tokio::task::JoinHandle<serde_json::Value>>,
 ) -> Vec<serde_json::Value> {
     let mut results = Vec::with_capacity(handles.len());
     for handle in handles {
-        match handle.await {
-            Ok(result) => results.push(result),
-            Err(e) => {
+        match tokio::time::timeout(MCP_TASK_TIMEOUT, handle).await {
+            Ok(Ok(result)) => results.push(result),
+            Ok(Err(e)) => {
                 results.push(json!({"error": format!("Task failed: {e}"), "status": "error"}))
             }
+            Err(_) => results.push(json!({"error": "Request timed out (120s)", "status": "error"})),
         }
     }
     results
