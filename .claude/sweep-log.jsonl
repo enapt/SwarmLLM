@@ -96,3 +96,12 @@
 {"file":"frontend/js/components/models.js","line":646,"kind":"duplication","summary":"inline error.message extraction bypasses getApiErrorMessage in 4 components","status":"deferred","date":"2026-04-06"}
 {"file":"src/credit/trust.rs","line":138,"kind":"visibility","summary":"hydrate_from_db pub but only used in tests — kept pub for integration tests","status":"wontfix","date":"2026-04-06"}
 {"file":"*","line":0,"kind":"convergence","summary":"Sweep R7: full scan of 106 .rs + 22 .js files found zero new issues — codebase converged","status":"fixed","date":"2026-04-06"}
+{"file":"frontend/js/components/settings.js","line":157,"kind":"logic_bug","summary":"_updateClaudeSubSteps step 3 checked data.cli_installed (same as step 1) instead of data.cli_installed && data.authenticated","status":"fixed","date":"2026-04-06"}
+{"file":"frontend/js/components/pool.js","line":364,"kind":"dead_code","summary":"unused qrText variable in renderQR","status":"fixed","date":"2026-04-06"}
+{"file":"frontend/js/core/utils.js","line":217,"kind":"hardcoded_english","summary":"'AI' fallback in appendMessageToDOM bypassed I18n.t — replaced with I18n.t('chat.avatar_ai')","status":"fixed","date":"2026-04-06"}
+{"file":"src/api/claude_sub.rs","line":640,"kind":"unstructured_tracing","summary":"subprocess timeout tracing::error! missing model structured field (2 occurrences)","status":"fixed","date":"2026-04-06"}
+{"file":"src/daemon/dispatch.rs","line":1294,"kind":"missing_validation","summary":"ModelDemandGossip handler missing model_id length check — added max 256","status":"fixed","date":"2026-04-06"}
+{"file":"src/daemon/dispatch.rs","line":1239,"kind":"missing_validation","summary":"RegionShardSummary handler missing model_id length check — added max 256","status":"fixed","date":"2026-04-06"}
+{"file":"src/daemon/dispatch.rs","line":581,"kind":"missing_validation","summary":"ShardAnnounce handler missing model_id length check on shard entries — added max 256","status":"fixed","date":"2026-04-06"}
+{"file":"src/api/metrics.rs","line":145,"kind":"duplication","summary":"inference_latency_samples RwLock acquired twice in same handler — could pass single guard","status":"deferred","date":"2026-04-06"}
+{"file":"src/api/mcp.rs","line":716,"kind":"duplication","summary":"tool_models() and resource_models() duplicate ~20 lines of model source enumeration","status":"deferred","date":"2026-04-06"}
