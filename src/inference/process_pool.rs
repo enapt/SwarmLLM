@@ -482,7 +482,7 @@ impl ModelProcessPool {
     }
 
     /// Clear a shard window (revert to loading all on-disk shards).
-    pub fn clear_shard_window(&self, model_id: &ModelId) {
+    fn clear_shard_window(&self, model_id: &ModelId) {
         self.active_shard_windows.remove(model_id);
     }
 
