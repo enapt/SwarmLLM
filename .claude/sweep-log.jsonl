@@ -105,3 +105,10 @@
 {"file":"src/daemon/dispatch.rs","line":581,"kind":"missing_validation","summary":"ShardAnnounce handler missing model_id length check on shard entries — added max 256","status":"fixed","date":"2026-04-06"}
 {"file":"src/api/metrics.rs","line":145,"kind":"duplication","summary":"inference_latency_samples RwLock acquired twice in same handler — could pass single guard","status":"deferred","date":"2026-04-06"}
 {"file":"src/api/mcp.rs","line":716,"kind":"duplication","summary":"tool_models() and resource_models() duplicate ~20 lines of model source enumeration","status":"deferred","date":"2026-04-06"}
+{"file":"src/network/manager.rs","line":2165,"kind":"duplication","summary":"inline acquisition cleanup duplicated schedule_acquisition_cleanup (2 sites)","status":"fixed","date":"2026-04-06"}
+{"file":"src/pool/manager.rs","line":916,"kind":"unstructured_tracing","summary":"pool-full warning missing invitee/invitation_id/current_members/max_size fields","status":"fixed","date":"2026-04-06"}
+{"file":"src/inference/router.rs","line":431,"kind":"magic_number","summary":"MAX_QUEUE_DEPTH was function-local — moved to module level","status":"fixed","date":"2026-04-06"}
+{"file":"src/api/claude_sub.rs","line":649,"kind":"duplication","summary":"SSE response builder duplicated 4x across claude_sub/claude_session/providers — helper exists in providers.rs","status":"deferred","date":"2026-04-06"}
+{"file":"src/api/admin_models.rs","line":186,"kind":"duplication","summary":"build_shard_detail and shard_storage inline ~40 lines of identical shard JSON building","status":"deferred","date":"2026-04-06"}
+{"file":"src/inference/router.rs","line":1838,"kind":"test_duplication","summary":"SharedState construction boilerplate repeated 6x across 3 test modules","status":"deferred","date":"2026-04-06"}
+{"file":"src/inference/router.rs","line":1759,"kind":"test_duplication","summary":"InferenceRequest test construction duplicated between router.rs and pipeline.rs","status":"deferred","date":"2026-04-06"}
