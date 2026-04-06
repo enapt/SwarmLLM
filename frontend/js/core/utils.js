@@ -45,6 +45,13 @@
     return mb + ' MB';
   }
 
+  function formatCompact(n) {
+    if (!n || n === 0) return '0';
+    if (n >= 1000000) return (n / 1000000).toFixed(1) + 'M';
+    if (n >= 1000) return (n / 1000).toFixed(1) + 'K';
+    return String(n);
+  }
+
   function formatBytes(bytes) {
     if (!bytes || bytes === 0) return '\u2014';
     if (bytes >= 1073741824) return (bytes / 1073741824).toFixed(1) + ' GB';
@@ -426,6 +433,7 @@
     formatUptime: formatUptime,
     formatMB: formatMB,
     formatBytes: formatBytes,
+    formatCompact: formatCompact,
     formatDlProgress: formatDlProgress,
     formatSpeed: formatSpeed,
     formatEta: formatEta,

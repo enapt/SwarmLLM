@@ -351,11 +351,22 @@
         authBadge = ' <span class="cc-auth-badge cc-auth-api">API</span>';
       }
 
+      // Token counter for the session
+      var tokenHtml = '';
+      if (s.token_usage && (s.token_usage.input > 0 || s.token_usage.output > 0)) {
+        tokenHtml = '<span class="chat-token-counter" id="chat-token-counter" title="' + U.escapeHtml(I18n.t('chat.session_tokens', { input: U.formatCompact(s.token_usage.input), output: U.formatCompact(s.token_usage.output) })) + '">' +
+          '\u2191' + U.formatCompact(s.token_usage.input) + ' \u2193' + U.formatCompact(s.token_usage.output) +
+          '</span>';
+      } else {
+        tokenHtml = '<span class="chat-token-counter" id="chat-token-counter" style="display:none"></span>';
+      }
+
       header.classList.add('visible');
       header.innerHTML =
         '<span class="chat-session-title" id="chat-header-title" title="' + U.escapeHtml(I18n.t('chat.rename_title')) + '">' + U.escapeHtml(s.title) + '</span>' +
         '<span class="' + countClass + '">' + U.escapeHtml(countLabel) + '</span>' +
-        '<span class="' + badgeClass + '" title="' + U.escapeHtml(badgeTitle) + '">' + (hdrIconHtml ? hdrIconHtml + ' ' : '') + U.escapeHtml(modelName) + authBadge + (available ? '' : ' ' + U.escapeHtml(I18n.t('chat.model_unavailable_suffix'))) + '</span>';
+        '<span class="' + badgeClass + '" title="' + U.escapeHtml(badgeTitle) + '">' + (hdrIconHtml ? hdrIconHtml + ' ' : '') + U.escapeHtml(modelName) + authBadge + (available ? '' : ' ' + U.escapeHtml(I18n.t('chat.model_unavailable_suffix'))) + '</span>' +
+        tokenHtml;
 
       if (encBanner) {
         var modelData = s.model ? (App.data.cache.models || []).find(function(m) { return m.id === s.model; }) : null;
@@ -562,10 +573,12 @@
         temperature: 0.7,
         max_tokens: 2048,
         stream: true,
+        stream_options: { include_usage: true },
       };
 
       var fullContent = '';
       var reasoningContent = '';
+      var streamUsage = null;
 
       try {
         var resp = await App.authFetch('/v1/chat/completions', {
@@ -615,6 +628,7 @@
 
             try {
               var chunk = JSON.parse(payload);
+              if (chunk.usage) streamUsage = chunk.usage;
               if (chunk.choices && chunk.choices[0] && chunk.choices[0].delta) {
                 var delta = chunk.choices[0].delta;
                 if (delta.reasoning_content) {
@@ -671,6 +685,13 @@
 
       if (fullContent) {
         session.messages.push({ role: 'assistant', content: fullContent, encrypted: msgEncrypted, duration: elapsed, model: model });
+        // Accumulate token usage for the session
+        if (streamUsage) {
+          if (!session.token_usage) session.token_usage = { input: 0, output: 0 };
+          session.token_usage.input += streamUsage.prompt_tokens || streamUsage.input_tokens || 0;
+          session.token_usage.output += streamUsage.completion_tokens || streamUsage.output_tokens || 0;
+          App.chat.updateTokenCounter(session);
+        }
         App.chat.saveSessions();
         App.chat.flashSession(session.id);
       }
@@ -678,6 +699,18 @@
       S.isStreaming = false;
       var _sendBtnEnd = document.getElementById('send-btn');
       if (_sendBtnEnd) _sendBtnEnd.disabled = false;
+    },
+
+    updateTokenCounter: function(session) {
+      var el = document.getElementById('chat-token-counter');
+      if (!el) return;
+      if (!session || !session.token_usage || (session.token_usage.input === 0 && session.token_usage.output === 0)) {
+        el.style.display = 'none';
+        return;
+      }
+      el.style.display = '';
+      el.textContent = '\u2191' + U.formatCompact(session.token_usage.input) + ' \u2193' + U.formatCompact(session.token_usage.output);
+      el.title = I18n.t('chat.session_tokens', { input: U.formatCompact(session.token_usage.input), output: U.formatCompact(session.token_usage.output) });
     },
 
     scrollToBottom: function() {

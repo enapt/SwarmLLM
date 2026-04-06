@@ -942,5 +942,6 @@
   "dashboard.chip_subscription": "Subscription",
   "models.subscription_suffix": " (Subscription)",
   "dashboard.sub_authenticated": "Authenticated",
-  "dashboard.sub_not_authenticated": "Not authenticated"
+  "dashboard.sub_not_authenticated": "Not authenticated",
+  "chat.session_tokens": "Session: {input} in · {output} out"
 }
