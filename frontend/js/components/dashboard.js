@@ -1048,7 +1048,7 @@
         });
 
         // Fetch CLI status for subscription providers
-        App.data.authFetch('/api/admin/claude-subscription/status').then(function(resp) {
+        App.authFetch('/api/admin/claude-subscription/status').then(function(resp) {
           if (!resp || !resp.ok) return resp;
           return resp.json();
         }).then(function(data) {
