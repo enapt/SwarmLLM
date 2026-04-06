@@ -527,10 +527,11 @@ pub async fn proxy_via_subprocess_openai(
                 let line_result = tokio::time::timeout_at(deadline, lines.next_line()).await;
                 match line_result {
                     Ok(Ok(Some(line))) => {
-                        if line.trim().is_empty() {
+                        let trimmed = line.trim();
+                        if trimmed.is_empty() || !trimmed.starts_with('{') {
                             continue;
                         }
-                        let parsed: serde_json::Value = match serde_json::from_str(&line) {
+                        let parsed: serde_json::Value = match serde_json::from_str(trimmed) {
                             Ok(v) => v,
                             Err(_) => continue,
                         };
@@ -749,8 +750,9 @@ pub async fn proxy_via_subprocess_anthropic(
                 let line_result = tokio::time::timeout_at(deadline, lines.next_line()).await;
                 match line_result {
                     Ok(Ok(Some(line))) => {
-                        if line.trim().is_empty() { continue; }
-                        let parsed: serde_json::Value = match serde_json::from_str(&line) {
+                        let trimmed = line.trim();
+                        if trimmed.is_empty() || !trimmed.starts_with('{') { continue; }
+                        let parsed: serde_json::Value = match serde_json::from_str(trimmed) {
                             Ok(v) => v,
                             Err(_) => continue,
                         };
@@ -878,7 +880,8 @@ async fn collect_result(
         let line_result = tokio::time::timeout_at(deadline, lines.next_line()).await;
         match line_result {
             Ok(Ok(Some(line))) => {
-                if line.trim().is_empty() {
+                let trimmed = line.trim();
+                if trimmed.is_empty() || !trimmed.starts_with('{') {
                     continue;
                 }
                 // Security: cap per-line size to prevent OOM from misbehaving subprocess
@@ -888,7 +891,7 @@ async fn collect_result(
                         "Claude CLI response line too large (>1MB)".into(),
                     )));
                 }
-                let parsed: serde_json::Value = match serde_json::from_str(&line) {
+                let parsed: serde_json::Value = match serde_json::from_str(trimmed) {
                     Ok(v) => v,
                     Err(_) => continue,
                 };
