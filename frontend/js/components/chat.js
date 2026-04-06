@@ -257,7 +257,7 @@
         var badgeEl = div.querySelector('.session-model-badge');
         if (s.model) {
           var source = U.getModelSource(s.model);
-          var sourceLabel = source === 'local' ? I18n.t('chat.source_local') : source === 'cloud' ? I18n.t('chat.source_cloud') : I18n.t('chat.source_network');
+          var sourceLabel = source === 'local' ? I18n.t('chat.source_local') : source === 'subscription' ? I18n.t('dashboard.subscription_badge') : source === 'cloud' ? I18n.t('chat.source_cloud') : I18n.t('chat.source_network');
           var _sibIconKey = (modelItem && modelItem.group && _ICON_MAP[modelItem.group]) ? modelItem.group : modelIconKey(s.model);
           var sibIconHtml = _sibIconKey ? providerIconHtml(_sibIconKey, 11) : '';
           badgeEl.removeAttribute('hidden');
@@ -512,6 +512,7 @@
         userHtml += '</div>';
       }
       userHtml += U.escapeHtml(displayText);
+      var model = session.model || S.currentModel || 'local';
       U.appendMessageToDOM('user', userHtml, true, { encrypted: msgEncrypted });
 
       var assistantEl = U.appendMessageToDOM('assistant', '', false, { encrypted: msgEncrypted, model: model });
@@ -522,8 +523,6 @@
       var _sendBtn = document.getElementById('send-btn');
       if (_sendBtn) _sendBtn.disabled = true;
       var startTime = performance.now();
-
-      var model = session.model || S.currentModel || 'local';
       if (!session.model) {
         session.model = model;
         App.chat.updateChatHeader();
@@ -713,7 +712,7 @@
           if (!session.token_usage) session.token_usage = { input: 0, output: 0 };
           session.token_usage.input += streamUsage.prompt_tokens || streamUsage.input_tokens || 0;
           session.token_usage.output += streamUsage.completion_tokens || streamUsage.output_tokens || 0;
-          App.chat.updateTokenCounter(session);
+          App.chat.updateSessionTokens(session);
         }
         App.chat.saveSessions();
         App.chat.flashSession(session.id);
@@ -724,7 +723,7 @@
       if (_sendBtnEnd) _sendBtnEnd.disabled = false;
     },
 
-    updateTokenCounter: function(session) {
+    updateSessionTokens: function(session) {
       var el = document.getElementById('chat-token-counter');
       if (!el) return;
       if (!session || !session.token_usage || (session.token_usage.input === 0 && session.token_usage.output === 0)) {

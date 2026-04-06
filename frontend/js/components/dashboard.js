@@ -1049,7 +1049,7 @@
 
         // Fetch CLI status for subscription providers
         App.authFetch('/api/admin/claude-subscription/status').then(function(resp) {
-          if (!resp || !resp.ok) return resp;
+          if (!resp || !resp.ok) return null;
           return resp.json();
         }).then(function(data) {
           if (!data || data.error) return;
