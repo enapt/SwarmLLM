@@ -12,14 +12,9 @@
   // Per-model event logs — split into activity and network
   var MODEL_EVENTS_KEY = App.MODEL_EVENTS_KEY;
   var MODEL_NET_EVENTS_KEY = App.MODEL_NET_EVENTS_KEY;
-  var _modelEvents = (function() {
-    try { var s = sessionStorage.getItem(MODEL_EVENTS_KEY); if (s) return JSON.parse(s); } catch (e) {}
-    return {};
-  })();
-  var _modelNetEvents = (function() {
-    try { var s = sessionStorage.getItem(MODEL_NET_EVENTS_KEY); if (s) return JSON.parse(s); } catch (e) {}
-    return {};
-  })();
+  // Start fresh each page load — backend replays current-session events via activity_history
+  var _modelEvents = {};
+  var _modelNetEvents = {};
 
   // Kinds that go to the network ticker on model cards
   var MODEL_NET_KINDS = { 'shard_announced': 1, 'peer_connected': 1, 'peer_disconnected': 1, 'rebalance_peer_left': 1 };
