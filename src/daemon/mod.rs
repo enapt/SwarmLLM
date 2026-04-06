@@ -1522,6 +1522,14 @@ impl Daemon {
 
         // redb writes are durable on commit — no flush needed
 
+        // Shut down Claude Code sessions (kill subprocesses, clean temp dirs)
+        #[cfg(feature = "claude-subscription")]
+        {
+            crate::api::claude_session::SessionManager::global()
+                .shutdown_all()
+                .await;
+        }
+
         tracing::info!("Daemon shutdown complete");
 
         Ok(())

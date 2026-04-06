@@ -208,6 +208,13 @@
 
     deleteSession: function(id, e) {
       if (e) { e.stopPropagation(); e.preventDefault(); }
+      // Close backend Claude Code session (kills subprocess + cleans temp dir)
+      var session = S.sessions[id];
+      if (session && session.claude_code && session.claude_code.active) {
+        App.authFetch('/api/claude-code/session/' + encodeURIComponent(id), {
+          method: 'DELETE',
+        }).catch(function() {});
+      }
       delete S.sessions[id];
       if (S.currentSessionId === id) {
         var keys = Object.keys(S.sessions);

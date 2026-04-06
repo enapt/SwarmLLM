@@ -489,7 +489,20 @@ impl SessionManager {
     pub async fn close_session(&self, session_id: &str) {
         if let Some((_, session)) = self.sessions.remove(session_id) {
             let mut s = session.lock().await;
+            let working_dir = s.working_dir.clone();
             s.kill().await;
+            drop(s);
+            // Clean up temp directories created for quick chats
+            let tmp_prefix = std::env::temp_dir().join("swarmllm-chat-");
+            if working_dir.starts_with(&tmp_prefix.parent().unwrap_or(&tmp_prefix))
+                && working_dir
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .map_or(false, |n| n.starts_with("swarmllm-chat-"))
+            {
+                let _ = std::fs::remove_dir_all(&working_dir);
+                tracing::debug!(dir = %working_dir.display(), "Cleaned up temp session directory");
+            }
         }
     }
 
@@ -521,13 +534,18 @@ impl SessionManager {
             .collect()
     }
 
-    /// Run periodic cleanup — suspend idle sessions, warn about upcoming timeouts.
+    /// Run periodic cleanup — suspend idle sessions, prune dead entries, warn about upcoming timeouts.
     pub async fn cleanup_stale(&self, shared_state: &crate::daemon::state::SharedState) {
         let mut to_suspend = Vec::new();
         let mut to_warn = Vec::new();
+        let mut to_remove = Vec::new();
 
         for entry in self.sessions.iter() {
             if let Ok(session) = entry.value().try_lock() {
+                if session.state == SessionState::Expired {
+                    to_remove.push(session.id.clone());
+                    continue;
+                }
                 if !session.is_alive() {
                     continue;
                 }
@@ -544,8 +562,12 @@ impl SessionManager {
             }
         }
 
+        // Remove expired/dead entries from the map
+        for id in &to_remove {
+            self.sessions.remove(id.as_str());
+        }
+
         for id in to_warn {
-            // Send idle warning via activity event (frontend can show a keepalive prompt)
             shared_state.emit_activity(
                 crate::daemon::state::ActivityEvent::new(
                     "claude_code",
@@ -568,6 +590,15 @@ impl SessionManager {
                 .with_toast("info", 5000),
             );
         }
+    }
+
+    /// Shut down all active sessions — called during daemon shutdown.
+    pub async fn shutdown_all(&self) {
+        let ids: Vec<String> = self.sessions.iter().map(|e| e.key().clone()).collect();
+        for id in ids {
+            self.close_session(&id).await;
+        }
+        tracing::info!("All Claude Code sessions shut down");
     }
 }
 
