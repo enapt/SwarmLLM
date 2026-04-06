@@ -60,3 +60,13 @@
 {"file":"frontend/js/components/chat.js","line":524,"kind":"regression","summary":"chat.js fallback was bypassPermissions — changed to acceptEdits","status":"fixed","date":"2026-04-05"}
 {"file":"src/api/claude_session.rs","line":26,"kind":"security_medium","summary":"ALLOWED_PERMISSION_MODES missing 'auto' (valid CLI mode used in UI dropdown) — added","status":"fixed","date":"2026-04-05"}
 {"file":"docs/ARCHITECTURE.md","line":1225,"kind":"doc_mismatch","summary":"i18n key count 874 → 934","status":"fixed","date":"2026-04-05"}
+{"file":"frontend/js/components/network-map.js","line":346,"kind":"hardcoded_english","summary":"updateFromWs() used hardcoded English for node/region stats — replaced with I18n.t()","status":"fixed","date":"2026-04-06"}
+{"file":"frontend/js/components/network-map.js","line":371,"kind":"undefined_css_var","summary":"--color-accent undefined — replaced with --accent","status":"fixed","date":"2026-04-06"}
+{"file":"frontend/js/components/network-map.js","line":380,"kind":"undefined_css_var","summary":"--color-warning undefined — replaced with --yellow","status":"fixed","date":"2026-04-06"}
+{"file":"frontend/js/components/network-map.js","line":371,"kind":"hardcoded_english","summary":"req/10m unit hardcoded — added i18n key map.tooltip_demand_rate","status":"fixed","date":"2026-04-06"}
+{"file":"src/credit/transaction.rs","line":130,"kind":"error_type_misuse","summary":"unreachable SwarmError::Internal for sig length — changed to InvalidSignature","status":"fixed","date":"2026-04-06"}
+{"file":"src/api/claude_sub.rs","line":587,"kind":"duplication","summary":"Bearer token extraction duplicated between openai.rs and middleware.rs","status":"deferred","date":"2026-04-06"}
+{"file":"src/api/claude_sub.rs","line":331,"kind":"duplication","summary":"extract_openai_prompt and extract_anthropic_prompt share same message serialization body","status":"deferred","date":"2026-04-06"}
+{"file":"src/api/claude_sub.rs","line":508,"kind":"duplication","summary":"NDJSON line-reading loop duplicated between claude_sub.rs and claude_session.rs","status":"deferred","date":"2026-04-06"}
+{"file":"src/api/claude_sub.rs","line":470,"kind":"duplication","summary":"proxy_via_subprocess_openai and proxy_via_subprocess_anthropic have identical 15-line setup boilerplate","status":"deferred","date":"2026-04-06"}
+{"file":"src/api/mcp.rs","line":840,"kind":"missing_timeout","summary":"MCP compare/research/batch_prompts tools lack application-level timeout (tool_chat has 120s)","status":"deferred","date":"2026-04-06"}
