@@ -72,9 +72,26 @@
           _timeout: 130000, // 130s — hooks (SessionStart) can take 30-60s before init
         });
 
-        if (!resp.ok) {
+        // If resume failed (stale session from previous daemon run), retry without resume
+        if (!resp.ok && body.resume_claude_session_id) {
           var errText = await resp.text();
-          throw new Error(errText);
+          if (errText.indexOf('No Claude Code session') !== -1) {
+            delete body.resume_claude_session_id;
+            if (session && session.claude_code) session.claude_code.claude_session_id = null;
+            resp = await App.authFetch('/api/claude-code/session', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(body),
+              _timeout: 130000,
+            });
+          } else {
+            throw new Error(errText);
+          }
+        }
+
+        if (!resp.ok) {
+          var errText2 = await resp.text();
+          throw new Error(errText2);
         }
 
         var data = await resp.json();
