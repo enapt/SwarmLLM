@@ -343,7 +343,7 @@
         }
       }
       var statsEl = document.getElementById('map-stats-text');
-      if (statsEl) statsEl.textContent = totalNodes + (totalNodes === 1 ? ' node' : ' nodes') + ' across ' + totalRegions + (totalRegions === 1 ? ' region' : ' regions');
+      if (statsEl) statsEl.textContent = I18n.t(totalNodes === 1 ? 'map.stats_nodes' : 'map.stats_nodes_plural', { count: totalNodes }) + ' ' + I18n.t('map.stats_across') + ' ' + I18n.t(totalRegions === 1 ? 'map.stats_region' : 'map.stats_regions', { count: totalRegions });
       document.getElementById('map-legend-max').textContent = maxCount;
     },
 
@@ -368,7 +368,7 @@
               if (mName.length > 22) mName = mName.substring(0, 22) + '...';
               var demandStr = '';
               if (info.demand && info.demand[mids[i]]) {
-                demandStr = ' <span style="color:var(--color-accent)">' + info.demand[mids[i]].toFixed(1) + ' req/10m</span>';
+                demandStr = ' <span style="color:var(--accent)">' + I18n.t('map.tooltip_demand_rate', { rate: info.demand[mids[i]].toFixed(1) }) + '</span>';
               }
               html += '<div class="flex-between" style="gap:12px"><span class="text-muted">' + U.escapeHtml(mName) + '</span><span class="mono">' + U.escapeHtml(String(info.models[mids[i]])) + demandStr + '</span></div>';
             }
@@ -377,7 +377,7 @@
           }
         }
         if (info.coverage_gaps && info.coverage_gaps.length > 0) {
-          html += '<div class="mt-1" style="font-size:0.7rem;color:var(--color-warning)">' + I18n.t('map.coverage_gaps') + ': ' + U.escapeHtml(I18n.t(info.coverage_gaps.length === 1 ? 'map.tooltip_models' : 'map.tooltip_models_plural', { count: info.coverage_gaps.length })) + '</div>';
+          html += '<div class="mt-1" style="font-size:0.7rem;color:var(--yellow)">' + I18n.t('map.coverage_gaps') + ': ' + U.escapeHtml(I18n.t(info.coverage_gaps.length === 1 ? 'map.tooltip_models' : 'map.tooltip_models_plural', { count: info.coverage_gaps.length })) + '</div>';
         }
       } else {
         html += '<span class="text-muted" style="margin-left:8px">' + U.escapeHtml(I18n.t('map.tooltip_no_nodes')) + '</span>';

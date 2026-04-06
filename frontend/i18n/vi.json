@@ -934,5 +934,6 @@
   "claude_code.turns_count": "{count} turns",
   "claude_code.initializing": "Starting Claude Code session…",
   "claude_code.subscription_tip": "Using Claude subscription (no API costs)",
-  "nav.copied": "Copied!"
+  "nav.copied": "Copied!",
+  "map.tooltip_demand_rate": "{rate} req/10m"
 }

@@ -127,7 +127,7 @@ fn verify_single_signature(
         sig_bytes
             .as_slice()
             .try_into()
-            .map_err(|_| SwarmError::Internal("Invalid signature length".into()))?,
+            .map_err(|_| SwarmError::InvalidSignature)?,
     );
 
     let payload = build_signing_payload(
