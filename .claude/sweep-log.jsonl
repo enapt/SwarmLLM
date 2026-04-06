@@ -84,3 +84,14 @@
 {"file":"frontend/js/components/notifications.js","line":367,"kind":"stale_render","summary":"first WS connect cleared network entries but never re-rendered","status":"fixed","date":"2026-04-06"}
 {"file":"frontend/js/components/notifications.js","line":358,"kind":"debounce_skip","summary":"WS reconnect loadInitial dropped by 5s debounce — reset _lastLoadTime","status":"fixed","date":"2026-04-06"}
 {"file":"frontend/js/components/dashboard.js","line":1051,"kind":"undefined_function","summary":"App.data.authFetch undefined — should be App.authFetch","status":"fixed","date":"2026-04-06"}
+{"file":"frontend/js/components/ui.js","line":264,"kind":"hardcoded_english","summary":"' plan' suffix hardcoded — replaced with I18n.t('settings.plan')","status":"fixed","date":"2026-04-06"}
+{"file":"frontend/i18n/*.json","line":943,"kind":"dead_i18n","summary":"dead key models.subscription_suffix removed from all 21 files","status":"fixed","date":"2026-04-06"}
+{"file":"frontend/js/core/utils.js","line":230,"kind":"dead_branch","summary":"source==='network' branch never matched — changed to 'swarm'","status":"fixed","date":"2026-04-06"}
+{"file":"src/inference/process_pool.rs","line":485,"kind":"visibility","summary":"clear_shard_window was pub with only internal callers — made private","status":"fixed","date":"2026-04-06"}
+{"file":"src/api/admin_models.rs","line":1085,"kind":"duplication","summary":"shadowed local_node_id clone in unload_shard — removed","status":"fixed","date":"2026-04-06"}
+{"file":"src/types.rs","line":20,"kind":"duplication","summary":"unix_now_ms/unix_now_secs helpers extracted — replaced 8 inline SystemTime idioms","status":"fixed","date":"2026-04-06"}
+{"file":"src/network/protocol.rs","line":40,"kind":"magic_number","summary":"SHARD_CHUNK_SIZE constant extracted — replaced 6 bare 32*1024*1024 literals","status":"fixed","date":"2026-04-06"}
+{"file":"src/update.rs","line":233,"kind":"error_type_misuse","summary":"oversized update binary used SwarmError::Internal — changed to Validation","status":"fixed","date":"2026-04-06"}
+{"file":"src/api/admin_models.rs","line":1059,"kind":"duplication","summary":"shard handler 5-line setup boilerplate repeated 4x — resolve_local_shard helper","status":"deferred","date":"2026-04-06"}
+{"file":"frontend/js/components/models.js","line":646,"kind":"duplication","summary":"inline error.message extraction bypasses getApiErrorMessage in 4 components","status":"deferred","date":"2026-04-06"}
+{"file":"src/credit/trust.rs","line":138,"kind":"visibility","summary":"hydrate_from_db pub but only used in tests — kept pub for integration tests","status":"wontfix","date":"2026-04-06"}
