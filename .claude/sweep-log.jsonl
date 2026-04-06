@@ -70,3 +70,17 @@
 {"file":"src/api/claude_sub.rs","line":470,"kind":"duplication","summary":"proxy_via_subprocess setup extracted into prepare_proxy() with ProxySetup struct","status":"fixed","date":"2026-04-06"}
 {"file":"src/api/claude_sub.rs","line":508,"kind":"duplication","summary":"NDJSON parsing hardened with non-JSON line skip matching claude_session.rs","status":"fixed","date":"2026-04-06"}
 {"file":"src/api/mcp.rs","line":840,"kind":"missing_timeout","summary":"MCP multi-model tools now have 120s per-task timeout via collect_handle_results","status":"fixed","date":"2026-04-06"}
+{"file":"frontend/js/components/chat.js","line":517,"kind":"var_hoisting","summary":"model var used before declaration in send() — moved above appendMessageToDOM","status":"fixed","date":"2026-04-06"}
+{"file":"frontend/js/components/chat.js","line":260,"kind":"missing_case","summary":"sourceLabel ternary missing subscription — fell through to Network","status":"fixed","date":"2026-04-06"}
+{"file":"frontend/js/core/utils.js","line":220,"kind":"incomplete_impl","summary":"source-subscription CSS applied but no visible badge rendered in appendMessageToDOM","status":"fixed","date":"2026-04-06"}
+{"file":"frontend/js/components/dashboard.js","line":1052,"kind":"error_handling","summary":"subscription health fetch returned Response on error instead of null","status":"fixed","date":"2026-04-06"}
+{"file":"frontend/js/components/chat.js","line":716,"kind":"naming","summary":"updateTokenCounter renamed to updateSessionTokens to avoid collision with U.updateTokenCounter","status":"fixed","date":"2026-04-06"}
+{"file":"frontend/js/components/chat.js","line":209,"kind":"resource_leak","summary":"deleteSession did not call backend DELETE — orphaned subprocess","status":"fixed","date":"2026-04-06"}
+{"file":"src/api/claude_session.rs","line":489,"kind":"resource_leak","summary":"close_session did not clean up temp dirs","status":"fixed","date":"2026-04-06"}
+{"file":"src/api/claude_session.rs","line":524,"kind":"resource_leak","summary":"cleanup_stale never pruned Expired entries from DashMap","status":"fixed","date":"2026-04-06"}
+{"file":"src/daemon/mod.rs","line":1525,"kind":"resource_leak","summary":"no shutdown hook for Claude Code sessions — orphaned subprocesses","status":"fixed","date":"2026-04-06"}
+{"file":"frontend/js/init.js","line":660,"kind":"dead_code","summary":"data loading was dead code after I18n.init return — moved into initAfterI18n","status":"fixed","date":"2026-04-06"}
+{"file":"frontend/js/init.js","line":726,"kind":"race_condition","summary":"compare tab setTimeout(0) raced against async I18n.init","status":"fixed","date":"2026-04-06"}
+{"file":"frontend/js/components/notifications.js","line":367,"kind":"stale_render","summary":"first WS connect cleared network entries but never re-rendered","status":"fixed","date":"2026-04-06"}
+{"file":"frontend/js/components/notifications.js","line":358,"kind":"debounce_skip","summary":"WS reconnect loadInitial dropped by 5s debounce — reset _lastLoadTime","status":"fixed","date":"2026-04-06"}
+{"file":"frontend/js/components/dashboard.js","line":1051,"kind":"undefined_function","summary":"App.data.authFetch undefined — should be App.authFetch","status":"fixed","date":"2026-04-06"}
