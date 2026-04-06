@@ -544,7 +544,23 @@
           var ccText = displayText;
           var translated = App.claudeCode.translateSlashCommand(displayText);
           if (translated) ccText = translated;
-          var result = await App.claudeCode.sendMessage(session.id, ccText, contentEl, assistantEl);
+          var result;
+          try {
+            result = await App.claudeCode.sendMessage(session.id, ccText, contentEl, assistantEl);
+          } catch (sendErr) {
+            // Session may have been lost (daemon restart) — re-create and retry
+            if (sendErr.message && sendErr.message.indexOf('No Claude Code session') !== -1) {
+              var dirInput2 = document.getElementById('cc-dir-input');
+              var workDir2 = cc.working_dir || (dirInput2 ? dirInput2.value.trim() : '');
+              var permMode2 = cc.permission_mode || 'acceptEdits';
+              contentEl.innerHTML = '<span class="typing-indicator">' +
+                U.escapeHtml(I18n.t('claude_code.initializing')) + '</span>';
+              await App.claudeCode.createSession(session.id, model, workDir2, permMode2);
+              result = await App.claudeCode.sendMessage(session.id, ccText, contentEl, assistantEl);
+            } else {
+              throw sendErr;
+            }
+          }
           if (result.content) {
             session.messages.push({ role: 'assistant', content: result.content, encrypted: false, duration: result.duration, model: model });
             App.chat.saveSessions();
