@@ -5,7 +5,7 @@
 When building SwarmLLM for testing, development, or debugging:
 
 ```bash
-cargo build --no-default-features --features dev
+cargo build --no-default-features --features dev,claude-subscription
 ```
 
 This serves frontend files from disk (`frontend/`) so CSS/JS/HTML changes are instant without recompiling.
