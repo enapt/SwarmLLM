@@ -653,6 +653,14 @@
 
     App.ui.switchTab(S.activeTab, true);
 
+    // Post-switch: load compare data if that tab is active
+    if (S.activeTab === 'compare' && App.compare) {
+      setTimeout(function() {
+        App.compare.loadModels();
+        App.compare.renderHistory();
+      }, 0);
+    }
+
     // Data loading — must happen after i18n + UI init
     App.chat.loadSessions();
     App.chat.renderSessionList();
@@ -721,14 +729,6 @@
   } else {
     init();
   }
-
-  // Post-init: load compare models if that tab is active
-  setTimeout(function() {
-    if (S.activeTab === 'compare' && App.compare) {
-      App.compare.loadModels();
-      App.compare.renderHistory();
-    }
-  }, 0);
 
   // Export public API
   window.SwarmLLM = {

@@ -355,15 +355,18 @@
       if (S.wsWasConnected) {
         showWsBanner('connected', I18n.t('connection.connected'));
         hideWsBanner(2000);
-        // Reload ALL data on reconnect so nothing is stale
+        // Reload ALL data on reconnect — reset debounce so it's never skipped
+        App.dashboard._lastLoadTime = 0;
         App.dashboard.loadInitial();
         App.providerHealth.startHealthPolling();
       } else {
-        // First connect this page load — clear stale global activity
+        // First connect this page load — clear stale events from previous session
         _activityEntries = [];
         _networkEntries = [];
         _persistActivity();
         _persistNetwork();
+        _renderActivityLog();
+        _renderNetworkLog();
       }
       S.wsWasConnected = true;
       logActivity('\u{1F4E1}', I18n.t('activity.connected'), 'system');
