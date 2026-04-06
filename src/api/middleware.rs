@@ -409,16 +409,12 @@ pub async fn auth_middleware(
 
     let expected_key = &state.shared_state.api_key;
 
-    // Extract Bearer token from Authorization header, or fall back to x-api-key header
-    // (Anthropic SDK sends credentials via x-api-key instead of Authorization: Bearer)
-    let auth_header = req
-        .headers()
-        .get(axum::http::header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok());
-
-    let token = auth_header
-        .and_then(|h| h.strip_prefix("Bearer "))
-        .or_else(|| req.headers().get("x-api-key").and_then(|v| v.to_str().ok()));
+    let extracted = super::extract_bearer_token(req.headers());
+    let token: Option<&str> = if extracted.is_empty() {
+        None
+    } else {
+        Some(extracted)
+    };
 
     match token {
         Some(t) if constant_time_eq(t.as_bytes(), expected_key.as_bytes()) => next.run(req).await,

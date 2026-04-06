@@ -12,6 +12,17 @@ pub(crate) fn scrub_truncate_error(body: &str) -> String {
     }
 }
 
+/// Extract a Bearer token from `Authorization: Bearer <tok>` or `x-api-key` header.
+/// Returns an empty string if neither header is present.
+pub(crate) fn extract_bearer_token(headers: &axum::http::HeaderMap) -> &str {
+    headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .or_else(|| headers.get("x-api-key").and_then(|v| v.to_str().ok()))
+        .unwrap_or("")
+}
+
 /// Strip `provider:` prefix from a model name, returning the bare model name.
 pub(crate) fn strip_provider_prefix(model: &str) -> &str {
     model.split_once(':').map_or(model, |(_, name)| name)
