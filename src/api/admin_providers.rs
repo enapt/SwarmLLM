@@ -287,7 +287,7 @@ pub async fn update_providers(
 /// in the background. On first call (empty cache), blocks until fetch completes.
 /// This prevents slow/flaky provider APIs from making the dashboard feel broken.
 pub async fn list_provider_models(State(state): State<AppState>) -> Json<serde_json::Value> {
-    const CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(60);
+    const CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(30);
 
     // Check cache — return immediately if fresh
     {

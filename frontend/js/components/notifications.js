@@ -397,6 +397,8 @@
           if (_modelsChangedTimer) clearTimeout(_modelsChangedTimer);
           _modelsChangedTimer = setTimeout(function() {
             App.data.invalidateDedup('models');
+            App.data.invalidateDedup('providers');
+            App.data.cache.cloudModels = [];
             App.models.load();
             App.modeIndicator.load();
           }, 1000);
