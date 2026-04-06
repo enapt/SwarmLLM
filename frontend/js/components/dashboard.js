@@ -1041,11 +1041,31 @@
             provider: p, models: bySubProvider[p], parentEl: subBody,
             cardClass: 'subscription-model-card', headerClass: 'subscription-card-header',
             badgeClass: 'badge-subscription',
-            statusHtml: '<span class="cloud-status-sub">\u25cf ' + U.escapeHtml(I18n.t('dashboard.cloud_subscription')) + '</span>',
+            statusHtml: '<span class="cloud-status-sub" id="sub-status-' + p + '">\u25cf ' + U.escapeHtml(I18n.t('dashboard.cloud_subscription')) + '</span>',
             noteText: I18n.t('dashboard.cloud_sub_note'),
             idPrefix: 'sub',
           });
         });
+
+        // Fetch CLI status for subscription providers
+        App.data.authFetch('/api/admin/claude-subscription/status').then(function(resp) {
+          if (!resp || !resp.ok) return resp;
+          return resp.json();
+        }).then(function(data) {
+          if (!data || data.error) return;
+          var statusEl = document.getElementById('sub-status-claude_subscription');
+          if (!statusEl) return;
+          var parts = [];
+          if (data.authenticated) {
+            parts.push('\u2713 ' + I18n.t('dashboard.sub_authenticated'));
+            if (data.subscription_type) parts.push(data.subscription_type);
+            if (data.cli_version) parts.push('v' + data.cli_version);
+            statusEl.innerHTML = '<span style="color:#3ddc84">\u25cf</span> ' + U.escapeHtml(parts.join(' \u00b7 '));
+          } else {
+            statusEl.innerHTML = '<span style="color:var(--red)">\u25cf</span> ' + U.escapeHtml(I18n.t('dashboard.sub_not_authenticated'));
+            statusEl.style.color = 'var(--red)';
+          }
+        }).catch(function() {});
       }
     },
 
