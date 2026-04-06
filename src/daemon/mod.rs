@@ -419,6 +419,9 @@ impl Daemon {
             Ok(shards) => {
                 // Track which model manifests we've already registered
                 let mut registered_manifests = std::collections::HashSet::new();
+                // Count shards per model for startup activity events
+                let mut model_shard_counts: std::collections::HashMap<crate::types::ModelId, u32> =
+                    std::collections::HashMap::new();
 
                 for (model_id, shard_info) in &shards {
                     // Register the manifest if we haven't yet
@@ -574,6 +577,24 @@ impl Daemon {
                     shared_state
                         .model_registry
                         .record_shard_holder(shard_id, node_id);
+                    *model_shard_counts.entry(model_id.clone()).or_insert(0) += 1;
+                }
+
+                // Emit startup activity events so the dashboard shows them
+                for (mid, count) in &model_shard_counts {
+                    let name = shared_state
+                        .model_registry
+                        .get_manifest(mid)
+                        .map(|m| m.name.clone())
+                        .unwrap_or_else(|| mid.0.clone());
+                    shared_state.emit_activity(
+                        crate::daemon::state::ActivityEvent::new(
+                            "model",
+                            "shards_loaded",
+                            format!("Loaded {} shards for {}", count, name),
+                        )
+                        .with_model(mid.0.clone()),
+                    );
                 }
             }
             Err(e) => {
