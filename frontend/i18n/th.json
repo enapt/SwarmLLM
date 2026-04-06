@@ -475,7 +475,6 @@
   "chat.count_new": "ใหม่",
   "chat.count_one": "1 ข้อความ",
   "chat.count_many": "{count} ข้อความ",
-  "dashboard.health_at_risk": "มีความเสี่ยง",
   "dashboard.health_unavailable_label": "ไม่พร้อมใช้งาน",
   "dashboard.health_incomplete": "ไม่สมบูรณ์",
   "dashboard.health_no_shards_available": "ไม่มีส่วนที่พร้อมใช้งานบนเครือข่าย",

@@ -475,7 +475,6 @@
   "chat.count_new": "Nové",
   "chat.count_one": "1 zpráva",
   "chat.count_many": "{count} zpráv",
-  "dashboard.health_at_risk": "V ohrožení",
   "dashboard.health_unavailable_label": "Nedostupné",
   "dashboard.health_incomplete": "Neúplné",
   "dashboard.health_no_shards_available": "Na síti nejsou dostupné žádné části",

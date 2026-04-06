@@ -475,7 +475,6 @@
   "chat.count_new": "Mới",
   "chat.count_one": "1 tin nhắn",
   "chat.count_many": "{count} tin nhắn",
-  "dashboard.health_at_risk": "Có rủi ro",
   "dashboard.health_unavailable_label": "Không khả dụng",
   "dashboard.health_incomplete": "Không đầy đủ",
   "dashboard.health_no_shards_available": "Không có phần nào khả dụng trên mạng",

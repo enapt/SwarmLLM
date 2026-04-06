@@ -475,7 +475,6 @@
   "chat.count_new": "नया",
   "chat.count_one": "1 संदेश",
   "chat.count_many": "{count} संदेश",
-  "dashboard.health_at_risk": "जोखिम में",
   "dashboard.health_unavailable_label": "अनुपलब्ध",
   "dashboard.health_incomplete": "अपूर्ण",
   "dashboard.health_no_shards_available": "नेटवर्क पर कोई भाग उपलब्ध नहीं",

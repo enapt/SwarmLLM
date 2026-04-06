@@ -159,10 +159,9 @@
       var inviteRow = document.getElementById('summary-invite-row');
       if (App.setup._joinedPeer) { inviteRow.classList.remove('hidden'); document.getElementById('summary-invite').textContent = I18n.t('setup.summary_connected'); }
       var provRow = document.getElementById('summary-provider-row');
-      var provNames = {openai:'OpenAI',deepseek:'DeepSeek',groq:'Groq',nvidia_nim:'NVIDIA NIM',cerebras:'Cerebras',sambanova:'SambaNova',anthropic:'Anthropic',mistral:'Mistral',fireworks:'Fireworks',together:'Together',deepinfra:'DeepInfra'};
       if (App.setup._savedProvider) {
         provRow.classList.remove('hidden');
-        document.getElementById('summary-provider').textContent = provNames[App.setup._savedProvider] || App.setup._savedProvider;
+        document.getElementById('summary-provider').textContent = PROVIDER_NAMES[App.setup._savedProvider] || App.setup._savedProvider;
       }
 
       // Dynamic next steps

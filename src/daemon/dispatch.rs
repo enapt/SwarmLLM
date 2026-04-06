@@ -332,7 +332,7 @@ pub(crate) async fn dispatch_network_messages(
                                         let permit = match forward_semaphore.clone().try_acquire_owned() {
                                             Ok(p) => p,
                                             Err(_) => {
-                                                tracing::warn!(sender = %authenticated_sender.as_ref().unwrap(), "VisionEncodeRequest rejected — forward semaphore full");
+                                                tracing::warn!(sender = %authenticated_sender.as_ref().map(|s| s.to_string()).unwrap_or_default(), "VisionEncodeRequest rejected — forward semaphore full");
                                                 continue;
                                             }
                                         };

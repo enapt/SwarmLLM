@@ -474,7 +474,6 @@
   "chat.count_new": "Нове",
   "chat.count_one": "1 повідомлення",
   "chat.count_many": "{count} повідомлень",
-  "dashboard.health_at_risk": "Під загрозою",
   "dashboard.health_unavailable_label": "Недоступно",
   "dashboard.health_incomplete": "Неповне",
   "dashboard.health_no_shards_available": "Немає доступних частин у мережі",

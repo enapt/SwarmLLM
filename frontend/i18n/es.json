@@ -474,7 +474,6 @@
   "chat.count_new": "Nuevo",
   "chat.count_one": "1 mensaje",
   "chat.count_many": "{count} mensajes",
-  "dashboard.health_at_risk": "En riesgo",
   "dashboard.health_unavailable_label": "No disponible",
   "dashboard.health_incomplete": "Incompleto",
   "dashboard.health_no_shards_available": "No hay partes disponibles en la red",

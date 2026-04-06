@@ -475,7 +475,6 @@
   "chat.count_new": "Ny",
   "chat.count_one": "1 meddelande",
   "chat.count_many": "{count} meddelanden",
-  "dashboard.health_at_risk": "I riskzonen",
   "dashboard.health_unavailable_label": "Otillgänglig",
   "dashboard.health_incomplete": "Ofullständig",
   "dashboard.health_no_shards_available": "Inga delar tillgängliga i nätverket",

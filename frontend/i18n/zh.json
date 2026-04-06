@@ -474,7 +474,6 @@
   "chat.count_new": "新",
   "chat.count_one": "1 条消息",
   "chat.count_many": "{count} 条消息",
-  "dashboard.health_at_risk": "有风险",
   "dashboard.health_unavailable_label": "不可用",
   "dashboard.health_incomplete": "不完整",
   "dashboard.health_no_shards_available": "网络上没有可用的分片",

@@ -205,7 +205,7 @@
       if (indicator) indicator.classList.add(modeClass);
 
       var requests = statsData ? (statsData.requests_made || 0) : 0;
-      var served = statsData ? (statsData.served || 0) : 0;
+      var served = statsData ? (statsData.requests_served || 0) : 0;
       var active = statsData ? (statsData.active_requests || 0) : 0;
 
       var parts = [];

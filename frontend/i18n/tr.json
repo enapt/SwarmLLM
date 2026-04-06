@@ -475,7 +475,6 @@
   "chat.count_new": "Yeni",
   "chat.count_one": "1 mesaj",
   "chat.count_many": "{count} mesaj",
-  "dashboard.health_at_risk": "Riskli",
   "dashboard.health_unavailable_label": "Kullanılamaz",
   "dashboard.health_incomplete": "Eksik",
   "dashboard.health_no_shards_available": "Ağda mevcut parça yok",

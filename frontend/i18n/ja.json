@@ -474,7 +474,6 @@
   "chat.count_new": "新規",
   "chat.count_one": "1件のメッセージ",
   "chat.count_many": "{count}件のメッセージ",
-  "dashboard.health_at_risk": "リスクあり",
   "dashboard.health_unavailable_label": "利用不可",
   "dashboard.health_incomplete": "不完全",
   "dashboard.health_no_shards_available": "ネットワーク上に利用可能なシャードがありません",

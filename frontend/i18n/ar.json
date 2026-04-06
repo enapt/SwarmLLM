@@ -474,7 +474,6 @@
   "chat.count_new": "جديد",
   "chat.count_one": "1 رسالة",
   "chat.count_many": "{count} رسائل",
-  "dashboard.health_at_risk": "في خطر",
   "dashboard.health_unavailable_label": "غير متاح",
   "dashboard.health_incomplete": "غير مكتمل",
   "dashboard.health_no_shards_available": "لا توجد أجزاء متاحة على الشبكة",
