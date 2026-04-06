@@ -10,11 +10,30 @@
   var U = App.utils;
 
   // Per-model event logs — split into activity and network
+  // Restore from sessionStorage only if the daemon session (boot_epoch) matches
   var MODEL_EVENTS_KEY = App.MODEL_EVENTS_KEY;
   var MODEL_NET_EVENTS_KEY = App.MODEL_NET_EVENTS_KEY;
-  // Start fresh each page load — backend replays current-session events via activity_history
   var _modelEvents = {};
   var _modelNetEvents = {};
+  var _sessionValidated = false;
+
+  function _validateSession(bootEpoch) {
+    if (_sessionValidated) return;
+    _sessionValidated = true;
+    var stored = sessionStorage.getItem(App.BOOT_EPOCH_KEY);
+    if (stored && stored === String(bootEpoch)) {
+      // Same daemon session — restore persisted events
+      try { var s = sessionStorage.getItem(MODEL_EVENTS_KEY); if (s) _modelEvents = JSON.parse(s); } catch (e) {}
+      try { var s2 = sessionStorage.getItem(MODEL_NET_EVENTS_KEY); if (s2) _modelNetEvents = JSON.parse(s2); } catch (e) {}
+    } else {
+      // New daemon session — clear stale events
+      _modelEvents = {};
+      _modelNetEvents = {};
+      sessionStorage.removeItem(MODEL_EVENTS_KEY);
+      sessionStorage.removeItem(MODEL_NET_EVENTS_KEY);
+    }
+    sessionStorage.setItem(App.BOOT_EPOCH_KEY, String(bootEpoch));
+  }
 
   // Kinds that go to the network ticker on model cards
   var MODEL_NET_KINDS = { 'shard_announced': 1, 'peer_connected': 1, 'peer_disconnected': 1, 'rebalance_peer_left': 1 };
@@ -154,6 +173,7 @@
     },
 
     updateFull: function(data) {
+      if (data.boot_epoch !== undefined) _validateSession(data.boot_epoch);
       if (data.node_id) {
         var el = document.getElementById('node-id');
         var short = data.node_id.substring(0, 8);
@@ -280,6 +300,7 @@
     },
 
     updateStats: function(data) {
+      if (data.boot_epoch !== undefined) _validateSession(data.boot_epoch);
       if (data.uptime_seconds !== undefined) {
         document.getElementById('uptime').textContent = U.formatUptime(data.uptime_seconds);
       }

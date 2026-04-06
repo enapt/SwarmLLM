@@ -342,6 +342,7 @@ async fn build_stats_message(
         "requests_made": stats.requests_made,
         "forwards_served": stats.forwards_served,
         "uptime_seconds": (chrono::Utc::now() - stats.uptime_start).num_seconds(),
+        "boot_epoch": stats.uptime_start.timestamp(),
         "acquisitions": acquisitions,
     });
 

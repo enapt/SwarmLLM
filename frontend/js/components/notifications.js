@@ -359,12 +359,12 @@
         App.dashboard.loadInitial();
         App.providerHealth.startHealthPolling();
       } else {
-        // First connect this page load — clear stale activity from previous daemon session
+        // First connect this page load — clear stale global activity (per-model events
+        // are validated against boot_epoch in dashboard.js _validateSession)
         _activityEntries = [];
         _networkEntries = [];
         _persistActivity();
         _persistNetwork();
-        try { sessionStorage.removeItem(App.MODEL_EVENTS_KEY); sessionStorage.removeItem(App.MODEL_NET_EVENTS_KEY); } catch (e2) {}
       }
       S.wsWasConnected = true;
       logActivity('\u{1F4E1}', I18n.t('activity.connected'), 'system');
