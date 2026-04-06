@@ -15,7 +15,7 @@ const TREE_ESCROW: &str = "escrow";
 pub const DEFAULT_ESCROW_THRESHOLD: i64 = 10;
 
 /// Escrow entry TTL in seconds (10 minutes).
-pub(crate) const ESCROW_TTL_SECS: u64 = 600;
+const ESCROW_TTL_SECS: u64 = 600;
 
 /// Status of an escrow entry.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

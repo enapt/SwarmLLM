@@ -55,11 +55,6 @@ fn extract_anthropic_response(body: &serde_json::Value) -> (String, u64, u64) {
     (content, input_tokens, output_tokens)
 }
 
-/// Re-export shared helper for local usage.
-fn scrub_truncate_error(body: String) -> String {
-    super::scrub_truncate_error(&body)
-}
-
 /// Result of a single model dispatch call used by MCP compare/research/batch tools.
 struct ModelCallResult {
     pub content: String,
@@ -125,7 +120,7 @@ async fn dispatch_model_call(
         Ok(resp) => {
             let status = resp.status().as_u16();
             let body = resp.text().await.unwrap_or_default();
-            let truncated = scrub_truncate_error(body);
+            let truncated = super::scrub_truncate_error(&body);
             ModelCallResult {
                 content: String::new(),
                 input_tokens: 0,
