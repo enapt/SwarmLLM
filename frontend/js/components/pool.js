@@ -361,8 +361,6 @@
       // Simple QR code using a canvas-based generator
       // We use a minimal QR encoding — for 8 alphanumeric chars, version 1 is sufficient
       // Fallback: just show the code in a styled box if QR lib isn't available
-      var qrText = 'swarmllm-pool:' + code;
-
       // Create a visual representation using CSS grid (works without any library)
       var size = 120;
       var canvas = document.createElement('canvas');

@@ -637,7 +637,7 @@ pub async fn proxy_via_subprocess_openai(
                         break;
                     }
                     Err(_) => {
-                        tracing::error!("claude_sub: subprocess timeout");
+                        tracing::error!(model = %model_owned, "claude_sub: subprocess timeout");
                         let _ = child.kill().await;
                         break;
                     }
@@ -806,7 +806,7 @@ pub async fn proxy_via_subprocess_anthropic(
                         break;
                     }
                     Err(_) => {
-                        tracing::error!("claude_sub: subprocess timeout");
+                        tracing::error!(model = %model_owned, "claude_sub: subprocess timeout");
                         let _ = child.kill().await;
                         break;
                     }

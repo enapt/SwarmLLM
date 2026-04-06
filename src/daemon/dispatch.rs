@@ -567,6 +567,14 @@ pub(crate) async fn dispatch_network_messages(
                                             );
                                             continue;
                                         }
+                                        // Reject oversized model_id strings (memory DoS prevention)
+                                        if announce.shards.iter().any(|s| s.model_id.0.len() > 256) {
+                                            tracing::warn!(
+                                                node_id = %announce.node_id,
+                                                "ShardAnnounce contains oversized model_id — dropping"
+                                            );
+                                            continue;
+                                        }
                                         tracing::info!(
                                             node_id = %announce.node_id,
                                             shards = announce.shards.len(),
@@ -1236,7 +1244,9 @@ pub(crate) async fn dispatch_network_messages(
                                             }
                                             Some(_) => {} // Sender matches publisher — proceed
                                         }
-                                        if summary.region.len() > 8 || summary.shard_counts.len() > 512 {
+                                        if summary.region.len() > 8 || summary.shard_counts.len() > 512
+                                            || summary.model_id.0.len() > 256
+                                        {
                                             continue;
                                         }
                                         // Reject stale summaries
@@ -1291,7 +1301,7 @@ pub(crate) async fn dispatch_network_messages(
                                             }
                                             Some(_) => {} // Sender matches publisher — proceed
                                         }
-                                        if demand.region.len() > 8 {
+                                        if demand.region.len() > 8 || demand.model_id.0.len() > 256 {
                                             continue;
                                         }
                                         // Reject stale demand

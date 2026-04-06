@@ -214,7 +214,7 @@
     } else {
       // Show model name instead of generic "Assistant"
       var modelId = (opts && opts.model) || '';
-      var modelDisplay = modelId ? formatModelDisplayName(modelId) : 'AI';
+      var modelDisplay = modelId ? formatModelDisplayName(modelId) : I18n.t('chat.avatar_ai');
       roleEl.textContent = modelDisplay;
       // Source badge (local/network — skip "cloud" since model name already implies it)
       if (source === 'local') {

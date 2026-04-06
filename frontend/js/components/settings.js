@@ -154,7 +154,7 @@
         else { step2.textContent = '2'; step2.style.cssText = pendingStyle; }
       }
       if (step3) {
-        if (data.cli_installed) { step3.textContent = '\u2713'; step3.style.cssText = checkStyle; }
+        if (data.cli_installed && data.authenticated) { step3.textContent = '\u2713'; step3.style.cssText = checkStyle; }
         else { step3.textContent = '3'; step3.style.cssText = pendingStyle; }
       }
       if (step4 && toggle) {
