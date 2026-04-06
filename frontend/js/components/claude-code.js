@@ -174,6 +174,7 @@
               var evt = JSON.parse(payload);
               App.claudeCode._handleEvent(evt, contentEl, assistantEl, toolPanels, agentPanels, taskItems, {
                 cleared: cleared,
+                sessionId: sessionId,
                 setClear: function() { cleared = true; },
                 appendText: function(text) { fullContent += text; },
                 getFullContent: function() { return fullContent; },
@@ -353,7 +354,12 @@
         '</div>';
 
       // Show input details for certain tools
-      if (toolName === 'Bash' && input.command) {
+      if (toolName === 'AskUserQuestion' && input.question) {
+        var q = document.createElement('div');
+        q.className = 'cc-tool-input cc-question';
+        q.textContent = input.question;
+        panel.appendChild(q);
+      } else if (toolName === 'Bash' && input.command) {
         var pre = document.createElement('pre');
         pre.className = 'cc-tool-input cc-bash-cmd';
         pre.textContent = '$ ' + input.command;
@@ -612,7 +618,7 @@
       var toolName = req.tool_name || 'Unknown';
       var input = req.input || {};
       var requestId = evt.request_id || '';
-      var sessionId = S.currentSessionId || '';
+      var sessionId = ctx.sessionId || S.currentSessionId || '';
 
       var panel = document.createElement('div');
       panel.className = 'cc-permission-prompt';
@@ -741,6 +747,9 @@
         TodoWrite: '📋',
         LSP: '🔗',
         NotebookEdit: '📓',
+        AskUserQuestion: '❓',
+        EnterPlanMode: '📐',
+        ExitPlanMode: '📐',
       };
       return icons[name] || '⚡';
     },

@@ -1036,24 +1036,23 @@ pub async fn permission_handler(
         session.stdin_handle()
     };
 
-    let response = if req.allow {
-        serde_json::json!({
-            "type": "control_response",
-            "request_id": req.request_id,
-            "response": {
-                "behavior": "allow"
-            }
-        })
+    // SDK protocol: response envelope wraps request_id + subtype inside .response
+    let inner = if req.allow {
+        serde_json::json!({ "behavior": "allow" })
     } else {
         serde_json::json!({
-            "type": "control_response",
-            "request_id": req.request_id,
-            "response": {
-                "behavior": "deny",
-                "message": req.message.as_deref().unwrap_or("User denied this action")
-            }
+            "behavior": "deny",
+            "message": req.message.as_deref().unwrap_or("User denied this action")
         })
     };
+    let response = serde_json::json!({
+        "type": "control_response",
+        "response": {
+            "subtype": "success",
+            "request_id": req.request_id,
+            "response": inner
+        }
+    });
 
     write_to_stdin(&stdin_handle, &response).await?;
 
