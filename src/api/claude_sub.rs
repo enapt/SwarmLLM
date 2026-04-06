@@ -322,48 +322,21 @@ fn extract_content_text(msg: &serde_json::Value) -> String {
 ///
 /// Uses the production-proven format from claude-max-api-proxy-rs:
 /// - system messages → `<system>...</system>` (also extracted as --system-prompt)
-/// - assistant messages → `<previous_response>...</previous_response>`
-/// - user messages → bare text
-/// - tool_use/tool_result → tagged blocks
+/// Serialize a conversation to a single CLI prompt string.
 ///
-/// For single-turn (1 user message), just returns the raw message text.
-/// For multi-turn, serializes the full conversation every invocation (stateless).
-fn extract_openai_prompt(messages: &[serde_json::Value]) -> (String, Option<String>) {
-    let mut system_prompt = None;
-    let mut parts: Vec<String> = Vec::new();
-
-    for msg in messages {
-        let role = msg["role"].as_str().unwrap_or("user");
-        let text = extract_content_text(msg);
-        if text.is_empty() {
-            continue;
-        }
-        match role {
-            "system" => {
-                system_prompt = Some(text.clone());
-                parts.push(format!("<system>\n{text}\n</system>"));
-            }
-            "assistant" => {
-                parts.push(format!("<previous_response>\n{text}\n</previous_response>"));
-            }
-            _ => {
-                // user, tool, function — pass as bare text
-                parts.push(text);
-            }
-        }
-    }
-
-    let prompt = parts.join("\n\n").trim().to_string();
-    (prompt, system_prompt)
-}
-
-/// Serialize Anthropic-format messages to a single prompt string.
-/// Same stateless approach as OpenAI: full conversation every invocation.
-fn extract_anthropic_prompt(
+/// Message roles are tagged with XML:
+/// - system → `<system>...</system>`
+/// - assistant → `<previous_response>...</previous_response>`
+/// - user/tool/function → bare text
+///
+/// `system_override` provides a pre-extracted system prompt (Anthropic format);
+/// when `None`, system prompts are extracted from inline `"system"` role messages (OpenAI format).
+fn extract_prompt(
     messages: &[serde_json::Value],
-    system: Option<&serde_json::Value>,
+    system_override: Option<&serde_json::Value>,
 ) -> (String, Option<String>) {
-    let system_prompt = system.and_then(|s| match s {
+    // Extract system from top-level field (Anthropic) if provided
+    let mut system_prompt = system_override.and_then(|s| match s {
         serde_json::Value::String(text) => Some(text.clone()),
         serde_json::Value::Array(blocks) => Some(
             blocks
@@ -377,7 +350,7 @@ fn extract_anthropic_prompt(
 
     let mut parts: Vec<String> = Vec::new();
 
-    // Include system prompt in the serialized conversation
+    // If system was provided via override, include it first
     if let Some(ref sys) = system_prompt {
         parts.push(format!("<system>\n{sys}\n</system>"));
     }
@@ -389,6 +362,11 @@ fn extract_anthropic_prompt(
             continue;
         }
         match role {
+            "system" if system_prompt.is_none() => {
+                // OpenAI format: system is an inline message role
+                system_prompt = Some(text.clone());
+                parts.push(format!("<system>\n{text}\n</system>"));
+            }
             "assistant" => {
                 parts.push(format!("<previous_response>\n{text}\n</previous_response>"));
             }
@@ -466,12 +444,24 @@ async fn spawn_and_stream(
 // OpenAI-format proxy
 // ---------------------------------------------------------------------------
 
-/// Proxy a ChatCompletionRequest through the Claude CLI, returning OpenAI format.
-pub async fn proxy_via_subprocess_openai(
+/// Common setup for proxy_via_subprocess_* functions.
+struct ProxySetup {
+    child: tokio::process::Child,
+    lines: tokio::io::Lines<tokio::io::BufReader<tokio::process::ChildStdout>>,
+    model: String,
+    stream: bool,
+    system_prompt: Option<String>,
+    sess_key: Option<String>,
+    timeout: std::time::Duration,
+    _permit: tokio::sync::SemaphorePermit<'static>,
+}
+
+async fn prepare_proxy(
     config: &ClaudeSubscriptionConfig,
     req: &serde_json::Value,
-) -> Result<axum::response::Response, ApiError> {
-    let _permit = acquire_permit(config)?;
+    system_override: Option<&serde_json::Value>,
+) -> Result<ProxySetup, ApiError> {
+    let permit = acquire_permit(config)?;
 
     let model = req["model"].as_str().unwrap_or("claude-sonnet-4-6");
     let model = config.default_model.as_deref().unwrap_or(model);
@@ -479,13 +469,12 @@ pub async fn proxy_via_subprocess_openai(
     let stream = req["stream"].as_bool().unwrap_or(false);
     let messages: Vec<serde_json::Value> = req["messages"].as_array().cloned().unwrap_or_default();
 
-    let (prompt, system_prompt) = extract_openai_prompt(&messages);
+    let (prompt, system_prompt) = extract_prompt(&messages, system_override);
 
-    // Session management: check for cached session for multi-turn (only for 2+ messages)
     let sess_key = session_key(model, &messages);
     let cached_session = sess_key.as_ref().and_then(|k| get_session(k));
 
-    let (mut child, mut lines) = spawn_and_stream(
+    let (child, lines) = spawn_and_stream(
         config,
         model,
         &prompt,
@@ -495,13 +484,40 @@ pub async fn proxy_via_subprocess_openai(
     )
     .await?;
 
+    Ok(ProxySetup {
+        child,
+        lines,
+        model: model.to_string(),
+        stream,
+        system_prompt,
+        sess_key,
+        timeout: config.timeout(),
+        _permit: permit,
+    })
+}
+
+/// Proxy a ChatCompletionRequest through the Claude CLI, returning OpenAI format.
+pub async fn proxy_via_subprocess_openai(
+    config: &ClaudeSubscriptionConfig,
+    req: &serde_json::Value,
+) -> Result<axum::response::Response, ApiError> {
+    let ProxySetup {
+        mut child,
+        mut lines,
+        model,
+        stream,
+        system_prompt: _,
+        sess_key,
+        timeout,
+        _permit,
+    } = prepare_proxy(config, req, None).await?;
+
     let request_id = format!("chatcmpl-{}", uuid::Uuid::new_v4().simple());
     let created = chrono::Utc::now().timestamp();
-    let timeout = config.timeout();
 
     if stream {
         // Streaming: translate NDJSON → OpenAI SSE
-        let model_owned = model.to_string();
+        let model_owned = model.clone();
         let rid = request_id.clone();
         let sk = sess_key.clone();
 
@@ -690,31 +706,16 @@ pub async fn proxy_via_subprocess_anthropic(
     config: &ClaudeSubscriptionConfig,
     req: &serde_json::Value,
 ) -> Result<axum::response::Response, ApiError> {
-    let _permit = acquire_permit(config)?;
-
-    let model = req["model"].as_str().unwrap_or("claude-sonnet-4-6");
-    let model = config.default_model.as_deref().unwrap_or(model);
-    validate_model_name(model)?;
-    let stream = req["stream"].as_bool().unwrap_or(false);
-    let messages: Vec<serde_json::Value> = req["messages"].as_array().cloned().unwrap_or_default();
-
-    let (prompt, system_prompt) = extract_anthropic_prompt(&messages, req.get("system"));
-
-    // Session management (multi-turn only)
-    let sess_key = session_key(model, &messages);
-    let cached_session = sess_key.as_ref().and_then(|k| get_session(k));
-
-    let (mut child, mut lines) = spawn_and_stream(
-        config,
+    let ProxySetup {
+        mut child,
+        mut lines,
         model,
-        &prompt,
-        system_prompt.as_deref(),
-        cached_session.as_deref(),
         stream,
-    )
-    .await?;
-
-    let timeout = config.timeout();
+        system_prompt: _,
+        sess_key,
+        timeout,
+        _permit,
+    } = prepare_proxy(config, req, req.get("system")).await?;
 
     if stream {
         // Streaming: translate NDJSON → Anthropic SSE
@@ -1021,22 +1022,22 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_openai_prompt_single_turn() {
+    fn test_extract_prompt_single_turn() {
         let messages = vec![serde_json::json!({"role": "user", "content": "Hello"})];
-        let (prompt, system) = extract_openai_prompt(&messages);
+        let (prompt, system) = extract_prompt(&messages, None);
         assert_eq!(prompt, "Hello");
         assert!(system.is_none());
     }
 
     #[test]
-    fn test_extract_openai_prompt_multi_turn() {
+    fn test_extract_prompt_multi_turn() {
         let messages = vec![
             serde_json::json!({"role": "system", "content": "You are helpful"}),
             serde_json::json!({"role": "user", "content": "What is 2+2?"}),
             serde_json::json!({"role": "assistant", "content": "4"}),
             serde_json::json!({"role": "user", "content": "And 3+3?"}),
         ];
-        let (prompt, system) = extract_openai_prompt(&messages);
+        let (prompt, system) = extract_prompt(&messages, None);
         assert!(prompt.contains("<system>"));
         assert!(prompt.contains("You are helpful"));
         assert!(prompt.contains("<previous_response>"));
