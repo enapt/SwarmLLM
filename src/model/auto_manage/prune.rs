@@ -667,10 +667,7 @@ impl AutoShardManager {
 
     /// Check if this model's shards were used recently (last 5 min).
     fn shard_recently_used(&self, model_id: &ModelId) -> bool {
-        let now_secs = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
+        let now_secs = crate::types::unix_now_secs();
         if let Some(ranges) = self.shared_state.split_model_index.get(model_id) {
             for &(s, e) in ranges.iter() {
                 let key = (model_id.clone(), s, e);

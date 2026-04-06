@@ -122,10 +122,7 @@ fn is_leaderboard_eligible(first_seen: u64, verified_tx_count: u32, peer_count: 
     if peer_count < SMALL_NETWORK_THRESHOLD {
         return true;
     }
-    let now_ts = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
+    let now_ts = crate::types::unix_now_secs();
     const SECS_PER_DAY: u64 = 86_400;
     let age_days = if first_seen > 0 {
         (now_ts.saturating_sub(first_seen)) / SECS_PER_DAY

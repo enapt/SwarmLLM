@@ -992,10 +992,7 @@ pub(crate) async fn dispatch_network_messages(
                                         }
 
                                         // Respond with a pong containing our own load
-                                        let ts = std::time::SystemTime::now()
-                                            .duration_since(std::time::UNIX_EPOCH)
-                                            .unwrap_or_default()
-                                            .as_secs();
+                                        let ts = crate::types::unix_now_secs();
                                         let our_load = shared_state.active_pipelines.len() as u32;
                                         let our_id = Some(shared_state.identity.node_id().clone());
                                         let pong = SwarmMessage::HealthPong {
@@ -1243,10 +1240,7 @@ pub(crate) async fn dispatch_network_messages(
                                             continue;
                                         }
                                         // Reject stale summaries
-                                        let now_ms = std::time::SystemTime::now()
-                                            .duration_since(std::time::UNIX_EPOCH)
-                                            .unwrap_or_default()
-                                            .as_millis() as u64;
+                                        let now_ms = crate::types::unix_now_ms();
                                         if now_ms.saturating_sub(summary.timestamp_ms) > GOSSIP_STALENESS_MS {
                                             tracing::debug!(
                                                 region = %summary.region,
@@ -1301,10 +1295,7 @@ pub(crate) async fn dispatch_network_messages(
                                             continue;
                                         }
                                         // Reject stale demand
-                                        let now_ms = std::time::SystemTime::now()
-                                            .duration_since(std::time::UNIX_EPOCH)
-                                            .unwrap_or_default()
-                                            .as_millis() as u64;
+                                        let now_ms = crate::types::unix_now_ms();
                                         if now_ms.saturating_sub(demand.timestamp_ms) > GOSSIP_STALENESS_MS {
                                             tracing::debug!(
                                                 model = %demand.model_id,

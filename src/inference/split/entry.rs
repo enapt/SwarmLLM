@@ -35,10 +35,7 @@ pub struct SplitModelEntry {
 
 impl SplitModelEntry {
     fn now_secs() -> u64 {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs()
+        crate::types::unix_now_secs()
     }
 
     /// Extract metadata from a `SplitModel` reference, then drop the model.

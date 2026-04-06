@@ -1082,7 +1082,6 @@ pub async fn unload_shard(
 
     // Get current shard window (or all local shard indices if no window set)
     let current_window = shared.model_process_pool.get_shard_window(&mid);
-    let local_node_id = shared.identity.node_id().clone();
     let window = current_window.unwrap_or_else(|| {
         shared
             .model_registry

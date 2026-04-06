@@ -1229,10 +1229,7 @@ impl NetworkManager {
             }
         }
 
-        let now_ts = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
+        let now_ts = crate::types::unix_now_secs();
         // Preserve first_seen from existing entry or use current time
         let first_seen = self
             .shared_state

@@ -123,10 +123,7 @@ impl HealthMonitor {
     }
 
     async fn send_health_ping(&self, nonce: u64) {
-        let timestamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
+        let timestamp = crate::types::unix_now_secs();
 
         let active_request_count = self.shared_state.active_pipelines.len() as u32;
         let node_id = Some(self.shared_state.identity.node_id().clone());
@@ -315,10 +312,7 @@ impl HealthMonitor {
         };
 
         let our_id = self.shared_state.identity.node_id().clone();
-        let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as u64;
+        let now_ms = crate::types::unix_now_ms();
 
         // Count same-region peers (including self)
         let mut region_node_count: u32 = 1; // self
@@ -561,10 +555,7 @@ impl HealthMonitor {
 
         // region_shard_summaries: evict entries older than 10 minutes
         const REGION_SUMMARY_TTL_MS: u64 = 600_000;
-        let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as u64;
+        let now_ms = crate::types::unix_now_ms();
         let stale_region: Vec<_> = self
             .shared_state
             .region_shard_summaries
