@@ -261,7 +261,7 @@
           return r.json();
         }).then(function(data) {
           if (data.subscription_type) {
-            planEl.textContent = data.subscription_type.charAt(0).toUpperCase() + data.subscription_type.slice(1) + ' plan';
+            planEl.textContent = data.subscription_type.charAt(0).toUpperCase() + data.subscription_type.slice(1) + ' ' + I18n.t('settings.plan');
           }
           if (data.cli_version) {
             planEl.textContent = (planEl.textContent ? planEl.textContent + ' · ' : '') + data.cli_version.replace(' (Claude Code)', '');

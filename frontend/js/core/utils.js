@@ -227,9 +227,9 @@
         subBadge.className = 'msg-source-badge source-subscription';
         subBadge.textContent = I18n.t('dashboard.subscription_badge');
         roleEl.appendChild(subBadge);
-      } else if (source === 'network') {
+      } else if (source === 'swarm') {
         var netBadge = document.createElement('span');
-        netBadge.className = 'msg-source-badge source-network';
+        netBadge.className = 'msg-source-badge source-swarm';
         netBadge.textContent = I18n.t('chat.source_network');
         roleEl.appendChild(netBadge);
       }
