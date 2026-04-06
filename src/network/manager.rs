@@ -24,6 +24,9 @@ use crate::types::{NetworkCommand, PeerInfo, SwarmMessage};
 
 /// Maximum in-flight shard chunk requests before dropping new ones.
 const MAX_PENDING_SHARD_REQUESTS: usize = 1024;
+/// Maximum lifetime (seconds) for a tensor channel or outbound forward before eviction.
+/// Used for both channel cleanup and adaptive timeout upper clamp.
+const MAX_TENSOR_FORWARD_SECS: u64 = 600;
 
 /// Check if a multiaddr string contains a private/loopback/link-local/CGN IP.
 /// Used for PEX filtering to prevent leaking internal topology.
@@ -436,7 +439,7 @@ impl NetworkManager {
                     // Sweep stale pending_tensor_channels independently of outbound state.
                     // On serving nodes, pending_tensor_outbound is empty but channels can still leak.
                     self.pending_tensor_channels.retain(|_uuid, (inserted, _chan)| {
-                        inserted.elapsed().as_secs() < 600
+                        inserted.elapsed().as_secs() < MAX_TENSOR_FORWARD_SECS
                     });
                     if !self.pending_tensor_outbound.is_empty() {
                         let now = std::time::Instant::now();
@@ -447,7 +450,7 @@ impl NetworkManager {
                             // clamped to [30s, 600s]. Matches pipeline.rs logic.
                             let is_prefill = *activation_bytes > crate::inference::pipeline::PREFILL_ACTIVATION_THRESHOLD_BYTES;
                             let per_layer = if is_prefill { 15u64 } else { 2 };
-                            let timeout_secs = ((*num_layers as u64) * per_layer).clamp(30, 600);
+                            let timeout_secs = ((*num_layers as u64) * per_layer).clamp(30, MAX_TENSOR_FORWARD_SECS);
                             let is_rr_pending = self.swarm.behaviour()
                                 .request_response.is_pending_outbound(target_peer, req_id);
                             let is_connected = self.swarm.is_connected(target_peer);

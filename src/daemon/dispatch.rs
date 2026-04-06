@@ -18,6 +18,12 @@ const MAX_NICKNAME_REGISTRY: usize = 10_000;
 const ZSTD_COMPRESS_LEVEL: i32 = 3;
 /// Maximum age (ms) for regional gossip messages before they're considered stale.
 const GOSSIP_STALENESS_MS: u64 = 15 * 60 * 1000;
+/// Maximum AllReduce partials in flight before dropping new TpAllReduceRequests (DoS guard).
+const MAX_PENDING_TP_PARTIALS: usize = 512;
+/// Maximum cached regional shard summaries (per region+model pair).
+const MAX_REGION_SUMMARIES: usize = 10_000;
+/// Maximum demand rate entries across all (model, region) pairs.
+const MAX_DEMAND_ENTRIES: usize = 10_000;
 
 /// Pipeline sealing: encrypt the token IDs in a LayerResult for the requester's X25519 key.
 /// If `requester_node_id` is present, seals `token_ids` into `sealed_token_ids` and clears
@@ -1125,8 +1131,6 @@ pub(crate) async fn dispatch_network_messages(
                                         // (embedded by NetworkManager when receiving the rr request)
                                         let sender_peer = req.sender_peer_bytes.clone();
 
-                                        // SEC: Cap pending_tp_partials to prevent OOM from AllReduce flooding
-                                        const MAX_PENDING_TP_PARTIALS: usize = 512;
                                         if !ss.pending_tp_partials.contains_key(&key)
                                             && ss.pending_tp_partials.len() >= MAX_PENDING_TP_PARTIALS
                                         {
@@ -1268,8 +1272,6 @@ pub(crate) async fn dispatch_network_messages(
                                             .map(|existing| summary.timestamp_ms > existing.timestamp_ms)
                                             .unwrap_or(true);
                                         if should_update {
-                                            // Cap to prevent unbounded growth from malicious/diverse gossip
-                                            const MAX_REGION_SUMMARIES: usize = 10_000;
                                             if shared_state.region_shard_summaries.len() >= MAX_REGION_SUMMARIES
                                                 && !shared_state.region_shard_summaries.contains_key(&key)
                                             {
@@ -1315,8 +1317,6 @@ pub(crate) async fn dispatch_network_messages(
                                             continue;
                                         }
                                         let key = (demand.model_id.clone(), demand.region.clone());
-                                        // Cap to prevent unbounded growth
-                                        const MAX_DEMAND_ENTRIES: usize = 10_000;
                                         if shared_state.region_demand.len() >= MAX_DEMAND_ENTRIES
                                             && !shared_state.region_demand.contains_key(&key)
                                         {

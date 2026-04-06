@@ -92,6 +92,28 @@ impl AutoShardManager {
     /// Run the auto-manage loop. Checks periodically based on config interval,
     /// and also wakes immediately when new HF sources or manifests arrive from peers.
     /// Always runs (even when disabled) so it can respond to runtime config changes.
+    /// Sum the on-disk byte count of all shards held by a given node.
+    /// Returns (total_bytes, shard_count).
+    pub(super) fn local_shard_bytes(&self, node_id: &crate::types::NodeId) -> (u64, u32) {
+        let local_shards = self.shared_state.model_registry.shards_for_node(node_id);
+        let count = local_shards.len() as u32;
+        let bytes = local_shards
+            .iter()
+            .filter_map(|sid| {
+                let manifest = self
+                    .shared_state
+                    .model_registry
+                    .get_manifest(&sid.model_id)?;
+                manifest
+                    .shards
+                    .iter()
+                    .find(|s| s.index == sid.index)
+                    .map(|si| si.size_bytes)
+            })
+            .sum();
+        (bytes, count)
+    }
+
     pub async fn run(mut self) {
         let config = &self.shared_state.config.auto_manage;
         if !config.enabled {
@@ -575,18 +597,7 @@ mod tests {
         target.clamp(min_replicas, (pool_size as u32).max(min_replicas))
     }
 
-    /// Helper: adjust target based on resource pressure.
-    fn pressure_adjusted_target_pure(target: u32, pressure: f64, min_replicas: u32) -> u32 {
-        if pressure < 0.5 {
-            target + 1
-        } else if pressure < 0.8 {
-            target
-        } else if pressure < 0.95 {
-            target.saturating_sub(1).max(min_replicas)
-        } else {
-            target.saturating_sub(2).max(min_replicas)
-        }
-    }
+    use crate::model::auto_manage::pressure_adjusted_target as pressure_adjusted_target_pure;
 
     #[test]
     fn geo_target_idle_small_pool() {

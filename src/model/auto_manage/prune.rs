@@ -497,18 +497,7 @@ impl AutoShardManager {
         pressure: f64,
         min_replicas: u32,
     ) -> u32 {
-        if pressure < 0.5 {
-            // Relaxed: keep extras
-            target.saturating_add(1)
-        } else if pressure < 0.8 {
-            target
-        } else if pressure < 0.95 {
-            // Eager
-            target.saturating_sub(1).max(min_replicas)
-        } else {
-            // Urgent
-            target.saturating_sub(2).max(min_replicas)
-        }
+        pressure_adjusted_target(target, pressure, min_replicas)
     }
 
     /// Compute resource pressure (0.0-1.0) based on VRAM and disk usage.
@@ -522,19 +511,7 @@ impl AutoShardManager {
         } else {
             config.resources.max_disk_mb / 2
         };
-        // Use reverse index for O(local_shards) instead of O(all_shards)
-        let mut local_bytes = 0u64;
-        let local_shards = self
-            .shared_state
-            .model_registry
-            .shards_for_node(&local_node_id);
-        for sid in &local_shards {
-            if let Some(manifest) = self.shared_state.model_registry.get_manifest(&sid.model_id) {
-                if let Some(shard_info) = manifest.shards.iter().find(|s| s.index == sid.index) {
-                    local_bytes += shard_info.size_bytes;
-                }
-            }
-        }
+        let (local_bytes, _) = self.local_shard_bytes(&local_node_id);
         let disk_pressure = if budget_mb > 0 {
             local_bytes as f64 / (budget_mb as f64 * 1024.0 * 1024.0)
         } else {
@@ -784,5 +761,20 @@ impl AutoShardManager {
         } else {
             None
         }
+    }
+}
+
+/// Adjust shard target replicas based on resource pressure (pure function).
+/// Relaxed (<0.5): keep extras, Normal (<0.8): unchanged,
+/// Eager (<0.95): reduce by 1, Urgent (≥0.95): reduce by 2.
+pub(crate) fn pressure_adjusted_target(target: u32, pressure: f64, min_replicas: u32) -> u32 {
+    if pressure < 0.5 {
+        target.saturating_add(1)
+    } else if pressure < 0.8 {
+        target
+    } else if pressure < 0.95 {
+        target.saturating_sub(1).max(min_replicas)
+    } else {
+        target.saturating_sub(2).max(min_replicas)
     }
 }

@@ -27,19 +27,7 @@ impl AutoShardManager {
         };
 
         // Sum up bytes of shards we already hold (O(local_shards) via reverse index)
-        let local_shards = self
-            .shared_state
-            .model_registry
-            .shards_for_node(local_node_id);
-        let mut current_bytes = 0u64;
-        let current_shard_count = local_shards.len() as u32;
-        for sid in &local_shards {
-            if let Some(manifest) = self.shared_state.model_registry.get_manifest(&sid.model_id) {
-                if let Some(si) = manifest.shards.iter().find(|s| s.index == sid.index) {
-                    current_bytes += si.size_bytes;
-                }
-            }
-        }
+        let (current_bytes, current_shard_count) = self.local_shard_bytes(local_node_id);
 
         // Check max_shards limit
         if config.max_shards > 0 && current_shard_count >= config.max_shards {
