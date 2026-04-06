@@ -1507,7 +1507,7 @@ pub async fn download_shard(
             let request = crate::types::ShardRequest {
                 shard_id,
                 chunk_offset: 0,
-                chunk_size: 32 * 1024 * 1024,
+                chunk_size: crate::network::protocol::SHARD_CHUNK_SIZE,
             };
             if let Some(ref tx) = state.network_tx {
                 let _ = tx

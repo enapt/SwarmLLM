@@ -2092,7 +2092,7 @@ impl NetworkManager {
                                     let retry_req = crate::types::ShardRequest {
                                         shard_id: shard_id.clone(),
                                         chunk_offset: 0,
-                                        chunk_size: 32 * 1024 * 1024,
+                                        chunk_size: crate::network::protocol::SHARD_CHUNK_SIZE,
                                     };
                                     self.handle_send_shard_request(next_bytes, retry_req);
                                     return;
@@ -2255,7 +2255,7 @@ mname.as_deref().unwrap_or(&shard_id.model_id.0),
                             let next_req = crate::types::ShardRequest {
                                 shard_id: shard_id.clone(),
                                 chunk_offset: new_offset,
-                                chunk_size: 32 * 1024 * 1024, // 32MB chunks
+                                chunk_size: crate::network::protocol::SHARD_CHUNK_SIZE, // 32MB chunks
                             };
                             let req = SwarmRequest::ShardTransfer(next_req);
                             let new_req_id = self
@@ -3421,7 +3421,7 @@ async fn read_shard_chunk_async(
         match std::fs::File::open(&path) {
             Ok(mut file) => {
                 let total_size = file.metadata().map(|m| m.len()).unwrap_or(0);
-                let chunk_size = chunk_size.min(32 * 1024 * 1024);
+                let chunk_size = chunk_size.min(crate::network::protocol::SHARD_CHUNK_SIZE);
                 if let Err(e) = file.seek(SeekFrom::Start(offset)) {
                     tracing::warn!(error = %e, "Failed to seek in shard file");
                     return SwarmResponse::ShardData(crate::types::ShardResponse {

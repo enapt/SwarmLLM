@@ -230,7 +230,7 @@ impl UpdateChecker {
                 })?;
                 body_bytes.extend_from_slice(&chunk);
                 if body_bytes.len() as u64 > MAX_UPDATE_SIZE {
-                    return Err(SwarmError::Internal(format!(
+                    return Err(SwarmError::Validation(format!(
                         "Update binary too large (>{} bytes) — aborting download",
                         MAX_UPDATE_SIZE
                     )));

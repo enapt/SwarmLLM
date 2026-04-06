@@ -36,6 +36,8 @@ pub const TOPIC_REGIONS: &str = "swarm/regions";
 const MAX_MESSAGE_SIZE: usize = 256 * 1024 * 1024;
 /// Maximum JSON control message size (4 MB).
 const MAX_JSON_MSG_SIZE: usize = 4 * 1024 * 1024;
+/// Shard transfer chunk size (32 MB) — used by acquisition, download, and serve paths.
+pub const SHARD_CHUNK_SIZE: u64 = 32 * 1024 * 1024;
 
 /// Maximum activation payload size in layer results (128 MB).
 const MAX_ACTIVATION_SIZE: usize = 128 * 1024 * 1024;

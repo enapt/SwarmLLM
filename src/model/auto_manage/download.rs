@@ -690,7 +690,7 @@ e
                     let request = crate::types::ShardRequest {
                         shard_id: sid.clone(),
                         chunk_offset: 0,
-                        chunk_size: 32 * 1024 * 1024,
+                        chunk_size: crate::network::protocol::SHARD_CHUNK_SIZE,
                     };
                     tracing::info!(
                         model = %candidate.model_id,

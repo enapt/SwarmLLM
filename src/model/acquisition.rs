@@ -482,7 +482,7 @@ impl AcquisitionManager {
                 let request = crate::types::ShardRequest {
                     shard_id: shard_id.clone(),
                     chunk_offset: 0,
-                    chunk_size: 32 * 1024 * 1024, // 32MB chunks
+                    chunk_size: crate::network::protocol::SHARD_CHUNK_SIZE,
                 };
 
                 // Look up the peer's libp2p PeerId bytes for directed request_response
