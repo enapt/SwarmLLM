@@ -913,6 +913,10 @@ impl PoolManager {
                 let max_size = self.shared_state.config.pool.max_pool_size;
                 if ps.members.len() >= max_size as usize {
                     tracing::warn!(
+                        invitee = %acceptance.invitee_node_id,
+                        invitation_id = %acceptance.invitation_id,
+                        current_members = ps.members.len(),
+                        max_size,
                         "Pool full, rejecting acceptance — invitation preserved for retry"
                     );
                     return;

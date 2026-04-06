@@ -15,6 +15,8 @@ use crate::types::{InferenceRequest, NetworkCommand, NodeId, PipelineAssignment,
 
 const KV_CACHE_CLEANUP_INTERVAL_SECS: u64 = 30;
 const MODEL_LOAD_WAIT_SECS: u64 = 60;
+/// Maximum depth of the inference request queue. Requests are rejected with 503 when full.
+const MAX_QUEUE_DEPTH: usize = 512;
 
 /// Result channel for returning inference output to API callers.
 pub type InferenceResultTx = oneshot::Sender<Result<InferenceOutput, SwarmError>>;
@@ -428,7 +430,6 @@ impl InferenceRouter {
 
         // Reject when queue is full to prevent memory exhaustion from request flooding.
         // max_concurrent gates execution slots; this caps the waiting queue depth.
-        const MAX_QUEUE_DEPTH: usize = 512;
         if self.queue.len() >= MAX_QUEUE_DEPTH {
             tracing::warn!(
                 queue_len = self.queue.len(),

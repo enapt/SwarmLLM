@@ -2162,15 +2162,8 @@ mname.as_deref().unwrap_or(&shard_id.model_id.0),
                                 reason: "P2P transfer failed".into(),
                             };
                         }
-                        let cleanup_shared = self.shared_state.clone();
-                        let cleanup_mid = shard_id.model_id.clone();
-                        tokio::spawn(async move {
-                            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                            cleanup_shared
-                                .models
-                                .acquisition_progress
-                                .remove(&cleanup_mid);
-                        });
+                        self.shared_state
+                            .schedule_acquisition_cleanup(shard_id.model_id.clone());
                         return;
                     }
 
@@ -2315,17 +2308,8 @@ mname.as_deref().unwrap_or(&shard_id.model_id.0),
                             }
                         }
                         // Remove the acquisition entry after a delay so UI sees the completion
-                        {
-                            let cleanup_shared = self.shared_state.clone();
-                            let cleanup_mid = shard_id.model_id.clone();
-                            tokio::spawn(async move {
-                                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                                cleanup_shared
-                                    .models
-                                    .acquisition_progress
-                                    .remove(&cleanup_mid);
-                            });
-                        }
+                        self.shared_state
+                            .schedule_acquisition_cleanup(shard_id.model_id.clone());
 
                         // Register ourselves as a holder of this shard
                         let local_node_id = self.shared_state.identity.node_id().clone();
