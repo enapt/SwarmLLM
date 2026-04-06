@@ -452,6 +452,11 @@ a:hover { color: var(--accent-hover); }
   background: var(--accent-glow);
   border: 1px solid color-mix(in srgb, var(--accent) 25%, transparent);
 }
+.session-source-subscription {
+  color: #D97757;
+  background: rgba(217, 119, 87, 0.12);
+  border: 1px solid rgba(217, 119, 87, 0.25);
+}
 .session-title {
   font-size: 0.8rem;
   color: var(--text-primary);
@@ -1211,13 +1216,18 @@ input[type="range"]::-webkit-slider-thumb {
   background: var(--green-dim);
   border-color: rgba(34, 197, 94, 0.25);
 }
+.chat-session-model.source-subscription {
+  color: #D97757;
+  background: rgba(217, 119, 87, 0.12);
+  border-color: rgba(217, 119, 87, 0.25);
+}
 .chat-session-model.unavailable {
   color: var(--red, #f44);
   background: color-mix(in srgb, var(--red, #f44) 10%, transparent);
   border-color: color-mix(in srgb, var(--red, #f44) 30%, transparent);
 }
 .cc-auth-badge { font-size: 0.58rem; font-weight: 700; padding: 0 4px; border-radius: 3px; letter-spacing: 0.03em; vertical-align: middle; }
-.cc-auth-sub { background: rgba(168,85,247,0.2); color: #a855f7; }
+.cc-auth-sub { background: rgba(217,119,87,0.2); color: #D97757; }
 .cc-auth-api { background: rgba(59,130,246,0.2); color: #3b82f6; }
 .chat-session-count {
   font-size: 0.68rem;
@@ -1406,6 +1416,7 @@ input[type="range"]::-webkit-slider-thumb {
 .chat-messages.chat-messenger .chat-msg.assistant.source-local .msg-avatar  { border-color: var(--green);  color: var(--green);  }
 .chat-messages.chat-messenger .chat-msg.assistant.source-cloud .msg-avatar  { border-color: var(--purple); color: var(--purple); }
 .chat-messages.chat-messenger .chat-msg.assistant.source-swarm .msg-avatar  { border-color: var(--accent); color: var(--accent); }
+.chat-messages.chat-messenger .chat-msg.assistant.source-subscription .msg-avatar  { border-color: #D97757; color: #D97757; }
 
 /* ---- Actions in messenger mode ---- */
 .chat-messages.chat-messenger .msg-actions { margin-top: 4px; gap: 4px; }
@@ -2024,6 +2035,28 @@ select.cloud-model-sort { flex: 0 0 88px; width: 88px; padding: 6px 6px; font-si
 .cloud-model-row-ping { flex-shrink: 0; min-width: 44px; text-align: right; }
 .cloud-model-empty { padding: 12px 10px; font-size: 0.8rem; color: var(--text-muted); text-align: center; }
 .cloud-card-note { font-size: 0.72rem; color: var(--text-muted); }
+
+/* Subscription model panel — visually distinct from cloud providers */
+.badge-subscription {
+  background: rgba(217, 119, 87, 0.15); color: #D97757;
+  border: 1px solid rgba(217, 119, 87, 0.35);
+  font-size: 0.62rem; font-weight: 700; padding: 2px 8px;
+  border-radius: var(--radius-lg); letter-spacing: 0.05em;
+  text-transform: uppercase; margin-left: auto; flex-shrink: 0;
+}
+.subscription-card-header {
+  background: linear-gradient(135deg, rgba(217, 119, 87, 0.12) 0%, rgba(217, 119, 87, 0.04) 100%);
+  border-bottom: 1px solid rgba(217, 119, 87, 0.2);
+}
+.model-card.subscription-model-card {
+  border-color: rgba(217, 119, 87, 0.25);
+}
+.model-card.subscription-model-card:hover {
+  border-color: rgba(217, 119, 87, 0.45);
+}
+.cloud-status-sub {
+  font-size: 0.68rem; font-weight: 600; color: #D97757; margin-left: 8px;
+}
 /* (cloud-models-divider removed — unused) */
 .provider-health-badge { display: inline-block; font-size: 0.68rem; font-weight: 600; padding: 1px 6px; border-radius: var(--radius-sm); margin-left: 6px; }
 .health-fast { background: rgba(76,175,80,0.15); color: var(--green); }
@@ -2917,10 +2950,15 @@ select.cloud-model-sort { flex: 0 0 88px; width: 88px; padding: 6px 6px; font-si
   background: var(--accent-glow); color: var(--accent);
   border: 1px solid rgba(59, 130, 246, 0.3);
 }
+.msg-source-badge.source-subscription {
+  background: rgba(217, 119, 87, 0.12); color: #D97757;
+  border: 1px solid rgba(217, 119, 87, 0.3);
+}
 /* Source-colored left border for assistant messages */
 .chat-msg.assistant.source-local { border-left-color: var(--green); }
 .chat-msg.assistant.source-cloud { border-left-color: var(--purple); }
 .chat-msg.assistant.source-swarm { border-left-color: var(--accent); }
+.chat-msg.assistant.source-subscription { border-left-color: #D97757; }
 
 /* Messenger layout: source colors handled via avatar border (see messenger block above) */
 

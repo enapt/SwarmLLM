@@ -317,8 +317,22 @@
       var loading = document.getElementById('models-loading');
       if (loading) loading.remove();
 
-      var hasCloud = cloudModels && cloudModels.length > 0;
-      if ((!models || models.length === 0) && !hasCloud) {
+      // Split cloud models into API-key providers vs subscription providers
+      var apiModels = [];
+      var subscriptionModels = [];
+      if (cloudModels && cloudModels.length > 0) {
+        cloudModels.forEach(function(cm) {
+          if (typeof isSubscriptionProvider === 'function' && isSubscriptionProvider(cm.provider)) {
+            subscriptionModels.push(cm);
+          } else {
+            apiModels.push(cm);
+          }
+        });
+      }
+      var hasCloud = apiModels.length > 0;
+      var hasSubscription = subscriptionModels.length > 0;
+
+      if ((!models || models.length === 0) && !hasCloud && !hasSubscription) {
         list.innerHTML = '';
         empty.style.display = '';
         var _sb = document.getElementById('models-stats-bar');
@@ -335,7 +349,7 @@
         return anyHolder;
       });
 
-      if (models.length === 0 && !hasCloud) {
+      if (models.length === 0 && !hasCloud && !hasSubscription) {
         list.innerHTML = '';
         empty.style.display = '';
         var _sb2 = document.getElementById('models-stats-bar');
@@ -355,11 +369,11 @@
           return m.status === 'loaded' || m.status === 'ready' || (hc === sc && sc > 0);
         }).length;
         var statNet = models.filter(function(m) { return !m.local && !(m.hosted_shards > 0) && m.peers_hosting > 0; }).length;
-        var statCloudTotal = hasCloud ? cloudModels.length : 0;
+        var statCloudTotal = hasCloud ? apiModels.length : 0;
         var statProviders = 0;
         if (hasCloud) {
           var _pset = {};
-          cloudModels.forEach(function(cm) { _pset[cm.provider || 'cloud'] = 1; });
+          apiModels.forEach(function(cm) { _pset[cm.provider || 'cloud'] = 1; });
           statProviders = Object.keys(_pset).length;
         }
         document.getElementById('stat-chip-ready-val').textContent = statReady;
@@ -373,6 +387,13 @@
         var sep = statsBar.querySelector('.models-stat-sep');
         if (cloudGroup) cloudGroup.style.display = hasCloud ? '' : 'none';
         if (sep) sep.style.display = hasCloud ? '' : 'none';
+        // Subscription stats chip
+        var subGroup = document.getElementById('stat-group-subscription');
+        var subSep = document.getElementById('models-stat-sep-sub');
+        if (subGroup) subGroup.style.display = hasSubscription ? '' : 'none';
+        if (subSep) subSep.style.display = hasSubscription ? '' : 'none';
+        var subValEl = document.getElementById('stat-chip-subscription-val');
+        if (subValEl && hasSubscription) subValEl.textContent = subscriptionModels.length;
       }
 
       // Sort swarm models
@@ -863,80 +884,117 @@
         }
       });
 
-      // Cloud provider models
+      // --- Shared helpers for cloud + subscription card rendering ---
+      function getCtxLen(cm) {
+        if (!cm.meta) return cm.context_length || 0;
+        return cm.meta.context_length || cm.meta.context_window || cm.meta.max_model_len || cm.context_length || 0;
+      }
+      var _nonChatPattern = /dall-e|tts|whisper|embed|moderation|davinci-\d|babbage-\d|text-embedding|audio/i;
+      function sortCloudModels(models, sortBy) {
+        var sorted = models.slice();
+        if (sortBy === 'ctx-desc') sorted.sort(function(a, b) { return getCtxLen(b) - getCtxLen(a); });
+        else if (sortBy === 'ctx-asc') sorted.sort(function(a, b) { return getCtxLen(a) - getCtxLen(b); });
+        else if (sortBy === 'avail') sorted.sort(function(a, b) {
+          var sa = S.modelStatus[a.id], sb = S.modelStatus[b.id];
+          var rank = { up: 0, rate_limited: 1, timeout: 3, unavailable: 4, not_found: 5, error: 4 };
+          var ra = sa ? (rank[sa.status] !== undefined ? rank[sa.status] : 2) : 2;
+          var rb = sb ? (rank[sb.status] !== undefined ? rank[sb.status] : 2) : 2;
+          if (ra !== rb) return ra - rb;
+          return (sa ? sa.latency_ms : 99999) - (sb ? sb.latency_ms : 99999);
+        });
+        else if (sortBy === 'popular') sorted.sort(function(a, b) {
+          var aNon = _nonChatPattern.test(a.id) ? 1 : 0, bNon = _nonChatPattern.test(b.id) ? 1 : 0;
+          if (aNon !== bNon) return aNon - bNon;
+          var ca = (a.meta && a.meta.created) || 0, cb = (b.meta && b.meta.created) || 0;
+          if (ca !== cb) return cb - ca;
+          var na = (a.name || a.id).toLowerCase(), nb = (b.name || b.id).toLowerCase();
+          return na < nb ? -1 : na > nb ? 1 : 0;
+        });
+        else sorted.sort(function(a, b) {
+          var na = (a.name || a.id).toLowerCase(), nb = (b.name || b.id).toLowerCase();
+          return na < nb ? -1 : na > nb ? 1 : 0;
+        });
+        return sorted;
+      }
+      function renderCloudRow(cm) {
+        var ctx = getCtxLen(cm);
+        var ctxStr = ctx > 0 ? (ctx >= 1000 ? Math.round(ctx / 1000) + 'K' : ctx.toString()) : '';
+        var pingHtml = App.providerHealth.modelBadgeHtml(cm.id);
+        return '<div class="cloud-model-row" data-select-cloud="' + U.escapeHtml(cm.id) + '" title="' + U.escapeHtml(cm.id) + '">' +
+          '<span class="cloud-model-row-name">' + U.escapeHtml(cm.name || cm.id) + '</span>' +
+          (ctxStr ? '<span class="cloud-model-row-ctx">' + ctxStr + '</span>' : '<span class="cloud-model-row-ctx"></span>') +
+          '<span class="cloud-model-row-ping">' + pingHtml + '</span></div>';
+      }
+      function renderRowsInto(container, models) {
+        container.innerHTML = models.length > 0
+          ? models.map(renderCloudRow).join('')
+          : '<div class="cloud-model-empty">' + U.escapeHtml(I18n.t('dashboard.cloud_no_match')) + '</div>';
+      }
+      function renderProviderCard(opts) {
+        var p = opts.provider, pLabel = PROVIDER_NAMES[p] || p, pModels = opts.models;
+        var sorted = sortCloudModels(pModels, 'popular');
+        var prefix = opts.idPrefix || 'cloud';
+        var filterId = prefix + '-filter-' + p, sortId = prefix + '-sort-' + p, listId = prefix + '-list-wrap-' + p;
+        var card = document.createElement('div');
+        card.className = 'model-card cloud-model' + (opts.cardClass ? ' ' + opts.cardClass : '');
+        card.setAttribute('data-provider', p);
+        var cardIconHtml = providerIconHtml(p, 18);
+        card.innerHTML =
+          '<div class="cloud-card-header' + (opts.headerClass ? ' ' + opts.headerClass : '') + '">' +
+            '<span class="cloud-provider-name">' + (cardIconHtml ? cardIconHtml + ' ' : '') + U.escapeHtml(pLabel) + '</span>' +
+            '<span>' +
+              '<span class="badge ' + (opts.badgeClass || 'badge-cloud') + '">' + I18n.t('dashboard.cloud_models_count', { count: pModels.length }) + '</span>' +
+              (opts.statusHtml || '<span class="cloud-status-ok">\u25cf ' + U.escapeHtml(I18n.t('dashboard.cloud_connected')) + '</span>') +
+            '</span>' +
+          '</div>' +
+          '<div class="cloud-card-controls">' +
+            '<input type="text" class="cloud-model-filter" id="' + filterId + '" placeholder="' + U.escapeHtml(I18n.t('dashboard.cloud_search')) + '" autocomplete="off">' +
+            '<select class="cloud-model-sort" id="' + sortId + '">' +
+              '<option value="popular">' + U.escapeHtml(I18n.t('dashboard.cloud_sort_newest')) + '</option>' +
+              '<option value="az">' + U.escapeHtml(I18n.t('dashboard.sort_az')) + '</option>' +
+              '<option value="ctx-desc">' + U.escapeHtml(I18n.t('dashboard.cloud_sort_ctx_desc')) + '</option>' +
+              '<option value="ctx-asc">' + U.escapeHtml(I18n.t('dashboard.cloud_sort_ctx_asc')) + '</option>' +
+              '<option value="avail">' + U.escapeHtml(I18n.t('dashboard.cloud_sort_ping')) + '</option>' +
+            '</select>' +
+          '</div>' +
+          '<div class="cloud-model-list" id="' + listId + '"></div>' +
+          '<div class="cloud-card-note">' + U.escapeHtml(opts.noteText || I18n.t('dashboard.cloud_note', { provider: pLabel })) + '</div>';
+        opts.parentEl.appendChild(card);
+        var listContainer = document.getElementById(listId);
+        if (listContainer) renderRowsInto(listContainer, sorted);
+        setTimeout(function() { App.providerHealth.probe(sorted.slice(0, 20).map(function(cm) { return cm.id; })); }, 500);
+        var filterEl = document.getElementById(filterId), sortEl = document.getElementById(sortId);
+        var refreshRows = function() {
+          var query = filterEl ? filterEl.value.toLowerCase().trim() : '';
+          var sortBy = sortEl ? sortEl.value : 'popular';
+          var filtered = query ? pModels.filter(function(cm) {
+            return ((cm.name || '') + ' ' + cm.id + ' ' + (cm.meta && cm.meta.owned_by ? cm.meta.owned_by : '')).toLowerCase().indexOf(query) !== -1;
+          }) : pModels;
+          var s = sortCloudModels(filtered, sortBy);
+          if (listContainer) renderRowsInto(listContainer, s);
+          App.providerHealth.probe(s.slice(0, 20).map(function(cm) { return cm.id; }));
+        };
+        if (filterEl) { filterEl.addEventListener('input', refreshRows); filterEl.addEventListener('paste', function() { setTimeout(refreshRows, 0); }); }
+        if (sortEl) sortEl.addEventListener('change', function() {
+          refreshRows();
+          if (sortEl.value === 'avail') App.providerHealth.probe(pModels.map(function(cm) { return cm.id; }).slice(0, 40));
+        });
+      }
+
+      // --- Cloud provider models ---
       if (hasCloud) {
         var byProvider = {};
-        cloudModels.forEach(function(cm) {
+        apiModels.forEach(function(cm) {
           var p = cm.provider || 'cloud';
           if (!byProvider[p]) byProvider[p] = [];
           byProvider[p].push(cm);
         });
 
-        function getCtxLen(cm) {
-          if (!cm.meta) return 0;
-          return cm.meta.context_length || cm.meta.context_window || cm.meta.max_model_len || 0;
-        }
-
-        var _nonChatPattern = /dall-e|tts|whisper|embed|moderation|davinci-\d|babbage-\d|text-embedding|audio/i;
-
-        function sortCloudModels(models, sortBy) {
-          var sorted = models.slice();
-          if (sortBy === 'ctx-desc') {
-            sorted.sort(function(a, b) { return getCtxLen(b) - getCtxLen(a); });
-          } else if (sortBy === 'ctx-asc') {
-            sorted.sort(function(a, b) { return getCtxLen(a) - getCtxLen(b); });
-          } else if (sortBy === 'avail') {
-            sorted.sort(function(a, b) {
-              var sa = S.modelStatus[a.id], sb = S.modelStatus[b.id];
-              var rank = { up: 0, rate_limited: 1, timeout: 3, unavailable: 4, not_found: 5, error: 4 };
-              var ra = sa ? (rank[sa.status] !== undefined ? rank[sa.status] : 2) : 2;
-              var rb = sb ? (rank[sb.status] !== undefined ? rank[sb.status] : 2) : 2;
-              if (ra !== rb) return ra - rb;
-              var la = sa ? sa.latency_ms : 99999, lb = sb ? sb.latency_ms : 99999;
-              return la - lb;
-            });
-          } else if (sortBy === 'popular') {
-            sorted.sort(function(a, b) {
-              var aNon = _nonChatPattern.test(a.id) ? 1 : 0;
-              var bNon = _nonChatPattern.test(b.id) ? 1 : 0;
-              if (aNon !== bNon) return aNon - bNon;
-              var ca = (a.meta && a.meta.created) || 0;
-              var cb = (b.meta && b.meta.created) || 0;
-              if (ca !== cb) return cb - ca;
-              var na = (a.name || a.id).toLowerCase(), nb = (b.name || b.id).toLowerCase();
-              return na < nb ? -1 : na > nb ? 1 : 0;
-            });
-          } else {
-            sorted.sort(function(a, b) {
-              var na = (a.name || a.id).toLowerCase(), nb = (b.name || b.id).toLowerCase();
-              return na < nb ? -1 : na > nb ? 1 : 0;
-            });
-          }
-          return sorted;
-        }
-
-        function renderCloudRow(cm) {
-          var ctx = getCtxLen(cm);
-          var ctxStr = ctx > 0 ? (ctx >= 1000 ? Math.round(ctx / 1000) + 'K' : ctx.toString()) : '';
-          var pingHtml = App.providerHealth.modelBadgeHtml(cm.id);
-          return '<div class="cloud-model-row" data-select-cloud="' + U.escapeHtml(cm.id) + '" title="' + U.escapeHtml(cm.id) + '">' +
-            '<span class="cloud-model-row-name">' + U.escapeHtml(cm.name || cm.id) + '</span>' +
-            (ctxStr ? '<span class="cloud-model-row-ctx">' + ctxStr + '</span>' : '<span class="cloud-model-row-ctx"></span>') +
-            '<span class="cloud-model-row-ping">' + pingHtml + '</span>' +
-            '</div>';
-        }
-
-        function renderRowsInto(container, models) {
-          container.innerHTML = models.length > 0
-            ? models.map(renderCloudRow).join('')
-            : '<div class="cloud-model-empty">' + U.escapeHtml(I18n.t('dashboard.cloud_no_match')) + '</div>';
-        }
-
         var providerCount = Object.keys(byProvider).length;
         var cloudSection = document.createElement('details');
         cloudSection.className = 'models-section';
         cloudSection.open = true;
-        var cloudMeta = I18n.t('dashboard.providers_count', { count: providerCount, models: cloudModels.length });
+        var cloudMeta = I18n.t('dashboard.providers_count', { count: providerCount, models: apiModels.length });
         cloudSection.innerHTML = '<summary class="models-section-header">' +
           '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true" class="models-section-logo" style="flex-shrink:0"><path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z" fill="var(--accent)"/></svg>' +
           '<span class="models-section-title">' + U.escapeHtml(I18n.t('settings.cloud_providers')) + '</span>' +
@@ -948,76 +1006,46 @@
         list.appendChild(cloudSection);
 
         Object.keys(byProvider).forEach(function(p) {
-          var pLabel = PROVIDER_NAMES[p] || p;
-          var pModels = byProvider[p];
-          var sorted = sortCloudModels(pModels, 'popular');
-          var filterId = 'cloud-filter-' + p;
-          var sortId = 'cloud-sort-' + p;
-          var listId = 'cloud-list-wrap-' + p;
-
-          var card = document.createElement('div');
-          card.className = 'model-card cloud-model';
-          card.setAttribute('data-provider', p);
-
-          var cardIconHtml = providerIconHtml(p, 18);
-          card.innerHTML =
-            '<div class="cloud-card-header">' +
-              '<span class="cloud-provider-name">' + (cardIconHtml ? cardIconHtml + ' ' : '') + U.escapeHtml(pLabel) + '</span>' +
-              '<span>' +
-                '<span class="badge badge-cloud">' + I18n.t('dashboard.cloud_models_count', { count: pModels.length }) + '</span>' +
-                (p === 'claude_subscription'
-                  ? '<span class="cloud-status-sub">\u25cf ' + U.escapeHtml(I18n.t('dashboard.cloud_subscription')) + '</span>'
-                  : '<span class="cloud-status-ok">\u25cf ' + U.escapeHtml(I18n.t('dashboard.cloud_connected')) + '</span>') +
-              '</span>' +
-            '</div>' +
-            '<div class="cloud-card-controls">' +
-              '<input type="text" class="cloud-model-filter" id="' + filterId + '" placeholder="' + U.escapeHtml(I18n.t('dashboard.cloud_search')) + '" autocomplete="off">' +
-              '<select class="cloud-model-sort" id="' + sortId + '">' +
-                '<option value="popular">' + U.escapeHtml(I18n.t('dashboard.cloud_sort_newest')) + '</option>' +
-                '<option value="az">' + U.escapeHtml(I18n.t('dashboard.sort_az')) + '</option>' +
-                '<option value="ctx-desc">' + U.escapeHtml(I18n.t('dashboard.cloud_sort_ctx_desc')) + '</option>' +
-                '<option value="ctx-asc">' + U.escapeHtml(I18n.t('dashboard.cloud_sort_ctx_asc')) + '</option>' +
-                '<option value="avail">' + U.escapeHtml(I18n.t('dashboard.cloud_sort_ping')) + '</option>' +
-              '</select>' +
-            '</div>' +
-            '<div class="cloud-model-list" id="' + listId + '"></div>' +
-            '<div class="cloud-card-note">' + U.escapeHtml(
-              p === 'claude_subscription'
-                ? I18n.t('dashboard.cloud_sub_note')
-                : I18n.t('dashboard.cloud_note', { provider: pLabel })
-            ) + '</div>';
-
-          cloudBody.appendChild(card);
-
-          var listContainer = document.getElementById(listId);
-          if (listContainer) renderRowsInto(listContainer, sorted);
-
-          var visibleIds = sorted.slice(0, 20).map(function(cm) { return cm.id; });
-          setTimeout(function() { App.providerHealth.probe(visibleIds); }, 500);
-
-          var filterEl = document.getElementById(filterId);
-          var sortEl = document.getElementById(sortId);
-          var refreshRows = function() {
-            var query = filterEl ? filterEl.value.toLowerCase().trim() : '';
-            var sortBy = sortEl ? sortEl.value : 'popular';
-            var filtered = query ? pModels.filter(function(cm) {
-              var text = ((cm.name || '') + ' ' + cm.id + ' ' + (cm.meta && cm.meta.owned_by ? cm.meta.owned_by : '')).toLowerCase();
-              return text.indexOf(query) !== -1;
-            }) : pModels;
-            var s = sortCloudModels(filtered, sortBy);
-            if (listContainer) renderRowsInto(listContainer, s);
-            App.providerHealth.probe(s.slice(0, 20).map(function(cm) { return cm.id; }));
-          };
-          if (filterEl) {
-            filterEl.addEventListener('input', refreshRows);
-            filterEl.addEventListener('paste', function() { setTimeout(refreshRows, 0); });
-          }
-          if (sortEl) sortEl.addEventListener('change', function() {
-            refreshRows();
-            if (sortEl.value === 'avail') App.providerHealth.probe(pModels.map(function(cm) { return cm.id; }).slice(0, 40));
-          });
+          renderProviderCard({ provider: p, models: byProvider[p], parentEl: cloudBody });
         });
         if (Object.keys(S.modelStatus).length > 0) App.providerHealth.updateModelBadges();
+      }
+
+      // --- Subscription models ---
+      if (hasSubscription) {
+        var bySubProvider = {};
+        subscriptionModels.forEach(function(cm) {
+          var p = cm.provider || 'subscription';
+          if (!bySubProvider[p]) bySubProvider[p] = [];
+          bySubProvider[p].push(cm);
+        });
+
+        var subProviderCount = Object.keys(bySubProvider).length;
+        var subSection = document.createElement('details');
+        subSection.className = 'models-section';
+        subSection.open = true;
+        var subMeta = I18n.t('dashboard.subscription_count', { count: subProviderCount, models: subscriptionModels.length });
+        subSection.innerHTML = '<summary class="models-section-header">' +
+          '<img src="' + (providerIconUrl('claude_subscription') || '') + '" width="16" height="16" alt="" aria-hidden="true" class="models-section-logo" style="flex-shrink:0">' +
+          '<span class="models-section-title">' + U.escapeHtml(I18n.t('dashboard.subscription_title')) + '</span>' +
+          '<span class="models-section-count">' + subMeta + '</span>' +
+          '<span class="badge badge-subscription">' + U.escapeHtml(I18n.t('dashboard.subscription_badge')) + '</span>' +
+          '</summary>';
+        var subBody = document.createElement('div');
+        subBody.className = 'models-section-body';
+        subSection.appendChild(subBody);
+        list.appendChild(subSection);
+
+        Object.keys(bySubProvider).forEach(function(p) {
+          renderProviderCard({
+            provider: p, models: bySubProvider[p], parentEl: subBody,
+            cardClass: 'subscription-model-card', headerClass: 'subscription-card-header',
+            badgeClass: 'badge-subscription',
+            statusHtml: '<span class="cloud-status-sub">\u25cf ' + U.escapeHtml(I18n.t('dashboard.cloud_subscription')) + '</span>',
+            noteText: I18n.t('dashboard.cloud_sub_note'),
+            idPrefix: 'sub',
+          });
+        });
       }
     },
 

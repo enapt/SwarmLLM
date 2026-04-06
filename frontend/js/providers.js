@@ -35,7 +35,7 @@ var _ICON_MAP = {
 // Previously duplicated as providerLabels (×3) and providerDisplayNames (×1).
 var PROVIDER_NAMES = {
   anthropic:  'Anthropic',
-  claude_subscription: 'Claude Code',
+  claude_subscription: 'Claude Code (Subscription)',
   openai:     'OpenAI',
   deepseek:   'DeepSeek',
   mistral:    'Mistral',
@@ -70,6 +70,16 @@ function providerIconHtml(key, size) {
       '" alt="" aria-hidden="true" class="provider-icon" style="display:inline-block;vertical-align:middle;flex-shrink:0">';
   }
   return _providerIconCache[cacheKey];
+}
+
+// Subscription providers — models accessed via CLI/subscription, not API key billing.
+// Add new subscription providers here as they are introduced.
+var SUBSCRIPTION_PROVIDERS = {
+  claude_subscription: true,
+};
+
+function isSubscriptionProvider(key) {
+  return !!SUBSCRIPTION_PROVIDERS[key];
 }
 
 // Infer a provider/family key from a model ID string.

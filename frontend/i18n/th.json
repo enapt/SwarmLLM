@@ -935,5 +935,10 @@
   "claude_code.initializing": "Starting Claude Code session…",
   "claude_code.subscription_tip": "Using Claude subscription (no API costs)",
   "nav.copied": "Copied!",
-  "map.tooltip_demand_rate": "{rate} req/10m"
+  "map.tooltip_demand_rate": "{rate} req/10m",
+  "dashboard.subscription_title": "Subscription Models",
+  "dashboard.subscription_badge": "Subscription",
+  "dashboard.subscription_count": "{count} provider(s) · {models} models",
+  "dashboard.chip_subscription": "Subscription",
+  "models.subscription_suffix": " (Subscription)"
 }

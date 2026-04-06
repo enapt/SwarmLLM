@@ -430,8 +430,10 @@ async fn fetch_provider_models_inner(state: &AppState) -> Vec<serde_json::Value>
                         "id": id,
                         "name": name,
                         "provider": provider_label,
-                        "context_length": ctx,
-                        "source": "subscription",
+                        "meta": {
+                            "context_length": ctx,
+                            "source": "subscription",
+                        },
                     }));
                 }
             }

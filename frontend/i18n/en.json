@@ -935,5 +935,10 @@
   "models.pricing_in": "${price}/1K in",
   "models.pricing_out": "${price}/1K out",
   "errors.request_timeout": "Request timed out — server may be busy or unreachable",
-  "map.tooltip_demand_rate": "{rate} req/10m"
+  "map.tooltip_demand_rate": "{rate} req/10m",
+  "dashboard.subscription_title": "Subscription Models",
+  "dashboard.subscription_badge": "Subscription",
+  "dashboard.subscription_count": "{count} provider(s) · {models} models",
+  "dashboard.chip_subscription": "Subscription",
+  "models.subscription_suffix": " (Subscription)"
 }

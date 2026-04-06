@@ -112,6 +112,7 @@
     if (!match) return 'local';
     if (match.group === 'local') return 'local';
     if (match.group === 'swarm') return 'swarm';
+    if (typeof isSubscriptionProvider === 'function' && isSubscriptionProvider(match.group)) return 'subscription';
     return 'cloud';
   }
 
