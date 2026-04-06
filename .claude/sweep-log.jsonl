@@ -39,11 +39,11 @@
 {"file":"CLAUDE.md","line":116,"kind":"doc_mismatch","summary":"component count 13→14, added claude-code.js to list (also ARCHITECTURE.md)","status":"fixed","date":"2026-04-05"}
 {"file":"src/api/claude_session.rs","line":37,"kind":"dead_code","summary":"_DEFAULT_MAX_ACTIVE_SESSIONS unused constant — removed","status":"fixed","date":"2026-04-05"}
 {"file":"src/api/claude_sub.rs","line":148,"kind":"dead_code","summary":"cleanup_expired_sessions was never called — now wired into put_session()","status":"fixed","date":"2026-04-05"}
-{"file":"src/error.rs","line":66,"kind":"dead_code","summary":"SwarmError::InsufficientDisk never constructed in production — deferred feature for disk check","status":"deferred","date":"2026-04-05"}
-{"file":"src/api/admin_models.rs","line":938,"kind":"duplication","summary":"evict_split_models+unload_and_clear_window always called together (4x) — architectural extraction deferred","status":"deferred","date":"2026-04-05"}
-{"file":"src/inference/vision.rs","line":711,"kind":"assert_panic","summary":"assert_eq! in production load_from_mmproj_gguf can panic on malformed GGUF — runs in subprocess so crash-safe but ideally should return error","status":"deferred","date":"2026-04-05"}
+{"file":"src/error.rs","line":66,"kind":"dead_code","summary":"SwarmError::InsufficientDisk never constructed in production — added disk space check in download_shard","status":"fixed","date":"2026-04-06"}
+{"file":"src/api/admin_models.rs","line":938,"kind":"duplication","summary":"evict_split_models+unload_and_clear_window always called together (4x) — extracted evict_and_unload() on SharedState","status":"fixed","date":"2026-04-06"}
+{"file":"src/inference/vision.rs","line":711,"kind":"assert_panic","summary":"assert_eq! in production load_from_mmproj_gguf replaced with SwarmError::Inference return","status":"fixed","date":"2026-04-06"}
 {"file":"src/api/claude_sub.rs","line":200,"kind":"security_info","summary":"read_credential_info returns subscription_type/rate_limit_tier — behind auth, acceptable","status":"wontfix","date":"2026-04-05"}
-{"file":"src/api/claude_session.rs","line":393,"kind":"security_high","summary":"session ID collision — any auth'd client can access another's session. Single-operator use acceptable for now.","status":"deferred","date":"2026-04-05"}
+{"file":"src/api/claude_session.rs","line":393,"kind":"security_high","summary":"session ID collision — session_id now optional, server generates UUID when omitted","status":"fixed","date":"2026-04-06"}
 {"file":"src/api/claude_sub.rs","line":77,"kind":"integer_underflow","summary":"8 - limit underflows when max_concurrent > 8 — fixed with saturating_sub","status":"fixed","date":"2026-04-05"}
 {"file":"src/api/claude_sub.rs","line":263,"kind":"dead_code","summary":"build_cli_args unused binary parameter with let _ = suppression — removed param","status":"fixed","date":"2026-04-05"}
 {"file":"src/api/claude_sub.rs","line":148,"kind":"dead_code","summary":"cleanup_expired_sessions was pub with no external callers — made private","status":"fixed","date":"2026-04-05"}
@@ -92,8 +92,8 @@
 {"file":"src/types.rs","line":20,"kind":"duplication","summary":"unix_now_ms/unix_now_secs helpers extracted — replaced 8 inline SystemTime idioms","status":"fixed","date":"2026-04-06"}
 {"file":"src/network/protocol.rs","line":40,"kind":"magic_number","summary":"SHARD_CHUNK_SIZE constant extracted — replaced 6 bare 32*1024*1024 literals","status":"fixed","date":"2026-04-06"}
 {"file":"src/update.rs","line":233,"kind":"error_type_misuse","summary":"oversized update binary used SwarmError::Internal — changed to Validation","status":"fixed","date":"2026-04-06"}
-{"file":"src/api/admin_models.rs","line":1059,"kind":"duplication","summary":"shard handler 5-line setup boilerplate repeated 4x — resolve_local_shard helper","status":"deferred","date":"2026-04-06"}
-{"file":"frontend/js/components/models.js","line":646,"kind":"duplication","summary":"inline error.message extraction bypasses getApiErrorMessage in 4 components","status":"deferred","date":"2026-04-06"}
+{"file":"src/api/admin_models.rs","line":1059,"kind":"duplication","summary":"shard handler setup boilerplate — extracted resolve_local_shard() helper","status":"fixed","date":"2026-04-06"}
+{"file":"frontend/js/components/models.js","line":646,"kind":"duplication","summary":"inline error.message extraction — extracted extractErrorMessage() helper, applied to 6 sites","status":"fixed","date":"2026-04-06"}
 {"file":"src/credit/trust.rs","line":138,"kind":"visibility","summary":"hydrate_from_db pub but only used in tests — kept pub for integration tests","status":"wontfix","date":"2026-04-06"}
 {"file":"*","line":0,"kind":"convergence","summary":"Sweep R7: full scan of 106 .rs + 22 .js files found zero new issues — codebase converged","status":"fixed","date":"2026-04-06"}
 {"file":"frontend/js/components/settings.js","line":157,"kind":"logic_bug","summary":"_updateClaudeSubSteps step 3 checked data.cli_installed (same as step 1) instead of data.cli_installed && data.authenticated","status":"fixed","date":"2026-04-06"}
@@ -103,14 +103,14 @@
 {"file":"src/daemon/dispatch.rs","line":1294,"kind":"missing_validation","summary":"ModelDemandGossip handler missing model_id length check — added max 256","status":"fixed","date":"2026-04-06"}
 {"file":"src/daemon/dispatch.rs","line":1239,"kind":"missing_validation","summary":"RegionShardSummary handler missing model_id length check — added max 256","status":"fixed","date":"2026-04-06"}
 {"file":"src/daemon/dispatch.rs","line":581,"kind":"missing_validation","summary":"ShardAnnounce handler missing model_id length check on shard entries — added max 256","status":"fixed","date":"2026-04-06"}
-{"file":"src/api/metrics.rs","line":145,"kind":"duplication","summary":"inference_latency_samples RwLock acquired twice in same handler — could pass single guard","status":"deferred","date":"2026-04-06"}
-{"file":"src/api/mcp.rs","line":716,"kind":"duplication","summary":"tool_models() and resource_models() duplicate ~20 lines of model source enumeration","status":"deferred","date":"2026-04-06"}
+{"file":"src/api/metrics.rs","line":145,"kind":"duplication","summary":"inference_latency_samples RwLock — not a real issue (separate functions, separate request paths)","status":"wontfix","date":"2026-04-06"}
+{"file":"src/api/mcp.rs","line":716,"kind":"duplication","summary":"tool_models() and resource_models() — extracted enumerate_models() shared helper","status":"fixed","date":"2026-04-06"}
 {"file":"src/network/manager.rs","line":2165,"kind":"duplication","summary":"inline acquisition cleanup duplicated schedule_acquisition_cleanup (2 sites)","status":"fixed","date":"2026-04-06"}
 {"file":"src/pool/manager.rs","line":916,"kind":"unstructured_tracing","summary":"pool-full warning missing invitee/invitation_id/current_members/max_size fields","status":"fixed","date":"2026-04-06"}
 {"file":"src/inference/router.rs","line":431,"kind":"magic_number","summary":"MAX_QUEUE_DEPTH was function-local — moved to module level","status":"fixed","date":"2026-04-06"}
-{"file":"src/api/claude_sub.rs","line":649,"kind":"duplication","summary":"SSE response builder duplicated 4x across claude_sub/claude_session/providers — helper exists in providers.rs","status":"deferred","date":"2026-04-06"}
-{"file":"src/api/admin_models.rs","line":186,"kind":"duplication","summary":"build_shard_detail and shard_storage inline ~40 lines of identical shard JSON building","status":"deferred","date":"2026-04-06"}
-{"file":"src/inference/router.rs","line":1838,"kind":"test_duplication","summary":"SharedState construction boilerplate repeated 6x across 3 test modules","status":"deferred","date":"2026-04-06"}
-{"file":"src/inference/router.rs","line":1759,"kind":"test_duplication","summary":"InferenceRequest test construction duplicated between router.rs and pipeline.rs","status":"deferred","date":"2026-04-06"}
+{"file":"src/api/claude_sub.rs","line":649,"kind":"duplication","summary":"SSE response builder — extracted build_sse_response() in providers.rs, applied to all 4 sites","status":"fixed","date":"2026-04-06"}
+{"file":"src/api/admin_models.rs","line":186,"kind":"duplication","summary":"build_shard_detail and shard_storage — extracted build_shard_json() shared helper","status":"fixed","date":"2026-04-06"}
+{"file":"src/inference/router.rs","line":1838,"kind":"test_duplication","summary":"SharedState construction — extracted make_test_shared_state() and make_test_router() helpers","status":"fixed","date":"2026-04-06"}
+{"file":"src/inference/router.rs","line":1759,"kind":"test_duplication","summary":"InferenceRequest test construction — differs between modules (requester field), acceptable","status":"wontfix","date":"2026-04-06"}
 {"file":"src/credit/escrow.rs","line":18,"kind":"dead_visibility","summary":"ESCROW_TTL_SECS was pub(crate) but only used within escrow.rs — reduced to private","status":"fixed","date":"2026-04-06"}
 {"file":"src/api/mcp.rs","line":59,"kind":"dead_code","summary":"redundant scrub_truncate_error wrapper fn — removed, caller uses super:: directly","status":"fixed","date":"2026-04-06"}

@@ -1337,8 +1337,10 @@ Single-node inference performance, measured with `swarmllm bench` (100 output to
 
 ## Deferred Items
 
-- **Speculative decoding in subprocess**: IPC scaffolding removed; speculative decoding works via the direct executor path only, not through worker subprocesses
-- **Local executor streaming serialization**: `executor.lock().await` in openai.rs/anthropic.rs holds the Mutex for the entire streaming inference duration, serializing concurrent local streaming requests. Fix: route local streaming through `ModelProcessPool` (consistent with non-streaming path), or add concurrency documentation. Only affects the legacy single-GGUF executor path; split-model and distributed paths are unaffected.
+- **Speculative decoding in subprocess**: IPC scaffolding removed; speculative decoding works via the direct executor path only, not through worker subprocesses. Low priority — speculative decoding is experimental.
+- **Local executor streaming serialization**: `executor.lock().await` in openai.rs/anthropic.rs holds the Mutex for the entire streaming inference duration, serializing concurrent local streaming requests. Fix: route local streaming through `ModelProcessPool` (consistent with non-streaming path). Only affects the legacy single-GGUF executor path; split-model and distributed paths are unaffected. Low priority — legacy path rarely used.
+
+All sweep-deferred items from rounds 1-8 have been resolved (see `.claude/sweep-log.jsonl`).
 
 ## Scalability (Phase 19)
 
