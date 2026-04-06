@@ -652,21 +652,8 @@
     App.settings._apiKeyPromise = App.settings.loadApiKey();
 
     App.ui.switchTab(S.activeTab, true);
-  }
 
-  function init() {
-    if (typeof I18n !== 'undefined') {
-      // I18n.init is async (fetches JSON) — wait for it before rendering chat
-      I18n.init(['en','es','fr','de','pt','it','nl','ru','zh','ja','ko','ar','tr','pl','sv','th','hi','vi','id','uk','cs'], initAfterI18n);
-      return;
-    }
-    initAfterI18n();
-
-    window.addEventListener('popstate', function(e) {
-      var tab = (e.state && e.state.tab) ? e.state.tab : 'dashboard';
-      App.ui.switchTab(tab, true);
-    });
-
+    // Data loading — must happen after i18n + UI init
     App.chat.loadSessions();
     App.chat.renderSessionList();
     App.chat.renderMessages();
@@ -693,7 +680,6 @@
 
     if (typeof NeuralBg !== 'undefined') NeuralBg.init();
 
-    // Data loading
     App.dashboard.loadInitial();
     App.pruneSchedule.loadHistory();
     App.pruneSchedule.loadSchedule();
@@ -702,6 +688,19 @@
     App.notifications.connectWebSocket();
     App.notifications.startPolling();
     App.providerHealth.startHealthPolling();
+
+    window.addEventListener('popstate', function(e) {
+      var tab = (e.state && e.state.tab) ? e.state.tab : 'dashboard';
+      App.ui.switchTab(tab, true);
+    });
+  }
+
+  function init() {
+    if (typeof I18n !== 'undefined') {
+      I18n.init(['en','es','fr','de','pt','it','nl','ru','zh','ja','ko','ar','tr','pl','sv','th','hi','vi','id','uk','cs'], initAfterI18n);
+      return;
+    }
+    initAfterI18n();
   }
 
   // Delegated error handler for provider icons
