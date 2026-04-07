@@ -944,5 +944,8 @@
   "pool.stats_ram": "{size} ذاكرة عشوائية",
   "pool.stats_requests": "{n} طلبات",
   "pool.stats_models": "النماذج: {models}",
-  "pool.stats_pending": "في انتظار الإحصائيات..."
+  "pool.stats_pending": "في انتظار الإحصائيات...",
+  "pool.role_master": "رئيسي",
+  "pool.role_linked": "مرتبط",
+  "pool.joined_prefix": "انضم"
 }

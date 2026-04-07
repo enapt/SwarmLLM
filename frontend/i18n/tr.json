@@ -944,5 +944,8 @@
   "pool.stats_ram": "{size} RAM",
   "pool.stats_requests": "{n} istek",
   "pool.stats_models": "Modeller: {models}",
-  "pool.stats_pending": "İstatistikler bekleniyor..."
+  "pool.stats_pending": "İstatistikler bekleniyor...",
+  "pool.role_master": "Ana",
+  "pool.role_linked": "Bağlı",
+  "pool.joined_prefix": "Katıldı"
 }

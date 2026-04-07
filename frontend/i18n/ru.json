@@ -944,5 +944,8 @@
   "pool.stats_ram": "{size} ОЗУ",
   "pool.stats_requests": "{n} запросов",
   "pool.stats_models": "Модели: {models}",
-  "pool.stats_pending": "Ожидание статистики..."
+  "pool.stats_pending": "Ожидание статистики...",
+  "pool.role_master": "Главное",
+  "pool.role_linked": "Подключено",
+  "pool.joined_prefix": "Присоединился"
 }

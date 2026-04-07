@@ -944,5 +944,8 @@
   "pool.stats_ram": "{size} RAM",
   "pool.stats_requests": "{n} リクエスト",
   "pool.stats_models": "モデル: {models}",
-  "pool.stats_pending": "統計を待機中..."
+  "pool.stats_pending": "統計を待機中...",
+  "pool.role_master": "マスター",
+  "pool.role_linked": "リンク済み",
+  "pool.joined_prefix": "参加"
 }

@@ -944,5 +944,8 @@
   "pool.stats_ram": "{size} 内存",
   "pool.stats_requests": "{n} 个请求",
   "pool.stats_models": "模型：{models}",
-  "pool.stats_pending": "等待统计数据..."
+  "pool.stats_pending": "等待统计数据...",
+  "pool.role_master": "主设备",
+  "pool.role_linked": "已链接",
+  "pool.joined_prefix": "加入"
 }

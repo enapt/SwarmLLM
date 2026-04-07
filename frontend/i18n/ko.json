@@ -944,5 +944,8 @@
   "pool.stats_ram": "{size} RAM",
   "pool.stats_requests": "{n} 요청",
   "pool.stats_models": "모델: {models}",
-  "pool.stats_pending": "통계 대기 중..."
+  "pool.stats_pending": "통계 대기 중...",
+  "pool.role_master": "마스터",
+  "pool.role_linked": "연결됨",
+  "pool.joined_prefix": "가입"
 }

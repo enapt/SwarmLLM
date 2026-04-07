@@ -1365,17 +1365,22 @@
   </template>
 
   <template id="tmpl-pool-member-row">
-    <div class="pool-member-row" style="display:flex;justify-content:space-between;align-items:center;padding:10px 0;border-bottom:1px solid var(--border)">
-      <div style="display:flex;align-items:center;gap:10px">
-        <span class="pool-member-status" style="font-size:0.7rem" data-i18n-title="pool.online_status" title="Online status"></span>
-        <span class="pool-member-icon" style="font-size:1.2rem">&#128187;</span>
-        <div>
-          <div class="pool-member-id" style="font-size:0.88rem;font-weight:500"></div>
-          <div class="pool-member-joined text-muted" style="font-size:0.72rem"></div>
-          <div class="pool-member-stats-detail text-muted" style="font-size:0.7rem;display:none"></div>
+    <div class="pool-member-row" style="display:flex;justify-content:space-between;align-items:flex-start;padding:12px 0;border-bottom:1px solid var(--border)">
+      <div style="display:flex;align-items:flex-start;gap:10px;flex:1;min-width:0">
+        <div style="display:flex;flex-direction:column;align-items:center;gap:2px;min-width:28px;padding-top:2px">
+          <span class="pool-member-status" style="font-size:0.7rem" data-i18n-title="pool.online_status" title="Online status"></span>
+          <span class="pool-member-icon" style="font-size:1.2rem">&#128187;</span>
+        </div>
+        <div style="flex:1;min-width:0">
+          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+            <div class="pool-member-id" style="font-size:0.92rem;font-weight:600"></div>
+            <span class="pool-member-role-badge" style="font-size:0.65rem;font-weight:600;padding:1px 7px;border-radius:9px;text-transform:uppercase;letter-spacing:0.5px"></span>
+          </div>
+          <div class="pool-member-stats-detail text-muted" style="font-size:0.75rem;margin-top:3px;display:none"></div>
+          <div class="pool-member-joined text-muted" style="font-size:0.7rem;margin-top:2px"></div>
         </div>
       </div>
-      <div style="display:flex;align-items:center;gap:12px">
+      <div style="display:flex;align-items:center;gap:12px;flex-shrink:0">
         <div style="text-align:right">
           <div class="pool-member-credits" style="font-size:0.9rem;font-weight:600;color:var(--green)"></div>
           <div class="text-muted" style="font-size:0.7rem" data-i18n="pool.credits_contributed">credits</div>

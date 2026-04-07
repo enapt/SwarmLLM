@@ -944,5 +944,8 @@
   "pool.stats_ram": "{size} RAM",
   "pool.stats_requests": "{n} solicitudes",
   "pool.stats_models": "Modelos: {models}",
-  "pool.stats_pending": "Esperando estadísticas..."
+  "pool.stats_pending": "Esperando estadísticas...",
+  "pool.role_master": "Principal",
+  "pool.role_linked": "Vinculado",
+  "pool.joined_prefix": "Unido"
 }

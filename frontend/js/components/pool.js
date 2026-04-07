@@ -202,6 +202,7 @@
         var statusEl = row.querySelector('.pool-member-status');
         var statsEl = row.querySelector('.pool-member-stats-detail');
         var iconEl = row.querySelector('.pool-member-icon');
+        var roleBadge = row.querySelector('.pool-member-role-badge');
 
         var isSelf = m.node_id === self._myNodeId;
         var isOwnerDevice = m.node_id === poolId;
@@ -210,6 +211,19 @@
         var displayName = m.device_name || (m.node_id ? m.node_id.substring(0, 12) + '...' : '?');
         if (isSelf) displayName += I18n.t('pool.you_suffix');
         if (idEl) idEl.textContent = displayName;
+
+        // Role badge: Master vs Linked
+        if (roleBadge) {
+          if (isOwnerDevice) {
+            roleBadge.textContent = I18n.t('pool.role_master');
+            roleBadge.style.background = 'var(--green)';
+            roleBadge.style.color = 'var(--bg)';
+          } else {
+            roleBadge.textContent = I18n.t('pool.role_linked');
+            roleBadge.style.background = 'var(--border)';
+            roleBadge.style.color = 'var(--text)';
+          }
+        }
 
         // Online status dot
         if (statusEl) {
@@ -222,7 +236,9 @@
         }
 
         // Joined date
-        if (joinedEl) joinedEl.textContent = m.joined_at ? m.joined_at.substring(0, 10) : '?';
+        if (joinedEl) joinedEl.textContent = m.joined_at
+          ? I18n.t('pool.joined_prefix') + ' ' + m.joined_at.substring(0, 10)
+          : '?';
 
         // Credits
         if (creditsEl) creditsEl.textContent = (m.credits_contributed || 0).toLocaleString();
