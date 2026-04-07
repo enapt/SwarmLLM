@@ -296,6 +296,67 @@
       }
     },
 
+    // Get or create a tool group container for batching consecutive tool calls.
+    // A new group is created when the last child of contentEl is not a group,
+    // or when forceNew is true (e.g., after a text block).
+    _getOrCreateToolGroup: function(contentEl, ctx) {
+      var last = contentEl.lastElementChild;
+      if (last && last.classList && last.classList.contains('cc-tool-group') && !last.classList.contains('cc-group-closed')) {
+        return last;
+      }
+      var group = document.createElement('details');
+      group.className = 'cc-tool-group';
+      group.open = true;
+      group.innerHTML = '<summary class="cc-group-header">' +
+        '<span class="cc-group-label"></span>' +
+        '<span class="cc-group-count"></span>' +
+        '</summary>';
+      contentEl.appendChild(group);
+      return group;
+    },
+
+    // Update the group summary label with tool count
+    _updateGroupSummary: function(group) {
+      var items = group.querySelectorAll('.cc-tool-call, .cc-permission-prompt');
+      var countEl = group.querySelector('.cc-group-count');
+      var labelEl = group.querySelector('.cc-group-label');
+      if (!countEl) return;
+      var total = items.length;
+      var done = group.querySelectorAll('.cc-tool-done, .cc-perm-allowed, .cc-perm-denied').length;
+      countEl.textContent = total > 1 ? (done + '/' + total) : '';
+      // Build a label from tool names
+      var names = [];
+      for (var i = 0; i < items.length && names.length < 4; i++) {
+        var n = items[i].querySelector('.cc-tool-name, .cc-perm-tool-name');
+        if (n && names.indexOf(n.textContent) === -1) names.push(n.textContent);
+      }
+      if (names.length > 0) {
+        var suffix = total > items.length ? ' +' + (total - items.length) : '';
+        labelEl.textContent = names.join(', ') + suffix;
+      }
+    },
+
+    // Close the current tool group (called when text content appears)
+    _closeCurrentGroup: function(contentEl) {
+      var last = contentEl.lastElementChild;
+      if (last && last.classList && last.classList.contains('cc-tool-group')) {
+        last.classList.add('cc-group-closed');
+        // Auto-collapse groups where all items are done
+        App.claudeCode._maybeCollapseGroup(last);
+      }
+    },
+
+    // Collapse a group if all its items are resolved
+    _maybeCollapseGroup: function(group) {
+      var items = group.querySelectorAll('.cc-tool-call, .cc-permission-prompt');
+      var done = group.querySelectorAll('.cc-tool-done, .cc-perm-allowed, .cc-perm-denied').length;
+      if (items.length > 0 && done === items.length) {
+        group.open = false;
+        group.classList.add('cc-group-done');
+        App.claudeCode._updateGroupSummary(group);
+      }
+    },
+
     // Handle complete assistant message (may contain tool_use)
     _handleAssistantMessage: function(evt, contentEl, toolPanels, agentPanels, taskItems, ctx) {
       var msg = evt.message || {};
@@ -304,6 +365,8 @@
 
       content.forEach(function(block) {
         if (block.type === 'text' && block.text) {
+          // Close any open tool group before text
+          App.claudeCode._closeCurrentGroup(contentEl);
           // Text already streamed via stream_event — skip unless not streamed
           if (!ctx.getFullContent()) {
             if (!ctx.cleared) { contentEl.textContent = ''; ctx.setClear(); }
@@ -320,11 +383,15 @@
           if (!ctx.cleared) { contentEl.textContent = ''; ctx.setClear(); }
           var toolName = block.name || '';
           if (AGENT_TOOLS[toolName]) {
+            App.claudeCode._closeCurrentGroup(contentEl);
             App.claudeCode._renderAgentCall(contentEl, block, agentPanels);
           } else if (TASK_TOOLS[toolName]) {
             App.claudeCode._renderTaskCall(contentEl, block, toolPanels, taskItems);
           } else {
-            App.claudeCode._renderToolCall(contentEl, block, toolPanels);
+            // Render inside current tool group
+            var group = App.claudeCode._getOrCreateToolGroup(contentEl, ctx);
+            App.claudeCode._renderToolCall(group, block, toolPanels);
+            App.claudeCode._updateGroupSummary(group);
           }
         }
       });
@@ -685,6 +752,12 @@
           } else {
             panel.appendChild(resultEl);
           }
+          // Check if parent group can collapse
+          var group = panel.closest('.cc-tool-group');
+          if (group) {
+            App.claudeCode._updateGroupSummary(group);
+            App.claudeCode._maybeCollapseGroup(group);
+          }
         } else {
           contentEl.appendChild(resultEl);
         }
@@ -734,10 +807,13 @@
           html += '<div class="cc-perm-desc">' + U.escapeHtml(input.question) + '</div>';
         }
       } else {
-        // Generic: show JSON preview
-        var jsonStr = JSON.stringify(input, null, 2);
-        if (jsonStr.length > 300) jsonStr = jsonStr.substring(0, 300) + '\n...';
-        html += '<pre class="cc-perm-code">' + U.escapeHtml(jsonStr) + '</pre>';
+        // Generic: show JSON preview (skip if empty)
+        var keys = Object.keys(input);
+        if (keys.length > 0) {
+          var jsonStr = JSON.stringify(input, null, 2);
+          if (jsonStr.length > 300) jsonStr = jsonStr.substring(0, 300) + '\n...';
+          html += '<pre class="cc-perm-code">' + U.escapeHtml(jsonStr) + '</pre>';
+        }
       }
       return html;
     },
@@ -751,11 +827,19 @@
       var sessionId = ctx.sessionId || S.currentSessionId || '';
       var reason = req.decision_reason || '';
 
+      // Render inside the current tool group
+      var group = App.claudeCode._getOrCreateToolGroup(contentEl, ctx);
+
       var panel = document.createElement('div');
       panel.className = 'cc-permission-prompt cc-perm-waiting';
 
       var icon = App.claudeCode._toolIcon(toolName);
+      var hint = App.claudeCode._toolHint(toolName, input);
+      // For empty input (MCP tools etc.), show tool name as hint
+      if (!hint && Object.keys(input).length === 0) hint = '';
       var detailHtml = App.claudeCode._buildToolDetail(toolName, input);
+      // Skip detail section if input is empty (just {})
+      var hasDetail = detailHtml && detailHtml.indexOf('{}') === -1;
 
       panel.innerHTML =
         '<div class="cc-perm-header">' +
@@ -765,15 +849,22 @@
         '<div class="cc-perm-tool-row">' +
           '<span class="cc-tool-icon">' + icon + '</span>' +
           '<strong class="cc-perm-tool-name">' + U.escapeHtml(toolName) + '</strong>' +
+          (hint ? '<span class="cc-tool-file">' + U.escapeHtml(hint) + '</span>' : '') +
         '</div>' +
-        '<div class="cc-perm-detail">' + detailHtml + '</div>' +
+        (hasDetail ? '<div class="cc-perm-detail">' + detailHtml + '</div>' : '') +
         (reason ? '<div class="cc-perm-reason">' + U.escapeHtml(reason) + '</div>' : '') +
         '<div class="cc-perm-actions">' +
           '<button class="btn btn-sm cc-perm-allow">' + U.escapeHtml(I18n.t('claude_code.allow')) + '</button>' +
           '<button class="btn btn-sm cc-perm-deny">' + U.escapeHtml(I18n.t('claude_code.deny')) + '</button>' +
         '</div>';
 
-      contentEl.appendChild(panel);
+      // Store tool metadata for the collapsed view
+      panel._ccToolName = toolName;
+      panel._ccIcon = icon;
+      panel._ccHint = hint;
+
+      group.appendChild(panel);
+      App.claudeCode._updateGroupSummary(group);
       ctx.setPendingPermission({ requestId: requestId, element: panel });
 
       // Auto-focus the allow button for keyboard accessibility
@@ -825,7 +916,7 @@
       }
     },
 
-    // Send permission response
+    // Send permission response — then collapse to one-liner
     _respondPermission: async function(sessionId, requestId, allow, input, panelEl) {
       // Prevent double-click
       if (panelEl.classList.contains('cc-perm-allowed') || panelEl.classList.contains('cc-perm-denied')) return;
@@ -844,12 +935,31 @@
           body: JSON.stringify(body),
         });
 
+        // Collapse to a slim one-liner
+        var toolName = panelEl._ccToolName || 'Tool';
+        var icon = panelEl._ccIcon || '⚡';
+        var hint = panelEl._ccHint || '';
+        var statusClass = allow ? 'cc-perm-allowed' : 'cc-perm-denied';
+        var statusIcon = allow ? '✓' : '✗';
+        var statusText = allow ? I18n.t('claude_code.allowed') : I18n.t('claude_code.denied');
+
         panelEl.classList.remove('cc-perm-waiting');
-        panelEl.classList.add(allow ? 'cc-perm-allowed' : 'cc-perm-denied');
-        actionsEl.innerHTML =
-          '<span class="cc-perm-resolved">' +
-          (allow ? '✓ ' + I18n.t('claude_code.allowed') : '✗ ' + I18n.t('claude_code.denied')) +
-          '</span>';
+        panelEl.classList.add(statusClass, 'cc-perm-collapsed');
+        panelEl.innerHTML =
+          '<div class="cc-perm-oneliner">' +
+            '<span class="cc-perm-status-icon">' + statusIcon + '</span>' +
+            '<span class="cc-tool-icon">' + icon + '</span>' +
+            '<span class="cc-perm-tool-name">' + U.escapeHtml(toolName) + '</span>' +
+            (hint ? '<span class="cc-tool-file">' + U.escapeHtml(hint) + '</span>' : '') +
+            '<span class="cc-perm-resolved">' + statusText + '</span>' +
+          '</div>';
+
+        // Check if the parent group can now collapse
+        var group = panelEl.closest('.cc-tool-group');
+        if (group) {
+          App.claudeCode._updateGroupSummary(group);
+          App.claudeCode._maybeCollapseGroup(group);
+        }
       } catch (e) {
         actionsEl.innerHTML =
           '<span class="cc-perm-resolved cc-perm-error">' + U.escapeHtml(I18n.t('common.request_failed')) + '</span>';
