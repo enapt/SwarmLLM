@@ -164,4 +164,5 @@
 {"file":"frontend/js/components/pool.js","line":75,"kind":"hardcoded_english","summary":"'network error' hardcoded in errorMsg — replaced with I18n.t('common.request_failed')","status":"fixed","date":"2026-04-07"}
 {"file":"CLAUDE.md","line":124,"kind":"doc_mismatch","summary":"i18n key count 942 → 962","status":"fixed","date":"2026-04-07"}
 {"file":"frontend/js/components/shard-menu.js","line":38,"kind":"dead_code","summary":"currentInVram property set but never read — removed","status":"fixed","date":"2026-04-07"}
-{"file":"src/api/providers.rs","line":210,"kind":"structural_fragility","summary":"make_provider expect('known provider') correct today but fragile if new provider added without URL — wontfix (hypothetical)","status":"wontfix","date":"2026-04-07"}
+{"file":"src/api/providers.rs","line":210,"kind":"structural_fragility","summary":"make_provider expect('known provider') → returns Option, propagated via .and_then()","status":"fixed","date":"2026-04-07"}
+{"file":"src/credit/anti_gaming.rs","line":118,"kind":"memory_leak","summary":"subnet_counts tracked Vec<NodeId> — nodes that connect but never transact leaked forever. Changed to Vec<(NodeId, Instant)> with 24h age-based eviction in cleanup()","status":"fixed","date":"2026-04-07"}
