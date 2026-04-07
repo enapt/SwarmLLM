@@ -44,8 +44,10 @@ pub async fn run_worker(
         std::process::exit(1);
     }
 
-    // Per-model state: (layer_start, layer_end) → SplitModel
-    let mut models: HashMap<(usize, usize), SplitModel> = HashMap::new();
+    // Per-model state: (layer_start, layer_end, tp_rank, tp_size) → SplitModel
+    // Non-TP models use (start, end, 0, 1). TP-split models use (start, end, rank, size).
+    // This allows TP and non-TP inference to coexist without corrupting shared weights.
+    let mut models: HashMap<(usize, usize, usize, usize), SplitModel> = HashMap::new();
     let kv_store = Arc::new(KvCacheStore::new(std::time::Duration::from_secs(
         kv_cache_ttl_secs,
     )));
@@ -121,7 +123,8 @@ pub async fn run_worker(
                 layer_start,
                 layer_end,
             } => {
-                models.remove(&(layer_start, layer_end));
+                // Remove all entries for this layer range (both TP and non-TP variants)
+                models.retain(|&(ls, le, _, _), _| !(ls == layer_start && le == layer_end));
                 tracing::info!(layer_start, layer_end, "model-worker: unloaded shard range");
             }
             DaemonMsg::Shutdown => {
@@ -136,17 +139,21 @@ pub async fn run_worker(
     tracing::info!("model-worker: exiting cleanly");
 }
 
-/// Ensure a SplitModel is loaded for the given model_id and layer range.
+#[allow(clippy::too_many_arguments)]
+/// Ensure a SplitModel is loaded for the given model_id, layer range, and TP config.
+/// Non-TP uses (0, 1). TP uses the actual (rank, size).
 /// `shard_window`: if Some, only load shards in this set (VRAM-saving mode).
 fn ensure_model_loaded(
-    models: &mut HashMap<(usize, usize), SplitModel>,
+    models: &mut HashMap<(usize, usize, usize, usize), SplitModel>,
     data_dir: &std::path::Path,
     model_id: &crate::types::ModelId,
     layer_start: usize,
     layer_end: usize,
+    tp_rank: usize,
+    tp_size: usize,
     shard_window: &Option<Vec<u32>>,
 ) -> Result<(), SwarmError> {
-    let key = (layer_start, layer_end);
+    let key = (layer_start, layer_end, tp_rank, tp_size);
     if models.contains_key(&key) {
         return Ok(());
     }
@@ -190,7 +197,7 @@ fn ensure_model_loaded(
     let gguf_path = model_dir.join("model.gguf");
     let source_path_file = model_dir.join("source_path");
 
-    let model = if gguf_path.exists() {
+    let mut model = if gguf_path.exists() {
         tracing::info!(
             model = %model_id,
             layers = format!("[{layer_start}..{layer_end})"),
@@ -244,9 +251,16 @@ fn ensure_model_loaded(
         })?
     };
 
+    // Apply TP weight splitting if this is a TP variant (tp_size > 1)
+    if tp_size > 1 {
+        model.pre_split_for_tp(tp_rank, tp_size)?;
+    }
+
     tracing::info!(
         model = %model_id,
         layers = format!("[{layer_start}..{layer_end})"),
+        tp_rank,
+        tp_size,
         device = ?model.device(),
         "model-worker: Model loaded"
     );
@@ -257,7 +271,7 @@ fn ensure_model_loaded(
 /// Handle a Forward IPC message — run a single-step forward pass.
 async fn handle_forward(
     writer: &mut tokio::net::unix::OwnedWriteHalf,
-    models: &mut HashMap<(usize, usize), SplitModel>,
+    models: &mut HashMap<(usize, usize, usize, usize), SplitModel>,
     kv_store: &Arc<KvCacheStore>,
     data_dir: &std::path::Path,
     fwd: IpcForward,
@@ -268,31 +282,27 @@ async fn handle_forward(
     let model_id = fwd.model_id.clone();
     let (layer_start, layer_end) = (fwd.layer_range.0 as usize, fwd.layer_range.1 as usize);
 
-    // Ensure model is loaded
+    // Determine TP config for the cache key
+    let (tp_rank, tp_size) = fwd
+        .tp_meta
+        .as_ref()
+        .map(|tp| (tp.tp_rank as usize, tp.tp_size as usize))
+        .unwrap_or((0, 1));
+
+    // Ensure the TP-specific model variant is loaded and split
     ensure_model_loaded(
         models,
         data_dir,
         &model_id,
         layer_start,
         layer_end,
+        tp_rank,
+        tp_size,
         shard_window,
     )?;
 
-    // Pre-split weights for tensor parallelism on first TP forward
-    if let Some(ref tp) = fwd.tp_meta {
-        let model = models
-            .get_mut(&(layer_start, layer_end))
-            .ok_or_else(|| SwarmError::Internal("Model vanished after load".into()))?;
-        // Only split once — check if n_head already reflects tp splitting
-        let current_heads = model.n_kv_head();
-        let expected_heads = current_heads / (tp.tp_size as usize);
-        if expected_heads > 0 && current_heads > expected_heads {
-            model.pre_split_for_tp(tp.tp_rank as usize, tp.tp_size as usize)?;
-        }
-    }
-
     let model = models
-        .get_mut(&(layer_start, layer_end))
+        .get_mut(&(layer_start, layer_end, tp_rank, tp_size))
         .ok_or_else(|| SwarmError::Internal("Model vanished after load".into()))?;
 
     let is_first = model.is_first();
@@ -519,7 +529,7 @@ async fn handle_forward(
 /// Handle a Generate IPC message — run a full tokenize+decode loop.
 async fn handle_generate(
     writer: &mut tokio::net::unix::OwnedWriteHalf,
-    models: &mut HashMap<(usize, usize), SplitModel>,
+    models: &mut HashMap<(usize, usize, usize, usize), SplitModel>,
     kv_store: &Arc<KvCacheStore>,
     data_dir: &std::path::Path,
     gen: IpcGenerate,
@@ -529,18 +539,20 @@ async fn handle_generate(
     let model_id = gen.model_id.clone();
     let (layer_start, layer_end) = (gen.layer_range.0 as usize, gen.layer_range.1 as usize);
 
-    // Ensure model is loaded
+    // Generate is always non-TP (full local inference)
     ensure_model_loaded(
         models,
         data_dir,
         &model_id,
         layer_start,
         layer_end,
+        0,
+        1,
         shard_window,
     )?;
 
     let model = models
-        .get_mut(&(layer_start, layer_end))
+        .get_mut(&(layer_start, layer_end, 0, 1))
         .ok_or_else(|| SwarmError::Internal("Model vanished after load".into()))?;
 
     let req_id_str = request_id.to_string();
