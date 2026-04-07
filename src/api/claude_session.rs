@@ -22,8 +22,15 @@ use tokio::sync::Mutex;
 use crate::api::server::AppState;
 use crate::error::ApiError;
 
-/// Allowed permission modes — `bypassPermissions` is never allowed via API.
-const ALLOWED_PERMISSION_MODES: &[&str] = &["default", "acceptEdits", "auto", "plan"];
+/// Allowed permission modes.
+const ALLOWED_PERMISSION_MODES: &[&str] = &[
+    "default",
+    "acceptEdits",
+    "auto",
+    "plan",
+    "bypassPermissions",
+    "dontAsk",
+];
 
 /// Maximum concurrent sessions (hard ceiling regardless of config).
 const MAX_SESSIONS_HARD_LIMIT: usize = 20;
@@ -370,6 +377,7 @@ impl SessionManager {
 
         let binary = config.binary();
         let permission_mode = permission_mode.unwrap_or_else(|| "acceptEdits".to_string());
+        let is_bypass = permission_mode == "bypassPermissions";
         // -p "" is required to trigger the CLI to start a session and emit system/init.
         // Without it, the CLI in --input-format stream-json mode just waits silently.
         // The SDK's new agent protocol uses control_request/initialize instead, but
@@ -387,12 +395,19 @@ impl SessionManager {
             model.clone(),
             "--permission-mode".to_string(),
             permission_mode,
-            // Route permission prompts through stdin/stdout so the frontend can
-            // display approve/deny UI. Without this flag the CLI auto-denies in
-            // non-interactive mode and control_request events are never emitted.
-            "--permission-prompt-tool".to_string(),
-            "stdio".to_string(),
         ];
+
+        // bypassPermissions requires the explicit --dangerously-skip-permissions flag
+        if is_bypass {
+            args.push("--dangerously-skip-permissions".to_string());
+        } else {
+            // Route permission prompts through stdin/stdout so the frontend can
+            // display approve/deny UI. Not needed for bypassPermissions since
+            // no prompts are generated. Without this flag the CLI auto-denies in
+            // non-interactive mode and control_request events are never emitted.
+            args.push("--permission-prompt-tool".to_string());
+            args.push("stdio".to_string());
+        }
 
         // Connect SwarmLLM's MCP server so Claude can query other models
         if let Some(ref url) = mcp_url {

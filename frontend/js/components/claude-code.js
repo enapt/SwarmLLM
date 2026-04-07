@@ -331,46 +331,57 @@
       App.chat.scrollToBottom();
     },
 
-    // Render a tool call block
+    // Get a short description for a tool's file/target hint
+    _toolHint: function(toolName, input) {
+      if (toolName === 'Bash') return input.description || '';
+      if (toolName === 'Read' || toolName === 'Write' || toolName === 'Edit') {
+        var fp = input.file_path || '';
+        return fp.split('/').pop() || fp;
+      }
+      if (toolName === 'Glob') return input.pattern || '';
+      if (toolName === 'Grep') return input.pattern || '';
+      if (toolName === 'WebSearch') return input.query || '';
+      if (toolName === 'WebFetch') {
+        var url = input.url || '';
+        try { return new URL(url).hostname; } catch (_e) { return url.substring(0, 40); }
+      }
+      if (toolName === 'ToolSearch') return input.query || '';
+      if (toolName === 'AskUserQuestion') return input.question ? input.question.substring(0, 50) : '';
+      return '';
+    },
+
+    // Render a tool call block as a collapsible <details> element
     _renderToolCall: function(contentEl, block, toolPanels) {
       var toolId = block.id || '';
       var toolName = block.name || 'Unknown';
       var input = block.input || {};
 
-      var panel = document.createElement('div');
+      var panel = document.createElement('details');
       panel.className = 'cc-tool-call';
       panel.setAttribute('data-tool-id', toolId);
+      panel.open = false; // collapsed by default, shows summary
 
-      var fileHint = input.file_path || input.command || input.pattern || input.url || '';
-      if (fileHint.length > 80) fileHint = '...' + fileHint.slice(-77);
+      var hint = App.claudeCode._toolHint(toolName, input);
+      if (hint.length > 60) hint = hint.substring(0, 57) + '...';
 
       var icon = App.claudeCode._toolIcon(toolName);
-      panel.innerHTML =
-        '<div class="cc-tool-header">' +
-          '<span class="cc-tool-icon">' + icon + '</span>' +
-          '<span class="cc-tool-name">' + U.escapeHtml(toolName) + '</span>' +
-          (fileHint ? '<span class="cc-tool-file">' + U.escapeHtml(fileHint) + '</span>' : '') +
-          '<span class="cc-tool-status pending">' + U.escapeHtml(I18n.t('claude_code.running')) + '</span>' +
-        '</div>';
+      var summary = document.createElement('summary');
+      summary.className = 'cc-tool-header';
+      summary.innerHTML =
+        '<span class="cc-tool-icon">' + icon + '</span>' +
+        '<span class="cc-tool-name">' + U.escapeHtml(toolName) + '</span>' +
+        (hint ? '<span class="cc-tool-file">' + U.escapeHtml(hint) + '</span>' : '') +
+        '<span class="cc-tool-status pending">' + U.escapeHtml(I18n.t('claude_code.running')) + '</span>';
+      panel.appendChild(summary);
 
-      // Show input details for certain tools
-      if (toolName === 'AskUserQuestion' && input.question) {
-        var q = document.createElement('div');
-        q.className = 'cc-tool-input cc-question';
-        q.textContent = input.question;
-        panel.appendChild(q);
-      } else if (toolName === 'Bash' && input.command) {
-        var pre = document.createElement('pre');
-        pre.className = 'cc-tool-input cc-bash-cmd';
-        pre.textContent = '$ ' + input.command;
-        panel.appendChild(pre);
-      } else if (toolName === 'Edit' && input.old_string) {
-        var pre = document.createElement('pre');
-        pre.className = 'cc-tool-input';
-        pre.textContent = input.old_string + ' → ' + (input.new_string || '');
-        if (pre.textContent.length > 200) pre.textContent = pre.textContent.substring(0, 200) + '...';
-        panel.appendChild(pre);
+      // Build expandable detail content
+      var detail = document.createElement('div');
+      detail.className = 'cc-tool-body';
+      var detailHtml = App.claudeCode._buildToolDetail(toolName, input);
+      if (detailHtml) {
+        detail.innerHTML = detailHtml;
       }
+      panel.appendChild(detail);
 
       contentEl.appendChild(panel);
       toolPanels[toolId] = panel;
@@ -531,6 +542,69 @@
       }
     },
 
+    // Render tool output with smart formatting (diffs, file lists, errors)
+    _renderToolOutput: function(toolName, blockText) {
+      var el = document.createElement('div');
+      el.className = 'cc-tool-result';
+      if (!blockText || blockText.length === 0) return el;
+
+      // Detect diff output
+      if (blockText.indexOf('@@') !== -1 && (blockText.indexOf('+') !== -1 || blockText.indexOf('-') !== -1) &&
+          (blockText.indexOf('---') !== -1 || blockText.indexOf('+++') !== -1)) {
+        el.innerHTML = App.claudeCode._renderDiffOutput(blockText);
+        return el;
+      }
+
+      // Detect error output
+      var isError = /^(error|Error|ERROR|FAIL|panic)/.test(blockText);
+
+      // Truncate with expandable toggle
+      var truncated = blockText.length > 800;
+      var displayText = truncated ? blockText.substring(0, 800) : blockText;
+
+      var pre = document.createElement('pre');
+      pre.className = 'cc-tool-output' + (isError ? ' cc-tool-output-error' : '');
+      if (toolName === 'Bash') pre.classList.add('cc-bash-output-dark');
+      pre.textContent = displayText;
+      el.appendChild(pre);
+
+      if (truncated) {
+        var toggle = document.createElement('button');
+        toggle.className = 'cc-output-toggle';
+        toggle.textContent = I18n.t('claude_code.show_more');
+        toggle.addEventListener('click', function() {
+          if (pre.textContent === displayText) {
+            pre.textContent = blockText;
+            toggle.textContent = I18n.t('claude_code.show_less');
+          } else {
+            pre.textContent = displayText;
+            toggle.textContent = I18n.t('claude_code.show_more');
+          }
+        });
+        el.appendChild(toggle);
+      }
+
+      return el;
+    },
+
+    // Render diff-formatted output with syntax highlighting
+    _renderDiffOutput: function(text) {
+      var lines = text.split('\n');
+      var html = '<pre class="cc-diff-output">';
+      for (var i = 0; i < lines.length && i < 200; i++) {
+        var line = lines[i];
+        var cls = '';
+        if (line.charAt(0) === '+' && line.charAt(1) !== '+') cls = 'diff-add';
+        else if (line.charAt(0) === '-' && line.charAt(1) !== '-') cls = 'diff-del';
+        else if (line.indexOf('@@') === 0) cls = 'diff-hunk';
+        if (cls) html += '<span class="' + cls + '">' + U.escapeHtml(line) + '</span>\n';
+        else html += U.escapeHtml(line) + '\n';
+      }
+      if (lines.length > 200) html += '<span class="diff-hunk">... (' + (lines.length - 200) + ' more lines)</span>\n';
+      html += '</pre>';
+      return html;
+    },
+
     // Handle tool result
     _handleToolResult: function(evt, contentEl, toolPanels, agentPanels, taskItems) {
       var msg = evt.message || {};
@@ -591,19 +665,26 @@
             statusEl2.textContent = I18n.t('claude_code.done');
             statusEl2.className = 'cc-tool-status done';
           }
+          // Collapse the details panel now that it's done
+          if (panel.tagName === 'DETAILS') {
+            panel.classList.add('cc-tool-done');
+          }
         }
 
-        // Render result as text (Claude CLI returns tool results as plain text)
-        var resultEl = document.createElement('div');
-        resultEl.className = 'cc-tool-result';
+        // Determine tool name from panel data
+        var toolNameEl = panel && panel.querySelector('.cc-tool-name');
+        var toolName = toolNameEl ? toolNameEl.textContent : '';
 
-        if (blockText.length > 0) {
-          var displayText = blockText.length > 2000 ? blockText.substring(0, 2000) + '\n... (truncated)' : blockText;
-          resultEl.innerHTML = '<pre class="cc-tool-output">' + U.escapeHtml(displayText) + '</pre>';
-        }
+        // Render result with smart formatting
+        var resultEl = App.claudeCode._renderToolOutput(toolName, blockText);
 
-        if (panel && panel.appendChild) {
-          panel.appendChild(resultEl);
+        if (panel) {
+          var body = panel.querySelector('.cc-tool-body');
+          if (body) {
+            body.appendChild(resultEl);
+          } else {
+            panel.appendChild(resultEl);
+          }
         } else {
           contentEl.appendChild(resultEl);
         }
