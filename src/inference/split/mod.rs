@@ -26,7 +26,7 @@ pub use super::shard_layout::{
 };
 pub use super::tensor_util::{
     bytes_to_tensor, raw_f32_to_tensor_bytes, sample_token, sample_token_with_params,
-    tensor_to_bytes, tensor_to_raw_f32,
+    tensor_bytes_add, tensor_to_bytes, tensor_to_raw_f32,
 };
 pub use super::tokenizer::{BpeTokenizer, SplitTokenizer, SpmTokenizer};
 

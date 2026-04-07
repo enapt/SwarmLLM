@@ -1507,7 +1507,7 @@ async fn handle_layer_forward(
         let layer_idx = match tp.phase {
             crate::types::TpPhase::AttnOnly => tp.single_layer * 2,
             crate::types::TpPhase::FfnOnly => tp.single_layer * 2 + 1,
-            crate::types::TpPhase::Full => tp.single_layer,
+            crate::types::TpPhase::Full | crate::types::TpPhase::EmbedOnly => tp.single_layer,
         };
 
         // Extract raw f32 bytes from tensor format (strip header) for AllReduce.

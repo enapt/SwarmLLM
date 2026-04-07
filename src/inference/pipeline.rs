@@ -1910,15 +1910,39 @@ impl PipelineExecutor {
                 )));
             }
 
-            let mut current_activations_bytes = activation_bytes.to_vec();
+            // Pre-embed the prompt so we have tensor-format hidden states for residual management.
+            // The EmbedOnly phase tokenizes + embeds without running any layers.
+            let embedded = {
+                let embed_fwd = crate::types::LayerForward {
+                    request_id,
+                    sequence_num,
+                    index_pos: index_pos as u32,
+                    activations: activation_bytes.to_vec(),
+                    format: crate::types::TensorFormat::FP16,
+                    model_id: model_id.clone(),
+                    layer_range: (layer_start as u32, layer_end as u32),
+                    tp_meta: Some(crate::types::TensorParallelMeta {
+                        tp_rank: tp_rank as u8,
+                        tp_size: tp_size as u8,
+                        single_layer: 0,
+                        phase: crate::types::TpPhase::EmbedOnly,
+                    }),
+                    vision_embeddings: None,
+                    sender_peer_bytes: None,
+                    requester_node_id: None,
+                    pre_embedded: false,
+                    adapter_id: None,
+                };
+                self.shared_state
+                    .model_process_pool
+                    .forward(embed_fwd)
+                    .await?
+            };
+            let mut current_activations_bytes = embedded.activations;
 
             for abs_layer in layer_start..layer_end {
-                // 2-phase TP protocol: AttnOnly → AllReduce → FfnOnly → AllReduce
-                // This ensures FFN norm is applied to the full post-attention tensor,
-                // not the partial pre-AllReduce output.
-
-                // After the first layer, activations are tensor data (not raw text)
-                let attn_pre_embedded = abs_layer > layer_start;
+                // 2-phase TP protocol: AttnOnly → AllReduce → residual add → FfnOnly → AllReduce → residual add
+                // Residuals are managed here (not in the worker) since AllReduce must complete before add.
 
                 // --- Send AttnOnly LayerForward to remote TP peers FIRST (so they start in parallel) ---
                 for (rank, peer_bytes) in &remote_tp_peers {
@@ -1939,7 +1963,7 @@ impl PipelineExecutor {
                         vision_embeddings: None,
                         sender_peer_bytes: None,
                         requester_node_id: None,
-                        pre_embedded: attn_pre_embedded,
+                        pre_embedded: true,
                         adapter_id: None,
                     };
                     let _ = self
@@ -1969,7 +1993,7 @@ impl PipelineExecutor {
                     vision_embeddings: None,
                     sender_peer_bytes: None,
                     requester_node_id: None,
-                    pre_embedded: attn_pre_embedded,
+                    pre_embedded: true,
                     adapter_id: None,
                 };
                 let attn_partial = self
@@ -2002,11 +2026,15 @@ impl PipelineExecutor {
                 )
                 .await?;
 
-                // Decompress raw f32 AllReduce result and reconstruct tensor format for worker
+                // Decompress raw f32 AllReduce result, reconstruct tensor, add residual
                 let post_attn_raw = zstd::decode_all(std::io::Cursor::new(&attn_resp.reduced_data))
                     .map_err(|e| SwarmError::Internal(format!("Decompress attn AR: {e}")))?;
-                let post_attn_bytes =
+                let attn_reduced_bytes =
                     split::raw_f32_to_tensor_bytes(&post_attn_raw, &attn_resp.shape);
+                // Residual add: post_attn = AllReduce(attn_partials) + layer_input
+                let post_attn_bytes =
+                    split::tensor_bytes_add(&attn_reduced_bytes, &current_activations_bytes)
+                        .map_err(|e| SwarmError::Internal(format!("Attn residual add: {e}")))?;
 
                 // --- Send FfnOnly LayerForward to remote TP peers ---
                 for (rank, peer_bytes) in &remote_tp_peers {
@@ -2044,7 +2072,7 @@ impl PipelineExecutor {
                     request_id,
                     sequence_num,
                     index_pos: index_pos as u32,
-                    activations: post_attn_bytes,
+                    activations: post_attn_bytes.clone(),
                     format: crate::types::TensorFormat::FP16,
                     model_id: model_id.clone(),
                     layer_range: (layer_start as u32, layer_end as u32),
@@ -2089,11 +2117,14 @@ impl PipelineExecutor {
                 )
                 .await?;
 
-                // Decompress raw f32 AllReduce result and reconstruct tensor format for next layer
+                // Decompress raw f32 AllReduce result, reconstruct tensor, add residual
                 let ffn_raw = zstd::decode_all(std::io::Cursor::new(&ffn_resp.reduced_data))
                     .map_err(|e| SwarmError::Internal(format!("Decompress ffn AR: {e}")))?;
+                let ffn_reduced_bytes = split::raw_f32_to_tensor_bytes(&ffn_raw, &ffn_resp.shape);
+                // Residual add: next_layer_input = AllReduce(ffn_partials) + post_attn
                 current_activations_bytes =
-                    split::raw_f32_to_tensor_bytes(&ffn_raw, &ffn_resp.shape);
+                    split::tensor_bytes_add(&ffn_reduced_bytes, &post_attn_bytes)
+                        .map_err(|e| SwarmError::Internal(format!("FFN residual add: {e}")))?;
             }
 
             if _is_last {

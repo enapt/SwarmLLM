@@ -628,6 +628,9 @@ pub enum TpPhase {
     /// Phase 2: ffn_norm → FFN (column-sliced) → return partial.
     /// Pipeline AllReduces, adds residual to get full layer output.
     FfnOnly,
+    /// Embedding only: tokenize + embed → return hidden states (no layer processing).
+    /// Used by the coordinator to get the residual for the first layer.
+    EmbedOnly,
 }
 
 /// Tensor-parallel metadata attached to a LayerForward for TP execution.

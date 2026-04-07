@@ -459,6 +459,7 @@ pub fn encode_layer_forward(forward: &LayerForward) -> Result<Vec<u8>, SwarmErro
             crate::types::TpPhase::Full => 0,
             crate::types::TpPhase::AttnOnly => 1,
             crate::types::TpPhase::FfnOnly => 2,
+            crate::types::TpPhase::EmbedOnly => 3,
         };
         buf.push(phase_byte);
         buf.push(if forward.pre_embedded { 1 } else { 0 });
@@ -585,6 +586,7 @@ pub fn decode_layer_forward(data: &[u8]) -> Result<LayerForward, SwarmError> {
             let phase = match data[tp_meta_start + 7] {
                 1 => crate::types::TpPhase::AttnOnly,
                 2 => crate::types::TpPhase::FfnOnly,
+                3 => crate::types::TpPhase::EmbedOnly,
                 _ => crate::types::TpPhase::Full,
             };
             let pre_embedded = data[tp_meta_start + 8] != 0;
@@ -842,6 +844,7 @@ pub fn encode_layer_forward_encrypted(
             crate::types::TpPhase::Full => 0,
             crate::types::TpPhase::AttnOnly => 1,
             crate::types::TpPhase::FfnOnly => 2,
+            crate::types::TpPhase::EmbedOnly => 3,
         };
         buf.push(phase_byte);
         buf.push(if forward.pre_embedded { 1 } else { 0 });
@@ -956,6 +959,7 @@ pub fn decode_layer_forward_encrypted(
             let phase = match data[tp_meta_start + 7] {
                 1 => crate::types::TpPhase::AttnOnly,
                 2 => crate::types::TpPhase::FfnOnly,
+                3 => crate::types::TpPhase::EmbedOnly,
                 _ => crate::types::TpPhase::Full,
             };
             let pre_embedded = data[tp_meta_start + 8] != 0;

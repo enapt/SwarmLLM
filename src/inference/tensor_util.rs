@@ -31,6 +31,17 @@ pub fn tensor_to_bytes(tensor: &Tensor) -> Result<Vec<u8>, SwarmError> {
     Ok(bytes)
 }
 
+/// Element-wise add of two tensors in tensor_to_bytes format.
+/// Both must have the same shape. Returns the sum in tensor_to_bytes format.
+pub fn tensor_bytes_add(a: &[u8], b: &[u8]) -> Result<Vec<u8>, SwarmError> {
+    let ta = bytes_to_tensor(a)?;
+    let tb = bytes_to_tensor(b)?;
+    let sum = ta
+        .add(&tb)
+        .map_err(|e| SwarmError::Internal(format!("Tensor add: {e}")))?;
+    tensor_to_bytes(&sum)
+}
+
 /// Extract raw f32 bytes from a tensor (no header, just flat f32 LE data).
 /// Used by AllReduce to ensure consistent data format across TP ranks.
 pub fn tensor_to_raw_f32(tensor: &Tensor) -> Result<Vec<u8>, SwarmError> {

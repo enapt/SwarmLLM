@@ -3077,6 +3077,26 @@ impl SplitModel {
             .to_device(&self.device)
             .map_err(|e| SwarmError::Internal(format!("Device transfer: {e}")))?;
 
+        // EmbedOnly: just tokenize + embed, no layer processing
+        if *phase == crate::types::TpPhase::EmbedOnly {
+            if let Some(ref emb) = self.tok_embeddings {
+                let mut result = emb
+                    .forward(&input)
+                    .map_err(|e| SwarmError::Internal(format!("tp embed: {e}")))?;
+                if self.arch.use_gemma_norm() {
+                    let scale = (self.hidden_dim as f64).sqrt();
+                    result = result
+                        .affine(scale, 0.0)
+                        .map_err(|e| SwarmError::Internal(format!("tp embed scale: {e}")))?;
+                }
+                return Ok(result);
+            } else {
+                return Err(SwarmError::Internal(
+                    "EmbedOnly requested but model has no tok_embeddings".into(),
+                ));
+            }
+        }
+
         let local_layer_idx = abs_layer.checked_sub(self.layer_start).ok_or_else(|| {
             SwarmError::Internal(format!(
                 "TP layer {abs_layer} below model range [{}, {})",
@@ -3143,9 +3163,11 @@ impl SplitModel {
                             .map_err(|e| SwarmError::Internal(format!("tp moe: {e}"))),
                     }
                 }
-                crate::types::TpPhase::Full => Err(SwarmError::Internal(
-                    "TpPhase::Full not valid for single-layer TP".into(),
-                )),
+                crate::types::TpPhase::Full | crate::types::TpPhase::EmbedOnly => {
+                    Err(SwarmError::Internal(
+                        "TpPhase::Full/EmbedOnly not valid for single-layer TP".into(),
+                    ))
+                }
             },
             _ => Err(SwarmError::Internal(
                 "TP not supported for non-Dense layers".into(),
