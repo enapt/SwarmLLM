@@ -139,7 +139,22 @@ pub async fn get_config(State(state): State<AppState>) -> Json<serde_json::Value
         ContributionMode::Moderate => "moderate",
         ContributionMode::Maximum => "maximum",
     };
-    Json(serde_json::json!({
+    // Include claude_subscription config if the feature is enabled
+    #[cfg(feature = "claude-subscription")]
+    let claude_sub = {
+        let providers = state.shared_state.metrics.providers_config.try_read();
+        providers.ok().and_then(|p| {
+            p.claude_subscription.as_ref().map(|s| {
+                serde_json::json!({
+                    "enabled": s.enabled,
+                })
+            })
+        })
+    };
+    #[cfg(not(feature = "claude-subscription"))]
+    let claude_sub: Option<serde_json::Value> = None;
+
+    let mut result = serde_json::json!({
         "contribution": contribution,
         "max_concurrent_requests": config.inference.max_concurrent_requests,
         "max_bandwidth_mbps": config.resources.max_bandwidth_mbps,
@@ -151,7 +166,11 @@ pub async fn get_config(State(state): State<AppState>) -> Json<serde_json::Value
         "shard_size_mb": config.model.shard_size_mb,
         "max_batch_size": config.inference.max_batch_size,
         "batch_timeout_ms": config.inference.batch_timeout_ms,
-    }))
+    });
+    if let Some(cs) = claude_sub {
+        result["claude_subscription"] = cs;
+    }
+    Json(result)
 }
 
 /// PUT /api/admin/config — Update configuration at runtime.
