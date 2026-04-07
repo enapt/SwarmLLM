@@ -312,14 +312,17 @@
       return group;
     },
 
-    // Update the group summary label with tool count
+    // Update the group summary label with tool count, and surface pending
+    // permission prompts' action buttons onto the group header so they're
+    // accessible even when the group is collapsed.
     _updateGroupSummary: function(group) {
-      var items = group.querySelectorAll('.cc-tool-call, .cc-permission-prompt');
+      var items = group.querySelectorAll('.cc-tool-call, .cc-permission-prompt, .cc-perm-collapsed');
+      var headerEl = group.querySelector('.cc-group-header');
       var countEl = group.querySelector('.cc-group-count');
       var labelEl = group.querySelector('.cc-group-label');
       if (!countEl) return;
       var total = items.length;
-      var done = group.querySelectorAll('.cc-tool-done, .cc-perm-allowed, .cc-perm-denied').length;
+      var done = group.querySelectorAll('.cc-tool-done, .cc-perm-allowed, .cc-perm-denied, .cc-perm-collapsed').length;
       countEl.textContent = total > 1 ? (done + '/' + total) : '';
       // Build a label from tool names
       var names = [];
@@ -330,6 +333,48 @@
       if (names.length > 0) {
         var suffix = total > items.length ? ' +' + (total - items.length) : '';
         labelEl.textContent = names.join(', ') + suffix;
+      }
+
+      // Surface pending permission actions onto the group header
+      var oldActions = headerEl.querySelector('.cc-group-actions');
+      if (oldActions) oldActions.remove();
+
+      var pending = group.querySelectorAll('.cc-perm-waiting');
+      if (pending.length > 0) {
+        // Show the first pending prompt's tool name + Allow/Deny on the header
+        var first = pending[0];
+        var pToolName = first._ccToolName || first.querySelector('.cc-perm-tool-name');
+        var pName = pToolName ? (typeof pToolName === 'string' ? pToolName : pToolName.textContent) : '';
+        var pIcon = first._ccIcon || '';
+
+        var actions = document.createElement('span');
+        actions.className = 'cc-group-actions';
+        actions.innerHTML =
+          (pIcon ? '<span class="cc-tool-icon">' + pIcon + '</span>' : '') +
+          '<span class="cc-group-action-label">' + U.escapeHtml(pName) + '</span>' +
+          (pending.length > 1 ? '<span class="cc-group-action-count">+' + (pending.length - 1) + '</span>' : '') +
+          '<button class="btn btn-sm cc-perm-allow cc-group-allow">' + U.escapeHtml(I18n.t('claude_code.allow')) + '</button>' +
+          '<button class="btn btn-sm cc-perm-deny cc-group-deny">' + U.escapeHtml(I18n.t('claude_code.deny')) + '</button>';
+
+        // Wire up to the first pending prompt's actual handlers
+        var allowBtn = actions.querySelector('.cc-group-allow');
+        var denyBtn = actions.querySelector('.cc-group-deny');
+        var origAllow = first.querySelector('.cc-perm-allow');
+        var origDeny = first.querySelector('.cc-perm-deny');
+        allowBtn.addEventListener('click', function(e) {
+          e.preventDefault(); e.stopPropagation();
+          if (origAllow) origAllow.click();
+        });
+        denyBtn.addEventListener('click', function(e) {
+          e.preventDefault(); e.stopPropagation();
+          if (origDeny) origDeny.click();
+        });
+
+        headerEl.appendChild(actions);
+        // Mark the group as needing attention
+        group.classList.add('cc-group-pending');
+      } else {
+        group.classList.remove('cc-group-pending');
       }
     },
 
@@ -345,8 +390,10 @@
 
     // Collapse a group if all its items are resolved
     _maybeCollapseGroup: function(group) {
-      var items = group.querySelectorAll('.cc-tool-call, .cc-permission-prompt');
-      var done = group.querySelectorAll('.cc-tool-done, .cc-perm-allowed, .cc-perm-denied').length;
+      // Never collapse if there are pending permission prompts
+      if (group.querySelector('.cc-perm-waiting')) return;
+      var items = group.querySelectorAll('.cc-tool-call, .cc-permission-prompt, .cc-perm-collapsed');
+      var done = group.querySelectorAll('.cc-tool-done, .cc-perm-allowed, .cc-perm-denied, .cc-perm-collapsed').length;
       if (items.length > 0 && done === items.length) {
         group.open = false;
         group.classList.add('cc-group-done');

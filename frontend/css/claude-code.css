@@ -122,6 +122,17 @@
 .cc-group-done:hover { opacity: 0.9; }
 .cc-group-done > .cc-group-header { color: var(--green); }
 .cc-group-done > .cc-group-header .cc-group-label { color: var(--text-secondary); }
+/* Pending group — keep visible and highlighted */
+.cc-group-pending { border-color: rgba(245,158,11,0.3); border-left-color: var(--orange); }
+.cc-group-pending > .cc-group-header { color: var(--text-primary); }
+/* Surfaced action buttons on the group header */
+.cc-group-actions { display: flex; align-items: center; gap: 5px; margin-left: auto; flex-shrink: 0; }
+.cc-group-action-label { font-size: 0.68rem; font-weight: 600; color: var(--accent); max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cc-group-action-count { font-size: 0.62rem; color: var(--text-muted); }
+.cc-group-actions .cc-group-allow { background: var(--green); color: #fff; border: none; cursor: pointer; padding: 1px 10px; font-weight: 600; font-size: 0.65rem; border-radius: var(--radius); }
+.cc-group-actions .cc-group-allow:hover { opacity: 0.85; }
+.cc-group-actions .cc-group-deny { background: transparent; color: var(--red); border: 1px solid var(--red); cursor: pointer; padding: 0 8px; font-weight: 600; font-size: 0.65rem; border-radius: var(--radius); }
+.cc-group-actions .cc-group-deny:hover { background: rgba(239,68,68,0.1); }
 /* When group is open, remove the outer border so children render their own */
 .cc-tool-group[open] > .cc-tool-call,
 .cc-tool-group[open] > .cc-permission-prompt { margin: 4px 0; }
