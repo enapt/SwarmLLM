@@ -128,3 +128,14 @@
 {"file":"src/api/admin.rs","line":713,"kind":"magic_number","summary":"bare 4096 invite code limit → MAX_INVITE_CODE_LEN constant","status":"fixed","date":"2026-04-07"}
 {"file":"frontend/i18n/en.json","line":596,"kind":"false_positive","summary":"mode.subscription IS used in index.html:756 data-i18n attribute — not dead","status":"wontfix","date":"2026-04-07"}
 {"file":"frontend/js/components/dashboard.js","line":1117,"kind":"false_positive","summary":"shard-endpoint/shard-pinned classes ARE assigned at lines 613/616 and styled in CSS — not dead","status":"wontfix","date":"2026-04-07"}
+{"file":"frontend/i18n/*.json","line":597,"kind":"dead_i18n","summary":"mode.claude_sub_tip key unused — removed from all 21 files","status":"fixed","date":"2026-04-07"}
+{"file":"src/inference/pipeline.rs","line":1416,"kind":"error_type_misuse","summary":"SwarmError::Internal for pipeline overload → ServiceUnavailable","status":"fixed","date":"2026-04-07"}
+{"file":"src/update.rs","line":264,"kind":"error_type_misuse","summary":"SwarmError::Internal for missing SHA256 → Validation","status":"fixed","date":"2026-04-07"}
+{"file":"src/api/admin.rs","line":713,"kind":"magic_number","summary":"bare 4096 → MAX_INVITE_CODE_LEN constant","status":"fixed","date":"2026-04-07"}
+{"file":"src/api/anthropic.rs","line":384,"kind":"duplication","summary":"model resolution block duplicated with openai.rs — extracted resolve_model_for_inference()","status":"fixed","date":"2026-04-07"}
+{"file":"src/api/anthropic.rs","line":504,"kind":"duplication","summary":"claude subscription check duplicated — extracted try_get_claude_subscription() in claude_sub.rs","status":"fixed","date":"2026-04-07"}
+{"file":"frontend/js/components/setup.js","line":77,"kind":"duplication","summary":"join-with-code pattern duplicated across setup.js/identity.js/pool.js — extracted submitCodeForm() in utils.js","status":"fixed","date":"2026-04-07"}
+{"file":"frontend/i18n/en.json","line":596,"kind":"false_positive","summary":"mode.subscription IS used in index.html:756 — not dead","status":"wontfix","date":"2026-04-07"}
+{"file":"frontend/js/components/dashboard.js","line":1117,"kind":"false_positive","summary":"shard-endpoint/shard-pinned ARE assigned at lines 613/616 — not dead","status":"wontfix","date":"2026-04-07"}
+{"file":"src/credit/trust.rs","line":29,"kind":"deferred_feature","summary":"4 TrustEvent variants only used in tests — deferred Sybil resistance feature","status":"wontfix","date":"2026-04-07"}
+{"file":"src/inference/executor.rs","line":314,"kind":"acknowledged_duplication","summary":"token loop SYNC duplication with model_worker.rs — different runtime contexts, SYNC comments track it","status":"wontfix","date":"2026-04-07"}
