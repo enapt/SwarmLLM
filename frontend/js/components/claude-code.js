@@ -946,17 +946,20 @@
 
         panelEl.classList.remove('cc-perm-waiting');
         panelEl.classList.add(statusClass, 'cc-perm-collapsed');
-        panelEl.innerHTML =
+        // Replace with a non-details div so it renders as a simple one-liner
+        var oneliner = document.createElement('div');
+        oneliner.className = 'cc-permission-prompt cc-perm-collapsed ' + statusClass;
+        oneliner.innerHTML =
           '<div class="cc-perm-oneliner">' +
-            '<span class="cc-perm-status-icon">' + statusIcon + '</span>' +
+            '<span class="cc-perm-status-badge ' + (allow ? 'cc-badge-allow' : 'cc-badge-deny') + '">' + statusIcon + ' ' + statusText + '</span>' +
             '<span class="cc-tool-icon">' + icon + '</span>' +
             '<span class="cc-perm-tool-name">' + U.escapeHtml(toolName) + '</span>' +
             (hint ? '<span class="cc-tool-file">' + U.escapeHtml(hint) + '</span>' : '') +
-            '<span class="cc-perm-resolved">' + statusText + '</span>' +
           '</div>';
+        panelEl.replaceWith(oneliner);
 
         // Check if the parent group can now collapse
-        var group = panelEl.closest('.cc-tool-group');
+        var group = oneliner.closest('.cc-tool-group');
         if (group) {
           App.claudeCode._updateGroupSummary(group);
           App.claudeCode._maybeCollapseGroup(group);
