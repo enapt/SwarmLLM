@@ -594,7 +594,6 @@
   "mode.stat_requests": "{count} req",
   "mode.stat_served": "{count} served",
   "mode.subscription": "SUBSCRIPTION",
-  "mode.claude_sub_tip": "Claude models routed through your Claude Code subscription — no per-token API charges",
   "models.hf_fit_boomerang": "First+last shard fit VRAM (~{size})",
   "models.hf_fit_shard": "Individual shards fit VRAM (~{size}/shard)",
   "models.hf_exceeds_vram": "Even individual shards may exceed your available VRAM",

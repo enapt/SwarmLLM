@@ -902,7 +902,6 @@
   "dashboard.cloud_subscription": "Subscription",
   "dashboard.cloud_sub_note": "Routed through Claude Code CLI — uses your subscription, no per-token charges",
   "mode.subscription": "SUBSCRIPTION",
-  "mode.claude_sub_tip": "Claude models routed through your Claude Code subscription — no per-token API charges",
   "claude_code.dir_placeholder": "Plak een mappad, of laat leeg om te chatten",
   "claude_code.quick_chat": "Snel chatten",
   "claude_code.session_failed": "Failed to create Claude Code session",

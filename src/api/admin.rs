@@ -709,11 +709,12 @@ pub async fn join_network(
     State(state): State<AppState>,
     Json(body): Json<JoinNetworkRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    // SEC: Limit invite code length to prevent memory exhaustion during decode
-    if body.code.len() > 4096 {
-        return Err(ApiError(crate::error::SwarmError::Validation(
-            "Invite code too long (max 4096 chars)".into(),
-        )));
+    const MAX_INVITE_CODE_LEN: usize = 4096;
+    if body.code.len() > MAX_INVITE_CODE_LEN {
+        return Err(ApiError(crate::error::SwarmError::Validation(format!(
+            "Invite code too long (max {} chars)",
+            MAX_INVITE_CODE_LEN
+        ))));
     }
     let addr_str = crate::network::discovery::decode_network_code(&body.code)
         .map_err(|e| ApiError(crate::error::SwarmError::Validation(e.to_string())))?;

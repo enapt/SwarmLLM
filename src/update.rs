@@ -261,7 +261,7 @@ impl UpdateChecker {
                 tracing::info!("Update checksum verified (SHA256)");
             }
             None => {
-                return Err(SwarmError::Internal(
+                return Err(SwarmError::Validation(
                     "Update rejected: no SHA256 checksum available. Release must include a .sha256 sidecar file.".to_string(),
                 ));
             }

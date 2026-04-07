@@ -1413,8 +1413,8 @@ impl PipelineExecutor {
                 // Cap pending entries to prevent OOM under sustained load
                 const MAX_PENDING_LAYER_RESULTS: usize = 1024;
                 if self.shared_state.pending_layer_results.len() >= MAX_PENDING_LAYER_RESULTS {
-                    return Err(SwarmError::Internal(
-                        "Too many pending layer results — pipeline overloaded".into(),
+                    return Err(SwarmError::ServiceUnavailable(
+                        "Pipeline overloaded — too many pending layer results".into(),
                     ));
                 }
                 let (tx, rx) = tokio::sync::oneshot::channel();
