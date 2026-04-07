@@ -122,3 +122,9 @@
 {"file":"frontend/js/components/setup.js","line":162,"kind":"duplication","summary":"local provNames object duplicated global PROVIDER_NAMES from providers.js — replaced with global","status":"fixed","date":"2026-04-06"}
 {"file":"src/daemon/dispatch.rs","line":335,"kind":"production_unwrap","summary":"bare unwrap() on authenticated_sender in VisionEncodeRequest semaphore-full log — replaced with unwrap_or_default()","status":"fixed","date":"2026-04-06"}
 {"file":"frontend/i18n/*.json","line":478,"kind":"dead_i18n","summary":"dashboard.health_at_risk key unused in all JS/HTML — removed from all 21 language files (944→943)","status":"fixed","date":"2026-04-06"}
+{"file":"frontend/i18n/*.json","line":597,"kind":"dead_i18n","summary":"dead key mode.claude_sub_tip removed from all 21 files (942 keys remain)","status":"fixed","date":"2026-04-07"}
+{"file":"src/inference/pipeline.rs","line":1416,"kind":"error_type_misuse","summary":"SwarmError::Internal for pipeline overload → ServiceUnavailable (503)","status":"fixed","date":"2026-04-07"}
+{"file":"src/update.rs","line":264,"kind":"error_type_misuse","summary":"SwarmError::Internal for missing SHA256 sidecar → Validation","status":"fixed","date":"2026-04-07"}
+{"file":"src/api/admin.rs","line":713,"kind":"magic_number","summary":"bare 4096 invite code limit → MAX_INVITE_CODE_LEN constant","status":"fixed","date":"2026-04-07"}
+{"file":"frontend/i18n/en.json","line":596,"kind":"false_positive","summary":"mode.subscription IS used in index.html:756 data-i18n attribute — not dead","status":"wontfix","date":"2026-04-07"}
+{"file":"frontend/js/components/dashboard.js","line":1117,"kind":"false_positive","summary":"shard-endpoint/shard-pinned classes ARE assigned at lines 613/616 and styled in CSS — not dead","status":"wontfix","date":"2026-04-07"}
