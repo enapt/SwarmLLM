@@ -146,3 +146,4 @@
 {"file":"src/inference/pipeline.rs","line":1979,"kind":"bug","summary":"AllReduce compressed full tensor bytes (with header) instead of raw f32 data — size mismatch between ranks","status":"fixed","date":"2026-04-07"}
 {"file":"src/inference/pipeline.rs","line":1939,"kind":"bug","summary":"TP LayerForward always set pre_embedded=false — FfnOnly and subsequent AttnOnly phases received tensor data interpreted as text","status":"fixed","date":"2026-04-07"}
 {"file":"src/network/protocol.rs","line":612,"kind":"bug","summary":"pre_embedded not serialized in wire format — remote TP peers always saw pre_embedded=false","status":"fixed","date":"2026-04-07"}
+{"file":"src/inference/model_worker.rs","line":48,"kind":"critical_bug","summary":"TP pre_split_for_tp permanently corrupted shared model cache — extended key to (start,end,tp_rank,tp_size) so TP and non-TP models coexist","status":"fixed","date":"2026-04-07"}
