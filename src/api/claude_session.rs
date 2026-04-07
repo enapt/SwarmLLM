@@ -308,12 +308,18 @@ static SESSION_MANAGER: LazyLock<SessionManager> = LazyLock::new(SessionManager:
 
 pub struct SessionManager {
     sessions: DashMap<String, std::sync::Arc<Mutex<ClaudeSession>>>,
+    /// Stdin handles indexed by session ID — accessible without locking the
+    /// session mutex, which prevents deadlock when the SSE stream loop holds
+    /// the session lock for stdout reads while the permission handler writes
+    /// to stdin concurrently.
+    stdin_handles: DashMap<String, StdinHandle>,
 }
 
 impl SessionManager {
     fn new() -> Self {
         Self {
             sessions: DashMap::new(),
+            stdin_handles: DashMap::new(),
         }
     }
 
@@ -357,6 +363,7 @@ impl SessionManager {
 
         // Remove existing session if present
         if let Some((_, old)) = self.sessions.remove(&session_id) {
+            self.stdin_handles.remove(&session_id);
             let mut old = old.lock().await;
             old.kill().await;
         }
@@ -463,11 +470,12 @@ impl SessionManager {
         let lines = reader.lines();
 
         let now = Instant::now();
+        let stdin_handle: StdinHandle = std::sync::Arc::new(Mutex::new(Some(stdin)));
         let session = ClaudeSession {
             id: session_id.clone(),
             claude_session_id: resume_claude_id,
             child: Some(child),
-            stdin: std::sync::Arc::new(Mutex::new(Some(stdin))),
+            stdin: stdin_handle.clone(),
             stdout: Some(lines),
             working_dir,
             model,
@@ -479,6 +487,7 @@ impl SessionManager {
             exit_error: None,
         };
 
+        self.stdin_handles.insert(session_id.clone(), stdin_handle);
         self.sessions
             .insert(session_id, std::sync::Arc::new(Mutex::new(session)));
 
@@ -490,8 +499,16 @@ impl SessionManager {
         self.sessions.get(session_id).map(|e| e.value().clone())
     }
 
+    /// Get a session's stdin handle by ID (no session lock needed).
+    pub fn get_stdin_handle(&self, session_id: &str) -> Option<StdinHandle> {
+        self.stdin_handles
+            .get(session_id)
+            .map(|e| e.value().clone())
+    }
+
     /// Remove a session, killing its subprocess.
     pub async fn close_session(&self, session_id: &str) {
+        self.stdin_handles.remove(session_id);
         if let Some((_, session)) = self.sessions.remove(session_id) {
             let mut s = session.lock().await;
             let working_dir = s.working_dir.clone();
@@ -569,6 +586,7 @@ impl SessionManager {
 
         // Remove expired/dead entries from the map
         for id in &to_remove {
+            self.stdin_handles.remove(id.as_str());
             self.sessions.remove(id.as_str());
         }
 
@@ -990,6 +1008,15 @@ pub async fn send_message_handler(
                 Some(evt) => {
                     let evt_type = evt["type"].as_str().unwrap_or("");
 
+                    // Log control_request events for debugging permission flow
+                    if evt_type == "control_request" {
+                        tracing::info!(
+                            target: "swarmllm::api::claude_session",
+                            "Control request received: {}",
+                            serde_json::to_string(&evt).unwrap_or_default()
+                        );
+                    }
+
                     // Forward the raw NDJSON event as an SSE data line
                     let data = serde_json::to_string(&evt).unwrap_or_default();
                     yield Ok::<_, std::io::Error>(
@@ -1030,19 +1057,17 @@ pub async fn permission_handler(
     axum::extract::Path(session_id): axum::extract::Path<String>,
     Json(req): Json<PermissionRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let session_arc = SessionManager::global()
-        .get_session(&session_id)
+    // Get the stdin handle directly — no session lock needed.
+    // This avoids a deadlock: the SSE stream loop holds the session lock
+    // while blocking on read_event(), so locking the session here would
+    // block forever.
+    let stdin_handle = SessionManager::global()
+        .get_stdin_handle(&session_id)
         .ok_or_else(|| {
             ApiError(crate::error::SwarmError::Validation(format!(
                 "No Claude Code session with id '{session_id}'"
             )))
         })?;
-
-    // Grab the stdin handle without holding the session lock.
-    let stdin_handle = {
-        let session = session_arc.lock().await;
-        session.stdin_handle()
-    };
 
     // SDK protocol: response envelope wraps request_id + subtype inside .response.
     // When allowing, updatedInput passes through the (possibly modified) tool input.
