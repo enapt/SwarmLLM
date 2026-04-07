@@ -166,3 +166,16 @@
 {"file":"frontend/js/components/shard-menu.js","line":38,"kind":"dead_code","summary":"currentInVram property set but never read — removed","status":"fixed","date":"2026-04-07"}
 {"file":"src/api/providers.rs","line":210,"kind":"structural_fragility","summary":"make_provider expect('known provider') → returns Option, propagated via .and_then()","status":"fixed","date":"2026-04-07"}
 {"file":"src/credit/anti_gaming.rs","line":118,"kind":"memory_leak","summary":"subnet_counts tracked Vec<NodeId> — nodes that connect but never transact leaked forever. Changed to Vec<(NodeId, Instant)> with 24h age-based eviction in cleanup()","status":"fixed","date":"2026-04-07"}
+{"file":"src/pool/scope.rs","line":48,"kind":"dead_code","summary":"is_node_allowed() pub fn with zero callers — removed","status":"fixed","date":"2026-04-07"}
+{"file":"src/pool/scope.rs","line":66,"kind":"dead_code","summary":"filter_holders() pub fn with zero callers (tests reimplemented inline) — removed along with empty tests","status":"fixed","date":"2026-04-07"}
+{"file":"src/inference/pipeline.rs","line":249,"kind":"error_type_misuse","summary":"SwarmError::Internal for multi-image VLM → Validation (user-fixable)","status":"fixed","date":"2026-04-07"}
+{"file":"src/api/mcp.rs","line":688,"kind":"magic_number","summary":"bare Duration::from_secs(120) → MCP_TASK_TIMEOUT constant","status":"fixed","date":"2026-04-07"}
+{"file":"src/api/claude_session.rs","line":862,"kind":"magic_number","summary":"bare 120 init timeout → CLAUDE_INIT_TIMEOUT_SECS constant, format! in error message","status":"fixed","date":"2026-04-07"}
+{"file":"src/model/auto_manage/download.rs","line":94,"kind":"duplication","summary":"shard size check (metadata >= 9/10 expected) repeated 3x — extracted size_ok() closure","status":"fixed","date":"2026-04-07"}
+{"file":"frontend/js/components/claude-code.js","line":253,"kind":"hardcoded_english","summary":"'Unknown error' fallback → I18n.t('claude_code.unknown_error')","status":"fixed","date":"2026-04-07"}
+{"file":"frontend/js/components/claude-code.js","line":1048,"kind":"hardcoded_english","summary":"'Error' fallback → I18n.t('claude_code.error_fallback')","status":"fixed","date":"2026-04-07"}
+{"file":"frontend/js/components/dashboard.js","line":154,"kind":"dead_code","summary":"dead || 'Copied!' fallback after I18n.t() which never returns falsy — removed","status":"fixed","date":"2026-04-07"}
+{"file":"CLAUDE.md","line":124,"kind":"doc_mismatch","summary":"i18n key count 962 → 968","status":"fixed","date":"2026-04-07"}
+{"file":"src/inference/speculative.rs","line":62,"kind":"dead_code","summary":"is_valid_draft_pair() has no production callers — only tests. Should be wired into executor or deleted","status":"deferred","date":"2026-04-07"}
+{"file":"src/network/protocol.rs","line":117,"kind":"duplication","summary":"read_request/read_response share wire-frame header parsing + decompression (~30 lines). Hot path, risky refactor","status":"deferred","date":"2026-04-07"}
+{"file":"src/network/protocol.rs","line":270,"kind":"duplication","summary":"write_request/write_response identical JSON frame building (~12 lines). Hot path, risky refactor","status":"deferred","date":"2026-04-07"}
