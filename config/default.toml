@@ -72,3 +72,9 @@ invitation_ttl_hours = 24      # How long an invite code stays valid
 rate_limit_per_hour = 10       # Max pool operations per hour
 gossip_interval_secs = 600     # How often to gossip pool state (10 min)
 # Credit rates: [pool.credit_rates] — see docs for per-pool overrides
+
+# Private Mode: restrict YOUR inference requests to pool devices only.
+# Your nodes still contribute to the swarm (serve others, seed shards, earn credits).
+# private_mode = false           # Toggle via dashboard or API (persisted to DB)
+# private_mode_allow_lan = true  # Also allow LAN peers (mDNS-discovered) when private
+# offline_mode = false           # Air-gapped: no bootstrap, no HF downloads, mDNS only

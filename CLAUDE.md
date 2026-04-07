@@ -29,7 +29,7 @@ The daemon spawns 11 subsystems as Tokio tasks wired together with `mpsc` channe
 
 Shared state lives in `Arc<SharedState>` with `DashMap` for concurrent access. SharedState is organized into 4 logical sub-structs:
 - `state.events` (`EventBus`) — `activity_tx`, `activity_history`, `dashboard_tx`, `update_state`
-- `state.credits` (`CreditPool`) — `credit_balance`, `pool_state`, `pool_registry`, `pool_tx`, `trust_manager`, `escrow_manager`, `anti_gaming`, etc.
+- `state.credits` (`CreditPool`) — `credit_balance`, `pool_state`, `pool_registry`, `pool_tx`, `trust_manager`, `escrow_manager`, `anti_gaming`, `private_mode`, `offline_mode`, etc.
 - `state.models` (`ModelMgmt`) — `acquisition_progress`, `hf_sources`, `auto_manage_*`, `model_trust`, `locked_shards`, `prune_history`, etc.
 - `state.metrics` (`MetricsProviders`) — `node_stats`, `inference_requests_total`, `channel_metrics`, `providers_config`, etc.
 
@@ -60,7 +60,7 @@ swarmllm/
 │   ├── credit/    (ledger, transaction, priority, anti_gaming, trust, escrow)
 │   ├── identity/  (keypair, nickname)
 │   ├── crypto/    (session, pipeline_seal, gossip_seal, key_rotation, provider_keys)
-│   ├── pool/      (types, crypto, manager, forward)
+│   ├── pool/      (types, crypto, manager, forward, scope)
 │   ├── api/       (server, openai, anthropic, mcp, admin, admin_hf, admin_models, admin_providers, websocket, middleware, identity, pool, metrics, providers, claude_sub*)
 │   ├── storage/   (db)
 │   └── health/    (monitor, rebalancer)
@@ -147,6 +147,7 @@ libp2p 0.55 (pin to 0.55.x), axum 0.7, candle-core/candle-transformers (CUDA), e
 - KV-cache sessions expire after 10 minutes of inactivity (configurable)
 - Shard verification: BLAKE3 content hash checked on every load
 - Pipeline failover: hot-standby nodes pre-identified per segment
+- **Private mode**: restricts YOUR outbound inference to pool/LAN nodes only. Nodes still serve the swarm. Single `allowed_node_set()` in `src/pool/scope.rs` gates everything. Runtime-toggleable via `AtomicBool`. Shard pinning lets pool owners assign models to devices.
 - **No full model download required**: A node NEVER needs the full GGUF or all shards to participate in inference. Shards are downloaded individually via byte-range requests. Downloading all shards (or a full model) is opt-in only — for users who want offline inference or to seed more shards to the network. Never add code that implicitly downloads a full model or reconstructs a GGUF from shards. All inference loads from shard files + gguf_header.bin.
 
 ## Automated Workflow

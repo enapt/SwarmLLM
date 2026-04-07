@@ -121,6 +121,9 @@ Every configuration option, organized by section.
 | `invitation_ttl_hours` | integer | `24` | Invitation validity period |
 | `rate_limit_per_hour` | integer | `10` | Max pool operations per hour |
 | `gossip_interval_secs` | integer | `600` | Pool state gossip interval |
+| `private_mode` | bool | `false` | Restrict inference to pool members only. Toggleable at runtime via API/UI |
+| `private_mode_allow_lan` | bool | `true` | Also allow LAN peers (mDNS-discovered) when private mode is on |
+| `offline_mode` | bool | `false` | Air-gapped: no bootstrap peers, no HF downloads, mDNS-only discovery |
 
 ## `[pool.credit_rates]` — Credit Rates
 

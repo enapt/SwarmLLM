@@ -94,6 +94,32 @@ Pool member contribution rankings.
 #### GET/PUT /api/admin/pools/:id/rates
 Per-pool credit rate overrides.
 
+## Private Mode
+
+Restrict inference to your device pool for maximum privacy. Your prompts never leave your devices.
+
+### GET /api/pool/private-mode
+Current state + coverage summary. Returns `enabled`, `allow_lan`, `offline_mode`, and `coverage` object.
+
+### PUT /api/pool/private-mode
+Toggle private mode. Body: `{"enabled": true}` or `{"enabled": true, "offline_mode": true}`.
+Returns coverage summary so the UI can show trade-offs immediately.
+
+### GET /api/pool/coverage
+Per-model coverage breakdown: `total_shards`, `pool_shards`, `coverage_pct`, `missing` indices, `est_download_mb`. Also returns `disk_budget_mb` and `disk_used_mb`.
+
+### Shard Pinning
+
+### GET /api/pool/pins
+List current shard pins.
+
+### POST /api/pool/pin
+Pin a model to a specific device (owner only). Body: `{"model_id": "...", "target_node_id": "hex..."}`.
+Optional `shard_indices` array for specific shards (empty = all shards).
+
+### DELETE /api/pool/pin
+Remove a shard pin. Same body format as POST.
+
 ## Pool Features
 
 - **Device nicknames**: Name each device for easy identification
@@ -101,6 +127,10 @@ Per-pool credit rate overrides.
 - **Per-device stats**: VRAM, shards hosted, forwards served, uptime, models hosted
 - **Combined VRAM**: Aggregate GPU memory across all linked devices
 - **Credit split**: Owner configures what percentage (0-50%) members keep vs forward
+- **Private Mode**: Restrict inference to pool devices only. Toggle via UI or API
+- **Shard Pinning**: Assign specific models to specific devices. Auto-manage respects pins
+- **Offline Mode**: Air-gapped LAN operation with mDNS-only discovery
+- **Coverage Dashboard**: Per-model availability bars showing pool shard coverage
 - **Max 10 devices** per pool (configurable), 10 pool operations per hour rate limit
 
 ## Pool Security

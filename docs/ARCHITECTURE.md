@@ -946,6 +946,52 @@ With privacy:        Prompt text → [tokenize + embed locally] → FP32 activat
 - Trade-off: larger wire payloads (e.g., 512 tokens × 4096 dim × 4B = 8MB vs ~2KB text)
 - Modules: `src/inference/local_embedder.rs`, `src/daemon/state.rs` (`local_embedders` DashMap)
 
+## Private Mode
+
+Pool-only inference restriction that guarantees your prompts never leave your devices. Toggle via dashboard shield icon, pool section toggle, or `PUT /api/pool/private-mode`.
+
+**Three scopes:**
+- **Private (pool only)** — inference restricted to device pool members. Works over WAN or LAN.
+- **Private + LAN** — pool members plus any mDNS-discovered LAN peer (`private_mode_allow_lan: true`, default).
+- **Offline** — air-gapped operation. No bootstrap peers, no HF downloads, mDNS-only discovery.
+
+**What Private Mode restricts (your outbound requests):**
+- Inference pipeline assembly: scheduler filters candidates to allowed node set
+- Auto-manage shard scoring: only counts holders/replicas within allowed set
+- Auto-manage pruning: only considers pool-scoped replication
+- Auto-manage downloads: only downloads from pool peers (HF fallback in online mode)
+- VRAM pool calculation: only sums allowed peers' GPU VRAM
+
+**What Private Mode does NOT restrict (you still contribute):**
+- Serving inference requests from other swarm nodes
+- Hosting and seeding shards to the network
+- Earning credits for work done
+- P2P gossip, DHT, health pings
+
+**Implementation:** Single `allowed_node_set()` helper in `src/pool/scope.rs` returns `Option<HashSet<NodeId>>`. `None` = unrestricted (normal mode), `Some(set)` = only these nodes. All filtering flows from this one function. Runtime-toggleable via `AtomicBool` on `SharedState.credits.private_mode`.
+
+**Shard Pinning:** Pool owners can pin specific models/shards to specific devices via `POST /api/pool/pin`. Pinned shards get 1000x scoring bonus on the target node and are never pruned. Enables manual shard distribution (e.g. GPU machine gets the big model).
+
+**Coverage Dashboard:** `GET /api/pool/coverage` returns per-model coverage within the pool (total_shards, pool_shards, coverage_pct, missing indices, est_download_mb). Frontend shows color-coded bars and disk usage.
+
+**Config:**
+```toml
+[pool]
+private_mode = false           # Restrict inference to pool only
+private_mode_allow_lan = true  # Include LAN peers when private
+offline_mode = false           # Air-gapped: no internet, mDNS only
+```
+
+**API:**
+- `GET /api/pool/private-mode` — state + coverage summary
+- `PUT /api/pool/private-mode` — toggle `{ "enabled": true, "offline_mode": true }`
+- `GET /api/pool/coverage` — per-model pool coverage
+- `GET /api/pool/pins` — list shard pins
+- `POST /api/pool/pin` — pin model to device
+- `DELETE /api/pool/pin` — remove pin
+
+**Error:** `SwarmError::PrivateModeUnavailable { model_id, missing_shards }` → HTTP 503 with specific missing shard list so users know exactly what's needed.
+
 ## Transport-Authenticated Dispatch
 
 All inbound network messages are wrapped in `AuthenticatedMessage` with the transport-verified sender `NodeId` (from libp2p Noise protocol). The MessageDispatcher validates sender identity against message claims for all security-sensitive message types (ShardAnnounce, CreditTransaction, CreditGossip, NicknameGossip, HealthPing/Pong, EphemeralKeyExchange). Mismatched messages are logged and dropped.

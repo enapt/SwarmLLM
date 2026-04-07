@@ -66,7 +66,7 @@ Running a smart AI model (like Llama 3 70B) normally requires a $10,000+ GPU. Wi
 
 | | SwarmLLM | Others |
 |---|---|---|
-| **Privacy** | E2E encrypted + optional encrypted pipeline (no remote sees plaintext) | Unencrypted — peers can read your prompts and outputs (Petals); no encryption (Exo) |
+| **Privacy** | E2E encrypted + **Private Mode** (pool-only inference) + offline LAN + shard pinning | Unencrypted — peers can read your prompts and outputs (Petals); no encryption (Exo) |
 | **Install** | Single binary, zero dependencies | Python environments, pip, Docker, blockchain setup |
 | **Cloud + Local** | 12 cloud providers as fallback through one API | Local only, no cloud integration |
 | **Claude Code** | Full Anthropic Messages API — native Claude Code backend | No Anthropic API support (Exo added basic support recently) |
@@ -181,6 +181,38 @@ SwarmLLM uses a 5-layer discovery stack — no manual configuration needed:
 
 > For private networks, set `gossip_network_id = "my-private-net"` in config to isolate your nodes from the public network.
 
+## Private Mode
+
+For maximum privacy, enable **Private Mode** to restrict all inference to your device pool. Your prompts never leave your machines.
+
+```bash
+# Toggle via API
+curl -X PUT http://localhost:8800/api/pool/private-mode \
+  -H "Authorization: Bearer $KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"enabled": true}'
+
+# Check what models your pool can serve
+curl http://localhost:8800/api/pool/coverage -H "Authorization: Bearer $KEY"
+```
+
+Or click the **shield icon** in the dashboard header — a confirmation dialog shows your pool's model coverage before activating.
+
+**What's restricted:** Your outbound inference requests only route to pool members (and optionally LAN peers). Auto-manage scoring, pruning, downloads, and VRAM calculations all scope to your pool.
+
+**What's NOT restricted:** Your nodes still serve the swarm — processing inference for others, hosting shards, earning credits. Private mode is one-way: your data stays private, but you still contribute.
+
+**Three levels:**
+| Mode | Config | Behavior |
+|------|--------|----------|
+| **Pool Only** | `private_mode = true` | Inference restricted to pool members |
+| **Pool + LAN** | `private_mode = true, private_mode_allow_lan = true` (default) | Pool + mDNS-discovered LAN peers |
+| **Offline** | `private_mode = true, offline_mode = true` | Air-gapped: no internet, mDNS only |
+
+**Shard Pinning:** Pool owners can assign specific models to specific devices — e.g., the GPU machine gets the 7B model, the laptop gets the 1B. Auto-manage downloads pinned shards with highest priority and never prunes them.
+
+**Coverage Dashboard:** Shows per-model availability in your pool with color-coded bars, missing shard counts, and estimated download sizes to fill gaps.
+
 ## Features
 
 ### Inference
@@ -206,6 +238,8 @@ SwarmLLM uses a 5-layer discovery stack — no manual configuration needed:
 - **End-to-End Encryption** — Three-tier encryption: pairwise sessions (X25519 + ChaCha20-Poly1305 with forward secrecy via key rotation), pipeline sealing (final segment encrypts output tokens for requester's X25519 key), and authenticated sealed gossip. All peer-to-peer traffic is encrypted in transit. Intermediate pipeline nodes process activation tensors but never see the plaintext output — see [Security Model](docs/book/src/architecture/security.md) for details. By comparison, Petals [explicitly warns](https://github.com/bigscience-workshop/petals/wiki/Security,-privacy,-and-AI-safety) that "peers can recover input data and model outputs" with no encryption layer, and Exo has no encryption at all
 - **Encrypted Pipeline** — Optional "boomerang" topology where the requesting node holds both the first shard (embedding) and last shard (token sampling), so **no remote node ever sees plaintext** — only intermediate activation tensors. Per-model toggle via API/dashboard or global config. Auto-enables local embedding privacy. Adds ~1 RTT per token for the return hop. Requires 3+ shard models. See [Encrypted Pipeline](docs/book/src/architecture/security.md#encrypted-pipeline)
 - **Security Hardened** — ~90-fix security audit across 5 rounds: authenticated P2P dispatch, signed DHT records, ephemeral key auth, path traversal fix, HF input validation, constant-time auth, CSP hardening, WebSocket Origin check, SSRF protection, resource caps, input limits, credit signature verification, XSS fixes
+- **Private Mode** — Restrict all inference to your device pool only. Your prompts never leave your machines. Toggle via dashboard shield icon or API. Includes model coverage dashboard showing which models your pool can serve, estimated download sizes for gaps, and shard disk usage. Your nodes still contribute to the swarm (serve others, earn credits) — only your outbound requests are restricted. Supports three scopes: pool-only, pool+LAN, and fully offline (air-gapped mDNS-only with no internet)
+- **Pool Shard Pinning** — Pool owners can assign specific models to specific devices (e.g. GPU machine gets the 7B model, laptop gets the 1B). Auto-manage respects pins: 1000x download priority on target, never prunes pinned shards
 - **Local Embedding Privacy** — requesting node performs token→embedding locally so remote first-segment nodes never see raw tokens
 - **Sybil Resistance** — Ed25519-signed balance reports, peer reputation scoring with trust decay, subnet clustering detection, leaderboard spoofing protection
 - **API Authentication** — Bearer token middleware with auto-generated keys, CORS lockdown, SSRF protection, Content-Security-Policy, IP-based rate limiting
@@ -483,7 +517,7 @@ The `.env` file is loaded at startup and does not override existing environment 
 | `[network]` | `bootstrap_peers`, `enable_mdns`, `enable_encryption`, `gossip_network_id`, `enable_relay`, `max_peers`, `tensor_compression` |
 | `[inference]` | `model_path`, `gpu_layers`, `session_timeout_seconds`, `max_batch_size`, `speculative_decoding`, `tp_max_latency_ms`, `local_embedding_privacy`, `encrypted_pipeline` |
 | `[api]` | `api_key`, `rate_limit_rpm` |
-| `[pool]` | `max_pool_size`, `invitation_ttl_hours`, `rate_limit_per_hour` |
+| `[pool]` | `max_pool_size`, `invitation_ttl_hours`, `rate_limit_per_hour`, `private_mode`, `private_mode_allow_lan`, `offline_mode` |
 | `[auto_manage]` | `enabled`, `max_storage_mb`, `interval_minutes`, `max_concurrent_downloads`, `prune_enabled`, `min_replicas` |
 | `[providers]` | API keys for cloud providers (also via `OPENAI_API_KEY` env var / `.env` file), custom providers |
 | `[logging]` | `level`, `format` (pretty/json), `file` |
@@ -524,6 +558,17 @@ See the [Configuration Reference](docs/book/src/configuration/reference.md) for 
 | POST | `/api/admin/hf/download-shards` | Download specific shards |
 | GET/PUT | `/api/admin/models/:id/encrypted-pipeline` | Per-model encrypted pipeline toggle |
 | POST | `/api/admin/shutdown` | Graceful shutdown (localhost only) |
+
+### Device Pools & Private Mode
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/pool/state` | Pool membership, members, stats, private_mode status |
+| POST | `/api/pool/create` | Create a device pool |
+| POST | `/api/pool/join` | Join pool with invite code |
+| GET/PUT | `/api/pool/private-mode` | Toggle private mode (pool-only inference) |
+| GET | `/api/pool/coverage` | Per-model pool coverage with shard gaps + disk usage |
+| GET | `/api/pool/pins` | List shard pins |
+| POST/DELETE | `/api/pool/pin` | Pin/unpin model to specific device |
 
 Plus ~50 more admin routes for downloads, providers, adapters, identity, pools, scheduling, and more. See [ARCHITECTURE.md](docs/ARCHITECTURE.md) for the complete list.
 
@@ -573,7 +618,7 @@ Plus ~50 more admin routes for downloads, providers, adapters, identity, pools, 
 | **Install** | Download & run | pip install | pip/source/macOS app | pip + blockchain setup |
 | **Scale** | LAN + WAN + Tailscale/WireGuard (zero config) | Internet (volunteer) | LAN + Tailscale (manual) | Internet (blockchain) |
 | **E2E Encryption** | **X25519 + ChaCha20 + forward secrecy** | **None** — peers can see your prompts | **None** | Minimal (blockchain-level) |
-| **Privacy** | **Encrypted by default** — all traffic encrypted in transit. Optional **encrypted pipeline** ensures no remote node sees plaintext (boomerang topology) | Unencrypted — Petals' own wiki states peers can read your prompts and outputs | No encryption between nodes | Subnet-dependent |
+| **Privacy** | **Encrypted by default** + **Private Mode** (pool-only inference, offline LAN). Optional encrypted pipeline (boomerang topology). Shard pinning per device | Unencrypted — Petals' own wiki states peers can read your prompts and outputs | No encryption between nodes | Subnet-dependent |
 | **Security Audit** | **~90-fix, 5-round hardening** (auth, SSRF, replay, caps) | None documented | None documented | PoA consensus (centralized) |
 | **Incentives** | Credit tiers (no token, no blockchain) | Name on monitor page | None | TAO token (real money) |
 | **Parallelism** | Pipeline + tensor (auto-detected LAN) | Pipeline | Tensor + pipeline | Subnet routing |
