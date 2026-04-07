@@ -826,6 +826,20 @@ pub fn encode_layer_forward_encrypted(
     buf.extend_from_slice(&(sealed_len as u32).to_le_bytes());
     buf.extend_from_slice(&sealed_activations);
 
+    // Optional: tp_meta trailer (marker 0x02 + tp_rank(1) + tp_size(1) + single_layer(4) + phase(1))
+    if let Some(ref tp) = forward.tp_meta {
+        buf.push(0x02);
+        buf.push(tp.tp_rank);
+        buf.push(tp.tp_size);
+        buf.extend_from_slice(&tp.single_layer.to_le_bytes());
+        let phase_byte: u8 = match tp.phase {
+            crate::types::TpPhase::Full => 0,
+            crate::types::TpPhase::AttnOnly => 1,
+            crate::types::TpPhase::FfnOnly => 2,
+        };
+        buf.push(phase_byte);
+    }
+
     Ok(buf)
 }
 
@@ -921,6 +935,31 @@ pub fn decode_layer_forward_encrypted(
 
     let sealed = data[sealed_start..sealed_start + sealed_len].to_vec();
 
+    // Optional: tp_meta trailer after sealed data (marker 0x02 + 7 bytes)
+    let tp_meta_start = sealed_start + sealed_len;
+    let tp_meta = if data.len() >= tp_meta_start + 8 && data[tp_meta_start] == 0x02 {
+        let tp_rank = data[tp_meta_start + 1];
+        let tp_size = data[tp_meta_start + 2];
+        let single_layer = u32::from_le_bytes(
+            data[tp_meta_start + 3..tp_meta_start + 7]
+                .try_into()
+                .map_err(|_| SwarmError::Network("Invalid tp single_layer".into()))?,
+        );
+        let phase = match data[tp_meta_start + 7] {
+            1 => crate::types::TpPhase::AttnOnly,
+            2 => crate::types::TpPhase::FfnOnly,
+            _ => crate::types::TpPhase::Full,
+        };
+        Some(crate::types::TensorParallelMeta {
+            tp_rank,
+            tp_size,
+            single_layer,
+            phase,
+        })
+    } else {
+        None
+    };
+
     let forward = LayerForward {
         request_id,
         sequence_num,
@@ -929,7 +968,7 @@ pub fn decode_layer_forward_encrypted(
         format,
         model_id,
         layer_range: (layer_start, layer_end),
-        tp_meta: None,
+        tp_meta,
         vision_embeddings: None,
         sender_peer_bytes: None,
         requester_node_id: None,
