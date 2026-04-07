@@ -155,3 +155,13 @@
 {"file":"src/network/manager.rs","line":1598,"kind":"bug","summary":"No reconnect scheduled when connection drops during active pipeline. Added 500ms redial.","status":"fixed","date":"2026-04-07"}
 {"file":"src/network/manager.rs","line":1563,"kind":"bug","summary":"Crypto session removed on disconnect even during active pipeline — 500ms window where seal() fails. Now preserved during active pipelines.","status":"fixed","date":"2026-04-07"}
 {"file":"src/network/manager.rs","line":2701,"kind":"bug","summary":"seal() failure silently dropped forward — pipeline waited full AllReduce timeout. Now notifies pipeline immediately.","status":"fixed","date":"2026-04-07"}
+{"file":"src/pool/types.rs","line":136,"kind":"dead_code","summary":"PoolCommand::GetMembership variant never sent — removed variant + match arm","status":"fixed","date":"2026-04-07"}
+{"file":"src/update.rs","line":84,"kind":"duplication","summary":"reqwest::Client::builder() duplicated in check_for_update + download_update — extracted static LazyLock clients","status":"fixed","date":"2026-04-07"}
+{"file":"src/api/admin_providers.rs","line":446,"kind":"duplication","summary":"3x per-request reqwest::Client construction — extracted static LIST/PROBE/HEALTH_CLIENT","status":"fixed","date":"2026-04-07"}
+{"file":"src/api/websocket.rs","line":89,"kind":"unstructured_tracing","summary":"4 bare tracing::debug! calls without structured fields — added subsystem field","status":"fixed","date":"2026-04-07"}
+{"file":"src/inference/model_worker.rs","line":214,"kind":"error_type_misuse","summary":"SwarmError::Internal for path traversal outside data dir — changed to Validation","status":"fixed","date":"2026-04-07"}
+{"file":"frontend/js/components/setup.js","line":83,"kind":"hardcoded_english","summary":"'network error' hardcoded in 2 i18n interpolations — replaced with I18n.t('common.request_failed')","status":"fixed","date":"2026-04-07"}
+{"file":"frontend/js/components/pool.js","line":75,"kind":"hardcoded_english","summary":"'network error' hardcoded in errorMsg — replaced with I18n.t('common.request_failed')","status":"fixed","date":"2026-04-07"}
+{"file":"CLAUDE.md","line":124,"kind":"doc_mismatch","summary":"i18n key count 942 → 962","status":"fixed","date":"2026-04-07"}
+{"file":"frontend/js/components/shard-menu.js","line":38,"kind":"dead_code","summary":"currentInVram property set but never read — removed","status":"fixed","date":"2026-04-07"}
+{"file":"src/api/providers.rs","line":210,"kind":"structural_fragility","summary":"make_provider expect('known provider') correct today but fragile if new provider added without URL — wontfix (hypothetical)","status":"wontfix","date":"2026-04-07"}
