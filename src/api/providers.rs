@@ -204,14 +204,15 @@ fn resolve_provider_inner(model: &str, config: &ProvidersConfig) -> Option<Provi
 }
 
 /// Helper: build ProviderInfo from a config entry and known provider name.
-fn make_provider(name: &str, entry: &ProviderEntry, is_anthropic: bool) -> ProviderInfo {
-    ProviderInfo {
+/// Returns `None` if the provider name has no known base URL.
+fn make_provider(name: &str, entry: &ProviderEntry, is_anthropic: bool) -> Option<ProviderInfo> {
+    Some(ProviderInfo {
         name: name.into(),
-        base_url: provider_base_url(name).expect("known provider").into(),
+        base_url: provider_base_url(name)?.into(),
         api_key: entry.api_key.clone(),
         is_anthropic,
         is_subprocess: false,
-    }
+    })
 }
 
 pub fn resolve_by_name(name: &str, config: &ProvidersConfig) -> Option<ProviderInfo> {
@@ -219,51 +220,51 @@ pub fn resolve_by_name(name: &str, config: &ProvidersConfig) -> Option<ProviderI
         "anthropic" => config
             .anthropic
             .as_ref()
-            .map(|e| make_provider("anthropic", e, true)),
+            .and_then(|e| make_provider("anthropic", e, true)),
         "openai" => config
             .openai
             .as_ref()
-            .map(|e| make_provider("openai", e, false)),
+            .and_then(|e| make_provider("openai", e, false)),
         "deepseek" => config
             .deepseek
             .as_ref()
-            .map(|e| make_provider("deepseek", e, false)),
+            .and_then(|e| make_provider("deepseek", e, false)),
         "mistral" => config
             .mistral
             .as_ref()
-            .map(|e| make_provider("mistral", e, false)),
+            .and_then(|e| make_provider("mistral", e, false)),
         "groq" => config
             .groq
             .as_ref()
-            .map(|e| make_provider("groq", e, false)),
+            .and_then(|e| make_provider("groq", e, false)),
         "nvidia_nim" | "nvidia" | "nim" => config
             .nvidia_nim
             .as_ref()
-            .map(|e| make_provider("nvidia_nim", e, false)),
+            .and_then(|e| make_provider("nvidia_nim", e, false)),
         "cerebras" => config
             .cerebras
             .as_ref()
-            .map(|e| make_provider("cerebras", e, false)),
+            .and_then(|e| make_provider("cerebras", e, false)),
         "sambanova" => config
             .sambanova
             .as_ref()
-            .map(|e| make_provider("sambanova", e, false)),
+            .and_then(|e| make_provider("sambanova", e, false)),
         "fireworks" => config
             .fireworks
             .as_ref()
-            .map(|e| make_provider("fireworks", e, false)),
+            .and_then(|e| make_provider("fireworks", e, false)),
         "together" => config
             .together
             .as_ref()
-            .map(|e| make_provider("together", e, false)),
+            .and_then(|e| make_provider("together", e, false)),
         "deepinfra" => config
             .deepinfra
             .as_ref()
-            .map(|e| make_provider("deepinfra", e, false)),
+            .and_then(|e| make_provider("deepinfra", e, false)),
         "moonshot" | "kimi" => config
             .moonshot
             .as_ref()
-            .map(|e| make_provider("moonshot", e, false)),
+            .and_then(|e| make_provider("moonshot", e, false)),
         _ => {
             // Check custom providers
             config

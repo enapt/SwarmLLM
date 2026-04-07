@@ -29,7 +29,8 @@ pub struct AntiGaming {
     spot_check_rate: f64,
     /// Tracks observed /24 subnet clustering (first 3 bytes of IPv4).
     /// Many nodes from the same /24 may indicate Sybil attack.
-    subnet_counts: HashMap<[u8; 3], Vec<NodeId>>,
+    /// Each entry stores (NodeId, registration time) for age-based eviction.
+    subnet_counts: HashMap<[u8; 3], Vec<(NodeId, Instant)>>,
 }
 
 impl AntiGaming {
@@ -115,9 +116,11 @@ impl AntiGaming {
             timestamps.retain(|t| *t > cutoff);
             !timestamps.is_empty()
         });
-        // Prune subnet_counts for nodes no longer in rate_limits to prevent unbounded growth
+        // Evict subnet registrations older than 24 hours to prevent unbounded growth
+        // from nodes that connect but never transact.
+        let subnet_cutoff = Instant::now() - Duration::from_secs(86400);
         self.subnet_counts.retain(|_, nodes| {
-            nodes.retain(|n| self.rate_limits.contains_key(n));
+            nodes.retain(|(_, ts)| *ts > subnet_cutoff);
             !nodes.is_empty()
         });
     }
@@ -142,8 +145,10 @@ impl AntiGaming {
     pub fn register_subnet(&mut self, node_id: &NodeId, ip_bytes: [u8; 4]) {
         let prefix = [ip_bytes[0], ip_bytes[1], ip_bytes[2]];
         let nodes = self.subnet_counts.entry(prefix).or_default();
-        if !nodes.contains(node_id) {
-            nodes.push(node_id.clone());
+        if let Some(entry) = nodes.iter_mut().find(|(n, _)| n == node_id) {
+            entry.1 = Instant::now(); // refresh timestamp
+        } else {
+            nodes.push((node_id.clone(), Instant::now()));
             if nodes.len() > SUBNET_CLUSTER_THRESHOLD {
                 tracing::warn!(
                     subnet = format!("{}.{}.{}.0/24", prefix[0], prefix[1], prefix[2]),
@@ -157,9 +162,9 @@ impl AntiGaming {
     /// Check if a node is in a clustered subnet (> SUBNET_CLUSTER_THRESHOLD nodes
     /// sharing the same /24). Returns true if the node should face elevated scrutiny.
     fn is_subnet_clustered(&self, node_id: &NodeId) -> bool {
-        self.subnet_counts
-            .values()
-            .any(|nodes| nodes.len() > SUBNET_CLUSTER_THRESHOLD && nodes.contains(node_id))
+        self.subnet_counts.values().any(|nodes| {
+            nodes.len() > SUBNET_CLUSTER_THRESHOLD && nodes.iter().any(|(n, _)| n == node_id)
+        })
     }
 
     /// Get the effective spot-check rate for a node, considering subnet clustering.
