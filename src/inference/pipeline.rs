@@ -246,7 +246,7 @@ impl PipelineExecutor {
 
         // Remote vision encoding only supports single images — multi-image requires local mmproj
         if images.len() > 1 {
-            return Err(SwarmError::Internal(
+            return Err(SwarmError::Validation(
                 "Multi-image VLM requires local mmproj — remote encoding only supports single images"
                     .into(),
             ));

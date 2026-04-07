@@ -74,6 +74,12 @@ impl AutoShardManager {
 
             // Verify shard integrity: try BLAKE3 hash if available, fall back to size check
             let shard_store = self.shared_state.shard_store();
+            let size_ok = || {
+                candidate.shard_size_bytes > 0
+                    && std::fs::metadata(&shard_path)
+                        .map(|m| m.len() >= candidate.shard_size_bytes * 9 / 10)
+                        .unwrap_or(false)
+            };
             let file_ok = if let Some(manifest) = self
                 .shared_state
                 .model_registry
@@ -89,27 +95,15 @@ impl AutoShardManager {
                         shard_store
                             .verify_shard(&candidate.model_id, shard_info)
                             .is_ok()
-                    } else if candidate.shard_size_bytes > 0 {
-                        // Zero-hash placeholder -- fall back to size check
-                        std::fs::metadata(&shard_path)
-                            .map(|m| m.len() >= candidate.shard_size_bytes * 9 / 10)
-                            .unwrap_or(false)
                     } else {
-                        false // unknown expected size -- needs re-download
+                        // Zero-hash placeholder -- fall back to size check
+                        size_ok()
                     }
-                } else if candidate.shard_size_bytes > 0 {
-                    std::fs::metadata(&shard_path)
-                        .map(|m| m.len() >= candidate.shard_size_bytes * 9 / 10)
-                        .unwrap_or(false)
                 } else {
-                    false
+                    size_ok()
                 }
-            } else if candidate.shard_size_bytes > 0 {
-                std::fs::metadata(&shard_path)
-                    .map(|m| m.len() >= candidate.shard_size_bytes * 9 / 10)
-                    .unwrap_or(false)
             } else {
-                false
+                size_ok()
             };
 
             if file_ok {

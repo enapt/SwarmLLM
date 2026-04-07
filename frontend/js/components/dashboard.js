@@ -151,7 +151,7 @@
             var fullId = el.dataset.fullId;
             navigator.clipboard.writeText(fullId).then(function() {
               var s = el.textContent;
-              el.textContent = I18n.t('nav.copied') || 'Copied!';
+              el.textContent = I18n.t('nav.copied');
               setTimeout(function() { el.textContent = s; }, 1200);
             });
           });

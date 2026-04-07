@@ -685,7 +685,7 @@ async fn tool_chat(state: &AppState, id: Option<Value>, args: Value) -> JsonRpcR
     );
 
     match tokio::time::timeout(
-        std::time::Duration::from_secs(120),
+        MCP_TASK_TIMEOUT,
         crate::api::submit_to_router(&router_tx, request),
     )
     .await

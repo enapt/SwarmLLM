@@ -966,5 +966,7 @@
   "pool.disk_usage": "Shard Disk Usage",
   "pool.confirm_enable_private": "Enable Private Mode?\n\nAll inference will be restricted to your device pool only. Models not fully available on your devices will be unavailable.",
   "pool.confirm_disable_private": "Disable Private Mode?\n\nInference will use the full swarm network again.",
-  "pool.coverage_download_warning": "Estimated {size} of shard downloads needed for full coverage."
+  "pool.coverage_download_warning": "Estimated {size} of shard downloads needed for full coverage.",
+  "claude_code.unknown_error": "Unknown error",
+  "claude_code.error_fallback": "Error"
 }

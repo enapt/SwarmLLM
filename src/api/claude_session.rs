@@ -44,6 +44,8 @@ const MAX_JSON_BUFFER: usize = 1024 * 1024;
 
 /// Default idle timeout before a session subprocess is gracefully suspended.
 const DEFAULT_IDLE_TIMEOUT_SECS: u64 = 4 * 3600; // 4 hours
+/// Timeout for the initial Claude CLI subprocess handshake.
+const CLAUDE_INIT_TIMEOUT_SECS: u64 = 120;
 /// Warning sent to frontend this many seconds before idle timeout.
 const IDLE_WARNING_BEFORE_SECS: u64 = 15 * 60; // 15 minutes
 
@@ -859,7 +861,8 @@ pub async fn create_session_handler(
     // from the empty -p "" prompt. Without this drain, the buffered result event
     // would be read by the first SSE stream, which would interpret it as the
     // user's response and immediately close with [DONE].
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(120);
+    let deadline =
+        tokio::time::Instant::now() + std::time::Duration::from_secs(CLAUDE_INIT_TIMEOUT_SECS);
     let init_result: Result<serde_json::Value, ApiError> = async {
         let reader = stdout_reader.as_mut().ok_or_else(|| {
             ApiError(crate::error::SwarmError::Internal(
@@ -923,7 +926,11 @@ pub async fn create_session_handler(
                         return Ok(evt);
                     }
                     return Err(ApiError(crate::error::SwarmError::Internal(
-                        "Timeout waiting for Claude CLI init (120s)".into(),
+                        format!(
+                            "Timeout waiting for Claude CLI init ({}s)",
+                            CLAUDE_INIT_TIMEOUT_SECS
+                        )
+                        .into(),
                     )));
                 }
             }

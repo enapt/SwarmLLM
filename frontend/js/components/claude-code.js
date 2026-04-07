@@ -250,7 +250,7 @@
           break;
 
         case 'error':
-          App.claudeCode._showStatus(target, evt.message || 'Unknown error', true);
+          App.claudeCode._showStatus(target, evt.message || I18n.t('claude_code.unknown_error'), true);
           break;
       }
     },
@@ -1045,7 +1045,7 @@
       }
 
       if (evt.is_error) {
-        App.claudeCode._showStatus(contentEl, resultText || 'Error', true);
+        App.claudeCode._showStatus(contentEl, resultText || I18n.t('claude_code.error_fallback'), true);
       }
 
       // Update the live timer with final info (turns + duration)
