@@ -100,7 +100,7 @@
     var container = document.getElementById(containerId);
     if (!container || !data || data.length === 0) return;
     var hasActivity = data.some(function(v) { return v !== 0; });
-    if (!hasActivity) { container.innerHTML = '<span class="text-muted" style="font-size:0.7rem">' + escapeHtml(I18n.t('dashboard.credit_activity_empty')) + '</span>'; return; }
+    if (!hasActivity) { container.innerHTML = '<span class="text-muted text-2xs">' + escapeHtml(I18n.t('dashboard.credit_activity_empty')) + '</span>'; return; }
     var min = Math.min.apply(null, data);
     var max = Math.max.apply(null, data);
     var range = (max - min) || 1;
@@ -293,24 +293,24 @@
     if (modelData && modelData.encrypted_pipeline && modelData.shard_count > 1) {
       var isFullLocal = modelData.hosted_shards === modelData.shard_count;
       if (isFullLocal) {
-        encHint = '<div class="chat-empty-hint" style="margin:6px 0;font-size:0.8rem;color:var(--green)">' +
+        encHint = '<div class="chat-empty-hint text-sm text-green" style="margin:6px 0">' +
           '&#128274; ' + escapeHtml(I18n.t('chat.enc_local_hint')) + '</div>';
       } else {
-        encHint = '<div class="chat-empty-hint" style="margin:6px 0;font-size:0.8rem;color:var(--cyan,#22d3ee)">' +
+        encHint = '<div class="chat-empty-hint text-sm" style="margin:6px 0;color:var(--cyan)">' +
           '&#128274; ' + escapeHtml(I18n.t('chat.enc_e2e_hint')) +
-          '<br><span style="font-size:0.75rem;color:var(--text-muted)">' + escapeHtml(I18n.t('chat.enc_e2e_latency')) + '</span></div>';
+          '<br><span class="field-hint text-muted">' + escapeHtml(I18n.t('chat.enc_e2e_latency')) + '</span></div>';
       }
     } else if (modelData && modelData.shard_count > 1 && modelData.hosted_shards < modelData.shard_count) {
-      encHint = '<div class="chat-empty-hint" style="margin:6px 0;font-size:0.8rem;color:var(--text-muted)">' +
+      encHint = '<div class="chat-empty-hint text-sm text-muted" style="margin:6px 0">' +
         '&#127760; ' + escapeHtml(I18n.t('chat.enc_distributed_hint')) +
-        '<br><span style="font-size:0.75rem">' + escapeHtml(I18n.t('chat.enc_enable_hint')) + '</span></div>';
+        '<br><span class="field-hint">' + escapeHtml(I18n.t('chat.enc_enable_hint')) + '</span></div>';
     }
 
     div.innerHTML = '<div class="chat-empty-icon">' + icon + '</div>' +
       '<div class="chat-empty-title">' + title + '</div>' +
       encHint +
       '<div class="chat-empty-hint" style="margin:8px 0">' + I18n.t('chat.type_to_send') + '</div>' +
-      '<div class="chat-empty-hint" style="font-size:0.8rem;margin-top:4px">' +
+      '<div class="chat-empty-hint text-sm mt-0">' +
         (modelName ? '' : escapeHtml(I18n.t('chat.pick_model_hint')) + ' \u2022 ') +
         '<kbd>' + escapeHtml(I18n.t('chat.shift_enter')) + '</kbd></div>';
     return div;
@@ -358,18 +358,18 @@
       var peerCount = (App.data.cache && App.data.cache.stats) ? (App.data.cache.stats.peers || 0) : 0;
       if (peerCount > 0) {
         // Connected to peers but no models ready yet — they're coming
-        emptyState.innerHTML = '<div class="chat-empty-icon" style="font-size:2rem">' +
+        emptyState.innerHTML = '<div class="chat-empty-icon text-xl">' +
           '<div class="spinner" style="width:24px;height:24px;display:inline-block"></div></div>' +
-          '<div class="chat-empty-title" style="font-size:1.1rem">' + I18n.t('chat.discovering') + '</div>' +
+          '<div class="chat-empty-title text-lg">' + I18n.t('chat.discovering') + '</div>' +
           '<div class="chat-empty-hint" style="margin:8px 0">' + I18n.t('chat.discovering_hint', { count: peerCount }) + '</div>';
       } else {
         // No peers, no models — need to connect or add cloud provider
         emptyState.innerHTML = '<div class="chat-empty-icon">&#11203;</div>' +
-          '<div class="chat-empty-title" style="font-size:1.1rem">' + I18n.t('chat.getting_started') + '</div>' +
+          '<div class="chat-empty-title text-lg">' + I18n.t('chat.getting_started') + '</div>' +
           '<div class="chat-empty-hint" style="margin:8px 0">' + I18n.t('chat.getting_started_hint') + '</div>' +
-          '<div style="display:flex;gap:8px;margin-top:12px;justify-content:center">' +
+          '<div class="flex justify-center gap-1 mt-2">' +
             '<button class="btn btn-primary" data-goto-network-code="1">' + I18n.t('chat.connect_peers') + '</button>' +
-            '<button class="btn btn-outline" data-goto-settings="1" style="border:1px solid var(--border)">' + I18n.t('chat.add_provider') + '</button>' +
+            '<button class="btn btn-outline" data-goto-settings="1">' + I18n.t('chat.add_provider') + '</button>' +
           '</div>';
       }
     }

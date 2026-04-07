@@ -272,13 +272,13 @@
       try {
         var resp = await App.authFetch('/api/admin/schedule');
         if (!resp.ok) {
-          if (el) el.innerHTML = '<div class="text-muted" style="font-size:0.85rem">' + App.utils.escapeHtml(I18n.t('downloads.no_schedule')) + '</div>';
+          if (el) el.innerHTML = '<div class="text-muted text-base">' + App.utils.escapeHtml(I18n.t('downloads.no_schedule')) + '</div>';
           return;
         }
         var s = await resp.json();
         renderScheduleCard(s);
       } catch (e) {
-        if (el) el.innerHTML = '<div class="text-muted" style="font-size:0.85rem">' + U.escapeHtml(I18n.t('downloads.no_schedule')) + '</div>';
+        if (el) el.innerHTML = '<div class="text-muted text-base">' + U.escapeHtml(I18n.t('downloads.no_schedule')) + '</div>';
       }
     },
 

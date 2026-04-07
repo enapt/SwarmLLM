@@ -32,7 +32,7 @@
       ? '<span style="display:flex;align-items:center;gap:8px"><span class="mono dl-progress-text">' + opts.rightText + '</span>' + opts.cancelBtn + '</span>'
       : '<span class="mono dl-progress-text">' + opts.rightText + '</span>';
     return '<div class="dl-progress" data-model-progress="' + opts.safeId + '" data-last-pct="' + opts.pct + '">' +
-      '<div class="flex-between" style="font-size:0.75rem;margin-bottom:3px">' +
+      '<div class="flex-between field-hint mb-0">' +
       '<span class="text-muted">' + opts.label + '</span>' +
       right +
       '</div>' +
@@ -77,7 +77,7 @@
         return ('0' + d.getHours()).slice(-2) + ':' + ('0' + d.getMinutes()).slice(-2) + ':' + ('0' + d.getSeconds()).slice(-2);
       }
       function _renderColumn(events, emptyText) {
-        if (events.length === 0) return '<div class="text-muted" style="font-size:0.68rem;padding:2px 0">' + emptyText + '</div>';
+        if (events.length === 0) return '<div class="text-muted text-2xs py-1">' + emptyText + '</div>';
         var latest = events[0];
         var html = '<div class="model-ticker-latest"><span class="model-ticker-icon">' + latest.icon + '</span>' +
           '<span class="model-ticker-text">' + U.escapeHtml(latest.text) + '</span>' +
@@ -1385,7 +1385,7 @@
         }
       } else {
         if (summary) summary.textContent = '';
-        list.innerHTML = '<div class="text-muted" style="font-size:0.85rem">' + I18n.t('network.no_peers_yet') + '</div>';
+        list.innerHTML = '<div class="text-muted text-base">' + I18n.t('network.no_peers_yet') + '</div>';
         if (overflow) overflow.style.display = 'none';
       }
     },
@@ -1398,7 +1398,7 @@
         var list = document.getElementById('peers-list');
         var pLoading2 = document.getElementById('peers-loading');
         if (pLoading2) pLoading2.remove();
-        if (list) list.innerHTML = '<div class="text-muted" style="font-size:0.85rem">' + I18n.t('network.no_peers_yet') + '</div>';
+        if (list) list.innerHTML = '<div class="text-muted text-base">' + I18n.t('network.no_peers_yet') + '</div>';
       }
     },
 
