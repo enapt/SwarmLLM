@@ -278,19 +278,16 @@
           textNode.textContent = ctx.getFullContent();
           App.chat.scrollToBottom();
         } else if (deltaType === 'thinking_delta') {
-          // Extended thinking
+          // Extended thinking — render as faded italic preface, not a box
           var thinkText = inner.delta.thinking || '';
           if (!ctx.cleared) { contentEl.textContent = ''; ctx.setClear(); }
-          var thinkingEl = contentEl.querySelector('.reasoning-block');
+          var thinkingEl = contentEl.querySelector('.cc-thinking');
           if (!thinkingEl) {
-            thinkingEl = document.createElement('details');
-            thinkingEl.className = 'reasoning-block';
-            thinkingEl.innerHTML = '<summary>' + U.escapeHtml(I18n.t('chat.reasoning_label')) + '</summary><pre class="reasoning-content"></pre>';
-            thinkingEl.open = true;
+            thinkingEl = document.createElement('div');
+            thinkingEl.className = 'cc-thinking';
             contentEl.appendChild(thinkingEl);
           }
-          var preEl = thinkingEl.querySelector('.reasoning-content');
-          if (preEl) preEl.textContent += thinkText;
+          thinkingEl.textContent += thinkText;
           App.chat.scrollToBottom();
         }
       }
@@ -818,7 +815,8 @@
       return html;
     },
 
-    // Handle permission request — show prominent approve/deny UI
+    // Handle permission request — compact inline bar with quick actions,
+    // expandable detail if the user wants to inspect.
     _handlePermissionRequest: function(evt, contentEl, ctx) {
       var req = evt.request || {};
       var toolName = req.tool_name || 'Unknown';
@@ -830,33 +828,36 @@
       // Render inside the current tool group
       var group = App.claudeCode._getOrCreateToolGroup(contentEl, ctx);
 
-      var panel = document.createElement('div');
+      var panel = document.createElement('details');
       panel.className = 'cc-permission-prompt cc-perm-waiting';
 
       var icon = App.claudeCode._toolIcon(toolName);
       var hint = App.claudeCode._toolHint(toolName, input);
-      // For empty input (MCP tools etc.), show tool name as hint
-      if (!hint && Object.keys(input).length === 0) hint = '';
       var detailHtml = App.claudeCode._buildToolDetail(toolName, input);
-      // Skip detail section if input is empty (just {})
-      var hasDetail = detailHtml && detailHtml.indexOf('{}') === -1;
+      var hasDetail = detailHtml && Object.keys(input).length > 0;
 
-      panel.innerHTML =
-        '<div class="cc-perm-header">' +
-          '<span class="cc-perm-pulse"></span>' +
-          '<span>' + U.escapeHtml(I18n.t('claude_code.permission_prompt')) + '</span>' +
-        '</div>' +
-        '<div class="cc-perm-tool-row">' +
-          '<span class="cc-tool-icon">' + icon + '</span>' +
-          '<strong class="cc-perm-tool-name">' + U.escapeHtml(toolName) + '</strong>' +
-          (hint ? '<span class="cc-tool-file">' + U.escapeHtml(hint) + '</span>' : '') +
-        '</div>' +
-        (hasDetail ? '<div class="cc-perm-detail">' + detailHtml + '</div>' : '') +
-        (reason ? '<div class="cc-perm-reason">' + U.escapeHtml(reason) + '</div>' : '') +
-        '<div class="cc-perm-actions">' +
+      // Summary line: icon + tool + hint + Allow/Deny buttons — always visible
+      var summary = document.createElement('summary');
+      summary.className = 'cc-perm-bar';
+      summary.innerHTML =
+        '<span class="cc-perm-pulse"></span>' +
+        '<span class="cc-tool-icon">' + icon + '</span>' +
+        '<strong class="cc-perm-tool-name">' + U.escapeHtml(toolName) + '</strong>' +
+        (hint ? '<span class="cc-tool-file">' + U.escapeHtml(hint) + '</span>' : '') +
+        '<span class="cc-perm-actions">' +
           '<button class="btn btn-sm cc-perm-allow">' + U.escapeHtml(I18n.t('claude_code.allow')) + '</button>' +
           '<button class="btn btn-sm cc-perm-deny">' + U.escapeHtml(I18n.t('claude_code.deny')) + '</button>' +
-        '</div>';
+        '</span>';
+      panel.appendChild(summary);
+
+      // Expandable detail body
+      if (hasDetail || reason) {
+        var body = document.createElement('div');
+        body.className = 'cc-perm-body';
+        if (hasDetail) body.innerHTML += '<div class="cc-perm-detail">' + detailHtml + '</div>';
+        if (reason) body.innerHTML += '<div class="cc-perm-reason">' + U.escapeHtml(reason) + '</div>';
+        panel.appendChild(body);
+      }
 
       // Store tool metadata for the collapsed view
       panel._ccToolName = toolName;
@@ -867,15 +868,23 @@
       App.claudeCode._updateGroupSummary(group);
       ctx.setPendingPermission({ requestId: requestId, element: panel });
 
-      // Auto-focus the allow button for keyboard accessibility
-      var allowBtn = panel.querySelector('.cc-perm-allow');
-      var denyBtn = panel.querySelector('.cc-perm-deny');
-      setTimeout(function() { allowBtn.focus(); }, 50);
+      // Quick action buttons — stop click from toggling <details>
+      var allowBtn = summary.querySelector('.cc-perm-allow');
+      var denyBtn = summary.querySelector('.cc-perm-deny');
 
-      // Keyboard shortcut: Enter = allow, Escape = deny
-      panel.addEventListener('keydown', function(e) {
+      allowBtn.addEventListener('click', function(e) {
+        e.preventDefault(); e.stopPropagation();
+        App.claudeCode._respondPermission(sessionId, requestId, true, input, panel);
+      });
+      denyBtn.addEventListener('click', function(e) {
+        e.preventDefault(); e.stopPropagation();
+        App.claudeCode._respondPermission(sessionId, requestId, false, input, panel);
+      });
+
+      // Keyboard: Enter = allow, Escape = deny
+      summary.addEventListener('keydown', function(e) {
         if (e.key === 'Enter' && !panel.classList.contains('cc-perm-allowed') && !panel.classList.contains('cc-perm-denied')) {
-          e.preventDefault();
+          e.preventDefault(); e.stopPropagation();
           App.claudeCode._respondPermission(sessionId, requestId, true, input, panel);
         } else if (e.key === 'Escape') {
           e.preventDefault();
@@ -883,16 +892,8 @@
         }
       });
 
-      allowBtn.addEventListener('click', function() {
-        App.claudeCode._respondPermission(sessionId, requestId, true, input, panel);
-      });
-      denyBtn.addEventListener('click', function() {
-        App.claudeCode._respondPermission(sessionId, requestId, false, input, panel);
-      });
-
-      // Play a subtle notification sound if available
+      setTimeout(function() { allowBtn.focus(); }, 50);
       App.claudeCode._notifyPermissionNeeded();
-
       App.chat.scrollToBottom();
     },
 
