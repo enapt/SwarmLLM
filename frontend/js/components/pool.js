@@ -662,9 +662,25 @@
       }
 
       list.innerHTML = '';
+
+      // Disk usage bar
+      if (data.disk_budget_mb && data.disk_budget_mb > 0) {
+        var usedPct = Math.min(100, Math.round((data.disk_used_mb || 0) / data.disk_budget_mb * 100));
+        var diskColor = usedPct > 90 ? 'var(--red)' : usedPct > 70 ? 'var(--orange)' : 'var(--green)';
+        var diskRow = document.createElement('div');
+        diskRow.style.cssText = 'padding:8px 0;border-bottom:1px solid var(--border);margin-bottom:4px';
+        diskRow.innerHTML =
+          '<div style="display:flex;justify-content:space-between;font-size:0.78rem;margin-bottom:4px">' +
+            '<span>' + I18n.t('pool.disk_usage') + '</span>' +
+            '<span class="text-muted">' + U.formatMB(data.disk_used_mb || 0) + ' / ' + U.formatMB(data.disk_budget_mb) + '</span>' +
+          '</div>' +
+          '<div class="coverage-bar"><div class="coverage-bar-fill" style="width:' + usedPct + '%;background:' + diskColor + '"></div></div>';
+        list.appendChild(diskRow);
+      }
+
       var models = data.models || [];
       if (models.length === 0) {
-        list.innerHTML = '<div class="text-muted" style="padding:8px">' +
+        list.innerHTML += '<div class="text-muted" style="padding:8px">' +
           U.escapeHtml(I18n.t('pool.no_models_coverage')) + '</div>';
         return;
       }

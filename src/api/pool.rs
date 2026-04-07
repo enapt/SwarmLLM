@@ -732,6 +732,35 @@ async fn compute_pool_coverage(shared: &crate::daemon::SharedState) -> serde_jso
         }));
     }
 
+    // Disk budget info
+    let max_storage_mb = if shared.config.auto_manage.max_storage_mb > 0 {
+        shared.config.auto_manage.max_storage_mb
+    } else {
+        shared.config.resources.max_disk_mb / 2
+    };
+    // Estimate current auto-managed disk usage from local shard files
+    let shard_store = shared.shard_store();
+    let mut used_bytes: u64 = 0;
+    for manifest in shared.model_registry.models() {
+        let my_id = shared.identity.node_id();
+        for shard in &manifest.shards {
+            let path = shard_store.shard_path(&manifest.id, shard.index);
+            if shared
+                .model_registry
+                .shard_holders(&crate::types::ShardId {
+                    model_id: manifest.id.clone(),
+                    index: shard.index,
+                })
+                .contains(my_id)
+            {
+                if let Ok(meta) = std::fs::metadata(&path) {
+                    used_bytes += meta.len();
+                }
+            }
+        }
+    }
+    let used_mb = used_bytes / (1024 * 1024);
+
     serde_json::json!({
         "models": models,
         "total_models": models.len(),
@@ -740,5 +769,7 @@ async fn compute_pool_coverage(shared: &crate::daemon::SharedState) -> serde_jso
         "not_covered": models.len() as u32 - total_fully_covered - total_partially_covered,
         "est_total_download_mb": total_est_download_bytes / (1024 * 1024),
         "pool_member_count": allowed.len(),
+        "disk_budget_mb": max_storage_mb,
+        "disk_used_mb": used_mb,
     })
 }

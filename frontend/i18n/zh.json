@@ -957,5 +957,6 @@
   "pool.model_coverage": "Model Coverage",
   "pool.coverage_summary": "{full} fully available, {partial} partial, {none} unavailable",
   "pool.coverage_needed": "needed",
-  "pool.no_models_coverage": "No models registered yet"
+  "pool.no_models_coverage": "No models registered yet",
+  "pool.disk_usage": "Shard Disk Usage"
 }
