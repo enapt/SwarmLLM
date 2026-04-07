@@ -3055,6 +3055,112 @@ impl SplitModel {
         Ok(())
     }
 
+    /// Forward a single layer in a specific TP phase (AttnOnly or FfnOnly).
+    ///
+    /// Unlike the full `forward()`, this processes exactly ONE layer and does NOT
+    /// add the residual connection — the coordinator adds residuals after AllReduce.
+    ///
+    /// - **AttnOnly**: attention_norm → head-sliced attention → return partial
+    /// - **FfnOnly**: ffn_norm → column-sliced FFN → return partial
+    ///
+    /// The model must have been pre-split via `pre_split_for_tp()`.
+    pub fn forward_tp_phase(
+        &mut self,
+        input: &Tensor,
+        index_pos: usize,
+        kv_cache_store: &KvCacheStore,
+        request_id: &str,
+        abs_layer: usize,
+        phase: &crate::types::TpPhase,
+    ) -> Result<Tensor, SwarmError> {
+        let input = input
+            .to_device(&self.device)
+            .map_err(|e| SwarmError::Internal(format!("Device transfer: {e}")))?;
+
+        let local_layer_idx = abs_layer.checked_sub(self.layer_start).ok_or_else(|| {
+            SwarmError::Internal(format!(
+                "TP layer {abs_layer} below model range [{}, {})",
+                self.layer_start,
+                self.layer_start + self.layers.len()
+            ))
+        })?;
+        if local_layer_idx >= self.layers.len() {
+            return Err(SwarmError::Internal(format!(
+                "TP layer {abs_layer} above model range [{}, {})",
+                self.layer_start,
+                self.layer_start + self.layers.len()
+            )));
+        }
+
+        let seq_len = input
+            .dim(1)
+            .map_err(|e| SwarmError::Internal(e.to_string()))?;
+
+        let mask = if seq_len == 1 {
+            None
+        } else {
+            Some(
+                self.mask(seq_len)
+                    .map_err(|e| SwarmError::Internal(e.to_string()))?,
+            )
+        };
+
+        let num_layers = self.layers.len();
+        let cache_key = KvCacheStore::cache_key(&self.kv_model_key, request_id);
+        let mut layer_kv_caches = {
+            let mut entry = kv_cache_store.get_or_create_keyed(&cache_key, num_layers);
+            std::mem::take(&mut entry.layers)
+        };
+
+        let result = match &self.layers[local_layer_idx] {
+            LayerVariant::Dense(lw) => match phase {
+                crate::types::TpPhase::AttnOnly => {
+                    let x = lw
+                        .attention_norm
+                        .forward(&input)
+                        .map_err(|e| SwarmError::Internal(format!("tp attn_norm: {e}")))?;
+                    lw.forward_attn(
+                        &x,
+                        mask.as_ref(),
+                        index_pos,
+                        &mut layer_kv_caches[local_layer_idx],
+                        self.max_seq_len,
+                        None,
+                    )
+                    .map_err(|e| SwarmError::Internal(format!("tp attn: {e}")))
+                }
+                crate::types::TpPhase::FfnOnly => {
+                    let x = lw
+                        .ffn_norm
+                        .forward(&input)
+                        .map_err(|e| SwarmError::Internal(format!("tp ffn_norm: {e}")))?;
+                    match &lw.ffn {
+                        FfnVariant::Dense(mlp) => mlp
+                            .forward(&x, None)
+                            .map_err(|e| SwarmError::Internal(format!("tp mlp: {e}"))),
+                        FfnVariant::MoE(moe) => moe
+                            .forward(&x)
+                            .map_err(|e| SwarmError::Internal(format!("tp moe: {e}"))),
+                    }
+                }
+                crate::types::TpPhase::Full => Err(SwarmError::Internal(
+                    "TpPhase::Full not valid for single-layer TP".into(),
+                )),
+            },
+            _ => Err(SwarmError::Internal(
+                "TP not supported for non-Dense layers".into(),
+            )),
+        }?;
+
+        // Write back KV caches
+        {
+            let mut entry = kv_cache_store.get_or_create_keyed(&cache_key, num_layers);
+            entry.layers = layer_kv_caches;
+        }
+
+        Ok(result)
+    }
+
     /// Return the KV cache model key (used for cache cleanup).
     pub fn kv_model_key(&self) -> &str {
         &self.kv_model_key

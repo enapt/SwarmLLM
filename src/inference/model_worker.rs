@@ -432,9 +432,22 @@ async fn handle_forward(
     };
 
     // Run forward pass — CPU-bound, use block_in_place
+    let tp_meta = fwd.tp_meta.clone();
     let compute_result =
         tokio::task::block_in_place(|| -> Result<crate::types::LayerResult, String> {
-            let output = if pre_embedded {
+            // TP single-layer forward: process one layer in AttnOnly or FfnOnly phase
+            let output = if let Some(ref tp) = tp_meta {
+                model
+                    .forward_tp_phase(
+                        &input_tensor,
+                        fwd.index_pos as usize,
+                        kv_store,
+                        &req_id_str,
+                        tp.single_layer as usize,
+                        &tp.phase,
+                    )
+                    .map_err(|e| format!("Forward TP phase: {e}"))?
+            } else if pre_embedded {
                 model
                     .forward_pre_embedded(
                         &input_tensor,
@@ -465,7 +478,7 @@ async fn handle_forward(
                     .map_err(|e| format!("Forward: {e}"))?
             };
 
-            if is_last {
+            if is_last && tp_meta.is_none() {
                 let token_id = split::sample_token_with_params(&output, &fwd.sampling)
                     .map_err(|e| format!("Sample: {e}"))?;
                 let eos_tokens = model.eos_tokens();
