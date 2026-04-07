@@ -899,7 +899,7 @@
   "pool.stats_forwards": "{n} forwards",
   "pool.stats_models": "Models: {models}",
   "pool.stats_pending": "Waiting for stats...",
-  "pool.role_master": "Master",
+  "pool.role_master": "Main",
   "pool.role_linked": "Linked",
   "pool.joined_prefix": "Joined",
   "pool.default_name": "My Devices",
