@@ -1917,6 +1917,9 @@ impl PipelineExecutor {
                 // This ensures FFN norm is applied to the full post-attention tensor,
                 // not the partial pre-AllReduce output.
 
+                // After the first layer, activations are tensor data (not raw text)
+                let attn_pre_embedded = abs_layer > layer_start;
+
                 // --- Send AttnOnly LayerForward to remote TP peers FIRST (so they start in parallel) ---
                 for (rank, peer_bytes) in &remote_tp_peers {
                     let remote_forward = crate::types::LayerForward {
@@ -1936,7 +1939,7 @@ impl PipelineExecutor {
                         vision_embeddings: None,
                         sender_peer_bytes: None,
                         requester_node_id: None,
-                        pre_embedded: false,
+                        pre_embedded: attn_pre_embedded,
                         adapter_id: None,
                     };
                     let _ = self
@@ -1966,7 +1969,7 @@ impl PipelineExecutor {
                     vision_embeddings: None,
                     sender_peer_bytes: None,
                     requester_node_id: None,
-                    pre_embedded: false,
+                    pre_embedded: attn_pre_embedded,
                     adapter_id: None,
                 };
                 let attn_partial = self
@@ -2024,7 +2027,7 @@ impl PipelineExecutor {
                         vision_embeddings: None,
                         sender_peer_bytes: None,
                         requester_node_id: None,
-                        pre_embedded: false,
+                        pre_embedded: true,
                         adapter_id: None,
                     };
                     let _ = self
@@ -2054,7 +2057,7 @@ impl PipelineExecutor {
                     vision_embeddings: None,
                     sender_peer_bytes: None,
                     requester_node_id: None,
-                    pre_embedded: false,
+                    pre_embedded: true,
                     adapter_id: None,
                 };
                 let ffn_partial = self
