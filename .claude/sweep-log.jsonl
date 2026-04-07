@@ -139,3 +139,10 @@
 {"file":"frontend/js/components/dashboard.js","line":1117,"kind":"false_positive","summary":"shard-endpoint/shard-pinned ARE assigned at lines 613/616 — not dead","status":"wontfix","date":"2026-04-07"}
 {"file":"src/credit/trust.rs","line":29,"kind":"deferred_feature","summary":"4 TrustEvent variants only used in tests — deferred Sybil resistance feature","status":"wontfix","date":"2026-04-07"}
 {"file":"src/inference/executor.rs","line":314,"kind":"acknowledged_duplication","summary":"token loop SYNC duplication with model_worker.rs — different runtime contexts, SYNC comments track it","status":"wontfix","date":"2026-04-07"}
+{"file":"src/inference/pipeline.rs","line":1878,"kind":"critical_bug","summary":"execute_tp_segment never sent LayerForward to remote TP peers — coordinator waited forever for partials","status":"fixed","date":"2026-04-07"}
+{"file":"src/daemon/dispatch.rs","line":1472,"kind":"critical_bug","summary":"handle_layer_forward had no TP-aware path — remote peers processed full forward instead of TP partial","status":"fixed","date":"2026-04-07"}
+{"file":"src/network/protocol.rs","line":567,"kind":"critical_bug","summary":"encode/decode_layer_forward never serialized tp_meta — hardcoded to None on decode","status":"fixed","date":"2026-04-07"}
+{"file":"src/network/protocol.rs","line":932,"kind":"critical_bug","summary":"encode/decode_layer_forward_encrypted also never serialized tp_meta","status":"fixed","date":"2026-04-07"}
+{"file":"src/inference/pipeline.rs","line":1979,"kind":"bug","summary":"AllReduce compressed full tensor bytes (with header) instead of raw f32 data — size mismatch between ranks","status":"fixed","date":"2026-04-07"}
+{"file":"src/inference/pipeline.rs","line":1939,"kind":"bug","summary":"TP LayerForward always set pre_embedded=false — FfnOnly and subsequent AttnOnly phases received tensor data interpreted as text","status":"fixed","date":"2026-04-07"}
+{"file":"src/network/protocol.rs","line":612,"kind":"bug","summary":"pre_embedded not serialized in wire format — remote TP peers always saw pre_embedded=false","status":"fixed","date":"2026-04-07"}
