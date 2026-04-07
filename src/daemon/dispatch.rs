@@ -1510,20 +1510,33 @@ async fn handle_layer_forward(
             crate::types::TpPhase::Full => tp.single_layer,
         };
 
-        // Compress the partial activations
-        let compressed = match zstd::encode_all(std::io::Cursor::new(&result.activations), 1) {
+        // Extract raw f32 bytes from tensor format (strip header) for AllReduce.
+        // The worker returns activations in tensor_to_bytes format (ndim + shape + dtype + data).
+        // AllReduce needs just the raw f32 data to ensure consistent sizes across ranks.
+        let (raw_f32, shape) = match crate::inference::split::bytes_to_tensor(&result.activations) {
+            Ok(tensor) => {
+                let shape: Vec<u32> = tensor.dims().iter().map(|&d| d as u32).collect();
+                match crate::inference::split::tensor_to_raw_f32(&tensor) {
+                    Ok(raw) => (raw, shape),
+                    Err(e) => {
+                        tracing::warn!(error = %e, "Failed to extract raw f32 from TP partial");
+                        return;
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "Failed to deserialize TP partial tensor");
+                return;
+            }
+        };
+
+        let compressed = match zstd::encode_all(std::io::Cursor::new(&raw_f32), 1) {
             Ok(c) => c,
             Err(e) => {
                 tracing::warn!(error = %e, "Failed to compress TP partial");
                 return;
             }
         };
-
-        // Derive shape from the raw activation bytes (FP32: 4 bytes/element)
-        // The shape is [1, seq_len, hidden_dim] but we only need the flat element count
-        // for AllReduce — the coordinator already knows the shape from its own partial.
-        let num_f32 = result.activations.len() / 4;
-        let shape = vec![1, 1, num_f32 as u32];
 
         let allreduce_req = crate::types::TpAllReduceRequest {
             request_id,

@@ -25,7 +25,8 @@ pub use super::shard_layout::{
     available_layer_ranges_from_manifest, compute_layer_shard_layouts, LayerShardLayout,
 };
 pub use super::tensor_util::{
-    bytes_to_tensor, sample_token, sample_token_with_params, tensor_to_bytes,
+    bytes_to_tensor, raw_f32_to_tensor_bytes, sample_token, sample_token_with_params,
+    tensor_to_bytes, tensor_to_raw_f32,
 };
 pub use super::tokenizer::{BpeTokenizer, SplitTokenizer, SpmTokenizer};
 

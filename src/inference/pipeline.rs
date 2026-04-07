@@ -1976,12 +1976,14 @@ impl PipelineExecutor {
                     .await?;
 
                 // AllReduce attention partials → full post-attention output
-                let attn_compressed =
-                    zstd::encode_all(std::io::Cursor::new(&attn_partial.activations), 1)
-                        .map_err(|e| SwarmError::Internal(format!("Compress attn partial: {e}")))?;
+                // Extract raw f32 bytes (strip tensor header) for AllReduce
                 let attn_tensor = split::bytes_to_tensor(&attn_partial.activations)
                     .map_err(|e| SwarmError::Internal(format!("Deserialize attn partial: {e}")))?;
                 let attn_shape: Vec<u32> = attn_tensor.dims().iter().map(|&d| d as u32).collect();
+                let attn_raw = split::tensor_to_raw_f32(&attn_tensor)
+                    .map_err(|e| SwarmError::Internal(format!("Extract attn f32: {e}")))?;
+                let attn_compressed = zstd::encode_all(std::io::Cursor::new(&attn_raw), 1)
+                    .map_err(|e| SwarmError::Internal(format!("Compress attn partial: {e}")))?;
 
                 // Use layer*2 as AllReduce step ID for attn phase, layer*2+1 for FFN phase
                 let attn_resp = crate::inference::allreduce::allreduce_sum(
@@ -1997,10 +1999,11 @@ impl PipelineExecutor {
                 )
                 .await?;
 
-                // Decompress full post-attention tensor + residual add happens in worker
+                // Decompress raw f32 AllReduce result and reconstruct tensor format for worker
+                let post_attn_raw = zstd::decode_all(std::io::Cursor::new(&attn_resp.reduced_data))
+                    .map_err(|e| SwarmError::Internal(format!("Decompress attn AR: {e}")))?;
                 let post_attn_bytes =
-                    zstd::decode_all(std::io::Cursor::new(&attn_resp.reduced_data))
-                        .map_err(|e| SwarmError::Internal(format!("Decompress attn AR: {e}")))?;
+                    split::raw_f32_to_tensor_bytes(&post_attn_raw, &attn_resp.shape);
 
                 // --- Send FfnOnly LayerForward to remote TP peers ---
                 for (rank, peer_bytes) in &remote_tp_peers {
@@ -2061,12 +2064,14 @@ impl PipelineExecutor {
                     .await?;
 
                 // AllReduce FFN partials → full post-FFN output
-                let ffn_compressed =
-                    zstd::encode_all(std::io::Cursor::new(&ffn_partial.activations), 1)
-                        .map_err(|e| SwarmError::Internal(format!("Compress ffn partial: {e}")))?;
+                // Extract raw f32 bytes (strip tensor header) for AllReduce
                 let ffn_tensor = split::bytes_to_tensor(&ffn_partial.activations)
                     .map_err(|e| SwarmError::Internal(format!("Deserialize ffn partial: {e}")))?;
                 let ffn_shape: Vec<u32> = ffn_tensor.dims().iter().map(|&d| d as u32).collect();
+                let ffn_raw = split::tensor_to_raw_f32(&ffn_tensor)
+                    .map_err(|e| SwarmError::Internal(format!("Extract ffn f32: {e}")))?;
+                let ffn_compressed = zstd::encode_all(std::io::Cursor::new(&ffn_raw), 1)
+                    .map_err(|e| SwarmError::Internal(format!("Compress ffn partial: {e}")))?;
 
                 let ffn_resp = crate::inference::allreduce::allreduce_sum(
                     &self.shared_state,
@@ -2081,10 +2086,11 @@ impl PipelineExecutor {
                 )
                 .await?;
 
-                // Decompress full layer output — becomes input for next layer
+                // Decompress raw f32 AllReduce result and reconstruct tensor format for next layer
+                let ffn_raw = zstd::decode_all(std::io::Cursor::new(&ffn_resp.reduced_data))
+                    .map_err(|e| SwarmError::Internal(format!("Decompress ffn AR: {e}")))?;
                 current_activations_bytes =
-                    zstd::decode_all(std::io::Cursor::new(&ffn_resp.reduced_data))
-                        .map_err(|e| SwarmError::Internal(format!("Decompress ffn AR: {e}")))?;
+                    split::raw_f32_to_tensor_bytes(&ffn_raw, &ffn_resp.shape);
             }
 
             if _is_last {

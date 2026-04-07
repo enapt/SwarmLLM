@@ -31,6 +31,34 @@ pub fn tensor_to_bytes(tensor: &Tensor) -> Result<Vec<u8>, SwarmError> {
     Ok(bytes)
 }
 
+/// Extract raw f32 bytes from a tensor (no header, just flat f32 LE data).
+/// Used by AllReduce to ensure consistent data format across TP ranks.
+pub fn tensor_to_raw_f32(tensor: &Tensor) -> Result<Vec<u8>, SwarmError> {
+    let tensor = tensor
+        .to_dtype(DType::F32)
+        .map_err(|e| SwarmError::Internal(e.to_string()))?;
+    let data = tensor
+        .flatten_all()
+        .map_err(|e| SwarmError::Internal(e.to_string()))?
+        .to_vec1::<f32>()
+        .map_err(|e| SwarmError::Internal(e.to_string()))?;
+    Ok(data.iter().flat_map(|f| f.to_le_bytes()).collect())
+}
+
+/// Reconstruct tensor bytes (with header) from raw f32 data and shape.
+/// Inverse of `tensor_to_raw_f32` — produces the format that `bytes_to_tensor` expects.
+pub fn raw_f32_to_tensor_bytes(raw: &[u8], shape: &[u32]) -> Vec<u8> {
+    let ndim = shape.len() as u32;
+    let mut bytes = Vec::with_capacity(4 + shape.len() * 4 + 4 + raw.len());
+    bytes.extend_from_slice(&ndim.to_le_bytes());
+    for &dim in shape {
+        bytes.extend_from_slice(&dim.to_le_bytes());
+    }
+    bytes.extend_from_slice(&0u32.to_le_bytes()); // dtype tag: f32
+    bytes.extend_from_slice(raw);
+    bytes
+}
+
 /// Deserialize bytes back to a candle Tensor.
 pub fn bytes_to_tensor(bytes: &[u8]) -> Result<Tensor, SwarmError> {
     if bytes.len() < 4 {
