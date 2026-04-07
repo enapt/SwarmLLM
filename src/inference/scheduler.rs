@@ -140,6 +140,34 @@ impl PipelineScheduler {
         // Gather all candidates: nodes that have shards for this model
         let candidates = self.gather_candidates(&manifest, local_node_id);
         if candidates.is_empty() {
+            // In private mode, give a specific error showing which shards are missing
+            if self
+                .shared_state
+                .credits
+                .private_mode
+                .load(std::sync::atomic::Ordering::Relaxed)
+            {
+                // Find which shards no allowed node holds
+                let allowed =
+                    crate::pool::scope::allowed_node_set(&self.shared_state).unwrap_or_default();
+                let missing: Vec<u32> = manifest
+                    .shards
+                    .iter()
+                    .filter(|s| {
+                        let sid = ShardId {
+                            model_id: manifest.id.clone(),
+                            index: s.index,
+                        };
+                        let holders = self.shared_state.model_registry.shard_holders(&sid);
+                        !holders.iter().any(|h| allowed.contains(h))
+                    })
+                    .map(|s| s.index)
+                    .collect();
+                return Err(SwarmError::PrivateModeUnavailable {
+                    model_id: manifest.name.clone(),
+                    missing_shards: missing,
+                });
+            }
             return Err(SwarmError::InsufficientCapacity(model_id.clone()));
         }
 
@@ -223,6 +251,9 @@ impl PipelineScheduler {
         manifest: &ModelManifest,
         local_node_id: &NodeId,
     ) -> Vec<NodeCandidate> {
+        // Private mode: compute allowed node set (None = unrestricted).
+        let allowed_set = crate::pool::scope::allowed_node_set(&self.shared_state);
+
         // Build set of pool member NodeIds for preferred routing.
         // Pool devices are trusted, free (no credit cost), and usually low latency.
         let pool_member_ids: std::collections::HashSet<NodeId> = {
@@ -246,6 +277,12 @@ impl PipelineScheduler {
             };
             let holders = self.shared_state.model_registry.shard_holders(&shard_id);
             for node_id in holders {
+                // Private mode: skip nodes outside the allowed set
+                if let Some(ref allowed) = allowed_set {
+                    if !allowed.contains(&node_id) {
+                        continue;
+                    }
+                }
                 node_shards.entry(node_id).or_default().push(shard.index);
             }
         }
