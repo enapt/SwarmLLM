@@ -449,6 +449,20 @@ pub fn encode_layer_forward(forward: &LayerForward) -> Result<Vec<u8>, SwarmErro
     buf.extend_from_slice(&(model_id_bytes.len() as u16).to_le_bytes());
     buf.extend_from_slice(model_id_bytes);
 
+    // Optional: tp_meta trailer (marker 0x02 + tp_rank(1) + tp_size(1) + single_layer(4) + phase(1))
+    if let Some(ref tp) = forward.tp_meta {
+        buf.push(0x02);
+        buf.push(tp.tp_rank);
+        buf.push(tp.tp_size);
+        buf.extend_from_slice(&tp.single_layer.to_le_bytes());
+        let phase_byte: u8 = match tp.phase {
+            crate::types::TpPhase::Full => 0,
+            crate::types::TpPhase::AttnOnly => 1,
+            crate::types::TpPhase::FfnOnly => 2,
+        };
+        buf.push(phase_byte);
+    }
+
     Ok(buf)
 }
 
@@ -556,6 +570,31 @@ pub fn decode_layer_forward(data: &[u8]) -> Result<LayerForward, SwarmError> {
         .map_err(|_| SwarmError::Network("Invalid model_id UTF-8".into()))?;
     let model_id = ModelId(model_id_str.to_string());
 
+    // Optional: tp_meta trailer (marker 0x02 + tp_rank(1) + tp_size(1) + single_layer(4) + phase(1))
+    let tp_meta_start = mid_start + mid_len;
+    let tp_meta = if data.len() >= tp_meta_start + 8 && data[tp_meta_start] == 0x02 {
+        let tp_rank = data[tp_meta_start + 1];
+        let tp_size = data[tp_meta_start + 2];
+        let single_layer = u32::from_le_bytes(
+            data[tp_meta_start + 3..tp_meta_start + 7]
+                .try_into()
+                .map_err(|_| SwarmError::Network("Invalid tp single_layer".into()))?,
+        );
+        let phase = match data[tp_meta_start + 7] {
+            1 => crate::types::TpPhase::AttnOnly,
+            2 => crate::types::TpPhase::FfnOnly,
+            _ => crate::types::TpPhase::Full,
+        };
+        Some(crate::types::TensorParallelMeta {
+            tp_rank,
+            tp_size,
+            single_layer,
+            phase,
+        })
+    } else {
+        None
+    };
+
     Ok(LayerForward {
         request_id,
         sequence_num,
@@ -564,7 +603,7 @@ pub fn decode_layer_forward(data: &[u8]) -> Result<LayerForward, SwarmError> {
         format,
         model_id,
         layer_range,
-        tp_meta: None,
+        tp_meta,
         vision_embeddings: None,
         sender_peer_bytes: None,
         requester_node_id: None,
