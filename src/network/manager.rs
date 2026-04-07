@@ -312,22 +312,28 @@ impl NetworkManager {
         discovery::subscribe_topics(&mut self.swarm)?;
 
         // Layer 2: Load cached peers from last session and dial them
-        let cached_peers = crate::network::peer_cache::load_peer_cache(&self.shared_state.db);
-        if !cached_peers.is_empty() {
-            let cached_count = discovery::bootstrap_peers(&mut self.swarm, &cached_peers)?;
-            if cached_count > 0 {
-                tracing::info!(
-                    count = cached_count,
-                    "Dialing cached peers from last session"
-                );
+        if config.pool.offline_mode {
+            tracing::info!(
+                "Offline LAN mode — skipping bootstrap peers and peer cache, mDNS discovery only"
+            );
+        } else {
+            let cached_peers = crate::network::peer_cache::load_peer_cache(&self.shared_state.db);
+            if !cached_peers.is_empty() {
+                let cached_count = discovery::bootstrap_peers(&mut self.swarm, &cached_peers)?;
+                if cached_count > 0 {
+                    tracing::info!(
+                        count = cached_count,
+                        "Dialing cached peers from last session"
+                    );
+                }
             }
-        }
 
-        // Bootstrap with configured peers
-        let bootstrap_count =
-            discovery::bootstrap_peers(&mut self.swarm, &config.network.bootstrap_peers)?;
-        if bootstrap_count > 0 || !cached_peers.is_empty() {
-            discovery::trigger_bootstrap(&mut self.swarm)?;
+            // Bootstrap with configured peers
+            let bootstrap_count =
+                discovery::bootstrap_peers(&mut self.swarm, &config.network.bootstrap_peers)?;
+            if bootstrap_count > 0 || !cached_peers.is_empty() {
+                discovery::trigger_bootstrap(&mut self.swarm)?;
+            }
         }
 
         // Periodic discovery timer
@@ -379,6 +385,8 @@ impl NetworkManager {
                             pending = self.pending_tensor_outbound.len(),
                             "Skipping discovery tick — tensor forwards pending"
                         );
+                    } else if self.shared_state.config.pool.offline_mode {
+                        // Offline mode: skip bootstrap/cache redials, rely on mDNS only
                     } else {
                         tracing::debug!("Discovery tick");
                         let _ = discovery::trigger_bootstrap(&mut self.swarm);

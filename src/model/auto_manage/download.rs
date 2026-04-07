@@ -145,7 +145,9 @@ impl AutoShardManager {
         let has_peer_holders = candidate.holder_count > 0;
 
         // Download from HuggingFace only if no peers hold the shard
-        if !has_peer_holders {
+        // In offline mode, skip automatic HF downloads (user must trigger manually)
+        let offline_mode = self.shared_state.config.pool.offline_mode;
+        if !has_peer_holders && !offline_mode {
             if let Some(hf_source) = self.shared_state.models.hf_sources.get(&candidate.model_id) {
                 // Create progress entry with per-shard tracking for the specific shard
                 let mut shard_progress = std::collections::HashMap::new();
