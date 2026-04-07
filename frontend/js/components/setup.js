@@ -77,28 +77,15 @@
     joinInvite: async function() {
       var code = (document.getElementById('setup-invite-code').value || '').trim();
       var status = document.getElementById('setup-invite-status');
-      if (!code) { status.textContent = I18n.t('setup.paste_code_first'); status.style.color = 'var(--text-muted)'; return; }
-      status.textContent = I18n.t('identity.connecting'); status.style.color = 'var(--text-muted)';
-      try {
-        var resp = await App.authFetch('/api/admin/join-network', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ code: code }),
-        });
-        var result = await resp.json();
-        if (resp.ok) {
-          status.textContent = I18n.t('identity.connected');
-          status.style.color = 'var(--green)';
+      await U.submitCodeForm('/api/admin/join-network', code, status, {
+        emptyMsg: I18n.t('setup.paste_code_first'),
+        failMsg: I18n.t('setup.failed_connect'),
+        errorMsg: I18n.t('setup.connection_error', { error: 'network error' }),
+        onSuccess: function() {
           App.setup._joinedPeer = true;
           document.getElementById('setup-invite-code').value = '';
-        } else {
-          status.textContent = U.extractErrorMessage(result, I18n.t('setup.failed_connect'));
-          status.style.color = 'var(--red)';
         }
-      } catch (e) {
-        status.textContent = I18n.t('setup.connection_error', { error: e.message || 'network error' });
-        status.style.color = 'var(--red)';
-      }
+      });
     },
 
     nextStep: function() {

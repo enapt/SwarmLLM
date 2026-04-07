@@ -437,6 +437,36 @@
     return msg;
   }
 
+  // Submit a code/invite form: POST to endpoint, update status element with i18n messages.
+  // opts: { emptyMsg, pendingMsg, successMsg, failMsg, errorMsg, body, onSuccess }
+  async function submitCodeForm(endpoint, code, statusEl, opts) {
+    opts = opts || {};
+    if (!code) {
+      if (statusEl) { statusEl.textContent = opts.emptyMsg || ''; statusEl.style.color = 'var(--text-muted)'; }
+      return false;
+    }
+    if (statusEl) { statusEl.textContent = opts.pendingMsg || I18n.t('identity.connecting'); statusEl.style.color = 'var(--text-muted)'; }
+    try {
+      var resp = await App.authFetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(opts.body || { code: code })
+      });
+      var data = await resp.json();
+      if (resp.ok && !data.error) {
+        if (statusEl) { statusEl.textContent = opts.successMsg || I18n.t('identity.connected'); statusEl.style.color = 'var(--green)'; }
+        if (opts.onSuccess) opts.onSuccess(data);
+        return true;
+      } else {
+        if (statusEl) { statusEl.textContent = extractErrorMessage(data, opts.failMsg || I18n.t('identity.failed_to_join')); statusEl.style.color = 'var(--red)'; }
+        return false;
+      }
+    } catch (e) {
+      if (statusEl) { statusEl.textContent = opts.errorMsg || I18n.t('identity.network_error'); statusEl.style.color = 'var(--red)'; }
+      return false;
+    }
+  }
+
   // Export utilities
   App.utils = {
     escapeHtml: escapeHtml,
@@ -462,6 +492,7 @@
     updateChatAvailability: updateChatAvailability,
     updateChatDownloadProgress: updateChatDownloadProgress,
     extractErrorMessage: extractErrorMessage,
+    submitCodeForm: submitCodeForm,
     getApiErrorMessage: getApiErrorMessage,
     modelApiUrl: function(modelId) {
       var parts = Array.prototype.slice.call(arguments, 1);

@@ -68,20 +68,12 @@
           if (status) { status.textContent = I18n.t('pool.code_invalid'); status.style.color = 'var(--red)'; }
           return;
         }
-        if (status) { status.textContent = I18n.t('pool.linking'); status.style.color = 'var(--text-muted)'; }
-        App.authFetch('/api/pool/join', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ code: code })
-        }).then(function (r) { return r.json(); }).then(function (data) {
-          if (data.error) {
-            if (status) { status.textContent = U.extractErrorMessage(data, I18n.t('pool.join_failed')); status.style.color = 'var(--red)'; }
-          } else {
-            if (status) { status.textContent = I18n.t('pool.link_sent'); status.style.color = 'var(--green)'; }
-            if (input) input.value = '';
-          }
-        }).catch(function (e) {
-          if (status) { status.textContent = I18n.t('pool.failed_generic', { error: e.message }); status.style.color = 'var(--red)'; }
+        U.submitCodeForm('/api/pool/join', code, status, {
+          pendingMsg: I18n.t('pool.linking'),
+          successMsg: I18n.t('pool.link_sent'),
+          failMsg: I18n.t('pool.join_failed'),
+          errorMsg: I18n.t('pool.failed_generic', { error: 'network error' }),
+          onSuccess: function() { if (input) input.value = ''; }
         });
       });
 

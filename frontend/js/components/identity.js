@@ -127,28 +127,14 @@
     join: async function() {
       var input = document.getElementById('join-code-input');
       var status = document.getElementById('join-status');
-      if (!input || !input.value.trim()) return;
-
-      if (status) { status.textContent = I18n.t('identity.connecting'); status.style.color = 'var(--text-muted)'; }
-
-      try {
-        var resp = await App.authFetch('/api/admin/join-network', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ code: input.value.trim() })
-        });
-        var data = await resp.json();
-        if (resp.ok) {
-          if (status) { status.textContent = I18n.t('identity.connected'); status.style.color = 'var(--green)'; }
-          input.value = '';
+      var code = input ? input.value.trim() : '';
+      await U.submitCodeForm('/api/admin/join-network', code, status, {
+        onSuccess: function() {
+          if (input) input.value = '';
           App.notifications.showToast(I18n.t('identity.peer_connected'), 'success');
           setTimeout(function() { App.networkCode.load(); }, 2000);
-        } else {
-          if (status) { status.textContent = U.extractErrorMessage(data, I18n.t('identity.failed_to_join')); status.style.color = 'var(--red, #ff6464)'; }
         }
-      } catch (e) {
-        if (status) { status.textContent = I18n.t('identity.network_error'); status.style.color = 'var(--red, #ff6464)'; }
-      }
+      });
     }
   };
 })();
