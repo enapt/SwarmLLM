@@ -81,6 +81,13 @@ pub enum SwarmError {
     #[error("Provider error ({status}): {body}")]
     ProviderError { status: u16, body: String },
 
+    // Private mode
+    #[error("Private mode: model {model_id} not fully available in your device pool (missing shards: {missing_shards:?})")]
+    PrivateModeUnavailable {
+        model_id: String,
+        missing_shards: Vec<u32>,
+    },
+
     // Overload
     #[error("Service unavailable: {0}")]
     ServiceUnavailable(String),
@@ -128,6 +135,11 @@ impl IntoResponse for ApiError {
                 StatusCode::SERVICE_UNAVAILABLE,
                 self.0.to_string(),
                 "server_error",
+            ),
+            SwarmError::PrivateModeUnavailable { .. } => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                self.0.to_string(),
+                "private_mode_error",
             ),
             SwarmError::VisionEncoderUnavailable(_) => (
                 StatusCode::SERVICE_UNAVAILABLE,
