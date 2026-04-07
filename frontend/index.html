@@ -17,10 +17,10 @@
   <div class="modal-overlay hidden" id="setup-modal" role="dialog" aria-modal="true" aria-labelledby="setup-title">
     <div class="modal">
       <div class="modal-header">
-        <div id="setup-lang-bar" style="display:flex;align-items:center;justify-content:flex-end;gap:8px;margin-bottom:4px">
-          <button class="btn btn-sm" id="setup-lang-english" style="font-size:0.75rem;padding:2px 10px;display:none" data-i18n="setup.lang_english">Continue in English</button>
+        <div id="setup-lang-bar" class="flex-center gap-1" style="justify-content:flex-end;margin-bottom:4px">
+          <button class="btn btn-sm text-xs hidden" id="setup-lang-english" data-i18n="setup.lang_english">Continue in English</button>
           <img id="setup-lang-flag" src="/static/flags/gb.svg" alt="" class="lang-flag-img" style="width:20px;height:15px">
-          <select id="setup-language" style="font-size:0.8rem;padding:3px 8px;border:1px solid var(--border);border-radius:6px;background:var(--bg-secondary);color:var(--text-primary);cursor:pointer" data-i18n-title="settings.language_label" title="Language">
+          <select id="setup-language" class="text-sm" style="width:auto;padding:3px 8px;cursor:pointer" data-i18n-title="settings.language_label" title="Language">
             <option value="en">English</option>
             <option value="es">Español</option>
             <option value="fr">Français</option>
@@ -57,26 +57,26 @@
       <!-- Step 1: About You (hardware + preferences merged) -->
       <div class="wizard-body" id="step-1">
         <h3 data-i18n="setup.about_you">About You</h3>
-        <div id="hw-loading" class="flex gap-1" style="align-items:center;margin-bottom:8px">
+        <div id="hw-loading" class="flex-center gap-1 mb-1">
           <div class="spinner"></div>
           <span class="text-muted" data-i18n="setup.detecting_hw">Detecting hardware...</span>
         </div>
-        <div id="hw-results" class="hidden" style="padding:8px 12px;background:var(--bg-tertiary);border-radius:var(--radius);border:1px solid var(--border);margin-bottom:12px">
-          <div style="display:flex;gap:16px;flex-wrap:wrap;font-size:0.82rem">
+        <div id="hw-results" class="hidden setup-hw-box">
+          <div class="setup-hw-row">
             <span><strong id="hw-gpu">---</strong></span>
             <span class="text-muted" id="hw-vram">---</span>
             <span class="text-muted" id="hw-ram">---</span>
             <span class="text-muted" id="hw-disk">---</span>
           </div>
-          <div id="hw-recommendation" class="text-muted" style="font-size:0.78rem;margin-top:4px"></div>
+          <div id="hw-recommendation" class="text-muted text-sm mt-0"></div>
         </div>
         <div class="form-group">
-          <label style="font-size:0.85rem;font-weight:600"><span data-i18n="setup.nickname_label">Nickname</span> <span class="text-muted" style="font-weight:normal" data-i18n="setup.nickname_optional">(optional)</span></label>
-          <input type="text" id="setup-nickname" data-i18n-placeholder="setup.nickname_placeholder" placeholder="e.g. HomePC, GamerRig, ServerBox" maxlength="32" style="width:100%;font-size:0.85rem;padding:6px 10px;margin-top:4px;background:var(--bg-tertiary);border:1px solid var(--border);border-radius:var(--radius);color:var(--text-primary)">
+          <label class="field-label"><span data-i18n="setup.nickname_label">Nickname</span> <span class="text-muted font-normal" data-i18n="setup.nickname_optional">(optional)</span></label>
+          <input type="text" id="setup-nickname" data-i18n-placeholder="setup.nickname_placeholder" placeholder="e.g. HomePC, GamerRig, ServerBox" maxlength="32" class="mt-0">
         </div>
-        <div class="form-group mt-2" style="border-top:1px solid var(--border);padding-top:12px">
-          <label style="font-size:0.85rem;font-weight:600" data-i18n="setup.resource_label">Resource Contribution</label>
-          <p class="text-muted" style="font-size:0.78rem;margin:4px 0 8px" data-i18n="setup.resource_desc">Let others use your compute to help run AI. You earn credits in return.</p>
+        <div class="form-group mt-2 divider">
+          <label class="field-label" data-i18n="setup.resource_label">Resource Contribution</label>
+          <p class="text-muted text-sm" style="margin:4px 0 8px" data-i18n="setup.resource_desc">Let others use your compute to help run AI. You earn credits in return.</p>
           <div class="flex-between mb-1">
             <span><span data-i18n="setup.contrib_minimal">Minimal</span><span class="contribution-hint">&lt;5% CPU</span></span>
             <span class="mono" id="contribution-label" data-i18n="setup.contrib_minimal">Minimal</span>
@@ -84,13 +84,13 @@
           </div>
           <input type="range" id="contribution-slider" min="0" max="2" step="1" value="0" data-i18n-aria-label="setup.contribution_aria" aria-label="Resource contribution level">
         </div>
-        <div class="text-muted" style="font-size:0.78rem" id="contribution-desc" data-i18n="setup.contrib_minimal_desc">Low impact: uses minimal resources. Best for shared or low-spec machines.</div>
-        <div class="form-group mt-2" style="border-top:1px solid var(--border);padding-top:12px">
-          <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+        <div class="text-muted text-sm" id="contribution-desc" data-i18n="setup.contrib_minimal_desc">Low impact: uses minimal resources. Best for shared or low-spec machines.</div>
+        <div class="form-group mt-2 divider">
+          <label class="flex-center gap-1" style="cursor:pointer">
             <input type="checkbox" id="setup-auto-manage" checked style="width:18px;height:18px">
             <span data-i18n="setup.auto_download_label">Auto-download AI models</span>
           </label>
-          <span class="text-muted" style="font-size:0.75rem;display:block;margin-top:4px" data-i18n="setup.auto_download_desc">Automatically download popular AI models that fit your hardware. Uses disk space and bandwidth. You can set limits in Settings.</span>
+          <span class="text-muted field-hint" data-i18n="setup.auto_download_desc">Automatically download popular AI models that fit your hardware. Uses disk space and bandwidth. You can set limits in Settings.</span>
         </div>
       </div>
       <!-- Step 2: Connect (invite code + cloud provider) -->
@@ -98,32 +98,32 @@
         <h3 data-i18n="setup.connect_title">Connect</h3>
         <p class="text-muted mb-2" data-i18n="setup.connect_subtitle">Choose one or both. You can also skip this and configure later.</p>
         <!-- Peer address section (NOT device pool — this connects to the P2P swarm) -->
-        <div style="margin-bottom:16px">
-          <label style="font-size:0.85rem;font-weight:600" data-i18n="setup.connect_peer">Connect to a swarm peer</label>
-          <p class="text-muted" style="font-size:0.78rem;margin:4px 0 8px" data-i18n="setup.connect_peer_desc">Paste a peer address from someone already running SwarmLLM. This connects you to the network — it's not the same as linking your own devices.</p>
-          <div style="display:flex;gap:8px">
-            <input type="text" id="setup-invite-code" placeholder="swarm://..." style="flex:1;font-size:0.85rem;padding:6px 10px;background:var(--bg-tertiary);border:1px solid var(--border);border-radius:var(--radius);color:var(--text-primary);font-family:var(--font-mono)">
+        <div class="mb-2">
+          <label class="field-label" data-i18n="setup.connect_peer">Connect to a swarm peer</label>
+          <p class="text-muted text-sm" style="margin:4px 0 8px" data-i18n="setup.connect_peer_desc">Paste a peer address from someone already running SwarmLLM. This connects you to the network — it's not the same as linking your own devices.</p>
+          <div class="flex gap-1">
+            <input type="text" id="setup-invite-code" placeholder="swarm://..." class="flex-1 mono">
             <button class="btn btn-sm" id="setup-invite-join" data-i18n="setup.connect_btn">Connect</button>
           </div>
-          <div id="setup-invite-status" style="font-size:0.78rem;margin-top:4px"></div>
-          <p class="text-muted" style="font-size:0.75rem;margin-top:6px" data-i18n="setup.auto_discover">No address? No problem — devices on the same local network find each other automatically.</p>
+          <div id="setup-invite-status" class="text-sm mt-0"></div>
+          <p class="text-muted field-hint mt-1" data-i18n="setup.auto_discover">No address? No problem — devices on the same local network find each other automatically.</p>
         </div>
         <!-- Device group section (collapsed by default — most first-time users have one device) -->
-        <details style="border-top:1px solid var(--border);padding-top:12px;margin-bottom:12px">
-          <summary style="font-size:0.85rem;font-weight:600;cursor:pointer" data-i18n="setup.link_device">Already have SwarmLLM on another device? <span class="text-muted" style="font-weight:normal">(optional)</span></summary>
-          <p class="text-muted" style="font-size:0.78rem;margin:8px 0 8px" data-i18n="setup.link_device_desc">Enter the invite code from your main device to link this machine. Credits earned here will be combined with your main device.</p>
-          <div style="display:flex;gap:8px">
-            <input type="text" id="setup-pool-code" placeholder="A3F7K2M9" maxlength="8" style="flex:1;font-size:1rem;padding:8px 10px;text-align:center;letter-spacing:3px;text-transform:uppercase;font-family:var(--font-mono);background:var(--bg-tertiary);border:1px solid var(--border);border-radius:var(--radius);color:var(--text-primary)">
+        <details class="divider mb-2">
+          <summary class="field-label" style="cursor:pointer" data-i18n="setup.link_device">Already have SwarmLLM on another device? <span class="text-muted font-normal">(optional)</span></summary>
+          <p class="text-muted text-sm mb-1" data-i18n="setup.link_device_desc">Enter the invite code from your main device to link this machine. Credits earned here will be combined with your main device.</p>
+          <div class="flex gap-1">
+            <input type="text" id="setup-pool-code" placeholder="A3F7K2M9" maxlength="8" class="flex-1 pool-code-input">
             <button class="btn btn-sm" id="setup-pool-join" data-i18n="pool.join">Link</button>
           </div>
-          <div id="setup-pool-status" style="font-size:0.78rem;margin-top:4px"></div>
+          <div id="setup-pool-status" class="text-sm mt-0"></div>
         </details>
 
         <!-- Cloud provider section -->
-        <div style="border-top:1px solid var(--border);padding-top:12px">
-          <label style="font-size:0.85rem;font-weight:600"><span data-i18n="setup.cloud_label">Cloud AI Service</span> <span class="text-muted" style="font-weight:normal" data-i18n="setup.cloud_optional">(optional — chat instantly)</span></label>
-          <p class="text-muted" style="font-size:0.78rem;margin:4px 0 8px" data-i18n="setup.cloud_desc">Add an API key to start chatting right away while local models download.</p>
-          <select id="setup-provider-select" style="width:100%;font-size:0.85rem;padding:6px 10px;margin-bottom:6px;background:var(--bg-tertiary);border:1px solid var(--border);border-radius:var(--radius);color:var(--text-primary)">
+        <div class="divider">
+          <label class="field-label"><span data-i18n="setup.cloud_label">Cloud AI Service</span> <span class="text-muted font-normal" data-i18n="setup.cloud_optional">(optional — chat instantly)</span></label>
+          <p class="text-muted text-sm" style="margin:4px 0 8px" data-i18n="setup.cloud_desc">Add an API key to start chatting right away while local models download.</p>
+          <select id="setup-provider-select" class="mb-0">
             <option value="" data-i18n="setup.select_provider">Select a provider...</option>
             <option value="openai">OpenAI</option>
             <option value="deepseek">DeepSeek</option>
@@ -137,12 +137,12 @@
             <option value="together">Together AI</option>
             <option value="deepinfra">DeepInfra</option>
           </select>
-          <div id="setup-provider-input" class="hidden" style="margin-top:6px">
-            <input type="password" id="setup-provider-key" data-i18n-placeholder="setup.paste_key" placeholder="Paste your API key here..." style="width:100%;font-size:0.85rem;padding:6px 10px;background:var(--bg-tertiary);border:1px solid var(--border);border-radius:var(--radius);color:var(--text-primary);margin-bottom:4px">
-            <div style="display:flex;gap:8px;align-items:center">
+          <div id="setup-provider-input" class="hidden mt-1">
+            <input type="password" id="setup-provider-key" data-i18n-placeholder="setup.paste_key" placeholder="Paste your API key here..." class="mb-0">
+            <div class="flex-center gap-1 mt-0">
               <button class="btn btn-sm" id="setup-provider-save" data-i18n="setup.save_key">Save Key</button>
               <a id="setup-provider-signup" href="#" target="_blank" rel="noopener" class="provider-signup-link" data-i18n="setup.get_free_key">Get a free key &rarr;</a>
-              <span id="setup-provider-status" style="font-size:0.78rem"></span>
+              <span id="setup-provider-status" class="text-sm"></span>
             </div>
           </div>
         </div>
@@ -158,14 +158,14 @@
           <div id="summary-invite-row" class="flex-between mb-1 hidden"><span class="text-muted" data-i18n="setup.summary_peer">Swarm Peer</span><span class="mono" id="summary-invite">---</span></div>
           <div id="summary-provider-row" class="flex-between mb-1 hidden"><span class="text-muted" data-i18n="setup.summary_provider">Cloud Provider</span><span class="mono" id="summary-provider">---</span></div>
         </div>
-        <div id="summary-next-steps" style="margin-top:16px;padding:12px;background:var(--bg-tertiary);border-radius:var(--radius);border:1px solid var(--border)">
-          <p style="font-size:0.85rem;font-weight:600;margin-bottom:4px" data-i18n="setup.next_steps_title">What happens next:</p>
-          <div id="summary-next-list" class="text-muted" style="font-size:0.8rem"></div>
+        <div id="summary-next-steps" class="next-steps-box">
+          <p class="text-base font-semibold mb-0" data-i18n="setup.next_steps_title">What happens next:</p>
+          <div id="summary-next-list" class="text-muted text-sm"></div>
         </div>
       </div>
       <div class="wizard-footer">
         <button class="btn hidden" id="btn-prev" data-i18n="setup.btn_back">Back</button>
-        <a href="#" id="btn-skip-setup" style="font-size:0.78rem;color:var(--text-muted);text-decoration:none;align-self:center" data-i18n="setup.btn_skip" data-i18n-title="setup.btn_skip_title" title="Skip setup and go straight to the dashboard">Skip setup</a>
+        <a href="#" id="btn-skip-setup" class="text-sm text-dim" style="text-decoration:none;align-self:center" data-i18n="setup.btn_skip" data-i18n-title="setup.btn_skip_title" title="Skip setup and go straight to the dashboard">Skip setup</a>
         <button class="btn btn-primary btn-lg" id="btn-next" data-i18n="setup.continue">Continue</button>
       </div>
     </div>
@@ -180,16 +180,16 @@
       </div>
       <div class="form-group">
         <label for="settings-api-key" data-i18n="settings.access_token">Access Token</label>
-        <div class="flex gap-1" style="align-items:center">
-          <input type="text" id="settings-api-key" readonly style="flex:1;font-family:var(--font-mono);font-size:0.8rem;background:var(--bg-primary)" data-i18n-placeholder="settings.loading" placeholder="Loading..." value="">
+        <div class="flex-center gap-1">
+          <input type="text" id="settings-api-key" readonly class="flex-1 mono text-sm" style="background:var(--bg-primary)" data-i18n-placeholder="settings.loading" placeholder="Loading..." value="">
           <button class="btn btn-sm" id="btn-copy-api-key" data-i18n-title="settings.copy_token_title" title="Copy access token" data-i18n="actions.copy">Copy</button>
         </div>
-        <span class="text-muted" style="font-size:0.75rem" data-i18n="settings.access_token_hint">Your private key for connecting other apps to SwarmLLM. Keep it secret.</span>
+        <span class="text-muted field-hint" data-i18n="settings.access_token_hint">Your private key for connecting other apps to SwarmLLM. Keep it secret.</span>
       </div>
       <div class="form-group">
         <label for="settings-nickname" data-i18n="settings.nickname_label">Nickname</label>
         <input type="text" id="settings-nickname" data-i18n-placeholder="settings.nickname_anon" placeholder="Anonymous" maxlength="32" pattern="[a-zA-Z0-9_-]+">
-        <span class="text-muted" style="font-size:0.75rem" data-i18n="settings.nickname_hint">1-32 chars, letters/numbers/underscore/dash only</span>
+        <span class="text-muted field-hint" data-i18n="settings.nickname_hint">1-32 chars, letters/numbers/underscore/dash only</span>
         <span class="form-error hidden" id="nickname-error" data-i18n="settings.nickname_error">Only letters, numbers, underscore, and dash allowed</span>
       </div>
       <div class="form-group">
@@ -224,7 +224,7 @@
           <option value="uk">Українська</option>
           <option value="cs">Čeština</option>
         </select>
-        <span class="text-muted" style="font-size:0.75rem" data-i18n="settings.language_hint">Dashboard language. Community translations welcome!</span>
+        <span class="text-muted field-hint" data-i18n="settings.language_hint">Dashboard language. Community translations welcome!</span>
       </div>
       <div class="form-group">
         <label for="settings-contribution" data-i18n="settings.contribution_label">Contribution Level</label>
@@ -244,22 +244,22 @@
           <option value="off" data-i18n="settings.auto_off">Off</option>
           <option value="on" data-i18n="settings.auto_on">On — automatically download popular model data</option>
         </select>
-        <span class="text-muted" style="font-size:0.75rem" data-i18n="settings.auto_download_hint">Downloads pieces of AI models so the network can run them. Uses disk space.</span>
+        <span class="text-muted field-hint" data-i18n="settings.auto_download_hint">Downloads pieces of AI models so the network can run them. Uses disk space.</span>
       </div>
-      <div id="settings-storage-info" class="hidden" style="background:var(--bg-tertiary);border-radius:var(--radius);padding:10px;margin-bottom:12px;border:1px solid var(--border)">
-        <div class="flex-between mb-1" style="font-size:0.85rem">
+      <div id="settings-storage-info" class="hidden card mb-2">
+        <div class="flex-between mb-1 text-base">
           <span class="text-muted" data-i18n="settings.model_data_stored">Model data stored</span>
           <span class="mono" id="settings-storage-used">--</span>
         </div>
-        <div class="flex-between mb-1" style="font-size:0.85rem">
+        <div class="flex-between mb-1 text-base">
           <span class="text-muted" data-i18n="settings.max_auto_storage">Max auto-download storage</span>
           <span class="mono" id="settings-storage-max">--</span>
         </div>
-        <div class="flex-between mb-1" style="font-size:0.85rem">
+        <div class="flex-between mb-1 text-base">
           <span class="text-muted" data-i18n="settings.network_gpu_memory">Network GPU memory</span>
           <span class="mono" id="settings-pool-vram">--</span>
         </div>
-        <div id="settings-storage-models" style="font-size:0.8rem;margin-top:8px"></div>
+        <div id="settings-storage-models" class="text-sm mt-1"></div>
       </div>
       <div class="form-group" id="settings-auto-manage-storage-group" style="display:none">
         <label data-i18n="settings.max_auto_label">Max Auto-Download Storage (MB, 0 = 50% of disk limit)</label>
@@ -267,62 +267,62 @@
       </div>
       <details class="settings-providers" id="settings-providers-section">
         <summary data-i18n="settings.cloud_providers">Cloud Providers</summary>
-        <div class="mt-2" style="font-size:0.8rem">
+        <div class="mt-2 text-sm">
           <span class="text-muted" data-i18n="settings.cloud_providers_desc">Add cloud API keys to access models from OpenAI, Anthropic, DeepSeek, and more. Keys can also be loaded automatically from a .env file in your data directory (e.g. OPENAI_API_KEY=sk-...).</span>
         </div>
-        <div class="mt-2" style="margin-bottom:8px;display:flex;align-items:center;gap:12px;flex-wrap:wrap">
-          <label style="font-size:0.78rem;color:var(--text-secondary);display:flex;align-items:center;gap:4px" data-i18n="settings.key_source_label">Key source:
-            <select id="provider-key-source" style="font-size:0.78rem;padding:3px 6px;background:var(--bg-tertiary);border:1px solid var(--border);border-radius:var(--radius);color:var(--text-primary)">
+        <div class="mt-2 mb-1 flex-center flex-wrap gap-2">
+          <label class="text-sm text-muted flex-center gap-0" data-i18n="settings.key_source_label">Key source:
+            <select id="provider-key-source" class="text-sm" style="width:auto;padding:3px 6px">
               <option value="auto" data-i18n="settings.key_source_auto">Auto (dashboard, then .env)</option>
               <option value="env" data-i18n="settings.key_source_env">.env / environment only</option>
               <option value="dashboard" data-i18n="settings.key_source_dashboard">Dashboard only</option>
             </select>
           </label>
-          <input type="text" id="provider-filter" data-i18n-placeholder="settings.filter_providers" placeholder="Filter providers..." style="flex:1;min-width:150px;font-size:0.8rem;padding:6px 10px;background:var(--bg-tertiary);border:1px solid var(--border);border-radius:var(--radius);color:var(--text-primary)">
+          <input type="text" id="provider-filter" data-i18n-placeholder="settings.filter_providers" placeholder="Filter providers..." class="flex-1 text-sm" style="min-width:150px">
         </div>
         <div id="provider-cards" class="mt-2">
-          <div class="provider-card" id="claude-subscription-card" style="background:var(--bg-tertiary);border-radius:var(--radius);padding:12px;margin-bottom:8px;border:1px solid var(--border);display:none">
+          <div class="provider-card provider-card-lg hidden" id="claude-subscription-card">
             <div class="flex-between mb-1">
-              <strong style="font-size:0.85rem" data-i18n="settings.claude_subscription">Claude Subscription</strong>
-              <span class="badge" id="claude-subscription-status" style="font-size:0.7rem" data-i18n="settings.badge_not_set">Not set</span>
+              <strong class="text-base" data-i18n="settings.claude_subscription">Claude Subscription</strong>
+              <span class="badge" id="claude-subscription-status" data-i18n="settings.badge_not_set">Not set</span>
             </div>
-            <div style="font-size:0.78rem;color:var(--text-secondary);margin-bottom:8px" data-i18n="settings.claude_sub_intro">Use your existing Claude Pro, Max, Team, or Enterprise subscription to access Claude models — no API key or per-token charges needed.</div>
+            <div class="text-sm text-muted mb-1" data-i18n="settings.claude_sub_intro">Use your existing Claude Pro, Max, Team, or Enterprise subscription to access Claude models — no API key or per-token charges needed.</div>
 
             <!-- Step-by-step setup guide -->
-            <div id="claude-sub-setup-guide" style="font-size:0.78rem;margin-bottom:10px;padding:8px 10px;background:var(--bg-secondary);border-radius:var(--radius);border:1px solid var(--border)">
-              <div style="font-weight:600;margin-bottom:6px" data-i18n="settings.claude_sub_setup_title">Setup Guide</div>
+            <div id="claude-sub-setup-guide" class="card text-sm mb-2">
+              <div class="font-semibold mb-1" data-i18n="settings.claude_sub_setup_title">Setup Guide</div>
 
-              <div style="display:flex;align-items:flex-start;gap:8px;margin-bottom:6px">
-                <span id="claude-sub-step1-icon" style="flex-shrink:0;width:20px;height:20px;border-radius:50%;background:var(--bg-tertiary);border:1px solid var(--border);display:flex;align-items:center;justify-content:center;font-size:0.7rem;font-weight:600">1</span>
+              <div class="setup-step-row">
+                <span id="claude-sub-step1-icon" class="setup-step-icon">1</span>
                 <div>
                   <div data-i18n="settings.claude_sub_step1">Install the Claude CLI</div>
-                  <div style="color:var(--text-secondary);font-size:0.72rem">
+                  <div class="setup-step-detail">
                     <span data-i18n="settings.claude_sub_step1_detail">Open a terminal and run:</span>
-                    <code style="display:block;margin-top:3px;padding:4px 8px;background:var(--bg-tertiary);border-radius:4px;font-size:0.72rem;user-select:all">npm install -g @anthropic-ai/claude-code</code>
+                    <code class="setup-code-block">npm install -g @anthropic-ai/claude-code</code>
                   </div>
                 </div>
               </div>
 
-              <div style="display:flex;align-items:flex-start;gap:8px;margin-bottom:6px">
-                <span id="claude-sub-step2-icon" style="flex-shrink:0;width:20px;height:20px;border-radius:50%;background:var(--bg-tertiary);border:1px solid var(--border);display:flex;align-items:center;justify-content:center;font-size:0.7rem;font-weight:600">2</span>
+              <div class="setup-step-row">
+                <span id="claude-sub-step2-icon" class="setup-step-icon">2</span>
                 <div>
                   <div data-i18n="settings.claude_sub_step2">Log in with your subscription</div>
-                  <div style="color:var(--text-secondary);font-size:0.72rem">
+                  <div class="setup-step-detail">
                     <span data-i18n="settings.claude_sub_step2_detail">Run this command and follow the browser login:</span>
-                    <code style="display:block;margin-top:3px;padding:4px 8px;background:var(--bg-tertiary);border-radius:4px;font-size:0.72rem;user-select:all">claude login</code>
+                    <code class="setup-code-block">claude login</code>
                   </div>
                 </div>
               </div>
 
-              <div style="display:flex;align-items:flex-start;gap:8px;margin-bottom:6px">
-                <span id="claude-sub-step3-icon" style="flex-shrink:0;width:20px;height:20px;border-radius:50%;background:var(--bg-tertiary);border:1px solid var(--border);display:flex;align-items:center;justify-content:center;font-size:0.7rem;font-weight:600">3</span>
+              <div class="setup-step-row">
+                <span id="claude-sub-step3-icon" class="setup-step-icon">3</span>
                 <div>
                   <div data-i18n="settings.claude_sub_step3">Click "Check Status" below to verify</div>
                 </div>
               </div>
 
-              <div style="display:flex;align-items:flex-start;gap:8px">
-                <span id="claude-sub-step4-icon" style="flex-shrink:0;width:20px;height:20px;border-radius:50%;background:var(--bg-tertiary);border:1px solid var(--border);display:flex;align-items:center;justify-content:center;font-size:0.7rem;font-weight:600">4</span>
+              <div class="setup-step-row" style="margin-bottom:0">
+                <span id="claude-sub-step4-icon" class="setup-step-icon">4</span>
                 <div>
                   <div data-i18n="settings.claude_sub_step4">Enable the toggle to start routing Claude requests</div>
                 </div>
@@ -330,124 +330,124 @@
             </div>
 
             <!-- Status + controls -->
-            <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+            <div class="flex-center flex-wrap gap-2">
               <button class="btn btn-sm" id="claude-subscription-detect" style="min-width:100px" data-i18n="settings.check_status_btn">Check Status</button>
-              <span id="claude-subscription-info" style="font-size:0.75rem;color:var(--text-secondary)"></span>
+              <span id="claude-subscription-info" class="field-hint"></span>
             </div>
-            <div id="claude-sub-status-detail" style="display:none;margin-top:8px;padding:6px 10px;background:var(--bg-secondary);border-radius:var(--radius);font-size:0.75rem"></div>
-            <div style="margin-top:8px;display:flex;align-items:center;gap:8px">
-              <label style="font-size:0.8rem;display:flex;align-items:center;gap:6px;cursor:pointer">
+            <div id="claude-sub-status-detail" class="hidden card mt-1 field-hint"></div>
+            <div class="flex-center gap-1 mt-1">
+              <label class="text-sm flex-center gap-1" style="cursor:pointer">
                 <input type="checkbox" id="claude-subscription-toggle">
                 <span data-i18n="settings.claude_sub_enable_routing">Route Claude models through subscription</span>
               </label>
             </div>
-            <div style="font-size:0.7rem;color:var(--text-secondary);margin-top:4px" data-i18n="settings.claude_sub_note">When enabled, Claude model requests use your subscription instead of an API key. Your existing Anthropic API key (if set) is used as fallback when disabled.</div>
+            <div class="text-2xs text-muted mt-0" data-i18n="settings.claude_sub_note">When enabled, Claude model requests use your subscription instead of an API key. Your existing Anthropic API key (if set) is used as fallback when disabled.</div>
           </div>
-          <div class="provider-card" style="background:var(--bg-tertiary);border-radius:var(--radius);padding:10px;margin-bottom:8px;border:1px solid var(--border)">
+          <div class="provider-card">
             <div class="flex-between mb-1">
-              <strong style="font-size:0.85rem">Anthropic</strong>
-              <span class="badge" id="provider-status-anthropic" style="font-size:0.7rem" data-i18n="settings.badge_not_set">Not set</span>
+              <strong class="text-base">Anthropic</strong>
+              <span class="badge" id="provider-status-anthropic" data-i18n="settings.badge_not_set">Not set</span>
             </div>
-            <input type="password" id="provider-key-anthropic" placeholder="sk-ant-..." style="width:100%;font-size:0.8rem;margin-bottom:4px">
+            <input type="password" id="provider-key-anthropic" placeholder="sk-ant-..." class="text-sm mb-0">
             <button class="btn btn-sm" data-test-provider="anthropic" data-i18n="settings.test_btn">Test</button>
             <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noopener" class="provider-signup-link" data-i18n="settings.get_key">Get key &rarr;</a>
           </div>
-          <div class="provider-card" style="background:var(--bg-tertiary);border-radius:var(--radius);padding:10px;margin-bottom:8px;border:1px solid var(--border)">
+          <div class="provider-card">
             <div class="flex-between mb-1">
-              <strong style="font-size:0.85rem">OpenAI</strong>
-              <span class="badge" id="provider-status-openai" style="font-size:0.7rem" data-i18n="settings.badge_not_set">Not set</span>
+              <strong class="text-base">OpenAI</strong>
+              <span class="badge" id="provider-status-openai" data-i18n="settings.badge_not_set">Not set</span>
             </div>
-            <input type="password" id="provider-key-openai" placeholder="sk-..." style="width:100%;font-size:0.8rem;margin-bottom:4px">
+            <input type="password" id="provider-key-openai" placeholder="sk-..." class="text-sm mb-0">
             <button class="btn btn-sm" data-test-provider="openai" data-i18n="settings.test_btn">Test</button>
             <a href="https://platform.openai.com/api-keys" target="_blank" rel="noopener" class="provider-signup-link" data-i18n="settings.get_key">Get key &rarr;</a>
           </div>
-          <div class="provider-card" style="background:var(--bg-tertiary);border-radius:var(--radius);padding:10px;margin-bottom:8px;border:1px solid var(--border)">
+          <div class="provider-card">
             <div class="flex-between mb-1">
-              <strong style="font-size:0.85rem">DeepSeek</strong>
-              <span class="badge" id="provider-status-deepseek" style="font-size:0.7rem" data-i18n="settings.badge_not_set">Not set</span>
+              <strong class="text-base">DeepSeek</strong>
+              <span class="badge" id="provider-status-deepseek" data-i18n="settings.badge_not_set">Not set</span>
             </div>
-            <input type="password" id="provider-key-deepseek" placeholder="sk-..." style="width:100%;font-size:0.8rem;margin-bottom:4px">
+            <input type="password" id="provider-key-deepseek" placeholder="sk-..." class="text-sm mb-0">
             <button class="btn btn-sm" data-test-provider="deepseek" data-i18n="settings.test_btn">Test</button>
             <a href="https://platform.deepseek.com/api_keys" target="_blank" rel="noopener" class="provider-signup-link" data-i18n="settings.get_key">Get key &rarr;</a>
           </div>
-          <div class="provider-card" style="background:var(--bg-tertiary);border-radius:var(--radius);padding:10px;margin-bottom:8px;border:1px solid var(--border)">
+          <div class="provider-card">
             <div class="flex-between mb-1">
-              <strong style="font-size:0.85rem">Mistral</strong>
-              <span class="badge" id="provider-status-mistral" style="font-size:0.7rem" data-i18n="settings.badge_not_set">Not set</span>
+              <strong class="text-base">Mistral</strong>
+              <span class="badge" id="provider-status-mistral" data-i18n="settings.badge_not_set">Not set</span>
             </div>
-            <input type="password" id="provider-key-mistral" placeholder="..." style="width:100%;font-size:0.8rem;margin-bottom:4px">
+            <input type="password" id="provider-key-mistral" placeholder="..." class="text-sm mb-0">
             <button class="btn btn-sm" data-test-provider="mistral" data-i18n="settings.test_btn">Test</button>
             <a href="https://console.mistral.ai/api-keys" target="_blank" rel="noopener" class="provider-signup-link" data-i18n="settings.get_key">Get key &rarr;</a>
           </div>
-          <div class="provider-card" style="background:var(--bg-tertiary);border-radius:var(--radius);padding:10px;margin-bottom:8px;border:1px solid var(--border)">
+          <div class="provider-card">
             <div class="flex-between mb-1">
-              <strong style="font-size:0.85rem">Groq</strong>
-              <span class="badge" id="provider-status-groq" style="font-size:0.7rem" data-i18n="settings.badge_not_set">Not set</span>
+              <strong class="text-base">Groq</strong>
+              <span class="badge" id="provider-status-groq" data-i18n="settings.badge_not_set">Not set</span>
             </div>
-            <input type="password" id="provider-key-groq" placeholder="gsk_..." style="width:100%;font-size:0.8rem;margin-bottom:4px">
+            <input type="password" id="provider-key-groq" placeholder="gsk_..." class="text-sm mb-0">
             <button class="btn btn-sm" data-test-provider="groq" data-i18n="settings.test_btn">Test</button>
             <a href="https://console.groq.com/keys" target="_blank" rel="noopener" class="provider-signup-link" data-i18n="settings.get_key">Get key &rarr;</a>
           </div>
-          <div class="provider-card" style="background:var(--bg-tertiary);border-radius:var(--radius);padding:10px;margin-bottom:8px;border:1px solid var(--border)">
+          <div class="provider-card">
             <div class="flex-between mb-1">
-              <strong style="font-size:0.85rem">NVIDIA NIM</strong>
-              <span class="badge" id="provider-status-nvidia_nim" style="font-size:0.7rem" data-i18n="settings.badge_not_set">Not set</span>
+              <strong class="text-base">NVIDIA NIM</strong>
+              <span class="badge" id="provider-status-nvidia_nim" data-i18n="settings.badge_not_set">Not set</span>
             </div>
-            <input type="password" id="provider-key-nvidia_nim" placeholder="nvapi-..." style="width:100%;font-size:0.8rem;margin-bottom:4px">
+            <input type="password" id="provider-key-nvidia_nim" placeholder="nvapi-..." class="text-sm mb-0">
             <button class="btn btn-sm" data-test-provider="nvidia_nim" data-i18n="settings.test_btn">Test</button>
             <a href="https://build.nvidia.com/" target="_blank" rel="noopener" class="provider-signup-link" data-i18n="settings.get_key">Get key &rarr;</a>
           </div>
-          <div class="provider-card" style="background:var(--bg-tertiary);border-radius:var(--radius);padding:10px;margin-bottom:8px;border:1px solid var(--border)">
+          <div class="provider-card">
             <div class="flex-between mb-1">
-              <strong style="font-size:0.85rem">Cerebras</strong>
-              <span class="badge" id="provider-status-cerebras" style="font-size:0.7rem" data-i18n="settings.badge_not_set">Not set</span>
+              <strong class="text-base">Cerebras</strong>
+              <span class="badge" id="provider-status-cerebras" data-i18n="settings.badge_not_set">Not set</span>
             </div>
-            <input type="password" id="provider-key-cerebras" placeholder="csk-..." style="width:100%;font-size:0.8rem;margin-bottom:4px">
+            <input type="password" id="provider-key-cerebras" placeholder="csk-..." class="text-sm mb-0">
             <button class="btn btn-sm" data-test-provider="cerebras" data-i18n="settings.test_btn">Test</button>
             <a href="https://cloud.cerebras.ai/" target="_blank" rel="noopener" class="provider-signup-link" data-i18n="settings.get_key">Get key &rarr;</a>
           </div>
-          <div class="provider-card" style="background:var(--bg-tertiary);border-radius:var(--radius);padding:10px;margin-bottom:8px;border:1px solid var(--border)">
+          <div class="provider-card">
             <div class="flex-between mb-1">
-              <strong style="font-size:0.85rem">SambaNova</strong>
-              <span class="badge" id="provider-status-sambanova" style="font-size:0.7rem" data-i18n="settings.badge_not_set">Not set</span>
+              <strong class="text-base">SambaNova</strong>
+              <span class="badge" id="provider-status-sambanova" data-i18n="settings.badge_not_set">Not set</span>
             </div>
-            <input type="password" id="provider-key-sambanova" placeholder="..." style="width:100%;font-size:0.8rem;margin-bottom:4px">
+            <input type="password" id="provider-key-sambanova" placeholder="..." class="text-sm mb-0">
             <button class="btn btn-sm" data-test-provider="sambanova" data-i18n="settings.test_btn">Test</button>
             <a href="https://cloud.sambanova.ai/" target="_blank" rel="noopener" class="provider-signup-link" data-i18n="settings.get_key">Get key &rarr;</a>
           </div>
-          <div class="provider-card" style="background:var(--bg-tertiary);border-radius:var(--radius);padding:10px;margin-bottom:8px;border:1px solid var(--border)">
+          <div class="provider-card">
             <div class="flex-between mb-1">
-              <strong style="font-size:0.85rem">Fireworks AI</strong>
-              <span class="badge" id="provider-status-fireworks" style="font-size:0.7rem" data-i18n="settings.badge_not_set">Not set</span>
+              <strong class="text-base">Fireworks AI</strong>
+              <span class="badge" id="provider-status-fireworks" data-i18n="settings.badge_not_set">Not set</span>
             </div>
-            <input type="password" id="provider-key-fireworks" placeholder="fw_..." style="width:100%;font-size:0.8rem;margin-bottom:4px">
+            <input type="password" id="provider-key-fireworks" placeholder="fw_..." class="text-sm mb-0">
             <button class="btn btn-sm" data-test-provider="fireworks" data-i18n="settings.test_btn">Test</button>
             <a href="https://fireworks.ai/account/api-keys" target="_blank" rel="noopener" class="provider-signup-link" data-i18n="settings.get_key">Get key &rarr;</a>
           </div>
-          <div class="provider-card" style="background:var(--bg-tertiary);border-radius:var(--radius);padding:10px;margin-bottom:8px;border:1px solid var(--border)">
+          <div class="provider-card">
             <div class="flex-between mb-1">
-              <strong style="font-size:0.85rem">Together AI</strong>
-              <span class="badge" id="provider-status-together" style="font-size:0.7rem" data-i18n="settings.badge_not_set">Not set</span>
+              <strong class="text-base">Together AI</strong>
+              <span class="badge" id="provider-status-together" data-i18n="settings.badge_not_set">Not set</span>
             </div>
-            <input type="password" id="provider-key-together" placeholder="..." style="width:100%;font-size:0.8rem;margin-bottom:4px">
+            <input type="password" id="provider-key-together" placeholder="..." class="text-sm mb-0">
             <button class="btn btn-sm" data-test-provider="together" data-i18n="settings.test_btn">Test</button>
             <a href="https://api.together.xyz/settings/api-keys" target="_blank" rel="noopener" class="provider-signup-link" data-i18n="settings.get_key">Get key &rarr;</a>
           </div>
-          <div class="provider-card" style="background:var(--bg-tertiary);border-radius:var(--radius);padding:10px;margin-bottom:8px;border:1px solid var(--border)">
+          <div class="provider-card">
             <div class="flex-between mb-1">
-              <strong style="font-size:0.85rem">DeepInfra</strong>
-              <span class="badge" id="provider-status-deepinfra" style="font-size:0.7rem" data-i18n="settings.badge_not_set">Not set</span>
+              <strong class="text-base">DeepInfra</strong>
+              <span class="badge" id="provider-status-deepinfra" data-i18n="settings.badge_not_set">Not set</span>
             </div>
-            <input type="password" id="provider-key-deepinfra" placeholder="..." style="width:100%;font-size:0.8rem;margin-bottom:4px">
+            <input type="password" id="provider-key-deepinfra" placeholder="..." class="text-sm mb-0">
             <button class="btn btn-sm" data-test-provider="deepinfra" data-i18n="settings.test_btn">Test</button>
             <a href="https://deepinfra.com/dash/api_keys" target="_blank" rel="noopener" class="provider-signup-link" data-i18n="settings.get_key">Get key &rarr;</a>
           </div>
-          <div class="provider-card" style="background:var(--bg-tertiary);border-radius:var(--radius);padding:10px;margin-bottom:8px;border:1px solid var(--border)">
+          <div class="provider-card">
             <div class="flex-between mb-1">
-              <strong style="font-size:0.85rem">Moonshot (Kimi)</strong>
-              <span class="badge" id="provider-status-moonshot" style="font-size:0.7rem" data-i18n="settings.badge_not_set">Not set</span>
+              <strong class="text-base">Moonshot (Kimi)</strong>
+              <span class="badge" id="provider-status-moonshot" data-i18n="settings.badge_not_set">Not set</span>
             </div>
-            <input type="password" id="provider-key-moonshot" placeholder="..." style="width:100%;font-size:0.8rem;margin-bottom:4px">
+            <input type="password" id="provider-key-moonshot" placeholder="..." class="text-sm mb-0">
             <button class="btn btn-sm" data-test-provider="moonshot" data-i18n="settings.test_btn">Test</button>
             <a href="https://platform.moonshot.cn/console/api-keys" target="_blank" rel="noopener" class="provider-signup-link" data-i18n="settings.get_key">Get key &rarr;</a>
           </div>
@@ -470,9 +470,9 @@
           </div>
         </div>
       </details>
-      <div class="mt-2" style="display:flex;gap:8px;align-items:center">
+      <div class="mt-2 flex-center gap-1">
         <button class="btn btn-primary" id="btn-save-settings" data-i18n="actions.save_settings">Save Settings</button>
-        <button class="btn btn-ghost btn-sm" id="btn-rerun-setup" data-i18n="settings.rerun_setup" data-i18n-title="settings.rerun_setup_title" title="Re-run the first-time setup wizard" style="margin-left:auto;font-size:0.75rem">Re-run Setup</button>
+        <button class="btn btn-ghost btn-sm field-hint" id="btn-rerun-setup" data-i18n="settings.rerun_setup" data-i18n-title="settings.rerun_setup_title" title="Re-run the first-time setup wizard" style="margin-left:auto">Re-run Setup</button>
       </div>
     </div>
   </div>
@@ -502,7 +502,7 @@
       </div>
       <div id="hf-results">
         <div class="hf-suggestions" id="hf-suggestions">
-          <p class="text-muted" style="font-size:0.85rem;margin:0 0 10px" data-i18n="model_browser.popular_title">Popular models to get started:</p>
+          <p class="text-muted text-base" style="margin:0 0 10px" data-i18n="model_browser.popular_title">Popular models to get started:</p>
           <div class="hf-suggestion-chips">
             <button class="hf-suggestion-chip" data-hf-suggest="llama">Llama</button>
             <button class="hf-suggestion-chip" data-hf-suggest="qwen">Qwen</button>
@@ -513,10 +513,10 @@
             <button class="hf-suggestion-chip" data-hf-suggest="codestral">Codestral</button>
             <button class="hf-suggestion-chip" data-hf-suggest="tinyllama">TinyLlama</button>
           </div>
-          <p class="text-muted" style="font-size:0.78rem;margin:10px 0 0" data-i18n="model_browser.results_hint">Results show whether a model is already on the swarm and whether your hardware can host or run it.</p>
+          <p class="text-muted text-sm" style="margin:10px 0 0" data-i18n="model_browser.results_hint">Results show whether a model is already on the swarm and whether your hardware can host or run it.</p>
         </div>
       </div>
-      <div id="hf-loading" class="hidden" style="text-align:center;padding:20px">
+      <div id="hf-loading" class="hidden text-center p-3">
         <div class="spinner"></div>
         <span class="text-muted ml-1" data-i18n="model_browser.searching">Searching HuggingFace...</span>
       </div>
@@ -555,20 +555,20 @@
       <div class="share-btn-wrap" style="position:relative">
         <button class="btn btn-ghost btn-sm" id="btn-share-network" data-i18n-title="nav.share_peer" title="Share your swarm peer address" data-i18n-aria-label="nav.share_peer" aria-label="Share peer address"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" y1="13.51" x2="15.42" y2="17.49"/><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"/></svg></button>
         <div class="share-popover" id="share-popover">
-          <label style="font-weight:600;margin-bottom:6px" data-i18n="network.your_peer_address">Your Swarm Peer Address</label>
-          <div class="text-muted" style="font-size:0.75rem;margin-bottom:6px" data-i18n="network.share_desc">Share with other SwarmLLM users so your nodes can discover each other on the network</div>
-          <div style="display:flex;gap:0.5rem;margin-bottom:10px">
-            <input type="text" id="my-network-code" readonly class="form-control mono" style="font-size:0.7rem;flex:1" data-i18n-aria-label="network.my_address_aria" aria-label="Your peer address">
+          <label class="font-semibold mb-1" data-i18n="network.your_peer_address">Your Swarm Peer Address</label>
+          <div class="text-muted field-hint mb-1" data-i18n="network.share_desc">Share with other SwarmLLM users so your nodes can discover each other on the network</div>
+          <div class="flex gap-1 mb-2">
+            <input type="text" id="my-network-code" readonly class="form-control mono text-2xs flex-1" data-i18n-aria-label="network.my_address_aria" aria-label="Your peer address">
             <button class="btn btn-sm" id="btn-copy-network-code" data-i18n-title="nav.copy_clipboard" title="Copy to clipboard" data-i18n="actions.copy">Copy</button>
           </div>
-          <label style="font-weight:600;margin-bottom:4px" data-i18n="network.other_peer_address">Another User's Peer Address</label>
-          <div class="text-muted" style="font-size:0.75rem;margin-bottom:4px" data-i18n="network.connect_desc">Paste an address from another user to connect your nodes</div>
-          <div style="display:flex;gap:0.5rem">
-            <input type="text" id="join-code-input" class="form-control mono" placeholder="swarm://..." style="font-size:0.7rem;flex:1" data-i18n-aria-label="network.peer_address_aria" aria-label="Peer address">
+          <label class="font-semibold mb-0" data-i18n="network.other_peer_address">Another User's Peer Address</label>
+          <div class="text-muted field-hint mb-0" data-i18n="network.connect_desc">Paste an address from another user to connect your nodes</div>
+          <div class="flex gap-1">
+            <input type="text" id="join-code-input" class="form-control mono text-2xs flex-1" placeholder="swarm://..." data-i18n-aria-label="network.peer_address_aria" aria-label="Peer address">
             <button class="btn btn-sm btn-primary" id="btn-join-network" data-i18n="network.connect">Connect</button>
           </div>
-          <div class="text-muted" id="join-status" style="margin-top:4px"></div>
-          <div class="text-muted" style="font-size:0.68rem;margin-top:6px;border-top:1px solid var(--border);padding-top:6px" data-i18n="network.not_devices">This connects you to the SwarmLLM network. To link your own devices, use the My Devices tab instead.</div>
+          <div class="text-muted mt-0" id="join-status"></div>
+          <div class="text-muted text-2xs divider" data-i18n="network.not_devices">This connects you to the SwarmLLM network. To link your own devices, use the My Devices tab instead.</div>
         </div>
       </div>
       <button class="btn btn-ghost btn-sm" id="btn-private-mode-toggle" data-i18n-title="pool.private_mode_tooltip" title="Private Mode — restrict inference to your devices" aria-label="Toggle private mode" style="position:relative">
@@ -660,14 +660,14 @@
             </div>
             <!-- Slash command autocomplete -->
             <div class="cc-slash-autocomplete" id="cc-slash-autocomplete" style="display:none"></div>
-            <div id="image-preview-area" style="display:none;max-width:740px;margin:0 auto 6px;padding:6px;background:var(--bg-tertiary);border-radius:8px;"></div>
+            <div id="image-preview-area" class="hidden bg-surface rounded mx-auto" style="max-width:740px;padding:6px;margin-bottom:6px"></div>
             <div class="chat-input-wrap">
               <input type="file" id="image-upload-input" accept="image/*" multiple style="display:none">
-              <button class="btn" id="image-upload-btn" data-i18n-title="chat.attach_image" data-i18n-aria-label="chat.attach_image" title="Attach image (or paste/drag)" aria-label="Attach image" style="padding:6px 10px;font-size:1.1rem;background:transparent;border:1px solid var(--border);cursor:pointer;border-radius:6px;margin-right:4px;">&#128247;</button>
+              <button class="btn btn-ghost text-lg" id="image-upload-btn" data-i18n-title="chat.attach_image" data-i18n-aria-label="chat.attach_image" title="Attach image (or paste/drag)" aria-label="Attach image" style="margin-right:4px">&#128247;</button>
               <textarea id="chat-input" placeholder="Type your message... (Enter to send, Shift+Enter for new line)" data-i18n-placeholder="chat.placeholder" rows="1"></textarea>
               <button class="btn btn-primary" id="send-btn" data-i18n="chat.send">Send</button>
             </div>
-            <div style="display:flex;align-items:center;justify-content:space-between;max-width:740px;margin:4px auto 0">
+            <div class="flex-between" style="max-width:740px;margin:4px auto 0">
               <div class="token-counter" id="token-counter" data-i18n-title="chat.word_counter_tip" title="Word count for your current message"></div>
               <button class="chat-layout-toggle" id="chat-layout-toggle" data-i18n-title="chat.layout_tip" data-i18n-aria-label="chat.layout_tip" title="Switch between Linear (traditional) and Messenger (bubble) chat layout" aria-label="Switch chat layout">
                 <span id="chat-layout-icon">&#9776;</span>
@@ -744,7 +744,7 @@
               </div>
             </div>
             <div class="stat-card" data-i18n-title="dashboard.stat_active_tip" title="Currently running inference requests">
-              <div class="stat-icon" style="background:rgba(255,100,100,0.12);color:#ff6464">&#9203;</div>
+              <div class="stat-icon red">&#9203;</div>
               <div class="stat-body">
                 <div class="stat-value" id="stat-active">0</div>
                 <div class="stat-label"><span data-i18n="stats.active">Active</span> <span class="stat-help" data-i18n-title="stats.active_help" title="AI requests currently being processed right now">?</span></div>
@@ -770,9 +770,9 @@
             <div class="panel node-compact">
               <div class="panel-header">
                 <h2 data-i18n="dashboard.node_title">Node</h2>
-                <span style="display:flex;align-items:center;gap:6px">
+                <span class="flex-center gap-1">
                   <span id="node-gpu-badge" class="node-mode-badge node-mode-cpu" data-i18n="hw.mode_cpu">CPU mode</span>
-                  <span class="mono text-muted" style="font-size:0.75rem"><span id="version">v...</span> &middot; Up <span id="uptime">...</span></span>
+                  <span class="mono text-muted field-hint"><span id="version">v...</span> &middot; Up <span id="uptime">...</span></span>
                 </span>
               </div>
               <div class="node-hw-grid">
@@ -865,7 +865,7 @@
               <span class="models-stat-group" id="stat-group-subscription" style="display:none">
                 <img src="/static/icons/claude-code.svg" width="13" height="13" alt="" aria-hidden="true" style="opacity:0.7;vertical-align:middle">
                 <span class="models-stat-label" data-i18n="dashboard.chip_subscription">Subscription</span>
-                <span class="models-stat-chip" style="background:rgba(217,119,87,0.15);color:#D97757" id="stat-chip-subscription">
+                <span class="models-stat-chip claude" id="stat-chip-subscription">
                   <span class="models-stat-value" id="stat-chip-subscription-val">0</span>
                   <span data-i18n="dashboard.chip_models"> models</span>
                 </span>
@@ -991,36 +991,36 @@
       <div class="view" id="view-compare" style="display:none">
         <div class="container">
           <div class="panel">
-            <div class="panel-header" style="flex-wrap:wrap;gap:4px 12px">
-              <h2 style="margin:0" data-i18n="compare.title">Model Compare</h2>
-              <span class="text-muted" style="font-size:0.8rem" data-i18n="compare.subtitle">Send the same prompt to multiple models and compare results side-by-side. Results vary by model context length, capabilities, and specialization.</span>
+            <div class="panel-header flex-wrap" style="gap:4px 12px">
+              <h2 data-i18n="compare.title">Model Compare</h2>
+              <span class="text-muted text-sm" data-i18n="compare.subtitle">Send the same prompt to multiple models and compare results side-by-side. Results vary by model context length, capabilities, and specialization.</span>
             </div>
             <div class="compare-controls">
               <div class="form-group" style="margin-bottom:8px">
                 <textarea id="compare-prompt" rows="3" placeholder="Enter your prompt here..." data-i18n-placeholder="compare.prompt_placeholder" style="font-size:0.9rem;resize:vertical"></textarea>
               </div>
-              <details style="margin-bottom:4px">
-                <summary style="font-size:0.78rem;color:var(--text-muted);cursor:pointer" data-i18n="compare.advanced">Advanced: system prompt &amp; parameters</summary>
+              <details class="mb-0">
+                <summary class="text-sm text-dim" style="cursor:pointer" data-i18n="compare.advanced">Advanced: system prompt &amp; parameters</summary>
                 <div class="form-group mt-1">
                   <label for="compare-system" data-i18n="compare.system_prompt_label">System prompt (sets the AI's behavior)</label>
                   <input type="text" id="compare-system" data-i18n-placeholder="compare.system_default" placeholder="You are a helpful assistant." style="font-size:0.85rem">
                 </div>
-                <div style="display:flex;gap:12px;align-items:flex-end;margin-top:8px">
-                  <div class="form-group" style="width:100px">
+                <div class="flex gap-2 mt-1" style="align-items:flex-end">
+                  <div class="form-group compare-param-group">
                     <label for="compare-temp" data-i18n="compare.creativity">Creativity</label>
-                    <input type="number" id="compare-temp" value="0.7" min="0" max="2" step="0.1" style="font-size:0.85rem" data-i18n-title="compare.creativity_tip" title="Lower = more focused, Higher = more creative">
+                    <input type="number" id="compare-temp" value="0.7" min="0" max="2" step="0.1" data-i18n-title="compare.creativity_tip" title="Lower = more focused, Higher = more creative">
                   </div>
-                  <div class="form-group" style="width:140px">
+                  <div class="form-group compare-param-group-lg">
                     <label for="compare-max-tokens" data-i18n="compare.max_length">Max response length</label>
-                    <input type="number" id="compare-max-tokens" value="1024" min="1" max="8192" step="64" style="font-size:0.85rem">
+                    <input type="number" id="compare-max-tokens" value="1024" min="1" max="8192" step="64">
                   </div>
                 </div>
               </details>
               <div class="compare-params">
-                <div class="form-group" style="flex:1;min-width:0">
-                  <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
+                <div class="form-group flex-1" style="min-width:0">
+                  <div class="flex-center gap-1 mb-0">
                     <label style="margin:0" data-i18n="compare.pick_models">Pick 2 or more models to compare</label>
-                    <div class="compare-filters" id="compare-filters" style="display:flex;gap:4px;margin-left:auto;font-size:0.72rem">
+                    <div class="compare-filters flex gap-0 text-xs" id="compare-filters" style="margin-left:auto">
                       <button class="btn btn-xs compare-filter active" data-filter="all" data-i18n="compare.filter_all">All</button>
                       <button class="btn btn-xs compare-filter" data-filter="local" data-i18n="compare.filter_local">Local</button>
                       <button class="btn btn-xs compare-filter" data-filter="cloud" data-i18n="compare.filter_cloud">Cloud</button>
@@ -1035,8 +1035,8 @@
                     <span class="skeleton-chip" style="width:100px"></span>
                   </div>
                 </div>
-                <div style="display:flex;align-items:flex-end">
-                  <button class="btn btn-primary" id="btn-compare-run" style="height:38px;white-space:nowrap" data-i18n="compare.run">Compare</button>
+                <div class="flex" style="align-items:flex-end">
+                  <button class="btn btn-primary whitespace-nowrap" id="btn-compare-run" style="height:38px" data-i18n="compare.run">Compare</button>
                 </div>
               </div>
             </div>
@@ -1079,34 +1079,34 @@
         <div class="container">
 
           <!-- No pool state -->
-          <div id="pool-no-pool" class="panel" style="text-align:center;padding:40px 20px">
-            <div class="empty-icon" style="font-size:2.5rem;margin-bottom:12px">&#128187;</div>
-            <h2 style="margin:0 0 8px" data-i18n="pool.title">My Devices</h2>
+          <div id="pool-no-pool" class="panel text-center" style="padding:40px 20px">
+            <div class="empty-icon text-2xl mb-2">&#128187;</div>
+            <h2 class="mb-1" data-i18n="pool.title">My Devices</h2>
             <p class="text-muted" style="max-width:480px;margin:0 auto 20px" data-i18n="pool.description">Link your personal computers, laptops, and servers together. Inference across your own devices is free — no credits used. Credits earned by any of your machines are combined into one balance on your main device.</p>
-            <p class="text-muted" style="max-width:480px;margin:0 auto 20px;font-size:0.78rem" data-i18n="pool.not_network">This is different from the SwarmLLM network — linking devices groups your own hardware, while the network connects you with other people.</p>
-            <p style="max-width:480px;margin:0 auto 12px;font-size:0.75rem;color:var(--orange);background:rgba(255,160,0,0.08);padding:8px 12px;border-radius:var(--radius)" data-i18n="pool.personal_only">&#9888; Only link your own devices. Linked devices forward 100% of their credits to the main device. Do not share invite codes with other users — this is for your personal machines only.</p>
+            <p class="text-muted text-sm" style="max-width:480px;margin:0 auto 20px" data-i18n="pool.not_network">This is different from the SwarmLLM network — linking devices groups your own hardware, while the network connects you with other people.</p>
+            <p class="info-box info-box-warn" style="max-width:480px;margin:0 auto 12px" data-i18n="pool.personal_only">&#9888; Only link your own devices. Linked devices forward 100% of their credits to the main device. Do not share invite codes with other users — this is for your personal machines only.</p>
 
-            <div style="display:flex;gap:12px;justify-content:center;flex-wrap:wrap">
+            <div class="flex justify-center flex-wrap gap-2">
               <button class="btn btn-primary" id="pool-create-btn" data-i18n="pool.create_pool">Create Pool</button>
               <button class="btn btn-outline" id="pool-join-btn" data-i18n="pool.join_pool">Join Pool</button>
             </div>
 
             <!-- Join form (hidden until Join Pool clicked) -->
-            <div id="pool-join-form" class="mt-2" style="display:none;max-width:320px;margin:16px auto 0">
+            <div id="pool-join-form" class="mt-2 hidden mx-auto" style="max-width:320px">
               <div class="form-group">
                 <label data-i18n="pool.enter_code">Enter invite code</label>
-                <input type="text" id="pool-join-code" placeholder="A3F7K2M9" maxlength="8" style="text-align:center;font-size:1.3rem;letter-spacing:3px;text-transform:uppercase;font-family:var(--font-mono)">
+                <input type="text" id="pool-join-code" placeholder="A3F7K2M9" maxlength="8" class="pool-code-input">
               </div>
-              <button class="btn btn-primary" id="pool-join-submit" style="width:100%" data-i18n="pool.join">Join</button>
+              <button class="btn btn-primary w-full" id="pool-join-submit" data-i18n="pool.join">Join</button>
             </div>
 
             <!-- Create form (hidden until Create Pool clicked) -->
-            <div id="pool-create-form" class="mt-2" style="display:none;max-width:320px;margin:16px auto 0">
+            <div id="pool-create-form" class="mt-2 hidden mx-auto" style="max-width:320px">
               <div class="form-group">
                 <label data-i18n="pool.pool_name">Pool name</label>
                 <input type="text" id="pool-create-name" data-i18n-placeholder="pool.name_placeholder" placeholder="My Devices" maxlength="64">
               </div>
-              <button class="btn btn-primary" id="pool-create-submit" style="width:100%" data-i18n="pool.create">Create</button>
+              <button class="btn btn-primary w-full" id="pool-create-submit" data-i18n="pool.create">Create</button>
             </div>
           </div>
 
@@ -1116,35 +1116,35 @@
             <div class="panel">
               <div class="panel-header">
                 <div>
-                  <h2 style="margin:0" id="pool-name">My Devices</h2>
-                  <span class="text-muted" style="font-size:0.8rem" id="pool-role-label"></span>
+                  <h2 id="pool-name">My Devices</h2>
+                  <span class="text-muted text-sm" id="pool-role-label"></span>
                 </div>
-                <div style="display:flex;gap:8px;align-items:center">
+                <div class="flex-center gap-1">
                   <label class="toggle-switch" id="pool-private-mode-switch" style="margin-right:4px" data-i18n-title="pool.private_mode_tooltip" title="Private Mode">
                     <input type="checkbox" id="pool-private-mode-checkbox">
                     <span class="toggle-slider"></span>
                   </label>
-                  <span id="pool-private-mode-label" class="text-muted" style="font-size:0.75rem;white-space:nowrap" data-i18n="pool.private_mode_off">Private Mode</span>
+                  <span id="pool-private-mode-label" class="text-muted field-hint whitespace-nowrap" data-i18n="pool.private_mode_off">Private Mode</span>
                   <button class="btn btn-sm btn-outline" id="pool-invite-code-btn" data-i18n="pool.generate_code" style="display:none">Generate Invite Code</button>
-                  <button class="btn btn-sm btn-ghost" id="pool-leave-btn" style="color:var(--red)" data-i18n="pool.leave">Leave Pool</button>
+                  <button class="btn btn-sm btn-ghost text-red" id="pool-leave-btn" data-i18n="pool.leave">Leave Pool</button>
                 </div>
               </div>
             </div>
 
             <!-- Invite code display (shown after generating) -->
-            <div id="pool-invite-code-display" class="panel mt-1" style="display:none;text-align:center;padding:24px">
-              <p class="text-muted" style="margin:0 0 8px" data-i18n="pool.share_code">Share this code with your other devices:</p>
-              <div id="pool-invite-code-value" style="font-size:2rem;font-weight:700;letter-spacing:6px;font-family:var(--font-mono);color:var(--accent);margin:8px 0"></div>
-              <div id="pool-qr-code" style="display:none;margin:12px auto"></div>
-              <p class="text-muted" style="font-size:0.78rem;margin:4px 0 12px" data-i18n="pool.code_expires">One-time use. Expires in 24 hours.</p>
-              <div style="display:flex;gap:8px;justify-content:center">
+            <div id="pool-invite-code-display" class="panel mt-1 hidden pool-invite-display">
+              <p class="text-muted mb-1" data-i18n="pool.share_code">Share this code with your other devices:</p>
+              <div id="pool-invite-code-value" class="pool-invite-code"></div>
+              <div id="pool-qr-code" class="hidden mx-auto" style="margin:12px auto"></div>
+              <p class="text-muted text-sm" style="margin:4px 0 12px" data-i18n="pool.code_expires">One-time use. Expires in 24 hours.</p>
+              <div class="flex justify-center gap-1">
                 <button class="btn btn-sm btn-outline" id="pool-copy-code-btn" data-i18n="actions.copy">Copy</button>
               </div>
-              <p class="text-muted" style="font-size:0.72rem;margin:12px 0 0" data-i18n="pool.how_to_join">On your other device, open the dashboard and go to My Devices → Join, or run: swarmllm pool join CODE</p>
+              <p class="text-muted text-xs" style="margin:12px 0 0" data-i18n="pool.how_to_join">On your other device, open the dashboard and go to My Devices → Join, or run: swarmllm pool join CODE</p>
             </div>
 
             <!-- Stats strip -->
-            <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-top:8px">
+            <div class="pool-stat-grid">
               <div class="stat-card">
                 <div class="stat-body">
                   <div class="stat-value" id="pool-member-count">0</div>

@@ -1170,7 +1170,7 @@
           // State dot color
           if (dot) {
             var state = cc.state || 'active';
-            dot.style.background = state === 'active' ? '#3ddc84' : state === 'suspended' ? 'var(--orange)' : 'var(--red)';
+            dot.style.background = state === 'active' ? 'var(--green)' : state === 'suspended' ? 'var(--orange)' : 'var(--red)';
             dot.title = state;
           }
           // MCP badge

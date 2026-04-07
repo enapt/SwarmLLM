@@ -1060,7 +1060,7 @@
             parts.push('\u2713 ' + I18n.t('dashboard.sub_authenticated'));
             if (data.subscription_type) parts.push(data.subscription_type);
             if (data.cli_version) parts.push('v' + data.cli_version);
-            statusEl.innerHTML = '<span style="color:#3ddc84">\u25cf</span> ' + U.escapeHtml(parts.join(' \u00b7 '));
+            statusEl.innerHTML = '<span style="color:var(--green)">\u25cf</span> ' + U.escapeHtml(parts.join(' \u00b7 '));
           } else {
             statusEl.innerHTML = '<span style="color:var(--red)">\u25cf</span> ' + U.escapeHtml(I18n.t('dashboard.sub_not_authenticated'));
             statusEl.style.color = 'var(--red)';

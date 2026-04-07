@@ -7,7 +7,7 @@
 .cc-project-bar { max-width: 740px; margin: 0 auto 6px; padding: 10px 14px; background: rgba(217,119,87,0.06); border: 1px solid rgba(217,119,87,0.2); border-radius: var(--radius-lg); font-size: 0.78rem; }
 .cc-bar-title-row { display: flex; align-items: center; gap: 6px; margin-bottom: 8px; }
 .cc-project-bar .cc-bar-icon { flex-shrink: 0; }
-.cc-project-bar .cc-bar-label { color: #D97757; font-weight: 700; font-family: var(--font-mono); white-space: nowrap; font-size: 0.82rem; }
+.cc-project-bar .cc-bar-label { color: var(--claude); font-weight: 700; font-family: var(--font-mono); white-space: nowrap; font-size: 0.82rem; }
 .cc-bar-subtitle { color: var(--text-muted); font-size: 0.7rem; margin-left: 4px; }
 .cc-dir-picker { display: flex; flex-direction: column; gap: 6px; }
 .cc-dir-row, .cc-perm-row { display: flex; align-items: center; gap: 8px; }
@@ -19,8 +19,8 @@
 
 /* Session info (shown when CC session is active) */
 .cc-session-info { display: flex; align-items: center; gap: 6px; font-size: 0.72rem; color: var(--text-secondary); font-family: var(--font-mono); }
-.cc-session-info .cc-dir-badge { color: #D97757; font-weight: 600; }
-.cc-session-info .cc-state-dot { width: 6px; height: 6px; border-radius: 50%; background: #3ddc84; display: inline-block; }
+.cc-session-info .cc-dir-badge { color: var(--claude); font-weight: 600; }
+.cc-session-info .cc-state-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--green); display: inline-block; }
 
 /* ─── Thinking / Reasoning (inline preface, not boxed) ─── */
 .cc-thinking { font-size: 0.78rem; color: var(--text-muted); font-style: italic; white-space: pre-wrap; word-wrap: break-word; margin-bottom: 6px; line-height: 1.5; max-height: 200px; overflow-y: auto; opacity: 0.7; }
@@ -56,7 +56,7 @@
 .cc-diff .cc-diff-file { color: var(--text-primary); font-weight: 600; }
 .cc-diff .cc-diff-stats { color: var(--text-secondary); margin-left: auto; }
 .cc-diff .cc-diff-content { margin: 0; padding: 6px 8px; background: var(--bg-secondary); border-radius: 0 0 var(--radius) var(--radius); border: 1px solid var(--border); font-size: 0.72rem; font-family: var(--font-mono); overflow-x: auto; max-height: 400px; overflow-y: auto; line-height: 1.5; }
-.diff-add { color: #3ddc84; background: rgba(61,220,132,0.08); display: block; }
+.diff-add { color: var(--green); background: rgba(61,220,132,0.08); display: block; }
 .diff-del { color: #ef4444; background: rgba(239,68,68,0.08); display: block; }
 .diff-hunk { color: var(--accent); opacity: 0.7; display: block; }
 
@@ -88,7 +88,7 @@
 .cc-perm-code.cc-bash-cmd { color: var(--green); background: #0d1117; border: 1px solid rgba(255,255,255,0.05); }
 .cc-perm-diff { margin: 3px 0; border-radius: var(--radius); overflow: hidden; border: 1px solid var(--border); }
 .cc-perm-diff-del { padding: 3px 6px; font-size: 0.7rem; font-family: var(--font-mono); color: #ef4444; background: rgba(239,68,68,0.08); white-space: pre-wrap; word-break: break-all; border-bottom: 1px solid var(--border); }
-.cc-perm-diff-add { padding: 3px 6px; font-size: 0.7rem; font-family: var(--font-mono); color: #3ddc84; background: rgba(61,220,132,0.08); white-space: pre-wrap; word-break: break-all; }
+.cc-perm-diff-add { padding: 3px 6px; font-size: 0.7rem; font-family: var(--font-mono); color: var(--green); background: rgba(61,220,132,0.08); white-space: pre-wrap; word-break: break-all; }
 .cc-perm-desc { font-size: 0.72rem; color: var(--text-secondary); margin: 3px 0; }
 .cc-perm-reason { font-size: 0.7rem; color: var(--text-muted); font-style: italic; }
 .cc-perm-resolved { font-size: 0.72rem; font-weight: 600; }
@@ -147,19 +147,19 @@
 .cc-status-error { color: var(--red); font-style: normal; }
 
 /* ─── Sub-Agent Panels ─── */
-.cc-agent-panel { margin: 10px 0; border: 1px solid rgba(139,92,246,0.25); border-radius: var(--radius); border-left: 3px solid #8b5cf6; background: rgba(139,92,246,0.04); overflow: hidden; }
+.cc-agent-panel { margin: 10px 0; border: 1px solid rgba(139,92,246,0.25); border-radius: var(--radius); border-left: 3px solid var(--violet); background: rgba(139,92,246,0.04); overflow: hidden; }
 .cc-agent-panel[open] { background: rgba(139,92,246,0.06); }
 .cc-agent-header { display: flex; align-items: center; gap: 6px; padding: 8px 10px; font-size: 0.78rem; cursor: pointer; list-style: none; flex-wrap: wrap; }
 .cc-agent-header::-webkit-details-marker { display: none; }
 .cc-agent-header::before { content: '▸'; color: var(--text-muted); font-size: 0.7rem; transition: transform 0.15s; }
 .cc-agent-panel[open] > .cc-agent-header::before { transform: rotate(90deg); }
 .cc-agent-icon { font-size: 1rem; flex-shrink: 0; }
-.cc-agent-label { font-weight: 700; color: #8b5cf6; font-family: var(--font-mono); white-space: nowrap; }
+.cc-agent-label { font-weight: 700; color: var(--violet); font-family: var(--font-mono); white-space: nowrap; }
 .cc-agent-meta { font-size: 0.68rem; color: var(--text-muted); font-family: var(--font-mono); background: rgba(139,92,246,0.1); padding: 1px 6px; border-radius: 3px; white-space: nowrap; }
 .cc-agent-desc { padding: 4px 10px 6px; font-size: 0.75rem; color: var(--text-secondary); border-top: 1px solid rgba(139,92,246,0.12); }
 .cc-agent-content { padding: 4px 10px 8px; }
 .cc-agent-content:empty { display: none; }
-.cc-agent-content .cc-tool-call { border-color: rgba(139,92,246,0.15); background: rgba(139,92,246,0.03); border-left-color: #8b5cf6; }
+.cc-agent-content .cc-tool-call { border-color: rgba(139,92,246,0.15); background: rgba(139,92,246,0.03); border-left-color: var(--violet); }
 .cc-agent-summary { margin-top: 6px; padding: 6px 8px; background: var(--bg-secondary); border-radius: var(--radius); font-size: 0.72rem; color: var(--text-primary); font-family: var(--font-mono); white-space: pre-wrap; word-break: break-word; max-height: 200px; overflow-y: auto; }
 
 /* Nested agent panels (agent-in-agent) */
@@ -182,7 +182,7 @@
 .cc-task-deleted .cc-task-subject { color: var(--text-muted); text-decoration: line-through; }
 
 /* ─── Running Agents Summary Bar ─── */
-.cc-agents-summary { margin: 6px 0; padding: 4px 10px; font-size: 0.72rem; font-weight: 600; color: #8b5cf6; background: rgba(139,92,246,0.08); border-radius: var(--radius); font-family: var(--font-mono); text-align: center; }
+.cc-agents-summary { margin: 6px 0; padding: 4px 10px; font-size: 0.72rem; font-weight: 600; color: var(--violet); background: rgba(139,92,246,0.08); border-radius: var(--radius); font-family: var(--font-mono); text-align: center; }
 
 /* ─── Background Agent Tray ─── */
 .cc-bg-tray { margin: 8px 0; padding: 6px; background: rgba(139,92,246,0.03); border: 1px dashed rgba(139,92,246,0.2); border-radius: var(--radius); }
@@ -201,8 +201,8 @@
 .cc-slash-cmd { font-family: var(--font-mono); font-weight: 600; color: var(--accent); }
 
 /* ─── Session List CC Badge ─── */
-.session-cc-badge { display: inline-block; font-size: 0.6rem; padding: 0 4px; background: rgba(217,119,87,0.12); color: #D97757; border-radius: 3px; font-family: var(--font-mono); max-width: 80px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: middle; margin-left: 4px; }
-.session-cc-badge.cc-active::before { content: ''; display: inline-block; width: 5px; height: 5px; border-radius: 50%; background: #3ddc84; margin-right: 3px; vertical-align: middle; }
+.session-cc-badge { display: inline-block; font-size: 0.6rem; padding: 0 4px; background: rgba(217,119,87,0.12); color: var(--claude); border-radius: 3px; font-family: var(--font-mono); max-width: 80px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: middle; margin-left: 4px; }
+.session-cc-badge.cc-active::before { content: ''; display: inline-block; width: 5px; height: 5px; border-radius: 50%; background: var(--green); margin-right: 3px; vertical-align: middle; }
 .session-cc-badge.cc-suspended { opacity: 0.6; }
 .session-cc-badge.cc-suspended::before { content: ''; display: inline-block; width: 5px; height: 5px; border-radius: 50%; background: var(--orange); margin-right: 3px; vertical-align: middle; }
 
