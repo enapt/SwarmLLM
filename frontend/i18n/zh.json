@@ -940,5 +940,9 @@
   "dashboard.chip_subscription": "Subscription",
   "dashboard.sub_authenticated": "Authenticated",
   "dashboard.sub_not_authenticated": "Not authenticated",
-  "chat.session_tokens": "Session: {input} in · {output} out"
+  "chat.session_tokens": "Session: {input} in · {output} out",
+  "pool.stats_ram": "{size} 内存",
+  "pool.stats_requests": "{n} 个请求",
+  "pool.stats_models": "模型：{models}",
+  "pool.stats_pending": "等待统计数据..."
 }

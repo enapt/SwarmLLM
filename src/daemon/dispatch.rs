@@ -783,6 +783,7 @@ pub(crate) async fn dispatch_network_messages(
                                             crate::types::PoolMessage::CreditForward(fwd) => fwd.from_node_id == *sender,
                                             crate::types::PoolMessage::MemberLeft { node_id, .. } => node_id == sender,
                                             crate::types::PoolMessage::JoinRequest { requester, .. } => requester == sender,
+                                            crate::types::PoolMessage::DeviceStatsReport { node_id, .. } => node_id == sender,
                                             // Invitation/Acceptance/Removal are verified by crypto sigs in pool manager
                                             _ => true,
                                         };
@@ -834,6 +835,14 @@ pub(crate) async fn dispatch_network_messages(
                                                     Some(crate::pool::types::PoolCommand::InboundJoinRequest {
                                                         code_hash,
                                                         requester,
+                                                    })
+                                                }
+                                                crate::types::PoolMessage::DeviceStatsReport { pool_id, node_id, device_name, stats } => {
+                                                    Some(crate::pool::types::PoolCommand::InboundDeviceStatsReport {
+                                                        pool_id,
+                                                        node_id,
+                                                        device_name,
+                                                        stats,
                                                     })
                                                 }
                                             };

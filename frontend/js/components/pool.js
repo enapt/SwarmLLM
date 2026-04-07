@@ -231,11 +231,27 @@
         if (statsEl && m.stats) {
           var parts = [];
           if (m.stats.vram_mb > 0) parts.push(I18n.t('pool.stats_vram', { size: U.formatMB(m.stats.vram_mb) }));
+          if (m.stats.ram_mb > 0) parts.push(I18n.t('pool.stats_ram', { size: U.formatMB(m.stats.ram_mb) }));
           if (m.stats.shards_hosted > 0) parts.push(I18n.t('pool.stats_shards', { n: m.stats.shards_hosted }));
+          if (m.stats.requests_served > 0) parts.push(I18n.t('pool.stats_requests', { n: m.stats.requests_served }));
           if (m.stats.forwards_served > 0) parts.push(I18n.t('pool.stats_forwards', { n: m.stats.forwards_served }));
           if (m.stats.uptime_secs > 0) parts.push(U.formatUptime(m.stats.uptime_secs));
-          statsEl.textContent = parts.join(' · ') || '';
+          statsEl.textContent = parts.join(' \u00B7 ') || '';
           statsEl.style.display = parts.length > 0 ? '' : 'none';
+
+          // Show models hosted in a sub-line
+          if (m.stats.models_hosted && m.stats.models_hosted.length > 0) {
+            var modelsLine = document.createElement('div');
+            modelsLine.className = 'pool-member-models text-muted';
+            modelsLine.style.cssText = 'font-size:0.78em;margin-top:2px;opacity:0.8;';
+            modelsLine.textContent = I18n.t('pool.stats_models', { models: m.stats.models_hosted.join(', ') });
+            statsEl.parentElement.insertBefore(modelsLine, statsEl.nextSibling);
+          }
+        } else if (statsEl) {
+          statsEl.textContent = I18n.t('pool.stats_pending');
+          statsEl.style.display = '';
+          statsEl.style.opacity = '0.5';
+          statsEl.style.fontStyle = 'italic';
         }
 
         // Icon

@@ -940,5 +940,9 @@
   "dashboard.chip_subscription": "Subscription",
   "dashboard.sub_authenticated": "Authenticated",
   "dashboard.sub_not_authenticated": "Not authenticated",
-  "chat.session_tokens": "Session: {input} in · {output} out"
+  "chat.session_tokens": "Session: {input} in · {output} out",
+  "pool.stats_ram": "{size} RAM",
+  "pool.stats_requests": "{n} förfrågningar",
+  "pool.stats_models": "Modeller: {models}",
+  "pool.stats_pending": "Väntar på statistik..."
 }

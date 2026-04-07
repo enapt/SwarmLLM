@@ -940,5 +940,9 @@
   "dashboard.chip_subscription": "Subscription",
   "dashboard.sub_authenticated": "Authenticated",
   "dashboard.sub_not_authenticated": "Not authenticated",
-  "chat.session_tokens": "Session: {input} in · {output} out"
+  "chat.session_tokens": "Session: {input} in · {output} out",
+  "pool.stats_ram": "{size} ОЗП",
+  "pool.stats_requests": "{n} запитів",
+  "pool.stats_models": "Моделі: {models}",
+  "pool.stats_pending": "Очікування статистики..."
 }

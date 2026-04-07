@@ -940,5 +940,9 @@
   "dashboard.chip_subscription": "Subscription",
   "dashboard.sub_authenticated": "Authenticated",
   "dashboard.sub_not_authenticated": "Not authenticated",
-  "chat.session_tokens": "Session: {input} in · {output} out"
+  "chat.session_tokens": "Session: {input} in · {output} out",
+  "pool.stats_ram": "{size} ذاكرة عشوائية",
+  "pool.stats_requests": "{n} طلبات",
+  "pool.stats_models": "النماذج: {models}",
+  "pool.stats_pending": "في انتظار الإحصائيات..."
 }

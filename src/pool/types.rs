@@ -139,6 +139,13 @@ pub enum PoolCommand {
     GetLeaderboard {
         reply: tokio::sync::oneshot::Sender<Vec<LeaderboardEntry>>,
     },
+    /// Received device stats report from a pool member.
+    InboundDeviceStatsReport {
+        pool_id: crate::types::NodeId,
+        node_id: crate::types::NodeId,
+        device_name: Option<String>,
+        stats: crate::types::PoolDeviceStats,
+    },
 }
 
 /// Sliding-window rate limiter: max `limit` events per `window`.

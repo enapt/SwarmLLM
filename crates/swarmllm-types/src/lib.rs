@@ -1193,6 +1193,13 @@ pub enum PoolMessage {
         /// Ed25519 signature over BLAKE3("pool_join_request_v1" || code_hash || requester)
         signature: Vec<u8>,
     },
+    /// Periodic stats + nickname report from a pool member to the leader.
+    DeviceStatsReport {
+        pool_id: NodeId,
+        node_id: NodeId,
+        device_name: Option<String>,
+        stats: PoolDeviceStats,
+    },
 }
 
 // ---- Network Commands ----
