@@ -146,7 +146,11 @@ impl AutoShardManager {
 
         // Download from HuggingFace only if no peers hold the shard
         // In offline mode, skip automatic HF downloads (user must trigger manually)
-        let offline_mode = self.shared_state.config.pool.offline_mode;
+        let offline_mode = self
+            .shared_state
+            .credits
+            .offline_mode
+            .load(std::sync::atomic::Ordering::Relaxed);
         if !has_peer_holders && !offline_mode {
             if let Some(hf_source) = self.shared_state.models.hf_sources.get(&candidate.model_id) {
                 // Create progress entry with per-shard tracking for the specific shard

@@ -217,6 +217,8 @@ pub struct CreditPool {
     pub peer_credit_balances: DashMap<NodeId, i64>,
     /// Private mode: restrict inference + auto-manage to pool members (+ optional LAN peers).
     pub private_mode: std::sync::atomic::AtomicBool,
+    /// Offline mode: no internet bootstrap, mDNS-only, no automatic HF downloads.
+    pub offline_mode: std::sync::atomic::AtomicBool,
 }
 
 /// Model management: shard acquisition, auto-manage, trust gating, pruning.
@@ -720,6 +722,12 @@ impl SharedState {
                         .ok()
                         .flatten()
                         .unwrap_or(config.pool.private_mode)
+                }),
+                offline_mode: std::sync::atomic::AtomicBool::new({
+                    db.get_json::<bool>("pool_state", "offline_mode")
+                        .ok()
+                        .flatten()
+                        .unwrap_or(config.pool.offline_mode)
                 }),
             },
             models: ModelMgmt {

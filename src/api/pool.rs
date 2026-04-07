@@ -596,7 +596,7 @@ pub async fn get_private_mode(State(state): State<AppState>) -> Json<serde_json:
     Json(serde_json::json!({
         "enabled": enabled,
         "allow_lan": allow_lan,
-        "offline_mode": state.shared_state.config.pool.offline_mode,
+        "offline_mode": state.shared_state.credits.offline_mode.load(std::sync::atomic::Ordering::Relaxed),
         "coverage": coverage,
     }))
 }
@@ -604,9 +604,11 @@ pub async fn get_private_mode(State(state): State<AppState>) -> Json<serde_json:
 #[derive(Deserialize)]
 pub struct SetPrivateModeRequest {
     pub enabled: bool,
+    #[serde(default)]
+    pub offline_mode: Option<bool>,
 }
 
-/// PUT /api/pool/private-mode — Toggle private mode on/off.
+/// PUT /api/pool/private-mode — Toggle private mode and/or offline mode.
 pub async fn set_private_mode(
     State(state): State<AppState>,
     Json(body): Json<SetPrivateModeRequest>,
@@ -626,34 +628,64 @@ pub async fn set_private_mode(
         .credits
         .private_mode
         .store(body.enabled, std::sync::atomic::Ordering::Relaxed);
-
-    // Persist to DB
     let _ = state
         .shared_state
         .db
         .put_json("pool_state", "private_mode", &body.enabled);
 
+    // Offline mode toggle (optional)
+    if let Some(offline) = body.offline_mode {
+        state
+            .shared_state
+            .credits
+            .offline_mode
+            .store(offline, std::sync::atomic::Ordering::Relaxed);
+        let _ = state
+            .shared_state
+            .db
+            .put_json("pool_state", "offline_mode", &offline);
+    }
+    let offline = state
+        .shared_state
+        .credits
+        .offline_mode
+        .load(std::sync::atomic::Ordering::Relaxed);
+
     // Emit activity event so all WS clients update
+    let msg = if body.enabled && offline {
+        "Offline private mode enabled — air-gapped, LAN only".to_string()
+    } else if body.enabled {
+        "Private mode enabled — inference restricted to your devices".to_string()
+    } else {
+        "Private mode disabled — using full swarm network".to_string()
+    };
     state.shared_state.emit_activity(
-        crate::daemon::state::ActivityEvent::new(
-            "pool",
-            "private_mode_changed",
-            if body.enabled {
-                "Private mode enabled — inference restricted to your devices".to_string()
-            } else {
-                "Private mode disabled — using full swarm network".to_string()
-            },
-        )
-        .with_toast(if body.enabled { "info" } else { "success" }, 5000),
+        crate::daemon::state::ActivityEvent::new("pool", "private_mode_changed", msg)
+            .with_toast(if body.enabled { "info" } else { "success" }, 5000),
     );
 
-    tracing::info!(enabled = body.enabled, "Private mode toggled");
+    // Signal dashboard to refresh models (availability changes in private mode)
+    let _ = state
+        .shared_state
+        .events
+        .dashboard_tx
+        .send(crate::daemon::state::DashboardSignal::ModelsChanged);
 
-    // Return coverage summary so UI can show trade-offs
+    // Trigger auto-manage re-evaluation so shard availability updates immediately
+    state.shared_state.models.auto_manage_notify.notify_one();
+
+    tracing::info!(
+        private_mode = body.enabled,
+        offline_mode = offline,
+        "Private/offline mode toggled"
+    );
+
+    // Return coverage summary so UI can show trade-offs immediately
     let coverage = compute_pool_coverage(&state.shared_state).await;
 
     Ok(Json(serde_json::json!({
         "enabled": body.enabled,
+        "offline_mode": offline,
         "coverage": coverage,
     })))
 }

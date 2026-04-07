@@ -571,16 +571,51 @@
       var checkbox = document.getElementById('pool-private-mode-checkbox');
       if (checkbox) {
         checkbox.addEventListener('change', function () {
-          self.setPrivateMode(this.checked);
+          var cb = this;
+          self.confirmPrivateMode(cb.checked, function () {
+            // Revert checkbox if user cancels
+            cb.checked = self._privateMode;
+          });
         });
       }
       // Header shield button
       var headerBtn = document.getElementById('btn-private-mode-toggle');
       if (headerBtn) {
         headerBtn.addEventListener('click', function () {
-          self.setPrivateMode(!self._privateMode);
+          self.confirmPrivateMode(!self._privateMode);
         });
       }
+    },
+
+    confirmPrivateMode: async function (enabled, onCancel) {
+      // Fetch coverage preview before confirming
+      var coverageText = '';
+      try {
+        var resp = await App.authFetch('/api/pool/coverage');
+        if (resp.ok) {
+          var cov = await resp.json();
+          coverageText = '\n\n' + I18n.t('pool.coverage_summary', {
+            full: cov.fully_covered || 0,
+            partial: cov.partially_covered || 0,
+            none: cov.not_covered || 0
+          });
+          if (cov.est_total_download_mb > 0 && enabled) {
+            coverageText += '\n' + I18n.t('pool.coverage_download_warning', {
+              size: U.formatMB(cov.est_total_download_mb)
+            });
+          }
+        }
+      } catch (e) { /* ignore */ }
+
+      var msg = enabled
+        ? I18n.t('pool.confirm_enable_private') + coverageText
+        : I18n.t('pool.confirm_disable_private');
+
+      if (!confirm(msg)) {
+        if (onCancel) onCancel();
+        return;
+      }
+      this.setPrivateMode(enabled);
     },
 
     setPrivateMode: async function (enabled) {

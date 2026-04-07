@@ -385,7 +385,7 @@ impl NetworkManager {
                             pending = self.pending_tensor_outbound.len(),
                             "Skipping discovery tick — tensor forwards pending"
                         );
-                    } else if self.shared_state.config.pool.offline_mode {
+                    } else if self.shared_state.credits.offline_mode.load(std::sync::atomic::Ordering::Relaxed) {
                         // Offline mode: skip bootstrap/cache redials, rely on mDNS only
                     } else {
                         tracing::debug!("Discovery tick");
