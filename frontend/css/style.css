@@ -3103,6 +3103,30 @@ select.cloud-model-sort { flex: 0 0 88px; width: 88px; padding: 6px 6px; font-si
 /* (nav-tabs/tab-bar removed — unused Bootstrap-style selectors) */
 
 
+/* ---- Toggle switch ---- */
+.toggle-switch {
+  position: relative; display: inline-block; width: 36px; height: 20px; cursor: pointer; vertical-align: middle;
+}
+.toggle-switch input { opacity: 0; width: 0; height: 0; }
+.toggle-slider {
+  position: absolute; top: 0; left: 0; right: 0; bottom: 0;
+  background: var(--border); border-radius: 10px; transition: background 0.2s;
+}
+.toggle-slider::before {
+  content: ''; position: absolute; width: 16px; height: 16px; left: 2px; bottom: 2px;
+  background: var(--text); border-radius: 50%; transition: transform 0.2s;
+}
+.toggle-switch input:checked + .toggle-slider { background: var(--green); }
+.toggle-switch input:checked + .toggle-slider::before { transform: translateX(16px); }
+
+/* ---- Coverage bar ---- */
+.coverage-bar {
+  height: 6px; border-radius: 3px; background: var(--border); overflow: hidden; flex: 1;
+}
+.coverage-bar-fill {
+  height: 100%; border-radius: 3px; transition: width 0.3s;
+}
+
 /* ---- Reduced motion preference ---- */
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {

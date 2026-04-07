@@ -79,6 +79,8 @@
 
       // Check pool state on init to show slave banner
       this.checkSlaveBanner();
+      // Wire private mode toggles
+      this.initPrivateMode();
     },
 
     load: async function () {
@@ -98,8 +100,13 @@
 
         if (data.in_pool) {
           this._isOwner = data.pool_id === this._myNodeId;
+          this._privateMode = !!data.private_mode;
           this.renderActivePool(data);
+          this.updatePrivateModeUI();
+          if (this._privateMode) this.loadCoverage();
         } else {
+          this._privateMode = false;
+          this.updatePrivateModeUI();
           this.renderNoPool();
         }
         // Update slave banner on dashboard
@@ -552,6 +559,153 @@
       } else {
         banner.classList.remove('visible');
       }
+    },
+
+    // ---- Private Mode ----
+
+    _privateMode: false,
+
+    initPrivateMode: function () {
+      var self = this;
+      // Pool section toggle
+      var checkbox = document.getElementById('pool-private-mode-checkbox');
+      if (checkbox) {
+        checkbox.addEventListener('change', function () {
+          self.setPrivateMode(this.checked);
+        });
+      }
+      // Header shield button
+      var headerBtn = document.getElementById('btn-private-mode-toggle');
+      if (headerBtn) {
+        headerBtn.addEventListener('click', function () {
+          self.setPrivateMode(!self._privateMode);
+        });
+      }
+    },
+
+    setPrivateMode: async function (enabled) {
+      try {
+        var resp = await App.authFetch('/api/pool/private-mode', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ enabled: enabled })
+        });
+        if (!resp.ok) {
+          var err = await resp.json().catch(function () { return {}; });
+          App.notifications.showToast(
+            (err.error && err.error.message) || I18n.t('pool.private_mode_error'),
+            'error'
+          );
+          return;
+        }
+        var data = await resp.json();
+        this._privateMode = data.enabled;
+        this.updatePrivateModeUI();
+        if (data.coverage) this.renderCoverage(data.coverage);
+        App.notifications.showToast(
+          data.enabled ? I18n.t('pool.private_mode_enabled') : I18n.t('pool.private_mode_disabled'),
+          data.enabled ? 'info' : 'success'
+        );
+      } catch (e) {
+        App.notifications.showToast(I18n.t('pool.private_mode_error'), 'error');
+      }
+    },
+
+    updatePrivateModeUI: function () {
+      var enabled = this._privateMode;
+      // Pool section toggle
+      var checkbox = document.getElementById('pool-private-mode-checkbox');
+      if (checkbox) checkbox.checked = enabled;
+      var label = document.getElementById('pool-private-mode-label');
+      if (label) {
+        label.textContent = enabled ? I18n.t('pool.private_mode_on') : I18n.t('pool.private_mode_off');
+        label.style.color = enabled ? 'var(--green)' : '';
+      }
+      // Header shield
+      var icon = document.getElementById('private-mode-icon');
+      if (icon) {
+        icon.style.color = enabled ? 'var(--green)' : '';
+        icon.style.fill = enabled ? 'var(--green)' : 'none';
+      }
+      var badge = document.getElementById('private-mode-badge');
+      if (badge) {
+        if (enabled) badge.classList.remove('hidden');
+        else badge.classList.add('hidden');
+      }
+      // Coverage panel
+      var coveragePanel = document.getElementById('pool-coverage-panel');
+      if (coveragePanel) coveragePanel.style.display = enabled ? '' : 'none';
+    },
+
+    loadCoverage: async function () {
+      if (!this._privateMode) return;
+      try {
+        var resp = await App.authFetch('/api/pool/coverage');
+        if (!resp.ok) return;
+        var data = await resp.json();
+        this.renderCoverage(data);
+      } catch (e) { /* ignore */ }
+    },
+
+    renderCoverage: function (data) {
+      var list = document.getElementById('pool-coverage-list');
+      var summary = document.getElementById('pool-coverage-summary');
+      if (!list) return;
+
+      // Summary
+      if (summary) {
+        summary.textContent = I18n.t('pool.coverage_summary', {
+          full: data.fully_covered || 0,
+          partial: data.partially_covered || 0,
+          none: data.not_covered || 0
+        });
+      }
+
+      list.innerHTML = '';
+      var models = data.models || [];
+      if (models.length === 0) {
+        list.innerHTML = '<div class="text-muted" style="padding:8px">' +
+          U.escapeHtml(I18n.t('pool.no_models_coverage')) + '</div>';
+        return;
+      }
+
+      // Sort: fully covered first, then by coverage desc
+      models.sort(function (a, b) {
+        return b.coverage_pct - a.coverage_pct;
+      });
+
+      models.forEach(function (m) {
+        var row = document.createElement('div');
+        row.style.cssText = 'display:flex;align-items:center;gap:10px;padding:6px 0;border-bottom:1px solid var(--border)';
+
+        var barColor = m.coverage_pct === 100 ? 'var(--green)'
+          : m.coverage_pct > 0 ? 'var(--orange)' : 'var(--red)';
+
+        var statusIcon = m.coverage_pct === 100 ? '\u2705'
+          : m.coverage_pct > 0 ? '\u26A0\uFE0F' : '\u274C';
+
+        row.innerHTML =
+          '<span style="font-size:0.9rem;width:20px;text-align:center">' + statusIcon + '</span>' +
+          '<div style="flex:1;min-width:0">' +
+            '<div style="font-size:0.82rem;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' +
+              U.escapeHtml(m.name || m.id) + '</div>' +
+            '<div style="display:flex;align-items:center;gap:8px;margin-top:2px">' +
+              '<div class="coverage-bar" style="flex:1">' +
+                '<div class="coverage-bar-fill" style="width:' + m.coverage_pct + '%;background:' + barColor + '"></div>' +
+              '</div>' +
+              '<span class="text-muted" style="font-size:0.7rem;white-space:nowrap">' +
+                m.pool_shards + '/' + m.total_shards +
+              '</span>' +
+            '</div>' +
+          '</div>' +
+          (m.est_download_mb > 0
+            ? '<span class="text-muted" style="font-size:0.7rem;white-space:nowrap">' +
+                U.formatMB(m.est_download_mb) + ' ' + I18n.t('pool.coverage_needed') +
+              '</span>'
+            : '');
+
+        list.appendChild(row);
+      });
     }
   };
 })();

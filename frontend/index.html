@@ -571,6 +571,10 @@
           <div class="text-muted" style="font-size:0.68rem;margin-top:6px;border-top:1px solid var(--border);padding-top:6px" data-i18n="network.not_devices">This connects you to the SwarmLLM network. To link your own devices, use the My Devices tab instead.</div>
         </div>
       </div>
+      <button class="btn btn-ghost btn-sm" id="btn-private-mode-toggle" data-i18n-title="pool.private_mode_tooltip" title="Private Mode — restrict inference to your devices" aria-label="Toggle private mode" style="position:relative">
+        <svg id="private-mode-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0110 0v4"/></svg>
+        <span id="private-mode-badge" class="hidden" style="position:absolute;top:0;right:0;width:8px;height:8px;background:var(--green);border-radius:50%;border:2px solid var(--bg)"></span>
+      </button>
       <button class="btn btn-ghost btn-sm" id="btn-open-settings" data-i18n-title="settings.title" title="Settings" data-i18n-aria-label="settings.title" aria-label="Settings">&#9881;</button>
       <div class="header-lang-picker" style="position:relative">
         <button class="btn btn-ghost btn-sm" id="btn-lang-picker" data-i18n-title="settings.language_label" title="Language" data-i18n-aria-label="settings.language_label" aria-label="Language"><img src="/static/flags/gb.svg" alt="EN" class="lang-flag-img"></button>
@@ -1113,7 +1117,12 @@
                   <h2 style="margin:0" id="pool-name">My Devices</h2>
                   <span class="text-muted" style="font-size:0.8rem" id="pool-role-label"></span>
                 </div>
-                <div style="display:flex;gap:8px">
+                <div style="display:flex;gap:8px;align-items:center">
+                  <label class="toggle-switch" id="pool-private-mode-switch" style="margin-right:4px" data-i18n-title="pool.private_mode_tooltip" title="Private Mode">
+                    <input type="checkbox" id="pool-private-mode-checkbox">
+                    <span class="toggle-slider"></span>
+                  </label>
+                  <span id="pool-private-mode-label" class="text-muted" style="font-size:0.75rem;white-space:nowrap" data-i18n="pool.private_mode_off">Private Mode</span>
                   <button class="btn btn-sm btn-outline" id="pool-invite-code-btn" data-i18n="pool.generate_code" style="display:none">Generate Invite Code</button>
                   <button class="btn btn-sm btn-ghost" id="pool-leave-btn" style="color:var(--red)" data-i18n="pool.leave">Leave Pool</button>
                 </div>
@@ -1189,6 +1198,17 @@
               </div>
               <div class="panel-body" id="pool-members-list">
                 <div class="empty-state text-muted" data-i18n="pool.no_members">No devices linked yet. Generate an invite code to add your other machines.</div>
+              </div>
+            </div>
+
+            <!-- Pool coverage (shown when private mode is on) -->
+            <div id="pool-coverage-panel" class="panel mt-1" style="display:none">
+              <div class="panel-header" data-collapse="pool-coverage-body">
+                <h3 style="margin:0" data-i18n="pool.model_coverage">Model Coverage</h3>
+                <span id="pool-coverage-summary" class="text-muted" style="font-size:0.78rem"></span>
+              </div>
+              <div class="panel-body" id="pool-coverage-body">
+                <div id="pool-coverage-list"></div>
               </div>
             </div>
           </div>
