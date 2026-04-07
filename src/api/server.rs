@@ -287,6 +287,12 @@ pub fn build_router(state: AppState) -> Router {
             get(pool::get_private_mode).put(pool::set_private_mode),
         )
         .route("/api/pool/coverage", get(pool::pool_coverage))
+        // Shard pinning
+        .route("/api/pool/pins", get(pool::pool_pins))
+        .route(
+            "/api/pool/pin",
+            post(pool::pool_add_pin).delete(pool::pool_remove_pin),
+        )
         // Pool credit rates
         .route(
             "/api/admin/pools/:id/rates",

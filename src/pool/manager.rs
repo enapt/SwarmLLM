@@ -297,6 +297,7 @@ impl PoolManager {
             owner_signature: sig,
             total_lifetime_credits: 0,
             member_credit_split_pct: 0,
+            shard_pins: Vec::new(),
         };
 
         // Persist and update shared state
@@ -453,6 +454,7 @@ impl PoolManager {
             owner_signature: invitation.owner_signature.clone(),
             total_lifetime_credits: 0,
             member_credit_split_pct: 0,
+            shard_pins: Vec::new(),
         };
 
         self.persist_pool_state(&state)?;

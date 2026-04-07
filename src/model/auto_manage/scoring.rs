@@ -71,6 +71,16 @@ impl AutoShardManager {
         let pool_size = crate::pool::scope::effective_pool_size(&self.shared_state);
         // Allowed node set for private mode holder filtering (None = unrestricted)
         let allowed_set = crate::pool::scope::allowed_node_set(&self.shared_state);
+        // Shard pins from pool state (for scoring bonus)
+        let shard_pins: Vec<crate::types::ShardPin> = {
+            if let Ok(ps) = self.shared_state.credits.pool_state.try_read() {
+                ps.as_ref()
+                    .map(|s| s.shard_pins.clone())
+                    .unwrap_or_default()
+            } else {
+                Vec::new()
+            }
+        };
 
         // Build consistent hash ring ONCE for the entire evaluation cycle.
         // Each node gets VIRTUAL_SLOTS positions. Ring is sorted for binary search.
@@ -441,6 +451,40 @@ impl AutoShardManager {
 
                 let configured_bonus = if in_configured_range { 100.0 } else { 1.0 };
 
+                // Shard pinning bonus: if this shard is pinned to us, massive bonus.
+                // If pinned to another node, score 0 (skip it).
+                let pin_bonus = {
+                    let pins_for_model: Vec<_> = shard_pins
+                        .iter()
+                        .filter(|p| p.model_id == manifest.id.0)
+                        .collect();
+                    if pins_for_model.is_empty() {
+                        1.0 // No pins for this model
+                    } else {
+                        let pinned_to_us = pins_for_model.iter().any(|p| {
+                            p.target_node_id == *local_node_id
+                                && (p.shard_indices.is_empty()
+                                    || p.shard_indices.contains(&shard.index))
+                        });
+                        let pinned_to_other = pins_for_model.iter().any(|p| {
+                            p.target_node_id != *local_node_id
+                                && (p.shard_indices.is_empty()
+                                    || p.shard_indices.contains(&shard.index))
+                        });
+                        if pinned_to_us {
+                            1000.0 // Massive bonus — download this shard
+                        } else if pinned_to_other {
+                            0.0 // Pinned elsewhere — don't download
+                        } else {
+                            1.0 // Not pinned
+                        }
+                    }
+                };
+
+                if pin_bonus == 0.0 {
+                    continue; // Skip shards pinned to other nodes
+                }
+
                 // Node-specific jitter (0.0-0.1) so nodes with identical views
                 // of the network don't all pick the same shard to download.
                 // BLAKE3(node_id || model_id || shard_index) -> deterministic per-node tiebreaker.
@@ -456,6 +500,7 @@ impl AutoShardManager {
                 let score = model_popularity
                     * regional_rarity
                     * configured_bonus
+                    * pin_bonus
                     * vram_fitness
                     * spread_bonus
                     * source_bonus

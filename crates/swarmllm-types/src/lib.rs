@@ -110,6 +110,21 @@ pub struct PoolState {
     /// The remainder is forwarded to the owner. Default: 0 (all to owner).
     #[serde(default)]
     pub member_credit_split_pct: u8,
+    /// Shard pins: owner assigns specific models/shards to specific devices.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub shard_pins: Vec<ShardPin>,
+}
+
+/// A shard pinning assignment: a model (or specific shards) pinned to a target device.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ShardPin {
+    /// Model ID to pin.
+    pub model_id: String,
+    /// Specific shard indices to pin, or empty for all shards.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub shard_indices: Vec<u32>,
+    /// Target device NodeId.
+    pub target_node_id: NodeId,
 }
 
 /// Invitation to join a pool.
