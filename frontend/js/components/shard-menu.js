@@ -35,8 +35,6 @@
       this.currentIndex = shardIndex;
       this.currentState = shardState;
       this.currentLocked = !!isLocked;
-      this.currentInVram = !!isInVram;
-
       var header = document.getElementById('shard-ctx-header');
       var statusEl = document.getElementById('shard-ctx-status');
       var btn = document.getElementById('shard-ctx-action');

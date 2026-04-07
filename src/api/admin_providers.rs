@@ -16,6 +16,29 @@ const PROVIDER_HEALTH_TIMEOUT_SECS: u64 = 5;
 /// Connect timeout for lightweight model health checks.
 const PROVIDER_HEALTH_CONNECT_SECS: u64 = 3;
 
+static LIST_CLIENT: std::sync::LazyLock<reqwest::Client> = std::sync::LazyLock::new(|| {
+    reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(PROVIDER_LIST_TIMEOUT_SECS))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new())
+});
+
+static PROBE_CLIENT: std::sync::LazyLock<reqwest::Client> = std::sync::LazyLock::new(|| {
+    reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(PROVIDER_PROBE_TIMEOUT_SECS))
+        .connect_timeout(std::time::Duration::from_secs(PROVIDER_PROBE_CONNECT_SECS))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new())
+});
+
+static HEALTH_CLIENT: std::sync::LazyLock<reqwest::Client> = std::sync::LazyLock::new(|| {
+    reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(PROVIDER_HEALTH_TIMEOUT_SECS))
+        .connect_timeout(std::time::Duration::from_secs(PROVIDER_HEALTH_CONNECT_SECS))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new())
+});
+
 // ── Cloud Provider Management ──
 
 /// GET /api/admin/providers — List configured provider status (no keys exposed).
@@ -443,10 +466,7 @@ async fn fetch_provider_models_inner(state: &AppState) -> Vec<serde_json::Value>
     drop(config);
 
     // Fetch models from all OpenAI-compatible providers in parallel
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(PROVIDER_LIST_TIMEOUT_SECS))
-        .build()
-        .unwrap_or_else(|_| reqwest::Client::new());
+    let client = LIST_CLIENT.clone();
 
     let fetches =
         fetch_tasks
@@ -601,11 +621,7 @@ pub async fn provider_health(State(state): State<AppState>) -> Json<serde_json::
 
     drop(config);
 
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(PROVIDER_PROBE_TIMEOUT_SECS))
-        .connect_timeout(std::time::Duration::from_secs(PROVIDER_PROBE_CONNECT_SECS))
-        .build()
-        .unwrap_or_else(|_| reqwest::Client::new());
+    let client = PROBE_CLIENT.clone();
 
     let probes_futures = probes
         .into_iter()
@@ -753,11 +769,7 @@ pub async fn provider_model_status(
     }
     drop(config);
 
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(PROVIDER_HEALTH_TIMEOUT_SECS))
-        .connect_timeout(std::time::Duration::from_secs(PROVIDER_HEALTH_CONNECT_SECS))
-        .build()
-        .unwrap_or_else(|_| reqwest::Client::new());
+    let client = HEALTH_CLIENT.clone();
 
     let futures = probes.into_iter().map(|(model_id, base_url, api_key)| {
         let client = client.clone();

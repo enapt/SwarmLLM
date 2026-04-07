@@ -80,7 +80,7 @@
       await U.submitCodeForm('/api/admin/join-network', code, status, {
         emptyMsg: I18n.t('setup.paste_code_first'),
         failMsg: I18n.t('setup.failed_connect'),
-        errorMsg: I18n.t('setup.connection_error', { error: 'network error' }),
+        errorMsg: I18n.t('setup.connection_error', { error: I18n.t('common.request_failed') }),
         onSuccess: function() {
           App.setup._joinedPeer = true;
           document.getElementById('setup-invite-code').value = '';
@@ -179,7 +179,7 @@
           return;
         }
       } catch (e) {
-        App.ui.showBanner('error', I18n.t('setup.failed_save_error', { error: e.message || 'network error' }));
+        App.ui.showBanner('error', I18n.t('setup.failed_save_error', { error: e.message || I18n.t('common.request_failed') }));
         return;
       }
       var nick = (document.getElementById('setup-nickname').value || '').trim();

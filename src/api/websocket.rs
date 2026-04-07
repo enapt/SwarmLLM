@@ -86,7 +86,7 @@ async fn handle_socket(socket: WebSocket, shared_state: Arc<SharedState>) {
     }
     // RAII guard ensures decrement on panic or any exit path
     let _ws_guard = WsCountGuard(shared_state.clone());
-    tracing::debug!("DIAG: websocket client connected");
+    tracing::debug!(subsystem = "websocket", "DIAG: client connected");
     let (mut sender, mut receiver) = socket.split();
 
     // Track last pong timestamp for dead connection detection
@@ -226,15 +226,15 @@ async fn handle_socket(socket: WebSocket, shared_state: Arc<SharedState>) {
 
     tokio::select! {
         _ = &mut push_task => {
-            tracing::debug!("DIAG: websocket push_task exited first");
+            tracing::debug!(subsystem = "websocket", "DIAG: push_task exited first");
         }
         _ = recv_loop => {
             push_task.abort();
-            tracing::debug!("DIAG: websocket receiver loop exited first");
+            tracing::debug!(subsystem = "websocket", "DIAG: receiver loop exited first");
         }
     }
     // _ws_guard drop handles decrement
-    tracing::debug!("DIAG: websocket client disconnected");
+    tracing::debug!(subsystem = "websocket", "DIAG: client disconnected");
 }
 
 /// Build a `peer_list` WS message with the current peer registry snapshot.

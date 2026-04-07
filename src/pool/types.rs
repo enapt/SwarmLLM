@@ -133,9 +133,6 @@ pub enum PoolCommand {
     GetInvitations {
         reply: tokio::sync::oneshot::Sender<Vec<PoolInvitation>>,
     },
-    GetMembership {
-        reply: tokio::sync::oneshot::Sender<Option<PoolMembership>>,
-    },
     GetLeaderboard {
         reply: tokio::sync::oneshot::Sender<Vec<LeaderboardEntry>>,
     },

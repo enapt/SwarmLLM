@@ -211,7 +211,7 @@ fn ensure_model_loaded(
                 let data_models = shard_store.models_dir();
                 let canonical = p.canonicalize().unwrap_or_else(|_| p.clone());
                 if !canonical.starts_with(&data_models) {
-                    return Err(SwarmError::Internal(
+                    return Err(SwarmError::Validation(
                         "source_path outside data directory".into(),
                     ));
                 }

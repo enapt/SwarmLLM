@@ -72,7 +72,7 @@
           pendingMsg: I18n.t('pool.linking'),
           successMsg: I18n.t('pool.link_sent'),
           failMsg: I18n.t('pool.join_failed'),
-          errorMsg: I18n.t('pool.failed_generic', { error: 'network error' }),
+          errorMsg: I18n.t('pool.failed_generic', { error: I18n.t('common.request_failed') }),
           onSuccess: function() { if (input) input.value = ''; }
         });
       });

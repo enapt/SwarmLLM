@@ -225,14 +225,6 @@ impl PoolManager {
                     self.pending_invitations.values().cloned().collect();
                 let _ = reply.send(invitations);
             }
-            PoolCommand::GetMembership { reply } => {
-                let state = self.shared_state.credits.pool_state.read().await;
-                let my_id = self.shared_state.identity.node_id();
-                let membership = state
-                    .as_ref()
-                    .and_then(|s| s.members.iter().find(|m| m.node_id == *my_id).cloned());
-                let _ = reply.send(membership);
-            }
             PoolCommand::GetLeaderboard { reply } => {
                 let leaderboard = self.build_leaderboard().await;
                 let _ = reply.send(leaderboard);

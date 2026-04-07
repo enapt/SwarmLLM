@@ -7,6 +7,23 @@ use tokio::sync::{watch, RwLock};
 use crate::config::UpdateConfig;
 use crate::error::SwarmError;
 
+static UPDATE_CHECK_CLIENT: std::sync::LazyLock<reqwest::Client> = std::sync::LazyLock::new(|| {
+    reqwest::Client::builder()
+        .user_agent(concat!("SwarmLLM/", env!("CARGO_PKG_VERSION")))
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new())
+});
+
+static UPDATE_DOWNLOAD_CLIENT: std::sync::LazyLock<reqwest::Client> =
+    std::sync::LazyLock::new(|| {
+        reqwest::Client::builder()
+            .user_agent(concat!("SwarmLLM/", env!("CARGO_PKG_VERSION")))
+            .timeout(std::time::Duration::from_secs(300))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new())
+    });
+
 /// Information about an available update.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct UpdateInfo {
@@ -81,13 +98,7 @@ impl UpdateChecker {
         let current = env!("CARGO_PKG_VERSION");
         let url = format!("https://api.github.com/repos/{}/releases/latest", self.repo);
 
-        let client = reqwest::Client::builder()
-            .user_agent(format!("SwarmLLM/{current}"))
-            .timeout(std::time::Duration::from_secs(15))
-            .build()
-            .map_err(|e| SwarmError::Network(format!("HTTP client error: {e}")))?;
-
-        let resp = client
+        let resp = UPDATE_CHECK_CLIENT
             .get(&url)
             .send()
             .await
@@ -143,7 +154,11 @@ impl UpdateChecker {
             .iter()
             .find(|a| a.name == format!("{asset_name}.sha256"))
         {
-            match client.get(&sha_asset.browser_download_url).send().await {
+            match UPDATE_CHECK_CLIENT
+                .get(&sha_asset.browser_download_url)
+                .send()
+                .await
+            {
                 Ok(resp) if resp.status().is_success() => {
                     resp.text().await.ok().map(|t| t.trim().to_string())
                 }
@@ -182,11 +197,7 @@ impl UpdateChecker {
 
         let tmp_path = self.binary_path.with_extension("update.tmp");
 
-        let client = reqwest::Client::builder()
-            .user_agent(format!("SwarmLLM/{}", env!("CARGO_PKG_VERSION")))
-            .timeout(std::time::Duration::from_secs(300))
-            .build()
-            .map_err(|e| SwarmError::Network(format!("HTTP client error: {e}")))?;
+        let client = &*UPDATE_DOWNLOAD_CLIENT;
 
         tracing::info!(
             url = %info.download_url,
