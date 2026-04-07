@@ -1560,7 +1560,10 @@ impl NetworkManager {
                 // prevent epoch desync after reconnection.
                 // Only remove if no new connection has been established
                 // (prevents race where reconnect arrives before close is processed).
-                if !self.swarm.is_connected(&peer_id) {
+                // Keep the session alive if the peer is in an active pipeline —
+                // reconnection will refresh it, and removing it mid-pipeline
+                // causes "seal() failed" on pending TP forwards.
+                if !self.swarm.is_connected(&peer_id) && !in_active_pipeline {
                     self.shared_state.session_manager.remove_session(&node_id);
                 }
 
@@ -1596,7 +1599,20 @@ impl NetworkManager {
                     );
                     tracing::debug!(%peer_id, "Removed disconnected peer from registry");
                 } else {
-                    tracing::debug!(%peer_id, "Keeping peer in registry (active pipeline)");
+                    tracing::info!(%peer_id, "Keeping peer in registry (active pipeline) — scheduling reconnect");
+                    // Active pipeline needs this peer — reconnect immediately.
+                    // Use peer_id_map to find the address, or fall back to closed_addr.
+                    if let Some(addr) = closed_addr.clone() {
+                        let already_queued = self
+                            .pending_redial
+                            .iter()
+                            .any(|(pid, _, _)| *pid == peer_id);
+                        if !already_queued {
+                            let scheduled =
+                                std::time::Instant::now() + std::time::Duration::from_millis(500);
+                            self.pending_redial.push((peer_id, addr, scheduled));
+                        }
+                    }
                 }
             } else {
                 // Peer was never registered (connection died before Identify).
@@ -2695,6 +2711,30 @@ mname.as_deref().unwrap_or(&shard_id.model_id.0),
                         has_session = self.shared_state.session_manager.has_session(&node_id),
                         "DIAG: seal() failed — dropping forward (no plaintext fallback)"
                     );
+                    // Notify the pipeline immediately so it fails fast
+                    // instead of waiting for the AllReduce timeout.
+                    let request_id = forward.request_id;
+                    if let Some((_, channel)) = self.pending_tensor_channels.remove(&request_id) {
+                        let _ = self
+                            .swarm
+                            .behaviour_mut()
+                            .request_response
+                            .send_response(channel, SwarmResponse::Ack);
+                    }
+                    let error_result = crate::types::LayerResult {
+                        request_id,
+                        token_ids: vec![],
+                        finish_reason: Some(crate::types::NetworkFinishReason::Error(
+                            "Encryption session lost — reconnecting".into(),
+                        )),
+                        activations: vec![],
+                        sealed_token_ids: None,
+                    };
+                    if let Some((_, tx)) =
+                        self.shared_state.pending_layer_results.remove(&request_id)
+                    {
+                        let _ = tx.send(error_result);
+                    }
                     return;
                 }
             }
@@ -2930,6 +2970,7 @@ mname.as_deref().unwrap_or(&shard_id.model_id.0),
                 match protocol::decode_layer_forward(payload) {
                     Ok(mut forward) => {
                         let request_id = forward.request_id;
+                        let is_tp = forward.tp_meta.is_some();
                         forward.sender_peer_bytes = Some(peer.to_bytes());
                         let msg = SwarmMessage::LayerForward(forward);
                         if let Err(e) = self.dispatch_authenticated(Some(&peer), msg) {
@@ -2946,6 +2987,12 @@ mname.as_deref().unwrap_or(&shard_id.model_id.0),
                                 .channel_metrics
                                 .network_out
                                 .record_sent();
+                        }
+                        // TP forwards send their response via separate TpAllReduceRequest,
+                        // NOT through the original request_response channel. Return None
+                        // so the caller ACKs immediately instead of storing the channel.
+                        if is_tp {
+                            return None;
                         }
                         Some(request_id)
                     }
@@ -3015,6 +3062,7 @@ mname.as_deref().unwrap_or(&shard_id.model_id.0),
                             {
                                 Ok(plaintext) => {
                                     let request_id = forward.request_id;
+                                    let is_tp = forward.tp_meta.is_some();
                                     forward.activations = plaintext;
                                     forward.sender_peer_bytes = Some(peer.to_bytes());
                                     if let Err(e) = self.dispatch_authenticated(
@@ -3034,6 +3082,10 @@ mname.as_deref().unwrap_or(&shard_id.model_id.0),
                                             .channel_metrics
                                             .network_out
                                             .record_sent();
+                                    }
+                                    // TP forwards respond via TpAllReduceRequest, not this channel
+                                    if is_tp {
+                                        return None;
                                     }
                                     return Some(request_id);
                                 }

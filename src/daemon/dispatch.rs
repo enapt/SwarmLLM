@@ -12,7 +12,9 @@ use super::state::{SharedState, TpAllReduceCollector};
 /// Maximum number of concurrent LayerForward tasks.
 const MAX_CONCURRENT_FORWARDS: usize = 64;
 /// Maximum concurrent forwards per individual peer to prevent single-peer semaphore exhaustion.
-const MAX_FORWARDS_PER_PEER: usize = 8;
+/// Set to 32 to support tensor-parallel inference (24 per-layer TP forwards per token step)
+/// while still preventing a single peer from consuming all semaphore permits.
+const MAX_FORWARDS_PER_PEER: usize = 32;
 const MAX_NICKNAME_REGISTRY: usize = 10_000;
 /// Zstd compression level for tensor wire payloads.
 const ZSTD_COMPRESS_LEVEL: i32 = 3;
