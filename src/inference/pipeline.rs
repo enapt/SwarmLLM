@@ -1877,9 +1877,39 @@ impl PipelineExecutor {
 
         // TP execution: layer-by-layer with AllReduce coordination in main process.
         // Each layer's partial computation is routed to the worker subprocess via
-        // LayerForward with tp_meta set. AllReduce network communication stays here.
+        // LayerForward with tp_meta set. Remote TP peers receive the same LayerForward
+        // over the network and send their partials as TpAllReduceRequests to us (rank 0).
         if let Some(tp_rank) = local_tp_rank {
             // We are in the TP group — per-layer partial computation via subprocess + AllReduce
+
+            // Resolve PeerId bytes for each remote TP peer (needed to send LayerForward)
+            let remote_tp_peers: Vec<(usize, Vec<u8>)> = tp_group
+                .nodes
+                .iter()
+                .enumerate()
+                .filter(|(rank, _)| *rank != tp_rank)
+                .filter_map(|(rank, node_id)| {
+                    self.shared_state
+                        .peer_id_map
+                        .get(node_id)
+                        .map(|r| (rank, r.value().clone()))
+                        .or_else(|| {
+                            self.shared_state
+                                .peer_registry
+                                .get(node_id)
+                                .and_then(|p| p.peer_id_bytes.clone().map(|b| (rank, b)))
+                        })
+                })
+                .collect();
+
+            if remote_tp_peers.len() != tp_size - 1 {
+                return Err(SwarmError::Network(format!(
+                    "Cannot resolve PeerId for all TP peers (got {}, need {})",
+                    remote_tp_peers.len(),
+                    tp_size - 1
+                )));
+            }
+
             let mut current_activations_bytes = activation_bytes.to_vec();
 
             for abs_layer in layer_start..layer_end {
@@ -1887,7 +1917,38 @@ impl PipelineExecutor {
                 // This ensures FFN norm is applied to the full post-attention tensor,
                 // not the partial pre-AllReduce output.
 
-                // Phase 1: AttnOnly — norm → head-sliced attention → partial output
+                // --- Send AttnOnly LayerForward to remote TP peers FIRST (so they start in parallel) ---
+                for (rank, peer_bytes) in &remote_tp_peers {
+                    let remote_forward = crate::types::LayerForward {
+                        request_id,
+                        sequence_num,
+                        index_pos: index_pos as u32,
+                        activations: current_activations_bytes.clone(),
+                        format: crate::types::TensorFormat::FP16,
+                        model_id: model_id.clone(),
+                        layer_range: (layer_start as u32, layer_end as u32),
+                        tp_meta: Some(crate::types::TensorParallelMeta {
+                            tp_rank: *rank as u8,
+                            tp_size: tp_size as u8,
+                            single_layer: abs_layer as u32,
+                            phase: crate::types::TpPhase::AttnOnly,
+                        }),
+                        vision_embeddings: None,
+                        sender_peer_bytes: None,
+                        requester_node_id: None,
+                        pre_embedded: false,
+                        adapter_id: None,
+                    };
+                    let _ = self
+                        .network_tx
+                        .send(NetworkCommand::SendTensor {
+                            target_peer_bytes: peer_bytes.clone(),
+                            forward: remote_forward,
+                        })
+                        .await;
+                }
+
+                // Phase 1: AttnOnly — norm → head-sliced attention → partial output (local)
                 let attn_forward = crate::types::LayerForward {
                     request_id,
                     sequence_num,
@@ -1941,7 +2002,38 @@ impl PipelineExecutor {
                     zstd::decode_all(std::io::Cursor::new(&attn_resp.reduced_data))
                         .map_err(|e| SwarmError::Internal(format!("Decompress attn AR: {e}")))?;
 
-                // Phase 2: FfnOnly — ffn_norm → column-sliced FFN → partial output
+                // --- Send FfnOnly LayerForward to remote TP peers ---
+                for (rank, peer_bytes) in &remote_tp_peers {
+                    let remote_forward = crate::types::LayerForward {
+                        request_id,
+                        sequence_num,
+                        index_pos: index_pos as u32,
+                        activations: post_attn_bytes.clone(),
+                        format: crate::types::TensorFormat::FP16,
+                        model_id: model_id.clone(),
+                        layer_range: (layer_start as u32, layer_end as u32),
+                        tp_meta: Some(crate::types::TensorParallelMeta {
+                            tp_rank: *rank as u8,
+                            tp_size: tp_size as u8,
+                            single_layer: abs_layer as u32,
+                            phase: crate::types::TpPhase::FfnOnly,
+                        }),
+                        vision_embeddings: None,
+                        sender_peer_bytes: None,
+                        requester_node_id: None,
+                        pre_embedded: false,
+                        adapter_id: None,
+                    };
+                    let _ = self
+                        .network_tx
+                        .send(NetworkCommand::SendTensor {
+                            target_peer_bytes: peer_bytes.clone(),
+                            forward: remote_forward,
+                        })
+                        .await;
+                }
+
+                // Phase 2: FfnOnly — ffn_norm → column-sliced FFN → partial output (local)
                 let ffn_forward = crate::types::LayerForward {
                     request_id,
                     sequence_num,

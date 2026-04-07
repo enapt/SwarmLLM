@@ -1468,7 +1468,8 @@ async fn handle_layer_forward(
         entry.value().touch();
     }
 
-    // Capture requester_node_id before moving forward into the process pool
+    // Capture TP metadata and requester_node_id before moving forward into the process pool
+    let tp_meta = forward.tp_meta.clone();
     let requester_node_id = forward.requester_node_id;
 
     // Route forward pass to subprocess via process pool
@@ -1497,8 +1498,64 @@ async fn handle_layer_forward(
         elapsed_ms = forward_elapsed.as_millis() as u64,
         model_id = %model_id,
         layers = format!("[{layer_start}..{layer_end})"),
+        tp = tp_meta.is_some(),
         "DIAG: LayerForward processed via worker subprocess"
     );
+
+    // TP path: send partial as AllReduceRequest to the coordinator (sender) instead of LayerResult
+    if let Some(ref tp) = tp_meta {
+        let layer_idx = match tp.phase {
+            crate::types::TpPhase::AttnOnly => tp.single_layer * 2,
+            crate::types::TpPhase::FfnOnly => tp.single_layer * 2 + 1,
+            crate::types::TpPhase::Full => tp.single_layer,
+        };
+
+        // Compress the partial activations
+        let compressed = match zstd::encode_all(std::io::Cursor::new(&result.activations), 1) {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(error = %e, "Failed to compress TP partial");
+                return;
+            }
+        };
+
+        // Derive shape from the raw activation bytes (FP32: 4 bytes/element)
+        // The shape is [1, seq_len, hidden_dim] but we only need the flat element count
+        // for AllReduce — the coordinator already knows the shape from its own partial.
+        let num_f32 = result.activations.len() / 4;
+        let shape = vec![1, 1, num_f32 as u32];
+
+        let allreduce_req = crate::types::TpAllReduceRequest {
+            request_id,
+            layer_idx,
+            tp_rank: tp.tp_rank as u32,
+            tp_size: tp.tp_size as u32,
+            partial_data: compressed,
+            shape,
+            op: crate::types::AllReduceOp::Sum,
+            sender_peer_bytes: None,
+        };
+
+        // Send to the coordinator (= the node that sent us the LayerForward)
+        if let Err(e) = network_tx
+            .send(crate::types::NetworkCommand::SendAllReduceRequest {
+                target_peer_bytes: sender_peer_bytes,
+                request: allreduce_req,
+            })
+            .await
+        {
+            tracing::warn!(error = %e, "Failed to send TpAllReduceRequest");
+        }
+
+        track_forward_participation(
+            &shared_state,
+            layer_start,
+            layer_end,
+            total_layers,
+            estimated_tokens,
+        );
+        return;
+    }
 
     track_forward_participation(
         &shared_state,
