@@ -380,6 +380,11 @@ impl SessionManager {
             model.clone(),
             "--permission-mode".to_string(),
             permission_mode,
+            // Route permission prompts through stdin/stdout so the frontend can
+            // display approve/deny UI. Without this flag the CLI auto-denies in
+            // non-interactive mode and control_request events are never emitted.
+            "--permission-prompt-tool".to_string(),
+            "stdio".to_string(),
         ];
 
         // Connect SwarmLLM's MCP server so Claude can query other models
@@ -650,6 +655,9 @@ pub struct PermissionRequest {
     pub allow: bool,
     #[serde(default)]
     pub message: Option<String>,
+    /// Optional modified input to pass back when allowing (SDK `updatedInput`).
+    #[serde(default)]
+    pub updated_input: Option<serde_json::Value>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1036,9 +1044,14 @@ pub async fn permission_handler(
         session.stdin_handle()
     };
 
-    // SDK protocol: response envelope wraps request_id + subtype inside .response
+    // SDK protocol: response envelope wraps request_id + subtype inside .response.
+    // When allowing, updatedInput passes through the (possibly modified) tool input.
     let inner = if req.allow {
-        serde_json::json!({ "behavior": "allow" })
+        let mut allow_obj = serde_json::json!({ "behavior": "allow" });
+        if let Some(updated) = &req.updated_input {
+            allow_obj["updatedInput"] = updated.clone();
+        }
+        allow_obj
     } else {
         serde_json::json!({
             "behavior": "deny",

@@ -612,60 +612,166 @@
       App.chat.scrollToBottom();
     },
 
-    // Handle permission request — show approve/deny UI
+    // Build rich detail view for a tool's input
+    _buildToolDetail: function(toolName, input) {
+      var html = '';
+      if (toolName === 'Bash') {
+        var cmd = input.command || '';
+        html += '<pre class="cc-perm-code cc-bash-cmd">$ ' + U.escapeHtml(cmd) + '</pre>';
+        if (input.description) {
+          html += '<div class="cc-perm-desc">' + U.escapeHtml(input.description) + '</div>';
+        }
+      } else if (toolName === 'Edit') {
+        html += '<div class="cc-perm-file">' + U.escapeHtml(input.file_path || '') + '</div>';
+        if (input.old_string || input.new_string) {
+          var old = (input.old_string || '').substring(0, 300);
+          var nw = (input.new_string || '').substring(0, 300);
+          html += '<div class="cc-perm-diff">';
+          if (old) html += '<div class="cc-perm-diff-del">' + U.escapeHtml(old) + '</div>';
+          if (nw) html += '<div class="cc-perm-diff-add">' + U.escapeHtml(nw) + '</div>';
+          html += '</div>';
+        }
+      } else if (toolName === 'Write') {
+        html += '<div class="cc-perm-file">' + U.escapeHtml(input.file_path || '') + '</div>';
+        if (input.content) {
+          var preview = input.content.substring(0, 300);
+          if (input.content.length > 300) preview += '\n...';
+          html += '<pre class="cc-perm-code">' + U.escapeHtml(preview) + '</pre>';
+        }
+      } else if (toolName === 'Read') {
+        html += '<div class="cc-perm-file">' + U.escapeHtml(input.file_path || '') + '</div>';
+      } else if (toolName === 'Glob' || toolName === 'Grep') {
+        if (input.pattern) html += '<div class="cc-perm-file">' + U.escapeHtml(input.pattern) + '</div>';
+        if (input.path) html += '<div class="cc-perm-desc">' + I18n.t('claude_code.perm_in') + ' ' + U.escapeHtml(input.path) + '</div>';
+      } else if (toolName === 'WebFetch') {
+        html += '<div class="cc-perm-file">' + U.escapeHtml(input.url || '') + '</div>';
+      } else if (toolName === 'WebSearch') {
+        html += '<div class="cc-perm-file">' + U.escapeHtml(input.query || '') + '</div>';
+      } else if (toolName === 'AskUserQuestion') {
+        // AskUserQuestion — render the question and options
+        if (input.question) {
+          html += '<div class="cc-perm-desc">' + U.escapeHtml(input.question) + '</div>';
+        }
+      } else {
+        // Generic: show JSON preview
+        var jsonStr = JSON.stringify(input, null, 2);
+        if (jsonStr.length > 300) jsonStr = jsonStr.substring(0, 300) + '\n...';
+        html += '<pre class="cc-perm-code">' + U.escapeHtml(jsonStr) + '</pre>';
+      }
+      return html;
+    },
+
+    // Handle permission request — show prominent approve/deny UI
     _handlePermissionRequest: function(evt, contentEl, ctx) {
       var req = evt.request || {};
       var toolName = req.tool_name || 'Unknown';
       var input = req.input || {};
       var requestId = evt.request_id || '';
       var sessionId = ctx.sessionId || S.currentSessionId || '';
+      var reason = req.decision_reason || '';
 
       var panel = document.createElement('div');
-      panel.className = 'cc-permission-prompt';
+      panel.className = 'cc-permission-prompt cc-perm-waiting';
 
-      var desc = '';
-      if (toolName === 'Bash') desc = input.command || '';
-      else if (toolName === 'Edit') desc = (input.file_path || '') + ': ' + (input.old_string || '').substring(0, 50) + ' → ...';
-      else if (toolName === 'Write') desc = input.file_path || '';
-      else desc = JSON.stringify(input).substring(0, 100);
+      var icon = App.claudeCode._toolIcon(toolName);
+      var detailHtml = App.claudeCode._buildToolDetail(toolName, input);
 
       panel.innerHTML =
-        '<div class="cc-perm-header">' + U.escapeHtml(I18n.t('claude_code.permission_prompt')) + '</div>' +
-        '<div class="cc-perm-tool">' +
-          '<span class="cc-tool-icon">' + App.claudeCode._toolIcon(toolName) + '</span> ' +
-          '<strong>' + U.escapeHtml(toolName) + '</strong>: ' + U.escapeHtml(desc) +
+        '<div class="cc-perm-header">' +
+          '<span class="cc-perm-pulse"></span>' +
+          '<span>' + U.escapeHtml(I18n.t('claude_code.permission_prompt')) + '</span>' +
         '</div>' +
+        '<div class="cc-perm-tool-row">' +
+          '<span class="cc-tool-icon">' + icon + '</span>' +
+          '<strong class="cc-perm-tool-name">' + U.escapeHtml(toolName) + '</strong>' +
+        '</div>' +
+        '<div class="cc-perm-detail">' + detailHtml + '</div>' +
+        (reason ? '<div class="cc-perm-reason">' + U.escapeHtml(reason) + '</div>' : '') +
         '<div class="cc-perm-actions">' +
-          '<button class="btn btn-sm cc-perm-allow" data-cc-perm-id="' + U.escapeHtml(requestId) + '">' + U.escapeHtml(I18n.t('claude_code.allow')) + '</button>' +
-          '<button class="btn btn-sm cc-perm-deny" data-cc-perm-id="' + U.escapeHtml(requestId) + '">' + U.escapeHtml(I18n.t('claude_code.deny')) + '</button>' +
+          '<button class="btn btn-sm cc-perm-allow">' + U.escapeHtml(I18n.t('claude_code.allow')) + '</button>' +
+          '<button class="btn btn-sm cc-perm-deny">' + U.escapeHtml(I18n.t('claude_code.deny')) + '</button>' +
         '</div>';
 
       contentEl.appendChild(panel);
       ctx.setPendingPermission({ requestId: requestId, element: panel });
 
-      // Bind click handlers
-      panel.querySelector('.cc-perm-allow').addEventListener('click', function() {
-        App.claudeCode._respondPermission(sessionId, requestId, true, panel);
+      // Auto-focus the allow button for keyboard accessibility
+      var allowBtn = panel.querySelector('.cc-perm-allow');
+      var denyBtn = panel.querySelector('.cc-perm-deny');
+      setTimeout(function() { allowBtn.focus(); }, 50);
+
+      // Keyboard shortcut: Enter = allow, Escape = deny
+      panel.addEventListener('keydown', function(e) {
+        if (e.key === 'Enter' && !panel.classList.contains('cc-perm-allowed') && !panel.classList.contains('cc-perm-denied')) {
+          e.preventDefault();
+          App.claudeCode._respondPermission(sessionId, requestId, true, input, panel);
+        } else if (e.key === 'Escape') {
+          e.preventDefault();
+          App.claudeCode._respondPermission(sessionId, requestId, false, input, panel);
+        }
       });
-      panel.querySelector('.cc-perm-deny').addEventListener('click', function() {
-        App.claudeCode._respondPermission(sessionId, requestId, false, panel);
+
+      allowBtn.addEventListener('click', function() {
+        App.claudeCode._respondPermission(sessionId, requestId, true, input, panel);
       });
+      denyBtn.addEventListener('click', function() {
+        App.claudeCode._respondPermission(sessionId, requestId, false, input, panel);
+      });
+
+      // Play a subtle notification sound if available
+      App.claudeCode._notifyPermissionNeeded();
 
       App.chat.scrollToBottom();
     },
 
+    // Notify user that a permission decision is needed
+    _notifyPermissionNeeded: function() {
+      // Flash the document title to draw attention
+      if (document.hidden) {
+        var original = document.title;
+        var flash = function() {
+          document.title = document.title === original ? '⚠ Permission Required' : original;
+        };
+        var interval = setInterval(flash, 800);
+        var restore = function() {
+          clearInterval(interval);
+          document.title = original;
+          document.removeEventListener('visibilitychange', restore);
+        };
+        document.addEventListener('visibilitychange', restore);
+        // Auto-stop after 30s
+        setTimeout(restore, 30000);
+      }
+    },
+
     // Send permission response
-    _respondPermission: async function(sessionId, requestId, allow, panelEl) {
+    _respondPermission: async function(sessionId, requestId, allow, input, panelEl) {
+      // Prevent double-click
+      if (panelEl.classList.contains('cc-perm-allowed') || panelEl.classList.contains('cc-perm-denied')) return;
+
+      var actionsEl = panelEl.querySelector('.cc-perm-actions');
+      actionsEl.innerHTML = '<span class="cc-perm-resolving">' + U.escapeHtml(I18n.t('claude_code.sending')) + '...</span>';
+
       try {
+        var body = { request_id: requestId, allow: allow };
+        if (allow && input) body.updated_input = input;
+        if (!allow) body.message = 'User denied this action';
+
         await App.authFetch('/api/claude-code/session/' + encodeURIComponent(sessionId) + '/permission', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ request_id: requestId, allow: allow }),
+          body: JSON.stringify(body),
         });
-        panelEl.querySelector('.cc-perm-actions').innerHTML =
-          '<span class="cc-perm-resolved">' + (allow ? '✓ ' + I18n.t('claude_code.allowed') : '✗ ' + I18n.t('claude_code.denied')) + '</span>';
+
+        panelEl.classList.remove('cc-perm-waiting');
         panelEl.classList.add(allow ? 'cc-perm-allowed' : 'cc-perm-denied');
+        actionsEl.innerHTML =
+          '<span class="cc-perm-resolved">' +
+          (allow ? '✓ ' + I18n.t('claude_code.allowed') : '✗ ' + I18n.t('claude_code.denied')) +
+          '</span>';
       } catch (e) {
+        actionsEl.innerHTML =
+          '<span class="cc-perm-resolved cc-perm-error">' + U.escapeHtml(I18n.t('common.request_failed')) + '</span>';
         App.notifications.showToast(I18n.t('common.request_failed'), 'error', 3000);
       }
     },
