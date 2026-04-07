@@ -45,7 +45,9 @@ impl AutoShardManager {
         // Check if we're in reduced hours
         let schedule_pressure = self.schedule_pressure_bonus().await;
 
-        let pool_size = self.shared_state.peer_registry.len() + 1; // +1 for us
+        let pool_size = crate::pool::scope::effective_pool_size(&self.shared_state);
+        // Private mode: allowed node set for holder filtering (None = unrestricted)
+        let allowed_set = crate::pool::scope::allowed_node_set(&self.shared_state);
 
         // Track how many shards pruned per model in this cycle
         let mut pruned_per_model: std::collections::HashMap<ModelId, u32> =
@@ -96,6 +98,14 @@ impl AutoShardManager {
                 if !holders.contains(&local_node_id) {
                     continue;
                 }
+                // Private mode: filter holders to allowed set for replica counting
+                let holders: Vec<NodeId> = match allowed_set {
+                    Some(ref allowed) => holders
+                        .into_iter()
+                        .filter(|h| allowed.contains(h))
+                        .collect(),
+                    None => holders,
+                };
 
                 // Skip locked/pinned shards
                 if self
@@ -210,7 +220,11 @@ impl AutoShardManager {
                             model_id: manifest.id.clone(),
                             index: s.index,
                         };
-                        registry.shard_holders(&sid).len()
+                        let h = registry.shard_holders(&sid);
+                        match allowed_set {
+                            Some(ref allowed) => h.iter().filter(|n| allowed.contains(n)).count(),
+                            None => h.len(),
+                        }
                     })
                     .min()
                     .unwrap_or(0);
@@ -277,6 +291,14 @@ impl AutoShardManager {
                     index: crate::types::MMPROJ_SHARD_INDEX,
                 };
                 let mmproj_holders = registry.shard_holders(&mmproj_shard_id);
+                // Private mode: filter mmproj holders to allowed set
+                let mmproj_holders: Vec<NodeId> = match allowed_set {
+                    Some(ref allowed) => mmproj_holders
+                        .into_iter()
+                        .filter(|h| allowed.contains(h))
+                        .collect(),
+                    None => mmproj_holders,
+                };
                 if mmproj_holders.contains(&local_node_id) {
                     let mmproj_path = crate::model::shard::model_dir(
                         &self.shared_state.config.node.data_dir,
@@ -330,7 +352,13 @@ impl AutoShardManager {
                 model_id: candidate.model_id.clone(),
                 index: candidate.shard_index,
             };
-            let current_holders = registry.shard_holders(&shard_id_check).len();
+            let current_holders = {
+                let h = registry.shard_holders(&shard_id_check);
+                match allowed_set {
+                    Some(ref allowed) => h.iter().filter(|n| allowed.contains(n)).count(),
+                    None => h.len(),
+                }
+            };
             if current_holders <= candidate.target_replicas as usize {
                 tracing::debug!(
                     model = %candidate.model_id,

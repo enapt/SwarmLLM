@@ -67,8 +67,10 @@ impl AutoShardManager {
             .auto_manage_default_model_cap
             .load(std::sync::atomic::Ordering::Relaxed);
         let min_replicas = self.shared_state.config.auto_manage.min_replicas as usize;
-        // pool_size = peers + self; used for target_replicas clamping
-        let pool_size = self.shared_state.peer_registry.len() + 1;
+        // pool_size: in private mode, only count allowed nodes; otherwise all peers + self
+        let pool_size = crate::pool::scope::effective_pool_size(&self.shared_state);
+        // Allowed node set for private mode holder filtering (None = unrestricted)
+        let allowed_set = crate::pool::scope::allowed_node_set(&self.shared_state);
 
         // Build consistent hash ring ONCE for the entire evaluation cycle.
         // Each node gets VIRTUAL_SLOTS positions. Ring is sorted for binary search.
@@ -201,6 +203,14 @@ impl AutoShardManager {
                     index: shard.index,
                 };
                 let holders = registry.shard_holders(&shard_id);
+                // Private mode: only count holders within allowed set
+                let holders: Vec<NodeId> = match allowed_set {
+                    Some(ref allowed) => holders
+                        .into_iter()
+                        .filter(|h| allowed.contains(h))
+                        .collect(),
+                    None => holders,
+                };
                 shard_holder_counts.push((shard.index, holders.len()));
                 for h in &holders {
                     all_holders.insert(h.clone());
@@ -252,6 +262,14 @@ impl AutoShardManager {
                     index: shard.index,
                 };
                 let holders = registry.shard_holders(&shard_id);
+                // Private mode: only count holders within allowed set
+                let holders: Vec<NodeId> = match allowed_set {
+                    Some(ref allowed) => holders
+                        .into_iter()
+                        .filter(|h| allowed.contains(h))
+                        .collect(),
+                    None => holders,
+                };
 
                 // Skip if we already hold it (both in registry AND on disk)
                 if holders.contains(local_node_id)
@@ -267,7 +285,10 @@ impl AutoShardManager {
                     .models
                     .peer_shard_downloads
                     .get(&shard_id)
-                    .map(|v| v.len())
+                    .map(|v| match allowed_set {
+                        Some(ref allowed) => v.iter().filter(|(n, _)| allowed.contains(n)).count(),
+                        None => v.len(),
+                    })
                     .unwrap_or(0);
                 let holder_count = holders.len() + peer_dl_count;
 

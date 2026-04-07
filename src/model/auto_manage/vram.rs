@@ -186,8 +186,16 @@ pub fn global_pool_vram_mb(shared: &SharedState) -> u64 {
     // Local GPU -- use gpu_info if available, fallback to nvidia-smi
     total += local_vram_mb(shared);
 
-    // All known peers
+    // Private mode: only count allowed nodes' VRAM
+    let allowed_set = crate::pool::scope::allowed_node_set(shared);
+
     for peer in shared.peer_registry.iter() {
+        // In private mode, skip peers outside the allowed set
+        if let Some(ref allowed) = allowed_set {
+            if !allowed.contains(peer.key()) {
+                continue;
+            }
+        }
         if let Some(ref cap) = peer.capability {
             if let Some(ref gpu) = cap.gpu {
                 total += gpu.vram_total_mb;

@@ -385,7 +385,7 @@ impl AutoShardManager {
             // cluster can promote at 2 holders, while large networks still need 3.
             // No DemandVerified prerequisite -- if peers already hold shards,
             // the model is clearly legitimate and new nodes should be able to adopt it.
-            let pool_size = self.shared_state.peer_registry.len() + 1;
+            let pool_size = crate::pool::scope::effective_pool_size(&self.shared_state);
             let popular_threshold = 3usize.min(pool_size.saturating_sub(1)).max(1);
             if holder_nodes.len() >= popular_threshold
                 && trust.trust_level < crate::types::ModelTrustLevel::NetworkPopular

@@ -591,12 +591,22 @@ e
                 model_id: candidate.model_id.clone(),
                 index: candidate.shard_index,
             };
+            // Private mode: only download from allowed nodes
+            let allowed_set = crate::pool::scope::allowed_node_set(&self.shared_state);
             let holders: Vec<_> = self
                 .shared_state
                 .model_registry
                 .shard_holders(&sid)
                 .into_iter()
-                .filter(|n| n != self.shared_state.identity.node_id())
+                .filter(|n| {
+                    if n == self.shared_state.identity.node_id() {
+                        return false; // Skip self
+                    }
+                    match allowed_set {
+                        Some(ref allowed) => allowed.contains(n),
+                        None => true,
+                    }
+                })
                 .collect();
             if holders.is_empty() {
                 tracing::debug!(
