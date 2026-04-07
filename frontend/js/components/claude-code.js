@@ -408,7 +408,17 @@
       if (!Array.isArray(content)) return;
 
       content.forEach(function(block) {
-        if (block.type === 'text' && block.text) {
+        if (block.type === 'thinking' && block.thinking) {
+          // Thinking block — render as faded preface text
+          if (!ctx.cleared) { contentEl.textContent = ''; ctx.setClear(); }
+          var thinkingEl = contentEl.querySelector('.cc-thinking');
+          if (!thinkingEl) {
+            thinkingEl = document.createElement('div');
+            thinkingEl.className = 'cc-thinking';
+            contentEl.appendChild(thinkingEl);
+          }
+          thinkingEl.textContent += block.thinking;
+        } else if (block.type === 'text' && block.text) {
           // Close any open tool group before text
           App.claudeCode._closeCurrentGroup(contentEl);
           // Text already streamed via stream_event — skip unless not streamed
