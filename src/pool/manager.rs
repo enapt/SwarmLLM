@@ -484,6 +484,9 @@ impl PoolManager {
             .with_toast("success", 5000),
         );
 
+        // Immediately send our nickname + stats to the leader
+        self.send_device_stats_report().await;
+
         Ok(())
     }
 
@@ -1035,6 +1038,8 @@ impl PoolManager {
                 members = member_count,
                 "Pool member joined"
             );
+            // Immediately gossip updated pool state so the new member sees full membership
+            self.gossip_pool_state().await;
         }
     }
 
@@ -1187,10 +1192,18 @@ impl PoolManager {
             }
         };
 
-        // Resolve our nickname from identity prefs
+        // Resolve device name: pool device_name first, then identity nickname
         let device_name = {
-            let store = crate::identity::nickname::NicknameStore::new(self.shared_state.db.clone());
-            store.get_prefs().ok().and_then(|p| p.nickname)
+            let state = self.shared_state.credits.pool_state.read().await;
+            let pool_name = state
+                .as_ref()
+                .and_then(|ps| ps.members.iter().find(|m| m.node_id == my_id))
+                .and_then(|m| m.device_name.clone());
+            pool_name.or_else(|| {
+                let store =
+                    crate::identity::nickname::NicknameStore::new(self.shared_state.db.clone());
+                store.get_prefs().ok().and_then(|p| p.nickname)
+            })
         };
 
         let stats = self.collect_device_stats().await;
@@ -1271,8 +1284,8 @@ impl PoolManager {
         let mut ps_guard = self.shared_state.credits.pool_state.write().await;
         if let Some(ref mut ps) = *ps_guard {
             if let Some(member) = ps.members.iter_mut().find(|m| m.node_id == node_id) {
-                // Update nickname if the member sent one and we don't have one locally set by the leader
-                if device_name.is_some() && member.device_name.is_none() {
+                // Always accept the member's reported device name
+                if device_name.is_some() {
                     member.device_name = device_name;
                 }
                 member.device_stats = Some(stats);
