@@ -59,6 +59,7 @@ pub async fn pool_state(State(state): State<AppState>) -> Json<serde_json::Value
             "created_at": ps.created_at.to_rfc3339(),
             "total_lifetime_credits": ps.total_lifetime_credits,
             "member_credit_split_pct": ps.member_credit_split_pct,
+            "private_mode": state.shared_state.credits.private_mode.load(std::sync::atomic::Ordering::Relaxed),
         })),
         None => Json(serde_json::json!({
             "in_pool": false,
@@ -578,4 +579,166 @@ pub async fn pool_rates_set(
             "penalty_serve_failure": new_rates.penalty_serve_failure,
         }
     })))
+}
+
+// ---- Private Mode ----
+
+/// GET /api/pool/private-mode — Get current private mode state + coverage summary.
+pub async fn get_private_mode(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let enabled = state
+        .shared_state
+        .credits
+        .private_mode
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let allow_lan = state.shared_state.config.pool.private_mode_allow_lan;
+    let coverage = compute_pool_coverage(&state.shared_state).await;
+
+    Json(serde_json::json!({
+        "enabled": enabled,
+        "allow_lan": allow_lan,
+        "offline_mode": state.shared_state.config.pool.offline_mode,
+        "coverage": coverage,
+    }))
+}
+
+#[derive(Deserialize)]
+pub struct SetPrivateModeRequest {
+    pub enabled: bool,
+}
+
+/// PUT /api/pool/private-mode — Toggle private mode on/off.
+pub async fn set_private_mode(
+    State(state): State<AppState>,
+    Json(body): Json<SetPrivateModeRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    // Must be in a pool to enable private mode
+    if body.enabled {
+        let pool_state = state.shared_state.credits.pool_state.read().await;
+        if pool_state.is_none() {
+            return Err(ApiError(SwarmError::Validation(
+                "Must be in a device pool to enable private mode".into(),
+            )));
+        }
+    }
+
+    state
+        .shared_state
+        .credits
+        .private_mode
+        .store(body.enabled, std::sync::atomic::Ordering::Relaxed);
+
+    // Persist to DB
+    let _ = state
+        .shared_state
+        .db
+        .put_json("pool_state", "private_mode", &body.enabled);
+
+    // Emit activity event so all WS clients update
+    state.shared_state.emit_activity(
+        crate::daemon::state::ActivityEvent::new(
+            "pool",
+            "private_mode_changed",
+            if body.enabled {
+                "Private mode enabled — inference restricted to your devices".to_string()
+            } else {
+                "Private mode disabled — using full swarm network".to_string()
+            },
+        )
+        .with_toast(if body.enabled { "info" } else { "success" }, 5000),
+    );
+
+    tracing::info!(enabled = body.enabled, "Private mode toggled");
+
+    // Return coverage summary so UI can show trade-offs
+    let coverage = compute_pool_coverage(&state.shared_state).await;
+
+    Ok(Json(serde_json::json!({
+        "enabled": body.enabled,
+        "coverage": coverage,
+    })))
+}
+
+/// GET /api/pool/coverage — Detailed model coverage within the device pool.
+pub async fn pool_coverage(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let coverage = compute_pool_coverage(&state.shared_state).await;
+    Json(coverage)
+}
+
+/// Compute which models are fully/partially covered by pool members.
+async fn compute_pool_coverage(shared: &crate::daemon::SharedState) -> serde_json::Value {
+    let pool_state = shared.credits.pool_state.read().await;
+    let pool_members: std::collections::HashSet<NodeId> = pool_state
+        .as_ref()
+        .map(|ps| ps.members.iter().map(|m| m.node_id.clone()).collect())
+        .unwrap_or_default();
+
+    // Include LAN peers if configured
+    let mut allowed = pool_members;
+    allowed.insert(shared.identity.node_id().clone());
+    if shared.config.pool.private_mode_allow_lan {
+        for entry in shared.peer_registry.iter() {
+            if entry.value().is_lan_peer {
+                allowed.insert(entry.key().clone());
+            }
+        }
+    }
+
+    let mut models = Vec::new();
+    let mut total_fully_covered = 0u32;
+    let mut total_partially_covered = 0u32;
+    let mut total_est_download_bytes: u64 = 0;
+
+    for manifest in shared.model_registry.models() {
+        let total_shards = manifest.shard_count;
+        let mut pool_shards = 0u32;
+        let mut missing_indices = Vec::new();
+        let mut missing_bytes: u64 = 0;
+
+        for shard in &manifest.shards {
+            let sid = crate::types::ShardId {
+                model_id: manifest.id.clone(),
+                index: shard.index,
+            };
+            let holders = shared.model_registry.shard_holders(&sid);
+            if holders.iter().any(|h| allowed.contains(h)) {
+                pool_shards += 1;
+            } else {
+                missing_indices.push(shard.index);
+                missing_bytes += shard.size_bytes;
+            }
+        }
+
+        let coverage_pct = if total_shards > 0 {
+            (pool_shards as f64 / total_shards as f64 * 100.0).round() as u32
+        } else {
+            0
+        };
+
+        if pool_shards == total_shards {
+            total_fully_covered += 1;
+        } else if pool_shards > 0 {
+            total_partially_covered += 1;
+        }
+        total_est_download_bytes += missing_bytes;
+
+        models.push(serde_json::json!({
+            "id": manifest.id.0,
+            "name": manifest.name,
+            "total_shards": total_shards,
+            "pool_shards": pool_shards,
+            "coverage_pct": coverage_pct,
+            "missing": missing_indices,
+            "est_download_mb": missing_bytes / (1024 * 1024),
+        }));
+    }
+
+    serde_json::json!({
+        "models": models,
+        "total_models": models.len(),
+        "fully_covered": total_fully_covered,
+        "partially_covered": total_partially_covered,
+        "not_covered": models.len() as u32 - total_fully_covered - total_partially_covered,
+        "est_total_download_mb": total_est_download_bytes / (1024 * 1024),
+        "pool_member_count": allowed.len(),
+    })
 }

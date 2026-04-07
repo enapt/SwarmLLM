@@ -281,6 +281,12 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/pool/device-name", post(pool::pool_set_device_name))
         .route("/api/pool/credit-split", put(pool::pool_set_credit_split))
         .route("/api/pool/contribution", put(pool::pool_set_contribution))
+        // Private mode
+        .route(
+            "/api/pool/private-mode",
+            get(pool::get_private_mode).put(pool::set_private_mode),
+        )
+        .route("/api/pool/coverage", get(pool::pool_coverage))
         // Pool credit rates
         .route(
             "/api/admin/pools/:id/rates",
