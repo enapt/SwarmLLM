@@ -60,6 +60,27 @@ impl ClaudeSubscriptionConfig {
     }
 }
 
+/// Check if a model should be routed through Claude subscription and return the config if so.
+///
+/// Returns `Some(config)` when the model starts with "claude" and a subscription is
+/// enabled in provider config. Both openai.rs and anthropic.rs call this to avoid
+/// duplicating the check logic.
+pub async fn try_get_claude_subscription(
+    state: &crate::api::server::AppState,
+    model: &str,
+) -> Option<ClaudeSubscriptionConfig> {
+    let lower = model.to_lowercase();
+    if !lower.starts_with("claude") {
+        return None;
+    }
+    let config = state.shared_state.metrics.providers_config.read().await;
+    let sub = config.claude_subscription.as_ref()?;
+    if !sub.enabled {
+        return None;
+    }
+    Some(sub.clone())
+}
+
 // ---------------------------------------------------------------------------
 // Concurrency limiter (global semaphore)
 // ---------------------------------------------------------------------------

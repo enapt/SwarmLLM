@@ -647,26 +647,18 @@ async fn try_cloud_proxy(
 ) -> Result<Option<axum::response::Response>, ApiError> {
     // Claude subscription: proxy through local CLI subprocess (higher priority than API key)
     #[cfg(feature = "claude-subscription")]
+    if let Some(sub_config) =
+        crate::api::claude_sub::try_get_claude_subscription(state, &req.model).await
     {
-        let lower = req.model.to_lowercase();
-        if lower.starts_with("claude-") || lower.starts_with("claude3") {
-            let config = state.shared_state.metrics.providers_config.read().await;
-            if let Some(ref sub_config) = config.claude_subscription {
-                if sub_config.enabled {
-                    let sub_config = sub_config.clone();
-                    drop(config);
-                    tracing::info!(model = %req.model, "DIAG: openai proxying via claude subscription subprocess");
-                    let body = serde_json::to_value(req).map_err(|e| {
-                        ApiError(crate::error::SwarmError::Validation(format!(
-                            "serialize request: {e}"
-                        )))
-                    })?;
-                    return crate::api::claude_sub::proxy_via_subprocess_openai(&sub_config, &body)
-                        .await
-                        .map(Some);
-                }
-            }
-        }
+        tracing::info!(model = %req.model, "DIAG: openai proxying via claude subscription subprocess");
+        let body = serde_json::to_value(req).map_err(|e| {
+            ApiError(crate::error::SwarmError::Validation(format!(
+                "serialize request: {e}"
+            )))
+        })?;
+        return crate::api::claude_sub::proxy_via_subprocess_openai(&sub_config, &body)
+            .await
+            .map(Some);
     }
 
     let body = serde_json::to_value(req).map_err(|e| {
@@ -755,27 +747,12 @@ pub async fn chat_completions(
         );
     }
 
-    // Resolve "auto" model alias to the first available model.
-    // Check loaded_model_info first (local split model), then fall back to registry ID.
-    if req.model == "auto" {
-        let resolved = {
-            let info = state.shared_state.loaded_model_info.read().await;
-            info.as_ref()
-                .map(|i| resolve_loaded_model_registry_id(&state, &i.name))
-        };
-        // Fall back to the first model in the registry if nothing loaded locally
-        let resolved = resolved.or_else(|| {
-            state
-                .shared_state
-                .model_registry
-                .models()
-                .into_iter()
-                .next()
-                .map(|m| m.id.0.clone())
-        });
-        if let Some(id) = resolved {
-            tracing::info!(resolved_model = %id, "Resolved 'auto' model alias");
-            req.model = id;
+    // Resolve "auto" alias and display-name → registry-ID mapping.
+    {
+        let resolved = resolve_model_for_inference(&state, &req.model).await;
+        if resolved != req.model {
+            tracing::info!(original = %req.model, resolved_model = %resolved, "Resolved model alias");
+            req.model = resolved;
         }
     }
 
@@ -1152,6 +1129,34 @@ fn all_shards_available_inner(state: &AppState, model_name: &str) -> bool {
         "all_shards_available: all layers covered across network"
     );
     true
+}
+
+/// Resolve a model name for inference: handles "auto" alias and display-name → registry-ID mapping.
+///
+/// 1. If a local model is loaded and the request matches (by "auto", registry ID, or display name),
+///    returns the resolved registry ID.
+/// 2. For "auto" with no loaded model, falls back to the first model in the registry.
+/// 3. Otherwise returns the original model name unchanged.
+pub async fn resolve_model_for_inference(state: &AppState, model: &str) -> String {
+    let info = state.shared_state.loaded_model_info.read().await;
+    if let Some(i) = info.as_ref() {
+        let resolved = resolve_loaded_model_registry_id(state, &i.name);
+        if model == "auto" || model == resolved || model == i.name {
+            return resolved;
+        }
+    }
+    if model == "auto" {
+        if let Some(m) = state
+            .shared_state
+            .model_registry
+            .models()
+            .into_iter()
+            .next()
+        {
+            return m.id.0.clone();
+        }
+    }
+    model.to_string()
 }
 
 /// Resolve a loaded model's display name to its registry ID.

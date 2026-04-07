@@ -381,26 +381,8 @@ pub async fn messages(
     let internal_messages = to_internal_messages(&req);
     let sampling_params = to_sampling_params(&req);
 
-    // Try local inference first — resolve model to registry ID using shared helper.
-    let model = {
-        let info = state.shared_state.loaded_model_info.read().await;
-        if let Some(i) = info.as_ref() {
-            if !crate::api::openai::all_shards_available(&state, &model) {
-                let resolved =
-                    crate::api::openai::resolve_loaded_model_registry_id(&state, &i.name);
-                // Only use resolved ID if request matches. Never silently substitute.
-                if model == "auto" || model == resolved || model == i.name {
-                    resolved
-                } else {
-                    model
-                }
-            } else {
-                model
-            }
-        } else {
-            model
-        }
-    };
+    // Resolve model alias (display name → registry ID, "auto" → first available).
+    let model = crate::api::openai::resolve_model_for_inference(&state, &model).await;
 
     // Check if network has all shards for this model
     let network_available = crate::api::openai::all_shards_available(&state, &model);
@@ -502,45 +484,38 @@ pub async fn messages(
 
     // Claude subscription: proxy through local CLI subprocess (higher priority than API key)
     #[cfg(feature = "claude-subscription")]
-    if lower_model.starts_with("claude") {
-        let config = state.shared_state.metrics.providers_config.read().await;
-        if let Some(ref sub_config) = config.claude_subscription {
-            if sub_config.enabled {
-                let sub_config = sub_config.clone();
-                drop(config);
-                tracing::info!(model = %req.model, "DIAG: anthropic proxying via claude subscription subprocess");
-                // Build a minimal JSON for the subprocess handler (MessagesRequest isn't Serialize)
-                let body = serde_json::json!({
-                    "model": req.model,
-                    "max_tokens": req.max_tokens,
-                    "messages": req.messages.iter().map(|m| {
-                        serde_json::json!({
-                            "role": m.role,
-                            "content": match &m.content {
-                                AnthropicContent::Text(s) => serde_json::Value::String(s.clone()),
-                                AnthropicContent::Blocks(blocks) => serde_json::Value::Array(
-                                    blocks.iter().map(|b| match b {
-                                        ContentBlock::Text { text } => serde_json::json!({"type": "text", "text": text}),
-                                        _ => serde_json::json!({"type": "text", "text": "[non-text content]"}),
-                                    }).collect()
-                                ),
-                            }
-                        })
-                    }).collect::<Vec<_>>(),
-                    "stream": req.stream,
-                    "system": match &req.system {
-                        Some(SystemContent::Text(s)) => serde_json::Value::String(s.clone()),
-                        Some(SystemContent::Blocks(blocks)) => serde_json::Value::Array(
-                            blocks.iter().map(|b| serde_json::json!({"type": b.block_type, "text": b.text})).collect()
+    if let Some(sub_config) =
+        crate::api::claude_sub::try_get_claude_subscription(&state, &req.model).await
+    {
+        tracing::info!(model = %req.model, "DIAG: anthropic proxying via claude subscription subprocess");
+        // Build a minimal JSON for the subprocess handler (MessagesRequest isn't Serialize)
+        let body = serde_json::json!({
+            "model": req.model,
+            "max_tokens": req.max_tokens,
+            "messages": req.messages.iter().map(|m| {
+                serde_json::json!({
+                    "role": m.role,
+                    "content": match &m.content {
+                        AnthropicContent::Text(s) => serde_json::Value::String(s.clone()),
+                        AnthropicContent::Blocks(blocks) => serde_json::Value::Array(
+                            blocks.iter().map(|b| match b {
+                                ContentBlock::Text { text } => serde_json::json!({"type": "text", "text": text}),
+                                _ => serde_json::json!({"type": "text", "text": "[non-text content]"}),
+                            }).collect()
                         ),
-                        None => serde_json::Value::Null,
-                    },
-                });
-                return crate::api::claude_sub::proxy_via_subprocess_anthropic(&sub_config, &body)
-                    .await;
-            }
-        }
-        drop(config);
+                    }
+                })
+            }).collect::<Vec<_>>(),
+            "stream": req.stream,
+            "system": match &req.system {
+                Some(SystemContent::Text(s)) => serde_json::Value::String(s.clone()),
+                Some(SystemContent::Blocks(blocks)) => serde_json::Value::Array(
+                    blocks.iter().map(|b| serde_json::json!({"type": b.block_type, "text": b.text})).collect()
+                ),
+                None => serde_json::Value::Null,
+            },
+        });
+        return crate::api::claude_sub::proxy_via_subprocess_anthropic(&sub_config, &body).await;
     }
 
     // Claude models → Anthropic cloud API (full pass-through, preserves tools/thinking)
