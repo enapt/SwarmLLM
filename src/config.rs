@@ -407,6 +407,16 @@ pub struct PoolConfig {
     /// Global credit rate overrides. Pools can further override these per-pool.
     #[serde(default)]
     pub credit_rates: CreditRateConfig,
+    /// Private mode: restrict all inference and shard management to pool members only.
+    /// When enabled, no data leaves your device pool.
+    #[serde(default)]
+    pub private_mode: bool,
+    /// When private mode is on, also allow LAN peers (discovered via mDNS) as inference targets.
+    #[serde(default = "default_true")]
+    pub private_mode_allow_lan: bool,
+    /// Offline LAN mode: disable internet bootstrap, mDNS-only discovery. Air-gapped operation.
+    #[serde(default)]
+    pub offline_mode: bool,
 }
 
 impl Default for PoolConfig {
@@ -417,6 +427,9 @@ impl Default for PoolConfig {
             rate_limit_per_hour: default_pool_rate_limit(),
             gossip_interval_secs: default_pool_gossip_interval(),
             credit_rates: CreditRateConfig::default(),
+            private_mode: false,
+            private_mode_allow_lan: true,
+            offline_mode: false,
         }
     }
 }

@@ -215,6 +215,8 @@ pub struct CreditPool {
     pub escrow_manager: Arc<crate::credit::escrow::EscrowManager>,
     pub anti_gaming: tokio::sync::Mutex<crate::credit::anti_gaming::AntiGaming>,
     pub peer_credit_balances: DashMap<NodeId, i64>,
+    /// Private mode: restrict inference + auto-manage to pool members (+ optional LAN peers).
+    pub private_mode: std::sync::atomic::AtomicBool,
 }
 
 /// Model management: shard acquisition, auto-manage, trust gating, pruning.
@@ -712,6 +714,13 @@ impl SharedState {
                 escrow_manager,
                 anti_gaming: tokio::sync::Mutex::new(crate::credit::anti_gaming::AntiGaming::new()),
                 peer_credit_balances: DashMap::new(),
+                private_mode: std::sync::atomic::AtomicBool::new({
+                    // Restore from DB, fall back to config
+                    db.get_json::<bool>("pool_state", "private_mode")
+                        .ok()
+                        .flatten()
+                        .unwrap_or(config.pool.private_mode)
+                }),
             },
             models: ModelMgmt {
                 acquisition_progress: DashMap::new(),
