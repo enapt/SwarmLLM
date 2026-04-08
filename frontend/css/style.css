@@ -821,8 +821,6 @@ a:hover { color: var(--accent-hover); }
   .chat-input-area { padding: 8px 12px 12px; }
   .chat-input-wrap textarea { font-size: 1rem; min-height: 48px; }
   .chat-msg { gap: 8px; }
-  .chat-msg.user { padding-left: 24px; }
-  .chat-msg.assistant { padding-right: 24px; }
   .msg-bubble { padding: 10px 14px; }
 
   /* Larger tap targets for buttons */
@@ -1288,9 +1286,8 @@ input[type="range"]::-webkit-slider-thumb {
   margin: 0 auto 4px;
   animation: msgIn 0.2s ease-out;
 }
-/* Indent: user nudged right, assistant nudged left */
-.chat-msg.user    { flex-direction: row-reverse; padding-left: 64px; }
-.chat-msg.assistant { padding-right: 64px; }
+/* User avatar on the right */
+.chat-msg.user { flex-direction: row-reverse; }
 
 /* Extra gap before a new speaker group */
 .chat-msg.group-first,
