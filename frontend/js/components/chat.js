@@ -414,10 +414,9 @@
           });
           html += '</div>' + U.escapeHtml(msg.content);
           el = U.appendMessageToDOM(msg.role, html, true, msgOpts);
-        } else if (msg.role === 'assistant' && msg.toolHtml && App.claudeCode) {
-          // CC message with tool activity — render markdown + tool footer
-          var ccHtml = '<div class="response-text cc-md">' + App.claudeCode._renderMarkdown(msg.content) + '</div>' + msg.toolHtml;
-          el = U.appendMessageToDOM(msg.role, ccHtml, true, msgOpts);
+        } else if (msg.role === 'assistant' && msg.renderedHtml) {
+          // CC message — restore full rendered content (text + inline tool panels)
+          el = U.appendMessageToDOM(msg.role, msg.renderedHtml, true, msgOpts);
         } else {
           el = U.appendMessageToDOM(msg.role, msg.content, false, msgOpts);
         }
@@ -542,7 +541,7 @@
           }
           if (result.content) {
             var ccMsg = { role: 'assistant', content: result.content, encrypted: false, duration: result.duration, model: model };
-            if (result.toolHtml) ccMsg.toolHtml = result.toolHtml;
+            if (result.renderedHtml) ccMsg.renderedHtml = result.renderedHtml;
             session.messages.push(ccMsg);
             App.chat.saveSessions();
             App.chat.flashSession(session.id);

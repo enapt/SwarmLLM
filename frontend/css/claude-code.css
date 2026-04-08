@@ -250,22 +250,6 @@
 .session-cc-badge.cc-suspended { opacity: 0.6; }
 .session-cc-badge.cc-suspended::before { content: ''; display: inline-block; width: 5px; height: 5px; border-radius: 50%; background: var(--orange); margin-right: 3px; vertical-align: middle; }
 
-/* ─── Tool Activity Footer (collapsible per-message) ─── */
-.cc-tool-footer { margin-top: 10px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-tertiary); overflow: hidden; }
-.cc-tool-footer[open] { background: var(--bg-secondary); }
-.cc-tool-footer-bar { display: flex; align-items: center; gap: 6px; padding: 5px 10px; font-size: 0.72rem; cursor: pointer; list-style: none; user-select: none; font-family: var(--font-mono); color: var(--text-muted); }
-.cc-tool-footer-bar::-webkit-details-marker { display: none; }
-.cc-tool-footer-bar::before { content: '\25B8'; font-size: 0.6rem; flex-shrink: 0; transition: transform 0.15s; }
-.cc-tool-footer[open] > .cc-tool-footer-bar::before { transform: rotate(90deg); }
-.cc-tool-footer-icon { font-size: 0.8rem; }
-.cc-tool-footer-label { font-weight: 600; color: var(--text-secondary); }
-.cc-tool-footer-count { font-size: 0.65rem; color: var(--text-muted); margin-left: auto; }
-.cc-tool-footer > .cc-tool-group,
-.cc-tool-footer > .cc-tool-call,
-.cc-tool-footer > .cc-permission-prompt,
-.cc-tool-footer > .cc-agent-panel,
-.cc-tool-footer > .cc-task-list { margin: 4px 6px; }
-
 /* ─── Working Indicator (inline, animated) ─── */
 .cc-working { display: flex; align-items: center; gap: 6px; padding: 4px 0; font-size: 0.75rem; color: var(--text-muted); font-family: var(--font-mono); }
 .cc-working-icon { animation: cc-working-spin 1.6s cubic-bezier(0.2,0,0.2,1) infinite; display: inline-block; }

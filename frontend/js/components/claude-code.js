@@ -134,6 +134,8 @@
       }
 
       var fullContent = '';
+      var turnText = '';  // text for current turn only
+      var currentTextNode = null;  // current .response-text element
       var cleared = false;
       var reader = resp.body.getReader();
       var decoder = new TextDecoder();
@@ -176,8 +178,13 @@
                 cleared: cleared,
                 sessionId: sessionId,
                 setClear: function() { cleared = true; },
-                appendText: function(text) { fullContent += text; },
+                appendText: function(text) { fullContent += text; turnText += text; },
+                getTurnText: function() { return turnText; },
                 getFullContent: function() { return fullContent; },
+                // Start a new turn — resets per-turn text and text node
+                newTurn: function() { turnText = ''; currentTextNode = null; },
+                getTextNode: function() { return currentTextNode; },
+                setTextNode: function(n) { currentTextNode = n; },
                 setPendingPermission: function(p) { pendingPermission = p; },
               });
               // Update cleared flag from handler
@@ -200,13 +207,11 @@
       // Remove working indicator before capturing
       App.claudeCode._removeWorkingIndicator(contentEl);
 
-      // Capture tool footer HTML for persistence
-      var toolFooterHtml = '';
-      var footer = contentEl.querySelector('.cc-tool-footer');
-      if (footer) toolFooterHtml = footer.outerHTML;
+      // Capture full rendered content for persistence (text + tool panels)
+      var renderedHtml = contentEl.innerHTML || '';
 
       var elapsedSec = ((performance.now() - startTime) / 1000).toFixed(2);
-      return { content: fullContent, pendingPermission: pendingPermission, duration: elapsedSec, toolHtml: toolFooterHtml };
+      return { content: fullContent, pendingPermission: pendingPermission, duration: elapsedSec, renderedHtml: renderedHtml };
     },
 
     // Resolve the target container — if event has parent_tool_use_id pointing
@@ -278,18 +283,20 @@
             ctx.setClear();
           }
           ctx.appendText(text);
-          var textNode = contentEl.querySelector('.response-text');
+          // Get or create text node for THIS turn
+          var textNode = ctx.getTextNode();
           if (!textNode) {
             textNode = document.createElement('div');
             textNode.className = 'response-text cc-md';
             contentEl.appendChild(textNode);
+            ctx.setTextNode(textNode);
           }
-          // Apply markdown rendering on each newline for live formatting
-          var full = ctx.getFullContent();
-          if (full.indexOf('\n') !== -1) {
-            textNode.innerHTML = App.claudeCode._renderMarkdown(full);
+          // Render this turn's text with markdown
+          var turnContent = ctx.getTurnText();
+          if (turnContent.indexOf('\n') !== -1) {
+            textNode.innerHTML = App.claudeCode._renderMarkdown(turnContent);
           } else {
-            textNode.textContent = full;
+            textNode.textContent = turnContent;
           }
           App.chat.scrollToBottom();
         } else if (deltaType === 'thinking_delta') {
@@ -430,54 +437,6 @@
       }
     },
 
-    // Get or create the collapsible tool activity footer within msg-content
-    _getToolFooter: function(contentEl) {
-      var footer = contentEl.querySelector('.cc-tool-footer');
-      if (!footer) {
-        footer = document.createElement('details');
-        footer.className = 'cc-tool-footer';
-        footer.innerHTML = '<summary class="cc-tool-footer-bar">' +
-          '<span class="cc-tool-footer-icon">\u2699</span>' +
-          '<span class="cc-tool-footer-label">Tool Activity</span>' +
-          '<span class="cc-tool-footer-count"></span>' +
-          '</summary>';
-        contentEl.appendChild(footer);
-      }
-      // Always keep footer at the end
-      if (footer !== contentEl.lastElementChild) {
-        contentEl.appendChild(footer);
-      }
-      return footer;
-    },
-
-    // Update footer count badge
-    _updateToolFooterCount: function(contentEl) {
-      var footer = contentEl.querySelector('.cc-tool-footer');
-      if (!footer) return;
-      var count = footer.querySelectorAll('.cc-tool-call, .cc-permission-prompt, .cc-perm-collapsed').length;
-      var done = footer.querySelectorAll('.cc-tool-done, .cc-perm-allowed, .cc-perm-denied, .cc-perm-collapsed').length;
-      var countEl = footer.querySelector('.cc-tool-footer-count');
-      if (countEl) countEl.textContent = done + '/' + count;
-      // Update icon strip
-      var bar = footer.querySelector('.cc-tool-footer-bar');
-      var oldIcons = bar.querySelector('.cc-group-icons');
-      if (oldIcons) oldIcons.remove();
-      var items = footer.querySelectorAll('.cc-tool-call, .cc-permission-prompt, .cc-perm-collapsed');
-      if (items.length > 0) {
-        var iconsEl = document.createElement('span');
-        iconsEl.className = 'cc-group-icons';
-        for (var i = 0; i < items.length && i < 12; i++) {
-          var nameEl = items[i].querySelector('.cc-tool-name, .cc-perm-tool-name');
-          var tn = nameEl ? nameEl.textContent : '';
-          var badge = document.createElement('span');
-          badge.className = 'cc-group-icon-badge cc-icon-' + App.claudeCode._toolCategory(tn);
-          badge.textContent = App.claudeCode._toolIcon(tn);
-          iconsEl.appendChild(badge);
-        }
-        bar.insertBefore(iconsEl, countEl);
-      }
-    },
-
     // Show/update inline working indicator
     _showWorkingIndicator: function(contentEl) {
       var ind = contentEl.querySelector('.cc-working');
@@ -485,12 +444,6 @@
         ind = document.createElement('div');
         ind.className = 'cc-working';
         ind.innerHTML = '<span class="cc-working-icon">\u2699</span> <span class="cc-working-text">Working...</span>';
-      }
-      // Insert before footer if it exists, otherwise append
-      var footer = contentEl.querySelector('.cc-tool-footer');
-      if (footer) {
-        contentEl.insertBefore(ind, footer);
-      } else {
         contentEl.appendChild(ind);
       }
     },
@@ -506,7 +459,9 @@
       var content = msg.content || [];
       if (!Array.isArray(content)) return;
 
-      var firstTextStreamed = false;
+      // Check if this turn's text was already streamed
+      var textAlreadyStreamed = !!ctx.getTextNode();
+
       content.forEach(function(block) {
         if (block.type === 'thinking' && block.thinking) {
           if (!ctx.cleared) { contentEl.textContent = ''; ctx.setClear(); }
@@ -519,37 +474,35 @@
           thEl.textContent += block.thinking;
         } else if (block.type === 'text' && block.text) {
           App.claudeCode._removeWorkingIndicator(contentEl);
+          App.claudeCode._closeCurrentGroup(contentEl);
           if (!ctx.cleared) { contentEl.textContent = ''; ctx.setClear(); }
-          // First text block was already streamed — skip it
-          if (!firstTextStreamed && contentEl.querySelector('.response-text')) {
-            firstTextStreamed = true;
+          // Skip if this text was already streamed into the current text node
+          if (textAlreadyStreamed) {
+            textAlreadyStreamed = false;
             return;
           }
-          firstTextStreamed = true;
           var textNode = document.createElement('div');
           textNode.className = 'response-text cc-md';
           textNode.innerHTML = App.claudeCode._renderMarkdown(block.text);
-          // Insert before footer
-          var footer = contentEl.querySelector('.cc-tool-footer');
-          if (footer) contentEl.insertBefore(textNode, footer);
-          else contentEl.appendChild(textNode);
+          contentEl.appendChild(textNode);
         } else if (block.type === 'tool_use') {
           if (!ctx.cleared) { contentEl.textContent = ''; ctx.setClear(); }
           var toolName = block.name || '';
           // Show working indicator
           App.claudeCode._showWorkingIndicator(contentEl);
-          // Route tools into the footer section
-          var toolFooter = App.claudeCode._getToolFooter(contentEl);
+          // Render tool blocks inline
           if (AGENT_TOOLS[toolName]) {
-            App.claudeCode._renderAgentCall(toolFooter, block, agentPanels);
+            App.claudeCode._closeCurrentGroup(contentEl);
+            App.claudeCode._renderAgentCall(contentEl, block, agentPanels);
           } else if (TASK_TOOLS[toolName]) {
-            App.claudeCode._renderTaskCall(toolFooter, block, toolPanels, taskItems);
+            App.claudeCode._renderTaskCall(contentEl, block, toolPanels, taskItems);
           } else {
-            var group = App.claudeCode._getOrCreateToolGroup(toolFooter, ctx);
+            var group = App.claudeCode._getOrCreateToolGroup(contentEl, ctx);
             App.claudeCode._renderToolCall(group, block, toolPanels);
             App.claudeCode._updateGroupSummary(group);
           }
-          App.claudeCode._updateToolFooterCount(contentEl);
+          // Signal new turn so next streaming text creates a fresh node
+          ctx.newTurn();
         }
       });
       App.chat.scrollToBottom();
@@ -1074,10 +1027,8 @@
       var sessionId = ctx.sessionId || S.currentSessionId || '';
       var reason = req.decision_reason || '';
 
-      // Render inside the tool footer
-      var toolFooter = App.claudeCode._getToolFooter(contentEl);
-      toolFooter.open = true; // Expand footer for permission prompts
-      var group = App.claudeCode._getOrCreateToolGroup(toolFooter, ctx);
+      // Render inline in the current tool group
+      var group = App.claudeCode._getOrCreateToolGroup(contentEl, ctx);
 
       var panel = document.createElement('details');
       panel.className = 'cc-permission-prompt cc-perm-waiting';
