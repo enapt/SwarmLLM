@@ -16,9 +16,8 @@ impl ModelManifestExt for ModelManifest {
     fn load_from_dir(dir: &Path) -> Result<ModelManifest, SwarmError> {
         let manifest_path = dir.join(crate::model::shard::MANIFEST_FILENAME);
         if !manifest_path.exists() {
-            return Err(SwarmError::Internal(format!(
-                "Manifest not found: {}",
-                manifest_path.display()
+            return Err(SwarmError::ModelNotAvailable(crate::types::ModelId(
+                format!("Manifest not found: {}", manifest_path.display()),
             )));
         }
 

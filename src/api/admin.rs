@@ -292,7 +292,7 @@ pub async fn reload_config(
     );
 
     let params = crate::config::reload_operational_params(&config_path).map_err(|e| {
-        ApiError(crate::error::SwarmError::Config(format!(
+        ApiError(crate::error::SwarmError::Internal(format!(
             "Config file unreadable or invalid: {e}"
         )))
     })?;

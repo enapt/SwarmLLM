@@ -41,10 +41,12 @@ pub fn try_load_from_shards(
     let shard_files = shard_store.scan_local_shards(model_id, params.manifest.shard_count);
 
     if shard_files.is_empty() {
-        return Err(SwarmError::Internal(format!(
-            "No shard files found for model {} in {}",
-            model_id,
-            model_dir.display()
+        return Err(SwarmError::ModelNotAvailable(crate::types::ModelId(
+            format!(
+                "No shard files found for model {} in {}",
+                model_id,
+                model_dir.display()
+            ),
         )));
     }
 

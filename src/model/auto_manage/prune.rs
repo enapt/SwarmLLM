@@ -29,7 +29,7 @@ impl AutoShardManager {
         let resource_pressure = self.compute_resource_pressure(live_vram_used);
         let pressure_urgent = resource_pressure > 0.95;
         tracing::info!(
-            resource_pressure = format!("{:.2}", resource_pressure),
+            resource_pressure = %format_args!("{:.2}", resource_pressure),
             pressure_urgent,
             "DIAG: evaluate_and_prune starting"
         );
@@ -782,7 +782,7 @@ impl AutoShardManager {
                         model = %model_id,
                         total_shards = manifest.shard_count,
                         window_shards = w.len(),
-                        pressure = format!("{:.2}", pressure),
+                        pressure = %format_args!("{:.2}", pressure),
                         "VRAM soft-unload: narrowing shard window (shards stay on disk)"
                     );
                     pool.restart_with_window(&model_id, w.clone()).await;

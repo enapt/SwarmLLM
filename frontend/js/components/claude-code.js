@@ -721,7 +721,7 @@
         if (cls) html += '<span class="' + cls + '">' + U.escapeHtml(line) + '</span>\n';
         else html += U.escapeHtml(line) + '\n';
       }
-      if (lines.length > 200) html += '<span class="diff-hunk">... (' + (lines.length - 200) + ' more lines)</span>\n';
+      if (lines.length > 200) html += '<span class="diff-hunk">' + I18n.t('claude_code.diff_more_lines', { count: lines.length - 200 }) + '</span>\n';
       html += '</pre>';
       return html;
     },
@@ -960,7 +960,7 @@
       if (document.hidden) {
         var original = document.title;
         var flash = function() {
-          document.title = document.title === original ? '⚠ Permission Required' : original;
+          document.title = document.title === original ? I18n.t('claude_code.permission_required') : original;
         };
         var interval = setInterval(flash, 800);
         var restore = function() {

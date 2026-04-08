@@ -968,5 +968,7 @@
   "dashboard.sub_not_authenticated": "Not authenticated",
   "chat.session_tokens": "Session: {input} in · {output} out",
   "claude_code.unknown_error": "Unknown error",
-  "claude_code.error_fallback": "Error"
+  "claude_code.error_fallback": "Error",
+  "claude_code.permission_required": "⚠ Permission Required",
+  "claude_code.diff_more_lines": "... ({count} more lines)"
 }
