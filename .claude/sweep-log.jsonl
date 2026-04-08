@@ -200,3 +200,6 @@
 {"file":"src/api/mcp.rs","line":1409,"kind":"duplication","summary":"peer summary JSON built twice — extracted mcp_peer_json() helper","status":"fixed","date":"2026-04-08"}
 {"file":"src/credit/ledger.rs","line":17,"kind":"stale_comment","summary":"doc claimed all rates configurable via config.toml but dispatch.rs/router.rs use constants directly — updated doc","status":"fixed","date":"2026-04-08"}
 {"file":"CLAUDE.md","line":134,"kind":"false_positive","summary":"agent reported 646 tests stale vs MEMORY.md 659 — MEMORY.md was stale, CLAUDE.md 646 is correct","status":"wontfix","date":"2026-04-08"}
+{"file":"src/model/acquisition.rs","line":834,"kind":"bug","summary":"select_best_peer LAN bonus was 10_000 instead of 100_000 (10x wrong) and missing latency*100 scaling — unified with state.rs formula","status":"fixed","date":"2026-04-08"}
+{"file":"src/network/manager.rs","line":2075,"kind":"duplication","summary":"inline peer scoring missing trust component — replaced with SharedState::select_best_peer()","status":"fixed","date":"2026-04-08"}
+{"file":"CLAUDE.md","line":124,"kind":"false_positive","summary":"agent reported 969 vs 971 keys — 971 includes _lang and _dir, 969 actual translation keys is correct","status":"wontfix","date":"2026-04-08"}
