@@ -450,8 +450,8 @@
           App.claudeCode._closeCurrentGroup(contentEl);
           if (!ctx.cleared) { contentEl.textContent = ''; ctx.setClear(); }
           var textNode = document.createElement('div');
-          textNode.className = 'response-text';
-          textNode.textContent = block.text;
+          textNode.className = 'response-text cc-md';
+          textNode.innerHTML = App.claudeCode._renderMarkdown(block.text);
           contentEl.appendChild(textNode);
         } else if (block.type === 'tool_use') {
           if (!ctx.cleared) { contentEl.textContent = ''; ctx.setClear(); }
@@ -1213,6 +1213,97 @@
       if (name === 'WebSearch' || name === 'WebFetch') return 'web';
       if (name === 'Agent' || name === 'SendMessage' || name === 'TeamCreate') return 'agent';
       return 'default';
+    },
+
+    // Lightweight markdown renderer for response text — tables, lists, bold, code
+    _renderMarkdown: function(text) {
+      var lines = text.split('\n');
+      var html = '';
+      var inTable = false;
+      var inList = false;
+      var inCode = false;
+      var codeLang = '';
+
+      for (var i = 0; i < lines.length; i++) {
+        var line = lines[i];
+
+        // Fenced code blocks
+        if (line.match(/^```/)) {
+          if (inCode) {
+            html += '</code></pre>';
+            inCode = false;
+          } else {
+            if (inTable) { html += '</tbody></table>'; inTable = false; }
+            if (inList) { html += '</ul>'; inList = false; }
+            codeLang = line.substring(3).trim();
+            html += '<pre class="cc-md-code"><code' + (codeLang ? ' data-lang="' + U.escapeHtml(codeLang) + '"' : '') + '>';
+            inCode = true;
+          }
+          continue;
+        }
+        if (inCode) {
+          html += U.escapeHtml(line) + '\n';
+          continue;
+        }
+
+        // Table rows (| col | col |)
+        if (line.match(/^\|(.+)\|$/)) {
+          // Skip separator rows (| --- | --- |)
+          if (line.match(/^\|[\s\-:]+\|$/)) continue;
+          if (inList) { html += '</ul>'; inList = false; }
+          var cells = line.split('|').slice(1, -1);
+          if (!inTable) {
+            html += '<table class="cc-md-table"><thead><tr>';
+            cells.forEach(function(c) { html += '<th>' + App.claudeCode._inlineMarkdown(c.trim()) + '</th>'; });
+            html += '</tr></thead><tbody>';
+            inTable = true;
+          } else {
+            html += '<tr>';
+            cells.forEach(function(c) { html += '<td>' + App.claudeCode._inlineMarkdown(c.trim()) + '</td>'; });
+            html += '</tr>';
+          }
+          continue;
+        }
+        if (inTable) { html += '</tbody></table>'; inTable = false; }
+
+        // Unordered list items (* item, - item)
+        if (line.match(/^[\s]*[\*\-]\s+/)) {
+          if (!inList) { html += '<ul class="cc-md-list">'; inList = true; }
+          html += '<li>' + App.claudeCode._inlineMarkdown(line.replace(/^[\s]*[\*\-]\s+/, '')) + '</li>';
+          continue;
+        }
+        // Ordered list items (1. item)
+        if (line.match(/^[\s]*\d+\.\s+/)) {
+          if (!inList) { html += '<ul class="cc-md-list cc-md-ol">'; inList = true; }
+          html += '<li>' + App.claudeCode._inlineMarkdown(line.replace(/^[\s]*\d+\.\s+/, '')) + '</li>';
+          continue;
+        }
+        if (inList) { html += '</ul>'; inList = false; }
+
+        // Headers
+        var hMatch = line.match(/^(#{1,3})\s+(.+)/);
+        if (hMatch) {
+          var lvl = hMatch[1].length;
+          html += '<h' + (lvl + 2) + ' class="cc-md-heading">' + App.claudeCode._inlineMarkdown(hMatch[2]) + '</h' + (lvl + 2) + '>';
+          continue;
+        }
+
+        // Regular line
+        html += (line ? '<p>' + App.claudeCode._inlineMarkdown(line) + '</p>' : '<br>');
+      }
+      if (inTable) html += '</tbody></table>';
+      if (inList) html += '</ul>';
+      if (inCode) html += '</code></pre>';
+      return html;
+    },
+
+    // Inline markdown: bold, italic, inline code
+    _inlineMarkdown: function(text) {
+      var s = U.escapeHtml(text);
+      s = s.replace(/`([^`]+)`/g, '<code class="cc-md-inline-code">$1</code>');
+      s = s.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+      s = s.replace(/\*([^*]+)\*/g, '<em>$1</em>');
+      return s;
     },
 
     _addExpandBtn: function(parentEl, toolName, fullText, isDiff) {

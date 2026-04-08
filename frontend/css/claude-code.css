@@ -145,7 +145,7 @@
 /* ─── Tool Group (batches consecutive tool calls + prompts) ─── */
 .cc-tool-group { margin: 6px 0; border: 1px solid var(--border); border-radius: var(--radius); border-left: 3px solid var(--accent); overflow: hidden; background: var(--bg-tertiary); }
 .cc-tool-group[open] { background: transparent; border-color: transparent; border-left-color: transparent; }
-.cc-tool-group[open] > .cc-group-header { display: none; }
+.cc-tool-group[open] > .cc-group-header { opacity: 0.5; font-size: 0.65rem; padding: 3px 10px; }
 .cc-group-header { display: flex; align-items: center; gap: 8px; padding: 6px 10px; font-size: 0.72rem; cursor: pointer; list-style: none; user-select: none; color: var(--text-secondary); font-family: var(--font-mono); }
 .cc-group-header::-webkit-details-marker { display: none; }
 .cc-group-header::before { content: '▸'; color: var(--text-muted); font-size: 0.6rem; flex-shrink: 0; }
