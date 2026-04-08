@@ -324,15 +324,29 @@
       var total = items.length;
       var done = group.querySelectorAll('.cc-tool-done, .cc-perm-allowed, .cc-perm-denied, .cc-perm-collapsed').length;
       countEl.textContent = total > 1 ? (done + '/' + total) : '';
-      // Build a label from tool names
-      var names = [];
-      for (var i = 0; i < items.length && names.length < 4; i++) {
-        var n = items[i].querySelector('.cc-tool-name, .cc-perm-tool-name');
-        if (n && names.indexOf(n.textContent) === -1) names.push(n.textContent);
+
+      // Build icon strip from child tool panels
+      var oldIcons = headerEl.querySelector('.cc-group-icons');
+      if (oldIcons) oldIcons.remove();
+      var iconsEl = document.createElement('span');
+      iconsEl.className = 'cc-group-icons';
+      for (var i = 0; i < items.length; i++) {
+        var nameEl = items[i].querySelector('.cc-tool-name, .cc-perm-tool-name');
+        var tn = nameEl ? nameEl.textContent : '';
+        var badge = document.createElement('span');
+        badge.className = 'cc-group-icon-badge cc-icon-' + App.claudeCode._toolCategory(tn);
+        badge.textContent = App.claudeCode._toolIcon(tn);
+        iconsEl.appendChild(badge);
       }
-      if (names.length > 0) {
-        var suffix = total > items.length ? ' +' + (total - items.length) : '';
-        labelEl.textContent = names.join(', ') + suffix;
+
+      // Replace label with icons, keep text as fallback
+      if (labelEl) {
+        labelEl.textContent = '';
+        labelEl.appendChild(iconsEl);
+        if (total > 1) {
+          var countText = document.createTextNode(' ' + done + '/' + total + ' tools');
+          labelEl.appendChild(countText);
+        }
       }
 
       // Surface pending permission actions onto the group header
@@ -486,12 +500,14 @@
       if (hint.length > 60) hint = hint.substring(0, 57) + '...';
 
       var icon = App.claudeCode._toolIcon(toolName);
+      var cat = App.claudeCode._toolCategory(toolName);
       var summary = document.createElement('summary');
       summary.className = 'cc-tool-header';
       summary.innerHTML =
-        '<span class="cc-tool-icon">' + icon + '</span>' +
+        '<span class="cc-tool-icon cc-icon-' + cat + '">' + icon + '</span>' +
         '<span class="cc-tool-name">' + U.escapeHtml(toolName) + '</span>' +
         (hint ? '<span class="cc-tool-file">' + U.escapeHtml(hint) + '</span>' : '') +
+        '<span class="cc-tool-summary"></span>' +
         '<span class="cc-tool-status pending">' + U.escapeHtml(I18n.t('claude_code.running')) + '</span>';
       panel.appendChild(summary);
 
@@ -796,6 +812,14 @@
         var toolNameEl = panel && panel.querySelector('.cc-tool-name');
         var toolName = toolNameEl ? toolNameEl.textContent : '';
 
+        // Inject result summary into collapsed header
+        if (panel) {
+          var summaryEl = panel.querySelector('.cc-tool-summary');
+          if (summaryEl) {
+            summaryEl.textContent = App.claudeCode._resultSummary(toolName, blockText);
+          }
+        }
+
         // Render result with smart formatting
         var resultEl = App.claudeCode._renderToolOutput(toolName, blockText);
 
@@ -1087,31 +1111,57 @@
     // Get an icon for a tool name
     _toolIcon: function(name) {
       var icons = {
-        Bash: '⌨',
-        Read: '📄',
-        Edit: '✏',
-        Write: '📝',
-        Glob: '🔍',
-        Grep: '🔎',
-        WebSearch: '🌐',
-        WebFetch: '🌐',
-        Agent: '🤖',
-        SendMessage: '💬',
-        TeamCreate: '👥',
-        TaskCreate: '📋',
-        TaskUpdate: '📋',
-        TaskGet: '📋',
-        TaskList: '📋',
-        TaskStop: '🛑',
-        TaskOutput: '📋',
-        TodoWrite: '📋',
-        LSP: '🔗',
-        NotebookEdit: '📓',
-        AskUserQuestion: '❓',
-        EnterPlanMode: '📐',
-        ExitPlanMode: '📐',
+        Bash: '$', Read: '\u25C9', Edit: '\u270E', Write: '\u271A',
+        Glob: '\u203B', Grep: '\u2298', WebSearch: '\u25CE', WebFetch: '\u2193',
+        ToolSearch: '\u2295', Agent: '\u229B', SendMessage: '\u25E7',
+        TeamCreate: '\u2630', TaskCreate: '\u2610', TaskUpdate: '\u2611',
+        TaskGet: '\u2610', TaskList: '\u2610', TaskStop: '\u2612',
+        TaskOutput: '\u2610', TodoWrite: '\u2610', LSP: '\u2261',
+        NotebookEdit: '\u25A4', AskUserQuestion: '?',
+        EnterPlanMode: '\u25A6', ExitPlanMode: '\u25A6', Skill: '\u26A1',
       };
-      return icons[name] || '⚡';
+      return icons[name] || '\u2699';
+    },
+
+    _toolCategory: function(name) {
+      if (name === 'Bash') return 'terminal';
+      if (name === 'Read' || name === 'Edit' || name === 'Write' || name === 'Glob' || name === 'Grep') return 'file';
+      if (name === 'WebSearch' || name === 'WebFetch') return 'web';
+      if (name === 'Agent' || name === 'SendMessage' || name === 'TeamCreate') return 'agent';
+      return 'default';
+    },
+
+    _resultSummary: function(toolName, text) {
+      if (!text) return '';
+      var t = text.trim();
+      if (toolName === 'Read') {
+        var lines = t.split('\n').length;
+        return lines + ' line' + (lines !== 1 ? 's' : '');
+      }
+      if (toolName === 'Edit') {
+        if (/error|fail/i.test(t.substring(0, 60))) return t.substring(0, 50);
+        return 'applied';
+      }
+      if (toolName === 'Write') return 'written';
+      if (toolName === 'Glob') {
+        var files = t.split('\n').filter(function(l) { return l.trim(); }).length;
+        return files + ' file' + (files !== 1 ? 's' : '');
+      }
+      if (toolName === 'Grep') {
+        var matches = t.split('\n').filter(function(l) { return l.trim(); }).length;
+        return matches + ' match' + (matches !== 1 ? 'es' : '');
+      }
+      if (toolName === 'Bash') {
+        var first = t.split('\n')[0] || '';
+        return first.length > 50 ? first.substring(0, 47) + '...' : first;
+      }
+      if (toolName === 'WebFetch') {
+        var kb = (t.length / 1024).toFixed(1);
+        return kb + ' KB';
+      }
+      // Generic: first line, max 40 chars
+      var fl = t.split('\n')[0] || '';
+      return fl.length > 40 ? fl.substring(0, 37) + '...' : fl;
     },
 
     // Pass slash commands directly to Claude Code CLI — it has its own

@@ -34,10 +34,22 @@
 .cc-tool-header::-webkit-details-marker { display: none; }
 .cc-tool-header::before { content: '▸'; color: var(--text-muted); font-size: 0.65rem; flex-shrink: 0; transition: transform 0.15s; margin-right: 2px; }
 .cc-tool-call[open] > .cc-tool-header::before { transform: rotate(90deg); }
-.cc-tool-icon { font-size: 0.85rem; flex-shrink: 0; }
+.cc-tool-icon {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 20px; height: 20px; border-radius: 4px;
+  background: var(--bg-secondary); font-size: 0.72rem;
+  font-family: var(--font-mono); font-weight: 700;
+  color: var(--accent); flex-shrink: 0;
+}
+.cc-icon-terminal { color: var(--green); background: rgba(34,197,94,0.1); }
+.cc-icon-file { color: var(--accent); }
+.cc-icon-web { color: var(--purple); background: rgba(167,139,250,0.1); }
+.cc-icon-agent { color: var(--violet, #8b5cf6); background: rgba(139,92,246,0.1); }
 .cc-tool-name { font-weight: 700; color: var(--accent); font-family: var(--font-mono); font-size: 0.75rem; }
 .cc-tool-file { color: var(--text-secondary); font-family: var(--font-mono); font-size: 0.7rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 350px; flex: 1; min-width: 0; }
-.cc-tool-status { font-size: 0.65rem; margin-left: auto; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; flex-shrink: 0; }
+.cc-tool-summary { font-size: 0.68rem; color: var(--text-muted); font-family: var(--font-mono); max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-left: auto; }
+.cc-tool-summary:empty { display: none; }
+.cc-tool-status { font-size: 0.65rem; margin-left: 6px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; flex-shrink: 0; }
 .cc-tool-status.pending { color: var(--orange); }
 .cc-tool-status.done { color: var(--green); }
 .cc-tool-body { padding: 0 10px 8px; }
@@ -124,6 +136,18 @@
 .cc-group-done:hover { opacity: 0.9; }
 .cc-group-done > .cc-group-header { color: var(--green); }
 .cc-group-done > .cc-group-header .cc-group-label { color: var(--text-secondary); }
+/* Icon strip in collapsed group header */
+.cc-group-icons { display: inline-flex; gap: 3px; align-items: center; }
+.cc-group-icon-badge {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 16px; height: 16px; border-radius: 3px;
+  background: var(--bg-secondary); font-size: 0.6rem;
+  font-family: var(--font-mono); font-weight: 700;
+  color: var(--text-muted); flex-shrink: 0;
+}
+.cc-group-icon-badge.cc-icon-terminal { color: var(--green); background: rgba(34,197,94,0.1); }
+.cc-group-icon-badge.cc-icon-file { color: var(--accent); background: rgba(59,130,246,0.08); }
+.cc-group-icon-badge.cc-icon-web { color: var(--purple); background: rgba(167,139,250,0.1); }
 /* Pending group — keep visible and highlighted */
 .cc-group-pending { border-color: rgba(245,158,11,0.3); border-left-color: var(--orange); }
 .cc-group-pending > .cc-group-header { color: var(--text-primary); }
