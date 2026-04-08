@@ -1299,6 +1299,7 @@ input[type="range"]::-webkit-slider-thumb {
   border-left: 3px solid var(--accent);
 }
 .chat-msg .msg-role {
+  display: flex; align-items: center; gap: 6px;
   font-size: 0.65rem; font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.08em;
@@ -1310,8 +1311,15 @@ input[type="range"]::-webkit-slider-thumb {
 .msg-enc-lock { font-size: 0.7rem; opacity: 0.7; margin-left: 4px; vertical-align: middle; }
 .send-enc-lock { font-size: 0.75rem; opacity: 0.85; margin-left: 3px; vertical-align: middle; }
 
-/* ---- Avatar slot: hidden in linear mode ---- */
+/* ---- Avatar slot: hidden in linear mode, shown in messenger ---- */
 .msg-avatar { display: none; }
+
+/* ---- Role icon: inline avatar in linear mode ---- */
+.msg-role-icon {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 18px; height: 18px; flex-shrink: 0;
+}
+.msg-role-icon img { width: 16px; height: 16px; display: block; }
 
 /* ---- Chat Layout: Messenger (bubbles) ---- */
 
