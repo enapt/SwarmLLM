@@ -97,14 +97,15 @@
 
 /* ─── Permission Prompt (compact inline bar) ─── */
 .cc-permission-prompt { margin: 4px 0; border-radius: var(--radius); overflow: hidden; border: 1px solid rgba(245,158,11,0.3); border-left: 3px solid var(--orange); background: rgba(245,158,11,0.05); }
-.cc-perm-bar { display: flex; align-items: center; gap: 6px; padding: 5px 10px; font-size: 0.78rem; cursor: pointer; list-style: none; user-select: none; }
+.cc-perm-bar { display: flex; align-items: center; gap: 6px; padding: 5px 10px; font-size: 0.78rem; cursor: pointer; list-style: none; user-select: none; flex-wrap: wrap; }
 .cc-perm-bar::-webkit-details-marker { display: none; }
 .cc-perm-bar::before { content: '▸'; color: var(--text-muted); font-size: 0.6rem; flex-shrink: 0; transition: transform 0.15s; }
 .cc-permission-prompt[open] > .cc-perm-bar::before { transform: rotate(90deg); }
 .cc-perm-pulse { width: 7px; height: 7px; border-radius: 50%; background: var(--orange); flex-shrink: 0; }
 .cc-perm-waiting .cc-perm-pulse { animation: cc-perm-pulse-dot 1.5s ease-in-out infinite; }
 @keyframes cc-perm-pulse-dot { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: 0.4; transform: scale(0.7); } }
-.cc-perm-tool-name { font-size: 0.75rem; color: var(--accent); font-family: var(--font-mono); font-weight: 700; }
+.cc-perm-tool-name { font-size: 0.75rem; color: var(--accent); font-family: var(--font-mono); font-weight: 700; flex-shrink: 0; }
+.cc-perm-preview { font-size: 0.7rem; color: var(--text-secondary); font-family: var(--font-mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; flex: 1; }
 .cc-perm-actions { display: flex; gap: 6px; align-items: center; margin-left: auto; flex-shrink: 0; }
 .cc-perm-actions .cc-perm-allow { background: var(--green); color: #fff; border: none; cursor: pointer; padding: 2px 12px; font-weight: 600; font-size: 0.7rem; border-radius: var(--radius); transition: opacity 0.15s; }
 .cc-perm-actions .cc-perm-allow:hover { opacity: 0.85; }

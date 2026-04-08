@@ -999,7 +999,24 @@
       var detailHtml = App.claudeCode._buildToolDetail(toolName, input);
       var hasDetail = detailHtml && Object.keys(input).length > 0;
 
-      // Summary line: icon + tool + hint + Allow/Deny buttons — always visible
+      // Build a short preview of what's being asked
+      var preview = '';
+      if (toolName === 'Bash') {
+        var cmd = input.command || '';
+        preview = cmd.length > 80 ? cmd.substring(0, 77) + '...' : cmd;
+      } else if (toolName === 'Edit') {
+        preview = (input.file_path || '').split('/').pop();
+        if (input.old_string) {
+          var old = input.old_string.split('\n')[0];
+          preview += '  ' + (old.length > 40 ? old.substring(0, 37) + '...' : old);
+        }
+      } else if (toolName === 'Write') {
+        preview = input.file_path || '';
+      } else if (toolName === 'Read') {
+        preview = input.file_path || '';
+      }
+
+      // Summary line: icon + tool + hint + preview + Allow/Deny buttons
       var summary = document.createElement('summary');
       summary.className = 'cc-perm-bar';
       summary.innerHTML =
@@ -1007,6 +1024,7 @@
         '<span class="cc-tool-icon">' + icon + '</span>' +
         '<strong class="cc-perm-tool-name">' + U.escapeHtml(toolName) + '</strong>' +
         (hint ? '<span class="cc-tool-file">' + U.escapeHtml(hint) + '</span>' : '') +
+        (preview && preview !== hint ? '<span class="cc-perm-preview">' + U.escapeHtml(preview) + '</span>' : '') +
         '<span class="cc-perm-actions">' +
           '<button class="btn btn-sm cc-perm-allow">' + U.escapeHtml(I18n.t('claude_code.allow')) + '</button>' +
           '<button class="btn btn-sm cc-perm-deny">' + U.escapeHtml(I18n.t('claude_code.deny')) + '</button>' +
