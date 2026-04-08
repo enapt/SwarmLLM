@@ -871,10 +871,7 @@ e
     pub(super) async fn check_model_complete(&self, model_id: &ModelId) {
         let vram_budget = compute_vram_budget(&self.shared_state);
         check_and_load_model(&self.shared_state, model_id, vram_budget).await;
-        let _ = self
-            .shared_state
-            .events
-            .dashboard_tx
-            .send(crate::daemon::state::DashboardSignal::ModelsChanged);
+        self.shared_state
+            .signal_dashboard(crate::daemon::state::DashboardSignal::ModelsChanged);
     }
 }

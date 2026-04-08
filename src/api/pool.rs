@@ -665,11 +665,9 @@ pub async fn set_private_mode(
     );
 
     // Signal dashboard to refresh models (availability changes in private mode)
-    let _ = state
+    state
         .shared_state
-        .events
-        .dashboard_tx
-        .send(crate::daemon::state::DashboardSignal::ModelsChanged);
+        .signal_dashboard(crate::daemon::state::DashboardSignal::ModelsChanged);
 
     // Trigger auto-manage re-evaluation so shard availability updates immediately
     state.shared_state.models.auto_manage_notify.notify_one();
@@ -734,17 +732,7 @@ pub async fn pool_add_pin(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let my_id = state.shared_state.identity.node_id().clone();
 
-    // Decode target node ID
-    let target_bytes = hex::decode(&body.target_node_id)
-        .map_err(|_| ApiError(SwarmError::Validation("Invalid target_node_id hex".into())))?;
-    if target_bytes.len() != 32 {
-        return Err(ApiError(SwarmError::Validation(
-            "target_node_id must be 32 bytes".into(),
-        )));
-    }
-    let mut target_arr = [0u8; 32];
-    target_arr.copy_from_slice(&target_bytes);
-    let target = NodeId(target_arr);
+    let target = parse_node_id(&body.target_node_id)?;
 
     let mut ps_guard = state.shared_state.credits.pool_state.write().await;
     let ps = ps_guard
@@ -799,16 +787,7 @@ pub async fn pool_remove_pin(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let my_id = state.shared_state.identity.node_id().clone();
 
-    let target_bytes = hex::decode(&body.target_node_id)
-        .map_err(|_| ApiError(SwarmError::Validation("Invalid target_node_id hex".into())))?;
-    if target_bytes.len() != 32 {
-        return Err(ApiError(SwarmError::Validation(
-            "target_node_id must be 32 bytes".into(),
-        )));
-    }
-    let mut target_arr = [0u8; 32];
-    target_arr.copy_from_slice(&target_bytes);
-    let target = NodeId(target_arr);
+    let target = parse_node_id(&body.target_node_id)?;
 
     let mut ps_guard = state.shared_state.credits.pool_state.write().await;
     let ps = ps_guard

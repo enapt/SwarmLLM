@@ -954,24 +954,26 @@
       App.chat.scrollToBottom();
     },
 
+    _permFlashInterval: null,
+
     // Notify user that a permission decision is needed
     _notifyPermissionNeeded: function() {
-      // Flash the document title to draw attention
-      if (document.hidden) {
-        var original = document.title;
-        var flash = function() {
-          document.title = document.title === original ? I18n.t('claude_code.permission_required') : original;
-        };
-        var interval = setInterval(flash, 800);
-        var restore = function() {
-          clearInterval(interval);
-          document.title = original;
-          document.removeEventListener('visibilitychange', restore);
-        };
-        document.addEventListener('visibilitychange', restore);
-        // Auto-stop after 30s
-        setTimeout(restore, 30000);
-      }
+      // Flash the document title to draw attention — guard against stacking
+      if (!document.hidden || App.claudeCode._permFlashInterval) return;
+      var original = document.title;
+      var flash = function() {
+        document.title = document.title === original ? I18n.t('claude_code.permission_required') : original;
+      };
+      App.claudeCode._permFlashInterval = setInterval(flash, 800);
+      var restore = function() {
+        clearInterval(App.claudeCode._permFlashInterval);
+        App.claudeCode._permFlashInterval = null;
+        document.title = original;
+        document.removeEventListener('visibilitychange', restore);
+      };
+      document.addEventListener('visibilitychange', restore);
+      // Auto-stop after 30s
+      setTimeout(restore, 30000);
     },
 
     // Send permission response — then collapse to one-liner

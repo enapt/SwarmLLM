@@ -1060,6 +1060,12 @@ impl SharedState {
         let _ = self.events.activity_tx.send(event);
     }
 
+    /// Signal the dashboard to refresh (peers changed, models changed, update available).
+    /// Fire-and-forget — if no WebSocket subscribers, the signal is dropped.
+    pub fn signal_dashboard(&self, signal: DashboardSignal) {
+        let _ = self.events.dashboard_tx.send(signal);
+    }
+
     /// Register a shard as locally held and announce it to the network.
     ///
     /// Steps: record in model_registry, broadcast ShardAnnounce, start DHT providing,
@@ -1081,10 +1087,7 @@ impl SharedState {
         let _ = net_tx.try_send(crate::types::NetworkCommand::StartProviding(vec![
             shard_id.clone()
         ]));
-        let _ = self
-            .events
-            .dashboard_tx
-            .send(DashboardSignal::ModelsChanged);
+        self.signal_dashboard(DashboardSignal::ModelsChanged);
     }
 
     /// Convenience accessor for a `ShardStore` rooted at this node's data dir.

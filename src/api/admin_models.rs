@@ -947,10 +947,7 @@ pub async fn delete_model(
     }
 
     // Notify dashboard
-    let _ = shared
-        .events
-        .dashboard_tx
-        .send(crate::daemon::state::DashboardSignal::ModelsChanged);
+    shared.signal_dashboard(crate::daemon::state::DashboardSignal::ModelsChanged);
 
     tracing::info!(model = %model_id, files = files_removed, "Model deleted");
 
@@ -1004,10 +1001,7 @@ pub async fn unload_model(
     shared.gguf_meta.remove(&mid);
 
     // Notify dashboard
-    let _ = shared
-        .events
-        .dashboard_tx
-        .send(crate::daemon::state::DashboardSignal::ModelsChanged);
+    shared.signal_dashboard(crate::daemon::state::DashboardSignal::ModelsChanged);
 
     // Emit activity event
     shared.emit_activity(
@@ -1075,10 +1069,7 @@ pub async fn unload_shard(
     // Clear stale model_loaded history so updated layer range emits fresh
     shared.events.clear_model_load_history(&model_id);
 
-    let _ = shared
-        .events
-        .dashboard_tx
-        .send(crate::daemon::state::DashboardSignal::ModelsChanged);
+    shared.signal_dashboard(crate::daemon::state::DashboardSignal::ModelsChanged);
 
     {
         let display = shared.model_registry.display_name(&mid);
@@ -1155,10 +1146,7 @@ pub async fn load_shard(
     // Clear stale model_loaded history so the new layer range emits a fresh event
     shared.events.clear_model_load_history(&model_id);
 
-    let _ = shared
-        .events
-        .dashboard_tx
-        .send(crate::daemon::state::DashboardSignal::ModelsChanged);
+    shared.signal_dashboard(crate::daemon::state::DashboardSignal::ModelsChanged);
 
     {
         let display = shared.model_registry.display_name(&mid);
@@ -1291,18 +1279,12 @@ pub async fn delete_shard(
                 vram_budget,
             )
             .await;
-            let _ = reload_shared
-                .events
-                .dashboard_tx
-                .send(crate::daemon::state::DashboardSignal::ModelsChanged);
+            reload_shared.signal_dashboard(crate::daemon::state::DashboardSignal::ModelsChanged);
         });
     }
 
     // Notify dashboard so shard grid and model state update immediately
-    let _ = shared
-        .events
-        .dashboard_tx
-        .send(crate::daemon::state::DashboardSignal::ModelsChanged);
+    shared.signal_dashboard(crate::daemon::state::DashboardSignal::ModelsChanged);
 
     {
         let display = shared.model_registry.display_name(&mid);

@@ -295,11 +295,9 @@ pub async fn update_providers(
     }
 
     // Notify WebSocket clients so model list and mode indicator refresh immediately
-    let _ = state
+    state
         .shared_state
-        .events
-        .dashboard_tx
-        .send(crate::daemon::state::DashboardSignal::ModelsChanged);
+        .signal_dashboard(crate::daemon::state::DashboardSignal::ModelsChanged);
 
     Ok(Json(response))
 }
@@ -900,7 +898,7 @@ pub async fn check_update(
             us.last_checked = Some(chrono::Utc::now().to_rfc3339());
             us.last_error = None;
             // Notify WebSocket
-            let _ = state.shared_state.events.dashboard_tx.send(
+            state.shared_state.signal_dashboard(
                 crate::daemon::state::DashboardSignal::UpdateAvailable(info.clone()),
             );
             Ok(Json(serde_json::json!({

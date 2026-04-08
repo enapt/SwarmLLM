@@ -1289,11 +1289,8 @@ impl NetworkManager {
                 peer.trust_score = persisted_trust;
             }
         }
-        let _ = self
-            .shared_state
-            .events
-            .dashboard_tx
-            .send(crate::daemon::state::DashboardSignal::PeersChanged);
+        self.shared_state
+            .signal_dashboard(crate::daemon::state::DashboardSignal::PeersChanged);
 
         // Emit activity event for peer connection
         {
@@ -1591,11 +1588,8 @@ impl NetworkManager {
                     // dispatch from resolving NodeId for a peer that's being removed
                     self.peer_to_node.remove(&peer_id);
                     self.shared_state.peer_registry.remove(&node_id);
-                    let _ = self
-                        .shared_state
-                        .events
-                        .dashboard_tx
-                        .send(crate::daemon::state::DashboardSignal::PeersChanged);
+                    self.shared_state
+                        .signal_dashboard(crate::daemon::state::DashboardSignal::PeersChanged);
 
                     self.shared_state.emit_activity(
                         crate::daemon::state::ActivityEvent::new(
@@ -2359,10 +2353,9 @@ mname.as_deref().unwrap_or(&shard_id.model_id.0),
                                     vram_budget,
                                 )
                                 .await;
-                                let _ = load_shared
-                                    .events
-                                    .dashboard_tx
-                                    .send(crate::daemon::state::DashboardSignal::ModelsChanged);
+                                load_shared.signal_dashboard(
+                                    crate::daemon::state::DashboardSignal::ModelsChanged,
+                                );
                             });
                         }
                         self.shared_state.models.auto_manage_notify.notify_one();
