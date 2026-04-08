@@ -3045,7 +3045,9 @@ textarea:focus:not(:focus-visible) {
   white-space: pre-wrap; word-wrap: break-word; max-height: 300px; overflow-y: auto;
   margin: 0; background: transparent; border: none; border-top: 1px solid var(--border);
 }
-.response-text { white-space: pre-wrap; word-wrap: break-word; }
+.response-text { white-space: pre-wrap; word-wrap: break-word; display: block; }
+/* Multiple response segments get spacing between them */
+.response-text + .response-text { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--border); }
 /* Markdown-rendered response text */
 .response-text.cc-md { white-space: normal; }
 .response-text.cc-md p { margin: 0 0 0.4em; }
