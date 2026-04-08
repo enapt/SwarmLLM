@@ -669,8 +669,8 @@ pub struct CreateSessionRequest {
     /// If set, resume a previous CLI session instead of starting fresh.
     #[serde(default)]
     pub resume_claude_session_id: Option<String>,
-    /// Permission mode: "default", "acceptEdits", "plan".
-    /// Default: "acceptEdits". "bypassPermissions" is blocked for security.
+    /// Permission mode: "default", "acceptEdits", "auto", "plan", "bypassPermissions", "dontAsk".
+    /// Default: "acceptEdits". All modes require a valid API key.
     #[serde(default = "default_permission_mode")]
     pub permission_mode: String,
 }
