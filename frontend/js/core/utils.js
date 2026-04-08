@@ -244,19 +244,21 @@
     if (isHtml) { contentEl.innerHTML = content; }
     else { contentEl.textContent = content; }
 
-    // Assistant action buttons
+    // Assistant action icons (inline in role bar)
     if (role === 'assistant') {
-      var actions = document.createElement('div');
+      var actions = document.createElement('span');
       actions.className = 'msg-actions';
       var copyBtn = document.createElement('button');
       copyBtn.className = 'msg-action-btn'; copyBtn.dataset.action = 'copy';
-      copyBtn.title = I18n.t('chat.copy_response'); copyBtn.textContent = I18n.t('actions.copy');
+      copyBtn.title = I18n.t('chat.copy_response');
+      copyBtn.innerHTML = '&#128203;';
       var compareBtn = document.createElement('button');
       compareBtn.className = 'msg-action-btn'; compareBtn.dataset.action = 'compare';
-      compareBtn.title = I18n.t('chat.compare_question'); compareBtn.textContent = I18n.t('actions.try_other_models');
+      compareBtn.title = I18n.t('chat.compare_question');
+      compareBtn.innerHTML = '&#8644;';
       actions.appendChild(copyBtn);
       actions.appendChild(compareBtn);
-      div.querySelector('.msg-bubble').appendChild(actions);
+      roleEl.appendChild(actions);
     }
 
     container.appendChild(div);

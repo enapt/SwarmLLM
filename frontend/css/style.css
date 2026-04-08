@@ -1338,6 +1338,7 @@ input[type="range"]::-webkit-slider-thumb {
 
 /* ---- Role label ---- */
 .chat-msg .msg-role {
+  display: flex; align-items: center;
   font-size: 0.65rem; font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.08em;
@@ -3081,22 +3082,20 @@ textarea:focus:not(:focus-visible) {
 
 /* Messenger layout: source colors handled via avatar border (see messenger block above) */
 
-/* ---- Compare from chat button ---- */
+/* ---- Inline action icons (in role bar) ---- */
 .msg-actions {
-  display: flex; gap: 6px; margin-top: 6px; opacity: 0;
+  display: inline-flex; gap: 4px; margin-left: auto; opacity: 0;
   transition: opacity 0.15s;
 }
 .chat-msg:hover .msg-actions { opacity: 1; }
 .msg-action-btn {
-  background: var(--bg-tertiary); border: 1px solid var(--border);
-  border-radius: var(--radius); color: var(--text-muted);
-  font-size: 0.65rem; padding: 2px 8px; cursor: pointer;
-  transition: all var(--transition);
+  background: none; border: none;
+  color: var(--text-muted);
+  font-size: 0.75rem; padding: 0 2px; cursor: pointer;
+  transition: color var(--transition);
+  line-height: 1;
 }
-.msg-action-btn:hover {
-  color: var(--accent); border-color: var(--accent);
-  background: var(--accent-glow);
-}
+.msg-action-btn:hover { color: var(--accent); }
 
 /* ---- Compare tab improvements ---- */
 .compare-controls {
