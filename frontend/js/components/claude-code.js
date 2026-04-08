@@ -197,8 +197,16 @@
         }
       }
 
+      // Remove working indicator before capturing
+      App.claudeCode._removeWorkingIndicator(contentEl);
+
+      // Capture tool footer HTML for persistence
+      var toolFooterHtml = '';
+      var footer = contentEl.querySelector('.cc-tool-footer');
+      if (footer) toolFooterHtml = footer.outerHTML;
+
       var elapsedSec = ((performance.now() - startTime) / 1000).toFixed(2);
-      return { content: fullContent, pendingPermission: pendingPermission, duration: elapsedSec };
+      return { content: fullContent, pendingPermission: pendingPermission, duration: elapsedSec, toolHtml: toolFooterHtml };
     },
 
     // Resolve the target container — if event has parent_tool_use_id pointing
