@@ -194,3 +194,5 @@
 {"file":"CLAUDE.md","line":124,"kind":"doc_mismatch","summary":"i18n key count 968 → 970","status":"fixed","date":"2026-04-08"}
 {"file":"src/inference/tensor_util.rs","line":195,"kind":"duplication","summary":"sample_token_with_params reimplements softmax+top-p+sampling from sampling.rs — hot path, needs careful refactor","status":"deferred","date":"2026-04-08"}
 {"file":"src/model/auto_manage/prune.rs","line":125,"kind":"duplication","summary":"shard pin matching predicate duplicated 3x across prune.rs and scoring.rs — extract ShardPin::matches() method","status":"deferred","date":"2026-04-08"}
+{"file":"src/inference/tensor_util.rs","line":195,"kind":"duplication","summary":"sample_token_with_params reimplemented 85 lines of softmax+top-p+sampling — replaced with delegation to sampling::sample_token()","status":"fixed","date":"2026-04-08"}
+{"file":"src/model/auto_manage/prune.rs","line":125,"kind":"duplication","summary":"shard pin matching predicate 3x across prune.rs/scoring.rs — extracted ShardPin::matches() and matches_shard() methods","status":"fixed","date":"2026-04-08"}
