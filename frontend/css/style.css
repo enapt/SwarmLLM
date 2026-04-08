@@ -821,8 +821,8 @@ a:hover { color: var(--accent-hover); }
   .chat-input-area { padding: 8px 12px 12px; }
   .chat-input-wrap textarea { font-size: 1rem; min-height: 48px; }
   .chat-msg { gap: 8px; }
-  .chat-msg.user { padding-left: 16px; }
-  .chat-msg.assistant { padding-right: 16px; }
+  .chat-msg.user { padding-left: 24px; }
+  .chat-msg.assistant { padding-right: 24px; }
   .msg-bubble { padding: 10px 14px; }
 
   /* Larger tap targets for buttons */
