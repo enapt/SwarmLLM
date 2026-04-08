@@ -272,10 +272,16 @@
           var textNode = contentEl.querySelector('.response-text');
           if (!textNode) {
             textNode = document.createElement('div');
-            textNode.className = 'response-text';
+            textNode.className = 'response-text cc-md';
             contentEl.appendChild(textNode);
           }
-          textNode.textContent = ctx.getFullContent();
+          // Apply markdown rendering on each newline for live formatting
+          var full = ctx.getFullContent();
+          if (full.indexOf('\n') !== -1) {
+            textNode.innerHTML = App.claudeCode._renderMarkdown(full);
+          } else {
+            textNode.textContent = full;
+          }
           App.chat.scrollToBottom();
         } else if (deltaType === 'thinking_delta') {
           // Extended thinking — render as faded italic preface, not a box
@@ -421,21 +427,7 @@
       var content = msg.content || [];
       if (!Array.isArray(content)) return;
 
-      // Check if content has interleaved text + tool_use blocks
-      var hasTools = content.some(function(b) { return b.type === 'tool_use'; });
-      var hasText = content.some(function(b) { return b.type === 'text'; });
-
-      // If interleaved, clear the single streamed .response-text and re-render
-      // all blocks in order so tools appear at the correct position
-      if (hasTools && hasText) {
-        // Preserve thinking blocks
-        var thinkingEl = contentEl.querySelector('.cc-thinking');
-        // Clear streamed content
-        contentEl.innerHTML = '';
-        if (thinkingEl) contentEl.appendChild(thinkingEl);
-        ctx.setClear();
-      }
-
+      var firstTextStreamed = false;
       content.forEach(function(block) {
         if (block.type === 'thinking' && block.thinking) {
           if (!ctx.cleared) { contentEl.textContent = ''; ctx.setClear(); }
@@ -449,6 +441,12 @@
         } else if (block.type === 'text' && block.text) {
           App.claudeCode._closeCurrentGroup(contentEl);
           if (!ctx.cleared) { contentEl.textContent = ''; ctx.setClear(); }
+          // First text block was already streamed with markdown — skip it
+          if (!firstTextStreamed && contentEl.querySelector('.response-text')) {
+            firstTextStreamed = true;
+            return;
+          }
+          firstTextStreamed = true;
           var textNode = document.createElement('div');
           textNode.className = 'response-text cc-md';
           textNode.innerHTML = App.claudeCode._renderMarkdown(block.text);
