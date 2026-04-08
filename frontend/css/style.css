@@ -1358,10 +1358,18 @@ input[type="range"]::-webkit-slider-thumb {
 
 /* ---- Avatar reactive animations ---- */
 
-/* Thinking: smooth continuous spin */
-@keyframes avatar-spin {
-  from { transform: rotate(0deg); }
-  to   { transform: rotate(360deg); }
+/* Thinking: rolling spin — fast burst then slow coast, with glowing border */
+@keyframes avatar-roll {
+  0%   { transform: rotate(0deg); }
+  30%  { transform: rotate(240deg); }
+  50%  { transform: rotate(310deg); }
+  70%  { transform: rotate(340deg); }
+  100% { transform: rotate(360deg); }
+}
+@keyframes avatar-glow {
+  0%, 100% { box-shadow: 0 0 0 0 transparent;                        border-color: var(--border-light); }
+  30%      { box-shadow: 0 0 10px 2px var(--accent-glow, var(--accent)); border-color: var(--accent); }
+  70%      { box-shadow: 0 0 4px 1px var(--accent-glow, var(--accent));  border-color: var(--accent); }
 }
 
 /* Streaming: gentle breathing pulse */
@@ -1389,7 +1397,10 @@ input[type="range"]::-webkit-slider-thumb {
   100% { transform: translateX(0)    rotate(0); }
 }
 
-.msg-avatar.avatar-thinking  { animation: avatar-spin    1.2s linear infinite; }
+.msg-avatar.avatar-thinking {
+  animation: avatar-roll 1.6s cubic-bezier(0.2, 0, 0.2, 1) infinite,
+             avatar-glow 1.6s ease-in-out infinite;
+}
 .msg-avatar.avatar-streaming { animation: avatar-breathe  2s   ease-in-out infinite; }
 .msg-avatar.avatar-done      { animation: avatar-pop      0.4s cubic-bezier(0.18, 0.89, 0.32, 1.28) forwards; }
 .msg-avatar.avatar-error     { animation: avatar-shake    0.5s ease-out forwards; }
