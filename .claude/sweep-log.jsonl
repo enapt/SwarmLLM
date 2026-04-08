@@ -179,3 +179,7 @@
 {"file":"src/inference/speculative.rs","line":62,"kind":"dead_code","summary":"is_valid_draft_pair() has no production callers — only tests. Should be wired into executor or deleted","status":"deferred","date":"2026-04-07"}
 {"file":"src/network/protocol.rs","line":117,"kind":"duplication","summary":"read_request/read_response share wire-frame header parsing + decompression (~30 lines). Hot path, risky refactor","status":"deferred","date":"2026-04-07"}
 {"file":"src/network/protocol.rs","line":270,"kind":"duplication","summary":"write_request/write_response identical JSON frame building (~12 lines). Hot path, risky refactor","status":"deferred","date":"2026-04-07"}
+{"file":"src/inference/speculative.rs","line":62,"kind":"dead_code","summary":"is_valid_draft_pair() no production callers — removed function, unit tests, and integration test","status":"fixed","date":"2026-04-08"}
+{"file":"src/network/protocol.rs","line":117,"kind":"duplication","summary":"read_request/read_response shared header parsing — extracted read_wire_frame() helper","status":"fixed","date":"2026-04-08"}
+{"file":"src/network/protocol.rs","line":146,"kind":"duplication","summary":"request/response tensor decompression — extracted decompress_tensor_payload() helper","status":"fixed","date":"2026-04-08"}
+{"file":"src/network/protocol.rs","line":270,"kind":"duplication","summary":"write_request/write_response JSON frame building — extracted build_json_frame() helper","status":"fixed","date":"2026-04-08"}
