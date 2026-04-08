@@ -190,6 +190,8 @@
       var source = getModelSource(modelId);
       div.classList.add('source-' + source);
       var _avatarProvider = (modelId && S._modelDropdownData.find(function(m) { return m.id === modelId; }) || {}).group || null;
+      // Claude Code sessions always use the CC icon
+      if (_sess && _sess.claude_code) _avatarProvider = 'claude_subscription';
       var _iconKey = (_avatarProvider && _ICON_MAP[_avatarProvider]) ? _avatarProvider : modelIconKey(modelId);
       var _iconUrl = _iconKey ? providerIconUrl(_iconKey) : null;
       if (_iconUrl) {
