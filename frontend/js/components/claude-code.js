@@ -455,6 +455,7 @@
 
       // Check if this turn's text was already streamed
       var textAlreadyStreamed = !!ctx.getTextNode();
+      var hadTools = false;
 
       content.forEach(function(block) {
         if (block.type === 'thinking' && block.thinking) {
@@ -481,9 +482,8 @@
           contentEl.appendChild(textNode);
         } else if (block.type === 'tool_use') {
           if (!ctx.cleared) { contentEl.textContent = ''; ctx.setClear(); }
+          hadTools = true;
           var toolName = block.name || '';
-          // Show working indicator
-          App.claudeCode._showWorkingIndicator(contentEl);
           // Render tool blocks inline
           if (AGENT_TOOLS[toolName]) {
             App.claudeCode._closeCurrentGroup(contentEl);
@@ -495,10 +495,16 @@
             App.claudeCode._renderToolCall(group, block, toolPanels);
             App.claudeCode._updateGroupSummary(group);
           }
-          // Signal new turn so next streaming text creates a fresh node
-          ctx.newTurn();
         }
       });
+
+      // After processing all blocks: if tools were used, close the group
+      // and signal new turn so next streaming text creates a fresh node
+      if (hadTools) {
+        App.claudeCode._closeCurrentGroup(contentEl);
+        App.claudeCode._showWorkingIndicator(contentEl);
+        ctx.newTurn();
+      }
       App.chat.scrollToBottom();
     },
 
