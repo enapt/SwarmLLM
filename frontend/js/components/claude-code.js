@@ -435,17 +435,20 @@
         } else if (block.type === 'text' && block.text) {
           // Close any open tool group before text
           App.claudeCode._closeCurrentGroup(contentEl);
-          // Text already streamed via stream_event — skip unless not streamed
-          if (!ctx.getFullContent()) {
-            if (!ctx.cleared) { contentEl.textContent = ''; ctx.setClear(); }
-            ctx.appendText(block.text);
-            var textNode = contentEl.querySelector('.response-text');
-            if (!textNode) {
-              textNode = document.createElement('div');
-              textNode.className = 'response-text';
-              contentEl.appendChild(textNode);
-            }
+          if (!ctx.cleared) { contentEl.textContent = ''; ctx.setClear(); }
+          // Check if the last .response-text already has this text (from streaming)
+          var existingTexts = contentEl.querySelectorAll('.response-text');
+          var lastText = existingTexts.length > 0 ? existingTexts[existingTexts.length - 1] : null;
+          if (lastText && lastText.textContent === ctx.getFullContent() && existingTexts.length === 1) {
+            // First text block was already streamed — leave it in place
+            // but mark it so subsequent text blocks create new nodes
+            lastText.dataset.streamed = '1';
+          } else {
+            // New text segment (after tool_use blocks) — create a fresh div
+            var textNode = document.createElement('div');
+            textNode.className = 'response-text';
             textNode.textContent = block.text;
+            contentEl.appendChild(textNode);
           }
         } else if (block.type === 'tool_use') {
           if (!ctx.cleared) { contentEl.textContent = ''; ctx.setClear(); }
