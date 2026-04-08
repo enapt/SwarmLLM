@@ -207,19 +207,15 @@
       avatarEl.appendChild(userImg);
     }
 
-    // Role label + inline icon + model badge
+    // Role label + model badge
     var roleEl = div.querySelector('.msg-role');
-    // Clone avatar icon into role line for linear mode
-    var roleIcon = avatarEl.cloneNode(true);
-    roleIcon.className = 'msg-role-icon';
-    roleEl.appendChild(roleIcon);
     if (role === 'user') {
-      roleEl.appendChild(document.createTextNode(I18n.t('chat.role_user')));
+      roleEl.textContent = I18n.t('chat.role_user');
     } else {
       // Show model name instead of generic "Assistant"
       var modelId = (opts && opts.model) || '';
       var modelDisplay = modelId ? formatModelDisplayName(modelId) : I18n.t('chat.avatar_ai');
-      roleEl.appendChild(document.createTextNode(modelDisplay));
+      roleEl.textContent = modelDisplay;
       // Source badge (local/network — skip "cloud" since model name already implies it)
       if (source === 'local') {
         var sourceBadge = document.createElement('span');

@@ -71,45 +71,12 @@
     return parts;
   }
 
-  // --- Chat Layout Toggle ---
-  function toggleChatLayout() {
-    var container = document.getElementById('chat-messages');
-    var btn = document.getElementById('chat-layout-toggle');
-    var icon = document.getElementById('chat-layout-icon');
-    var label = document.getElementById('chat-layout-label');
-    if (!container) return;
-    var isMessenger = container.classList.toggle('chat-messenger');
-    if (icon) icon.innerHTML = isMessenger ? '&#9900;' : '&#9776;';
-    if (label) label.textContent = isMessenger ? I18n.t('chat.layout_messenger') : I18n.t('chat.layout_linear');
-    if (btn) btn.classList.toggle('active', isMessenger);
-    try { localStorage.setItem(App.CHAT_LAYOUT_KEY, isMessenger ? 'messenger' : 'linear'); } catch(e) {}
-    App.chat.scrollToBottom();
-  }
-
-  function initChatLayout() {
-    try {
-      var saved = localStorage.getItem(App.CHAT_LAYOUT_KEY);
-      if (saved === 'messenger') {
-        var container = document.getElementById('chat-messages');
-        var icon = document.getElementById('chat-layout-icon');
-        var label = document.getElementById('chat-layout-label');
-        var btn = document.getElementById('chat-layout-toggle');
-        if (container) container.classList.add('chat-messenger');
-        if (icon) icon.innerHTML = '&#9900;';
-        if (label) label.textContent = I18n.t('chat.layout_messenger');
-        if (btn) btn.classList.add('active');
-      }
-    } catch(e) {}
-  }
-
   // --- Chat Module ---
   App.chat = {
     // Expose for init
     addPendingImage: addPendingImage,
     clearPendingImages: clearPendingImages,
     buildMessageContent: buildMessageContent,
-    toggleChatLayout: toggleChatLayout,
-    initChatLayout: initChatLayout,
 
     // Flash a session sidebar item to indicate new activity
     flashSession: function(sessionId) {
@@ -516,8 +483,10 @@
       U.appendMessageToDOM('user', userHtml, true, { encrypted: msgEncrypted });
 
       var assistantEl = U.appendMessageToDOM('assistant', '', false, { encrypted: msgEncrypted, model: model });
+      var assistantAvatarEl = assistantEl ? assistantEl.querySelector('.msg-avatar') : null;
       var contentEl = assistantEl.querySelector('.msg-content');
       contentEl.innerHTML = '<span class="typing-indicator">' + U.escapeHtml(I18n.t('chat.thinking')) + '</span>';
+      if (assistantAvatarEl) assistantAvatarEl.classList.add('avatar-thinking');
 
       S.isStreaming = true;
       var _sendBtn = document.getElementById('send-btn');
@@ -575,7 +544,9 @@
         } catch (e) {
           contentEl.textContent = e.message || I18n.t('chat.connection_failed');
           contentEl.classList.add('chat-error');
+          if (assistantAvatarEl) { assistantAvatarEl.classList.remove('avatar-thinking', 'avatar-streaming'); assistantAvatarEl.classList.add('avatar-error'); }
         }
+        if (assistantAvatarEl) assistantAvatarEl.classList.remove('avatar-thinking', 'avatar-streaming');
         S.isStreaming = false;
         var _sendBtnCC = document.getElementById('send-btn');
         if (_sendBtnCC) _sendBtnCC.disabled = false;
@@ -622,6 +593,7 @@
           } catch (e) {}
           contentEl.innerHTML = U.escapeHtml(friendlyMsg) + hintHtml + '<div class="chat-error-actions"><button class="btn btn-sm" data-retry-chat="1">' + U.escapeHtml(I18n.t('actions.retry')) + '</button></div>';
           contentEl.classList.add('chat-error');
+          if (assistantAvatarEl) { assistantAvatarEl.classList.remove('avatar-thinking', 'avatar-streaming'); assistantAvatarEl.classList.add('avatar-error'); }
           S.isStreaming = false;
           var _sb = document.getElementById('send-btn');
           if (_sb) _sb.disabled = false;
@@ -654,7 +626,7 @@
               if (chunk.choices && chunk.choices[0] && chunk.choices[0].delta) {
                 var delta = chunk.choices[0].delta;
                 if (delta.reasoning_content) {
-                  if (!cleared) { contentEl.textContent = ''; cleared = true; }
+                  if (!cleared) { contentEl.textContent = ''; cleared = true; if (assistantAvatarEl) { assistantAvatarEl.classList.remove('avatar-thinking'); assistantAvatarEl.classList.add('avatar-streaming'); } }
                   if (!thinkingEl) {
                     thinkingEl = document.createElement('details');
                     thinkingEl.className = 'reasoning-block';
@@ -667,7 +639,7 @@
                   App.chat.scrollToBottom();
                 }
                 if (delta.content) {
-                  if (!cleared) { contentEl.textContent = ''; cleared = true; }
+                  if (!cleared) { contentEl.textContent = ''; cleared = true; if (assistantAvatarEl) { assistantAvatarEl.classList.remove('avatar-thinking'); assistantAvatarEl.classList.add('avatar-streaming'); } }
                   if (thinkingEl && thinkingEl.open) {
                     thinkingEl.open = false;
                     thinkingEl.querySelector('summary').textContent = I18n.t('chat.reasoning_summary', { chars: reasoningContent.length });
@@ -690,14 +662,18 @@
         if (!cleared && !fullContent && !reasoningContent) {
           contentEl.textContent = I18n.t('chat.no_response');
           contentEl.classList.add('chat-error');
+          if (assistantAvatarEl) { assistantAvatarEl.classList.remove('avatar-thinking', 'avatar-streaming'); assistantAvatarEl.classList.add('avatar-error'); }
         }
       } catch (e) {
         if (!fullContent) {
           contentEl.textContent = I18n.t('chat.connection_failed');
           contentEl.classList.add('chat-error');
+          if (assistantAvatarEl) { assistantAvatarEl.classList.remove('avatar-thinking', 'avatar-streaming'); assistantAvatarEl.classList.add('avatar-error'); }
         }
       }
 
+      // Clear avatar animation on completion
+      if (assistantAvatarEl) assistantAvatarEl.classList.remove('avatar-thinking', 'avatar-streaming');
       var elapsed = ((performance.now() - startTime) / 1000).toFixed(2);
       var timerEl = document.createElement('div');
       timerEl.className = 'msg-timer';

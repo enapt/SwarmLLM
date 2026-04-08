@@ -280,8 +280,6 @@
     // Chat
     on('send-btn', 'click', function() { App.chat.send(); });
     on('chat-input', 'keydown', function(e) { App.chat.handleKey(e); });
-    on('chat-layout-toggle', 'click', function() { App.chat.toggleChatLayout(); });
-
     // Image upload
     on('image-upload-btn', 'click', function() {
       document.getElementById('image-upload-input').click();
@@ -637,7 +635,6 @@
     initCollapsiblePanels();
     App.models.initDropdown();
     App.models.initMobileSync();
-    App.chat.initChatLayout();
 
     S.inputEl = document.getElementById('chat-input');
     if (S.inputEl) {
