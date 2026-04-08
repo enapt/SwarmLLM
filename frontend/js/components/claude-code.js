@@ -421,35 +421,38 @@
       var content = msg.content || [];
       if (!Array.isArray(content)) return;
 
+      // Check if content has interleaved text + tool_use blocks
+      var hasTools = content.some(function(b) { return b.type === 'tool_use'; });
+      var hasText = content.some(function(b) { return b.type === 'text'; });
+
+      // If interleaved, clear the single streamed .response-text and re-render
+      // all blocks in order so tools appear at the correct position
+      if (hasTools && hasText) {
+        // Preserve thinking blocks
+        var thinkingEl = contentEl.querySelector('.cc-thinking');
+        // Clear streamed content
+        contentEl.innerHTML = '';
+        if (thinkingEl) contentEl.appendChild(thinkingEl);
+        ctx.setClear();
+      }
+
       content.forEach(function(block) {
         if (block.type === 'thinking' && block.thinking) {
-          // Thinking block — render as faded preface text
           if (!ctx.cleared) { contentEl.textContent = ''; ctx.setClear(); }
-          var thinkingEl = contentEl.querySelector('.cc-thinking');
-          if (!thinkingEl) {
-            thinkingEl = document.createElement('div');
-            thinkingEl.className = 'cc-thinking';
-            contentEl.appendChild(thinkingEl);
+          var thEl = contentEl.querySelector('.cc-thinking');
+          if (!thEl) {
+            thEl = document.createElement('div');
+            thEl.className = 'cc-thinking';
+            contentEl.appendChild(thEl);
           }
-          thinkingEl.textContent += block.thinking;
+          thEl.textContent += block.thinking;
         } else if (block.type === 'text' && block.text) {
-          // Close any open tool group before text
           App.claudeCode._closeCurrentGroup(contentEl);
           if (!ctx.cleared) { contentEl.textContent = ''; ctx.setClear(); }
-          // Check if the last .response-text already has this text (from streaming)
-          var existingTexts = contentEl.querySelectorAll('.response-text');
-          var lastText = existingTexts.length > 0 ? existingTexts[existingTexts.length - 1] : null;
-          if (lastText && lastText.textContent === ctx.getFullContent() && existingTexts.length === 1) {
-            // First text block was already streamed — leave it in place
-            // but mark it so subsequent text blocks create new nodes
-            lastText.dataset.streamed = '1';
-          } else {
-            // New text segment (after tool_use blocks) — create a fresh div
-            var textNode = document.createElement('div');
-            textNode.className = 'response-text';
-            textNode.textContent = block.text;
-            contentEl.appendChild(textNode);
-          }
+          var textNode = document.createElement('div');
+          textNode.className = 'response-text';
+          textNode.textContent = block.text;
+          contentEl.appendChild(textNode);
         } else if (block.type === 'tool_use') {
           if (!ctx.cleared) { contentEl.textContent = ''; ctx.setClear(); }
           var toolName = block.name || '';
@@ -459,7 +462,6 @@
           } else if (TASK_TOOLS[toolName]) {
             App.claudeCode._renderTaskCall(contentEl, block, toolPanels, taskItems);
           } else {
-            // Render inside current tool group
             var group = App.claudeCode._getOrCreateToolGroup(contentEl, ctx);
             App.claudeCode._renderToolCall(group, block, toolPanels);
             App.claudeCode._updateGroupSummary(group);
