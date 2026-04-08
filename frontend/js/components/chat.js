@@ -341,7 +341,7 @@
         '<span class="' + countClass + '">' + U.escapeHtml(countLabel) + '</span>' +
         '<span class="' + badgeClass + '" title="' + U.escapeHtml(badgeTitle) + '">' + (hdrIconHtml ? hdrIconHtml + ' ' : '') + U.escapeHtml(modelName) + authBadge + (available ? '' : ' ' + U.escapeHtml(I18n.t('chat.model_unavailable_suffix'))) + '</span>' +
         tokenHtml +
-        '<button class="cc-rail-toggle' + (s.claude_code ? ' cc-rail-visible' : '') + (App.claudeCode && App.claudeCode._railActive ? ' active' : '') + '" id="cc-rail-toggle" title="Toggle tool rail">\u2699 Rail</button>';
+        '<button class="cc-rail-toggle' + ((s.claude_code || (App.claudeCode && App.claudeCode.isClaudeCodeModel(s.model))) ? ' cc-rail-visible' : '') + (App.claudeCode && App.claudeCode._railActive ? ' active' : '') + '" id="cc-rail-toggle" title="Toggle tool rail">\u2699 Rail</button>';
 
       var railBtn = header.querySelector('#cc-rail-toggle');
       if (railBtn) railBtn.addEventListener('click', function() { if (App.claudeCode) App.claudeCode.toggleRail(); });

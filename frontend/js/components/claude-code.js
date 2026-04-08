@@ -293,8 +293,8 @@
       }
     },
 
-    // Rail mode state
-    _railActive: false,
+    // Rail mode state — defaults to ON unless explicitly disabled
+    _railActive: true,
 
     _isRailActive: function() {
       return App.claudeCode._railActive;
@@ -311,12 +311,12 @@
 
     _initRailState: function() {
       try {
-        App.claudeCode._railActive = localStorage.getItem(App.CC_RAIL_KEY) === '1';
+        var saved = localStorage.getItem(App.CC_RAIL_KEY);
+        // Default to ON — only off if explicitly set to '0'
+        App.claudeCode._railActive = saved !== '0';
       } catch(e) {}
       var msgs = document.getElementById('chat-messages');
       if (msgs && App.claudeCode._railActive) msgs.classList.add('cc-rail-on');
-      var btn = document.getElementById('cc-rail-toggle');
-      if (btn && App.claudeCode._railActive) btn.classList.add('active');
     },
 
     // Get or create a tool rail in the assistant message bubble
