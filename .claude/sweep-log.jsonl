@@ -196,3 +196,7 @@
 {"file":"src/model/auto_manage/prune.rs","line":125,"kind":"duplication","summary":"shard pin matching predicate duplicated 3x across prune.rs and scoring.rs — extract ShardPin::matches() method","status":"deferred","date":"2026-04-08"}
 {"file":"src/inference/tensor_util.rs","line":195,"kind":"duplication","summary":"sample_token_with_params reimplemented 85 lines of softmax+top-p+sampling — replaced with delegation to sampling::sample_token()","status":"fixed","date":"2026-04-08"}
 {"file":"src/model/auto_manage/prune.rs","line":125,"kind":"duplication","summary":"shard pin matching predicate 3x across prune.rs/scoring.rs — extracted ShardPin::matches() and matches_shard() methods","status":"fixed","date":"2026-04-08"}
+{"file":"frontend/i18n/en.json","line":299,"kind":"dead_i18n","summary":"chat.role_assistant key unused in all JS/HTML — removed from all 21 language files","status":"fixed","date":"2026-04-08"}
+{"file":"src/api/mcp.rs","line":1409,"kind":"duplication","summary":"peer summary JSON built twice — extracted mcp_peer_json() helper","status":"fixed","date":"2026-04-08"}
+{"file":"src/credit/ledger.rs","line":17,"kind":"stale_comment","summary":"doc claimed all rates configurable via config.toml but dispatch.rs/router.rs use constants directly — updated doc","status":"fixed","date":"2026-04-08"}
+{"file":"CLAUDE.md","line":134,"kind":"false_positive","summary":"agent reported 646 tests stale vs MEMORY.md 659 — MEMORY.md was stale, CLAUDE.md 646 is correct","status":"wontfix","date":"2026-04-08"}
