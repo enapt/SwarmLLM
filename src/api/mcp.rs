@@ -1405,14 +1405,7 @@ async fn tool_node_info(state: &AppState, id: Option<Value>) -> JsonRpcResponse 
     let peer_count = state.shared_state.peer_registry.len();
     let mut peers_summary = Vec::new();
     for entry in state.shared_state.peer_registry.iter() {
-        let peer = entry.value();
-        peers_summary.push(json!({
-            "node_id_short": entry.key().to_string(),
-            "latency_ms": peer.latency_ms,
-            "is_lan": peer.is_lan_peer,
-            "trust_score": peer.trust_score,
-            "active_requests": peer.active_request_count,
-        }));
+        peers_summary.push(mcp_peer_json(&entry));
     }
 
     // Registry models
@@ -1565,20 +1558,17 @@ async fn resource_models(state: &AppState, id: Option<Value>) -> JsonRpcResponse
 async fn resource_peers(state: &AppState, id: Option<Value>) -> JsonRpcResponse {
     let mut peers = Vec::new();
     for entry in state.shared_state.peer_registry.iter() {
-        let peer = entry.value();
-        let region = peer
+        let mut p = mcp_peer_json(&entry);
+        let region = entry
+            .value()
             .capability
             .as_ref()
             .and_then(|c| c.region.as_deref())
             .unwrap_or("unknown");
-        peers.push(json!({
-            "node_id_short": entry.key().to_string(),
-            "latency_ms": peer.latency_ms,
-            "is_lan": peer.is_lan_peer,
-            "trust_score": peer.trust_score,
-            "active_requests": peer.active_request_count,
-            "region": region,
-        }));
+        p.as_object_mut()
+            .unwrap()
+            .insert("region".into(), json!(region));
+        peers.push(p);
     }
 
     JsonRpcResponse::success(
@@ -1593,6 +1583,20 @@ async fn resource_peers(state: &AppState, id: Option<Value>) -> JsonRpcResponse 
             ]
         }),
     )
+}
+
+/// Build a compact MCP peer summary JSON object.
+fn mcp_peer_json(
+    entry: &dashmap::mapref::multiple::RefMulti<'_, crate::types::NodeId, crate::types::PeerInfo>,
+) -> Value {
+    let peer = entry.value();
+    json!({
+        "node_id_short": entry.key().to_string(),
+        "latency_ms": peer.latency_ms,
+        "is_lan": peer.is_lan_peer,
+        "trust_score": peer.trust_score,
+        "active_requests": peer.active_request_count,
+    })
 }
 
 #[cfg(test)]

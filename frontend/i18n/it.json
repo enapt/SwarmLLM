@@ -296,7 +296,6 @@
   "chat.thinking": "Elaborazione...",
   "chat.reasoning_label": "Ragionamento...",
   "chat.role_user": "Tu",
-  "chat.role_assistant": "Assistente",
   "dashboard.status_active": "Attivo",
   "dashboard.status_ready": "Pronto",
   "dashboard.status_downloading": "Download in corso",

@@ -14,7 +14,9 @@ use crate::types::{
 /// IMPORTANT: Both earn and spend use `rate * tokens` (no layer multiplier) to prevent
 /// credit inflation. A 22-layer model serving 100 tokens earns 10*100=1000 credits,
 /// and the consumer spends 10*100=1000 credits — balanced.
-/// All rates are configurable via `[pool.credit_rates]` in config.toml.
+/// These constants are default values. The `CreditLedger` methods (`earn_inference`,
+/// `spend_inference`) resolve overrides from `[pool.credit_rates]` in config.toml,
+/// but some callers (dispatch.rs, router.rs) reference these constants directly.
 pub const RATE_INFERENCE_SERVE: i64 = 10; // per token served (not per layer)
 pub const RATE_INFERENCE_CONSUME: i64 = 10; // per token consumed — balanced with serve
 

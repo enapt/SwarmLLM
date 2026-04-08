@@ -295,7 +295,6 @@
   "chat.thinking": "考え中...",
   "chat.reasoning_label": "推論中...",
   "chat.role_user": "あなた",
-  "chat.role_assistant": "アシスタント",
   "dashboard.status_active": "アクティブ",
   "dashboard.status_ready": "準備完了",
   "dashboard.status_downloading": "ダウンロード中",

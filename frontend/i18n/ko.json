@@ -295,7 +295,6 @@
   "chat.thinking": "생각 중...",
   "chat.reasoning_label": "추론 중...",
   "chat.role_user": "나",
-  "chat.role_assistant": "어시스턴트",
   "dashboard.status_active": "활성",
   "dashboard.status_ready": "준비됨",
   "dashboard.status_downloading": "다운로드 중",

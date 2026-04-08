@@ -295,7 +295,6 @@
   "chat.thinking": "思考中...",
   "chat.reasoning_label": "推理中...",
   "chat.role_user": "你",
-  "chat.role_assistant": "助手",
   "dashboard.status_active": "活跃",
   "dashboard.status_ready": "就绪",
   "dashboard.status_downloading": "下载中",
