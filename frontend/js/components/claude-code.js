@@ -805,21 +805,97 @@
       return el;
     },
 
-    // Render diff-formatted output with syntax highlighting
+    // Render diff-formatted output with line numbers, gutter, and file headers
     _renderDiffOutput: function(text) {
       var lines = text.split('\n');
-      var html = '<pre class="cc-diff-output">';
-      for (var i = 0; i < lines.length && i < 200; i++) {
+      var adds = 0, dels = 0;
+      var oldLine = 0, newLine = 0;
+      var currentFile = '';
+      var html = '<div class="cc-diff">';
+      var inBody = false;
+
+      for (var i = 0; i < lines.length && i < 500; i++) {
         var line = lines[i];
-        var cls = '';
-        if (line.charAt(0) === '+' && line.charAt(1) !== '+') cls = 'diff-add';
-        else if (line.charAt(0) === '-' && line.charAt(1) !== '-') cls = 'diff-del';
-        else if (line.indexOf('@@') === 0) cls = 'diff-hunk';
-        if (cls) html += '<span class="' + cls + '">' + U.escapeHtml(line) + '</span>\n';
-        else html += U.escapeHtml(line) + '\n';
+
+        // File header: diff --git a/... b/...
+        if (line.indexOf('diff --git') === 0) {
+          if (inBody) html += '</table></div>'; // close previous file
+          var fileMatch = line.match(/b\/(.+)$/);
+          currentFile = fileMatch ? fileMatch[1] : '';
+          inBody = false;
+          continue;
+        }
+        // --- a/file or +++ b/file
+        if (line.indexOf('---') === 0 || line.indexOf('+++') === 0) {
+          if (!inBody && line.indexOf('+++') === 0) {
+            // Count stats for this file
+            var fileAdds = 0, fileDels = 0;
+            for (var j = i + 1; j < lines.length; j++) {
+              if (lines[j].indexOf('diff --git') === 0) break;
+              if (lines[j].charAt(0) === '+' && lines[j].charAt(1) !== '+') fileAdds++;
+              else if (lines[j].charAt(0) === '-' && lines[j].charAt(1) !== '-') fileDels++;
+            }
+            html += '<div class="diff-file-header">' +
+              '<span class="diff-file-name">' + U.escapeHtml(currentFile) + '</span>' +
+              '<span class="diff-file-stats">' +
+              (fileAdds ? '<span class="diff-stat-add">+' + fileAdds + '</span>' : '') +
+              (fileDels ? '<span class="diff-stat-del">\u2212' + fileDels + '</span>' : '') +
+              '</span></div>';
+            html += '<div class="diff-body"><table class="diff-table">';
+            inBody = true;
+          }
+          continue;
+        }
+        // Hunk header: @@ -old,count +new,count @@
+        if (line.indexOf('@@') === 0) {
+          var hunkMatch = line.match(/@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@(.*)/);
+          if (hunkMatch) {
+            oldLine = parseInt(hunkMatch[1], 10);
+            newLine = parseInt(hunkMatch[2], 10);
+            var hunkCtx = hunkMatch[3] || '';
+            if (!inBody) {
+              html += '<div class="diff-body"><table class="diff-table">';
+              inBody = true;
+            }
+            html += '<tr class="diff-hunk-row"><td class="diff-gutter" colspan="3">' +
+              U.escapeHtml(line) + '</td></tr>';
+          }
+          continue;
+        }
+
+        if (!inBody) continue;
+
+        var ch = line.charAt(0);
+        if (ch === '+') {
+          adds++;
+          html += '<tr class="diff-line diff-add-line">' +
+            '<td class="diff-ln diff-ln-old"></td>' +
+            '<td class="diff-ln diff-ln-new">' + newLine + '</td>' +
+            '<td class="diff-gutter-sign diff-gutter-add">+</td>' +
+            '<td class="diff-code">' + U.escapeHtml(line.substring(1)) + '</td></tr>';
+          newLine++;
+        } else if (ch === '-') {
+          dels++;
+          html += '<tr class="diff-line diff-del-line">' +
+            '<td class="diff-ln diff-ln-old">' + oldLine + '</td>' +
+            '<td class="diff-ln diff-ln-new"></td>' +
+            '<td class="diff-gutter-sign diff-gutter-del">\u2212</td>' +
+            '<td class="diff-code">' + U.escapeHtml(line.substring(1)) + '</td></tr>';
+          oldLine++;
+        } else {
+          var ctx = (ch === ' ') ? line.substring(1) : line;
+          html += '<tr class="diff-line diff-ctx-line">' +
+            '<td class="diff-ln diff-ln-old">' + oldLine + '</td>' +
+            '<td class="diff-ln diff-ln-new">' + newLine + '</td>' +
+            '<td class="diff-gutter-sign"></td>' +
+            '<td class="diff-code">' + U.escapeHtml(ctx) + '</td></tr>';
+          oldLine++;
+          newLine++;
+        }
       }
-      if (lines.length > 200) html += '<span class="diff-hunk">' + I18n.t('claude_code.diff_more_lines', { count: lines.length - 200 }) + '</span>\n';
-      html += '</pre>';
+      if (inBody) html += '</table></div>';
+      if (lines.length > 500) html += '<div class="diff-hunk-row" style="padding:4px 8px">' + I18n.t('claude_code.diff_more_lines', { count: lines.length - 500 }) + '</div>';
+      html += '</div>';
       return html;
     },
 
