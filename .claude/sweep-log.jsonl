@@ -183,3 +183,14 @@
 {"file":"src/network/protocol.rs","line":117,"kind":"duplication","summary":"read_request/read_response shared header parsing — extracted read_wire_frame() helper","status":"fixed","date":"2026-04-08"}
 {"file":"src/network/protocol.rs","line":146,"kind":"duplication","summary":"request/response tensor decompression — extracted decompress_tensor_payload() helper","status":"fixed","date":"2026-04-08"}
 {"file":"src/network/protocol.rs","line":270,"kind":"duplication","summary":"write_request/write_response JSON frame building — extracted build_json_frame() helper","status":"fixed","date":"2026-04-08"}
+{"file":"src/daemon/shard_loader.rs","line":44,"kind":"error_type_misuse","summary":"SwarmError::Internal for no shards found → ModelNotAvailable","status":"fixed","date":"2026-04-08"}
+{"file":"src/model/manifest.rs","line":19,"kind":"error_type_misuse","summary":"SwarmError::Internal for missing manifest → ModelNotAvailable","status":"fixed","date":"2026-04-08"}
+{"file":"src/api/admin.rs","line":295,"kind":"error_type_misuse","summary":"SwarmError::Config at runtime config reload → Internal (Config is startup-only)","status":"fixed","date":"2026-04-08"}
+{"file":"src/model/auto_manage/prune.rs","line":32,"kind":"unstructured_tracing","summary":"format!(\"{:.2}\") in resource_pressure field → format_args!() for numeric tracing","status":"fixed","date":"2026-04-08"}
+{"file":"src/model/auto_manage/prune.rs","line":785,"kind":"unstructured_tracing","summary":"format!(\"{:.2}\") in pressure field → format_args!() for numeric tracing","status":"fixed","date":"2026-04-08"}
+{"file":"frontend/js/components/claude-code.js","line":963,"kind":"hardcoded_english","summary":"'Permission Required' tab title flash → I18n.t('claude_code.permission_required')","status":"fixed","date":"2026-04-08"}
+{"file":"frontend/js/components/claude-code.js","line":724,"kind":"hardcoded_english","summary":"'more lines' diff truncation → I18n.t('claude_code.diff_more_lines')","status":"fixed","date":"2026-04-08"}
+{"file":"CLAUDE.md","line":229,"kind":"doc_mismatch","summary":"stale test count 659 → 646 in Status section","status":"fixed","date":"2026-04-08"}
+{"file":"CLAUDE.md","line":124,"kind":"doc_mismatch","summary":"i18n key count 968 → 970","status":"fixed","date":"2026-04-08"}
+{"file":"src/inference/tensor_util.rs","line":195,"kind":"duplication","summary":"sample_token_with_params reimplements softmax+top-p+sampling from sampling.rs — hot path, needs careful refactor","status":"deferred","date":"2026-04-08"}
+{"file":"src/model/auto_manage/prune.rs","line":125,"kind":"duplication","summary":"shard pin matching predicate duplicated 3x across prune.rs and scoring.rs — extract ShardPin::matches() method","status":"deferred","date":"2026-04-08"}
