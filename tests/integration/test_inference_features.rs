@@ -3,30 +3,8 @@
 //! Tests speculative decoding correctness (accept/reject algorithm preserves
 //! target distribution) and batch inference tracking.
 
-use swarmllm::inference::speculative::{
-    accept_reject, is_valid_draft_pair, softmax, SpeculativeDraftState,
-};
-use swarmllm::types::{ModelArchitecture, ModelId, ModelManifest, NodeId, Quantization};
-
-fn make_manifest(id: &str, params_b: f32) -> ModelManifest {
-    ModelManifest {
-        id: ModelId(id.to_string()),
-        name: id.to_string(),
-        architecture: ModelArchitecture::Llama,
-        num_layers: 32,
-        num_params_billions: params_b,
-        quantization: Quantization::Q4KM,
-        total_size_bytes: (params_b * 1e9) as u64,
-        shard_count: 1,
-        shards: vec![],
-        tokenizer_hash: [0u8; 32],
-        manifest_hash: [0u8; 32],
-        publisher: NodeId([0u8; 32]),
-        publish_date: chrono::Utc::now(),
-        license: "MIT".into(),
-        mmproj: None,
-    }
-}
+use swarmllm::inference::speculative::{accept_reject, softmax, SpeculativeDraftState};
+use swarmllm::types::ModelId;
 
 /// Test speculative decoding correctness: when draft and target have identical
 /// distributions, all tokens should be accepted (acceptance probability = 1.0).
@@ -109,24 +87,6 @@ fn test_speculative_decoding_always_has_bonus_token() {
         result.bonus_token.is_some(),
         "Should always produce a bonus token"
     );
-}
-
-/// Test draft-target pair validation: the draft model must be at most
-/// 1/10th the parameter count of the target.
-#[test]
-fn test_valid_draft_pair_size_constraint() {
-    let small = make_manifest("tinyllama", 1.1);
-    let medium = make_manifest("llama-13b", 13.0);
-    let large = make_manifest("llama-70b", 70.0);
-
-    // 1.1B draft with 70B target: 1.1 * 10 = 11 <= 70 ✓
-    assert!(is_valid_draft_pair(&small, &large));
-
-    // 13B draft with 70B target: 13 * 10 = 130 > 70 ✗
-    assert!(!is_valid_draft_pair(&medium, &large));
-
-    // 1.1B draft with 13B target: 1.1 * 10 = 11 <= 13 ✓
-    assert!(is_valid_draft_pair(&small, &medium));
 }
 
 /// Test that the speculative draft state correctly tracks acceptance rates

@@ -1,4 +1,4 @@
-use crate::types::{ModelId, ModelManifest};
+use crate::types::ModelId;
 
 /// State for an in-flight speculative decoding session.
 ///
@@ -53,14 +53,6 @@ impl SpeculativeDraftState {
             "DIAG: speculative batch"
         );
     }
-}
-
-/// Check if a model pair is eligible for speculative decoding.
-///
-/// The draft model must be at most 1/10th the parameter count of the target
-/// to ensure the draft model is fast enough to provide a speedup.
-pub fn is_valid_draft_pair(draft: &ModelManifest, target: &ModelManifest) -> bool {
-    draft.num_params_billions * 10.0 <= target.num_params_billions
 }
 
 /// Result of the speculative accept/reject step.
@@ -245,42 +237,6 @@ fn compute_adjusted_distribution(target_probs: &[f32], draft_probs: &[f32]) -> V
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::*;
-
-    fn make_manifest(id: &str, params_b: f32) -> ModelManifest {
-        ModelManifest {
-            id: ModelId(id.to_string()),
-            name: id.to_string(),
-            architecture: ModelArchitecture::Llama,
-            num_layers: 32,
-            num_params_billions: params_b,
-            quantization: Quantization::Q4KM,
-            total_size_bytes: (params_b * 1e9) as u64,
-            shard_count: 1,
-            shards: vec![],
-            tokenizer_hash: [0u8; 32],
-            manifest_hash: [0u8; 32],
-            publisher: NodeId([0u8; 32]),
-            publish_date: chrono::Utc::now(),
-            license: "MIT".into(),
-            mmproj: None,
-        }
-    }
-
-    #[test]
-    fn valid_draft_pair() {
-        let draft = make_manifest("small", 3.0);
-        let target = make_manifest("large", 70.0);
-        assert!(is_valid_draft_pair(&draft, &target));
-    }
-
-    #[test]
-    fn invalid_draft_pair_too_large() {
-        let draft = make_manifest("medium", 13.0);
-        let target = make_manifest("large", 70.0);
-        // 13 * 10 = 130 > 70
-        assert!(!is_valid_draft_pair(&draft, &target));
-    }
 
     #[test]
     fn acceptance_rate_empty() {

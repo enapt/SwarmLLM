@@ -100,6 +100,83 @@ const WIRE_TAG_TENSOR_COMPRESSED: u8 = 0x02;
 /// Avoids JSON serialization overhead for large shard chunks (32MB+).
 const WIRE_TAG_SHARD: u8 = 0x03;
 
+/// Read a wire frame header (tag byte + 4-byte BE length) and body from a stream.
+/// `large_tags` lists tag values that get the larger `MAX_MESSAGE_SIZE` limit;
+/// all other tags are capped at `MAX_JSON_MSG_SIZE`.
+async fn read_wire_frame<T: AsyncRead + Unpin + Send>(
+    io: &mut T,
+    label: &str,
+    large_tags: &[u8],
+) -> io::Result<(u8, Vec<u8>)> {
+    tracing::trace!("DIAG: codec {label} waiting for tag");
+    let mut tag_buf = [0u8; 1];
+    io.read_exact(&mut tag_buf).await?;
+
+    let mut len_buf = [0u8; 4];
+    io.read_exact(&mut len_buf).await?;
+    let len = u32::from_be_bytes(len_buf) as usize;
+    tracing::trace!(tag = tag_buf[0], len, "DIAG: codec {label} header");
+
+    let max_for_tag = if large_tags.contains(&tag_buf[0]) {
+        MAX_MESSAGE_SIZE
+    } else {
+        MAX_JSON_MSG_SIZE
+    };
+    if len > max_for_tag {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("{label} too large"),
+        ));
+    }
+
+    let mut buf = vec![0u8; len];
+    io.read_exact(&mut buf).await?;
+    Ok((tag_buf[0], buf))
+}
+
+/// Decompress a zstd-compressed tensor payload with diagnostic tracing.
+fn decompress_tensor_payload(buf: Vec<u8>, label: &str) -> io::Result<Vec<u8>> {
+    let decompressed = compression::decompress_tensor(&buf).map_err(|e| {
+        tracing::error!(
+            compressed_len = buf.len(),
+            "DIAG: {label} tensor decompression failed: {e}"
+        );
+        io::Error::new(io::ErrorKind::InvalidData, e)
+    })?;
+    tracing::debug!(
+        compressed_len = buf.len(),
+        decompressed_len = decompressed.len(),
+        ratio = format_args!(
+            "{:.1}x",
+            decompressed.len() as f64 / buf.len().max(1) as f64
+        ),
+        "DIAG: {label} tensor decompressed"
+    );
+    Ok(decompressed)
+}
+
+/// Build a JSON wire frame: [WIRE_TAG_JSON][4B BE length][JSON bytes].
+fn build_json_frame<T: serde::Serialize>(msg: &T, label: &str) -> io::Result<Vec<u8>> {
+    let data =
+        serde_json::to_vec(msg).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    if data.len() > MAX_JSON_MSG_SIZE {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "JSON {label} too large: {} bytes (max {})",
+                data.len(),
+                MAX_JSON_MSG_SIZE
+            ),
+        ));
+    }
+    let len = (data.len() as u32).to_be_bytes();
+    let mut frame = Vec::with_capacity(1 + 4 + data.len());
+    frame.push(WIRE_TAG_JSON);
+    frame.extend_from_slice(&len);
+    frame.extend_from_slice(&data);
+    Ok(frame)
+}
+
 #[async_trait]
 impl request_response::Codec for SwarmCodec {
     type Protocol = StreamProtocol;
@@ -114,54 +191,20 @@ impl request_response::Codec for SwarmCodec {
     where
         T: AsyncRead + Unpin + Send,
     {
-        tracing::trace!("DIAG: codec read_request waiting for tag");
-        let mut tag_buf = [0u8; 1];
-        io.read_exact(&mut tag_buf).await?;
+        let (tag, buf) = read_wire_frame(
+            io,
+            "read_request",
+            &[WIRE_TAG_TENSOR, WIRE_TAG_TENSOR_COMPRESSED],
+        )
+        .await?;
 
-        let mut len_buf = [0u8; 4];
-        io.read_exact(&mut len_buf).await?;
-        let len = u32::from_be_bytes(len_buf) as usize;
-        tracing::trace!(tag = tag_buf[0], len, "DIAG: codec read_request header");
-
-        // Tiered size limits: JSON control messages capped at 4 MB,
-        // tensor/shard data allowed up to 256 MB
-        let max_for_tag = match tag_buf[0] {
-            WIRE_TAG_TENSOR | WIRE_TAG_TENSOR_COMPRESSED => MAX_MESSAGE_SIZE,
-            _ => MAX_JSON_MSG_SIZE,
-        };
-        if len > max_for_tag {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "Message too large",
-            ));
-        }
-
-        let mut buf = vec![0u8; len];
-        io.read_exact(&mut buf).await?;
-
-        match tag_buf[0] {
+        match tag {
             WIRE_TAG_JSON => serde_json::from_slice(&buf)
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e)),
             WIRE_TAG_TENSOR => Ok(SwarmRequest::TensorPayload(buf)),
-            WIRE_TAG_TENSOR_COMPRESSED => {
-                let decompressed = compression::decompress_tensor(&buf).map_err(|e| {
-                    tracing::error!(
-                        compressed_len = buf.len(),
-                        "DIAG: request tensor decompression failed: {e}"
-                    );
-                    io::Error::new(io::ErrorKind::InvalidData, e)
-                })?;
-                tracing::debug!(
-                    compressed_len = buf.len(),
-                    decompressed_len = decompressed.len(),
-                    ratio = format_args!(
-                        "{:.1}x",
-                        decompressed.len() as f64 / buf.len().max(1) as f64
-                    ),
-                    "DIAG: request tensor decompressed"
-                );
-                Ok(SwarmRequest::TensorPayload(decompressed))
-            }
+            WIRE_TAG_TENSOR_COMPRESSED => Ok(SwarmRequest::TensorPayload(
+                decompress_tensor_payload(buf, "request")?,
+            )),
             unknown => Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!("Unknown wire tag: 0x{:02x}", unknown),
@@ -177,31 +220,15 @@ impl request_response::Codec for SwarmCodec {
     where
         T: AsyncRead + Unpin + Send,
     {
-        tracing::trace!("DIAG: codec read_response waiting for tag");
-        let mut tag_buf = [0u8; 1];
-        io.read_exact(&mut tag_buf).await?;
+        let (tag, buf) = read_wire_frame(
+            io,
+            "read_response",
+            &[WIRE_TAG_TENSOR, WIRE_TAG_TENSOR_COMPRESSED, WIRE_TAG_SHARD],
+        )
+        .await?;
+        tracing::trace!(tag, len = buf.len(), "DIAG: codec read_response done");
 
-        let mut len_buf = [0u8; 4];
-        io.read_exact(&mut len_buf).await?;
-        let len = u32::from_be_bytes(len_buf) as usize;
-        tracing::trace!(tag = tag_buf[0], len, "DIAG: codec read_response header");
-
-        let max_for_tag = match tag_buf[0] {
-            WIRE_TAG_TENSOR | WIRE_TAG_TENSOR_COMPRESSED | WIRE_TAG_SHARD => MAX_MESSAGE_SIZE,
-            _ => MAX_JSON_MSG_SIZE,
-        };
-        if len > max_for_tag {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "Response too large",
-            ));
-        }
-
-        let mut buf = vec![0u8; len];
-        io.read_exact(&mut buf).await?;
-        tracing::trace!(tag = tag_buf[0], len, "DIAG: codec read_response done");
-
-        match tag_buf[0] {
+        match tag {
             WIRE_TAG_JSON => serde_json::from_slice(&buf)
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e)),
             WIRE_TAG_SHARD => {
@@ -222,25 +249,9 @@ impl request_response::Codec for SwarmCodec {
                 }))
             }
             WIRE_TAG_TENSOR => Ok(SwarmResponse::TensorPayload(buf)),
-            WIRE_TAG_TENSOR_COMPRESSED => {
-                let decompressed = compression::decompress_tensor(&buf).map_err(|e| {
-                    tracing::error!(
-                        compressed_len = buf.len(),
-                        "DIAG: response tensor decompression failed: {e}"
-                    );
-                    io::Error::new(io::ErrorKind::InvalidData, e)
-                })?;
-                tracing::debug!(
-                    compressed_len = buf.len(),
-                    decompressed_len = decompressed.len(),
-                    ratio = format_args!(
-                        "{:.1}x",
-                        decompressed.len() as f64 / buf.len().max(1) as f64
-                    ),
-                    "DIAG: response tensor decompressed"
-                );
-                Ok(SwarmResponse::TensorPayload(decompressed))
-            }
+            WIRE_TAG_TENSOR_COMPRESSED => Ok(SwarmResponse::TensorPayload(
+                decompress_tensor_payload(buf, "response")?,
+            )),
             unknown => Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!("Unknown wire tag: 0x{:02x}", unknown),
@@ -267,26 +278,7 @@ impl request_response::Codec for SwarmCodec {
                 self.compress_level,
                 self.compress_threshold,
             ),
-            other => {
-                let data = serde_json::to_vec(&other)
-                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-                if data.len() > MAX_JSON_MSG_SIZE {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!(
-                            "JSON message too large: {} bytes (max {})",
-                            data.len(),
-                            MAX_JSON_MSG_SIZE
-                        ),
-                    ));
-                }
-                let len = (data.len() as u32).to_be_bytes();
-                let mut frame = Vec::with_capacity(1 + 4 + data.len());
-                frame.push(WIRE_TAG_JSON);
-                frame.extend_from_slice(&len);
-                frame.extend_from_slice(&data);
-                frame
-            }
+            other => build_json_frame(&other, "message")?,
         };
         let frame_len = frame.len();
         tracing::trace!(frame_len, "DIAG: codec write_request start");
@@ -326,26 +318,7 @@ impl request_response::Codec for SwarmCodec {
                 frame.extend_from_slice(&shard.data);
                 frame
             }
-            other => {
-                let data = serde_json::to_vec(&other)
-                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-                if data.len() > MAX_JSON_MSG_SIZE {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!(
-                            "JSON response too large: {} bytes (max {})",
-                            data.len(),
-                            MAX_JSON_MSG_SIZE
-                        ),
-                    ));
-                }
-                let len = (data.len() as u32).to_be_bytes();
-                let mut frame = Vec::with_capacity(1 + 4 + data.len());
-                frame.push(WIRE_TAG_JSON);
-                frame.extend_from_slice(&len);
-                frame.extend_from_slice(&data);
-                frame
-            }
+            other => build_json_frame(&other, "response")?,
         };
         let frame_len = frame.len();
         tracing::trace!(frame_len, "DIAG: codec write_response start");
