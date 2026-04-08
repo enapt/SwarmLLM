@@ -1282,10 +1282,6 @@ input[type="range"]::-webkit-slider-thumb {
   margin: 0 auto 4px;
   animation: msgIn 0.2s ease-out;
 }
-/* Widen only assistant messages that have an active tool rail */
-.chat-msg:has(.cc-rail-active) {
-  max-width: 1100px;
-}
 /* Extra gap before a new speaker group */
 .chat-msg.group-first,
 .chat-msg.group-solo { margin-top: 14px; }
