@@ -287,17 +287,11 @@
           var textNode = ctx.getTextNode();
           if (!textNode) {
             textNode = document.createElement('div');
-            textNode.className = 'response-text cc-md';
+            textNode.className = 'response-text';
             contentEl.appendChild(textNode);
             ctx.setTextNode(textNode);
           }
-          // Render this turn's text with markdown
-          var turnContent = ctx.getTurnText();
-          if (turnContent.indexOf('\n') !== -1) {
-            textNode.innerHTML = App.claudeCode._renderMarkdown(turnContent);
-          } else {
-            textNode.textContent = turnContent;
-          }
+          textNode.textContent = ctx.getTurnText();
           App.chat.scrollToBottom();
         } else if (deltaType === 'thinking_delta') {
           // Extended thinking — render as faded italic preface, not a box
@@ -482,8 +476,8 @@
             return;
           }
           var textNode = document.createElement('div');
-          textNode.className = 'response-text cc-md';
-          textNode.innerHTML = App.claudeCode._renderMarkdown(block.text);
+          textNode.className = 'response-text';
+          textNode.textContent = block.text;
           contentEl.appendChild(textNode);
         } else if (block.type === 'tool_use') {
           if (!ctx.cleared) { contentEl.textContent = ''; ctx.setClear(); }

@@ -415,8 +415,12 @@
           html += '</div>' + U.escapeHtml(msg.content);
           el = U.appendMessageToDOM(msg.role, html, true, msgOpts);
         } else if (msg.role === 'assistant' && msg.renderedHtml) {
-          // CC message — restore full rendered content (text + inline tool panels)
+          // CC message — restore full rendered content (text + inline tool panels + diffs)
           el = U.appendMessageToDOM(msg.role, msg.renderedHtml, true, msgOpts);
+        } else if (msg.role === 'assistant' && msg.toolHtml) {
+          // Legacy: older CC messages with separate toolHtml
+          var legacyHtml = '<div class="response-text">' + U.escapeHtml(msg.content) + '</div>' + msg.toolHtml;
+          el = U.appendMessageToDOM(msg.role, legacyHtml, true, msgOpts);
         } else {
           el = U.appendMessageToDOM(msg.role, msg.content, false, msgOpts);
         }
