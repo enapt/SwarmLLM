@@ -527,40 +527,30 @@
       return '';
     },
 
-    // Render a tool call block as a collapsible <details> element
+    // Render a tool call as a compact one-liner with optional expandable output
     _renderToolCall: function(contentEl, block, toolPanels) {
       var toolId = block.id || '';
       var toolName = block.name || 'Unknown';
       var input = block.input || {};
 
-      var panel = document.createElement('details');
+      var panel = document.createElement('div');
       panel.className = 'cc-tool-call';
       panel.setAttribute('data-tool-id', toolId);
-      panel.open = false; // collapsed by default, shows summary
 
       var hint = App.claudeCode._toolHint(toolName, input);
       if (hint.length > 60) hint = hint.substring(0, 57) + '...';
 
       var icon = App.claudeCode._toolIcon(toolName);
       var cat = App.claudeCode._toolCategory(toolName);
-      var summary = document.createElement('summary');
-      summary.className = 'cc-tool-header';
-      summary.innerHTML =
+      var header = document.createElement('div');
+      header.className = 'cc-tool-header';
+      header.innerHTML =
         '<span class="cc-tool-icon cc-icon-' + cat + '">' + icon + '</span>' +
         '<span class="cc-tool-name">' + U.escapeHtml(toolName) + '</span>' +
         (hint ? '<span class="cc-tool-file">' + U.escapeHtml(hint) + '</span>' : '') +
         '<span class="cc-tool-summary"></span>' +
         '<span class="cc-tool-status pending">' + U.escapeHtml(I18n.t('claude_code.running')) + '</span>';
-      panel.appendChild(summary);
-
-      // Build expandable detail content
-      var detail = document.createElement('div');
-      detail.className = 'cc-tool-body';
-      var detailHtml = App.claudeCode._buildToolDetail(toolName, input);
-      if (detailHtml) {
-        detail.innerHTML = detailHtml;
-      }
-      panel.appendChild(detail);
+      panel.appendChild(header);
 
       contentEl.appendChild(panel);
       toolPanels[toolId] = panel;
@@ -918,39 +908,39 @@
         }
 
         // ── Standard tool result ──
+        // Determine tool name from panel data
+        var toolNameEl = panel && panel.querySelector('.cc-tool-name');
+        var toolName = toolNameEl ? toolNameEl.textContent : '';
+
         if (panel) {
+          // Update status badge
           var statusEl2 = panel.querySelector('.cc-tool-status');
           if (statusEl2) {
             statusEl2.textContent = I18n.t('claude_code.done');
             statusEl2.className = 'cc-tool-status done';
           }
-          // Collapse the details panel now that it's done
-          if (panel.tagName === 'DETAILS') {
-            panel.classList.add('cc-tool-done');
-          }
-        }
+          panel.classList.add('cc-tool-done');
 
-        // Determine tool name from panel data
-        var toolNameEl = panel && panel.querySelector('.cc-tool-name');
-        var toolName = toolNameEl ? toolNameEl.textContent : '';
-
-        // Inject result summary into collapsed header + update inline tool
-        if (panel) {
+          // Show result summary on the header line
           var summaryEl = panel.querySelector('.cc-tool-summary');
           if (summaryEl) {
             summaryEl.textContent = App.claudeCode._resultSummary(toolName, blockText);
           }
-        }
-        // Render result with smart formatting
-        var resultEl = App.claudeCode._renderToolOutput(toolName, blockText);
 
-        if (panel) {
-          var body = panel.querySelector('.cc-tool-body');
-          if (body) {
-            body.appendChild(resultEl);
-          } else {
-            panel.appendChild(resultEl);
+          // Only add expandable output for large results (>200 chars) or diffs
+          var isDiff = blockText && blockText.indexOf('@@') !== -1 && (blockText.indexOf('---') !== -1 || blockText.indexOf('+++') !== -1);
+          if (blockText && (blockText.length > 200 || isDiff)) {
+            var expandBtn = document.createElement('button');
+            expandBtn.className = 'cc-expand-btn';
+            expandBtn.style.opacity = '0.7';
+            expandBtn.innerHTML = '\u2922';
+            expandBtn.title = 'View full output';
+            expandBtn.addEventListener('click', function() {
+              App.claudeCode._openExpandModal(toolName, blockText, isDiff);
+            });
+            panel.querySelector('.cc-tool-header').appendChild(expandBtn);
           }
+
           // Check if parent group can collapse
           var group = panel.closest('.cc-tool-group');
           if (group) {
@@ -958,6 +948,8 @@
             App.claudeCode._maybeCollapseGroup(group);
           }
         } else {
+          // No panel found — render output standalone
+          var resultEl = App.claudeCode._renderToolOutput(toolName, blockText);
           contentEl.appendChild(resultEl);
         }
       });

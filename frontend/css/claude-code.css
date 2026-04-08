@@ -25,15 +25,11 @@
 /* ─── Thinking / Reasoning (inline preface, not boxed) ─── */
 .cc-thinking { font-size: 0.78rem; color: var(--text-muted); font-style: italic; white-space: pre-wrap; word-wrap: break-word; margin-bottom: 6px; line-height: 1.5; max-height: 200px; overflow-y: auto; opacity: 0.7; }
 
-/* ─── Tool Call Blocks (collapsible <details>) ─── */
-.cc-tool-call { margin: 6px 0; background: var(--bg-tertiary); border: 1px solid var(--border); border-radius: var(--radius); border-left: 3px solid var(--accent); overflow: hidden; }
-.cc-tool-call[open] { background: var(--bg-secondary); }
-.cc-tool-call.cc-tool-done { border-left-color: var(--green); opacity: 0.85; }
-.cc-tool-call.cc-tool-done:not([open]) { opacity: 0.7; }
-.cc-tool-header { display: flex; align-items: center; gap: 6px; padding: 6px 10px; font-size: 0.78rem; cursor: pointer; list-style: none; user-select: none; }
-.cc-tool-header::-webkit-details-marker { display: none; }
-.cc-tool-header::before { content: '▸'; color: var(--text-muted); font-size: 0.65rem; flex-shrink: 0; transition: transform 0.15s; margin-right: 2px; }
-.cc-tool-call[open] > .cc-tool-header::before { transform: rotate(90deg); }
+/* ─── Tool Call Blocks (flat one-liner with optional expand) ─── */
+.cc-tool-call { margin: 2px 0; border-radius: var(--radius); overflow: hidden; }
+.cc-tool-call.cc-tool-done { opacity: 0.75; }
+.cc-tool-call.cc-tool-done:hover { opacity: 1; }
+.cc-tool-header { display: flex; align-items: center; gap: 6px; padding: 3px 0; font-size: 0.75rem; user-select: none; }
 .cc-tool-icon {
   display: inline-flex; align-items: center; justify-content: center;
   width: 20px; height: 20px; border-radius: 4px;
@@ -52,7 +48,7 @@
 .cc-tool-status { font-size: 0.65rem; margin-left: 6px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; flex-shrink: 0; }
 .cc-tool-status.pending { color: var(--orange); }
 .cc-tool-status.done { color: var(--green); }
-.cc-tool-body { padding: 0 10px 8px; }
+.cc-tool-body { padding: 0 10px 8px; display: none; }
 
 /* ─── Tool Result Blocks ─── */
 .cc-tool-result { margin-top: 6px; }
@@ -144,16 +140,16 @@
 .cc-perm-collapsed .cc-perm-tool-name { font-size: 0.7rem; font-weight: 600; }
 
 /* ─── Tool Group (batches consecutive tool calls + prompts) ─── */
-.cc-tool-group { margin: 6px 0; border: 1px solid var(--border); border-radius: var(--radius); border-left: 3px solid var(--accent); overflow: hidden; background: var(--bg-tertiary); }
-.cc-tool-group[open] { background: transparent; border-color: transparent; border-left-color: transparent; }
-.cc-tool-group[open] > .cc-group-header { opacity: 0.5; font-size: 0.65rem; padding: 3px 10px; }
-.cc-group-header { display: flex; align-items: center; gap: 8px; padding: 6px 10px; font-size: 0.72rem; cursor: pointer; list-style: none; user-select: none; color: var(--text-secondary); font-family: var(--font-mono); }
+.cc-tool-group { margin: 6px 0; padding: 4px 0; border-left: 2px solid var(--border); padding-left: 8px; }
+.cc-tool-group[open] { }
+.cc-tool-group[open] > .cc-group-header { opacity: 0.4; font-size: 0.62rem; padding: 2px 0; }
+.cc-group-header { display: flex; align-items: center; gap: 6px; padding: 3px 0; font-size: 0.7rem; cursor: pointer; list-style: none; user-select: none; color: var(--text-muted); font-family: var(--font-mono); }
 .cc-group-header::-webkit-details-marker { display: none; }
 .cc-group-header::before { content: '▸'; color: var(--text-muted); font-size: 0.6rem; flex-shrink: 0; }
 .cc-group-label { font-weight: 600; color: var(--text-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .cc-group-count { margin-left: auto; font-size: 0.65rem; color: var(--text-muted); flex-shrink: 0; }
-.cc-group-done { opacity: 0.7; border-left-color: var(--green); }
-.cc-group-done:hover { opacity: 0.9; }
+.cc-group-done { opacity: 0.6; border-left-color: var(--green); }
+.cc-group-done:hover { opacity: 1; }
 .cc-group-done > .cc-group-header { color: var(--green); }
 .cc-group-done > .cc-group-header .cc-group-label { color: var(--text-secondary); }
 /* Icon strip in collapsed group header */
