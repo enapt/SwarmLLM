@@ -820,7 +820,6 @@ a:hover { color: var(--accent-hover); }
   .chat-messages { padding: 12px; }
   .chat-input-area { padding: 8px 12px 12px; }
   .chat-input-wrap textarea { font-size: 1rem; min-height: 48px; }
-  .chat-msg { gap: 8px; }
   .msg-bubble { padding: 10px 14px; }
 
   /* Larger tap targets for buttons */
@@ -1276,19 +1275,13 @@ input[type="range"]::-webkit-slider-thumb {
 .chat-empty-title { font-size: 1.2rem; font-weight: 600; color: var(--text-primary); }
 .chat-empty-hint { color: var(--text-muted); }
 
-/* ---- Chat Layout (unified: avatar + card) ---- */
+/* ---- Chat Layout (linear with pinned avatar) ---- */
 .chat-msg {
-  display: flex;
-  flex-direction: row;
-  align-items: flex-start;
-  gap: 10px;
+  position: relative;
   max-width: 740px;
   margin: 0 auto 4px;
   animation: msgIn 0.2s ease-out;
 }
-/* User avatar on the right */
-.chat-msg.user { flex-direction: row-reverse; }
-
 /* Extra gap before a new speaker group */
 .chat-msg.group-first,
 .chat-msg.group-solo { margin-top: 14px; }
@@ -1296,25 +1289,28 @@ input[type="range"]::-webkit-slider-thumb {
 
 @keyframes msgIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
 
-/* ---- Avatar circle ---- */
+/* ---- Avatar circle: pinned to top-left corner of assistant card ---- */
 .msg-avatar {
-  display: flex;
+  display: none;
+  position: absolute;
+  top: -8px; left: -12px;
   width: 28px; height: 28px;
   border-radius: 50%;
-  background: var(--bg-tertiary);
+  background: var(--bg-primary);
   border: 1.5px solid var(--border-light);
   align-items: center; justify-content: center;
-  flex-shrink: 0;
   font-size: 0.6rem; font-weight: 700;
   color: var(--text-muted);
   user-select: none;
   overflow: hidden;
-  margin-top: 2px;
+  z-index: 1;
 }
+/* Only show avatar on assistant messages */
+.chat-msg.assistant .msg-avatar { display: flex; }
+/* Hide on grouped continuation messages */
+.chat-msg.assistant.group-mid .msg-avatar,
+.chat-msg.assistant.group-last .msg-avatar { display: none; }
 .msg-avatar img { width: 16px; height: 16px; display: block; }
-/* Hide avatar on grouped continuation messages (preserve space for alignment) */
-.chat-msg.group-mid .msg-avatar,
-.chat-msg.group-last .msg-avatar { visibility: hidden; }
 
 /* Source color on avatar border */
 .chat-msg.assistant.source-local .msg-avatar        { border-color: var(--green);  color: var(--green);  }
@@ -1324,7 +1320,6 @@ input[type="range"]::-webkit-slider-thumb {
 
 /* ---- Card bubble ---- */
 .msg-bubble {
-  flex: 1; min-width: 0;
   padding: 12px 16px;
   border-radius: var(--radius-lg);
   font-size: 0.88rem;
