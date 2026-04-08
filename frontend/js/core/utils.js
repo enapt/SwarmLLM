@@ -218,13 +218,8 @@
       var modelId = (opts && opts.model) || '';
       var modelDisplay = modelId ? formatModelDisplayName(modelId) : I18n.t('chat.avatar_ai');
       roleEl.textContent = modelDisplay;
-      // Source badge (local/network — skip "cloud" since model name already implies it)
-      if (source === 'local') {
-        var sourceBadge = document.createElement('span');
-        sourceBadge.className = 'msg-source-badge source-local';
-        sourceBadge.textContent = I18n.t('chat.source_local');
-        roleEl.appendChild(sourceBadge);
-      } else if (source === 'subscription') {
+      // Source badge — only for non-obvious sources (skip local + cloud)
+      if (source === 'subscription') {
         var subBadge = document.createElement('span');
         subBadge.className = 'msg-source-badge source-subscription';
         subBadge.textContent = I18n.t('dashboard.subscription_badge');

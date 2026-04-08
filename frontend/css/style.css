@@ -1344,6 +1344,7 @@ input[type="range"]::-webkit-slider-thumb {
   color: var(--text-muted);
   margin-bottom: 6px;
 }
+.chat-msg.user .msg-role { display: none; }
 .chat-msg.assistant .msg-role { color: var(--accent); }
 /* Hide role on grouped continuation messages */
 .chat-msg.group-mid .msg-role,
