@@ -1357,32 +1357,48 @@ input[type="range"]::-webkit-slider-thumb {
 .send-enc-lock { font-size: 0.75rem; opacity: 0.85; margin-left: 3px; vertical-align: middle; }
 
 /* ---- Avatar reactive animations ---- */
-@keyframes avatar-pulse {
-  0%, 100% { opacity: 1;    transform: scale(1); }
-  50%      { opacity: 0.55; transform: scale(0.88); }
+
+/* Thinking: smooth continuous spin */
+@keyframes avatar-spin {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
 }
+
+/* Streaming: gentle breathing pulse */
 @keyframes avatar-breathe {
   0%, 100% { transform: scale(1);    opacity: 1; }
-  40%      { transform: scale(1.12); opacity: 0.85; }
-  60%      { transform: scale(1.08); opacity: 0.9; }
+  50%      { transform: scale(1.08); opacity: 0.85; }
 }
+
+/* Done: satisfying pop */
+@keyframes avatar-pop {
+  0%   { transform: scale(1); }
+  40%  { transform: scale(1.35); }
+  70%  { transform: scale(0.92); }
+  100% { transform: scale(1); }
+}
+
+/* Error: shake */
 @keyframes avatar-shake {
   0%   { transform: translateX(0); }
-  15%  { transform: translateX(-4px); }
-  30%  { transform: translateX(4px); }
-  45%  { transform: translateX(-3px); }
-  60%  { transform: translateX(3px); }
-  75%  { transform: translateX(-1px); }
-  100% { transform: translateX(0); }
+  15%  { transform: translateX(-4px) rotate(-5deg); }
+  30%  { transform: translateX(4px)  rotate(5deg); }
+  45%  { transform: translateX(-3px) rotate(-3deg); }
+  60%  { transform: translateX(3px)  rotate(3deg); }
+  75%  { transform: translateX(-1px) rotate(-1deg); }
+  100% { transform: translateX(0)    rotate(0); }
 }
-.msg-avatar.avatar-thinking  { animation: avatar-pulse   2s   ease-in-out infinite; }
-.msg-avatar.avatar-streaming { animation: avatar-breathe  1.8s ease-in-out infinite; }
+
+.msg-avatar.avatar-thinking  { animation: avatar-spin    1.2s linear infinite; }
+.msg-avatar.avatar-streaming { animation: avatar-breathe  2s   ease-in-out infinite; }
+.msg-avatar.avatar-done      { animation: avatar-pop      0.4s cubic-bezier(0.18, 0.89, 0.32, 1.28) forwards; }
 .msg-avatar.avatar-error     { animation: avatar-shake    0.5s ease-out forwards; }
 
 @media (prefers-reduced-motion: reduce) {
   .msg-avatar.avatar-thinking,
   .msg-avatar.avatar-streaming,
-  .msg-avatar.avatar-error { animation: none; opacity: 0.7; }
+  .msg-avatar.avatar-done,
+  .msg-avatar.avatar-error { animation: none; }
 }
 kbd {
   background: var(--bg-tertiary);

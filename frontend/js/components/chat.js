@@ -546,7 +546,7 @@
           contentEl.classList.add('chat-error');
           if (assistantAvatarEl) { assistantAvatarEl.classList.remove('avatar-thinking', 'avatar-streaming'); assistantAvatarEl.classList.add('avatar-error'); }
         }
-        if (assistantAvatarEl) assistantAvatarEl.classList.remove('avatar-thinking', 'avatar-streaming');
+        if (assistantAvatarEl) { assistantAvatarEl.classList.remove('avatar-thinking', 'avatar-streaming'); if (!assistantAvatarEl.classList.contains('avatar-error')) assistantAvatarEl.classList.add('avatar-done'); }
         S.isStreaming = false;
         var _sendBtnCC = document.getElementById('send-btn');
         if (_sendBtnCC) _sendBtnCC.disabled = false;
@@ -672,8 +672,8 @@
         }
       }
 
-      // Clear avatar animation on completion
-      if (assistantAvatarEl) assistantAvatarEl.classList.remove('avatar-thinking', 'avatar-streaming');
+      // Clear avatar animation on completion — pop if successful
+      if (assistantAvatarEl) { assistantAvatarEl.classList.remove('avatar-thinking', 'avatar-streaming'); if (!assistantAvatarEl.classList.contains('avatar-error')) assistantAvatarEl.classList.add('avatar-done'); }
       var elapsed = ((performance.now() - startTime) / 1000).toFixed(2);
       var timerEl = document.createElement('div');
       timerEl.className = 'msg-timer';
