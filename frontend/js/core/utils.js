@@ -193,6 +193,7 @@
       // Claude Code sessions always use the CC icon
       if (_sess && _sess.claude_code) _avatarProvider = 'claude_subscription';
       var _iconKey = (_avatarProvider && _ICON_MAP[_avatarProvider]) ? _avatarProvider : modelIconKey(modelId);
+      if (_iconKey) div.classList.add('provider-' + _iconKey.replace(/_/g, '-'));
       var _iconUrl = _iconKey ? providerIconUrl(_iconKey) : null;
       if (_iconUrl) {
         var img = document.createElement('img');

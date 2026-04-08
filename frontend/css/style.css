@@ -1312,11 +1312,30 @@ input[type="range"]::-webkit-slider-thumb {
 .chat-msg.assistant.group-last .msg-avatar { display: none; }
 .msg-avatar img { width: 16px; height: 16px; display: block; }
 
-/* Source color on avatar border */
-.chat-msg.assistant.source-local .msg-avatar        { border-color: var(--green);  color: var(--green);  }
-.chat-msg.assistant.source-cloud .msg-avatar         { border-color: var(--purple); color: var(--purple); }
-.chat-msg.assistant.source-swarm .msg-avatar         { border-color: var(--accent); color: var(--accent); }
-.chat-msg.assistant.source-subscription .msg-avatar  { border-color: var(--claude); color: var(--claude); }
+/* ---- Provider brand colors ---- */
+.chat-msg.assistant { --provider-color: var(--accent); }
+/* Cloud providers */
+.chat-msg.provider-openai       { --provider-color: #10a37f; }
+.chat-msg.provider-anthropic    { --provider-color: #D97757; }
+.chat-msg.provider-claude-subscription { --provider-color: #D97757; }
+.chat-msg.provider-claude       { --provider-color: #D97757; }
+.chat-msg.provider-deepseek     { --provider-color: #4D6BFE; }
+.chat-msg.provider-mistral      { --provider-color: #F54E23; }
+.chat-msg.provider-groq         { --provider-color: #F55036; }
+.chat-msg.provider-nvidia-nim   { --provider-color: #76B900; }
+.chat-msg.provider-cerebras     { --provider-color: #F04E23; }
+.chat-msg.provider-fireworks    { --provider-color: #7C3AED; }
+.chat-msg.provider-together     { --provider-color: #3B82F6; }
+.chat-msg.provider-deepinfra    { --provider-color: #1A73E8; }
+/* Local model families */
+.chat-msg.provider-llama        { --provider-color: #0467DF; }
+.chat-msg.provider-gemma        { --provider-color: #4285F4; }
+.chat-msg.provider-gemini       { --provider-color: #4285F4; }
+.chat-msg.provider-qwen         { --provider-color: #6F42E0; }
+.chat-msg.provider-phi          { --provider-color: #00A4EF; }
+
+/* Avatar + card + role all use --provider-color */
+.chat-msg.assistant .msg-avatar { border-color: var(--provider-color); }
 
 /* ---- Card bubble ---- */
 .msg-bubble {
@@ -1333,7 +1352,7 @@ input[type="range"]::-webkit-slider-thumb {
 .chat-msg.assistant .msg-bubble {
   background: var(--bg-secondary);
   border: 1px solid var(--border);
-  border-left: 3px solid var(--accent);
+  border-left: 3px solid var(--provider-color);
 }
 
 /* ---- Role label ---- */
@@ -1346,7 +1365,7 @@ input[type="range"]::-webkit-slider-thumb {
   margin-bottom: 6px;
 }
 .chat-msg.user .msg-role { display: none; }
-.chat-msg.assistant .msg-role { color: var(--accent); }
+.chat-msg.assistant .msg-role { color: var(--provider-color); }
 /* Hide role on grouped continuation messages */
 .chat-msg.group-mid .msg-role,
 .chat-msg.group-last .msg-role { display: none; }
@@ -1367,9 +1386,9 @@ input[type="range"]::-webkit-slider-thumb {
   100% { transform: rotate(360deg); }
 }
 @keyframes avatar-glow {
-  0%, 100% { box-shadow: 0 0 0 0 transparent;                        border-color: var(--border-light); }
-  30%      { box-shadow: 0 0 10px 2px var(--accent-glow, var(--accent)); border-color: var(--accent); }
-  70%      { box-shadow: 0 0 4px 1px var(--accent-glow, var(--accent));  border-color: var(--accent); }
+  0%, 100% { box-shadow: 0 0 0 0 transparent;                             border-color: var(--border-light); }
+  30%      { box-shadow: 0 0 10px 2px var(--provider-color, var(--accent)); border-color: var(--provider-color, var(--accent)); }
+  70%      { box-shadow: 0 0 4px 1px var(--provider-color, var(--accent));  border-color: var(--provider-color, var(--accent)); }
 }
 
 /* Streaming: gentle breathing pulse */
@@ -3074,13 +3093,6 @@ textarea:focus:not(:focus-visible) {
   background: var(--claude-dim); color: var(--claude);
   border: 1px solid rgba(217, 119, 87, 0.3);
 }
-/* Source-colored left border for assistant messages */
-.chat-msg.assistant.source-local { border-left-color: var(--green); }
-.chat-msg.assistant.source-cloud { border-left-color: var(--purple); }
-.chat-msg.assistant.source-swarm { border-left-color: var(--accent); }
-.chat-msg.assistant.source-subscription { border-left-color: var(--claude); }
-
-/* Messenger layout: source colors handled via avatar border (see messenger block above) */
 
 /* ---- Inline action icons (in role bar) ---- */
 .msg-actions {
