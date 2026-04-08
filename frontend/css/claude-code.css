@@ -255,9 +255,9 @@
 
 /* ─── Tool Rail (co-scrolling sidebar within message bubble) ─── */
 .msg-bubble.cc-rail-active {
-  display: flex; gap: 12px; max-width: none;
+  display: flex; flex-wrap: wrap; gap: 0 12px; max-width: none;
 }
-.msg-bubble.cc-rail-active > .msg-role { width: 100%; flex-shrink: 0; }
+.msg-bubble.cc-rail-active > .msg-role { width: 100%; flex-basis: 100%; flex-shrink: 0; }
 .msg-bubble.cc-rail-active > .msg-content { flex: 1; min-width: 0; }
 .cc-tool-rail {
   width: 320px; flex-shrink: 0;
