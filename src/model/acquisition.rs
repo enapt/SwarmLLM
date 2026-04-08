@@ -831,12 +831,12 @@ impl AcquisitionManager {
                     .get(node_id)
                     .map(|peer| {
                         // LAN peers strongly preferred for bandwidth (matches state.rs scoring)
-                        let lan_bonus: u32 = if peer.is_lan_peer { 0 } else { 10_000 };
-                        let latency = peer.latency_ms.unwrap_or(200);
-                        let trust_penalty = ((1.0 - peer.trust_score) * 100.0) as u32;
-                        lan_bonus + latency + trust_penalty
+                        let is_lan = if peer.is_lan_peer { 0u64 } else { 1 };
+                        let latency = peer.latency_ms.unwrap_or(9999) as u64;
+                        let trust = (10000.0 - peer.trust_score * 100.0) as u64;
+                        is_lan * 100_000 + latency * 100 + trust
                     })
-                    .unwrap_or(10_500)
+                    .unwrap_or(200_000)
             })
             .cloned();
 

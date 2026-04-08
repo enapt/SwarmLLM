@@ -2072,21 +2072,8 @@ impl NetworkManager {
 
                             if !other_holders.is_empty() {
                                 // Retry with best remaining peer
-                                let mut scored: Vec<_> = other_holders
-                                    .iter()
-                                    .filter_map(|nid| {
-                                        self.shared_state.peer_registry.get(nid).map(|p| {
-                                            let is_lan = if p.is_lan_peer { 0u64 } else { 1 };
-                                            let latency = p.latency_ms.unwrap_or(9999) as u64;
-                                            (nid.clone(), is_lan * 100_000 + latency)
-                                        })
-                                    })
-                                    .collect();
-                                scored.sort_by_key(|(_, s)| *s);
-                                let next_target = scored
-                                    .first()
-                                    .map(|(nid, _)| nid.clone())
-                                    .unwrap_or_else(|| other_holders[0].clone());
+                                let next_target =
+                                    self.shared_state.select_best_peer(&other_holders);
 
                                 if let Some(next_bytes) = self
                                     .shared_state
