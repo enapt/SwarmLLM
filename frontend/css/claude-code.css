@@ -233,3 +233,93 @@
 /* ─── Live Timer ─── */
 .cc-live-timer { color: var(--orange); font-family: var(--font-mono); animation: cc-pulse 1.5s infinite; }
 @keyframes cc-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+
+/* ─── Tool Rail (co-scrolling sidebar within message bubble) ─── */
+.msg-bubble.cc-rail-active {
+  display: flex; gap: 12px; max-width: none;
+}
+.msg-bubble.cc-rail-active > .msg-role { width: 100%; flex-shrink: 0; }
+.msg-bubble.cc-rail-active > .msg-content { flex: 1; min-width: 0; }
+.cc-tool-rail {
+  width: 320px; flex-shrink: 0;
+  border-left: 1px solid var(--border);
+  padding-left: 12px;
+  font-size: 0.78rem;
+}
+.cc-tool-rail:empty { display: none; }
+/* On narrow screens, rail goes below content */
+@media (max-width: 900px) {
+  .msg-bubble.cc-rail-active { flex-direction: column; }
+  .cc-tool-rail { width: 100%; border-left: none; border-top: 1px solid var(--border); padding-left: 0; padding-top: 8px; margin-top: 8px; }
+}
+
+/* Rail toggle button in chat header */
+.cc-rail-toggle {
+  background: var(--bg-tertiary); border: 1px solid var(--border);
+  border-radius: var(--radius); color: var(--text-muted);
+  font-size: 0.7rem; padding: 2px 8px; cursor: pointer;
+  transition: all var(--transition); display: none; /* hidden until CC session */
+  align-items: center; gap: 4px; font-family: var(--font-mono);
+}
+.cc-rail-toggle.cc-rail-visible { display: inline-flex; }
+.cc-rail-toggle:hover { color: var(--text-primary); border-color: var(--border-light); }
+.cc-rail-toggle.active { color: var(--accent); border-color: var(--accent); }
+
+/* ─── Inline Tool Summary (compact one-liner in main content) ─── */
+.cc-inline-tool {
+  display: flex; align-items: center; gap: 5px;
+  padding: 2px 0; font-size: 0.72rem;
+  font-family: var(--font-mono); color: var(--text-muted);
+  opacity: 0.7; transition: opacity 0.15s;
+}
+.cc-inline-tool:hover { opacity: 1; }
+.cc-inline-tool .cc-tool-icon { width: 16px; height: 16px; font-size: 0.6rem; border-radius: 3px; }
+.cc-inline-tool-name { font-weight: 600; color: var(--text-secondary); }
+.cc-inline-tool-hint { color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 180px; }
+.cc-inline-tool-summary { color: var(--text-muted); margin-left: auto; }
+.cc-inline-tool-status { font-size: 0.6rem; font-weight: 600; text-transform: uppercase; }
+.cc-inline-tool-status.pending { color: var(--orange); }
+.cc-inline-tool-status.done { color: var(--green); }
+
+/* ─── Expand Modal (full-screen content viewer) ─── */
+.cc-expand-overlay {
+  position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+  background: rgba(0,0,0,0.75); backdrop-filter: blur(4px);
+  z-index: 250; display: flex; align-items: center; justify-content: center;
+}
+.cc-expand-modal {
+  background: var(--bg-primary); border: 1px solid var(--border);
+  border-radius: var(--radius-lg); width: 92%; max-width: 960px;
+  max-height: 90vh; display: flex; flex-direction: column;
+  box-shadow: 0 20px 60px rgba(0,0,0,0.5);
+}
+.cc-expand-header {
+  display: flex; align-items: center; gap: 8px;
+  padding: 12px 16px; border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.cc-expand-title { font-size: 0.82rem; font-weight: 700; font-family: var(--font-mono); color: var(--text-primary); flex: 1; }
+.cc-expand-close {
+  background: none; border: none; color: var(--text-muted);
+  font-size: 1.2rem; cursor: pointer; padding: 0 4px;
+  transition: color 0.15s;
+}
+.cc-expand-close:hover { color: var(--text-primary); }
+.cc-expand-body {
+  flex: 1; overflow: auto; padding: 12px 16px;
+}
+.cc-expand-body pre {
+  margin: 0; padding: 8px; font-size: 0.78rem; font-family: var(--font-mono);
+  line-height: 1.5; white-space: pre-wrap; word-break: break-all;
+  max-height: none; /* override tool output max-height */
+}
+
+/* Expand button on tool panels */
+.cc-expand-btn {
+  background: none; border: none; color: var(--text-muted);
+  font-size: 0.72rem; cursor: pointer; padding: 1px 4px;
+  opacity: 0; transition: opacity 0.15s;
+}
+.cc-tool-call:hover .cc-expand-btn,
+.cc-tool-result:hover .cc-expand-btn { opacity: 0.7; }
+.cc-expand-btn:hover { opacity: 1 !important; color: var(--accent); }

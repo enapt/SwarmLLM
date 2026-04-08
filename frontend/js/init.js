@@ -645,7 +645,7 @@
     App.setup.init();
     App.settings.init();
     if (App.pool) App.pool.init();
-    if (App.claudeCode) App.claudeCode.init();
+    if (App.claudeCode) { App.claudeCode.init(); App.claudeCode._initRailState(); }
     App.settings._apiKeyPromise = App.settings.loadApiKey();
 
     App.ui.switchTab(S.activeTab, true);

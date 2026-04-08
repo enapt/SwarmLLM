@@ -224,13 +224,13 @@
 
         case 'assistant':
           // Complete assistant turn — may contain tool_use blocks
-          App.claudeCode._handleAssistantMessage(evt, target, toolPanels, agentPanels, taskItems, ctx);
+          App.claudeCode._handleAssistantMessage(evt, target, assistantEl, toolPanels, agentPanels, taskItems, ctx);
           break;
 
         case 'user':
           // Tool results
           if (evt.message && evt.message.content) {
-            App.claudeCode._handleToolResult(evt, target, toolPanels, agentPanels, taskItems);
+            App.claudeCode._handleToolResult(evt, target, contentEl, toolPanels, agentPanels, taskItems);
           }
           break;
 
@@ -291,6 +291,74 @@
           App.chat.scrollToBottom();
         }
       }
+    },
+
+    // Rail mode state
+    _railActive: false,
+
+    _isRailActive: function() {
+      return App.claudeCode._railActive;
+    },
+
+    toggleRail: function() {
+      App.claudeCode._railActive = !App.claudeCode._railActive;
+      var msgs = document.getElementById('chat-messages');
+      var btn = document.getElementById('cc-rail-toggle');
+      if (msgs) msgs.classList.toggle('cc-rail-on', App.claudeCode._railActive);
+      if (btn) btn.classList.toggle('active', App.claudeCode._railActive);
+      try { localStorage.setItem(App.CC_RAIL_KEY, App.claudeCode._railActive ? '1' : '0'); } catch(e) {}
+    },
+
+    _initRailState: function() {
+      try {
+        App.claudeCode._railActive = localStorage.getItem(App.CC_RAIL_KEY) === '1';
+      } catch(e) {}
+      var msgs = document.getElementById('chat-messages');
+      if (msgs && App.claudeCode._railActive) msgs.classList.add('cc-rail-on');
+      var btn = document.getElementById('cc-rail-toggle');
+      if (btn && App.claudeCode._railActive) btn.classList.add('active');
+    },
+
+    // Get or create a tool rail in the assistant message bubble
+    _getOrCreateRail: function(assistantEl) {
+      if (!assistantEl) return null;
+      var bubble = assistantEl.querySelector('.msg-bubble');
+      if (!bubble) return null;
+      var rail = bubble.querySelector('.cc-tool-rail');
+      if (!rail) {
+        rail = document.createElement('div');
+        rail.className = 'cc-tool-rail';
+        bubble.classList.add('cc-rail-active');
+        bubble.appendChild(rail);
+      }
+      return rail;
+    },
+
+    // Render a compact inline tool summary in the main content area
+    _renderInlineTool: function(contentEl, toolName, hint, toolId) {
+      var icon = App.claudeCode._toolIcon(toolName);
+      var cat = App.claudeCode._toolCategory(toolName);
+      var el = document.createElement('div');
+      el.className = 'cc-inline-tool';
+      el.setAttribute('data-tool-id', toolId);
+      el.innerHTML =
+        '<span class="cc-tool-icon cc-icon-' + cat + '">' + icon + '</span>' +
+        '<span class="cc-inline-tool-name">' + U.escapeHtml(toolName) + '</span>' +
+        (hint ? '<span class="cc-inline-tool-hint">' + U.escapeHtml(hint.length > 40 ? hint.substring(0, 37) + '...' : hint) + '</span>' : '') +
+        '<span class="cc-inline-tool-summary"></span>' +
+        '<span class="cc-inline-tool-status pending">\u2022</span>';
+      contentEl.appendChild(el);
+      return el;
+    },
+
+    // Update an inline tool summary with result info
+    _updateInlineTool: function(contentEl, toolId, toolName, resultText) {
+      var el = contentEl.querySelector('.cc-inline-tool[data-tool-id="' + toolId + '"]');
+      if (!el) return;
+      var summaryEl = el.querySelector('.cc-inline-tool-summary');
+      var statusEl = el.querySelector('.cc-inline-tool-status');
+      if (summaryEl) summaryEl.textContent = App.claudeCode._resultSummary(toolName, resultText);
+      if (statusEl) { statusEl.className = 'cc-inline-tool-status done'; statusEl.textContent = '\u2713'; }
     },
 
     // Get or create a tool group container for batching consecutive tool calls.
@@ -416,10 +484,11 @@
     },
 
     // Handle complete assistant message (may contain tool_use)
-    _handleAssistantMessage: function(evt, contentEl, toolPanels, agentPanels, taskItems, ctx) {
+    _handleAssistantMessage: function(evt, contentEl, assistantEl, toolPanels, agentPanels, taskItems, ctx) {
       var msg = evt.message || {};
       var content = msg.content || [];
       if (!Array.isArray(content)) return;
+      var useRail = App.claudeCode._isRailActive() && assistantEl;
 
       content.forEach(function(block) {
         if (block.type === 'thinking' && block.thinking) {
@@ -434,7 +503,7 @@
           thinkingEl.textContent += block.thinking;
         } else if (block.type === 'text' && block.text) {
           // Close any open tool group before text
-          App.claudeCode._closeCurrentGroup(contentEl);
+          App.claudeCode._closeCurrentGroup(useRail ? App.claudeCode._getOrCreateRail(assistantEl) || contentEl : contentEl);
           // Text already streamed via stream_event — skip unless not streamed
           if (!ctx.getFullContent()) {
             if (!ctx.cleared) { contentEl.textContent = ''; ctx.setClear(); }
@@ -450,14 +519,22 @@
         } else if (block.type === 'tool_use') {
           if (!ctx.cleared) { contentEl.textContent = ''; ctx.setClear(); }
           var toolName = block.name || '';
+          var toolTarget = contentEl;
+          // Route to rail if active
+          if (useRail && !AGENT_TOOLS[toolName]) {
+            toolTarget = App.claudeCode._getOrCreateRail(assistantEl) || contentEl;
+            // Add inline summary in main content
+            var hint = App.claudeCode._toolHint(toolName, block.input || {});
+            App.claudeCode._renderInlineTool(contentEl, toolName, hint, block.id || '');
+          }
           if (AGENT_TOOLS[toolName]) {
-            App.claudeCode._closeCurrentGroup(contentEl);
-            App.claudeCode._renderAgentCall(contentEl, block, agentPanels);
+            App.claudeCode._closeCurrentGroup(useRail ? toolTarget : contentEl);
+            App.claudeCode._renderAgentCall(useRail ? toolTarget : contentEl, block, agentPanels);
           } else if (TASK_TOOLS[toolName]) {
-            App.claudeCode._renderTaskCall(contentEl, block, toolPanels, taskItems);
+            App.claudeCode._renderTaskCall(toolTarget, block, toolPanels, taskItems);
           } else {
             // Render inside current tool group
-            var group = App.claudeCode._getOrCreateToolGroup(contentEl, ctx);
+            var group = App.claudeCode._getOrCreateToolGroup(toolTarget, ctx);
             App.claudeCode._renderToolCall(group, block, toolPanels);
             App.claudeCode._updateGroupSummary(group);
           }
@@ -689,6 +766,7 @@
       if (blockText.indexOf('@@') !== -1 && (blockText.indexOf('+') !== -1 || blockText.indexOf('-') !== -1) &&
           (blockText.indexOf('---') !== -1 || blockText.indexOf('+++') !== -1)) {
         el.innerHTML = App.claudeCode._renderDiffOutput(blockText);
+        if (blockText.length > 200) App.claudeCode._addExpandBtn(el, toolName, blockText, true);
         return el;
       }
 
@@ -721,6 +799,9 @@
         el.appendChild(toggle);
       }
 
+      // Add expand button for large output
+      if (blockText.length > 200) App.claudeCode._addExpandBtn(el, toolName, blockText, false);
+
       return el;
     },
 
@@ -743,7 +824,7 @@
     },
 
     // Handle tool result
-    _handleToolResult: function(evt, contentEl, toolPanels, agentPanels, taskItems) {
+    _handleToolResult: function(evt, contentEl, mainContentEl, toolPanels, agentPanels, taskItems) {
       var msg = evt.message || {};
       var content = msg.content || [];
       if (!Array.isArray(content)) {
@@ -812,12 +893,15 @@
         var toolNameEl = panel && panel.querySelector('.cc-tool-name');
         var toolName = toolNameEl ? toolNameEl.textContent : '';
 
-        // Inject result summary into collapsed header
+        // Inject result summary into collapsed header + update inline tool
         if (panel) {
           var summaryEl = panel.querySelector('.cc-tool-summary');
           if (summaryEl) {
             summaryEl.textContent = App.claudeCode._resultSummary(toolName, blockText);
           }
+        }
+        if (mainContentEl && toolId) {
+          App.claudeCode._updateInlineTool(mainContentEl, toolId, toolName, blockText);
         }
 
         // Render result with smart formatting
@@ -1129,6 +1213,76 @@
       if (name === 'WebSearch' || name === 'WebFetch') return 'web';
       if (name === 'Agent' || name === 'SendMessage' || name === 'TeamCreate') return 'agent';
       return 'default';
+    },
+
+    _addExpandBtn: function(parentEl, toolName, fullText, isDiff) {
+      var btn = document.createElement('button');
+      btn.className = 'cc-expand-btn';
+      btn.title = 'Expand';
+      btn.innerHTML = '\u2922'; // ⤢ expand icon
+      btn.addEventListener('click', function(e) {
+        e.stopPropagation();
+        App.claudeCode._openExpandModal(toolName, fullText, isDiff);
+      });
+      parentEl.appendChild(btn);
+    },
+
+    _openExpandModal: function(toolName, content, isDiff) {
+      App.claudeCode._closeExpandModal();
+      var overlay = document.createElement('div');
+      overlay.className = 'cc-expand-overlay';
+      overlay.addEventListener('click', function(e) {
+        if (e.target === overlay) App.claudeCode._closeExpandModal();
+      });
+
+      var modal = document.createElement('div');
+      modal.className = 'cc-expand-modal';
+
+      var header = document.createElement('div');
+      header.className = 'cc-expand-header';
+      var title = document.createElement('span');
+      title.className = 'cc-expand-title';
+      title.textContent = toolName || 'Output';
+      var closeBtn = document.createElement('button');
+      closeBtn.className = 'cc-expand-close';
+      closeBtn.innerHTML = '\u00D7';
+      closeBtn.addEventListener('click', function() { App.claudeCode._closeExpandModal(); });
+      header.appendChild(title);
+      header.appendChild(closeBtn);
+
+      var body = document.createElement('div');
+      body.className = 'cc-expand-body';
+      if (isDiff) {
+        body.innerHTML = App.claudeCode._renderDiffOutput(content);
+        // Remove max-height limit in modal
+        var diffPre = body.querySelector('.cc-diff-output');
+        if (diffPre) diffPre.style.maxHeight = 'none';
+      } else {
+        var pre = document.createElement('pre');
+        pre.textContent = content;
+        if (toolName === 'Bash') pre.classList.add('cc-bash-output-dark');
+        body.appendChild(pre);
+      }
+
+      modal.appendChild(header);
+      modal.appendChild(body);
+      overlay.appendChild(modal);
+      document.body.appendChild(overlay);
+
+      // Close on Escape
+      App.claudeCode._expandEscHandler = function(e) {
+        if (e.key === 'Escape') App.claudeCode._closeExpandModal();
+      };
+      document.addEventListener('keydown', App.claudeCode._expandEscHandler);
+    },
+
+    _closeExpandModal: function() {
+      var existing = document.querySelector('.cc-expand-overlay');
+      if (existing) existing.remove();
+      if (App.claudeCode._expandEscHandler) {
+        document.removeEventListener('keydown', App.claudeCode._expandEscHandler);
+        App.claudeCode._expandEscHandler = null;
+      }
     },
 
     _resultSummary: function(toolName, text) {

@@ -44,6 +44,7 @@ window.App = {
   SESSIONS_KEY: 'swarmllm_sessions',
   ACTIVE_SESSION_KEY: 'swarmllm_active_session',
   SETUP_DONE_KEY: 'swarmllm_setup_done',
+  CC_RAIL_KEY: 'swarmllm_cc_rail',
   HEALTH_INTERVAL_KEY: 'swarmllm_health_interval',
   THEME_KEY: 'swarmllm_theme',
   MODEL_SORT_KEY: 'swarmllm_model_sort',
