@@ -461,15 +461,12 @@ impl AutoShardManager {
                     if pins_for_model.is_empty() {
                         1.0 // No pins for this model
                     } else {
-                        let pinned_to_us = pins_for_model.iter().any(|p| {
-                            p.target_node_id == *local_node_id
-                                && (p.shard_indices.is_empty()
-                                    || p.shard_indices.contains(&shard.index))
-                        });
+                        let pinned_to_us = pins_for_model
+                            .iter()
+                            .any(|p| p.matches(&manifest.id.0, local_node_id, shard.index));
                         let pinned_to_other = pins_for_model.iter().any(|p| {
                             p.target_node_id != *local_node_id
-                                && (p.shard_indices.is_empty()
-                                    || p.shard_indices.contains(&shard.index))
+                                && p.matches_shard(&manifest.id.0, shard.index)
                         });
                         if pinned_to_us {
                             1000.0 // Massive bonus — download this shard

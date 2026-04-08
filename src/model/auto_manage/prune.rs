@@ -122,12 +122,10 @@ impl AutoShardManager {
                     let local_id = self.shared_state.identity.node_id();
                     if let Ok(ps) = self.shared_state.credits.pool_state.try_read() {
                         if let Some(ref pool) = *ps {
-                            let is_pinned = pool.shard_pins.iter().any(|p| {
-                                p.model_id == manifest.id.0
-                                    && p.target_node_id == *local_id
-                                    && (p.shard_indices.is_empty()
-                                        || p.shard_indices.contains(&shard.index))
-                            });
+                            let is_pinned = pool
+                                .shard_pins
+                                .iter()
+                                .any(|p| p.matches(&manifest.id.0, local_id, shard.index));
                             if is_pinned {
                                 continue;
                             }

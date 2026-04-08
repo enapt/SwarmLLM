@@ -127,6 +127,22 @@ pub struct ShardPin {
     pub target_node_id: NodeId,
 }
 
+impl ShardPin {
+    /// Check whether this pin applies to a given model/node/shard combination.
+    /// Empty `shard_indices` means "all shards".
+    pub fn matches(&self, model_id: &str, node_id: &NodeId, shard_index: u32) -> bool {
+        self.model_id == model_id
+            && self.target_node_id == *node_id
+            && (self.shard_indices.is_empty() || self.shard_indices.contains(&shard_index))
+    }
+
+    /// Check whether this pin applies to a given model and shard (any node).
+    pub fn matches_shard(&self, model_id: &str, shard_index: u32) -> bool {
+        self.model_id == model_id
+            && (self.shard_indices.is_empty() || self.shard_indices.contains(&shard_index))
+    }
+}
+
 /// Invitation to join a pool.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PoolInvitation {
