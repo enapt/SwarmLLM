@@ -43,11 +43,14 @@
 .cc-icon-agent { color: var(--violet, #8b5cf6); background: rgba(139,92,246,0.1); }
 .cc-tool-name { font-weight: 700; color: var(--accent); font-family: var(--font-mono); font-size: 0.75rem; }
 .cc-tool-file { color: var(--text-secondary); font-family: var(--font-mono); font-size: 0.7rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 350px; flex: 1; min-width: 0; }
-.cc-tool-summary { font-size: 0.68rem; color: var(--text-muted); font-family: var(--font-mono); max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-left: auto; }
+.cc-tool-summary { font-size: 0.72rem; color: var(--text-secondary); font-family: var(--font-mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-left: auto; flex-shrink: 1; min-width: 0; }
 .cc-tool-summary:empty { display: none; }
-.cc-tool-status { font-size: 0.65rem; margin-left: 6px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; flex-shrink: 0; }
-.cc-tool-status.pending { color: var(--orange); }
+.cc-tool-summary-error { color: var(--red); }
+.cc-tool-status { font-size: 0.8rem; margin-left: 4px; flex-shrink: 0; line-height: 1; }
+.cc-tool-status.pending { color: var(--orange); animation: cc-pulse 1.5s infinite; }
 .cc-tool-status.done { color: var(--green); }
+.cc-tool-status.error { color: var(--red); }
+.cc-tool-error .cc-tool-name { color: var(--red); }
 .cc-tool-body { padding: 0 10px 8px; display: none; }
 
 /* ─── Tool Result Blocks ─── */

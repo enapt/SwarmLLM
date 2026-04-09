@@ -549,7 +549,7 @@
         '<span class="cc-tool-name">' + U.escapeHtml(toolName) + '</span>' +
         (hint ? '<span class="cc-tool-file">' + U.escapeHtml(hint) + '</span>' : '') +
         '<span class="cc-tool-summary"></span>' +
-        '<span class="cc-tool-status pending">' + U.escapeHtml(I18n.t('claude_code.running')) + '</span>';
+        '<span class="cc-tool-status pending">\u25CF</span>';
       panel.appendChild(header);
 
       contentEl.appendChild(panel);
@@ -621,7 +621,7 @@
         '<span class="cc-agent-icon">' + icon + '</span>' +
         '<span class="cc-agent-label">' + U.escapeHtml(I18n.t('claude_code.agent_spawned')) + '</span>' +
         metaHtml +
-        '<span class="cc-tool-status pending">' + U.escapeHtml(I18n.t('claude_code.running')) + '</span>';
+        '<span class="cc-tool-status pending">\u25CF</span>';
       panel.appendChild(summary);
 
       if (desc) {
@@ -874,7 +874,7 @@
           var agentInfo = agentPanels[toolId];
           var statusEl = agentInfo.panel.querySelector('.cc-tool-status');
           if (statusEl) {
-            statusEl.textContent = I18n.t('claude_code.done');
+            statusEl.textContent = '\u2713';
             statusEl.className = 'cc-tool-status done';
           }
           if (blockText) {
@@ -913,18 +913,23 @@
         var toolName = toolNameEl ? toolNameEl.textContent : '';
 
         if (panel) {
-          // Update status badge
+          // Detect errors in result
+          var isError = blockText && /^(error|Error|ERROR|FAIL|panic)/.test(blockText.trim());
+
+          // Update status badge — ✓ for success, ✗ for error
           var statusEl2 = panel.querySelector('.cc-tool-status');
           if (statusEl2) {
-            statusEl2.textContent = I18n.t('claude_code.done');
-            statusEl2.className = 'cc-tool-status done';
+            statusEl2.textContent = isError ? '\u2717' : '\u2713';
+            statusEl2.className = 'cc-tool-status ' + (isError ? 'error' : 'done');
           }
           panel.classList.add('cc-tool-done');
+          if (isError) panel.classList.add('cc-tool-error');
 
           // Show result summary on the header line
           var summaryEl = panel.querySelector('.cc-tool-summary');
           if (summaryEl) {
             summaryEl.textContent = App.claudeCode._resultSummary(toolName, blockText);
+            if (isError) summaryEl.classList.add('cc-tool-summary-error');
           }
 
           // Only add expandable output for large results (>200 chars) or diffs
