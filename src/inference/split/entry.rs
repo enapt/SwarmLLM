@@ -113,13 +113,8 @@ impl SplitModelEntry {
 
     /// Touch this entry to update its last-used time.
     pub fn touch(&self) {
-        self.last_used.store(
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs(),
-            std::sync::atomic::Ordering::Relaxed,
-        );
+        self.last_used
+            .store(Self::now_secs(), std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Get the last-used timestamp in seconds since epoch.
