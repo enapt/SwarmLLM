@@ -486,22 +486,17 @@
           var toolName = block.name || '';
           // Render tool blocks inline
           if (AGENT_TOOLS[toolName]) {
-            App.claudeCode._closeCurrentGroup(contentEl);
             App.claudeCode._renderAgentCall(contentEl, block, agentPanels);
           } else if (TASK_TOOLS[toolName]) {
             App.claudeCode._renderTaskCall(contentEl, block, toolPanels, taskItems);
           } else {
-            var group = App.claudeCode._getOrCreateToolGroup(contentEl, ctx);
-            App.claudeCode._renderToolCall(group, block, toolPanels);
-            App.claudeCode._updateGroupSummary(group);
+            App.claudeCode._renderToolCall(contentEl, block, toolPanels);
           }
         }
       });
 
-      // After processing all blocks: if tools were used, close the group
-      // and signal new turn so next streaming text creates a fresh node
+      // After processing all blocks: if tools were used, signal new turn
       if (hadTools) {
-        App.claudeCode._closeCurrentGroup(contentEl);
         App.claudeCode._showWorkingIndicator(contentEl);
         ctx.newTurn();
       }
@@ -1024,8 +1019,7 @@
       var sessionId = ctx.sessionId || S.currentSessionId || '';
       var reason = req.decision_reason || '';
 
-      // Render inline in the current tool group
-      var group = App.claudeCode._getOrCreateToolGroup(contentEl, ctx);
+      // Render directly in content
 
       var panel = document.createElement('details');
       panel.className = 'cc-permission-prompt cc-perm-waiting';
@@ -1081,8 +1075,7 @@
       panel._ccIcon = icon;
       panel._ccHint = hint;
 
-      group.appendChild(panel);
-      App.claudeCode._updateGroupSummary(group);
+      contentEl.appendChild(panel);
       ctx.setPendingPermission({ requestId: requestId, element: panel });
 
       // Quick action buttons — stop click from toggling <details>
