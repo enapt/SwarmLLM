@@ -241,10 +241,20 @@
           break;
 
         case 'user':
-          // Tool results
+          // Tool results — intermediate user messages with tool_result blocks
           if (evt.message && evt.message.content) {
             App.claudeCode._handleToolResult(evt, target, toolPanels, agentPanels, taskItems);
           }
+          break;
+
+        case 'tool_use_summary':
+          // Marks preceding tool_use blocks as complete (backup for type:"user")
+          App.claudeCode._handleToolUseSummary(evt, target, toolPanels, agentPanels);
+          break;
+
+        case 'tool_progress':
+          // Progress update for a running tool
+          App.claudeCode._handleToolProgress(evt, target, toolPanels, agentPanels);
           break;
 
         case 'control_request':
@@ -252,13 +262,20 @@
           break;
 
         case 'result':
+          // Final result — also mark any remaining pending tools as done
+          App.claudeCode._markAllToolsDone(toolPanels);
           App.claudeCode._handleResult(evt, contentEl);
           break;
 
         case 'system':
-          // api_retry, compact_boundary — show status
           if (evt.subtype === 'api_retry') {
             App.claudeCode._showStatus(target, I18n.t('claude_code.retrying', { attempt: evt.attempt || 1 }));
+          } else if (evt.subtype === 'task_started') {
+            App.claudeCode._handleTaskStarted(evt, contentEl, taskItems);
+          } else if (evt.subtype === 'task_progress') {
+            App.claudeCode._handleTaskProgress(evt, taskItems);
+          } else if (evt.subtype === 'task_notification') {
+            App.claudeCode._handleTaskNotification(evt, contentEl, taskItems);
           }
           break;
 
@@ -307,6 +324,163 @@
           App.chat.scrollToBottom();
         }
       }
+    },
+
+    // Handle tool_use_summary — marks preceding tools as done
+    _handleToolUseSummary: function(evt, contentEl, toolPanels, agentPanels) {
+      var ids = evt.preceding_tool_use_ids || [];
+      var summary = evt.summary || '';
+      ids.forEach(function(toolId) {
+        // Check agent panels first
+        if (agentPanels[toolId]) {
+          var agentInfo = agentPanels[toolId];
+          var statusEl = agentInfo.panel.querySelector('.cc-tool-status');
+          if (statusEl && statusEl.classList.contains('pending')) {
+            statusEl.textContent = '\u2713';
+            statusEl.className = 'cc-tool-status done';
+          }
+          if (!agentInfo.panel.querySelector('.cc-agent-summary') && summary) {
+            var summaryEl = document.createElement('div');
+            summaryEl.className = 'cc-agent-summary';
+            summaryEl.textContent = summary.length > 500 ? summary.substring(0, 497) + '...' : summary;
+            agentInfo.contentArea.appendChild(summaryEl);
+          }
+          agentInfo.panel.open = false;
+          App.claudeCode._updateAgentSummary(contentEl, agentPanels);
+          return;
+        }
+        // Standard tool panels
+        var panel = toolPanels[toolId];
+        if (panel && panel.classList && panel.classList.contains('cc-tool-call')) {
+          var statusEl2 = panel.querySelector('.cc-tool-status');
+          if (statusEl2 && statusEl2.classList.contains('pending')) {
+            statusEl2.textContent = '\u2713';
+            statusEl2.className = 'cc-tool-status done';
+          }
+          panel.classList.add('cc-tool-done');
+          // Set summary if not already set by a type:"user" result
+          var summaryEl2 = panel.querySelector('.cc-tool-summary');
+          if (summaryEl2 && !summaryEl2.textContent && summary) {
+            summaryEl2.textContent = summary.length > 60 ? summary.substring(0, 57) + '...' : summary;
+          }
+          var group = panel.closest('.cc-tool-group');
+          if (group) {
+            App.claudeCode._updateGroupSummary(group);
+            App.claudeCode._maybeCollapseGroup(group);
+          }
+        }
+        // Task list containers — just ignore (no status to update)
+      });
+      App.chat.scrollToBottom();
+    },
+
+    // Handle tool_progress — shows elapsed time on running tool
+    _handleToolProgress: function(evt, contentEl, toolPanels, agentPanels) {
+      var toolId = evt.tool_use_id || '';
+      var elapsed = evt.elapsed_time_seconds || 0;
+      // Agent panels
+      if (agentPanels[toolId]) {
+        var statusEl = agentPanels[toolId].panel.querySelector('.cc-tool-status');
+        if (statusEl && statusEl.classList.contains('pending')) {
+          statusEl.textContent = elapsed + 's';
+        }
+        return;
+      }
+      // Standard tool panels
+      var panel = toolPanels[toolId];
+      if (panel && panel.classList && panel.classList.contains('cc-tool-call')) {
+        var statusEl2 = panel.querySelector('.cc-tool-status');
+        if (statusEl2 && statusEl2.classList.contains('pending')) {
+          statusEl2.textContent = elapsed + 's';
+        }
+      }
+    },
+
+    // Mark all remaining pending tools as done (called on result event)
+    _markAllToolsDone: function(toolPanels) {
+      for (var id in toolPanels) {
+        var panel = toolPanels[id];
+        if (!panel || !panel.classList) continue;
+        if (!panel.classList.contains('cc-tool-call')) continue;
+        var statusEl = panel.querySelector('.cc-tool-status');
+        if (statusEl && statusEl.classList.contains('pending')) {
+          statusEl.textContent = '\u2713';
+          statusEl.className = 'cc-tool-status done';
+          panel.classList.add('cc-tool-done');
+        }
+      }
+    },
+
+    // Handle system/task_started — show task in task list
+    _handleTaskStarted: function(evt, contentEl, taskItems) {
+      var taskId = evt.task_id || '';
+      var desc = evt.description || '';
+      if (!taskId) return;
+      // Find or create task list container
+      var taskList = contentEl.querySelector('.cc-task-list');
+      if (!taskList) {
+        taskList = document.createElement('div');
+        taskList.className = 'cc-task-list';
+        taskList.innerHTML = '<div class="cc-task-list-header">' +
+          '<span class="cc-task-list-icon">\uD83D\uDCCB</span>' +
+          '<span class="cc-task-list-label">' + U.escapeHtml(I18n.t('claude_code.task_list')) + '</span>' +
+          '</div>';
+        contentEl.appendChild(taskList);
+      }
+      App.claudeCode._renderOneTask(taskList, { id: taskId, status: 'in_progress', subject: desc }, taskItems);
+      App.chat.scrollToBottom();
+    },
+
+    // Handle system/task_progress — update task description/status
+    _handleTaskProgress: function(evt, taskItems) {
+      var taskId = evt.task_id || '';
+      var desc = evt.description || '';
+      if (taskItems[taskId] && taskItems[taskId].element) {
+        var el = taskItems[taskId].element;
+        if (desc) el.querySelector('.cc-task-subject').textContent = desc;
+        // Keep as in_progress
+        el.className = 'cc-task-item cc-task-in-progress';
+        el.querySelector('.cc-task-check').textContent = '\u25C9';
+      }
+    },
+
+    // Handle system/task_notification — task completed/failed/stopped
+    _handleTaskNotification: function(evt, contentEl, taskItems) {
+      var taskId = evt.task_id || '';
+      var status = evt.status || '';
+      var summary = evt.summary || '';
+      if (taskItems[taskId] && taskItems[taskId].element) {
+        var el = taskItems[taskId].element;
+        if (status === 'completed') {
+          el.className = 'cc-task-item cc-task-completed';
+          el.querySelector('.cc-task-check').textContent = '\u2713';
+        } else if (status === 'failed' || status === 'stopped') {
+          el.className = 'cc-task-item cc-task-deleted';
+          el.querySelector('.cc-task-check').textContent = '\u2717';
+        }
+        taskItems[taskId].status = status;
+        // Show summary if available
+        if (summary) {
+          var subEl = el.querySelector('.cc-task-subject');
+          if (subEl) subEl.title = summary;
+        }
+      } else if (taskId) {
+        // Task not yet rendered — create it
+        var taskList = contentEl.querySelector('.cc-task-list');
+        if (!taskList) {
+          taskList = document.createElement('div');
+          taskList.className = 'cc-task-list';
+          taskList.innerHTML = '<div class="cc-task-list-header">' +
+            '<span class="cc-task-list-icon">\uD83D\uDCCB</span>' +
+            '<span class="cc-task-list-label">' + U.escapeHtml(I18n.t('claude_code.task_list')) + '</span>' +
+            '</div>';
+          contentEl.appendChild(taskList);
+        }
+        var mappedStatus = (status === 'completed') ? 'completed' :
+                           (status === 'failed' || status === 'stopped') ? 'deleted' : 'pending';
+        App.claudeCode._renderOneTask(taskList, { id: taskId, status: mappedStatus, subject: summary }, taskItems);
+      }
+      App.chat.scrollToBottom();
     },
 
     // Get or create a tool group container for batching consecutive tool calls.
@@ -968,9 +1142,12 @@
           return;
         }
 
-        // ── TaskList/TaskGet/TaskOutput result — render into task list ──
+        // ── Task tool result with task list container ──
         if (panel && panel.classList && panel.classList.contains('cc-task-list')) {
-          if (blockText) {
+          // Only render result content for tools that return task data
+          // (TaskList, TaskGet, TaskOutput). Skip TaskUpdate/TaskStop confirmations.
+          if (blockText && (blockText.charAt(0) === '[' || blockText.charAt(0) === '{' ||
+              /^#?\d+\s*\[/.test(blockText.trim()))) {
             App.claudeCode._renderTaskListResult(panel, blockText, taskItems);
           }
           App.chat.scrollToBottom();
