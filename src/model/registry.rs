@@ -216,6 +216,28 @@ impl ModelRegistry {
         self.manifests.iter().map(|v| v.value().clone()).collect()
     }
 
+    /// Build a "model not found" error carrying the list of known models.
+    ///
+    /// Callers get `SwarmError::ModelNotAvailable` (mapped to HTTP 404 by the
+    /// API layer). The message varies based on whether the registry is empty
+    /// to give users a more actionable hint.
+    pub fn model_not_found_error(&self, model_id: &ModelId) -> SwarmError {
+        let available: Vec<String> = self.models().iter().map(|m| m.id.0.clone()).collect();
+        let msg = if available.is_empty() {
+            format!(
+                "Model '{}' not found. No models are available — download shards first.",
+                model_id.0
+            )
+        } else {
+            format!(
+                "Model '{}' not found. Available models: {}",
+                model_id.0,
+                available.join(", ")
+            )
+        };
+        SwarmError::ModelNotAvailable(ModelId(msg))
+    }
+
     /// Get the number of registered models.
     #[cfg(test)]
     pub fn model_count(&self) -> usize {

@@ -9,6 +9,10 @@ const SUBNET_CLUSTER_THRESHOLD: usize = 5;
 /// Elevated spot-check rate for nodes in clustered subnets.
 const SUBNET_CLUSTER_SPOT_CHECK_RATE: f64 = 0.25;
 
+/// Age (seconds) after which a subnet registration is evicted from `subnet_counts`.
+/// Prevents unbounded growth from nodes that connect but never transact. 24 hours.
+const SUBNET_EVICTION_SECS: u64 = 86_400;
+
 /// Rate limiter and anti-gaming checks for the credit system.
 ///
 /// Prevents:
@@ -116,9 +120,9 @@ impl AntiGaming {
             timestamps.retain(|t| *t > cutoff);
             !timestamps.is_empty()
         });
-        // Evict subnet registrations older than 24 hours to prevent unbounded growth
-        // from nodes that connect but never transact.
-        let subnet_cutoff = Instant::now() - Duration::from_secs(86400);
+        // Evict subnet registrations older than SUBNET_EVICTION_SECS to prevent
+        // unbounded growth from nodes that connect but never transact.
+        let subnet_cutoff = Instant::now() - Duration::from_secs(SUBNET_EVICTION_SECS);
         self.subnet_counts.retain(|_, nodes| {
             nodes.retain(|(_, ts)| *ts > subnet_cutoff);
             !nodes.is_empty()

@@ -27,6 +27,16 @@ const MAX_PENDING_SHARD_REQUESTS: usize = 1024;
 /// Maximum lifetime (seconds) for a tensor channel or outbound forward before eviction.
 /// Used for both channel cleanup and adaptive timeout upper clamp.
 const MAX_TENSOR_FORWARD_SECS: u64 = 600;
+/// libp2p swarm idle connection timeout. Connections with no traffic for this long are closed.
+const IDLE_CONNECTION_TIMEOUT_SECS: u64 = 120;
+/// Interval for periodic PEX ping health checks. Keeps the outbound queue shallow so
+/// tensor forwards get immediate service instead of queueing behind stale requests.
+const RR_PING_INTERVAL_SECS: u64 = 120;
+/// Interval for stale tensor forward cleanup — catches requests silently dropped by libp2p
+/// (no OutboundFailure event) due to stale ConnectionIds or handler starvation.
+const STALE_TENSOR_CLEANUP_SECS: u64 = 10;
+/// Retention cutoff (seconds) for ping_sent_times entries when pruning under pressure.
+const PING_SENT_TIMES_CUTOFF_SECS: u64 = 120;
 
 /// Check if a multiaddr string contains a private/loopback/link-local/CGN IP.
 /// Used for PEX filtering to prevent leaking internal topology.
@@ -192,16 +202,16 @@ impl NetworkManager {
             })
             .map_err(|e| SwarmError::Network(format!("Behaviour error: {e}")))?
             .with_swarm_config(|c| {
-                c.with_idle_connection_timeout(std::time::Duration::from_secs(120))
-                    .with_notify_handler_buffer_size(
-                        std::num::NonZeroUsize::new(256).expect("256 > 0"),
-                    )
-                    // Increase connection→swarm event buffer from default 7 to 64.
-                    // With many sub-behaviours (identify, kademlia, gossipsub, mdns),
-                    // the default 7-slot buffer fills during post-connect bursts,
-                    // blocking the connection task at events.send().await and preventing
-                    // it from processing inbound NotifyHandler commands (tensor forwards).
-                    .with_per_connection_event_buffer_size(64)
+                c.with_idle_connection_timeout(std::time::Duration::from_secs(
+                    IDLE_CONNECTION_TIMEOUT_SECS,
+                ))
+                .with_notify_handler_buffer_size(std::num::NonZeroUsize::new(256).expect("256 > 0"))
+                // Increase connection→swarm event buffer from default 7 to 64.
+                // With many sub-behaviours (identify, kademlia, gossipsub, mdns),
+                // the default 7-slot buffer fills during post-connect bursts,
+                // blocking the connection task at events.send().await and preventing
+                // it from processing inbound NotifyHandler commands (tensor forwards).
+                .with_per_connection_event_buffer_size(64)
             })
             .build();
 
@@ -345,14 +355,16 @@ impl NetworkManager {
         peer_cache_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
         // Periodic send_request health check via PeerExchangeRequest.
-        // 120s keeps the outbound queue nearly empty so tensor forwards get immediate service.
-        let mut rr_ping_interval = tokio::time::interval(std::time::Duration::from_secs(120));
+        // Keeps the outbound queue nearly empty so tensor forwards get immediate service.
+        let mut rr_ping_interval =
+            tokio::time::interval(std::time::Duration::from_secs(RR_PING_INTERVAL_SECS));
         rr_ping_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut rr_ping_seq: u64 = 0;
 
         // Periodic stale tensor forward cleanup — catches requests that are silently dropped
         // by libp2p (no OutboundFailure event) due to stale ConnectionIds or handler starvation.
-        let mut stale_tensor_interval = tokio::time::interval(std::time::Duration::from_secs(10));
+        let mut stale_tensor_interval =
+            tokio::time::interval(std::time::Duration::from_secs(STALE_TENSOR_CLEANUP_SECS));
         stale_tensor_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
         // Periodic redial check — processes pending_redial queue for peers that failed
@@ -1459,7 +1471,8 @@ impl NetworkManager {
             // Prune stale entries before inserting.
             const MAX_PING_ENTRIES: usize = 2048;
             if self.ping_sent_times.len() >= MAX_PING_ENTRIES {
-                let cutoff = std::time::Instant::now() - std::time::Duration::from_secs(120);
+                let cutoff = std::time::Instant::now()
+                    - std::time::Duration::from_secs(PING_SENT_TIMES_CUTOFF_SECS);
                 self.ping_sent_times
                     .retain(|_, (_, sent_at)| *sent_at > cutoff);
             }

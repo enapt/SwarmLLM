@@ -402,28 +402,10 @@ impl InferenceRouter {
                 }
             };
             if !has_manifest && !has_split && !has_loaded {
-                let available: Vec<String> = self
+                let _ = result_tx.send(Err(self
                     .shared_state
                     .model_registry
-                    .models()
-                    .iter()
-                    .map(|m| m.id.0.clone())
-                    .collect();
-                let msg = if available.is_empty() {
-                    format!(
-                        "Model '{}' not found. No models are available — download shards first.",
-                        adjusted_request.model_id.0
-                    )
-                } else {
-                    format!(
-                        "Model '{}' not found. Available models: {}",
-                        adjusted_request.model_id.0,
-                        available.join(", ")
-                    )
-                };
-                let _ = result_tx.send(Err(crate::error::SwarmError::ModelNotAvailable(
-                    crate::types::ModelId(msg),
-                )));
+                    .model_not_found_error(&adjusted_request.model_id)));
                 return;
             }
         }
@@ -1481,17 +1463,7 @@ async fn execute_request(
             .iter()
             .any(|e| e.key().0 == *model_id);
         if !has_manifest && !has_split {
-            return Err(SwarmError::PipelineError(format!(
-                "Model '{}' not found. Available models: {}",
-                model_id.0,
-                shared_state
-                    .model_registry
-                    .models()
-                    .iter()
-                    .map(|m| m.id.0.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            )));
+            return Err(shared_state.model_registry.model_not_found_error(model_id));
         }
     }
 
