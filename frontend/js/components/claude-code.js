@@ -137,9 +137,6 @@
       var turnText = '';  // text for current turn only
       var currentTextNode = null;  // current .response-text element
       var cleared = false;
-      var reader = resp.body.getReader();
-      var decoder = new TextDecoder();
-      var buffer = '';
       var pendingPermission = null;
       var toolPanels = {};
       var agentPanels = {};  // toolId → { panel, contentArea, taskList }
@@ -158,42 +155,25 @@
       }, 1000);
 
       try {
-        while (true) {
-          var result = await reader.read();
-          if (result.done) break;
-
-          buffer += decoder.decode(result.value, { stream: true });
-          var lines = buffer.split('\n');
-          buffer = lines.pop() || '';
-
-          for (var i = 0; i < lines.length; i++) {
-            var line = lines[i].trim();
-            if (!line.startsWith('data:')) continue;
-            var payload = line.substring(5).trim();
-            if (payload === '[DONE]') continue;
-
-            try {
-              var evt = JSON.parse(payload);
-              App.claudeCode._handleEvent(evt, contentEl, assistantEl, toolPanels, agentPanels, taskItems, {
-                cleared: cleared,
-                sessionId: sessionId,
-                setClear: function() { cleared = true; },
-                appendText: function(text) { fullContent += text; turnText += text; },
-                getTurnText: function() { return turnText; },
-                getFullContent: function() { return fullContent; },
-                // Start a new turn — resets per-turn text and text node
-                newTurn: function() { turnText = ''; currentTextNode = null; },
-                getTextNode: function() { return currentTextNode; },
-                setTextNode: function(n) { currentTextNode = n; },
-                setPendingPermission: function(p) { pendingPermission = p; },
-              });
-              // Update cleared flag from handler
-              if (contentEl.querySelector('.response-text') || contentEl.querySelector('.cc-tool-call')) {
-                cleared = true;
-              }
-            } catch (e) {}
+        await U.readSseStream(resp.body.getReader(), function(evt) {
+          App.claudeCode._handleEvent(evt, contentEl, assistantEl, toolPanels, agentPanels, taskItems, {
+            cleared: cleared,
+            sessionId: sessionId,
+            setClear: function() { cleared = true; },
+            appendText: function(text) { fullContent += text; turnText += text; },
+            getTurnText: function() { return turnText; },
+            getFullContent: function() { return fullContent; },
+            // Start a new turn — resets per-turn text and text node
+            newTurn: function() { turnText = ''; currentTextNode = null; },
+            getTextNode: function() { return currentTextNode; },
+            setTextNode: function(n) { currentTextNode = n; },
+            setPendingPermission: function(p) { pendingPermission = p; },
+          });
+          // Update cleared flag from handler
+          if (contentEl.querySelector('.response-text') || contentEl.querySelector('.cc-tool-call')) {
+            cleared = true;
           }
-        }
+        });
       } finally {
         clearInterval(timerInterval);
         timerEl.classList.remove('cc-live-timer');

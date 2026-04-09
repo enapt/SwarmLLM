@@ -437,6 +437,32 @@
     return msg;
   }
 
+  // Read a Server-Sent Events stream and invoke onChunk for each parsed JSON event.
+  // Handles the standard SSE boilerplate: UTF-8 decode, line buffering, `data:` prefix
+  // stripping, `[DONE]` sentinel skip, and per-line JSON parse with silent failure
+  // (matching the fault-tolerant behavior expected by our chat streams).
+  // Usage: await U.readSseStream(resp.body.getReader(), function(chunk) { ... });
+  async function readSseStream(reader, onChunk) {
+    var decoder = new TextDecoder();
+    var buffer = '';
+    while (true) {
+      var result = await reader.read();
+      if (result.done) break;
+      buffer += decoder.decode(result.value, { stream: true });
+      var lines = buffer.split('\n');
+      buffer = lines.pop() || '';
+      for (var i = 0; i < lines.length; i++) {
+        var line = lines[i].trim();
+        if (!line.startsWith('data:')) continue;
+        var payload = line.substring(5).trim();
+        if (payload === '[DONE]') continue;
+        try {
+          onChunk(JSON.parse(payload));
+        } catch (e) {}
+      }
+    }
+  }
+
   // Submit a code/invite form: POST to endpoint, update status element with i18n messages.
   // opts: { emptyMsg, pendingMsg, successMsg, failMsg, errorMsg, body, onSuccess }
   async function submitCodeForm(endpoint, code, statusEl, opts) {
@@ -493,6 +519,7 @@
     updateChatDownloadProgress: updateChatDownloadProgress,
     extractErrorMessage: extractErrorMessage,
     submitCodeForm: submitCodeForm,
+    readSseStream: readSseStream,
     getApiErrorMessage: getApiErrorMessage,
     modelApiUrl: function(modelId) {
       var parts = Array.prototype.slice.call(arguments, 1);

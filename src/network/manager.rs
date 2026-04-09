@@ -37,6 +37,11 @@ const RR_PING_INTERVAL_SECS: u64 = 120;
 const STALE_TENSOR_CLEANUP_SECS: u64 = 10;
 /// Retention cutoff (seconds) for ping_sent_times entries when pruning under pressure.
 const PING_SENT_TIMES_CUTOFF_SECS: u64 = 120;
+/// Staleness threshold for PEX health-ping bookkeeping. Entries older than this
+/// are dropped from `ping_sent_times` at each rr_ping tick because their
+/// response is never arriving. Distinct from the 120s storm-guard cutoff —
+/// this is the normal-operation liveness window.
+const PEX_PING_STALENESS_SECS: u64 = 30;
 
 /// Check if a multiaddr string contains a private/loopback/link-local/CGN IP.
 /// Used for PEX filtering to prevent leaking internal topology.
@@ -426,8 +431,9 @@ impl NetworkManager {
                             "Skipping health ping — tensor forwards pending"
                         );
                     } else {
-                        // Clean up stale ping_sent_times (>30s old, response never arrived)
-                        let cutoff = std::time::Instant::now() - std::time::Duration::from_secs(30);
+                        // Clean up stale ping_sent_times (response never arrived)
+                        let cutoff = std::time::Instant::now()
+                            - std::time::Duration::from_secs(PEX_PING_STALENESS_SECS);
                         self.ping_sent_times.retain(|_, (_, sent_at)| *sent_at > cutoff);
 
                         let peers: Vec<libp2p::PeerId> = self.swarm.connected_peers().cloned().collect();

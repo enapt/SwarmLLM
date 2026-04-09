@@ -610,63 +610,43 @@
         }
 
         var cleared = false;
-        var reader = resp.body.getReader();
-        var decoder = new TextDecoder();
-        var buffer = '';
         var thinkingEl = null;
 
-        while (true) {
-          var result = await reader.read();
-          if (result.done) break;
-
-          buffer += decoder.decode(result.value, { stream: true });
-          var lines = buffer.split('\n');
-          buffer = lines.pop() || '';
-
-          for (var i = 0; i < lines.length; i++) {
-            var line = lines[i].trim();
-            if (!line.startsWith('data:')) continue;
-            var payload = line.substring(5).trim();
-            if (payload === '[DONE]') continue;
-
-            try {
-              var chunk = JSON.parse(payload);
-              if (chunk.usage) streamUsage = chunk.usage;
-              if (chunk.choices && chunk.choices[0] && chunk.choices[0].delta) {
-                var delta = chunk.choices[0].delta;
-                if (delta.reasoning_content) {
-                  if (!cleared) { contentEl.textContent = ''; cleared = true; if (assistantAvatarEl) { assistantAvatarEl.classList.remove('avatar-thinking'); assistantAvatarEl.classList.add('avatar-streaming'); } }
-                  if (!thinkingEl) {
-                    thinkingEl = document.createElement('details');
-                    thinkingEl.className = 'reasoning-block';
-                    thinkingEl.innerHTML = '<summary>' + U.escapeHtml(I18n.t('chat.reasoning_label')) + '</summary><pre class="reasoning-content"></pre>';
-                    thinkingEl.open = true;
-                    contentEl.appendChild(thinkingEl);
-                  }
-                  reasoningContent += delta.reasoning_content;
-                  thinkingEl.querySelector('.reasoning-content').textContent = reasoningContent;
-                  App.chat.scrollToBottom();
-                }
-                if (delta.content) {
-                  if (!cleared) { contentEl.textContent = ''; cleared = true; if (assistantAvatarEl) { assistantAvatarEl.classList.remove('avatar-thinking'); assistantAvatarEl.classList.add('avatar-streaming'); } }
-                  if (thinkingEl && thinkingEl.open) {
-                    thinkingEl.open = false;
-                    thinkingEl.querySelector('summary').textContent = I18n.t('chat.reasoning_summary', { chars: reasoningContent.length });
-                  }
-                  fullContent += delta.content;
-                  var textNode = contentEl.querySelector('.response-text');
-                  if (!textNode) {
-                    textNode = document.createElement('div');
-                    textNode.className = 'response-text';
-                    contentEl.appendChild(textNode);
-                  }
-                  textNode.textContent = fullContent.replace(/^\n+/, '');
-                  App.chat.scrollToBottom();
-                }
+        await U.readSseStream(resp.body.getReader(), function(chunk) {
+          if (chunk.usage) streamUsage = chunk.usage;
+          if (chunk.choices && chunk.choices[0] && chunk.choices[0].delta) {
+            var delta = chunk.choices[0].delta;
+            if (delta.reasoning_content) {
+              if (!cleared) { contentEl.textContent = ''; cleared = true; if (assistantAvatarEl) { assistantAvatarEl.classList.remove('avatar-thinking'); assistantAvatarEl.classList.add('avatar-streaming'); } }
+              if (!thinkingEl) {
+                thinkingEl = document.createElement('details');
+                thinkingEl.className = 'reasoning-block';
+                thinkingEl.innerHTML = '<summary>' + U.escapeHtml(I18n.t('chat.reasoning_label')) + '</summary><pre class="reasoning-content"></pre>';
+                thinkingEl.open = true;
+                contentEl.appendChild(thinkingEl);
               }
-            } catch (e) {}
+              reasoningContent += delta.reasoning_content;
+              thinkingEl.querySelector('.reasoning-content').textContent = reasoningContent;
+              App.chat.scrollToBottom();
+            }
+            if (delta.content) {
+              if (!cleared) { contentEl.textContent = ''; cleared = true; if (assistantAvatarEl) { assistantAvatarEl.classList.remove('avatar-thinking'); assistantAvatarEl.classList.add('avatar-streaming'); } }
+              if (thinkingEl && thinkingEl.open) {
+                thinkingEl.open = false;
+                thinkingEl.querySelector('summary').textContent = I18n.t('chat.reasoning_summary', { chars: reasoningContent.length });
+              }
+              fullContent += delta.content;
+              var textNode = contentEl.querySelector('.response-text');
+              if (!textNode) {
+                textNode = document.createElement('div');
+                textNode.className = 'response-text';
+                contentEl.appendChild(textNode);
+              }
+              textNode.textContent = fullContent.replace(/^\n+/, '');
+              App.chat.scrollToBottom();
+            }
           }
-        }
+        });
 
         if (!cleared && !fullContent && !reasoningContent) {
           contentEl.textContent = I18n.t('chat.no_response');

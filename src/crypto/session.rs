@@ -32,6 +32,10 @@ struct ReplayWindow {
 const REPLAY_WINDOW_SIZE: u64 = 128;
 const REPLAY_BITMAP_WORDS: usize = (REPLAY_WINDOW_SIZE / 64) as usize;
 
+/// Max lifetime of a pending ephemeral re-key exchange before the entry is evicted.
+/// SEC: prevents memory exhaustion from unanswered re-key requests.
+const PENDING_EPHEMERAL_TTL_SECS: u64 = 60;
+
 impl ReplayWindow {
     fn new() -> Self {
         Self {
@@ -457,8 +461,7 @@ impl SessionManager {
             keep
         });
         // SEC: Purge pending ephemeral exchanges that were never completed.
-        // Prevents memory exhaustion from unanswered re-key requests.
-        let ephemeral_ttl = std::time::Duration::from_secs(60);
+        let ephemeral_ttl = std::time::Duration::from_secs(PENDING_EPHEMERAL_TTL_SECS);
         let before = self.pending_ephemeral.len();
         self.pending_ephemeral.retain(|peer, pending| {
             let keep = now.duration_since(pending.created_at) < ephemeral_ttl;

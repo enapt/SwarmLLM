@@ -18,6 +18,10 @@ const TREE_POOL_FORWARDS: &str = "pool_forwards";
 const TREE_POOL_REMOVAL_REPLAYS: &str = "pool_removal_replays";
 const KEY_MY_POOL: &str = "my_pool";
 
+/// Max lifetime of a pending auto-accept intent created by a code-based join.
+/// Used both by the periodic expiry sweep and the inbound invitation handler.
+const AUTO_ACCEPT_TIMEOUT_SECS: u64 = 300;
+
 /// The PoolManager is the 9th subsystem task.
 /// It owns all pool state, persists to redb, and handles pool commands.
 pub struct PoolManager {
@@ -127,9 +131,9 @@ impl PoolManager {
                 _ = gossip_interval.tick() => {
                     self.gossip_pool_state().await;
                     self.send_device_stats_report().await;
-                    // Expire stale auto-accept intent (5 min timeout)
+                    // Expire stale auto-accept intent
                     if let Some((_, created_at)) = self.auto_accept_code_hash {
-                        if created_at.elapsed().as_secs() >= 300 {
+                        if created_at.elapsed().as_secs() >= AUTO_ACCEPT_TIMEOUT_SECS {
                             tracing::debug!("Clearing expired auto-accept code hash");
                             self.auto_accept_code_hash = None;
                         }
@@ -919,7 +923,6 @@ impl PoolManager {
 
         // Auto-accept only if we have a pending code-based join that hasn't expired
         if let Some((_, created_at)) = self.auto_accept_code_hash {
-            const AUTO_ACCEPT_TIMEOUT_SECS: u64 = 300; // 5 minutes
             if created_at.elapsed().as_secs() < AUTO_ACCEPT_TIMEOUT_SECS {
                 self.auto_accept_code_hash = None;
                 tracing::info!(
