@@ -140,18 +140,18 @@
 .cc-perm-collapsed .cc-perm-tool-name { font-size: 0.7rem; font-weight: 600; }
 
 /* ─── Tool Group (batches consecutive tool calls + prompts) ─── */
-.cc-tool-group { margin: 6px 0; padding: 4px 0; border-left: 2px solid var(--border); padding-left: 8px; }
-.cc-tool-group[open] { }
-.cc-tool-group[open] > .cc-group-header { opacity: 0.4; font-size: 0.62rem; padding: 2px 0; }
+.cc-tool-group { margin: 6px 0; padding: 2px 0 2px 8px; border-left: 2px solid var(--border); }
+/* When open, header is a subtle toggle to collapse */
+.cc-tool-group[open] > .cc-group-header { opacity: 0.35; font-size: 0.62rem; padding: 1px 0; }
+.cc-tool-group[open] > .cc-group-header:hover { opacity: 0.7; }
 .cc-group-header { display: flex; align-items: center; gap: 6px; padding: 3px 0; font-size: 0.7rem; cursor: pointer; list-style: none; user-select: none; color: var(--text-muted); font-family: var(--font-mono); }
 .cc-group-header::-webkit-details-marker { display: none; }
-.cc-group-header::before { content: '▸'; color: var(--text-muted); font-size: 0.6rem; flex-shrink: 0; }
-.cc-group-label { font-weight: 600; color: var(--text-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cc-group-header::before { content: '\25B8'; color: var(--text-muted); font-size: 0.6rem; flex-shrink: 0; }
+.cc-group-label { font-weight: 600; color: var(--text-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .cc-group-count { margin-left: auto; font-size: 0.65rem; color: var(--text-muted); flex-shrink: 0; }
-.cc-group-done { opacity: 0.6; border-left-color: var(--green); }
-.cc-group-done:hover { opacity: 1; }
-.cc-group-done > .cc-group-header { color: var(--green); }
-.cc-group-done > .cc-group-header .cc-group-label { color: var(--text-secondary); }
+.cc-group-done { border-left-color: var(--green); }
+.cc-group-done:not([open]) { opacity: 0.6; }
+.cc-group-done:not([open]):hover { opacity: 1; }
 /* Icon strip in collapsed group header */
 .cc-group-icons { display: inline-flex; gap: 3px; align-items: center; }
 .cc-group-icon-badge {
