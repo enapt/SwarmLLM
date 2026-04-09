@@ -742,6 +742,8 @@
   "claude_code.sending": "Sending",
   "claude_code.show_more": "Show more...",
   "claude_code.show_less": "Show less",
+  "claude_code.working": "Working...",
+  "claude_code.tools_label": "tools",
   "settings.test_btn": "Test",
   "settings.get_key": "Get key →",
   "settings.advanced": "Advanced Settings",

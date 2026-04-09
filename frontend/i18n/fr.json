@@ -929,6 +929,8 @@
   "claude_code.sending": "Sending",
   "claude_code.show_more": "Show more...",
   "claude_code.show_less": "Show less",
+  "claude_code.working": "Travail en cours...",
+  "claude_code.tools_label": "outils",
   "claude_code.initializing": "Starting Claude Code session…",
   "claude_code.subscription_tip": "Using Claude subscription (no API costs)",
   "nav.copied": "Copied!",

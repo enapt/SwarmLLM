@@ -449,7 +449,7 @@
         labelEl.textContent = '';
         labelEl.appendChild(iconsEl);
         if (total > 1) {
-          var countText = document.createTextNode(' ' + done + '/' + total + ' tools');
+          var countText = document.createTextNode(' ' + done + '/' + total + ' ' + I18n.t('claude_code.tools_label'));
           labelEl.appendChild(countText);
         }
       }
@@ -526,7 +526,7 @@
       if (!ind) {
         ind = document.createElement('div');
         ind.className = 'cc-working';
-        ind.innerHTML = '<span class="cc-working-icon">\u2699</span> <span class="cc-working-text">Working...</span>';
+        ind.innerHTML = '<span class="cc-working-icon">\u2699</span> <span class="cc-working-text">' + U.escapeHtml(I18n.t('claude_code.working')) + '</span>';
         contentEl.appendChild(ind);
       }
     },
