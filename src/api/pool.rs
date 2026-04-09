@@ -725,48 +725,65 @@ pub struct PinRequest {
     pub target_node_id: String,
 }
 
-/// POST /api/pool/pin — Pin a model/shards to a specific device (owner only).
-pub async fn pool_add_pin(
-    State(state): State<AppState>,
-    Json(body): Json<PinRequest>,
-) -> Result<Json<serde_json::Value>, ApiError> {
+/// Run `f` with a mutable reference to the current pool state, verifying
+/// that this node is the pool owner first. Returns the closure's result,
+/// or a 400 error if the node isn't in a pool or isn't the owner.
+///
+/// `f` runs while the pool_state write lock is held and must not await.
+async fn with_owned_pool<F, R>(state: &AppState, f: F) -> Result<R, ApiError>
+where
+    F: FnOnce(&mut crate::pool::types::PoolState) -> Result<R, ApiError>,
+{
     let my_id = state.shared_state.identity.node_id().clone();
-
-    let target = parse_node_id(&body.target_node_id)?;
-
     let mut ps_guard = state.shared_state.credits.pool_state.write().await;
     let ps = ps_guard
         .as_mut()
         .ok_or_else(|| ApiError(SwarmError::Validation("Not in a pool".into())))?;
-
-    // Owner only
     if ps.pool_id != my_id {
         return Err(ApiError(SwarmError::Validation(
             "Only the pool owner can manage pins".into(),
         )));
     }
+    f(ps)
+}
 
-    // Verify target is a pool member
-    if !ps.members.iter().any(|m| m.node_id == target) {
-        return Err(ApiError(SwarmError::Validation(
-            "Target device is not a pool member".into(),
-        )));
-    }
+/// POST /api/pool/pin — Pin a model/shards to a specific device (owner only).
+pub async fn pool_add_pin(
+    State(state): State<AppState>,
+    Json(body): Json<PinRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let target = parse_node_id(&body.target_node_id)?;
+    let PinRequest {
+        model_id,
+        shard_indices,
+        ..
+    } = body;
+    let model_id_resp = model_id.clone();
 
-    let pin = crate::types::ShardPin {
-        model_id: body.model_id.clone(),
-        shard_indices: body.shard_indices,
-        target_node_id: target,
-    };
+    let snapshot = with_owned_pool(&state, |ps| {
+        // Verify target is a pool member
+        if !ps.members.iter().any(|m| m.node_id == target) {
+            return Err(ApiError(SwarmError::Validation(
+                "Target device is not a pool member".into(),
+            )));
+        }
 
-    // Remove any existing pin for same model+target, then add
-    ps.shard_pins
-        .retain(|p| !(p.model_id == pin.model_id && p.target_node_id == pin.target_node_id));
-    ps.shard_pins.push(pin);
+        let pin = crate::types::ShardPin {
+            model_id,
+            shard_indices,
+            target_node_id: target,
+        };
+
+        // Remove any existing pin for same model+target, then add
+        ps.shard_pins
+            .retain(|p| !(p.model_id == pin.model_id && p.target_node_id == pin.target_node_id));
+        ps.shard_pins.push(pin);
+
+        Ok(ps.clone())
+    })
+    .await?;
 
     // Persist
-    let snapshot = ps.clone();
-    drop(ps_guard);
     let _ = state
         .shared_state
         .db
@@ -776,7 +793,7 @@ pub async fn pool_add_pin(
     state.shared_state.models.auto_manage_notify.notify_one();
 
     Ok(Json(
-        serde_json::json!({ "status": "pinned", "model_id": body.model_id }),
+        serde_json::json!({ "status": "pinned", "model_id": model_id_resp }),
     ))
 }
 
@@ -785,38 +802,30 @@ pub async fn pool_remove_pin(
     State(state): State<AppState>,
     Json(body): Json<PinRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let my_id = state.shared_state.identity.node_id().clone();
-
     let target = parse_node_id(&body.target_node_id)?;
+    let PinRequest { model_id, .. } = body;
+    let model_id_resp = model_id.clone();
 
-    let mut ps_guard = state.shared_state.credits.pool_state.write().await;
-    let ps = ps_guard
-        .as_mut()
-        .ok_or_else(|| ApiError(SwarmError::Validation("Not in a pool".into())))?;
+    let snapshot = with_owned_pool(&state, |ps| {
+        let before = ps.shard_pins.len();
+        ps.shard_pins
+            .retain(|p| !(p.model_id == model_id && p.target_node_id == target));
 
-    if ps.pool_id != my_id {
-        return Err(ApiError(SwarmError::Validation(
-            "Only the pool owner can manage pins".into(),
-        )));
-    }
+        if ps.shard_pins.len() == before {
+            return Err(ApiError(SwarmError::Validation("Pin not found".into())));
+        }
 
-    let before = ps.shard_pins.len();
-    ps.shard_pins
-        .retain(|p| !(p.model_id == body.model_id && p.target_node_id == target));
+        Ok(ps.clone())
+    })
+    .await?;
 
-    if ps.shard_pins.len() == before {
-        return Err(ApiError(SwarmError::Validation("Pin not found".into())));
-    }
-
-    let snapshot = ps.clone();
-    drop(ps_guard);
     let _ = state
         .shared_state
         .db
         .put_json("pool_state", "my_pool", &snapshot);
 
     Ok(Json(
-        serde_json::json!({ "status": "unpinned", "model_id": body.model_id }),
+        serde_json::json!({ "status": "unpinned", "model_id": model_id_resp }),
     ))
 }
 
