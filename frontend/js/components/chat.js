@@ -660,7 +660,7 @@
                     textNode.className = 'response-text';
                     contentEl.appendChild(textNode);
                   }
-                  textNode.textContent = fullContent;
+                  textNode.textContent = fullContent.replace(/^\n+/, '');
                   App.chat.scrollToBottom();
                 }
               }
@@ -691,7 +691,7 @@
       timerTarget.appendChild(timerEl);
 
       if (fullContent) {
-        session.messages.push({ role: 'assistant', content: fullContent, encrypted: msgEncrypted, duration: elapsed, model: model });
+        session.messages.push({ role: 'assistant', content: fullContent.replace(/^\n+/, ''), encrypted: msgEncrypted, duration: elapsed, model: model });
         // Accumulate token usage for the session
         if (streamUsage) {
           if (!session.token_usage) session.token_usage = { input: 0, output: 0 };
