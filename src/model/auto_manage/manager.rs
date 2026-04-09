@@ -9,6 +9,16 @@ use crate::types::{ModelId, NetworkCommand, ShardId};
 use super::scan::rescan_local_shards;
 use super::vram::global_pool_vram_mb;
 
+/// Interval between per-model request-count resets. Keeps the popularity window
+/// tight enough that a burst of demand on a stale model doesn't dominate.
+const AUTO_MANAGE_REQUEST_RESET_INTERVAL_SECS: u64 = 600;
+/// Minimum gap between notify-triggered evaluations. Prevents cascading
+/// re-evaluations when peers broadcast shard progress in bursts.
+const AUTO_MANAGE_NOTIFY_COOLDOWN_SECS: u64 = 60;
+/// Settle delay after a notify before evaluating — gives gossip time to fan out
+/// and peers time to announce their own downloads so our score is up-to-date.
+const AUTO_MANAGE_NOTIFY_SETTLE_SECS: u64 = 15;
+
 /// Compute a position on a u32 consistent hash ring for a node's virtual slot.
 pub(super) fn hash_ring_position(node_bytes: &[u8; 32], virtual_node: u32) -> u32 {
     let mut hasher = blake3::Hasher::new();
@@ -137,15 +147,16 @@ impl AutoShardManager {
             "AutoShardManager running"
         );
 
-        // Request count reset interval (10 minutes)
-        let mut request_reset_interval = tokio::time::interval(Duration::from_secs(600));
+        // Request count reset interval.
+        let mut request_reset_interval =
+            tokio::time::interval(Duration::from_secs(AUTO_MANAGE_REQUEST_RESET_INTERVAL_SECS));
         request_reset_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         request_reset_interval.tick().await; // skip first tick
 
         // Cooldown: minimum time between evaluations triggered by notify.
-        // Prevents cascading re-evaluations when peers broadcast shard progress.
-        let mut last_notify_eval = std::time::Instant::now() - Duration::from_secs(120);
-        let notify_cooldown = Duration::from_secs(60);
+        // Start back-dated so the first notify after launch isn't throttled.
+        let notify_cooldown = Duration::from_secs(AUTO_MANAGE_NOTIFY_COOLDOWN_SECS);
+        let mut last_notify_eval = std::time::Instant::now() - (notify_cooldown * 2);
 
         let mut config_watch_rx = self.shared_state.config_watch_rx();
 
@@ -178,7 +189,7 @@ impl AutoShardManager {
                 _ = self.notify.notified() => {
                     // Woken by a new HfSourceGossip or ModelManifest -- wait for gossip
                     // to settle and peers to announce their downloads before evaluating.
-                    tokio::time::sleep(Duration::from_secs(15)).await;
+                    tokio::time::sleep(Duration::from_secs(AUTO_MANAGE_NOTIFY_SETTLE_SECS)).await;
                     // Cooldown: skip if we evaluated recently (prevents cascading
                     // re-evaluations from shard progress gossip between peers).
                     let since_last = last_notify_eval.elapsed();

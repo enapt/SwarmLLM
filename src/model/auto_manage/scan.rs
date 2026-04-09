@@ -72,11 +72,7 @@ pub async fn rescan_local_shards(
             }
             // Skip size check when manifest has no size info (size_bytes == 0) —
             // an empty file must not pass as a valid shard.
-            let size_ok = shard_info.size_bytes > 0
-                && std::fs::metadata(&path)
-                    .map(|m| m.len() >= shard_info.size_bytes * 9 / 10)
-                    .unwrap_or(false);
-            if !size_ok {
+            if !super::shard_size_ok(&path, shard_info.size_bytes) {
                 continue;
             }
 
@@ -241,10 +237,7 @@ pub async fn check_and_load_model(
                 return false;
             }
             // Check file is fully downloaded (not a partial write)
-            let size_ok = std::fs::metadata(&path)
-                .map(|m| m.len() >= s.size_bytes * 9 / 10)
-                .unwrap_or(false);
-            if !size_ok {
+            if !super::shard_size_ok(&path, s.size_bytes) {
                 return false;
             }
             // Check no active download for this shard

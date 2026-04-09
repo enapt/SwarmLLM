@@ -2,6 +2,12 @@ use std::time::Duration;
 
 use libp2p::{Multiaddr, PeerId};
 
+/// Max wall-clock time a relayed circuit may stay open before the relay
+/// forcibly closes it. Matches `RELAY_RESERVATION_DURATION_SECS`.
+const RELAY_CIRCUIT_DURATION_SECS: u64 = 3600;
+/// Max reservation TTL granted to a NAT'd peer before it must re-reserve.
+const RELAY_RESERVATION_DURATION_SECS: u64 = 3600;
+
 /// Configuration for the relay server role.
 ///
 /// When a node has `config.network.enable_relay = true` and is publicly
@@ -21,8 +27,8 @@ impl Default for RelayServerConfig {
         Self {
             max_reservations: 128,
             max_circuits: 16,
-            max_circuit_duration: Duration::from_secs(3600),
-            reservation_duration: Duration::from_secs(3600),
+            max_circuit_duration: Duration::from_secs(RELAY_CIRCUIT_DURATION_SECS),
+            reservation_duration: Duration::from_secs(RELAY_RESERVATION_DURATION_SECS),
             max_circuit_bytes: 1 << 30, // 1 GB
         }
     }

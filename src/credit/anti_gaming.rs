@@ -13,6 +13,10 @@ const SUBNET_CLUSTER_SPOT_CHECK_RATE: f64 = 0.25;
 /// Prevents unbounded growth from nodes that connect but never transact. 24 hours.
 const SUBNET_EVICTION_SECS: u64 = 86_400;
 
+/// Default rate-limit window (seconds) used by `AntiGaming::new()` — caps how
+/// recent transactions are counted toward the per-peer rate limit.
+const ANTI_GAMING_RATE_WINDOW_SECS: u64 = 300;
+
 /// Rate limiter and anti-gaming checks for the credit system.
 ///
 /// Prevents:
@@ -42,7 +46,7 @@ impl AntiGaming {
         Self {
             rate_limits: HashMap::new(),
             max_tx_per_window: 100,
-            window_duration: Duration::from_secs(300), // 5 minutes
+            window_duration: Duration::from_secs(ANTI_GAMING_RATE_WINDOW_SECS),
             max_transaction_amount: 100_000,
             spot_check_rate: 0.05, // 5% of transactions
             subnet_counts: HashMap::new(),

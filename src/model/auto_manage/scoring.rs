@@ -214,13 +214,7 @@ impl AutoShardManager {
                 };
                 let holders = registry.shard_holders(&shard_id);
                 // Private mode: only count holders within allowed set
-                let holders: Vec<NodeId> = match allowed_set {
-                    Some(ref allowed) => holders
-                        .into_iter()
-                        .filter(|h| allowed.contains(h))
-                        .collect(),
-                    None => holders,
-                };
+                let holders = crate::pool::scope::filter_allowed_holders(holders, &allowed_set);
                 shard_holder_counts.push((shard.index, holders.len()));
                 for h in &holders {
                     all_holders.insert(h.clone());
@@ -273,13 +267,7 @@ impl AutoShardManager {
                 };
                 let holders = registry.shard_holders(&shard_id);
                 // Private mode: only count holders within allowed set
-                let holders: Vec<NodeId> = match allowed_set {
-                    Some(ref allowed) => holders
-                        .into_iter()
-                        .filter(|h| allowed.contains(h))
-                        .collect(),
-                    None => holders,
-                };
+                let holders = crate::pool::scope::filter_allowed_holders(holders, &allowed_set);
 
                 // Skip if we already hold it (both in registry AND on disk)
                 if holders.contains(local_node_id)

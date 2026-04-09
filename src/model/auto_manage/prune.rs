@@ -7,6 +7,10 @@ use crate::types::{ModelId, NodeId, ShardId};
 use super::manager::{AutoShardManager, PruneCandidate};
 use super::vram::query_gpu_vram_used;
 
+/// Protection window — a shard acquired within the last `SHARD_RECENTLY_ACQUIRED_SECS`
+/// gets a scoring penalty so it's not pruned immediately after download.
+const SHARD_RECENTLY_ACQUIRED_SECS: u64 = 1800;
+
 impl AutoShardManager {
     /// Evaluate and prune over-replicated shards. Called after downloads in each cycle.
     pub(super) async fn evaluate_and_prune(&self) {
@@ -99,13 +103,7 @@ impl AutoShardManager {
                     continue;
                 }
                 // Private mode: filter holders to allowed set for replica counting
-                let holders: Vec<NodeId> = match allowed_set {
-                    Some(ref allowed) => holders
-                        .into_iter()
-                        .filter(|h| allowed.contains(h))
-                        .collect(),
-                    None => holders,
-                };
+                let holders = crate::pool::scope::filter_allowed_holders(holders, &allowed_set);
 
                 // Skip locked/pinned shards
                 if self
@@ -237,10 +235,7 @@ impl AutoShardManager {
                             index: s.index,
                         };
                         let h = registry.shard_holders(&sid);
-                        match allowed_set {
-                            Some(ref allowed) => h.iter().filter(|n| allowed.contains(n)).count(),
-                            None => h.len(),
-                        }
+                        crate::pool::scope::count_allowed_holders(&h, &allowed_set)
                     })
                     .min()
                     .unwrap_or(0);
@@ -257,7 +252,7 @@ impl AutoShardManager {
                         .and_then(|m| m.modified())
                         .ok()
                         .and_then(|t| t.elapsed().ok())
-                        .map(|age| age < Duration::from_secs(1800))
+                        .map(|age| age < Duration::from_secs(SHARD_RECENTLY_ACQUIRED_SECS))
                         .unwrap_or(false)
                 })
                 .await
@@ -308,13 +303,8 @@ impl AutoShardManager {
                 };
                 let mmproj_holders = registry.shard_holders(&mmproj_shard_id);
                 // Private mode: filter mmproj holders to allowed set
-                let mmproj_holders: Vec<NodeId> = match allowed_set {
-                    Some(ref allowed) => mmproj_holders
-                        .into_iter()
-                        .filter(|h| allowed.contains(h))
-                        .collect(),
-                    None => mmproj_holders,
-                };
+                let mmproj_holders =
+                    crate::pool::scope::filter_allowed_holders(mmproj_holders, &allowed_set);
                 if mmproj_holders.contains(&local_node_id) {
                     let mmproj_path = crate::model::shard::model_dir(
                         &self.shared_state.config.node.data_dir,
@@ -370,10 +360,7 @@ impl AutoShardManager {
             };
             let current_holders = {
                 let h = registry.shard_holders(&shard_id_check);
-                match allowed_set {
-                    Some(ref allowed) => h.iter().filter(|n| allowed.contains(n)).count(),
-                    None => h.len(),
-                }
+                crate::pool::scope::count_allowed_holders(&h, &allowed_set)
             };
             if current_holders <= candidate.target_replicas as usize {
                 tracing::debug!(

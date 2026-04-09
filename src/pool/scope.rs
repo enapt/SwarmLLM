@@ -51,3 +51,28 @@ pub fn effective_pool_size(shared: &SharedState) -> usize {
         None => shared.peer_registry.len() + 1,
     }
 }
+
+/// Filter a holder list to the allowed set (private mode). Returns the input
+/// unchanged when `allowed_set` is `None`. Used by auto-manage scoring and
+/// pruning so both paths compute replica counts against the same node set.
+pub fn filter_allowed_holders(
+    holders: Vec<NodeId>,
+    allowed_set: &Option<HashSet<NodeId>>,
+) -> Vec<NodeId> {
+    match allowed_set {
+        Some(allowed) => holders
+            .into_iter()
+            .filter(|h| allowed.contains(h))
+            .collect(),
+        None => holders,
+    }
+}
+
+/// Count holders that fall within the allowed set without allocating.
+/// Returns the full slice length when `allowed_set` is `None`.
+pub fn count_allowed_holders(holders: &[NodeId], allowed_set: &Option<HashSet<NodeId>>) -> usize {
+    match allowed_set {
+        Some(allowed) => holders.iter().filter(|h| allowed.contains(h)).count(),
+        None => holders.len(),
+    }
+}

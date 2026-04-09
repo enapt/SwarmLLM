@@ -17,3 +17,16 @@ pub use manager::AutoShardManager;
 pub(crate) use prune::pressure_adjusted_target;
 pub use scan::{check_and_load_model, rescan_local_shards};
 pub use vram::{compute_vram_budget, estimate_model_vram_mb, global_pool_vram_mb, local_vram_mb};
+
+/// Returns true when a shard file on disk looks fully downloaded.
+///
+/// The check succeeds when `expected_size > 0` AND the file's metadata length
+/// is within 10% of the expected size (tolerates small compression/tail
+/// differences). A zero expected size means the manifest has no length info,
+/// in which case we refuse to validate — otherwise an empty file would pass.
+pub(crate) fn shard_size_ok(path: &std::path::Path, expected_size: u64) -> bool {
+    expected_size > 0
+        && std::fs::metadata(path)
+            .map(|m| m.len() >= expected_size * 9 / 10)
+            .unwrap_or(false)
+}

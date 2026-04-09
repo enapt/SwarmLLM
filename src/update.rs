@@ -7,10 +7,18 @@ use tokio::sync::{watch, RwLock};
 use crate::config::UpdateConfig;
 use crate::error::SwarmError;
 
+/// HTTP timeout for update-check requests (small GitHub API call).
+const UPDATE_CHECK_TIMEOUT_SECS: u64 = 15;
+/// HTTP timeout for the update-download request (binary transfer).
+const UPDATE_DOWNLOAD_TIMEOUT_SECS: u64 = 300;
+/// Delay between daemon start and the first update check — lets the rest of
+/// the node finish initializing before we touch the network.
+const UPDATE_STARTUP_DELAY_SECS: u64 = 30;
+
 static UPDATE_CHECK_CLIENT: std::sync::LazyLock<reqwest::Client> = std::sync::LazyLock::new(|| {
     reqwest::Client::builder()
         .user_agent(concat!("SwarmLLM/", env!("CARGO_PKG_VERSION")))
-        .timeout(std::time::Duration::from_secs(15))
+        .timeout(std::time::Duration::from_secs(UPDATE_CHECK_TIMEOUT_SECS))
         .build()
         .unwrap_or_else(|_| reqwest::Client::new())
 });
@@ -19,7 +27,7 @@ static UPDATE_DOWNLOAD_CLIENT: std::sync::LazyLock<reqwest::Client> =
     std::sync::LazyLock::new(|| {
         reqwest::Client::builder()
             .user_agent(concat!("SwarmLLM/", env!("CARGO_PKG_VERSION")))
-            .timeout(std::time::Duration::from_secs(300))
+            .timeout(std::time::Duration::from_secs(UPDATE_DOWNLOAD_TIMEOUT_SECS))
             .build()
             .unwrap_or_else(|_| reqwest::Client::new())
     });
@@ -365,7 +373,7 @@ impl UpdateChecker {
 
         // Initial check after a short delay (let daemon finish starting)
         tokio::select! {
-            _ = tokio::time::sleep(std::time::Duration::from_secs(30)) => {}
+            _ = tokio::time::sleep(std::time::Duration::from_secs(UPDATE_STARTUP_DELAY_SECS)) => {}
             _ = shutdown_rx.changed() => {
                 if *shutdown_rx.borrow() { return; }
             }

@@ -32,6 +32,15 @@ pub const KEY_BALANCE: &str = "balance";
 /// Tree name for credit transaction history (spec: `credit_txns`).
 pub const TREE_TRANSACTIONS: &str = "credit_txns";
 
+/// Interval between bucketed-balance gossip messages used for percentile estimation.
+const LEDGER_GOSSIP_INTERVAL_SECS: u64 = 300;
+/// Interval between on-disk balance persistence ticks.
+const LEDGER_PERSIST_INTERVAL_SECS: u64 = 60;
+/// Interval between shard-hosting credit payouts.
+const LEDGER_HOSTING_INTERVAL_SECS: u64 = 3600;
+/// Interval between expired-escrow cleanup sweeps.
+const LEDGER_ESCROW_CLEANUP_INTERVAL_SECS: u64 = 300;
+
 /// CreditLedger tracks the local node's credit balance and transaction history.
 ///
 /// It persists balance and transactions to redb, and gossips balance buckets
@@ -306,21 +315,25 @@ impl CreditLedger {
     pub async fn run(self) -> Result<(), SwarmError> {
         tracing::info!(target: "swarmllm::credit::ledger", "CreditLedger running");
 
-        // Gossip balance every 5 minutes
-        let mut gossip_interval = tokio::time::interval(std::time::Duration::from_secs(300));
+        // Gossip bucketed balance for percentile estimation.
+        let mut gossip_interval =
+            tokio::time::interval(std::time::Duration::from_secs(LEDGER_GOSSIP_INTERVAL_SECS));
         gossip_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
-        // Persist balance every 60 seconds
-        let mut persist_interval = tokio::time::interval(std::time::Duration::from_secs(60));
+        // Persist balance to disk.
+        let mut persist_interval =
+            tokio::time::interval(std::time::Duration::from_secs(LEDGER_PERSIST_INTERVAL_SECS));
         persist_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
-        // Earn shard hosting credits every hour
-        let mut hosting_interval = tokio::time::interval(std::time::Duration::from_secs(3600));
+        // Earn shard hosting credits.
+        let mut hosting_interval =
+            tokio::time::interval(std::time::Duration::from_secs(LEDGER_HOSTING_INTERVAL_SECS));
         hosting_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
-        // Clean up expired escrows every 5 minutes
-        let mut escrow_cleanup_interval =
-            tokio::time::interval(std::time::Duration::from_secs(300));
+        // Clean up expired escrows.
+        let mut escrow_cleanup_interval = tokio::time::interval(std::time::Duration::from_secs(
+            LEDGER_ESCROW_CLEANUP_INTERVAL_SECS,
+        ));
         escrow_cleanup_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
         let mut shutdown_rx = self.shutdown_rx.clone();

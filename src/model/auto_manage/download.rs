@@ -74,12 +74,7 @@ impl AutoShardManager {
 
             // Verify shard integrity: try BLAKE3 hash if available, fall back to size check
             let shard_store = self.shared_state.shard_store();
-            let size_ok = || {
-                candidate.shard_size_bytes > 0
-                    && std::fs::metadata(&shard_path)
-                        .map(|m| m.len() >= candidate.shard_size_bytes * 9 / 10)
-                        .unwrap_or(false)
-            };
+            let size_ok = || super::shard_size_ok(&shard_path, candidate.shard_size_bytes);
             let file_ok = if let Some(manifest) = self
                 .shared_state
                 .model_registry
