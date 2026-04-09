@@ -919,6 +919,8 @@
   "claude_code.permission_tip": "Сколько свободы у Claude для внесения изменений",
   "claude_code.agent_spawned": "Суб-агент",
   "claude_code.task_list": "Задачи",
+  "claude_code.rate_limit_warning": "Approaching rate limit",
+  "claude_code.rate_limit_rejected": "Rate limit exceeded",
   "claude_code.agents_running": "агент(ов) работает",
   "claude_code.agents_background": "в фоне",
   "claude_code.background_agents": "Фон",

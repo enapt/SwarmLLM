@@ -919,6 +919,8 @@
   "claude_code.permission_tip": "Seberapa banyak kebebasan Claude untuk melakukan perubahan",
   "claude_code.agent_spawned": "Sub-agen",
   "claude_code.task_list": "Tugas",
+  "claude_code.rate_limit_warning": "Approaching rate limit",
+  "claude_code.rate_limit_rejected": "Rate limit exceeded",
   "claude_code.agents_running": "agen berjalan",
   "claude_code.agents_background": "di latar belakang",
   "claude_code.background_agents": "Latar belakang",

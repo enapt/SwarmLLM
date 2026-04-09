@@ -919,6 +919,8 @@
   "claude_code.permission_tip": "Claudeが変更を行う自由度",
   "claude_code.agent_spawned": "サブエージェント",
   "claude_code.task_list": "タスク",
+  "claude_code.rate_limit_warning": "Approaching rate limit",
+  "claude_code.rate_limit_rejected": "Rate limit exceeded",
   "claude_code.agents_running": "エージェント実行中",
   "claude_code.agents_background": "バックグラウンド",
   "claude_code.background_agents": "バックグラウンド",

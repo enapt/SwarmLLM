@@ -919,6 +919,8 @@
   "claude_code.permission_tip": "ระดับอิสระของ Claude ในการเปลี่ยนแปลง",
   "claude_code.agent_spawned": "ตัวแทนย่อย",
   "claude_code.task_list": "งาน",
+  "claude_code.rate_limit_warning": "Approaching rate limit",
+  "claude_code.rate_limit_rejected": "Rate limit exceeded",
   "claude_code.agents_running": "ตัวแทนกำลังทำงาน",
   "claude_code.agents_background": "ในพื้นหลัง",
   "claude_code.background_agents": "พื้นหลัง",

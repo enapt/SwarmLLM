@@ -919,6 +919,8 @@
   "claude_code.permission_tip": "Claude'un değişiklik yapma özgürlüğü",
   "claude_code.agent_spawned": "Alt ajan",
   "claude_code.task_list": "Görevler",
+  "claude_code.rate_limit_warning": "Approaching rate limit",
+  "claude_code.rate_limit_rejected": "Rate limit exceeded",
   "claude_code.agents_running": "ajan çalışıyor",
   "claude_code.agents_background": "arka planda",
   "claude_code.background_agents": "Arka plan",

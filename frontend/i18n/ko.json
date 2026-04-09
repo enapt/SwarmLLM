@@ -919,6 +919,8 @@
   "claude_code.permission_tip": "Claude가 변경할 수 있는 자유도",
   "claude_code.agent_spawned": "하위 에이전트",
   "claude_code.task_list": "작업",
+  "claude_code.rate_limit_warning": "Approaching rate limit",
+  "claude_code.rate_limit_rejected": "Rate limit exceeded",
   "claude_code.agents_running": "에이전트 실행 중",
   "claude_code.agents_background": "백그라운드",
   "claude_code.background_agents": "백그라운드",

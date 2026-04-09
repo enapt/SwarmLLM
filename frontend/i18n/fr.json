@@ -919,6 +919,8 @@
   "claude_code.permission_tip": "Combien de liberté Claude a pour faire des modifications",
   "claude_code.agent_spawned": "Sous-agent",
   "claude_code.task_list": "Tâches",
+  "claude_code.rate_limit_warning": "Approaching rate limit",
+  "claude_code.rate_limit_rejected": "Rate limit exceeded",
   "claude_code.agents_running": "agent(s) en cours",
   "claude_code.agents_background": "en arrière-plan",
   "claude_code.background_agents": "Arrière-plan",

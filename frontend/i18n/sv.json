@@ -919,6 +919,8 @@
   "claude_code.permission_tip": "Hur mycket frihet Claude har att göra ändringar",
   "claude_code.agent_spawned": "Underagent",
   "claude_code.task_list": "Uppgifter",
+  "claude_code.rate_limit_warning": "Approaching rate limit",
+  "claude_code.rate_limit_rejected": "Rate limit exceeded",
   "claude_code.agents_running": "agent(er) körs",
   "claude_code.agents_background": "i bakgrunden",
   "claude_code.background_agents": "Bakgrund",

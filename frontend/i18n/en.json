@@ -735,6 +735,8 @@
   "claude_code.safety_label": "Permission mode",
   "claude_code.agent_spawned": "Sub-agent",
   "claude_code.task_list": "Tasks",
+  "claude_code.rate_limit_warning": "Approaching rate limit",
+  "claude_code.rate_limit_rejected": "Rate limit exceeded",
   "claude_code.agents_running": "agent(s) running",
   "claude_code.agents_background": "in background",
   "claude_code.background_agents": "Background",

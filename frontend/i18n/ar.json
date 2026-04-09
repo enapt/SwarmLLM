@@ -919,6 +919,8 @@
   "claude_code.permission_tip": "مقدار الحرية التي يملكها Claude لإجراء التغييرات",
   "claude_code.agent_spawned": "وكيل فرعي",
   "claude_code.task_list": "المهام",
+  "claude_code.rate_limit_warning": "Approaching rate limit",
+  "claude_code.rate_limit_rejected": "Rate limit exceeded",
   "claude_code.agents_running": "وكيل(ات) قيد التشغيل",
   "claude_code.agents_background": "في الخلفية",
   "claude_code.background_agents": "الخلفية",
