@@ -13,6 +13,7 @@
   var ACTIVITY_STORAGE_KEY = App.ACTIVITY_KEY;
   var NETWORK_STORAGE_KEY = App.NETWORK_LOG_KEY;
   var _modelsChangedTimer = null;
+  var _suppressToasts = true; // suppress toasts during WS history replay
   var _activityEntries = (function() {
     try { var s = sessionStorage.getItem(ACTIVITY_STORAGE_KEY); if (s) return JSON.parse(s); } catch (e) {}
     return [];
@@ -155,7 +156,8 @@
     }
 
     // --- Unified toast: backend controls when toasts appear via toast_level ---
-    if (data.toast_level) {
+    // Suppress toasts during WS reconnect history replay (first 2s after connect)
+    if (data.toast_level && !_suppressToasts) {
       var toastType = data.toast_level === 'warn' ? 'warning' : (data.toast_level || 'info');
       var toastMs = data.toast_duration_ms || 5000;
       showToast(text, toastType, toastMs);
@@ -347,7 +349,8 @@
     S.ws = new WebSocket(protocol + '//' + window.location.host + '/api/admin/ws');
 
     S.ws.onopen = function() {
-      
+      _suppressToasts = true;
+      setTimeout(function() { _suppressToasts = false; }, 2000);
       setDashboardCover(false);
       if (typeof NeuralBg !== 'undefined') NeuralBg.setHealth(1.0);
       S.pollTimers.forEach(function(t) { clearInterval(t); });
