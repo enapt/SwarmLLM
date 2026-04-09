@@ -46,6 +46,10 @@ const MAX_JSON_BUFFER: usize = 1024 * 1024;
 const DEFAULT_IDLE_TIMEOUT_SECS: u64 = 4 * 3600; // 4 hours
 /// Timeout for the initial Claude CLI subprocess handshake.
 const CLAUDE_INIT_TIMEOUT_SECS: u64 = 120;
+
+/// Grace period for each graceful-shutdown step in `suspend()` — used for the
+/// initial stdin-EOF wait and the post-SIGTERM wait before escalating to SIGKILL.
+const SUSPEND_GRACEFUL_TIMEOUT_SECS: u64 = 5;
 /// Warning sent to frontend this many seconds before idle timeout.
 const IDLE_WARNING_BEFORE_SECS: u64 = 15 * 60; // 15 minutes
 
@@ -229,16 +233,15 @@ impl ClaudeSession {
             }
         }
         if let Some(mut child) = self.child.take() {
-            // Step 2: wait 5s for graceful exit after stdin EOF
-            match tokio::time::timeout(std::time::Duration::from_secs(5), child.wait()).await {
+            // Step 2: wait SUSPEND_GRACEFUL_TIMEOUT_SECS for graceful exit after stdin EOF
+            let grace = std::time::Duration::from_secs(SUSPEND_GRACEFUL_TIMEOUT_SECS);
+            match tokio::time::timeout(grace, child.wait()).await {
                 Ok(_) => {} // exited gracefully
                 Err(_) => {
                     // Step 3: start_kill is async-safe (no subprocess spawn)
                     let _ = child.start_kill();
-                    // Step 4: wait 5s after SIGTERM
-                    match tokio::time::timeout(std::time::Duration::from_secs(5), child.wait())
-                        .await
-                    {
+                    // Step 4: wait SUSPEND_GRACEFUL_TIMEOUT_SECS after SIGTERM
+                    match tokio::time::timeout(grace, child.wait()).await {
                         Ok(_) => {}
                         Err(_) => {
                             // Step 5: force kill

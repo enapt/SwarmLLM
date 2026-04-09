@@ -282,13 +282,17 @@ pub fn resolve_by_name(name: &str, config: &ProvidersConfig) -> Option<ProviderI
     }
 }
 
+/// Total HTTP timeout for proxied provider requests. Tuned for reasoning
+/// models (DeepSeek R1, etc.) that can take 60-120s before the first token.
+const PROVIDER_PROXY_TIMEOUT_SECS: u64 = 300;
+/// TCP connect timeout for proxied provider requests.
+const PROVIDER_PROXY_CONNECT_SECS: u64 = 30;
+
 /// Lazily-initialized shared reqwest client for provider proxying.
-/// Uses a long timeout (5 min) because reasoning models (DeepSeek R1, etc.)
-/// can take 60-120s before the first token arrives.
 static PROVIDER_CLIENT: std::sync::LazyLock<reqwest::Client> = std::sync::LazyLock::new(|| {
     reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(300))
-        .connect_timeout(std::time::Duration::from_secs(30))
+        .timeout(std::time::Duration::from_secs(PROVIDER_PROXY_TIMEOUT_SECS))
+        .connect_timeout(std::time::Duration::from_secs(PROVIDER_PROXY_CONNECT_SECS))
         .build()
         .unwrap_or_else(|_| reqwest::Client::new())
 });

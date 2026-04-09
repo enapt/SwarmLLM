@@ -526,6 +526,29 @@ fn build_tensor_meta_from_content(
 /// Download the GGUF header (metadata + tensor info table) from a remote GGUF file.
 ///
 /// Returns the path to the saved `gguf_header.bin` file.
+/// Write `data` atomically to `dest_dir/filename` by staging to a `.tmp`
+/// sibling and renaming into place. Runs the blocking I/O on a dedicated
+/// tokio worker thread so the async runtime isn't stalled.
+async fn atomic_write_blocking(
+    dest_dir: std::path::PathBuf,
+    filename: &'static str,
+    data: Vec<u8>,
+) -> Result<std::path::PathBuf, String> {
+    let filename = filename.to_string();
+    tokio::task::spawn_blocking(move || -> Result<std::path::PathBuf, String> {
+        std::fs::create_dir_all(&dest_dir).map_err(|e| format!("Failed to create dir: {e}"))?;
+        let dest_path = dest_dir.join(&filename);
+        let tmp_path = dest_dir.join(format!("{filename}.tmp"));
+        std::fs::write(&tmp_path, &data)
+            .map_err(|e| format!("Failed to write {filename}.tmp: {e}"))?;
+        std::fs::rename(&tmp_path, &dest_path)
+            .map_err(|e| format!("Failed to rename {filename}: {e}"))?;
+        Ok(dest_path)
+    })
+    .await
+    .map_err(|e| format!("spawn_blocking: {e}"))?
+}
+
 pub async fn download_gguf_header(
     repo_id: &str,
     filename: &str,
@@ -555,21 +578,12 @@ pub async fn download_gguf_header(
         .await
         .map_err(|e| format!("Failed to read header bytes: {e}"))?;
 
-    let dd = dest_dir.to_path_buf();
-    let hb = header_bytes.to_vec();
-    tokio::task::spawn_blocking(move || -> Result<(), String> {
-        std::fs::create_dir_all(&dd).map_err(|e| format!("Failed to create dir: {e}"))?;
-        let dest_path = dd.join(crate::model::shard::HEADER_FILENAME);
-        let tmp_path = dd.join(format!("{}.tmp", crate::model::shard::HEADER_FILENAME));
-        std::fs::write(&tmp_path, &hb)
-            .map_err(|e| format!("Failed to write gguf_header.bin.tmp: {e}"))?;
-        std::fs::rename(&tmp_path, &dest_path)
-            .map_err(|e| format!("Failed to rename gguf_header.bin: {e}"))?;
-        Ok(())
-    })
-    .await
-    .map_err(|e| format!("spawn_blocking: {e}"))??;
-    let dest_path = dest_dir.join(crate::model::shard::HEADER_FILENAME);
+    let dest_path = atomic_write_blocking(
+        dest_dir.to_path_buf(),
+        crate::model::shard::HEADER_FILENAME,
+        header_bytes.to_vec(),
+    )
+    .await?;
 
     tracing::info!(
         size = header_bytes.len(),
@@ -638,21 +652,12 @@ pub async fn download_tied_output_weight(
         .await
         .map_err(|e| format!("Failed to read tied output weight bytes: {e}"))?;
 
-    let dd = dest_dir.to_path_buf();
-    let bytes = data.to_vec();
-    tokio::task::spawn_blocking(move || -> Result<(), String> {
-        std::fs::create_dir_all(&dd).map_err(|e| format!("Failed to create dir: {e}"))?;
-        let dest_path = dd.join("tied_output_weight.bin");
-        let tmp_path = dd.join("tied_output_weight.bin.tmp");
-        std::fs::write(&tmp_path, &bytes)
-            .map_err(|e| format!("Failed to write tied_output_weight.bin.tmp: {e}"))?;
-        std::fs::rename(&tmp_path, &dest_path)
-            .map_err(|e| format!("Failed to rename tied_output_weight.bin: {e}"))?;
-        Ok(())
-    })
-    .await
-    .map_err(|e| format!("spawn_blocking: {e}"))??;
-    let dest_path = dest_dir.join("tied_output_weight.bin");
+    let dest_path = atomic_write_blocking(
+        dest_dir.to_path_buf(),
+        "tied_output_weight.bin",
+        data.to_vec(),
+    )
+    .await?;
 
     tracing::info!(
         size = data.len(),
