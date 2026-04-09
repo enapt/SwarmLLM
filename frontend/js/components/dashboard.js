@@ -149,10 +149,12 @@
           el.dataset.bound = '1';
           el.addEventListener('click', function() {
             var fullId = el.dataset.fullId;
-            navigator.clipboard.writeText(fullId).then(function() {
-              var s = el.textContent;
-              el.textContent = I18n.t('nav.copied');
-              setTimeout(function() { el.textContent = s; }, 1200);
+            var short = el.textContent;
+            U.copyToClipboard(fullId, {
+              btn: el,
+              successLabel: I18n.t('nav.copied'),
+              resetLabel: short,
+              duration: 1200,
             });
           });
         }

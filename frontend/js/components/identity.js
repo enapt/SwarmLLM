@@ -114,14 +114,18 @@
     copy: function() {
       var input = document.getElementById('my-network-code');
       var btn = document.getElementById('btn-copy-network-code');
-      if (input && input.value) {
-        navigator.clipboard.writeText(input.value).then(function() {
-          if (btn) { btn.textContent = I18n.t('identity.copied'); btn.style.color = 'var(--green)'; setTimeout(function() { btn.textContent = I18n.t('actions.copy'); btn.style.color = ''; }, 2000); }
+      if (!input || !input.value) return;
+      U.copyToClipboard(input.value, {
+        btn: btn,
+        successLabel: I18n.t('identity.copied'),
+        resetLabel: I18n.t('actions.copy'),
+        onSuccess: function() {
           App.notifications.showToast(I18n.t('identity.code_copied'), 'success');
-        }).catch(function() {
+        },
+        onFailure: function() {
           App.ui.showBanner('error', I18n.t('identity.copy_failed'));
-        });
-      }
+        },
+      });
     },
 
     join: async function() {

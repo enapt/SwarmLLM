@@ -437,6 +437,54 @@
     return msg;
   }
 
+  // Copy text to the clipboard with an optional temporary button flash.
+  //
+  // opts: {
+  //   btn?:         HTMLElement to flash (textContent + color + borderColor)
+  //   successLabel?: label shown on the button on success (default: leave text alone)
+  //   failLabel?:   label shown on the button on failure (default: leave text alone)
+  //   resetLabel?:  label restored after `duration` ms (default: leave text alone)
+  //   duration?:    flash duration in ms (default 2000)
+  //   onSuccess?:   called on successful write
+  //   onFailure?:   called with the error on write failure
+  // }
+  //
+  // borderColor is set/reset unconditionally; for buttons without a border this
+  // is a harmless no-op, for bordered buttons (e.g. the settings API key copy)
+  // it matches the existing green-border flash.
+  // Returns a Promise<boolean> — true on success, false on failure.
+  async function copyToClipboard(text, opts) {
+    opts = opts || {};
+    if (!text) return false;
+    var btn = opts.btn || null;
+    var duration = opts.duration || 2000;
+    var resetLabel = opts.resetLabel;
+    try {
+      await navigator.clipboard.writeText(text);
+      if (btn) {
+        if (opts.successLabel) btn.textContent = opts.successLabel;
+        btn.style.color = 'var(--green)';
+        btn.style.borderColor = 'var(--green)';
+        setTimeout(function() {
+          if (resetLabel) btn.textContent = resetLabel;
+          btn.style.color = '';
+          btn.style.borderColor = '';
+        }, duration);
+      }
+      if (opts.onSuccess) opts.onSuccess();
+      return true;
+    } catch (e) {
+      if (btn && opts.failLabel) {
+        btn.textContent = opts.failLabel;
+        setTimeout(function() {
+          if (resetLabel) btn.textContent = resetLabel;
+        }, duration);
+      }
+      if (opts.onFailure) opts.onFailure(e);
+      return false;
+    }
+  }
+
   // Read a Server-Sent Events stream and invoke onChunk for each parsed JSON event.
   // Handles the standard SSE boilerplate: UTF-8 decode, line buffering, `data:` prefix
   // stripping, `[DONE]` sentinel skip, and per-line JSON parse with silent failure
@@ -519,6 +567,7 @@
     updateChatDownloadProgress: updateChatDownloadProgress,
     extractErrorMessage: extractErrorMessage,
     submitCodeForm: submitCodeForm,
+    copyToClipboard: copyToClipboard,
     readSseStream: readSseStream,
     getApiErrorMessage: getApiErrorMessage,
     modelApiUrl: function(modelId) {

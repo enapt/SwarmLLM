@@ -541,9 +541,11 @@
       if (copyCompare) {
         var el = document.getElementById(copyCompare);
         if (el) {
-          navigator.clipboard.writeText(el.textContent).then(function() {
-            target.textContent = I18n.t('actions.copied');
-            setTimeout(function() { target.textContent = I18n.t('actions.copy'); }, 1500);
+          U.copyToClipboard(el.textContent, {
+            btn: target,
+            successLabel: I18n.t('actions.copied'),
+            resetLabel: I18n.t('actions.copy'),
+            duration: 1500,
           });
         }
         return;
@@ -565,9 +567,11 @@
         var msgEl = target.closest('.chat-msg');
         var contentEl = msgEl ? msgEl.querySelector('.msg-content') : null;
         if (contentEl) {
-          navigator.clipboard.writeText(contentEl.textContent).then(function() {
-            target.textContent = I18n.t('actions.copied');
-            setTimeout(function() { target.textContent = I18n.t('actions.copy'); }, 1500);
+          U.copyToClipboard(contentEl.textContent, {
+            btn: target,
+            successLabel: I18n.t('actions.copied'),
+            resetLabel: I18n.t('actions.copy'),
+            duration: 1500,
           });
         }
         return;

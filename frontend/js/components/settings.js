@@ -207,22 +207,12 @@
     copyApiKey: async function() {
       var btn = document.getElementById('btn-copy-api-key');
       if (!App.settings._apiKeyFull) return;
-      try {
-        await navigator.clipboard.writeText(App.settings._apiKeyFull);
-        if (btn) {
-          btn.textContent = I18n.t('actions.copied');
-          btn.style.color = 'var(--green)';
-          btn.style.borderColor = 'var(--green)';
-          setTimeout(function() {
-            btn.textContent = I18n.t('actions.copy');
-            btn.style.color = '';
-            btn.style.borderColor = '';
-          }, 2000);
-        }
-      } catch (e) {
-        if (btn) btn.textContent = I18n.t('settings.key_copy_failed');
-        setTimeout(function() { if (btn) btn.textContent = I18n.t('actions.copy'); }, 2000);
-      }
+      await U.copyToClipboard(App.settings._apiKeyFull, {
+        btn: btn,
+        successLabel: I18n.t('actions.copied'),
+        failLabel: I18n.t('settings.key_copy_failed'),
+        resetLabel: I18n.t('actions.copy'),
+      });
     },
 
     loadStorageInfo: async function() {

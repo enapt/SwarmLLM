@@ -457,8 +457,10 @@
     copyInviteCode: function () {
       var code = this._lastCode;
       if (!code) return;
-      navigator.clipboard.writeText(code).then(function () {
-        App.notifications.showToast(I18n.t('pool.code_copied'), 'success');
+      U.copyToClipboard(code, {
+        onSuccess: function () {
+          App.notifications.showToast(I18n.t('pool.code_copied'), 'success');
+        },
       });
     },
 
