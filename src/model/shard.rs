@@ -130,17 +130,9 @@ impl ShardStore {
     }
 
     /// Verify a shard's BLAKE3 hash matches the expected value.
-    ///
-    /// When `allow_zero_hash` is true, shards with an all-zero hash in the manifest
-    /// (placeholder from HF download before hashes are known) skip verification.
-    /// This should ONLY be true for the local HF download path.
-    /// Network-received shards must always have a real hash.
-    fn verify_shard_with_options(
-        &self,
-        model_id: &ModelId,
-        info: &ShardInfo,
-        allow_zero_hash: bool,
-    ) -> Result<(), SwarmError> {
+    /// Network-received and on-disk shards must always have a real (non-zero) hash
+    /// in the manifest; zero-hash manifests are rejected as placeholders.
+    pub fn verify_shard(&self, model_id: &ModelId, info: &ShardInfo) -> Result<(), SwarmError> {
         let path = self.shard_path(model_id, info.index);
         if !path.exists() {
             return Err(SwarmError::ShardNotFound(crate::types::ShardId {
@@ -149,34 +141,11 @@ impl ShardStore {
             }));
         }
 
-        let hash_unknown = info.hash == [0u8; 32];
-
-        // Only skip verification for zero-hash if explicitly allowed (local HF downloads)
-        if hash_unknown && !allow_zero_hash {
+        if info.hash == [0u8; 32] {
             return Err(SwarmError::ShardIntegrity {
                 expected: "non-zero hash required".to_string(),
                 actual: "all-zero hash (placeholder)".to_string(),
             });
-        }
-
-        if hash_unknown && allow_zero_hash {
-            // Zero-hash: compute the actual hash and log a warning instead of
-            // silently bypassing verification. The caller should update the
-            // manifest hash after this returns.
-            tracing::warn!(
-                model = %model_id,
-                shard = info.index,
-                "Shard has zero hash — computing actual hash for verification"
-            );
-            // Still verify the file is readable (don't skip entirely)
-            let actual_hash = hash_file_blake3(&path)?;
-            tracing::info!(
-                model = %model_id,
-                shard = info.index,
-                hash = %hex::encode(actual_hash),
-                "Computed actual hash for zero-hash shard"
-            );
-            return Ok(());
         }
 
         let actual = hash_file_blake3(&path)?;
@@ -219,12 +188,6 @@ impl ShardStore {
         }
 
         Ok(())
-    }
-
-    /// Verify a shard's BLAKE3 hash matches the expected value.
-    /// Does NOT allow zero-hash bypass (safe default for network-received shards).
-    pub fn verify_shard(&self, model_id: &ModelId, info: &ShardInfo) -> Result<(), SwarmError> {
-        self.verify_shard_with_options(model_id, info, false)
     }
 
     /// Scan the models directory and return all locally available, verified shards.
