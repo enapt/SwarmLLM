@@ -43,6 +43,9 @@ pub struct AcquisitionStatus {
 
 const MAX_ACQUISITION_LOG_ENTRIES: usize = 200;
 
+/// Rolling window (seconds) for computing per-job download speed from byte samples.
+const SPEED_WINDOW_SECS: u64 = 10;
+
 impl AcquisitionStatus {
     /// Create a new "Downloading" status with zeroed counters.
     pub fn new_downloading(
@@ -619,10 +622,10 @@ impl AcquisitionManager {
             sp.state = ShardState::Downloading;
         }
 
-        // Update speed (rolling 10-second window)
+        // Update speed using the rolling SPEED_WINDOW_SECS window.
         let now = std::time::Instant::now();
         job.speed_samples.push((now, job.status.downloaded_bytes));
-        let cutoff = now - std::time::Duration::from_secs(10);
+        let cutoff = now - std::time::Duration::from_secs(SPEED_WINDOW_SECS);
         job.speed_samples.retain(|(t, _)| *t >= cutoff);
         if job.speed_samples.len() >= 2 {
             let first = &job.speed_samples[0];

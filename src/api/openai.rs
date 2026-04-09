@@ -1040,17 +1040,22 @@ fn find_peer_with_model(state: &AppState, model: &str) -> Option<String> {
     None
 }
 
+/// Short-lived per-model TTL for the `all_shards_available` cache. Kept tiny
+/// to stay consistent with shard announcement propagation delay.
+const SHARD_AVAIL_CACHE_TTL_MS: u64 = 100;
+
 /// Check if all layers for a model are covered across the network (for distributed inference).
 /// This does NOT require any single node to have all shards — it only requires that every
 /// shard has at least one holder somewhere in the network so the pipeline scheduler can
 /// assemble a complete pipeline across multiple nodes.
 pub fn all_shards_available(state: &AppState, model_name: &str) -> bool {
-    // Short-lived per-model cache (100ms TTL) to avoid repeated ModelId/ShardId allocations
+    // Short-lived per-model cache to avoid repeated ModelId/ShardId allocations
     use std::sync::LazyLock;
     static CACHE: LazyLock<dashmap::DashMap<String, (std::time::Instant, bool)>> =
         LazyLock::new(dashmap::DashMap::new);
+    let ttl = std::time::Duration::from_millis(SHARD_AVAIL_CACHE_TTL_MS);
     if let Some(entry) = CACHE.get(model_name) {
-        if entry.0.elapsed() < std::time::Duration::from_millis(100) {
+        if entry.0.elapsed() < ttl {
             return entry.1;
         }
     }
@@ -1059,7 +1064,7 @@ pub fn all_shards_available(state: &AppState, model_name: &str) -> bool {
     // Evict stale entries instead of clearing entire cache (prevents thundering herd)
     const SHARD_AVAIL_CACHE_MAX: usize = 1_000;
     if CACHE.len() > SHARD_AVAIL_CACHE_MAX {
-        CACHE.retain(|_, (ts, _)| ts.elapsed() < std::time::Duration::from_millis(100));
+        CACHE.retain(|_, (ts, _)| ts.elapsed() < ttl);
     }
     CACHE.insert(model_name.to_string(), (std::time::Instant::now(), result));
     result

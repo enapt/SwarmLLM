@@ -42,12 +42,33 @@ impl SamplingContext {
     }
 }
 
+/// Convert raw logits to a probability distribution via softmax.
+///
+/// Allocates a new `Vec<f32>` per call. Used by batch paths (e.g. speculative
+/// decoding in `executor.rs`) that need freestanding probability vectors.
+/// Hot-path decoding in `sample_token_with_ctx` reuses scratch buffers and
+/// does its own inline softmax to avoid allocation.
+pub fn softmax_vec(logits: &[f32]) -> Vec<f32> {
+    if logits.is_empty() {
+        return vec![];
+    }
+    let max = logits.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+    let exps: Vec<f32> = logits.iter().map(|&l| (l - max).exp()).collect();
+    let sum: f32 = exps.iter().sum();
+    if sum == 0.0 {
+        // Uniform fallback to avoid division by zero.
+        let n = logits.len() as f32;
+        return vec![1.0 / n; logits.len()];
+    }
+    exps.iter().map(|&e| e / sum).collect()
+}
+
 /// Apply temperature scaling to logits.
 ///
 /// Higher temperature = more random, lower = more deterministic.
 /// Callers must handle temperature == 0 (greedy/argmax) before calling this.
 /// Temperature == 1.0 is a no-op (dividing by 1 changes nothing).
-pub fn apply_temperature(logits: &mut [f32], temperature: f32) {
+fn apply_temperature(logits: &mut [f32], temperature: f32) {
     if temperature == 1.0 {
         return;
     }
@@ -58,8 +79,10 @@ pub fn apply_temperature(logits: &mut [f32], temperature: f32) {
 
 /// Apply top-k filtering: keep only the k highest logits, set rest to -inf.
 ///
-/// Allocates temporary buffers. For hot-path usage, prefer `apply_top_k_with_ctx`.
-pub fn apply_top_k(logits: &mut [f32], k: u32) {
+/// Allocates temporary buffers. Private — production hot path uses
+/// `apply_top_k_with_ctx` via `sample_token_with_ctx`; kept for unit tests.
+#[cfg(test)]
+fn apply_top_k(logits: &mut [f32], k: u32) {
     if k == 0 || k as usize >= logits.len() {
         return;
     }

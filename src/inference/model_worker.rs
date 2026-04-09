@@ -68,7 +68,7 @@ pub async fn run_worker(
         match msg {
             DaemonMsg::Forward(fwd) => {
                 let request_id = fwd.request_id;
-                match handle_forward(
+                if let Err(e) = handle_forward(
                     &mut writer,
                     &mut models,
                     &kv_store,
@@ -79,23 +79,12 @@ pub async fn run_worker(
                 )
                 .await
                 {
-                    Ok(()) => {}
-                    Err(e) => {
-                        let _ = send_worker(
-                            &mut writer,
-                            &WorkerMsg::Error {
-                                request_id,
-                                message: e.to_string(),
-                            },
-                            &[],
-                        )
-                        .await;
-                    }
+                    send_worker_error(&mut writer, request_id, e).await;
                 }
             }
             DaemonMsg::Generate(gen) => {
                 let request_id = gen.request_id;
-                match handle_generate(
+                if let Err(e) = handle_generate(
                     &mut writer,
                     &mut models,
                     &kv_store,
@@ -105,18 +94,7 @@ pub async fn run_worker(
                 )
                 .await
                 {
-                    Ok(()) => {}
-                    Err(e) => {
-                        let _ = send_worker(
-                            &mut writer,
-                            &WorkerMsg::Error {
-                                request_id,
-                                message: e.to_string(),
-                            },
-                            &[],
-                        )
-                        .await;
-                    }
+                    send_worker_error(&mut writer, request_id, e).await;
                 }
             }
             DaemonMsg::Unload {
@@ -137,6 +115,24 @@ pub async fn run_worker(
     // Explicitly drop all models before exiting — CUDA contexts will be freed
     drop(models);
     tracing::info!("model-worker: exiting cleanly");
+}
+
+/// Send a `WorkerMsg::Error` back to the daemon. Used by the `run_worker`
+/// dispatch loop to report handler failures without crashing the subprocess.
+async fn send_worker_error(
+    writer: &mut tokio::net::unix::OwnedWriteHalf,
+    request_id: uuid::Uuid,
+    err: SwarmError,
+) {
+    let _ = send_worker(
+        writer,
+        &WorkerMsg::Error {
+            request_id,
+            message: err.to_string(),
+        },
+        &[],
+    )
+    .await;
 }
 
 #[allow(clippy::too_many_arguments)]

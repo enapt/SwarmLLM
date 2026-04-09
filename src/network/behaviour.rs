@@ -12,6 +12,23 @@ use crate::config::NetworkConfig;
 use crate::network::protocol::SwarmCodec;
 use crate::network::relay::RelayServerConfig;
 
+/// Kademlia provider record TTL — how long a shard-holder record stays valid
+/// before being dropped. Republished automatically on the publication interval.
+const KAD_PROVIDER_TTL_SECS: u64 = 3600;
+/// Kademlia provider record republication interval. Must be < `KAD_PROVIDER_TTL_SECS`
+/// to ensure records refresh before expiry.
+const KAD_PUBLISH_INTERVAL_SECS: u64 = 1200;
+/// GossipSub mesh heartbeat interval — controls mesh maintenance cadence.
+const GOSSIPSUB_HEARTBEAT_SECS: u64 = 10;
+/// request_response per-request timeout. 10 minutes accommodates CPU-only
+/// inference on 7B+ models and slow LAN shard transfers. The vendored handler's
+/// Tokio watchdog handles truly stuck futures separately.
+const RR_REQUEST_TIMEOUT_SECS: u64 = 600;
+/// mDNS service record TTL advertised to LAN peers.
+const MDNS_TTL_SECS: u64 = 300;
+/// mDNS active query interval — how often to probe the LAN for new peers.
+const MDNS_QUERY_INTERVAL_SECS: u64 = 10;
+
 /// Combined network behaviour for the SwarmLLM node.
 ///
 /// Uses the libp2p `NetworkBehaviour` derive macro to combine multiple
@@ -65,12 +82,12 @@ pub fn build_behaviour(
     // Kademlia DHT for peer and shard discovery
     let store = MemoryStore::new(local_peer_id);
     let mut kad_config = kad::Config::new(StreamProtocol::new("/swarmllm/kad/1.0.0"));
-    // S5: Set provider record TTL to 1 hour (republished automatically).
-    // Provider records track which nodes hold which shards for DHT-based
-    // shard holder resolution at scale (50K+ nodes).
-    kad_config.set_provider_record_ttl(Some(Duration::from_secs(3600)));
-    // Provider publication interval — republish every 20 minutes to keep records fresh.
-    kad_config.set_provider_publication_interval(Some(Duration::from_secs(1200)));
+    // S5: Provider records track which nodes hold which shards for DHT-based
+    // shard holder resolution at scale (50K+ nodes). Records republish before
+    // the TTL expires so stale holders drop out automatically.
+    kad_config.set_provider_record_ttl(Some(Duration::from_secs(KAD_PROVIDER_TTL_SECS)));
+    kad_config
+        .set_provider_publication_interval(Some(Duration::from_secs(KAD_PUBLISH_INTERVAL_SECS)));
     let mut kademlia = kad::Behaviour::with_config(local_peer_id, store, kad_config);
     // Use Server mode so nodes accept each other's DHT queries.
     // Client mode rejects inbound queries — when BOTH nodes are Client, rejected
@@ -120,7 +137,7 @@ pub fn build_behaviour(
     );
 
     let gossipsub_config = gossipsub::ConfigBuilder::default()
-        .heartbeat_interval(Duration::from_secs(10))
+        .heartbeat_interval(Duration::from_secs(GOSSIPSUB_HEARTBEAT_SECS))
         .validation_mode(gossipsub::ValidationMode::Strict)
         .message_id_fn(message_id_fn)
         // SEC: Cap gossip message size to prevent oversized gossip flooding.
@@ -158,10 +175,10 @@ pub fn build_behaviour(
             StreamProtocol::new(crate::network::protocol::PROTOCOL_ID),
             request_response::ProtocolSupport::Full,
         )],
-        // NET-C3: 30s timeout covers LAN shard transfers (256MB @ 100Mbps < 25s)
-        // 600s to accommodate CPU-only inference on large models (7B+).
-        // The vendored handler's Tokio-based watchdog handles stuck futures separately.
-        request_response::Config::default().with_request_timeout(Duration::from_secs(600)),
+        // NET-C3: RR_REQUEST_TIMEOUT_SECS covers LAN shard transfers and slow CPU
+        // inference on large models (7B+). See constant docs for rationale.
+        request_response::Config::default()
+            .with_request_timeout(Duration::from_secs(RR_REQUEST_TIMEOUT_SECS)),
     );
 
     // Identify protocol
@@ -218,8 +235,8 @@ pub fn build_behaviour(
     // mDNS for automatic LAN peer discovery
     let mdns_behaviour = if enable_mdns {
         let mdns_config = mdns::Config {
-            ttl: Duration::from_secs(300),
-            query_interval: Duration::from_secs(10),
+            ttl: Duration::from_secs(MDNS_TTL_SECS),
+            query_interval: Duration::from_secs(MDNS_QUERY_INTERVAL_SECS),
             enable_ipv6: false,
         };
         Some(mdns::tokio::Behaviour::new(mdns_config, local_peer_id)?)
