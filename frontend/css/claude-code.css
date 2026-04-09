@@ -223,6 +223,7 @@
 .cc-task-completed .cc-task-subject { color: var(--text-secondary); text-decoration: line-through; text-decoration-color: rgba(var(--text-secondary-rgb, 128,128,128), 0.4); }
 .cc-task-deleted .cc-task-check { color: var(--red); }
 .cc-task-deleted .cc-task-subject { color: var(--text-muted); text-decoration: line-through; }
+.cc-task-result-text { white-space: pre-wrap; font-size: 0.72rem; font-family: var(--font-mono); color: var(--text-secondary); padding: 4px 0; }
 
 /* ─── Running Agents Summary Bar ─── */
 .cc-agents-summary { margin: 6px 0; padding: 4px 10px; font-size: 0.72rem; font-weight: 600; color: var(--violet); background: rgba(139,92,246,0.08); border-radius: var(--radius); font-family: var(--font-mono); text-align: center; }

@@ -706,6 +706,72 @@
       }
     },
 
+    // Render TaskList/TaskGet/TaskOutput result into the task list container
+    _renderTaskListResult: function(taskList, text, taskItems) {
+      var tasks = [];
+
+      // Try JSON parse first (TaskList returns JSON array or object)
+      try {
+        var json = JSON.parse(text);
+        var arr = Array.isArray(json) ? json : (json.tasks || json.items || [json]);
+        arr.forEach(function(t) {
+          if (t && (t.id || t.taskId)) {
+            tasks.push({
+              id: String(t.id || t.taskId),
+              status: t.status || 'pending',
+              subject: t.subject || t.description || t.name || ''
+            });
+          }
+        });
+      } catch (e) {
+        // Try line-based format: "#1 [status] subject" or "1 [status] subject"
+        text.split('\n').forEach(function(line) {
+          var m = line.match(/^#?(\d+)\s*\[(\w+)\]\s*(.+)/);
+          if (m) tasks.push({ id: m[1], status: m[2], subject: m[3].trim() });
+        });
+      }
+
+      if (tasks.length > 0) {
+        tasks.forEach(function(t) {
+          App.claudeCode._renderOneTask(taskList, t, taskItems);
+        });
+      } else if (text.trim()) {
+        // Fallback: show raw text
+        var fallback = document.createElement('div');
+        fallback.className = 'cc-task-result-text';
+        fallback.textContent = text;
+        taskList.appendChild(fallback);
+      }
+    },
+
+    // Render or update a single task item in the task list
+    _renderOneTask: function(taskList, t, taskItems) {
+      var statusClass = t.status === 'completed' ? 'cc-task-completed' :
+                        t.status === 'in_progress' ? 'cc-task-in-progress' :
+                        t.status === 'deleted' ? 'cc-task-deleted' : 'cc-task-pending';
+      var checkChar = t.status === 'completed' ? '\u2713' :
+                      t.status === 'in_progress' ? '\u25C9' :
+                      t.status === 'deleted' ? '\u2717' : '\u25CB';
+
+      // Update existing item if present
+      if (taskItems[t.id] && taskItems[t.id].element) {
+        var el = taskItems[t.id].element;
+        el.className = 'cc-task-item ' + statusClass;
+        el.querySelector('.cc-task-check').textContent = checkChar;
+        if (t.subject) el.querySelector('.cc-task-subject').textContent = t.subject;
+        taskItems[t.id].status = t.status;
+        return;
+      }
+
+      var item = document.createElement('div');
+      item.className = 'cc-task-item ' + statusClass;
+      item.innerHTML =
+        '<span class="cc-task-check">' + checkChar + '</span>' +
+        '<span class="cc-task-subject">' + U.escapeHtml(t.subject) + '</span>';
+      taskList.appendChild(item);
+      taskItems[t.id] = { element: item, status: t.status };
+    },
+
     // Render tool output with smart formatting (diffs, file lists, errors)
     _renderToolOutput: function(toolName, blockText) {
       var el = document.createElement('div');
@@ -897,6 +963,15 @@
           var idMatch = blockText.match(/#(\d+)/);
           if (idMatch) {
             taskItems[idMatch[1]] = { element: panel, status: 'pending' };
+          }
+          App.chat.scrollToBottom();
+          return;
+        }
+
+        // ── TaskList/TaskGet/TaskOutput result — render into task list ──
+        if (panel && panel.classList && panel.classList.contains('cc-task-list')) {
+          if (blockText) {
+            App.claudeCode._renderTaskListResult(panel, blockText, taskItems);
           }
           App.chat.scrollToBottom();
           return;
