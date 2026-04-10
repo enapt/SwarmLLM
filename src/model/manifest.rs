@@ -12,6 +12,43 @@ pub trait ModelManifestExt {
     fn save_to_dir(&self, dir: &Path) -> Result<(), SwarmError>;
 }
 
+/// Parameters for building a ModelManifest from GGUF metadata.
+pub struct ManifestFromGguf {
+    pub id: crate::types::ModelId,
+    pub name: String,
+    pub architecture: crate::types::ModelArchitecture,
+    pub num_layers: u32,
+    pub total_size_bytes: u64,
+    pub shard_count: u32,
+    pub shards: Vec<crate::types::ShardInfo>,
+    pub publisher: crate::types::NodeId,
+}
+
+/// Build a `ModelManifest` with standard zero-defaults for fields that are
+/// filled in later (params, quantization, tokenizer hash, license).
+/// Computes and sets `manifest_hash` automatically.
+pub fn build_manifest_from_gguf(p: ManifestFromGguf) -> ModelManifest {
+    let mut manifest = ModelManifest {
+        id: p.id,
+        name: p.name,
+        architecture: p.architecture,
+        num_layers: p.num_layers,
+        num_params_billions: 0.0,
+        quantization: crate::types::Quantization::Q4KM,
+        total_size_bytes: p.total_size_bytes,
+        shard_count: p.shard_count,
+        shards: p.shards,
+        tokenizer_hash: [0u8; 32],
+        manifest_hash: [0u8; 32],
+        publisher: p.publisher,
+        publish_date: chrono::Utc::now(),
+        license: "Unknown".to_string(),
+        mmproj: None,
+    };
+    manifest.manifest_hash = manifest.compute_hash();
+    manifest
+}
+
 impl ModelManifestExt for ModelManifest {
     fn load_from_dir(dir: &Path) -> Result<ModelManifest, SwarmError> {
         let manifest_path = dir.join(crate::model::shard::MANIFEST_FILENAME);

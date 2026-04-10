@@ -126,9 +126,12 @@ impl TrustManager {
             entry.trust_score = old + TRUST_DECAY_RATE * (DEFAULT_TRUST - old);
             // Persist the decayed score
             let key = hex::encode(entry.node_id.0);
-            let _ = self
+            if let Err(e) = self
                 .db
-                .put_json(TREE_TRUST_SCORES, &key, &entry.trust_score);
+                .put_json(TREE_TRUST_SCORES, &key, &entry.trust_score)
+            {
+                tracing::warn!(error = %e, node = %key, "Failed to persist decayed trust score");
+            }
         }
     }
 

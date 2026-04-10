@@ -118,24 +118,18 @@ pub fn generate_and_register_local_manifest(
             }
         };
 
-    let mut manifest = crate::types::ModelManifest {
-        id: model_id.clone(),
-        name: info.name.clone(),
-        architecture,
-        num_layers,
-        num_params_billions: 0.0,
-        quantization: crate::types::Quantization::Q4KM,
-        total_size_bytes: file_size,
-        shard_count,
-        shards,
-        tokenizer_hash: [0u8; 32],
-        manifest_hash: [0u8; 32],
-        publisher: node_id.clone(),
-        publish_date: chrono::Utc::now(),
-        license: "Unknown".to_string(),
-        mmproj: None,
-    };
-    manifest.manifest_hash = manifest.compute_hash();
+    let manifest = crate::model::manifest::build_manifest_from_gguf(
+        crate::model::manifest::ManifestFromGguf {
+            id: model_id.clone(),
+            name: info.name.clone(),
+            architecture,
+            num_layers,
+            total_size_bytes: file_size,
+            shard_count,
+            shards,
+            publisher: node_id.clone(),
+        },
+    );
 
     // Store the source GGUF path so the shard server can read byte ranges from it.
     // We write a small metadata file alongside the manifest.
@@ -349,24 +343,18 @@ pub(super) fn regenerate_manifest_from_header(
         _ => crate::types::ModelArchitecture::Llama,
     };
 
-    let mut manifest = crate::types::ModelManifest {
-        id: model_id.clone(),
-        name: model_name,
-        architecture,
-        num_layers: meta.block_count as u32,
-        num_params_billions: 0.0,
-        quantization: crate::types::Quantization::Q4KM,
-        total_size_bytes: total_size,
-        shard_count,
-        shards,
-        tokenizer_hash: [0u8; 32],
-        manifest_hash: [0u8; 32],
-        publisher: crate::types::NodeId([0u8; 32]),
-        publish_date: chrono::Utc::now(),
-        license: "Unknown".to_string(),
-        mmproj: None,
-    };
-    manifest.manifest_hash = manifest.compute_hash();
+    let manifest = crate::model::manifest::build_manifest_from_gguf(
+        crate::model::manifest::ManifestFromGguf {
+            id: model_id.clone(),
+            name: model_name,
+            architecture,
+            num_layers: meta.block_count as u32,
+            total_size_bytes: total_size,
+            shard_count,
+            shards,
+            publisher: crate::types::NodeId([0u8; 32]),
+        },
+    );
 
     // Save to disk
     if let Err(e) = manifest.save_to_dir(model_dir) {

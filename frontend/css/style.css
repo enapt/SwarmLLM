@@ -1906,7 +1906,6 @@ kbd {
 .shard-sum-dl .shard-sum-dot { background: var(--cyan); }
 .shard-sum-peer-dl .shard-sum-dot { background: var(--orange); }
 .shard-sum-queued .shard-sum-dot { background: transparent; border: 1px dashed var(--cyan); }
-.shard-sum-verifying .shard-sum-dot { background: var(--yellow, #eab308); }
 .shard-sum-missing .shard-sum-dot { background: var(--bg-tertiary); border: 1px dashed var(--border-light); }
 
 /* Model status pills */

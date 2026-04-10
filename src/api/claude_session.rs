@@ -137,11 +137,6 @@ impl ClaudeSession {
         self.last_active.elapsed().as_secs()
     }
 
-    /// Get a cloned handle to the stdin writer (for concurrent access).
-    pub fn stdin_handle(&self) -> StdinHandle {
-        self.stdin.clone()
-    }
-
     /// Send a user message to the subprocess via stdin.
     pub async fn send_user_message(&mut self, content: &str) -> Result<(), ApiError> {
         let session_id = self.claude_session_id.clone().unwrap_or_default();

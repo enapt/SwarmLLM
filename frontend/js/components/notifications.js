@@ -213,7 +213,7 @@
       html += '<div class="activity-overflow text-muted" style="font-size:0.7rem;padding:4px 0;text-align:center">' +
         I18n.t('activity.overflow', { count: entries.length - MAX_DISPLAY }) + '</div>';
     }
-    log.innerHTML = html || '<div class="text-muted" class="text-sm" style="padding:8px 0">' + emptyText + '</div>';
+    log.innerHTML = html || '<div class="text-muted text-sm" style="padding:8px 0">' + emptyText + '</div>';
   }
 
   function _renderActivityLog() { _renderEventLog(_activityEntries, 'activity-log', 'activity-count', I18n.t('activity.none')); }

@@ -369,17 +369,24 @@ impl ShardStore {
         }
         if let Ok(entries) = std::fs::read_dir(&models_dir) {
             for entry in entries.flatten() {
-                if !entry.path().is_dir() {
-                    continue;
+                if entry.path().is_dir() {
+                    Self::cleanup_tmp_files_in_dir(&entry.path());
                 }
-                if let Ok(files) = std::fs::read_dir(entry.path()) {
-                    for file in files.flatten() {
-                        let path = file.path();
-                        if path.extension().and_then(|e| e.to_str()) == Some("tmp") {
-                            tracing::info!(path = %path.display(), "Cleaning up leftover .tmp shard file");
-                            let _ = std::fs::remove_file(&path);
-                        }
-                    }
+            }
+        }
+    }
+
+    /// Clean up leftover .tmp files in a specific directory.
+    pub fn cleanup_tmp_files_in_dir(dir: &std::path::Path) {
+        if !dir.exists() {
+            return;
+        }
+        if let Ok(files) = std::fs::read_dir(dir) {
+            for file in files.flatten() {
+                let path = file.path();
+                if path.extension().and_then(|e| e.to_str()) == Some("tmp") {
+                    tracing::info!(path = %path.display(), "Cleaning up leftover .tmp shard file");
+                    let _ = std::fs::remove_file(&path);
                 }
             }
         }

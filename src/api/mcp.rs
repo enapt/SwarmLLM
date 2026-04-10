@@ -33,7 +33,7 @@ async fn collect_handle_results(
             Ok(Err(e)) => {
                 results.push(json!({"error": format!("Task failed: {e}"), "status": "error"}))
             }
-            Err(_) => results.push(json!({"error": "Request timed out (120s)", "status": "error"})),
+            Err(_) => results.push(json!({"error": format!("Request timed out ({}s)", MCP_TASK_TIMEOUT.as_secs()), "status": "error"})),
         }
     }
     results

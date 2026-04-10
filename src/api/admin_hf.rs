@@ -1364,24 +1364,18 @@ fn generate_manifest_from_header(params: &ManifestGenParams<'_>) -> Result<(), S
 
     let node_id = params.shared.identity.node_id().clone();
 
-    let mut manifest = crate::types::ModelManifest {
-        id: model_id.clone(),
-        name: model_name,
-        architecture,
-        num_layers,
-        num_params_billions: 0.0,
-        quantization: crate::types::Quantization::Q4KM,
-        total_size_bytes: total_size,
-        shard_count,
-        shards,
-        tokenizer_hash: [0u8; 32],
-        manifest_hash: [0u8; 32],
-        publisher: node_id.clone(),
-        publish_date: chrono::Utc::now(),
-        license: "Unknown".to_string(),
-        mmproj: None,
-    };
-    manifest.manifest_hash = manifest.compute_hash();
+    let manifest = crate::model::manifest::build_manifest_from_gguf(
+        crate::model::manifest::ManifestFromGguf {
+            id: model_id.clone(),
+            name: model_name,
+            architecture,
+            num_layers,
+            total_size_bytes: total_size,
+            shard_count,
+            shards,
+            publisher: node_id.clone(),
+        },
+    );
 
     // Save manifest to disk
     manifest.save_to_dir(model_dir).map_err(|e| e.to_string())?;
@@ -1466,17 +1460,7 @@ pub async fn cancel_download(
     let model_dir = crate::model::shard::model_dir(&state.config.node.data_dir, &model_id);
     let md = model_dir.clone();
     let _ = tokio::task::spawn_blocking(move || {
-        if md.exists() {
-            if let Ok(entries) = std::fs::read_dir(&md) {
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    if path.extension().and_then(|e| e.to_str()) == Some("tmp") {
-                        tracing::info!(path = %path.display(), "Removing partial download file");
-                        let _ = std::fs::remove_file(&path);
-                    }
-                }
-            }
-        }
+        crate::model::shard::ShardStore::cleanup_tmp_files_in_dir(&md);
     })
     .await;
 

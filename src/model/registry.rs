@@ -348,12 +348,10 @@ mod tests {
     use super::*;
     use crate::types::*;
 
-    #[test]
-    fn register_and_retrieve_manifest() {
-        let registry = ModelRegistry::new();
-        let manifest = ModelManifest {
-            id: ModelId("test".into()),
-            name: "Test".into(),
+    fn test_manifest(id: &str, name: &str) -> ModelManifest {
+        ModelManifest {
+            id: ModelId(id.into()),
+            name: name.into(),
             architecture: ModelArchitecture::Llama,
             num_layers: 2,
             num_params_billions: 0.001,
@@ -367,7 +365,13 @@ mod tests {
             publish_date: chrono::Utc::now(),
             license: "MIT".into(),
             mmproj: None,
-        };
+        }
+    }
+
+    #[test]
+    fn register_and_retrieve_manifest() {
+        let registry = ModelRegistry::new();
+        let manifest = test_manifest("test", "Test");
 
         registry.register_manifest(manifest.clone());
 
@@ -477,23 +481,7 @@ mod tests {
         let registry = ModelRegistry::new();
         assert_eq!(registry.model_count(), 0);
 
-        registry.register_manifest(ModelManifest {
-            id: ModelId("a".into()),
-            name: "A".into(),
-            architecture: ModelArchitecture::Llama,
-            num_layers: 2,
-            num_params_billions: 0.001,
-            quantization: Quantization::Q4KM,
-            total_size_bytes: 1024,
-            shard_count: 1,
-            shards: vec![],
-            tokenizer_hash: [0u8; 32],
-            manifest_hash: [0u8; 32],
-            publisher: NodeId([0u8; 32]),
-            publish_date: chrono::Utc::now(),
-            license: "MIT".into(),
-            mmproj: None,
-        });
+        registry.register_manifest(test_manifest("a", "A"));
 
         assert_eq!(registry.model_count(), 1);
         assert_eq!(registry.models().len(), 1);
