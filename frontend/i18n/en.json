@@ -704,7 +704,6 @@
   "settings.claude_subscription_toggled": "Claude subscription setting updated",
   "settings.check_status_btn": "Check Status",
   "settings.detecting": "Checking...",
-  "settings.authenticated": "authenticated",
   "settings.cli_not_found": "Claude CLI not found — see step 1 above",
   "settings.cli_version": "CLI version",
   "settings.plan": "Plan",
