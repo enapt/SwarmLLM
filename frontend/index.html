@@ -707,49 +707,65 @@
             <div class="stat-card" data-i18n-title="dashboard.stat_peers_tip" title="Connected P2P nodes in the swarm network">
               <div class="stat-icon blue">&#9901;</div>
               <div class="stat-body">
-                <div class="stat-value" id="stat-peers">0</div>
+                <div><span class="stat-value" id="stat-peers">0</span><span class="stat-trend trend-flat" id="stat-peers-trend"></span></div>
                 <div class="stat-label"><span data-i18n="stats.peers">Peers</span> <span class="stat-help" data-i18n-title="stats.peers_help" title="Other computers running SwarmLLM that you're connected to">?</span> <span class="lan-badge" id="lan-peer-badge" style="display:none">0 LAN</span></div>
+                <div class="stat-sparkline" id="stat-peers-spark"></div>
               </div>
             </div>
             <div class="stat-card" data-i18n-title="dashboard.stat_credits_tip" title="Credits earned by helping others run AI">
               <div class="stat-icon green">&#9733;</div>
               <div class="stat-body">
-                <div class="stat-value" id="stat-credits">0</div>
+                <div><span class="stat-value" id="stat-credits">0</span><span class="stat-trend trend-flat" id="stat-credits-trend"></span></div>
                 <div class="stat-label"><span data-i18n="stats.credits">Credits</span> <span class="stat-help" data-i18n-title="stats.credits_help" title="Earned by helping others, spent when you use the network">?</span></div>
+                <div class="stat-sparkline" id="stat-credits-spark"></div>
               </div>
             </div>
             <div class="stat-card" data-i18n-title="dashboard.stat_requests_tip" title="Chat requests sent from this node's API">
               <div class="stat-icon orange">&#9650;</div>
               <div class="stat-body">
-                <div class="stat-value" id="stat-requests-made">0</div>
+                <div><span class="stat-value" id="stat-requests-made">0</span><span class="stat-trend trend-flat" id="stat-requests-made-trend"></span></div>
                 <div class="stat-label"><span data-i18n="stats.requests">Requests</span> <span class="stat-help" data-i18n-title="stats.requests_help" title="Messages you've sent to AI models">?</span></div>
+                <div class="stat-sparkline" id="stat-requests-made-spark"></div>
               </div>
             </div>
             <div class="stat-card" data-i18n-title="dashboard.stat_served_tip" title="Full inference requests completed by this node for others">
               <div class="stat-icon purple">&#9889;</div>
               <div class="stat-body">
-                <div class="stat-value" id="stat-served">0</div>
+                <div><span class="stat-value" id="stat-served">0</span><span class="stat-trend trend-flat" id="stat-served-trend"></span></div>
                 <div class="stat-label"><span data-i18n="stats.served">Served</span> <span class="stat-help" data-i18n-title="stats.served_help" title="Requests your computer handled for others (earns credits)">?</span></div>
+                <div class="stat-sparkline" id="stat-served-spark"></div>
               </div>
             </div>
             <div class="stat-card" data-i18n-title="dashboard.stat_forwards_tip" title="Layer forward passes processed — earns credits">
               <div class="stat-icon teal">&#9881;</div>
               <div class="stat-body">
-                <div class="stat-value" id="stat-forwards">0</div>
+                <div><span class="stat-value" id="stat-forwards">0</span><span class="stat-trend trend-flat" id="stat-forwards-trend"></span></div>
                 <div class="stat-label"><span data-i18n="stats.forwards">Forwards</span> <span class="stat-help" data-i18n-title="stats.forwards_help" title="Computations your computer did as part of the network (earns credits)">?</span></div>
+                <div class="stat-sparkline" id="stat-forwards-spark"></div>
               </div>
             </div>
             <div class="stat-card" data-i18n-title="dashboard.stat_active_tip" title="Currently running inference requests">
               <div class="stat-icon red">&#9203;</div>
               <div class="stat-body">
-                <div class="stat-value" id="stat-active">0</div>
+                <div><span class="stat-value" id="stat-active">0</span><span class="stat-trend trend-flat" id="stat-active-trend"></span></div>
                 <div class="stat-label"><span data-i18n="stats.active">Active</span> <span class="stat-help" data-i18n-title="stats.active_help" title="AI requests currently being processed right now">?</span></div>
+                <div class="stat-sparkline" id="stat-active-spark"></div>
               </div>
             </div>
           </div>
 
-          <!-- Provider badges strip — health-probed API providers + Claude Code subscription -->
-          <div class="provider-strip-row">
+          <!-- Provider health bar — integrated compact strip -->
+          <div class="provider-health-bar hidden" id="provider-health-bar">
+            <div class="ph-item hidden" id="ph-claude-code">
+              <span class="ph-icon"><img src="/static/icons/claude-code.svg" width="14" height="14" alt=""></span>
+              <span class="ph-name">Claude Code</span>
+              <span class="ph-dot dot-ok"></span>
+              <span class="ph-latency" id="ph-cc-plan"></span>
+              <span class="ph-tag tag-sub" data-i18n="mode.subscription">SUB</span>
+            </div>
+          </div>
+          <!-- Keep old elements for backward compat with providerHealth.js writes -->
+          <div style="display:none">
             <div class="claude-code-indicator hidden" id="claude-code-badge">
               <img src="/static/icons/claude-code.svg" width="18" height="18" alt="" class="cc-icon">
               <span class="cc-name">Claude Code</span>

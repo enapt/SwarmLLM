@@ -510,8 +510,50 @@
       });
     },
 
+    // Render the new integrated provider health bar
+    updateHealthBar: function() {
+      var bar = document.getElementById('provider-health-bar');
+      if (!bar) return;
+      var configured = Object.keys(S.providerHealth);
+
+      // Remove old dynamic items (keep #ph-claude-code)
+      var oldItems = bar.querySelectorAll('.ph-item.ph-dynamic');
+      for (var i = 0; i < oldItems.length; i++) oldItems[i].remove();
+
+      if (configured.length === 0 && bar.querySelector('#ph-claude-code.hidden')) {
+        bar.classList.add('hidden');
+        return;
+      }
+      bar.classList.remove('hidden');
+
+      configured.sort().forEach(function(p) {
+        var h = S.providerHealth[p];
+        var item = document.createElement('div');
+        item.className = 'ph-item ph-dynamic';
+        var dotClass = 'dot-down';
+        var latencyText = '';
+        if (h.status === 'up') {
+          dotClass = h.latency_ms < 500 ? 'dot-ok' : h.latency_ms < 2000 ? 'dot-slow' : 'dot-down';
+          latencyText = h.latency_ms + 'ms';
+        } else if (h.status === 'rate_limited') { dotClass = 'dot-slow'; latencyText = I18n.t('provider.limited'); }
+        else if (h.status === 'timeout') { dotClass = 'dot-down'; latencyText = I18n.t('provider.timeout'); }
+        else if (h.status === 'auth_error') { dotClass = 'dot-error'; latencyText = I18n.t('provider.key_invalid'); }
+        else { dotClass = 'dot-error'; latencyText = I18n.t('provider.down'); }
+        var name = PROVIDER_NAMES[p] || p;
+        item.innerHTML =
+          '<span class="ph-icon">' + providerIconHtml(p, 14) + '</span>' +
+          '<span class="ph-name">' + U.escapeHtml(name) + '</span>' +
+          '<span class="ph-dot ' + dotClass + '"></span>' +
+          (latencyText ? '<span class="ph-latency">' + U.escapeHtml(latencyText) + '</span>' : '') +
+          '<span class="ph-tag tag-api">API</span>';
+        item.title = name + ': ' + h.status + (h.detail ? ' \u2014 ' + h.detail : '');
+        bar.appendChild(item);
+      });
+    },
+
     updateBadges: function() {
       App.providerHealth.updateBannerBadges();
+      App.providerHealth.updateHealthBar();
       Object.keys(S.providerHealth).forEach(function(p) {
         var h = S.providerHealth[p];
         var badge = document.getElementById('health-badge-' + p);

@@ -251,20 +251,36 @@
       var sub = providerData && providerData.claude_subscription;
       if (!sub || !sub.enabled) {
         strip.classList.add('hidden');
+        // Also hide in new health bar
+        var phCC = document.getElementById('ph-claude-code');
+        if (phCC) phCC.classList.add('hidden');
         return;
       }
       strip.classList.remove('hidden');
+
+      // Update new provider health bar item
+      var phCC = document.getElementById('ph-claude-code');
+      if (phCC) {
+        phCC.classList.remove('hidden');
+        var healthBar = document.getElementById('provider-health-bar');
+        if (healthBar) healthBar.classList.remove('hidden');
+      }
+
       // Fetch detailed status for plan label
       var planEl = document.getElementById('cc-plan-label');
+      var phPlanEl = document.getElementById('ph-cc-plan');
       if (planEl && !planEl.textContent) {
         App.data.loadClaudeSubStatus().then(function(data) {
           if (!data) return;
+          var label = '';
           if (data.subscription_type) {
-            planEl.textContent = data.subscription_type.charAt(0).toUpperCase() + data.subscription_type.slice(1) + ' ' + I18n.t('settings.plan');
+            label = data.subscription_type.charAt(0).toUpperCase() + data.subscription_type.slice(1) + ' ' + I18n.t('settings.plan');
           }
           if (data.cli_version) {
-            planEl.textContent = (planEl.textContent ? planEl.textContent + ' · ' : '') + data.cli_version.replace(' (Claude Code)', '');
+            label = (label ? label + ' · ' : '') + data.cli_version.replace(' (Claude Code)', '');
           }
+          planEl.textContent = label;
+          if (phPlanEl) phPlanEl.textContent = label;
         }).catch(function() {});
       }
       // Click navigates to settings

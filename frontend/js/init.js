@@ -517,9 +517,68 @@
       var amSave = target.getAttribute('data-am-save');
       if (amSave) { App.models.saveAutoManage(amSave); return; }
 
+      // Model card expand/collapse toggle — chevron or title row click
+      var expandBtn = target.closest('[data-expand-model]');
+      var titleRow = !expandBtn && target.closest('.model-card-title');
+      if (expandBtn || (titleRow && !target.closest('button, select, input, .badge-encrypted, [data-am-gear], [data-meta-toggle]'))) {
+        var expandCard = (expandBtn || titleRow).closest('.model-card');
+        if (expandCard && expandCard.getAttribute('data-model-id')) {
+          var expandModelId = expandCard.getAttribute('data-model-id');
+          var wasCompact = expandCard.classList.contains('compact');
+          if (wasCompact) {
+            expandCard.classList.remove('compact');
+            App.state._expandedModels[expandModelId] = true;
+          } else {
+            expandCard.classList.add('compact');
+            delete App.state._expandedModels[expandModelId];
+          }
+        }
+        return;
+      }
+
+      // Peer table sort click
+      var peerSortTh = target.closest('[data-peer-sort]');
+      if (peerSortTh) {
+        var key = peerSortTh.getAttribute('data-peer-sort');
+        if (App.dashboard._peerSort === key) {
+          App.dashboard._peerSortDir = App.dashboard._peerSortDir === 'asc' ? 'desc' : 'asc';
+        } else {
+          App.dashboard._peerSort = key;
+          App.dashboard._peerSortDir = key === 'name' ? 'asc' : 'desc';
+        }
+        App.dashboard.renderPeers(App.dashboard._lastPeers);
+        return;
+      }
+
+      // Cloud provider expand/collapse toggle
+      var cloudExpand = target.closest('[data-cloud-expand]');
+      if (cloudExpand) {
+        var cloudCard = cloudExpand.closest('.model-card.cloud-model');
+        if (cloudCard) {
+          cloudCard.classList.toggle('cloud-card-collapsed');
+          var isCollapsed = cloudCard.classList.contains('cloud-card-collapsed');
+          cloudExpand.innerHTML = (isCollapsed ? '&#9662; ' : '&#9652; ') + App.utils.escapeHtml(I18n.t(isCollapsed ? 'dashboard.cloud_browse' : 'dashboard.cloud_collapse'));
+        }
+        return;
+      }
+
+      // Availability bar click -> expand card
+      var availBar = target.closest('.availability-bar');
+      if (availBar) {
+        var availCard = availBar.closest('.model-card');
+        if (availCard && availCard.classList.contains('compact')) {
+          var availModelId = availCard.getAttribute('data-model-id');
+          if (availModelId) {
+            availCard.classList.remove('compact');
+            App.state._expandedModels[availModelId] = true;
+          }
+        }
+        return;
+      }
+
       // Model card click -> select and chat
       var modelCard = target.closest('.model-card');
-      if (modelCard && !target.closest('button, a, summary, details, .shard-cell, .badge-encrypted, [data-cancel-download], [data-remove-model], [data-unload-model], [data-enc-toggle], [data-am-gear], input, select')) {
+      if (modelCard && !target.closest('button, a, summary, details, .shard-cell, .badge-encrypted, [data-cancel-download], [data-remove-model], [data-unload-model], [data-enc-toggle], [data-am-gear], input, select, .model-expand-chevron, .availability-bar')) {
         var cardModelId = modelCard.getAttribute('data-model-id');
         if (cardModelId) {
           var cardModel = (App.data.cache.models || []).find(function(mm) { return mm.id === cardModelId; });

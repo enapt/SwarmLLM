@@ -3263,6 +3263,219 @@ textarea:focus:not(:focus-visible) {
   }
 }
 
+/* ============================================================================
+   Dashboard Enhancements — Compact Cards, Availability Bar, Sparklines, etc.
+   ============================================================================ */
+
+/* ---- Compact Model Cards (collapsed default, expand on click) ---- */
+.model-card.compact .model-card-shards,
+.model-card.compact .model-ticker,
+.model-card.compact .model-card-detail-badges {
+  display: none;
+}
+.model-card.compact .model-card-footer {
+  border-top: none;
+  background: none;
+  padding: 0 14px 8px;
+}
+.model-card.compact .model-card-title {
+  border-bottom: none;
+  padding-bottom: 4px;
+}
+/* Availability bar — thin horizontal strip below title in compact mode */
+.availability-bar {
+  display: flex; gap: 1px; height: 6px; margin: 0 14px 6px;
+  border-radius: 3px; overflow: hidden; cursor: pointer;
+  transition: height 0.15s, margin 0.15s;
+}
+.availability-bar:hover { height: 10px; }
+.avail-seg {
+  flex: 1; min-width: 0;
+  transition: background 0.4s;
+}
+/* Availability bar states — muted nominal, only deviations pop */
+.avail-seg.seg-nominal { background: rgba(34,197,94,0.25); }
+.avail-seg.seg-active { background: rgba(163,230,53,0.6); box-shadow: inset 0 0 4px rgba(163,230,53,0.3); }
+.avail-seg.seg-peer { background: rgba(59,130,246,0.3); }
+.avail-seg.seg-downloading { background: var(--cyan); animation: avail-pulse 2s ease-in-out infinite; }
+.avail-seg.seg-warning { background: var(--orange); }
+.avail-seg.seg-problem { background: var(--red); }
+.avail-seg.seg-missing { background: rgba(255,255,255,0.06); }
+@keyframes avail-pulse {
+  0%, 100% { opacity: 0.7; }
+  50% { opacity: 1; }
+}
+[data-theme="light"] .avail-seg.seg-nominal { background: rgba(34,197,94,0.3); }
+[data-theme="light"] .avail-seg.seg-active { background: rgba(101,163,13,0.5); }
+[data-theme="light"] .avail-seg.seg-peer { background: rgba(59,130,246,0.35); }
+[data-theme="light"] .avail-seg.seg-missing { background: rgba(0,0,0,0.06); }
+
+/* Expand chevron on compact cards */
+.model-expand-chevron {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 24px; height: 24px; font-size: 0.7rem;
+  color: var(--text-muted); transition: transform 0.2s;
+  flex-shrink: 0; cursor: pointer; border-radius: var(--radius-sm);
+  margin-right: 2px;
+}
+.model-expand-chevron:hover { color: var(--text-primary); background: var(--bg-hover); }
+.model-card:not(.compact) .model-expand-chevron { transform: rotate(180deg); }
+/* Make entire title row clickable for expand/collapse in compact mode */
+.model-card.compact .model-card-title { cursor: pointer; }
+.model-card.compact .model-card-title:hover { background: rgba(255,255,255,0.03); }
+
+/* ---- Composite Health Badge ---- */
+.composite-badge {
+  display: inline-flex; align-items: center; gap: 4px;
+  font-size: 0.68rem; font-weight: 600; padding: 2px 8px;
+  border-radius: var(--radius-lg); white-space: nowrap;
+  letter-spacing: 0.02em;
+}
+.composite-badge .cb-dot {
+  width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0;
+}
+.composite-badge.cb-active { background: var(--green-dim); color: var(--green); }
+.composite-badge.cb-active .cb-dot { background: var(--green); box-shadow: 0 0 4px rgba(34,197,94,0.5); }
+.composite-badge.cb-ready { background: rgba(34,197,94,0.08); color: rgba(34,197,94,0.7); }
+.composite-badge.cb-ready .cb-dot { background: rgba(34,197,94,0.5); }
+.composite-badge.cb-downloading { background: var(--accent-glow); color: var(--accent); }
+.composite-badge.cb-downloading .cb-dot { background: var(--accent); animation: badge-pulse 2s infinite; }
+.composite-badge.cb-fragile { background: var(--orange-dim); color: var(--orange); }
+.composite-badge.cb-fragile .cb-dot { background: var(--orange); }
+.composite-badge.cb-incomplete { background: var(--red-dim); color: var(--red); }
+.composite-badge.cb-incomplete .cb-dot { background: var(--red); }
+.composite-badge.cb-network { background: rgba(255,255,255,0.04); color: var(--text-muted); }
+.composite-badge.cb-network .cb-dot { background: var(--text-muted); }
+@keyframes badge-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+/* Detail badges row — shown only in expanded mode */
+.model-card-detail-badges {
+  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+  padding: 0 14px 6px; font-size: 0.68rem;
+}
+
+/* ---- Stat Card Sparklines & Trends ---- */
+.stat-card .stat-trend {
+  display: inline-flex; align-items: center; gap: 2px;
+  font-size: 0.58rem; font-weight: 600; margin-left: 4px;
+  vertical-align: middle;
+}
+.stat-card .stat-trend.trend-up { color: var(--green); }
+.stat-card .stat-trend.trend-down { color: var(--red); }
+.stat-card .stat-trend.trend-flat { color: var(--text-muted); }
+.stat-sparkline {
+  display: flex; align-items: flex-end; gap: 1px;
+  height: 18px; margin-top: 3px;
+}
+.stat-sparkline .spark-bar {
+  flex: 1; min-width: 2px; max-width: 6px;
+  background: var(--accent); opacity: 0.4;
+  border-radius: 1px 1px 0 0;
+  transition: height 0.3s;
+}
+.stat-sparkline .spark-bar:last-child { opacity: 0.8; }
+
+/* ---- Provider Health Strip — integrated bar ---- */
+.provider-health-bar {
+  display: flex; align-items: center; gap: 0; flex-wrap: wrap;
+  background: var(--bg-secondary); border: 1px solid var(--border);
+  border-radius: var(--radius); overflow: hidden;
+  margin-bottom: 8px;
+}
+.provider-health-bar .ph-item {
+  display: flex; align-items: center; gap: 6px;
+  padding: 6px 14px; font-size: 0.78rem;
+  border-right: 1px solid var(--border);
+  transition: background var(--transition);
+  cursor: default; white-space: nowrap;
+}
+.provider-health-bar .ph-item:last-child { border-right: none; }
+.provider-health-bar .ph-item:hover { background: var(--bg-hover); }
+.provider-health-bar .ph-icon { width: 16px; height: 16px; flex-shrink: 0; display: flex; align-items: center; justify-content: center; }
+.provider-health-bar .ph-name { font-weight: 600; font-size: 0.75rem; }
+.provider-health-bar .ph-dot {
+  width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0;
+}
+.provider-health-bar .ph-dot.dot-ok { background: var(--green); box-shadow: 0 0 4px rgba(34,197,94,0.4); }
+.provider-health-bar .ph-dot.dot-slow { background: var(--orange); }
+.provider-health-bar .ph-dot.dot-down { background: var(--text-muted); }
+.provider-health-bar .ph-dot.dot-error { background: var(--red); }
+.provider-health-bar .ph-latency { font-size: 0.65rem; color: var(--text-secondary); font-family: var(--font-mono); }
+.provider-health-bar .ph-tag {
+  font-size: 0.52rem; text-transform: uppercase; letter-spacing: 0.06em;
+  font-weight: 700; padding: 1px 5px; border-radius: 3px;
+}
+.provider-health-bar .ph-tag.tag-sub { color: var(--green); background: var(--green-dim); }
+.provider-health-bar .ph-tag.tag-api { color: var(--accent); background: var(--accent-glow); }
+.provider-health-bar .ph-overflow {
+  padding: 6px 12px; font-size: 0.72rem; color: var(--text-muted);
+  cursor: pointer;
+}
+.provider-health-bar .ph-overflow:hover { color: var(--text-primary); background: var(--bg-hover); }
+
+/* ---- Peer Table ---- */
+.peer-table { width: 100%; border-collapse: separate; border-spacing: 0; font-size: 0.78rem; }
+.peer-table th {
+  text-align: left; padding: 6px 10px; font-weight: 600;
+  font-size: 0.65rem; text-transform: uppercase; letter-spacing: 0.04em;
+  color: var(--text-muted); border-bottom: 1px solid var(--border);
+  cursor: pointer; user-select: none; white-space: nowrap;
+}
+.peer-table th:hover { color: var(--text-primary); }
+.peer-table th .sort-arrow { font-size: 0.55rem; margin-left: 3px; opacity: 0.5; }
+.peer-table th.sorted .sort-arrow { opacity: 1; color: var(--accent); }
+.peer-table td {
+  padding: 6px 10px; border-bottom: 1px solid var(--border);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.peer-table tr:last-child td { border-bottom: none; }
+.peer-table tr:hover td { background: var(--bg-hover); }
+.peer-table .peer-name-cell { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.peer-table .peer-name-cell .status-dot { flex-shrink: 0; }
+.peer-table .peer-name-cell .peer-nick { font-weight: 600; overflow: hidden; text-overflow: ellipsis; }
+.peer-table .peer-id-sub { font-size: 0.62rem; color: var(--text-muted); font-family: var(--font-mono); }
+.peer-table .peer-latency-spark {
+  display: inline-flex; align-items: flex-end; gap: 1px; height: 14px; vertical-align: middle; margin-left: 4px;
+}
+.peer-table .peer-latency-spark .spark-bar {
+  width: 2px; background: var(--accent); opacity: 0.5; border-radius: 1px 1px 0 0;
+}
+.peer-table .lan-badge { font-size: 0.55rem; background: var(--purple-dim); color: var(--purple); padding: 1px 4px; border-radius: 3px; font-weight: 600; text-transform: uppercase; }
+
+/* ---- Cloud Provider Collapsed Mode ---- */
+.cloud-card-collapsed .cloud-card-controls,
+.cloud-card-collapsed .cloud-model-list,
+.cloud-card-collapsed .cloud-card-note {
+  display: none;
+}
+.cloud-card-collapsed .cloud-card-header {
+  margin-bottom: 0;
+  border-radius: var(--radius);
+  border-bottom: none;
+}
+.cloud-expand-toggle {
+  display: inline-flex; align-items: center; gap: 4px;
+  font-size: 0.68rem; color: var(--text-muted);
+  cursor: pointer; padding: 2px 6px; border-radius: var(--radius-sm);
+  transition: color var(--transition), background var(--transition);
+}
+.cloud-expand-toggle:hover { color: var(--text-primary); background: var(--bg-hover); }
+
+/* ---- Color system: muted nominal states ---- */
+/* Override shard cells for quieter nominal appearance */
+.model-card .shard-cell.local.muted-nominal {
+  background: linear-gradient(180deg, rgba(34,197,94,0.35) 0%, rgba(22,163,74,0.45) 100%);
+  border-color: rgba(34,197,94,0.2);
+  color: rgba(255,255,255,0.6);
+}
+.model-card .shard-cell.peer.muted-nominal {
+  background: linear-gradient(180deg, rgba(59,130,246,0.35) 0%, rgba(37,99,235,0.4) 100%);
+  border-color: rgba(59,130,246,0.15);
+  color: rgba(255,255,255,0.5);
+}
+
 /* ---- Light theme semantic color overrides ---- */
 [data-theme="light"] {
   --green: #16a34a;

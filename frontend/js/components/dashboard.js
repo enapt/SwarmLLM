@@ -269,8 +269,53 @@
       if (data.uptime_seconds !== undefined) {
         document.getElementById('uptime').textContent = U.formatUptime(data.uptime_seconds);
       }
+
+      // Helper: track stat history & render sparkline + trend arrow
+      function _trackStat(key, value, elId) {
+        if (value === undefined) return;
+        var hist = S.statHistory[key];
+        if (!hist) { S.statHistory[key] = []; hist = S.statHistory[key]; }
+        hist.push(value);
+        if (hist.length > 20) hist.shift();
+
+        // Update value display
+        var valEl = document.getElementById(elId);
+        if (valEl) valEl.textContent = typeof value === 'number' ? value.toLocaleString() : value;
+
+        // Trend arrow
+        var trendEl = document.getElementById(elId + '-trend');
+        if (trendEl && hist.length >= 2) {
+          var prev = hist[hist.length - 2], cur = hist[hist.length - 1];
+          if (cur > prev) {
+            trendEl.className = 'stat-trend trend-up';
+            trendEl.textContent = '\u25B2';
+          } else if (cur < prev) {
+            trendEl.className = 'stat-trend trend-down';
+            trendEl.textContent = '\u25BC';
+          } else {
+            trendEl.className = 'stat-trend trend-flat';
+            trendEl.textContent = '\u2192';
+          }
+        }
+
+        // Mini sparkline
+        var sparkEl = document.getElementById(elId + '-spark');
+        if (sparkEl && hist.length >= 2) {
+          var min = Math.min.apply(null, hist);
+          var max = Math.max.apply(null, hist);
+          var range = (max - min) || 1;
+          sparkEl.innerHTML = '';
+          hist.forEach(function(v) {
+            var bar = document.createElement('div');
+            bar.className = 'spark-bar';
+            bar.style.height = Math.max(2, ((v - min) / range) * 16) + 'px';
+            sparkEl.appendChild(bar);
+          });
+        }
+      }
+
       if (data.peers !== undefined) {
-        document.getElementById('stat-peers').textContent = data.peers;
+        _trackStat('peers', data.peers, 'stat-peers');
         var lanBadge = document.getElementById('lan-peer-badge');
         if (lanBadge) {
           if (data.lan_peers && data.lan_peers > 0) {
@@ -292,7 +337,7 @@
           earned = 0;
           spent = 0;
         }
-        document.getElementById('stat-credits').textContent = bal.toLocaleString();
+        _trackStat('credits', bal, 'stat-credits');
         document.getElementById('credit-balance').textContent = bal.toLocaleString();
         document.getElementById('credit-earned').textContent = '+' + earned.toLocaleString();
         document.getElementById('credit-spent').textContent = '-' + spent.toLocaleString();
@@ -302,10 +347,10 @@
         if (S.creditHistory.length > 30) S.creditHistory.shift();
         U.renderSparkline('credit-sparkline', S.creditHistory.map(function(e) { return e.v; }));
       }
-      if (data.requests_served !== undefined) document.getElementById('stat-served').textContent = data.requests_served;
-      if (data.requests_made !== undefined) document.getElementById('stat-requests-made').textContent = data.requests_made;
-      if (data.forwards_served !== undefined) document.getElementById('stat-forwards').textContent = data.forwards_served;
-      if (data.active_requests !== undefined) document.getElementById('stat-active').textContent = data.active_requests;
+      if (data.requests_served !== undefined) _trackStat('served', data.requests_served, 'stat-served');
+      if (data.requests_made !== undefined) _trackStat('requests', data.requests_made, 'stat-requests-made');
+      if (data.forwards_served !== undefined) _trackStat('forwards', data.forwards_served, 'stat-forwards');
+      if (data.active_requests !== undefined) _trackStat('active', data.active_requests, 'stat-active');
 
       App.modeIndicator.update(data, S._cachedProviderData);
 
@@ -399,10 +444,34 @@
       }
 
       // Sort swarm models
-      var swarmSort = S._swarmModelSort || 'az';
+      var swarmSort = S._swarmModelSort || 'problems';
+      function _modelProblemScore(m) {
+        var shards = m.shards || [];
+        var shardCount = m.shard_count || shards.length || 0;
+        var hostedShards = m.hosted_shards || 0;
+        var globalAvail = m.global_available || hostedShards;
+        var isReady = m.status === 'loaded' || m.status === 'ready' || (globalAvail === shardCount && shardCount > 0);
+        var isDownloading = m.acquisition === 'downloading';
+        // Lower = more urgent (sort ascending)
+        if (m.status === 'loaded') return 10; // active — show near top
+        if (isDownloading && !isReady) return 20; // downloading, not ready
+        var fragile = shards.filter(function(s) { return (s.holders || 0) === 1; }).length;
+        var missing = shards.filter(function(s) { return !s.local && (s.holders || 0) === 0; }).length;
+        if (missing > 0) return 30; // incomplete
+        if (fragile > 0) return 40; // fragile
+        if (isReady) return 80; // healthy
+        return 60;
+      }
       function _sortModels(arr, mode) {
         var sorted = arr.slice();
-        if (mode === 'az') {
+        if (mode === 'problems') {
+          sorted.sort(function(a, b) {
+            var sa = _modelProblemScore(a), sb = _modelProblemScore(b);
+            if (sa !== sb) return sa - sb;
+            var na = (a.name || a.id).toLowerCase(), nb = (b.name || b.id).toLowerCase();
+            return na < nb ? -1 : na > nb ? 1 : 0;
+          });
+        } else if (mode === 'az') {
           sorted.sort(function(a, b) {
             var na = (a.name || a.id).toLowerCase(), nb = (b.name || b.id).toLowerCase();
             return na < nb ? -1 : na > nb ? 1 : 0;
@@ -446,6 +515,7 @@
           '<span class="models-section-title">' + U.escapeHtml(I18n.t('dashboard.swarm_models')) + '</span>' +
           '<span class="models-section-count">' + swarmMeta + '</span>' +
           '<select class="swarm-model-sort" id="swarm-model-sort" title="' + U.escapeHtml(I18n.t('dashboard.sort_title')) + '">' +
+            '<option value="problems"' + (swarmSort === 'problems' ? ' selected' : '') + '>' + U.escapeHtml(I18n.t('dashboard.sort_problems')) + '</option>' +
             '<option value="az"' + (swarmSort === 'az' ? ' selected' : '') + '>' + U.escapeHtml(I18n.t('dashboard.sort_az')) + '</option>' +
             '<option value="za"' + (swarmSort === 'za' ? ' selected' : '') + '>' + U.escapeHtml(I18n.t('dashboard.sort_za')) + '</option>' +
             '<option value="status"' + (swarmSort === 'status' ? ' selected' : '') + '>' + U.escapeHtml(I18n.t('dashboard.sort_status')) + '</option>' +
@@ -485,55 +555,101 @@
         var safeId = U.safeId(m.id || '');
 
         var card = document.createElement('div');
-        card.className = 'model-card' + (isReady ? ' ready' : (isDownloading ? ' downloading' : (isPartial ? ' partial' : '')));
+        var isCompact = !S._expandedModels[m.id];
+        card.className = 'model-card' + (isReady ? ' ready' : (isDownloading ? ' downloading' : (isPartial ? ' partial' : ''))) + (isCompact ? ' compact' : '');
         card.setAttribute('data-model-id', m.id);
 
-        // Status pill — Ready takes priority over Downloading when model is usable
-        var statusHtml = '';
+        // --- Composite health badge (single badge replacing 4 separate indicators) ---
+        var compositeBadgeClass, compositeBadgeLabel, compositeBadgeTitle;
+        var fragileCount = shards.filter(function(s) { return (s.holders || 0) === 1; }).length;
+        var networkMissingCount = shards.filter(function(s) { return !s.local && (s.holders || 0) === 0; }).length;
         if (m.status === 'loaded') {
-          statusHtml = '<span class="model-status-pill active">\u25CF ' + U.escapeHtml(I18n.t('dashboard.status_active')) + '</span>';
+          compositeBadgeClass = 'cb-active';
+          compositeBadgeLabel = I18n.t('dashboard.status_active');
+          compositeBadgeTitle = I18n.t('dashboard.cb_active_tip');
         } else if (isReady && !isDownloading) {
-          statusHtml = '<span class="model-status-pill ready">' + U.escapeHtml(I18n.t('dashboard.status_ready')) + '</span>';
+          compositeBadgeClass = 'cb-ready';
+          compositeBadgeLabel = I18n.t('dashboard.status_ready');
+          compositeBadgeTitle = I18n.t('dashboard.cb_ready_tip');
         } else if (isCachingLocally) {
-          statusHtml = '<span class="model-status-pill ready">' + U.escapeHtml(I18n.t('dashboard.status_ready')) + '</span>';
+          compositeBadgeClass = 'cb-ready';
+          compositeBadgeLabel = I18n.t('dashboard.status_ready');
+          compositeBadgeTitle = I18n.t('dashboard.cb_caching_tip');
         } else if (isDownloading) {
-          statusHtml = '<span class="model-status-pill downloading"><span class="spinner" style="width:10px;height:10px;border-width:1.5px;vertical-align:middle;margin-right:3px"></span>' + U.escapeHtml(I18n.t('dashboard.status_downloading')) + '</span>';
+          compositeBadgeClass = 'cb-downloading';
+          compositeBadgeLabel = I18n.t('dashboard.status_downloading');
+          compositeBadgeTitle = I18n.t('dashboard.cb_downloading_tip');
+        } else if (networkMissingCount > 0) {
+          compositeBadgeClass = 'cb-incomplete';
+          compositeBadgeLabel = I18n.t('dashboard.cb_incomplete', { count: networkMissingCount });
+          compositeBadgeTitle = I18n.t('dashboard.cb_incomplete_tip', { count: networkMissingCount, total: shardCount });
+        } else if (fragileCount > 0) {
+          compositeBadgeClass = 'cb-fragile';
+          compositeBadgeLabel = I18n.t('dashboard.cb_fragile', { count: fragileCount });
+          compositeBadgeTitle = I18n.t('dashboard.cb_fragile_tip', { count: fragileCount });
         } else if (isPartial) {
-          statusHtml = '<span class="model-status-pill partial">' + U.escapeHtml(I18n.t('dashboard.local_status', { hosted: hostedShards, total: shardCount })) + '</span>';
+          compositeBadgeClass = 'cb-incomplete';
+          compositeBadgeLabel = I18n.t('dashboard.local_status', { hosted: hostedShards, total: shardCount });
+          compositeBadgeTitle = I18n.t('dashboard.cb_partial_tip');
         } else {
-          statusHtml = '<span class="model-status-pill network">' + U.escapeHtml(I18n.t('dashboard.status_on_network')) + '</span>';
+          compositeBadgeClass = 'cb-network';
+          compositeBadgeLabel = I18n.t('dashboard.status_on_network');
+          compositeBadgeTitle = I18n.t('dashboard.cb_network_tip');
+        }
+        var compositeBadgeHtml = '<span class="composite-badge ' + compositeBadgeClass + '" title="' + U.escapeHtml(compositeBadgeTitle) + '">' +
+          '<span class="cb-dot"></span>' + U.escapeHtml(compositeBadgeLabel) + '</span>';
+
+        // --- Availability bar (compact shard strip) ---
+        var availBarHtml = '';
+        if (shards.length > 0) {
+          availBarHtml = '<div class="availability-bar" data-avail-bar="' + safeId + '" title="' + U.escapeHtml(I18n.t('dashboard.avail_bar_tip', { local: hostedShards, total: shardCount })) + '">';
+          shards.forEach(function(s) {
+            var segClass = 'seg-missing';
+            if (s.local && s.in_vram) segClass = 'seg-active';
+            else if (s.local) segClass = 'seg-nominal';
+            else if (s.download && (s.download.state === 'Downloading' || s.download.state === 'Verifying')) segClass = 'seg-downloading';
+            else if (s.peer_downloads && s.peer_downloads.length > 0) segClass = 'seg-downloading';
+            else if (s.holders > 0) {
+              segClass = (s.holders || 0) === 1 ? 'seg-warning' : 'seg-peer';
+            }
+            else segClass = 'seg-problem';
+            // Missing but no holders at all = problem
+            if (!s.local && (s.holders || 0) === 0 && !s.download) segClass = shardCount > 1 ? 'seg-problem' : 'seg-missing';
+            availBarHtml += '<div class="avail-seg ' + segClass + '"></div>';
+          });
+          availBarHtml += '</div>';
         }
 
-        // Trust level badge
-        var trustBadge = '';
+        // --- Detail badges (shown only in expanded mode) ---
+        var detailBadgesHtml = '';
+        var detailParts = [];
+        // Trust badge
         if (m.trust_level === 'network_popular') {
-          trustBadge = '<span class="badge-trust badge-trust-popular" title="' + U.escapeHtml(I18n.t('dashboard.trust_popular')) + '">' + U.escapeHtml(I18n.t('dashboard.badge_popular')) + '</span>';
+          detailParts.push('<span class="badge-trust badge-trust-popular" title="' + U.escapeHtml(I18n.t('dashboard.trust_popular')) + '">' + U.escapeHtml(I18n.t('dashboard.badge_popular')) + '</span>');
         } else if (m.trust_level === 'demand_verified') {
-          trustBadge = '<span class="badge-trust badge-trust-verified" title="' + U.escapeHtml(I18n.t('dashboard.trust_verified')) + '">' + U.escapeHtml(I18n.t('dashboard.badge_verified')) + '</span>';
+          detailParts.push('<span class="badge-trust badge-trust-verified" title="' + U.escapeHtml(I18n.t('dashboard.trust_verified')) + '">' + U.escapeHtml(I18n.t('dashboard.badge_verified')) + '</span>');
         } else if (m.trust_level === 'pinned') {
-          trustBadge = '<span class="badge-trust badge-trust-pinned" title="' + U.escapeHtml(I18n.t('dashboard.trust_pinned')) + '">' + U.escapeHtml(I18n.t('dashboard.badge_pinned')) + '</span>';
+          detailParts.push('<span class="badge-trust badge-trust-pinned" title="' + U.escapeHtml(I18n.t('dashboard.trust_pinned')) + '">' + U.escapeHtml(I18n.t('dashboard.badge_pinned')) + '</span>');
         }
-
         // Encrypted pipeline badge
-        var encBadge = '';
         if (m.shard_count > 1 && m.local) {
           var encReady = m.has_first_shard && m.has_last_shard;
           var encActive = m.encrypted_pipeline;
           var encClass = encActive ? 'badge-encrypted active' : (encReady ? 'badge-encrypted ready' : 'badge-encrypted faded');
           var encTitle = encActive ? I18n.t('dashboard.enc_active') :
-            (encReady ? I18n.t('dashboard.enc_available') :
-              I18n.t('dashboard.enc_unavailable'));
+            (encReady ? I18n.t('dashboard.enc_available') : I18n.t('dashboard.enc_unavailable'));
           var missingParts = [];
           if (!m.has_first_shard) missingParts.push(I18n.t('dashboard.enc_missing_first'));
           if (!m.has_last_shard) missingParts.push(I18n.t('dashboard.enc_missing_last', { n: m.shard_count - 1 }));
           if (missingParts.length > 0) encTitle += '. ' + I18n.t('dashboard.enc_missing', { parts: missingParts.join(', ') });
-          encBadge = '<span class="' + encClass + '" data-enc-toggle="' + U.escapeHtml(m.id) + '" data-enc-ready="' + (encReady ? '1' : '0') + '" title="' + U.escapeHtml(encTitle) + '">&#128274;</span>';
+          detailParts.push('<span class="' + encClass + '" data-enc-toggle="' + U.escapeHtml(m.id) + '" data-enc-ready="' + (encReady ? '1' : '0') + '" title="' + U.escapeHtml(encTitle) + '">&#128274;</span>');
         }
-
         // Source label
-        var sourceLabel = '';
         if (m.source === 'network' && hostedShards === 0) {
-          sourceLabel = '<span class="badge badge-remote" title="' + U.escapeHtml(I18n.t('dashboard.badge_remote')) + '">' + U.escapeHtml(I18n.t('dashboard.badge_remote_label')) + '</span>';
+          detailParts.push('<span class="badge badge-remote" title="' + U.escapeHtml(I18n.t('dashboard.badge_remote')) + '">' + U.escapeHtml(I18n.t('dashboard.badge_remote_label')) + '</span>');
+        }
+        if (detailParts.length > 0) {
+          detailBadgesHtml = '<div class="model-card-detail-badges">' + detailParts.join('') + '</div>';
         }
 
         // Gear + info buttons
@@ -852,19 +968,23 @@
 
         var name = U.formatModelDisplayName(m.name || m.id);
         var creatorIconHtml = providerIconHtml(modelIconKey(m.id), 14);
+        var chevronHtml = '<span class="model-expand-chevron" data-expand-model="' + U.escapeHtml(m.id) + '" title="' + U.escapeHtml(I18n.t('dashboard.expand_collapse')) + '">&#9662;</span>';
 
-        // Card HTML
+        // Card HTML — compact by default with availability bar, expand for full shard grid
         card.innerHTML =
           '<div class="model-card-title">' +
             '<div class="model-card-name-row">' +
+              chevronHtml +
               creatorIconHtml +
               '<span class="model-name" title="' + U.escapeHtml(m.id) + '">' + U.escapeHtml(name) + '</span>' +
-              encBadge + sourceLabel + trustBadge + healthBadgeHtml +
+              compositeBadgeHtml +
             '</div>' +
             '<div class="model-card-controls">' +
-              statusHtml + metaBtnHtml + gearHtml +
+              metaBtnHtml + gearHtml +
             '</div>' +
           '</div>' +
+          availBarHtml +
+          detailBadgesHtml +
           '<div class="model-card-shards">' +
             healthBarHtml + shardHtml + progressHtml + perShardDlHtml +
           '</div>' +
@@ -938,15 +1058,18 @@
         var prefix = opts.idPrefix || 'cloud';
         var filterId = prefix + '-filter-' + p, sortId = prefix + '-sort-' + p, listId = prefix + '-list-wrap-' + p;
         var card = document.createElement('div');
-        card.className = 'model-card cloud-model' + (opts.cardClass ? ' ' + opts.cardClass : '');
+        // Start collapsed by default
+        card.className = 'model-card cloud-model cloud-card-collapsed' + (opts.cardClass ? ' ' + opts.cardClass : '');
         card.setAttribute('data-provider', p);
         var cardIconHtml = providerIconHtml(p, 18);
+        var expandToggleHtml = '<span class="cloud-expand-toggle" data-cloud-expand="' + U.escapeHtml(p) + '">&#9662; ' + U.escapeHtml(I18n.t('dashboard.cloud_browse')) + '</span>';
         card.innerHTML =
           '<div class="cloud-card-header' + (opts.headerClass ? ' ' + opts.headerClass : '') + '">' +
             '<span class="cloud-provider-name">' + (cardIconHtml ? cardIconHtml + ' ' : '') + U.escapeHtml(pLabel) + '</span>' +
-            '<span>' +
+            '<span style="display:flex;align-items:center;gap:8px">' +
               '<span class="badge ' + (opts.badgeClass || 'badge-cloud') + '">' + I18n.t('dashboard.cloud_models_count', { count: pModels.length }) + '</span>' +
               (opts.statusHtml || '<span class="cloud-status-ok">\u25cf ' + U.escapeHtml(I18n.t('dashboard.cloud_connected')) + '</span>') +
+              expandToggleHtml +
             '</span>' +
           '</div>' +
           '<div class="cloud-card-controls">' +
@@ -1348,45 +1471,88 @@
       return div;
     },
 
+    _peerSort: 'shards',
+    _peerSortDir: 'desc',
+
     renderPeers: function(peers) {
-      var PEER_LIMIT = 5;
       var list = document.getElementById('peers-list');
       var summary = document.getElementById('peers-summary');
       var overflow = document.getElementById('peers-overflow');
       var pLoading = document.getElementById('peers-loading');
       if (pLoading) pLoading.remove();
       if (!list) return;
+      if (overflow) overflow.style.display = 'none';
 
       App.dashboard._lastPeers = peers || [];
 
-      if (peers && peers.length > 0) {
-        var lanCount = peers.filter(function(p) { return p.is_lan_peer; }).length;
-        var healthyCount = peers.filter(function(p) { return p.healthy; }).length;
-        if (summary) {
-          summary.textContent = I18n.t('dashboard.peers_summary', { count: peers.length, lan: lanCount, healthy: healthyCount });
-        }
-
-        list.innerHTML = '';
-        var showAll = App.dashboard._peersExpanded;
-        var visible = showAll ? peers : peers.slice(0, PEER_LIMIT);
-        visible.forEach(function(p) {
-          list.appendChild(App.dashboard.renderPeerItem(p));
-        });
-
-        if (overflow) {
-          if (peers.length > PEER_LIMIT) {
-            overflow.style.display = '';
-            var btn = document.getElementById('btn-show-all-peers');
-            if (btn) btn.textContent = showAll ? I18n.t('dashboard.show_fewer') : I18n.t('dashboard.show_all', { count: peers.length });
-          } else {
-            overflow.style.display = 'none';
-          }
-        }
-      } else {
+      if (!peers || peers.length === 0) {
         if (summary) summary.textContent = '';
         list.innerHTML = '<div class="text-muted text-base">' + I18n.t('network.no_peers_yet') + '</div>';
-        if (overflow) overflow.style.display = 'none';
+        return;
       }
+
+      var lanCount = peers.filter(function(p) { return p.is_lan_peer; }).length;
+      var healthyCount = peers.filter(function(p) { return p.healthy; }).length;
+      if (summary) {
+        summary.textContent = I18n.t('dashboard.peers_summary', { count: peers.length, lan: lanCount, healthy: healthyCount });
+      }
+
+      // Sort peers
+      var sortKey = App.dashboard._peerSort;
+      var sortDir = App.dashboard._peerSortDir;
+      var sorted = peers.slice().sort(function(a, b) {
+        var va, vb;
+        if (sortKey === 'name') {
+          va = (a.nickname || a.node_id || '').toLowerCase();
+          vb = (b.nickname || b.node_id || '').toLowerCase();
+          return sortDir === 'asc' ? (va < vb ? -1 : va > vb ? 1 : 0) : (va > vb ? -1 : va < vb ? 1 : 0);
+        }
+        if (sortKey === 'latency') { va = a.latency_ms || 99999; vb = b.latency_ms || 99999; }
+        else if (sortKey === 'shards') { va = a.hosted_shards || 0; vb = b.hosted_shards || 0; }
+        else if (sortKey === 'trust') { va = a.trust_score || 0; vb = b.trust_score || 0; }
+        else if (sortKey === 'credits') { va = a.credits || 0; vb = b.credits || 0; }
+        else { va = a.healthy ? 1 : 0; vb = b.healthy ? 1 : 0; }
+        return sortDir === 'asc' ? va - vb : vb - va;
+      });
+
+      // Render as sortable table
+      function _sortArrow(key) {
+        var isSorted = sortKey === key;
+        var arrow = sortDir === 'asc' ? '\u25B2' : '\u25BC';
+        return '<span class="sort-arrow">' + (isSorted ? arrow : '\u25B4') + '</span>';
+      }
+      function _thClass(key) { return sortKey === key ? ' class="sorted"' : ''; }
+
+      var html = '<table class="peer-table"><thead><tr>' +
+        '<th data-peer-sort="name"' + _thClass('name') + '>' + U.escapeHtml(I18n.t('dashboard.peer_col_name')) + _sortArrow('name') + '</th>' +
+        '<th data-peer-sort="latency"' + _thClass('latency') + '>' + U.escapeHtml(I18n.t('dashboard.peer_col_latency')) + _sortArrow('latency') + '</th>' +
+        '<th data-peer-sort="shards"' + _thClass('shards') + '>' + U.escapeHtml(I18n.t('dashboard.peer_col_shards')) + _sortArrow('shards') + '</th>' +
+        '<th data-peer-sort="trust"' + _thClass('trust') + '>' + U.escapeHtml(I18n.t('dashboard.peer_col_trust')) + _sortArrow('trust') + '</th>' +
+        '<th data-peer-sort="status"' + _thClass('status') + '>' + U.escapeHtml(I18n.t('dashboard.peer_col_status')) + _sortArrow('status') + '</th>' +
+        '</tr></thead><tbody>';
+
+      sorted.forEach(function(p) {
+        var name = p.nickname || (p.node_id || 'unknown').substring(0, 12);
+        var idSub = p.nickname ? '<span class="peer-id-sub">' + (p.node_id || '').substring(0, 8) + '</span>' : '';
+        var lanBadge = p.is_lan_peer ? ' <span class="lan-badge">' + U.escapeHtml(I18n.t('dashboard.lan_badge')) + '</span>' : '';
+        var dotClass = p.healthy ? 'online' : 'degraded';
+        var latency = p.latency_ms ? p.latency_ms + 'ms' : '\u2014';
+        var shards = p.hosted_shards || 0;
+        var trust = p.trust_score !== undefined ? (p.trust_score * 100).toFixed(0) + '%' : '\u2014';
+        var status = p.healthy ? I18n.t('dashboard.peer_healthy') : I18n.t('dashboard.peer_degraded');
+        var gpu = p.gpu ? '<div class="text-muted" style="font-size:0.62rem">' + U.escapeHtml(p.gpu) + '</div>' : '';
+
+        html += '<tr>' +
+          '<td><div class="peer-name-cell"><span class="status-dot ' + dotClass + '"></span><span class="peer-nick">' + U.escapeHtml(name) + '</span>' + idSub + lanBadge + '</div>' + gpu + '</td>' +
+          '<td class="mono">' + latency + '</td>' +
+          '<td class="mono">' + shards + '</td>' +
+          '<td class="mono">' + trust + '</td>' +
+          '<td><span class="status-dot ' + dotClass + '" style="display:inline-block;vertical-align:middle;margin-right:4px"></span>' + U.escapeHtml(status) + '</td>' +
+          '</tr>';
+      });
+
+      html += '</tbody></table>';
+      list.innerHTML = html;
     },
 
     loadNetworkData: async function() {

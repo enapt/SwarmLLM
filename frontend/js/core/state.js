@@ -13,8 +13,10 @@ window.App = {
     wsBannerTimer: null,
     pollTimers: [],
     creditHistory: [],
+    statHistory: { peers: [], credits: [], requests: [], served: [], forwards: [], active: [] },
+    _expandedModels: {},
     activeAcquisitions: {},
-    _swarmModelSort: 'az', // initialized below after App is defined, using App.MODEL_SORT_KEY
+    _swarmModelSort: 'problems', // initialized below after App is defined, using App.MODEL_SORT_KEY
     isStreaming: false,
     currentModel: '',
     currentSessionId: null,
@@ -63,7 +65,7 @@ window.App = {
 
 // Initialize _swarmModelSort using the constant now that App is defined
 try {
-  App.state._swarmModelSort = localStorage.getItem(App.MODEL_SORT_KEY) || 'az';
+  App.state._swarmModelSort = localStorage.getItem(App.MODEL_SORT_KEY) || 'problems';
 } catch (e) {}
 
 // Initialize modelStatus from sessionStorage cache
