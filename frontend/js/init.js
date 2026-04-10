@@ -559,7 +559,7 @@
           cloudCard.classList.toggle('cloud-card-collapsed');
           var isCollapsed = cloudCard.classList.contains('cloud-card-collapsed');
           var toggleEl = cloudCard.querySelector('[data-cloud-expand]');
-          if (toggleEl) toggleEl.innerHTML = (isCollapsed ? '&#9662; ' : '&#9652; ') + App.utils.escapeHtml(I18n.t(isCollapsed ? 'dashboard.cloud_browse' : 'dashboard.cloud_collapse'));
+          if (toggleEl) toggleEl.innerHTML = isCollapsed ? '&#9662;' : '&#9652;';
         }
         return;
       }

@@ -532,8 +532,6 @@
   "dashboard.cb_fragile_tip": "{count} shards have only a single copy on the network",
   "dashboard.cb_partial_tip": "Some shards available locally, others needed",
   "dashboard.cb_network_tip": "Available via peer nodes on the network",
-  "dashboard.cloud_browse": "Browse",
-  "dashboard.cloud_collapse": "Collapse",
   "dashboard.peer_col_name": "Peer",
   "dashboard.peer_col_latency": "Latency",
   "dashboard.peer_col_shards": "Shards",

@@ -1090,7 +1090,7 @@
         card.className = 'model-card cloud-model cloud-card-collapsed' + (opts.cardClass ? ' ' + opts.cardClass : '');
         card.setAttribute('data-provider', p);
         var cardIconHtml = providerIconHtml(p, 18);
-        var expandToggleHtml = '<span class="cloud-expand-toggle" data-cloud-expand="' + U.escapeHtml(p) + '">&#9662; ' + U.escapeHtml(I18n.t('dashboard.cloud_browse')) + '</span>';
+        var expandToggleHtml = '<span class="cloud-expand-toggle" data-cloud-expand="' + U.escapeHtml(p) + '">&#9662;</span>';
         card.innerHTML =
           '<div class="cloud-card-header' + (opts.headerClass ? ' ' + opts.headerClass : '') + '">' +
             '<span class="cloud-provider-name">' + (cardIconHtml ? cardIconHtml + ' ' : '') + U.escapeHtml(pLabel) + '</span>' +

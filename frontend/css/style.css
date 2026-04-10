@@ -3572,13 +3572,13 @@ textarea:focus:not(:focus-visible) {
   border-bottom: none;
 }
 .cloud-expand-toggle {
-  display: inline-flex; align-items: center; gap: 4px;
-  font-size: 0.65rem; font-weight: 600; color: var(--accent);
-  cursor: pointer; padding: 3px 8px; border-radius: var(--radius-sm);
-  border: 1px solid rgba(59,130,246,0.2); background: rgba(59,130,246,0.06);
-  transition: all var(--transition); letter-spacing: 0.02em;
+  display: inline-flex; align-items: center; justify-content: center;
+  font-size: 0.7rem; color: var(--text-muted);
+  cursor: pointer; padding: 2px 6px; border-radius: var(--radius-sm);
+  border: none; background: transparent;
+  transition: color var(--transition);
 }
-.cloud-expand-toggle:hover { color: var(--accent-hover); background: rgba(59,130,246,0.12); border-color: rgba(59,130,246,0.35); box-shadow: 0 0 8px rgba(59,130,246,0.1); }
+.cloud-expand-toggle:hover { color: var(--text-primary); }
 
 /* ---- Color system: muted nominal states ---- */
 /* Override shard cells for quieter nominal appearance */
