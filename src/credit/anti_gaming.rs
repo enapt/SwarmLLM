@@ -54,7 +54,7 @@ impl AntiGaming {
     }
 
     /// Check whether a transaction should be allowed based on rate limits and validity.
-    pub fn check_transaction(
+    fn check_transaction(
         &mut self,
         from: &NodeId,
         to: &NodeId,
@@ -97,7 +97,7 @@ impl AntiGaming {
     }
 
     /// Record a transaction for rate limiting purposes.
-    pub fn record_transaction(&mut self, node: &NodeId) {
+    fn record_transaction(&mut self, node: &NodeId) {
         let entries = self.rate_limits.entry(node.clone()).or_default();
         entries.push(Instant::now());
     }
