@@ -248,10 +248,16 @@ pub async fn update_providers(
     let signing_key_bytes = state.shared_state.identity.signing_key_bytes();
     match crate::crypto::encrypt_config(&new_config, &signing_key_bytes) {
         Ok(encrypted) => {
-            let _ = state
+            if let Err(e) = state
                 .shared_state
                 .db
-                .put_json("providers", "config", &encrypted);
+                .put_json("providers", "config", &encrypted)
+            {
+                tracing::error!(error = %e, "Provider keys encrypted but NOT persisted to DB — will revert on restart");
+                return Err(ApiError(crate::error::SwarmError::Internal(
+                    "Failed to persist provider configuration".into(),
+                )));
+            }
         }
         Err(e) => {
             tracing::error!(error = %e, "Failed to encrypt provider keys for storage — keys NOT saved");

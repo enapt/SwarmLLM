@@ -855,10 +855,13 @@ pub async fn update_schedule(
     }
 
     // Persist to DB (no write lock held)
-    let _ = state
+    if let Err(e) = state
         .shared_state
         .db
-        .put_json("resource_schedule", "current", &new_schedule);
+        .put_json("resource_schedule", "current", &new_schedule)
+    {
+        tracing::warn!(error = %e, "Failed to persist resource schedule — will revert on restart");
+    }
 
     tracing::debug!(
         enabled = new_schedule.enabled,

@@ -628,10 +628,13 @@ pub async fn set_private_mode(
         .credits
         .private_mode
         .store(body.enabled, std::sync::atomic::Ordering::Relaxed);
-    let _ = state
+    if let Err(e) = state
         .shared_state
         .db
-        .put_json("pool_state", "private_mode", &body.enabled);
+        .put_json("pool_state", "private_mode", &body.enabled)
+    {
+        tracing::warn!(error = %e, "Failed to persist private_mode — will revert on restart");
+    }
 
     // Offline mode toggle (optional)
     if let Some(offline) = body.offline_mode {
@@ -640,10 +643,13 @@ pub async fn set_private_mode(
             .credits
             .offline_mode
             .store(offline, std::sync::atomic::Ordering::Relaxed);
-        let _ = state
+        if let Err(e) = state
             .shared_state
             .db
-            .put_json("pool_state", "offline_mode", &offline);
+            .put_json("pool_state", "offline_mode", &offline)
+        {
+            tracing::warn!(error = %e, "Failed to persist offline_mode — will revert on restart");
+        }
     }
     let offline = state
         .shared_state
