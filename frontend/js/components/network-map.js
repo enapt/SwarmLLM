@@ -12,6 +12,32 @@
     data: null,
     mapRendered: false,
 
+    // Apply heatmap fill/stroke styling to all known region paths.
+    // `countsByCode` is { 'US': n, 'JP': n, ... }; missing codes get the zero style.
+    _applyRegionColors: function(countsByCode, maxCount) {
+      var allCodes = Object.keys(App.networkMap.paths);
+      for (var j = 0; j < allCodes.length; j++) {
+        var c = allCodes[j];
+        var el = document.getElementById('region-' + c);
+        if (!el) continue;
+        var n = countsByCode[c] || 0;
+        if (n === 0) {
+          el.style.fill = 'rgba(59,130,246,0.04)';
+          el.style.stroke = 'rgba(59,130,246,0.3)';
+          el.style.strokeWidth = '0.5';
+          el.removeAttribute('filter');
+        } else {
+          var intensity = Math.max(0.25, n / Math.max(maxCount, 1));
+          var fillAlpha = (0.06 + intensity * 0.14).toFixed(2);
+          var strokeAlpha = (0.5 + intensity * 0.5).toFixed(2);
+          el.style.fill = 'rgba(59,130,246,' + fillAlpha + ')';
+          el.style.stroke = 'rgba(100,180,255,' + strokeAlpha + ')';
+          el.style.strokeWidth = (0.8 + intensity * 1.2).toFixed(1);
+          el.setAttribute('filter', 'url(#glow-md)');
+        }
+      }
+    },
+
     numToAlpha2: {
       '004':'AF','008':'AL','012':'DZ','024':'AO','032':'AR','036':'AU','040':'AT',
       '044':'BS','050':'BD','056':'BE','064':'BT','068':'BO','070':'BA','072':'BW',
@@ -177,27 +203,7 @@
         }
       }
 
-      var allCodes = Object.keys(App.networkMap.paths);
-      for (var j = 0; j < allCodes.length; j++) {
-        var c = allCodes[j];
-        var el = document.getElementById('region-' + c);
-        if (!el) continue;
-        var n = counts[c] || 0;
-        if (n === 0) {
-          el.style.fill = 'rgba(59,130,246,0.04)';
-          el.style.stroke = 'rgba(59,130,246,0.3)';
-          el.style.strokeWidth = '0.5';
-          el.removeAttribute('filter');
-        } else {
-          var intensity = Math.max(0.25, n / Math.max(maxCount, 1));
-          var fillAlpha = (0.06 + intensity * 0.14).toFixed(2);
-          var strokeAlpha = (0.5 + intensity * 0.5).toFixed(2);
-          el.style.fill = 'rgba(59,130,246,' + fillAlpha + ')';
-          el.style.stroke = 'rgba(100,180,255,' + strokeAlpha + ')';
-          el.style.strokeWidth = (0.8 + intensity * 1.2).toFixed(1);
-          el.setAttribute('filter', 'url(#glow-md)');
-        }
-      }
+      App.networkMap._applyRegionColors(counts, maxCount);
 
       // Pulsing dots
       var svg = document.querySelector('.world-svg');
@@ -321,27 +327,7 @@
           if (count > maxCount) maxCount = count;
         }
       }
-      var allCodes = Object.keys(App.networkMap.paths);
-      for (var j = 0; j < allCodes.length; j++) {
-        var c = allCodes[j];
-        var el = document.getElementById('region-' + c);
-        if (!el) continue;
-        var n = regionSummary[c] || 0;
-        if (n === 0) {
-          el.style.fill = 'rgba(59,130,246,0.04)';
-          el.style.stroke = 'rgba(59,130,246,0.3)';
-          el.style.strokeWidth = '0.5';
-          el.removeAttribute('filter');
-        } else {
-          var intensity = Math.max(0.25, n / Math.max(maxCount, 1));
-          var fillAlpha = (0.06 + intensity * 0.14).toFixed(2);
-          var strokeAlpha = (0.5 + intensity * 0.5).toFixed(2);
-          el.style.fill = 'rgba(59,130,246,' + fillAlpha + ')';
-          el.style.stroke = 'rgba(100,180,255,' + strokeAlpha + ')';
-          el.style.strokeWidth = (0.8 + intensity * 1.2).toFixed(1);
-          el.setAttribute('filter', 'url(#glow-md)');
-        }
-      }
+      App.networkMap._applyRegionColors(regionSummary, maxCount);
       var statsEl = document.getElementById('map-stats-text');
       if (statsEl) statsEl.textContent = I18n.t(totalNodes === 1 ? 'map.stats_nodes' : 'map.stats_nodes_plural', { count: totalNodes }) + ' ' + I18n.t('map.stats_across') + ' ' + I18n.t(totalRegions === 1 ? 'map.stats_region' : 'map.stats_regions', { count: totalRegions });
       document.getElementById('map-legend-max').textContent = maxCount;
