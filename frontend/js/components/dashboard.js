@@ -922,19 +922,42 @@
           }
         }
 
-        // Footer meta info
-        var footerMeta = [];
-        footerMeta.push(U.formatBytes(m.total_size_bytes || 0));
-        if (shardCount > 0) footerMeta.push(I18n.t(shardCount === 1 ? 'dashboard.shard_count_one' : 'dashboard.shard_count_other', { count: shardCount }));
-        if (m.estimated_vram_mb) {
-          if (S._gpuInference) {
-            footerMeta.push(I18n.t('dashboard.vram_estimate', { vram: U.formatMB(m.estimated_vram_mb) }));
-          } else {
-            footerMeta.push('<span title="' + U.escapeHtml(I18n.t('hw.low_ram_tip')) + '" style="cursor:help">' + U.escapeHtml(I18n.t('hw.low_ram')) + '</span>');
-          }
+        // --- Parse architecture + quantization from model ID ---
+        var modelId = m.id || '';
+        var archKey = modelIconKey(modelId);
+        var archTag = archKey ? '<span class="model-tag tag-arch">' + U.escapeHtml(archKey) + '</span>' : '';
+        var quantMatch = modelId.match(/[._-](q[0-9]+[_-]?k?[_-]?[a-z]*)/i);
+        var quantTag = quantMatch ? '<span class="model-tag tag-quant">' + U.escapeHtml(quantMatch[1].toUpperCase().replace(/-/g, '_')) + '</span>' : '';
+
+        // --- Structured footer metadata (icon+label pairs with dot separators) ---
+        var metaParts = [];
+        // Size
+        metaParts.push('<span class="meta-item"><span class="meta-icon">\u25A3</span>' + U.formatBytes(m.total_size_bytes || 0) + '</span>');
+        // Shard count
+        if (shardCount > 0) {
+          metaParts.push('<span class="meta-item"><span class="meta-icon">\u2B22</span>' + I18n.t(shardCount === 1 ? 'dashboard.shard_count_one' : 'dashboard.shard_count_other', { count: shardCount }) + '</span>');
         }
-        if (m.peers_hosting > 0) footerMeta.push(I18n.t('dashboard.peer_count', { count: m.peers_hosting }));
-        else if (hostedShards > 0) footerMeta.push('<span style="color:var(--orange)">' + U.escapeHtml(I18n.t('dashboard.local_only')) + '</span>');
+        // VRAM fit indicator
+        if (m.estimated_vram_mb && S._gpuInference) {
+          var totalVram = (App.data.cache.stats && App.data.cache.stats.hardware && App.data.cache.stats.hardware.gpu_vram_mb) || 0;
+          var fitClass = 'fit-no', fitLabel = U.formatMB(m.estimated_vram_mb);
+          if (totalVram > 0) {
+            var ratio = m.estimated_vram_mb / totalVram;
+            if (ratio <= 0.85) { fitClass = 'fit-yes'; fitLabel = '\u2713 ' + fitLabel; }
+            else if (ratio <= 1.05) { fitClass = 'fit-tight'; fitLabel = '\u2248 ' + fitLabel; }
+            else { fitClass = 'fit-no'; fitLabel = '\u2717 ' + fitLabel; }
+          }
+          metaParts.push('<span class="meta-item"><span class="vram-fit ' + fitClass + '" title="' + U.escapeHtml(I18n.t('dashboard.vram_fit_tip', { est: U.formatMB(m.estimated_vram_mb), total: totalVram > 0 ? U.formatMB(totalVram) : '?' })) + '">' + fitLabel + '</span></span>');
+        } else if (m.estimated_vram_mb && !S._gpuInference) {
+          metaParts.push('<span class="meta-item" title="' + U.escapeHtml(I18n.t('hw.low_ram_tip')) + '" style="cursor:help"><span class="meta-icon">\u26A0</span><span class="meta-ok">' + U.escapeHtml(I18n.t('hw.low_ram')) + '</span></span>');
+        }
+        // Peer count or "Local only" warning
+        if (m.peers_hosting > 0) {
+          metaParts.push('<span class="meta-item"><span class="meta-icon">\u2B65</span>' + I18n.t('dashboard.peer_count', { count: m.peers_hosting }) + '</span>');
+        } else if (hostedShards > 0) {
+          metaParts.push('<span class="meta-item meta-warn" title="' + U.escapeHtml(I18n.t('dashboard.local_only_tip')) + '"><span class="meta-icon">\u26A0</span>' + U.escapeHtml(I18n.t('dashboard.local_only')) + '</span>');
+        }
+        var footerMetaHtml = metaParts.join('<span class="meta-sep">\u00B7</span>');
 
         // Missing files warning
         var fileIndicators = '';
@@ -945,30 +968,33 @@
             var missingFiles = [];
             if (!hasManifest) missingFiles.push('manifest');
             if (!hasHeader) missingFiles.push('header');
-            fileIndicators = '<span style="color:var(--orange);font-size:0.7rem" title="' + U.escapeHtml(I18n.t('dashboard.missing_files', { files: missingFiles.join(', ') })) + '">' + I18n.t('dashboard.missing_warning', { files: missingFiles.join(' + ') }) + '</span>';
+            fileIndicators = '<span class="meta-sep">\u00B7</span><span class="meta-item meta-warn" title="' + U.escapeHtml(I18n.t('dashboard.missing_files', { files: missingFiles.join(', ') })) + '">\u26A0 ' + I18n.t('dashboard.missing_warning', { files: missingFiles.join(' + ') }) + '</span>';
           }
         }
 
-        // Action buttons
+        // --- Styled action buttons ---
         var actionHtml = '';
         if (m.status === 'loaded') {
-          actionHtml = '<button class="btn btn-sm btn-outline" data-unload-model="' + U.escapeHtml(m.id) + '" title="' + U.escapeHtml(I18n.t('dashboard.unload_tip')) + '">' + U.escapeHtml(I18n.t('dashboard.btn_unload_all')) + '</button>';
+          actionHtml = '<button class="btn-action" data-unload-model="' + U.escapeHtml(m.id) + '" title="' + U.escapeHtml(I18n.t('dashboard.unload_tip')) + '">' + U.escapeHtml(I18n.t('dashboard.btn_unload_all')) + '</button>';
         } else if (isReady) {
-          actionHtml = '<button class="btn btn-sm btn-primary" data-select-model="' + U.escapeHtml(m.id) + '">' + U.escapeHtml(I18n.t('dashboard.btn_use')) + '</button>';
+          actionHtml = '<button class="btn-action btn-primary-action" data-select-model="' + U.escapeHtml(m.id) + '">' + U.escapeHtml(I18n.t('dashboard.btn_use')) + '</button>';
         } else if (isDownloading) {
-          actionHtml = '<button class="shard-cancel-btn" data-cancel-download="' + U.escapeHtml(m.id) + '" title="' + U.escapeHtml(I18n.t('shard.cancel_download')) + '">&times; ' + U.escapeHtml(I18n.t('actions.cancel')) + '</button>';
+          actionHtml = '<button class="btn-action btn-danger" data-cancel-download="' + U.escapeHtml(m.id) + '" title="' + U.escapeHtml(I18n.t('shard.cancel_download')) + '">&times; ' + U.escapeHtml(I18n.t('actions.cancel')) + '</button>';
         } else if (m.source === 'network' || m.status === 'available' || m.status === 'partial') {
-          actionHtml = '<button class="btn btn-sm" data-request-model="' + U.escapeHtml(m.id) + '">' + U.escapeHtml(I18n.t('models.download')) + '</button>';
+          actionHtml = '<button class="btn-action btn-download" data-request-model="' + U.escapeHtml(m.id) + '">' + U.escapeHtml(I18n.t('models.download')) + '</button>';
         }
 
         var removeHtml = '';
         if (hostedShards > 0 && !isDownloading) {
-          removeHtml = '<button class="model-remove-btn" data-remove-model="' + U.escapeHtml(m.id) + '">' + U.escapeHtml(I18n.t('actions.remove')) + '</button>';
+          removeHtml = '<button class="btn-action btn-danger" data-remove-model="' + U.escapeHtml(m.id) + '">' + U.escapeHtml(I18n.t('actions.remove')) + '</button>';
         }
 
         var name = U.formatModelDisplayName(m.name || m.id);
         var creatorIconHtml = providerIconHtml(modelIconKey(m.id), 14);
-        var chevronHtml = '<span class="model-expand-chevron" data-expand-model="' + U.escapeHtml(m.id) + '" title="' + U.escapeHtml(I18n.t('dashboard.expand_collapse')) + '">&#9662;</span>';
+        var chevronHtml = '<span class="model-expand-chevron" title="' + U.escapeHtml(I18n.t('dashboard.expand_collapse')) + '">&#9662;</span>';
+
+        // Active loaded class for pulsing border
+        if (m.status === 'loaded') card.classList.add('active-loaded');
 
         // Card HTML — compact by default with availability bar, expand for full shard grid
         card.innerHTML =
@@ -977,6 +1003,7 @@
               chevronHtml +
               creatorIconHtml +
               '<span class="model-name" title="' + U.escapeHtml(m.id) + '">' + U.escapeHtml(name) + '</span>' +
+              archTag + quantTag +
               compositeBadgeHtml +
             '</div>' +
             '<div class="model-card-controls">' +
@@ -990,10 +1017,7 @@
           '</div>' +
           '<div class="model-ticker" data-model-ticker="' + safeId + '" style="display:none"></div>' +
           '<div class="model-card-footer">' +
-            '<div class="model-card-meta">' +
-              footerMeta.map(function(p) { return '<span>' + p + '</span>'; }).join('') +
-              (fileIndicators ? '<span>' + fileIndicators + '</span>' : '') +
-            '</div>' +
+            '<div class="model-card-meta">' + footerMetaHtml + fileIndicators + '</div>' +
             '<div class="model-card-actions">' + actionHtml + removeHtml + '</div>' +
           '</div>' +
           '<div class="gguf-metadata-panel hidden" data-meta-panel="' + U.escapeHtml(m.id) + '"></div>';
