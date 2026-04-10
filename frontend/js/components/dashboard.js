@@ -303,12 +303,16 @@
         if (sparkEl && hist.length >= 2) {
           var min = Math.min.apply(null, hist);
           var max = Math.max.apply(null, hist);
-          var range = (max - min) || 1;
+          var range = max - min;
+          var isFlat = range === 0;
           sparkEl.innerHTML = '';
-          hist.forEach(function(v) {
+          hist.forEach(function(v, i) {
             var bar = document.createElement('div');
             bar.className = 'spark-bar';
-            bar.style.height = Math.max(2, ((v - min) / range) * 16) + 'px';
+            // Flat data: show a centered 6px line; varied data: scale to 16px
+            var h = isFlat ? 6 : Math.max(2, ((v - min) / range) * 16);
+            bar.style.height = h + 'px';
+            if (isFlat) bar.style.opacity = '0.25';
             sparkEl.appendChild(bar);
           });
         }
@@ -1511,7 +1515,7 @@
 
       if (!peers || peers.length === 0) {
         if (summary) summary.textContent = '';
-        list.innerHTML = '<div class="text-muted text-base">' + I18n.t('network.no_peers_yet') + '</div>';
+        list.innerHTML = '<div class="empty-state" style="padding:16px 0"><div class="empty-icon">\u{1F310}</div><p>' + I18n.t('network.no_peers_yet') + '</p></div>';
         return;
       }
 
@@ -1587,7 +1591,7 @@
         var list = document.getElementById('peers-list');
         var pLoading2 = document.getElementById('peers-loading');
         if (pLoading2) pLoading2.remove();
-        if (list) list.innerHTML = '<div class="text-muted text-base">' + I18n.t('network.no_peers_yet') + '</div>';
+        if (list) list.innerHTML = '<div class="empty-state" style="padding:16px 0"><div class="empty-icon">\u{1F310}</div><p>' + I18n.t('network.no_peers_yet') + '</p></div>';
       }
     },
 

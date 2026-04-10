@@ -1563,8 +1563,10 @@ kbd {
   padding: 30px 20px;
   color: var(--text-muted);
 }
-.empty-state .empty-icon { font-size: 2rem; margin-bottom: 10px; opacity: 0.5; }
-.empty-state p { font-size: 0.85rem; max-width: 300px; margin: 0 auto; }
+.empty-state .empty-icon { font-size: 2rem; margin-bottom: 10px; opacity: 0.4; filter: grayscale(0.5); }
+.empty-state p { font-size: 0.85rem; max-width: 340px; margin: 0 auto; line-height: 1.5; }
+/* Inline empty states for logs/peers */
+.panel-body .text-muted:only-child { opacity: 0.6; }
 
 /* ---- Activity log ---- */
 .activity-entry {
@@ -2811,9 +2813,12 @@ textarea:focus:not(:focus-visible) {
 /* ─── Collapsible panels ─── */
 .panel-header[data-collapse] { cursor: pointer; user-select: none; }
 .panel-header[data-collapse]::after {
-  content: '▾'; font-size: 0.75rem; color: var(--text-muted);
+  content: '▾'; font-size: 0.7rem; color: var(--text-muted);
   transition: transform var(--transition); margin-left: auto; padding-left: 8px;
+  width: 20px; height: 20px; display: flex; align-items: center; justify-content: center;
+  border-radius: var(--radius-sm); border: 1px solid var(--border);
 }
+.panel-header[data-collapse]:hover::after { border-color: var(--border-light); color: var(--text-primary); background: var(--bg-hover); }
 .panel-header[data-collapse].collapsed { margin-bottom: 0; }
 .panel-header[data-collapse].collapsed::after { transform: rotate(-90deg); }
 .panel-body { transition: max-height 0.3s ease, opacity 0.2s ease; overflow: hidden; }
@@ -3542,11 +3547,12 @@ textarea:focus:not(:focus-visible) {
 }
 .cloud-expand-toggle {
   display: inline-flex; align-items: center; gap: 4px;
-  font-size: 0.68rem; color: var(--text-muted);
-  cursor: pointer; padding: 2px 6px; border-radius: var(--radius-sm);
-  transition: color var(--transition), background var(--transition);
+  font-size: 0.65rem; font-weight: 600; color: var(--accent);
+  cursor: pointer; padding: 3px 8px; border-radius: var(--radius-sm);
+  border: 1px solid rgba(59,130,246,0.2); background: rgba(59,130,246,0.06);
+  transition: all var(--transition); letter-spacing: 0.02em;
 }
-.cloud-expand-toggle:hover { color: var(--text-primary); background: var(--bg-hover); }
+.cloud-expand-toggle:hover { color: var(--accent-hover); background: rgba(59,130,246,0.12); border-color: rgba(59,130,246,0.35); box-shadow: 0 0 8px rgba(59,130,246,0.1); }
 
 /* ---- Color system: muted nominal states ---- */
 /* Override shard cells for quieter nominal appearance */
