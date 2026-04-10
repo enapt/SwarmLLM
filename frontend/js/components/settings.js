@@ -142,27 +142,17 @@
     _updateClaudeSubSteps: function(data) {
       var checkStyle = 'background:var(--green);color:#fff;border-color:var(--green)';
       var pendingStyle = 'background:var(--bg-tertiary);color:var(--text-primary);border-color:var(--border)';
-      var step1 = document.getElementById('claude-sub-step1-icon');
-      var step2 = document.getElementById('claude-sub-step2-icon');
-      var step3 = document.getElementById('claude-sub-step3-icon');
-      var step4 = document.getElementById('claude-sub-step4-icon');
+      function setStep(id, num, done) {
+        var el = document.getElementById(id);
+        if (!el) return;
+        el.textContent = done ? '\u2713' : String(num);
+        el.style.cssText = done ? checkStyle : pendingStyle;
+      }
       var toggle = document.getElementById('claude-subscription-toggle');
-      if (step1) {
-        if (data.cli_installed) { step1.textContent = '\u2713'; step1.style.cssText = checkStyle; }
-        else { step1.textContent = '1'; step1.style.cssText = pendingStyle; }
-      }
-      if (step2) {
-        if (data.authenticated) { step2.textContent = '\u2713'; step2.style.cssText = checkStyle; }
-        else { step2.textContent = '2'; step2.style.cssText = pendingStyle; }
-      }
-      if (step3) {
-        if (data.cli_installed && data.authenticated) { step3.textContent = '\u2713'; step3.style.cssText = checkStyle; }
-        else { step3.textContent = '3'; step3.style.cssText = pendingStyle; }
-      }
-      if (step4 && toggle) {
-        if (toggle.checked) { step4.textContent = '\u2713'; step4.style.cssText = checkStyle; }
-        else { step4.textContent = '4'; step4.style.cssText = pendingStyle; }
-      }
+      setStep('claude-sub-step1-icon', 1, data.cli_installed);
+      setStep('claude-sub-step2-icon', 2, data.authenticated);
+      setStep('claude-sub-step3-icon', 3, data.cli_installed && data.authenticated);
+      if (toggle) setStep('claude-sub-step4-icon', 4, toggle.checked);
     },
 
     load: async function() {

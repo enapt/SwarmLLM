@@ -791,26 +791,15 @@ pub async fn chat_completions(
             );
 
             if let Some(router_tx) = &state.router_tx {
-                if req.stream {
-                    return router_inference_stream(
-                        router_tx.clone(),
-                        &state,
-                        &req,
-                        internal_messages.clone(),
-                        request_id,
-                        created,
-                    )
-                    .await;
-                } else {
-                    return router_inference(
-                        router_tx.clone(),
-                        &req,
-                        internal_messages.clone(),
-                        request_id,
-                        created,
-                    )
-                    .await;
-                }
+                return dispatch_inference(
+                    router_tx.clone(),
+                    &state,
+                    &req,
+                    internal_messages.clone(),
+                    request_id,
+                    created,
+                )
+                .await;
             } else {
                 return Err(ApiError(crate::error::SwarmError::NoModelLoaded));
             }
@@ -873,26 +862,15 @@ pub async fn chat_completions(
                     "Model became available after cold-start wait"
                 );
                 if let Some(router_tx) = &state.router_tx {
-                    if req.stream {
-                        return router_inference_stream(
-                            router_tx.clone(),
-                            &state,
-                            &req,
-                            internal_messages.clone(),
-                            request_id,
-                            created,
-                        )
-                        .await;
-                    } else {
-                        return router_inference(
-                            router_tx.clone(),
-                            &req,
-                            internal_messages.clone(),
-                            request_id,
-                            created,
-                        )
-                        .await;
-                    }
+                    return dispatch_inference(
+                        router_tx.clone(),
+                        &state,
+                        &req,
+                        internal_messages.clone(),
+                        request_id,
+                        created,
+                    )
+                    .await;
                 }
                 break;
             }
@@ -973,26 +951,15 @@ pub async fn chat_completions(
         || state.shared_state.config.inference.shard_range.is_some();
     if peers_have_shards {
         if let Some(router_tx) = &state.router_tx {
-            if req.stream {
-                return router_inference_stream(
-                    router_tx.clone(),
-                    &state,
-                    &req,
-                    internal_messages.clone(),
-                    request_id,
-                    created,
-                )
-                .await;
-            } else {
-                return router_inference(
-                    router_tx.clone(),
-                    &req,
-                    internal_messages.clone(),
-                    request_id,
-                    created,
-                )
-                .await;
-            }
+            return dispatch_inference(
+                router_tx.clone(),
+                &state,
+                &req,
+                internal_messages.clone(),
+                request_id,
+                created,
+            )
+            .await;
         }
     }
 
@@ -1472,6 +1439,22 @@ async fn forward_to_peer(
 
     let response = crate::api::providers::build_passthrough_response(peer_resp, stream).await?;
     Ok(response.into_response())
+}
+
+/// Dispatch to `router_inference` or `router_inference_stream` based on `req.stream`.
+async fn dispatch_inference(
+    router_tx: tokio::sync::mpsc::Sender<RouterCommand>,
+    state: &AppState,
+    req: &ChatCompletionRequest,
+    messages: Vec<ChatMessage>,
+    request_id: String,
+    created: i64,
+) -> Result<axum::response::Response, ApiError> {
+    if req.stream {
+        router_inference_stream(router_tx, state, req, messages, request_id, created).await
+    } else {
+        router_inference(router_tx, req, messages, request_id, created).await
+    }
 }
 
 /// Route inference through the InferenceRouter (non-streaming).

@@ -132,7 +132,7 @@
           var dlResp = await App.authFetch(U.modelApiUrl(modelId, 'shards', idx) + '/download', { method: 'POST' });
           var dlData = await dlResp.json();
           if (dlData.status === 'downloading') {
-            App.ui.showBanner('success', I18n.t('shard.downloading_from', { idx: idx + 1, source: dlData.source === 'p2p' ? 'peer ' + (dlData.peer || '') : 'peers' }));
+            App.ui.showBanner('success', I18n.t('shard.downloading_from', { idx: idx + 1, source: dlData.source === 'p2p' ? I18n.t('shard.source_peer', { id: dlData.peer || '' }) : I18n.t('shard.source_peers') }));
             App.models.load();
           } else if (dlData.status === 'use_hf') {
             // Backend says use HuggingFace

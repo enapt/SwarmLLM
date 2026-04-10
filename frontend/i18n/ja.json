@@ -987,5 +987,7 @@
   "dashboard.peer_healthy": "Healthy",
   "dashboard.peer_degraded": "Degraded",
   "dashboard.vram_fit_tip": "Estimated {est} VRAM needed (available: {total})",
-  "dashboard.local_only_tip": "No peers hosting this model — no redundancy if your node goes offline"
+  "dashboard.local_only_tip": "No peers hosting this model — no redundancy if your node goes offline",
+  "shard.source_peer": "ピア {id}",
+  "shard.source_peers": "ピア"
 }
