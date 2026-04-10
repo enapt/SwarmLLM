@@ -1049,11 +1049,8 @@
           });
         });
 
-        // Fetch CLI status for subscription providers
-        App.authFetch('/api/admin/claude-subscription/status').then(function(resp) {
-          if (!resp || !resp.ok) return null;
-          return resp.json();
-        }).then(function(data) {
+        // Fetch CLI status for subscription providers (dedup-coalesced across components)
+        App.data.loadClaudeSubStatus().then(function(data) {
           if (!data || data.error) return;
           var statusEl = document.getElementById('sub-status-claude_subscription');
           if (!statusEl) return;

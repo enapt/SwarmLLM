@@ -94,8 +94,10 @@
           if (detail) detail.style.display = 'none';
           csDetect.disabled = true;
           try {
-            var resp = await App.authFetch('/api/admin/claude-subscription/status');
-            var data = await resp.json();
+            // User-triggered refresh: clear in-flight dedup so we get fresh data
+            App.data.invalidateDedup('claudeSubStatus');
+            var data = await App.data.loadClaudeSubStatus();
+            if (!data) { throw new Error('No response'); }
             App.settings._updateClaudeSubSteps(data);
             if (data.cli_installed && data.authenticated) {
               var planLabel = data.subscription_type

@@ -257,9 +257,8 @@
       // Fetch detailed status for plan label
       var planEl = document.getElementById('cc-plan-label');
       if (planEl && !planEl.textContent) {
-        App.authFetch('/api/admin/claude-subscription/status').then(function(r) {
-          return r.json();
-        }).then(function(data) {
+        App.data.loadClaudeSubStatus().then(function(data) {
+          if (!data) return;
           if (data.subscription_type) {
             planEl.textContent = data.subscription_type.charAt(0).toUpperCase() + data.subscription_type.slice(1) + ' ' + I18n.t('settings.plan');
           }

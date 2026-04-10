@@ -123,12 +123,26 @@
     });
   }
 
+  // In-flight dedup only (no long-lived cache): three components can request
+  // this concurrently on page load — the header strip, the dashboard panel,
+  // and settings — but we want a single `claude --version` subprocess call.
+  function loadClaudeSubStatus() {
+    return dedupe('claudeSubStatus', async function() {
+      try {
+        var r = await authFetch('/api/admin/claude-subscription/status');
+        if (r && r.ok) return await r.json();
+      } catch (e) {}
+      return null;
+    });
+  }
+
   App.authFetch = authFetch;
   App.data = {
     loadModels: loadModels,
     loadStats: loadStats,
     loadPeers: loadPeers,
     loadProviders: loadProviders,
+    loadClaudeSubStatus: loadClaudeSubStatus,
     invalidateDedup: invalidateDedup,
     cache: cache,
   };
