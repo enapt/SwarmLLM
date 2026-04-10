@@ -550,14 +550,16 @@
         return;
       }
 
-      // Cloud provider expand/collapse toggle
+      // Cloud provider expand/collapse toggle — click on Browse button OR card header
       var cloudExpand = target.closest('[data-cloud-expand]');
-      if (cloudExpand) {
-        var cloudCard = cloudExpand.closest('.model-card.cloud-model');
+      var cloudHeader = !cloudExpand && target.closest('.cloud-card-header');
+      if (cloudExpand || cloudHeader) {
+        var cloudCard = (cloudExpand || cloudHeader).closest('.model-card.cloud-model');
         if (cloudCard) {
           cloudCard.classList.toggle('cloud-card-collapsed');
           var isCollapsed = cloudCard.classList.contains('cloud-card-collapsed');
-          cloudExpand.innerHTML = (isCollapsed ? '&#9662; ' : '&#9652; ') + App.utils.escapeHtml(I18n.t(isCollapsed ? 'dashboard.cloud_browse' : 'dashboard.cloud_collapse'));
+          var toggleEl = cloudCard.querySelector('[data-cloud-expand]');
+          if (toggleEl) toggleEl.innerHTML = (isCollapsed ? '&#9662; ' : '&#9652; ') + App.utils.escapeHtml(I18n.t(isCollapsed ? 'dashboard.cloud_browse' : 'dashboard.cloud_collapse'));
         }
         return;
       }

@@ -2035,6 +2035,10 @@ select.swarm-model-sort:focus { border-color: var(--accent); }
   background: linear-gradient(90deg, rgba(59,130,246,0.18) 0%, rgba(59,130,246,0.06) 60%, transparent 100%);
   border-bottom: 1px solid rgba(59,130,246,0.2);
   border-radius: var(--radius) var(--radius) 0 0;
+  cursor: pointer; user-select: none;
+}
+.cloud-card-header:hover {
+  background: linear-gradient(90deg, rgba(59,130,246,0.25) 0%, rgba(59,130,246,0.10) 60%, transparent 100%);
 }
 .cloud-provider-name { font-weight: 700; font-size: 0.95rem; display: inline-flex; align-items: center; gap: 7px; }
 .cloud-status-ok { color: var(--green); font-weight: 600; font-size: 0.78rem; margin-left: 8px; }
@@ -2067,6 +2071,9 @@ select.cloud-model-sort { flex: 0 0 88px; width: 88px; padding: 6px 6px; font-si
 .subscription-card-header {
   background: linear-gradient(135deg, rgba(217, 119, 87, 0.12) 0%, rgba(217, 119, 87, 0.04) 100%);
   border-bottom: 1px solid rgba(217, 119, 87, 0.2);
+}
+.subscription-card-header:hover {
+  background: linear-gradient(135deg, rgba(217, 119, 87, 0.20) 0%, rgba(217, 119, 87, 0.08) 100%);
 }
 .model-card.subscription-model-card {
   border-color: rgba(217, 119, 87, 0.25);
