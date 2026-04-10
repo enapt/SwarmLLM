@@ -249,4 +249,4 @@
 {"file":"src/inference/split/entry.rs","line":115,"kind":"duplication","summary":"touch() used inline SystemTime idiom — now calls Self::now_secs() (missed from sweep entry 92)","status":"fixed","date":"2026-04-09"}
 {"file":"frontend/js/components/claude-code.js","line":529,"kind":"hardcoded_english","summary":"Working... indicator now uses I18n.t('claude_code.working') — added key in all 21 langs","status":"fixed","date":"2026-04-09"}
 {"file":"frontend/js/components/claude-code.js","line":452,"kind":"hardcoded_english","summary":"tool group counter suffix ' tools' now uses I18n.t('claude_code.tools_label') — added key in all 21 langs","status":"fixed","date":"2026-04-09"}
-{"file":"src/api/pool.rs","line":733,"kind":"duplication","summary":"pool_add_pin and pool_remove_pin share 13-line owner-guard preamble; extraction requires non-trivial lifetime refactor, deferred for discussion","status":"deferred","date":"2026-04-09"}
+{"file":"src/api/pool.rs","line":733,"kind":"duplication","summary":"pool_add_pin and pool_remove_pin share 13-line owner-guard preamble; extracted into with_owned_pool helper taking FnOnce closure","status":"fixed","date":"2026-04-09"}
