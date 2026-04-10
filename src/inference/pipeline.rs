@@ -923,17 +923,7 @@ impl PipelineExecutor {
         };
 
         // Strip trailing partial stop strings (e.g. "<|user" when stop is "<|user|>").
-        // The token-by-token check above only catches complete matches, so a partial
-        // stop string at the very end of generation can leak into the output.
-        'stop_trim: for stop in &stop_strings {
-            for end_len in (1..stop.len()).rev() {
-                let prefix = &stop[..end_len];
-                if generated_text.ends_with(prefix) {
-                    generated_text.truncate(generated_text.len() - end_len);
-                    break 'stop_trim; // Only trim once — don't cascade across stop strings
-                }
-            }
-        }
+        crate::inference::trim_trailing_partial_stop(&mut generated_text, &stop_strings);
 
         // Batch credit write — one DB persist for the entire request instead of per-token.
         // Formula: rate * tokens (no layer multiplier — balanced with consume side).

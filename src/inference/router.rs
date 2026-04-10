@@ -1188,15 +1188,10 @@ async fn execute_local_batch(
                             }
                         }
                         // Strip trailing partial stop strings
-                        for stop in &local_stop_strings {
-                            for end_len in (1..stop.len()).rev() {
-                                let prefix = &stop[..end_len];
-                                if content.ends_with(prefix) {
-                                    content.truncate(content.len() - end_len);
-                                    break;
-                                }
-                            }
-                        }
+                        crate::inference::trim_trailing_partial_stop(
+                            &mut content,
+                            &local_stop_strings,
+                        );
                         Ok(InferenceOutput {
                             request_id: request.id,
                             content,
