@@ -94,21 +94,18 @@
     'system': 'activity-cat-model',
   };
 
+  function _pushEntry(entry, isNetwork) {
+    var list = isNetwork ? _networkEntries : _activityEntries;
+    list.unshift(entry);
+    if (list.length > MAX_ACTIVITY) list.pop();
+    if (isNetwork) { _persistNetwork(); _renderNetworkLog(); }
+    else { _persistActivity(); _renderActivityLog(); }
+  }
+
   function logActivity(icon, text, category, modelId) {
     var ts = Date.now();
     var entry = { icon: icon, text: text, ts: ts, category: category || '', modelId: modelId || '' };
-    // Route peer/network events to the Network panel
-    if (category === 'network') {
-      _networkEntries.unshift(entry);
-      if (_networkEntries.length > MAX_ACTIVITY) _networkEntries.pop();
-      _persistNetwork();
-      _renderNetworkLog();
-      return;
-    }
-    _activityEntries.unshift(entry);
-    if (_activityEntries.length > MAX_ACTIVITY) _activityEntries.pop();
-    _persistActivity();
-    _renderActivityLog();
+    _pushEntry(entry, category === 'network');
   }
 
   // Format activity event text — try i18n key, fall back to backend English message
@@ -143,17 +140,7 @@
 
     var entry = { icon: icon, text: text, ts: ts, category: category, modelId: modelId };
 
-    if (NETWORK_KINDS[data.kind]) {
-      _networkEntries.unshift(entry);
-      if (_networkEntries.length > MAX_ACTIVITY) _networkEntries.pop();
-      _persistNetwork();
-      _renderNetworkLog();
-    } else {
-      _activityEntries.unshift(entry);
-      if (_activityEntries.length > MAX_ACTIVITY) _activityEntries.pop();
-      _persistActivity();
-      _renderActivityLog();
-    }
+    _pushEntry(entry, !!NETWORK_KINDS[data.kind]);
 
     // --- Unified toast: backend controls when toasts appear via toast_level ---
     // Suppress toasts during WS reconnect history replay (first 2s after connect)

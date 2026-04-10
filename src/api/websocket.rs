@@ -17,6 +17,8 @@ const WS_PING_INTERVAL_SECS: u64 = 30;
 /// Maximum time since last pong before considering a connection dead.
 /// Must be > WS_PING_INTERVAL_SECS to allow one full ping cycle.
 const WS_PONG_TIMEOUT_SECS: u64 = 35;
+/// Maximum concurrent WebSocket connections (prevents resource exhaustion).
+const MAX_WS_CONNECTIONS: usize = 100;
 
 /// GET /api/admin/ws — WebSocket handler for real-time dashboard updates.
 ///
@@ -67,7 +69,6 @@ async fn handle_socket(socket: WebSocket, shared_state: Arc<SharedState>) {
     // Enforce a global WebSocket connection limit to prevent resource exhaustion.
     // Incrementing inside handle_socket (not before on_upgrade) prevents counter
     // leaks when the HTTP upgrade itself fails.
-    const MAX_WS_CONNECTIONS: usize = 100;
     let current = shared_state
         .metrics
         .ws_connection_count

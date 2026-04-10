@@ -90,28 +90,39 @@ fn decrypt_key(stored: &str, signing_key_bytes: &[u8; 32]) -> Result<String, Swa
     String::from_utf8(plaintext).map_err(|_| SwarmError::DecryptionFailed)
 }
 
+/// Apply a transformation to all provider entries in a ProvidersConfig.
+/// Used by encrypt_config and decrypt_config to avoid duplicating the field list.
+fn transform_config(
+    config: &ProvidersConfig,
+    entry_fn: fn(&mut Option<ProviderEntry>, &[u8; 32]) -> Result<(), SwarmError>,
+    key_fn: fn(&str, &[u8; 32]) -> Result<String, SwarmError>,
+    signing_key_bytes: &[u8; 32],
+) -> Result<ProvidersConfig, SwarmError> {
+    let mut out = config.clone();
+    entry_fn(&mut out.anthropic, signing_key_bytes)?;
+    entry_fn(&mut out.openai, signing_key_bytes)?;
+    entry_fn(&mut out.deepseek, signing_key_bytes)?;
+    entry_fn(&mut out.mistral, signing_key_bytes)?;
+    entry_fn(&mut out.groq, signing_key_bytes)?;
+    entry_fn(&mut out.nvidia_nim, signing_key_bytes)?;
+    entry_fn(&mut out.cerebras, signing_key_bytes)?;
+    entry_fn(&mut out.sambanova, signing_key_bytes)?;
+    entry_fn(&mut out.fireworks, signing_key_bytes)?;
+    entry_fn(&mut out.together, signing_key_bytes)?;
+    entry_fn(&mut out.deepinfra, signing_key_bytes)?;
+    entry_fn(&mut out.moonshot, signing_key_bytes)?;
+    for custom in &mut out.custom {
+        custom.api_key = key_fn(&custom.api_key, signing_key_bytes)?;
+    }
+    Ok(out)
+}
+
 /// Encrypt all API keys in a ProvidersConfig before persisting to database.
 pub fn encrypt_config(
     config: &ProvidersConfig,
     signing_key_bytes: &[u8; 32],
 ) -> Result<ProvidersConfig, SwarmError> {
-    let mut enc = config.clone();
-    encrypt_entry(&mut enc.anthropic, signing_key_bytes)?;
-    encrypt_entry(&mut enc.openai, signing_key_bytes)?;
-    encrypt_entry(&mut enc.deepseek, signing_key_bytes)?;
-    encrypt_entry(&mut enc.mistral, signing_key_bytes)?;
-    encrypt_entry(&mut enc.groq, signing_key_bytes)?;
-    encrypt_entry(&mut enc.nvidia_nim, signing_key_bytes)?;
-    encrypt_entry(&mut enc.cerebras, signing_key_bytes)?;
-    encrypt_entry(&mut enc.sambanova, signing_key_bytes)?;
-    encrypt_entry(&mut enc.fireworks, signing_key_bytes)?;
-    encrypt_entry(&mut enc.together, signing_key_bytes)?;
-    encrypt_entry(&mut enc.deepinfra, signing_key_bytes)?;
-    encrypt_entry(&mut enc.moonshot, signing_key_bytes)?;
-    for custom in &mut enc.custom {
-        custom.api_key = encrypt_key(&custom.api_key, signing_key_bytes)?;
-    }
-    Ok(enc)
+    transform_config(config, encrypt_entry, encrypt_key, signing_key_bytes)
 }
 
 /// Decrypt all API keys in a ProvidersConfig loaded from database.
@@ -119,23 +130,7 @@ pub fn decrypt_config(
     config: &ProvidersConfig,
     signing_key_bytes: &[u8; 32],
 ) -> Result<ProvidersConfig, SwarmError> {
-    let mut dec = config.clone();
-    decrypt_entry(&mut dec.anthropic, signing_key_bytes)?;
-    decrypt_entry(&mut dec.openai, signing_key_bytes)?;
-    decrypt_entry(&mut dec.deepseek, signing_key_bytes)?;
-    decrypt_entry(&mut dec.mistral, signing_key_bytes)?;
-    decrypt_entry(&mut dec.groq, signing_key_bytes)?;
-    decrypt_entry(&mut dec.nvidia_nim, signing_key_bytes)?;
-    decrypt_entry(&mut dec.cerebras, signing_key_bytes)?;
-    decrypt_entry(&mut dec.sambanova, signing_key_bytes)?;
-    decrypt_entry(&mut dec.fireworks, signing_key_bytes)?;
-    decrypt_entry(&mut dec.together, signing_key_bytes)?;
-    decrypt_entry(&mut dec.deepinfra, signing_key_bytes)?;
-    decrypt_entry(&mut dec.moonshot, signing_key_bytes)?;
-    for custom in &mut dec.custom {
-        custom.api_key = decrypt_key(&custom.api_key, signing_key_bytes)?;
-    }
-    Ok(dec)
+    transform_config(config, decrypt_entry, decrypt_key, signing_key_bytes)
 }
 
 fn encrypt_entry(

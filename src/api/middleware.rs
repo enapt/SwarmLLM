@@ -91,6 +91,8 @@ enum BucketKind {
 
 /// Requests per minute for sensitive key-management endpoints.
 const SENSITIVE_ADMIN_RPM: u64 = 5;
+/// Maximum rate-limiter buckets to prevent memory exhaustion from IP spoofing.
+const MAX_RATE_BUCKETS: usize = 50_000;
 
 /// Token-bucket rate limiter keyed by client IP address.
 ///
@@ -151,7 +153,6 @@ impl RateLimiter {
         // Check len() BEFORE entry() to avoid deadlock — DashMap::len() reads all
         // shards, but entry() holds a write lock on one shard. Calling len() while
         // holding an entry write lock deadlocks when len() tries to read the same shard.
-        const MAX_RATE_BUCKETS: usize = 50_000;
         if !self.buckets.contains_key(&key) && self.buckets.len() >= MAX_RATE_BUCKETS {
             tracing::warn!(
                 capacity = MAX_RATE_BUCKETS,

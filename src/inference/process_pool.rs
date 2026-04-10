@@ -17,6 +17,8 @@ use crate::inference::worker_ipc::*;
 use crate::types::{ModelId, SamplingParams};
 
 const WORKER_CONNECT_TIMEOUT_SECS: u64 = 30;
+/// Default KV-cache TTL in seconds (10 minutes). Overridden by config at startup.
+const DEFAULT_KV_CACHE_TTL_SECS: u64 = 600;
 
 /// A handle to a running model worker subprocess.
 struct WorkerHandle {
@@ -68,7 +70,7 @@ impl ModelProcessPool {
             data_dir,
             active_shard_windows: DashMap::new(),
             activity_tx: std::sync::OnceLock::new(),
-            kv_cache_ttl_secs: std::sync::atomic::AtomicU64::new(600),
+            kv_cache_ttl_secs: std::sync::atomic::AtomicU64::new(DEFAULT_KV_CACHE_TTL_SECS),
         }
     }
 

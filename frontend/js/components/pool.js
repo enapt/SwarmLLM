@@ -265,7 +265,7 @@
           // Show models hosted in a sub-line
           if (m.stats.models_hosted && m.stats.models_hosted.length > 0) {
             var modelsLine = document.createElement('div');
-            modelsLine.className = 'pool-member-models text-muted';
+            modelsLine.className = 'text-muted';
             modelsLine.style.cssText = 'font-size:0.78em;margin-top:2px;opacity:0.8;';
             modelsLine.textContent = I18n.t('pool.stats_models', { models: m.stats.models_hosted.join(', ') });
             statsEl.parentElement.insertBefore(modelsLine, statsEl.nextSibling);

@@ -91,7 +91,7 @@ function modelIconKey(modelId) {
   if (m.startsWith('deepseek')) return 'deepseek';
   if (m.startsWith('mistral') || m.startsWith('mixtral') || m.startsWith('codestral')) return 'mistral';
   if (m.startsWith('llama') || m.startsWith('meta-llama') || m.startsWith('tinyllama')) return 'llama';
-  if (m.startsWith('llava')) return 'llava';
+  if (m.startsWith('llava')) return 'llama';
   if (m.startsWith('gemma')) return 'gemma';
   if (m.startsWith('gemini')) return 'gemini';
   if (m.startsWith('qwen')) return 'qwen';
