@@ -89,22 +89,18 @@ pub async fn rescan_local_shards(
                 }
             }
 
-            // Register as holder — only count as new if not already registered
-            let was_holder = shared
-                .model_registry
-                .shard_holders(&shard_id)
-                .contains(&local_node_id);
+            // Register as holder. The early-continue above already ensured we're
+            // not yet a holder, and nothing between there and here mutates the
+            // registry, so every record here is a genuinely new shard.
             shared
                 .model_registry
                 .record_shard_holder(shard_id, local_node_id.clone());
-            if !was_holder {
-                new_shards += 1;
-                tracing::info!(
-                    model = %model_id_str,
-                    shard = shard_info.index,
-                    "Rescan: discovered new local shard"
-                );
-            }
+            new_shards += 1;
+            tracing::info!(
+                model = %model_id_str,
+                shard = shard_info.index,
+                "Rescan: discovered new local shard"
+            );
         }
 
         if new_shards > 0 {
