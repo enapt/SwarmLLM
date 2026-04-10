@@ -180,6 +180,22 @@ pub fn validate_nickname(nickname: &str) -> Result<(), SwarmError> {
     Ok(())
 }
 
+/// Short human-readable label for a peer in activity messages: nickname if
+/// known, otherwise the first 16 hex characters of the node_id (matching the
+/// CLAUDE.md "first 8 bytes hex-encoded" canonical short form).
+///
+/// Unlike `display_name`, this does NOT do collision detection — it's intended
+/// for activity log messages where compactness matters more than uniqueness.
+pub fn short_display_name(
+    node_id: &NodeId,
+    registry: &dashmap::DashMap<NodeId, NicknameRecord>,
+) -> String {
+    registry
+        .get(node_id)
+        .map(|r| r.nickname.clone())
+        .unwrap_or_else(|| format!("{node_id}").chars().take(16).collect())
+}
+
 /// Resolve a node's display name. If the nickname collides with another node,
 /// append `#ab12` (first 4 hex chars of node_id) as a disambiguator.
 pub fn display_name(

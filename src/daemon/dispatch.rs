@@ -600,9 +600,10 @@ pub(crate) async fn dispatch_network_messages(
                                             *models_announced.entry(shard_id.model_id.0.clone()).or_insert(0) += 1;
                                         }
                                         // Emit activity for each model announced
-                                        let peer_label = shared_state.nickname_registry.get(&announce.node_id)
-                                            .map(|r| r.nickname.clone())
-                                            .unwrap_or_else(|| format!("{}", announce.node_id).chars().take(8).collect());
+                                        let peer_label = crate::identity::nickname::short_display_name(
+                                            &announce.node_id,
+                                            &shared_state.nickname_registry,
+                                        );
                                         for (mid, count) in &models_announced {
                                             let mname = shared_state.model_registry
                                                 .get_manifest(&crate::types::ModelId(mid.clone()))

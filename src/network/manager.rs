@@ -1312,13 +1312,10 @@ impl NetworkManager {
 
         // Emit activity event for peer connection
         {
-            let nick = self
-                .shared_state
-                .nickname_registry
-                .get(&node_id)
-                .map(|r| r.nickname.clone());
-            let node_id_str = format!("{}", node_id);
-            let label = nick.as_deref().unwrap_or(&node_id_str[..16]);
+            let label = crate::identity::nickname::short_display_name(
+                &node_id,
+                &self.shared_state.nickname_registry,
+            );
             let gpu_name = self.shared_state.peer_registry.get(&node_id).and_then(|p| {
                 p.capability
                     .as_ref()
@@ -1338,7 +1335,7 @@ impl NetworkManager {
                             .unwrap_or_default()
                     ),
                 )
-                .with_node(node_id_str)
+                .with_node(format!("{}", node_id))
                 .with_detail_str(detail.to_string()),
             );
         }
@@ -1593,15 +1590,10 @@ impl NetworkManager {
 
                 if !in_active_pipeline {
                     // Capture info before removing
-                    let nick = self
-                        .shared_state
-                        .nickname_registry
-                        .get(&node_id)
-                        .map(|r| r.nickname.clone());
-                    let label = nick
-                        .as_deref()
-                        .unwrap_or(&format!("{}", node_id)[..16])
-                        .to_string();
+                    let label = crate::identity::nickname::short_display_name(
+                        &node_id,
+                        &self.shared_state.nickname_registry,
+                    );
 
                     // Remove peer_to_node BEFORE peer_registry to prevent
                     // dispatch from resolving NodeId for a peer that's being removed
