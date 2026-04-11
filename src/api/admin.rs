@@ -2,6 +2,12 @@ use axum::extract::State;
 use axum::Json;
 use serde::Deserialize;
 
+/// Timeout for considering a peer "healthy" — peers not seen within this window
+/// are marked as unhealthy in the admin dashboard.
+const PEER_HEALTHY_TIMEOUT_SECS: i64 = 90;
+/// Maximum length of an invite code string accepted by the join-network endpoint.
+const MAX_INVITE_CODE_LEN: usize = 4096;
+
 /// Serialize a peer registry entry to JSON. Used by both REST and WebSocket.
 ///
 /// When `include_addresses` is true, includes `addresses` and `last_seen` fields
@@ -11,7 +17,6 @@ pub fn serialize_peer_to_json(
     state: &crate::daemon::state::SharedState,
     include_addresses: bool,
 ) -> serde_json::Value {
-    const PEER_HEALTHY_TIMEOUT_SECS: i64 = 90;
     let timeout = chrono::Duration::seconds(PEER_HEALTHY_TIMEOUT_SECS);
     let now = chrono::Utc::now();
     let healthy = now.signed_duration_since(peer.last_seen) < timeout;
@@ -722,7 +727,6 @@ pub async fn join_network(
     State(state): State<AppState>,
     Json(body): Json<JoinNetworkRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    const MAX_INVITE_CODE_LEN: usize = 4096;
     if body.code.len() > MAX_INVITE_CODE_LEN {
         return Err(ApiError(crate::error::SwarmError::Validation(format!(
             "Invite code too long (max {} chars)",

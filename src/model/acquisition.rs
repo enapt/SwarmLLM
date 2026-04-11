@@ -92,6 +92,17 @@ pub struct ShardProgress {
     pub state: ShardState,
 }
 
+impl ShardProgress {
+    pub fn new_downloading(index: u32, total_bytes: u64) -> Self {
+        Self {
+            index,
+            total_bytes,
+            downloaded_bytes: 0,
+            state: ShardState::Downloading,
+        }
+    }
+}
+
 /// Compute download progress as a 0–100 percentage (truncated).
 pub fn shard_pct(downloaded_bytes: u64, total_bytes: u64) -> u32 {
     if total_bytes > 0 {

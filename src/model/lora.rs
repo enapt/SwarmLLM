@@ -26,8 +26,6 @@ pub struct LoraAdapter {
     /// Per-layer LoRA weights, keyed by the base weight name they modify.
     /// e.g., "blk.0.attn_q" → LoraLayerWeights { a, b }
     pub weights: HashMap<String, LoraLayerWeights>,
-    /// Device the tensors are loaded on.
-    pub device: Device,
 }
 
 /// Metadata for a registered adapter.
@@ -219,7 +217,6 @@ fn load_adapter(
             size_bytes: file_size,
         },
         weights,
-        device: device.clone(),
     })
 }
 

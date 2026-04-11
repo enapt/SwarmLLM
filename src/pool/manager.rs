@@ -24,6 +24,8 @@ const AUTO_ACCEPT_TIMEOUT_SECS: u64 = 300;
 
 /// Maximum pending invitations (outbound + inbound blinded) before rejecting new ones.
 const MAX_PENDING_INVITATIONS: usize = 50;
+/// Maximum active invite codes before refusing to generate more.
+const MAX_ACTIVE_CODES: usize = 5;
 
 /// The PoolManager is the 9th subsystem task.
 /// It owns all pool state, persists to redb, and handles pool commands.
@@ -1460,8 +1462,6 @@ impl PoolManager {
         self.invite_codes
             .retain(|_, v| !v.is_expired() && !v.consumed);
 
-        // Limit active codes to prevent abuse (max 5 active at once)
-        const MAX_ACTIVE_CODES: usize = 5;
         if self.invite_codes.len() >= MAX_ACTIVE_CODES {
             return Err(SwarmError::Validation(format!(
                 "Too many active invite codes ({MAX_ACTIVE_CODES}). Wait for existing codes to expire."

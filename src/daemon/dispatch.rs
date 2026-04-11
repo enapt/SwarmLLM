@@ -117,13 +117,7 @@ pub fn estimate_vram_from_shard_dir(
     ((total_bytes as f64 * layer_fraction) / (1024.0 * 1024.0)) as u64
 }
 
-fn track_forward_participation(
-    shared_state: &SharedState,
-    _layer_start: usize,
-    _layer_end: usize,
-    _max_layers: usize,
-    estimated_tokens: u32,
-) {
+fn track_forward_participation(shared_state: &SharedState, estimated_tokens: u32) {
     if let Ok(mut stats) = shared_state.metrics.node_stats.try_write() {
         stats.forwards_served += 1;
     }
@@ -1572,23 +1566,11 @@ async fn handle_layer_forward(
             tracing::warn!(error = %e, "Failed to send TpAllReduceRequest");
         }
 
-        track_forward_participation(
-            &shared_state,
-            layer_start,
-            layer_end,
-            total_layers,
-            estimated_tokens,
-        );
+        track_forward_participation(&shared_state, estimated_tokens);
         return;
     }
 
-    track_forward_participation(
-        &shared_state,
-        layer_start,
-        layer_end,
-        total_layers,
-        estimated_tokens,
-    );
+    track_forward_participation(&shared_state, estimated_tokens);
 
     // Pipeline sealing: encrypt token IDs for requester if this is the final segment
     let mut result = result;

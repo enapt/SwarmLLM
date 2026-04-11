@@ -8,7 +8,6 @@ use crate::types::ModelId;
 /// acceptance rate.
 #[derive(Debug, Clone)]
 pub struct SpeculativeDraftState {
-    pub session_id: uuid::Uuid,
     pub draft_model_id: ModelId,
     pub verify_model_id: ModelId,
     pub draft_tokens: Vec<u32>,
@@ -21,7 +20,6 @@ pub struct SpeculativeDraftState {
 impl SpeculativeDraftState {
     pub fn new(draft_model_id: ModelId, verify_model_id: ModelId, gamma: u32) -> Self {
         Self {
-            session_id: uuid::Uuid::new_v4(),
             draft_model_id,
             verify_model_id,
             draft_tokens: Vec::new(),

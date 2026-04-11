@@ -763,12 +763,7 @@ pub async fn hf_download_shards(
     for &idx in &shard_indices {
         initial_shard_progress.insert(
             idx,
-            crate::model::acquisition::ShardProgress {
-                index: idx,
-                total_bytes: 0,
-                downloaded_bytes: 0,
-                state: crate::model::acquisition::ShardState::Downloading,
-            },
+            crate::model::acquisition::ShardProgress::new_downloading(idx, 0),
         );
     }
     let mut status = crate::model::acquisition::AcquisitionStatus::new_downloading(
@@ -844,12 +839,7 @@ pub async fn hf_download_shards(
                 ));
                 entry.shard_progress.insert(
                     seed_shard,
-                    crate::model::acquisition::ShardProgress {
-                        index: seed_shard,
-                        total_bytes: 0,
-                        downloaded_bytes: 0,
-                        state: crate::model::acquisition::ShardState::Downloading,
-                    },
+                    crate::model::acquisition::ShardProgress::new_downloading(seed_shard, 0),
                 );
             }
             assigned

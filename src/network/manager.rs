@@ -46,6 +46,14 @@ const PEX_PING_STALENESS_SECS: u64 = 30;
 const PEX_WINDOW: std::time::Duration = std::time::Duration::from_secs(60);
 /// Maximum inbound PEX requests allowed per window before dropping.
 const PEX_MAX_PER_WINDOW: usize = 50;
+/// Maximum pending tensor channels before rejecting new ones (memory exhaustion guard).
+const MAX_PENDING_TENSOR_CHANNELS: usize = 256;
+/// Maximum pending provider model-list queries before pruning oldest.
+const MAX_PENDING_PROVIDER_QUERIES: usize = 500;
+/// Maximum queued redial attempts for recently-disconnected peers.
+const MAX_PENDING_REDIAL: usize = 50;
+/// Maximum buffered gossip messages when no peers are connected at startup.
+const MAX_BUFFERED_GOSSIP: usize = 64;
 
 /// Check if a multiaddr string contains a private/loopback/link-local/CGN IP.
 /// Used for PEX filtering to prevent leaking internal topology.
@@ -572,8 +580,8 @@ impl NetworkManager {
                             }
                         }
                         // Cap queue to prevent unbounded growth
-                        if self.pending_redial.len() > 50 {
-                            self.pending_redial.truncate(50);
+                        if self.pending_redial.len() > MAX_PENDING_REDIAL {
+                            self.pending_redial.truncate(MAX_PENDING_REDIAL);
                         }
                     }
                 }
@@ -1641,7 +1649,7 @@ impl NetworkManager {
                         .pending_redial
                         .iter()
                         .any(|(pid, _, _)| *pid == peer_id);
-                    if !already_queued && self.pending_redial.len() < 50 {
+                    if !already_queued && self.pending_redial.len() < MAX_PENDING_REDIAL {
                         use std::hash::{Hash, Hasher};
                         let mut hasher = std::collections::hash_map::DefaultHasher::new();
                         peer_id.hash(&mut hasher);
@@ -1891,8 +1899,6 @@ impl NetworkManager {
                 if let Some(request_id) = self.handle_tensor_payload(peer, &payload) {
                     // Store the ResponseChannel so we can send the computed result as
                     // the actual response (single substream per token, no separate request).
-                    // SEC: Cap to prevent memory exhaustion from request flooding.
-                    const MAX_PENDING_TENSOR_CHANNELS: usize = 256;
                     if self.pending_tensor_channels.len() >= MAX_PENDING_TENSOR_CHANNELS {
                         tracing::warn!(%peer, "pending_tensor_channels full — rejecting with ACK");
                         // Send ACK to avoid leaving requester hung, then skip storing
@@ -2612,11 +2618,15 @@ mname.as_deref().unwrap_or(&shard_id.model_id.0),
                     Ok(_) => tracing::debug!(topic, "Published message to GossipSub"),
                     Err(e) => {
                         // NET-I4: Buffer messages that fail at startup (no peers), capped to prevent memory leak
-                        if self.buffered_gossip.len() < 64 {
+                        if self.buffered_gossip.len() < MAX_BUFFERED_GOSSIP {
                             tracing::debug!(topic, error = %e, "Failed to publish to GossipSub, buffering");
                             self.buffered_gossip.push((topic.to_string(), publish_data));
                         } else {
-                            tracing::warn!(topic, "Gossip buffer full (64), dropping message");
+                            tracing::warn!(
+                                topic,
+                                cap = MAX_BUFFERED_GOSSIP,
+                                "Gossip buffer full, dropping message"
+                            );
                         }
                     }
                 }
@@ -3394,9 +3404,8 @@ mname.as_deref().unwrap_or(&shard_id.model_id.0),
         }
 
         // Cap pending queries to prevent unbounded growth
-        if self.pending_provider_queries.len() > 500 {
-            // Drain oldest entries (HashMap iteration order is arbitrary, which is fine)
-            let excess = self.pending_provider_queries.len() - 500;
+        if self.pending_provider_queries.len() > MAX_PENDING_PROVIDER_QUERIES {
+            let excess = self.pending_provider_queries.len() - MAX_PENDING_PROVIDER_QUERIES;
             let keys: Vec<_> = self
                 .pending_provider_queries
                 .keys()

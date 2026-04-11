@@ -19,7 +19,6 @@ struct TensorMapEntry {
 
 /// Metadata for one shard file.
 struct ShardFile {
-    _index: u32,
     path: PathBuf,
     file_len: u64,
 }
@@ -78,10 +77,9 @@ impl ShardReader {
         let mut shards = Vec::with_capacity(shard_files.len());
         let mut tensor_map = Vec::new();
 
-        for (i, (idx, path)) in shard_files.iter().enumerate() {
+        for (i, (_idx, path)) in shard_files.iter().enumerate() {
             let file_len = std::fs::metadata(path).map_err(SwarmError::Io)?.len();
             shards.push(ShardFile {
-                _index: *idx,
                 path: path.clone(),
                 file_len,
             });

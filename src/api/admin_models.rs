@@ -1407,12 +1407,7 @@ pub async fn download_shard(
             let mut shard_progress = std::collections::HashMap::new();
             shard_progress.insert(
                 shard_index,
-                crate::model::acquisition::ShardProgress {
-                    index: shard_index,
-                    total_bytes: shard_size,
-                    downloaded_bytes: 0,
-                    state: crate::model::acquisition::ShardState::Downloading,
-                },
+                crate::model::acquisition::ShardProgress::new_downloading(shard_index, shard_size),
             );
             let mut dl_status = crate::model::acquisition::AcquisitionStatus::new_downloading(
                 mid.clone(),

@@ -146,12 +146,10 @@ impl AutoShardManager {
                 let mut shard_progress = std::collections::HashMap::new();
                 shard_progress.insert(
                     candidate.shard_index,
-                    crate::model::acquisition::ShardProgress {
-                        index: candidate.shard_index,
-                        total_bytes: candidate.shard_size_bytes,
-                        downloaded_bytes: 0,
-                        state: crate::model::acquisition::ShardState::Downloading,
-                    },
+                    crate::model::acquisition::ShardProgress::new_downloading(
+                        candidate.shard_index,
+                        candidate.shard_size_bytes,
+                    ),
                 );
                 // Merge with existing progress entry rather than overwriting.
                 // Multiple shards of the same model may be downloading concurrently
@@ -169,11 +167,11 @@ impl AutoShardManager {
                     entry
                         .shard_progress
                         .entry(candidate.shard_index)
-                        .or_insert_with(|| crate::model::acquisition::ShardProgress {
-                            index: candidate.shard_index,
-                            total_bytes: candidate.shard_size_bytes,
-                            downloaded_bytes: 0,
-                            state: crate::model::acquisition::ShardState::Downloading,
+                        .or_insert_with(|| {
+                            crate::model::acquisition::ShardProgress::new_downloading(
+                                candidate.shard_index,
+                                candidate.shard_size_bytes,
+                            )
                         });
                     entry.log_push(format!(
                         "Auto-manage: downloading shard {} (score: {:.1})",
@@ -652,11 +650,11 @@ e
                         entry
                             .shard_progress
                             .entry(candidate.shard_index)
-                            .or_insert_with(|| crate::model::acquisition::ShardProgress {
-                                index: candidate.shard_index,
-                                total_bytes: shard_bytes,
-                                downloaded_bytes: 0,
-                                state: crate::model::acquisition::ShardState::Downloading,
+                            .or_insert_with(|| {
+                                crate::model::acquisition::ShardProgress::new_downloading(
+                                    candidate.shard_index,
+                                    shard_bytes,
+                                )
                             });
                         entry.log_push(format!(
                             "P2P: downloading shard {} from peer",
@@ -666,12 +664,10 @@ e
                         let mut shard_progress = std::collections::HashMap::new();
                         shard_progress.insert(
                             candidate.shard_index,
-                            crate::model::acquisition::ShardProgress {
-                                index: candidate.shard_index,
-                                total_bytes: shard_bytes,
-                                downloaded_bytes: 0,
-                                state: crate::model::acquisition::ShardState::Downloading,
-                            },
+                            crate::model::acquisition::ShardProgress::new_downloading(
+                                candidate.shard_index,
+                                shard_bytes,
+                            ),
                         );
                         let mut p2p_status =
                             crate::model::acquisition::AcquisitionStatus::new_downloading(
