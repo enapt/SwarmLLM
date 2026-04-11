@@ -320,9 +320,9 @@
       // Subscription/API badge for the model
       var authBadge = '';
       if (headerModelItem && headerModelItem.group === 'claude_subscription') {
-        authBadge = ' <span class="cc-auth-badge cc-auth-sub" title="' + U.escapeHtml(I18n.t('claude_code.subscription_tip')) + '">Sub</span>';
+        authBadge = ' <span class="cc-auth-badge cc-auth-sub" title="' + U.escapeHtml(I18n.t('claude_code.subscription_tip')) + '">' + U.escapeHtml(I18n.t('mode.subscription')) + '</span>';
       } else if (headerSource === 'cloud') {
-        authBadge = ' <span class="cc-auth-badge cc-auth-api">API</span>';
+        authBadge = ' <span class="cc-auth-badge cc-auth-api">' + U.escapeHtml(I18n.t('mode.api')) + '</span>';
       }
 
       // Token counter for the session

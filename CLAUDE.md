@@ -64,7 +64,7 @@ swarmllm/
 │   ├── api/       (server, openai, anthropic, mcp, admin, admin_hf, admin_models, admin_providers, websocket, middleware, identity, pool, metrics, providers, claude_sub*)
 │   ├── storage/   (db)
 │   └── health/    (monitor, rebalancer)
-├── frontend/      (index.html + 13 HTML templates, css/, js/{core/3,components/14,init.js,i18n.js,providers.js,neural-bg.js,topojson-client.min.js}, i18n/)
+├── frontend/      (index.html + 12 HTML templates, css/, js/{core/3,components/14,init.js,i18n.js,providers.js,neural-bg.js,topojson-client.min.js}, i18n/)
 ├── python/        (swarmllm-client SDK)
 ├── monitoring/    (Grafana + Prometheus + docker-compose)
 ├── docs/book/     (mdBook documentation site)
@@ -118,7 +118,7 @@ libp2p 0.55 (pin to 0.55.x), axum 0.7, candle-core/candle-transformers (CUDA), e
   - `js/components/` — ui.js, chat.js, claude-code.js, dashboard.js, models.js, shard-menu.js, settings.js, setup.js, downloads.js, notifications.js, identity.js, network-map.js, compare.js, pool.js
   - `js/init.js` — event binding, initialization, public API export
   - `js/i18n.js`, `js/providers.js`, `js/neural-bg.js`, `js/topojson-client.min.js` — standalone utilities (loaded before App)
-- 13 HTML `<template>` elements for repeating UI structures (session items, chat messages, toasts, model cards, etc.)
+- 12 HTML `<template>` elements for repeating UI structures (session items, chat messages, toasts, model cards, etc.)
 - All storage keys registered as named constants on `App` (e.g., `App.SESSIONS_KEY`, `App.MODEL_SORT_KEY`)
 - Dark/light/system theme toggle, CSS custom properties for theming
 - i18n: 1006 keys across 21 languages via `frontend/i18n/{lang}.json`, `I18n.t()` + `data-i18n` attributes

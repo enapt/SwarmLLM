@@ -9,7 +9,7 @@ const TREE_TRUST_SCORES: &str = "trust_scores";
 /// Default trust score for newly discovered peers.
 pub const DEFAULT_TRUST: f32 = 0.5;
 
-/// Trust score adjustments for various events.
+/// Trust score adjustments for various events (pub for integration tests).
 pub const TRUST_INFERENCE_SUCCESS: f32 = 0.01;
 pub const TRUST_SPOT_CHECK_FAIL: f32 = -0.1;
 const TRUST_INVALID_GOSSIP: f32 = -0.05;
