@@ -175,6 +175,22 @@ impl ClaudeSession {
                         tracing::trace!("Skipping non-JSON line from CLI stdout");
                         continue;
                     }
+                    // If mid-parse and a non-JSON line arrives, it would corrupt
+                    // the buffer (e.g., [SandboxDebug] interleaved with JSON).
+                    // Discard the partial buffer and skip the offending line.
+                    if !json_buffer.is_empty()
+                        && !trimmed.starts_with('{')
+                        && !trimmed.starts_with('"')
+                        && !trimmed.starts_with('[')
+                        && !trimmed.starts_with('}')
+                    {
+                        tracing::warn!(
+                            buffer_len = json_buffer.len(),
+                            "Non-JSON line interleaved mid-parse, discarding partial buffer"
+                        );
+                        json_buffer.clear();
+                        continue;
+                    }
                     json_buffer.push_str(trimmed);
                     if json_buffer.len() > MAX_JSON_BUFFER {
                         tracing::warn!(
@@ -191,6 +207,17 @@ impl ClaudeSession {
                             return Some(val);
                         }
                         Err(_) => {
+                            // If the buffer started as a valid JSON beginning but
+                            // this line looks like a fresh JSON object, the previous
+                            // buffer was likely a truncated event. Start fresh.
+                            if trimmed.starts_with('{') && json_buffer.len() > trimmed.len() {
+                                if let Ok(val) = serde_json::from_str::<serde_json::Value>(trimmed)
+                                {
+                                    json_buffer.clear();
+                                    self.touch();
+                                    return Some(val);
+                                }
+                            }
                             // Speculatively accumulate — may be partial JSON
                             continue;
                         }

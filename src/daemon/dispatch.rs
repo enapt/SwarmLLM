@@ -16,6 +16,8 @@ const MAX_CONCURRENT_FORWARDS: usize = 64;
 /// while still preventing a single peer from consuming all semaphore permits.
 const MAX_FORWARDS_PER_PEER: usize = 32;
 const MAX_NICKNAME_REGISTRY: usize = 10_000;
+/// Interval for sweeping stale zero-count entries from peer_forward_counts.
+const FORWARD_COUNTS_CLEANUP_SECS: u64 = 60;
 /// Zstd compression level for tensor wire payloads.
 const ZSTD_COMPRESS_LEVEL: i32 = 3;
 /// Maximum age (ms) for regional gossip messages before they're considered stale.
@@ -153,12 +155,19 @@ pub(crate) async fn dispatch_network_messages(
     let peer_forward_counts: Arc<
         dashmap::DashMap<crate::types::NodeId, std::sync::atomic::AtomicUsize>,
     > = Arc::new(dashmap::DashMap::new());
+    let mut cleanup_interval =
+        tokio::time::interval(std::time::Duration::from_secs(FORWARD_COUNTS_CLEANUP_SECS));
+    cleanup_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         tokio::select! {
                     _ = shutdown_rx.changed() => {
                         if *shutdown_rx.borrow() {
                             break;
                         }
+                    }
+                    _ = cleanup_interval.tick() => {
+                        // Sweep stale zero-count entries from transient peers
+                        peer_forward_counts.retain(|_, v| v.load(std::sync::atomic::Ordering::Relaxed) > 0);
                     }
                     authed_msg = network_out_rx.recv() => {
                         match authed_msg {
