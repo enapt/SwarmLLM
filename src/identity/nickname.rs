@@ -8,9 +8,9 @@ pub use crate::types::NicknameRecord;
 use crate::types::NodeId;
 
 /// redb tree key for nickname records.
-pub const TREE_NICKNAMES: &str = "nicknames";
+const TREE_NICKNAMES: &str = "nicknames";
 /// redb tree key for local identity preferences.
-pub const TREE_IDENTITY_PREFS: &str = "identity_prefs";
+const TREE_IDENTITY_PREFS: &str = "identity_prefs";
 
 /// Extension methods for NicknameRecord (defined in swarmllm-types crate).
 pub trait NicknameRecordExt {

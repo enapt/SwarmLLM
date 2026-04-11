@@ -945,6 +945,8 @@
   "claude_code.expand": "Rozbalit",
   "claude_code.output_title": "Výstup",
   "claude_code.state_suspended": "pozastaveno",
+  "claude_code.tool_unknown": "Neznámý",
+  "claude_code.tool_fallback": "Nástroj",
   "claude_code.initializing": "Spouštění relace Claude Code…",
   "claude_code.subscription_tip": "Používá se předplatné Claude (žádné náklady na API)",
   "nav.copied": "Zkopírováno!",

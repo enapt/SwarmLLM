@@ -945,6 +945,8 @@
   "claude_code.expand": "Espandi",
   "claude_code.output_title": "Output",
   "claude_code.state_suspended": "sospeso",
+  "claude_code.tool_unknown": "Sconosciuto",
+  "claude_code.tool_fallback": "Strumento",
   "claude_code.initializing": "Avvio sessione Claude Code…",
   "claude_code.subscription_tip": "Utilizzo dell'abbonamento Claude (nessun costo API)",
   "nav.copied": "Copiato!",

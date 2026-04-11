@@ -85,17 +85,21 @@ pub async fn try_get_claude_subscription(
 // Concurrency limiter (global semaphore)
 // ---------------------------------------------------------------------------
 
-/// Default concurrency limit. Overridden at runtime by config, but the
-/// semaphore is sized generously — actual limiting is via `try_acquire`.
-static SUBPROCESS_SEMAPHORE: LazyLock<Semaphore> = LazyLock::new(|| Semaphore::new(8));
+/// Maximum concurrent Claude subprocess sessions.
+const SUBPROCESS_SEMAPHORE_CAPACITY: usize = 8;
+/// Concurrency limiter for Claude subprocess sessions.
+static SUBPROCESS_SEMAPHORE: LazyLock<Semaphore> =
+    LazyLock::new(|| Semaphore::new(SUBPROCESS_SEMAPHORE_CAPACITY));
 
 fn acquire_permit(
     config: &ClaudeSubscriptionConfig,
 ) -> Result<tokio::sync::SemaphorePermit<'static>, ApiError> {
-    let limit = config.concurrency_limit();
+    let limit = config
+        .concurrency_limit()
+        .min(SUBPROCESS_SEMAPHORE_CAPACITY);
     // Enforce configured limit by checking available permits.
     let available = SUBPROCESS_SEMAPHORE.available_permits();
-    if available <= 8usize.saturating_sub(limit) {
+    if available <= SUBPROCESS_SEMAPHORE_CAPACITY.saturating_sub(limit) {
         return Err(ApiError(crate::error::SwarmError::ServiceUnavailable(
             "Claude subscription: too many concurrent requests, try again later".into(),
         )));

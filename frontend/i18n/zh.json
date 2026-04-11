@@ -945,6 +945,8 @@
   "claude_code.expand": "展开",
   "claude_code.output_title": "输出",
   "claude_code.state_suspended": "已暂停",
+  "claude_code.tool_unknown": "未知",
+  "claude_code.tool_fallback": "工具",
   "claude_code.initializing": "正在启动 Claude Code 会话…",
   "claude_code.subscription_tip": "使用 Claude 订阅(无 API 费用)",
   "nav.copied": "已复制!",

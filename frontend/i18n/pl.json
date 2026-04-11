@@ -945,6 +945,8 @@
   "claude_code.expand": "Rozwiń",
   "claude_code.output_title": "Dane wyjściowe",
   "claude_code.state_suspended": "wstrzymano",
+  "claude_code.tool_unknown": "Nieznany",
+  "claude_code.tool_fallback": "Narzędzie",
   "claude_code.initializing": "Uruchamianie sesji Claude Code…",
   "claude_code.subscription_tip": "Używana subskrypcja Claude (bez kosztów API)",
   "nav.copied": "Skopiowano!",

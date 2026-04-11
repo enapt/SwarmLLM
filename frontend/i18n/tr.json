@@ -945,6 +945,8 @@
   "claude_code.expand": "Genişlet",
   "claude_code.output_title": "Çıktı",
   "claude_code.state_suspended": "askıya alındı",
+  "claude_code.tool_unknown": "Bilinmeyen",
+  "claude_code.tool_fallback": "Araç",
   "claude_code.initializing": "Claude Code oturumu başlatılıyor…",
   "claude_code.subscription_tip": "Claude aboneliği kullanılıyor (API ücreti yok)",
   "nav.copied": "Kopyalandı!",

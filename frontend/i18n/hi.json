@@ -945,6 +945,8 @@
   "claude_code.expand": "विस्तृत करें",
   "claude_code.output_title": "आउटपुट",
   "claude_code.state_suspended": "निलंबित",
+  "claude_code.tool_unknown": "अज्ञात",
+  "claude_code.tool_fallback": "उपकरण",
   "claude_code.initializing": "Claude Code सत्र शुरू हो रहा है…",
   "claude_code.subscription_tip": "Claude सदस्यता का उपयोग (कोई API लागत नहीं)",
   "nav.copied": "कॉपी हो गया!",

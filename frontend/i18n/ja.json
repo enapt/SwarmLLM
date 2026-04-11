@@ -945,6 +945,8 @@
   "claude_code.expand": "展開",
   "claude_code.output_title": "出力",
   "claude_code.state_suspended": "一時停止",
+  "claude_code.tool_unknown": "不明",
+  "claude_code.tool_fallback": "ツール",
   "claude_code.initializing": "Claude Code セッションを開始中…",
   "claude_code.subscription_tip": "Claude サブスクリプションを使用(API 料金なし)",
   "nav.copied": "コピーしました!",

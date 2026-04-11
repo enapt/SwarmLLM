@@ -945,6 +945,8 @@
   "claude_code.expand": "Розгорнути",
   "claude_code.output_title": "Вивід",
   "claude_code.state_suspended": "призупинено",
+  "claude_code.tool_unknown": "Невідомо",
+  "claude_code.tool_fallback": "Інструмент",
   "claude_code.initializing": "Запуск сеансу Claude Code…",
   "claude_code.subscription_tip": "Використовується передплата Claude (без витрат на API)",
   "nav.copied": "Скопійовано!",

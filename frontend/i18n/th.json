@@ -945,6 +945,8 @@
   "claude_code.expand": "ขยาย",
   "claude_code.output_title": "ผลลัพธ์",
   "claude_code.state_suspended": "ถูกระงับ",
+  "claude_code.tool_unknown": "ไม่ทราบ",
+  "claude_code.tool_fallback": "เครื่องมือ",
   "claude_code.initializing": "กำลังเริ่มเซสชัน Claude Code…",
   "claude_code.subscription_tip": "ใช้การสมัครสมาชิก Claude (ไม่มีค่าใช้จ่าย API)",
   "nav.copied": "คัดลอกแล้ว!",

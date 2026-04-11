@@ -780,6 +780,8 @@
   "claude_code.expand": "Expand",
   "claude_code.output_title": "Output",
   "claude_code.state_suspended": "suspended",
+  "claude_code.tool_unknown": "Unknown",
+  "claude_code.tool_fallback": "Tool",
   "settings.test_btn": "Test",
   "settings.get_key": "Get key →",
   "settings.advanced": "Advanced Settings",

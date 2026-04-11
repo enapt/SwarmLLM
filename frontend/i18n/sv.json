@@ -945,6 +945,8 @@
   "claude_code.expand": "Expandera",
   "claude_code.output_title": "Utdata",
   "claude_code.state_suspended": "pausad",
+  "claude_code.tool_unknown": "Okänd",
+  "claude_code.tool_fallback": "Verktyg",
   "claude_code.initializing": "Startar Claude Code-session…",
   "claude_code.subscription_tip": "Använder Claude-prenumeration (inga API-kostnader)",
   "nav.copied": "Kopierat!",

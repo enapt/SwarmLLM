@@ -945,6 +945,8 @@
   "claude_code.expand": "Mở rộng",
   "claude_code.output_title": "Đầu ra",
   "claude_code.state_suspended": "tạm dừng",
+  "claude_code.tool_unknown": "Không xác định",
+  "claude_code.tool_fallback": "Công cụ",
   "claude_code.initializing": "Đang khởi động phiên Claude Code…",
   "claude_code.subscription_tip": "Đang dùng gói đăng ký Claude (không tốn phí API)",
   "nav.copied": "Đã sao chép!",

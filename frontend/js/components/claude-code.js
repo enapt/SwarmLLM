@@ -614,7 +614,7 @@
     // Render a tool call as a compact one-liner with optional expandable output
     _renderToolCall: function(contentEl, block, toolPanels) {
       var toolId = block.id || '';
-      var toolName = block.name || 'Unknown';
+      var toolName = block.name || I18n.t('claude_code.tool_unknown');
       var input = block.input || {};
 
       var panel = document.createElement('div');
@@ -1180,7 +1180,7 @@
     // expandable detail if the user wants to inspect.
     _handlePermissionRequest: function(evt, contentEl, ctx) {
       var req = evt.request || {};
-      var toolName = req.tool_name || 'Unknown';
+      var toolName = req.tool_name || I18n.t('claude_code.tool_unknown');
       var input = req.input || {};
       var requestId = evt.request_id || '';
       var sessionId = ctx.sessionId || S.currentSessionId || '';
@@ -1316,7 +1316,7 @@
         });
 
         // Collapse to a slim one-liner
-        var toolName = panelEl._ccToolName || 'Tool';
+        var toolName = panelEl._ccToolName || I18n.t('claude_code.tool_fallback');
         var icon = panelEl._ccIcon || '⚡';
         var hint = panelEl._ccHint || '';
         var statusClass = allow ? 'cc-perm-allowed' : 'cc-perm-denied';

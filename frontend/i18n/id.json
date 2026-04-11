@@ -945,6 +945,8 @@
   "claude_code.expand": "Perluas",
   "claude_code.output_title": "Output",
   "claude_code.state_suspended": "ditangguhkan",
+  "claude_code.tool_unknown": "Tidak dikenal",
+  "claude_code.tool_fallback": "Alat",
   "claude_code.initializing": "Memulai sesi Claude Code…",
   "claude_code.subscription_tip": "Menggunakan langganan Claude (tanpa biaya API)",
   "nav.copied": "Disalin!",

@@ -945,6 +945,8 @@
   "claude_code.expand": "توسيع",
   "claude_code.output_title": "الإخراج",
   "claude_code.state_suspended": "معلّق",
+  "claude_code.tool_unknown": "غير معروف",
+  "claude_code.tool_fallback": "أداة",
   "claude_code.initializing": "جارٍ بدء جلسة Claude Code…",
   "claude_code.subscription_tip": "استخدام اشتراك Claude (بدون تكاليف API)",
   "nav.copied": "تم النسخ!",

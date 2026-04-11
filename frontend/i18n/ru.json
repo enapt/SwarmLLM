@@ -945,6 +945,8 @@
   "claude_code.expand": "Развернуть",
   "claude_code.output_title": "Вывод",
   "claude_code.state_suspended": "приостановлено",
+  "claude_code.tool_unknown": "Неизвестно",
+  "claude_code.tool_fallback": "Инструмент",
   "claude_code.initializing": "Запуск сеанса Claude Code…",
   "claude_code.subscription_tip": "Используется подписка Claude (без затрат на API)",
   "nav.copied": "Скопировано!",

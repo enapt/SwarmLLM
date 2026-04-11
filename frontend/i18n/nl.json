@@ -945,6 +945,8 @@
   "claude_code.expand": "Uitvouwen",
   "claude_code.output_title": "Uitvoer",
   "claude_code.state_suspended": "onderbroken",
+  "claude_code.tool_unknown": "Onbekend",
+  "claude_code.tool_fallback": "Hulpmiddel",
   "claude_code.initializing": "Claude Code-sessie wordt gestart…",
   "claude_code.subscription_tip": "Gebruikt Claude-abonnement (geen API-kosten)",
   "nav.copied": "Gekopieerd!",

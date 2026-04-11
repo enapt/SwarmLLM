@@ -945,6 +945,8 @@
   "claude_code.expand": "펼치기",
   "claude_code.output_title": "출력",
   "claude_code.state_suspended": "일시중단",
+  "claude_code.tool_unknown": "알 수 없음",
+  "claude_code.tool_fallback": "도구",
   "claude_code.initializing": "Claude Code 세션 시작 중…",
   "claude_code.subscription_tip": "Claude 구독 사용 중 (API 비용 없음)",
   "nav.copied": "복사됨!",
