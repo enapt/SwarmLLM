@@ -390,6 +390,7 @@
   "compare.label_in": "输入：",
   "compare.label_out": "输出：",
   "compare.tok_per_sec": "tok/s",
+  "compare.context_tokens": "{n} 个token",
   "hw.mode_cpu": "CPU 模式",
   "hw.mode_cpu_only": "仅 CPU",
   "setup.hw_gpu_7b": "您的 GPU 可以本地运行 7B 模型（Qwen 7B、Phi-3.5、Gemma 2B）",

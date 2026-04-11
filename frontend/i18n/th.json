@@ -391,6 +391,7 @@
   "compare.label_in": "ใน: ",
   "compare.label_out": "ออก: ",
   "compare.tok_per_sec": "tok/s",
+  "compare.context_tokens": "{n} โทเค็น",
   "hw.mode_cpu": "โหมด CPU",
   "hw.mode_cpu_only": "CPU เท่านั้น",
   "setup.hw_gpu_7b": "GPU ของคุณสามารถรันโมเดล 7B ในเครื่องได้ (Qwen 7B, Phi-3.5, Gemma 2B)",

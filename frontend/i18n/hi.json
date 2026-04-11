@@ -391,6 +391,7 @@
   "compare.label_in": "इन: ",
   "compare.label_out": "आउट: ",
   "compare.tok_per_sec": "tok/s",
+  "compare.context_tokens": "{n} टोकन",
   "hw.mode_cpu": "CPU मोड",
   "hw.mode_cpu_only": "केवल CPU",
   "setup.hw_gpu_7b": "आपका GPU स्थानीय रूप से 7B मॉडल चला सकता है (Qwen 7B, Phi-3.5, Gemma 2B)",

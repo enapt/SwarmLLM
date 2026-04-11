@@ -390,6 +390,7 @@
   "compare.label_in": "إدخال: ",
   "compare.label_out": "إخراج: ",
   "compare.tok_per_sec": "رمز/ث",
+  "compare.context_tokens": "{n} رمز",
   "hw.mode_cpu": "وضع CPU",
   "hw.mode_cpu_only": "CPU فقط",
   "setup.hw_gpu_7b": "يمكن لـ GPU تشغيل نماذج 7B محلياً (Qwen 7B، Phi-3.5، Gemma 2B)",

@@ -52,7 +52,7 @@
           chip.querySelector('.chip-name').textContent = displayName;
           var typeLabel = m.type === 'local' ? I18n.t('compare.filter_local') : I18n.t('compare.filter_cloud');
           chip.querySelector('.chip-type').textContent = typeLabel + ctxLabel;
-          chip.title = m.id + (ctxLabel ? ' (' + m.context + ' tokens)' : '');
+          chip.title = m.id + (ctxLabel ? ' (' + I18n.t('compare.context_tokens', { n: m.context }) + ')' : '');
           chip.querySelector('input').addEventListener('change', function() {
             chip.classList.toggle('selected', this.checked);
             App.compare.updateSelected();

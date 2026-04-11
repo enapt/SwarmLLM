@@ -390,6 +390,7 @@
   "compare.label_in": "入力：",
   "compare.label_out": "出力：",
   "compare.tok_per_sec": "tok/s",
+  "compare.context_tokens": "{n} トークン",
   "hw.mode_cpu": "CPUモード",
   "hw.mode_cpu_only": "CPUのみ",
   "setup.hw_gpu_7b": "GPUで7Bモデルをローカル実行できます（Qwen 7B、Phi-3.5、Gemma 2B）",

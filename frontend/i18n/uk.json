@@ -390,6 +390,7 @@
   "compare.label_in": "Вх: ",
   "compare.label_out": "Вих: ",
   "compare.tok_per_sec": "тк/с",
+  "compare.context_tokens": "{n} токенів",
   "hw.mode_cpu": "Режим CPU",
   "hw.mode_cpu_only": "Тільки CPU",
   "setup.hw_gpu_7b": "Ваш GPU може запускати моделі 7B локально (Qwen 7B, Phi-3.5, Gemma 2B)",

@@ -391,6 +391,7 @@
   "compare.label_in": "Entrada: ",
   "compare.label_out": "Saída: ",
   "compare.tok_per_sec": "tok/s",
+  "compare.context_tokens": "{n} tokens",
   "hw.mode_cpu": "Modo CPU",
   "hw.mode_cpu_only": "Apenas CPU",
   "setup.hw_gpu_7b": "Sua GPU pode rodar modelos 7B localmente (Qwen 7B, Phi-3.5, Gemma 2B)",

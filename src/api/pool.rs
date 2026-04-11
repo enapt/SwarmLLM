@@ -350,7 +350,7 @@ pub async fn pool_join(
     Json(body): Json<PoolJoinRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let code = body.code.trim().to_uppercase();
-    if code.is_empty() || code.len() > 16 {
+    if code.len() != 8 {
         return Err(ApiError(crate::error::SwarmError::Validation(
             "Invite code must be 8 characters".into(),
         )));

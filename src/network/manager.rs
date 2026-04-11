@@ -1410,8 +1410,8 @@ impl NetworkManager {
         if self.peer_to_node.len() < MAX_PEER_TO_NODE || self.peer_to_node.contains_key(&peer_id) {
             self.peer_to_node.insert(peer_id, node_id.clone());
         }
-        // Persistent NodeId → PeerId mapping (survives disconnects, capped at 10k)
-        if self.shared_state.peer_id_map.len() < 10_000
+        // Persistent NodeId → PeerId mapping (survives disconnects, same cap)
+        if self.shared_state.peer_id_map.len() < MAX_PEER_TO_NODE
             || self.shared_state.peer_id_map.contains_key(&node_id)
         {
             self.shared_state

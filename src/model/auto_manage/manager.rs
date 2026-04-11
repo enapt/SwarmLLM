@@ -18,6 +18,10 @@ const AUTO_MANAGE_NOTIFY_COOLDOWN_SECS: u64 = 60;
 /// Settle delay after a notify before evaluating — gives gossip time to fan out
 /// and peers time to announce their own downloads so our score is up-to-date.
 const AUTO_MANAGE_NOTIFY_SETTLE_SECS: u64 = 15;
+/// EMA decay weight for model request popularity scoring.
+/// A spike of 100 requests persists ~30min and drops to noise after ~2h.
+const EMA_DECAY_WEIGHT: f64 = 0.85;
+const EMA_FRESH_WEIGHT: f64 = 0.15;
 
 /// Compute a position on a u32 consistent hash ring for a node's virtual slot.
 pub(super) fn hash_ring_position(node_bytes: &[u8; 32], virtual_node: u32) -> u32 {
@@ -336,7 +340,7 @@ impl AutoShardManager {
     }
 
     /// Decay model request counts with EMA and feed into region_demand.
-    /// Instead of zeroing counters, we blend: new_rate = old * 0.85 + fresh * 0.15.
+    /// Instead of zeroing counters, we blend: new_rate = old * EMA_DECAY + fresh * EMA_FRESH.
     /// A spike of 100 requests persists ~30min and drops to noise after ~2h.
     pub(super) fn decay_request_counts(&self) {
         let our_region = self.our_region().unwrap_or_else(|| "??".to_string());
@@ -352,7 +356,7 @@ impl AutoShardManager {
                 .get(&key)
                 .map(|v| *v)
                 .unwrap_or(0.0);
-            let new_rate = old * 0.85 + fresh as f64 * 0.15;
+            let new_rate = old * EMA_DECAY_WEIGHT + fresh as f64 * EMA_FRESH_WEIGHT;
             if new_rate > 0.001 {
                 self.shared_state.region_demand.insert(key, new_rate);
             } else {

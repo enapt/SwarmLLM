@@ -376,7 +376,7 @@
         var code = data.code;
         var display = document.getElementById('pool-invite-code-display');
         var codeVal = document.getElementById('pool-invite-code-value');
-        if (display) display.style.display = '';
+        if (display) display.classList.remove('hidden');
         if (codeVal) codeVal.textContent = code;
         this._lastCode = code;
 
@@ -391,7 +391,7 @@
       var container = document.getElementById('pool-qr-code');
       if (!container) return;
       container.innerHTML = '';
-      container.style.display = '';
+      container.classList.remove('hidden');
 
       // Simple QR code using a canvas-based generator
       // We use a minimal QR encoding — for 8 alphanumeric chars, version 1 is sufficient

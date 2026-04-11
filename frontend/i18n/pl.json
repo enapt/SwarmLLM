@@ -390,6 +390,7 @@
   "compare.label_in": "Wej: ",
   "compare.label_out": "Wyj: ",
   "compare.tok_per_sec": "tok/s",
+  "compare.context_tokens": "{n} tokenów",
   "hw.mode_cpu": "Tryb CPU",
   "hw.mode_cpu_only": "Tylko CPU",
   "setup.hw_gpu_7b": "Twoje GPU może uruchamiać modele 7B lokalnie (Qwen 7B, Phi-3.5, Gemma 2B)",

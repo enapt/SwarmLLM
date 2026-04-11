@@ -391,6 +391,7 @@
   "compare.label_in": "Masuk: ",
   "compare.label_out": "Keluar: ",
   "compare.tok_per_sec": "tok/d",
+  "compare.context_tokens": "{n} token",
   "hw.mode_cpu": "Mode CPU",
   "hw.mode_cpu_only": "Hanya CPU",
   "setup.hw_gpu_7b": "GPU Anda bisa menjalankan model 7B secara lokal (Qwen 7B, Phi-3.5, Gemma 2B)",

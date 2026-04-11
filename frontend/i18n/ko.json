@@ -390,6 +390,7 @@
   "compare.label_in": "입력: ",
   "compare.label_out": "출력: ",
   "compare.tok_per_sec": "tok/s",
+  "compare.context_tokens": "{n} 토큰",
   "hw.mode_cpu": "CPU 모드",
   "hw.mode_cpu_only": "CPU 전용",
   "setup.hw_gpu_7b": "GPU가 7B 모델을 로컬로 실행할 수 있습니다 (Qwen 7B, Phi-3.5, Gemma 2B)",

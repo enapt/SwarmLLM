@@ -391,6 +391,7 @@
   "compare.label_in": "Giriş: ",
   "compare.label_out": "Çıkış: ",
   "compare.tok_per_sec": "tok/s",
+  "compare.context_tokens": "{n} token",
   "hw.mode_cpu": "CPU modu",
   "hw.mode_cpu_only": "Yalnızca CPU",
   "setup.hw_gpu_7b": "GPU'nuz 7B modelleri yerel çalıştırabilir (Qwen 7B, Phi-3.5, Gemma 2B)",
