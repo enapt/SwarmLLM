@@ -1562,15 +1562,7 @@ async fn router_inference_stream(
         let mut token_count: u64 = 0;
 
         // Send initial role delta
-        if sse_tx
-            .send(StreamEvent::Delta {
-                content: None,
-                role: Some("assistant".into()),
-                finish_reason: None,
-            })
-            .await
-            .is_err()
-        {
+        if !send_role_preamble(&sse_tx).await {
             tracing::warn!(
                 "DIAG: SSE role delta send failed — client disconnected before stream started"
             );
@@ -1794,15 +1786,7 @@ async fn split_stream_response(
         let stream_start = std::time::Instant::now();
         let mut token_count: u64 = 0;
 
-        if tx
-            .send(StreamEvent::Delta {
-                content: None,
-                role: Some("assistant".into()),
-                finish_reason: None,
-            })
-            .await
-            .is_err()
-        {
+        if !send_role_preamble(&tx).await {
             tracing::debug!("DIAG: split stream role delta send failed — client disconnected");
             return;
         }
@@ -1893,15 +1877,7 @@ async fn stream_response(
         let mut token_count: u64 = 0;
 
         // Send initial role delta
-        if tx
-            .send(StreamEvent::Delta {
-                content: None,
-                role: Some("assistant".into()),
-                finish_reason: None,
-            })
-            .await
-            .is_err()
-        {
+        if !send_role_preamble(&tx).await {
             tracing::debug!("DIAG: local stream role delta send failed — client disconnected");
             return;
         }
@@ -2027,6 +2003,18 @@ enum StreamEvent {
         message: String,
     },
     Done,
+}
+
+/// Send the initial `role: "assistant"` delta that opens the streaming response.
+/// Returns `false` if the client has already disconnected.
+async fn send_role_preamble(tx: &tokio::sync::mpsc::Sender<StreamEvent>) -> bool {
+    tx.send(StreamEvent::Delta {
+        content: None,
+        role: Some("assistant".into()),
+        finish_reason: None,
+    })
+    .await
+    .is_ok()
 }
 
 /// GET /v1/models

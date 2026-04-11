@@ -22,6 +22,9 @@ const KEY_MY_POOL: &str = "my_pool";
 /// Used both by the periodic expiry sweep and the inbound invitation handler.
 const AUTO_ACCEPT_TIMEOUT_SECS: u64 = 300;
 
+/// Maximum pending invitations (outbound + inbound blinded) before rejecting new ones.
+const MAX_PENDING_INVITATIONS: usize = 50;
+
 /// The PoolManager is the 9th subsystem task.
 /// It owns all pool state, persists to redb, and handles pool commands.
 pub struct PoolManager {
@@ -357,6 +360,16 @@ impl PoolManager {
 
         if !self.rate_limiter.check_and_record() {
             return Err(SwarmError::Validation("Rate limit exceeded".into()));
+        }
+
+        // Prune expired before checking cap
+        let now = chrono::Utc::now();
+        self.pending_invitations
+            .retain(|_, inv| inv.expires_at > now);
+        if self.pending_invitations.len() >= MAX_PENDING_INVITATIONS {
+            return Err(SwarmError::Validation(format!(
+                "Too many pending invitations ({MAX_PENDING_INVITATIONS}). Wait for existing ones to expire or be accepted."
+            )));
         }
 
         let ttl = self.shared_state.config.pool.invitation_ttl_hours;
@@ -904,6 +917,11 @@ impl PoolManager {
         let now = chrono::Utc::now();
         self.pending_invitations
             .retain(|_, inv| inv.expires_at > now);
+
+        if self.pending_invitations.len() >= MAX_PENDING_INVITATIONS {
+            tracing::debug!("Pending invitations at capacity ({MAX_PENDING_INVITATIONS}), dropping inbound blinded invitation");
+            return;
+        }
 
         // Store as pending
         self.pending_invitations

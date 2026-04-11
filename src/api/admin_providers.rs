@@ -254,14 +254,14 @@ pub async fn update_providers(
                 .put_json("providers", "config", &encrypted)
             {
                 tracing::error!(error = %e, "Provider keys encrypted but NOT persisted to DB — will revert on restart");
-                return Err(ApiError(crate::error::SwarmError::Internal(
+                return Err(ApiError(crate::error::SwarmError::Database(
                     "Failed to persist provider configuration".into(),
                 )));
             }
         }
         Err(e) => {
             tracing::error!(error = %e, "Failed to encrypt provider keys for storage — keys NOT saved");
-            return Err(ApiError(crate::error::SwarmError::Internal(
+            return Err(ApiError(crate::error::SwarmError::Encryption(
                 "Failed to encrypt provider configuration".into(),
             )));
         }

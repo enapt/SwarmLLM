@@ -11,6 +11,14 @@ use super::vram::query_gpu_vram_used;
 /// gets a scoring penalty so it's not pruned immediately after download.
 const SHARD_RECENTLY_ACQUIRED_SECS: u64 = 1800;
 
+/// Resource pressure thresholds for pruning decisions.
+/// Relaxed: add a spare replica. Normal: no change. Eager: shed 1. Urgent: shed 2.
+const PRESSURE_RELAXED: f64 = 0.5;
+const PRESSURE_NORMAL: f64 = 0.8;
+const PRESSURE_URGENT: f64 = 0.95;
+/// VRAM soft-unload trigger — try narrowing shard windows before deleting files.
+const PRESSURE_SOFT_UNLOAD: f64 = 0.7;
+
 impl AutoShardManager {
     /// Evaluate and prune over-replicated shards. Called after downloads in each cycle.
     pub(super) async fn evaluate_and_prune(&self) {
@@ -31,7 +39,7 @@ impl AutoShardManager {
 
         // Compute resource pressure
         let resource_pressure = self.compute_resource_pressure(live_vram_used);
-        let pressure_urgent = resource_pressure > 0.95;
+        let pressure_urgent = resource_pressure > PRESSURE_URGENT;
         tracing::info!(
             resource_pressure = %format_args!("{:.2}", resource_pressure),
             pressure_urgent,
@@ -39,10 +47,10 @@ impl AutoShardManager {
         );
 
         // ── Phase 0: VRAM soft-unload ──
-        // When VRAM pressure is 0.7-0.95, try narrowing the shard window for loaded
-        // models instead of deleting files. This frees VRAM while keeping shards on
-        // disk for the network.
-        if resource_pressure > 0.7 && !pressure_urgent {
+        // When VRAM pressure is moderate (SOFT_UNLOAD..URGENT), try narrowing the shard
+        // window for loaded models instead of deleting files. This frees VRAM while
+        // keeping shards on disk for the network.
+        if resource_pressure > PRESSURE_SOFT_UNLOAD && !pressure_urgent {
             self.try_vram_soft_unload(resource_pressure).await;
         }
 
@@ -721,8 +729,8 @@ impl AutoShardManager {
             return; // No GPU or no budget configured
         };
 
-        // Scale budget by pressure: at 0.7 use 90% of budget, at 0.95 use 60%
-        let scale = 1.0 - (pressure - 0.5).clamp(0.0, 0.5);
+        // Scale budget by pressure: at SOFT_UNLOAD use 90% of budget, at URGENT use 60%
+        let scale = 1.0 - (pressure - PRESSURE_RELAXED).clamp(0.0, 0.5);
         let effective_budget = (budget as f64 * scale) as u64;
 
         let registry = &self.shared_state.model_registry;
@@ -793,14 +801,14 @@ impl AutoShardManager {
 }
 
 /// Adjust shard target replicas based on resource pressure (pure function).
-/// Relaxed (<0.5): keep extras, Normal (<0.8): unchanged,
-/// Eager (<0.95): reduce by 1, Urgent (≥0.95): reduce by 2.
+/// Relaxed (<RELAXED): keep extras, Normal (<NORMAL): unchanged,
+/// Eager (<URGENT): reduce by 1, Urgent (≥URGENT): reduce by 2.
 pub(crate) fn pressure_adjusted_target(target: u32, pressure: f64, min_replicas: u32) -> u32 {
-    if pressure < 0.5 {
+    if pressure < PRESSURE_RELAXED {
         target.saturating_add(1)
-    } else if pressure < 0.8 {
+    } else if pressure < PRESSURE_NORMAL {
         target
-    } else if pressure < 0.95 {
+    } else if pressure < PRESSURE_URGENT {
         target.saturating_sub(1).max(min_replicas)
     } else {
         target.saturating_sub(2).max(min_replicas)
