@@ -57,6 +57,9 @@ window.App = {
   ACTIVITY_KEY: 'swarmllm_activity',
   NETWORK_LOG_KEY: 'swarmllm_network_log',
 
+  // --- Constants ---
+  MMPROJ_SHARD_INDEX: 4294967295, // u32::MAX — sentinel for vision encoder shards
+
   // --- Component namespaces (populated by component files) ---
   // ui, chat, dashboard, hf, settings, setup, identity, networkMap,
   // compare, data, notifications, models, downloads, shardMenu, providerHealth,

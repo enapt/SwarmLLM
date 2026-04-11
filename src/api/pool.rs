@@ -21,6 +21,15 @@ async fn await_pool_reply<T>(
         .map_err(ApiError)
 }
 
+/// Await a raw (non-Result) oneshot from the pool manager.
+async fn await_pool_recv<T>(rx: tokio::sync::oneshot::Receiver<T>) -> Result<T, ApiError> {
+    rx.await.map_err(|_| {
+        ApiError(SwarmError::ServiceUnavailable(
+            "Pool manager unavailable".into(),
+        ))
+    })
+}
+
 /// GET /api/pool/state — Get current pool state.
 pub async fn pool_state(State(state): State<AppState>) -> Json<serde_json::Value> {
     let pool_state = state.shared_state.credits.pool_state.read().await;
@@ -140,11 +149,7 @@ pub async fn pool_accept(
     let (inv_tx, inv_rx) = tokio::sync::oneshot::channel();
     send_pool_command(&state, PoolCommand::GetInvitations { reply: inv_tx }).await?;
 
-    let invitations = inv_rx.await.map_err(|_| {
-        ApiError(crate::error::SwarmError::ServiceUnavailable(
-            "Pool manager unavailable".into(),
-        ))
-    })?;
+    let invitations = await_pool_recv(inv_rx).await?;
 
     let invitation = invitations
         .into_iter()
@@ -211,11 +216,7 @@ pub async fn pool_invitations(
 
     send_pool_command(&state, PoolCommand::GetInvitations { reply: tx }).await?;
 
-    let invitations = rx.await.map_err(|_| {
-        ApiError(crate::error::SwarmError::ServiceUnavailable(
-            "Pool manager unavailable".into(),
-        ))
-    })?;
+    let invitations = await_pool_recv(rx).await?;
 
     let values: Vec<serde_json::Value> = invitations
         .into_iter()
@@ -241,11 +242,7 @@ pub async fn pool_leaderboard(
 
     send_pool_command(&state, PoolCommand::GetLeaderboard { reply: tx }).await?;
 
-    let entries = rx.await.map_err(|_| {
-        ApiError(crate::error::SwarmError::ServiceUnavailable(
-            "Pool manager unavailable".into(),
-        ))
-    })?;
+    let entries = await_pool_recv(rx).await?;
 
     let values: Vec<serde_json::Value> = entries
         .into_iter()

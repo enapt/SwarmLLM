@@ -114,7 +114,7 @@
     var params = {
       model: data.model_name || data.model_id || '',
       node: data.node_id ? data.node_id.substring(0, 8) : '',
-      shard: data.shard_index != null ? String(data.shard_index + 1) : (data.detail_num != null ? String(data.detail_num) : ''),
+      shard: data.shard_index != null ? (data.shard_index === App.MMPROJ_SHARD_INDEX ? 'mmproj' : String(data.shard_index + 1)) : (data.detail_num != null ? String(data.detail_num) : ''),
       detail: data.detail_str || '',
       count: data.detail_num != null ? String(data.detail_num) : '',
     };

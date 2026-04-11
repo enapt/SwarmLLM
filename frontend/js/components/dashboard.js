@@ -1446,7 +1446,7 @@
           if (!wasPeerDl) {
             cell.classList.add('shard-transitioning');
             setTimeout(function() { cell.classList.remove('shard-transitioning'); }, 1500);
-            App.dashboard._logModelEvent(pd.model_id, '\u{1F4E1}', I18n.t('dashboard.peer_downloading_log', { peer: pd.node_id.substring(0, 8), shard: pd.shard_index + 1 }), true);
+            App.dashboard._logModelEvent(pd.model_id, '\u{1F4E1}', I18n.t('dashboard.peer_downloading_log', { peer: pd.node_id.substring(0, 8), shard: pd.shard_index === App.MMPROJ_SHARD_INDEX ? 'mmproj' : pd.shard_index + 1 }), true);
           }
           var pdPreserve = '';
           if (cell.classList.contains('locked')) pdPreserve += ' locked';
