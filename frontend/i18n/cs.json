@@ -896,6 +896,7 @@
   "settings.rate_tier": "Úroveň limitu",
   "dashboard.cloud_subscription": "Předplatné",
   "dashboard.cloud_sub_note": "Směrováno přes Claude Code CLI — používá vaše předplatné, bez poplatků za token",
+  "mode.api": "API",
   "mode.subscription": "PŘEDPLATNÉ",
   "claude_code.dir_placeholder": "Vložte cestu ke složce, nebo nechte prázdné pro chat",
   "claude_code.quick_chat": "Rychlý chat",

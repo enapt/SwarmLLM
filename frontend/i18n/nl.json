@@ -896,6 +896,7 @@
   "settings.rate_tier": "Snelheidsniveau",
   "dashboard.cloud_subscription": "Abonnement",
   "dashboard.cloud_sub_note": "Doorgestuurd via de Claude Code CLI — gebruikt je abonnement, geen kosten per token",
+  "mode.api": "API",
   "mode.subscription": "ABONNEMENT",
   "claude_code.dir_placeholder": "Plak een mappad, of laat leeg om te chatten",
   "claude_code.quick_chat": "Snel chatten",

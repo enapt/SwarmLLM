@@ -896,6 +896,7 @@
   "settings.rate_tier": "Tingkat tarif",
   "dashboard.cloud_subscription": "Langganan",
   "dashboard.cloud_sub_note": "Dirutekan melalui Claude Code CLI — menggunakan langganan Anda, tanpa biaya per token",
+  "mode.api": "API",
   "mode.subscription": "LANGGANAN",
   "claude_code.dir_placeholder": "Tempel jalur folder, atau biarkan kosong untuk mengobrol",
   "claude_code.quick_chat": "Obrolan cepat",

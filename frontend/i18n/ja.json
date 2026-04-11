@@ -896,6 +896,7 @@
   "settings.rate_tier": "レート階層",
   "dashboard.cloud_subscription": "サブスクリプション",
   "dashboard.cloud_sub_note": "Claude Code CLI 経由でルーティング — サブスクリプションを使用、トークン課金なし",
+  "mode.api": "API",
   "mode.subscription": "サブスクリプション",
   "claude_code.dir_placeholder": "フォルダパスを貼り付け、または空欄でチャット",
   "claude_code.quick_chat": "クイックチャット",

@@ -2092,35 +2092,6 @@ select.cloud-model-sort { flex: 0 0 88px; width: 88px; padding: 6px 6px; font-si
 .health-warn { background: rgba(255,193,7,0.2); color: var(--orange); }
 .health-down { background: rgba(244,67,54,0.15); color: var(--red); }
 
-/* ---- Provider badges strip (top banner) ---- */
-.provider-strip {
-  display: flex; gap: 8px; flex-wrap: wrap; align-items: center;
-  padding: 6px 0; margin-bottom: 8px;
-}
-.provider-strip.hidden { display: none; }
-.provider-badge {
-  display: inline-flex; align-items: center; gap: 6px;
-  background: var(--bg-secondary); border: 1px solid var(--border);
-  border-radius: var(--radius-pill); padding: 5px 12px 5px 8px;
-  font-size: 0.78rem; font-weight: 500; color: var(--text-primary);
-  transition: all var(--transition); cursor: default;
-}
-.provider-badge:hover { border-color: var(--border-light); background: var(--bg-hover); }
-.provider-badge.badge-active { border-color: rgba(34,197,94,0.35); box-shadow: 0 0 8px rgba(34,197,94,0.1); }
-.provider-badge .pb-icon { width: 18px; height: 18px; flex-shrink: 0; display: flex; align-items: center; justify-content: center; }
-.provider-badge .pb-dot {
-  width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0;
-}
-.provider-badge .pb-dot.dot-fast { background: var(--green); box-shadow: 0 0 4px rgba(34,197,94,0.5); }
-.provider-badge .pb-dot.dot-ok { background: var(--orange); box-shadow: 0 0 4px rgba(245,158,11,0.4); }
-.provider-badge .pb-dot.dot-slow { background: var(--red); }
-.provider-badge .pb-dot.dot-down { background: var(--text-muted); }
-.provider-badge .pb-dot.dot-error { background: var(--red); box-shadow: 0 0 4px rgba(239,68,68,0.5); }
-.provider-badge.badge-error { border-color: rgba(239,68,68,0.3); opacity: 0.75; }
-.provider-badge.badge-error .pb-name { text-decoration: line-through; text-decoration-color: rgba(239,68,68,0.4); }
-.provider-badge.badge-error .pb-latency { color: var(--red); }
-.provider-badge .pb-latency { font-size: 0.68rem; color: var(--text-secondary); font-family: var(--font-mono); }
-
 .model-status-badge { display: inline-block; font-size: 0.6rem; font-weight: 600; padding: 0 4px; border-radius: var(--radius-sm); margin-left: 4px; vertical-align: middle; }
 
 /* Unload button outline variant */
@@ -2904,17 +2875,6 @@ textarea:focus:not(:focus-visible) {
 }
 .mode-detail .mode-stat { font-family: var(--font-mono); font-size: 0.74rem; color: var(--text-secondary); }
 .mode-detail .mode-stat strong { color: var(--text-primary); font-weight: 600; }
-/* Provider badges row — contains Claude Code badge + API provider badges inline */
-.provider-strip-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-bottom: 6px; }
-.provider-strip-row .provider-strip { margin-bottom: 0; }
-/* Claude Code subscription badge — sits alongside provider health badges */
-.claude-code-indicator { display: inline-flex; align-items: center; gap: 6px; padding: 5px 12px 5px 8px; background: rgba(217,119,87,0.08); border: 1px solid rgba(217,119,87,0.3); border-radius: var(--radius-lg); cursor: pointer; transition: border-color 0.2s; }
-.claude-code-indicator:hover { border-color: rgba(217,119,87,0.5); }
-.claude-code-indicator .cc-icon { flex-shrink: 0; vertical-align: middle; }
-.claude-code-indicator .cc-name { font-family: var(--font-mono); font-size: 0.78rem; font-weight: 700; color: var(--claude); letter-spacing: 0.01em; }
-.claude-code-indicator .cc-status-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--green); box-shadow: 0 0 6px rgba(34,197,94,0.5); flex-shrink: 0; }
-.claude-code-indicator .cc-plan { font-size: 0.68rem; color: var(--text-secondary); font-family: var(--font-mono); }
-.claude-code-indicator .cc-tag { font-size: 0.56rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--green); font-weight: 700; background: var(--green-dim); border: 1px solid rgba(34,197,94,0.25); border-radius: 4px; padding: 1px 5px; }
 .mode-separator { color: var(--text-muted); font-size: 0.65rem; opacity: 0.35; }
 .mode-detail .mode-action { color: var(--text-muted); font-size: 0.74rem; cursor: pointer; text-decoration: underline; text-decoration-style: dotted; text-underline-offset: 2px; }
 .mode-detail .mode-action:hover { color: var(--accent); }

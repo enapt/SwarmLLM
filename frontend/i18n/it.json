@@ -896,6 +896,7 @@
   "settings.rate_tier": "Livello tariffa",
   "dashboard.cloud_subscription": "Abbonamento",
   "dashboard.cloud_sub_note": "Instradato tramite la CLI di Claude Code — usa il tuo abbonamento, nessun costo per token",
+  "mode.api": "API",
   "mode.subscription": "ABBONAMENTO",
   "claude_code.dir_placeholder": "Incolla un percorso cartella, o lascia vuoto per chattare",
   "claude_code.quick_chat": "Chat veloce",

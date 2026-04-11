@@ -896,6 +896,7 @@
   "settings.rate_tier": "Ratenstufe",
   "dashboard.cloud_subscription": "Abonnement",
   "dashboard.cloud_sub_note": "Über die Claude-Code-CLI geroutet — nutzt dein Abo, keine Token-Gebühren",
+  "mode.api": "API",
   "mode.subscription": "ABONNEMENT",
   "claude_code.dir_placeholder": "Ordnerpfad einfügen, oder leer lassen zum Chatten",
   "claude_code.quick_chat": "Schnell-Chat",

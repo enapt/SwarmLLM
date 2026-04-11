@@ -448,56 +448,7 @@
 
   // --- Provider Health Badges ---
   App.providerHealth = {
-    updateBannerBadges: function() {
-      var strip = document.getElementById('provider-badges');
-      if (!strip) return;
-      var configured = Object.keys(S.providerHealth);
-      if (configured.length === 0) { strip.classList.add('hidden'); return; }
-      strip.classList.remove('hidden');
-      strip.innerHTML = '';
-      var badgeTmpl = document.getElementById('tmpl-provider-badge');
-      configured.sort().forEach(function(p) {
-        var h = S.providerHealth[p];
-        var badge = badgeTmpl.content.cloneNode(true).firstElementChild;
-        var isError = (h.status === 'auth_error' || h.status === 'down' || h.status === 'error');
-        badge.className = 'provider-badge' + (h.status === 'up' ? ' badge-active' : '') + (isError ? ' badge-error' : '');
-        var dotClass = 'dot-down';
-        var latencyText = '';
-        if (h.status === 'up') {
-          dotClass = h.latency_ms < 500 ? 'dot-fast' : h.latency_ms < 2000 ? 'dot-ok' : 'dot-slow';
-          latencyText = h.latency_ms + 'ms';
-        } else if (h.status === 'rate_limited') { dotClass = 'dot-ok'; latencyText = I18n.t('provider.limited'); }
-        else if (h.status === 'timeout') { dotClass = 'dot-slow'; latencyText = I18n.t('provider.timeout'); }
-        else if (h.status === 'auth_error') { dotClass = 'dot-error'; latencyText = I18n.t('provider.key_invalid'); }
-        else if (h.status === 'overloaded') { dotClass = 'dot-ok'; latencyText = I18n.t('provider.busy'); }
-        else { dotClass = 'dot-error'; latencyText = I18n.t('provider.down'); }
-        var name = PROVIDER_NAMES[p] || p;
-        badge.querySelector('.pb-icon').innerHTML = providerIconHtml(p, 18);
-        badge.querySelector('.pb-name').textContent = name;
-        badge.querySelector('.pb-dot').className = 'pb-dot ' + dotClass;
-        var latencyEl = badge.querySelector('.pb-latency');
-        if (latencyText) { latencyEl.textContent = latencyText; } else { latencyEl.remove(); }
-        badge.title = name + ': ' + h.status + (h.detail ? ' — ' + h.detail : '') + (h.latency_ms ? ' (' + h.latency_ms + 'ms)' : '');
-        (function(providerKey, errored) {
-          badge.addEventListener('click', function() {
-            App.ui.switchTab('dashboard');
-            setTimeout(function() {
-              var card = document.querySelector('.cloud-model[data-provider="' + U.cssSafeAttr(providerKey) + '"]');
-              if (card) {
-                card.scrollIntoView({ behavior: 'smooth', block: 'start' });
-                card.classList.add('provider-highlight');
-                setTimeout(function() { card.classList.remove('provider-highlight'); }, 1500);
-              } else if (errored) {
-                App.ui.openSettings(true);
-              }
-            }, 100);
-          });
-        }(p, isError));
-        strip.appendChild(badge);
-      });
-    },
-
-    // Render the new integrated provider health bar
+    // Render the integrated provider health bar
     updateHealthBar: function() {
       var bar = document.getElementById('provider-health-bar');
       if (!bar) return;
@@ -532,14 +483,13 @@
           '<span class="ph-name">' + U.escapeHtml(name) + '</span>' +
           '<span class="ph-dot ' + dotClass + '"></span>' +
           (latencyText ? '<span class="ph-latency">' + U.escapeHtml(latencyText) + '</span>' : '') +
-          '<span class="ph-tag tag-api">API</span>';
+          '<span class="ph-tag tag-api">' + I18n.t('mode.api') + '</span>';
         item.title = name + ': ' + h.status + (h.detail ? ' \u2014 ' + h.detail : '');
         bar.appendChild(item);
       });
     },
 
     updateBadges: function() {
-      App.providerHealth.updateBannerBadges();
       App.providerHealth.updateHealthBar();
       Object.keys(S.providerHealth).forEach(function(p) {
         var h = S.providerHealth[p];

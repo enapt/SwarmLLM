@@ -612,6 +612,7 @@
   "mode.stat_active": "{count} active",
   "mode.stat_requests": "{count} req",
   "mode.stat_served": "{count} served",
+  "mode.api": "API",
   "mode.subscription": "SUBSCRIPTION",
   "models.hf_fit_boomerang": "First+last shard fit VRAM (~{size})",
   "models.hf_fit_shard": "Individual shards fit VRAM (~{size}/shard)",

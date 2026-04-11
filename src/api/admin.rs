@@ -430,7 +430,7 @@ fn detect_hardware(shared_state: &crate::daemon::SharedState) -> serde_json::Val
     let (gpu_name, gpu_vram_mb, gpu_vram_used_mb) = match &shared_state.gpu_info {
         Some(gpu) => {
             // Query live VRAM usage via nvidia-smi for an up-to-date reading
-            let used = query_gpu_vram_used();
+            let used = crate::model::auto_manage::vram::query_gpu_vram_used();
             (
                 Some(gpu.name.clone()),
                 Some(gpu.vram_total_mb),
@@ -439,7 +439,7 @@ fn detect_hardware(shared_state: &crate::daemon::SharedState) -> serde_json::Val
         }
         None => {
             let (name, total) = detect_gpu_nvidia_smi();
-            let used = query_gpu_vram_used();
+            let used = crate::model::auto_manage::vram::query_gpu_vram_used();
             (name, total, used)
         }
     };
@@ -478,10 +478,6 @@ fn detect_hardware(shared_state: &crate::daemon::SharedState) -> serde_json::Val
 
 /// Fallback GPU detection via nvidia-smi when llama.cpp gpu_info is unavailable.
 pub(crate) use crate::model::auto_manage::vram::detect_gpu_nvidia_smi;
-
-fn query_gpu_vram_used() -> Option<u64> {
-    crate::model::auto_manage::vram::query_gpu_vram_used()
-}
 
 /// POST /api/admin/rescan-shards — Scan the models directory for new shard files.
 ///

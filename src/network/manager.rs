@@ -42,6 +42,10 @@ const PING_SENT_TIMES_CUTOFF_SECS: u64 = 120;
 /// response is never arriving. Distinct from the 120s storm-guard cutoff —
 /// this is the normal-operation liveness window.
 const PEX_PING_STALENESS_SECS: u64 = 30;
+/// Sliding window for inbound PEX rate limiting.
+const PEX_WINDOW: std::time::Duration = std::time::Duration::from_secs(60);
+/// Maximum inbound PEX requests allowed per window before dropping.
+const PEX_MAX_PER_WINDOW: usize = 50;
 
 /// Check if a multiaddr string contains a private/loopback/link-local/CGN IP.
 /// Used for PEX filtering to prevent leaking internal topology.
@@ -1665,9 +1669,6 @@ impl NetworkManager {
                 // Handle PEX messages inline instead of forwarding to dispatcher
                 match *msg {
                     SwarmMessage::PeerExchangeRequest => {
-                        // Aggregate PEX rate limiter: max 50 inbound PEX requests per 60s window
-                        const PEX_WINDOW: std::time::Duration = std::time::Duration::from_secs(60);
-                        const PEX_MAX_PER_WINDOW: usize = 50;
                         let now_pex = std::time::Instant::now();
                         self.pex_inbound_timestamps
                             .retain(|t| now_pex.duration_since(*t) < PEX_WINDOW);

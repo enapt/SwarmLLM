@@ -896,6 +896,7 @@
   "settings.rate_tier": "Nivel de tasa",
   "dashboard.cloud_subscription": "Suscripción",
   "dashboard.cloud_sub_note": "Enrutado a través del CLI de Claude Code — usa tu suscripción, sin cargos por token",
+  "mode.api": "API",
   "mode.subscription": "SUSCRIPCIÓN",
   "claude_code.dir_placeholder": "Pega la ruta de una carpeta, o déjalo vacío para chatear",
   "claude_code.quick_chat": "Chat rápido",

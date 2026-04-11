@@ -896,6 +896,7 @@
   "settings.rate_tier": "요청 등급",
   "dashboard.cloud_subscription": "구독",
   "dashboard.cloud_sub_note": "Claude Code CLI를 통해 라우팅 — 구독을 사용하며 토큰당 요금이 없습니다",
+  "mode.api": "API",
   "mode.subscription": "구독",
   "claude_code.dir_placeholder": "폴더 경로를 붙여넣거나 비워두고 대화하세요",
   "claude_code.quick_chat": "빠른 채팅",

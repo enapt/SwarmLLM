@@ -896,6 +896,7 @@
   "settings.rate_tier": "Bậc giới hạn",
   "dashboard.cloud_subscription": "Đăng ký",
   "dashboard.cloud_sub_note": "Định tuyến qua Claude Code CLI — dùng gói đăng ký của bạn, không tính phí theo token",
+  "mode.api": "API",
   "mode.subscription": "ĐĂNG KÝ",
   "claude_code.dir_placeholder": "Dán đường dẫn thư mục, hoặc để trống để trò chuyện",
   "claude_code.quick_chat": "Trò chuyện nhanh",

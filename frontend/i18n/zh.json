@@ -896,6 +896,7 @@
   "settings.rate_tier": "速率等级",
   "dashboard.cloud_subscription": "订阅",
   "dashboard.cloud_sub_note": "通过 Claude Code CLI 路由 — 使用你的订阅，无按 token 计费",
+  "mode.api": "API",
   "mode.subscription": "订阅",
   "claude_code.dir_placeholder": "粘贴文件夹路径，或留空直接聊天",
   "claude_code.quick_chat": "快速聊天",

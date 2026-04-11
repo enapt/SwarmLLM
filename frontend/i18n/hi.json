@@ -896,6 +896,7 @@
   "settings.rate_tier": "दर स्तर",
   "dashboard.cloud_subscription": "सदस्यता",
   "dashboard.cloud_sub_note": "Claude Code CLI के माध्यम से रूट किया गया — आपकी सदस्यता का उपयोग करता है, प्रति-टोकन शुल्क नहीं",
+  "mode.api": "API",
   "mode.subscription": "सदस्यता",
   "claude_code.dir_placeholder": "फ़ोल्डर पथ पेस्ट करें, या चैट के लिए खाली छोड़ें",
   "claude_code.quick_chat": "त्वरित चैट",

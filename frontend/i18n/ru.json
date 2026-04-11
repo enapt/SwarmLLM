@@ -896,6 +896,7 @@
   "settings.rate_tier": "Уровень лимита",
   "dashboard.cloud_subscription": "Подписка",
   "dashboard.cloud_sub_note": "Проксируется через Claude Code CLI — используется ваша подписка, без оплаты за токены",
+  "mode.api": "API",
   "mode.subscription": "ПОДПИСКА",
   "claude_code.dir_placeholder": "Вставьте путь к папке, или оставьте пустым для чата",
   "claude_code.quick_chat": "Быстрый чат",

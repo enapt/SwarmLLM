@@ -896,6 +896,7 @@
   "settings.rate_tier": "ระดับอัตรา",
   "dashboard.cloud_subscription": "การสมัคร",
   "dashboard.cloud_sub_note": "กำหนดเส้นทางผ่าน Claude Code CLI — ใช้การสมัครสมาชิกของคุณ ไม่มีค่าใช้จ่ายต่อโทเค็น",
+  "mode.api": "API",
   "mode.subscription": "สมาชิก",
   "claude_code.dir_placeholder": "วางเส้นทางโฟลเดอร์ หรือเว้นว่างเพื่อแชท",
   "claude_code.quick_chat": "แชทด่วน",

@@ -896,6 +896,7 @@
   "settings.rate_tier": "Hastighetsnivå",
   "dashboard.cloud_subscription": "Prenumeration",
   "dashboard.cloud_sub_note": "Routas genom Claude Code CLI — använder din prenumeration, inga avgifter per token",
+  "mode.api": "API",
   "mode.subscription": "PRENUMERATION",
   "claude_code.dir_placeholder": "Klistra in en mappsökväg, eller lämna tomt för att chatta",
   "claude_code.quick_chat": "Snabbchatt",

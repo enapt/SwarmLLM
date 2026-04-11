@@ -896,6 +896,7 @@
   "settings.rate_tier": "Poziom limitu",
   "dashboard.cloud_subscription": "Subskrypcja",
   "dashboard.cloud_sub_note": "Kierowane przez Claude Code CLI — korzysta z Twojej subskrypcji, bez opłat za token",
+  "mode.api": "API",
   "mode.subscription": "SUBSKRYPCJA",
   "claude_code.dir_placeholder": "Wklej ścieżkę folderu lub zostaw puste, by rozmawiać",
   "claude_code.quick_chat": "Szybki czat",

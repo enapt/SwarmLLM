@@ -896,6 +896,7 @@
   "settings.rate_tier": "Nível de taxa",
   "dashboard.cloud_subscription": "Assinatura",
   "dashboard.cloud_sub_note": "Roteado pelo CLI do Claude Code — usa sua assinatura, sem cobranças por token",
+  "mode.api": "API",
   "mode.subscription": "ASSINATURA",
   "claude_code.dir_placeholder": "Cole o caminho de uma pasta, ou deixe vazio para conversar",
   "claude_code.quick_chat": "Chat rápido",

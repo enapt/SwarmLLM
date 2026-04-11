@@ -896,6 +896,7 @@
   "settings.rate_tier": "مستوى المعدل",
   "dashboard.cloud_subscription": "الاشتراك",
   "dashboard.cloud_sub_note": "يمر عبر واجهة Claude Code — يستخدم اشتراكك، دون رسوم لكل رمز",
+  "mode.api": "API",
   "mode.subscription": "اشتراك",
   "claude_code.dir_placeholder": "الصق مسار مجلد، أو اتركه فارغاً للمحادثة",
   "claude_code.quick_chat": "محادثة سريعة",

@@ -764,17 +764,6 @@
               <span class="ph-tag tag-sub" data-i18n="mode.subscription">SUB</span>
             </div>
           </div>
-          <!-- Keep old elements for backward compat with providerHealth.js writes -->
-          <div style="display:none">
-            <div class="claude-code-indicator hidden" id="claude-code-badge">
-              <img src="/static/icons/claude-code.svg" width="18" height="18" alt="" class="cc-icon">
-              <span class="cc-name">Claude Code</span>
-              <span class="cc-status-dot"></span>
-              <span class="cc-plan" id="cc-plan-label"></span>
-              <span class="cc-tag" data-i18n="mode.subscription">SUBSCRIPTION</span>
-            </div>
-            <div class="provider-strip hidden" id="provider-badges"></div>
-          </div>
 
 
           <div class="grid grid-2">
@@ -1313,16 +1302,6 @@
       <span class="toast-icon"></span>
       <span class="toast-text"></span>
       <button class="toast-close">&#215;</button>
-    </div>
-  </template>
-
-  <!-- Provider health badge (used by providerHealth.updateBannerBadges) -->
-  <template id="tmpl-provider-badge">
-    <div class="provider-badge" style="cursor:pointer">
-      <span class="pb-icon"></span>
-      <span class="pb-name"></span>
-      <span class="pb-dot"></span>
-      <span class="pb-latency"></span>
     </div>
   </template>
 
