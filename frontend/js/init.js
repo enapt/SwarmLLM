@@ -247,7 +247,6 @@
     });
     on('btn-open-model-browser', 'click', function() { App.ui.openModelBrowser(); });
     on('btn-browse-hf', 'click', function() { App.ui.openModelBrowser(); });
-    on('link-browse-hf', 'click', function(e) { e.preventDefault(); App.ui.openModelBrowser(); });
 
     // Header
     on('hamburger-btn', 'click', function() { App.ui.toggleSidebar(); });

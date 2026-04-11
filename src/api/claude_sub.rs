@@ -190,6 +190,14 @@ fn cleanup_expired_sessions() {
     SESSION_CACHE.retain(|_, entry| entry.last_used.elapsed() < SESSION_TTL);
 }
 
+/// Extract total input tokens from a CLI usage JSON object, summing base +
+/// cache_read + cache_creation components.
+fn extract_total_input_tokens(usage: &serde_json::Value) -> u64 {
+    usage["input_tokens"].as_u64().unwrap_or(0)
+        + usage["cache_read_input_tokens"].as_u64().unwrap_or(0)
+        + usage["cache_creation_input_tokens"].as_u64().unwrap_or(0)
+}
+
 /// Validate model name: must be ≤128 chars, safe characters only.
 fn validate_model_name(model: &str) -> Result<(), ApiError> {
     if model.len() > 128
@@ -625,9 +633,7 @@ pub async fn proxy_via_subprocess_openai(
                                 // Usage info (optional — not all clients use it)
                                 let usage = &parsed["usage"];
                                 if !usage.is_null() {
-                                    let input = usage["input_tokens"].as_u64().unwrap_or(0)
-                                        + usage["cache_read_input_tokens"].as_u64().unwrap_or(0)
-                                        + usage["cache_creation_input_tokens"].as_u64().unwrap_or(0);
+                                    let input = extract_total_input_tokens(usage);
                                     let output = usage["output_tokens"].as_u64().unwrap_or(0);
                                     let usage_chunk = serde_json::json!({
                                         "id": rid,
@@ -683,9 +689,7 @@ pub async fn proxy_via_subprocess_openai(
 
         let content = result["result"].as_str().unwrap_or("");
         let usage = &result["usage"];
-        let input_tokens = usage["input_tokens"].as_u64().unwrap_or(0)
-            + usage["cache_read_input_tokens"].as_u64().unwrap_or(0)
-            + usage["cache_creation_input_tokens"].as_u64().unwrap_or(0);
+        let input_tokens = extract_total_input_tokens(usage);
         let output_tokens = usage["output_tokens"].as_u64().unwrap_or(0);
 
         let response = serde_json::json!({

@@ -585,7 +585,7 @@
           existingBadge.textContent = h.latency_ms + 'ms';
         } else {
           existingBadge.className = 'provider-health-badge health-down';
-          existingBadge.textContent = h.status === 'rate_limited' ? I18n.t('provider.limited') : h.status === 'timeout' ? I18n.t('provider.slow') : I18n.t('provider.down');
+          existingBadge.textContent = h.status === 'rate_limited' ? I18n.t('provider.limited') : h.status === 'timeout' ? I18n.t('provider.timeout') : I18n.t('provider.down');
         }
       });
     },
