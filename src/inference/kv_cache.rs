@@ -72,6 +72,14 @@ impl KvCacheManager {
         }
     }
 
+    fn cache_holders(pipeline: &PipelineAssignment) -> Vec<NodeId> {
+        pipeline
+            .segments
+            .iter()
+            .map(|s| s.node_id.clone())
+            .collect()
+    }
+
     /// Register or update a KV-cache session.
     pub fn register_session(
         &mut self,
@@ -79,11 +87,7 @@ impl KvCacheManager {
         pipeline: PipelineAssignment,
         cached_tokens: u32,
     ) {
-        let cache_holders: Vec<NodeId> = pipeline
-            .segments
-            .iter()
-            .map(|s| s.node_id.clone())
-            .collect();
+        let cache_holders = Self::cache_holders(&pipeline);
 
         let entry = KvCacheSession {
             session_id,
@@ -112,11 +116,7 @@ impl KvCacheManager {
         cached_tokens: u32,
         prompt: String,
     ) {
-        let cache_holders: Vec<NodeId> = pipeline
-            .segments
-            .iter()
-            .map(|s| s.node_id.clone())
-            .collect();
+        let cache_holders = Self::cache_holders(&pipeline);
 
         let entry = KvCacheSession {
             session_id: internal_id,
@@ -308,7 +308,8 @@ impl KvCacheManager {
         self.sessions.get(session_id)
     }
 
-    /// Touch a session to refresh its TTL.
+    /// Touch a session to refresh its TTL (test-only — production refreshes via update_cached_tokens).
+    #[cfg(test)]
     pub fn touch_session(&mut self, session_id: &SessionId) {
         if let Some(session) = self.sessions.get_mut(session_id) {
             session.last_accessed = Instant::now();

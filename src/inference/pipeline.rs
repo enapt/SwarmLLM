@@ -21,6 +21,10 @@ const PREFILL_SECS_PER_LAYER: u64 = 15;
 const DECODE_SECS_PER_LAYER: u64 = 2;
 const SEGMENT_TIMEOUT_MIN_SECS: u64 = 30;
 const SEGMENT_TIMEOUT_MAX_SECS: u64 = 600;
+/// Fallback EOS token ID when GGUF metadata is unavailable. Matches LLaMA family;
+/// other architectures (Qwen2, Phi-3, Gemma) have different EOS tokens.
+/// A warning is emitted when this fallback is used.
+pub(crate) const LLAMA_FALLBACK_EOS_TOKEN: u32 = 2;
 pub(crate) const PREFILL_ACTIVATION_THRESHOLD_BYTES: usize = 100_000;
 
 /// Extract chat template, BOS, and EOS strings from a GGUF header file on disk.
@@ -765,7 +769,8 @@ impl PipelineExecutor {
                     generated_tokens.extend(&result.token_ids);
 
                     // Decode and stream each non-EOS token, checking for stop strings.
-                    let default_eos: std::collections::HashSet<u32> = [2].into_iter().collect();
+                    let default_eos: std::collections::HashSet<u32> =
+                        [LLAMA_FALLBACK_EOS_TOKEN].into_iter().collect();
                     let eos = cached_eos.as_ref().unwrap_or(&default_eos);
                     let decoder = cached_decoder.as_ref();
                     let mut hit_stop_string = false;
@@ -902,7 +907,8 @@ impl PipelineExecutor {
         }
 
         // Strip EOS tokens before decoding (loaded from GGUF metadata)
-        let eos_tokens = cached_eos.unwrap_or_else(|| [2].into_iter().collect());
+        let eos_tokens =
+            cached_eos.unwrap_or_else(|| [LLAMA_FALLBACK_EOS_TOKEN].into_iter().collect());
         let clean_tokens: Vec<u32> = generated_tokens
             .iter()
             .copied()
@@ -1049,10 +1055,11 @@ impl PipelineExecutor {
                         (ptc, eos, decoder)
                     }
                     None => {
+                        tracing::warn!(model_id = %model_id, "No GGUF header available — using LLaMA fallback EOS token");
                         let ptc = (prompt.chars().count() / 4).max(1);
                         (
                             ptc,
-                            vec![2],
+                            vec![LLAMA_FALLBACK_EOS_TOKEN],
                             CachedDecoder {
                                 vocab: Vec::new(),
                                 byte_decoder: HashMap::new(),
@@ -1102,10 +1109,11 @@ impl PipelineExecutor {
                         }
                     }
                 }
+                tracing::warn!(model_id = %model_id, "No GGUF header or local model — using LLaMA fallback EOS token");
                 let ptc = (prompt.chars().count() / 4).max(1);
                 (
                     ptc,
-                    vec![2],
+                    vec![LLAMA_FALLBACK_EOS_TOKEN],
                     CachedDecoder {
                         vocab: Vec::new(),
                         byte_decoder: HashMap::new(),
