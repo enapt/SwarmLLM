@@ -112,11 +112,11 @@
       this.hide();
 
       if (state === 'local') {
-        if (!confirm(I18n.t('actions.confirm_remove_shard', { index: idx, model: modelId }))) return;
+        if (!confirm(I18n.t('actions.confirm_remove_shard', { index: idx + 1, model: modelId }))) return;
         try {
           var resp = await App.authFetch(U.modelApiUrl(modelId, 'shards', idx), { method: 'DELETE' });
           if (resp.ok) {
-            App.ui.showBanner('success', I18n.t('shard.removed', { idx: idx }));
+            App.ui.showBanner('success', I18n.t('shard.removed', { idx: idx + 1 }));
             App.models.load();
           } else {
             App.ui.showBanner('error', await U.getApiErrorMessage(resp, I18n.t('shard.remove_failed')));
@@ -164,7 +164,7 @@
       try {
         var resp = await App.authFetch(url, opts);
         if (resp.ok) {
-          App.ui.showBanner('success', I18n.t(newLocked ? 'shard.locked' : 'shard.unlocked', { idx: idx }));
+          App.ui.showBanner('success', I18n.t(newLocked ? 'shard.locked' : 'shard.unlocked', { idx: idx + 1 }));
           App.models.load();
         } else {
           App.ui.showBanner('error', I18n.t('shard.lock_failed'));

@@ -17,6 +17,22 @@
     return false;
   }
 
+  async function _poolAction(url, opts, successMsg) {
+    try {
+      var resp = await App.authFetch(url, opts);
+      var data = await resp.json();
+      if (_hasError(data)) return;
+      if (successMsg) App.notifications.showToast(successMsg, 'success');
+      App.pool.load();
+    } catch (e) {
+      App.notifications.showToast(I18n.t('pool.failed_generic', { error: e.message }), 'error');
+    }
+  }
+
+  function _jsonOpts(method, body) {
+    return { method: method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) };
+  }
+
   App.pool = {
     _poolState: null,
     _isOwner: false,
@@ -325,19 +341,7 @@
         App.notifications.showToast(I18n.t('pool.name_required'), 'error');
         return;
       }
-      try {
-        var resp = await App.authFetch('/api/pool/create', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ name: name })
-        });
-        var data = await resp.json();
-        if (_hasError(data)) return;
-        App.notifications.showToast(I18n.t('pool.created_success'), 'success');
-        this.load();
-      } catch (e) {
-        App.notifications.showToast(I18n.t('pool.failed_generic', { error: e.message }), 'error');
-      }
+      await _poolAction('/api/pool/create', _jsonOpts('POST', { name: name }), I18n.t('pool.created_success'));
     },
 
     joinPool: async function () {
@@ -467,49 +471,17 @@
     saveDeviceName: async function () {
       var input = document.getElementById('pool-device-name-input');
       var name = input ? input.value.trim() : '';
-      try {
-        var resp = await App.authFetch('/api/pool/device-name', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ name: name })
-        });
-        var data = await resp.json();
-        if (_hasError(data)) return;
-        App.notifications.showToast(I18n.t('pool.name_saved'), 'success');
-        this.load();
-      } catch (e) {
-        App.notifications.showToast(I18n.t('pool.failed_generic', { error: e.message }), 'error');
-      }
+      await _poolAction('/api/pool/device-name', _jsonOpts('POST', { name: name }), I18n.t('pool.name_saved'));
     },
 
     leavePool: async function () {
       if (!confirm(I18n.t('pool.confirm_leave'))) return;
-      try {
-        var resp = await App.authFetch('/api/pool/leave', { method: 'POST' });
-        var data = await resp.json();
-        if (_hasError(data)) return;
-        App.notifications.showToast(I18n.t('pool.left'), 'success');
-        this.load();
-      } catch (e) {
-        App.notifications.showToast(I18n.t('pool.failed_generic', { error: e.message }), 'error');
-      }
+      await _poolAction('/api/pool/leave', { method: 'POST' }, I18n.t('pool.left'));
     },
 
     removeMember: async function (nodeId) {
       if (!confirm(I18n.t('pool.confirm_remove'))) return;
-      try {
-        var resp = await App.authFetch('/api/pool/remove', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ node_id: nodeId })
-        });
-        var data = await resp.json();
-        if (_hasError(data)) return;
-        App.notifications.showToast(I18n.t('pool.member_removed'), 'success');
-        this.load();
-      } catch (e) {
-        App.notifications.showToast(I18n.t('pool.failed_generic', { error: e.message }), 'error');
-      }
+      await _poolAction('/api/pool/remove', _jsonOpts('POST', { node_id: nodeId }), I18n.t('pool.member_removed'));
     },
 
     setContribution: async function (nodeId, level) {
