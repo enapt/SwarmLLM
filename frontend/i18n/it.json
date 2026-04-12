@@ -1051,5 +1051,6 @@
   "shard.matrix.peers_header": "Top peers by coverage ({total} total)",
   "dashboard.info_arch": "Arch",
   "dashboard.info_quant": "Quant",
-  "dashboard.info_trust": "Trust"
+  "dashboard.info_trust": "Trust",
+  "dashboard.section_model_health": "Model health"
 }

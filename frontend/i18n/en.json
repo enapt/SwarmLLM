@@ -269,6 +269,7 @@
   "dashboard.info_arch": "Arch",
   "dashboard.info_quant": "Quant",
   "dashboard.info_trust": "Trust",
+  "dashboard.section_model_health": "Model health",
   "shard.status_active": "Active (loaded in memory)",
   "shard.status_on_disk": "On disk (not loaded)",
   "shard.status_downloading": "Downloading...",
