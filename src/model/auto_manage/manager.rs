@@ -320,12 +320,6 @@ impl AutoShardManager {
                 peers = self.shared_state.peer_registry.len(),
                 "AutoShardManager: no remaining storage budget — skipping downloads"
             );
-            self.shared_state
-                .emit_activity(crate::daemon::state::ActivityEvent::new(
-                    "auto_manage",
-                    "budget_exhausted",
-                    "Auto-manage: storage budget exhausted, no downloads this cycle".to_string(),
-                ));
             return;
         }
 
@@ -348,17 +342,6 @@ impl AutoShardManager {
         tracing::info!(
             count = selected.len(),
             "AutoShardManager: downloading shards"
-        );
-        self.shared_state.emit_activity(
-            crate::daemon::state::ActivityEvent::new(
-                "auto_manage",
-                "download_cycle",
-                format!(
-                    "Auto-manage: selected {} shard(s) to download",
-                    selected.len()
-                ),
-            )
-            .with_detail_num(selected.len() as i64),
         );
 
         // 4. Trigger downloads

@@ -130,12 +130,15 @@
     var modelId = data.model_id || '';
     var ts = Date.now();
 
-    // Dedup: skip if the most recent entry has the same text within 3 seconds.
-    // This prevents duplicates from WS reconnect history replay and rapid-fire
-    // identical events (e.g. check_and_load_model called twice for same shard).
+    // Dedup: skip if the same text appears in the last 10 entries within 30s.
+    // Covers WS reconnect replay, rapid-fire identical events, and interleaved
+    // duplicates (e.g. cycle events arriving between per-shard events).
     var targetList = NETWORK_KINDS[data.kind] ? _networkEntries : _activityEntries;
-    if (targetList.length > 0 && targetList[0].text === text && (ts - targetList[0].ts) < 3000) {
-      return;
+    var scan = Math.min(targetList.length, 10);
+    for (var i = 0; i < scan; i++) {
+      if (targetList[i].text === text && (ts - targetList[i].ts) < 30000) {
+        return;
+      }
     }
 
     var entry = { icon: icon, text: text, ts: ts, category: category, modelId: modelId };
