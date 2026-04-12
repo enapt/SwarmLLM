@@ -1403,22 +1403,20 @@
                   (quantMatch ? '<span class="mce-info-pair"><span class="mce-info-label">' + U.escapeHtml(I18n.t('dashboard.info_quant')) + '</span><span class="mce-info-pill">' + U.escapeHtml(quantMatch[1].toUpperCase().replace(/-/g, '_')) + '</span></span>' : '') +
                   (m.trust_level ? '<span class="mce-info-pair"><span class="mce-info-label">' + U.escapeHtml(I18n.t('dashboard.info_trust')) + '</span>' + (detailBadgesHtml || '') + '</span>' : '') +
                 '</div>' +
-                // 3. Model health — a titled section so the chip has explicit context.
-                (healthBadgeHtml
-                  ? '<div class="mce-health-section">' +
-                      '<div class="mce-section-title">' + U.escapeHtml(I18n.t('dashboard.section_model_health')) + '</div>' +
-                      healthBadgeHtml +
-                    '</div>'
-                  : '') +
+                // 3. Model health chip (title sits above the coverage ribbon on the right).
+                (healthBadgeHtml || '') +
                 '<div class="mce-meta">' +
                   '<div class="mce-meta-row">' + footerMetaHtml + '</div>' +
                 '</div>' +
                 '<div class="mce-actions">' + actionHtml + removeHtml + '</div>' +
               '</div>' +
               '<div class="mce-right" data-shard-detail="' + safeId + '">' +
+                '<div class="mce-right-title">' +
+                  '<span class="mce-section-title">' + U.escapeHtml(I18n.t('dashboard.section_model_health')) + '</span>' +
+                  _buildShardViewToggle() +
+                '</div>' +
                 '<div class="mce-right-head">' +
                   _buildCoverageRibbon(m, shards, safeId) +
-                  _buildShardViewToggle() +
                 '</div>' +
                 '<div class="mce-right-body">' + _buildShardDetailBody(m, shards, safeId) + '</div>' +
               '</div>' +

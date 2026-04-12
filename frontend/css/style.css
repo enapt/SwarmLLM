@@ -3651,6 +3651,20 @@ textarea:focus:not(:focus-visible) {
   gap: 8px;
   min-width: 0;
 }
+.model-card-expanded .mce-right-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+.model-card-expanded .mce-right-title .mce-section-title {
+  font-size: 0.58rem;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-weight: 600;
+}
 .model-card-expanded .mce-right-head {
   display: flex;
   align-items: center;
