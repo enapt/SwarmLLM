@@ -3383,9 +3383,13 @@ textarea:focus:not(:focus-visible) {
    guarantee. Three visual states: active (green glow), ready (blue), unprotected
    (amber). Distinct visual language from the generic health chip. */
 .model-card-expanded .mce-left .mce-pipeline {
-  display: flex;
-  align-items: center;
-  gap: 6px;
+  display: grid;
+  grid-template-columns: auto 1fr;
+  grid-template-areas:
+    "icon label"
+    "detail detail";
+  row-gap: 4px;
+  column-gap: 6px;
   padding: 6px 8px;
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
@@ -3393,21 +3397,26 @@ textarea:focus:not(:focus-visible) {
   background: var(--bg-tertiary);
 }
 .model-card-expanded .mce-left .mce-pipeline .mce-pipeline-icon {
+  grid-area: icon;
   font-size: 0.9rem;
   flex-shrink: 0;
   opacity: 0.85;
+  line-height: 1;
+  align-self: center;
 }
 .model-card-expanded .mce-left .mce-pipeline .mce-pipeline-label {
+  grid-area: label;
   font-weight: 700;
   font-size: 0.6rem;
   text-transform: uppercase;
   letter-spacing: 0.05em;
-  white-space: nowrap;
+  align-self: center;
 }
 .model-card-expanded .mce-left .mce-pipeline .mce-pipeline-detail {
+  grid-area: detail;
   color: var(--text-muted);
   font-size: 0.62rem;
-  line-height: 1.25;
+  line-height: 1.35;
 }
 .model-card-expanded .mce-left .mce-pipeline.pipeline-active {
   border-color: rgba(34,197,94,0.45);
