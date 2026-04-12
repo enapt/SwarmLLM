@@ -232,7 +232,7 @@
   "shard.row.vram_label": "LOADED",
   "shard.row.disk_label": "DISK",
   "shard.row.peer_label": "PEER",
-  "shard.row.missing_label": "MISS",
+  "shard.row.missing_label": "MISSING",
   "shard.row.expand_tip": "Show details",
   "shard.row.collapse_tip": "Hide details",
   "shard.row.replicas_none": "No peers have this shard",

@@ -1034,7 +1034,9 @@
 
         var card = document.createElement('div');
         var isCompact = !S._expandedModels[m.id];
-        card.className = 'model-card' + (isReady ? ' ready' : (isDownloading ? ' downloading' : (isPartial ? ' partial' : ''))) + (isCompact ? ' compact' : '');
+        // Any shard with zero network replicas → the model can't run anywhere.
+        var unusable = shards.some(function(s) { return !s.local && (s.holders || 0) === 0; });
+        card.className = 'model-card' + (isReady ? ' ready' : (isDownloading ? ' downloading' : (isPartial ? ' partial' : ''))) + (isCompact ? ' compact' : '') + (unusable ? ' cb-unusable' : '');
         card.setAttribute('data-model-id', m.id);
 
         // --- Composite health badge (single badge replacing 4 separate indicators) ---

@@ -3192,8 +3192,19 @@ textarea:focus:not(:focus-visible) {
 .composite-badge.cb-downloading .cb-dot { background: var(--accent); animation: badge-pulse 2s infinite; }
 .composite-badge.cb-fragile { background: var(--orange-dim); color: var(--orange); }
 .composite-badge.cb-fragile .cb-dot { background: var(--orange); }
-.composite-badge.cb-incomplete { background: var(--red-dim); color: var(--red); }
-.composite-badge.cb-incomplete .cb-dot { background: var(--red); }
+.composite-badge.cb-incomplete {
+  background: var(--red-dim);
+  color: var(--red);
+  font-weight: 700;
+  border: 1px solid rgba(239,68,68,0.5);
+  padding: 2px 8px;
+}
+.composite-badge.cb-incomplete .cb-dot { background: var(--red); box-shadow: 0 0 6px rgba(239,68,68,0.7); animation: badge-pulse 1.6s infinite; }
+/* Whole-card accent when network missing — border, warning shadow */
+.model-card.partial.cb-unusable {
+  border-left: 3px solid var(--red);
+  box-shadow: inset 3px 0 0 0 var(--red), 0 0 0 1px rgba(239,68,68,0.15);
+}
 .composite-badge.cb-network { background: rgba(255,255,255,0.04); color: var(--text-muted); }
 .composite-badge.cb-network .cb-dot { background: var(--text-muted); }
 @keyframes badge-pulse {
@@ -3582,7 +3593,7 @@ textarea:focus:not(:focus-visible) {
 .shard-row {
   position: relative;
   display: grid;
-  grid-template-columns: 18px 24px 64px 56px 1fr auto auto auto;
+  grid-template-columns: 18px 40px 64px 64px 1fr auto auto auto;
   align-items: center;
   gap: 10px;
   min-height: 28px;
