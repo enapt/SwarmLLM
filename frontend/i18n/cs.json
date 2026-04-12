@@ -1039,7 +1039,7 @@
   "enc.active_tip": "End-to-end encrypted pipeline is active. Peers cannot read prompts, hidden states, or outputs.",
   "enc.ready_detail": "You hold both endpoint shards. Enable end-to-end encryption for total privacy (~2–5s extra latency).",
   "enc.ready_tip": "Both endpoint shards are on this device. Click to enable end-to-end encryption — all traffic already uses transport encryption regardless.",
-  "enc.unprotected_detail": "Requests are always encrypted in transit, but serving peers can read your prompts and outputs. Hold {missing} locally for full end-to-end privacy (costs disk space + ~2–5s extra latency).",
+  "enc.unprotected_detail": "Requests are always encrypted in transit, but serving peers can read your prompts and outputs. Download {missing} locally for full end-to-end privacy (costs disk space + ~2–5s extra latency).",
   "enc.unprotected_tip": "Transport encryption is always on. End-to-end encryption additionally requires the first AND last shard on this device.",
   "shard.endpoint_first_tip": "Pipeline entry shard. Holding this locally is required for end-to-end encryption.",
   "shard.endpoint_last_tip": "Pipeline exit shard. Holding this locally is required for end-to-end encryption.",
@@ -1052,5 +1052,7 @@
   "dashboard.info_arch": "Arch",
   "dashboard.info_quant": "Quant",
   "dashboard.info_trust": "Trust",
-  "dashboard.section_model_health": "Model health"
+  "dashboard.section_model_health": "Model health",
+  "enc.missing_both": "both the first and last shards",
+  "enc.missing_the": "the {which}"
 }

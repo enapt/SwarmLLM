@@ -1206,9 +1206,13 @@
             pipelineCls = 'pipeline-unprotected';
             pipelineLabel = I18n.t('enc.unavailable');
             var missingParts2 = [];
-            if (!hasFirst) missingParts2.push(I18n.t('enc.missing_first'));
-            if (!hasLast)  missingParts2.push(I18n.t('enc.missing_last', { n: shardCount - 1 }));
-            pipelineDetail = I18n.t('enc.unprotected_detail', { missing: missingParts2.join(' + ') });
+            if (!hasFirst) missingParts2.push(I18n.t('dashboard.enc_missing_first'));
+            if (!hasLast)  missingParts2.push(I18n.t('dashboard.enc_missing_last', { n: shardCount - 1 }));
+            // Both missing → "first and last shards"; one missing → "the first shard" / "the last shard"
+            var missingText = missingParts2.length === 2
+              ? I18n.t('enc.missing_both')
+              : (missingParts2.length === 1 ? I18n.t('enc.missing_the', { which: missingParts2[0] }) : '');
+            pipelineDetail = I18n.t('enc.unprotected_detail', { missing: missingText });
             pipelineTitle = I18n.t('enc.unprotected_tip');
           }
           // Lock glyph states: 🔒 active (closed), 🔏 ready (closed w/ pen), 🔓 unprotected (open)
