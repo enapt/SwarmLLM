@@ -805,7 +805,11 @@
                 </div>
               </div>
               <div class="vram-bar-container">
-                <div class="progress-bar vram-progress" style="height:8px">
+                <div class="contribution-label">
+                  <span data-i18n="dashboard.contribution_label">Your contribution</span>
+                  <span class="contribution-pct" id="contribution-pct">—</span>
+                </div>
+                <div class="progress-bar vram-progress" style="height:6px">
                   <div class="fill cyan" id="vram-bar" style="width:0%"></div>
                   <div class="vram-tick" style="left:25%" data-i18n-title="dashboard.tick_minimal" title="Minimal contribution"></div>
                   <div class="vram-tick" style="left:50%" data-i18n-title="dashboard.tick_moderate" title="Moderate contribution"></div>
@@ -827,15 +831,15 @@
               </div>
               <div class="credits-balance-row">
                 <span class="mono credits-balance-num" id="credit-balance">0</span>
-              </div>
-              <div class="credits-stats-row">
-                <div class="credits-stat">
-                  <span class="credits-stat-label" data-i18n="dashboard.earned">Earned</span>
-                  <span class="mono credits-stat-val text-green" id="credit-earned">+0</span>
-                </div>
-                <div class="credits-stat">
-                  <span class="credits-stat-label" data-i18n="dashboard.spent">Spent</span>
-                  <span class="credits-stat-val mono text-red" id="credit-spent">-0</span>
+                <div class="credits-stats-row">
+                  <div class="credits-stat">
+                    <span class="credits-stat-label" data-i18n="dashboard.earned">Earned</span>
+                    <span class="mono credits-stat-val text-green" id="credit-earned">+0</span>
+                  </div>
+                  <div class="credits-stat">
+                    <span class="credits-stat-label" data-i18n="dashboard.spent">Spent</span>
+                    <span class="credits-stat-val mono text-red" id="credit-spent">-0</span>
+                  </div>
                 </div>
               </div>
               <div class="sparkline" id="credit-sparkline"></div>

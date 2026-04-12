@@ -711,26 +711,25 @@ a:hover { color: var(--accent-hover); }
 /* ---- Stat cards ---- */
 /* Compact stat strip — single row */
 .stat-strip {
-  display: flex; gap: 8px; flex-wrap: wrap;
+  display: flex; gap: 6px; flex-wrap: wrap;
 }
 .stat-card {
   border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
-  padding: 10px 12px;
-  box-shadow: var(--shadow-xs);
+  border-radius: var(--radius-sm);
+  padding: 4px 8px;
   transition: all var(--transition);
   position: relative;
   overflow: hidden;
-  flex: 1; min-width: 90px;
-  display: flex; align-items: center; gap: 8px;
+  flex: 1; min-width: 96px;
+  display: flex; align-items: center; gap: 6px;
 }
-.stat-card:hover { border-color: var(--border-light); box-shadow: var(--shadow), 0 0 0 1px rgba(59,130,246,0.06); }
+.stat-card:hover { border-color: var(--border-light); }
 
 .stat-card .stat-icon {
-  width: 32px; height: 32px;
-  border-radius: var(--radius);
+  width: 18px; height: 18px;
+  border-radius: 4px;
   display: flex; align-items: center; justify-content: center;
-  font-size: 0.85rem;
+  font-size: 0.65rem;
   flex-shrink: 0;
   transition: box-shadow 0.3s;
 }
@@ -742,21 +741,30 @@ a:hover { color: var(--accent-hover); }
 .stat-card .stat-icon.red { background: var(--red-dim); color: var(--red); box-shadow: 0 0 10px rgba(239,68,68,0.15); }
 .stat-card:hover .stat-icon { box-shadow: 0 0 16px rgba(255,255,255,0.08); }
 
-.stat-card .stat-body { display: flex; flex-direction: column; }
+.stat-card .stat-body { display: flex; flex-direction: column; gap: 0; flex: 1; min-width: 0; line-height: 1.1; }
 .stat-card .stat-value {
   font-family: var(--font-mono);
-  font-size: 1.2rem;
+  font-size: 0.9rem;
   font-weight: 700;
-  line-height: 1.1;
+  line-height: 1;
   color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
 }
 .stat-card .stat-label {
-  font-size: 0.65rem;
+  font-size: 0.55rem;
   color: var(--text-secondary);
-  margin-top: 1px;
   text-transform: uppercase;
-  letter-spacing: 0.3px;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin-top: 1px;
 }
+/* Hide sparkline + help glyph in compact strip — not useful at small size */
+.stat-card .stat-sparkline { display: none; }
+.stat-card .stat-help { display: none; }
+/* Hide LAN sub-badge inside peers card (shown elsewhere in network panel) */
+.stat-card .lan-badge { display: none !important; }
 
 /* ---- Grid ---- */
 .grid { display: grid; gap: 14px; }
@@ -1015,23 +1023,32 @@ label {
 }
 .form-group { margin-bottom: 14px; }
 
-/* Compact Node panel (WI-7) */
-.node-compact .panel-header { margin-bottom: 6px; }
+/* Compact Node panel — all hw info inline on one row, mode badge dominant */
+.node-compact .panel-header { margin-bottom: 4px; }
 .node-hw-grid {
-  display: grid; grid-template-columns: 1fr 1fr; gap: 4px 12px;
-  margin-bottom: 6px;
+  display: flex; flex-wrap: wrap; gap: 4px 14px;
+  margin-bottom: 4px;
+  align-items: center;
 }
 .node-hw-cell {
-  display: flex; align-items: center; gap: 6px; font-size: 0.78rem;
+  display: inline-flex; align-items: center; gap: 5px; font-size: 0.72rem;
   min-width: 0;
+  white-space: nowrap;
 }
-/* (node-hw-row removed — replaced by node-hw-grid/node-hw-cell) */
-.node-hw-label { width: 44px; color: var(--text-muted); font-size: 0.65rem; text-transform: uppercase; flex-shrink: 0; display: flex; align-items: center; gap: 3px; }
-.node-hw-icon { font-size: 0.65rem; opacity: 0.7; line-height: 1; width: 16px; height: 16px; display: inline-flex; align-items: center; justify-content: center; border-radius: 3px; background: rgba(59,130,246,0.08); color: var(--accent); }
-.node-hw-value { flex: 1; font-size: 0.75rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--text-primary); }
+.node-hw-label { color: var(--text-muted); font-size: 0.58rem; text-transform: uppercase; letter-spacing: 0.06em; flex-shrink: 0; display: inline-flex; align-items: center; gap: 3px; }
+.node-hw-icon { font-size: 0.6rem; opacity: 0.65; line-height: 1; }
+.node-hw-value { font-size: 0.72rem; color: var(--text-primary); font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+.node-hw-value .text-muted { opacity: 0.55; font-weight: 400; }
 .node-mode-badge {
-  font-size: 0.58rem; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase;
-  padding: 1px 5px; border-radius: var(--radius-sm); flex-shrink: 0; white-space: nowrap;
+  font-size: 0.65rem; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase;
+  padding: 2px 8px; border-radius: var(--radius-sm); flex-shrink: 0; white-space: nowrap;
+  display: inline-flex; align-items: center; gap: 4px;
+}
+.node-mode-badge::before {
+  content: '';
+  width: 6px; height: 6px; border-radius: 50%;
+  background: currentColor;
+  box-shadow: 0 0 6px currentColor;
 }
 .node-mode-gpu {
   background: rgba(34, 197, 94, 0.15); color: var(--green);
@@ -1043,8 +1060,24 @@ label {
   border: 1px solid rgba(255, 193, 7, 0.25);
   box-shadow: 0 0 8px rgba(255,193,7,0.1);
 }
-.progress-bar.mini-bar { width: 44px; height: 4px; flex-shrink: 0; }
-.vram-bar-container { margin: 6px 0 2px; }
+.progress-bar.mini-bar { width: 32px; height: 3px; flex-shrink: 0; }
+.vram-bar-container { margin: 4px 0 2px; }
+.contribution-label {
+  display: flex; justify-content: space-between; align-items: baseline;
+  font-size: 0.58rem;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  margin-bottom: 3px;
+}
+.contribution-label .contribution-pct {
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  text-transform: none;
+  letter-spacing: 0;
+}
 .progress-bar.vram-progress { position: relative; }
 .vram-tick {
   position: absolute; top: 0; bottom: 0; width: 1px;
@@ -1059,21 +1092,24 @@ label {
   line-height: 14px;
 }
 
-/* Credits panel — streamlined */
+/* Credits panel — compact: balance + inline earned/spent on one line */
+.credits-panel .panel-header { margin-bottom: 4px; }
 .credits-panel .credits-balance-row {
-  display: flex; align-items: baseline; gap: 8px; margin: 4px 0 8px;
+  display: flex; align-items: baseline; gap: 10px; margin: 2px 0 4px;
+  flex-wrap: wrap;
 }
 .credits-balance-num {
-  font-size: 1.9rem; font-weight: 700; line-height: 1;
+  font-size: 1.3rem; font-weight: 700; line-height: 1;
   color: var(--text-primary);
-  text-shadow: 0 0 20px rgba(59,130,246,0.15);
 }
 .credits-stats-row {
-  display: flex; gap: 16px; margin-bottom: 8px;
+  display: inline-flex; gap: 12px; margin: 0;
+  align-items: baseline;
+  flex: 1;
 }
-.credits-stat { display: flex; flex-direction: column; gap: 1px; }
-.credits-stat-label { font-size: 0.68rem; text-transform: uppercase; color: var(--text-muted); letter-spacing: 0.04em; }
-.credits-stat-val { font-size: 0.95rem; font-weight: 600; }
+.credits-stat { display: inline-flex; align-items: baseline; gap: 4px; }
+.credits-stat-label { font-size: 0.55rem; text-transform: uppercase; color: var(--text-muted); letter-spacing: 0.05em; }
+.credits-stat-val { font-size: 0.8rem; font-weight: 600; font-family: var(--font-mono); }
 
 /* Provider card scroll-highlight */
 @keyframes provider-highlight-pulse {

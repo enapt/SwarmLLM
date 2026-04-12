@@ -560,6 +560,15 @@
     },
 
     // Render the per-model ticker DOM — split into activity + network columns
+    _updateContribution: function(pct, memKind) {
+      var el = document.getElementById('contribution-pct');
+      if (!el) return;
+      var tier = pct < 5 ? 'idle' : pct < 25 ? 'minimal' : pct < 60 ? 'moderate' : 'maximum';
+      var tierLabel = I18n.t('dashboard.contribution_tier_' + tier) || tier;
+      var memLabel = memKind === 'vram' ? I18n.t('hw.vram') : I18n.t('hw.ram');
+      el.textContent = pct.toFixed(0) + '% ' + memLabel + ' · ' + tierLabel;
+    },
+
     _renderModelTicker: function(modelId) {
       var actEvents = _modelEvents[modelId] || [];
       var netEvents = _modelNetEvents[modelId] || [];
@@ -710,14 +719,18 @@
               var vramPct = vramTotal > 0 ? (displayUsed / vramTotal * 100) : 0;
               document.getElementById('vram-bar').style.width = vramPct.toFixed(1) + '%';
               document.getElementById('vram-bar').className = vramPct > 90 ? 'fill red' : (vramPct > 70 ? 'fill orange' : 'fill cyan');
+              App.dashboard._updateContribution(vramPct, 'vram');
             } else {
               if (vramLabel) vramLabel.textContent = I18n.t('hw.vram_idle');
-              // CPU mode: show actual GPU VRAM (driver baseline only, models use RAM)
+              // CPU mode: contribution bar reflects RAM usage by loaded models,
+              // not GPU VRAM (which is idle — driver baseline only).
               vramEl.textContent = U.formatMB(vramUsed) + ' / ' + U.formatMB(vramTotal);
               vramEl.title = I18n.t('hw.vram_idle_tip');
-              var vramPct = vramTotal > 0 ? (vramUsed / vramTotal * 100) : 0;
-              document.getElementById('vram-bar').style.width = vramPct.toFixed(1) + '%';
-              document.getElementById('vram-bar').className = 'fill cyan';
+              var ramForModels = hw.process_rss_mb || 0;
+              var ramPctForBar = hw.total_ram_mb > 0 ? (ramForModels / hw.total_ram_mb * 100) : 0;
+              document.getElementById('vram-bar').style.width = ramPctForBar.toFixed(1) + '%';
+              document.getElementById('vram-bar').className = ramPctForBar > 90 ? 'fill red' : (ramPctForBar > 70 ? 'fill orange' : 'fill cyan');
+              App.dashboard._updateContribution(ramPctForBar, 'ram');
             }
           }
         } else {
