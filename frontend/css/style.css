@@ -3379,6 +3379,77 @@ textarea:focus:not(:focus-visible) {
 .model-card-expanded .mce-left .mce-health.health-low .mce-health-label   { color: var(--red);    background: var(--red-dim, rgba(239,68,68,0.15)); }
 .model-card-expanded .mce-left .mce-health-detail { color: var(--text-muted); font-size: 0.62rem; }
 
+/* Pipeline encryption chip — surfaces the "hold first + last to fully encrypt"
+   guarantee. Three visual states: active (green glow), ready (blue), unprotected
+   (amber). Distinct visual language from the generic health chip. */
+.model-card-expanded .mce-left .mce-pipeline {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-size: 0.66rem;
+  background: var(--bg-tertiary);
+}
+.model-card-expanded .mce-left .mce-pipeline .mce-pipeline-icon {
+  font-size: 0.9rem;
+  flex-shrink: 0;
+  opacity: 0.85;
+}
+.model-card-expanded .mce-left .mce-pipeline .mce-pipeline-label {
+  font-weight: 700;
+  font-size: 0.6rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  white-space: nowrap;
+}
+.model-card-expanded .mce-left .mce-pipeline .mce-pipeline-detail {
+  color: var(--text-muted);
+  font-size: 0.62rem;
+  line-height: 1.25;
+}
+.model-card-expanded .mce-left .mce-pipeline.pipeline-active {
+  border-color: rgba(34,197,94,0.45);
+  background: rgba(34,197,94,0.08);
+}
+.model-card-expanded .mce-left .mce-pipeline.pipeline-active .mce-pipeline-label { color: var(--green); }
+.model-card-expanded .mce-left .mce-pipeline.pipeline-active .mce-pipeline-icon  { text-shadow: 0 0 8px rgba(34,197,94,0.5); opacity: 1; }
+.model-card-expanded .mce-left .mce-pipeline.pipeline-ready {
+  border-color: rgba(59,130,246,0.35);
+  background: var(--accent-glow);
+}
+.model-card-expanded .mce-left .mce-pipeline.pipeline-ready .mce-pipeline-label { color: var(--accent); }
+.model-card-expanded .mce-left .mce-pipeline.pipeline-unprotected {
+  border-color: rgba(245,158,11,0.35);
+  background: rgba(245,158,11,0.08);
+}
+.model-card-expanded .mce-left .mce-pipeline.pipeline-unprotected .mce-pipeline-label { color: var(--orange); }
+
+/* Shard row endpoint badges (FIRST/LAST) + pipeline-pinned accent */
+.shard-row-endpoint {
+  display: inline-block;
+  margin-left: 4px;
+  padding: 1px 5px;
+  font-size: 0.5rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  border-radius: 3px;
+  background: rgba(250,204,21,0.18);
+  color: rgba(250,204,21,0.9);
+  vertical-align: 1px;
+}
+.shard-row-endpoint-row { border-left-width: 2px; }
+.shard-row-pipeline-pinned {
+  border-left-color: var(--green) !important;
+  box-shadow: inset 3px 0 0 0 var(--green);
+}
+.shard-row-pipeline-pinned .shard-row-endpoint {
+  background: rgba(34,197,94,0.18);
+  color: var(--green);
+}
+
 .model-card-expanded .mce-left .mce-actions {
   display: flex;
   flex-wrap: wrap;

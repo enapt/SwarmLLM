@@ -139,6 +139,17 @@
     var state = _shardState(s);
     var isMmproj = s.index === MMPROJ_SHARD_INDEX;
     var idxLabel = isMmproj ? '\u2605' : String((s.index || 0) + 1);
+    var shardCount = m.shard_count || (m.shards || []).length || 0;
+    var isFirst = shardCount > 1 && s.index === 0;
+    var isLast  = shardCount > 1 && s.index === shardCount - 1;
+    var isEndpoint = isFirst || isLast;
+    var isPipelinePinned = isEndpoint && s.local && m.encrypted_pipeline;
+    var endpointBadge = '';
+    if (isFirst) {
+      endpointBadge = '<span class="shard-row-endpoint" data-kind="first" title="' + U.escapeHtml(I18n.t('shard.endpoint_first_tip')) + '">' + U.escapeHtml(I18n.t('shard.endpoint_first')) + '</span>';
+    } else if (isLast) {
+      endpointBadge = '<span class="shard-row-endpoint" data-kind="last" title="' + U.escapeHtml(I18n.t('shard.endpoint_last_tip')) + '">' + U.escapeHtml(I18n.t('shard.endpoint_last')) + '</span>';
+    }
     var layerRange = '';
     var statusLabel = _shardStatusLabel(s, state);
     var sizeText = s.size_bytes ? U.formatBytes(s.size_bytes) : '\u2014';
@@ -149,13 +160,16 @@
       ? _buildPieceBar(s.peer_downloads, (s.download && s.download.progress_pct) || 0)
       : '';
     var actions = _buildRowActions(state, !!s.local, !!s.in_vram);
-    return '<div class="shard-row" data-state="' + state + '"' +
+    var rowClass = 'shard-row';
+    if (isEndpoint) rowClass += ' shard-row-endpoint-row';
+    if (isPipelinePinned) rowClass += ' shard-row-pipeline-pinned';
+    return '<div class="' + rowClass + '" data-state="' + state + '"' +
       ' data-shard-row="' + safeId + '-' + s.index + '"' +
       ' data-shard-model="' + U.escapeHtml(m.id) + '"' +
       ' data-shard-index="' + s.index + '"' +
       ' data-shard-locked="' + (s.locked ? '1' : '0') + '">' +
       '<span class="shard-row-state-glyph">' + _shardGlyph(state) + '</span>' +
-      '<span class="shard-row-index">' + idxLabel + '</span>' +
+      '<span class="shard-row-index">' + idxLabel + endpointBadge + '</span>' +
       '<span class="shard-row-layers">' + layerRange + '</span>' +
       '<span class="shard-row-status">' + U.escapeHtml(statusLabel) + '</span>' +
       _shardReplicaPips(s) +
@@ -1153,6 +1167,42 @@
             '</div>';
         }
 
+        // Pipeline encryption status — SwarmLLM requires the user to locally hold
+        // BOTH the first and last shard to fully encrypt the inference pipeline.
+        // Chip surfaces whether the guarantee is currently met, merely available
+        // (both endpoints local), or unprotected (one/both endpoints missing).
+        var pipelineChipHtml = '';
+        if (shardCount > 1) {
+          var hasFirst = !!m.has_first_shard;
+          var hasLast  = !!m.has_last_shard;
+          var encActive2 = !!m.encrypted_pipeline;
+          var pipelineCls, pipelineLabel, pipelineDetail, pipelineTitle;
+          if (encActive2) {
+            pipelineCls = 'pipeline-active';
+            pipelineLabel = I18n.t('enc.active');
+            pipelineDetail = I18n.t('enc.active_detail');
+            pipelineTitle = I18n.t('enc.active_tip');
+          } else if (hasFirst && hasLast) {
+            pipelineCls = 'pipeline-ready';
+            pipelineLabel = I18n.t('enc.available');
+            pipelineDetail = I18n.t('enc.ready_detail');
+            pipelineTitle = I18n.t('enc.ready_tip');
+          } else {
+            pipelineCls = 'pipeline-unprotected';
+            pipelineLabel = I18n.t('enc.unavailable');
+            var missingParts2 = [];
+            if (!hasFirst) missingParts2.push(I18n.t('enc.missing_first'));
+            if (!hasLast)  missingParts2.push(I18n.t('enc.missing_last', { n: shardCount - 1 }));
+            pipelineDetail = I18n.t('enc.unprotected_detail', { missing: missingParts2.join(' + ') });
+            pipelineTitle = I18n.t('enc.unprotected_tip');
+          }
+          pipelineChipHtml = '<div class="mce-pipeline ' + pipelineCls + '" title="' + U.escapeHtml(pipelineTitle) + '">' +
+            '<span class="mce-pipeline-icon">\uD83D\uDD10</span>' +
+            '<span class="mce-pipeline-label">' + U.escapeHtml(pipelineLabel) + '</span>' +
+            '<span class="mce-pipeline-detail">' + U.escapeHtml(pipelineDetail) + '</span>' +
+            '</div>';
+        }
+
         // Download progress bar
         var progressHtml = '';
         if (isDownloading && m.acquisition_progress) {
@@ -1318,6 +1368,7 @@
             '<div class="model-card-expanded">' +
               '<div class="mce-left">' +
                 (detailBadgesHtml || '') +
+                (pipelineChipHtml || '') +
                 (healthBadgeHtml || '') +
                 '<div class="mce-meta">' +
                   '<div class="mce-meta-row">' + footerMetaHtml + '</div>' +
