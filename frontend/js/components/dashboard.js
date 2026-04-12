@@ -40,6 +40,160 @@
       '</div>';
   }
 
+  // ==========================================================================
+  // Shard row list — new dense row-per-shard rendering (replaces grid)
+  // ==========================================================================
+  var MMPROJ_SHARD_INDEX = 0xFFFFFFFF;
+
+  function _shardState(s) {
+    if (s.download && s.download.state === 'Downloading') return 'downloading';
+    if (s.download && s.download.state === 'Verifying') return 'downloading';
+    if (s.download && (s.download.state === 'Queued' || s.download.state === 'pending')) return 'downloading';
+    if (s.peer_downloads && s.peer_downloads.length > 0 && !s.local) return 'downloading';
+    if (s.local && s.in_vram) return 'vram';
+    if (s.local) return 'disk';
+    if ((s.holders || 0) > 0) return 'peer';
+    return 'missing';
+  }
+
+  function _shardGlyph(state) {
+    // Filled square (▣), outlined square (▢), half-circle (◐), middle dot (·), heavy ballot (✕)
+    return state === 'vram' ? '\u25A0'
+         : state === 'disk' ? '\u25A1'
+         : state === 'downloading' ? '\u25D0'
+         : state === 'peer' ? '\u00B7'
+         : '\u2715';
+  }
+
+  function _shardStatusLabel(s, state) {
+    if (state === 'vram') return I18n.t('shard.row.vram_label');
+    if (state === 'disk') return I18n.t('shard.row.disk_label');
+    if (state === 'downloading') {
+      var pct = (s.download && typeof s.download.progress_pct === 'number')
+        ? s.download.progress_pct
+        : (s.peer_downloads && s.peer_downloads[0] ? s.peer_downloads[0].progress_pct : 0);
+      return (pct || 0) + '%\u2193';
+    }
+    if (state === 'peer') return I18n.t('shard.row.peer_label');
+    return I18n.t('shard.row.missing_label');
+  }
+
+  function _shardReplicaPips(s) {
+    var holders = s.holders || 0;
+    var tier = holders >= 3 ? 'good' : holders >= 1 ? 'low' : 'none';
+    var titleKey = holders === 0 ? 'shard.row.replicas_none'
+                 : (holders === 1 ? 'shard.row.replicas_count_one' : 'shard.row.replicas_count_other');
+    var title = I18n.t(titleKey, { n: holders });
+    if (holders === 0) {
+      return '<span class="shard-row-replicas" data-tier="none" title="' + U.escapeHtml(title) + '">' +
+        '<span class="shard-row-pip"></span></span>';
+    }
+    var visible = Math.min(holders, 4);
+    var html = '';
+    for (var i = 0; i < visible; i++) html += '<span class="shard-row-pip"></span>';
+    if (holders > 4) html += '<span class="shard-row-pip-more">+' + (holders - 4) + '</span>';
+    return '<span class="shard-row-replicas" data-tier="' + tier + '" title="' + U.escapeHtml(title) + '">' + html + '</span>';
+  }
+
+  // Torrent-style piece-bar — one colored segment per supplying peer
+  function _buildPieceBar(peerDownloads, totalPct) {
+    if (!peerDownloads || peerDownloads.length === 0) return '';
+    var segs = peerDownloads.slice(0, 4);
+    var overflow = peerDownloads.length > 4;
+    var total = 0;
+    segs.forEach(function(p) { total += (p.progress_pct || 0); });
+    if (totalPct && total < totalPct) total = totalPct;
+    var html = '<div class="shard-row-piecebar">';
+    segs.forEach(function(p) {
+      var pct = p.progress_pct || 0;
+      var color = U.peerColor(p.node_id || '');
+      html += '<div class="shard-row-piecebar-seg" style="--w:' + pct + '%;--c:' + color + '" title="' +
+        U.escapeHtml((p.node_id || '').substring(0, 12)) + ': ' + pct + '%"></div>';
+    });
+    if (overflow) {
+      html += '<div class="shard-row-piecebar-seg more" style="--w:10%" title="+' + (peerDownloads.length - 4) + '"></div>';
+    }
+    html += '</div>';
+    return html;
+  }
+
+  function _buildRowActions(state, isLocal, isInVram) {
+    var parts = [];
+    if (state === 'disk') {
+      parts.push('<button class="shard-row-act" data-shard-act="load" title="' + U.escapeHtml(I18n.t('shard.row.action_load')) + '">\u25B2</button>');
+    } else if (state === 'vram') {
+      parts.push('<button class="shard-row-act" data-shard-act="unload" title="' + U.escapeHtml(I18n.t('shard.row.action_unload')) + '">\u25BC</button>');
+    }
+    if (state === 'downloading') {
+      parts.push('<button class="shard-row-act danger" data-shard-act="cancel" title="' + U.escapeHtml(I18n.t('shard.row.action_cancel')) + '">\u2715</button>');
+    } else if (state === 'peer' || state === 'missing') {
+      parts.push('<button class="shard-row-act" data-shard-act="download" title="' + U.escapeHtml(I18n.t('shard.row.action_download')) + '">\u21E9</button>');
+    }
+    if (isLocal && state !== 'downloading') {
+      parts.push('<button class="shard-row-act danger" data-shard-act="delete" title="' + U.escapeHtml(I18n.t('shard.row.action_delete')) + '">\u2302</button>');
+    }
+    return parts.length ? '<span class="shard-row-actions">' + parts.join('') + '</span>' : '';
+  }
+
+  function _buildShardRow(s, m, safeId) {
+    var state = _shardState(s);
+    var isMmproj = s.index === MMPROJ_SHARD_INDEX;
+    var idxLabel = isMmproj ? '\u2605' : String((s.index || 0) + 1);
+    var layerRange = '';
+    var statusLabel = _shardStatusLabel(s, state);
+    var sizeText = s.size_bytes ? U.formatBytes(s.size_bytes) : '\u2014';
+    var lockCls = s.locked ? ' locked' : '';
+    var lockGlyph = s.locked ? '\uD83D\uDD12' : '\uD83D\uDD13';
+    var lockTitle = s.locked ? I18n.t('shard.unlock') : I18n.t('shard.lock');
+    var pieceBar = (state === 'downloading' && s.peer_downloads && s.peer_downloads.length > 0)
+      ? _buildPieceBar(s.peer_downloads, (s.download && s.download.progress_pct) || 0)
+      : '';
+    var actions = _buildRowActions(state, !!s.local, !!s.in_vram);
+    return '<div class="shard-row" data-state="' + state + '"' +
+      ' data-shard-row="' + safeId + '-' + s.index + '"' +
+      ' data-shard-model="' + U.escapeHtml(m.id) + '"' +
+      ' data-shard-index="' + s.index + '"' +
+      ' data-shard-locked="' + (s.locked ? '1' : '0') + '">' +
+      '<span class="shard-row-state-glyph">' + _shardGlyph(state) + '</span>' +
+      '<span class="shard-row-index">' + idxLabel + '</span>' +
+      '<span class="shard-row-layers">' + layerRange + '</span>' +
+      '<span class="shard-row-status">' + U.escapeHtml(statusLabel) + '</span>' +
+      _shardReplicaPips(s) +
+      '<span class="shard-row-size">' + sizeText + '</span>' +
+      '<button class="shard-row-lock' + lockCls + '" data-shard-act="toggle-lock" title="' + U.escapeHtml(lockTitle) + '">' + lockGlyph + '</button>' +
+      '<button class="shard-row-more" data-shard-act="expand" title="' + U.escapeHtml(I18n.t('shard.row.expand_tip')) + '">\u203A</button>' +
+      actions +
+      pieceBar +
+      '</div>';
+  }
+
+  function _buildShardList(m, shards, safeId) {
+    if (!shards || shards.length === 0) return '';
+    var rows = shards.map(function(s) { return _buildShardRow(s, m, safeId); }).join('');
+    return '<div class="shard-list" data-shard-list="' + safeId + '">' + rows + '</div>';
+  }
+
+  // Coverage ribbon for the expanded panel's right column — a compact strip
+  // colored by network replica count per shard. Reuses availability-bar semantics.
+  function _buildCoverageRibbon(m, shards, safeId) {
+    if (!shards || shards.length === 0) return '';
+    var html = '<div class="availability-bar shard-coverage-ribbon" data-coverage-ribbon="' + safeId +
+      '" title="' + U.escapeHtml(I18n.t('shard.view.coverage_tip') || '') + '">';
+    shards.forEach(function(s) {
+      var segClass = 'seg-missing';
+      if (s.local && s.in_vram) segClass = 'seg-active';
+      else if (s.local) segClass = 'seg-nominal';
+      else if (s.download && (s.download.state === 'Downloading' || s.download.state === 'Verifying')) segClass = 'seg-downloading';
+      else if (s.peer_downloads && s.peer_downloads.length > 0) segClass = 'seg-downloading';
+      else if ((s.holders || 0) >= 2) segClass = 'seg-peer';
+      else if ((s.holders || 0) === 1) segClass = 'seg-warning';
+      else segClass = 'seg-problem';
+      html += '<div class="avail-seg ' + segClass + '"></div>';
+    });
+    html += '</div>';
+    return html;
+  }
+
 
   App.dashboard = {
     _peersExpanded: false,
@@ -660,7 +814,9 @@
         var gearHtml = '<button class="model-gear-btn" data-am-gear="' + U.escapeHtml(m.id) + '" title="' + U.escapeHtml(I18n.t('dashboard.gear_title')) + '">&#9881;</button>';
         var metaBtnHtml = m.has_header ? '<button class="model-meta-btn" data-meta-toggle="' + U.escapeHtml(m.id) + '" title="' + U.escapeHtml(I18n.t('models.metadata_header')) + '">&#9432;</button>' : '';
 
-        // Shard grid
+        // Shard grid (legacy) — retained only to build the health summary badge that
+        // appears elsewhere in the card. The actual expanded rendering uses the new
+        // two-column shard-list builder below.
         var shardHtml = '';
         var healthBadgeHtml = '';
         var healthBarHtml = '';
@@ -1015,14 +1171,28 @@
             '</div>' +
           '</div>' +
           availBarHtml +
-          detailBadgesHtml +
           '<div class="model-card-shards">' +
-            healthBarHtml + shardHtml + progressHtml + perShardDlHtml +
+            progressHtml + perShardDlHtml +
+            '<div class="model-card-expanded">' +
+              '<div class="mce-left">' +
+                (detailBadgesHtml || '') +
+                (healthBadgeHtml || '') +
+                '<div class="mce-meta">' +
+                  '<div class="mce-meta-row">' + footerMetaHtml + '</div>' +
+                '</div>' +
+                '<div class="mce-actions">' + actionHtml + removeHtml + '</div>' +
+                '<div class="model-ticker" data-model-ticker="' + safeId + '" style="display:none"></div>' +
+              '</div>' +
+              '<div class="mce-right">' +
+                '<div class="mce-right-head">' +
+                  _buildCoverageRibbon(m, shards, safeId) +
+                '</div>' +
+                _buildShardList(m, shards, safeId) +
+              '</div>' +
+            '</div>' +
           '</div>' +
-          '<div class="model-ticker" data-model-ticker="' + safeId + '" style="display:none"></div>' +
           '<div class="model-card-footer">' +
-            '<div class="model-card-meta">' + footerMetaHtml + fileIndicators + '</div>' +
-            '<div class="model-card-actions">' + actionHtml + removeHtml + '</div>' +
+            '<div class="model-card-meta">' + fileIndicators + '</div>' +
           '</div>' +
           '<div class="gguf-metadata-panel hidden" data-meta-panel="' + U.escapeHtml(m.id) + '"></div>';
 

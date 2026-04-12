@@ -3283,8 +3283,11 @@ textarea:focus:not(:focus-visible) {
   border-bottom: none;
   padding-bottom: 4px;
 }
-/* Hide availability bar in expanded mode (health bar + grid provide more detail) */
-.model-card:not(.compact) .availability-bar { display: none; }
+/* Hide card-level availability bar in expanded mode — the coverage ribbon
+   inside .mce-right-head takes over. Use direct-child selector so nested
+   .shard-coverage-ribbon bars remain visible. */
+.model-card:not(.compact) > .availability-bar { display: none; }
+.shard-coverage-ribbon { margin: 0; }
 
 /* Availability bar — thin horizontal strip below title in compact mode */
 .availability-bar {
