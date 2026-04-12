@@ -1059,5 +1059,6 @@
   "dashboard.contribution_tier_idle": "idle",
   "dashboard.contribution_tier_minimal": "minimal",
   "dashboard.contribution_tier_moderate": "moderate",
-  "dashboard.contribution_tier_maximum": "maximum"
+  "dashboard.contribution_tier_maximum": "maximum",
+  "dashboard.chip_shards_locally": " shards locally"
 }

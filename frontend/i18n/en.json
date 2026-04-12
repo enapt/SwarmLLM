@@ -277,6 +277,7 @@
   "dashboard.contribution_tier_minimal": "minimal",
   "dashboard.contribution_tier_moderate": "moderate",
   "dashboard.contribution_tier_maximum": "maximum",
+  "dashboard.chip_shards_locally": " shards locally",
   "shard.status_active": "Active (loaded in memory)",
   "shard.status_on_disk": "On disk (not loaded)",
   "shard.status_downloading": "Downloading...",
