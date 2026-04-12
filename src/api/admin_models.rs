@@ -119,12 +119,19 @@ fn build_shard_json(
         .get(&shard_id)
         .map(|v| *v)
         .unwrap_or(false);
+    let holder_ids: Vec<String> = holders
+        .iter()
+        .filter(|h| *h != local_node_id)
+        .take(32)
+        .map(|h| format!("{}", h))
+        .collect();
 
     let mut shard_json = serde_json::json!({
         "index": shard.index,
         "size_bytes": shard.size_bytes,
         "local": is_local,
         "holders": holders.len(),
+        "holder_ids": holder_ids,
         "locked": locked,
     });
 
@@ -422,6 +429,12 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
                 "available": !holders.is_empty(),
                 "local": local_has,
                 "holders": holders.len(),
+                "holder_ids": holders
+                    .iter()
+                    .filter(|h| *h != &local_node_id)
+                    .take(32)
+                    .map(|h| format!("{}", h))
+                    .collect::<Vec<_>>(),
             },
         })
     };

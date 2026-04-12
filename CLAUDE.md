@@ -169,8 +169,10 @@ libp2p 0.55 (pin to 0.55.x), axum 0.7, candle-core/candle-transformers (CUDA), e
 | `/powerup` | — | inline | Interactive lessons teaching Claude Code features with animated demos (v2.1.90+) |
 | `/release-notes` | — | inline | Interactive version picker showing changelog (v2.1.92+) |
 | `/schedule` | — | inline | Create/manage scheduled remote agents (cron triggers) |
+| `/team-onboarding` | — | inline | Generate teammate ramp-up guide (v2.1.101+) |
+| `/ultraplan` | — | inline | Auto-creates cloud environment for deep planning (v2.1.101+) |
 
-> Claude Code v2.1.92. Opus 4.6 with 1M context. Agent teams enabled. Default effort: medium, high for complex tasks.
+> Claude Code v2.1.104. Opus 4.6 with 1M context. Agent teams enabled. Default effort: high for API-key/enterprise (changed v2.1.94 from medium); dial to medium/low for latency-sensitive or simple tasks.
 
 ### Agent Model Strategy
 
@@ -212,6 +214,16 @@ For larger sessions: `/build-phase 1` will implement an entire phase end-to-end 
 - **Stop**: Session summary + integrity checks logged to `.claude/logs/`
 - **TaskCreated** (available, v2.1.84+): Fires when tasks created via TaskCreate
 - **PermissionDenied** (available, v2.1.89+): Fires after auto mode denials, can retry
+
+### Prompting Opus 4.6 (per Anthropic best practices)
+
+- **Adaptive thinking is the default** on 4.6 — use `thinking: {type: "adaptive"}` with `output_config.effort` (low/medium/high/max). `budget_tokens` is deprecated. Omit `thinking` entirely when you don't need it.
+- **Prefilled assistant responses on the final turn are deprecated** in 4.6 — use structured outputs, clear instructions, or tool calls instead.
+- **Dial back "anti-laziness" prompting.** Opus 4.6 overtriggers on aggressive "CRITICAL: you MUST..." language — use normal phrasing. Tools that undertriggered on older models now trigger appropriately.
+- **Opus 4.6 tends to overengineer and overuse subagents** — explicitly scope work ("only change what's asked"), and guide subagent use ("delegate only for parallel or isolated work; use direct grep/read for simple exploration"). This aligns with the existing `simplify` + completeness rules.
+- **Structure long-context prompts** with longform data near the top, instructions/queries at the bottom, wrap docs in `<document>` XML tags. Queries-at-end yield up to 30% better quality on multi-doc tasks.
+- **Tell Claude what to do, not what not to do.** Match prompt style to desired output style.
+- For multi-context-window agent runs, inform Claude its context will be compacted so it doesn't artificially wrap up early (our PreCompact hook already enforces state-saving — prompt accordingly).
 
 ### Teams & Permissions
 
