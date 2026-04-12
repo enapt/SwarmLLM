@@ -1731,13 +1731,19 @@ kbd {
 .model-card.partial { border-left: 2px solid rgba(245,158,11,0.5); }
 .model-card.downloading { border-left: 2px solid rgba(59,130,246,0.5); }
 
-/* Title bar — split grid matches the two-column content layout below:
-     [ title-main (~260px) | title-health (flex) | controls (auto) ]
-   When the card is compact the title-health slot is empty and the grid
-   degrades gracefully (flex behavior). */
-.model-card-title {
+/* Card-level grid so header and content rows share the same column tracks.
+     [ title-main (260px) | ribbon / shard-detail (1fr) | controls (auto) ]
+   Title and expanded-content both use `grid-template-columns: subgrid`
+   to inherit the parent's tracks — guarantees title sections align
+   perfectly with content sections below. */
+.model-card:not(.compact) {
   display: grid;
   grid-template-columns: 260px 1fr auto;
+}
+.model-card-title {
+  display: grid;
+  grid-template-columns: subgrid;
+  grid-column: 1 / -1;
   align-items: center;
   padding: 10px 14px;
   border-bottom: 1px solid var(--border);
@@ -1745,20 +1751,21 @@ kbd {
   min-width: 0;
   transition: background 0.3s;
 }
-.model-card-title-main { min-width: 0; display: flex; align-items: center; }
-.model-card-title-health { min-width: 0; display: flex; flex-direction: column; gap: 3px; }
-.model-card-title-health:empty { display: none; }
-.model-card-title-health .mce-section-title {
-  font-size: 0.56rem;
-  color: var(--text-muted);
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-  font-weight: 600;
+/* Compact cards use a flat flex title (no multi-column alignment needed) */
+.model-card.compact > .model-card-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
 }
+.model-card-title-main { min-width: 0; display: flex; align-items: center; grid-column: 1; }
+.model-card-title-health { min-width: 0; display: flex; flex-direction: column; gap: 3px; grid-column: 2; }
+.model-card-title-health:empty { display: block; }
 .model-card-title-health .availability-bar { margin: 0; }
 @media (max-width: 899px) {
-  .model-card-title { grid-template-columns: 1fr auto; }
+  .model-card:not(.compact) { grid-template-columns: 1fr auto; }
+  .model-card-title-main { grid-column: 1; }
   .model-card-title-health { grid-column: 1 / -1; order: 3; }
+  .model-card-title-main ~ .model-card-controls { grid-column: 2; }
 }
 .model-card-name-row { display: flex; align-items: center; gap: 0; min-width: 0; flex: 1; }
 .model-card .model-name { font-weight: 700; font-size: 0.95rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -3399,14 +3406,22 @@ textarea:focus:not(:focus-visible) {
    Legacy .shard-grid / .shard-cell / .shard-context-menu styles fully removed.
    ============================================================================ */
 
+/* Expanded content uses subgrid so mce-left/mce-right align precisely with
+   the title columns above (260px · 1fr · auto). Right side spans the
+   ribbon column plus the controls column so the shard detail stretches
+   edge-to-edge of the card beyond where the buttons ended. */
 .model-card-expanded {
   display: grid;
-  grid-template-columns: 260px 1fr;
+  grid-template-columns: subgrid;
+  grid-column: 1 / -1;
   gap: 14px;
   padding: 10px 14px 12px;
 }
+.model-card-expanded .mce-left  { grid-column: 1; }
+.model-card-expanded .mce-right { grid-column: 2 / -1; }
 @media (max-width: 899px) {
-  .model-card-expanded { grid-template-columns: 1fr; }
+  .model-card-expanded .mce-left,
+  .model-card-expanded .mce-right { grid-column: 1 / -1; }
 }
 
 .model-card-expanded .mce-left {

@@ -1407,13 +1407,12 @@
             // with the shard list / matrix columns below. Shown only in expanded
             // mode (compact mode uses the separate full-width availability bar).
             '<div class="model-card-title-health">' +
-              (!isCompact && shards.length > 0 ? _buildCoverageRibbon(m, shards, safeId) : '') +
+              (shards.length > 0 ? _buildCoverageRibbon(m, shards, safeId) : '') +
             '</div>' +
             '<div class="model-card-controls">' +
               metaBtnHtml + gearHtml + chevronHtml +
             '</div>' +
           '</div>' +
-          availBarHtml +
           '<div class="model-card-shards">' +
             progressHtml + perShardDlHtml +
             '<div class="model-card-expanded">' +
