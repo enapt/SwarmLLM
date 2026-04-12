@@ -4184,3 +4184,9 @@ textarea:focus:not(:focus-visible) {
 
 /* Coverage ribbon (reuses availability-bar semantics, sits at top of right column) */
 .shard-coverage-ribbon { margin: 0 0 4px; }
+/* In Peers view, shard columns are offset by the 90px peer-label column;
+   push the ribbon over by the same amount so segments align vertically
+   with their matrix columns. */
+.mce-right:has(.shard-matrix) .shard-coverage-ribbon {
+  margin-left: 92px;
+}
