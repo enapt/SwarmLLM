@@ -724,6 +724,7 @@
     App.setup.init();
     App.settings.init();
     if (App.pool) App.pool.init();
+    if (App.autoManageStatus) App.autoManageStatus.init();
     if (App.claudeCode) App.claudeCode.init();
     App.settings._apiKeyPromise = App.settings.loadApiKey();
 

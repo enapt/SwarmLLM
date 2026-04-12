@@ -169,6 +169,11 @@
       App.dashboard._logModelEvent(modelId, icon, data.message || data.kind, true, data.kind);
     }
 
+    // Forward auto-manage events to the header status indicator
+    if (App.autoManageStatus && App.autoManageStatus.onEvent) {
+      App.autoManageStatus.onEvent(data);
+    }
+
     // Auto-refresh pool tab when pool events arrive
     if (data.kind === 'pool_device_joined' || data.kind === 'pool_device_left') {
       if (App.pool && App.pool.load) App.pool.load();
@@ -370,6 +375,7 @@
           // stats_update only drives UI progress bars and data refreshes.
           App.dashboard.updateStats(msg.data);
           if (msg.data.acquisitions) App.dashboard.updateAcquisitionProgress(msg.data.acquisitions);
+          if (App.autoManageStatus) App.autoManageStatus.updateFromStats(msg.data.acquisitions || []);
           App.dashboard.updateShardsLive(msg.data.acquisitions, msg.data.shard_registry || null, msg.data.peer_downloads || null);
           App.downloads.updateFromWs(msg.data.acquisitions);
           U.updateChatDownloadProgress(msg.data.acquisitions);

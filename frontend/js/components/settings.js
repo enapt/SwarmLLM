@@ -171,6 +171,7 @@
         document.getElementById('settings-auto-manage-storage-group').style.display = isOn ? '' : 'none';
         document.getElementById('settings-storage-info').classList.toggle('hidden', !isOn);
         if (isOn) App.settings.loadStorageInfo();
+        if (App.autoManageStatus) App.autoManageStatus.setEnabled(isOn);
       } catch (e) {
         App.ui.showBanner('error', I18n.t('settings.load_failed') + ': ' + (e.message || I18n.t('common.request_failed')));
       }
@@ -436,6 +437,7 @@
           body: JSON.stringify(config),
         });
         if (resp.ok) {
+          if (App.autoManageStatus) App.autoManageStatus.setEnabled(autoManageOn);
           // Save ancillary settings only if main config save succeeded
           var healthIntervalEl = document.getElementById('settings-health-interval');
           if (healthIntervalEl) {

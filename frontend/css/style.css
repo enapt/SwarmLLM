@@ -959,6 +959,24 @@ a:hover { color: var(--accent-hover); }
   margin-right: 6px;
   animation: pulse 2s infinite;
 }
+
+/* Auto-manage status indicator */
+#auto-manage-dot.idle-ok { background: var(--green); }
+#auto-manage-dot.idle-disabled { background: var(--text-muted, #888); }
+#auto-manage-dot.active-download { background: #3b82f6; animation: pulse-am 1.2s infinite; }
+#auto-manage-dot.active-prune { background: var(--orange, #f59e0b); animation: pulse-am 1.2s infinite; }
+#auto-manage-dot.problem { background: var(--red, #ef4444); animation: pulse-am 1s infinite; }
+#auto-manage-label:not(.hidden) {
+  display: inline-block;
+  margin-left: 4px;
+  font-size: 0.72em;
+  color: var(--text-muted);
+  vertical-align: middle;
+}
+@keyframes pulse-am {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.5; transform: scale(0.85); }
+}
 @keyframes pulse {
   0%, 100% { opacity: 1; box-shadow: 0 0 0 0 rgba(34, 197, 94, 0.4); }
   50% { opacity: 0.8; box-shadow: 0 0 0 6px rgba(34, 197, 94, 0); }
