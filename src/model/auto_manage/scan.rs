@@ -85,6 +85,20 @@ pub async fn rescan_local_shards(
                         error = %e,
                         "Rescan: shard verification failed, skipping"
                     );
+                    shared.emit_activity(
+                        crate::daemon::state::ActivityEvent::new(
+                            "auto_manage",
+                            "shard_verification_failed",
+                            format!(
+                                "Shard {} of {} failed hash verification",
+                                shard_info.index, model_id_str
+                            ),
+                        )
+                        .with_model(&model_id_str)
+                        .with_shard_index(shard_info.index)
+                        .with_detail_str(e.to_string())
+                        .with_toast("error", 6000),
+                    );
                     continue;
                 }
             }

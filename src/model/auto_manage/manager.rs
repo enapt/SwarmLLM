@@ -224,6 +224,17 @@ impl AutoShardManager {
                             new_interval_secs = new_secs,
                             "Hot-reloaded auto-manage interval"
                         );
+                        self.shared_state.emit_activity(
+                            crate::daemon::state::ActivityEvent::new(
+                                "auto_manage",
+                                "interval_changed",
+                                format!(
+                                    "Auto-manage interval changed: {}s → {}s",
+                                    interval_secs, new_secs
+                                ),
+                            )
+                            .with_detail_num(new_secs as i64),
+                        );
                         interval_secs = new_secs;
                         interval = tokio::time::interval(Duration::from_secs(new_secs));
                         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -309,6 +320,12 @@ impl AutoShardManager {
                 peers = self.shared_state.peer_registry.len(),
                 "AutoShardManager: no remaining storage budget — skipping downloads"
             );
+            self.shared_state
+                .emit_activity(crate::daemon::state::ActivityEvent::new(
+                    "auto_manage",
+                    "budget_exhausted",
+                    "Auto-manage: storage budget exhausted, no downloads this cycle".to_string(),
+                ));
             return;
         }
 
@@ -331,6 +348,17 @@ impl AutoShardManager {
         tracing::info!(
             count = selected.len(),
             "AutoShardManager: downloading shards"
+        );
+        self.shared_state.emit_activity(
+            crate::daemon::state::ActivityEvent::new(
+                "auto_manage",
+                "download_cycle",
+                format!(
+                    "Auto-manage: selected {} shard(s) to download",
+                    selected.len()
+                ),
+            )
+            .with_detail_num(selected.len() as i64),
         );
 
         // 4. Trigger downloads
@@ -411,6 +439,20 @@ impl AutoShardManager {
                     holders = holder_nodes.len(),
                     "Model promoted to NetworkPopular"
                 );
+                self.shared_state.emit_activity(
+                    crate::daemon::state::ActivityEvent::new(
+                        "auto_manage",
+                        "model_promoted",
+                        format!(
+                            "Model {} promoted to NetworkPopular ({} holders)",
+                            manifest.name,
+                            holder_nodes.len()
+                        ),
+                    )
+                    .with_model(&manifest.id.0)
+                    .with_model_name(&manifest.name)
+                    .with_detail_num(holder_nodes.len() as i64),
+                );
             }
 
             // Decay inactive models
@@ -456,6 +498,18 @@ impl AutoShardManager {
                                 model = %model_id_str,
                                 repo = %source.repo_id,
                                 "Discovered HF source from hf_source.json"
+                            );
+                            self.shared_state.emit_activity(
+                                crate::daemon::state::ActivityEvent::new(
+                                    "auto_manage",
+                                    "hf_source_discovered",
+                                    format!(
+                                        "Discovered HF source for {} ({})",
+                                        model_id_str, source.repo_id
+                                    ),
+                                )
+                                .with_model(&model_id_str)
+                                .with_detail_str(&source.repo_id),
                             );
                             self.shared_state
                                 .models

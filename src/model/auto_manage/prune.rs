@@ -479,6 +479,18 @@ impl AutoShardManager {
                     model = %candidate.model_id,
                     "No local shards remain after pruning — unloading model worker to free VRAM"
                 );
+                self.shared_state.emit_activity(
+                    crate::daemon::state::ActivityEvent::new(
+                        "auto_manage",
+                        "model_unloaded",
+                        format!(
+                            "Unloaded {} worker (no local shards remain after pruning)",
+                            candidate.model_name
+                        ),
+                    )
+                    .with_model(&candidate.model_id.0)
+                    .with_model_name(&candidate.model_name),
+                );
                 self.shared_state
                     .model_process_pool
                     .unload_model(&candidate.model_id)
@@ -774,6 +786,28 @@ impl AutoShardManager {
                         window_shards = w.len(),
                         pressure = %format_args!("{:.2}", pressure),
                         "VRAM soft-unload: narrowing shard window (shards stay on disk)"
+                    );
+                    let mname = self
+                        .shared_state
+                        .model_registry
+                        .get_manifest(&model_id)
+                        .map(|m| m.name.clone())
+                        .unwrap_or_else(|| model_id.0.clone());
+                    self.shared_state.emit_activity(
+                        crate::daemon::state::ActivityEvent::new(
+                            "auto_manage",
+                            "vram_soft_unload",
+                            format!(
+                                "VRAM pressure: narrowed {} to {} of {} shards",
+                                mname,
+                                w.len(),
+                                manifest.shard_count
+                            ),
+                        )
+                        .with_model(&model_id.0)
+                        .with_model_name(&mname)
+                        .with_detail_num(w.len() as i64)
+                        .with_toast("warning", 5000),
                     );
                     pool.restart_with_window(&model_id, w.clone()).await;
                     // Only do one model per cycle to avoid thundering restart

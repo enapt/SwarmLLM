@@ -324,6 +324,19 @@ impl AutoShardManager {
                             arch = %arch_str,
                             "AutoShardManager: skipping unsupported architecture"
                         );
+                        shared.emit_activity(
+                            crate::daemon::state::ActivityEvent::new(
+                                "auto_manage",
+                                "unsupported_architecture",
+                                format!(
+                                    "Skipped {} — unsupported architecture: {}",
+                                    model_id, arch_str
+                                ),
+                            )
+                            .with_model(&model_id.0)
+                            .with_detail_str(arch_str)
+                            .with_toast("warning", 5000),
+                        );
                         return;
                     }
 
@@ -355,6 +368,19 @@ impl AutoShardManager {
                             error = %e,
                             "AutoShardManager: gguf_header.bin download failed — shard registered but first-segment local inference will be unavailable until header is re-downloaded"
                         );
+                        shared.emit_activity(
+                            crate::daemon::state::ActivityEvent::new(
+                                "auto_manage",
+                                "header_download_failed",
+                                format!(
+                                    "GGUF header download failed for {} (first-segment inference unavailable)",
+                                    model_id
+                                ),
+                            )
+                            .with_model(&model_id.0)
+                            .with_detail_str(e.to_string())
+                            .with_toast("warning", 5000),
+                        );
                     }
 
                     // Download tied output weight for weight-tied models
@@ -367,6 +393,18 @@ impl AutoShardManager {
                     .await
                     {
                         tracing::warn!(error = %e, "Tied output weight download failed (non-fatal)");
+                        shared.emit_activity(
+                            crate::daemon::state::ActivityEvent::new(
+                                "auto_manage",
+                                "tied_output_failed",
+                                format!(
+                                    "Tied output weight download failed for {} (non-fatal)",
+                                    model_id
+                                ),
+                            )
+                            .with_model(&model_id.0)
+                            .with_detail_str(e.to_string()),
+                        );
                     }
 
                     match crate::model::huggingface::download_shard(
@@ -799,6 +837,15 @@ e
             filename = %filename,
             "AutoShardManager: downloading mmproj from HuggingFace"
         );
+        shared.emit_activity(
+            crate::daemon::state::ActivityEvent::new(
+                "auto_manage",
+                "mmproj_download_started",
+                format!("Downloading vision projector (mmproj) for {}", model_id),
+            )
+            .with_model(&model_id.0)
+            .with_detail_str(&repo_id),
+        );
 
         tokio::spawn(async move {
             let _permit = permit;
@@ -809,6 +856,15 @@ e
                     tracing::info!(
                         model = %model_id,
                         "AutoShardManager: mmproj downloaded from HF"
+                    );
+                    shared.emit_activity(
+                        crate::daemon::state::ActivityEvent::new(
+                            "auto_manage",
+                            "mmproj_download_complete",
+                            format!("Vision projector (mmproj) downloaded for {}", model_id),
+                        )
+                        .with_model(&model_id.0)
+                        .with_toast("success", 4000),
                     );
                     // Register + announce the mmproj sentinel shard
                     let sid = crate::types::ShardId {
@@ -822,6 +878,16 @@ e
                         model = %model_id,
                         error = %e,
                         "AutoShardManager: mmproj download failed"
+                    );
+                    shared.emit_activity(
+                        crate::daemon::state::ActivityEvent::new(
+                            "auto_manage",
+                            "mmproj_download_failed",
+                            format!("Vision projector download failed for {}", model_id),
+                        )
+                        .with_model(&model_id.0)
+                        .with_detail_str(e.to_string())
+                        .with_toast("error", 6000),
                     );
                 }
             }
