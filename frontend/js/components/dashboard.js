@@ -1396,10 +1396,18 @@
         // Card HTML — compact by default with availability bar, expand for full shard grid
         card.innerHTML =
           '<div class="model-card-title">' +
-            '<div class="model-card-name-row">' +
-              creatorIconHtml +
-              '<span class="model-name" title="' + U.escapeHtml(m.id) + '">' + U.escapeHtml(name) + '</span>' +
-              compositeBadgeHtml +
+            '<div class="model-card-title-main">' +
+              '<div class="model-card-name-row">' +
+                creatorIconHtml +
+                '<span class="model-name" title="' + U.escapeHtml(m.id) + '">' + U.escapeHtml(name) + '</span>' +
+                compositeBadgeHtml +
+              '</div>' +
+            '</div>' +
+            // Coverage ribbon sits in the title row so it aligns horizontally
+            // with the shard list / matrix columns below. Shown only in expanded
+            // mode (compact mode uses the separate full-width availability bar).
+            '<div class="model-card-title-health">' +
+              (!isCompact && shards.length > 0 ? _buildCoverageRibbon(m, shards, safeId) : '') +
             '</div>' +
             '<div class="model-card-controls">' +
               metaBtnHtml + gearHtml + chevronHtml +
@@ -1427,12 +1435,8 @@
                 '<div class="mce-actions">' + actionHtml + removeHtml + '</div>' +
               '</div>' +
               '<div class="mce-right" data-shard-detail="' + safeId + '">' +
-                '<div class="mce-right-title">' +
-                  '<span class="mce-section-title">' + U.escapeHtml(I18n.t('dashboard.section_model_health')) + '</span>' +
-                  _buildShardViewToggle() +
-                '</div>' +
                 '<div class="mce-right-head">' +
-                  _buildCoverageRibbon(m, shards, safeId) +
+                  _buildShardViewToggle() +
                 '</div>' +
                 '<div class="mce-right-body">' + _buildShardDetailBody(m, shards, safeId) + '</div>' +
               '</div>' +
