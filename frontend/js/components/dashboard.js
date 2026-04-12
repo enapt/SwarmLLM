@@ -78,21 +78,19 @@
     return I18n.t('shard.row.missing_label');
   }
 
+  // Compact replica indicator — single pill that scales to arbitrary N.
+  // Tier: none=0, low=1-2, good=3-9, high=10+. Same layout irrespective of count.
   function _shardReplicaPips(s) {
     var holders = s.holders || 0;
-    var tier = holders >= 3 ? 'good' : holders >= 1 ? 'low' : 'none';
+    var tier = holders === 0 ? 'none' : holders <= 2 ? 'low' : holders <= 9 ? 'good' : 'high';
     var titleKey = holders === 0 ? 'shard.row.replicas_none'
                  : (holders === 1 ? 'shard.row.replicas_count_one' : 'shard.row.replicas_count_other');
     var title = I18n.t(titleKey, { n: holders });
-    if (holders === 0) {
-      return '<span class="shard-row-replicas" data-tier="none" title="' + U.escapeHtml(title) + '">' +
-        '<span class="shard-row-pip"></span></span>';
-    }
-    var visible = Math.min(holders, 4);
-    var html = '';
-    for (var i = 0; i < visible; i++) html += '<span class="shard-row-pip"></span>';
-    if (holders > 4) html += '<span class="shard-row-pip-more">+' + (holders - 4) + '</span>';
-    return '<span class="shard-row-replicas" data-tier="' + tier + '" title="' + U.escapeHtml(title) + '">' + html + '</span>';
+    var label = holders === 0 ? '\u2014' : String(holders);
+    return '<span class="shard-row-replicas" data-tier="' + tier + '" title="' + U.escapeHtml(title) + '">' +
+      '<span class="shard-row-replica-dot"></span>' +
+      '<span class="shard-row-replica-count">' + label + '</span>' +
+      '</span>';
   }
 
   // Torrent-style piece-bar — one colored segment per supplying peer
@@ -222,6 +220,29 @@
     var capped = showAll ? coverage : coverage.slice(0, MATRIX_MAX_PEERS_DEFAULT);
     var overflow = coverage.length - capped.length;
 
+    // Aggregate replica histogram — one tall bar per shard showing network
+    // replica density. Scales to any number of peers since we only show max/
+    // height, not per-peer rows. Self inclusion counted.
+    var maxReplicas = 1;
+    shards.forEach(function(s) {
+      var total = (s.holders || 0);
+      if (total > maxReplicas) maxReplicas = total;
+    });
+    var histHtml = '<div class="shard-matrix-histogram" aria-label="' + U.escapeHtml(I18n.t('shard.matrix.histogram_tip')) + '">';
+    shards.forEach(function(s, i) {
+      var h = s.holders || 0;
+      // log-scaled height so 1 vs 1000 still both readable; min 3px when nonzero.
+      var pct = h === 0 ? 0 : Math.max(8, Math.round(Math.log(1 + h) / Math.log(1 + maxReplicas) * 100));
+      var tier = h === 0 ? 'none' : h <= 2 ? 'low' : h <= 9 ? 'good' : 'high';
+      var label = s.index === MMPROJ_SHARD_INDEX ? '\u2605' : String(s.index + 1);
+      histHtml += '<div class="smh-col" data-tier="' + tier + '" title="' + U.escapeHtml(I18n.t('shard.matrix.hist_col_tip', { n: s.index + 1, holders: h })) + '">' +
+        '<div class="smh-bar-wrap"><div class="smh-bar" style="height:' + pct + '%"></div></div>' +
+        '<div class="smh-label">' + label + '</div>' +
+        '<div class="smh-count">' + h + '</div>' +
+        '</div>';
+    });
+    histHtml += '</div>';
+
     // Column headers: show every shard index; cap density if many
     var headHtml = '<tr><th></th>';
     var colEvery = shards.length > 40 ? 5 : 1;
@@ -272,6 +293,8 @@
       : '';
 
     return '<div class="shard-matrix" data-shard-matrix="' + safeId + '"' + (showAll ? ' data-expanded="1"' : '') + '>' +
+      histHtml +
+      '<div class="shard-matrix-peers-header">' + U.escapeHtml(I18n.t('shard.matrix.peers_header', { total: coverage.length })) + '</div>' +
       '<table>' +
       '<thead>' + headHtml + '</thead>' +
       '<tbody>' + selfRow + peerRows + '</tbody>' +
@@ -1111,19 +1134,8 @@
         } else if (m.trust_level === 'pinned') {
           detailParts.push('<span class="badge-trust badge-trust-pinned" title="' + U.escapeHtml(I18n.t('dashboard.trust_pinned')) + '">' + U.escapeHtml(I18n.t('dashboard.badge_pinned')) + '</span>');
         }
-        // Encrypted pipeline badge
-        if (m.shard_count > 1 && m.local) {
-          var encReady = m.has_first_shard && m.has_last_shard;
-          var encActive = m.encrypted_pipeline;
-          var encClass = encActive ? 'badge-encrypted active' : (encReady ? 'badge-encrypted ready' : 'badge-encrypted faded');
-          var encTitle = encActive ? I18n.t('dashboard.enc_active') :
-            (encReady ? I18n.t('dashboard.enc_available') : I18n.t('dashboard.enc_unavailable'));
-          var missingParts = [];
-          if (!m.has_first_shard) missingParts.push(I18n.t('dashboard.enc_missing_first'));
-          if (!m.has_last_shard) missingParts.push(I18n.t('dashboard.enc_missing_last', { n: m.shard_count - 1 }));
-          if (missingParts.length > 0) encTitle += '. ' + I18n.t('dashboard.enc_missing', { parts: missingParts.join(', ') });
-          detailParts.push('<span class="' + encClass + '" data-enc-toggle="' + U.escapeHtml(m.id) + '" data-enc-ready="' + (encReady ? '1' : '0') + '" title="' + U.escapeHtml(encTitle) + '">&#128274;</span>');
-        }
+        // (Encrypted pipeline badge is rendered as an integrated toggle inside the
+        //  .mce-pipeline chip below — no standalone floating lock icon anymore.)
         // Source label
         if (m.source === 'network' && hostedShards === 0) {
           detailParts.push('<span class="badge badge-remote" title="' + U.escapeHtml(I18n.t('dashboard.badge_remote')) + '">' + U.escapeHtml(I18n.t('dashboard.badge_remote_label')) + '</span>');
@@ -1201,9 +1213,20 @@
           }
           // Lock glyph states: 🔒 active (closed), 🔏 ready (closed w/ pen), 🔓 unprotected (open)
           var pipelineIcon = encActive2 ? '\uD83D\uDD12' : (hasFirst && hasLast ? '\uD83D\uDD0F' : '\uD83D\uDD13');
-          pipelineChipHtml = '<div class="mce-pipeline ' + pipelineCls + '" title="' + U.escapeHtml(pipelineTitle) + '">' +
+          // When both endpoints are local the chip acts as a toggle for the E2E
+          // pipeline. When endpoints are missing it's passive (informational only).
+          var canToggle = hasFirst && hasLast;
+          var toggleAttr = canToggle
+            ? ' data-enc-toggle="' + U.escapeHtml(m.id) + '" data-enc-ready="1" role="switch" aria-checked="' + (encActive2 ? 'true' : 'false') + '"'
+            : '';
+          var toggleClass = canToggle ? ' toggleable' : '';
+          var toggleHint = canToggle
+            ? '<span class="mce-pipeline-toggle-hint">' + U.escapeHtml(encActive2 ? I18n.t('enc.disable') : I18n.t('enc.enable_privacy')) + '</span>'
+            : '';
+          pipelineChipHtml = '<div class="mce-pipeline ' + pipelineCls + toggleClass + '"' + toggleAttr + ' title="' + U.escapeHtml(pipelineTitle) + '">' +
             '<span class="mce-pipeline-icon">' + pipelineIcon + '</span>' +
             '<span class="mce-pipeline-label">' + U.escapeHtml(pipelineLabel) + '</span>' +
+            toggleHint +
             '<span class="mce-pipeline-detail">' + U.escapeHtml(pipelineDetail) + '</span>' +
             '</div>';
         }
@@ -1360,7 +1383,6 @@
               chevronHtml +
               creatorIconHtml +
               '<span class="model-name" title="' + U.escapeHtml(m.id) + '">' + U.escapeHtml(name) + '</span>' +
-              archTag + quantTag +
               compositeBadgeHtml +
             '</div>' +
             '<div class="model-card-controls">' +
@@ -1372,7 +1394,12 @@
             progressHtml + perShardDlHtml +
             '<div class="model-card-expanded">' +
               '<div class="mce-left">' +
-                (detailBadgesHtml || '') +
+                // Structured info block — arch, quant, and any trust badges with labels.
+                '<dl class="mce-info">' +
+                  (archKey    ? '<dt>' + U.escapeHtml(I18n.t('dashboard.info_arch')) + '</dt><dd><span class="mce-info-pill">' + U.escapeHtml(archKey) + '</span></dd>' : '') +
+                  (quantMatch ? '<dt>' + U.escapeHtml(I18n.t('dashboard.info_quant')) + '</dt><dd><span class="mce-info-pill">' + U.escapeHtml(quantMatch[1].toUpperCase().replace(/-/g, '_')) + '</span></dd>' : '') +
+                  (m.trust_level ? '<dt>' + U.escapeHtml(I18n.t('dashboard.info_trust')) + '</dt><dd>' + (detailBadgesHtml || '') + '</dd>' : '') +
+                '</dl>' +
                 (pipelineChipHtml || '') +
                 (healthBadgeHtml || '') +
                 '<div class="mce-meta">' +

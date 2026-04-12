@@ -1045,5 +1045,11 @@
   "shard.endpoint_last_tip": "Pipeline exit shard. Holding this locally is required for end-to-end encryption.",
   "enc.active": "End-to-end encrypted",
   "enc.available": "End-to-end ready",
-  "enc.unavailable": "Transport only"
+  "enc.unavailable": "Transport only",
+  "shard.matrix.histogram_tip": "Per-shard replica density across the swarm. Bar height is log-scaled so rare and common shards are both readable.",
+  "shard.matrix.hist_col_tip": "Shard {n}: {holders} holders on the network",
+  "shard.matrix.peers_header": "Top peers by coverage ({total} total)",
+  "dashboard.info_arch": "Arch",
+  "dashboard.info_quant": "Quant",
+  "dashboard.info_trust": "Trust"
 }

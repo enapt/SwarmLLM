@@ -3214,8 +3214,10 @@ textarea:focus:not(:focus-visible) {
 /* Detail badges row — shown only in expanded mode */
 .model-card-detail-badges {
   display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
-  padding: 0 14px 6px; font-size: 0.68rem;
+  padding: 0; font-size: 0.68rem;
 }
+/* Legacy detail-badges is no longer rendered (trust chips moved into .mce-left);
+   this rule remains only so any orphan instances don't inject extra gutter. */
 
 /* ---- Stat Card Sparklines & Trends ---- */
 .stat-card .stat-trend {
@@ -3357,6 +3359,40 @@ textarea:focus:not(:focus-visible) {
   gap: 8px;
   min-width: 0;
 }
+/* Structured info block — definition-list style: muted label on left, value on right */
+.model-card-expanded .mce-left .mce-info {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  column-gap: 10px;
+  row-gap: 4px;
+  margin: 0 0 2px;
+  font-size: 0.66rem;
+}
+.model-card-expanded .mce-left .mce-info dt {
+  color: var(--text-muted);
+  font-size: 0.58rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  align-self: center;
+}
+.model-card-expanded .mce-left .mce-info dd {
+  margin: 0;
+  align-self: center;
+  color: var(--text-primary);
+  min-width: 0;
+}
+.model-card-expanded .mce-left .mce-info .mce-info-pill {
+  display: inline-block;
+  padding: 2px 7px;
+  border-radius: var(--radius-pill, 9999px);
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  font-family: var(--font-mono, monospace);
+  font-size: 0.62rem;
+  color: var(--text-primary);
+  letter-spacing: 0.03em;
+}
+
 .model-card-expanded .mce-left .mce-meta {
   display: flex;
   flex-direction: column;
@@ -3446,6 +3482,44 @@ textarea:focus:not(:focus-visible) {
 }
 .model-card-expanded .mce-left .mce-pipeline.pipeline-unprotected .mce-pipeline-label { color: var(--orange); }
 
+/* Pipeline chip as toggle — when both endpoints are on this device */
+.model-card-expanded .mce-left .mce-pipeline.toggleable {
+  cursor: pointer;
+  user-select: none;
+  transition: transform 0.12s, box-shadow 0.15s, border-color 0.15s;
+}
+.model-card-expanded .mce-left .mce-pipeline.toggleable:hover {
+  box-shadow: 0 0 0 2px rgba(34,197,94,0.18), 0 2px 6px rgba(0,0,0,0.15);
+}
+.model-card-expanded .mce-left .mce-pipeline.toggleable:active { transform: scale(0.98); }
+.model-card-expanded .mce-left .mce-pipeline .mce-pipeline-toggle-hint {
+  grid-column: 1 / -1;
+  font-size: 0.58rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-weight: 700;
+  opacity: 0.85;
+  padding: 2px 7px;
+  border-radius: 3px;
+  justify-self: start;
+}
+.model-card-expanded .mce-left .mce-pipeline.pipeline-active .mce-pipeline-toggle-hint {
+  background: rgba(34,197,94,0.22);
+  color: var(--green);
+}
+.model-card-expanded .mce-left .mce-pipeline.pipeline-ready .mce-pipeline-toggle-hint {
+  background: rgba(59,130,246,0.2);
+  color: var(--accent);
+}
+/* Re-layout toggleable chip so the hint sits on its own row above detail */
+.model-card-expanded .mce-left .mce-pipeline.toggleable {
+  grid-template-areas:
+    "icon label"
+    "hint hint"
+    "detail detail";
+}
+.model-card-expanded .mce-left .mce-pipeline .mce-pipeline-toggle-hint { grid-area: hint; }
+
 /* Shard row endpoint badges (FIRST/LAST) + pipeline-pinned accent */
 .shard-row-endpoint {
   display: inline-block;
@@ -3460,14 +3534,23 @@ textarea:focus:not(:focus-visible) {
   color: rgba(250,204,21,0.9);
   vertical-align: 1px;
 }
-.shard-row-endpoint-row { border-left-width: 2px; }
+.shard-row-endpoint-row { border-left-width: 3px; }
 .shard-row-pipeline-pinned {
   border-left-color: var(--green) !important;
-  box-shadow: inset 3px 0 0 0 var(--green);
+  border-left-width: 4px !important;
+  background: linear-gradient(90deg, rgba(34,197,94,0.08) 0%, var(--bg-tertiary) 40%);
+  box-shadow: inset 0 0 0 1px rgba(34,197,94,0.25);
 }
 .shard-row-pipeline-pinned .shard-row-endpoint {
-  background: rgba(34,197,94,0.18);
+  background: rgba(34,197,94,0.22);
   color: var(--green);
+  box-shadow: 0 0 4px rgba(34,197,94,0.4);
+  padding: 1px 6px;
+}
+.shard-row-pipeline-pinned .shard-row-endpoint::before {
+  content: '\1F512 ';
+  margin-right: 2px;
+  font-size: 0.55rem;
 }
 
 .model-card-expanded .mce-left .mce-actions {
@@ -3668,28 +3751,46 @@ textarea:focus:not(:focus-visible) {
 .shard-row[data-state="missing"].shard-row-status,
 .shard-row[data-state="missing"] .shard-row-status { color: var(--red); }
 
+/* Compact replica pill: one colored dot + tabular number, scales to any N. */
 .shard-row-replicas {
   display: inline-flex;
-  gap: 3px;
   align-items: center;
-  flex-wrap: nowrap;
+  gap: 4px;
+  padding: 1px 6px 1px 5px;
+  border-radius: var(--radius-pill, 9999px);
+  font-size: 0.6rem;
+  font-variant-numeric: tabular-nums;
+  min-width: 30px;
+  justify-content: center;
   justify-self: start;
 }
-.shard-row-replicas .shard-row-pip {
+.shard-row-replicas .shard-row-replica-dot {
   width: 6px;
   height: 6px;
   border-radius: 50%;
-  background: var(--green);
   flex-shrink: 0;
 }
-.shard-row-replicas[data-tier="low"]  .shard-row-pip { background: var(--orange); }
-.shard-row-replicas[data-tier="none"] .shard-row-pip { background: var(--red); }
-.shard-row-replicas .shard-row-pip-more {
-  font-size: 0.58rem;
-  color: var(--text-muted);
-  margin-left: 2px;
-  font-variant-numeric: tabular-nums;
+.shard-row-replicas .shard-row-replica-count { line-height: 1; }
+.shard-row-replicas[data-tier="high"] {
+  background: var(--green-dim);
+  color: var(--green);
 }
+.shard-row-replicas[data-tier="high"] .shard-row-replica-dot { background: var(--green); box-shadow: 0 0 4px rgba(34,197,94,0.5); }
+.shard-row-replicas[data-tier="good"] {
+  background: rgba(34,197,94,0.1);
+  color: rgba(34,197,94,0.85);
+}
+.shard-row-replicas[data-tier="good"] .shard-row-replica-dot { background: var(--green); }
+.shard-row-replicas[data-tier="low"] {
+  background: rgba(245,158,11,0.1);
+  color: var(--orange);
+}
+.shard-row-replicas[data-tier="low"] .shard-row-replica-dot { background: var(--orange); }
+.shard-row-replicas[data-tier="none"] {
+  background: rgba(239,68,68,0.1);
+  color: var(--red);
+}
+.shard-row-replicas[data-tier="none"] .shard-row-replica-dot { background: var(--red); }
 
 .shard-row-size {
   font-family: var(--font-mono, monospace);
@@ -3882,6 +3983,67 @@ textarea:focus:not(:focus-visible) {
 .shard-row-expanded-panel .srep-destructive button:hover { color: var(--text-primary); border-color: var(--border-light); }
 .shard-row-expanded-panel .srep-destructive button.danger { color: var(--red); border-color: rgba(239,68,68,0.25); }
 .shard-row-expanded-panel .srep-destructive button.danger:hover { background: var(--red-dim); }
+
+/* Aggregate replica histogram — one column per shard, height encodes replica
+   count (log-scaled so 1 vs 1000 both readable). Sits above peer rows and
+   scales to arbitrary swarm size without per-peer rendering. */
+.shard-matrix-histogram {
+  display: flex;
+  align-items: flex-end;
+  gap: 3px;
+  height: 72px;
+  padding: 8px 8px 4px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  margin-bottom: 10px;
+}
+.shard-matrix-histogram .smh-col {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+}
+.shard-matrix-histogram .smh-bar-wrap {
+  flex: 1;
+  width: 70%;
+  display: flex;
+  align-items: flex-end;
+  min-height: 0;
+}
+.shard-matrix-histogram .smh-bar {
+  width: 100%;
+  background: var(--green);
+  border-radius: 2px 2px 0 0;
+  transition: height 0.3s ease;
+  min-height: 2px;
+}
+.shard-matrix-histogram .smh-col[data-tier="high"] .smh-bar { background: var(--green); box-shadow: 0 0 6px rgba(34,197,94,0.35); }
+.shard-matrix-histogram .smh-col[data-tier="good"] .smh-bar { background: rgba(34,197,94,0.75); }
+.shard-matrix-histogram .smh-col[data-tier="low"]  .smh-bar { background: var(--orange); }
+.shard-matrix-histogram .smh-col[data-tier="none"] .smh-bar { background: var(--red); opacity: 0.45; }
+.shard-matrix-histogram .smh-label {
+  font-family: var(--font-mono, monospace);
+  font-size: 0.58rem;
+  color: var(--text-muted);
+  line-height: 1;
+}
+.shard-matrix-histogram .smh-count {
+  font-family: var(--font-mono, monospace);
+  font-size: 0.56rem;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+}
+.shard-matrix-peers-header {
+  font-size: 0.58rem;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  margin-bottom: 4px;
+}
 
 /* Peers-by-shard matrix */
 .shard-matrix {
