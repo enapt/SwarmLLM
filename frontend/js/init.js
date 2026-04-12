@@ -425,6 +425,21 @@
       var hfRepo = target.getAttribute('data-hf-download');
       if (hfRepo) { App.hf.download(hfRepo, target.getAttribute('data-hf-variant') || ''); return; }
 
+      // Shard row inline actions (load/unload/download/cancel/delete/toggle-lock/expand)
+      var shardAct = target.getAttribute('data-shard-act');
+      if (shardAct) {
+        var rowEl = target.closest('.shard-row');
+        if (rowEl) {
+          var modelId = rowEl.getAttribute('data-shard-model');
+          var idx = parseInt(rowEl.getAttribute('data-shard-index'), 10);
+          if (modelId != null && !isNaN(idx)) {
+            App.dashboard.shardRowAction(shardAct, modelId, idx, rowEl);
+            e.stopPropagation();
+            return;
+          }
+        }
+      }
+
       // Shard view toggle (List | Matrix)
       var shardView = target.getAttribute('data-shard-view');
       if (shardView && target.closest('.shard-view-toggle')) {

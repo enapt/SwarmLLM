@@ -324,6 +324,173 @@
       });
     },
 
+    // Inline shard-row action dispatcher. Maps each data-shard-act value to its
+    // existing per-shard API endpoint. Replaces the old shard-menu.js popup flow.
+    shardRowAction: function(action, modelId, shardIndex, rowEl) {
+      var url = U.modelApiUrl(modelId, 'shards', shardIndex);
+      var rowReload = function() { App.models.load(); };
+
+      if (action === 'toggle-lock') {
+        var wasLocked = rowEl && rowEl.getAttribute('data-shard-locked') === '1';
+        var newLocked = !wasLocked;
+        App.authFetch(url + '/lock', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ locked: newLocked }),
+        }).then(function(resp) {
+          if (resp.ok) {
+            App.notifications.showToast(I18n.t(newLocked ? 'shard.locked' : 'shard.unlocked', { idx: shardIndex + 1 }), 'success');
+            rowReload();
+          } else {
+            App.notifications.showToast(I18n.t('shard.lock_failed'), 'error');
+          }
+        }).catch(function(err) {
+          App.notifications.showToast(I18n.t('shard.lock_error', { error: err.message }), 'error');
+        });
+        return;
+      }
+
+      if (action === 'expand') {
+        App.dashboard.toggleShardRowExpand(rowEl);
+        return;
+      }
+
+      if (action === 'load') {
+        App.authFetch(url + '/load', { method: 'POST' }).then(function(resp) {
+          return resp.ok
+            ? App.notifications.showToast(I18n.t('shard.loading', { idx: shardIndex + 1 }), 'success')
+            : U.getApiErrorMessage(resp, I18n.t('shard.load_failed')).then(function(msg) { App.notifications.showToast(msg, 'error'); });
+        }).then(rowReload).catch(function(err) {
+          App.notifications.showToast(I18n.t('shard.load_error', { error: err.message }), 'error');
+        });
+        return;
+      }
+
+      if (action === 'unload') {
+        if (!confirm(I18n.t('shard.confirm_unload', { idx: shardIndex + 1 }))) return;
+        App.authFetch(url + '/unload', { method: 'POST' }).then(function(resp) {
+          if (resp.ok) {
+            var name = U.formatModelDisplayName(modelId);
+            App.notifications.showToast(I18n.t('shard.unloaded', { idx: shardIndex + 1, model: name }), 'success');
+            rowReload();
+          } else {
+            U.getApiErrorMessage(resp, I18n.t('shard.unload_failed')).then(function(msg) { App.notifications.showToast(msg, 'error'); });
+          }
+        }).catch(function(err) {
+          App.notifications.showToast(I18n.t('shard.unload_error', { error: err.message }), 'error');
+        });
+        return;
+      }
+
+      if (action === 'delete') {
+        if (!confirm(I18n.t('actions.confirm_remove_shard', { index: shardIndex + 1, model: modelId }))) return;
+        App.authFetch(url, { method: 'DELETE' }).then(function(resp) {
+          if (resp.ok) {
+            App.ui.showBanner('success', I18n.t('shard.removed', { idx: shardIndex + 1 }));
+            rowReload();
+          } else {
+            U.getApiErrorMessage(resp, I18n.t('shard.remove_failed')).then(function(msg) { App.ui.showBanner('error', msg); });
+          }
+        }).catch(function(err) {
+          App.ui.showBanner('error', I18n.t('shard.remove_error', { error: err.message }));
+        });
+        return;
+      }
+
+      if (action === 'cancel') {
+        App.models.cancelDownload(modelId);
+        return;
+      }
+
+      if (action === 'download') {
+        App.authFetch(url + '/download', { method: 'POST' }).then(function(resp) {
+          return resp.json();
+        }).then(function(data) {
+          if (data.status === 'downloading') {
+            App.ui.showBanner('success', I18n.t('shard.downloading_from', {
+              idx: shardIndex + 1,
+              source: data.source === 'p2p' ? I18n.t('shard.source_peer', { id: data.peer || '' }) : I18n.t('shard.source_peers'),
+            }));
+            rowReload();
+          } else if (data.status === 'use_hf') {
+            App.hf.downloadShards({ repo_id: data.repo_id, filename: data.filename, shards: [shardIndex], model_id: modelId }).then(function(r) {
+              if (r.ok) {
+                App.ui.showBanner('success', I18n.t('shard.downloading_hf', { idx: shardIndex + 1 }));
+                rowReload();
+              } else {
+                App.ui.showBanner('error', r.errorMsg || I18n.t('shard.hf_download_failed'));
+              }
+            });
+          } else if (data.status === 'already_local') {
+            App.ui.showBanner('info', I18n.t('shard.already_local', { idx: shardIndex + 1 }));
+          } else {
+            App.ui.showBanner('error', U.extractErrorMessage(data, I18n.t('shard.download_unavailable')));
+          }
+        }).catch(function(err) {
+          App.ui.showBanner('error', I18n.t('shard.download_failed', { error: err.message }));
+        });
+        return;
+      }
+    },
+
+    // Accordion expand/collapse. Only one row per model expanded at a time.
+    toggleShardRowExpand: function(rowEl) {
+      if (!rowEl) return;
+      var isExpanded = rowEl.classList.contains('expanded');
+      var list = rowEl.parentElement;
+      if (list) {
+        list.querySelectorAll('.shard-row.expanded').forEach(function(other) {
+          if (other !== rowEl) {
+            other.classList.remove('expanded');
+            var panel = other.querySelector('.shard-row-expanded-panel');
+            if (panel) panel.remove();
+          }
+        });
+      }
+      if (isExpanded) {
+        rowEl.classList.remove('expanded');
+        var ep = rowEl.querySelector('.shard-row-expanded-panel');
+        if (ep) ep.remove();
+        return;
+      }
+      // Build detail panel using cached model data
+      var modelId = rowEl.getAttribute('data-shard-model');
+      var idx = parseInt(rowEl.getAttribute('data-shard-index'), 10);
+      var cached = (App.data && App.data.cache && App.data.cache.models) || [];
+      var model = null;
+      for (var i = 0; i < cached.length; i++) { if (cached[i].id === modelId) { model = cached[i]; break; } }
+      if (!model) return;
+      var shard = (model.shards || []).find(function(s) { return s.index === idx; });
+      if (!shard) return;
+
+      var state = _shardState(shard);
+      var holders = shard.holder_ids || [];
+      var holdersHtml = holders.length === 0
+        ? '<span class="text-muted">' + U.escapeHtml(I18n.t('shard.row.no_other_holders')) + '</span>'
+        : holders.slice(0, 16).map(function(pid) {
+            var short = pid.length > 12 ? pid.substring(0, 12) : pid;
+            return '<span class="srep-holder-chip"><span class="srep-holder-swatch" style="background:' + U.peerColor(pid) + '"></span>' + U.escapeHtml(short) + '</span>';
+          }).join('');
+
+      var destructive = [];
+      if (state === 'disk') destructive.push('<button data-shard-act="load">' + U.escapeHtml(I18n.t('shard.row.action_load')) + '</button>');
+      if (state === 'vram') destructive.push('<button data-shard-act="unload">' + U.escapeHtml(I18n.t('shard.row.action_unload')) + '</button>');
+      if (state === 'downloading') destructive.push('<button class="danger" data-shard-act="cancel">' + U.escapeHtml(I18n.t('shard.row.action_cancel')) + '</button>');
+      if (state === 'peer' || state === 'missing') destructive.push('<button data-shard-act="download">' + U.escapeHtml(I18n.t('shard.row.action_download')) + '</button>');
+      if (shard.local && state !== 'downloading') destructive.push('<button class="danger" data-shard-act="delete">' + U.escapeHtml(I18n.t('shard.row.action_delete')) + '</button>');
+
+      var panelHtml = '<div class="shard-row-expanded-panel">' +
+        '<div class="srep-section">' +
+          '<div class="srep-section-label">' + U.escapeHtml(I18n.t('shard.row.holders_title')) + '</div>' +
+          '<div class="srep-holders">' + holdersHtml + '</div>' +
+        '</div>' +
+        (shard.size_bytes ? '<div class="srep-section"><span class="srep-section-label">Size</span> ' + U.formatBytes(shard.size_bytes) + '</div>' : '') +
+        '<div class="srep-destructive">' + destructive.join('') + '</div>' +
+        '</div>';
+      rowEl.insertAdjacentHTML('beforeend', panelHtml);
+      rowEl.classList.add('expanded');
+    },
+
     expandMatrixAllPeers: function(safeId) {
       var mx = document.querySelector('[data-shard-matrix="' + U.cssSafeAttr(safeId) + '"]');
       if (!mx) return;
@@ -1528,8 +1695,46 @@
       }
     },
 
+    // Patch a single shard row in place. Returns true if state actually changed.
+    _patchShardRow: function(row, opts) {
+      if (!row) return false;
+      var oldState = row.getAttribute('data-state');
+      var newState = opts.state;
+      var glyphEl = row.querySelector('.shard-row-state-glyph');
+      var statusEl = row.querySelector('.shard-row-status');
+      var existing = row.querySelector('.shard-row-piecebar');
+      if (oldState !== newState) {
+        row.setAttribute('data-state', newState);
+        row.classList.add('shard-transitioning');
+        setTimeout(function() { row.classList.remove('shard-transitioning'); }, 1500);
+        if (glyphEl) glyphEl.textContent = _shardGlyph(newState);
+      }
+      if (statusEl && opts.statusText !== undefined) statusEl.textContent = opts.statusText;
+
+      // Piece-bar: add/update/remove to match current download state
+      if (opts.peerDownloads && opts.peerDownloads.length > 0 && newState === 'downloading') {
+        var newBar = _buildPieceBar(opts.peerDownloads, opts.dlPct || 0);
+        if (existing) existing.outerHTML = newBar;
+        else row.insertAdjacentHTML('beforeend', newBar);
+      } else if (existing && newState !== 'downloading') {
+        existing.remove();
+      }
+      return oldState !== newState;
+    },
+
     updateShardsLive: function(acquisitions, shardRegistry, peerDownloads) {
       if (!acquisitions && !shardRegistry && !peerDownloads) return;
+      var self = this;
+
+      // Index peerDownloads by modelId/shardIndex for quick lookup during patches
+      var pdIndex = {};
+      if (peerDownloads && peerDownloads.length > 0) {
+        peerDownloads.forEach(function(pd) {
+          var k = pd.model_id + ':' + pd.shard_index;
+          if (!pdIndex[k]) pdIndex[k] = [];
+          pdIndex[k].push({ node_id: pd.node_id, progress_pct: pd.progress_pct || 0 });
+        });
+      }
 
       if (acquisitions) {
         acquisitions.forEach(function(acq) {
@@ -1538,72 +1743,25 @@
           var safeId = U.safeId(modelId);
 
           var shardDetails = acq.shard_details || [];
-          var localCount = 0, peerCount = 0, dlCount = 0, peerDlCount = 0, queuedCount = 0, missingCount = 0;
           shardDetails.forEach(function(sd) {
-            var cellId = safeId + '-' + sd.index;
-            var cell = document.querySelector('[data-shard="' + cellId + '"]');
-            if (!cell) return;
+            var rowId = safeId + '-' + sd.index;
+            var row = document.querySelector('[data-shard-row="' + U.cssSafeAttr(rowId) + '"]');
+            if (!row) return;
 
-            var oldClass = cell.className.replace(/shard-cell\s*/, '').trim().split(/\s+/)[0] || 'missing';
-            var newClass = 'missing';
-            var label = '' + (sd.index + 1);
             var dlPct = sd.progress_pct || 0;
+            var newState = 'missing';
+            var statusText = I18n.t('shard.row.missing_label');
+            if (sd.state === 'complete') { newState = 'disk'; statusText = I18n.t('shard.row.disk_label'); }
+            else if (sd.state === 'verifying') { newState = 'downloading'; statusText = dlPct + '%\u2193'; }
+            else if (sd.state === 'downloading') { newState = 'downloading'; statusText = dlPct + '%\u2193'; }
+            else if (sd.state === 'pending') { newState = 'downloading'; statusText = '\u2022'; }
 
-            if (sd.state === 'complete') { newClass = 'local'; localCount++; }
-            else if (sd.state === 'verifying') {
-              newClass = 'verifying'; dlCount++;
-              label = '\u2713';
-            } else if (sd.state === 'downloading') {
-              newClass = 'downloading'; dlCount++;
-              label = dlPct + '%';
-            } else if (sd.state === 'pending') {
-              newClass = 'queued'; queuedCount++;
-              label = '\u2022';
-            } else if (sd.state === 'failed') { newClass = 'missing'; missingCount++; }
-            else { missingCount++; }
-
-            if (oldClass !== newClass || cell.textContent !== label) {
-              // Flash animation on state transition
-              if (oldClass !== newClass) {
-                cell.classList.add('shard-transitioning');
-                setTimeout(function() { cell.classList.remove('shard-transitioning'); }, 1500);
-                // Log per-model activity
-                // Shard state transition logging is handled by backend activity_event
-                // messages — no duplicate frontend logging needed here.
-              }
-              // Preserve lock, endpoint, and pinned classes
-              var preserve = '';
-              if (cell.classList.contains('locked')) preserve += ' locked';
-              if (cell.classList.contains('shard-endpoint')) preserve += ' shard-endpoint';
-              if (cell.classList.contains('shard-pinned')) preserve += ' shard-pinned';
-              cell.className = 'shard-cell ' + newClass + preserve;
-
-              // Set label text while preserving holder badge and endpoint tag
-              var holderBadge = cell.querySelector('.shard-holders');
-              var endpointTag = cell.querySelector('.shard-endpoint-tag');
-              var lockIcon = cell.querySelector('.shard-lock-icon');
-              // Clear text nodes only (preserves child elements)
-              Array.from(cell.childNodes).forEach(function(n) {
-                if (n.nodeType === 3) n.textContent = '';
-              });
-              cell.insertBefore(document.createTextNode(label), cell.firstChild);
-
-              if (newClass === 'downloading' || newClass === 'peer-downloading') {
-                cell.style.setProperty('--dl-pct', dlPct + '%');
-              } else {
-                cell.style.removeProperty('--dl-pct');
-              }
-
-              var title = I18n.t('shard.part_n', { n: sd.index + 1 });
-              if (newClass === 'local') title += ' \u2014 ' + I18n.t('dashboard.shard_verified');
-              else if (newClass === 'verifying') title += ' \u2014 ' + I18n.t('dashboard.shard_verifying');
-              else if (newClass === 'downloading') title += ' \u2014 ' + I18n.t('shard.tooltip_downloading', { pct: dlPct });
-              else if (newClass === 'queued') title += ' \u2014 ' + I18n.t('dashboard.shard_queued');
-              else if (sd.state === 'failed') title += ' \u2014 ' + I18n.t('dashboard.shard_failed');
-              else title += ' \u2014 ' + I18n.t('shard.tooltip_unavailable');
-              cell.setAttribute('title', title);
-              cell.setAttribute('aria-label', title);
-            }
+            self._patchShardRow(row, {
+              state: newState,
+              statusText: statusText,
+              peerDownloads: pdIndex[modelId + ':' + sd.index],
+              dlPct: dlPct,
+            });
           });
 
           // Update progress bar
@@ -1677,95 +1835,59 @@
         });
       }
 
-      // Update shard cells from shard registry changes
+      // Patch shard rows from shardRegistry (peer availability snapshot)
       if (shardRegistry) {
         Object.keys(shardRegistry).forEach(function(modelId) {
           var safeId = U.safeId(modelId);
           var shards = shardRegistry[modelId] || [];
           shards.forEach(function(s) {
-            var cellId = safeId + '-' + s.index;
-            var cell = document.querySelector('[data-shard="' + cellId + '"]');
-            if (!cell) return;
+            var rowId = safeId + '-' + s.index;
+            var row = document.querySelector('[data-shard-row="' + U.cssSafeAttr(rowId) + '"]');
+            if (!row) return;
+            var current = row.getAttribute('data-state') || 'missing';
+            if (current === 'downloading') return;
 
-            var current = cell.className;
-            if (current.indexOf('downloading') >= 0) return;
-            // Allow local→local+vram and local+vram→local transitions
-            var alreadyLocal = current.indexOf('local') >= 0;
-            var hasVram = current.indexOf('vram') >= 0;
-            if (alreadyLocal && s.local && s.in_vram === hasVram) return;
-
-            // Preserve lock/endpoint classes across state changes
-            var preserve = '';
-            if (cell.classList.contains('locked')) preserve += ' locked';
-            if (cell.classList.contains('shard-endpoint')) preserve += ' shard-endpoint';
-            if (cell.classList.contains('shard-pinned')) preserve += ' shard-pinned';
-
-            if (s.local) {
-              var wasLocal = alreadyLocal;
-              if (!wasLocal) {
-                cell.classList.add('shard-transitioning');
-                setTimeout(function() { cell.classList.remove('shard-transitioning'); }, 1500);
-              }
-              var vramCls = s.in_vram ? 'local vram' : 'local';
-              var vramLabel = s.in_vram ? I18n.t('dashboard.shard_active_vram', { mem: S._gpuInference ? 'VRAM' : 'RAM' }) : I18n.t('shard.tooltip_on_disk');
-              cell.className = 'shard-cell ' + vramCls + preserve;
-              // Preserve inner elements (holder badge, endpoint tag)
-              Array.from(cell.childNodes).forEach(function(n) { if (n.nodeType === 3) n.textContent = ''; });
-              cell.insertBefore(document.createTextNode('' + (s.index + 1)), cell.firstChild);
-              cell.setAttribute('title', I18n.t('shard.part_n', { n: s.index + 1 }) + ' \u2014 ' + vramLabel);
-              // Only log the first time a shard becomes local (not on vram toggle)
-              // Shard state logging handled by backend activity_event
-            } else if (s.holders > 0 && current.indexOf('peer') < 0) {
-              cell.classList.add('shard-transitioning');
-              setTimeout(function() { cell.classList.remove('shard-transitioning'); }, 1500);
-              cell.className = 'shard-cell peer' + preserve;
-              // Update or create holder badge
-              var hBadge = cell.querySelector('.shard-holders');
-              if (hBadge) { hBadge.textContent = s.holders; }
-              else {
-                hBadge = document.createElement('span');
-                hBadge.className = 'shard-holders';
-                hBadge.textContent = s.holders;
-                cell.appendChild(hBadge);
-              }
-              cell.setAttribute('title', I18n.t('dashboard.shard_peer_available', { idx: s.index, holders: s.holders }));
-              // Peer discovery logging handled by backend activity_event
-            } else if (s.holders > 0) {
-              // Update holder count on existing peer cells
-              var hBadge2 = cell.querySelector('.shard-holders');
-              if (hBadge2) hBadge2.textContent = s.holders;
+            var pdKey = modelId + ':' + s.index;
+            if (pdIndex[pdKey]) {
+              // Active peer download — force downloading state
+              var pct0 = pdIndex[pdKey][0] ? pdIndex[pdKey][0].progress_pct : 0;
+              self._patchShardRow(row, {
+                state: 'downloading',
+                statusText: (pct0 || 0) + '%\u2193',
+                peerDownloads: pdIndex[pdKey],
+                dlPct: pct0,
+              });
+              return;
             }
+
+            var newState;
+            var statusText;
+            if (s.local && s.in_vram) { newState = 'vram'; statusText = I18n.t('shard.row.vram_label'); }
+            else if (s.local) { newState = 'disk'; statusText = I18n.t('shard.row.disk_label'); }
+            else if (s.holders > 0) { newState = 'peer'; statusText = I18n.t('shard.row.peer_label'); }
+            else { newState = 'missing'; statusText = I18n.t('shard.row.missing_label'); }
+
+            self._patchShardRow(row, { state: newState, statusText: statusText });
           });
         });
       }
 
-      // Update shard cells with peer download progress
+      // Peer downloads without accompanying registry entry — patch row as downloading
       if (peerDownloads && peerDownloads.length > 0) {
         peerDownloads.forEach(function(pd) {
           var safeId = U.safeId(pd.model_id);
-          var cellId = safeId + '-' + pd.shard_index;
-          var cell = document.querySelector('[data-shard="' + cellId + '"]');
-          if (!cell) return;
-
-          var current = cell.className;
-          if (current.indexOf('local') >= 0 || current.indexOf(' downloading') >= 0) return;
-
-          var pdPct = pd.progress_pct || 0;
-          var wasPeerDl = current.indexOf('peer-downloading') >= 0;
-          if (!wasPeerDl) {
-            cell.classList.add('shard-transitioning');
-            setTimeout(function() { cell.classList.remove('shard-transitioning'); }, 1500);
-            App.dashboard._logModelEvent(pd.model_id, '\u{1F4E1}', I18n.t('dashboard.peer_downloading_log', { peer: pd.node_id.substring(0, 8), shard: pd.shard_index === App.MMPROJ_SHARD_INDEX ? 'mmproj' : pd.shard_index + 1 }), true);
-          }
-          var pdPreserve = '';
-          if (cell.classList.contains('locked')) pdPreserve += ' locked';
-          if (cell.classList.contains('shard-endpoint')) pdPreserve += ' shard-endpoint';
-          if (cell.classList.contains('shard-pinned')) pdPreserve += ' shard-pinned';
-          cell.className = 'shard-cell peer-downloading' + pdPreserve;
-          cell.style.setProperty('--dl-pct', pdPct + '%');
-          Array.from(cell.childNodes).forEach(function(n) { if (n.nodeType === 3) n.textContent = ''; });
-          cell.insertBefore(document.createTextNode(pdPct + '%'), cell.firstChild);
-          cell.setAttribute('title', I18n.t('dashboard.peer_downloading_title', { idx: pd.shard_index, peer: pd.node_id.substring(0, 8), pct: pdPct }));
+          var rowId = safeId + '-' + pd.shard_index;
+          var row = document.querySelector('[data-shard-row="' + U.cssSafeAttr(rowId) + '"]');
+          if (!row) return;
+          var cur = row.getAttribute('data-state');
+          if (cur === 'vram' || cur === 'disk') return;
+          var pct = pd.progress_pct || 0;
+          self._patchShardRow(row, {
+            state: 'downloading',
+            statusText: pct + '%\u2193',
+            peerDownloads: pdIndex[pd.model_id + ':' + pd.shard_index] || [pd],
+            dlPct: pct,
+          });
         });
       }
     },
