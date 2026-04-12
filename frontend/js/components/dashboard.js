@@ -1323,7 +1323,6 @@
                   '<div class="mce-meta-row">' + footerMetaHtml + '</div>' +
                 '</div>' +
                 '<div class="mce-actions">' + actionHtml + removeHtml + '</div>' +
-                '<div class="model-ticker" data-model-ticker="' + safeId + '" style="display:none"></div>' +
               '</div>' +
               '<div class="mce-right" data-shard-detail="' + safeId + '">' +
                 '<div class="mce-right-head">' +
@@ -1333,6 +1332,7 @@
                 '<div class="mce-right-body">' + _buildShardDetailBody(m, shards, safeId) + '</div>' +
               '</div>' +
             '</div>' +
+            '<div class="model-ticker model-ticker-fullwidth" data-model-ticker="' + safeId + '" style="display:none"></div>' +
           '</div>' +
           '<div class="model-card-footer">' +
             '<div class="model-card-meta">' + fileIndicators + '</div>' +

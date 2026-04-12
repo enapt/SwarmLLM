@@ -249,7 +249,7 @@
   "shard.view.matrix": "Matrix",
   "shard.view.toggle_tip": "Toggle list or matrix view",
   "shard.view.coverage_tip": "Shard coverage across the network",
-  "shard.matrix.peer_you": "you",
+  "shard.matrix.peer_you": "local",
   "shard.matrix.show_all_peers": "Show all {n} peers",
   "shard.matrix.col_header_tip": "Shard {n}",
   "shard.matrix.no_peers": "No other peers carry shards of this model",

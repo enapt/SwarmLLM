@@ -1738,9 +1738,28 @@ kbd {
   max-height: 0; overflow: hidden; transition: max-height 0.25s ease-out;
   border-top: 1px solid var(--border); margin-top: 0;
 }
-.model-ticker:hover .model-ticker-history {
-  max-height: 250px; margin-top: 4px;
+.model-ticker.expanded .model-ticker-history {
+  max-height: 300px; margin-top: 4px; overflow-y: auto;
 }
+.model-ticker-fullwidth {
+  margin-top: 8px;
+  padding: 6px 12px;
+  border-top: 1px dashed var(--border);
+  cursor: pointer;
+  user-select: none;
+  transition: background 0.15s;
+}
+.model-ticker-fullwidth:hover { background: rgba(255,255,255,0.03); }
+.model-ticker-fullwidth::after {
+  content: '\25BE';
+  position: absolute;
+  right: 12px;
+  top: 8px;
+  font-size: 0.6rem;
+  color: var(--text-muted);
+  transition: transform 0.2s;
+}
+.model-ticker-fullwidth.expanded::after { transform: rotate(180deg); }
 .model-ticker-row {
   display: flex; justify-content: space-between; align-items: center;
   padding: 2px 0; font-size: 0.68rem; color: var(--text-muted);
@@ -3364,6 +3383,70 @@ textarea:focus:not(:focus-visible) {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
+  margin-top: 2px;
+}
+/* shadcn-style buttons scoped to the expanded model panel's left column.
+   Default = outline variant (secondary surface, subtle border, lifts on hover).
+   .btn-primary-action → primary variant (filled accent).
+   .btn-danger          → destructive variant (red tint, stronger on hover).
+   .btn-download        → primary-tinted outline. */
+.model-card-expanded .mce-left .mce-actions .btn-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  height: 26px;
+  padding: 0 10px;
+  font-size: 0.72rem;
+  font-weight: 500;
+  line-height: 1;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  cursor: pointer;
+  box-shadow: 0 1px 2px rgba(0,0,0,0.06);
+  transition: background 0.15s, border-color 0.15s, color 0.15s, box-shadow 0.15s;
+  white-space: nowrap;
+  flex: 0 0 auto;
+}
+.model-card-expanded .mce-left .mce-actions .btn-action:hover {
+  background: var(--bg-tertiary);
+  border-color: var(--border-light);
+}
+.model-card-expanded .mce-left .mce-actions .btn-action:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--bg-primary), 0 0 0 4px var(--ring);
+}
+.model-card-expanded .mce-left .mce-actions .btn-action.btn-primary-action {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+  font-weight: 600;
+  box-shadow: 0 1px 2px rgba(0,0,0,0.12);
+}
+.model-card-expanded .mce-left .mce-actions .btn-action.btn-primary-action:hover {
+  background: var(--accent-hover, #2563eb);
+  border-color: var(--accent-hover, #2563eb);
+}
+.model-card-expanded .mce-left .mce-actions .btn-action.btn-download {
+  background: var(--accent-glow);
+  border-color: rgba(59,130,246,0.35);
+  color: var(--accent);
+  font-weight: 600;
+}
+.model-card-expanded .mce-left .mce-actions .btn-action.btn-download:hover {
+  background: rgba(59,130,246,0.2);
+  border-color: var(--accent);
+}
+.model-card-expanded .mce-left .mce-actions .btn-action.btn-danger {
+  background: transparent;
+  border-color: rgba(239,68,68,0.3);
+  color: var(--red);
+}
+.model-card-expanded .mce-left .mce-actions .btn-action.btn-danger:hover {
+  background: var(--red-dim, rgba(239,68,68,0.12));
+  border-color: var(--red);
 }
 .model-card-expanded .mce-right {
   display: flex;
@@ -3733,8 +3816,8 @@ textarea:focus:not(:focus-visible) {
   width: 16px;
 }
 .shard-matrix tbody th {
-  text-align: left;
-  padding: 0 8px 0 0;
+  text-align: right;
+  padding: 0 10px 0 0;
   color: var(--text-secondary);
   font-size: 0.62rem;
   white-space: nowrap;

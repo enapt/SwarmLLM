@@ -424,6 +424,14 @@
       var hfRepo = target.getAttribute('data-hf-download');
       if (hfRepo) { App.hf.download(hfRepo, target.getAttribute('data-hf-variant') || ''); return; }
 
+      // Per-model activity ticker: click to expand history
+      var tickerEl = target.closest('.model-ticker-fullwidth');
+      if (tickerEl && !target.closest('button, a')) {
+        tickerEl.classList.toggle('expanded');
+        e.stopPropagation();
+        return;
+      }
+
       // Shard row inline actions (load/unload/download/cancel/delete/toggle-lock/expand)
       var shardAct = target.getAttribute('data-shard-act');
       if (shardAct) {
