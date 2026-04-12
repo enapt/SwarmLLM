@@ -1915,7 +1915,7 @@ select.swarm-model-sort {
 select.swarm-model-sort:focus { border-color: var(--accent); }
 /* (models-section-icon removed — unused) */
 .models-section-logo { display: inline-block; vertical-align: middle; flex-shrink: 0; }
-.model-card-name-row .provider-icon { margin-right: 4px; opacity: 0.85; }
+.model-card-name-row .provider-icon { margin-right: 6px; opacity: 0.9; flex-shrink: 0; }
 .models-section-title { flex: 1; }
 .models-section-count {
   font-size: 0.72rem; font-weight: 500;
@@ -3125,15 +3125,15 @@ textarea:focus:not(:focus-visible) {
 [data-theme="light"] .avail-seg.seg-peer { background: rgba(59,130,246,0.4); border-color: rgba(59,130,246,0.2); }
 [data-theme="light"] .avail-seg.seg-missing { background: rgba(0,0,0,0.05); border-color: rgba(0,0,0,0.1); }
 
-/* Expand chevron on compact cards */
+/* Expand chevron — right-aligned, borderless, matches cloud card pattern */
 .model-expand-chevron {
   display: inline-flex; align-items: center; justify-content: center;
-  width: 22px; height: 22px; font-size: 0.65rem;
-  color: var(--text-muted); transition: transform 0.2s, color 0.15s;
+  width: 24px; height: 24px; font-size: 0.85rem;
+  color: var(--text-muted); transition: transform 0.2s, color 0.15s, background 0.15s;
   flex-shrink: 0; cursor: pointer; border-radius: var(--radius-sm);
-  margin-right: 4px; border: 1px solid var(--border);
+  background: transparent; border: none;
 }
-.model-expand-chevron:hover { color: var(--text-primary); background: var(--bg-hover); border-color: var(--border-light); }
+.model-expand-chevron:hover { color: var(--text-primary); background: var(--bg-hover); }
 .model-card:not(.compact) .model-expand-chevron { transform: rotate(180deg); }
 /* Make entire title row clickable for expand/collapse */
 .model-card .model-card-title { cursor: pointer; }

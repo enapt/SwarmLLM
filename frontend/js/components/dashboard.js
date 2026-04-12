@@ -1387,7 +1387,7 @@
         }
 
         var name = U.formatModelDisplayName(m.name || m.id);
-        var creatorIconHtml = providerIconHtml(modelIconKey(m.id), 14);
+        var creatorIconHtml = providerIconHtml(modelIconKey(m.id), 20);
         var chevronHtml = '<span class="model-expand-chevron" title="' + U.escapeHtml(I18n.t('dashboard.expand_collapse')) + '">&#9662;</span>';
 
         // Active loaded class for pulsing border
@@ -1397,13 +1397,12 @@
         card.innerHTML =
           '<div class="model-card-title">' +
             '<div class="model-card-name-row">' +
-              chevronHtml +
               creatorIconHtml +
               '<span class="model-name" title="' + U.escapeHtml(m.id) + '">' + U.escapeHtml(name) + '</span>' +
               compositeBadgeHtml +
             '</div>' +
             '<div class="model-card-controls">' +
-              metaBtnHtml + gearHtml +
+              metaBtnHtml + gearHtml + chevronHtml +
             '</div>' +
           '</div>' +
           availBarHtml +
