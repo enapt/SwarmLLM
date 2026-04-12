@@ -897,6 +897,7 @@
   "settings.check_status_btn": "Vérifier le statut",
   "settings.cli_version": "Version CLI",
   "settings.plan": "Plan",
+  "settings.subscription_plan_label": "Plan {type}",
   "settings.rate_tier": "Niveau de débit",
   "dashboard.cloud_subscription": "Abonnement",
   "dashboard.cloud_sub_note": "Acheminé via la CLI Claude Code — utilise votre abonnement, sans frais par jeton",

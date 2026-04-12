@@ -897,6 +897,7 @@
   "settings.check_status_btn": "Kontrollera status",
   "settings.cli_version": "CLI-version",
   "settings.plan": "Plan",
+  "settings.subscription_plan_label": "{type}-abonnemang",
   "settings.rate_tier": "Hastighetsnivå",
   "dashboard.cloud_subscription": "Prenumeration",
   "dashboard.cloud_sub_note": "Routas genom Claude Code CLI — använder din prenumeration, inga avgifter per token",

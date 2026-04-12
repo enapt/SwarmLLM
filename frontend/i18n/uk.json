@@ -897,6 +897,7 @@
   "settings.check_status_btn": "Перевірити статус",
   "settings.cli_version": "Версія CLI",
   "settings.plan": "План",
+  "settings.subscription_plan_label": "Тариф {type}",
   "settings.rate_tier": "Рівень ліміту",
   "dashboard.cloud_subscription": "Підписка",
   "dashboard.cloud_sub_note": "Маршрутизується через Claude Code CLI — використовує вашу підписку, без оплати за токен",

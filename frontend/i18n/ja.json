@@ -897,6 +897,7 @@
   "settings.check_status_btn": "ステータス確認",
   "settings.cli_version": "CLI バージョン",
   "settings.plan": "プラン",
+  "settings.subscription_plan_label": "{type} プラン",
   "settings.rate_tier": "レート階層",
   "dashboard.cloud_subscription": "サブスクリプション",
   "dashboard.cloud_sub_note": "Claude Code CLI 経由でルーティング — サブスクリプションを使用、トークン課金なし",

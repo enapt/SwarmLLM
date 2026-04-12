@@ -897,6 +897,7 @@
   "settings.check_status_btn": "检查状态",
   "settings.cli_version": "CLI 版本",
   "settings.plan": "方案",
+  "settings.subscription_plan_label": "{type} 套餐",
   "settings.rate_tier": "速率等级",
   "dashboard.cloud_subscription": "订阅",
   "dashboard.cloud_sub_note": "通过 Claude Code CLI 路由 — 使用你的订阅，无按 token 计费",

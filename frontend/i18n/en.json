@@ -734,6 +734,7 @@
   "settings.cli_not_found": "Claude CLI not found — see step 1 above",
   "settings.cli_version": "CLI version",
   "settings.plan": "Plan",
+  "settings.subscription_plan_label": "{type} Plan",
   "settings.rate_tier": "Rate tier",
   "claude_code.dir_placeholder": "Paste a folder path, or leave empty to just chat",
   "claude_code.quick_chat": "Quick chat",

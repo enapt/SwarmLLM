@@ -897,6 +897,7 @@
   "settings.check_status_btn": "Zkontrolovat stav",
   "settings.cli_version": "Verze CLI",
   "settings.plan": "Plán",
+  "settings.subscription_plan_label": "Plán {type}",
   "settings.rate_tier": "Úroveň limitu",
   "dashboard.cloud_subscription": "Předplatné",
   "dashboard.cloud_sub_note": "Směrováno přes Claude Code CLI — používá vaše předplatné, bez poplatků za token",

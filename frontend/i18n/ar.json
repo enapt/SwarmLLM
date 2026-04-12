@@ -897,6 +897,7 @@
   "settings.check_status_btn": "التحقق من الحالة",
   "settings.cli_version": "إصدار CLI",
   "settings.plan": "الخطة",
+  "settings.subscription_plan_label": "خطة {type}",
   "settings.rate_tier": "مستوى المعدل",
   "dashboard.cloud_subscription": "الاشتراك",
   "dashboard.cloud_sub_note": "يمر عبر واجهة Claude Code — يستخدم اشتراكك، دون رسوم لكل رمز",

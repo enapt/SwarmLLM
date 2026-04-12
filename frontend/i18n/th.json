@@ -897,6 +897,7 @@
   "settings.check_status_btn": "ตรวจสอบสถานะ",
   "settings.cli_version": "เวอร์ชัน CLI",
   "settings.plan": "แผน",
+  "settings.subscription_plan_label": "แพ็กเกจ {type}",
   "settings.rate_tier": "ระดับอัตรา",
   "dashboard.cloud_subscription": "การสมัคร",
   "dashboard.cloud_sub_note": "กำหนดเส้นทางผ่าน Claude Code CLI — ใช้การสมัครสมาชิกของคุณ ไม่มีค่าใช้จ่ายต่อโทเค็น",

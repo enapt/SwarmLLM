@@ -897,6 +897,7 @@
   "settings.check_status_btn": "Durumu kontrol et",
   "settings.cli_version": "CLI sürümü",
   "settings.plan": "Plan",
+  "settings.subscription_plan_label": "{type} Planı",
   "settings.rate_tier": "Hız katmanı",
   "dashboard.cloud_subscription": "Abonelik",
   "dashboard.cloud_sub_note": "Claude Code CLI üzerinden yönlendirilir — aboneliğinizi kullanır, token başına ücret yok",

@@ -897,6 +897,7 @@
   "settings.check_status_btn": "Periksa Status",
   "settings.cli_version": "Versi CLI",
   "settings.plan": "Paket",
+  "settings.subscription_plan_label": "Paket {type}",
   "settings.rate_tier": "Tingkat tarif",
   "dashboard.cloud_subscription": "Langganan",
   "dashboard.cloud_sub_note": "Dirutekan melalui Claude Code CLI — menggunakan langganan Anda, tanpa biaya per token",

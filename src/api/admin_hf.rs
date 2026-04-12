@@ -410,9 +410,7 @@ pub async fn hf_download(
                     entry.state = crate::model::acquisition::AcquisitionState::Complete;
                     entry.downloaded_shards = 1;
                     entry.verified_shards = 1;
-                    entry
-                        .log
-                        .push(format!("Download complete: {}", path.display()));
+                    entry.log_push(format!("Download complete: {}", path.display()));
                 }
 
                 // Try to load the downloaded model
@@ -1249,9 +1247,7 @@ pub async fn hf_download_shards(
             {
                 entry.state = crate::model::acquisition::AcquisitionState::Complete;
                 entry.verified_shards = shard_indices.len() as u32;
-                entry
-                    .log
-                    .push("All shards downloaded and registered".to_string());
+                entry.log_push("All shards downloaded and registered".to_string());
             }
 
             // Load available shards for inference (partial is fine)

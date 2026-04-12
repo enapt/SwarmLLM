@@ -897,6 +897,7 @@
   "settings.check_status_btn": "Kiểm tra trạng thái",
   "settings.cli_version": "Phiên bản CLI",
   "settings.plan": "Gói",
+  "settings.subscription_plan_label": "Gói {type}",
   "settings.rate_tier": "Bậc giới hạn",
   "dashboard.cloud_subscription": "Đăng ký",
   "dashboard.cloud_sub_note": "Định tuyến qua Claude Code CLI — dùng gói đăng ký của bạn, không tính phí theo token",

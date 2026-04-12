@@ -897,6 +897,7 @@
   "settings.check_status_btn": "상태 확인",
   "settings.cli_version": "CLI 버전",
   "settings.plan": "플랜",
+  "settings.subscription_plan_label": "{type} 플랜",
   "settings.rate_tier": "요청 등급",
   "dashboard.cloud_subscription": "구독",
   "dashboard.cloud_sub_note": "Claude Code CLI를 통해 라우팅 — 구독을 사용하며 토큰당 요금이 없습니다",

@@ -897,6 +897,7 @@
   "settings.check_status_btn": "Status controleren",
   "settings.cli_version": "CLI-versie",
   "settings.plan": "Abonnement",
+  "settings.subscription_plan_label": "{type}-abonnement",
   "settings.rate_tier": "Snelheidsniveau",
   "dashboard.cloud_subscription": "Abonnement",
   "dashboard.cloud_sub_note": "Doorgestuurd via de Claude Code CLI — gebruikt je abonnement, geen kosten per token",

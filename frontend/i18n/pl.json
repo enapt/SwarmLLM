@@ -897,6 +897,7 @@
   "settings.check_status_btn": "Sprawdź status",
   "settings.cli_version": "Wersja CLI",
   "settings.plan": "Plan",
+  "settings.subscription_plan_label": "Plan {type}",
   "settings.rate_tier": "Poziom limitu",
   "dashboard.cloud_subscription": "Subskrypcja",
   "dashboard.cloud_sub_note": "Kierowane przez Claude Code CLI — korzysta z Twojej subskrypcji, bez opłat za token",

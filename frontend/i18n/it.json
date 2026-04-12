@@ -897,6 +897,7 @@
   "settings.check_status_btn": "Controlla stato",
   "settings.cli_version": "Versione CLI",
   "settings.plan": "Piano",
+  "settings.subscription_plan_label": "Piano {type}",
   "settings.rate_tier": "Livello tariffa",
   "dashboard.cloud_subscription": "Abbonamento",
   "dashboard.cloud_sub_note": "Instradato tramite la CLI di Claude Code — usa il tuo abbonamento, nessun costo per token",

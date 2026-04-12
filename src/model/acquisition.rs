@@ -32,7 +32,7 @@ pub struct AcquisitionStatus {
     pub started_at: Option<chrono::DateTime<chrono::Utc>>,
     /// Recent log lines for the UI.
     #[serde(default)]
-    pub log: Vec<String>,
+    pub log: std::collections::VecDeque<String>,
     /// Download source: "peers", "huggingface", or "mixed".
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub source: String,
@@ -68,7 +68,7 @@ impl AcquisitionStatus {
             shard_progress: HashMap::new(),
             speed_bytes_per_sec: 0,
             started_at: Some(chrono::Utc::now()),
-            log: vec![initial_log.into()],
+            log: std::collections::VecDeque::from([initial_log.into()]),
             source: source.into(),
             trigger: trigger.into(),
         }
@@ -77,9 +77,9 @@ impl AcquisitionStatus {
     /// Append a log line, capping total entries to prevent unbounded growth.
     pub fn log_push(&mut self, msg: String) {
         if self.log.len() >= MAX_ACQUISITION_LOG_ENTRIES {
-            self.log.remove(0);
+            self.log.pop_front();
         }
-        self.log.push(msg);
+        self.log.push_back(msg);
     }
 }
 
@@ -286,7 +286,9 @@ impl AcquisitionManager {
                     shard_progress: HashMap::new(),
                     speed_bytes_per_sec: 0,
                     started_at: Some(chrono::Utc::now()),
-                    log: vec!["Waiting for manifest from network...".into()],
+                    log: std::collections::VecDeque::from([
+                        "Waiting for manifest from network...".into()
+                    ]),
                     source: "peers".to_string(),
                     trigger: "user".to_string(),
                 };
@@ -428,8 +430,7 @@ impl AcquisitionManager {
             if let Some(job) = self.jobs.get_mut(&model_id) {
                 job.status.state = AcquisitionState::Complete;
                 job.status
-                    .log
-                    .push("All shards already present and verified".into());
+                    .log_push("All shards already present and verified".into());
                 self.shared_state
                     .models
                     .acquisition_progress
@@ -721,9 +722,10 @@ impl AcquisitionManager {
                             if let Some(sp) = job.status.shard_progress.get_mut(&shard_index) {
                                 sp.state = ShardState::Failed;
                             }
-                            job.status
-                                .log
-                                .push(format!("Shard {} FAILED verification: {}", shard_index, e));
+                            job.status.log_push(format!(
+                                "Shard {} FAILED verification: {}",
+                                shard_index, e
+                            ));
                             tracing::warn!(
                                 model = %model_id,
                                 shard = shard_index,
@@ -816,9 +818,7 @@ impl AcquisitionManager {
             .acquisition_progress
             .get_mut(model_id)
         {
-            entry
-                .log
-                .push("Loading model from shards for inference...".into());
+            entry.log_push("Loading model from shards for inference...".into());
         }
 
         // Load from shards — no full GGUF reconstruction needed.
