@@ -3562,3 +3562,468 @@ textarea:focus:not(:focus-visible) {
   --purple: #7c3aed;
   --cyan: #0891b2;
 }
+
+/* ============================================================================
+   Swarm Model Panel — Redesign (two-column expanded layout + row-per-shard list)
+   Ships alongside legacy .shard-grid styles during switchover; old styles
+   removed in a later commit once renderModels() is fully converted.
+   ============================================================================ */
+
+.model-card-expanded {
+  display: grid;
+  grid-template-columns: 260px 1fr;
+  gap: 14px;
+  padding: 10px 14px 12px;
+}
+@media (max-width: 899px) {
+  .model-card-expanded { grid-template-columns: 1fr; }
+}
+
+.model-card-expanded .mce-left {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+.model-card-expanded .mce-left .mce-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 0.72rem;
+  color: var(--text-secondary);
+}
+.model-card-expanded .mce-left .mce-meta-row {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.model-card-expanded .mce-left .mce-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.model-card-expanded .mce-right {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+.model-card-expanded .mce-right-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  justify-content: space-between;
+}
+.model-card-expanded .mce-right-head .availability-bar { flex: 1; margin: 0; }
+
+/* View toggle (segmented, shadcn-style) */
+.shard-view-toggle {
+  display: inline-flex;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 2px;
+  gap: 2px;
+  flex-shrink: 0;
+}
+.shard-view-toggle button {
+  background: transparent;
+  border: none;
+  color: var(--text-secondary);
+  font-size: 0.65rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  padding: 3px 8px;
+  border-radius: 3px;
+  cursor: pointer;
+  transition: var(--transition);
+  font-weight: 600;
+}
+.shard-view-toggle button:hover { color: var(--text-primary); }
+.shard-view-toggle button.active {
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  box-shadow: 0 1px 2px rgba(0,0,0,0.15);
+}
+
+/* Shard row list */
+.shard-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+.shard-row {
+  position: relative;
+  display: grid;
+  grid-template-columns: 18px 24px 64px 56px 1fr auto auto auto;
+  align-items: center;
+  gap: 10px;
+  min-height: 28px;
+  padding: 4px 10px 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+  font-size: 0.72rem;
+  transition: var(--transition);
+  cursor: default;
+}
+.shard-row:hover {
+  border-color: var(--border-light);
+  background: var(--bg-secondary);
+}
+.shard-row[data-state="vram"]   { border-left: 2px solid var(--green); }
+.shard-row[data-state="disk"]   { border-left: 2px solid rgba(34,197,94,0.35); }
+.shard-row[data-state="downloading"] { border-left: 2px solid var(--cyan); }
+.shard-row[data-state="peer"]   { border-left: 2px solid var(--accent); }
+.shard-row[data-state="missing"]{ border-left: 2px solid var(--red); opacity: 0.75; }
+
+.shard-row-state-glyph {
+  width: 14px;
+  height: 14px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--font-mono, monospace);
+  color: var(--text-primary);
+  flex-shrink: 0;
+}
+.shard-row[data-state="vram"]   .shard-row-state-glyph { color: var(--green); }
+.shard-row[data-state="disk"]   .shard-row-state-glyph { color: rgba(34,197,94,0.8); }
+.shard-row[data-state="downloading"] .shard-row-state-glyph { color: var(--cyan); animation: shard-row-stripe-pulse 1.4s linear infinite; }
+.shard-row[data-state="peer"]   .shard-row-state-glyph { color: var(--accent); }
+.shard-row[data-state="missing"].shard-row-state-glyph,
+.shard-row[data-state="missing"] .shard-row-state-glyph { color: var(--red); }
+
+@keyframes shard-row-stripe-pulse {
+  0%   { opacity: 0.55; }
+  50%  { opacity: 1; }
+  100% { opacity: 0.55; }
+}
+
+.shard-row-index {
+  font-family: var(--font-mono, monospace);
+  color: var(--text-secondary);
+  font-size: 0.68rem;
+  text-align: right;
+}
+.shard-row-layers {
+  font-family: var(--font-mono, monospace);
+  color: var(--text-muted);
+  font-size: 0.65rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.shard-row-status {
+  font-size: 0.62rem;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.shard-row[data-state="vram"]   .shard-row-status { color: var(--green); }
+.shard-row[data-state="disk"]   .shard-row-status { color: rgba(34,197,94,0.85); }
+.shard-row[data-state="downloading"] .shard-row-status { color: var(--cyan); }
+.shard-row[data-state="peer"]   .shard-row-status { color: var(--accent); }
+.shard-row[data-state="missing"].shard-row-status,
+.shard-row[data-state="missing"] .shard-row-status { color: var(--red); }
+
+.shard-row-replicas {
+  display: inline-flex;
+  gap: 3px;
+  align-items: center;
+  flex-wrap: nowrap;
+  justify-self: start;
+}
+.shard-row-replicas .shard-row-pip {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--green);
+  flex-shrink: 0;
+}
+.shard-row-replicas[data-tier="low"]  .shard-row-pip { background: var(--orange); }
+.shard-row-replicas[data-tier="none"] .shard-row-pip { background: var(--red); }
+.shard-row-replicas .shard-row-pip-more {
+  font-size: 0.58rem;
+  color: var(--text-muted);
+  margin-left: 2px;
+  font-variant-numeric: tabular-nums;
+}
+
+.shard-row-size {
+  font-family: var(--font-mono, monospace);
+  color: var(--text-secondary);
+  font-size: 0.65rem;
+  text-align: right;
+  min-width: 58px;
+  font-variant-numeric: tabular-nums;
+  transition: opacity 0.15s ease;
+}
+.shard-row-lock {
+  width: 16px;
+  height: 16px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-muted);
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  font-size: 0.75rem;
+  opacity: 0.45;
+  transition: var(--transition);
+  border-radius: 3px;
+}
+.shard-row-lock:hover { opacity: 1; background: var(--bg-primary); color: var(--text-primary); }
+.shard-row-lock.locked { color: var(--orange); opacity: 1; }
+
+.shard-row-more {
+  width: 18px;
+  height: 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-muted);
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  font-size: 0.85rem;
+  transition: var(--transition);
+  border-radius: 3px;
+}
+.shard-row-more:hover { color: var(--text-primary); background: var(--bg-primary); }
+.shard-row.expanded .shard-row-more { transform: rotate(90deg); color: var(--text-primary); }
+
+/* Hover action strip (replaces size column on row hover) */
+.shard-row-actions {
+  display: inline-flex;
+  gap: 2px;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.15s ease;
+  position: absolute;
+  right: 52px;
+  top: 50%;
+  transform: translateY(-50%);
+  background: var(--bg-tertiary);
+  padding: 2px 4px;
+  border-radius: 3px;
+}
+.shard-row:hover .shard-row-actions { opacity: 1; pointer-events: auto; }
+.shard-row:hover .shard-row-size { opacity: 0; }
+.shard-row-actions button {
+  width: 20px;
+  height: 20px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: none;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 0.75rem;
+  border-radius: 3px;
+  transition: var(--transition);
+}
+.shard-row-actions button:hover { color: var(--text-primary); background: var(--bg-primary); }
+.shard-row-actions button.danger:hover { color: var(--red); background: var(--red-dim); }
+@media (max-width: 899px) {
+  .shard-row-actions { opacity: 1; pointer-events: auto; position: static; transform: none; background: transparent; padding: 0; }
+  .shard-row-size { display: none; }
+}
+
+/* Piece-bar (torrent-style) for downloading rows */
+.shard-row-piecebar {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 4px;
+  display: flex;
+  pointer-events: none;
+  border-bottom-left-radius: var(--radius-sm);
+  border-bottom-right-radius: var(--radius-sm);
+  overflow: hidden;
+  background: rgba(255,255,255,0.04);
+}
+.shard-row-piecebar-seg {
+  height: 100%;
+  width: var(--w, 0%);
+  background: var(--c, var(--cyan));
+  transition: width 0.3s ease;
+}
+.shard-row-piecebar-seg.more {
+  background: repeating-linear-gradient(135deg, var(--text-muted) 0 3px, transparent 3px 6px);
+  opacity: 0.5;
+}
+
+/* Expanded row detail sub-panel */
+.shard-row-expanded-panel {
+  grid-column: 1 / -1;
+  max-height: 0;
+  overflow: hidden;
+  transition: max-height 0.25s ease, opacity 0.2s ease, margin 0.2s ease;
+  opacity: 0;
+  margin: 0;
+  padding: 0;
+}
+.shard-row.expanded .shard-row-expanded-panel {
+  max-height: 300px;
+  opacity: 1;
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px dashed var(--border);
+}
+.shard-row-expanded-panel .srep-section {
+  font-size: 0.65rem;
+  color: var(--text-secondary);
+  margin-bottom: 6px;
+}
+.shard-row-expanded-panel .srep-section-label {
+  font-size: 0.6rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+  margin-bottom: 2px;
+}
+.shard-row-expanded-panel .srep-hash {
+  font-family: var(--font-mono, monospace);
+  font-size: 0.62rem;
+  color: var(--text-muted);
+  user-select: all;
+  word-break: break-all;
+}
+.shard-row-expanded-panel .srep-holders {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.shard-row-expanded-panel .srep-holder-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-family: var(--font-mono, monospace);
+  font-size: 0.6rem;
+  color: var(--text-secondary);
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  padding: 1px 6px;
+  border-radius: var(--radius-pill, 9999px);
+}
+.shard-row-expanded-panel .srep-holder-swatch {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.shard-row-expanded-panel .srep-destructive {
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px dashed var(--border);
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.shard-row-expanded-panel .srep-destructive button {
+  font-size: 0.62rem;
+  padding: 3px 8px;
+  border-radius: 3px;
+  border: 1px solid var(--border);
+  background: var(--bg-primary);
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: var(--transition);
+}
+.shard-row-expanded-panel .srep-destructive button:hover { color: var(--text-primary); border-color: var(--border-light); }
+.shard-row-expanded-panel .srep-destructive button.danger { color: var(--red); border-color: rgba(239,68,68,0.25); }
+.shard-row-expanded-panel .srep-destructive button.danger:hover { background: var(--red-dim); }
+
+/* Peers-by-shard matrix */
+.shard-matrix {
+  overflow-x: auto;
+  font-family: var(--font-mono, monospace);
+  font-size: 0.68rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 8px;
+  background: var(--bg-tertiary);
+}
+.shard-matrix table {
+  border-collapse: separate;
+  border-spacing: 2px;
+  min-width: 100%;
+}
+.shard-matrix th, .shard-matrix td {
+  text-align: center;
+  padding: 0;
+  font-weight: 500;
+}
+.shard-matrix thead th {
+  font-size: 0.58rem;
+  color: var(--text-muted);
+  padding-bottom: 4px;
+  min-width: 16px;
+  width: 16px;
+}
+.shard-matrix tbody th {
+  text-align: left;
+  padding: 0 8px 0 0;
+  color: var(--text-secondary);
+  font-size: 0.62rem;
+  white-space: nowrap;
+  vertical-align: middle;
+}
+.shard-matrix tbody th .srm-peer-swatch {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-right: 5px;
+  vertical-align: baseline;
+}
+.shard-matrix tbody th.you {
+  color: var(--text-primary);
+  font-weight: 600;
+}
+.shard-matrix td {
+  width: 16px;
+  height: 16px;
+  border-radius: 3px;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font-size: 0.62rem;
+  line-height: 16px;
+  cursor: default;
+  transition: transform 0.1s ease;
+}
+.shard-matrix td:hover { transform: scale(1.25); z-index: 2; position: relative; }
+.shard-matrix td[data-state="vram"]   { background: var(--green); color: #000; }
+.shard-matrix td[data-state="disk"]   { background: rgba(34,197,94,0.25); color: var(--green); }
+.shard-matrix td[data-state="downloading"] { background: var(--cyan); color: #000; }
+.shard-matrix td[data-state="peer"]   { background: rgba(59,130,246,0.25); color: var(--accent); }
+.shard-matrix td[data-state="absent"] { background: transparent; border: 1px dashed var(--border); }
+.shard-matrix-empty {
+  color: var(--text-muted);
+  font-size: 0.7rem;
+  padding: 12px;
+  text-align: center;
+}
+.shard-matrix-showall {
+  margin-top: 6px;
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text-secondary);
+  font-size: 0.62rem;
+  padding: 3px 10px;
+  border-radius: 3px;
+  cursor: pointer;
+}
+.shard-matrix-showall:hover { color: var(--text-primary); border-color: var(--border-light); }
+
+/* Coverage ribbon (reuses availability-bar semantics, sits at top of right column) */
+.shard-coverage-ribbon { margin: 0 0 4px; }

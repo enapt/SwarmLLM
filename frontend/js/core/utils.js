@@ -541,6 +541,21 @@
     }
   }
 
+  // Stable peer color — deterministic HSL from the first 3 hex chars of a node_id.
+  // Used by shard-row piece-bars and matrix-view peer swatches so any given peer
+  // shows the same color everywhere in the dashboard. Fixed saturation/lightness
+  // values tuned to read against both dark and light panel backgrounds.
+  function peerColor(nodeId) {
+    if (!nodeId) return 'hsl(0, 0%, 45%)';
+    var s = String(nodeId);
+    var h = 0;
+    for (var i = 0; i < Math.min(s.length, 6); i++) {
+      h = (h * 31 + s.charCodeAt(i)) >>> 0;
+    }
+    var hue = h % 360;
+    return 'hsl(' + hue + ', 60%, 55%)';
+  }
+
   // Export utilities
   App.utils = {
     escapeHtml: escapeHtml,
@@ -570,6 +585,7 @@
     copyToClipboard: copyToClipboard,
     readSseStream: readSseStream,
     getApiErrorMessage: getApiErrorMessage,
+    peerColor: peerColor,
     modelApiUrl: function(modelId) {
       var parts = Array.prototype.slice.call(arguments, 1);
       var base = '/api/admin/models/' + encodeURIComponent(modelId);
