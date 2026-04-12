@@ -3359,38 +3359,61 @@ textarea:focus:not(:focus-visible) {
   gap: 8px;
   min-width: 0;
 }
-/* Structured info block — definition-list style: muted label on left, value on right */
+/* Single-line compact info row: arch · quant · trust. Wraps only on very
+   narrow columns; label is muted, value is a tight pill. */
 .model-card-expanded .mce-left .mce-info {
-  display: grid;
-  grid-template-columns: auto 1fr;
-  column-gap: 10px;
-  row-gap: 4px;
-  margin: 0 0 2px;
-  font-size: 0.66rem;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  font-size: 0.62rem;
+  padding: 4px 0;
+  border-top: 1px dashed var(--border);
+  border-bottom: 1px dashed var(--border);
 }
-.model-card-expanded .mce-left .mce-info dt {
+.model-card-expanded .mce-left .mce-info .mce-info-pair {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+}
+.model-card-expanded .mce-left .mce-info .mce-info-label {
   color: var(--text-muted);
-  font-size: 0.58rem;
+  font-size: 0.56rem;
   text-transform: uppercase;
   letter-spacing: 0.06em;
-  align-self: center;
-}
-.model-card-expanded .mce-left .mce-info dd {
-  margin: 0;
-  align-self: center;
-  color: var(--text-primary);
-  min-width: 0;
 }
 .model-card-expanded .mce-left .mce-info .mce-info-pill {
   display: inline-block;
-  padding: 2px 7px;
+  padding: 1px 6px;
   border-radius: var(--radius-pill, 9999px);
   background: var(--bg-primary);
   border: 1px solid var(--border);
   font-family: var(--font-mono, monospace);
-  font-size: 0.62rem;
+  font-size: 0.6rem;
   color: var(--text-primary);
   letter-spacing: 0.03em;
+}
+/* Trust badge sitting inside .mce-info-pair — strip its legacy container padding */
+.model-card-expanded .mce-left .mce-info .model-card-detail-badges {
+  display: inline-flex;
+  padding: 0;
+  margin: 0;
+  gap: 0;
+}
+
+/* Section titles (small muted label above a grouped block) */
+.model-card-expanded .mce-left .mce-section-title {
+  font-size: 0.56rem;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  margin-bottom: 3px;
+  font-weight: 600;
+}
+.model-card-expanded .mce-left .mce-health-section {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
 }
 
 .model-card-expanded .mce-left .mce-meta {

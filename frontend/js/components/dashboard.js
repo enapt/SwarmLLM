@@ -1394,14 +1394,22 @@
             progressHtml + perShardDlHtml +
             '<div class="model-card-expanded">' +
               '<div class="mce-left">' +
-                // Structured info block — arch, quant, and any trust badges with labels.
-                '<dl class="mce-info">' +
-                  (archKey    ? '<dt>' + U.escapeHtml(I18n.t('dashboard.info_arch')) + '</dt><dd><span class="mce-info-pill">' + U.escapeHtml(archKey) + '</span></dd>' : '') +
-                  (quantMatch ? '<dt>' + U.escapeHtml(I18n.t('dashboard.info_quant')) + '</dt><dd><span class="mce-info-pill">' + U.escapeHtml(quantMatch[1].toUpperCase().replace(/-/g, '_')) + '</span></dd>' : '') +
-                  (m.trust_level ? '<dt>' + U.escapeHtml(I18n.t('dashboard.info_trust')) + '</dt><dd>' + (detailBadgesHtml || '') + '</dd>' : '') +
-                '</dl>' +
+                // 1. Pipeline encryption chip sits at the very top — it's the most
+                //    important state affordance for this model.
                 (pipelineChipHtml || '') +
-                (healthBadgeHtml || '') +
+                // 2. Compact single-line info: arch · quant · trust.
+                '<div class="mce-info">' +
+                  (archKey    ? '<span class="mce-info-pair"><span class="mce-info-label">' + U.escapeHtml(I18n.t('dashboard.info_arch')) + '</span><span class="mce-info-pill">' + U.escapeHtml(archKey) + '</span></span>' : '') +
+                  (quantMatch ? '<span class="mce-info-pair"><span class="mce-info-label">' + U.escapeHtml(I18n.t('dashboard.info_quant')) + '</span><span class="mce-info-pill">' + U.escapeHtml(quantMatch[1].toUpperCase().replace(/-/g, '_')) + '</span></span>' : '') +
+                  (m.trust_level ? '<span class="mce-info-pair"><span class="mce-info-label">' + U.escapeHtml(I18n.t('dashboard.info_trust')) + '</span>' + (detailBadgesHtml || '') + '</span>' : '') +
+                '</div>' +
+                // 3. Model health — a titled section so the chip has explicit context.
+                (healthBadgeHtml
+                  ? '<div class="mce-health-section">' +
+                      '<div class="mce-section-title">' + U.escapeHtml(I18n.t('dashboard.section_model_health')) + '</div>' +
+                      healthBadgeHtml +
+                    '</div>'
+                  : '') +
                 '<div class="mce-meta">' +
                   '<div class="mce-meta-row">' + footerMetaHtml + '</div>' +
                 '</div>' +

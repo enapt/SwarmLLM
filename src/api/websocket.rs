@@ -325,9 +325,14 @@ async fn build_stats_message(
         None
     };
 
+    // Derive LAN count from the authoritative peer_registry rather than the
+    // monotonically-incremented atomic counter, which can overcount after
+    // reconnect cycles on platforms without mDNS-expire events (WSL2).
     let lan_peers = state
-        .lan_peer_count
-        .load(std::sync::atomic::Ordering::Relaxed);
+        .peer_registry
+        .iter()
+        .filter(|entry| entry.is_lan_peer)
+        .count();
 
     // Use peer_registry.len() as authoritative peer count — DashMap never
     // has contention issues, unlike node_stats.peers_connected which uses
