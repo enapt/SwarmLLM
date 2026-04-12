@@ -52,6 +52,7 @@ window.App = {
   CURRENT_MODEL_KEY: 'swarmllm_current_model',
   COMPARE_HISTORY_KEY: 'swarmllm_compare_history',
   CHAT_HISTORY_KEY: 'swarmllm_chat_history',
+  SHARD_VIEW_KEY: 'swarmllm_shard_view',
   // sessionStorage keys
   MODEL_STATUS_KEY: 'swarmllm_model_status',
   ACTIVITY_KEY: 'swarmllm_activity',
@@ -69,6 +70,7 @@ window.App = {
 // Initialize _swarmModelSort using the constant now that App is defined
 try {
   App.state._swarmModelSort = localStorage.getItem(App.MODEL_SORT_KEY) || 'problems';
+  App.state._shardView = localStorage.getItem(App.SHARD_VIEW_KEY) || 'list';
 } catch (e) {}
 
 // Initialize modelStatus from sessionStorage cache

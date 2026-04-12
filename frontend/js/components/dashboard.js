@@ -173,6 +173,106 @@
     return '<div class="shard-list" data-shard-list="' + safeId + '">' + rows + '</div>';
   }
 
+  function _buildShardViewToggle() {
+    var mode = S._shardView === 'matrix' ? 'matrix' : 'list';
+    return '<div class="shard-view-toggle" role="tablist">' +
+      '<button type="button" data-shard-view="list" class="' + (mode === 'list' ? 'active' : '') + '" title="' + U.escapeHtml(I18n.t('shard.view.toggle_tip') || '') + '">' + U.escapeHtml(I18n.t('shard.view.list')) + '</button>' +
+      '<button type="button" data-shard-view="matrix" class="' + (mode === 'matrix' ? 'active' : '') + '" title="' + U.escapeHtml(I18n.t('shard.view.toggle_tip') || '') + '">' + U.escapeHtml(I18n.t('shard.view.matrix')) + '</button>' +
+      '</div>';
+  }
+
+  // Matrix view — rows = peers (self pinned top), cols = shards.
+  // Cell state derived from the model's shards[]: self row uses local/in_vram/download
+  // state directly; peer rows use holder_ids membership (disk if present, absent otherwise).
+  var MATRIX_MAX_PEERS_DEFAULT = 12;
+
+  function _buildShardMatrix(m, shards, safeId, expanded) {
+    if (!shards || shards.length === 0) return '';
+    // Aggregate unique peers from holder_ids across all shards.
+    var peerOrder = [];
+    var peerIndex = {};
+    shards.forEach(function(s) {
+      (s.holder_ids || []).forEach(function(pid) {
+        if (peerIndex[pid] === undefined) { peerIndex[pid] = peerOrder.length; peerOrder.push(pid); }
+      });
+    });
+    // Count coverage per peer so we can sort by most complete first.
+    var coverage = peerOrder.map(function(pid) {
+      var c = 0;
+      shards.forEach(function(s) { if ((s.holder_ids || []).indexOf(pid) !== -1) c++; });
+      return { pid: pid, c: c };
+    });
+    coverage.sort(function(a, b) { return b.c - a.c; });
+    var showAll = !!expanded;
+    var capped = showAll ? coverage : coverage.slice(0, MATRIX_MAX_PEERS_DEFAULT);
+    var overflow = coverage.length - capped.length;
+
+    // Column headers: show every shard index; cap density if many
+    var headHtml = '<tr><th></th>';
+    var colEvery = shards.length > 40 ? 5 : 1;
+    shards.forEach(function(s, i) {
+      var isMmproj = s.index === MMPROJ_SHARD_INDEX;
+      var label = isMmproj ? '\u2605' : ((i % colEvery === 0) ? String(s.index + 1) : '');
+      headHtml += '<th title="' + U.escapeHtml(I18n.t('shard.matrix.col_header_tip', { n: s.index + 1 }) || '') + '">' + label + '</th>';
+    });
+    headHtml += '</tr>';
+
+    // Self row
+    var selfRow = '<tr><th class="you" title="' + U.escapeHtml(m.id) + '">' +
+      U.escapeHtml(I18n.t('shard.matrix.peer_you')) + '</th>';
+    shards.forEach(function(s) {
+      var state = _shardState(s);
+      // Self-row "peer" state is effectively absent locally — but holders count > 0 could mean
+      // other peers have it. For self-row we want local presence only.
+      if (state === 'peer') state = 'absent';
+      var glyph = state === 'vram' ? '\u25A0' : state === 'disk' ? '\u25A1'
+                : state === 'downloading' ? '\u25D0' : '';
+      selfRow += '<td data-state="' + state + '">' + glyph + '</td>';
+    });
+    selfRow += '</tr>';
+
+    // Peer rows
+    var peerRows = capped.map(function(entry) {
+      var pid = entry.pid;
+      var shortId = pid.length > 8 ? pid.substring(0, 8) : pid;
+      var swatch = '<span class="srm-peer-swatch" style="background:' + U.peerColor(pid) + '"></span>';
+      var row = '<tr><th title="' + U.escapeHtml(pid) + '">' + swatch + U.escapeHtml(shortId) + '</th>';
+      shards.forEach(function(s) {
+        var has = (s.holder_ids || []).indexOf(pid) !== -1;
+        var state = has ? 'disk' : 'absent';
+        var glyph = has ? '\u25A1' : '';
+        row += '<td data-state="' + state + '">' + glyph + '</td>';
+      });
+      row += '</tr>';
+      return row;
+    }).join('');
+
+    var showAllBtn = overflow > 0
+      ? '<button class="shard-matrix-showall" data-matrix-showall="' + safeId + '">' +
+        U.escapeHtml(I18n.t('shard.matrix.show_all_peers', { n: coverage.length })) + '</button>'
+      : '';
+
+    var emptyHtml = (coverage.length === 0)
+      ? '<div class="shard-matrix-empty">' + U.escapeHtml(I18n.t('shard.matrix.no_peers')) + '</div>'
+      : '';
+
+    return '<div class="shard-matrix" data-shard-matrix="' + safeId + '"' + (showAll ? ' data-expanded="1"' : '') + '>' +
+      '<table>' +
+      '<thead>' + headHtml + '</thead>' +
+      '<tbody>' + selfRow + peerRows + '</tbody>' +
+      '</table>' +
+      emptyHtml +
+      showAllBtn +
+      '</div>';
+  }
+
+  function _buildShardDetailBody(m, shards, safeId) {
+    var mode = S._shardView === 'matrix' ? 'matrix' : 'list';
+    return mode === 'matrix'
+      ? _buildShardMatrix(m, shards, safeId, false)
+      : _buildShardList(m, shards, safeId);
+  }
+
   // Coverage ribbon for the expanded panel's right column — a compact strip
   // colored by network replica count per shard. Reuses availability-bar semantics.
   function _buildCoverageRibbon(m, shards, safeId) {
@@ -198,6 +298,44 @@
   App.dashboard = {
     _peersExpanded: false,
     _lastPeers: [],
+
+    // Swap all expanded model cards' right-column bodies between list and matrix.
+    // Called by the delegated click handler on .shard-view-toggle buttons.
+    setShardView: function(mode) {
+      if (mode !== 'list' && mode !== 'matrix') return;
+      S._shardView = mode;
+      try { localStorage.setItem(App.SHARD_VIEW_KEY, mode); } catch (e) {}
+      var cached = (App.data && App.data.cache && App.data.cache.models) || [];
+      var byId = {};
+      cached.forEach(function(m) { byId[m.id] = m; });
+      document.querySelectorAll('[data-shard-detail]').forEach(function(rightEl) {
+        var safeId = rightEl.getAttribute('data-shard-detail');
+        var card = rightEl.closest('.model-card');
+        var modelId = card ? card.getAttribute('data-model-id') : null;
+        var model = modelId ? byId[modelId] : null;
+        if (!model) return;
+        var body = rightEl.querySelector('.mce-right-body');
+        if (body) body.innerHTML = _buildShardDetailBody(model, model.shards || [], safeId);
+        // Update toggle active states
+        rightEl.querySelectorAll('.shard-view-toggle button').forEach(function(btn) {
+          var v = btn.getAttribute('data-shard-view');
+          if (v === mode) btn.classList.add('active'); else btn.classList.remove('active');
+        });
+      });
+    },
+
+    expandMatrixAllPeers: function(safeId) {
+      var mx = document.querySelector('[data-shard-matrix="' + U.cssSafeAttr(safeId) + '"]');
+      if (!mx) return;
+      var card = mx.closest('.model-card');
+      var modelId = card ? card.getAttribute('data-model-id') : null;
+      var cached = (App.data && App.data.cache && App.data.cache.models) || [];
+      var model = null;
+      for (var i = 0; i < cached.length; i++) { if (cached[i].id === modelId) { model = cached[i]; break; } }
+      if (!model) return;
+      var body = mx.parentElement;
+      if (body) body.innerHTML = _buildShardMatrix(model, model.shards || [], safeId, true);
+    },
 
     _logModelEvent: function(modelId, icon, text, skipGlobal, kind) {
       var isNet = kind && MODEL_NET_KINDS[kind];
@@ -1183,11 +1321,12 @@
                 '<div class="mce-actions">' + actionHtml + removeHtml + '</div>' +
                 '<div class="model-ticker" data-model-ticker="' + safeId + '" style="display:none"></div>' +
               '</div>' +
-              '<div class="mce-right">' +
+              '<div class="mce-right" data-shard-detail="' + safeId + '">' +
                 '<div class="mce-right-head">' +
                   _buildCoverageRibbon(m, shards, safeId) +
+                  _buildShardViewToggle() +
                 '</div>' +
-                _buildShardList(m, shards, safeId) +
+                '<div class="mce-right-body">' + _buildShardDetailBody(m, shards, safeId) + '</div>' +
               '</div>' +
             '</div>' +
           '</div>' +

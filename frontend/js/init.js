@@ -425,6 +425,22 @@
       var hfRepo = target.getAttribute('data-hf-download');
       if (hfRepo) { App.hf.download(hfRepo, target.getAttribute('data-hf-variant') || ''); return; }
 
+      // Shard view toggle (List | Matrix)
+      var shardView = target.getAttribute('data-shard-view');
+      if (shardView && target.closest('.shard-view-toggle')) {
+        App.dashboard.setShardView(shardView);
+        e.stopPropagation();
+        return;
+      }
+
+      // Matrix "show all peers" button
+      var matrixShowAll = target.getAttribute('data-matrix-showall');
+      if (matrixShowAll) {
+        App.dashboard.expandMatrixAllPeers(matrixShowAll);
+        e.stopPropagation();
+        return;
+      }
+
       // Shard cell click
       if (target.classList.contains('shard-cell')) {
         var shardModel = target.getAttribute('data-shard-model');
