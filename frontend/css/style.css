@@ -3404,10 +3404,19 @@ textarea:focus:not(:focus-visible) {
    Legacy .shard-grid / .shard-cell / .shard-context-menu styles fully removed.
    ============================================================================ */
 
-/* Expanded content uses subgrid so mce-left/mce-right align precisely with
-   the title columns above (260px · 1fr · auto). Right side spans the
-   ribbon column plus the controls column so the shard detail stretches
-   edge-to-edge of the card beyond where the buttons ended. */
+/* .model-card-shards and .model-card-footer are direct children of the card
+   grid and must span all 3 columns. .model-card-shards is itself a subgrid
+   so .model-card-expanded inside it can inherit the column tracks. */
+.model-card .model-card-shards,
+.model-card .model-card-footer {
+  display: grid;
+  grid-template-columns: subgrid;
+  grid-column: 1 / -1;
+}
+.model-card .model-card-shards > *,
+.model-card .model-card-footer > * { grid-column: 1 / -1; }
+
+/* Expanded content grid inherits the card's 3-column tracks via subgrid. */
 .model-card-expanded {
   display: grid;
   grid-template-columns: subgrid;
