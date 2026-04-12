@@ -154,7 +154,8 @@
     var statusLabel = _shardStatusLabel(s, state);
     var sizeText = s.size_bytes ? U.formatBytes(s.size_bytes) : '\u2014';
     var lockCls = s.locked ? ' locked' : '';
-    var lockGlyph = s.locked ? '\uD83D\uDD12' : '\uD83D\uDD13';
+    // Pushpin icon = "pin to device" (auto-manage). Reserved 🔒/🔓 for pipeline encryption.
+    var lockGlyph = '\uD83D\uDCCC';
     var lockTitle = s.locked ? I18n.t('shard.unlock') : I18n.t('shard.lock');
     var pieceBar = (state === 'downloading' && s.peer_downloads && s.peer_downloads.length > 0)
       ? _buildPieceBar(s.peer_downloads, (s.download && s.download.progress_pct) || 0)
@@ -1196,8 +1197,10 @@
             pipelineDetail = I18n.t('enc.unprotected_detail', { missing: missingParts2.join(' + ') });
             pipelineTitle = I18n.t('enc.unprotected_tip');
           }
+          // Lock glyph states: 🔒 active (closed), 🔏 ready (closed w/ pen), 🔓 unprotected (open)
+          var pipelineIcon = encActive2 ? '\uD83D\uDD12' : (hasFirst && hasLast ? '\uD83D\uDD0F' : '\uD83D\uDD13');
           pipelineChipHtml = '<div class="mce-pipeline ' + pipelineCls + '" title="' + U.escapeHtml(pipelineTitle) + '">' +
-            '<span class="mce-pipeline-icon">\uD83D\uDD10</span>' +
+            '<span class="mce-pipeline-icon">' + pipelineIcon + '</span>' +
             '<span class="mce-pipeline-label">' + U.escapeHtml(pipelineLabel) + '</span>' +
             '<span class="mce-pipeline-detail">' + U.escapeHtml(pipelineDetail) + '</span>' +
             '</div>';

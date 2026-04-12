@@ -3680,23 +3680,27 @@ textarea:focus:not(:focus-visible) {
   font-variant-numeric: tabular-nums;
   transition: opacity 0.15s ease;
 }
+/* Per-shard pin toggle — pushpin icon. Muted when unpinned (shard can be
+   auto-pruned), accent-colored when pinned (auto-prune will not remove it).
+   Visually distinct from the lock icons used for pipeline encryption. */
 .shard-row-lock {
-  width: 16px;
-  height: 16px;
+  width: 18px;
+  height: 18px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  color: var(--text-muted);
   background: transparent;
   border: none;
   cursor: pointer;
   font-size: 0.75rem;
-  opacity: 0.45;
+  opacity: 0.3;
+  filter: grayscale(1);
   transition: var(--transition);
   border-radius: 3px;
 }
-.shard-row-lock:hover { opacity: 1; background: var(--bg-primary); color: var(--text-primary); }
-.shard-row-lock.locked { color: var(--orange); opacity: 1; }
+.shard-row-lock:hover { opacity: 0.85; filter: grayscale(0.4); background: var(--bg-primary); }
+.shard-row-lock.locked { opacity: 1; filter: none; }
+.shard-row-lock.locked:hover { background: var(--bg-primary); }
 
 .shard-row-more {
   width: 18px;
