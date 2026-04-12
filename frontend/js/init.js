@@ -349,7 +349,6 @@
     // Escape key + Tab focus trap
     document.addEventListener('keydown', function(e) {
       if (e.key === 'Escape') {
-        App.shardMenu.hide();
         var sidebar = document.getElementById('sidebar');
         var settingsModal = document.getElementById('settings-modal');
         var modelModal = document.getElementById('model-browser-modal');
@@ -455,27 +454,6 @@
         e.stopPropagation();
         return;
       }
-
-      // Shard cell click
-      if (target.classList.contains('shard-cell')) {
-        var shardModel = target.getAttribute('data-shard-model');
-        var shardIdx = parseInt(target.getAttribute('data-shard-index'), 10);
-        if (shardModel != null && !isNaN(shardIdx)) {
-          var cls = target.className;
-          var state = 'missing';
-          if (cls.indexOf('local') !== -1) state = 'local';
-          else if (cls.indexOf('downloading') !== -1 && cls.indexOf('peer-downloading') === -1) state = 'downloading';
-          else if (cls.indexOf('peer') !== -1) state = 'peer';
-          var isLocked = target.getAttribute('data-shard-locked') === '1';
-          var isInVram = cls.indexOf('vram') !== -1;
-          App.shardMenu.show(shardModel, shardIdx, state, e.clientX, e.clientY, isLocked, isInVram);
-          e.stopPropagation();
-          return;
-        }
-      }
-
-      // Shard context menu action
-      if (target.id === 'shard-ctx-action') { App.shardMenu.execute(); return; }
 
       // GGUF metadata toggle
       var metaToggle = target.getAttribute('data-meta-toggle');
@@ -610,7 +588,7 @@
 
       // Model card click -> select and chat
       var modelCard = target.closest('.model-card');
-      if (modelCard && !target.closest('button, a, summary, details, .shard-cell, .badge-encrypted, [data-cancel-download], [data-remove-model], [data-unload-model], [data-enc-toggle], [data-am-gear], input, select, .model-expand-chevron, .availability-bar')) {
+      if (modelCard && !target.closest('button, a, summary, details, .shard-row, .badge-encrypted, [data-cancel-download], [data-remove-model], [data-unload-model], [data-enc-toggle], [data-am-gear], input, select, .model-expand-chevron, .availability-bar')) {
         var cardModelId = modelCard.getAttribute('data-model-id');
         if (cardModelId) {
           var cardModel = (App.data.cache.models || []).find(function(mm) { return mm.id === cardModelId; });
@@ -702,8 +680,6 @@
         return;
       }
 
-      // Close shard context menu
-      App.shardMenu.hide();
     });
   }
 

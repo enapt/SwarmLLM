@@ -1119,122 +1119,13 @@
         var gearHtml = '<button class="model-gear-btn" data-am-gear="' + U.escapeHtml(m.id) + '" title="' + U.escapeHtml(I18n.t('dashboard.gear_title')) + '">&#9881;</button>';
         var metaBtnHtml = m.has_header ? '<button class="model-meta-btn" data-meta-toggle="' + U.escapeHtml(m.id) + '" title="' + U.escapeHtml(I18n.t('models.metadata_header')) + '">&#9432;</button>' : '';
 
-        // Shard grid (legacy) — retained only to build the health summary badge that
-        // appears elsewhere in the card. The actual expanded rendering uses the new
-        // two-column shard-list builder below.
-        var shardHtml = '';
+        // Swarm health summary badge — shown in the left column of the expanded card.
+        // Derived from per-shard holder counts across the network.
         var healthBadgeHtml = '';
-        var healthBarHtml = '';
         if (shards.length > 0) {
-          var lastIdx = shardCount - 1;
-          var sizeClass = shardCount > 50 ? ' shard-grid-sm' : (shardCount > 20 ? ' shard-grid-md' : '');
-          shardHtml = '<div class="shard-grid' + sizeClass + '" role="grid" aria-label="' + U.escapeHtml(I18n.t('dashboard.shard_grid_aria', { model: U.formatModelDisplayName(m.name || m.id) })) + '" data-model-grid="' + safeId + '">';
-          var localCount = 0, peerCount = 0, dlCount = 0, peerDlCount = 0, queuedCount = 0, missingCount = 0;
-
-          shards.forEach(function(s) {
-            var cls = 'missing';
-            var label = '' + (s.index + 1);
-            var dlPct = 0;
-
-            var holderBadge = '';
-            if (s.local && s.in_vram) { cls = 'local vram'; localCount++; }
-            else if (s.local) { cls = 'local'; localCount++; }
-            else if (s.holders > 0) {
-              cls = 'peer'; peerCount++;
-              holderBadge = '<span class="shard-holders">' + s.holders + '</span>';
-            }
-            else { missingCount++; }
-
-            if (s.download && s.download.state === 'Downloading') {
-              dlPct = s.download.progress_pct || 0;
-              cls = 'downloading'; dlCount++;
-              label = dlPct + '%';
-              if (missingCount > 0) missingCount--;
-              if (peerCount > 0 && !s.local) peerCount--;
-            } else if (s.download && s.download.state === 'Verifying') {
-              cls = 'verifying'; dlCount++;
-              label = '\u2713';
-              if (missingCount > 0) missingCount--;
-              if (peerCount > 0 && !s.local) peerCount--;
-            } else if (s.download && (s.download.state === 'Queued' || s.download.state === 'pending')) {
-              cls = 'queued'; queuedCount++;
-              label = '\u2022';
-              if (missingCount > 0) missingCount--;
-              if (peerCount > 0 && !s.local) peerCount--;
-            }
-
-            if (s.peer_downloads && s.peer_downloads.length > 0) {
-              if (cls !== 'local' && cls !== 'downloading' && cls !== 'verifying') {
-                dlPct = s.peer_downloads[0].progress_pct || 0;
-                cls = 'peer-downloading'; peerDlCount++;
-                label = dlPct + '%';
-                if (missingCount > 0) missingCount--;
-                if (peerCount > 0) peerCount--;
-              }
-            }
-
-            var title = I18n.t('shard.part_n', { n: s.index + 1 }) + (s.size_bytes ? ' (' + U.formatBytes(s.size_bytes) + ')' : '');
-            if (cls === 'local vram') title += ' \u2014 ' + I18n.t(S._gpuInference ? 'shard.tooltip_active_vram' : 'shard.tooltip_active_ram');
-            else if (cls === 'local') title += ' \u2014 ' + I18n.t('shard.tooltip_on_disk');
-            else if (cls === 'peer') title += ' \u2014 ' + I18n.t('shard.tooltip_peer_available', { count: s.holders });
-            else if (cls === 'downloading') title += ' \u2014 ' + I18n.t('shard.tooltip_downloading', { pct: dlPct });
-            else if (cls === 'verifying') title += ' \u2014 ' + I18n.t('shard.tooltip_verifying');
-            else if (cls === 'peer-downloading') title += ' \u2014 ' + I18n.t('shard.tooltip_peer_downloading', { pct: dlPct });
-            else title += ' \u2014 ' + I18n.t('shard.tooltip_unavailable');
-            title += '\n' + I18n.t('shard.tooltip_click');
-
-            var style = '';
-            if (cls === 'downloading' || cls === 'peer-downloading') {
-              style = ' style="--dl-pct:' + dlPct + '%"';
-            }
-
-            var lockIcon = s.locked ? '<span class="shard-lock-icon" title="' + U.escapeHtml(I18n.t('shard.locked_tooltip')) + '">\uD83D\uDD12</span>' : '';
-
-            var endpointClass = '';
-            var endpointLabel = '';
-            if (shardCount > 1 && s.index === 0) {
-              endpointClass = (m.encrypted_pipeline && s.local) ? ' shard-pinned' : ' shard-endpoint';
-              endpointLabel = '<span class="shard-endpoint-tag">' + U.escapeHtml(I18n.t('shard.endpoint_first')) + '</span>';
-            } else if (shardCount > 1 && s.index === lastIdx) {
-              endpointClass = (m.encrypted_pipeline && s.local) ? ' shard-pinned' : ' shard-endpoint';
-              endpointLabel = '<span class="shard-endpoint-tag">' + U.escapeHtml(I18n.t('shard.endpoint_last')) + '</span>';
-            }
-
-            shardHtml += '<div class="shard-cell ' + cls + (s.locked ? ' locked' : '') + endpointClass + '"' +
-              (style ? style : '') +
-              ' data-shard="' + safeId + '-' + s.index + '"' +
-              ' data-shard-model="' + U.escapeHtml(m.id) + '"' +
-              ' data-shard-index="' + s.index + '"' +
-              ' data-shard-locked="' + (s.locked ? '1' : '0') + '"' +
-              ' role="gridcell"' +
-              ' aria-label="' + U.escapeHtml(title) + '"' +
-              ' title="' + U.escapeHtml(title) + '">' + label + holderBadge + endpointLabel + lockIcon + '</div>';
-          });
-          shardHtml += '</div>';
-
-          // Compact legend — only show entries relevant to this model's current state
-          var hasVram = shards.some(function(s) { return s.local && s.in_vram; });
-          var hasLocalNotVram = shards.some(function(s) { return s.local && !s.in_vram; });
-          var hasPeer = peerCount > 0;
-          var hasDl = dlCount > 0 || peerDlCount > 0 || queuedCount > 0;
-          var hasMissing = missingCount > 0;
-
-          var legendParts = [];
-          if (hasLocalNotVram) legendParts.push('<span class="sleg"><span class="sleg-swatch sleg-local"></span>' + U.escapeHtml(I18n.t('dashboard.shard_on_pc')) + '</span>');
-          if (hasVram) legendParts.push('<span class="sleg"><span class="sleg-swatch sleg-vram"></span>' + U.escapeHtml(I18n.t('dashboard.active_in', { mem: I18n.t(S._gpuInference ? 'hw.vram' : 'hw.ram') })) + '</span>');
-          if (hasPeer) legendParts.push('<span class="sleg"><span class="sleg-swatch sleg-peer"></span>' + U.escapeHtml(I18n.t('dashboard.shard_on_peers')) + '</span>');
-          if (hasDl) legendParts.push('<span class="sleg"><span class="sleg-swatch sleg-dl"></span>' + U.escapeHtml(I18n.t('dashboard.shard_downloading')) + '</span>');
-          if (hasMissing) legendParts.push('<span class="sleg"><span class="sleg-swatch sleg-missing"></span>' + U.escapeHtml(I18n.t('dashboard.shard_missing')) + '</span>');
-          if (legendParts.length > 0) {
-            shardHtml += '<div class="shard-legend-bar">' + legendParts.join('') + '</div>';
-          }
-
-          // Swarm health bar — shows NETWORK replication, not local status
-          // Color = holder count per shard across all nodes (including this one)
           var totalShards = shards.length;
           var totalHolders = 0;
           var wellReplicated = 0, adequate = 0, fragile = 0, networkMissing = 0;
-
           shards.forEach(function(s) {
             var holders = s.holders || 0;
             totalHolders += holders;
@@ -1243,77 +1134,23 @@
             else if (holders === 1) fragile++;
             else networkMissing++;
           });
-
           var avgHolders = totalShards > 0 ? (totalHolders / totalShards) : 0;
-
-          // Health label based on network replication quality
           var healthLabel, healthClass;
           if (networkMissing === totalShards) { healthLabel = I18n.t('dashboard.health_unavailable_label'); healthClass = 'health-low'; }
           else if (networkMissing > 0) { healthLabel = I18n.t('dashboard.health_incomplete'); healthClass = 'health-low'; }
           else if (fragile > 0) { healthLabel = I18n.t('dashboard.health_fragile'); healthClass = 'health-partial'; }
           else if (avgHolders >= 2) { healthLabel = I18n.t('dashboard.health_healthy'); healthClass = 'health-full'; }
           else { healthLabel = I18n.t('dashboard.health_good'); healthClass = 'health-good'; }
-
-          // Health tooltip — scale-aware language
-          var barTooltipLines = [];
-          var maxH = 0;
-          shards.forEach(function(s) { if ((s.holders || 0) > maxH) maxH = s.holders || 0; });
-
-          if (healthClass === 'health-full') {
-            barTooltipLines.push(I18n.t('dashboard.health_well_replicated'));
-          } else if (healthClass === 'health-good') {
-            barTooltipLines.push(I18n.t('dashboard.health_lightly_replicated'));
-          } else if (healthClass === 'health-partial') {
-            barTooltipLines.push(I18n.t('dashboard.health_single_copy'));
-          } else {
-            barTooltipLines.push(I18n.t('dashboard.health_parts_missing'));
-          }
-
-          barTooltipLines.push('');
-          if (wellReplicated > 0) barTooltipLines.push(I18n.t('dashboard.health_nodes_3plus', { count: wellReplicated, total: totalShards, nodes: maxH >= 3 ? maxH + '+' : '3+' }));
-          if (adequate > 0) barTooltipLines.push(I18n.t('dashboard.health_nodes_2', { count: adequate, total: totalShards }));
-          if (fragile > 0) barTooltipLines.push(I18n.t('dashboard.health_nodes_1', { count: fragile, total: totalShards }));
-          if (networkMissing > 0) barTooltipLines.push(I18n.t('dashboard.health_unavailable', { count: networkMissing, total: totalShards }));
-          barTooltipLines.push('');
-          barTooltipLines.push(I18n.t('dashboard.health_summary', { parts: totalShards, avg: avgHolders.toFixed(1) }));
-
-          var barTooltip = barTooltipLines.join('\n');
-
-          // Build segmented health bar using flex — same layout as shard grid so they align
-          var healthPct = totalShards > 0 ? Math.round(((totalShards - networkMissing) / totalShards) * 100) : 0;
-          var barSegments = '';
-          shards.forEach(function(s, i) {
-            var holders = s.holders || 0;
-            var color;
-            if (holders >= 3) color = 'var(--green)';
-            else if (holders === 2) color = 'rgba(134,239,172,0.7)';
-            else if (holders === 1) color = 'var(--orange)';
-            else color = 'var(--red, #ef4444)';
-            barSegments += '<div class="health-seg" style="flex:1;background:' + color + '" title="' + U.escapeHtml(I18n.t('dashboard.health_seg_title', { n: i + 1, holders: holders })) + '"></div>';
-          });
-          var barHtml = '<div class="shard-health-bar" role="progressbar" aria-valuenow="' + healthPct + '" aria-valuemin="0" aria-valuemax="100" aria-label="' + U.escapeHtml(I18n.t('dashboard.health_bar_label', { label: healthLabel })) + '" title="' + U.escapeHtml(barTooltip) + '">' + barSegments + '</div>';
-
-          // Summary: scale-aware detail
           var healthDetail = '';
-          if (healthClass === 'health-full') {
-            healthDetail = I18n.t('dashboard.health_replicated', { avg: avgHolders.toFixed(1) });
-          } else if (healthClass === 'health-good') {
-            healthDetail = I18n.t('dashboard.health_distributed', { count: totalShards });
-          } else if (fragile > 0) {
-            healthDetail = I18n.t('dashboard.health_under_replicated', { count: fragile });
-          } else if (networkMissing === totalShards) {
-            healthDetail = I18n.t('dashboard.health_no_shards_available');
-          } else if (networkMissing > 0) {
-            healthDetail = I18n.t('dashboard.health_missing', { count: networkMissing });
-          }
-          var healthSummary = '<div class="shard-health-summary ' + healthClass + '">' +
-            '<span class="shard-health-label">' + healthLabel + '</span>' +
-            '<span class="shard-health-detail">' + healthDetail + '</span>' +
+          if (healthClass === 'health-full') healthDetail = I18n.t('dashboard.health_replicated', { avg: avgHolders.toFixed(1) });
+          else if (healthClass === 'health-good') healthDetail = I18n.t('dashboard.health_distributed', { count: totalShards });
+          else if (fragile > 0) healthDetail = I18n.t('dashboard.health_under_replicated', { count: fragile });
+          else if (networkMissing === totalShards) healthDetail = I18n.t('dashboard.health_no_shards_available');
+          else if (networkMissing > 0) healthDetail = I18n.t('dashboard.health_missing', { count: networkMissing });
+          healthBadgeHtml = '<div class="mce-health ' + healthClass + '">' +
+            '<span class="mce-health-label">' + U.escapeHtml(healthLabel) + '</span>' +
+            '<span class="mce-health-detail">' + U.escapeHtml(healthDetail) + '</span>' +
             '</div>';
-
-          // Split: badge goes in title, bar goes above shard grid
-          var healthBadgeHtml = healthSummary;
-          var healthBarHtml = barHtml;
         }
 
         // Download progress bar

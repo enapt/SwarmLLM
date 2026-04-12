@@ -63,7 +63,7 @@ window.App = {
 
   // --- Component namespaces (populated by component files) ---
   // ui, chat, dashboard, hf, settings, setup, identity, networkMap,
-  // compare, data, notifications, models, downloads, shardMenu, providerHealth,
+  // compare, data, notifications, models, downloads, providerHealth,
   // pruneSchedule, networkCode, modeIndicator, pool
 };
 

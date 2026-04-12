@@ -500,16 +500,16 @@
             var progress = card.querySelector('.dl-progress');
             if (progress) progress.remove();
             card.classList.remove('downloading');
-            card.querySelectorAll('.shard-cell.downloading, .shard-cell.verifying').forEach(function(cell) {
-              var idx = cell.getAttribute('data-shard-index') || cell.textContent;
-              var cPreserve = '';
-              if (cell.classList.contains('locked')) cPreserve += ' locked';
-              if (cell.classList.contains('shard-endpoint')) cPreserve += ' shard-endpoint';
-              if (cell.classList.contains('shard-pinned')) cPreserve += ' shard-pinned';
-              cell.className = 'shard-cell missing' + cPreserve;
-              Array.from(cell.childNodes).forEach(function(n) { if (n.nodeType === 3) n.textContent = ''; });
-              cell.insertBefore(document.createTextNode(idx), cell.firstChild);
-              cell.style.removeProperty('--dl-pct');
+            // Reset any downloading shard rows to missing. Full refresh via
+            // loadInitial() below fills in accurate per-shard state.
+            card.querySelectorAll('.shard-row[data-state="downloading"]').forEach(function(row) {
+              row.setAttribute('data-state', 'missing');
+              var pb = row.querySelector('.shard-row-piecebar');
+              if (pb) pb.remove();
+              var status = row.querySelector('.shard-row-status');
+              if (status) status.textContent = I18n.t('shard.row.missing_label');
+              var glyph = row.querySelector('.shard-row-state-glyph');
+              if (glyph) glyph.textContent = '\u2715';
             });
           }
           delete S.activeAcquisitions[modelId];

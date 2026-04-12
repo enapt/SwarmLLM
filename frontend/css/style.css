@@ -852,8 +852,6 @@ a:hover { color: var(--accent-hover); }
   .session-delete { opacity: 0.6; min-width: 44px; min-height: 44px; display: flex; align-items: center; justify-content: center; }
 
   /* Model cards: single column, larger touch targets */
-  .model-card .shard-cell { width: 32px; height: 26px; font-size: 0.65rem; }
-  .model-card .shard-grid.shard-grid-md .shard-cell { width: 28px; height: 22px; }
   .model-card .model-header { flex-wrap: wrap; gap: 8px; }
 
   /* HF model card: stack on mobile */
@@ -1680,7 +1678,6 @@ kbd {
 
 /* (source-badge removed — unused, replaced by msg-source-badge) */
 
-/* (shard-map removed — unused, replaced by shard-grid) */
 
 /* Model cards */
 .model-card {
@@ -1725,140 +1722,6 @@ kbd {
 .model-card-meta { display: flex; gap: 12px; font-size: 0.78rem; color: var(--text-secondary); flex-wrap: wrap; }
 .model-card-actions { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
 
-/* Shard grid — flex cells fill available width */
-.model-card .shard-grid { display: flex; gap: 3px; flex-wrap: wrap; margin-bottom: 6px; }
-/* Size tiers — md: 21-50 shards, sm: 51+ shards */
-.model-card .shard-grid.shard-grid-md .shard-cell { min-width: 24px; height: 24px; font-size: 0.6rem; }
-.model-card .shard-grid.shard-grid-sm .shard-cell { min-width: 18px; height: 18px; font-size: 0.48rem; }
-
-.model-card .shard-cell {
-  flex: 1; min-width: 0; height: 30px; border-radius: 5px; cursor: pointer;
-  display: flex; align-items: center; justify-content: center;
-  font-size: 0.8rem; font-weight: 900; color: #fff;
-  text-shadow: 0 1px 2px rgba(0,0,0,0.5);
-  transition: transform 0.15s, box-shadow 0.15s, background-color 0.4s ease, border-color 0.4s ease;
-  position: relative; overflow: hidden;
-  letter-spacing: -0.02em;
-}
-.model-card .shard-cell:hover {
-  transform: scale(1.2); box-shadow: 0 3px 12px rgba(0,0,0,0.45); z-index: 2;
-  outline: 2px solid rgba(255,255,255,0.6); outline-offset: 1px;
-}
-.model-card .shard-cell:active { transform: scale(0.92); }
-
-/* ── Shard cell states ── */
-
-/* Local: solid green, fully opaque for readable numbers */
-.model-card .shard-cell.local {
-  background: linear-gradient(180deg, rgba(34,197,94,0.85) 0%, rgba(22,163,74,0.95) 100%);
-  border: 1px solid rgba(34,197,94,0.4);
-}
-/* VRAM: yellow-green gradient with animated glow — distinctly "live/active" */
-.model-card .shard-cell.local.vram {
-  background: linear-gradient(180deg, #a3e635 0%, #65a30d 100%);
-  border: 1px solid rgba(163,230,53,0.5);
-  box-shadow: 0 0 8px rgba(163,230,53,0.5);
-  animation: vram-glow 3s ease-in-out infinite;
-}
-@keyframes vram-glow {
-  0%, 100% { box-shadow: 0 0 6px rgba(163,230,53,0.3); }
-  50% { box-shadow: 0 0 14px rgba(163,230,53,0.6); }
-}
-/* Peer: blue, solid background for contrast */
-.model-card .shard-cell.peer {
-  background: linear-gradient(180deg, rgba(59,130,246,0.8) 0%, rgba(37,99,235,0.9) 100%);
-  border: 1px solid rgba(59,130,246,0.3);
-}
-/* Downloading: bottom-to-top fill */
-.model-card .shard-cell.downloading {
-  background: linear-gradient(0deg, var(--cyan) var(--dl-pct, 0%), var(--bg-tertiary) var(--dl-pct, 0%));
-  border: 1px solid var(--cyan);
-  animation: pulse-shard-glow 2s ease-in-out infinite;
-}
-/* Peer downloading: bottom-to-top fill, orange */
-.model-card .shard-cell.peer-downloading {
-  background: linear-gradient(0deg, var(--orange) var(--dl-pct, 0%), var(--bg-tertiary) var(--dl-pct, 0%));
-  border: 1px solid var(--orange);
-  animation: pulse-shard-glow 2s ease-in-out infinite;
-}
-/* Queued */
-.model-card .shard-cell.queued {
-  background: var(--bg-tertiary);
-  border: 1px dashed var(--cyan);
-  color: var(--cyan);
-}
-/* Verifying */
-.model-card .shard-cell.verifying {
-  background: linear-gradient(180deg, var(--yellow, #eab308) 0%, #ca8a04 100%);
-  border: 1px solid var(--yellow, #eab308);
-  color: var(--bg-primary);
-  animation: pulse-shard-glow 1.5s ease-in-out infinite;
-}
-.model-card .shard-cell.missing { background: var(--bg-tertiary); border: 1px dashed var(--border-light); color: var(--text-secondary); }
-/* Holder count badge — small number in corner of peer shard cells */
-.shard-holders {
-  position: absolute; top: -1px; right: -1px;
-  font-size: 0.45rem; font-weight: 800; line-height: 1;
-  background: rgba(0,0,0,0.55); color: #fff;
-  padding: 2px 3px; border-radius: 0 5px 0 4px;
-  pointer-events: none; text-shadow: none;
-}
-/* Endpoint tag — "1st" / "last" label */
-.shard-endpoint-tag {
-  position: absolute; bottom: -1px; left: 50%; transform: translateX(-50%);
-  font-size: 0.38rem; font-weight: 700; line-height: 1;
-  background: rgba(250,204,21,0.85); color: #000;
-  padding: 1px 3px; border-radius: var(--radius-sm) 3px 0 0;
-  pointer-events: none; text-transform: uppercase;
-  letter-spacing: 0.03em; text-shadow: none;
-}
-/* Compact shard legend */
-.shard-legend-bar {
-  display: flex; gap: 10px; font-size: 0.62rem; color: var(--text-muted);
-  margin-bottom: 4px; flex-wrap: wrap;
-}
-.sleg { display: inline-flex; align-items: center; gap: 3px; white-space: nowrap; }
-.sleg-swatch {
-  width: 10px; height: 10px; border-radius: var(--radius-sm); flex-shrink: 0;
-}
-.sleg-local { background: linear-gradient(180deg, rgba(34,197,94,0.85), rgba(22,163,74,0.95)); }
-.sleg-vram { background: linear-gradient(180deg, #a3e635, #65a30d); box-shadow: 0 0 4px rgba(163,230,53,0.5); }
-.sleg-peer { background: linear-gradient(180deg, rgba(59,130,246,0.8), rgba(37,99,235,0.9)); }
-.sleg-dl { background: var(--cyan); }
-.sleg-missing { background: var(--bg-tertiary); border: 1px dashed var(--border-light); }
-@keyframes pulse-shard-glow {
-  0%, 100% { box-shadow: none; }
-  50% { box-shadow: 0 0 6px rgba(34, 211, 238, 0.4); }
-}
-/* (shard-legend/.leg-* removed — replaced by .shard-legend-bar/.sleg-* ) */
-
-/* Shard health bar — gradient, sits above the shard grid */
-/* Health bar — flex segments with same gap as shard grid for alignment */
-.shard-health-bar {
-  display: flex; gap: 3px; height: 8px; margin-bottom: 6px;
-  transition: height 0.15s;
-  cursor: help;
-}
-.shard-health-bar:hover { height: 12px; }
-.health-seg {
-  flex: 1; min-width: 0; border-radius: var(--radius-sm); transition: background 0.4s, box-shadow 0.15s;
-}
-.shard-health-bar:hover .health-seg { box-shadow: 0 1px 4px rgba(0,0,0,0.3); }
-/* Health badge — inline in the title row next to the model name */
-.shard-health-summary {
-  display: inline-flex; align-items: center; gap: 4px;
-  font-size: 0.68rem; margin-left: 6px; flex-shrink: 0;
-}
-.shard-health-label {
-  font-weight: 700; font-size: 0.6rem; text-transform: uppercase;
-  letter-spacing: 0.03em; padding: 1px 6px; border-radius: var(--radius-lg);
-}
-.health-full .shard-health-label { color: var(--green); background: var(--green-dim); }
-.health-good .shard-health-label { color: var(--accent); background: var(--accent-glow); }
-.health-partial .shard-health-label { color: var(--orange); background: rgba(245,158,11,0.15); }
-.health-low .shard-health-label { color: var(--red, #ef4444); background: var(--red-dim, rgba(239,68,68,0.15)); }
-.shard-health-detail { color: var(--text-muted); font-size: 0.62rem; }
-
 /* Per-model activity ticker */
 .model-ticker {
   padding: 4px 14px; font-size: 0.72rem;
@@ -1889,24 +1752,13 @@ kbd {
 .model-ticker-col-label { font-size: 0.6rem; font-weight: 600; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 2px; }
 .model-ticker-col + .model-ticker-col { border-left: 1px solid var(--border); padding-left: 8px; }
 
-/* Shard cell transition flash */
+/* Shard row transition flash (reused across both list rows and matrix cells) */
 @keyframes shard-flash {
   0% { box-shadow: 0 0 0 rgba(255,255,255,0); }
   30% { box-shadow: 0 0 12px rgba(255,255,255,0.6); }
   100% { box-shadow: 0 0 0 rgba(255,255,255,0); }
 }
 .shard-transitioning { animation: shard-flash 1.5s ease-out; }
-
-/* Shard summary (live updates) */
-.shard-summary { display: flex; flex-wrap: wrap; font-size: 0.72rem; color: var(--text-secondary); margin-bottom: 6px; }
-.shard-sum-item { display: inline-flex; align-items: center; gap: 4px; margin-right: 10px; white-space: nowrap; }
-.shard-sum-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
-.shard-sum-local .shard-sum-dot { background: var(--green); }
-.shard-sum-peer .shard-sum-dot { background: var(--accent); }
-.shard-sum-dl .shard-sum-dot { background: var(--cyan); }
-.shard-sum-peer-dl .shard-sum-dot { background: var(--orange); }
-.shard-sum-queued .shard-sum-dot { background: transparent; border: 1px dashed var(--cyan); }
-.shard-sum-missing .shard-sum-dot { background: var(--bg-tertiary); border: 1px dashed var(--border-light); }
 
 /* Model status pills */
 .model-status-pill { font-size: 0.8rem; font-weight: 600; }
@@ -2565,52 +2417,6 @@ textarea:focus:not(:focus-visible) {
   background: var(--red-dim);
 }
 
-/* ---- Shard context menu ---- */
-.shard-context-menu {
-  position: fixed;
-  z-index: 10000;
-  background: var(--bg-secondary);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  box-shadow: 0 4px 20px rgba(0,0,0,0.5);
-  min-width: 200px; max-width: 260px;
-  overflow: hidden;
-}
-.shard-ctx-header {
-  padding: 8px 12px 4px;
-  font-size: 0.85rem; font-weight: 700;
-  color: var(--text-primary);
-}
-.shard-ctx-status {
-  padding: 0 12px 6px;
-  font-size: 0.7rem; color: var(--text-muted);
-  border-bottom: 1px solid var(--border);
-}
-.shard-ctx-actions { padding: 4px 0; }
-.shard-ctx-btn {
-  display: block;
-  width: 100%;
-  padding: 7px 12px;
-  background: none;
-  border: none;
-  color: var(--text-primary);
-  font-size: 0.78rem;
-  text-align: left;
-  cursor: pointer;
-  transition: background var(--transition);
-}
-.shard-ctx-btn:hover { background: var(--bg-tertiary); }
-.shard-ctx-btn.danger { color: var(--red); }
-.shard-ctx-btn.danger:hover { background: var(--red-dim); }
-.shard-ctx-warn {
-  padding: 5px 12px; font-size: 0.62rem;
-  color: var(--orange); border-top: 1px solid var(--border);
-  background: rgba(245,158,11,0.05);
-}
-
-/* ---- Shard cell clickable cursor ---- */
-.model-card .shard-cell { cursor: pointer; }
-
 /* ---- Provider active states ---- */
 .provider-badge-active {
   background: var(--green) !important;
@@ -2658,34 +2464,6 @@ textarea:focus:not(:focus-visible) {
   transform: scale(1.2);
 }
 
-/* Endpoint shards — first (0) and last (N-1): always highlighted as pipeline boundaries */
-.shard-cell.shard-endpoint {
-  outline: 2px solid rgba(250,204,21,0.75);
-  outline-offset: 1px;
-  z-index: 1;
-}
-.shard-cell.shard-endpoint.missing {
-  animation: pulse-endpoint 1.5s ease-in-out infinite;
-}
-.shard-cell.shard-pinned {
-  outline: 2px solid var(--green);
-  outline-offset: 1px;
-  z-index: 1;
-  box-shadow: 0 0 8px rgba(34,197,94,0.4);
-}
-.shard-cell.shard-pinned::after {
-  content: '';
-  position: absolute;
-  top: 0; right: 0;
-  border-style: solid;
-  border-width: 0 6px 6px 0;
-  border-color: transparent var(--green) transparent transparent;
-}
-@keyframes pulse-endpoint {
-  0%, 100% { outline-color: rgba(250,204,21,0.5); }
-  50% { outline-color: rgba(250,204,21,1); box-shadow: 0 0 8px rgba(250,204,21,0.5); }
-}
-
 /* ---- Auto-manage gear button ---- */
 .model-gear-btn {
   background: none;
@@ -2722,21 +2500,6 @@ textarea:focus:not(:focus-visible) {
   font-size: 0.8rem;
 }
 .auto-manage-panel .btn { font-size: 0.75rem; padding: 3px 10px; }
-
-/* Shard lock icon */
-.shard-lock-icon {
-  position: absolute;
-  top: 1px;
-  right: 2px;
-  font-size: 0.6rem;
-  line-height: 1;
-  opacity: 0.85;
-  pointer-events: none;
-}
-.shard-cell.locked {
-  outline: 1.5px solid var(--accent);
-  outline-offset: -1px;
-}
 
 /* Prune toast notifications */
 .prune-toast-container {
@@ -2953,10 +2716,6 @@ textarea:focus:not(:focus-visible) {
 /* #14: Mode indicator help text */
 /* (mode-help removed — unused) */
 
-/* #17: Shard cells pointer cursor */
-.shard-cell { cursor: pointer; }
-.shard-cell:hover { opacity: 0.8; }
-
 /* #21: Token counter tooltips */
 .token-counter { cursor: help; }
 
@@ -2977,12 +2736,6 @@ textarea:focus:not(:focus-visible) {
   cursor: pointer; opacity: 0.6; transition: opacity 0.15s;
 }
 .model-gear-btn:hover { opacity: 1; }
-
-/* #26: Shard cell patterns for colorblind */
-.shard-cell.local::after { content: 'D'; position: absolute; font-size: 0.5rem; opacity: 0.7; }
-.shard-cell.local.vram::after { content: 'V'; }
-.shard-cell.peer::after { content: 'P'; position: absolute; font-size: 0.5rem; opacity: 0.7; }
-.shard-cell { position: relative; }
 
 /* #28: Form error messages */
 .form-error {
@@ -3543,19 +3296,6 @@ textarea:focus:not(:focus-visible) {
 }
 .cloud-expand-toggle:hover { color: var(--text-primary); }
 
-/* ---- Color system: muted nominal states ---- */
-/* Override shard cells for quieter nominal appearance */
-.model-card .shard-cell.local.muted-nominal {
-  background: linear-gradient(180deg, rgba(34,197,94,0.35) 0%, rgba(22,163,74,0.45) 100%);
-  border-color: rgba(34,197,94,0.2);
-  color: rgba(255,255,255,0.6);
-}
-.model-card .shard-cell.peer.muted-nominal {
-  background: linear-gradient(180deg, rgba(59,130,246,0.35) 0%, rgba(37,99,235,0.4) 100%);
-  border-color: rgba(59,130,246,0.15);
-  color: rgba(255,255,255,0.5);
-}
-
 /* ---- Light theme semantic color overrides ---- */
 [data-theme="light"] {
   --green: #16a34a;
@@ -3567,9 +3307,8 @@ textarea:focus:not(:focus-visible) {
 }
 
 /* ============================================================================
-   Swarm Model Panel — Redesign (two-column expanded layout + row-per-shard list)
-   Ships alongside legacy .shard-grid styles during switchover; old styles
-   removed in a later commit once renderModels() is fully converted.
+   Swarm Model Panel — two-column expanded layout + row-per-shard list.
+   Legacy .shard-grid / .shard-cell / .shard-context-menu styles fully removed.
    ============================================================================ */
 
 .model-card-expanded {
@@ -3601,6 +3340,26 @@ textarea:focus:not(:focus-visible) {
   align-items: center;
   flex-wrap: wrap;
 }
+.model-card-expanded .mce-left .mce-health {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  font-size: 0.7rem;
+}
+.model-card-expanded .mce-left .mce-health-label {
+  font-weight: 700;
+  font-size: 0.6rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 1px 6px;
+  border-radius: var(--radius-lg);
+}
+.model-card-expanded .mce-left .mce-health.health-full .mce-health-label  { color: var(--green);  background: var(--green-dim); }
+.model-card-expanded .mce-left .mce-health.health-good .mce-health-label  { color: var(--accent); background: var(--accent-glow); }
+.model-card-expanded .mce-left .mce-health.health-partial .mce-health-label { color: var(--orange); background: rgba(245,158,11,0.15); }
+.model-card-expanded .mce-left .mce-health.health-low .mce-health-label   { color: var(--red);    background: var(--red-dim, rgba(239,68,68,0.15)); }
+.model-card-expanded .mce-left .mce-health-detail { color: var(--text-muted); font-size: 0.62rem; }
+
 .model-card-expanded .mce-left .mce-actions {
   display: flex;
   flex-wrap: wrap;
