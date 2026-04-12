@@ -247,7 +247,7 @@
   "shard.row.holders_title": "Peers holding this shard",
   "shard.row.no_other_holders": "No other peers hold this shard",
   "shard.view.list": "List",
-  "shard.view.matrix": "Matrix",
+  "shard.view.matrix": "Peers",
   "shard.view.toggle_tip": "Toggle list or matrix view",
   "shard.view.coverage_tip": "Shard coverage across the network",
   "shard.matrix.peer_you": "local",
