@@ -4118,9 +4118,16 @@ textarea:focus:not(:focus-visible) {
   color: var(--text-muted);
   padding-bottom: 4px;
 }
-/* First column (peer labels) sized to content; shard columns share remainder */
+/* First column (peer labels) has an explicit fixed width so the peer row
+   headers (e.g. 'local', 'df6cb8fb') can't bleed into the shard cells. */
 .shard-matrix thead th:first-child,
-.shard-matrix tbody th { width: 1%; white-space: nowrap; }
+.shard-matrix tbody th {
+  width: 90px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  padding-right: 10px;
+}
 .shard-matrix tbody th {
   text-align: right;
   padding: 0 10px 0 0;
