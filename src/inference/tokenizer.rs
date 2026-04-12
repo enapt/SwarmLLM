@@ -649,21 +649,7 @@ impl SplitTokenizer {
     pub fn decode_token(&self, token_str: &str) -> Vec<u8> {
         match self {
             Self::Bpe(bpe) => bpe.decode_token(token_str),
-            Self::SentencePiece(_) => {
-                // Handle byte fallback tokens like <0x0A>
-                if token_str.starts_with("<0x") && token_str.ends_with('>') && token_str.len() == 6
-                {
-                    if let Ok(byte) = u8::from_str_radix(&token_str[3..5], 16) {
-                        return vec![byte];
-                    }
-                }
-                // Special tokens → empty
-                if token_str.starts_with('<') && token_str.ends_with('>') {
-                    return vec![];
-                }
-                // ▁ → space, everything else is raw UTF-8
-                token_str.replace('\u{2581}', " ").into_bytes()
-            }
+            Self::SentencePiece(_) => decode_token_impl(token_str, true, &HashMap::new()),
         }
     }
 

@@ -760,7 +760,7 @@
 
           var legendParts = [];
           if (hasLocalNotVram) legendParts.push('<span class="sleg"><span class="sleg-swatch sleg-local"></span>' + U.escapeHtml(I18n.t('dashboard.shard_on_pc')) + '</span>');
-          if (hasVram) legendParts.push('<span class="sleg"><span class="sleg-swatch sleg-vram"></span>' + U.escapeHtml(I18n.t('dashboard.active_in', { mem: S._gpuInference ? 'VRAM' : 'RAM' })) + '</span>');
+          if (hasVram) legendParts.push('<span class="sleg"><span class="sleg-swatch sleg-vram"></span>' + U.escapeHtml(I18n.t('dashboard.active_in', { mem: I18n.t(S._gpuInference ? 'hw.vram' : 'hw.ram') })) + '</span>');
           if (hasPeer) legendParts.push('<span class="sleg"><span class="sleg-swatch sleg-peer"></span>' + U.escapeHtml(I18n.t('dashboard.shard_on_peers')) + '</span>');
           if (hasDl) legendParts.push('<span class="sleg"><span class="sleg-swatch sleg-dl"></span>' + U.escapeHtml(I18n.t('dashboard.shard_downloading')) + '</span>');
           if (hasMissing) legendParts.push('<span class="sleg"><span class="sleg-swatch sleg-missing"></span>' + U.escapeHtml(I18n.t('dashboard.shard_missing')) + '</span>');
@@ -970,8 +970,8 @@
           var hasHeader = m.has_header !== false;
           if (!hasManifest || !hasHeader) {
             var missingFiles = [];
-            if (!hasManifest) missingFiles.push('manifest');
-            if (!hasHeader) missingFiles.push('header');
+            if (!hasManifest) missingFiles.push(I18n.t('dashboard.missing_manifest'));
+            if (!hasHeader) missingFiles.push(I18n.t('dashboard.missing_header'));
             fileIndicators = '<span class="meta-sep">\u00B7</span><span class="meta-item meta-warn" title="' + U.escapeHtml(I18n.t('dashboard.missing_files', { files: missingFiles.join(', ') })) + '">\u26A0 ' + I18n.t('dashboard.missing_warning', { files: missingFiles.join(' + ') }) + '</span>';
           }
         }
