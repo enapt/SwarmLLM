@@ -20,6 +20,11 @@ pub fn serialize_peer_to_json(
     let timeout = chrono::Duration::seconds(PEER_HEALTHY_TIMEOUT_SECS);
     let now = chrono::Utc::now();
     let healthy = now.signed_duration_since(peer.last_seen) < timeout;
+    let hosted_shards_count = peer
+        .capability
+        .as_ref()
+        .map(|c| c.hosted_shards.len())
+        .unwrap_or(0);
     let hosted_models: Vec<String> = peer
         .capability
         .as_ref()
@@ -46,6 +51,7 @@ pub fn serialize_peer_to_json(
         "healthy": healthy,
         "gpu": peer.capability.as_ref().and_then(|c| c.gpu.as_ref().map(|g| &g.name)),
         "hosted_models": hosted_models,
+        "hosted_shards": hosted_shards_count,
         "is_lan_peer": peer.is_lan_peer,
     });
     if include_addresses {
