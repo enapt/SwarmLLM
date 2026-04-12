@@ -235,11 +235,11 @@
       densityByIdx[s.index] = { pct: pct, tier: tier, count: h };
     });
 
-    // Column headers — mini density bar above the shard index number. The bar
-    // height encodes network replica count (log-scaled) and the color tier
-    // mirrors the row-level replica pills. At-a-glance scan of per-shard
-    // density without needing a separate histogram row.
-    var headHtml = '<tr><th></th>';
+    // Column headers — mini density bar above the shard index number.
+    // No leading label column; peer identity is carried by a colored left
+    // border + hover tooltip on each row so shard columns align perfectly
+    // with the coverage ribbon above.
+    var headHtml = '<tr>';
     var colEvery = shards.length > 40 ? 5 : 1;
     shards.forEach(function(s, i) {
       var isMmproj = s.index === MMPROJ_SHARD_INDEX;
@@ -255,13 +255,10 @@
     });
     headHtml += '</tr>';
 
-    // Self row
-    var selfRow = '<tr><th class="you" title="' + U.escapeHtml(m.id) + '">' +
-      U.escapeHtml(I18n.t('shard.matrix.peer_you')) + '</th>';
+    // Self row — no leading <th>; left-border accent + title tooltip identifies.
+    var selfRow = '<tr class="srm-row-self" title="' + U.escapeHtml(I18n.t('shard.matrix.peer_you')) + ' (' + U.escapeHtml(m.id) + ')">';
     shards.forEach(function(s) {
       var state = _shardState(s);
-      // Self-row "peer" state is effectively absent locally — but holders count > 0 could mean
-      // other peers have it. For self-row we want local presence only.
       if (state === 'peer') state = 'absent';
       var glyph = state === 'vram' ? '\u25A0' : state === 'disk' ? '\u25A1'
                 : state === 'downloading' ? '\u25D0' : '';
@@ -269,12 +266,11 @@
     });
     selfRow += '</tr>';
 
-    // Peer rows
+    // Peer rows — colored left border (U.peerColor) + tooltip for identity.
     var peerRows = capped.map(function(entry) {
       var pid = entry.pid;
-      var shortId = pid.length > 8 ? pid.substring(0, 8) : pid;
-      var swatch = '<span class="srm-peer-swatch" style="background:' + U.peerColor(pid) + '"></span>';
-      var row = '<tr><th title="' + U.escapeHtml(pid) + '">' + swatch + U.escapeHtml(shortId) + '</th>';
+      var color = U.peerColor(pid);
+      var row = '<tr class="srm-row-peer" style="--peer-color:' + color + '" title="' + U.escapeHtml(pid) + '">';
       shards.forEach(function(s) {
         var has = (s.holder_ids || []).indexOf(pid) !== -1;
         var state = has ? 'disk' : 'absent';

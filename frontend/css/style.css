@@ -4160,16 +4160,17 @@ textarea:focus:not(:focus-visible) {
   color: var(--text-muted);
   padding-bottom: 4px;
 }
-/* First column (peer labels) has an explicit fixed width so the peer row
-   headers (e.g. 'local', 'df6cb8fb') can't bleed into the shard cells. */
-.shard-matrix thead th:first-child,
-.shard-matrix tbody th {
-  width: 90px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  padding-right: 10px;
+/* Peer rows: identified by a 3px colored left border (U.peerColor) + tooltip.
+   Self row uses the green primary color. No label column means shard cells
+   align 1:1 with the coverage ribbon above in both Shards and Peers views. */
+.shard-matrix tr.srm-row-self {
+  box-shadow: inset 3px 0 0 0 var(--green);
 }
+.shard-matrix tr.srm-row-peer {
+  box-shadow: inset 3px 0 0 0 var(--peer-color, var(--accent));
+}
+.shard-matrix tbody tr { cursor: help; }
+.shard-matrix tbody tr:hover { background: rgba(255,255,255,0.04); }
 .shard-matrix tbody th {
   text-align: right;
   padding: 0 10px 0 0;
@@ -4226,10 +4227,6 @@ textarea:focus:not(:focus-visible) {
 
 /* Coverage ribbon (reuses availability-bar semantics, sits at top of right column) */
 .shard-coverage-ribbon { margin: 0 0 4px; }
-/* In Peers view, shard columns are offset by the 90px peer-label column;
-   push the ribbon over by the same amount so segments align vertically
-   with their matrix columns. Ribbon now lives in the title row so the
-   selector walks up to the model-card. */
-.model-card:has(.shard-matrix) .model-card-title-health .shard-coverage-ribbon {
-  margin-left: 92px;
-}
+/* Peers/Shards toggle no longer shifts the ribbon — matrix cells start at
+   column-0 because the peer-label column was replaced with a left-border
+   row accent + tooltip for identification. */
