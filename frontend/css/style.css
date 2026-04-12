@@ -4069,7 +4069,8 @@ textarea:focus:not(:focus-visible) {
 .shard-matrix table {
   border-collapse: separate;
   border-spacing: 2px;
-  min-width: 100%;
+  width: 100%;
+  table-layout: fixed;
 }
 .shard-matrix th, .shard-matrix td {
   text-align: center;
@@ -4080,9 +4081,10 @@ textarea:focus:not(:focus-visible) {
   font-size: 0.58rem;
   color: var(--text-muted);
   padding-bottom: 4px;
-  min-width: 16px;
-  width: 16px;
 }
+/* First column (peer labels) sized to content; shard columns share remainder */
+.shard-matrix thead th:first-child,
+.shard-matrix tbody th { width: 1%; white-space: nowrap; }
 .shard-matrix tbody th {
   text-align: right;
   padding: 0 10px 0 0;
@@ -4104,7 +4106,6 @@ textarea:focus:not(:focus-visible) {
   font-weight: 600;
 }
 .shard-matrix td {
-  width: 16px;
   height: 16px;
   border-radius: 3px;
   background: var(--bg-primary);
