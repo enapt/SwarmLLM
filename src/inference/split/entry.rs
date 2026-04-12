@@ -5,6 +5,10 @@ use candle_core::Tensor;
 
 use super::model::SplitModel;
 
+/// Fallback EOS token IDs covering major architectures when GGUF metadata is unavailable.
+/// 2=LLaMA `</s>`, 107=Gemma `<end_of_turn>`, 32000=Mistral/Mixtral `</s>`.
+const FALLBACK_EOS_TOKEN_IDS: &[u32] = &[2, 107, 32000];
+
 /// Key type for split_models DashMap: (model_id, layer_start, layer_end).
 pub type SplitModelKey = (crate::types::ModelId, usize, usize);
 
@@ -80,19 +84,17 @@ impl SplitModelEntry {
             let bos = t.bos_string();
             let eos_str = t.eos_string();
             let eos_ids = if t.eos_token_ids.is_empty() {
-                vec![2, 107, 32000]
+                FALLBACK_EOS_TOKEN_IDS.to_vec()
             } else {
                 t.eos_token_ids
             };
             (t.vocab, bos, eos_str, eos_ids, t.chat_template)
         } else {
-            // Fallback: include common EOS tokens across architectures
-            // (2=LLaMA </s>, 107=Gemma, 32000=Mistral/Mixtral)
             (
                 vec![],
                 String::new(),
                 String::new(),
-                vec![2, 107, 32000],
+                FALLBACK_EOS_TOKEN_IDS.to_vec(),
                 None,
             )
         };

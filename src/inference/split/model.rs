@@ -71,6 +71,58 @@ pub struct SplitModel {
     pub(super) final_logit_softcap: Option<f32>,
 }
 
+/// Bundle returned by [`load_qkv_weights`]: either fused `wqkv` is Some, or
+/// all three of `wq/wk/wv` are Some.
+type QkvWeights = (
+    Option<QTensor>,
+    Option<QMatMul>,
+    Option<QMatMul>,
+    Option<QMatMul>,
+);
+
+/// Load attn_qkv.weight (fused) or attn_q/k/v.weight (split) for a layer.
+/// Used by Qwen35 hybrid architecture (SSM + full-attention layers).
+/// Returns (wqkv, wq, wk, wv). Errors if neither fused nor individual weights are present.
+fn load_qkv_weights<R: std::io::Read + std::io::Seek>(
+    ct: &gguf_file::Content,
+    file: &mut R,
+    device: &Device,
+    prefix: &str,
+) -> Result<QkvWeights, SwarmError> {
+    fn load_qm<R: std::io::Read + std::io::Seek>(
+        ct: &gguf_file::Content,
+        file: &mut R,
+        device: &Device,
+        name: &str,
+    ) -> Result<Option<QMatMul>, SwarmError> {
+        ct.tensor(file, name, device)
+            .ok()
+            .map(|t| {
+                QMatMul::from_qtensor(t)
+                    .map_err(|e| SwarmError::Internal(format!("QMatMul load failed: {e}")))
+            })
+            .transpose()
+    }
+    let wqkv = ct
+        .tensor(file, &format!("{prefix}.attn_qkv.weight"), device)
+        .ok();
+    let (wq, wk, wv) = if wqkv.is_none() {
+        (
+            load_qm(ct, file, device, &format!("{prefix}.attn_q.weight"))?,
+            load_qm(ct, file, device, &format!("{prefix}.attn_k.weight"))?,
+            load_qm(ct, file, device, &format!("{prefix}.attn_v.weight"))?,
+        )
+    } else {
+        (None, None, None)
+    };
+    if wqkv.is_none() && (wq.is_none() || wk.is_none() || wv.is_none()) {
+        return Err(SwarmError::Internal(format!(
+            "{prefix}: missing attn_qkv and individual attn_q/k/v weights"
+        )));
+    }
+    Ok((wqkv, wq, wk, wv))
+}
+
 impl SplitModel {
     /// Load a partial model from a GGUF file, only loading the specified layer range.
     ///
@@ -997,47 +1049,7 @@ impl SplitModel {
 
                 if is_ssm_layer {
                     // SSM / Gated Delta Network layer
-                    let wqkv = ct
-                        .tensor(&mut file, &format!("{prefix}.attn_qkv.weight"), &device)
-                        .ok();
-                    let (wq, wk, wv) = if wqkv.is_none() {
-                        let q = ct
-                            .tensor(&mut file, &format!("{prefix}.attn_q.weight"), &device)
-                            .ok();
-                        let k = ct
-                            .tensor(&mut file, &format!("{prefix}.attn_k.weight"), &device)
-                            .ok();
-                        let v = ct
-                            .tensor(&mut file, &format!("{prefix}.attn_v.weight"), &device)
-                            .ok();
-                        (
-                            q.map(|t| {
-                                QMatMul::from_qtensor(t).map_err(|e| {
-                                    SwarmError::Internal(format!("QMatMul load failed: {e}"))
-                                })
-                            })
-                            .transpose()?,
-                            k.map(|t| {
-                                QMatMul::from_qtensor(t).map_err(|e| {
-                                    SwarmError::Internal(format!("QMatMul load failed: {e}"))
-                                })
-                            })
-                            .transpose()?,
-                            v.map(|t| {
-                                QMatMul::from_qtensor(t).map_err(|e| {
-                                    SwarmError::Internal(format!("QMatMul load failed: {e}"))
-                                })
-                            })
-                            .transpose()?,
-                        )
-                    } else {
-                        (None, None, None)
-                    };
-                    if wqkv.is_none() && (wq.is_none() || wk.is_none() || wv.is_none()) {
-                        return Err(SwarmError::Internal(format!(
-                            "{prefix}: missing attn_qkv and individual attn_q/k/v weights"
-                        )));
-                    }
+                    let (wqkv, wq, wk, wv) = load_qkv_weights(&ct, &mut file, &device, &prefix)?;
 
                     let ssm_alpha = ct
                         .tensor(&mut file, &format!("{prefix}.ssm_alpha.weight"), &device)
@@ -1098,47 +1110,7 @@ impl SplitModel {
                     });
                 } else {
                     // Full attention layer (every 4th layer in Qwen 3.5)
-                    let wqkv = ct
-                        .tensor(&mut file, &format!("{prefix}.attn_qkv.weight"), &device)
-                        .ok();
-                    let (wq, wk, wv) = if wqkv.is_none() {
-                        let q = ct
-                            .tensor(&mut file, &format!("{prefix}.attn_q.weight"), &device)
-                            .ok();
-                        let k = ct
-                            .tensor(&mut file, &format!("{prefix}.attn_k.weight"), &device)
-                            .ok();
-                        let v = ct
-                            .tensor(&mut file, &format!("{prefix}.attn_v.weight"), &device)
-                            .ok();
-                        (
-                            q.map(|t| {
-                                QMatMul::from_qtensor(t).map_err(|e| {
-                                    SwarmError::Internal(format!("QMatMul load failed: {e}"))
-                                })
-                            })
-                            .transpose()?,
-                            k.map(|t| {
-                                QMatMul::from_qtensor(t).map_err(|e| {
-                                    SwarmError::Internal(format!("QMatMul load failed: {e}"))
-                                })
-                            })
-                            .transpose()?,
-                            v.map(|t| {
-                                QMatMul::from_qtensor(t).map_err(|e| {
-                                    SwarmError::Internal(format!("QMatMul load failed: {e}"))
-                                })
-                            })
-                            .transpose()?,
-                        )
-                    } else {
-                        (None, None, None)
-                    };
-                    if wqkv.is_none() && (wq.is_none() || wk.is_none() || wv.is_none()) {
-                        return Err(SwarmError::Internal(format!(
-                            "{prefix}: missing attn_qkv and individual attn_q/k/v weights"
-                        )));
-                    }
+                    let (wqkv, wq, wk, wv) = load_qkv_weights(&ct, &mut file, &device, &prefix)?;
                     let wo = ct
                         .tensor(&mut file, &format!("{prefix}.attn_output.weight"), &device)
                         .map_err(|e| SwarmError::Internal(format!("{prefix}.attn_output: {e}")))?;
