@@ -220,36 +220,38 @@
     var capped = showAll ? coverage : coverage.slice(0, MATRIX_MAX_PEERS_DEFAULT);
     var overflow = coverage.length - capped.length;
 
-    // Aggregate replica histogram — one tall bar per shard showing network
-    // replica density. Scales to any number of peers since we only show max/
-    // height, not per-peer rows. Self inclusion counted.
+    // Compute per-shard density tier so column headers can carry a mini
+    // density bar above the index number — one unified view, no duplicate bar.
     var maxReplicas = 1;
     shards.forEach(function(s) {
       var total = (s.holders || 0);
       if (total > maxReplicas) maxReplicas = total;
     });
-    var histHtml = '<div class="shard-matrix-histogram" aria-label="' + U.escapeHtml(I18n.t('shard.matrix.histogram_tip')) + '">';
-    shards.forEach(function(s, i) {
+    var densityByIdx = {};
+    shards.forEach(function(s) {
       var h = s.holders || 0;
-      // log-scaled height so 1 vs 1000 still both readable; min 3px when nonzero.
-      var pct = h === 0 ? 0 : Math.max(8, Math.round(Math.log(1 + h) / Math.log(1 + maxReplicas) * 100));
+      var pct = h === 0 ? 0 : Math.max(15, Math.round(Math.log(1 + h) / Math.log(1 + maxReplicas) * 100));
       var tier = h === 0 ? 'none' : h <= 2 ? 'low' : h <= 9 ? 'good' : 'high';
-      var label = s.index === MMPROJ_SHARD_INDEX ? '\u2605' : String(s.index + 1);
-      histHtml += '<div class="smh-col" data-tier="' + tier + '" title="' + U.escapeHtml(I18n.t('shard.matrix.hist_col_tip', { n: s.index + 1, holders: h })) + '">' +
-        '<div class="smh-bar-wrap"><div class="smh-bar" style="height:' + pct + '%"></div></div>' +
-        '<div class="smh-label">' + label + '</div>' +
-        '<div class="smh-count">' + h + '</div>' +
-        '</div>';
+      densityByIdx[s.index] = { pct: pct, tier: tier, count: h };
     });
-    histHtml += '</div>';
 
-    // Column headers: show every shard index; cap density if many
+    // Column headers — mini density bar above the shard index number. The bar
+    // height encodes network replica count (log-scaled) and the color tier
+    // mirrors the row-level replica pills. At-a-glance scan of per-shard
+    // density without needing a separate histogram row.
     var headHtml = '<tr><th></th>';
     var colEvery = shards.length > 40 ? 5 : 1;
     shards.forEach(function(s, i) {
       var isMmproj = s.index === MMPROJ_SHARD_INDEX;
       var label = isMmproj ? '\u2605' : ((i % colEvery === 0) ? String(s.index + 1) : '');
-      headHtml += '<th title="' + U.escapeHtml(I18n.t('shard.matrix.col_header_tip', { n: s.index + 1 }) || '') + '">' + label + '</th>';
+      var d = densityByIdx[s.index] || { pct: 0, tier: 'none', count: 0 };
+      var tip = I18n.t('shard.matrix.hist_col_tip', { n: s.index + 1, holders: d.count });
+      headHtml += '<th title="' + U.escapeHtml(tip) + '">' +
+        '<div class="smh-col" data-tier="' + d.tier + '">' +
+          '<div class="smh-bar-wrap"><div class="smh-bar" style="height:' + d.pct + '%"></div></div>' +
+          '<div class="smh-label">' + label + '</div>' +
+        '</div>' +
+        '</th>';
     });
     headHtml += '</tr>';
 
@@ -293,8 +295,6 @@
       : '';
 
     return '<div class="shard-matrix" data-shard-matrix="' + safeId + '"' + (showAll ? ' data-expanded="1"' : '') + '>' +
-      histHtml +
-      '<div class="shard-matrix-peers-header">' + U.escapeHtml(I18n.t('shard.matrix.peers_header', { total: coverage.length })) + '</div>' +
       '<table>' +
       '<thead>' + headHtml + '</thead>' +
       '<tbody>' + selfRow + peerRows + '</tbody>' +

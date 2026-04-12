@@ -4021,65 +4021,39 @@ textarea:focus:not(:focus-visible) {
 .shard-row-expanded-panel .srep-destructive button.danger { color: var(--red); border-color: rgba(239,68,68,0.25); }
 .shard-row-expanded-panel .srep-destructive button.danger:hover { background: var(--red-dim); }
 
-/* Aggregate replica histogram — one column per shard, height encodes replica
-   count (log-scaled so 1 vs 1000 both readable). Sits above peer rows and
-   scales to arbitrary swarm size without per-peer rendering. */
-.shard-matrix-histogram {
-  display: flex;
-  align-items: flex-end;
-  gap: 3px;
-  height: 72px;
-  padding: 8px 8px 4px;
-  background: var(--bg-tertiary);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  margin-bottom: 10px;
-}
-.shard-matrix-histogram .smh-col {
-  flex: 1;
-  min-width: 0;
+/* Per-column density bar inside matrix <th> — height encodes network replica
+   count (log-scaled). Lives inline with the shard index label so the matrix
+   header doubles as a histogram. Colors match the row replica pill tiers. */
+.shard-matrix thead .smh-col {
   display: flex;
   flex-direction: column;
   align-items: center;
   gap: 2px;
+  width: 100%;
+  padding-top: 2px;
 }
-.shard-matrix-histogram .smh-bar-wrap {
-  flex: 1;
-  width: 70%;
+.shard-matrix thead .smh-bar-wrap {
+  width: 60%;
+  height: 20px;
   display: flex;
   align-items: flex-end;
-  min-height: 0;
 }
-.shard-matrix-histogram .smh-bar {
+.shard-matrix thead .smh-bar {
   width: 100%;
   background: var(--green);
   border-radius: 2px 2px 0 0;
   transition: height 0.3s ease;
   min-height: 2px;
 }
-.shard-matrix-histogram .smh-col[data-tier="high"] .smh-bar { background: var(--green); box-shadow: 0 0 6px rgba(34,197,94,0.35); }
-.shard-matrix-histogram .smh-col[data-tier="good"] .smh-bar { background: rgba(34,197,94,0.75); }
-.shard-matrix-histogram .smh-col[data-tier="low"]  .smh-bar { background: var(--orange); }
-.shard-matrix-histogram .smh-col[data-tier="none"] .smh-bar { background: var(--red); opacity: 0.45; }
-.shard-matrix-histogram .smh-label {
-  font-family: var(--font-mono, monospace);
-  font-size: 0.58rem;
-  color: var(--text-muted);
-  line-height: 1;
-}
-.shard-matrix-histogram .smh-count {
+.shard-matrix thead .smh-col[data-tier="high"] .smh-bar { background: var(--green); box-shadow: 0 0 4px rgba(34,197,94,0.45); }
+.shard-matrix thead .smh-col[data-tier="good"] .smh-bar { background: rgba(34,197,94,0.75); }
+.shard-matrix thead .smh-col[data-tier="low"]  .smh-bar { background: var(--orange); }
+.shard-matrix thead .smh-col[data-tier="none"] .smh-bar { background: var(--red); opacity: 0.45; }
+.shard-matrix thead .smh-label {
   font-family: var(--font-mono, monospace);
   font-size: 0.56rem;
-  color: var(--text-secondary);
-  font-variant-numeric: tabular-nums;
-  line-height: 1;
-}
-.shard-matrix-peers-header {
-  font-size: 0.58rem;
   color: var(--text-muted);
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  margin-bottom: 4px;
+  line-height: 1;
 }
 
 /* Peers-by-shard matrix */
