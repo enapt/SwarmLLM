@@ -1996,6 +1996,13 @@ select.swarm-model-sort:focus { border-color: var(--accent); }
   background: linear-gradient(90deg, rgba(59,130,246,0.25) 0%, rgba(59,130,246,0.10) 60%, transparent 100%);
 }
 .cloud-provider-name { font-weight: 700; font-size: 0.95rem; display: inline-flex; align-items: center; gap: 7px; }
+.cloud-provider-count {
+  font-size: 0.7rem; font-weight: 600;
+  color: var(--text-muted);
+  background: var(--bg-elevated, rgba(127,127,127,0.12));
+  padding: 1px 7px; border-radius: 10px;
+  margin-left: 4px; line-height: 1.4;
+}
 .cloud-card-header .badge { margin-left: 8px; }
 .cloud-card-controls { display: flex; align-items: center; gap: 6px; margin-bottom: 8px; width: 100%; }
 input.cloud-model-filter { flex: 1 1 0%; min-width: 0; padding: 6px 10px; font-size: 13px; background: var(--bg-tertiary); border: 1px solid var(--border); border-radius: 5px; color: var(--text-primary); outline: none; box-sizing: border-box; }
