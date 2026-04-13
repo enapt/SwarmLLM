@@ -42,6 +42,19 @@
   --transition: 0.2s cubic-bezier(0.4, 0, 0.2, 1);
   --header-height: 52px;
   --sidebar-width: 240px;
+  /* Icon sizing scale — use these for any icon/toggle/arrow */
+  --icon-xs: 12px;
+  --icon-sm: 14px;
+  --icon-md: 16px;   /* default — matches info icon */
+  --icon-lg: 20px;
+  --icon-xl: 32px;
+  /* Badge shared tokens — pill style used across status/tag badges */
+  --badge-font-size: 0.7rem;
+  --badge-font-weight: 700;
+  --badge-padding: 1px 8px;
+  --badge-radius: var(--radius-lg);
+  --badge-letter-spacing: 0.03em;
+  --badge-border-width: 1px;
 }
 
 /* Light theme overrides */
@@ -1887,19 +1900,12 @@ kbd {
 .per-shard-dl-fill { height: 100%; background: linear-gradient(90deg, var(--cyan), var(--accent)); transition: width 0.5s ease-out; }
 .per-shard-dl-pct { width: 130px; text-align: right; color: var(--text-muted); flex-shrink: 0; font-family: 'SF Mono', 'Fira Code', monospace; }
 
-/* Remote badge */
-.badge-remote { background: var(--orange); color: var(--bg-primary); font-size: 0.65rem; padding: 1px 6px; border-radius: var(--radius-sm); margin-left: 6px; font-weight: 600; }
-
 /* Trust level badges */
 .badge-trust { font-size: 0.6rem; padding: 1px 6px; border-radius: var(--radius-pill); margin-left: 6px; font-weight: 600; letter-spacing: 0.3px; }
 .badge-trust-popular { background: var(--green); color: var(--bg-primary); }
 .badge-trust-verified { background: var(--accent); color: #fff; }
 .badge-trust-pinned { background: #f59e0b; color: var(--bg-primary); }
 
-
-/* HF search badges */
-.badge-swarm { background: var(--green); color: var(--bg-primary); font-size: 0.7rem; padding: 2px 8px; border-radius: var(--radius-sm); font-weight: 600; }
-.badge-new { background: var(--accent); color: #fff; font-size: 0.7rem; padding: 2px 8px; border-radius: var(--radius-sm); }
 
 /* Provider signup link */
 .provider-signup-link { font-size: 0.75rem; color: var(--accent); text-decoration: none; margin-left: 8px; opacity: 0.8; }
@@ -1966,8 +1972,7 @@ select.swarm-model-sort:focus { border-color: var(--accent); }
 }
 .models-section-body { padding-top: 4px; }
 
-/* Cloud provider badge & cards */
-.badge-cloud { background: var(--accent); color: #fff; font-size: 0.65rem; padding: 2px 8px; border-radius: var(--radius-sm); font-weight: 600; }
+/* Cloud provider cards */
 .model-card.cloud-model {
   padding: 14px 16px;
   display: block;
@@ -1991,8 +1996,7 @@ select.swarm-model-sort:focus { border-color: var(--accent); }
   background: linear-gradient(90deg, rgba(59,130,246,0.25) 0%, rgba(59,130,246,0.10) 60%, transparent 100%);
 }
 .cloud-provider-name { font-weight: 700; font-size: 0.95rem; display: inline-flex; align-items: center; gap: 7px; }
-.cloud-status-ok { color: var(--green); font-weight: 600; font-size: 0.78rem; margin-left: 8px; }
-.cloud-status-sub { color: var(--claude); font-weight: 700; font-size: 0.72rem; margin-left: 8px; background: var(--claude-dim); border: 1px solid rgba(217,119,87,0.3); border-radius: var(--radius-lg); padding: 1px 8px; letter-spacing: 0.03em; text-transform: uppercase; }
+.cloud-card-header .badge { margin-left: 8px; }
 .cloud-card-controls { display: flex; align-items: center; gap: 6px; margin-bottom: 8px; width: 100%; }
 input.cloud-model-filter { flex: 1 1 0%; min-width: 0; padding: 6px 10px; font-size: 13px; background: var(--bg-tertiary); border: 1px solid var(--border); border-radius: 5px; color: var(--text-primary); outline: none; box-sizing: border-box; }
 input.cloud-model-filter::placeholder { color: var(--text-muted); }
@@ -2011,13 +2015,6 @@ select.cloud-model-sort { flex: 0 0 88px; width: 88px; padding: 6px 6px; font-si
 .cloud-card-note { font-size: 0.72rem; color: var(--text-muted); }
 
 /* Subscription model panel — visually distinct from cloud providers */
-.badge-subscription {
-  background: rgba(217, 119, 87, 0.15); color: var(--claude);
-  border: 1px solid rgba(217, 119, 87, 0.35);
-  font-size: 0.62rem; font-weight: 700; padding: 2px 8px;
-  border-radius: var(--radius-lg); letter-spacing: 0.05em;
-  text-transform: uppercase; margin-left: auto; flex-shrink: 0;
-}
 .subscription-card-header {
   background: linear-gradient(135deg, rgba(217, 119, 87, 0.12) 0%, rgba(217, 119, 87, 0.04) 100%);
   border-bottom: 1px solid rgba(217, 119, 87, 0.2);
@@ -2025,16 +2022,8 @@ select.cloud-model-sort { flex: 0 0 88px; width: 88px; padding: 6px 6px; font-si
 .subscription-card-header:hover {
   background: linear-gradient(135deg, rgba(217, 119, 87, 0.20) 0%, rgba(217, 119, 87, 0.08) 100%);
 }
-.model-card.subscription-model-card {
-  border-color: rgba(217, 119, 87, 0.25);
-}
-.model-card.subscription-model-card:hover {
-  border-color: rgba(217, 119, 87, 0.45);
-}
-.cloud-status-sub {
-  font-size: 0.68rem; font-weight: 600; color: var(--claude); margin-left: 8px;
-}
-/* (cloud-models-divider removed — unused) */
+.model-card.subscription-model-card { border-color: rgba(217, 119, 87, 0.25); }
+.model-card.subscription-model-card:hover { border-color: rgba(217, 119, 87, 0.45); }
 .provider-health-badge { display: inline-block; font-size: 0.68rem; font-weight: 600; padding: 1px 6px; border-radius: var(--radius-sm); margin-left: 6px; }
 .health-fast { background: rgba(76,175,80,0.15); color: var(--green); }
 .health-ok { background: rgba(255,193,7,0.15); color: var(--orange); }
@@ -2651,18 +2640,7 @@ textarea:focus:not(:focus-visible) {
 }
 
 /* LAN peer badge */
-.lan-badge {
-  display: inline-block;
-  background: var(--green-dim);
-  color: var(--green);
-  font-size: 0.65rem;
-  font-weight: 600;
-  padding: 1px 6px;
-  border-radius: var(--radius-sm);
-  margin-left: 4px;
-  vertical-align: middle;
-  letter-spacing: 0.02em;
-}
+.lan-badge { margin-left: 4px; }
 
 /* ─── Collapsible panels ─── */
 .panel-header[data-collapse] { cursor: pointer; user-select: none; }
@@ -3385,7 +3363,6 @@ textarea:focus:not(:focus-visible) {
 .peer-table .peer-latency-spark .spark-bar {
   width: 2px; background: var(--accent); opacity: 0.5; border-radius: 1px 1px 0 0;
 }
-.peer-table .lan-badge { font-size: 0.55rem; background: var(--purple-dim); color: var(--purple); padding: 1px 4px; border-radius: 3px; font-weight: 600; text-transform: uppercase; }
 
 /* ---- Cloud Provider Collapsed Mode ---- */
 .cloud-card-collapsed .cloud-card-controls,
@@ -3398,10 +3375,13 @@ textarea:focus:not(:focus-visible) {
   border-radius: var(--radius);
   border-bottom: none;
 }
+.model-card.cloud-model.cloud-card-collapsed { padding-bottom: 0; }
 .cloud-expand-toggle {
   display: inline-flex; align-items: center; justify-content: center;
-  font-size: 0.7rem; color: var(--text-muted);
-  cursor: pointer; padding: 2px 6px; border-radius: var(--radius-sm);
+  width: var(--icon-md); height: var(--icon-md);
+  font-size: var(--icon-md); line-height: 1;
+  color: var(--text-muted);
+  cursor: pointer; padding: 0; border-radius: var(--radius-sm);
   border: none; background: transparent;
   transition: color var(--transition);
 }

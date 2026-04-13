@@ -1,0 +1,49 @@
+/* SwarmLLM — shared utility classes (icons + badges) */
+
+/* ---- Icons ----
+   Use .icon as the base. Default size matches --icon-md (16px).
+   SVG/img children inherit the size automatically.
+*/
+.icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--icon-md);
+  height: var(--icon-md);
+  font-size: var(--icon-md);
+  line-height: 1;
+  flex-shrink: 0;
+}
+.icon > svg, .icon > img { width: 100%; height: 100%; display: block; }
+.icon-xs { width: var(--icon-xs); height: var(--icon-xs); font-size: var(--icon-xs); }
+.icon-sm { width: var(--icon-sm); height: var(--icon-sm); font-size: var(--icon-sm); }
+.icon-md { width: var(--icon-md); height: var(--icon-md); font-size: var(--icon-md); }
+.icon-lg { width: var(--icon-lg); height: var(--icon-lg); font-size: var(--icon-lg); }
+.icon-xl { width: var(--icon-xl); height: var(--icon-xl); font-size: var(--icon-xl); }
+
+/* ---- Badges ----
+   One unified pill style — bordered tint, uppercase, compact.
+   Combine the base .badge with a color modifier.
+*/
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: var(--badge-font-size);
+  font-weight: var(--badge-font-weight);
+  line-height: 1.3;
+  padding: var(--badge-padding);
+  border-radius: var(--badge-radius);
+  letter-spacing: var(--badge-letter-spacing);
+  text-transform: uppercase;
+  border: var(--badge-border-width) solid transparent;
+  white-space: nowrap;
+  vertical-align: middle;
+}
+.badge-green  { color: var(--green);  background: rgba(34,197,94,0.12);   border-color: rgba(34,197,94,0.3);  }
+.badge-red    { color: var(--red);    background: var(--red-dim);         border-color: rgba(239,68,68,0.3);  }
+.badge-orange { color: var(--orange); background: var(--orange-dim);      border-color: rgba(245,158,11,0.3); }
+.badge-accent { color: var(--accent); background: var(--accent-glow);     border-color: color-mix(in srgb, var(--accent) 30%, transparent); }
+.badge-purple { color: var(--purple); background: var(--purple-dim);      border-color: rgba(167,139,250,0.3); }
+.badge-claude { color: var(--claude); background: var(--claude-dim);      border-color: rgba(217,119,87,0.3); }
+.badge-muted  { color: var(--text-secondary); background: rgba(255,255,255,0.04); border-color: var(--border); }

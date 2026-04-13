@@ -1147,7 +1147,7 @@
         //  .mce-pipeline chip below — no standalone floating lock icon anymore.)
         // Source label
         if (m.source === 'network' && hostedShards === 0) {
-          detailParts.push('<span class="badge badge-remote" title="' + U.escapeHtml(I18n.t('dashboard.badge_remote')) + '">' + U.escapeHtml(I18n.t('dashboard.badge_remote_label')) + '</span>');
+          detailParts.push('<span class="badge badge-orange" title="' + U.escapeHtml(I18n.t('dashboard.badge_remote')) + '">' + U.escapeHtml(I18n.t('dashboard.badge_remote_label')) + '</span>');
         }
         if (detailParts.length > 0) {
           detailBadgesHtml = '<div class="model-card-detail-badges">' + detailParts.join('') + '</div>';
@@ -1512,8 +1512,7 @@
           '<div class="cloud-card-header' + (opts.headerClass ? ' ' + opts.headerClass : '') + '">' +
             '<span class="cloud-provider-name">' + (cardIconHtml ? cardIconHtml + ' ' : '') + U.escapeHtml(pLabel) + '</span>' +
             '<span style="display:flex;align-items:center;gap:8px">' +
-              '<span class="badge ' + (opts.badgeClass || 'badge-cloud') + '">' + I18n.t('dashboard.cloud_models_count', { count: pModels.length }) + '</span>' +
-              (opts.statusHtml || '<span class="cloud-status-ok">\u25cf ' + U.escapeHtml(I18n.t('dashboard.cloud_connected')) + '</span>') +
+              (opts.statusHtml || '<span class="badge badge-green">' + U.escapeHtml(I18n.t('dashboard.cloud_connected')) + '</span>') +
               expandToggleHtml +
             '</span>' +
           '</div>' +
@@ -1599,7 +1598,7 @@
           '<img src="' + (providerIconUrl('claude_subscription') || '') + '" width="16" height="16" alt="" aria-hidden="true" class="models-section-logo" style="flex-shrink:0">' +
           '<span class="models-section-title">' + U.escapeHtml(I18n.t('dashboard.subscription_title')) + '</span>' +
           '<span class="models-section-count">' + subMeta + '</span>' +
-          '<span class="badge badge-subscription">' + U.escapeHtml(I18n.t('dashboard.subscription_badge')) + '</span>' +
+          '<span class="badge badge-claude" style="margin-left:auto">' + U.escapeHtml(I18n.t('dashboard.subscription_badge')) + '</span>' +
           '</summary>';
         var subBody = document.createElement('div');
         subBody.className = 'models-section-body';
@@ -1610,8 +1609,7 @@
           renderProviderCard({
             provider: p, models: bySubProvider[p], parentEl: subBody,
             cardClass: 'subscription-model-card', headerClass: 'subscription-card-header',
-            badgeClass: 'badge-subscription',
-            statusHtml: '<span class="cloud-status-sub" id="sub-status-' + p + '">\u25cf ' + U.escapeHtml(I18n.t('dashboard.cloud_subscription')) + '</span>',
+            statusHtml: '<span class="badge badge-claude" id="sub-status-' + p + '">' + U.escapeHtml(I18n.t('dashboard.cloud_subscription')) + '</span>',
             noteText: I18n.t('dashboard.cloud_sub_note'),
             idPrefix: 'sub',
           });
@@ -1934,7 +1932,7 @@
       sorted.forEach(function(p) {
         var name = p.nickname || (p.node_id || 'unknown').substring(0, 12);
         var idSub = p.nickname ? '<span class="peer-id-sub">' + (p.node_id || '').substring(0, 8) + '</span>' : '';
-        var lanBadge = p.is_lan_peer ? ' <span class="lan-badge">' + U.escapeHtml(I18n.t('dashboard.lan_badge')) + '</span>' : '';
+        var lanBadge = p.is_lan_peer ? ' <span class="badge badge-purple lan-badge">' + U.escapeHtml(I18n.t('dashboard.lan_badge')) + '</span>' : '';
         var dotClass = p.healthy ? 'online' : 'degraded';
         var latency = p.latency_ms ? p.latency_ms + 'ms' : '\u2014';
         var shards = p.hosted_shards || 0;

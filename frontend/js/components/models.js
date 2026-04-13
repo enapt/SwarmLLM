@@ -122,8 +122,8 @@
           // Network meta
           var replicas = repo.network_replicas || 0;
           var networkHtml = replicas > 0
-            ? '<span class="badge-swarm" title="' + U.escapeHtml(I18n.t('models.hf_on_swarm', { count: replicas })) + '">' + U.escapeHtml(I18n.t('models.hf_on_swarm', { count: replicas })) + '</span>'
-            : '<span class="badge-new">' + U.escapeHtml(I18n.t('models.badge_new')) + '</span>';
+            ? '<span class="badge badge-green" title="' + U.escapeHtml(I18n.t('models.hf_on_swarm', { count: replicas })) + '">' + U.escapeHtml(I18n.t('models.hf_on_swarm', { count: replicas })) + '</span>'
+            : '';
           if (replicas === 0) networkHtml += '<span style="color:var(--green)">&#128176; ' + U.escapeHtml(I18n.t('models.demand_high')) + '</span>';
           else if (replicas <= 2) networkHtml += '<span style="color:var(--yellow)">&#128176; ' + U.escapeHtml(I18n.t('models.demand_medium')) + '</span>';
           else networkHtml += '<span style="color:var(--text-muted)">&#128176; ' + U.escapeHtml(I18n.t('models.well_replicated')) + '</span>';

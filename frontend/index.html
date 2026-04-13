@@ -6,6 +6,7 @@
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self' ws: wss:; img-src 'self' data:; font-src 'self';">
   <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
   <title>SwarmLLM — Join the Swarm</title>
+  <link rel="stylesheet" href="/static/css/utilities.css">
   <link rel="stylesheet" href="/static/css/style.css">
   <link rel="stylesheet" href="/static/css/claude-code.css">
 </head>
@@ -713,7 +714,7 @@
               <div class="stat-icon blue">&#9901;</div>
               <div class="stat-body">
                 <div><span class="stat-value" id="stat-peers">0</span><span class="stat-trend trend-flat" id="stat-peers-trend"></span></div>
-                <div class="stat-label"><span data-i18n="stats.peers">Peers</span> <span class="stat-help" data-i18n-title="stats.peers_help" title="Other computers running SwarmLLM that you're connected to">?</span> <span class="lan-badge" id="lan-peer-badge" style="display:none">0 LAN</span></div>
+                <div class="stat-label"><span data-i18n="stats.peers">Peers</span> <span class="stat-help" data-i18n-title="stats.peers_help" title="Other computers running SwarmLLM that you're connected to">?</span> <span class="badge badge-purple lan-badge" id="lan-peer-badge" style="display:none">0 LAN</span></div>
                 <div class="stat-sparkline" id="stat-peers-spark"></div>
               </div>
             </div>
@@ -1236,7 +1237,7 @@
   <template id="tmpl-peer-row">
     <div class="peer-row-item">
       <span class="status-dot"></span>
-      <span class="peer-lan-badge lan-badge" hidden></span>
+      <span class="peer-lan-badge badge badge-purple lan-badge" hidden></span>
       <span class="peer-label"></span>
       <span class="peer-gpu text-muted"></span>
     </div>
