@@ -60,7 +60,8 @@ pub async fn get_providers(State(state): State<AppState>) -> Json<serde_json::Va
         ("moonshot", &config.moonshot),
     ];
 
-    let providers: Vec<_> = entries
+    #[allow(unused_mut)]
+    let mut providers: Vec<serde_json::Value> = entries
         .iter()
         .map(|(name, entry)| {
             let source = if entry.is_some() && config.env_sourced.contains(*name) {
@@ -74,9 +75,25 @@ pub async fn get_providers(State(state): State<AppState>) -> Json<serde_json::Va
                 "name": name,
                 "configured": entry.is_some(),
                 "source": source,
+                "auth_type": "api_key",
             })
         })
         .collect();
+
+    // Claude subscription: emit as a unified provider entry so the frontend renders
+    // it in the same cloud-providers list as API-key providers (differentiated by
+    // auth_type == "subscription").
+    #[cfg(feature = "claude-subscription")]
+    if let Some(ref sub_config) = config.claude_subscription {
+        providers.push(serde_json::json!({
+            "name": "claude_subscription",
+            "configured": sub_config.enabled,
+            "source": if sub_config.enabled { "subscription" } else { "none" },
+            "auth_type": "subscription",
+            "enabled": sub_config.enabled,
+            "binary": sub_config.binary(),
+        }));
+    }
 
     let key_source = match config.key_source {
         crate::config::ProviderKeySource::Auto => "auto",
@@ -786,19 +803,14 @@ pub async fn provider_model_status(
                     "error": format!("SSRF blocked: {e}"),
                 });
             }
-            let url = format!("{}/chat/completions", base_url);
-            let body = serde_json::json!({
-                "model": model_id,
-                "max_tokens": 1,
-                "messages": [{"role": "user", "content": "hi"}],
-                "stream": false
-            });
+            // Probe via GET /models/{id} — O(1) cost, no rate-limit hit, works for
+            // all model types (DALL-E, Whisper, embeddings too). Measures real network
+            // latency to the provider's API.
+            let url = format!("{}/models/{}", base_url, model_id);
             let start = std::time::Instant::now();
             let result = client
-                .post(&url)
+                .get(&url)
                 .header("authorization", format!("Bearer {}", api_key))
-                .header("content-type", "application/json")
-                .json(&body)
                 .send()
                 .await;
             let latency_ms = start.elapsed().as_millis() as u64;
@@ -812,6 +824,8 @@ pub async fn provider_model_status(
                         "rate_limited"
                     } else if code == 404 {
                         "not_found"
+                    } else if code == 401 || code == 403 {
+                        "auth_error"
                     } else if code == 503 || code == 502 {
                         "unavailable"
                     } else {

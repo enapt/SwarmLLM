@@ -637,6 +637,7 @@
   "dashboard.cloud_sort_ctx_asc": "Context ↑",
   "dashboard.cloud_sort_ping": "Ping ↓",
   "dashboard.cloud_no_match": "No models match",
+  "dashboard.cloud_model_count": "{count} models",
   "dashboard.cloud_note": "Requests routed via {provider} API key — billed per token",
   "dashboard.cloud_sub_note": "Routed through Claude Code CLI — uses your subscription, no per-token charges",
   "dashboard.shard_verified": "Verified, stored locally",

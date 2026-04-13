@@ -1497,6 +1497,11 @@
           ? models.map(renderCloudRow).join('')
           : '<div class="cloud-model-empty">' + U.escapeHtml(I18n.t('dashboard.cloud_no_match')) + '</div>';
       }
+      // Skip probing non-chat endpoints (DALL-E, Whisper, embeddings, moderation)
+      // — they'd always 404 and add noise.
+      function probableChatModels(models) {
+        return models.filter(function(cm) { return !_nonChatPattern.test(cm.id); });
+      }
       function renderProviderCard(opts) {
         var p = opts.provider, pLabel = PROVIDER_NAMES[p] || p, pModels = opts.models;
         var sorted = sortCloudModels(pModels, 'popular');
@@ -1508,9 +1513,12 @@
         card.setAttribute('data-provider', p);
         var cardIconHtml = providerIconHtml(p, 18);
         var expandToggleHtml = '<span class="cloud-expand-toggle" data-cloud-expand="' + U.escapeHtml(p) + '">&#9662;</span>';
+        var modelCountHtml = '<span class="cloud-provider-count" title="' +
+          U.escapeHtml(I18n.t('dashboard.cloud_model_count', { count: pModels.length })) + '">' +
+          pModels.length + '</span>';
         card.innerHTML =
           '<div class="cloud-card-header' + (opts.headerClass ? ' ' + opts.headerClass : '') + '">' +
-            '<span class="cloud-provider-name">' + (cardIconHtml ? cardIconHtml + ' ' : '') + U.escapeHtml(pLabel) + '</span>' +
+            '<span class="cloud-provider-name">' + (cardIconHtml ? cardIconHtml + ' ' : '') + U.escapeHtml(pLabel) + modelCountHtml + '</span>' +
             '<span style="display:flex;align-items:center;gap:8px">' +
               (opts.statusHtml || '<span class="badge badge-green">' + U.escapeHtml(I18n.t('dashboard.cloud_connected')) + '</span>') +
               expandToggleHtml +
@@ -1531,7 +1539,7 @@
         opts.parentEl.appendChild(card);
         var listContainer = document.getElementById(listId);
         if (listContainer) renderRowsInto(listContainer, sorted);
-        setTimeout(function() { App.providerHealth.probe(sorted.slice(0, 20).map(function(cm) { return cm.id; })); }, 500);
+        setTimeout(function() { App.providerHealth.probe(probableChatModels(sorted).slice(0, 20).map(function(cm) { return cm.id; })); }, 500);
         var filterEl = document.getElementById(filterId), sortEl = document.getElementById(sortId);
         var refreshRows = function() {
           var query = filterEl ? filterEl.value.toLowerCase().trim() : '';
@@ -1541,29 +1549,35 @@
           }) : pModels;
           var s = sortCloudModels(filtered, sortBy);
           if (listContainer) renderRowsInto(listContainer, s);
-          App.providerHealth.probe(s.slice(0, 20).map(function(cm) { return cm.id; }));
+          App.providerHealth.probe(probableChatModels(s).slice(0, 20).map(function(cm) { return cm.id; }));
         };
         if (filterEl) { filterEl.addEventListener('input', refreshRows); filterEl.addEventListener('paste', function() { setTimeout(refreshRows, 0); }); }
         if (sortEl) sortEl.addEventListener('change', function() {
           refreshRows();
-          if (sortEl.value === 'avail') App.providerHealth.probe(pModels.map(function(cm) { return cm.id; }).slice(0, 40));
+          if (sortEl.value === 'avail') App.providerHealth.probe(probableChatModels(pModels).map(function(cm) { return cm.id; }).slice(0, 40));
         });
       }
 
-      // --- Cloud provider models ---
-      if (hasCloud) {
+      // --- Cloud providers (API-key + subscription unified) ---
+      if (hasCloud || hasSubscription) {
         var byProvider = {};
         apiModels.forEach(function(cm) {
           var p = cm.provider || 'cloud';
           if (!byProvider[p]) byProvider[p] = [];
           byProvider[p].push(cm);
         });
+        subscriptionModels.forEach(function(cm) {
+          var p = cm.provider || 'subscription';
+          if (!byProvider[p]) byProvider[p] = [];
+          byProvider[p].push(cm);
+        });
 
         var providerCount = Object.keys(byProvider).length;
+        var totalModels = apiModels.length + subscriptionModels.length;
         var cloudSection = document.createElement('details');
         cloudSection.className = 'models-section';
         cloudSection.open = true;
-        var cloudMeta = I18n.t('dashboard.providers_count', { count: providerCount, models: apiModels.length });
+        var cloudMeta = I18n.t('dashboard.providers_count', { count: providerCount, models: totalModels });
         cloudSection.innerHTML = '<summary class="models-section-header">' +
           '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true" class="models-section-logo" style="flex-shrink:0"><path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z" fill="var(--accent)"/></svg>' +
           '<span class="models-section-title">' + U.escapeHtml(I18n.t('settings.cloud_providers')) + '</span>' +
@@ -1574,63 +1588,49 @@
         cloudSection.appendChild(cloudBody);
         list.appendChild(cloudSection);
 
-        Object.keys(byProvider).forEach(function(p) {
-          renderProviderCard({ provider: p, models: byProvider[p], parentEl: cloudBody });
-        });
-        if (Object.keys(S.modelStatus).length > 0) App.providerHealth.updateModelBadges();
-      }
-
-      // --- Subscription models ---
-      if (hasSubscription) {
-        var bySubProvider = {};
-        subscriptionModels.forEach(function(cm) {
-          var p = cm.provider || 'subscription';
-          if (!bySubProvider[p]) bySubProvider[p] = [];
-          bySubProvider[p].push(cm);
+        // Sort: subscription providers appear first (distinctive, usually fewer models)
+        var providerOrder = Object.keys(byProvider).sort(function(a, b) {
+          var aSub = typeof isSubscriptionProvider === 'function' && isSubscriptionProvider(a) ? 0 : 1;
+          var bSub = typeof isSubscriptionProvider === 'function' && isSubscriptionProvider(b) ? 0 : 1;
+          if (aSub !== bSub) return aSub - bSub;
+          return a < b ? -1 : a > b ? 1 : 0;
         });
 
-        var subProviderCount = Object.keys(bySubProvider).length;
-        var subSection = document.createElement('details');
-        subSection.className = 'models-section';
-        subSection.open = true;
-        var subMeta = I18n.t('dashboard.subscription_count', { count: subProviderCount, models: subscriptionModels.length });
-        subSection.innerHTML = '<summary class="models-section-header">' +
-          '<img src="' + (providerIconUrl('claude_subscription') || '') + '" width="16" height="16" alt="" aria-hidden="true" class="models-section-logo" style="flex-shrink:0">' +
-          '<span class="models-section-title">' + U.escapeHtml(I18n.t('dashboard.subscription_title')) + '</span>' +
-          '<span class="models-section-count">' + subMeta + '</span>' +
-          '<span class="badge badge-claude" style="margin-left:auto">' + U.escapeHtml(I18n.t('dashboard.subscription_badge')) + '</span>' +
-          '</summary>';
-        var subBody = document.createElement('div');
-        subBody.className = 'models-section-body';
-        subSection.appendChild(subBody);
-        list.appendChild(subSection);
-
-        Object.keys(bySubProvider).forEach(function(p) {
-          renderProviderCard({
-            provider: p, models: bySubProvider[p], parentEl: subBody,
-            cardClass: 'subscription-model-card', headerClass: 'subscription-card-header',
-            statusHtml: '<span class="badge badge-claude" id="sub-status-' + p + '">' + U.escapeHtml(I18n.t('dashboard.cloud_subscription')) + '</span>',
-            noteText: I18n.t('dashboard.cloud_sub_note'),
-            idPrefix: 'sub',
-          });
-        });
-
-        // Fetch CLI status for subscription providers (dedup-coalesced across components)
-        App.data.loadClaudeSubStatus().then(function(data) {
-          if (!data || data.error) return;
-          var statusEl = document.getElementById('sub-status-claude_subscription');
-          if (!statusEl) return;
-          var parts = [];
-          if (data.authenticated) {
-            parts.push('\u2713 ' + I18n.t('dashboard.sub_authenticated'));
-            if (data.subscription_type) parts.push(data.subscription_type);
-            if (data.cli_version) parts.push('v' + data.cli_version);
-            statusEl.innerHTML = '<span style="color:var(--green)">\u25cf</span> ' + U.escapeHtml(parts.join(' \u00b7 '));
+        providerOrder.forEach(function(p) {
+          var isSub = typeof isSubscriptionProvider === 'function' && isSubscriptionProvider(p);
+          if (isSub) {
+            renderProviderCard({
+              provider: p, models: byProvider[p], parentEl: cloudBody,
+              cardClass: 'subscription-model-card', headerClass: 'subscription-card-header',
+              statusHtml: '<span class="badge badge-claude" id="sub-status-' + p + '">' + U.escapeHtml(I18n.t('dashboard.cloud_subscription')) + '</span>',
+              noteText: I18n.t('dashboard.cloud_sub_note'),
+              idPrefix: 'sub',
+            });
           } else {
-            statusEl.innerHTML = '<span style="color:var(--red)">\u25cf</span> ' + U.escapeHtml(I18n.t('dashboard.sub_not_authenticated'));
-            statusEl.style.color = 'var(--red)';
+            renderProviderCard({ provider: p, models: byProvider[p], parentEl: cloudBody });
           }
-        }).catch(function() {});
+        });
+
+        if (hasSubscription) {
+          // Fetch CLI status for subscription providers (dedup-coalesced across components)
+          App.data.loadClaudeSubStatus().then(function(data) {
+            if (!data || data.error) return;
+            var statusEl = document.getElementById('sub-status-claude_subscription');
+            if (!statusEl) return;
+            var parts = [];
+            if (data.authenticated) {
+              parts.push('\u2713 ' + I18n.t('dashboard.sub_authenticated'));
+              if (data.subscription_type) parts.push(data.subscription_type);
+              if (data.cli_version) parts.push('v' + data.cli_version);
+              statusEl.innerHTML = '<span style="color:var(--green)">\u25cf</span> ' + U.escapeHtml(parts.join(' \u00b7 '));
+            } else {
+              statusEl.innerHTML = '<span style="color:var(--red)">\u25cf</span> ' + U.escapeHtml(I18n.t('dashboard.sub_not_authenticated'));
+              statusEl.style.color = 'var(--red)';
+            }
+          }).catch(function() {});
+        }
+
+        if (Object.keys(S.modelStatus).length > 0) App.providerHealth.updateModelBadges();
       }
     },
 
