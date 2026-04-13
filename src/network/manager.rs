@@ -406,6 +406,15 @@ impl NetworkManager {
         let mut redial_interval = tokio::time::interval(std::time::Duration::from_secs(1));
         redial_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
+        // Liveness heartbeat — every 30s, refresh `last_seen` on every peer
+        // libp2p still reports as connected. The HealthMonitor evicts peers at
+        // 90s of silence, but rr_ping fires every 120s — so a peer with no
+        // other inbound traffic in its first 90s would be evicted while still
+        // having a live TCP/QUIC connection (especially on WSL2 where QUIC
+        // substream negotiation is slow). This tick is the floor.
+        let mut liveness_interval = tokio::time::interval(std::time::Duration::from_secs(30));
+        liveness_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
         tracing::info!(
             target: "swarmllm::network::manager",
             port = self.shared_state.config.node.listen_port,
@@ -448,6 +457,17 @@ impl NetworkManager {
                 // Periodic peer cache save
                 _ = peer_cache_interval.tick() => {
                     self.save_peer_cache();
+                }
+                // Liveness heartbeat — refresh `last_seen` for every peer
+                // libp2p still considers connected. Prevents the HealthMonitor
+                // from evicting peers whose only proof of life is their TCP/QUIC
+                // connection (no rr / gossip / identify traffic in the window).
+                _ = liveness_interval.tick() => {
+                    let connected: Vec<libp2p::PeerId> =
+                        self.swarm.connected_peers().cloned().collect();
+                    for peer_id in &connected {
+                        self.refresh_peer_last_seen(peer_id);
+                    }
                 }
                 // Periodic request_response health ping.
                 // Skip when tensor forwards are pending — each ping consumes a substream
