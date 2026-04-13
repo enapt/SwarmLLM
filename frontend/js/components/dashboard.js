@@ -1322,15 +1322,17 @@
         var quantMatch = modelId.match(/[._-](q[0-9]+[_-]?k?[_-]?[a-z]*)/i);
         var quantTag = quantMatch ? '<span class="model-tag tag-quant">' + U.escapeHtml(quantMatch[1].toUpperCase().replace(/-/g, '_')) + '</span>' : '';
 
-        // --- Structured footer metadata (icon+label pairs with dot separators) ---
-        var metaParts = [];
-        // Size
-        metaParts.push('<span class="meta-item"><span class="meta-icon">\u25A3</span>' + U.formatBytes(m.total_size_bytes || 0) + '</span>');
-        // Shard count
+        // --- Config rows (key/value pairs for the CONFIG section) ---
+        var configRows = [];
+        if (archKey)    configRows.push(['dashboard.info_arch',  '<span class="mce-info-pill">' + U.escapeHtml(archKey) + '</span>']);
+        if (quantMatch) configRows.push(['dashboard.info_quant', '<span class="mce-info-pill">' + U.escapeHtml(quantMatch[1].toUpperCase().replace(/-/g, '_')) + '</span>']);
+        configRows.push(['dashboard.info_size', U.formatBytes(m.total_size_bytes || 0)]);
         if (shardCount > 0) {
-          metaParts.push('<span class="meta-item"><span class="meta-icon">\u2B22</span>' + I18n.t(shardCount === 1 ? 'dashboard.shard_count_one' : 'dashboard.shard_count_other', { count: shardCount }) + '</span>');
+          configRows.push(['dashboard.info_shards', String(shardCount)]);
         }
-        // VRAM fit indicator
+        // Mode (CPU/GPU) — single word
+        configRows.push(['dashboard.info_mode', S._gpuInference ? I18n.t('dashboard.mode_gpu') : I18n.t('dashboard.mode_cpu')]);
+        // VRAM fit — only when GPU mode; in CPU mode the Mode row already conveys this.
         if (m.estimated_vram_mb && S._gpuInference) {
           var totalVram = (App.data.cache.stats && App.data.cache.stats.hardware && App.data.cache.stats.hardware.gpu_vram_mb) || 0;
           var fitClass = 'fit-no', fitLabel = U.formatMB(m.estimated_vram_mb);
@@ -1340,17 +1342,23 @@
             else if (ratio <= 1.05) { fitClass = 'fit-tight'; fitLabel = '\u2248 ' + fitLabel; }
             else { fitClass = 'fit-no'; fitLabel = '\u2717 ' + fitLabel; }
           }
-          metaParts.push('<span class="meta-item"><span class="vram-fit ' + fitClass + '" title="' + U.escapeHtml(I18n.t('dashboard.vram_fit_tip', { est: U.formatMB(m.estimated_vram_mb), total: totalVram > 0 ? U.formatMB(totalVram) : '?' })) + '">' + fitLabel + '</span></span>');
-        } else if (m.estimated_vram_mb && !S._gpuInference) {
-          metaParts.push('<span class="meta-item" title="' + U.escapeHtml(I18n.t('hw.low_ram_tip')) + '" style="cursor:help"><span class="meta-icon">\u26A0</span><span class="meta-ok">' + U.escapeHtml(I18n.t('hw.low_ram')) + '</span></span>');
+          configRows.push(['dashboard.info_vram', '<span class="vram-fit ' + fitClass + '" title="' + U.escapeHtml(I18n.t('dashboard.vram_fit_tip', { est: U.formatMB(m.estimated_vram_mb), total: totalVram > 0 ? U.formatMB(totalVram) : '?' })) + '">' + fitLabel + '</span>']);
         }
-        // Peer count or "Local only" warning
+        // Trust (reuse detail-badges markup, strip extra container)
+        if (detailBadgesHtml && m.trust_level) {
+          configRows.push(['dashboard.info_trust', detailBadgesHtml]);
+        }
+        var configGridHtml = configRows.map(function(row) {
+          return '<dt>' + U.escapeHtml(I18n.t(row[0])) + '</dt><dd>' + row[1] + '</dd>';
+        }).join('');
+
+        // Peer count line for STATUS section
+        var peerLineHtml = '';
         if (m.peers_hosting > 0) {
-          metaParts.push('<span class="meta-item"><span class="meta-icon">\u2B65</span>' + I18n.t('dashboard.peer_count', { count: m.peers_hosting }) + '</span>');
+          peerLineHtml = '<div class="mce-status-peers"><span class="mce-status-icon">\u2B65</span>' + U.escapeHtml(I18n.t('dashboard.peer_count', { count: m.peers_hosting })) + '</div>';
         } else if (hostedShards > 0) {
-          metaParts.push('<span class="meta-item meta-warn" title="' + U.escapeHtml(I18n.t('dashboard.local_only_tip')) + '"><span class="meta-icon">\u26A0</span>' + U.escapeHtml(I18n.t('dashboard.local_only')) + '</span>');
+          peerLineHtml = '<div class="mce-status-peers mce-warn" title="' + U.escapeHtml(I18n.t('dashboard.local_only_tip')) + '"><span class="mce-status-icon">\u26A0</span>' + U.escapeHtml(I18n.t('dashboard.local_only')) + '</div>';
         }
-        var footerMetaHtml = metaParts.join('<span class="meta-sep">\u00B7</span>');
 
         // Missing files warning
         var fileIndicators = '';
@@ -1413,33 +1421,39 @@
             progressHtml + perShardDlHtml +
             '<div class="model-card-expanded">' +
               '<div class="mce-left">' +
-                // 1. Pipeline encryption chip sits at the very top — it's the most
-                //    important state affordance for this model.
-                (pipelineChipHtml || '') +
-                // 2. Compact single-line info: arch · quant · trust.
-                '<div class="mce-info">' +
-                  (archKey    ? '<span class="mce-info-pair"><span class="mce-info-label">' + U.escapeHtml(I18n.t('dashboard.info_arch')) + '</span><span class="mce-info-pill">' + U.escapeHtml(archKey) + '</span></span>' : '') +
-                  (quantMatch ? '<span class="mce-info-pair"><span class="mce-info-label">' + U.escapeHtml(I18n.t('dashboard.info_quant')) + '</span><span class="mce-info-pill">' + U.escapeHtml(quantMatch[1].toUpperCase().replace(/-/g, '_')) + '</span></span>' : '') +
-                  (m.trust_level ? '<span class="mce-info-pair"><span class="mce-info-label">' + U.escapeHtml(I18n.t('dashboard.info_trust')) + '</span>' + (detailBadgesHtml || '') + '</span>' : '') +
+                // STATUS — what the model is doing right now (active/fragile/peer count)
+                '<div class="mce-section mce-section-status">' +
+                  '<div class="mce-section-title">' + U.escapeHtml(I18n.t('dashboard.section_status')) + '</div>' +
+                  '<div class="mce-section-body">' +
+                    compositeBadgeHtml +
+                    (healthBadgeHtml || '') +
+                    peerLineHtml +
+                  '</div>' +
                 '</div>' +
-                // 3. Model health chip (title sits above the coverage ribbon on the right).
-                (healthBadgeHtml || '') +
-                '<div class="mce-meta">' +
-                  '<div class="mce-meta-row">' + footerMetaHtml + '</div>' +
+                // CONFIG — static spec sheet: arch, quant, size, shards, mode, trust, vram
+                '<div class="mce-section mce-section-config">' +
+                  '<div class="mce-section-title">' + U.escapeHtml(I18n.t('dashboard.section_config')) + '</div>' +
+                  '<dl class="mce-config-grid">' + configGridHtml + '</dl>' +
                 '</div>' +
+                // PRIVACY — pipeline encryption (skipped for single-shard models)
+                (pipelineChipHtml
+                  ? '<div class="mce-section mce-section-privacy">' +
+                      '<div class="mce-section-title">' + U.escapeHtml(I18n.t('dashboard.section_privacy')) + '</div>' +
+                      pipelineChipHtml +
+                    '</div>'
+                  : '') +
                 '<div class="mce-actions">' + actionHtml + removeHtml + '</div>' +
+                (fileIndicators ? '<div class="mce-file-warn">' + fileIndicators + '</div>' : '') +
               '</div>' +
               '<div class="mce-right" data-shard-detail="' + safeId + '">' +
                 '<div class="mce-right-head">' +
                   _buildShardViewToggle() +
                 '</div>' +
                 '<div class="mce-right-body">' + _buildShardDetailBody(m, shards, safeId) + '</div>' +
+                // Activity/Network ticker lives under the matrix — fills right-column dead space
+                '<div class="model-ticker model-ticker-embedded" data-model-ticker="' + safeId + '" style="display:none"></div>' +
               '</div>' +
             '</div>' +
-            '<div class="model-ticker model-ticker-fullwidth" data-model-ticker="' + safeId + '" style="display:none"></div>' +
-          '</div>' +
-          '<div class="model-card-footer">' +
-            '<div class="model-card-meta">' + fileIndicators + '</div>' +
           '</div>' +
           '<div class="gguf-metadata-panel hidden" data-meta-panel="' + U.escapeHtml(m.id) + '"></div>';
 

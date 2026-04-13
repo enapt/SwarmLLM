@@ -3110,6 +3110,10 @@ textarea:focus:not(:focus-visible) {
 .model-card.compact .model-card-detail-badges {
   display: none;
 }
+/* Active/Ready/etc. badge is surfaced by the left color bar (collapsed)
+   and the STATUS section inside .mce-left (expanded). Hide it in the
+   header row to avoid duplication. */
+.model-card .model-card-name-row .composite-badge { display: none; }
 .model-card.compact .model-card-footer {
   border-top: none;
   background: none;
@@ -3473,11 +3477,125 @@ textarea:focus:not(:focus-visible) {
 .model-card-expanded .mce-left {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 10px;
   min-width: 0;
 }
-/* Single-line compact info row: arch · quant · trust. Wraps only on very
-   narrow columns; label is muted, value is a tight pill. */
+
+/* Section frame — three labeled groups (STATUS/CONFIG/PRIVACY) that share
+   a consistent visual rhythm. Each has a small muted title and a padded body. */
+.model-card-expanded .mce-left .mce-section {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 8px 10px;
+  background: rgba(255,255,255,0.015);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.model-card-expanded .mce-left .mce-section-title {
+  font-size: 0.56rem;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-weight: 600;
+  margin: 0;
+}
+.model-card-expanded .mce-left .mce-section-body {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.model-card-expanded .mce-left .mce-section .composite-badge {
+  align-self: flex-start;
+}
+.model-card-expanded .mce-left .mce-status-peers {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 0.72rem;
+  color: var(--text-secondary);
+}
+.model-card-expanded .mce-left .mce-status-peers.mce-warn {
+  color: var(--orange);
+  cursor: help;
+}
+.model-card-expanded .mce-left .mce-status-icon {
+  opacity: 0.75;
+  font-size: 0.8rem;
+}
+
+/* CONFIG — <dl> key/value grid. Left column muted label, right monospace value. */
+.model-card-expanded .mce-left .mce-config-grid {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 4px 10px;
+  margin: 0;
+  font-size: 0.7rem;
+}
+.model-card-expanded .mce-left .mce-config-grid dt {
+  color: var(--text-muted);
+  font-size: 0.58rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-weight: 600;
+  align-self: center;
+}
+.model-card-expanded .mce-left .mce-config-grid dd {
+  margin: 0;
+  color: var(--text-primary);
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+.model-card-expanded .mce-left .mce-config-grid .mce-info-pill {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: var(--radius-pill, 9999px);
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  font-family: var(--font-mono, monospace);
+  font-size: 0.6rem;
+  color: var(--text-primary);
+  letter-spacing: 0.03em;
+}
+.model-card-expanded .mce-left .mce-config-grid .model-card-detail-badges {
+  display: inline-flex;
+  padding: 0;
+  margin: 0;
+  gap: 0;
+}
+
+/* Privacy section — remove the chip's own border; the section frame carries it. */
+.model-card-expanded .mce-left .mce-section-privacy .mce-pipeline {
+  border: none;
+  background: transparent;
+  padding: 0;
+}
+
+/* File-missing warning sits below actions as a subtle caution line */
+.model-card-expanded .mce-left .mce-file-warn {
+  font-size: 0.7rem;
+  color: var(--orange);
+  padding-top: 2px;
+}
+
+/* Embedded ticker inside right column — fills the dead space under the matrix */
+.model-card-expanded .mce-right .model-ticker-embedded {
+  margin-top: auto;
+  border-top: 1px dashed var(--border);
+  padding: 8px 4px 4px;
+  font-size: 0.7rem;
+  position: relative;
+  cursor: pointer;
+  user-select: none;
+  transition: background 0.15s;
+}
+.model-card-expanded .mce-right .model-ticker-embedded:hover {
+  background: rgba(255,255,255,0.02);
+}
+
+/* Legacy mce-info (compact single-line info row) retained for non-swarm cards */
 .model-card-expanded .mce-left .mce-info {
   display: flex;
   flex-wrap: wrap;
