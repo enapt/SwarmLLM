@@ -258,12 +258,23 @@
     // with the coverage ribbon above.
     var headHtml = '<tr>';
     var colEvery = shards.length > 40 ? 5 : 1;
+    var shardCountTotal = shards.length;
     shards.forEach(function(s, i) {
       var isMmproj = s.index === MMPROJ_SHARD_INDEX;
       var label = isMmproj ? '\u2605' : ((i % colEvery === 0) ? String(s.index + 1) : '');
       var d = densityByIdx[s.index] || { pct: 0, tier: 'none', count: 0 };
       var tip = I18n.t('shard.matrix.hist_col_tip', { n: s.index + 1, holders: d.count });
-      headHtml += '<th title="' + U.escapeHtml(tip) + '">' +
+      // Mark endpoint columns so CSS + connector measurement can light them
+      // up when the pipeline is E2E encrypted.
+      var isFirst = shardCountTotal > 1 && s.index === 0;
+      var isLast  = shardCountTotal > 1 && s.index === shardCountTotal - 1;
+      var isPinned = (isFirst || isLast) && !!m.encrypted_pipeline;
+      var thCls = [];
+      if (isFirst) thCls.push('smh-endpoint-first');
+      if (isLast)  thCls.push('smh-endpoint-last');
+      if (isPinned) thCls.push('smh-col-pipeline-pinned');
+      var thAttr = thCls.length ? ' class="' + thCls.join(' ') + '"' : '';
+      headHtml += '<th' + thAttr + ' title="' + U.escapeHtml(tip) + '">' +
         '<div class="smh-col" data-tier="' + d.tier + '">' +
           '<div class="smh-bar-wrap"><div class="smh-bar" style="height:' + d.pct + '%"></div></div>' +
           '<div class="smh-label">' + label + '</div>' +
@@ -372,6 +383,11 @@
           var v = btn.getAttribute('data-shard-view');
           if (v === mode) btn.classList.add('active'); else btn.classList.remove('active');
         });
+        // Re-measure pipeline connector since the anchors changed
+        // (rows ↔ columns) with the view switch.
+        if (card) {
+          requestAnimationFrame(function() { App.dashboard._measurePipelineConnector(card); });
+        }
       });
     },
 
@@ -590,7 +606,11 @@
       var exp = card.querySelector('.model-card-expanded.pipeline-encrypted');
       var right = exp && exp.querySelector('.mce-right');
       if (!right) return;
+      // List view uses shard rows; matrix view uses column headers.
       var pinned = right.querySelectorAll('.shard-row-pipeline-pinned');
+      if (pinned.length < 1) {
+        pinned = right.querySelectorAll('.smh-col-pipeline-pinned');
+      }
       if (pinned.length < 1) {
         right.style.removeProperty('--pipe-line-top');
         right.style.removeProperty('--pipe-line-bottom');
