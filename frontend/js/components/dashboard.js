@@ -687,7 +687,7 @@
       matrix.querySelectorAll('.planned-row').forEach(function(el) { el.classList.remove('planned-row'); });
       svg.innerHTML = '';
 
-      App.data.authFetch('/api/admin/models/' + encodeURIComponent(modelId) + '/pipeline-plan')
+      App.authFetch('/api/admin/models/' + encodeURIComponent(modelId) + '/pipeline-plan')
         .then(function(res) { return res.ok ? res.json() : null; })
         .then(function(plan) {
           if (!plan || !plan.segments || plan.segments.length === 0) return;
