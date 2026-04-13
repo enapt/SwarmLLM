@@ -1517,11 +1517,12 @@
           U.escapeHtml(I18n.t('dashboard.cloud_model_count', { count: pModels.length })) + '">' +
           pModels.length + '</span>';
         var isSub = typeof isSubscriptionProvider === 'function' && isSubscriptionProvider(p);
+        // Subscription cards: render a permanent auth-type tag (the status slot
+        // gets overwritten by the CLI status fetch). API-key cards already show
+        // an "API KEY" labeled badge in the status slot — no extra tag needed.
         var authTagHtml = isSub
           ? '<span class="ph-tag tag-sub" title="' + U.escapeHtml(I18n.t('dashboard.cloud_sub_note')) + '">' + U.escapeHtml(I18n.t('mode.subscription')) + '</span>'
-          : '<span class="ph-tag tag-api" title="' + U.escapeHtml(I18n.t('dashboard.cloud_note', { provider: pLabel })) + '">' + U.escapeHtml(I18n.t('mode.api')) + '</span>';
-        // Subscription cards: status element is a separate slot so the auth-type tag
-        // stays visible after the CLI status fetch overwrites the status element.
+          : '';
         var statusHtml = opts.statusHtml ||
           '<span class="badge badge-green">' + U.escapeHtml(I18n.t('dashboard.cloud_connected')) + '</span>';
         card.innerHTML =
