@@ -1628,16 +1628,22 @@
             if (!data || data.error) return;
             var statusEl = document.getElementById('sub-status-claude_subscription');
             if (!statusEl) return;
-            var parts = [];
+            var pills = [];
             if (data.authenticated) {
-              parts.push('\u2713 ' + I18n.t('dashboard.sub_authenticated'));
-              if (data.subscription_type) parts.push(data.subscription_type);
-              if (data.cli_version) parts.push('v' + data.cli_version);
-              statusEl.innerHTML = '<span style="color:var(--green)">\u25cf</span> ' + U.escapeHtml(parts.join(' \u00b7 '));
+              pills.push('<span class="ph-tag tag-ok" title="' + U.escapeHtml(I18n.t('dashboard.sub_authenticated')) + '">\u2713 ' + U.escapeHtml(I18n.t('dashboard.sub_authenticated')) + '</span>');
+              if (data.subscription_type) {
+                var plan = data.subscription_type.charAt(0).toUpperCase() + data.subscription_type.slice(1);
+                pills.push('<span class="ph-tag tag-plan">' + U.escapeHtml(plan) + '</span>');
+              }
+              if (data.cli_version) {
+                // claude --version returns e.g. "2.0.5 (Claude Code)" — strip the suffix
+                var ver = data.cli_version.replace(/\s*\(Claude Code\)\s*$/, '').trim();
+                if (ver) pills.push('<span class="ph-tag tag-ver">v' + U.escapeHtml(ver) + '</span>');
+              }
             } else {
-              statusEl.innerHTML = '<span style="color:var(--red)">\u25cf</span> ' + U.escapeHtml(I18n.t('dashboard.sub_not_authenticated'));
-              statusEl.style.color = 'var(--red)';
+              pills.push('<span class="ph-tag tag-down" title="' + U.escapeHtml(I18n.t('dashboard.sub_not_authenticated')) + '">\u26a0 ' + U.escapeHtml(I18n.t('dashboard.sub_not_authenticated')) + '</span>');
             }
+            statusEl.outerHTML = pills.join('');
           }).catch(function() {});
         }
 
