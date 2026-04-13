@@ -1517,14 +1517,15 @@
           U.escapeHtml(I18n.t('dashboard.cloud_model_count', { count: pModels.length })) + '">' +
           pModels.length + '</span>';
         var isSub = typeof isSubscriptionProvider === 'function' && isSubscriptionProvider(p);
-        // Subscription cards: render a permanent auth-type tag (the status slot
-        // gets overwritten by the CLI status fetch). API-key cards already show
-        // an "API KEY" labeled badge in the status slot — no extra tag needed.
+        // Auth-type pill — same styling as the top provider health bar
+        // (tag-sub violet for subscription, tag-api neutral grey for API key).
         var authTagHtml = isSub
           ? '<span class="ph-tag tag-sub" title="' + U.escapeHtml(I18n.t('dashboard.cloud_sub_note')) + '">' + U.escapeHtml(I18n.t('mode.subscription')) + '</span>'
-          : '';
-        var statusHtml = opts.statusHtml ||
-          '<span class="badge badge-green">' + U.escapeHtml(I18n.t('dashboard.cloud_connected')) + '</span>';
+          : '<span class="ph-tag tag-api" title="' + U.escapeHtml(I18n.t('dashboard.cloud_note', { provider: pLabel })) + '">' + U.escapeHtml(I18n.t('mode.api')) + '</span>';
+        // Subscription cards put the auth-status badge into statusHtml (it gets
+        // replaced by the CLI fetch). API-key cards have no separate status
+        // badge — the tag-api pill alone conveys the auth mode.
+        var statusHtml = opts.statusHtml || '';
         card.innerHTML =
           '<div class="cloud-card-header' + (opts.headerClass ? ' ' + opts.headerClass : '') + '">' +
             '<span class="cloud-provider-name">' + (cardIconHtml ? cardIconHtml + ' ' : '') + U.escapeHtml(pLabel) + modelCountHtml + '</span>' +
