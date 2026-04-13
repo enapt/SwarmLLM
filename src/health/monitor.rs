@@ -22,7 +22,21 @@ pub struct HealthMonitor {
     last_announced_shards: std::collections::HashSet<crate::types::ShardId>,
     /// Counter for periodic full re-announce (ensures late-joining peers get data).
     shard_announce_counter: u64,
+    /// Per-acquisition liveness tracker: model_id → (last bytes seen, when seen).
+    /// If bytes don't advance for STALL_THRESHOLD, the acquisition is reconciled
+    /// against disk (mark Complete if shards present, Failed otherwise).
+    acq_liveness: std::collections::HashMap<crate::types::ModelId, (u64, std::time::Instant)>,
+    /// Per-peer-shard-download liveness tracker: (ShardId, NodeId) → (last pct, when seen).
+    /// Removed if pct doesn't change for STALL_THRESHOLD — peer's gossip stopped.
+    peer_dl_liveness: std::collections::HashMap<
+        (crate::types::ShardId, crate::types::NodeId),
+        (u32, std::time::Instant),
+    >,
 }
+
+/// How long a download tracking entry can sit unchanged before being treated
+/// as stalled. Generous enough to tolerate slow peers and HF rate limiting.
+const DOWNLOAD_STALL_THRESHOLD: Duration = Duration::from_secs(90);
 
 /// How often to send health pings.
 const PING_INTERVAL: Duration = Duration::from_secs(30);
@@ -44,6 +58,8 @@ impl HealthMonitor {
             shutdown_rx,
             last_announced_shards: std::collections::HashSet::new(),
             shard_announce_counter: 0,
+            acq_liveness: std::collections::HashMap::new(),
+            peer_dl_liveness: std::collections::HashMap::new(),
         }
     }
 
@@ -101,6 +117,7 @@ impl HealthMonitor {
 
                     // Cleanup tasks: run every tick (cheap, local-only)
                     self.cleanup_acquisition_progress();
+                    self.cleanup_stale_peer_shard_downloads();
                     self.cleanup_stale_channels();
                     self.cleanup_stale_peer_id_map();
                     // Cleanup expired anti-gaming rate limit entries
@@ -645,27 +662,121 @@ impl HealthMonitor {
         }
     }
 
-    /// Remove completed/failed acquisition entries older than 1 hour.
-    fn cleanup_acquisition_progress(&self) {
-        use crate::model::acquisition::AcquisitionState;
+    /// Reconcile acquisition_progress against reality each tick.
+    ///
+    /// 1. Stalled Downloading entries (no byte progress for >STALL_THRESHOLD)
+    ///    are reconciled against the shard registry: if all shards are now
+    ///    locally held, mark Complete; otherwise mark Failed. Per-shard
+    ///    ShardProgress states are flipped to Failed so the dashboard's
+    ///    per-shard progress bars disappear.
+    /// 2. Completed/Failed entries older than 5 minutes are evicted (was 1h —
+    ///    too long, kept stale UI around long after the user cared).
+    ///
+    /// This is the single source of truth for download liveness — replaces the
+    /// scattered cleanup logic that left both `acquisition_progress` and
+    /// `peer_shard_downloads` drifting when a download task died silently.
+    fn cleanup_acquisition_progress(&mut self) {
+        use crate::model::acquisition::{AcquisitionState, ShardState};
 
-        let cutoff = chrono::Utc::now() - chrono::Duration::hours(1);
-        let to_remove: Vec<_> = self
-            .shared_state
-            .models
-            .acquisition_progress
-            .iter()
-            .filter(|entry| {
-                let status = entry.value();
-                match &status.state {
-                    AcquisitionState::Complete | AcquisitionState::Failed { .. } => {
-                        status.started_at.map_or(true, |s| s < cutoff)
+        let now = std::time::Instant::now();
+        let chrono_now = chrono::Utc::now();
+        let cutoff = chrono_now - chrono::Duration::minutes(5);
+        let local_node_id = self.shared_state.identity.node_id().clone();
+        let mut to_remove: Vec<crate::types::ModelId> = Vec::new();
+        let mut to_fail: Vec<(crate::types::ModelId, String, bool)> = Vec::new();
+        let mut seen: std::collections::HashSet<crate::types::ModelId> =
+            std::collections::HashSet::new();
+
+        for entry in self.shared_state.models.acquisition_progress.iter() {
+            let key = entry.key();
+            let status = entry.value();
+            seen.insert(key.clone());
+
+            match &status.state {
+                AcquisitionState::Complete | AcquisitionState::Failed { .. } => {
+                    if status.started_at.map_or(true, |s| s < cutoff) {
+                        to_remove.push(key.clone());
                     }
-                    _ => false,
+                    self.acq_liveness.remove(key);
                 }
-            })
-            .map(|entry| entry.key().clone())
-            .collect();
+                AcquisitionState::Downloading | AcquisitionState::AwaitingManifest => {
+                    let bytes = status.downloaded_bytes;
+                    let prev = self.acq_liveness.get(key).copied();
+                    let stalled = match prev {
+                        None => false,
+                        Some((prev_bytes, last_change)) => {
+                            if bytes != prev_bytes {
+                                false
+                            } else {
+                                now.duration_since(last_change) > DOWNLOAD_STALL_THRESHOLD
+                            }
+                        }
+                    };
+                    if stalled {
+                        // Reconcile against disk — if every shard the model
+                        // needs is now locally held, the download actually
+                        // completed but the completion event was lost.
+                        let manifest = self.shared_state.model_registry.get_manifest(key);
+                        let all_local = manifest
+                            .as_ref()
+                            .map(|m| {
+                                m.shards.iter().all(|s| {
+                                    let sid = crate::types::ShardId {
+                                        model_id: key.clone(),
+                                        index: s.index,
+                                    };
+                                    self.shared_state
+                                        .model_registry
+                                        .shard_holders(&sid)
+                                        .contains(&local_node_id)
+                                })
+                            })
+                            .unwrap_or(false);
+                        let secs = now
+                            .duration_since(prev.map(|p| p.1).unwrap_or(now))
+                            .as_secs();
+                        let reason = format!("Stalled — no progress for {}s", secs);
+                        to_fail.push((key.clone(), reason, all_local));
+                        self.acq_liveness.remove(key);
+                    } else if prev.map_or(true, |(b, _)| b != bytes) {
+                        self.acq_liveness.insert(key.clone(), (bytes, now));
+                    }
+                }
+            }
+        }
+
+        // Drop tracker entries for acquisitions that vanished from the map.
+        self.acq_liveness.retain(|k, _| seen.contains(k));
+
+        for (mid, reason, all_local) in to_fail {
+            if let Some(mut entry) = self.shared_state.models.acquisition_progress.get_mut(&mid) {
+                if all_local {
+                    entry.state = AcquisitionState::Complete;
+                    entry.log_push("Reconciled: all shards present on disk".into());
+                    tracing::info!(model = %mid, "Reconciled stalled acquisition → Complete");
+                } else {
+                    entry.state = AcquisitionState::Failed {
+                        reason: reason.clone(),
+                    };
+                    entry.log_push(format!("Reconciliation: {}", reason));
+                    tracing::warn!(model = %mid, %reason, "Reconciled stalled acquisition → Failed");
+                }
+                // Flip in-flight per-shard progress to terminal so the
+                // dashboard's per-shard bars stop rendering.
+                for sp in entry.shard_progress.values_mut() {
+                    if matches!(
+                        sp.state,
+                        ShardState::Downloading | ShardState::Verifying | ShardState::Pending
+                    ) {
+                        sp.state = if all_local {
+                            ShardState::Complete
+                        } else {
+                            ShardState::Failed
+                        };
+                    }
+                }
+            }
+        }
 
         if !to_remove.is_empty() {
             tracing::debug!(
@@ -675,6 +786,64 @@ impl HealthMonitor {
             for key in to_remove {
                 self.shared_state.models.acquisition_progress.remove(&key);
             }
+        }
+    }
+
+    /// Sweep peer_shard_downloads — drop entries whose pct hasn't moved for
+    /// STALL_THRESHOLD (peer's progress gossip stopped, likely crashed) and
+    /// entries whose peer is no longer in peer_registry (already covered by
+    /// disconnect handler, but defensive). Single sweep keeps the per-shard
+    /// peer-progress dots in the dashboard from going stale.
+    fn cleanup_stale_peer_shard_downloads(&mut self) {
+        let now = std::time::Instant::now();
+        let mut seen: std::collections::HashSet<(crate::types::ShardId, crate::types::NodeId)> =
+            std::collections::HashSet::new();
+        let mut total_stripped = 0usize;
+
+        self.shared_state
+            .models
+            .peer_shard_downloads
+            .retain(|shard_id, downloaders| {
+                downloaders.retain(|(node_id, pct)| {
+                    let key = (shard_id.clone(), node_id.clone());
+                    seen.insert(key.clone());
+                    // Drop if peer is no longer known
+                    if !self.shared_state.peer_registry.contains_key(node_id) {
+                        self.peer_dl_liveness.remove(&key);
+                        total_stripped += 1;
+                        return false;
+                    }
+                    let prev = self.peer_dl_liveness.get(&key).copied();
+                    match prev {
+                        None => {
+                            self.peer_dl_liveness.insert(key, (*pct, now));
+                            true
+                        }
+                        Some((prev_pct, last_change)) => {
+                            if *pct != prev_pct {
+                                self.peer_dl_liveness.insert(key, (*pct, now));
+                                true
+                            } else if now.duration_since(last_change) > DOWNLOAD_STALL_THRESHOLD {
+                                self.peer_dl_liveness.remove(&key);
+                                total_stripped += 1;
+                                false
+                            } else {
+                                true
+                            }
+                        }
+                    }
+                });
+                !downloaders.is_empty()
+            });
+
+        // GC liveness entries for downloaders that vanished from the map.
+        self.peer_dl_liveness.retain(|k, _| seen.contains(k));
+
+        if total_stripped > 0 {
+            tracing::debug!(
+                count = total_stripped,
+                "Stripped stale peer_shard_downloads entries"
+            );
         }
     }
 }
