@@ -582,6 +582,28 @@
       el.textContent = pct.toFixed(0) + '% ' + memLabel + ' · ' + tierLabel;
     },
 
+    // Measure pinned endpoint shard rows and set CSS vars on .mce-right so
+    // the pipeline-encrypted connector line spans exactly from the first to
+    // the last endpoint tick. Safe to call repeatedly.
+    _measurePipelineConnector: function(card) {
+      if (!card) return;
+      var exp = card.querySelector('.model-card-expanded.pipeline-encrypted');
+      var right = exp && exp.querySelector('.mce-right');
+      if (!right) return;
+      var pinned = right.querySelectorAll('.shard-row-pipeline-pinned');
+      if (pinned.length < 1) {
+        right.style.removeProperty('--pipe-line-top');
+        right.style.removeProperty('--pipe-line-bottom');
+        return;
+      }
+      var rightRect = right.getBoundingClientRect();
+      var firstRect = pinned[0].getBoundingClientRect();
+      var lastRect  = pinned[pinned.length - 1].getBoundingClientRect();
+      var topOffset = (firstRect.top + firstRect.height / 2) - rightRect.top;
+      var bottomOffset = rightRect.bottom - (lastRect.top + lastRect.height / 2);
+      right.style.setProperty('--pipe-line-top', topOffset + 'px');
+      right.style.setProperty('--pipe-line-bottom', bottomOffset + 'px');
+    },
     _renderModelTicker: function(modelId) {
       var actEvents = _modelEvents[modelId] || [];
       var netEvents = _modelNetEvents[modelId] || [];
@@ -1494,6 +1516,15 @@
         // Restore per-model activity ticker from stored events (DOM only, don't re-log)
         if (_modelEvents[m.id] && _modelEvents[m.id].length > 0) {
           App.dashboard._renderModelTicker(m.id);
+        }
+
+        // Measure pinned endpoint rows (first + last) and set CSS custom
+        // properties so the pipeline-encrypted connector line starts at the
+        // first tick and ends at the last tick — not the whole right column.
+        if (m.encrypted_pipeline && !isCompact) {
+          requestAnimationFrame(function() {
+            App.dashboard._measurePipelineConnector(card);
+          });
         }
       });
 

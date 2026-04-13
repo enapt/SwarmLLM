@@ -3792,25 +3792,57 @@ textarea:focus:not(:focus-visible) {
 
 /* ---- Privacy-panel ↔ endpoint shard connectors ----
    The mce-right column draws a dashed vertical line in its left gutter when
-   the card's pipeline is active. The line aligns with the privacy panel on
-   the left, visually joining the first + last shard rows to the panel. */
-.model-card-expanded .mce-right {
+   the card's pipeline is active. Endpoints are measured at render time (JS)
+   and written to --pipe-line-top / --pipe-line-bottom so the line runs
+   exactly from the first pinned row's center to the last pinned row's center. */
+.model-card-expanded .mce-right,
+.model-card-expanded .mce-left .mce-section-privacy {
   position: relative;
 }
 .model-card-expanded.pipeline-encrypted .mce-right::before {
   content: '';
   position: absolute;
   left: -7px;
-  top: 44px;   /* below the SHARDS/PEERS toggle header */
-  bottom: 4px;
+  top: var(--pipe-line-top, 44px);
+  bottom: var(--pipe-line-bottom, 50%);
   width: 2px;
   background: repeating-linear-gradient(
     to bottom,
-    rgba(34,197,94,0.45) 0 4px,
+    rgba(34,197,94,0.55) 0 4px,
     transparent 4px 8px
   );
   pointer-events: none;
   border-radius: 1px;
+}
+/* Notch on the privacy panel's right edge, indicating the connector
+   originates here. A short solid stub + an outward-pointing arrow tip
+   that joins the dashed line in the gutter. */
+.model-card-expanded.pipeline-encrypted .mce-section-privacy::after {
+  content: '';
+  position: absolute;
+  right: -9px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 9px;
+  height: 2px;
+  background: var(--green);
+  box-shadow: 0 0 6px rgba(34,197,94,0.6);
+  border-radius: 1px;
+  pointer-events: none;
+}
+.model-card-expanded.pipeline-encrypted .mce-section-privacy::before {
+  content: '';
+  position: absolute;
+  right: -13px;
+  top: 50%;
+  width: 0;
+  height: 0;
+  transform: translateY(-50%);
+  border-top: 4px solid transparent;
+  border-bottom: 4px solid transparent;
+  border-left: 5px solid var(--green);
+  filter: drop-shadow(0 0 3px rgba(34,197,94,0.5));
+  pointer-events: none;
 }
 /* Small green ticks where the connector joins each endpoint row */
 .shard-row-pipeline-pinned::before {

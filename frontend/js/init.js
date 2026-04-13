@@ -544,6 +544,9 @@
           if (wasCompact) {
             expandCard.classList.remove('compact');
             App.state._expandedModels[expandModelId] = true;
+            if (App.dashboard && App.dashboard._measurePipelineConnector) {
+              requestAnimationFrame(function() { App.dashboard._measurePipelineConnector(expandCard); });
+            }
           } else {
             expandCard.classList.add('compact');
             delete App.state._expandedModels[expandModelId];
