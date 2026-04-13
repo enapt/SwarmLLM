@@ -1901,10 +1901,16 @@ kbd {
 .per-shard-dl-pct { width: 130px; text-align: right; color: var(--text-muted); flex-shrink: 0; font-family: 'SF Mono', 'Fira Code', monospace; }
 
 /* Trust level badges */
-.badge-trust { font-size: 0.6rem; padding: 1px 6px; border-radius: var(--radius-pill); margin-left: 6px; font-weight: 600; letter-spacing: 0.3px; }
-.badge-trust-popular { background: var(--green); color: var(--bg-primary); }
-.badge-trust-verified { background: var(--accent); color: #fff; }
-.badge-trust-pinned { background: #f59e0b; color: var(--bg-primary); }
+/* Trust badges — match ph-tag / composite-badge language */
+.badge-trust {
+  display: inline-flex; align-items: center;
+  font-size: 0.52rem; font-weight: 700; padding: 2px 6px;
+  border-radius: 3px; text-transform: uppercase; letter-spacing: 0.06em;
+  border: 1px solid transparent; line-height: 1.4; white-space: nowrap;
+}
+.badge-trust-popular  { color: var(--green);  background: var(--green-dim);  border-color: rgba(34,197,94,0.35); }
+.badge-trust-verified { color: var(--accent); background: var(--accent-glow); border-color: rgba(59,130,246,0.35); }
+.badge-trust-pinned   { color: #f59e0b;        background: rgba(245,158,11,0.15); border-color: rgba(245,158,11,0.35); }
 
 
 /* Provider signup link */
@@ -3541,6 +3547,14 @@ textarea:focus:not(:focus-visible) {
   justify-content: space-between;
   gap: 8px;
 }
+/* Title + inline badge grouping (used by STATUS to sit the active-state
+   badge directly next to the section title). */
+.model-card-expanded .mce-left .mce-section-title-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
 .model-card-expanded .mce-left .mce-status-peers {
   display: inline-flex;
   align-items: center;
@@ -3690,58 +3704,126 @@ textarea:focus:not(:focus-visible) {
   background: rgba(255,255,255,0.02);
 }
 
-/* Health chip shown in STATUS section body */
+/* Health chip shown in STATUS section body — matches composite-badge /
+   ph-tag visual language (uppercase, bordered, compact). */
 .model-card-expanded .mce-left .mce-health {
-  display: flex;
-  align-items: baseline;
-  gap: 6px;
-  font-size: 0.7rem;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.62rem;
+  color: var(--text-muted);
 }
 .model-card-expanded .mce-left .mce-health-label {
+  display: inline-flex;
+  align-items: center;
   font-weight: 700;
-  font-size: 0.6rem;
+  font-size: 0.52rem;
   text-transform: uppercase;
-  letter-spacing: 0.04em;
-  padding: 1px 6px;
-  border-radius: var(--radius-lg);
+  letter-spacing: 0.06em;
+  padding: 2px 6px;
+  border-radius: 3px;
+  border: 1px solid transparent;
+  line-height: 1.4;
+  white-space: nowrap;
 }
-.model-card-expanded .mce-left .mce-health.health-full .mce-health-label  { color: var(--green);  background: var(--green-dim); }
-.model-card-expanded .mce-left .mce-health.health-good .mce-health-label  { color: var(--accent); background: var(--accent-glow); }
-.model-card-expanded .mce-left .mce-health.health-partial .mce-health-label { color: var(--orange); background: rgba(245,158,11,0.15); }
-.model-card-expanded .mce-left .mce-health.health-low .mce-health-label   { color: var(--red);    background: var(--red-dim, rgba(239,68,68,0.15)); }
+.model-card-expanded .mce-left .mce-health.health-full .mce-health-label {
+  color: var(--green); background: var(--green-dim);
+  border-color: rgba(34,197,94,0.35);
+}
+.model-card-expanded .mce-left .mce-health.health-good .mce-health-label {
+  color: var(--accent); background: var(--accent-glow);
+  border-color: rgba(59,130,246,0.35);
+}
+.model-card-expanded .mce-left .mce-health.health-partial .mce-health-label {
+  color: var(--orange); background: var(--orange-dim);
+  border-color: rgba(245,158,11,0.35);
+}
+.model-card-expanded .mce-left .mce-health.health-low .mce-health-label {
+  color: var(--red); background: var(--red-dim, rgba(239,68,68,0.15));
+  border-color: rgba(239,68,68,0.5);
+}
 .model-card-expanded .mce-left .mce-health-detail { color: var(--text-muted); font-size: 0.62rem; }
 
-/* Shard row endpoint badges (FIRST/LAST) + pipeline-pinned accent */
+/* ---- FIRST/LAST endpoint badges + pipeline-pinned (E2E) accent ----
+   Endpoint rows (first & last shards) are the pipeline trust anchors — they
+   get a stronger visual treatment when the E2E pipeline is active so the
+   link to the Privacy panel is self-evident. */
 .shard-row-endpoint {
-  display: inline-block;
-  margin-left: 4px;
-  padding: 1px 5px;
-  font-size: 0.5rem;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  margin-left: 6px;
+  padding: 2px 6px;
+  font-size: 0.52rem;
   font-weight: 700;
-  letter-spacing: 0.06em;
+  letter-spacing: 0.08em;
   text-transform: uppercase;
   border-radius: 3px;
-  background: rgba(250,204,21,0.18);
-  color: rgba(250,204,21,0.9);
-  vertical-align: 1px;
+  background: rgba(250,204,21,0.14);
+  color: rgba(250,204,21,0.95);
+  border: 1px solid rgba(250,204,21,0.35);
+  line-height: 1.4;
 }
 .shard-row-endpoint-row { border-left-width: 3px; }
+
+/* Pipeline-pinned endpoint rows: saturated green tint across the whole row,
+   matching the PRIVACY panel's pipeline-active state. */
 .shard-row-pipeline-pinned {
-  border-left-color: var(--green) !important;
-  border-left-width: 4px !important;
-  background: linear-gradient(90deg, rgba(34,197,94,0.08) 0%, var(--bg-tertiary) 40%);
-  box-shadow: inset 0 0 0 1px rgba(34,197,94,0.25);
+  border-left: 3px solid var(--green) !important;
+  background: linear-gradient(90deg, rgba(34,197,94,0.18) 0%, rgba(34,197,94,0.08) 100%) !important;
+  box-shadow: inset 0 0 0 1px rgba(34,197,94,0.3);
+  position: relative;
 }
 .shard-row-pipeline-pinned .shard-row-endpoint {
-  background: rgba(34,197,94,0.22);
+  background: rgba(34,197,94,0.25);
   color: var(--green);
-  box-shadow: 0 0 4px rgba(34,197,94,0.4);
-  padding: 1px 6px;
+  border-color: rgba(34,197,94,0.55);
+  box-shadow: 0 0 6px rgba(34,197,94,0.35);
 }
 .shard-row-pipeline-pinned .shard-row-endpoint::before {
-  content: '\1F512 ';
-  margin-right: 2px;
-  font-size: 0.55rem;
+  content: '\1F512';
+  margin-right: 3px;
+  font-size: 0.58rem;
+  line-height: 1;
+}
+.shard-row-pipeline-pinned .shard-row-status {
+  color: var(--green);
+}
+
+/* ---- Privacy-panel ↔ endpoint shard connectors ----
+   The mce-right column draws a dashed vertical line in its left gutter when
+   the card's pipeline is active. The line aligns with the privacy panel on
+   the left, visually joining the first + last shard rows to the panel. */
+.model-card-expanded .mce-right {
+  position: relative;
+}
+.model-card-expanded.pipeline-encrypted .mce-right::before {
+  content: '';
+  position: absolute;
+  left: -7px;
+  top: 44px;   /* below the SHARDS/PEERS toggle header */
+  bottom: 4px;
+  width: 2px;
+  background: repeating-linear-gradient(
+    to bottom,
+    rgba(34,197,94,0.45) 0 4px,
+    transparent 4px 8px
+  );
+  pointer-events: none;
+  border-radius: 1px;
+}
+/* Small green ticks where the connector joins each endpoint row */
+.shard-row-pipeline-pinned::before {
+  content: '';
+  position: absolute;
+  left: -9px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 6px;
+  height: 2px;
+  background: var(--green);
+  box-shadow: 0 0 4px rgba(34,197,94,0.6);
+  border-radius: 1px;
 }
 
 .model-card-expanded .mce-left .mce-actions {
@@ -3996,6 +4078,20 @@ textarea:focus:not(:focus-visible) {
   color: var(--red);
 }
 .shard-row-replicas[data-tier="none"] .shard-row-replica-dot { background: var(--red); }
+/* Local-only tier: held by this node, no remote replicas — informational,
+   not a warning. Styled neutral-blue to differentiate from the missing/fragile
+   danger states. */
+.shard-row-replicas[data-tier="local-only"] {
+  background: rgba(127,127,127,0.12);
+  color: var(--text-secondary);
+}
+.shard-row-replicas[data-tier="local-only"] .shard-row-replica-dot { background: var(--text-muted); }
+.shard-row-replicas[data-local="1"][data-tier="low"],
+.shard-row-replicas[data-local="1"][data-tier="good"],
+.shard-row-replicas[data-local="1"][data-tier="high"] {
+  /* When held locally AND there are remote peers, badge the "+N" so it's
+     obvious the count excludes self. */
+}
 
 .shard-row-size {
   font-family: var(--font-mono, monospace);

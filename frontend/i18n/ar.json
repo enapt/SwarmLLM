@@ -1070,5 +1070,8 @@
   "dashboard.section_config": "Config",
   "dashboard.section_privacy": "Privacy",
   "dashboard.mode_gpu": "GPU",
-  "dashboard.mode_cpu": "CPU"
+  "dashboard.mode_cpu": "CPU",
+  "dashboard.btn_remove_model": "إزالة",
+  "shard.row.replicas_local_only": "Held locally — no other peers have this shard",
+  "shard.row.replicas_local_plus": "Held locally + {n} other peer(s)"
 }

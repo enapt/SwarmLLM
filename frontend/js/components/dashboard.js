@@ -81,13 +81,30 @@
   // Compact replica indicator — single pill that scales to arbitrary N.
   // Tier: none=0, low=1-2, good=3-9, high=10+. Same layout irrespective of count.
   function _shardReplicaPips(s) {
+    // `holders` from the backend is the TOTAL count including self. The row
+    // already visualizes the local-vs-remote dimension elsewhere, so this pip
+    // surfaces just the remote replica count and says "Local only" when nobody
+    // else has it.
     var holders = s.holders || 0;
-    var tier = holders === 0 ? 'none' : holders <= 2 ? 'low' : holders <= 9 ? 'good' : 'high';
-    var titleKey = holders === 0 ? 'shard.row.replicas_none'
-                 : (holders === 1 ? 'shard.row.replicas_count_one' : 'shard.row.replicas_count_other');
-    var title = I18n.t(titleKey, { n: holders });
-    var label = holders === 0 ? '\u2014' : String(holders);
-    return '<span class="shard-row-replicas" data-tier="' + tier + '" title="' + U.escapeHtml(title) + '">' +
+    var isLocal = !!s.local;
+    var others = Math.max(0, holders - (isLocal ? 1 : 0));
+    var tier = others === 0 ? (isLocal ? 'local-only' : 'none')
+             : others <= 2 ? 'low' : others <= 9 ? 'good' : 'high';
+    var label, title;
+    if (isLocal && others === 0) {
+      label = '\u25C9'; // local-only glyph (filled circle)
+      title = I18n.t('shard.row.replicas_local_only');
+    } else if (others === 0) {
+      label = '\u2014';
+      title = I18n.t('shard.row.replicas_none');
+    } else {
+      label = (isLocal ? '+' : '') + String(others);
+      title = I18n.t(
+        isLocal ? 'shard.row.replicas_local_plus' : (others === 1 ? 'shard.row.replicas_count_one' : 'shard.row.replicas_count_other'),
+        { n: others }
+      );
+    }
+    return '<span class="shard-row-replicas" data-tier="' + tier + '"' + (isLocal ? ' data-local="1"' : '') + ' title="' + U.escapeHtml(title) + '">' +
       '<span class="shard-row-replica-dot"></span>' +
       '<span class="shard-row-replica-count">' + label + '</span>' +
       '</span>';
@@ -1358,10 +1375,9 @@
           }
           configRows.push(['dashboard.info_vram', '<span class="vram-fit ' + fitClass + '" title="' + U.escapeHtml(I18n.t('dashboard.vram_fit_tip', { est: U.formatMB(m.estimated_vram_mb), total: totalVram > 0 ? U.formatMB(totalVram) : '?' })) + '">' + fitLabel + '</span>']);
         }
-        // Trust (reuse detail-badges markup, strip extra container)
-        if (detailBadgesHtml && m.trust_level) {
-          configRows.push(['dashboard.info_trust', detailBadgesHtml]);
-        }
+        // Trust is rendered in the CONFIG section header (top-right), not as
+        // a grid row — frees a cell and surfaces trust next to "Config".
+        var trustHeaderHtml = (detailBadgesHtml && m.trust_level) ? detailBadgesHtml : '';
         var configGridHtml = configRows.map(function(row) {
           return '<dt>' + U.escapeHtml(I18n.t(row[0])) + '</dt><dd>' + row[1] + '</dd>';
         }).join('');
@@ -1401,7 +1417,7 @@
 
         var removeHtml = '';
         if (hostedShards > 0 && !isDownloading) {
-          removeHtml = '<button class="btn-action btn-danger" data-remove-model="' + U.escapeHtml(m.id) + '">' + U.escapeHtml(I18n.t('actions.remove')) + '</button>';
+          removeHtml = '<button class="btn-action btn-danger" data-remove-model="' + U.escapeHtml(m.id) + '">' + U.escapeHtml(I18n.t('dashboard.btn_remove_model')) + '</button>';
         }
 
         var name = U.formatModelDisplayName(m.name || m.id);
@@ -1433,23 +1449,27 @@
           '</div>' +
           '<div class="model-card-shards">' +
             progressHtml + perShardDlHtml +
-            '<div class="model-card-expanded">' +
+            '<div class="model-card-expanded' + (m.encrypted_pipeline ? ' pipeline-encrypted' : '') + '">' +
               '<div class="mce-left">' +
-                // STATUS — what the model is doing right now. Peer count sits
-                // in the title row (top-right) so the body row stays clean.
+                // STATUS — title + status badge inline; peer count on the right.
+                // Health badge (fragile/degraded/etc.) drops into the body row.
                 '<div class="mce-section mce-section-status">' +
                   '<div class="mce-section-header">' +
-                    '<div class="mce-section-title">' + U.escapeHtml(I18n.t('dashboard.section_status')) + '</div>' +
+                    '<div class="mce-section-title-row">' +
+                      '<div class="mce-section-title">' + U.escapeHtml(I18n.t('dashboard.section_status')) + '</div>' +
+                      compositeBadgeHtml +
+                    '</div>' +
                     peerLineHtml +
                   '</div>' +
-                  '<div class="mce-section-body">' +
-                    compositeBadgeHtml +
-                    (healthBadgeHtml || '') +
-                  '</div>' +
+                  (healthBadgeHtml ? '<div class="mce-section-body">' + healthBadgeHtml + '</div>' : '') +
                 '</div>' +
-                // CONFIG — static spec sheet: arch, quant, size, shards, mode, trust, vram
+                // CONFIG — static spec sheet: arch, quant, size, shards, mode, vram.
+                // Trust badge sits in the header top-right.
                 '<div class="mce-section mce-section-config">' +
-                  '<div class="mce-section-title">' + U.escapeHtml(I18n.t('dashboard.section_config')) + '</div>' +
+                  '<div class="mce-section-header">' +
+                    '<div class="mce-section-title">' + U.escapeHtml(I18n.t('dashboard.section_config')) + '</div>' +
+                    trustHeaderHtml +
+                  '</div>' +
                   '<dl class="mce-config-grid">' + configGridHtml + '</dl>' +
                 '</div>' +
                 // PRIVACY — pipeline encryption (skipped for single-shard models)
