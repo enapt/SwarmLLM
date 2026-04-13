@@ -3846,6 +3846,14 @@ textarea:focus:not(:focus-visible) {
   gap: 6px;
   margin-top: 2px;
 }
+/* Actions fill the left column: two buttons split 50/50, single button
+   full width. On narrow columns they stack. */
+.model-card-expanded .mce-left .mce-actions .btn-action {
+  flex: 1 1 calc(50% - 6px);
+  min-width: 0;
+  height: 32px;
+  font-size: 0.78rem;
+}
 /* shadcn-style buttons scoped to the expanded model panel's left column.
    Default = outline variant (secondary surface, subtle border, lifts on hover).
    .btn-primary-action → primary variant (filled accent).
