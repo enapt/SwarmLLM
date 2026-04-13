@@ -596,11 +596,25 @@
         right.style.removeProperty('--pipe-line-bottom');
         return;
       }
+      // Line must span all three connection points: the privacy panel's
+      // stub (at its vertical center) + the first and last pinned rows.
+      // With 2 shards, first == last, so without the stub anchor the line
+      // would collapse to a single row and not reach the privacy panel.
       var rightRect = right.getBoundingClientRect();
       var firstRect = pinned[0].getBoundingClientRect();
       var lastRect  = pinned[pinned.length - 1].getBoundingClientRect();
-      var topOffset = (firstRect.top + firstRect.height / 2) - rightRect.top;
-      var bottomOffset = rightRect.bottom - (lastRect.top + lastRect.height / 2);
+      var anchors = [
+        (firstRect.top + firstRect.height / 2) - rightRect.top,
+        (lastRect.top  + lastRect.height  / 2) - rightRect.top,
+      ];
+      var privacy = exp.querySelector('.mce-section-privacy');
+      if (privacy) {
+        // Stub sits at top: 33% of the privacy panel (matches the CSS).
+        var pRect = privacy.getBoundingClientRect();
+        anchors.push((pRect.top + pRect.height * 0.33) - rightRect.top);
+      }
+      var topOffset    = Math.min.apply(null, anchors);
+      var bottomOffset = rightRect.height - Math.max.apply(null, anchors);
       right.style.setProperty('--pipe-line-top', topOffset + 'px');
       right.style.setProperty('--pipe-line-bottom', bottomOffset + 'px');
     },
