@@ -173,6 +173,7 @@
         App.networkMap.data = data;
         App.networkMap.render(data);
         App.networkMap.populateModelFilter(data);
+        App.networkMap.renderPipelinePath();
       } catch (e) {}
     },
 
@@ -287,6 +288,89 @@
 
     applyFilter: function() {
       if (App.networkMap.data) App.networkMap.render(App.networkMap.data);
+      App.networkMap.renderPipelinePath();
+    },
+
+    // Fetch the scheduler's plan for the currently-filtered model and draw
+    // arcs between each chosen peer's region on the world map — the literal
+    // inference path for the next request to that model.
+    renderPipelinePath: function() {
+      var svg = document.querySelector('.world-svg');
+      if (!svg) return;
+      svg.querySelectorAll('.map-pipeline-path').forEach(function(el) { el.remove(); });
+
+      var filter = (document.getElementById('map-model-filter') || {}).value || '';
+      if (!filter) return;
+
+      App.authFetch('/api/admin/models/' + encodeURIComponent(filter) + '/pipeline-plan')
+        .then(function(res) { return res.ok ? res.json() : null; })
+        .then(function(plan) {
+          if (!plan || !plan.segments || plan.segments.length === 0) return;
+          function regionCenter(code) {
+            if (!code) return null;
+            var el = document.getElementById('region-' + code);
+            if (!el) return null;
+            var bb = el.getBBox();
+            return [bb.x + bb.width / 2, bb.y + bb.height / 2];
+          }
+          var local = regionCenter(plan.local_region);
+          var pts = [];
+          if (local) pts.push({ c: local, label: 'You', local: true });
+          plan.segments.forEach(function(seg, i) {
+            if (seg.is_local && pts.length && pts[pts.length - 1].local) return;
+            var c = regionCenter(seg.region);
+            if (c) pts.push({
+              c: c,
+              label: String(i + 1),
+              local: seg.is_local,
+              nickname: seg.nickname,
+              latency: seg.latency_ms,
+            });
+          });
+          if (pts.length < 2) return;
+
+          var ns = 'http://www.w3.org/2000/svg';
+          var group = document.createElementNS(ns, 'g');
+          group.setAttribute('class', 'map-pipeline-path');
+
+          for (var i = 0; i < pts.length - 1; i++) {
+            var a = pts[i].c, b = pts[i + 1].c;
+            var mx = (a[0] + b[0]) / 2;
+            var my = (a[1] + b[1]) / 2;
+            var dx = b[0] - a[0], dy = b[1] - a[1];
+            var dist = Math.sqrt(dx * dx + dy * dy);
+            var lift = Math.min(60, dist * 0.25);
+            var cx = mx, cy = my - lift;
+            var path = document.createElementNS(ns, 'path');
+            path.setAttribute('d', 'M' + a[0] + ',' + a[1] + ' Q' + cx + ',' + cy + ' ' + b[0] + ',' + b[1]);
+            path.setAttribute('class', 'map-pipeline-arc');
+            group.appendChild(path);
+          }
+
+          pts.forEach(function(p, i) {
+            var ring = document.createElementNS(ns, 'circle');
+            ring.setAttribute('cx', p.c[0]);
+            ring.setAttribute('cy', p.c[1]);
+            ring.setAttribute('r', 8);
+            ring.setAttribute('class', 'map-pipeline-node' + (p.local ? ' local' : ''));
+            var title = (p.label === 'You' ? 'You' : 'Hop ' + p.label) +
+              (p.nickname ? ' — ' + p.nickname : '') +
+              (typeof p.latency === 'number' ? ' (' + p.latency + 'ms)' : '');
+            var t = document.createElementNS(ns, 'title');
+            t.textContent = title;
+            ring.appendChild(t);
+            group.appendChild(ring);
+            var lbl = document.createElementNS(ns, 'text');
+            lbl.setAttribute('x', p.c[0]);
+            lbl.setAttribute('y', p.c[1] + 3);
+            lbl.setAttribute('class', 'map-pipeline-label');
+            lbl.textContent = p.label;
+            group.appendChild(lbl);
+          });
+
+          svg.appendChild(group);
+        })
+        .catch(function() { /* quiet */ });
     },
 
     populateModelFilter: function(data) {

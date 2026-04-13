@@ -276,7 +276,7 @@
       if (isLast)  thCls.push('smh-endpoint-last');
       if (isPinned) thCls.push('smh-col-pipeline-pinned');
       var thAttr = thCls.length ? ' class="' + thCls.join(' ') + '"' : '';
-      headHtml += '<th' + thAttr + ' title="' + U.escapeHtml(tip) + '">' +
+      headHtml += '<th' + thAttr + ' data-shard-col="' + s.index + '" title="' + U.escapeHtml(tip) + '">' +
         '<div class="smh-col" data-tier="' + d.tier + '">' +
           '<div class="smh-bar-wrap"><div class="smh-bar" style="height:' + d.pct + '%"></div></div>' +
           '<div class="smh-label">' + label + '</div>' +
@@ -296,7 +296,7 @@
       var sIsLast  = shardCountTotal > 1 && s.index === shardCountTotal - 1;
       var sPinned  = (sIsFirst || sIsLast) && !!s.local && !!m.encrypted_pipeline;
       var tdCls = sPinned ? ' class="smh-self-pipeline-pinned"' : '';
-      selfRow += '<td' + tdCls + ' data-state="' + state + '">' + glyph + '</td>';
+      selfRow += '<td' + tdCls + ' data-state="' + state + '" data-shard-col="' + s.index + '">' + glyph + '</td>';
     });
     selfRow += '</tr>';
 
@@ -304,12 +304,12 @@
     var peerRows = capped.map(function(entry) {
       var pid = entry.pid;
       var color = U.peerColor(pid);
-      var row = '<tr class="srm-row-peer" style="--peer-color:' + color + '" title="' + U.escapeHtml(pid) + '">';
+      var row = '<tr class="srm-row-peer" data-peer-id="' + U.escapeHtml(pid) + '" style="--peer-color:' + color + '" title="' + U.escapeHtml(pid) + '">';
       shards.forEach(function(s) {
         var has = (s.holder_ids || []).indexOf(pid) !== -1;
         var state = has ? 'disk' : 'absent';
         var glyph = has ? '\u25A1' : '';
-        row += '<td data-state="' + state + '">' + glyph + '</td>';
+        row += '<td data-state="' + state + '" data-shard-col="' + s.index + '">' + glyph + '</td>';
       });
       row += '</tr>';
       return row;
@@ -324,11 +324,14 @@
       ? '<div class="shard-matrix-empty">' + U.escapeHtml(I18n.t('shard.matrix.no_peers')) + '</div>'
       : '';
 
-    return '<div class="shard-matrix" data-shard-matrix="' + safeId + '"' + (showAll ? ' data-expanded="1"' : '') + '>' +
+    return '<div class="shard-matrix" data-shard-matrix="' + safeId + '" data-shard-matrix-model="' + U.escapeHtml(m.id) + '"' + (showAll ? ' data-expanded="1"' : '') + '>' +
+      '<div class="shard-matrix-wrap">' +
       '<table>' +
       '<thead>' + headHtml + '</thead>' +
       '<tbody>' + selfRow + peerRows + '</tbody>' +
       '</table>' +
+      '<svg class="shard-matrix-path" data-matrix-path="' + safeId + '" aria-hidden="true"></svg>' +
+      '</div>' +
       emptyHtml +
       showAllBtn +
       '</div>';
@@ -392,7 +395,10 @@
         // Re-measure pipeline connector since the anchors changed
         // (rows ↔ columns) with the view switch.
         if (card) {
-          requestAnimationFrame(function() { App.dashboard._measurePipelineConnector(card); });
+          requestAnimationFrame(function() {
+            App.dashboard._measurePipelineConnector(card);
+            App.dashboard._applyPipelinePlan(card);
+          });
         }
       });
     },
@@ -661,6 +667,84 @@
         right.style.removeProperty('--pipe-tail-y');
         right.style.removeProperty('--pipe-tail-x');
       }
+    },
+    // Fetch the scheduler's pipeline plan for this model and render the
+    // inference path on top of the shard matrix: mark chosen peer+shard
+    // cells and draw an SVG polyline connecting them in segment order.
+    // Unchosen holders are dimmed so the path stands out.
+    _applyPipelinePlan: function(card) {
+      if (!card) return;
+      var modelId = card.getAttribute('data-model-id');
+      if (!modelId) return;
+      var matrix = card.querySelector('[data-shard-matrix]');
+      if (!matrix) return;
+      var table = matrix.querySelector('table');
+      var svg = matrix.querySelector('.shard-matrix-path');
+      if (!table || !svg) return;
+      // Clear previous plan state
+      matrix.removeAttribute('data-has-plan');
+      matrix.querySelectorAll('.planned-cell').forEach(function(el) { el.classList.remove('planned-cell'); });
+      matrix.querySelectorAll('.planned-row').forEach(function(el) { el.classList.remove('planned-row'); });
+      svg.innerHTML = '';
+
+      App.data.authFetch('/api/admin/models/' + encodeURIComponent(modelId) + '/pipeline-plan')
+        .then(function(res) { return res.ok ? res.json() : null; })
+        .then(function(plan) {
+          if (!plan || !plan.segments || plan.segments.length === 0) return;
+          var localId = plan.local_node_id;
+          matrix.setAttribute('data-has-plan', '1');
+          matrix.querySelectorAll('tbody tr').forEach(function(tr) { tr.classList.add('unplanned-row'); });
+
+          var points = [];
+          plan.segments.forEach(function(seg, i) {
+            var peerId = seg.node_id;
+            var row = peerId === localId
+              ? matrix.querySelector('tr.srm-row-self')
+              : matrix.querySelector('tr.srm-row-peer[data-peer-id="' + U.cssSafeAttr(peerId) + '"]');
+            if (!row) return;
+            row.classList.remove('unplanned-row');
+            row.classList.add('planned-row');
+            var td = row.querySelector('td[data-shard-col="' + seg.shard_index + '"]');
+            if (!td) return;
+            td.classList.add('planned-cell');
+            td.setAttribute('data-plan-order', String(i + 1));
+            var tblRect = table.getBoundingClientRect();
+            var r = td.getBoundingClientRect();
+            points.push({
+              x: (r.left + r.width / 2) - tblRect.left,
+              y: (r.top + r.height / 2) - tblRect.top,
+              local: seg.is_local,
+            });
+          });
+          if (points.length < 1) return;
+
+          var w = table.clientWidth;
+          var h = table.clientHeight;
+          svg.setAttribute('viewBox', '0 0 ' + w + ' ' + h);
+          svg.setAttribute('width', w);
+          svg.setAttribute('height', h);
+          var ns = 'http://www.w3.org/2000/svg';
+          var d = points.map(function(p, i) { return (i === 0 ? 'M' : 'L') + p.x + ' ' + p.y; }).join(' ');
+          var path = document.createElementNS(ns, 'path');
+          path.setAttribute('d', d);
+          path.setAttribute('class', 'shard-matrix-path-line');
+          svg.appendChild(path);
+          points.forEach(function(p, i) {
+            var c = document.createElementNS(ns, 'circle');
+            c.setAttribute('cx', p.x);
+            c.setAttribute('cy', p.y);
+            c.setAttribute('r', '5');
+            c.setAttribute('class', 'shard-matrix-path-dot' + (p.local ? ' local' : ''));
+            svg.appendChild(c);
+            var t = document.createElementNS(ns, 'text');
+            t.setAttribute('x', p.x);
+            t.setAttribute('y', p.y + 3);
+            t.setAttribute('class', 'shard-matrix-path-label');
+            t.textContent = String(i + 1);
+            svg.appendChild(t);
+          });
+        })
+        .catch(function() { /* quiet: plan unavailable (no peers etc.) */ });
     },
     _renderModelTicker: function(modelId) {
       var actEvents = _modelEvents[modelId] || [];
@@ -1584,6 +1668,11 @@
         if (m.encrypted_pipeline && !isCompact) {
           requestAnimationFrame(function() {
             App.dashboard._measurePipelineConnector(card);
+          });
+        }
+        if (!isCompact) {
+          requestAnimationFrame(function() {
+            App.dashboard._applyPipelinePlan(card);
           });
         }
       });

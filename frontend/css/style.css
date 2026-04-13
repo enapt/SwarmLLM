@@ -4480,3 +4480,69 @@ textarea:focus:not(:focus-visible) {
 /* Peers/Shards toggle no longer shifts the ribbon — matrix cells start at
    column-0 because the peer-label column was replaced with a left-border
    row accent + tooltip for identification. */
+
+/* Pipeline-plan overlay for the shard matrix — draws the inference path the
+   scheduler has picked, joining chosen peer+shard cells in segment order. */
+.shard-matrix-wrap { position: relative; }
+.shard-matrix-path {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  overflow: visible;
+}
+.shard-matrix-path-line {
+  fill: none;
+  stroke: var(--accent, #22d3ee);
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  filter: drop-shadow(0 0 4px rgba(34, 211, 238, 0.6));
+  opacity: 0.95;
+}
+.shard-matrix-path-dot {
+  fill: var(--accent, #22d3ee);
+  stroke: #0b1220;
+  stroke-width: 1.5;
+}
+.shard-matrix-path-dot.local { fill: #facc15; }
+.shard-matrix-path-label {
+  fill: #0b1220;
+  font-size: 8px;
+  font-weight: 700;
+  text-anchor: middle;
+  pointer-events: none;
+}
+.shard-matrix[data-has-plan] tbody tr.unplanned-row { opacity: 0.35; }
+.shard-matrix[data-has-plan] td.planned-cell {
+  outline: 1.5px solid var(--accent, #22d3ee);
+  outline-offset: -2px;
+  background: rgba(34, 211, 238, 0.10);
+}
+
+/* Network-map inference-path overlay — arcs connect chosen peers' regions. */
+.map-pipeline-arc {
+  fill: none;
+  stroke: var(--accent, #22d3ee);
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-dasharray: 6 4;
+  filter: drop-shadow(0 0 4px rgba(34, 211, 238, 0.5));
+  opacity: 0.9;
+  animation: map-pipe-dash 1.2s linear infinite;
+}
+@keyframes map-pipe-dash {
+  to { stroke-dashoffset: -20; }
+}
+.map-pipeline-node {
+  fill: rgba(34, 211, 238, 0.9);
+  stroke: #0b1220;
+  stroke-width: 1.5;
+}
+.map-pipeline-node.local { fill: #facc15; }
+.map-pipeline-label {
+  fill: #0b1220;
+  font-size: 8px;
+  font-weight: 700;
+  text-anchor: middle;
+  pointer-events: none;
+}

@@ -2113,4 +2113,74 @@ pub async fn delete_adapter(
     }
 }
 
+// ── Pipeline Plan (read-only preview for UI) ──
+
+/// GET /api/admin/models/:id/pipeline-plan — Return the pipeline the scheduler
+/// would currently assemble for this model. Read-only: no execution, no side
+/// effects. Used by the frontend to render the inference path on the shard
+/// matrix and network map. Fails with 404 if the model isn't registered or if
+/// the current peer set can't cover all layers (same conditions that would
+/// fail a real inference request).
+pub async fn pipeline_plan(
+    State(state): State<AppState>,
+    Path(model_id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    validate_model_id(&model_id)?;
+    let mid = crate::types::ModelId(model_id.clone());
+    let local_node_id = state.shared_state.identity.node_id().clone();
+    let scheduler = crate::inference::scheduler::PipelineScheduler::new(state.shared_state.clone());
+    let assignment = scheduler
+        .assemble_pipeline_for(&mid, &local_node_id, uuid::Uuid::new_v4())
+        .map_err(ApiError)?;
+
+    let segments: Vec<serde_json::Value> = assignment
+        .segments
+        .iter()
+        .map(|seg| {
+            let peer = state.shared_state.peer_registry.get(&seg.node_id);
+            let peer_latency = peer.as_ref().and_then(|p| p.latency_ms);
+            let region = peer
+                .as_ref()
+                .and_then(|p| p.capability.as_ref())
+                .and_then(|c| c.region.clone());
+            let is_local = seg.node_id == local_node_id;
+            let nickname = state
+                .shared_state
+                .nickname_registry
+                .get(&seg.node_id)
+                .map(|r| r.nickname.clone());
+            serde_json::json!({
+                "node_id": format!("{}", seg.node_id),
+                "nickname": nickname,
+                "region": region,
+                "shard_index": seg.shard_id.index,
+                "layer_range": [seg.layer_range.0, seg.layer_range.1],
+                "latency_ms": if is_local { Some(0) } else { peer_latency },
+                "is_local": is_local,
+            })
+        })
+        .collect();
+
+    let standbys: Vec<serde_json::Value> = assignment
+        .standbys
+        .iter()
+        .map(|seg| {
+            serde_json::json!({
+                "node_id": format!("{}", seg.node_id),
+                "shard_index": seg.shard_id.index,
+                "layer_range": [seg.layer_range.0, seg.layer_range.1],
+            })
+        })
+        .collect();
+
+    let local_region = state.shared_state.config.identity.region.clone();
+    Ok(Json(serde_json::json!({
+        "model_id": model_id,
+        "local_node_id": format!("{}", local_node_id),
+        "local_region": local_region,
+        "segments": segments,
+        "standbys": standbys,
+    })))
+}
+
 // ── Cloud Provider Management ──

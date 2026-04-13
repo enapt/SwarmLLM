@@ -130,6 +130,10 @@ pub fn build_router(state: AppState) -> Router {
         )
         // GGUF metadata browser
         .route("/api/admin/models/:id/metadata", get(admin::model_metadata))
+        .route(
+            "/api/admin/models/:id/pipeline-plan",
+            get(admin::pipeline_plan),
+        )
         // Single-shard management
         .route(
             "/api/admin/models/:id/shards/:index",
