@@ -124,17 +124,17 @@
 
       var active = downloads.filter(function(d) {
         var st = typeof d.state === 'string' ? d.state : '';
-        return st !== 'complete';
+        return st === 'downloading' || st === 'awaiting_manifest';
       });
 
-      if (active.length === 0 && downloads.length === 0) { panel.classList.add('hidden'); return; }
-      panel.classList.remove('hidden');
       if (active.length === 0) {
         list.innerHTML = '';
-        if (empty) empty.classList.remove('hidden');
+        if (empty) empty.classList.add('hidden');
         if (count) count.textContent = '';
+        panel.classList.add('hidden');
         return;
       }
+      panel.classList.remove('hidden');
 
       if (empty) empty.classList.add('hidden');
       if (count) count.textContent = I18n.t('downloads.active_count', { count: active.length });
@@ -178,11 +178,20 @@
           return;
         }
 
-        _updateDlProgress(existing, acq);
-
-        if (typeof acq.state === 'string' && acq.state === 'complete') {
-          setTimeout(function() { App.downloads.load(); }, 2000);
+        var st = typeof acq.state === 'string' ? acq.state : '';
+        var active = st === 'downloading' || st === 'awaiting_manifest';
+        if (!active) {
+          existing.remove();
+          var remaining = list.querySelectorAll('.dl-queue-item').length;
+          if (remaining === 0) {
+            panel.classList.add('hidden');
+            if (count) count.textContent = '';
+          } else if (count) {
+            count.textContent = I18n.t('downloads.active_count', { count: remaining });
+          }
+          return;
         }
+        _updateDlProgress(existing, acq);
       });
     },
 

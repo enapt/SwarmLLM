@@ -694,15 +694,37 @@
           // Cache plan on the matrix so resize-driven redraws can reuse it
           // without re-fetching from the server.
           matrix._pipelinePlan = plan;
-          App.dashboard._drawPipelinePath(matrix);
-          // Redraw when the table's layout changes (visibility toggles,
-          // peers-list expand, window resize). This is what makes the path
-          // appear on first paint without needing a manual view flick —
-          // the initial rAF often fires before the table has real dimensions.
+          // Retry on rAF until the table has real dimensions. On initial card
+          // expand the fetch can resolve before layout settles; without this
+          // the line stays invisible until the user toggles views.
+          var attempts = 0;
+          var tryDraw = function() {
+            if (!matrix.isConnected) return;
+            var tbl = matrix.querySelector('table');
+            if (tbl && tbl.clientWidth > 0 && tbl.clientHeight > 0) {
+              App.dashboard._drawPipelinePath(matrix);
+              return;
+            }
+            if (++attempts < 30) requestAnimationFrame(tryDraw);
+          };
+          tryDraw();
+          // Redraw on later layout changes (peers-list expand, window resize).
           if (!matrix._pipelineRO && typeof ResizeObserver !== 'undefined') {
             var ro = new ResizeObserver(function() { App.dashboard._drawPipelinePath(matrix); });
             ro.observe(table);
             matrix._pipelineRO = ro;
+          }
+          // Also redraw when the matrix itself becomes visible (display:none →
+          // block on view switch). ResizeObserver misses this transition on
+          // some browsers when the node is inserted already hidden.
+          if (!matrix._pipelineIO && typeof IntersectionObserver !== 'undefined') {
+            var io = new IntersectionObserver(function(entries) {
+              entries.forEach(function(e) {
+                if (e.isIntersecting) App.dashboard._drawPipelinePath(matrix);
+              });
+            });
+            io.observe(matrix);
+            matrix._pipelineIO = io;
           }
         })
         .catch(function() { /* quiet: plan unavailable (no peers etc.) */ });
