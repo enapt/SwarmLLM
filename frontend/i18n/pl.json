@@ -551,7 +551,7 @@
   "dashboard.enc_available": "Zaszyfrowany pipeline dostępny — kliknij, aby włączyć",
   "dashboard.enc_unavailable": "Zaszyfrowany pipeline niedostępny — potrzebne pierwszy i ostatni shard",
   "dashboard.enc_missing": "Brakuje: {parts}",
-  "dashboard.enc_missing_first": "pierwszy (shard 0)",
+  "dashboard.enc_missing_first": "pierwszy (shard 1)",
   "dashboard.enc_missing_last": "ostatni (shard {n})",
   "dashboard.badge_remote": "Dostępny przez węzły sieci",
   "dashboard.gear_title": "Ustawienia auto-zarządzania",

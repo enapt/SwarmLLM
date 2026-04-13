@@ -552,7 +552,7 @@
   "dashboard.enc_available": "Đường ống mã hóa khả dụng — nhấp để bật",
   "dashboard.enc_unavailable": "Đường ống mã hóa không khả dụng — cần mảnh đầu + cuối",
   "dashboard.enc_missing": "Thiếu: {parts}",
-  "dashboard.enc_missing_first": "đầu tiên (mảnh 0)",
+  "dashboard.enc_missing_first": "đầu tiên (mảnh 1)",
   "dashboard.enc_missing_last": "cuối cùng (mảnh {n})",
   "dashboard.badge_remote": "Có sẵn qua nút mạng",
   "dashboard.gear_title": "Cài đặt tự động quản lý",

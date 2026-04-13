@@ -551,7 +551,7 @@
   "dashboard.enc_available": "加密管道可用——点击启用",
   "dashboard.enc_unavailable": "加密管道不可用——需要第一个和最后一个分片",
   "dashboard.enc_missing": "缺失：{parts}",
-  "dashboard.enc_missing_first": "第一个（分片 0）",
+  "dashboard.enc_missing_first": "第一个（分片 1）",
   "dashboard.enc_missing_last": "最后一个（分片 {n}）",
   "dashboard.badge_remote": "可通过网络对等节点访问",
   "dashboard.gear_title": "自动管理设置",

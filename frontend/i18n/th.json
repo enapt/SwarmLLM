@@ -552,7 +552,7 @@
   "dashboard.enc_available": "Pipeline ที่เข้ารหัสพร้อมใช้งาน — คลิกเพื่อเปิดใช้งาน",
   "dashboard.enc_unavailable": "Pipeline ที่เข้ารหัสไม่พร้อมใช้งาน — ต้องการ shard แรก + shard สุดท้าย",
   "dashboard.enc_missing": "ขาดหาย: {parts}",
-  "dashboard.enc_missing_first": "แรก (shard 0)",
+  "dashboard.enc_missing_first": "แรก (shard 1)",
   "dashboard.enc_missing_last": "สุดท้าย (shard {n})",
   "dashboard.badge_remote": "มีผ่านเพียร์เครือข่าย",
   "dashboard.gear_title": "การตั้งค่าการจัดการอัตโนมัติ",

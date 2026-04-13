@@ -551,7 +551,7 @@
   "dashboard.enc_available": "Зашифрований pipeline доступний — натисніть для увімкнення",
   "dashboard.enc_unavailable": "Зашифрований pipeline недоступний — потрібен перший і останній шард",
   "dashboard.enc_missing": "Відсутнє: {parts}",
-  "dashboard.enc_missing_first": "перший (шард 0)",
+  "dashboard.enc_missing_first": "перший (шард 1)",
   "dashboard.enc_missing_last": "останній (шард {n})",
   "dashboard.badge_remote": "Доступний через мережеві піри",
   "dashboard.gear_title": "Налаштування авто-керування",

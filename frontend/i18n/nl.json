@@ -552,7 +552,7 @@
   "dashboard.enc_available": "Versleutelde pipeline beschikbaar — klik om in te schakelen",
   "dashboard.enc_unavailable": "Versleutelde pipeline niet beschikbaar — eerste + laatste shard nodig",
   "dashboard.enc_missing": "Ontbreekt: {parts}",
-  "dashboard.enc_missing_first": "eerste (shard 0)",
+  "dashboard.enc_missing_first": "eerste (shard 1)",
   "dashboard.enc_missing_last": "laatste (shard {n})",
   "dashboard.badge_remote": "Beschikbaar via netwerk-peers",
   "dashboard.gear_title": "Auto-beheerinstellingen",

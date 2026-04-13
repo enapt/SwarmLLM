@@ -552,7 +552,7 @@
   "dashboard.enc_available": "Pipeline criptografado disponível — clique para ativar",
   "dashboard.enc_unavailable": "Pipeline criptografado indisponível — precisa do primeiro + último fragmento",
   "dashboard.enc_missing": "Ausente: {parts}",
-  "dashboard.enc_missing_first": "primeiro (fragmento 0)",
+  "dashboard.enc_missing_first": "primeiro (fragmento 1)",
   "dashboard.enc_missing_last": "último (fragmento {n})",
   "dashboard.badge_remote": "Disponível via pares de rede",
   "dashboard.gear_title": "Configurações de gerenciamento automático",

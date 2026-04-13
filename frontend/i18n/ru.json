@@ -552,7 +552,7 @@
   "dashboard.enc_available": "Зашифрованный конвейер доступен — нажмите для включения",
   "dashboard.enc_unavailable": "Зашифрованный конвейер недоступен — нужны первый + последний шард",
   "dashboard.enc_missing": "Отсутствует: {parts}",
-  "dashboard.enc_missing_first": "первый (шард 0)",
+  "dashboard.enc_missing_first": "первый (шард 1)",
   "dashboard.enc_missing_last": "последний (шард {n})",
   "dashboard.badge_remote": "Доступно через пиры сети",
   "dashboard.gear_title": "Настройки авто-управления",

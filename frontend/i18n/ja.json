@@ -551,7 +551,7 @@
   "dashboard.enc_available": "暗号化パイプラインが利用可能——クリックして有効化",
   "dashboard.enc_unavailable": "暗号化パイプラインが利用不可——最初と最後のシャードが必要",
   "dashboard.enc_missing": "不足：{parts}",
-  "dashboard.enc_missing_first": "最初（シャード0）",
+  "dashboard.enc_missing_first": "最初（シャード1）",
   "dashboard.enc_missing_last": "最後（シャード{n}）",
   "dashboard.badge_remote": "ネットワークピア経由で利用可能",
   "dashboard.gear_title": "自動管理設定",

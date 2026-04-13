@@ -552,7 +552,7 @@
   "dashboard.enc_available": "एन्क्रिप्टेड पाइपलाइन उपलब्ध — चालू करने के लिए क्लिक करें",
   "dashboard.enc_unavailable": "एन्क्रिप्टेड पाइपलाइन उपलब्ध नहीं — पहला + अंतिम शार्ड चाहिए",
   "dashboard.enc_missing": "गायब: {parts}",
-  "dashboard.enc_missing_first": "पहला (शार्ड 0)",
+  "dashboard.enc_missing_first": "पहला (शार्ड 1)",
   "dashboard.enc_missing_last": "अंतिम (शार्ड {n})",
   "dashboard.badge_remote": "नेटवर्क पीयर से उपलब्ध",
   "dashboard.gear_title": "ऑटो-मैनेज सेटिंग्स",

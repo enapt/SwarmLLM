@@ -552,7 +552,7 @@
   "dashboard.enc_available": "Pipeline terenkripsi tersedia — klik untuk mengaktifkan",
   "dashboard.enc_unavailable": "Pipeline terenkripsi tidak tersedia — butuh shard pertama + terakhir",
   "dashboard.enc_missing": "Hilang: {parts}",
-  "dashboard.enc_missing_first": "pertama (shard 0)",
+  "dashboard.enc_missing_first": "pertama (shard 1)",
   "dashboard.enc_missing_last": "terakhir (shard {n})",
   "dashboard.badge_remote": "Tersedia melalui peer jaringan",
   "dashboard.gear_title": "Pengaturan manajemen otomatis",

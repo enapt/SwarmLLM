@@ -1456,7 +1456,7 @@
           } else {
             var missingParts2 = [];
             if (!hasFirst) missingParts2.push(I18n.t('dashboard.enc_missing_first'));
-            if (!hasLast)  missingParts2.push(I18n.t('dashboard.enc_missing_last', { n: shardCount - 1 }));
+            if (!hasLast)  missingParts2.push(I18n.t('dashboard.enc_missing_last', { n: shardCount }));
             var missingText = missingParts2.length === 2
               ? I18n.t('enc.missing_both')
               : (missingParts2.length === 1 ? I18n.t('enc.missing_the', { which: missingParts2[0] }) : '');

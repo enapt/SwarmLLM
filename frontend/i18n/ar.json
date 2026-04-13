@@ -551,7 +551,7 @@
   "dashboard.enc_available": "خط أنابيب التشفير متاح — انقر للتفعيل",
   "dashboard.enc_unavailable": "خط أنابيب التشفير غير متاح — يحتاج الشظية الأولى + الأخيرة",
   "dashboard.enc_missing": "مفقود: {parts}",
-  "dashboard.enc_missing_first": "الأولى (الشظية 0)",
+  "dashboard.enc_missing_first": "الأولى (الشظية 1)",
   "dashboard.enc_missing_last": "الأخيرة (الشظية {n})",
   "dashboard.badge_remote": "متاح عبر أقران الشبكة",
   "dashboard.gear_title": "إعدادات الإدارة التلقائية",

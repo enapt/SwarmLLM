@@ -551,7 +551,7 @@
   "dashboard.enc_available": "Pipeline chiffré disponible — cliquez pour activer",
   "dashboard.enc_unavailable": "Pipeline chiffré non disponible — besoin du premier et du dernier fragment",
   "dashboard.enc_missing": "Manquant : {parts}",
-  "dashboard.enc_missing_first": "premier (fragment 0)",
+  "dashboard.enc_missing_first": "premier (fragment 1)",
   "dashboard.enc_missing_last": "dernier (fragment {n})",
   "dashboard.badge_remote": "Disponible via des pairs réseau",
   "dashboard.gear_title": "Paramètres de gestion auto",

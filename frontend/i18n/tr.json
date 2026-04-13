@@ -552,7 +552,7 @@
   "dashboard.enc_available": "Şifreli pipeline mevcut — etkinleştirmek için tıklayın",
   "dashboard.enc_unavailable": "Şifreli pipeline kullanılamıyor — ilk + son parça gerekli",
   "dashboard.enc_missing": "Eksik: {parts}",
-  "dashboard.enc_missing_first": "ilk (parça 0)",
+  "dashboard.enc_missing_first": "ilk (parça 1)",
   "dashboard.enc_missing_last": "son (parça {n})",
   "dashboard.badge_remote": "Ağ eşleri aracılığıyla mevcut",
   "dashboard.gear_title": "Otomatik yönetim ayarları",

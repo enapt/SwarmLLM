@@ -552,7 +552,7 @@
   "dashboard.enc_available": "Verschlüsselte Pipeline verfügbar — klicken zum Aktivieren",
   "dashboard.enc_unavailable": "Verschlüsselte Pipeline nicht verfügbar — erster + letzter Shard benötigt",
   "dashboard.enc_missing": "Fehlt: {parts}",
-  "dashboard.enc_missing_first": "erster (Shard 0)",
+  "dashboard.enc_missing_first": "erster (Shard 1)",
   "dashboard.enc_missing_last": "letzter (Shard {n})",
   "dashboard.badge_remote": "Über Netzwerk-Peers verfügbar",
   "dashboard.gear_title": "Auto-Verwaltungseinstellungen",

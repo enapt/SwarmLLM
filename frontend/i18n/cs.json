@@ -552,7 +552,7 @@
   "dashboard.enc_available": "Šifrovaný pipeline dostupný — klikněte pro povolení",
   "dashboard.enc_unavailable": "Šifrovaný pipeline nedostupný — potřebujete první + poslední fragment",
   "dashboard.enc_missing": "Chybí: {parts}",
-  "dashboard.enc_missing_first": "první (fragment 0)",
+  "dashboard.enc_missing_first": "první (fragment 1)",
   "dashboard.enc_missing_last": "poslední (fragment {n})",
   "dashboard.badge_remote": "Dostupné přes síťové uzly",
   "dashboard.gear_title": "Nastavení automatické správy",

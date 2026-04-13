@@ -611,7 +611,7 @@
   "dashboard.enc_available": "Encrypted pipeline available — click to enable",
   "dashboard.enc_unavailable": "Encrypted pipeline unavailable — need first + last shard",
   "dashboard.enc_missing": "Missing: {parts}",
-  "dashboard.enc_missing_first": "first (shard 0)",
+  "dashboard.enc_missing_first": "first (shard 1)",
   "dashboard.enc_missing_last": "last (shard {n})",
   "dashboard.badge_remote": "Available via network peers",
   "dashboard.gear_title": "Auto-manage settings",

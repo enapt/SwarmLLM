@@ -551,7 +551,7 @@
   "dashboard.enc_available": "암호화 파이프라인 사용 가능 — 활성화하려면 클릭",
   "dashboard.enc_unavailable": "암호화 파이프라인 사용 불가 — 첫 번째 + 마지막 샤드 필요",
   "dashboard.enc_missing": "없음: {parts}",
-  "dashboard.enc_missing_first": "첫 번째 (샤드 0)",
+  "dashboard.enc_missing_first": "첫 번째 (샤드 1)",
   "dashboard.enc_missing_last": "마지막 (샤드 {n})",
   "dashboard.badge_remote": "네트워크 피어를 통해 사용 가능",
   "dashboard.gear_title": "자동 관리 설정",

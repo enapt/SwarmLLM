@@ -552,7 +552,7 @@
   "dashboard.enc_available": "Krypterad pipeline tillgänglig — klicka för att aktivera",
   "dashboard.enc_unavailable": "Krypterad pipeline ej tillgänglig — behöver första + sista shard",
   "dashboard.enc_missing": "Saknas: {parts}",
-  "dashboard.enc_missing_first": "första (shard 0)",
+  "dashboard.enc_missing_first": "första (shard 1)",
   "dashboard.enc_missing_last": "sista (shard {n})",
   "dashboard.badge_remote": "Tillgänglig via nätverkspeers",
   "dashboard.gear_title": "Inställningar för automatisk hantering",
