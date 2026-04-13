@@ -287,12 +287,16 @@
 
     // Self row — no leading <th>; left-border accent + title tooltip identifies.
     var selfRow = '<tr class="srm-row-self" title="' + U.escapeHtml(I18n.t('shard.matrix.peer_you')) + ' (' + U.escapeHtml(m.id) + ')">';
-    shards.forEach(function(s) {
+    shards.forEach(function(s, i) {
       var state = _shardState(s);
       if (state === 'peer') state = 'absent';
       var glyph = state === 'vram' ? '\u25A0' : state === 'disk' ? '\u25A1'
                 : state === 'downloading' ? '\u25D0' : '';
-      selfRow += '<td data-state="' + state + '">' + glyph + '</td>';
+      var sIsFirst = shardCountTotal > 1 && s.index === 0;
+      var sIsLast  = shardCountTotal > 1 && s.index === shardCountTotal - 1;
+      var sPinned  = (sIsFirst || sIsLast) && !!s.local && !!m.encrypted_pipeline;
+      var tdCls = sPinned ? ' class="smh-self-pipeline-pinned"' : '';
+      selfRow += '<td' + tdCls + ' data-state="' + state + '">' + glyph + '</td>';
     });
     selfRow += '</tr>';
 
@@ -608,11 +612,13 @@
       var exp = card.querySelector('.model-card-expanded.pipeline-encrypted');
       var right = exp && exp.querySelector('.mce-right');
       if (!right) return;
-      // List view uses shard rows; matrix view uses column headers.
+      // List view uses shard rows; matrix view anchors to the self row's
+      // first+last cells (where this node holds the pipeline endpoints),
+      // not the column headers (which show density across all peers).
       var pinned = right.querySelectorAll('.shard-row-pipeline-pinned');
       var isMatrix = false;
       if (pinned.length < 1) {
-        pinned = right.querySelectorAll('.smh-col-pipeline-pinned');
+        pinned = right.querySelectorAll('.smh-self-pipeline-pinned');
         isMatrix = pinned.length > 0;
       }
       right.classList.toggle('pipe-matrix', isMatrix);

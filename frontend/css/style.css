@@ -4352,30 +4352,36 @@ textarea:focus:not(:focus-visible) {
   color: var(--text-muted);
   line-height: 1;
 }
-/* Pipeline-pinned endpoint columns in matrix view: saturated green
-   highlight matching the list-view endpoint rows, serving as the
-   visual anchor for the privacy-panel connector line. */
+/* Pipeline-pinned endpoint columns in matrix view: subtle green border
+   so the column reads as special; the SELF ROW cell inside the column
+   carries the stronger treatment and is the actual connector anchor. */
 .shard-matrix thead th.smh-col-pipeline-pinned {
-  background: rgba(34,197,94,0.14);
-  box-shadow: inset 0 0 0 1px rgba(34,197,94,0.45);
+  box-shadow: inset 0 -2px 0 rgba(34,197,94,0.45);
   position: relative;
-}
-.shard-matrix thead th.smh-col-pipeline-pinned .smh-bar {
-  background: var(--green) !important;
-  box-shadow: 0 0 6px rgba(34,197,94,0.5);
 }
 .shard-matrix thead th.smh-col-pipeline-pinned .smh-label {
   color: var(--green);
   font-weight: 700;
 }
-.shard-matrix thead th.smh-col-pipeline-pinned::before {
+
+/* Self-row pipeline-pinned cell — this is where the connector line
+   actually joins: it's the cell where THIS node holds an endpoint
+   shard, making the E2E pipeline guarantee visible. */
+.shard-matrix tbody .srm-row-self td.smh-self-pipeline-pinned {
+  background: rgba(34,197,94,0.22);
+  box-shadow: inset 0 0 0 2px rgba(34,197,94,0.55),
+              0 0 8px rgba(34,197,94,0.3);
+  position: relative;
+  color: var(--green);
+}
+.shard-matrix tbody .srm-row-self td.smh-self-pipeline-pinned::after {
   content: '\1F512';
   position: absolute;
-  top: -2px;
+  bottom: 1px;
   right: 2px;
   font-size: 0.55rem;
   line-height: 1;
-  opacity: 0.9;
+  opacity: 0.85;
 }
 
 /* Peers-by-shard matrix */
