@@ -54,6 +54,10 @@ const MAX_PENDING_PROVIDER_QUERIES: usize = 500;
 const MAX_PENDING_REDIAL: usize = 50;
 /// Maximum buffered gossip messages when no peers are connected at startup.
 const MAX_BUFFERED_GOSSIP: usize = 64;
+/// Maximum entries in connection_addrs before half-eviction of oldest ConnectionIds.
+const MAX_CONNECTION_ADDRS: usize = 1024;
+/// Maximum entries in ping_sent_times before pruning stale entries.
+const MAX_PING_ENTRIES: usize = 2048;
 
 /// Check if a multiaddr string contains a private/loopback/link-local/CGN IP.
 /// Used for PEX filtering to prevent leaking internal topology.
@@ -1467,7 +1471,6 @@ impl NetworkManager {
         // Track which address each connection uses — the Identify handler
         // uses this to add only the connected address to Kademlia.
         // SEC: Cap connection_addrs to prevent unbounded memory growth.
-        const MAX_CONNECTION_ADDRS: usize = 1024;
         if self.connection_addrs.len() >= MAX_CONNECTION_ADDRS {
             // Evict oldest half — stale ConnectionIds from missed close events.
             let mut ids: Vec<_> = self.connection_addrs.keys().cloned().collect();
@@ -1484,7 +1487,6 @@ impl NetworkManager {
         if num_established.get() == 1 && self.shared_state.config.network.peer_exchange {
             // SEC: Cap ping_sent_times to prevent unbounded growth from connection storms.
             // Prune stale entries before inserting.
-            const MAX_PING_ENTRIES: usize = 2048;
             if self.ping_sent_times.len() >= MAX_PING_ENTRIES {
                 let cutoff = std::time::Instant::now()
                     - std::time::Duration::from_secs(PING_SENT_TIMES_CUTOFF_SECS);

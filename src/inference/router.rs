@@ -155,7 +155,7 @@ impl InferenceRouter {
                 .config
                 .inference
                 .kv_cache_ttl_secs
-                .unwrap_or(600),
+                .unwrap_or(crate::inference::process_pool::DEFAULT_KV_CACHE_TTL_SECS),
         );
         let max_concurrent = shared_state.config.inference.max_concurrent_requests as usize;
         let max_batch_size = (shared_state.config.inference.max_batch_size as usize).max(1);

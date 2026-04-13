@@ -1254,7 +1254,7 @@ Routes Claude model requests through a locally-authenticated `claude` CLI subpro
   - `frontend/js/components/claude-code.js` — Claude Code interactive sessions (subprocess, permission flow, SSE)
   - `frontend/js/components/dashboard.js` — stats, hardware, model cards, peers, shard grid live updates
   - `frontend/js/components/models.js` — model dropdown, HF search/download, auto-manage, metadata panel
-  - `frontend/js/components/shard-menu.js` — per-shard context menu (load/unload/delete/lock)
+  - `frontend/js/components/auto-manage-status.js` — auto-manage scan/VRAM-pressure status display
   - `frontend/js/components/settings.js` — settings panel (API keys, config, contribution)
   - `frontend/js/components/setup.js` — first-run setup wizard (3-step configuration)
   - `frontend/js/components/downloads.js` — download queue, prune history, resource schedule

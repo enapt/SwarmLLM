@@ -18,7 +18,7 @@ use crate::types::{ModelId, SamplingParams};
 
 const WORKER_CONNECT_TIMEOUT_SECS: u64 = 30;
 /// Default KV-cache TTL in seconds (10 minutes). Overridden by config at startup.
-const DEFAULT_KV_CACHE_TTL_SECS: u64 = 600;
+pub const DEFAULT_KV_CACHE_TTL_SECS: u64 = 600;
 
 /// A handle to a running model worker subprocess.
 struct WorkerHandle {

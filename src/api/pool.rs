@@ -268,9 +268,9 @@ pub async fn pool_set_device_name(
             "Device name must not be empty".into(),
         )));
     }
-    if body.name.len() > 64 {
+    if body.name.trim().len() > 32 {
         return Err(ApiError(crate::error::SwarmError::Validation(
-            "Device name must be 64 characters or fewer".into(),
+            "Device name must be 32 characters or fewer".into(),
         )));
     }
     let (tx, rx) = tokio::sync::oneshot::channel();
