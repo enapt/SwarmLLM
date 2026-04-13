@@ -3331,12 +3331,23 @@ textarea:focus:not(:focus-visible) {
 .provider-health-bar .ph-dot.dot-down { background: var(--text-muted); }
 .provider-health-bar .ph-dot.dot-error { background: var(--red); box-shadow: 0 0 6px rgba(239,68,68,0.4); }
 .provider-health-bar .ph-latency { font-size: 0.65rem; color: var(--text-secondary); font-family: var(--font-mono); }
-.provider-health-bar .ph-tag {
+.ph-tag {
   font-size: 0.52rem; text-transform: uppercase; letter-spacing: 0.06em;
   font-weight: 700; padding: 1px 5px; border-radius: 3px;
+  display: inline-block; line-height: 1.4; white-space: nowrap;
 }
-.provider-health-bar .ph-tag.tag-sub { color: var(--green); background: var(--green-dim); }
-.provider-health-bar .ph-tag.tag-api { color: var(--accent); background: var(--accent-glow); }
+/* Subscription tag — Claude-themed violet (distinct from green "Connected"
+   status badge and from the accent-colored API tag). */
+.ph-tag.tag-sub {
+  color: #c084fc;
+  background: rgba(192,132,252,0.14);
+  border: 1px solid rgba(192,132,252,0.35);
+}
+.ph-tag.tag-api {
+  color: var(--text-muted);
+  background: rgba(127,127,127,0.12);
+  border: 1px solid rgba(127,127,127,0.25);
+}
 .provider-health-bar .ph-overflow {
   padding: 6px 12px; font-size: 0.72rem; color: var(--text-muted);
   cursor: pointer;

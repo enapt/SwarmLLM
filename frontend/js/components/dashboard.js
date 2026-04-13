@@ -1516,11 +1516,20 @@
         var modelCountHtml = '<span class="cloud-provider-count" title="' +
           U.escapeHtml(I18n.t('dashboard.cloud_model_count', { count: pModels.length })) + '">' +
           pModels.length + '</span>';
+        var isSub = typeof isSubscriptionProvider === 'function' && isSubscriptionProvider(p);
+        var authTagHtml = isSub
+          ? '<span class="ph-tag tag-sub" title="' + U.escapeHtml(I18n.t('dashboard.cloud_sub_note')) + '">' + U.escapeHtml(I18n.t('mode.subscription')) + '</span>'
+          : '<span class="ph-tag tag-api" title="' + U.escapeHtml(I18n.t('dashboard.cloud_note', { provider: pLabel })) + '">' + U.escapeHtml(I18n.t('mode.api')) + '</span>';
+        // Subscription cards: status element is a separate slot so the auth-type tag
+        // stays visible after the CLI status fetch overwrites the status element.
+        var statusHtml = opts.statusHtml ||
+          '<span class="badge badge-green">' + U.escapeHtml(I18n.t('dashboard.cloud_connected')) + '</span>';
         card.innerHTML =
           '<div class="cloud-card-header' + (opts.headerClass ? ' ' + opts.headerClass : '') + '">' +
             '<span class="cloud-provider-name">' + (cardIconHtml ? cardIconHtml + ' ' : '') + U.escapeHtml(pLabel) + modelCountHtml + '</span>' +
             '<span style="display:flex;align-items:center;gap:8px">' +
-              (opts.statusHtml || '<span class="badge badge-green">' + U.escapeHtml(I18n.t('dashboard.cloud_connected')) + '</span>') +
+              statusHtml +
+              authTagHtml +
               expandToggleHtml +
             '</span>' +
           '</div>' +
