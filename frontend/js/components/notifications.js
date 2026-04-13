@@ -492,7 +492,9 @@
           '<span class="ph-name">' + U.escapeHtml(name) + '</span>' +
           '<span class="ph-dot ' + dotClass + '"></span>' +
           (latencyText ? '<span class="ph-latency">' + U.escapeHtml(latencyText) + '</span>' : '') +
-          '<span class="ph-tag tag-api">' + I18n.t('mode.api') + '</span>';
+          (typeof isSubscriptionProvider === 'function' && isSubscriptionProvider(p)
+            ? '<span class="ph-tag tag-sub">' + I18n.t('mode.subscription') + '</span>'
+            : '<span class="ph-tag tag-api">' + I18n.t('mode.api') + '</span>');
         item.title = name + ': ' + h.status + (h.detail ? ' \u2014 ' + h.detail : '');
         bar.appendChild(item);
       });

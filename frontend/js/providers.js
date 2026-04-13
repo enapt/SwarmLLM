@@ -35,7 +35,7 @@ var _ICON_MAP = {
 // Previously duplicated as providerLabels (×3) and providerDisplayNames (×1).
 var PROVIDER_NAMES = {
   anthropic:  'Anthropic',
-  claude_subscription: 'Claude Code (Subscription)',
+  claude_subscription: 'Claude Code',
   openai:     'OpenAI',
   deepseek:   'DeepSeek',
   mistral:    'Mistral',
