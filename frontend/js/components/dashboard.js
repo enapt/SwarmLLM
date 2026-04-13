@@ -1485,6 +1485,10 @@
                   '</div>' +
                   (healthBadgeHtml ? '<div class="mce-section-body">' + healthBadgeHtml + '</div>' : '') +
                 '</div>' +
+                // PRIVACY — pipeline encryption (skipped for single-shard models).
+                // Above CONFIG so the connector line lands higher and closer
+                // to the endpoint shard rows on the right.
+                privacySectionHtml +
                 // CONFIG — static spec sheet: arch, quant, size, shards, mode, vram.
                 // Trust badge sits in the header top-right.
                 '<div class="mce-section mce-section-config">' +
@@ -1494,8 +1498,6 @@
                   '</div>' +
                   '<dl class="mce-config-grid">' + configGridHtml + '</dl>' +
                 '</div>' +
-                // PRIVACY — pipeline encryption (skipped for single-shard models)
-                privacySectionHtml +
                 '<div class="mce-actions">' + actionHtml + removeHtml + '</div>' +
                 (fileIndicators ? '<div class="mce-file-warn">' + fileIndicators + '</div>' : '') +
               '</div>' +
