@@ -691,12 +691,47 @@
         .then(function(res) { return res.ok ? res.json() : null; })
         .then(function(plan) {
           if (!plan || !plan.segments || plan.segments.length === 0) return;
-          var localId = plan.local_node_id;
-          matrix.setAttribute('data-has-plan', '1');
-          matrix.querySelectorAll('tbody tr').forEach(function(tr) { tr.classList.add('unplanned-row'); });
+          // Cache plan on the matrix so resize-driven redraws can reuse it
+          // without re-fetching from the server.
+          matrix._pipelinePlan = plan;
+          App.dashboard._drawPipelinePath(matrix);
+          // Redraw when the table's layout changes (visibility toggles,
+          // peers-list expand, window resize). This is what makes the path
+          // appear on first paint without needing a manual view flick —
+          // the initial rAF often fires before the table has real dimensions.
+          if (!matrix._pipelineRO && typeof ResizeObserver !== 'undefined') {
+            var ro = new ResizeObserver(function() { App.dashboard._drawPipelinePath(matrix); });
+            ro.observe(table);
+            matrix._pipelineRO = ro;
+          }
+        })
+        .catch(function() { /* quiet: plan unavailable (no peers etc.) */ });
+    },
 
-          var points = [];
-          plan.segments.forEach(function(seg, i) {
+    _drawPipelinePath: function(matrix) {
+      if (!matrix) return;
+      var plan = matrix._pipelinePlan;
+      var table = matrix.querySelector('table');
+      var svg = matrix.querySelector('.shard-matrix-path');
+      if (!plan || !table || !svg) return;
+      if (table.clientWidth === 0 || table.clientHeight === 0) return;
+      svg.innerHTML = '';
+      // Reset row highlights from any previous draw.
+      matrix.querySelectorAll('.planned-cell').forEach(function(el) {
+        el.classList.remove('planned-cell');
+        el.removeAttribute('data-plan-order');
+      });
+      matrix.querySelectorAll('tbody tr').forEach(function(tr) {
+        tr.classList.remove('planned-row');
+        tr.classList.add('unplanned-row');
+      });
+      matrix.setAttribute('data-has-plan', '1');
+
+      var localId = plan.local_node_id;
+      var U = App.utils;
+      var points = [];
+      var tblRect = table.getBoundingClientRect();
+      plan.segments.forEach(function(seg, i) {
             var peerId = seg.node_id;
             var row = peerId === localId
               ? matrix.querySelector('tr.srm-row-self')
@@ -704,16 +739,31 @@
             if (!row) return;
             row.classList.remove('unplanned-row');
             row.classList.add('planned-row');
-            var td = row.querySelector('td[data-shard-col="' + seg.shard_index + '"]');
-            if (!td) return;
-            td.classList.add('planned-cell');
-            td.setAttribute('data-plan-order', String(i + 1));
-            var tblRect = table.getBoundingClientRect();
-            var r = td.getBoundingClientRect();
-            points.push({
-              x: (r.left + r.width / 2) - tblRect.left,
-              y: (r.top + r.height / 2) - tblRect.top,
-              local: seg.is_local,
+            // Mark every cell this segment covers (a peer may serve multiple
+            // contiguous shards as one segment).
+            var indices = (seg.shard_indices && seg.shard_indices.length)
+              ? seg.shard_indices.slice().sort(function(a, b) { return a - b; })
+              : [seg.shard_index];
+            var segCells = [];
+            indices.forEach(function(idx) {
+              var td = row.querySelector('td[data-shard-col="' + idx + '"]');
+              if (!td) return;
+              td.classList.add('planned-cell');
+              segCells.push(td);
+            });
+            if (segCells.length === 0) return;
+            // Route the polyline along the chosen cells: enter at the first,
+            // traverse to the last. The hop label sits on the first cell.
+            segCells[0].setAttribute('data-plan-order', String(i + 1));
+            segCells.forEach(function(td, k) {
+              var r = td.getBoundingClientRect();
+              points.push({
+                x: (r.left + r.width / 2) - tblRect.left,
+                y: (r.top + r.height / 2) - tblRect.top,
+                local: seg.is_local,
+                anchor: k === 0,
+                label: k === 0 ? String(i + 1) : '',
+              });
             });
           });
           if (points.length < 1) return;
@@ -729,22 +779,24 @@
           path.setAttribute('d', d);
           path.setAttribute('class', 'shard-matrix-path-line');
           svg.appendChild(path);
-          points.forEach(function(p, i) {
+          // Draw a dot on every cell along the path so the traversal is
+          // visible end-to-end. Number only the segment anchors (1, 2, 3...).
+          points.forEach(function(p) {
             var c = document.createElementNS(ns, 'circle');
             c.setAttribute('cx', p.x);
             c.setAttribute('cy', p.y);
-            c.setAttribute('r', '5');
-            c.setAttribute('class', 'shard-matrix-path-dot' + (p.local ? ' local' : ''));
+            c.setAttribute('r', p.anchor ? '6' : '3');
+            c.setAttribute('class', 'shard-matrix-path-dot' + (p.local ? ' local' : '') + (p.anchor ? ' anchor' : ''));
             svg.appendChild(c);
-            var t = document.createElementNS(ns, 'text');
-            t.setAttribute('x', p.x);
-            t.setAttribute('y', p.y + 3);
-            t.setAttribute('class', 'shard-matrix-path-label');
-            t.textContent = String(i + 1);
-            svg.appendChild(t);
+            if (p.label) {
+              var t = document.createElementNS(ns, 'text');
+              t.setAttribute('x', p.x);
+              t.setAttribute('y', p.y + 3);
+              t.setAttribute('class', 'shard-matrix-path-label');
+              t.textContent = p.label;
+              svg.appendChild(t);
+            }
           });
-        })
-        .catch(function() { /* quiet: plan unavailable (no peers etc.) */ });
     },
     _renderModelTicker: function(modelId) {
       var actEvents = _modelEvents[modelId] || [];

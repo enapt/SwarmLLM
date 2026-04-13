@@ -2133,6 +2133,29 @@ pub async fn pipeline_plan(
         .assemble_pipeline_for(&mid, &local_node_id, uuid::Uuid::new_v4())
         .map_err(ApiError)?;
 
+    // Map segment layer range → full list of shard indices so the UI can
+    // highlight every cell the segment covers, not just the anchor shard.
+    let manifest = state.shared_state.model_registry.get_manifest(&mid);
+    let shard_indices_for = |lr: (u32, u32)| -> Vec<u32> {
+        let (s, e) = lr;
+        manifest
+            .as_ref()
+            .map(|m| {
+                let mut v: Vec<u32> = m
+                    .shards
+                    .iter()
+                    .filter(|sh| {
+                        let (ss, se) = sh.layer_range;
+                        se > s && ss < e
+                    })
+                    .map(|sh| sh.index)
+                    .collect();
+                v.sort_unstable();
+                v
+            })
+            .unwrap_or_default()
+    };
+
     let segments: Vec<serde_json::Value> = assignment
         .segments
         .iter()
@@ -2149,11 +2172,13 @@ pub async fn pipeline_plan(
                 .nickname_registry
                 .get(&seg.node_id)
                 .map(|r| r.nickname.clone());
+            let shard_indices = shard_indices_for(seg.layer_range);
             serde_json::json!({
                 "node_id": format!("{}", seg.node_id),
                 "nickname": nickname,
                 "region": region,
                 "shard_index": seg.shard_id.index,
+                "shard_indices": shard_indices,
                 "layer_range": [seg.layer_range.0, seg.layer_range.1],
                 "latency_ms": if is_local { Some(0) } else { peer_latency },
                 "is_local": is_local,
