@@ -3811,6 +3811,22 @@ textarea:focus:not(:focus-visible) {
   pointer-events: none;
   border-radius: 1px;
 }
+/* Matrix view: horizontal tail from the vertical line to the first
+   pinned column header, bridging the gap between the left gutter
+   line and the column in the matrix body. */
+.model-card-expanded.pipeline-encrypted .mce-right.pipe-matrix::after {
+  content: '';
+  position: absolute;
+  left: -7px;
+  top: var(--pipe-tail-y, 44px);
+  right: var(--pipe-tail-x, 100%);
+  height: 2px;
+  background: var(--green);
+  box-shadow: 0 0 6px rgba(34,197,94,0.45);
+  transform: translateY(-1px);
+  pointer-events: none;
+  border-radius: 1px;
+}
 /* Short solid stub on the privacy panel's right edge, joining the
    vertical connector line in the gutter. Centered vertically. */
 .model-card-expanded.pipeline-encrypted .mce-section-privacy::after {

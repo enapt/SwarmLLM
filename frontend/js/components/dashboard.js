@@ -268,7 +268,9 @@
       // up when the pipeline is E2E encrypted.
       var isFirst = shardCountTotal > 1 && s.index === 0;
       var isLast  = shardCountTotal > 1 && s.index === shardCountTotal - 1;
-      var isPinned = (isFirst || isLast) && !!m.encrypted_pipeline;
+      // Mirrors list-view: pinned only when this node holds the endpoint
+      // (the E2E guarantee needs local possession of first+last).
+      var isPinned = (isFirst || isLast) && !!s.local && !!m.encrypted_pipeline;
       var thCls = [];
       if (isFirst) thCls.push('smh-endpoint-first');
       if (isLast)  thCls.push('smh-endpoint-last');
@@ -608,12 +610,16 @@
       if (!right) return;
       // List view uses shard rows; matrix view uses column headers.
       var pinned = right.querySelectorAll('.shard-row-pipeline-pinned');
+      var isMatrix = false;
       if (pinned.length < 1) {
         pinned = right.querySelectorAll('.smh-col-pipeline-pinned');
+        isMatrix = pinned.length > 0;
       }
+      right.classList.toggle('pipe-matrix', isMatrix);
       if (pinned.length < 1) {
         right.style.removeProperty('--pipe-line-top');
         right.style.removeProperty('--pipe-line-bottom');
+        right.style.removeProperty('--pipe-tail-x');
         return;
       }
       // Line must span all three connection points: the privacy panel's
@@ -637,6 +643,18 @@
       var bottomOffset = rightRect.height - Math.max.apply(null, anchors);
       right.style.setProperty('--pipe-line-top', topOffset + 'px');
       right.style.setProperty('--pipe-line-bottom', bottomOffset + 'px');
+      // Matrix view: add a horizontal tail from the line across to the
+      // first pinned column so the visual connection is obvious.
+      if (isMatrix) {
+        var firstPinnedRect = pinned[0].getBoundingClientRect();
+        var tailTopY = (firstPinnedRect.top + firstPinnedRect.height / 2) - rightRect.top;
+        var tailRightX = rightRect.right - (firstPinnedRect.left + firstPinnedRect.width / 2);
+        right.style.setProperty('--pipe-tail-y', tailTopY + 'px');
+        right.style.setProperty('--pipe-tail-x', tailRightX + 'px');
+      } else {
+        right.style.removeProperty('--pipe-tail-y');
+        right.style.removeProperty('--pipe-tail-x');
+      }
     },
     _renderModelTicker: function(modelId) {
       var actEvents = _modelEvents[modelId] || [];
