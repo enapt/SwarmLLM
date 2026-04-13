@@ -269,6 +269,19 @@ impl NetworkManager {
         self.peer_to_node.get(peer).map(|r| r.value().clone())
     }
 
+    /// Refresh `last_seen` on any inbound request/response traffic. Health monitor
+    /// evicts peers at PING_INTERVAL × MAX_MISSED_PINGS (90s) of silence. On slow
+    /// transports (e.g. WSL2 QUIC substream negotiation at 14–25s) PEX replies can
+    /// arrive successfully but after specific dispatch handlers already declared
+    /// the peer stale. Any rr activity proves liveness — treat it as a heartbeat.
+    fn refresh_peer_last_seen(&self, peer: &libp2p::PeerId) {
+        if let Some(node_id) = self.peer_to_node.get(peer) {
+            if let Some(mut peer_info) = self.shared_state.peer_registry.get_mut(&*node_id) {
+                peer_info.last_seen = chrono::Utc::now();
+            }
+        }
+    }
+
     /// Send a SwarmMessage to the dispatcher with transport-authenticated sender.
     #[allow(clippy::result_large_err)]
     fn dispatch_authenticated(
@@ -1674,6 +1687,7 @@ impl NetworkManager {
         request: SwarmRequest,
         channel: request_response::ResponseChannel<SwarmResponse>,
     ) {
+        self.refresh_peer_last_seen(&peer);
         match request {
             SwarmRequest::Message(mut msg) => {
                 // Handle PEX messages inline instead of forwarding to dispatcher
@@ -1941,6 +1955,7 @@ impl NetworkManager {
         request_id: OutboundRequestId,
         response: SwarmResponse,
     ) {
+        self.refresh_peer_last_seen(&peer);
         match response {
             SwarmResponse::Message(msg) => {
                 // Handle PEX response inline
