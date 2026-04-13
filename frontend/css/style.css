@@ -3812,13 +3812,12 @@ textarea:focus:not(:focus-visible) {
   border-radius: 1px;
 }
 /* Short solid stub on the privacy panel's right edge, joining the
-   vertical connector line in the gutter. Sits at the top third of the
-   panel so the connector stays short when there are few shards. */
+   vertical connector line in the gutter. Centered vertically. */
 .model-card-expanded.pipeline-encrypted .mce-section-privacy::after {
   content: '';
   position: absolute;
   right: -9px;
-  top: 33%;
+  top: 50%;
   transform: translateY(-50%);
   width: 9px;
   height: 2px;

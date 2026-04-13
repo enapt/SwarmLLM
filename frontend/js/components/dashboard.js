@@ -609,9 +609,9 @@
       ];
       var privacy = exp.querySelector('.mce-section-privacy');
       if (privacy) {
-        // Stub sits at top: 33% of the privacy panel (matches the CSS).
+        // Stub sits at the privacy panel's vertical center (matches CSS).
         var pRect = privacy.getBoundingClientRect();
-        anchors.push((pRect.top + pRect.height * 0.33) - rightRect.top);
+        anchors.push((pRect.top + pRect.height / 2) - rightRect.top);
       }
       var topOffset    = Math.min.apply(null, anchors);
       var bottomOffset = rightRect.height - Math.max.apply(null, anchors);
