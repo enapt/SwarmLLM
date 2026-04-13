@@ -45,22 +45,24 @@
   // ==========================================================================
   var MMPROJ_SHARD_INDEX = 0xFFFFFFFF;
 
+  // Per-shard *display* state. Local download progress is owned by the
+  // Downloads panel — never re-rendered inside the model card. The only
+  // "in-flight" hint here is gossip from OTHER nodes (peer_downloads), so
+  // users can still see the swarm is actively replicating.
   function _shardState(s) {
-    if (s.download && s.download.state === 'Downloading') return 'downloading';
-    if (s.download && s.download.state === 'Verifying') return 'downloading';
-    if (s.download && (s.download.state === 'Queued' || s.download.state === 'pending')) return 'downloading';
-    if (s.peer_downloads && s.peer_downloads.length > 0 && !s.local) return 'downloading';
     if (s.local && s.in_vram) return 'vram';
     if (s.local) return 'disk';
+    if (s.peer_downloads && s.peer_downloads.length > 0) return 'gossip';
     if ((s.holders || 0) > 0) return 'peer';
     return 'missing';
   }
 
   function _shardGlyph(state) {
-    // Filled square (▣), outlined square (▢), half-circle (◐), middle dot (·), heavy ballot (✕)
+    // Filled square (▣), outlined square (▢), half-circle (◐ — peer fetching),
+    // middle dot (·), heavy ballot (✕)
     return state === 'vram' ? '\u25A0'
          : state === 'disk' ? '\u25A1'
-         : state === 'downloading' ? '\u25D0'
+         : state === 'gossip' ? '\u25D0'
          : state === 'peer' ? '\u00B7'
          : '\u2715';
   }
@@ -68,11 +70,12 @@
   function _shardStatusLabel(s, state) {
     if (state === 'vram') return I18n.t('shard.row.vram_label');
     if (state === 'disk') return I18n.t('shard.row.disk_label');
-    if (state === 'downloading') {
-      var pct = (s.download && typeof s.download.progress_pct === 'number')
-        ? s.download.progress_pct
-        : (s.peer_downloads && s.peer_downloads[0] ? s.peer_downloads[0].progress_pct : 0);
-      return (pct || 0) + '%\u2193';
+    if (state === 'gossip') {
+      // Peer download in flight (gossip view). Show the leader's progress so
+      // the user can see replication is moving.
+      var lead = s.peer_downloads && s.peer_downloads[0]
+        ? s.peer_downloads[0].progress_pct : 0;
+      return (lead || 0) + '%\u2193';
     }
     if (state === 'peer') return I18n.t('shard.row.peer_label');
     return I18n.t('shard.row.missing_label');
@@ -139,12 +142,13 @@
     } else if (state === 'vram') {
       parts.push('<button class="shard-row-act" data-shard-act="unload" title="' + U.escapeHtml(I18n.t('shard.row.action_unload')) + '">\u25BC</button>');
     }
-    if (state === 'downloading') {
-      parts.push('<button class="shard-row-act danger" data-shard-act="cancel" title="' + U.escapeHtml(I18n.t('shard.row.action_cancel')) + '">\u2715</button>');
-    } else if (state === 'peer' || state === 'missing') {
+    // Local-download state lives in the Downloads panel, not the shard row —
+    // no per-row cancel here. Download button is offered for every non-local
+    // shard (peer / missing / gossip-in-flight by other peers).
+    if (state === 'peer' || state === 'missing' || state === 'gossip') {
       parts.push('<button class="shard-row-act" data-shard-act="download" title="' + U.escapeHtml(I18n.t('shard.row.action_download')) + '">\u21E9</button>');
     }
-    if (isLocal && state !== 'downloading') {
+    if (isLocal) {
       parts.push('<button class="shard-row-act danger" data-shard-act="delete" title="' + U.escapeHtml(I18n.t('shard.row.action_delete')) + '">\u2302</button>');
     }
     return parts.length ? '<span class="shard-row-actions">' + parts.join('') + '</span>' : '';
@@ -172,8 +176,8 @@
     // Pushpin icon = "pin to device" (auto-manage). Reserved 🔒/🔓 for pipeline encryption.
     var lockGlyph = '\uD83D\uDCCC';
     var lockTitle = s.locked ? I18n.t('shard.unlock') : I18n.t('shard.lock');
-    var pieceBar = (state === 'downloading' && s.peer_downloads && s.peer_downloads.length > 0)
-      ? _buildPieceBar(s.peer_downloads, (s.download && s.download.progress_pct) || 0)
+    var pieceBar = (state === 'gossip' && s.peer_downloads && s.peer_downloads.length > 0)
+      ? _buildPieceBar(s.peer_downloads, 0)
       : '';
     var actions = _buildRowActions(state, !!s.local, !!s.in_vram);
     var rowClass = 'shard-row';
@@ -290,8 +294,7 @@
     shards.forEach(function(s, i) {
       var state = _shardState(s);
       if (state === 'peer') state = 'absent';
-      var glyph = state === 'vram' ? '\u25A0' : state === 'disk' ? '\u25A1'
-                : state === 'downloading' ? '\u25D0' : '';
+      var glyph = state === 'vram' ? '\u25A0' : state === 'disk' ? '\u25A1' : '';
       var sIsFirst = shardCountTotal > 1 && s.index === 0;
       var sIsLast  = shardCountTotal > 1 && s.index === shardCountTotal - 1;
       var sPinned  = (sIsFirst || sIsLast) && !!s.local && !!m.encrypted_pipeline;
@@ -354,7 +357,6 @@
       var segClass = 'seg-missing';
       if (s.local && s.in_vram) segClass = 'seg-active';
       else if (s.local) segClass = 'seg-nominal';
-      else if (s.download && (s.download.state === 'Downloading' || s.download.state === 'Verifying')) segClass = 'seg-downloading';
       else if (s.peer_downloads && s.peer_downloads.length > 0) segClass = 'seg-downloading';
       else if ((s.holders || 0) >= 2) segClass = 'seg-peer';
       else if ((s.holders || 0) === 1) segClass = 'seg-warning';
@@ -554,9 +556,8 @@
       var destructive = [];
       if (state === 'disk') destructive.push('<button data-shard-act="load">' + U.escapeHtml(I18n.t('shard.row.action_load')) + '</button>');
       if (state === 'vram') destructive.push('<button data-shard-act="unload">' + U.escapeHtml(I18n.t('shard.row.action_unload')) + '</button>');
-      if (state === 'downloading') destructive.push('<button class="danger" data-shard-act="cancel">' + U.escapeHtml(I18n.t('shard.row.action_cancel')) + '</button>');
-      if (state === 'peer' || state === 'missing') destructive.push('<button data-shard-act="download">' + U.escapeHtml(I18n.t('shard.row.action_download')) + '</button>');
-      if (shard.local && state !== 'downloading') destructive.push('<button class="danger" data-shard-act="delete">' + U.escapeHtml(I18n.t('shard.row.action_delete')) + '</button>');
+      if (state === 'peer' || state === 'missing' || state === 'gossip') destructive.push('<button data-shard-act="download">' + U.escapeHtml(I18n.t('shard.row.action_download')) + '</button>');
+      if (shard.local) destructive.push('<button class="danger" data-shard-act="delete">' + U.escapeHtml(I18n.t('shard.row.action_delete')) + '</button>');
 
       var panelHtml = '<div class="shard-row-expanded-panel">' +
         '<div class="srep-section">' +
@@ -1374,14 +1375,13 @@
             var segClass = 'seg-missing';
             if (s.local && s.in_vram) segClass = 'seg-active';
             else if (s.local) segClass = 'seg-nominal';
-            else if (s.download && (s.download.state === 'Downloading' || s.download.state === 'Verifying')) segClass = 'seg-downloading';
             else if (s.peer_downloads && s.peer_downloads.length > 0) segClass = 'seg-downloading';
             else if (s.holders > 0) {
               segClass = (s.holders || 0) === 1 ? 'seg-warning' : 'seg-peer';
             }
             else segClass = 'seg-problem';
             // Missing but no holders at all = problem
-            if (!s.local && (s.holders || 0) === 0 && !s.download) segClass = shardCount > 1 ? 'seg-problem' : 'seg-missing';
+            if (!s.local && (s.holders || 0) === 0) segClass = shardCount > 1 ? 'seg-problem' : 'seg-missing';
             availBarHtml += '<div class="avail-seg ' + segClass + '"></div>';
           });
           availBarHtml += '</div>';
@@ -1513,76 +1513,11 @@
             '</div>';
         }
 
-        // Download progress bar
-        var progressHtml = '';
-        if (isDownloading && m.acquisition_progress) {
-          var ap = m.acquisition_progress;
-          var dlBytes = ap.downloaded_bytes || 0;
-          var totalBytes = ap.total_bytes || 0;
-          if (dlBytes > totalBytes && totalBytes > 0) dlBytes = totalBytes;
-          var pct = totalBytes > 0 ? Math.min(100, Math.round((dlBytes / totalBytes) * 100)) : 0;
-          var speed = ap.speed_bytes_per_sec || 0;
-          var etaStr = '';
-          if (speed > 0 && totalBytes > dlBytes) {
-            etaStr = U.formatEta((totalBytes - dlBytes) / speed);
-          }
-          var dlShards2 = shards.filter(function(s) { return s.download || s.local; });
-          var segmentCount = Math.max(dlShards2.length, shardCount);
-          var segmentsHtml = '';
-          if (segmentCount > 0) {
-            var segW = (100 / segmentCount);
-            for (var si = 0; si < segmentCount; si++) {
-              var sh = shards.find(function(s) { return s.index === si; });
-              var segPct = 0;
-              if (sh && sh.local) segPct = 100;
-              else if (sh && sh.download) segPct = sh.download.progress_pct || 0;
-              segmentsHtml += '<div class="dl-seg" style="width:' + segW.toFixed(2) + '%;"><div class="dl-seg-fill" style="width:' + segPct + '%"></div></div>';
-            }
-          }
-          var shardLabel;
-          var localNow = shards.filter(function(s) { return s.local; }).length;
-          var dlSource = ap.source || '';
-          var dlTrigger = ap.trigger || '';
-          var triggerText = dlTrigger === 'auto_manage' ? I18n.t('dashboard.auto_manage') : (dlTrigger === 'user' ? I18n.t('dashboard.manual') : '');
-          var sourceText = dlSource === 'huggingface' ? I18n.t('dashboard.from_hf') : (dlSource === 'peers' ? I18n.t('dashboard.from_peers') : '');
-          if (isCachingLocally) {
-            shardLabel = I18n.t('dashboard.caching_label', { trigger: triggerText || I18n.t('dashboard.auto_manage'), local: localNow, total: shardCount });
-          } else {
-            // Show which specific shard is downloading (from shard_details)
-            var dlShardIdx = '';
-            if (ap.shard_details) {
-              var activeShard = ap.shard_details.find(function(sd) { return sd.state === 'downloading'; });
-              if (activeShard) dlShardIdx = I18n.t('dashboard.downloading_part', { n: activeShard.index + 1 });
-            }
-            shardLabel = (triggerText ? triggerText + ': ' : '') + I18n.t('dashboard.downloading_label') + dlShardIdx + (sourceText ? ' ' + sourceText : '') + I18n.t('dashboard.downloading_local', { local: localNow, total: shardCount });
-          }
-          var rightText = U.formatDlProgress(dlBytes, totalBytes, pct);
-          if (speed > 0) rightText += ' \u00b7 ' + U.formatSpeed(speed);
-          if (etaStr) rightText += I18n.t('dashboard.eta', { eta: etaStr });
-          progressHtml = _buildProgressBar({ safeId: safeId, pct: pct, label: shardLabel, rightText: rightText, barContent: segmentsHtml });
-        }
-
-        // Per-shard download bars
-        var perShardDlHtml = '';
-        if (isDownloading && shards.length > 0 && shardCount <= 20) {
-          var dlShardBars = shards.filter(function(s) {
-            return s.download && s.download.state === 'Downloading';
-          });
-          if (dlShardBars.length > 1) {
-            perShardDlHtml = '<div class="per-shard-dl">';
-            dlShardBars.forEach(function(s) {
-              var pct2 = s.download.progress_pct || 0;
-              var bytes = s.download.downloaded_bytes || 0;
-              var total = s.download.total_bytes || s.size_bytes || 0;
-              perShardDlHtml += '<div class="per-shard-dl-row">' +
-                '<span class="per-shard-dl-label">' + U.escapeHtml(I18n.t('shard.part_n', { n: s.index + 1 })) + '</span>' +
-                '<div class="per-shard-dl-bar"><div class="per-shard-dl-fill" style="width:' + pct2 + '%"></div></div>' +
-                '<span class="per-shard-dl-pct">' + U.formatBytes(bytes) + '/' + U.formatBytes(total) + ' (' + pct2 + '%)</span>' +
-                '</div>';
-            });
-            perShardDlHtml += '</div>';
-          }
-        }
+        // YOUR own download progress is rendered exclusively by the global
+        // Downloads panel (see frontend/js/components/downloads.js). The model
+        // card never duplicates it — peer_downloads dots in the matrix view
+        // already convey "swarm replication is active" via gossip from other
+        // nodes.
 
         // --- Parse architecture + quantization from model ID ---
         var modelId = m.id || '';
@@ -1686,7 +1621,6 @@
             '</div>' +
           '</div>' +
           '<div class="model-card-shards">' +
-            progressHtml + perShardDlHtml +
             '<div class="model-card-expanded' + (m.encrypted_pipeline ? ' pipeline-encrypted' : '') + '">' +
               '<div class="mce-left">' +
                 // STATUS — title + status badge inline; peer count on the right.
