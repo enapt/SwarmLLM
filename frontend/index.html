@@ -912,6 +912,18 @@
             </div>
           </div>
 
+          <!-- Downloads queue (hidden when no active downloads) -->
+          <div class="panel mt-2 hidden" id="download-queue-panel">
+            <div class="panel-header" data-collapse="download-queue-body">
+              <h2 data-i18n="dashboard.downloads_title">Downloads</h2>
+              <span class="text-muted" style="font-size:0.75rem" id="download-queue-count"></span>
+            </div>
+            <div class="panel-body" id="download-queue-body">
+              <div id="download-queue-list"></div>
+              <div id="download-queue-empty" class="text-muted hidden" style="font-size:0.78rem;padding:8px 0;opacity:0.6" data-i18n="dashboard.downloads_empty">No active downloads.</div>
+            </div>
+          </div>
+
           <!-- Activity + Network Logs side by side -->
           <div class="grid grid-2 mt-2">
             <div class="panel">

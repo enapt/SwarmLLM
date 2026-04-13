@@ -1079,5 +1079,7 @@
   "claude_code.permission_required": "⚠ Permission Required",
   "claude_code.diff_more_lines": "... ({count} more lines)",
   "shard.source_peer": "peer {id}",
-  "shard.source_peers": "peers"
+  "shard.source_peers": "peers",
+  "dashboard.downloads_title": "Downloads",
+  "dashboard.downloads_empty": "No active downloads."
 }
