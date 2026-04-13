@@ -3242,30 +3242,43 @@ textarea:focus:not(:focus-visible) {
 .model-card-actions .btn-action.btn-download { color: var(--accent); border-color: rgba(59,130,246,0.3); background: var(--accent-glow); }
 .model-card-actions .btn-action.btn-download:hover { background: rgba(59,130,246,0.22); }
 
-/* ---- Composite Health Badge ---- */
+/* ---- Composite Health Badge ----
+   Shares the ph-tag visual language (uppercase, bordered, compact) used by
+   the API / SUBSCRIPTION tags in the provider health bar. This is the
+   canonical badge style across the app. */
 .composite-badge {
-  display: inline-flex; align-items: center; gap: 4px;
-  font-size: 0.68rem; font-weight: 600; padding: 2px 8px;
-  border-radius: var(--radius-pill); white-space: nowrap;
-  letter-spacing: 0.02em;
+  display: inline-flex; align-items: center; gap: 5px;
+  font-size: 0.52rem; font-weight: 700; padding: 2px 6px;
+  border-radius: 3px; white-space: nowrap;
+  text-transform: uppercase; letter-spacing: 0.06em;
+  border: 1px solid transparent; line-height: 1.4;
 }
 .composite-badge .cb-dot {
-  width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0;
+  width: 5px; height: 5px; border-radius: 50%; flex-shrink: 0;
 }
-.composite-badge.cb-active { background: var(--green-dim); color: var(--green); }
-.composite-badge.cb-active .cb-dot { background: var(--green); box-shadow: 0 0 8px rgba(34,197,94,0.6); }
-.composite-badge.cb-ready { background: rgba(34,197,94,0.08); color: rgba(34,197,94,0.7); }
+.composite-badge.cb-active {
+  color: var(--green); background: var(--green-dim);
+  border-color: rgba(34,197,94,0.35);
+}
+.composite-badge.cb-active .cb-dot { background: var(--green); box-shadow: 0 0 6px rgba(34,197,94,0.6); }
+.composite-badge.cb-ready {
+  color: rgba(34,197,94,0.8); background: rgba(34,197,94,0.08);
+  border-color: rgba(34,197,94,0.28);
+}
 .composite-badge.cb-ready .cb-dot { background: rgba(34,197,94,0.5); }
-.composite-badge.cb-downloading { background: var(--accent-glow); color: var(--accent); }
+.composite-badge.cb-downloading {
+  color: var(--accent); background: var(--accent-glow);
+  border-color: rgba(59,130,246,0.35);
+}
 .composite-badge.cb-downloading .cb-dot { background: var(--accent); animation: badge-pulse 2s infinite; }
-.composite-badge.cb-fragile { background: var(--orange-dim); color: var(--orange); }
+.composite-badge.cb-fragile {
+  color: var(--orange); background: var(--orange-dim);
+  border-color: rgba(245,158,11,0.35);
+}
 .composite-badge.cb-fragile .cb-dot { background: var(--orange); }
 .composite-badge.cb-incomplete {
-  background: var(--red-dim);
-  color: var(--red);
-  font-weight: 700;
-  border: 1px solid rgba(239,68,68,0.5);
-  padding: 2px 8px;
+  color: var(--red); background: var(--red-dim);
+  border-color: rgba(239,68,68,0.5);
 }
 .composite-badge.cb-incomplete .cb-dot { background: var(--red); box-shadow: 0 0 6px rgba(239,68,68,0.7); animation: badge-pulse 1.6s infinite; }
 /* Whole-card accent when network missing — border, warning shadow */
@@ -3273,7 +3286,10 @@ textarea:focus:not(:focus-visible) {
   border-left: 3px solid var(--red);
   box-shadow: inset 3px 0 0 0 var(--red), 0 0 0 1px rgba(239,68,68,0.15);
 }
-.composite-badge.cb-network { background: rgba(255,255,255,0.04); color: var(--text-muted); }
+.composite-badge.cb-network {
+  color: var(--text-secondary); background: rgba(127,127,127,0.10);
+  border-color: rgba(127,127,127,0.25);
+}
 .composite-badge.cb-network .cb-dot { background: var(--text-muted); }
 @keyframes badge-pulse {
   0%, 100% { opacity: 1; }
@@ -3503,17 +3519,36 @@ textarea:focus:not(:focus-visible) {
 .model-card-expanded .mce-left .mce-section-body {
   display: flex;
   flex-direction: column;
+  align-items: flex-start;
   gap: 6px;
 }
-.model-card-expanded .mce-left .mce-section .composite-badge {
-  align-self: flex-start;
+/* STATUS section packs badge + health + peers on one horizontal line. */
+.model-card-expanded .mce-left .mce-section-status .mce-section-body {
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.model-card-expanded .mce-left .mce-section-status .mce-health {
+  margin: 0;
+}
+.model-card-expanded .mce-left .mce-section-status .mce-health-detail {
+  font-size: 0.6rem;
+}
+.model-card-expanded .mce-left .mce-section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
 }
 .model-card-expanded .mce-left .mce-status-peers {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
-  font-size: 0.72rem;
+  gap: 4px;
+  font-size: 0.6rem;
   color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
 }
 .model-card-expanded .mce-left .mce-status-peers.mce-warn {
   color: var(--orange);
@@ -3524,13 +3559,20 @@ textarea:focus:not(:focus-visible) {
   font-size: 0.8rem;
 }
 
-/* CONFIG — <dl> key/value grid. Left column muted label, right monospace value. */
+/* CONFIG — <dl> key/value grid in 2 pair-columns (4 tracks total). Values
+   are short enough that two pairs fit per row comfortably. Falls back to
+   1 pair-column on narrow widths. */
 .model-card-expanded .mce-left .mce-config-grid {
   display: grid;
-  grid-template-columns: auto 1fr;
-  gap: 4px 10px;
+  grid-template-columns: auto 1fr auto 1fr;
+  gap: 5px 12px;
   margin: 0;
   font-size: 0.7rem;
+}
+@media (max-width: 700px) {
+  .model-card-expanded .mce-left .mce-config-grid {
+    grid-template-columns: auto 1fr;
+  }
 }
 .model-card-expanded .mce-left .mce-config-grid dt {
   color: var(--text-muted);
@@ -3566,11 +3608,64 @@ textarea:focus:not(:focus-visible) {
   gap: 0;
 }
 
-/* Privacy section — remove the chip's own border; the section frame carries it. */
-.model-card-expanded .mce-left .mce-section-privacy .mce-pipeline {
-  border: none;
-  background: transparent;
-  padding: 0;
+/* -------- Section state modifiers (shared by any .mce-section) --------
+   Paints the frame + title in a single color family. Inner content inherits
+   visual context without needing its own borders or backgrounds. */
+.model-card-expanded .mce-left .mce-section.mce-section-state-green {
+  border-color: rgba(34,197,94,0.45);
+  background: rgba(34,197,94,0.08);
+}
+.model-card-expanded .mce-left .mce-section.mce-section-state-green .mce-section-title { color: var(--green); }
+.model-card-expanded .mce-left .mce-section.mce-section-state-blue {
+  border-color: rgba(59,130,246,0.35);
+  background: var(--accent-glow);
+}
+.model-card-expanded .mce-left .mce-section.mce-section-state-blue .mce-section-title { color: var(--accent); }
+.model-card-expanded .mce-left .mce-section.mce-section-state-amber {
+  border-color: rgba(245,158,11,0.35);
+  background: rgba(245,158,11,0.08);
+}
+.model-card-expanded .mce-left .mce-section.mce-section-state-amber .mce-section-title { color: var(--orange); }
+
+/* Toggleable section (clickable panel — e.g. Privacy enable/disable) */
+.model-card-expanded .mce-left .mce-section.mce-section-toggleable {
+  cursor: pointer;
+  user-select: none;
+  transition: transform 0.12s, box-shadow 0.15s, border-color 0.15s;
+}
+.model-card-expanded .mce-left .mce-section.mce-section-toggleable:hover {
+  box-shadow: 0 0 0 2px rgba(255,255,255,0.04), 0 2px 6px rgba(0,0,0,0.15);
+}
+.model-card-expanded .mce-left .mce-section.mce-section-toggleable:active { transform: scale(0.99); }
+
+/* Section right-aligned action/hint in the header (e.g. "Disable" toggle hint) */
+.model-card-expanded .mce-left .mce-section-action {
+  font-size: 0.56rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  padding: 2px 6px;
+  border-radius: 3px;
+  background: rgba(255,255,255,0.06);
+  color: inherit;
+  opacity: 0.85;
+}
+.model-card-expanded .mce-left .mce-section.mce-section-state-green .mce-section-action {
+  background: rgba(34,197,94,0.22); color: var(--green);
+}
+.model-card-expanded .mce-left .mce-section.mce-section-state-blue .mce-section-action {
+  background: rgba(59,130,246,0.2); color: var(--accent);
+}
+
+/* Section detail text (secondary/explanatory copy inside the body) */
+.model-card-expanded .mce-left .mce-section-detail {
+  color: var(--text-muted);
+  font-size: 0.62rem;
+  line-height: 1.35;
+}
+.model-card-expanded .mce-left .mce-section-icon {
+  font-size: 0.78rem;
+  line-height: 1;
 }
 
 /* File-missing warning sits below actions as a subtle caution line */
@@ -3595,75 +3690,7 @@ textarea:focus:not(:focus-visible) {
   background: rgba(255,255,255,0.02);
 }
 
-/* Legacy mce-info (compact single-line info row) retained for non-swarm cards */
-.model-card-expanded .mce-left .mce-info {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px 10px;
-  font-size: 0.62rem;
-  padding: 4px 0;
-  border-top: 1px dashed var(--border);
-  border-bottom: 1px dashed var(--border);
-}
-.model-card-expanded .mce-left .mce-info .mce-info-pair {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  white-space: nowrap;
-}
-.model-card-expanded .mce-left .mce-info .mce-info-label {
-  color: var(--text-muted);
-  font-size: 0.56rem;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-}
-.model-card-expanded .mce-left .mce-info .mce-info-pill {
-  display: inline-block;
-  padding: 1px 6px;
-  border-radius: var(--radius-pill, 9999px);
-  background: var(--bg-primary);
-  border: 1px solid var(--border);
-  font-family: var(--font-mono, monospace);
-  font-size: 0.6rem;
-  color: var(--text-primary);
-  letter-spacing: 0.03em;
-}
-/* Trust badge sitting inside .mce-info-pair — strip its legacy container padding */
-.model-card-expanded .mce-left .mce-info .model-card-detail-badges {
-  display: inline-flex;
-  padding: 0;
-  margin: 0;
-  gap: 0;
-}
-
-/* Section titles (small muted label above a grouped block) */
-.model-card-expanded .mce-left .mce-section-title {
-  font-size: 0.56rem;
-  color: var(--text-muted);
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-  margin-bottom: 3px;
-  font-weight: 600;
-}
-.model-card-expanded .mce-left .mce-health-section {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-
-.model-card-expanded .mce-left .mce-meta {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  font-size: 0.72rem;
-  color: var(--text-secondary);
-}
-.model-card-expanded .mce-left .mce-meta-row {
-  display: flex;
-  gap: 10px;
-  align-items: center;
-  flex-wrap: wrap;
-}
+/* Health chip shown in STATUS section body */
 .model-card-expanded .mce-left .mce-health {
   display: flex;
   align-items: baseline;
@@ -3683,100 +3710,6 @@ textarea:focus:not(:focus-visible) {
 .model-card-expanded .mce-left .mce-health.health-partial .mce-health-label { color: var(--orange); background: rgba(245,158,11,0.15); }
 .model-card-expanded .mce-left .mce-health.health-low .mce-health-label   { color: var(--red);    background: var(--red-dim, rgba(239,68,68,0.15)); }
 .model-card-expanded .mce-left .mce-health-detail { color: var(--text-muted); font-size: 0.62rem; }
-
-/* Pipeline encryption chip — surfaces the "hold first + last to fully encrypt"
-   guarantee. Three visual states: active (green glow), ready (blue), unprotected
-   (amber). Distinct visual language from the generic health chip. */
-.model-card-expanded .mce-left .mce-pipeline {
-  display: grid;
-  grid-template-columns: auto 1fr;
-  grid-template-areas:
-    "icon label"
-    "detail detail";
-  row-gap: 4px;
-  column-gap: 6px;
-  padding: 6px 8px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  font-size: 0.66rem;
-  background: var(--bg-tertiary);
-}
-.model-card-expanded .mce-left .mce-pipeline .mce-pipeline-icon {
-  grid-area: icon;
-  font-size: 0.9rem;
-  flex-shrink: 0;
-  opacity: 0.85;
-  line-height: 1;
-  align-self: center;
-}
-.model-card-expanded .mce-left .mce-pipeline .mce-pipeline-label {
-  grid-area: label;
-  font-weight: 700;
-  font-size: 0.6rem;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  align-self: center;
-}
-.model-card-expanded .mce-left .mce-pipeline .mce-pipeline-detail {
-  grid-area: detail;
-  color: var(--text-muted);
-  font-size: 0.62rem;
-  line-height: 1.35;
-}
-.model-card-expanded .mce-left .mce-pipeline.pipeline-active {
-  border-color: rgba(34,197,94,0.45);
-  background: rgba(34,197,94,0.08);
-}
-.model-card-expanded .mce-left .mce-pipeline.pipeline-active .mce-pipeline-label { color: var(--green); }
-.model-card-expanded .mce-left .mce-pipeline.pipeline-active .mce-pipeline-icon  { text-shadow: 0 0 8px rgba(34,197,94,0.5); opacity: 1; }
-.model-card-expanded .mce-left .mce-pipeline.pipeline-ready {
-  border-color: rgba(59,130,246,0.35);
-  background: var(--accent-glow);
-}
-.model-card-expanded .mce-left .mce-pipeline.pipeline-ready .mce-pipeline-label { color: var(--accent); }
-.model-card-expanded .mce-left .mce-pipeline.pipeline-unprotected {
-  border-color: rgba(245,158,11,0.35);
-  background: rgba(245,158,11,0.08);
-}
-.model-card-expanded .mce-left .mce-pipeline.pipeline-unprotected .mce-pipeline-label { color: var(--orange); }
-
-/* Pipeline chip as toggle — when both endpoints are on this device */
-.model-card-expanded .mce-left .mce-pipeline.toggleable {
-  cursor: pointer;
-  user-select: none;
-  transition: transform 0.12s, box-shadow 0.15s, border-color 0.15s;
-}
-.model-card-expanded .mce-left .mce-pipeline.toggleable:hover {
-  box-shadow: 0 0 0 2px rgba(34,197,94,0.18), 0 2px 6px rgba(0,0,0,0.15);
-}
-.model-card-expanded .mce-left .mce-pipeline.toggleable:active { transform: scale(0.98); }
-.model-card-expanded .mce-left .mce-pipeline .mce-pipeline-toggle-hint {
-  grid-column: 1 / -1;
-  font-size: 0.58rem;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-  font-weight: 700;
-  opacity: 0.85;
-  padding: 2px 7px;
-  border-radius: 3px;
-  justify-self: start;
-}
-.model-card-expanded .mce-left .mce-pipeline.pipeline-active .mce-pipeline-toggle-hint {
-  background: rgba(34,197,94,0.22);
-  color: var(--green);
-}
-.model-card-expanded .mce-left .mce-pipeline.pipeline-ready .mce-pipeline-toggle-hint {
-  background: rgba(59,130,246,0.2);
-  color: var(--accent);
-}
-/* Re-layout toggleable chip so the hint sits on its own row above detail */
-.model-card-expanded .mce-left .mce-pipeline.toggleable {
-  grid-template-areas:
-    "icon label"
-    "hint hint"
-    "detail detail";
-}
-.model-card-expanded .mce-left .mce-pipeline .mce-pipeline-toggle-hint { grid-area: hint; }
 
 /* Shard row endpoint badges (FIRST/LAST) + pipeline-pinned accent */
 .shard-row-endpoint {

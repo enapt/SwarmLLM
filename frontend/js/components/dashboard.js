@@ -1195,52 +1195,66 @@
         // BOTH the first and last shard to fully encrypt the inference pipeline.
         // Chip surfaces whether the guarantee is currently met, merely available
         // (both endpoints local), or unprotected (one/both endpoints missing).
-        var pipelineChipHtml = '';
+        // Pipeline encryption — rendered as a standard .mce-section with a
+        // state modifier (green/blue/amber) so it shares the panel language
+        // with STATUS and CONFIG. Computes the data once, section markup is
+        // assembled later alongside the other sections.
+        var privacySectionHtml = '';
         if (shardCount > 1) {
           var hasFirst = !!m.has_first_shard;
           var hasLast  = !!m.has_last_shard;
-          var encActive2 = !!m.encrypted_pipeline;
-          var pipelineCls, pipelineLabel, pipelineDetail, pipelineTitle;
-          if (encActive2) {
-            pipelineCls = 'pipeline-active';
-            pipelineLabel = I18n.t('enc.active');
-            pipelineDetail = I18n.t('enc.active_detail');
-            pipelineTitle = I18n.t('enc.active_tip');
-          } else if (hasFirst && hasLast) {
-            pipelineCls = 'pipeline-ready';
-            pipelineLabel = I18n.t('enc.available');
-            pipelineDetail = I18n.t('enc.ready_detail');
-            pipelineTitle = I18n.t('enc.ready_tip');
+          var encActive = !!m.encrypted_pipeline;
+          var canToggle = hasFirst && hasLast;
+          var encState; // { stateMod, badgeCls, icon, label, detail, tip, action }
+          if (encActive) {
+            encState = {
+              stateMod: 'mce-section-state-green', badgeCls: 'cb-active',
+              icon: '\uD83D\uDD12', label: I18n.t('enc.active'),
+              detail: I18n.t('enc.active_detail'), tip: I18n.t('enc.active_tip'),
+              action: I18n.t('enc.disable')
+            };
+          } else if (canToggle) {
+            encState = {
+              stateMod: 'mce-section-state-blue', badgeCls: 'cb-downloading',
+              icon: '\uD83D\uDD0F', label: I18n.t('enc.available'),
+              detail: I18n.t('enc.ready_detail'), tip: I18n.t('enc.ready_tip'),
+              action: I18n.t('enc.enable_privacy')
+            };
           } else {
-            pipelineCls = 'pipeline-unprotected';
-            pipelineLabel = I18n.t('enc.unavailable');
             var missingParts2 = [];
             if (!hasFirst) missingParts2.push(I18n.t('dashboard.enc_missing_first'));
             if (!hasLast)  missingParts2.push(I18n.t('dashboard.enc_missing_last', { n: shardCount - 1 }));
-            // Both missing → "first and last shards"; one missing → "the first shard" / "the last shard"
             var missingText = missingParts2.length === 2
               ? I18n.t('enc.missing_both')
               : (missingParts2.length === 1 ? I18n.t('enc.missing_the', { which: missingParts2[0] }) : '');
-            pipelineDetail = I18n.t('enc.unprotected_detail', { missing: missingText });
-            pipelineTitle = I18n.t('enc.unprotected_tip');
+            encState = {
+              stateMod: 'mce-section-state-amber', badgeCls: 'cb-fragile',
+              icon: '\uD83D\uDD13', label: I18n.t('enc.unavailable'),
+              detail: I18n.t('enc.unprotected_detail', { missing: missingText }),
+              tip: I18n.t('enc.unprotected_tip'),
+              action: ''
+            };
           }
-          // Lock glyph states: 🔒 active (closed), 🔏 ready (closed w/ pen), 🔓 unprotected (open)
-          var pipelineIcon = encActive2 ? '\uD83D\uDD12' : (hasFirst && hasLast ? '\uD83D\uDD0F' : '\uD83D\uDD13');
-          // When both endpoints are local the chip acts as a toggle for the E2E
-          // pipeline. When endpoints are missing it's passive (informational only).
-          var canToggle = hasFirst && hasLast;
-          var toggleAttr = canToggle
-            ? ' data-enc-toggle="' + U.escapeHtml(m.id) + '" data-enc-ready="1" role="switch" aria-checked="' + (encActive2 ? 'true' : 'false') + '"'
+          var toggleAttrs = canToggle
+            ? ' data-enc-toggle="' + U.escapeHtml(m.id) + '" data-enc-ready="1" role="switch" aria-checked="' + (encActive ? 'true' : 'false') + '"'
             : '';
-          var toggleClass = canToggle ? ' toggleable' : '';
-          var toggleHint = canToggle
-            ? '<span class="mce-pipeline-toggle-hint">' + U.escapeHtml(encActive2 ? I18n.t('enc.disable') : I18n.t('enc.enable_privacy')) + '</span>'
+          var toggleCls = canToggle ? ' mce-section-toggleable' : '';
+          var actionHtml2 = canToggle && encState.action
+            ? '<span class="mce-section-action">' + U.escapeHtml(encState.action) + '</span>'
             : '';
-          pipelineChipHtml = '<div class="mce-pipeline ' + pipelineCls + toggleClass + '"' + toggleAttr + ' title="' + U.escapeHtml(pipelineTitle) + '">' +
-            '<span class="mce-pipeline-icon">' + pipelineIcon + '</span>' +
-            '<span class="mce-pipeline-label">' + U.escapeHtml(pipelineLabel) + '</span>' +
-            toggleHint +
-            '<span class="mce-pipeline-detail">' + U.escapeHtml(pipelineDetail) + '</span>' +
+          privacySectionHtml =
+            '<div class="mce-section mce-section-privacy ' + encState.stateMod + toggleCls + '"' + toggleAttrs + ' title="' + U.escapeHtml(encState.tip) + '">' +
+              '<div class="mce-section-header">' +
+                '<div class="mce-section-title">' + U.escapeHtml(I18n.t('dashboard.section_privacy')) + '</div>' +
+                actionHtml2 +
+              '</div>' +
+              '<div class="mce-section-body">' +
+                '<span class="composite-badge ' + encState.badgeCls + '">' +
+                  '<span class="mce-section-icon">' + encState.icon + '</span>' +
+                  U.escapeHtml(encState.label) +
+                '</span>' +
+                '<div class="mce-section-detail">' + U.escapeHtml(encState.detail) + '</div>' +
+              '</div>' +
             '</div>';
         }
 
@@ -1421,13 +1435,16 @@
             progressHtml + perShardDlHtml +
             '<div class="model-card-expanded">' +
               '<div class="mce-left">' +
-                // STATUS — what the model is doing right now (active/fragile/peer count)
+                // STATUS — what the model is doing right now. Peer count sits
+                // in the title row (top-right) so the body row stays clean.
                 '<div class="mce-section mce-section-status">' +
-                  '<div class="mce-section-title">' + U.escapeHtml(I18n.t('dashboard.section_status')) + '</div>' +
+                  '<div class="mce-section-header">' +
+                    '<div class="mce-section-title">' + U.escapeHtml(I18n.t('dashboard.section_status')) + '</div>' +
+                    peerLineHtml +
+                  '</div>' +
                   '<div class="mce-section-body">' +
                     compositeBadgeHtml +
                     (healthBadgeHtml || '') +
-                    peerLineHtml +
                   '</div>' +
                 '</div>' +
                 // CONFIG — static spec sheet: arch, quant, size, shards, mode, trust, vram
@@ -1436,12 +1453,7 @@
                   '<dl class="mce-config-grid">' + configGridHtml + '</dl>' +
                 '</div>' +
                 // PRIVACY — pipeline encryption (skipped for single-shard models)
-                (pipelineChipHtml
-                  ? '<div class="mce-section mce-section-privacy">' +
-                      '<div class="mce-section-title">' + U.escapeHtml(I18n.t('dashboard.section_privacy')) + '</div>' +
-                      pipelineChipHtml +
-                    '</div>'
-                  : '') +
+                privacySectionHtml +
                 '<div class="mce-actions">' + actionHtml + removeHtml + '</div>' +
                 (fileIndicators ? '<div class="mce-file-warn">' + fileIndicators + '</div>' : '') +
               '</div>' +
