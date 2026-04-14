@@ -696,6 +696,22 @@ pub async fn add_model_interest(
 
     let mid = crate::types::ModelId(model_id.clone());
 
+    // User-initiated acquisition pins the model for auto-manage: without this,
+    // auto-manage would skip a "discovered" model even if P2P exhausts and our
+    // HF-fallback path (src/network/manager.rs::retry_shard_or_fallback) notifies
+    // it. Pinning satisfies the trust gate in auto_manage/scoring.rs.
+    state
+        .shared_state
+        .models
+        .model_trust
+        .entry(mid.clone())
+        .and_modify(|t| t.pinned_by_user = true)
+        .or_insert_with(|| {
+            let mut t = crate::types::ModelTrustInfo::new_discovered();
+            t.pinned_by_user = true;
+            t
+        });
+
     // Send acquisition command if the channel is wired up
     if let Some(ref tx) = state.acquisition_tx {
         tx.send(crate::model::acquisition::AcquisitionCommand::Acquire { model_id: mid })

@@ -578,6 +578,39 @@ impl AcquisitionManager {
                     .acquisition_progress
                     .insert(model_id.clone(), job.status.clone());
             }
+
+            // If we never managed to dispatch a request (no reachable holder), mark
+            // this shard as P2P-exhausted so auto-manage takes the HF fallback path
+            // on its next evaluation. Without this, handle_acquire silently gives up
+            // when every holder has disconnected. Also reset shard_progress state so
+            // auto_manage/scoring.rs's is_shard_in_progress gate doesn't block HF.
+            if !success {
+                self.shared_state
+                    .models
+                    .shard_p2p_failed
+                    .insert(shard_id.clone());
+                // Remove the shard_progress entry from BOTH the job status and the
+                // published progress map, so auto_manage/scoring.rs's is_shard_in_progress
+                // gate no longer blocks HF fallback. The job also has its own copy
+                // that gets re-published on each iteration of the outer loop.
+                if let Some(job) = self.jobs.get_mut(&model_id) {
+                    job.status.shard_progress.remove(&shard_id.index);
+                }
+                if let Some(mut entry) = self
+                    .shared_state
+                    .models
+                    .acquisition_progress
+                    .get_mut(&model_id)
+                {
+                    entry.shard_progress.remove(&shard_id.index);
+                }
+                tracing::warn!(
+                    model = %model_id,
+                    shard = shard_id.index,
+                    "P2P exhausted in handle_acquire — marking for HF fallback"
+                );
+                self.shared_state.models.auto_manage_notify.notify_one();
+            }
         }
     }
 

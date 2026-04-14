@@ -1765,7 +1765,11 @@ impl NetworkManager {
         } else {
             self.update_peer_count();
 
-            // NET-I1: Drain pending shard requests and download progress for this peer
+            // NET-I1: Drain pending shard requests for this peer and kick each
+            // into the failover path. Without this, libp2p's subsequent
+            // OutboundFailure events fire AFTER we've already dropped the
+            // pending_shard_requests entries, so the retry handler no-ops and
+            // the user just sees a dead download.
             let drained_ids: Vec<OutboundRequestId> = self
                 .pending_shard_requests
                 .iter()
@@ -1774,14 +1778,13 @@ impl NetworkManager {
                 .collect();
             for rid in &drained_ids {
                 if let Some((_, shard_id)) = self.pending_shard_requests.remove(rid) {
-                    self.shard_download_progress.remove(&shard_id);
-                    self.shard_p2p_retries.remove(&shard_id);
                     tracing::debug!(
                         %peer_id,
                         model = %shard_id.model_id,
                         index = shard_id.index,
-                        "Cleaned up pending shard request for disconnected peer"
+                        "Disconnected peer had pending shard request — routing to failover"
                     );
+                    self.retry_shard_or_fallback(shard_id, peer_id, "peer disconnected");
                 }
             }
 
@@ -3292,6 +3295,14 @@ impl NetworkManager {
     ) -> bool {
         const MAX_P2P_RETRIES: u32 = 5;
 
+        tracing::debug!(
+            model = %shard_id.model_id,
+            shard = shard_id.index,
+            %failed_peer,
+            reason,
+            "DIAG: retry_shard_or_fallback entered"
+        );
+
         // Clear any partial progress — restarting from offset 0 with a fresh peer.
         self.shard_download_progress.remove(&shard_id);
         self.shard_last_progress_at.remove(&shard_id);
@@ -3368,6 +3379,23 @@ impl NetworkManager {
             .models
             .shard_p2p_failed
             .insert(shard_id.clone());
+        // Clear the per-shard progress entry so auto_manage/scoring.rs's
+        // is_shard_in_progress gate lets the HF download through.
+        if let Some(mut entry) = self
+            .shared_state
+            .models
+            .acquisition_progress
+            .get_mut(&shard_id.model_id)
+        {
+            entry.shard_progress.remove(&shard_id.index);
+        }
+        tracing::info!(
+            model = %shard_id.model_id,
+            shard = shard_id.index,
+            retry_num,
+            has_hf_source = self.shared_state.models.hf_sources.contains_key(&shard_id.model_id),
+            "P2P exhausted — entering HF fallback branch"
+        );
         let mname = self
             .shared_state
             .model_registry
@@ -3465,14 +3493,15 @@ impl NetworkManager {
 
         // Pre-check: if libp2p has no live connection, send_request would
         // queue into a dead ConnectionId and silently hang for 600s (gotcha
-        // #14). Fail fast so the AcquisitionManager can retry on another
-        // shard holder without waiting for the rr timeout.
+        // #14). Fail fast via the retry path so the next peer (or HF
+        // fallback) kicks in immediately.
         if !self.swarm.is_connected(&peer_id) {
             tracing::warn!(
                 %peer_id,
                 shard = ?request.shard_id,
-                "Dropping shard request — peer not connected"
+                "Dropping shard request — peer not connected; routing to failover"
             );
+            self.retry_shard_or_fallback(request.shard_id, peer_id, "peer not connected");
             return;
         }
         let shard_id = request.shard_id.clone();

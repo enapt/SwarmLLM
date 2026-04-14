@@ -196,8 +196,11 @@ impl AutoShardManager {
                     tokio::time::sleep(Duration::from_secs(AUTO_MANAGE_NOTIFY_SETTLE_SECS)).await;
                     // Cooldown: skip if we evaluated recently (prevents cascading
                     // re-evaluations from shard progress gossip between peers).
+                    // Exception: bypass when P2P has exhausted for one or more
+                    // shards — those need HF fallback picked up ASAP, not in 45s.
                     let since_last = last_notify_eval.elapsed();
-                    if since_last < notify_cooldown {
+                    let has_p2p_failures = !self.shared_state.models.shard_p2p_failed.is_empty();
+                    if since_last < notify_cooldown && !has_p2p_failures {
                         tracing::debug!(
                             remaining_secs = (notify_cooldown - since_last).as_secs(),
                             "AutoShardManager: notify cooldown active, skipping evaluation"
@@ -339,7 +342,10 @@ impl AutoShardManager {
                 .num_seconds()
                 .max(0) as u64;
             drop(stats);
-            if uptime_secs < 60 {
+            // Exception: if a shard has already exhausted P2P in this session,
+            // the user is waiting on the HF fallback path — don't delay 60s.
+            let p2p_exhausted = !self.shared_state.models.shard_p2p_failed.is_empty();
+            if uptime_secs < 60 && !p2p_exhausted {
                 tracing::info!(
                     uptime_secs,
                     "AutoShardManager: waiting for peer discovery before evaluation (no peers yet)"
