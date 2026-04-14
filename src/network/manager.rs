@@ -2265,6 +2265,8 @@ impl NetworkManager {
                             "Rejecting shard download — total_size exceeds limit"
                         );
                         self.shard_download_progress.remove(&shard_id);
+                        self.shard_last_progress_at.remove(&shard_id);
+                        self.shard_p2p_retries.remove(&shard_id);
                         return;
                     }
                     let offset = self
@@ -2370,6 +2372,7 @@ impl NetworkManager {
                             );
                             self.shard_download_progress.remove(&shard_id);
                             self.shard_p2p_retries.remove(&shard_id);
+                            self.shard_last_progress_at.remove(&shard_id);
                         } else {
                             self.shard_download_progress
                                 .insert(shard_id.clone(), new_offset);
@@ -2433,17 +2436,48 @@ impl NetworkManager {
                             .acquisition_progress
                             .get_mut(&shard_id.model_id)
                         {
-                            entry.downloaded_shards = entry.downloaded_shards.saturating_add(1);
-                            entry.downloaded_bytes = entry.total_bytes;
-                            entry.state = crate::model::acquisition::AcquisitionState::Complete;
+                            let was_complete = entry
+                                .shard_progress
+                                .get(&shard_id.index)
+                                .map(|sp| {
+                                    matches!(
+                                        sp.state,
+                                        crate::model::acquisition::ShardState::Complete
+                                    )
+                                })
+                                .unwrap_or(false);
                             if let Some(sp) = entry.shard_progress.get_mut(&shard_id.index) {
                                 sp.state = crate::model::acquisition::ShardState::Complete;
                                 sp.downloaded_bytes = sp.total_bytes;
                             }
+                            if !was_complete {
+                                entry.downloaded_shards = entry.downloaded_shards.saturating_add(1);
+                            }
+                            if entry.total_shards > 0
+                                && entry.downloaded_shards >= entry.total_shards
+                            {
+                                entry.state = crate::model::acquisition::AcquisitionState::Complete;
+                                entry.downloaded_bytes = entry.total_bytes;
+                            }
                         }
-                        // Remove the acquisition entry after a delay so UI sees the completion
-                        self.shared_state
-                            .schedule_acquisition_cleanup(shard_id.model_id.clone());
+                        // Remove the acquisition entry after a delay only when the
+                        // entire model is done — not after each individual shard.
+                        let model_done = self
+                            .shared_state
+                            .models
+                            .acquisition_progress
+                            .get(&shard_id.model_id)
+                            .map(|e| {
+                                matches!(
+                                    e.state,
+                                    crate::model::acquisition::AcquisitionState::Complete
+                                )
+                            })
+                            .unwrap_or(false);
+                        if model_done {
+                            self.shared_state
+                                .schedule_acquisition_cleanup(shard_id.model_id.clone());
+                        }
 
                         // Register ourselves as a holder of this shard
                         let local_node_id = self.shared_state.identity.node_id().clone();
