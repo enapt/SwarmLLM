@@ -25,8 +25,11 @@ use crate::types::{NetworkCommand, PeerInfo, SwarmMessage};
 /// Maximum in-flight shard chunk requests before dropping new ones.
 const MAX_PENDING_SHARD_REQUESTS: usize = 1024;
 /// Maximum lifetime (seconds) for a tensor channel or outbound forward before eviction.
-/// Used for both channel cleanup and adaptive timeout upper clamp.
-const MAX_TENSOR_FORWARD_SECS: u64 = 600;
+/// Used for both channel cleanup and adaptive timeout upper clamp. Must match
+/// the libp2p request_response timeout so our cleanup fires at or just before
+/// libp2p's own failure notification — not before (spurious double-failures)
+/// and not after (stuck entries outliving the transport).
+const MAX_TENSOR_FORWARD_SECS: u64 = behaviour::RR_REQUEST_TIMEOUT_SECS;
 /// libp2p swarm idle connection timeout. Connections with no traffic for this long are closed.
 const IDLE_CONNECTION_TIMEOUT_SECS: u64 = 120;
 /// Interval for periodic PEX ping health checks. Keeps the outbound queue shallow so
@@ -688,6 +691,15 @@ impl NetworkManager {
                 // and with max_established_per_peer=1, the loser's connection is immediately
                 // closed. We schedule a re-dial with random jitter (2-5s) so one side wins.
                 _ = redial_interval.tick() => {
+                    // Cap queue unconditionally — push sites may race past the
+                    // soft check or skip it entirely. Truncating before dispatch
+                    // evicts oldest (front) first in FIFO fashion: reverse,
+                    // truncate, reverse so the newest entries survive.
+                    if self.pending_redial.len() > MAX_PENDING_REDIAL {
+                        self.pending_redial.reverse();
+                        self.pending_redial.truncate(MAX_PENDING_REDIAL);
+                        self.pending_redial.reverse();
+                    }
                     if !self.pending_redial.is_empty() {
                         let now = std::time::Instant::now();
                         let ready: Vec<_> = self.pending_redial
@@ -715,10 +727,6 @@ impl NetworkManager {
                                     ),
                                 }
                             }
-                        }
-                        // Cap queue to prevent unbounded growth
-                        if self.pending_redial.len() > MAX_PENDING_REDIAL {
-                            self.pending_redial.truncate(MAX_PENDING_REDIAL);
                         }
                     }
                 }
@@ -1548,6 +1556,9 @@ impl NetworkManager {
             self.peer_to_node.insert(peer_id, node_id.clone());
         }
         // Ground-truth connection set — consumed by HealthMonitor to skip eviction.
+        // Populated here (not at ConnectionEstablished) because we only learn
+        // the NodeId after Identify. Identify also re-pushes periodically;
+        // DashSet insert is idempotent so repeat inserts are harmless.
         self.shared_state.connected_node_ids.insert(node_id.clone());
         // Persistent NodeId → PeerId mapping (survives disconnects, same cap)
         if self.shared_state.peer_id_map.len() < MAX_PEER_TO_NODE
@@ -1783,7 +1794,7 @@ impl NetworkManager {
                             .pending_redial
                             .iter()
                             .any(|(pid, _, _)| *pid == peer_id);
-                        if !already_queued {
+                        if !already_queued && self.pending_redial.len() < MAX_PENDING_REDIAL {
                             let scheduled =
                                 std::time::Instant::now() + std::time::Duration::from_millis(500);
                             self.pending_redial.push((peer_id, addr, scheduled));
@@ -2729,7 +2740,6 @@ mname.as_deref().unwrap_or(&shard_id.model_id.0),
             | SwarmMessage::ShardDownloadProgress(_)
             | SwarmMessage::HfSourceGossip(_) => TOPIC_MODELS,
             SwarmMessage::CreditGossip(_) => crate::network::protocol::TOPIC_CREDITS,
-            SwarmMessage::ModelVote(_) => TOPIC_MODELS, // wire-compat: retained for older peers, payload discarded on receive
             SwarmMessage::HealthPing { .. } | SwarmMessage::HealthPong { .. } => {
                 crate::network::protocol::TOPIC_HEALTH
             }
@@ -3090,6 +3100,14 @@ mname.as_deref().unwrap_or(&shard_id.model_id.0),
         result: &crate::types::LayerResult,
         is_connected: bool,
     ) {
+        if !is_connected {
+            tracing::warn!(
+                %peer_id,
+                request_id = %result.request_id,
+                "Dropping tensor result fallback — peer not connected"
+            );
+            return;
+        }
         match protocol::encode_layer_result(result) {
             Ok(payload) => {
                 let payload_len = payload.len();
@@ -3348,6 +3366,18 @@ mname.as_deref().unwrap_or(&shard_id.model_id.0),
             return;
         }
 
+        // Pre-check: if libp2p has no live connection, send_request would
+        // queue into a dead ConnectionId and silently hang for 600s (gotcha
+        // #14). Fail fast so the AcquisitionManager can retry on another
+        // shard holder without waiting for the rr timeout.
+        if !self.swarm.is_connected(&peer_id) {
+            tracing::warn!(
+                %peer_id,
+                shard = ?request.shard_id,
+                "Dropping shard request — peer not connected"
+            );
+            return;
+        }
         let shard_id = request.shard_id.clone();
         let req = SwarmRequest::ShardTransfer(request);
         // NET-C1: Track by OutboundRequestId for correct request-response correlation
@@ -3374,6 +3404,13 @@ mname.as_deref().unwrap_or(&shard_id.model_id.0),
             }
         };
 
+        if !self.swarm.is_connected(&peer_id) {
+            tracing::warn!(
+                %peer_id,
+                "Dropping streaming token — peer not connected"
+            );
+            return;
+        }
         let msg = SwarmMessage::StreamingToken(token);
         let req = SwarmRequest::Message(Box::new(msg));
         self.swarm
@@ -3398,6 +3435,14 @@ mname.as_deref().unwrap_or(&shard_id.model_id.0),
             }
         };
 
+        if !self.swarm.is_connected(&peer_id) {
+            tracing::warn!(
+                %peer_id,
+                label,
+                "Dropping rr message — peer not connected"
+            );
+            return;
+        }
         let req = SwarmRequest::Message(Box::new(msg));
         self.swarm
             .behaviour_mut()

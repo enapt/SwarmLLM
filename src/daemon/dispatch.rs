@@ -436,9 +436,6 @@ pub(crate) async fn dispatch_network_messages(
                                             Some(&shared_state.credits.peer_credit_balances),
                                         ).await;
                                     }
-                                    SwarmMessage::ModelVote(_) => {
-                                        // Model governance voting is not enforced — users add models directly.
-                                    }
                                     SwarmMessage::CreditTransaction(tx) => {
                                         tracing::debug!(
                                             tx_id = %tx.id,

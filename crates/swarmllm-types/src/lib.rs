@@ -737,9 +737,6 @@ pub enum SwarmMessage {
     // Credits — gossip
     CreditGossip(CreditGossip),
 
-    // Governance (wire-compat only — governance module removed, see deferred items)
-    ModelVote(ModelVote),
-
     // Identity
     NicknameGossip(NicknameGossip),
 
@@ -1091,15 +1088,6 @@ pub struct CreditGossip {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct NicknameGossip {
     pub record: NicknameRecord,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct ModelVote {
-    pub voter: NodeId,
-    pub model_manifest_hash: Blake3Hash,
-    pub vote: bool,
-    pub weight: u64,
-    pub signature: Vec<u8>,
 }
 
 // ---- Model Trust ----

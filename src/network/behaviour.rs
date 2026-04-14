@@ -22,8 +22,10 @@ const KAD_PUBLISH_INTERVAL_SECS: u64 = 1200;
 const GOSSIPSUB_HEARTBEAT_SECS: u64 = 10;
 /// request_response per-request timeout. 10 minutes accommodates CPU-only
 /// inference on 7B+ models and slow LAN shard transfers. The vendored handler's
-/// Tokio watchdog handles truly stuck futures separately.
-const RR_REQUEST_TIMEOUT_SECS: u64 = 600;
+/// Tokio watchdog handles truly stuck futures separately. Shared with the
+/// adaptive stale-tensor cleanup upper clamp in manager.rs so the two can't
+/// drift out of sync.
+pub const RR_REQUEST_TIMEOUT_SECS: u64 = 600;
 /// mDNS service record TTL advertised to LAN peers.
 const MDNS_TTL_SECS: u64 = 300;
 /// mDNS active query interval — how often to probe the LAN for new peers.
