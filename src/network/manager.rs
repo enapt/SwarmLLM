@@ -378,6 +378,14 @@ impl NetworkManager {
             if bootstrap_count > 0 || !cached_peers.is_empty() {
                 discovery::trigger_bootstrap(&mut self.swarm)?;
             }
+
+            // Loopback probe: find same-host peers when mDNS is off
+            // (WSL2 default) and the peer cache / bootstrap list is empty.
+            // Cheap — only fires a handful of TCP dials on 127.0.0.1.
+            discovery::probe_loopback_peers(
+                &mut self.swarm,
+                self.shared_state.config.node.listen_port,
+            );
         }
 
         // Periodic discovery timer
@@ -405,6 +413,29 @@ impl NetworkManager {
         // initial connection (e.g., mDNS simultaneous-dial race).
         let mut redial_interval = tokio::time::interval(std::time::Duration::from_secs(1));
         redial_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+        // Kademlia bootstrap backoff — retries at 10s, 30s, 60s, 120s after a
+        // no-peers startup instead of waiting the full 300s discovery tick.
+        // `bootstrap_backoff_secs` is the next retry delay; resets to 10s once
+        // any peer connects. Works in tandem with the loopback probe and
+        // discovery_interval.
+        let backoff_schedule: [u64; 4] = [10, 30, 60, 120];
+        let mut backoff_idx: usize = 0;
+        let mut bootstrap_retry_deadline: Option<std::time::Instant> = if config.pool.offline_mode {
+            None
+        } else {
+            Some(std::time::Instant::now() + std::time::Duration::from_secs(backoff_schedule[0]))
+        };
+        let mut bootstrap_retry_interval = tokio::time::interval(std::time::Duration::from_secs(5));
+        bootstrap_retry_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+        // "No peers" WARN loop — surfaces the "node is running but totally
+        // isolated" state (happens on fresh WSL2 installs with mDNS disabled
+        // and no bootstrap peers configured). Fires every 30s while
+        // connected_peers == 0.
+        let mut no_peers_interval = tokio::time::interval(std::time::Duration::from_secs(30));
+        no_peers_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let startup_instant = std::time::Instant::now();
 
         // Liveness heartbeat — every 30s, refresh `last_seen` on every peer
         // libp2p still reports as connected. The HealthMonitor evicts peers at
@@ -457,6 +488,75 @@ impl NetworkManager {
                 // Periodic peer cache save
                 _ = peer_cache_interval.tick() => {
                     self.save_peer_cache();
+                }
+                // Kademlia bootstrap retry with exponential backoff.
+                // Checks every 5s whether we've passed the next retry deadline
+                // AND are still peerless; fires bootstrap + loopback probe if so,
+                // then advances the backoff schedule. Resets to the first step
+                // once any peer connects.
+                _ = bootstrap_retry_interval.tick() => {
+                    let connected = self.swarm.connected_peers().count();
+                    if connected > 0 {
+                        backoff_idx = 0;
+                        bootstrap_retry_deadline = None;
+                    } else if let Some(deadline) = bootstrap_retry_deadline {
+                        if std::time::Instant::now() >= deadline
+                            && !self.shared_state.credits.offline_mode.load(std::sync::atomic::Ordering::Relaxed)
+                        {
+                            tracing::info!(
+                                attempt_delay_secs = backoff_schedule[backoff_idx],
+                                "Bootstrap retry — still no peers, re-triggering Kademlia bootstrap + loopback probe"
+                            );
+                            let _ = discovery::trigger_bootstrap(&mut self.swarm);
+                            // Re-dial bootstrap + cached peers
+                            let _ = discovery::bootstrap_peers(
+                                &mut self.swarm,
+                                &self.shared_state.config.network.bootstrap_peers,
+                            );
+                            let cached = crate::network::peer_cache::load_peer_cache(
+                                &self.shared_state.db,
+                            );
+                            if !cached.is_empty() {
+                                let _ = discovery::bootstrap_peers(&mut self.swarm, &cached);
+                            }
+                            discovery::probe_loopback_peers(
+                                &mut self.swarm,
+                                self.shared_state.config.node.listen_port,
+                            );
+                            backoff_idx = (backoff_idx + 1).min(backoff_schedule.len() - 1);
+                            bootstrap_retry_deadline = Some(
+                                std::time::Instant::now()
+                                    + std::time::Duration::from_secs(backoff_schedule[backoff_idx]),
+                            );
+                        }
+                    }
+                }
+                // "No peers" visibility loop — every 30s while isolated, log a
+                // WARN that lists every discovery path with its state so the
+                // operator can see *why* no peers are being found.
+                _ = no_peers_interval.tick() => {
+                    let connected = self.swarm.connected_peers().count();
+                    if connected == 0 {
+                        let cfg = &self.shared_state.config.network;
+                        let age_secs = startup_instant.elapsed().as_secs();
+                        let cached = crate::network::peer_cache::load_peer_cache(
+                            &self.shared_state.db,
+                        );
+                        let offline = self.shared_state.credits.offline_mode
+                            .load(std::sync::atomic::Ordering::Relaxed);
+                        tracing::warn!(
+                            age_secs,
+                            mdns = cfg.enable_mdns,
+                            quic = cfg.enable_quic,
+                            autonat = cfg.enable_autonat,
+                            dcutr = cfg.enable_dcutr,
+                            bootstrap_peers = cfg.bootstrap_peers.len(),
+                            cached_peers = cached.len(),
+                            offline_mode = offline,
+                            listen_addr = %cfg.listen_address,
+                            "No peers connected — all active discovery paths listed. If all counters are 0 and mDNS is off, configure bootstrap_peers in config.toml or share an invite code."
+                        );
+                    }
                 }
                 // Liveness heartbeat — refresh `last_seen` for every peer
                 // libp2p still considers connected. Prevents the HealthMonitor
@@ -1554,8 +1654,19 @@ impl NetworkManager {
             .values()
             .map(|(u, _, _, _, _)| u.to_string())
             .collect();
+        // Classify the close reason so operators can triage dropouts at a glance
+        // without having to parse nested ConnectionError Debug output.
+        let reason = match &cause {
+            None => "clean_close",
+            Some(libp2p::swarm::ConnectionError::KeepAliveTimeout) => "idle_timeout",
+            Some(libp2p::swarm::ConnectionError::IO(_)) => "io_error",
+        };
         tracing::warn!(
-            %peer_id, %connection_id, ?cause, remaining = num_established,
+            %peer_id, %connection_id,
+            reason,
+            ?cause,
+            ?closed_addr,
+            remaining = num_established,
             pending_tensor_forwards = self.pending_tensor_outbound.len(),
             affected_request_ids = ?affected_tensors.iter().take(5).collect::<Vec<_>>(),
             total_peers = self.swarm.connected_peers().count(),

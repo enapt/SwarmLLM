@@ -129,6 +129,57 @@ pub fn verify_dht_value(signed: &[u8]) -> Result<([u8; 32], &[u8]), SwarmError> 
 /// Discovery interval for periodic peer discovery.
 pub const DISCOVERY_INTERVAL: Duration = Duration::from_secs(300);
 
+/// Build a list of loopback TCP multiaddrs to probe for same-machine SwarmLLM peers.
+///
+/// On WSL2 (and other environments with broken multicast), mDNS cannot find a
+/// peer running on the same host, and Kademlia bootstrap has no entry point on
+/// a fresh install with an empty peer cache and no configured bootstrap peers.
+/// This cheaply scans a small range of common SwarmLLM HTTP API ports on
+/// 127.0.0.1, producing TCP P2P multiaddrs (api_port+10) to dial. libp2p rejects
+/// dials to our own PeerId and silently drops failed connections, so probing a
+/// port range on loopback is a benign O(N) operation.
+///
+/// Returns addresses for api_port in `own_api_port-10 ..= own_api_port+10` (clamped),
+/// excluding the caller's own port. The TCP offset is api_port + 10 to match
+/// `NetworkManager::run()`.
+pub fn loopback_candidate_addrs(own_api_port: u16) -> Vec<Multiaddr> {
+    let lo: u16 = own_api_port.saturating_sub(10).max(1024);
+    let hi: u16 = own_api_port.saturating_add(10);
+    let mut addrs = Vec::with_capacity((hi - lo) as usize);
+    for api_port in lo..=hi {
+        if api_port == own_api_port {
+            continue;
+        }
+        let tcp_port = api_port.saturating_add(10);
+        if let Ok(addr) = format!("/ip4/127.0.0.1/tcp/{tcp_port}").parse::<Multiaddr>() {
+            addrs.push(addr);
+        }
+    }
+    addrs
+}
+
+/// Dial each loopback candidate once. Harmless no-ops for ports with no listener
+/// (libp2p reports DialFailure and moves on). Logs at debug to avoid log spam.
+pub fn probe_loopback_peers(swarm: &mut Swarm<SwarmBehaviour>, own_api_port: u16) -> usize {
+    let candidates = loopback_candidate_addrs(own_api_port);
+    let mut dialed = 0;
+    for addr in candidates {
+        match swarm.dial(addr.clone()) {
+            Ok(_) => {
+                dialed += 1;
+                tracing::debug!(%addr, "Loopback probe dial");
+            }
+            Err(e) => {
+                tracing::trace!(%addr, error = %e, "Loopback probe dial rejected");
+            }
+        }
+    }
+    if dialed > 0 {
+        tracing::debug!(count = dialed, "Loopback discovery: dialed candidate ports");
+    }
+    dialed
+}
+
 /// Peer cache save interval.
 pub const PEER_CACHE_SAVE_INTERVAL: Duration = Duration::from_secs(300);
 
