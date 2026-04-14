@@ -604,6 +604,17 @@ pub fn decode_layer_forward(data: &[u8]) -> Result<LayerForward, SwarmError> {
 /// Encode a LayerResult into binary.
 pub fn encode_layer_result(result: &LayerResult) -> Result<Vec<u8>, SwarmError> {
     let num_tokens = result.token_ids.len();
+    if num_tokens > MAX_RESULT_TOKENS {
+        return Err(SwarmError::Network(format!(
+            "LayerResult token_ids too large: {num_tokens} > {MAX_RESULT_TOKENS}"
+        )));
+    }
+    if result.activations.len() > MAX_ACTIVATION_SIZE {
+        return Err(SwarmError::Network(format!(
+            "LayerResult activations too large: {} > {MAX_ACTIVATION_SIZE}",
+            result.activations.len()
+        )));
+    }
     let mut buf = Vec::with_capacity(1 + 25 + num_tokens * 4 + result.activations.len());
 
     // Message type tag
@@ -620,9 +631,17 @@ pub fn encode_layer_result(result: &LayerResult) -> Result<Vec<u8>, SwarmError> 
         Some(NetworkFinishReason::MaxTokens) => buf.push(2),
         Some(NetworkFinishReason::Error(msg)) => {
             buf.push(3);
-            // Error message length + message
-            buf.extend_from_slice(&(msg.len() as u32).to_le_bytes());
-            buf.extend_from_slice(msg.as_bytes());
+            // Error message length + message — capped to match the 4KB decode-side limit.
+            let bytes = msg.as_bytes();
+            let cap = bytes.len().min(4096);
+            // Slice on a UTF-8 boundary ≤ cap.
+            let mut end = cap;
+            while end > 0 && !msg.is_char_boundary(end) {
+                end -= 1;
+            }
+            let slice = &bytes[..end];
+            buf.extend_from_slice(&(slice.len() as u32).to_le_bytes());
+            buf.extend_from_slice(slice);
         }
     }
 

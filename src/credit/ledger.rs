@@ -167,7 +167,11 @@ impl CreditLedger {
                 }
                 Ok(false) => {} // Not in a pool or is the owner — credit locally below
                 Err(e) => {
-                    tracing::debug!(error = %e, "Pool credit forwarding failed — crediting locally");
+                    tracing::warn!(
+                        error = %e,
+                        amount,
+                        "Pool credit forwarding failed — crediting locally. Owner will not receive these credits."
+                    );
                 }
             }
         }

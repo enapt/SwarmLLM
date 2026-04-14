@@ -250,10 +250,23 @@ impl UpdateChecker {
         {
             use futures::StreamExt;
             let mut stream = resp.bytes_stream();
+            let cleanup = |tp: &std::path::Path| {
+                let tp = tp.to_path_buf();
+                tokio::spawn(async move {
+                    let _ = tokio::fs::remove_file(&tp).await;
+                });
+            };
             while let Some(chunk) = stream.next().await {
-                let chunk = chunk.map_err(|e| {
-                    SwarmError::Network(format!("Failed to read response body: {e}"))
-                })?;
+                let chunk = match chunk {
+                    Ok(c) => c,
+                    Err(e) => {
+                        drop(file);
+                        cleanup(&tmp_path);
+                        return Err(SwarmError::Network(format!(
+                            "Failed to read response body: {e}"
+                        )));
+                    }
+                };
                 total = total.saturating_add(chunk.len() as u64);
                 if total > MAX_UPDATE_SIZE {
                     drop(file);
@@ -264,9 +277,17 @@ impl UpdateChecker {
                     )));
                 }
                 hasher.update(&chunk);
-                file.write_all(&chunk).await.map_err(SwarmError::Io)?;
+                if let Err(e) = file.write_all(&chunk).await {
+                    drop(file);
+                    cleanup(&tmp_path);
+                    return Err(SwarmError::Io(e));
+                }
             }
-            file.flush().await.map_err(SwarmError::Io)?;
+            if let Err(e) = file.flush().await {
+                drop(file);
+                cleanup(&tmp_path);
+                return Err(SwarmError::Io(e));
+            }
         }
         drop(file);
 

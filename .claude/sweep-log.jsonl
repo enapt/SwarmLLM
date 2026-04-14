@@ -387,3 +387,16 @@
 {"file":"src/api/pool.rs","line":736,"kind":"toctou","summary":"write-lock released before db persist; needs discussion","status":"deferred","date":"2026-04-14"}
 {"file":"src/api/admin_models.rs","line":1582,"kind":"error_handling","summary":"silent DB persist - lower severity","status":"deferred","date":"2026-04-14"}
 {"file":"frontend/js/components/settings.js","line":213,"kind":"architecture","summary":"direct authFetch to /api/admin/shard-storage","status":"deferred","date":"2026-04-14"}
+{"file":"src/inference/sampling.rs","line":235,"kind":"bug","summary":"softmax NaN collapse silently emitted last vocab token; now argmax fallback","status":"fixed","date":"2026-04-14"}
+{"file":"src/inference/model_worker.rs","line":634,"kind":"bug","summary":"max_tokens=0 emitted 1 token via off-by-one fix","status":"fixed","date":"2026-04-14"}
+{"file":"src/api/admin_models.rs","line":2061,"kind":"security","summary":"absolute adapter path bypassed traversal check; added canonical containment","status":"fixed","date":"2026-04-14"}
+{"file":"src/api/middleware.rs","line":136,"kind":"rate_limit","summary":"provider-health routed to SensitiveAdmin bucket","status":"fixed","date":"2026-04-14"}
+{"file":"src/health/monitor.rs","line":124,"kind":"concurrency","summary":"anti_gaming.lock().await -> try_lock","status":"fixed","date":"2026-04-14"}
+{"file":"frontend/js/components/claude-code.js","line":1296,"kind":"leak","summary":"setTimeout for flash restore not cancelled","status":"fixed","date":"2026-04-14"}
+{"file":"src/network/manager.rs","line":3608,"kind":"observability","summary":"send_streaming_token rr id discarded; needs discussion (hot path)","status":"deferred","date":"2026-04-14"}
+{"file":"src/network/manager.rs","line":3635,"kind":"observability","summary":"allreduce/ringchunk rr id discarded; needs discussion","status":"deferred","date":"2026-04-14"}
+{"file":"src/network/manager.rs","line":2162,"kind":"bug","summary":"capacity-rejected TensorPayload sends bare Ack; pipeline stall","status":"deferred","date":"2026-04-14"}
+{"file":"src/model/acquisition.rs","line":529,"kind":"concurrency","summary":"sleep inside handle_acquire retry loop blocks AcquisitionManager","status":"deferred","date":"2026-04-14"}
+{"file":"src/inference/pipeline.rs","line":769,"kind":"bug","summary":"completion_tokens off-by-one on stop seq vs worker","status":"deferred","date":"2026-04-14"}
+{"file":"frontend/js/components/chat.js","line":419,"kind":"xss","summary":"renderedHtml persisted raw; needs sanitization plan","status":"deferred","date":"2026-04-14"}
+{"file":"frontend/js/components/settings.js","line":113,"kind":"antipattern","summary":"innerHTML join with mixed escaped/html content","status":"deferred","date":"2026-04-14"}
