@@ -614,6 +614,21 @@ impl AcquisitionManager {
                     shard = shard_id.index,
                     "P2P exhausted in handle_acquire — marking for HF fallback"
                 );
+                let display = self.shared_state.model_registry.display_name(&model_id);
+                self.shared_state.emit_activity(
+                    crate::daemon::state::ActivityEvent::new(
+                        "download",
+                        "shard_p2p_exhausted",
+                        format!(
+                            "No peers served shard {} of {} — falling back to HuggingFace",
+                            shard_id.index + 1,
+                            display
+                        ),
+                    )
+                    .with_model(model_id.0.clone())
+                    .with_detail_num(shard_id.index as i64)
+                    .with_toast("warn", 5000),
+                );
                 self.shared_state.models.auto_manage_notify.notify_one();
             }
         }
@@ -743,6 +758,22 @@ impl AcquisitionManager {
                                 error = %e,
                                 "Downloaded shard failed verification — quarantined, penalizing peer"
                             );
+                            let display = self.shared_state.model_registry.display_name(&model_id);
+                            self.shared_state.emit_activity(
+                                crate::daemon::state::ActivityEvent::new(
+                                    "download",
+                                    "shard_verify_failed",
+                                    format!(
+                                        "Shard {} of {} failed BLAKE3 verification: {}",
+                                        shard_index + 1,
+                                        display,
+                                        e
+                                    ),
+                                )
+                                .with_model(model_id.0.clone())
+                                .with_detail_num(shard_index as i64)
+                                .with_toast("error", 6000),
+                            );
                         }
                     }
                 }
@@ -791,14 +822,44 @@ impl AcquisitionManager {
                     let manifest = job.manifest.clone();
                     tracing::info!(model = %model_id, "Model acquisition complete");
                     self.register_model(&model_id, &manifest);
+                    let display = self.shared_state.model_registry.display_name(&model_id);
+                    self.shared_state.emit_activity(
+                        crate::daemon::state::ActivityEvent::new(
+                            "download",
+                            "model_download_complete",
+                            format!(
+                                "All shards of {} downloaded and verified — model ready",
+                                display
+                            ),
+                        )
+                        .with_model(model_id.0.clone())
+                        .with_detail_str("p2p".to_string())
+                        .with_toast("success", 8000),
+                    );
+                    self.shared_state
+                        .schedule_acquisition_cleanup(model_id.clone());
                 } else {
                     let reason = format!(
                         "{} of {} shards failed verification",
                         job.status.failed_shards, job.status.total_shards
                     );
                     job.status.log_push(format!("FAILED: {}", reason));
-                    job.status.state = AcquisitionState::Failed { reason };
+                    job.status.state = AcquisitionState::Failed {
+                        reason: reason.clone(),
+                    };
                     progress_map.insert(model_id.clone(), job.status.clone());
+                    let display = self.shared_state.model_registry.display_name(&model_id);
+                    self.shared_state.emit_activity(
+                        crate::daemon::state::ActivityEvent::new(
+                            "download",
+                            "model_acquisition_failed",
+                            format!("Acquisition of {} failed: {}", display, reason),
+                        )
+                        .with_model(model_id.0.clone())
+                        .with_toast("error", 8000),
+                    );
+                    self.shared_state
+                        .schedule_acquisition_cleanup(model_id.clone());
                 }
             }
         }
