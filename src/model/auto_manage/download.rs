@@ -131,7 +131,18 @@ impl AutoShardManager {
 
         // Prefer P2P over HuggingFace when peers hold the shard — P2P is faster
         // for LAN peers and doesn't depend on external CDN availability.
-        let has_peer_holders = candidate.holder_count > 0;
+        // Exception: if P2P has already exhausted all peer attempts for this shard
+        // in this session, skip P2P and go straight to HF fallback.
+        let sid_for_failed_check = ShardId {
+            model_id: candidate.model_id.clone(),
+            index: candidate.shard_index,
+        };
+        let p2p_exhausted = self
+            .shared_state
+            .models
+            .shard_p2p_failed
+            .contains(&sid_for_failed_check);
+        let has_peer_holders = candidate.holder_count > 0 && !p2p_exhausted;
 
         // Download from HuggingFace only if no peers hold the shard
         // In offline mode, skip automatic HF downloads (user must trigger manually)

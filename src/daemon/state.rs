@@ -237,6 +237,10 @@ pub struct ModelMgmt {
     pub model_trust: DashMap<crate::types::ModelId, crate::types::ModelTrustInfo>,
     pub loading_models: DashMap<crate::types::ModelId, Arc<tokio::sync::Notify>>,
     pub locked_shards: DashMap<crate::types::ShardId, bool>,
+    /// Shards where P2P download has exhausted all peer attempts in this session.
+    /// Signals auto_manage to force the HF path even when peer holders are registered.
+    /// Cleared when a download for the shard successfully completes.
+    pub shard_p2p_failed: dashmap::DashSet<crate::types::ShardId>,
     pub model_request_counts: DashMap<crate::types::ModelId, AtomicU64>,
     pub resource_schedule: RwLock<crate::config::ResourceSchedule>,
     pub prune_history: RwLock<VecDeque<crate::types::PruneEvent>>,
@@ -776,6 +780,7 @@ impl SharedState {
                 model_request_counts: DashMap::new(),
                 resource_schedule: RwLock::new(config.resources.schedule.clone()),
                 prune_history: RwLock::new(VecDeque::new()),
+                shard_p2p_failed: dashmap::DashSet::new(),
             },
             events: EventBus {
                 dashboard_tx: broadcast::channel(32).0,

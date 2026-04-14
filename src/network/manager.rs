@@ -110,6 +110,10 @@ pub struct NetworkManager {
     shard_download_progress: HashMap<crate::types::ShardId, u64>,
     /// P2P retry count per shard (max 5 before HF fallback).
     shard_p2p_retries: HashMap<crate::types::ShardId, u32>,
+    /// Last time a shard download made forward progress (chunk received or request dispatched).
+    /// Used by the stale shard watchdog to detect stalled downloads that never fire
+    /// OutboundFailure (e.g., silent connection drops, handler starvation).
+    shard_last_progress_at: HashMap<crate::types::ShardId, std::time::Instant>,
     /// Reverse lookup: PeerId → NodeId for O(1) peer identification.
     peer_to_node: DashMap<libp2p::PeerId, crate::types::NodeId>,
     /// Buffered GossipSub messages that failed to publish at startup (no peers yet).
@@ -256,6 +260,7 @@ impl NetworkManager {
             pending_shard_requests: HashMap::new(),
             shard_download_progress: HashMap::new(),
             shard_p2p_retries: HashMap::new(),
+            shard_last_progress_at: HashMap::new(),
             peer_to_node: DashMap::new(),
             buffered_gossip: Vec::new(),
             relay_activated: false,
@@ -690,6 +695,39 @@ impl NetworkManager {
                             }
                         }
                     }
+
+                    // Stale shard download watchdog — catches downloads that stopped
+                    // making progress without firing OutboundFailure (silent connection
+                    // drops, handler starvation). After 30s of no chunks, cancel and
+                    // retry via retry_shard_or_fallback.
+                    const SHARD_STALL_SECS: u64 = 30;
+                    let now = std::time::Instant::now();
+                    let stalled: Vec<(crate::types::ShardId, libp2p::PeerId, OutboundRequestId)> = self
+                        .pending_shard_requests
+                        .iter()
+                        .filter_map(|(req_id, (peer_id, shard_id))| {
+                            let last = self
+                                .shard_last_progress_at
+                                .get(shard_id)
+                                .copied()
+                                .unwrap_or(now);
+                            if now.duration_since(last).as_secs() > SHARD_STALL_SECS {
+                                Some((shard_id.clone(), *peer_id, *req_id))
+                            } else {
+                                None
+                            }
+                        })
+                        .collect();
+                    for (shard_id, peer_id, req_id) in stalled {
+                        tracing::warn!(
+                            %peer_id,
+                            model = %shard_id.model_id,
+                            shard = shard_id.index,
+                            "DIAG: stalled shard download (>30s no progress) — cancelling + retrying"
+                        );
+                        self.pending_shard_requests.remove(&req_id);
+                        self.retry_shard_or_fallback(shard_id, peer_id, "stalled (no progress >30s)");
+                    }
                 }
                 // Process pending re-dials (mDNS simultaneous-dial race recovery).
                 // When both sides discover each other via mDNS at the same time, both dial,
@@ -946,35 +984,10 @@ impl NetworkManager {
                         shard_index = shard_id.index,
                         %error,
                         bytes_downloaded = progress,
-                        "DIAG: shard download OutboundFailure"
+                        "DIAG: shard download OutboundFailure — attempting peer failover"
                     );
-                    {
-                        let mname = self
-                            .shared_state
-                            .model_registry
-                            .get_manifest(&shard_id.model_id)
-                            .map(|m| m.name.clone());
-                        self.shared_state.emit_activity(
-                            crate::daemon::state::ActivityEvent::new(
-                                "download",
-                                "shard_transfer_failed",
-                                format!(
-                                    "P2P transfer failed: shard {} of {} — {} ({}B received)",
-                                    crate::types::ShardId::display_index_short(shard_id.index),
-                                    mname.as_deref().unwrap_or(&shard_id.model_id.0),
-                                    error,
-                                    progress
-                                ),
-                            )
-                            .with_model(shard_id.model_id.0.clone())
-                            .with_node(format!("{}", peer))
-                            .with_detail_num(shard_id.index as i64)
-                            .with_detail_str(format!("{}", error))
-                            .with_toast("warning", 6000),
-                        );
-                    }
-                    // Clean up stale download progress entry to prevent resource leak
-                    self.shard_download_progress.remove(&shard_id);
+                    // Try another peer; fall back to HF only after retries exhausted.
+                    self.retry_shard_or_fallback(shard_id, peer, &format!("{error}"));
                 }
             }
             SwarmEvent::Behaviour(SwarmBehaviourEvent::RequestResponse(
@@ -2270,145 +2283,7 @@ impl NetworkManager {
                             shard = shard_id.index,
                             "Peer returned empty shard data — trying next peer or HF fallback"
                         );
-                        self.shard_download_progress.remove(&shard_id);
-
-                        // Track retry count — max 5 P2P attempts before HF fallback
-                        const MAX_P2P_RETRIES: u32 = 5;
-                        let retries = self.shard_p2p_retries.entry(shard_id.clone()).or_insert(0);
-                        *retries += 1;
-                        let retry_num = *retries;
-
-                        if retry_num > MAX_P2P_RETRIES {
-                            self.shard_p2p_retries.remove(&shard_id);
-                            // Fall through to HF fallback below
-                        } else {
-                            // Try next peer that holds this shard (excluding the failed one)
-                            let local_nid = self.shared_state.identity.node_id().clone();
-                            let failed_peer_nid = self.peer_to_node.get(&peer).map(|r| r.clone());
-                            let other_holders: Vec<_> = self
-                                .shared_state
-                                .model_registry
-                                .shard_holders(&shard_id)
-                                .into_iter()
-                                .filter(|n| {
-                                    if *n == local_nid {
-                                        return false;
-                                    }
-                                    match &failed_peer_nid {
-                                        Some(fp) => n != fp,
-                                        None => true,
-                                    }
-                                })
-                                .collect();
-
-                            if !other_holders.is_empty() {
-                                // Retry with best remaining peer
-                                let next_target =
-                                    self.shared_state.select_best_peer(&other_holders);
-
-                                if let Some(next_bytes) = self
-                                    .shared_state
-                                    .peer_registry
-                                    .get(&next_target)
-                                    .and_then(|p| p.peer_id_bytes.clone())
-                                {
-                                    let mname = self
-                                        .shared_state
-                                        .model_registry
-                                        .get_manifest(&shard_id.model_id)
-                                        .map(|m| m.name.clone());
-                                    self.shared_state.emit_activity(
-                                        crate::daemon::state::ActivityEvent::new(
-                                            "download",
-                                            "shard_download_p2p",
-                                            format!(
-                                                "Retrying shard {} of {} from another peer",
-                                                crate::types::ShardId::display_index_short(
-                                                    shard_id.index
-                                                ),
-                                                mname.as_deref().unwrap_or(&shard_id.model_id.0),
-                                            ),
-                                        )
-                                        .with_model(shard_id.model_id.0.clone())
-                                        .with_node(format!("{}", next_target))
-                                        .with_detail_num(shard_id.index as i64)
-                                        .with_detail_str("retry".to_string()),
-                                    );
-                                    let retry_req = crate::types::ShardRequest {
-                                        shard_id: shard_id.clone(),
-                                        chunk_offset: 0,
-                                        chunk_size: crate::network::protocol::SHARD_CHUNK_SIZE,
-                                    };
-                                    self.handle_send_shard_request(next_bytes, retry_req);
-                                    return;
-                                }
-                            }
-                        } // end retry_num <= MAX_P2P_RETRIES
-
-                        // Retries exhausted or no more peers — fall back to HuggingFace
-                        self.shard_p2p_retries.remove(&shard_id);
-                        if let Some(hf_src) =
-                            self.shared_state.models.hf_sources.get(&shard_id.model_id)
-                        {
-                            let mname = self
-                                .shared_state
-                                .model_registry
-                                .get_manifest(&shard_id.model_id)
-                                .map(|m| m.name.clone());
-                            self.shared_state.emit_activity(
-                                crate::daemon::state::ActivityEvent::new(
-                                    "download",
-                                    "shard_download_started",
-                                    format!(
-"P2P failed after {} retries — falling back to HuggingFace for shard {} of {}",
-retry_num,
-crate::types::ShardId::display_index_short(shard_id.index),
-mname.as_deref().unwrap_or(&shard_id.model_id.0),
-),
-                                )
-                                .with_model(shard_id.model_id.0.clone())
-                                .with_detail_num(shard_id.index as i64)
-                                .with_detail_str("hf_fallback".to_string()),
-                            );
-                            // Wake auto-manage to pick up HF download
-                            self.shared_state.models.auto_manage_notify.notify_one();
-                            drop(hf_src);
-                        } else {
-                            let mname = self
-                                .shared_state
-                                .model_registry
-                                .get_manifest(&shard_id.model_id)
-                                .map(|m| m.name.clone());
-                            self.shared_state.emit_activity(
-                                crate::daemon::state::ActivityEvent::new(
-                                    "download",
-                                    "shard_transfer_failed",
-                                    format!(
-                                        "No peers or HF source for shard {} of {}",
-                                        crate::types::ShardId::display_index_short(shard_id.index),
-                                        mname.as_deref().unwrap_or(&shard_id.model_id.0),
-                                    ),
-                                )
-                                .with_model(shard_id.model_id.0.clone())
-                                .with_detail_num(shard_id.index as i64)
-                                .with_detail_str("no_source".to_string())
-                                .with_toast("warning", 6000),
-                            );
-                        }
-
-                        // Clean up acquisition progress
-                        if let Some(mut entry) = self
-                            .shared_state
-                            .models
-                            .acquisition_progress
-                            .get_mut(&shard_id.model_id)
-                        {
-                            entry.state = crate::model::acquisition::AcquisitionState::Failed {
-                                reason: "P2P transfer failed".into(),
-                            };
-                        }
-                        self.shared_state
-                            .schedule_acquisition_cleanup(shard_id.model_id.clone());
+                        self.retry_shard_or_fallback(shard_id, peer, "empty response");
                         return;
                     }
 
@@ -2489,6 +2364,8 @@ mname.as_deref().unwrap_or(&shard_id.model_id.0),
                         } else {
                             self.shard_download_progress
                                 .insert(shard_id.clone(), new_offset);
+                            self.shard_last_progress_at
+                                .insert(shard_id.clone(), std::time::Instant::now());
 
                             let next_req = crate::types::ShardRequest {
                                 shard_id: shard_id.clone(),
@@ -2508,6 +2385,9 @@ mname.as_deref().unwrap_or(&shard_id.model_id.0),
                         // Download complete for this shard
                         self.shard_download_progress.remove(&shard_id);
                         self.shard_p2p_retries.remove(&shard_id);
+                        self.shard_last_progress_at.remove(&shard_id);
+                        // Allow future P2P attempts for this shard if it gets re-downloaded later.
+                        self.shared_state.models.shard_p2p_failed.remove(&shard_id);
 
                         // Finalize: rename .tmp → .bin atomically
                         if let Err(e) = self
@@ -3389,6 +3269,158 @@ mname.as_deref().unwrap_or(&shard_id.model_id.0),
         None
     }
 
+    /// Retry a failed P2P shard download: try another peer, or if retries are
+    /// exhausted, mark the shard as P2P-failed and wake auto-manage to try HF.
+    ///
+    /// Returns `true` if a retry was dispatched to another peer; `false` if we
+    /// gave up or fell back to HF (caller should treat the download as ended).
+    fn retry_shard_or_fallback(
+        &mut self,
+        shard_id: crate::types::ShardId,
+        failed_peer: libp2p::PeerId,
+        reason: &str,
+    ) -> bool {
+        const MAX_P2P_RETRIES: u32 = 5;
+
+        // Clear any partial progress — restarting from offset 0 with a fresh peer.
+        self.shard_download_progress.remove(&shard_id);
+        self.shard_last_progress_at.remove(&shard_id);
+
+        let retries = self.shard_p2p_retries.entry(shard_id.clone()).or_insert(0);
+        *retries += 1;
+        let retry_num = *retries;
+
+        if retry_num <= MAX_P2P_RETRIES {
+            // Pick next peer holding this shard, excluding the failed one.
+            let local_nid = self.shared_state.identity.node_id().clone();
+            let failed_nid = self.peer_to_node.get(&failed_peer).map(|r| r.clone());
+            let other_holders: Vec<_> = self
+                .shared_state
+                .model_registry
+                .shard_holders(&shard_id)
+                .into_iter()
+                .filter(|n| {
+                    if *n == local_nid {
+                        return false;
+                    }
+                    match &failed_nid {
+                        Some(fp) => n != fp,
+                        None => true,
+                    }
+                })
+                .collect();
+
+            if !other_holders.is_empty() {
+                let next_target = self.shared_state.select_best_peer(&other_holders);
+                if let Some(next_bytes) = self
+                    .shared_state
+                    .peer_registry
+                    .get(&next_target)
+                    .and_then(|p| p.peer_id_bytes.clone())
+                {
+                    let mname = self
+                        .shared_state
+                        .model_registry
+                        .get_manifest(&shard_id.model_id)
+                        .map(|m| m.name.clone());
+                    self.shared_state.emit_activity(
+                        crate::daemon::state::ActivityEvent::new(
+                            "download",
+                            "shard_download_p2p",
+                            format!(
+                                "Retrying shard {} of {} from another peer ({}, attempt {}/{})",
+                                crate::types::ShardId::display_index_short(shard_id.index),
+                                mname.as_deref().unwrap_or(&shard_id.model_id.0),
+                                reason,
+                                retry_num,
+                                MAX_P2P_RETRIES,
+                            ),
+                        )
+                        .with_model(shard_id.model_id.0.clone())
+                        .with_node(format!("{}", next_target))
+                        .with_detail_num(shard_id.index as i64)
+                        .with_detail_str("retry".to_string()),
+                    );
+                    let retry_req = crate::types::ShardRequest {
+                        shard_id: shard_id.clone(),
+                        chunk_offset: 0,
+                        chunk_size: crate::network::protocol::SHARD_CHUNK_SIZE,
+                    };
+                    self.handle_send_shard_request(next_bytes, retry_req);
+                    return true;
+                }
+            }
+        }
+
+        // Retries exhausted or no more peers — fall back to HuggingFace.
+        self.shard_p2p_retries.remove(&shard_id);
+        self.shared_state
+            .models
+            .shard_p2p_failed
+            .insert(shard_id.clone());
+        let mname = self
+            .shared_state
+            .model_registry
+            .get_manifest(&shard_id.model_id)
+            .map(|m| m.name.clone());
+        if self
+            .shared_state
+            .models
+            .hf_sources
+            .contains_key(&shard_id.model_id)
+        {
+            self.shared_state.emit_activity(
+                crate::daemon::state::ActivityEvent::new(
+                    "download",
+                    "shard_download_started",
+                    format!(
+                        "P2P failed after {} attempts ({}) — falling back to HuggingFace for shard {} of {}",
+                        retry_num,
+                        reason,
+                        crate::types::ShardId::display_index_short(shard_id.index),
+                        mname.as_deref().unwrap_or(&shard_id.model_id.0),
+                    ),
+                )
+                .with_model(shard_id.model_id.0.clone())
+                .with_detail_num(shard_id.index as i64)
+                .with_detail_str("hf_fallback".to_string()),
+            );
+            // Wake auto-manage; shard_p2p_failed forces the HF path even if peers are registered.
+            self.shared_state.models.auto_manage_notify.notify_one();
+        } else {
+            self.shared_state.emit_activity(
+                crate::daemon::state::ActivityEvent::new(
+                    "download",
+                    "shard_transfer_failed",
+                    format!(
+                        "No peers or HF source for shard {} of {} ({})",
+                        crate::types::ShardId::display_index_short(shard_id.index),
+                        mname.as_deref().unwrap_or(&shard_id.model_id.0),
+                        reason,
+                    ),
+                )
+                .with_model(shard_id.model_id.0.clone())
+                .with_detail_num(shard_id.index as i64)
+                .with_detail_str("no_source".to_string())
+                .with_toast("warning", 6000),
+            );
+            // Mark acquisition as failed so the UI doesn't spin forever.
+            if let Some(mut entry) = self
+                .shared_state
+                .models
+                .acquisition_progress
+                .get_mut(&shard_id.model_id)
+            {
+                entry.state = crate::model::acquisition::AcquisitionState::Failed {
+                    reason: format!("P2P transfer failed: {reason}"),
+                };
+            }
+            self.shared_state
+                .schedule_acquisition_cleanup(shard_id.model_id.clone());
+        }
+        false
+    }
+
     /// Send a shard transfer request to a specific peer.
     fn handle_send_shard_request(
         &mut self,
@@ -3442,7 +3474,9 @@ mname.as_deref().unwrap_or(&shard_id.model_id.0),
             .request_response
             .send_request(&peer_id, req);
         self.pending_shard_requests
-            .insert(outbound_id, (peer_id, shard_id));
+            .insert(outbound_id, (peer_id, shard_id.clone()));
+        self.shard_last_progress_at
+            .insert(shard_id, std::time::Instant::now());
     }
 
     /// Send a StreamingToken to a specific peer via the JSON request_response protocol.
