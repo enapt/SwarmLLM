@@ -137,6 +137,10 @@ pub struct NetworkManager {
     /// not all listen_addrs (which causes redundant connections to the same peer on
     /// different addresses, leading to request_response round-robin routing failures).
     connection_addrs: HashMap<libp2p::swarm::ConnectionId, Multiaddr>,
+    /// Maps PeerId → most recent connected remote Multiaddr. Used by the Identify
+    /// handler to mark peers as LAN when their connected address is loopback/private,
+    /// even if their advertised listen_addrs are empty or public.
+    peer_remote_addrs: HashMap<libp2p::PeerId, Multiaddr>,
     /// Tracks rr_ping send times per OutboundRequestId for RTT measurement.
     /// When the PEX response arrives, RTT is calculated and stored as `latency_ms`
     /// on the peer's PeerInfo, enabling tensor-parallelism group detection.
@@ -258,6 +262,7 @@ impl NetworkManager {
             pending_tensor_outbound: HashMap::new(),
             pending_tensor_channels: HashMap::new(),
             connection_addrs: HashMap::new(),
+            peer_remote_addrs: HashMap::new(),
             ping_sent_times: HashMap::new(),
             shutdown_rx,
             pending_redial: Vec::new(),
@@ -1433,11 +1438,12 @@ impl NetworkManager {
             .unwrap_or(0);
         let was_lan = existing.as_ref().map(|p| p.is_lan_peer).unwrap_or(false);
         drop(existing);
-        // Auto-detect LAN peers from listen_addrs: if any advertised address is
-        // loopback, private (RFC1918), link-local, or unique-local IPv6, this peer
-        // is on the same network. Covers mDNS, loopback discovery, and peers whose
-        // mDNS announcement was missed.
-        let addr_is_lan = info.listen_addrs.iter().any(|a| {
+        // Auto-detect LAN peers from advertised addresses. Check both the peer's
+        // listen_addrs AND observed_addr (the address they see US on) — if either
+        // is loopback/private/link-local/ULA, we're on the same network. Also
+        // check the actual connected remote addresses tracked per-connection,
+        // which covers peers whose initial identify had empty listen_addrs.
+        let is_local_multiaddr = |a: &libp2p::Multiaddr| {
             a.iter().any(|proto| match proto {
                 libp2p::multiaddr::Protocol::Ip4(ip) => {
                     ip.is_loopback() || ip.is_private() || ip.is_link_local()
@@ -1447,7 +1453,14 @@ impl NetworkManager {
                 }
                 _ => false,
             })
-        });
+        };
+        let addr_is_lan = info.listen_addrs.iter().any(&is_local_multiaddr)
+            || is_local_multiaddr(&info.observed_addr)
+            || self
+                .peer_remote_addrs
+                .get(&peer_id)
+                .map(&is_local_multiaddr)
+                .unwrap_or(false);
         let is_lan = was_lan || addr_is_lan;
         let peer_info = PeerInfo {
             node_id: node_id.clone(),
@@ -1665,6 +1678,7 @@ impl NetworkManager {
         }
         self.connection_addrs
             .insert(connection_id, remote_addr.clone());
+        self.peer_remote_addrs.insert(peer_id, remote_addr.clone());
         self.update_peer_count();
 
         // Layer 5: Peer Exchange — send PEX request on first connection only
@@ -1699,6 +1713,9 @@ impl NetworkManager {
         num_established: u32,
     ) {
         let closed_addr = self.connection_addrs.remove(&connection_id);
+        if num_established == 0 {
+            self.peer_remote_addrs.remove(&peer_id);
+        }
         // Check if any in-flight tensor forwards are affected
         let affected_tensors: Vec<_> = self
             .pending_tensor_outbound
