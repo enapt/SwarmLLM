@@ -1075,5 +1075,9 @@
   "shard.row.replicas_local_only": "Held locally — no other peers have this shard",
   "shard.row.replicas_local_plus": "Held locally + {n} other peer(s)",
   "dashboard.downloads_title": "التنزيلات",
-  "dashboard.downloads_empty": "لا توجد تنزيلات نشطة."
+  "dashboard.downloads_empty": "لا توجد تنزيلات نشطة.",
+  "activity.shard_p2p_exhausted": "لم يقدم أي نظير الجزء {shard} من {model} — الرجوع إلى HuggingFace",
+  "activity.model_acquisition_failed": "فشل الحصول على {model}: {detail}",
+  "activity.hf_download_stalled": "تعليق تنزيل {model} من HuggingFace — تم الإلغاء",
+  "activity.manifest_gen_failed": "فشل إنشاء البيان لـ {model}: {detail}"
 }

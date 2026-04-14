@@ -202,6 +202,8 @@
   "activity.shard_p2p_complete": "Shard {shard} of {model} downloaded from peer {node}",
   "activity.shard_p2p_exhausted": "No peers served shard {shard} of {model} — falling back to HuggingFace",
   "activity.model_acquisition_failed": "Acquisition of {model} failed: {detail}",
+  "activity.hf_download_stalled": "HuggingFace download of {model} stalled — aborted",
+  "activity.manifest_gen_failed": "Manifest generation failed for {model}: {detail}",
   "activity.shard_transfer_failed": "Shard transfer failed: {detail}",
   "activity.shard_no_source": "No source for shard of {model}",
   "activity.shard_write_failed": "Failed to write shard to disk",

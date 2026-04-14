@@ -1075,5 +1075,9 @@
   "shard.row.replicas_local_only": "Held locally — no other peers have this shard",
   "shard.row.replicas_local_plus": "Held locally + {n} other peer(s)",
   "dashboard.downloads_title": "Downloads",
-  "dashboard.downloads_empty": "Keine aktiven Downloads."
+  "dashboard.downloads_empty": "Keine aktiven Downloads.",
+  "activity.shard_p2p_exhausted": "Kein Peer lieferte Fragment {shard} von {model} — Rückfall auf HuggingFace",
+  "activity.model_acquisition_failed": "Beschaffung von {model} fehlgeschlagen: {detail}",
+  "activity.hf_download_stalled": "HuggingFace-Download von {model} hängt — abgebrochen",
+  "activity.manifest_gen_failed": "Manifest-Erzeugung für {model} fehlgeschlagen: {detail}"
 }

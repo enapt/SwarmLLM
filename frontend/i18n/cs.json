@@ -1075,5 +1075,9 @@
   "shard.row.replicas_local_only": "Held locally — no other peers have this shard",
   "shard.row.replicas_local_plus": "Held locally + {n} other peer(s)",
   "dashboard.downloads_title": "Stahování",
-  "dashboard.downloads_empty": "Žádná aktivní stahování."
+  "dashboard.downloads_empty": "Žádná aktivní stahování.",
+  "activity.shard_p2p_exhausted": "Žádný peer neposkytl úlomek {shard} modelu {model} — přecházím na HuggingFace",
+  "activity.model_acquisition_failed": "Získání {model} selhalo: {detail}",
+  "activity.hf_download_stalled": "Stahování {model} z HuggingFace uvázlo — přerušeno",
+  "activity.manifest_gen_failed": "Generování manifestu pro {model} selhalo: {detail}"
 }

@@ -1075,5 +1075,9 @@
   "shard.row.replicas_local_only": "Held locally — no other peers have this shard",
   "shard.row.replicas_local_plus": "Held locally + {n} other peer(s)",
   "dashboard.downloads_title": "Unduhan",
-  "dashboard.downloads_empty": "Tidak ada unduhan aktif."
+  "dashboard.downloads_empty": "Tidak ada unduhan aktif.",
+  "activity.shard_p2p_exhausted": "Tidak ada peer yang melayani shard {shard} dari {model} — beralih ke HuggingFace",
+  "activity.model_acquisition_failed": "Akuisisi {model} gagal: {detail}",
+  "activity.hf_download_stalled": "Unduhan {model} dari HuggingFace macet — dibatalkan",
+  "activity.manifest_gen_failed": "Pembuatan manifest untuk {model} gagal: {detail}"
 }

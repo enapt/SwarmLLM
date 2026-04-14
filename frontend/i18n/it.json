@@ -1075,5 +1075,9 @@
   "shard.row.replicas_local_only": "Held locally — no other peers have this shard",
   "shard.row.replicas_local_plus": "Held locally + {n} other peer(s)",
   "dashboard.downloads_title": "Download",
-  "dashboard.downloads_empty": "Nessun download attivo."
+  "dashboard.downloads_empty": "Nessun download attivo.",
+  "activity.shard_p2p_exhausted": "Nessun peer ha servito il frammento {shard} di {model} — ripiego su HuggingFace",
+  "activity.model_acquisition_failed": "Acquisizione di {model} fallita: {detail}",
+  "activity.hf_download_stalled": "Download di {model} da HuggingFace bloccato — interrotto",
+  "activity.manifest_gen_failed": "Generazione del manifesto per {model} fallita: {detail}"
 }

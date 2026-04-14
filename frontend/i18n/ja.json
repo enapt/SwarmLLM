@@ -1075,5 +1075,9 @@
   "shard.row.replicas_local_only": "Held locally — no other peers have this shard",
   "shard.row.replicas_local_plus": "Held locally + {n} other peer(s)",
   "dashboard.downloads_title": "ダウンロード",
-  "dashboard.downloads_empty": "進行中のダウンロードはありません。"
+  "dashboard.downloads_empty": "進行中のダウンロードはありません。",
+  "activity.shard_p2p_exhausted": "{model} のシャード {shard} を提供するピアがいません — HuggingFace にフォールバック",
+  "activity.model_acquisition_failed": "{model} の取得に失敗しました: {detail}",
+  "activity.hf_download_stalled": "{model} の HuggingFace ダウンロードが停滞 — 中止しました",
+  "activity.manifest_gen_failed": "{model} のマニフェスト生成に失敗: {detail}"
 }

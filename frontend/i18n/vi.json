@@ -1075,5 +1075,9 @@
   "shard.row.replicas_local_only": "Held locally — no other peers have this shard",
   "shard.row.replicas_local_plus": "Held locally + {n} other peer(s)",
   "dashboard.downloads_title": "Tải xuống",
-  "dashboard.downloads_empty": "Không có lượt tải xuống đang hoạt động."
+  "dashboard.downloads_empty": "Không có lượt tải xuống đang hoạt động.",
+  "activity.shard_p2p_exhausted": "Không có peer nào phục vụ phân đoạn {shard} của {model} — chuyển sang HuggingFace",
+  "activity.model_acquisition_failed": "Tải {model} thất bại: {detail}",
+  "activity.hf_download_stalled": "Tải {model} từ HuggingFace bị treo — đã huỷ",
+  "activity.manifest_gen_failed": "Tạo manifest cho {model} thất bại: {detail}"
 }

@@ -34,6 +34,9 @@ fn count_unique_shard_holders(
 const SLOW_DOWNLOAD_SPEED_THRESHOLD: u64 = 102400;
 /// Duration in seconds before emitting a slow-download warning.
 const SLOW_DOWNLOAD_WARN_SECS: f64 = 30.0;
+/// Hard abort: seconds of zero-byte progress before we trip the cancel flag.
+/// The HF download task checks the flag every chunk, so this fires fast.
+const STALL_ABORT_SECS: u64 = 120;
 
 /// Spawn a background task that reads download progress events and updates acquisition_progress.
 fn spawn_progress_updater(
@@ -45,8 +48,10 @@ fn spawn_progress_updater(
     tokio::spawn(async move {
         let mut last_bytes = 0u64;
         let mut last_time = std::time::Instant::now();
+        let mut last_progress_at = std::time::Instant::now();
         let mut slow_since: Option<std::time::Instant> = None;
         let mut throttle_warned = false;
+        let stall_tick = std::time::Duration::from_secs(10);
         loop {
             tokio::select! {
                 prog = prx.recv() => {
@@ -55,6 +60,9 @@ fn spawn_progress_updater(
                         entry.downloaded_bytes = prog.downloaded_bytes;
                         entry.total_bytes = prog.total_bytes;
                         let now = std::time::Instant::now();
+                        if prog.downloaded_bytes > last_bytes {
+                            last_progress_at = now;
+                        }
                         let dt = now.duration_since(last_time).as_secs_f64();
                         if dt > 0.5 {
                             let speed =
@@ -83,6 +91,27 @@ fn spawn_progress_updater(
                                 slow_since = None;
                             }
                         }
+                    }
+                }
+                _ = tokio::time::sleep(stall_tick) => {
+                    if last_progress_at.elapsed().as_secs() >= STALL_ABORT_SECS {
+                        if let Some(flag) = shared.models.download_cancel_flags.get(&mid) {
+                            flag.store(true, std::sync::atomic::Ordering::Release);
+                        }
+                        let display = shared.model_registry.display_name(&mid);
+                        shared.emit_activity(
+                            crate::daemon::state::ActivityEvent::new(
+                                "download",
+                                "hf_download_stalled",
+                                format!(
+                                    "HuggingFace download of {} stalled for {}s — aborting",
+                                    display, STALL_ABORT_SECS
+                                ),
+                            )
+                            .with_model(mid.0.clone())
+                            .with_toast("error", 8000),
+                        );
+                        break;
                     }
                 }
                 _ = shutdown_rx.changed() => break,
@@ -941,6 +970,19 @@ pub async fn hf_download_shards(
             {
                 entry.log_push(format!("Manifest generation failed: {e}"));
             }
+            let display = download_shared.model_registry.display_name(&download_mid);
+            download_shared.emit_activity(
+                crate::daemon::state::ActivityEvent::new(
+                    "download",
+                    "manifest_gen_failed",
+                    format!(
+                        "Early manifest generation failed for {} — will retry after shards download: {}",
+                        display, e
+                    ),
+                )
+                .with_model(download_mid.0.clone())
+                .with_toast("warn", 6000),
+            );
             // Continue with downloads anyway — manifest can be regenerated later
         }
 
@@ -1238,6 +1280,19 @@ pub async fn hf_download_shards(
                 precomputed_layouts: Some(&info.layouts),
             }) {
                 tracing::error!(error = %e, model = %model_id_str, "Final manifest regeneration failed after shard download");
+                let display = download_shared.model_registry.display_name(&download_mid);
+                download_shared.emit_activity(
+                    crate::daemon::state::ActivityEvent::new(
+                        "download",
+                        "manifest_gen_failed",
+                        format!(
+                            "Could not finalize manifest for {} — model may not register correctly: {}",
+                            display, e
+                        ),
+                    )
+                    .with_model(download_mid.0.clone())
+                    .with_toast("error", 8000),
+                );
             }
 
             if let Some(mut entry) = download_shared

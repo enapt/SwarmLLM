@@ -1075,5 +1075,9 @@
   "shard.row.replicas_local_only": "Held locally — no other peers have this shard",
   "shard.row.replicas_local_plus": "Held locally + {n} other peer(s)",
   "dashboard.downloads_title": "डाउनलोड",
-  "dashboard.downloads_empty": "कोई सक्रिय डाउनलोड नहीं।"
+  "dashboard.downloads_empty": "कोई सक्रिय डाउनलोड नहीं।",
+  "activity.shard_p2p_exhausted": "किसी पीयर ने {model} का शार्ड {shard} नहीं दिया — HuggingFace पर फ़ॉलबैक",
+  "activity.model_acquisition_failed": "{model} प्राप्त करना विफल: {detail}",
+  "activity.hf_download_stalled": "{model} का HuggingFace डाउनलोड रुक गया — रोक दिया",
+  "activity.manifest_gen_failed": "{model} के लिए मैनिफ़ेस्ट बनाना विफल: {detail}"
 }

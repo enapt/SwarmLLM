@@ -1075,5 +1075,9 @@
   "shard.row.replicas_local_only": "Held locally — no other peers have this shard",
   "shard.row.replicas_local_plus": "Held locally + {n} other peer(s)",
   "dashboard.downloads_title": "다운로드",
-  "dashboard.downloads_empty": "진행 중인 다운로드가 없습니다."
+  "dashboard.downloads_empty": "진행 중인 다운로드가 없습니다.",
+  "activity.shard_p2p_exhausted": "{model}의 샤드 {shard}을(를) 제공한 피어가 없음 — HuggingFace로 대체",
+  "activity.model_acquisition_failed": "{model} 획득 실패: {detail}",
+  "activity.hf_download_stalled": "{model}의 HuggingFace 다운로드 정지 — 중단됨",
+  "activity.manifest_gen_failed": "{model}의 매니페스트 생성 실패: {detail}"
 }

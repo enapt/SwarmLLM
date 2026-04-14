@@ -1075,5 +1075,9 @@
   "shard.row.replicas_local_only": "Held locally — no other peers have this shard",
   "shard.row.replicas_local_plus": "Held locally + {n} other peer(s)",
   "dashboard.downloads_title": "Pobierania",
-  "dashboard.downloads_empty": "Brak aktywnych pobrań."
+  "dashboard.downloads_empty": "Brak aktywnych pobrań.",
+  "activity.shard_p2p_exhausted": "Żaden peer nie dostarczył fragmentu {shard} modelu {model} — powrót do HuggingFace",
+  "activity.model_acquisition_failed": "Pobieranie {model} nie powiodło się: {detail}",
+  "activity.hf_download_stalled": "Pobieranie {model} z HuggingFace zawiesiło się — przerwano",
+  "activity.manifest_gen_failed": "Generowanie manifestu dla {model} nie powiodło się: {detail}"
 }

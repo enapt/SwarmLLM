@@ -1075,5 +1075,9 @@
   "shard.row.replicas_local_only": "Held locally — no other peers have this shard",
   "shard.row.replicas_local_plus": "Held locally + {n} other peer(s)",
   "dashboard.downloads_title": "การดาวน์โหลด",
-  "dashboard.downloads_empty": "ไม่มีการดาวน์โหลดที่ทำงานอยู่"
+  "dashboard.downloads_empty": "ไม่มีการดาวน์โหลดที่ทำงานอยู่",
+  "activity.shard_p2p_exhausted": "ไม่มีเพียร์ให้บริการชาร์ด {shard} ของ {model} — ย้อนไปใช้ HuggingFace",
+  "activity.model_acquisition_failed": "การรับ {model} ล้มเหลว: {detail}",
+  "activity.hf_download_stalled": "การดาวน์โหลด {model} จาก HuggingFace ค้าง — ยกเลิกแล้ว",
+  "activity.manifest_gen_failed": "การสร้าง manifest สำหรับ {model} ล้มเหลว: {detail}"
 }

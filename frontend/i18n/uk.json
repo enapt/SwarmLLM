@@ -1075,5 +1075,9 @@
   "shard.row.replicas_local_only": "Held locally — no other peers have this shard",
   "shard.row.replicas_local_plus": "Held locally + {n} other peer(s)",
   "dashboard.downloads_title": "Завантаження",
-  "dashboard.downloads_empty": "Немає активних завантажень."
+  "dashboard.downloads_empty": "Немає активних завантажень.",
+  "activity.shard_p2p_exhausted": "Жоден пір не надав фрагмент {shard} моделі {model} — повернення до HuggingFace",
+  "activity.model_acquisition_failed": "Отримання {model} не вдалося: {detail}",
+  "activity.hf_download_stalled": "Завантаження {model} з HuggingFace зависло — перервано",
+  "activity.manifest_gen_failed": "Створення маніфесту для {model} не вдалося: {detail}"
 }

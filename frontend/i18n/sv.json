@@ -1075,5 +1075,9 @@
   "shard.row.replicas_local_only": "Held locally — no other peers have this shard",
   "shard.row.replicas_local_plus": "Held locally + {n} other peer(s)",
   "dashboard.downloads_title": "Nedladdningar",
-  "dashboard.downloads_empty": "Inga aktiva nedladdningar."
+  "dashboard.downloads_empty": "Inga aktiva nedladdningar.",
+  "activity.shard_p2p_exhausted": "Ingen peer levererade fragment {shard} av {model} — återgår till HuggingFace",
+  "activity.model_acquisition_failed": "Hämtning av {model} misslyckades: {detail}",
+  "activity.hf_download_stalled": "HuggingFace-nedladdning av {model} hängde — avbruten",
+  "activity.manifest_gen_failed": "Manifestgenerering för {model} misslyckades: {detail}"
 }

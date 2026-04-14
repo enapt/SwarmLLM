@@ -1075,5 +1075,9 @@
   "shard.row.replicas_local_only": "Held locally — no other peers have this shard",
   "shard.row.replicas_local_plus": "Held locally + {n} other peer(s)",
   "dashboard.downloads_title": "下载",
-  "dashboard.downloads_empty": "没有进行中的下载。"
+  "dashboard.downloads_empty": "没有进行中的下载。",
+  "activity.shard_p2p_exhausted": "没有对等节点提供 {model} 的分片 {shard} — 回退到 HuggingFace",
+  "activity.model_acquisition_failed": "获取 {model} 失败:{detail}",
+  "activity.hf_download_stalled": "{model} 的 HuggingFace 下载停滞 — 已中止",
+  "activity.manifest_gen_failed": "{model} 的清单生成失败:{detail}"
 }
