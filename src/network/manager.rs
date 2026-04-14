@@ -1547,6 +1547,8 @@ impl NetworkManager {
         if self.peer_to_node.len() < MAX_PEER_TO_NODE || self.peer_to_node.contains_key(&peer_id) {
             self.peer_to_node.insert(peer_id, node_id.clone());
         }
+        // Ground-truth connection set — consumed by HealthMonitor to skip eviction.
+        self.shared_state.connected_node_ids.insert(node_id.clone());
         // Persistent NodeId → PeerId mapping (survives disconnects, same cap)
         if self.shared_state.peer_id_map.len() < MAX_PEER_TO_NODE
             || self.shared_state.peer_id_map.contains_key(&node_id)
@@ -1709,6 +1711,9 @@ impl NetworkManager {
             // be orphaned permanently, accumulating stale data.
             let node_id_for_cleanup = self.peer_to_node.get(&peer_id).map(|r| r.clone());
             if let Some(ref nid) = node_id_for_cleanup {
+                // Remove from libp2p-connected ground-truth set so HealthMonitor
+                // can now evict the peer_registry entry if it goes stale.
+                self.shared_state.connected_node_ids.remove(nid);
                 self.shared_state
                     .models
                     .peer_shard_downloads

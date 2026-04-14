@@ -438,6 +438,11 @@ impl HealthMonitor {
         }
 
         let mut stale_peers = Vec::new();
+        // NodeIds whose registry entry looks stale but whose libp2p connection
+        // is still live — bumped back to `now` after the iteration completes
+        // (can't take a write lock on a DashMap entry while we're holding a
+        // read ref via .iter()).
+        let mut refresh_peers = Vec::new();
 
         for entry in self.shared_state.peer_registry.iter() {
             let peer = entry.value();
@@ -452,7 +457,26 @@ impl HealthMonitor {
                     );
                     continue;
                 }
+                // Libp2p still has a live connection to this peer. Registry
+                // staleness is just silence in the application-level protocol
+                // (no recent PEX/gossip), not an actual disconnect — refresh
+                // last_seen so it doesn't keep flagging every tick.
+                if self.shared_state.connected_node_ids.contains(entry.key()) {
+                    tracing::debug!(
+                        peer = %entry.key(),
+                        age_secs = age.num_seconds(),
+                        "Peer registry entry is stale but libp2p connection is live — refreshing last_seen, skipping eviction"
+                    );
+                    refresh_peers.push(entry.key().clone());
+                    continue;
+                }
                 stale_peers.push(entry.key().clone());
+            }
+        }
+
+        for nid in refresh_peers {
+            if let Some(mut p) = self.shared_state.peer_registry.get_mut(&nid) {
+                p.last_seen = now;
             }
         }
 

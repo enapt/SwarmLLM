@@ -143,13 +143,22 @@ pub const DISCOVERY_INTERVAL: Duration = Duration::from_secs(300);
 /// excluding the caller's own port. The TCP offset is api_port + 10 to match
 /// `NetworkManager::run()`.
 pub fn loopback_candidate_addrs(own_api_port: u16) -> Vec<Multiaddr> {
+    let mut ports: std::collections::BTreeSet<u16> = std::collections::BTreeSet::new();
+    // Adjacent ports: handles tight test layouts like 8800/8801/8802.
     let lo: u16 = own_api_port.saturating_sub(10).max(1024);
     let hi: u16 = own_api_port.saturating_add(10);
-    let mut addrs = Vec::with_capacity((hi - lo) as usize);
-    for api_port in lo..=hi {
-        if api_port == own_api_port {
-            continue;
-        }
+    for p in lo..=hi {
+        ports.insert(p);
+    }
+    // Common multi-node test bases: 8800/8900/9000/9100 layouts (100 apart)
+    // and 9800-series used by some dev configs. Covers the standard SwarmLLM
+    // multi-node setup where loopback probing needs to cross larger gaps.
+    for base in [8800u16, 8900, 9000, 9100, 9200, 9800, 9900] {
+        ports.insert(base);
+    }
+    ports.remove(&own_api_port);
+    let mut addrs = Vec::with_capacity(ports.len());
+    for api_port in ports {
         let tcp_port = api_port.saturating_add(10);
         if let Ok(addr) = format!("/ip4/127.0.0.1/tcp/{tcp_port}").parse::<Multiaddr>() {
             addrs.push(addr);

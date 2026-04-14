@@ -295,6 +295,12 @@ pub struct SharedState {
     pub model_registry: ModelRegistry,
     pub nickname_registry: DashMap<NodeId, crate::identity::nickname::NicknameRecord>,
     pub peer_id_map: DashMap<NodeId, Vec<u8>>,
+    /// NodeIds currently connected at the libp2p transport layer.
+    /// Populated by NetworkManager on Identify-Received, removed on ConnectionClosed
+    /// when num_established transitions to 0. HealthMonitor uses this as ground truth
+    /// to avoid evicting peer_registry entries for peers that are still connected but
+    /// momentarily silent (e.g. slow WSL2 QUIC substream negotiation, no recent gossip).
+    pub connected_node_ids: dashmap::DashSet<NodeId>,
 
     // Inference engine
     pub executor: SharedExecutor,
@@ -793,6 +799,7 @@ impl SharedState {
             gguf_meta: DashMap::new(),
             nickname_registry,
             peer_id_map: DashMap::new(),
+            connected_node_ids: dashmap::DashSet::new(),
             session_manager,
             gossip_sealer,
             api_key,
