@@ -1079,5 +1079,10 @@
   "activity.shard_p2p_exhausted": "Nenhum par serviu o fragmento {shard} de {model} — recorrendo ao HuggingFace",
   "activity.model_acquisition_failed": "Aquisição de {model} falhou: {detail}",
   "activity.hf_download_stalled": "Download de {model} do HuggingFace travou — abortado",
-  "activity.manifest_gen_failed": "Geração do manifesto para {model} falhou: {detail}"
+  "activity.manifest_gen_failed": "Geração do manifesto para {model} falhou: {detail}",
+  "nav.auto_manage_idle_ok": "Autogestão: inativo, saudável",
+  "nav.auto_manage_idle_disabled": "Autogestão: desativado",
+  "nav.auto_manage_active_download": "Autogestão: baixando shards",
+  "nav.auto_manage_active_prune": "Autogestão: removendo shards",
+  "nav.auto_manage_problem": "Autogestão: falha recente — verifique o registro"
 }

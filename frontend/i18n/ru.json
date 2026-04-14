@@ -1079,5 +1079,10 @@
   "activity.shard_p2p_exhausted": "Ни один пир не обслужил фрагмент {shard} модели {model} — откат на HuggingFace",
   "activity.model_acquisition_failed": "Получение {model} не удалось: {detail}",
   "activity.hf_download_stalled": "Загрузка {model} с HuggingFace зависла — прервана",
-  "activity.manifest_gen_failed": "Создание манифеста для {model} не удалось: {detail}"
+  "activity.manifest_gen_failed": "Создание манифеста для {model} не удалось: {detail}",
+  "nav.auto_manage_idle_ok": "Автоуправление: простой, исправно",
+  "nav.auto_manage_idle_disabled": "Автоуправление: отключено",
+  "nav.auto_manage_active_download": "Автоуправление: загрузка шардов",
+  "nav.auto_manage_active_prune": "Автоуправление: очистка шардов",
+  "nav.auto_manage_problem": "Автоуправление: недавняя ошибка — см. журнал"
 }

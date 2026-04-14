@@ -1264,11 +1264,11 @@ Routes Claude model requests through a locally-authenticated `claude` CLI subpro
   - `frontend/js/components/compare.js` — multi-model comparison tool
   - `frontend/js/components/pool.js` — device pool management (create, join, members, contribution)
   - `frontend/js/init.js` — event binding, initialization, public API export (`window.SwarmLLM`)
-- **HTML templates**: 13 `<template id="tmpl-*">` elements for repeating UI structures (session items, chat messages, toasts, provider badges, compare cards, leaderboard rows, HF result cards, download queue items, peer rows, prune rows, storage rows, compare chips, pool member rows). Components clone templates via `template.content.cloneNode(true)` instead of innerHTML string building.
+- **HTML templates**: 12 `<template id="tmpl-*">` elements for repeating UI structures (session items, chat messages, toasts, provider badges, compare cards, leaderboard rows, HF result cards, download queue items, peer rows, prune rows, storage rows, compare chips, pool member rows). Components clone templates via `template.content.cloneNode(true)` instead of innerHTML string building.
 - Cross-component calls: `App.componentName.method()`. Shared state: `App.state.*`. Utilities: `App.utils.*`.
 
 ### Frontend Features
-- **i18n**: 1010 translation keys across 21 languages (en, es, fr, de, pt, it, nl, ru, zh, ja, ko, ar, tr, pl, sv, th, hi, vi, id, uk, cs). Auto-detects browser language. `I18n.t()` + `data-i18n` DOM attributes. Interpolation via `{variable}` placeholders. Fallback chain: current language → English → raw key. "Continue in English" UX for non-English users who prefer English.
+- **i18n**: 1089 translation keys across 21 languages (en, es, fr, de, pt, it, nl, ru, zh, ja, ko, ar, tr, pl, sv, th, hi, vi, id, uk, cs). Auto-detects browser language. `I18n.t()` + `data-i18n` DOM attributes. Interpolation via `{variable}` placeholders. Fallback chain: current language → English → raw key. "Continue in English" UX for non-English users who prefer English.
 - **Theme**: Light / Dark / System toggle. `[data-theme="light"]` CSS overrides. Persisted in localStorage.
 - **Neural network background**: Animated canvas particle network behind dashboard tiles (`frontend/js/neural-bg.js`). ~60 nodes with connecting edges, gentle drift, mouse repulsion/glow. State-reactive coloring: blue (idle) → cyan (active inference) → red-orange (unhealthy/disconnected). Peer count boosts vibrancy, active requests trigger node firing pulses. Pauses when tab hidden; reduced opacity in light theme.
 

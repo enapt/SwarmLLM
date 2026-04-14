@@ -1079,5 +1079,10 @@
   "activity.shard_p2p_exhausted": "Hiçbir eş {model} için parça {shard} sağlamadı — HuggingFace'e dönülüyor",
   "activity.model_acquisition_failed": "{model} edinme başarısız: {detail}",
   "activity.hf_download_stalled": "{model} HuggingFace indirmesi takıldı — iptal edildi",
-  "activity.manifest_gen_failed": "{model} için bildirim oluşturma başarısız: {detail}"
+  "activity.manifest_gen_failed": "{model} için bildirim oluşturma başarısız: {detail}",
+  "nav.auto_manage_idle_ok": "Otomatik yönetim: boşta, sağlıklı",
+  "nav.auto_manage_idle_disabled": "Otomatik yönetim: devre dışı",
+  "nav.auto_manage_active_download": "Otomatik yönetim: parçalar indiriliyor",
+  "nav.auto_manage_active_prune": "Otomatik yönetim: parçalar temizleniyor",
+  "nav.auto_manage_problem": "Otomatik yönetim: son hata — günlüğü kontrol edin"
 }

@@ -1079,5 +1079,10 @@
   "activity.shard_p2p_exhausted": "لم يقدم أي نظير الجزء {shard} من {model} — الرجوع إلى HuggingFace",
   "activity.model_acquisition_failed": "فشل الحصول على {model}: {detail}",
   "activity.hf_download_stalled": "تعليق تنزيل {model} من HuggingFace — تم الإلغاء",
-  "activity.manifest_gen_failed": "فشل إنشاء البيان لـ {model}: {detail}"
+  "activity.manifest_gen_failed": "فشل إنشاء البيان لـ {model}: {detail}",
+  "nav.auto_manage_idle_ok": "إدارة تلقائية: خامل، سليم",
+  "nav.auto_manage_idle_disabled": "إدارة تلقائية: معطلة",
+  "nav.auto_manage_active_download": "إدارة تلقائية: جارٍ تنزيل الشظايا",
+  "nav.auto_manage_active_prune": "إدارة تلقائية: جارٍ تقليم الشظايا",
+  "nav.auto_manage_problem": "إدارة تلقائية: خطأ حديث — راجع السجل"
 }

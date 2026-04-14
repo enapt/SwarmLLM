@@ -377,6 +377,7 @@ impl SessionManager {
     }
 
     /// Create a new session by spawning a Claude CLI subprocess.
+    #[allow(clippy::too_many_arguments)]
     pub async fn create_session(
         &self,
         session_id: String,
@@ -558,11 +559,11 @@ impl SessionManager {
             drop(s);
             // Clean up temp directories created for quick chats
             let tmp_prefix = std::env::temp_dir().join("swarmllm-chat-");
-            if working_dir.starts_with(&tmp_prefix.parent().unwrap_or(&tmp_prefix))
+            if working_dir.starts_with(tmp_prefix.parent().unwrap_or(&tmp_prefix))
                 && working_dir
                     .file_name()
                     .and_then(|n| n.to_str())
-                    .map_or(false, |n| n.starts_with("swarmllm-chat-"))
+                    .is_some_and(|n| n.starts_with("swarmllm-chat-"))
             {
                 let _ = std::fs::remove_dir_all(&working_dir);
                 tracing::debug!(dir = %working_dir.display(), "Cleaned up temp session directory");
@@ -633,11 +634,15 @@ impl SessionManager {
         }
 
         for id in to_warn {
+            let short = &id[..8.min(id.len())];
             shared_state.emit_activity(
                 crate::daemon::state::ActivityEvent::new(
                     "claude_code",
                     "idle_warning",
-                    "Claude Code session will suspend soon due to inactivity".to_string(),
+                    format!(
+                        "Claude Code session {} will suspend soon due to inactivity",
+                        short
+                    ),
                 )
                 .with_toast("warning", 10000),
             );
@@ -920,11 +925,14 @@ pub async fn create_session_handler(
                         continue;
                     }
 
-                    if init_evt.is_some() && evt_type == "result" {
-                        // Consumed the empty prompt's result. Session is now
-                        // fully idle and ready for user messages.
-                        tracing::debug!("Drained empty-prompt result event during init");
-                        return Ok(init_evt.unwrap());
+                    if let Some(evt) = init_evt.take() {
+                        if evt_type == "result" {
+                            // Consumed the empty prompt's result. Session is now
+                            // fully idle and ready for user messages.
+                            tracing::debug!("Drained empty-prompt result event during init");
+                            return Ok(evt);
+                        }
+                        init_evt = Some(evt);
                     }
                     // Skip hook messages, assistant messages from empty prompt, etc.
                 }
@@ -950,13 +958,10 @@ pub async fn create_session_handler(
                         );
                         return Ok(evt);
                     }
-                    return Err(ApiError(crate::error::SwarmError::Internal(
-                        format!(
-                            "Timeout waiting for Claude CLI init ({}s)",
-                            CLAUDE_INIT_TIMEOUT_SECS
-                        )
-                        .into(),
-                    )));
+                    return Err(ApiError(crate::error::SwarmError::Internal(format!(
+                        "Timeout waiting for Claude CLI init ({}s)",
+                        CLAUDE_INIT_TIMEOUT_SECS
+                    ))));
                 }
             }
         }

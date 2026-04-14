@@ -1079,5 +1079,10 @@
   "activity.shard_p2p_exhausted": "Không có peer nào phục vụ phân đoạn {shard} của {model} — chuyển sang HuggingFace",
   "activity.model_acquisition_failed": "Tải {model} thất bại: {detail}",
   "activity.hf_download_stalled": "Tải {model} từ HuggingFace bị treo — đã huỷ",
-  "activity.manifest_gen_failed": "Tạo manifest cho {model} thất bại: {detail}"
+  "activity.manifest_gen_failed": "Tạo manifest cho {model} thất bại: {detail}",
+  "nav.auto_manage_idle_ok": "Tự quản lý: rảnh, khỏe",
+  "nav.auto_manage_idle_disabled": "Tự quản lý: đã tắt",
+  "nav.auto_manage_active_download": "Tự quản lý: đang tải shard",
+  "nav.auto_manage_active_prune": "Tự quản lý: đang dọn shard",
+  "nav.auto_manage_problem": "Tự quản lý: lỗi gần đây — xem nhật ký"
 }

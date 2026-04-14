@@ -1079,5 +1079,10 @@
   "activity.shard_p2p_exhausted": "没有对等节点提供 {model} 的分片 {shard} — 回退到 HuggingFace",
   "activity.model_acquisition_failed": "获取 {model} 失败:{detail}",
   "activity.hf_download_stalled": "{model} 的 HuggingFace 下载停滞 — 已中止",
-  "activity.manifest_gen_failed": "{model} 的清单生成失败:{detail}"
+  "activity.manifest_gen_failed": "{model} 的清单生成失败:{detail}",
+  "nav.auto_manage_idle_ok": "自动管理：空闲，正常",
+  "nav.auto_manage_idle_disabled": "自动管理：已禁用",
+  "nav.auto_manage_active_download": "自动管理：正在下载分片",
+  "nav.auto_manage_active_prune": "自动管理：正在清理分片",
+  "nav.auto_manage_problem": "自动管理：最近失败 — 请查看活动日志"
 }

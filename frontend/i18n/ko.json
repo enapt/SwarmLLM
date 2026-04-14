@@ -1079,5 +1079,10 @@
   "activity.shard_p2p_exhausted": "{model}의 샤드 {shard}을(를) 제공한 피어가 없음 — HuggingFace로 대체",
   "activity.model_acquisition_failed": "{model} 획득 실패: {detail}",
   "activity.hf_download_stalled": "{model}의 HuggingFace 다운로드 정지 — 중단됨",
-  "activity.manifest_gen_failed": "{model}의 매니페스트 생성 실패: {detail}"
+  "activity.manifest_gen_failed": "{model}의 매니페스트 생성 실패: {detail}",
+  "nav.auto_manage_idle_ok": "자동 관리: 대기, 정상",
+  "nav.auto_manage_idle_disabled": "자동 관리: 비활성화",
+  "nav.auto_manage_active_download": "자동 관리: 샤드 다운로드 중",
+  "nav.auto_manage_active_prune": "자동 관리: 샤드 정리 중",
+  "nav.auto_manage_problem": "자동 관리: 최근 오류 — 로그 확인"
 }

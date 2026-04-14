@@ -502,19 +502,7 @@
 
     updateBadges: function() {
       App.providerHealth.updateHealthBar();
-      Object.keys(S.providerHealth).forEach(function(p) {
-        var h = S.providerHealth[p];
-        var badge = document.getElementById('health-badge-' + p);
-        if (!badge) {
-          var card = document.querySelector('.cloud-model[data-provider="' + U.cssSafeAttr(p) + '"]');
-          if (!card) return;
-          var header = card.querySelector('.model-header');
-          if (!header) return;
-          badge = document.createElement('span');
-          badge.id = 'health-badge-' + p;
-          badge.className = 'provider-health-badge';
-          header.querySelector('span:last-child').appendChild(badge);
-        }
+      function applyCardBadge(badge, h) {
         var statusIcon, statusClass;
         if (h.status === 'up') {
           statusIcon = h.latency_ms + 'ms';
@@ -527,19 +515,35 @@
         badge.className = 'provider-health-badge ' + statusClass;
         badge.textContent = statusIcon;
         badge.title = h.status + (h.detail ? ': ' + h.detail : '') + ' (' + h.latency_ms + 'ms)';
-      });
-
+      }
       Object.keys(S.providerHealth).forEach(function(p) {
         var h = S.providerHealth[p];
+        // Card badge
+        var badge = document.getElementById('health-badge-' + p);
+        if (!badge) {
+          var card = document.querySelector('.cloud-model[data-provider="' + U.cssSafeAttr(p) + '"]');
+          if (card) {
+            var header = card.querySelector('.model-header');
+            if (header) {
+              badge = document.createElement('span');
+              badge.id = 'health-badge-' + p;
+              badge.className = 'provider-health-badge';
+              header.querySelector('span:last-child').appendChild(badge);
+            }
+          }
+        }
+        if (badge) applyCardBadge(badge, h);
+
+        // Dropdown group badge
         var groupEl = document.querySelector('.model-dropdown-group[data-group="' + p + '"]');
         if (!groupEl) return;
         var existingBadge = groupEl.querySelector('.provider-health-badge');
         if (!existingBadge) {
-          var header = groupEl.querySelector('.model-dropdown-group-header');
-          if (!header) return;
+          var ghead = groupEl.querySelector('.model-dropdown-group-header');
+          if (!ghead) return;
           existingBadge = document.createElement('span');
           existingBadge.className = 'provider-health-badge';
-          header.appendChild(existingBadge);
+          ghead.appendChild(existingBadge);
         }
         if (h.status === 'up') {
           existingBadge.className = 'provider-health-badge ' + (h.latency_ms < 500 ? 'health-fast' : h.latency_ms < 2000 ? 'health-ok' : 'health-slow');
@@ -587,15 +591,18 @@
     modelBadgeHtml: function(modelId) {
       var s = S.modelStatus[modelId];
       if (!s) return '';
+      function badge(cls, title, text) {
+        return '<span class="model-status-badge ' + cls + '" title="' + U.escapeHtml(title) + '">' + U.escapeHtml(text) + '</span>';
+      }
       if (s.status === 'up') {
         var cls = s.latency_ms < 1000 ? 'health-fast' : s.latency_ms < 3000 ? 'health-ok' : 'health-slow';
-        return '<span class="model-status-badge ' + cls + '" title="' + U.escapeHtml(I18n.t('provider.responded_in', { ms: s.latency_ms })) + '">' + U.escapeHtml(String(s.latency_ms)) + 'ms</span>';
+        return badge(cls, I18n.t('provider.responded_in', { ms: s.latency_ms }), String(s.latency_ms) + 'ms');
       }
-      if (s.status === 'timeout') return '<span class="model-status-badge health-slow" title="' + U.escapeHtml(I18n.t('provider.model_timeout')) + '">' + U.escapeHtml(I18n.t('provider.slow')) + '</span>';
-      if (s.status === 'unavailable') return '<span class="model-status-badge health-down" title="' + U.escapeHtml(I18n.t('provider.model_unavailable')) + '">' + U.escapeHtml(I18n.t('provider.down')) + '</span>';
-      if (s.status === 'not_found') return '<span class="model-status-badge health-down" title="' + U.escapeHtml(I18n.t('provider.model_not_found')) + '">' + U.escapeHtml(I18n.t('provider.not_available')) + '</span>';
-      if (s.status === 'rate_limited') return '<span class="model-status-badge health-warn" title="' + U.escapeHtml(I18n.t('provider.rate_limited')) + '">' + U.escapeHtml(I18n.t('provider.limited')) + '</span>';
-      return '<span class="model-status-badge health-down" title="' + U.escapeHtml(I18n.t('provider.error')) + '">' + U.escapeHtml(I18n.t('provider.err')) + '</span>';
+      if (s.status === 'timeout') return badge('health-slow', I18n.t('provider.model_timeout'), I18n.t('provider.slow'));
+      if (s.status === 'unavailable') return badge('health-down', I18n.t('provider.model_unavailable'), I18n.t('provider.down'));
+      if (s.status === 'not_found') return badge('health-down', I18n.t('provider.model_not_found'), I18n.t('provider.not_available'));
+      if (s.status === 'rate_limited') return badge('health-warn', I18n.t('provider.rate_limited'), I18n.t('provider.limited'));
+      return badge('health-down', I18n.t('provider.error'), I18n.t('provider.err'));
     },
 
     updateModelBadges: function() {

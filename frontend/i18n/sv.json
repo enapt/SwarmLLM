@@ -1079,5 +1079,10 @@
   "activity.shard_p2p_exhausted": "Ingen peer levererade fragment {shard} av {model} — återgår till HuggingFace",
   "activity.model_acquisition_failed": "Hämtning av {model} misslyckades: {detail}",
   "activity.hf_download_stalled": "HuggingFace-nedladdning av {model} hängde — avbruten",
-  "activity.manifest_gen_failed": "Manifestgenerering för {model} misslyckades: {detail}"
+  "activity.manifest_gen_failed": "Manifestgenerering för {model} misslyckades: {detail}",
+  "nav.auto_manage_idle_ok": "Auto-hantering: inaktiv, frisk",
+  "nav.auto_manage_idle_disabled": "Auto-hantering: inaktiverad",
+  "nav.auto_manage_active_download": "Auto-hantering: laddar ner fragment",
+  "nav.auto_manage_active_prune": "Auto-hantering: rensar fragment",
+  "nav.auto_manage_problem": "Auto-hantering: nyligen fel — kontrollera loggen"
 }

@@ -495,6 +495,18 @@ pub struct Usage {
     pub cache_read_input_tokens: Option<u32>,
 }
 
+impl Usage {
+    pub fn from_counts(prompt_tokens: u32, completion_tokens: u32) -> Self {
+        Self {
+            prompt_tokens,
+            completion_tokens,
+            total_tokens: prompt_tokens + completion_tokens,
+            cache_creation_input_tokens: None,
+            cache_read_input_tokens: None,
+        }
+    }
+}
+
 #[derive(Debug, Serialize)]
 pub struct ChatCompletionChunk {
     pub id: String,
@@ -1514,13 +1526,7 @@ async fn router_inference(
                 })
             },
         }],
-        usage: Usage {
-            prompt_tokens: output.prompt_tokens,
-            completion_tokens: output.completion_tokens,
-            total_tokens: output.prompt_tokens + output.completion_tokens,
-            cache_creation_input_tokens: None,
-            cache_read_input_tokens: None,
-        },
+        usage: Usage::from_counts(output.prompt_tokens, output.completion_tokens),
         session_id: output.session_id,
     };
 
@@ -1751,13 +1757,7 @@ async fn split_non_stream_response(
             finish_reason: output.finish_reason.clone(),
             logprobs: None,
         }],
-        usage: Usage {
-            prompt_tokens: output.prompt_tokens,
-            completion_tokens: output.completion_tokens,
-            total_tokens: output.prompt_tokens + output.completion_tokens,
-            cache_creation_input_tokens: None,
-            cache_read_input_tokens: None,
-        },
+        usage: Usage::from_counts(output.prompt_tokens, output.completion_tokens),
         session_id: None,
     };
 

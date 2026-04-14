@@ -787,10 +787,13 @@ pub async fn pool_add_pin(
     .await?;
 
     // Persist
-    let _ = state
-        .shared_state
-        .db
-        .put_json("pool_state", "my_pool", &snapshot);
+    if let Err(e) = state.shared_state.db.put_json(
+        crate::pool::manager::TREE_POOL_STATE,
+        crate::pool::manager::KEY_MY_POOL,
+        &snapshot,
+    ) {
+        tracing::warn!(error = %e, "Failed to persist pool shard pin — may be lost on restart");
+    }
 
     // Notify auto-manage to re-evaluate
     state.shared_state.models.auto_manage_notify.notify_one();
@@ -822,10 +825,13 @@ pub async fn pool_remove_pin(
     })
     .await?;
 
-    let _ = state
-        .shared_state
-        .db
-        .put_json("pool_state", "my_pool", &snapshot);
+    if let Err(e) = state.shared_state.db.put_json(
+        crate::pool::manager::TREE_POOL_STATE,
+        crate::pool::manager::KEY_MY_POOL,
+        &snapshot,
+    ) {
+        tracing::warn!(error = %e, "Failed to persist pool shard unpin — may be lost on restart");
+    }
 
     Ok(Json(
         serde_json::json!({ "status": "unpinned", "model_id": model_id_resp }),

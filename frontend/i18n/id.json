@@ -1079,5 +1079,10 @@
   "activity.shard_p2p_exhausted": "Tidak ada peer yang melayani shard {shard} dari {model} — beralih ke HuggingFace",
   "activity.model_acquisition_failed": "Akuisisi {model} gagal: {detail}",
   "activity.hf_download_stalled": "Unduhan {model} dari HuggingFace macet — dibatalkan",
-  "activity.manifest_gen_failed": "Pembuatan manifest untuk {model} gagal: {detail}"
+  "activity.manifest_gen_failed": "Pembuatan manifest untuk {model} gagal: {detail}",
+  "nav.auto_manage_idle_ok": "Pengelolaan otomatis: idle, sehat",
+  "nav.auto_manage_idle_disabled": "Pengelolaan otomatis: nonaktif",
+  "nav.auto_manage_active_download": "Pengelolaan otomatis: mengunduh shard",
+  "nav.auto_manage_active_prune": "Pengelolaan otomatis: memangkas shard",
+  "nav.auto_manage_problem": "Pengelolaan otomatis: kegagalan terbaru — periksa log"
 }

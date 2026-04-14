@@ -1079,5 +1079,10 @@
   "activity.shard_p2p_exhausted": "{model} のシャード {shard} を提供するピアがいません — HuggingFace にフォールバック",
   "activity.model_acquisition_failed": "{model} の取得に失敗しました: {detail}",
   "activity.hf_download_stalled": "{model} の HuggingFace ダウンロードが停滞 — 中止しました",
-  "activity.manifest_gen_failed": "{model} のマニフェスト生成に失敗: {detail}"
+  "activity.manifest_gen_failed": "{model} のマニフェスト生成に失敗: {detail}",
+  "nav.auto_manage_idle_ok": "自動管理：アイドル、正常",
+  "nav.auto_manage_idle_disabled": "自動管理：無効",
+  "nav.auto_manage_active_download": "自動管理：シャードをダウンロード中",
+  "nav.auto_manage_active_prune": "自動管理：シャードを削除中",
+  "nav.auto_manage_problem": "自動管理：最近エラー — ログを確認"
 }

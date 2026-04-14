@@ -1079,5 +1079,10 @@
   "activity.shard_p2p_exhausted": "Жоден пір не надав фрагмент {shard} моделі {model} — повернення до HuggingFace",
   "activity.model_acquisition_failed": "Отримання {model} не вдалося: {detail}",
   "activity.hf_download_stalled": "Завантаження {model} з HuggingFace зависло — перервано",
-  "activity.manifest_gen_failed": "Створення маніфесту для {model} не вдалося: {detail}"
+  "activity.manifest_gen_failed": "Створення маніфесту для {model} не вдалося: {detail}",
+  "nav.auto_manage_idle_ok": "Автокерування: простій, справно",
+  "nav.auto_manage_idle_disabled": "Автокерування: вимкнено",
+  "nav.auto_manage_active_download": "Автокерування: завантаження шардів",
+  "nav.auto_manage_active_prune": "Автокерування: очищення шардів",
+  "nav.auto_manage_problem": "Автокерування: нещодавня помилка — перевірте журнал"
 }

@@ -1079,5 +1079,10 @@
   "activity.shard_p2p_exhausted": "Kein Peer lieferte Fragment {shard} von {model} — Rückfall auf HuggingFace",
   "activity.model_acquisition_failed": "Beschaffung von {model} fehlgeschlagen: {detail}",
   "activity.hf_download_stalled": "HuggingFace-Download von {model} hängt — abgebrochen",
-  "activity.manifest_gen_failed": "Manifest-Erzeugung für {model} fehlgeschlagen: {detail}"
+  "activity.manifest_gen_failed": "Manifest-Erzeugung für {model} fehlgeschlagen: {detail}",
+  "nav.auto_manage_idle_ok": "Auto-Verwaltung: inaktiv, gesund",
+  "nav.auto_manage_idle_disabled": "Auto-Verwaltung: deaktiviert",
+  "nav.auto_manage_active_download": "Auto-Verwaltung: Shards werden heruntergeladen",
+  "nav.auto_manage_active_prune": "Auto-Verwaltung: Shards werden entfernt",
+  "nav.auto_manage_problem": "Auto-Verwaltung: kürzlicher Fehler — Protokoll prüfen"
 }

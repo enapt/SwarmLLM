@@ -777,13 +777,14 @@ impl ProvidersConfig {
         // Auto-detect Claude CLI and initialize subscription config if not already set.
         // This ensures the dashboard shows the Claude Code card on first startup.
         #[cfg(feature = "claude-subscription")]
-        if self.claude_subscription.is_none() {
-            if std::process::Command::new("claude")
+        if self.claude_subscription.is_none()
+            && std::process::Command::new("claude")
                 .arg("--version")
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null())
                 .status()
                 .is_ok()
+        {
             {
                 tracing::info!("Auto-detected Claude CLI — enabling subscription provider");
                 self.claude_subscription = Some(crate::api::claude_sub::ClaudeSubscriptionConfig {

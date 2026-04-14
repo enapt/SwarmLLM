@@ -1079,5 +1079,10 @@
   "activity.shard_p2p_exhausted": "किसी पीयर ने {model} का शार्ड {shard} नहीं दिया — HuggingFace पर फ़ॉलबैक",
   "activity.model_acquisition_failed": "{model} प्राप्त करना विफल: {detail}",
   "activity.hf_download_stalled": "{model} का HuggingFace डाउनलोड रुक गया — रोक दिया",
-  "activity.manifest_gen_failed": "{model} के लिए मैनिफ़ेस्ट बनाना विफल: {detail}"
+  "activity.manifest_gen_failed": "{model} के लिए मैनिफ़ेस्ट बनाना विफल: {detail}",
+  "nav.auto_manage_idle_ok": "ऑटो-प्रबंधन: निष्क्रिय, स्वस्थ",
+  "nav.auto_manage_idle_disabled": "ऑटो-प्रबंधन: अक्षम",
+  "nav.auto_manage_active_download": "ऑटो-प्रबंधन: शार्ड डाउनलोड हो रहे हैं",
+  "nav.auto_manage_active_prune": "ऑटो-प्रबंधन: शार्ड हटाए जा रहे हैं",
+  "nav.auto_manage_problem": "ऑटो-प्रबंधन: हाल की विफलता — लॉग देखें"
 }

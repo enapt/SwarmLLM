@@ -1079,5 +1079,10 @@
   "activity.shard_p2p_exhausted": "Geen peer leverde shard {shard} van {model} — terugval naar HuggingFace",
   "activity.model_acquisition_failed": "Acquisitie van {model} mislukt: {detail}",
   "activity.hf_download_stalled": "HuggingFace-download van {model} vastgelopen — afgebroken",
-  "activity.manifest_gen_failed": "Manifest-generatie voor {model} mislukt: {detail}"
+  "activity.manifest_gen_failed": "Manifest-generatie voor {model} mislukt: {detail}",
+  "nav.auto_manage_idle_ok": "Auto-beheer: inactief, gezond",
+  "nav.auto_manage_idle_disabled": "Auto-beheer: uitgeschakeld",
+  "nav.auto_manage_active_download": "Auto-beheer: shards downloaden",
+  "nav.auto_manage_active_prune": "Auto-beheer: shards opschonen",
+  "nav.auto_manage_problem": "Auto-beheer: recente fout — controleer logboek"
 }

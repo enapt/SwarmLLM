@@ -355,6 +355,7 @@ fn extract_content_text(msg: &serde_json::Value) -> String {
 ///
 /// Uses the production-proven format from claude-max-api-proxy-rs:
 /// - system messages → `<system>...</system>` (also extracted as --system-prompt)
+///
 /// Serialize a conversation to a single CLI prompt string.
 ///
 /// Message roles are tagged with XML:

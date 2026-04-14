@@ -1079,5 +1079,10 @@
   "activity.shard_p2p_exhausted": "ไม่มีเพียร์ให้บริการชาร์ด {shard} ของ {model} — ย้อนไปใช้ HuggingFace",
   "activity.model_acquisition_failed": "การรับ {model} ล้มเหลว: {detail}",
   "activity.hf_download_stalled": "การดาวน์โหลด {model} จาก HuggingFace ค้าง — ยกเลิกแล้ว",
-  "activity.manifest_gen_failed": "การสร้าง manifest สำหรับ {model} ล้มเหลว: {detail}"
+  "activity.manifest_gen_failed": "การสร้าง manifest สำหรับ {model} ล้มเหลว: {detail}",
+  "nav.auto_manage_idle_ok": "จัดการอัตโนมัติ: ว่าง ปกติ",
+  "nav.auto_manage_idle_disabled": "จัดการอัตโนมัติ: ปิดใช้งาน",
+  "nav.auto_manage_active_download": "จัดการอัตโนมัติ: กำลังดาวน์โหลดชาร์ด",
+  "nav.auto_manage_active_prune": "จัดการอัตโนมัติ: กำลังลบชาร์ด",
+  "nav.auto_manage_problem": "จัดการอัตโนมัติ: ข้อผิดพลาดล่าสุด — ตรวจสอบบันทึก"
 }

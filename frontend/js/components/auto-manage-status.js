@@ -131,8 +131,8 @@
   }
 
   function refreshEnabled() {
-    if (!App.data || !App.data.authFetch) return;
-    App.data.authFetch('/api/admin/config').then(function(r) {
+    if (!App.authFetch) return;
+    App.authFetch('/api/admin/config').then(function(r) {
       return r && r.ok ? r.json() : null;
     }).then(function(cfg) {
       if (cfg && typeof cfg.auto_manage_shards === 'boolean') {

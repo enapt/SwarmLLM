@@ -1079,5 +1079,10 @@
   "activity.shard_p2p_exhausted": "Nessun peer ha servito il frammento {shard} di {model} — ripiego su HuggingFace",
   "activity.model_acquisition_failed": "Acquisizione di {model} fallita: {detail}",
   "activity.hf_download_stalled": "Download di {model} da HuggingFace bloccato — interrotto",
-  "activity.manifest_gen_failed": "Generazione del manifesto per {model} fallita: {detail}"
+  "activity.manifest_gen_failed": "Generazione del manifesto per {model} fallita: {detail}",
+  "nav.auto_manage_idle_ok": "Auto-gestione: inattivo, sano",
+  "nav.auto_manage_idle_disabled": "Auto-gestione: disattivato",
+  "nav.auto_manage_active_download": "Auto-gestione: download shard",
+  "nav.auto_manage_active_prune": "Auto-gestione: rimozione shard",
+  "nav.auto_manage_problem": "Auto-gestione: errore recente — controlla il registro"
 }

@@ -12,11 +12,11 @@ use crate::pool::types::*;
 use crate::types::{NetworkCommand, NodeId, SwarmMessage};
 
 /// Database tree names for pool persistence.
-const TREE_POOL_STATE: &str = "pool_state";
+pub(crate) const TREE_POOL_STATE: &str = "pool_state";
 const TREE_POOL_INVITATIONS: &str = "pool_invitations";
 const TREE_POOL_FORWARDS: &str = "pool_forwards";
 const TREE_POOL_REMOVAL_REPLAYS: &str = "pool_removal_replays";
-const KEY_MY_POOL: &str = "my_pool";
+pub(crate) const KEY_MY_POOL: &str = "my_pool";
 
 /// Max lifetime of a pending auto-accept intent created by a code-based join.
 /// Used both by the periodic expiry sweep and the inbound invitation handler.

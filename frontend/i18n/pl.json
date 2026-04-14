@@ -1079,5 +1079,10 @@
   "activity.shard_p2p_exhausted": "Żaden peer nie dostarczył fragmentu {shard} modelu {model} — powrót do HuggingFace",
   "activity.model_acquisition_failed": "Pobieranie {model} nie powiodło się: {detail}",
   "activity.hf_download_stalled": "Pobieranie {model} z HuggingFace zawiesiło się — przerwano",
-  "activity.manifest_gen_failed": "Generowanie manifestu dla {model} nie powiodło się: {detail}"
+  "activity.manifest_gen_failed": "Generowanie manifestu dla {model} nie powiodło się: {detail}",
+  "nav.auto_manage_idle_ok": "Auto-zarządzanie: bezczynne, sprawne",
+  "nav.auto_manage_idle_disabled": "Auto-zarządzanie: wyłączone",
+  "nav.auto_manage_active_download": "Auto-zarządzanie: pobieranie fragmentów",
+  "nav.auto_manage_active_prune": "Auto-zarządzanie: usuwanie fragmentów",
+  "nav.auto_manage_problem": "Auto-zarządzanie: ostatni błąd — sprawdź dziennik"
 }

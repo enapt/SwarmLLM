@@ -1079,5 +1079,10 @@
   "activity.shard_p2p_exhausted": "Žádný peer neposkytl úlomek {shard} modelu {model} — přecházím na HuggingFace",
   "activity.model_acquisition_failed": "Získání {model} selhalo: {detail}",
   "activity.hf_download_stalled": "Stahování {model} z HuggingFace uvázlo — přerušeno",
-  "activity.manifest_gen_failed": "Generování manifestu pro {model} selhalo: {detail}"
+  "activity.manifest_gen_failed": "Generování manifestu pro {model} selhalo: {detail}",
+  "nav.auto_manage_idle_ok": "Automatická správa: nečinná, v pořádku",
+  "nav.auto_manage_idle_disabled": "Automatická správa: zakázána",
+  "nav.auto_manage_active_download": "Automatická správa: stahování shardů",
+  "nav.auto_manage_active_prune": "Automatická správa: úklid shardů",
+  "nav.auto_manage_problem": "Automatická správa: nedávná chyba — zkontrolujte protokol"
 }

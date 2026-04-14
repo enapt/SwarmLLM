@@ -1079,5 +1079,10 @@
   "activity.shard_p2p_exhausted": "Aucun pair n'a fourni le fragment {shard} de {model} — repli sur HuggingFace",
   "activity.model_acquisition_failed": "Acquisition de {model} échouée : {detail}",
   "activity.hf_download_stalled": "Téléchargement de {model} depuis HuggingFace bloqué — abandonné",
-  "activity.manifest_gen_failed": "Échec de la génération du manifeste pour {model} : {detail}"
+  "activity.manifest_gen_failed": "Échec de la génération du manifeste pour {model} : {detail}",
+  "nav.auto_manage_idle_ok": "Auto-gestion : inactif, sain",
+  "nav.auto_manage_idle_disabled": "Auto-gestion : désactivé",
+  "nav.auto_manage_active_download": "Auto-gestion : téléchargement des fragments",
+  "nav.auto_manage_active_prune": "Auto-gestion : élagage des fragments",
+  "nav.auto_manage_problem": "Auto-gestion : échec récent — vérifier le journal"
 }
