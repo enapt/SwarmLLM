@@ -1431,8 +1431,24 @@ impl NetworkManager {
             .as_ref()
             .map(|p| p.verified_transaction_count)
             .unwrap_or(0);
-        let is_lan = existing.as_ref().map(|p| p.is_lan_peer).unwrap_or(false);
+        let was_lan = existing.as_ref().map(|p| p.is_lan_peer).unwrap_or(false);
         drop(existing);
+        // Auto-detect LAN peers from listen_addrs: if any advertised address is
+        // loopback, private (RFC1918), link-local, or unique-local IPv6, this peer
+        // is on the same network. Covers mDNS, loopback discovery, and peers whose
+        // mDNS announcement was missed.
+        let addr_is_lan = info.listen_addrs.iter().any(|a| {
+            a.iter().any(|proto| match proto {
+                libp2p::multiaddr::Protocol::Ip4(ip) => {
+                    ip.is_loopback() || ip.is_private() || ip.is_link_local()
+                }
+                libp2p::multiaddr::Protocol::Ip6(ip) => {
+                    ip.is_loopback() || (ip.segments()[0] & 0xfe00) == 0xfc00
+                }
+                _ => false,
+            })
+        });
+        let is_lan = was_lan || addr_is_lan;
         let peer_info = PeerInfo {
             node_id: node_id.clone(),
             addresses: info
@@ -1457,6 +1473,28 @@ impl NetworkManager {
         self.shared_state
             .peer_registry
             .insert(node_id.clone(), peer_info);
+        // If identify just newly marked this peer as LAN (based on its advertised
+        // addresses), bump the LAN peer counter and emit a discovery event. This
+        // covers peers that were reached via loopback probe or bootstrap where
+        // mDNS never fired but the addresses are clearly local.
+        if !was_lan && addr_is_lan {
+            let count = self
+                .shared_state
+                .lan_peer_count
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                + 1;
+            let msg = format!(
+                "Found {} peer{} on your local network",
+                count,
+                if count == 1 { "" } else { "s" }
+            );
+            tracing::info!(%peer_id, lan_peers = count, "LAN peer detected from listen_addrs");
+            self.shared_state.emit_activity(
+                crate::daemon::state::ActivityEvent::new("network", "lan_peer_discovered", msg)
+                    .with_detail_num(count as i64)
+                    .with_toast("success", 8000),
+            );
+        }
         // Restore persisted trust score from DB (survives restarts)
         let persisted_trust = self.shared_state.credits.trust_manager.get_trust(&node_id);
         if (persisted_trust - 0.5_f32).abs() > f32::EPSILON {
