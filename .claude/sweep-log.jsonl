@@ -371,3 +371,19 @@
 {"file":"src/inference/kv_cache.rs","line":84,"kind":"dead_visibility","summary":"register_session/get_session/invalidate_session pub used by integration tests, NOT dead","status":"wontfix","date":"2026-04-13"}
 {"file":"CLAUDE.md","line":118,"kind":"doc_mismatch","summary":"stale shard-menu.js reference in frontend component list","status":"fixed","date":"2026-04-13"}
 {"file":"docs/ARCHITECTURE.md","line":1257,"kind":"doc_mismatch","summary":"stale shard-menu.js reference - replaced with auto-manage-status.js","status":"fixed","date":"2026-04-13"}
+{"file":"frontend/js/components/auto-manage-status.js","line":134,"kind":"bug","summary":"App.data.authFetch doesn't exist; refreshEnabled() always no-ops","status":"fixed","date":"2026-04-14"}
+{"file":"src/api/pool.rs","line":790,"kind":"error_handling","summary":"Silent DB persist failure for pool shard pins","status":"fixed","date":"2026-04-14"}
+{"file":"src/api/pool.rs","line":825,"kind":"error_handling","summary":"Silent DB persist failure for pool shard unpin","status":"fixed","date":"2026-04-14"}
+{"file":"src/api/pool.rs","line":793,"kind":"magic_string","summary":"pool_state/my_pool magic strings now use pool::manager constants","status":"fixed","date":"2026-04-14"}
+{"file":"src/api/claude_session.rs","line":640,"kind":"observability","summary":"idle_warning toast missing session id","status":"fixed","date":"2026-04-14"}
+{"file":"src/api/openai.rs","line":1517,"kind":"duplication","summary":"Usage{...} block duplicated; extracted Usage::from_counts","status":"fixed","date":"2026-04-14"}
+{"file":"frontend/js/components/notifications.js","line":505,"kind":"duplication","summary":"updateBadges: merged duplicate forEach loops","status":"fixed","date":"2026-04-14"}
+{"file":"frontend/js/components/notifications.js","line":591,"kind":"duplication","summary":"modelBadgeHtml: extracted badge() helper","status":"fixed","date":"2026-04-14"}
+{"file":"docs/ARCHITECTURE.md","line":1267,"kind":"stale_doc","summary":"13 templates→12","status":"fixed","date":"2026-04-14"}
+{"file":"docs/ARCHITECTURE.md","line":1271,"kind":"stale_doc","summary":"i18n keys 1010→1089","status":"fixed","date":"2026-04-14"}
+{"file":"CLAUDE.md","line":124,"kind":"stale_doc","summary":"i18n keys 1010→1089","status":"fixed","date":"2026-04-14"}
+{"file":"frontend/i18n/*.json","line":0,"kind":"i18n","summary":"Added 5 nav.auto_manage_* keys to 20 languages","status":"fixed","date":"2026-04-14"}
+{"file":"src/credit/anti_gaming.rs","line":14,"kind":"tuning","summary":"SUBNET_EVICTION_SECS 24h long TTL; needs discussion","status":"deferred","date":"2026-04-14"}
+{"file":"src/api/pool.rs","line":736,"kind":"toctou","summary":"write-lock released before db persist; needs discussion","status":"deferred","date":"2026-04-14"}
+{"file":"src/api/admin_models.rs","line":1582,"kind":"error_handling","summary":"silent DB persist - lower severity","status":"deferred","date":"2026-04-14"}
+{"file":"frontend/js/components/settings.js","line":213,"kind":"architecture","summary":"direct authFetch to /api/admin/shard-storage","status":"deferred","date":"2026-04-14"}

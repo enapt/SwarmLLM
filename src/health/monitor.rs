@@ -120,8 +120,12 @@ impl HealthMonitor {
                     self.cleanup_stale_peer_shard_downloads();
                     self.cleanup_stale_channels();
                     self.cleanup_stale_peer_id_map();
-                    // Cleanup expired anti-gaming rate limit entries
-                    self.shared_state.credits.anti_gaming.lock().await.cleanup();
+                    // Cleanup expired anti-gaming rate limit entries.
+                    // try_lock so a contending API/credit-ledger call can't stall the
+                    // health monitor; cleanup is idempotent and the next tick retries.
+                    if let Ok(mut ag) = self.shared_state.credits.anti_gaming.try_lock() {
+                        ag.cleanup();
+                    }
                     // Decay trust scores toward default (0.5) on each health ping cycle
                     self.shared_state.credits.trust_manager.decay_all(&self.shared_state.peer_registry);
                     // Clean up stale AllReduce/RingChunk entries (receiver dropped/timed out)

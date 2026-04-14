@@ -234,6 +234,26 @@ fn sample_token_with_ctx(
         .extend(logits.iter().map(|l| (l - max_logit).exp()));
     let sum: f32 = ctx.probs.iter().sum();
 
+    // All logits masked to -inf (e.g. degenerate top_k ∩ top_p).
+    // Fall back to argmax over the pre-softmax logits rather than emitting
+    // the last vocab token, which is a silent wrong-token bug.
+    if !sum.is_finite() || sum == 0.0 {
+        let mut best_i = 0u32;
+        let mut best_v = f32::NEG_INFINITY;
+        for (i, &l) in logits.iter().enumerate() {
+            if l > best_v {
+                best_v = l;
+                best_i = i as u32;
+            }
+        }
+        tracing::warn!(
+            vocab_size = logits.len(),
+            sum,
+            "DIAG: sampling softmax collapsed — falling back to argmax"
+        );
+        return best_i;
+    }
+
     // Weighted random selection
     let r: f32 = simple_random() * sum;
     let mut cumulative = 0.0;

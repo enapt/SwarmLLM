@@ -134,6 +134,7 @@ impl RateLimiter {
         // mutations restricted but reads use the normal admin bucket (page loads
         // call these on every refresh and hitting 5/min breaks the dashboard).
         let (kind, limit) = if path == "/api/admin/provider-model-status"
+            || path == "/api/admin/provider-health"
             || ((path == "/api/admin/providers" || path == "/api/admin/api-key") && is_mutating)
         {
             (BucketKind::SensitiveAdmin, SENSITIVE_ADMIN_RPM)

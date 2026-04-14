@@ -631,7 +631,8 @@ async fn handle_generate(
 
     // If the loop exhausted max_tokens (not EOS/stop), the last sampled token
     // was never sent. Emit it now to avoid the off-by-one.
-    if finish_reason == "length" && !eos.contains(&next_token) {
+    // Skip when max_tokens == 0 — user explicitly requested no completion tokens.
+    if finish_reason == "length" && gen.sampling.max_tokens > 0 && !eos.contains(&next_token) {
         let text = decode_token(model, next_token);
         generated.push(next_token);
         send_worker(

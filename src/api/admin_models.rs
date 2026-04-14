@@ -2058,14 +2058,11 @@ pub async fn register_adapter(
     let adapter_id = body.id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
     let path = std::path::PathBuf::from(&body.path);
+    let adapter_dir = state.shared_state.adapter_registry.adapter_dir();
     let resolved = if path.is_absolute() {
         path
     } else {
-        state
-            .shared_state
-            .adapter_registry
-            .adapter_dir()
-            .join(&path)
+        adapter_dir.join(&path)
     };
 
     // Reject path traversal attempts (e.g. "../../../etc/passwd")
@@ -2082,6 +2079,21 @@ pub async fn register_adapter(
             "Adapter file not found: {}",
             resolved.display()
         ))));
+    }
+
+    // Confine resolved path to the adapter directory (symlinks + absolute paths).
+    let canonical = resolved.canonicalize().map_err(|_| {
+        ApiError(crate::error::SwarmError::Validation(
+            "Adapter path could not be resolved".into(),
+        ))
+    })?;
+    let canonical_root = adapter_dir
+        .canonicalize()
+        .unwrap_or_else(|_| adapter_dir.to_path_buf());
+    if !canonical.starts_with(&canonical_root) {
+        return Err(ApiError(crate::error::SwarmError::Validation(
+            "Adapter path must be within the adapter directory".into(),
+        )));
     }
 
     let device = candle_core::Device::Cpu;

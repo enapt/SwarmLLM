@@ -1285,7 +1285,9 @@
         document.title = document.title === original ? I18n.t('claude_code.permission_required') : original;
       };
       App.claudeCode._permFlashInterval = setInterval(flash, 800);
+      var restoreTimer = null;
       var restore = function() {
+        if (restoreTimer) { clearTimeout(restoreTimer); restoreTimer = null; }
         clearInterval(App.claudeCode._permFlashInterval);
         App.claudeCode._permFlashInterval = null;
         document.title = original;
@@ -1293,7 +1295,7 @@
       };
       document.addEventListener('visibilitychange', restore);
       // Auto-stop after 30s
-      setTimeout(restore, 30000);
+      restoreTimer = setTimeout(restore, 30000);
     },
 
     // Send permission response — then collapse to one-liner
