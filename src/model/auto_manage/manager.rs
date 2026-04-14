@@ -249,6 +249,25 @@ impl AutoShardManager {
     /// and coordinates pruning with downloads (only prune when there's resource
     /// pressure or when making room for higher-value shards).
     async fn evaluate(&self) {
+        let local_node_id = self.shared_state.identity.node_id().clone();
+        let hosted_before = self
+            .shared_state
+            .model_registry
+            .all_shard_entries()
+            .into_iter()
+            .filter(|(_, holders)| holders.contains(&local_node_id))
+            .count();
+        let models_hosted = self
+            .shared_state
+            .model_registry
+            .all_shard_entries()
+            .into_iter()
+            .filter(|(_, holders)| holders.contains(&local_node_id))
+            .map(|(sid, _)| sid.model_id)
+            .collect::<std::collections::HashSet<_>>()
+            .len();
+        let active_downloads = self.shared_state.models.acquisition_progress.len();
+
         self.evaluate_and_download().await;
 
         // Prune only if enabled -- pruning is the last resort to free resources.
@@ -257,6 +276,33 @@ impl AutoShardManager {
         if self.shared_state.config.auto_manage.prune_enabled {
             self.evaluate_and_prune().await;
         }
+
+        let hosted_after = self
+            .shared_state
+            .model_registry
+            .all_shard_entries()
+            .into_iter()
+            .filter(|(_, holders)| holders.contains(&local_node_id))
+            .count();
+        let new_downloads = self
+            .shared_state
+            .models
+            .acquisition_progress
+            .len()
+            .saturating_sub(active_downloads);
+        let delta = hosted_after as i64 - hosted_before as i64;
+
+        self.shared_state.emit_activity(
+            crate::daemon::state::ActivityEvent::new(
+                "auto_manage",
+                "cycle_complete",
+                format!(
+                    "Auto-manage cycle: {} models, {} shards hosted ({:+}), {} download(s) started",
+                    models_hosted, hosted_after, delta, new_downloads
+                ),
+            )
+            .with_detail_num(hosted_after as i64),
+        );
     }
 
     /// Download under-replicated shards based on geo-aware scoring.
