@@ -237,9 +237,16 @@ impl UpdateChecker {
             }
         }
 
-        // Stream the response body with a size check during download to prevent OOM
-        // on a malicious server that sends a huge body without Content-Length
-        let mut body_bytes = Vec::with_capacity(64 * 1024);
+        // Stream the body to disk while incrementally hashing.
+        // Avoids buffering up to MAX_UPDATE_SIZE in RAM and lets us abort early
+        // on oversize bodies that omit Content-Length.
+        use sha2::{Digest, Sha256};
+        use tokio::io::AsyncWriteExt;
+        let mut hasher = Sha256::new();
+        let mut total: u64 = 0;
+        let mut file = tokio::fs::File::create(&tmp_path)
+            .await
+            .map_err(SwarmError::Io)?;
         {
             use futures::StreamExt;
             let mut stream = resp.bytes_stream();
@@ -247,24 +254,26 @@ impl UpdateChecker {
                 let chunk = chunk.map_err(|e| {
                     SwarmError::Network(format!("Failed to read response body: {e}"))
                 })?;
-                body_bytes.extend_from_slice(&chunk);
-                if body_bytes.len() as u64 > MAX_UPDATE_SIZE {
+                total = total.saturating_add(chunk.len() as u64);
+                if total > MAX_UPDATE_SIZE {
+                    drop(file);
+                    let _ = tokio::fs::remove_file(&tmp_path).await;
                     return Err(SwarmError::Validation(format!(
                         "Update binary too large (>{} bytes) — aborting download",
                         MAX_UPDATE_SIZE
                     )));
                 }
+                hasher.update(&chunk);
+                file.write_all(&chunk).await.map_err(SwarmError::Io)?;
             }
+            file.flush().await.map_err(SwarmError::Io)?;
         }
-        let bytes = bytes::Bytes::from(body_bytes);
+        drop(file);
 
         // Verify SHA256 checksum — MANDATORY for security.
         // Reject updates without a .sha256 sidecar to prevent accepting unverified binaries.
         match info.checksum_sha256 {
             Some(ref expected_hash) => {
-                use sha2::{Digest, Sha256};
-                let mut hasher = Sha256::new();
-                hasher.update(&bytes);
                 let actual_hash = hex::encode(hasher.finalize());
                 // The .sha256 file may contain "hash  filename" format
                 let expected_trimmed = expected_hash
@@ -272,6 +281,7 @@ impl UpdateChecker {
                     .next()
                     .unwrap_or(expected_hash);
                 if actual_hash != expected_trimmed {
+                    let _ = tokio::fs::remove_file(&tmp_path).await;
                     return Err(SwarmError::ShardIntegrity {
                         expected: expected_trimmed.to_string(),
                         actual: actual_hash,
@@ -280,29 +290,27 @@ impl UpdateChecker {
                 tracing::info!("Update checksum verified (SHA256)");
             }
             None => {
+                let _ = tokio::fs::remove_file(&tmp_path).await;
                 return Err(SwarmError::Validation(
                     "Update rejected: no SHA256 checksum available. Release must include a .sha256 sidecar file.".to_string(),
                 ));
             }
         }
 
-        let download_size = bytes.len();
-        let tp = tmp_path.clone();
-        tokio::task::spawn_blocking(move || -> Result<(), std::io::Error> {
-            std::fs::write(&tp, &bytes)?;
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                std::fs::set_permissions(&tp, std::fs::Permissions::from_mode(0o755))?;
-            }
-            Ok(())
-        })
-        .await
-        .map_err(|e| SwarmError::Internal(format!("spawn_blocking: {e}")))?
-        .map_err(SwarmError::Io)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let tp = tmp_path.clone();
+            tokio::task::spawn_blocking(move || -> Result<(), std::io::Error> {
+                std::fs::set_permissions(&tp, std::fs::Permissions::from_mode(0o755))
+            })
+            .await
+            .map_err(|e| SwarmError::Internal(format!("spawn_blocking: {e}")))?
+            .map_err(SwarmError::Io)?;
+        }
 
         tracing::info!(
-            bytes = download_size,
+            bytes = total,
             path = %tmp_path.display(),
             "Update binary downloaded"
         );

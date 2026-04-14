@@ -630,27 +630,18 @@ impl AcquisitionManager {
         let model_id = shard_id.model_id.clone();
         let shard_index = shard_id.index;
 
-        if !self.jobs.contains_key(&model_id) {
-            tracing::warn!(
-                model = %model_id,
-                "Received shard data for unknown acquisition — ignoring"
-            );
-            return;
-        }
-
         // NOTE: chunk bytes and `.tmp → .bin` finalize are owned by NetworkManager
         // (src/network/manager.rs handle_response::ShardData path). Writing here too
         // created a race: if this mpsc-queued task fell behind manager.rs's direct
         // writes and ran finalize_shard on a partial `.tmp`, it clobbered the
         // already-finalized `.bin` with mostly-zero content. AcquisitionManager now
         // just tracks progress and verifies the file that manager.rs produced.
-        let _ = offset; // offset is no longer used here; retained in the message for future tracking
-                        // Grab references we need before borrowing job mutably
+        let _ = offset;
         let progress_map = &self.shared_state.models.acquisition_progress;
         let node_id = self.shared_state.identity.node_id().clone();
 
         let Some(job) = self.jobs.get_mut(&model_id) else {
-            tracing::warn!(model = %model_id, "Received shard chunk for unknown job");
+            tracing::debug!(model = %model_id, "Received shard chunk for unknown job — ignoring");
             return;
         };
 

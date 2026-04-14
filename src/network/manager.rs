@@ -2245,11 +2245,7 @@ impl NetworkManager {
                 }
             }
             SwarmResponse::ShardData(data) => {
-                if data.data.is_empty() {
-                    tracing::debug!(%peer, "Received empty shard response (peer doesn't have it)");
-                    return;
-                }
-                tracing::info!(
+                tracing::debug!(
                     %peer,
                     bytes = data.data.len(),
                     total_size = data.total_size,
@@ -2748,6 +2744,17 @@ impl NetworkManager {
         }
     }
 
+    /// Decode peer ID bytes; logs and returns None on failure.
+    fn resolve_peer_id(bytes: &[u8], label: &str) -> Option<libp2p::PeerId> {
+        match libp2p::PeerId::from_bytes(bytes) {
+            Ok(id) => Some(id),
+            Err(e) => {
+                tracing::warn!(error = %e, label, "Invalid peer ID bytes");
+                None
+            }
+        }
+    }
+
     /// Send a tensor forward to a specific peer via the unified binary tensor protocol.
     /// Uses WIRE_TAG_TENSOR (0x01) framing. Encrypts activations when an encryption
     /// session exists, falls back to plaintext.
@@ -2756,12 +2763,8 @@ impl NetworkManager {
         target_peer_bytes: Vec<u8>,
         forward: crate::types::LayerForward,
     ) {
-        let peer_id = match libp2p::PeerId::from_bytes(&target_peer_bytes) {
-            Ok(id) => id,
-            Err(e) => {
-                tracing::warn!(error = %e, "Invalid peer ID bytes for tensor send");
-                return;
-            }
+        let Some(peer_id) = Self::resolve_peer_id(&target_peer_bytes, "tensor send") else {
+            return;
         };
 
         // Try to find the peer's NodeId for encryption
@@ -2973,12 +2976,8 @@ impl NetworkManager {
         target_peer_bytes: Vec<u8>,
         result: crate::types::LayerResult,
     ) {
-        let peer_id = match libp2p::PeerId::from_bytes(&target_peer_bytes) {
-            Ok(id) => id,
-            Err(e) => {
-                tracing::warn!(error = %e, "Invalid peer ID bytes for tensor result");
-                return;
-            }
+        let Some(peer_id) = Self::resolve_peer_id(&target_peer_bytes, "tensor result") else {
+            return;
         };
 
         let is_connected = self.swarm.is_connected(&peer_id);
@@ -3465,12 +3464,8 @@ impl NetworkManager {
         target_peer_bytes: Vec<u8>,
         request: crate::types::ShardRequest,
     ) {
-        let peer_id = match libp2p::PeerId::from_bytes(&target_peer_bytes) {
-            Ok(id) => id,
-            Err(e) => {
-                tracing::warn!(error = %e, "Invalid peer ID bytes for shard request");
-                return;
-            }
+        let Some(peer_id) = Self::resolve_peer_id(&target_peer_bytes, "shard request") else {
+            return;
         };
 
         tracing::info!(
@@ -3531,12 +3526,8 @@ impl NetworkManager {
         target_peer_bytes: Vec<u8>,
         token: crate::types::StreamingToken,
     ) {
-        let peer_id = match libp2p::PeerId::from_bytes(&target_peer_bytes) {
-            Ok(id) => id,
-            Err(e) => {
-                tracing::warn!(error = %e, "Invalid peer ID bytes for streaming token");
-                return;
-            }
+        let Some(peer_id) = Self::resolve_peer_id(&target_peer_bytes, "streaming token") else {
+            return;
         };
 
         if !self.swarm.is_connected(&peer_id) {
@@ -3562,12 +3553,8 @@ impl NetworkManager {
         msg: SwarmMessage,
         label: &str,
     ) {
-        let peer_id = match libp2p::PeerId::from_bytes(&target_peer_bytes) {
-            Ok(id) => id,
-            Err(e) => {
-                tracing::warn!(error = %e, label, "Invalid peer ID bytes for rr message");
-                return;
-            }
+        let Some(peer_id) = Self::resolve_peer_id(&target_peer_bytes, label) else {
+            return;
         };
 
         if !self.swarm.is_connected(&peer_id) {

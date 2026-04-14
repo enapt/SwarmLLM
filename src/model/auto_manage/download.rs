@@ -533,12 +533,30 @@ display
                             if let Some(mut entry) =
                                 shared.models.acquisition_progress.get_mut(&model_id)
                             {
-                                entry.state = crate::model::acquisition::AcquisitionState::Complete;
-                                entry.downloaded_shards = 1;
-                                entry.verified_shards = 1;
+                                let was_complete = entry
+                                    .shard_progress
+                                    .get(&shard_idx)
+                                    .map(|sp| {
+                                        matches!(
+                                            sp.state,
+                                            crate::model::acquisition::ShardState::Complete
+                                        )
+                                    })
+                                    .unwrap_or(false);
                                 if let Some(sp) = entry.shard_progress.get_mut(&shard_idx) {
                                     sp.state = crate::model::acquisition::ShardState::Complete;
                                     sp.downloaded_bytes = sp.total_bytes;
+                                }
+                                if !was_complete {
+                                    entry.downloaded_shards =
+                                        entry.downloaded_shards.saturating_add(1);
+                                    entry.verified_shards = entry.verified_shards.saturating_add(1);
+                                }
+                                if entry.total_shards > 0
+                                    && entry.verified_shards >= entry.total_shards
+                                {
+                                    entry.state =
+                                        crate::model::acquisition::AcquisitionState::Complete;
                                 }
                                 entry.log_push("Shard downloaded and registered".into());
                             }
@@ -836,31 +854,20 @@ e
             return;
         }
 
-        // Look up mmproj_filename from HfSource
-        let mmproj_filename = self
-            .shared_state
-            .models
-            .hf_sources
-            .get(&candidate.model_id)
-            .and_then(|s| s.mmproj_filename.clone());
-
-        let Some(filename) = mmproj_filename else {
-            tracing::debug!(
-                model = %candidate.model_id,
-                "No mmproj_filename in HfSource — cannot download mmproj"
-            );
-            return;
-        };
-
-        let repo_id = self
-            .shared_state
-            .models
-            .hf_sources
-            .get(&candidate.model_id)
-            .map(|s| s.repo_id.clone());
-
-        let Some(repo_id) = repo_id else {
-            return;
+        // Look up mmproj_filename + repo_id from HfSource in a single access
+        let (filename, repo_id) = match self.shared_state.models.hf_sources.get(&candidate.model_id)
+        {
+            Some(s) => match s.mmproj_filename.clone() {
+                Some(f) => (f, s.repo_id.clone()),
+                None => {
+                    tracing::debug!(
+                        model = %candidate.model_id,
+                        "No mmproj_filename in HfSource — cannot download mmproj"
+                    );
+                    return;
+                }
+            },
+            None => return,
         };
 
         let shared = self.shared_state.clone();

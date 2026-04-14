@@ -1089,7 +1089,8 @@ pub async fn download_shard(
     }
 
     // Atomic rename .tmp → .bin
-    std::fs::rename(&tmp_path, &dest_path)
+    tokio::fs::rename(&tmp_path, &dest_path)
+        .await
         .map_err(|e| format!("Failed to rename tmp to final shard file: {e}"))?;
 
     tracing::info!(
