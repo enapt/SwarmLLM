@@ -2299,8 +2299,18 @@ impl NetworkManager {
                         });
                     }
 
-                    // Also write directly (handles auto-manage P2P downloads that
-                    // bypass the AcquisitionManager job registry).
+                    // NetworkManager is the sole writer for shard chunks (both
+                    // user-initiated acquisitions and auto-manage P2P downloads).
+                    // AcquisitionManager only tracks progress + verifies the final
+                    // file. See commit: p2p dual-writer race fix.
+                    tracing::debug!(
+                        model = %shard_id.model_id,
+                        shard = shard_id.index,
+                        write_offset = offset,
+                        chunk_len,
+                        total_size = data.total_size,
+                        "DIAG: writing shard chunk to disk"
+                    );
                     if let Err(e) = self.shard_store.write_chunk(
                         &shard_id.model_id,
                         shard_id.index,
@@ -3768,9 +3778,10 @@ async fn read_shard_chunk_async(
                 let mut buf = vec![0u8; read_len];
                 match file.read_exact(&mut buf) {
                     Ok(()) => {
-                        tracing::info!(
+                        tracing::debug!(
                             model = %model_id,
                             shard = shard_index,
+                            offset,
                             bytes = buf.len(),
                             total_size,
                             "Serving shard chunk from file"

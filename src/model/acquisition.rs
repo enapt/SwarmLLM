@@ -600,21 +600,14 @@ impl AcquisitionManager {
             return;
         }
 
-        // Write chunk to disk
-        if let Err(e) = self
-            .shard_store
-            .write_chunk(&model_id, shard_index, offset, data)
-        {
-            tracing::error!(
-                model = %model_id,
-                shard = shard_index,
-                error = %e,
-                "Failed to write shard chunk"
-            );
-            return;
-        }
-
-        // Grab references we need before borrowing job mutably
+        // NOTE: chunk bytes and `.tmp → .bin` finalize are owned by NetworkManager
+        // (src/network/manager.rs handle_response::ShardData path). Writing here too
+        // created a race: if this mpsc-queued task fell behind manager.rs's direct
+        // writes and ran finalize_shard on a partial `.tmp`, it clobbered the
+        // already-finalized `.bin` with mostly-zero content. AcquisitionManager now
+        // just tracks progress and verifies the file that manager.rs produced.
+        let _ = offset; // offset is no longer used here; retained in the message for future tracking
+                        // Grab references we need before borrowing job mutably
         let progress_map = &self.shared_state.models.acquisition_progress;
         let node_id = self.shared_state.identity.node_id().clone();
 
@@ -659,20 +652,9 @@ impl AcquisitionManager {
             .map(|sp| matches!(sp.state, ShardState::Complete | ShardState::Failed))
             .unwrap_or(false);
         if *received >= total_size && !already_done {
-            // Atomically finalize the shard file (.tmp → .bin)
-            if let Err(e) = self.shard_store.finalize_shard(&model_id, shard_index) {
-                tracing::error!(
-                    model = %model_id,
-                    shard = shard_index,
-                    error = %e,
-                    "Failed to finalize shard file — skipping verification"
-                );
-                // Mark as failed and skip verification — the .tmp file was not renamed
-                if let Some(sp) = job.status.shard_progress.get_mut(&shard_index) {
-                    sp.state = ShardState::Failed;
-                }
-                return;
-            }
+            // manager.rs has already finalized (.tmp → .bin) before we see this
+            // message (synchronous in its handler; we're async-processing a queue).
+            // Verify the finalized .bin against the manifest hash.
 
             // SECURITY: Verify the completed shard against the manifest hash
             let shard_info_cloned = job
