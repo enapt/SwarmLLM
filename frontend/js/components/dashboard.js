@@ -2132,7 +2132,30 @@
       if (!list) return;
       if (overflow) overflow.style.display = 'none';
 
+      // If the set of hosted shards changed since the last snapshot, refresh
+      // pipeline plans on visible matrix cards. The initial card render often
+      // 404s against /pipeline-plan because peers haven't announced shards
+      // yet; without this the path stays invisible until the user toggles
+      // list↔matrix views (which re-fetches the plan).
+      var prev = App.dashboard._lastPeers || [];
+      var shardSig = function(ps) {
+        return (ps || []).map(function(p) {
+          return (p.node_id || '') + ':' + (p.hosted_shards || 0);
+        }).sort().join('|');
+      };
+      var changed = shardSig(prev) !== shardSig(peers);
       App.dashboard._lastPeers = peers || [];
+      if (changed) {
+        if (App.dashboard._pipelinePlanRefreshTimer) {
+          clearTimeout(App.dashboard._pipelinePlanRefreshTimer);
+        }
+        App.dashboard._pipelinePlanRefreshTimer = setTimeout(function() {
+          document.querySelectorAll('.model-card').forEach(function(card) {
+            if (card.offsetParent === null) return;
+            App.dashboard._applyPipelinePlan(card);
+          });
+        }, 500);
+      }
 
       if (!peers || peers.length === 0) {
         if (summary) summary.textContent = '';
