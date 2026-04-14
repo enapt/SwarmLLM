@@ -3505,6 +3505,7 @@ impl NetworkManager {
             return;
         }
         let shard_id = request.shard_id.clone();
+        let chunk_offset = request.chunk_offset;
         let req = SwarmRequest::ShardTransfer(request);
         // NET-C1: Track by OutboundRequestId for correct request-response correlation
         let outbound_id = self
@@ -3514,6 +3515,12 @@ impl NetworkManager {
             .send_request(&peer_id, req);
         self.pending_shard_requests
             .insert(outbound_id, (peer_id, shard_id.clone()));
+        // Resume support: seed the per-shard write offset from the request's
+        // chunk_offset so the first received chunk lands at the resume position
+        // (and write_chunk's truncate-on-zero-offset path doesn't wipe an
+        // existing partial .tmp file).
+        self.shard_download_progress
+            .insert(shard_id.clone(), chunk_offset);
         self.shard_last_progress_at
             .insert(shard_id, std::time::Instant::now());
     }

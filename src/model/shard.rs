@@ -317,10 +317,18 @@ impl ShardStore {
     }
 
     /// Get the path to the temporary file used during shard download.
-    fn shard_tmp_path(&self, model_id: &ModelId, index: u32) -> PathBuf {
+    pub fn shard_tmp_path(&self, model_id: &ModelId, index: u32) -> PathBuf {
         let mut p = self.shard_path(model_id, index);
         p.set_extension("bin.tmp");
         p
+    }
+
+    /// Size on disk of the partial `.tmp` file (0 if none). Used by callers
+    /// to resume P2P shard downloads from where a prior run left off.
+    pub fn tmp_size(&self, model_id: &ModelId, index: u32) -> u64 {
+        std::fs::metadata(self.shard_tmp_path(model_id, index))
+            .map(|m| m.len())
+            .unwrap_or(0)
     }
 
     /// Write a chunk of shard data to disk (for progressive downloads).

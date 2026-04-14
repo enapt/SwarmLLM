@@ -493,10 +493,15 @@ impl AcquisitionManager {
                     }
                 };
 
-                // Send directed shard transfer request to the target peer
+                // Send directed shard transfer request to the target peer.
+                // Resume from any existing partial `.tmp` so we don't truncate
+                // bytes already on disk (write_chunk truncates on offset==0).
+                let resume_offset = self
+                    .shard_store
+                    .tmp_size(&shard_id.model_id, shard_id.index);
                 let request = crate::types::ShardRequest {
                     shard_id: shard_id.clone(),
-                    chunk_offset: 0,
+                    chunk_offset: resume_offset,
                     chunk_size: crate::network::protocol::SHARD_CHUNK_SIZE,
                 };
 

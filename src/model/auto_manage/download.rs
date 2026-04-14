@@ -26,6 +26,25 @@ impl AutoShardManager {
             }
         };
 
+        // Reject duplicate downloads early. Without this, a re-trigger that
+        // arrives while a download is mid-flight (and the .bin doesn't exist
+        // yet) starts a SECOND parallel task that appends concurrently to the
+        // same .tmp file — producing the right size but corrupted bytes.
+        // The .bin-exists path below has its own in-progress check; this one
+        // covers the more common partial-.tmp case.
+        if self
+            .shared_state
+            .models
+            .is_shard_in_progress(&candidate.model_id, candidate.shard_index)
+        {
+            tracing::debug!(
+                model = %candidate.model_id,
+                shard = candidate.shard_index,
+                "Shard download already in progress, deferring"
+            );
+            return;
+        }
+
         tracing::info!(
             model = %candidate.model_id,
             shard = candidate.shard_index,
@@ -728,9 +747,15 @@ e
                             .insert(candidate.model_id.clone(), p2p_status);
                     }
 
+                    // Resume: pick up where a previous interrupted P2P attempt
+                    // (or daemon restart) left off in the .tmp file.
+                    let resume_offset = self
+                        .shared_state
+                        .shard_store()
+                        .tmp_size(&candidate.model_id, candidate.shard_index);
                     let request = crate::types::ShardRequest {
                         shard_id: sid.clone(),
-                        chunk_offset: 0,
+                        chunk_offset: resume_offset,
                         chunk_size: crate::network::protocol::SHARD_CHUNK_SIZE,
                     };
                     tracing::info!(
