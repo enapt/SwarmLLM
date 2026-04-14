@@ -27,6 +27,9 @@ pub use vram::{compute_vram_budget, estimate_model_vram_mb, global_pool_vram_mb,
 pub(crate) fn shard_size_ok(path: &std::path::Path, expected_size: u64) -> bool {
     expected_size > 0
         && std::fs::metadata(path)
-            .map(|m| m.len() >= expected_size * 9 / 10)
+            .map(|m| {
+                let actual = m.len();
+                actual >= expected_size * 9 / 10 && actual <= expected_size * 11 / 10
+            })
             .unwrap_or(false)
 }

@@ -400,3 +400,14 @@
 {"file":"src/inference/pipeline.rs","line":769,"kind":"bug","summary":"completion_tokens off-by-one on stop seq vs worker","status":"deferred","date":"2026-04-14"}
 {"file":"frontend/js/components/chat.js","line":419,"kind":"xss","summary":"renderedHtml persisted raw; needs sanitization plan","status":"deferred","date":"2026-04-14"}
 {"file":"frontend/js/components/settings.js","line":113,"kind":"antipattern","summary":"innerHTML join with mixed escaped/html content","status":"deferred","date":"2026-04-14"}
+{"file":"src/network/protocol.rs","line":605,"kind":"validation","summary":"encode_layer_result: added MAX_RESULT_TOKENS/MAX_ACTIVATION_SIZE caps","status":"fixed","date":"2026-04-14"}
+{"file":"src/network/protocol.rs","line":621,"kind":"validation","summary":"error-finish msg capped to 4KB on encode","status":"fixed","date":"2026-04-14"}
+{"file":"src/update.rs","line":254,"kind":"leak","summary":"temp update.tmp cleaned up on I/O errors","status":"fixed","date":"2026-04-14"}
+{"file":"src/credit/ledger.rs","line":170,"kind":"observability","summary":"warn level on credit forward failure","status":"fixed","date":"2026-04-14"}
+{"file":"src/pool/crypto.rs","line":35,"kind":"security","summary":"MemberLeft payload lacks timestamp/nonce; replay possible","status":"deferred","date":"2026-04-14"}
+{"file":"src/pool/crypto.rs","line":154,"kind":"security","summary":"credit forward UUID dedup is client-generated","status":"deferred","date":"2026-04-14"}
+{"file":"src/credit/ledger.rs","line":383,"kind":"ordering","summary":"pending_credit_earn rollback ordering","status":"deferred","date":"2026-04-14"}
+{"file":"src/pool/manager.rs","line":1288,"kind":"state","summary":"device_stats_report member verification","status":"deferred","date":"2026-04-14"}
+{"file":"src/model/auto_manage/mod.rs","line":27,"kind":"bug","summary":"shard_size_ok missing upper bound — oversized files passed","status":"fixed","date":"2026-04-14"}
+{"file":"src/inference/pipeline.rs","line":964,"kind":"bug","summary":"completion_tokens included EOS tokens not in output text","status":"fixed","date":"2026-04-14"}
+{"file":"frontend/js/components/compare.js","line":125,"kind":"xss_preempt","summary":"escape I18n.t output before innerHTML insertion","status":"fixed","date":"2026-04-14"}

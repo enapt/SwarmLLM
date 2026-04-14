@@ -122,13 +122,13 @@
         card.querySelector('.compare-card-model').textContent = modelId;
         card.querySelector('.compare-card-model').title = modelId;
         card.querySelector('.compare-card-status').innerHTML = '<span class="spinner" style="width:14px;height:14px"></span>';
-        card.querySelector('.compare-card-body').innerHTML = '<div class="compare-spinner"><div class="spinner"></div> ' + I18n.t('compare.waiting') + '</div>';
+        card.querySelector('.compare-card-body').innerHTML = '<div class="compare-spinner"><div class="spinner"></div> ' + U.escapeHtml(I18n.t('compare.waiting')) + '</div>';
         card.querySelector('.compare-card-actions').style.display = 'none';
         resultsDiv.appendChild(card);
       });
 
       var statusDiv = document.getElementById('compare-status');
-      if (statusDiv) { statusDiv.style.display = ''; statusDiv.innerHTML = '<span class="text-muted">' + I18n.t('compare.sending', { n: n }) + '</span>'; }
+      if (statusDiv) { statusDiv.style.display = ''; statusDiv.innerHTML = '<span class="text-muted">' + U.escapeHtml(I18n.t('compare.sending', { n: n })) + '</span>'; }
 
       var promises = App.compare.selected.map(function(modelId) {
         var body = {
@@ -167,9 +167,9 @@
           completed++;
           App.compare.renderCard(result);
           if (statusDiv) {
-            statusDiv.innerHTML = '<span class="text-muted">' + I18n.t('compare.progress', { done: completed, total: n }) + '</span>';
+            statusDiv.innerHTML = '<span class="text-muted">' + U.escapeHtml(I18n.t('compare.progress', { done: completed, total: n })) + '</span>';
             if (completed === n) {
-              statusDiv.innerHTML = '<span style="color:var(--green)">' + I18n.t('compare.all_complete', { n: n }) + '</span>';
+              statusDiv.innerHTML = '<span style="color:var(--green)">' + U.escapeHtml(I18n.t('compare.all_complete', { n: n })) + '</span>';
               setTimeout(function() { statusDiv.style.display = 'none'; }, 3000);
             }
           }
@@ -215,7 +215,7 @@
         var history = JSON.parse(localStorage.getItem(App.COMPARE_HISTORY_KEY) || '[]');
         if (history.length === 0) { container.style.display = 'none'; return; }
         container.style.display = '';
-        var html = '<div style="font-size:0.75rem;color:var(--text-muted);margin-bottom:8px;text-transform:uppercase;letter-spacing:0.06em">' + I18n.t('compare.history_title') + '</div>';
+        var html = '<div style="font-size:0.75rem;color:var(--text-muted);margin-bottom:8px;text-transform:uppercase;letter-spacing:0.06em">' + U.escapeHtml(I18n.t('compare.history_title')) + '</div>';
         history.slice(0, 10).forEach(function(item, idx) {
           var ago = U.timeAgo(item.timestamp);
           var modelList = (item.models || []).map(function(m) {
