@@ -139,6 +139,42 @@ async fn dispatch_model_call(
     }
 }
 
+/// Spawn a single model dispatch call as a detached task, with caller-supplied
+/// JSON shaping applied to the result. Shared plumbing for tool_compare,
+/// tool_research, and tool_batch_prompts, each of which uses slightly different
+/// output keys (`content` vs `response`, with or without `task_id`).
+#[allow(clippy::too_many_arguments)]
+fn spawn_model_call_task<F>(
+    client: reqwest::Client,
+    base_url: &str,
+    api_key: String,
+    model_id: String,
+    prompt: String,
+    system: Option<String>,
+    temperature: f32,
+    max_tokens: u32,
+    shape: F,
+) -> tokio::task::JoinHandle<serde_json::Value>
+where
+    F: FnOnce(&str, ModelCallResult) -> serde_json::Value + Send + 'static,
+{
+    let url = format!("{base_url}/v1/messages");
+    tokio::spawn(async move {
+        let r = dispatch_model_call(
+            &client,
+            &url,
+            &api_key,
+            &model_id,
+            &prompt,
+            system.as_deref(),
+            temperature,
+            max_tokens,
+        )
+        .await;
+        shape(&model_id, r)
+    })
+}
+
 const MCP_PROTOCOL_VERSION: &str = "2025-11-25";
 const SERVER_NAME: &str = "swarmllm";
 const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -835,28 +871,18 @@ async fn tool_compare(state: &AppState, id: Option<Value>, args: Value) -> JsonR
 
     let mut handles = Vec::new();
     for model_id in &models {
-        let url = format!("{base}/v1/messages");
-        let client = client.clone();
-        let model_id = model_id.clone();
-        let api_key = api_key.clone();
-        let system_val = system.clone();
-        let prompt = prompt.clone();
-
-        let handle = tokio::spawn(async move {
-            let r = dispatch_model_call(
-                &client,
-                &url,
-                &api_key,
-                &model_id,
-                &prompt,
-                system_val.as_deref(),
-                temperature,
-                max_tokens,
-            )
-            .await;
-            match r.error {
+        handles.push(spawn_model_call_task(
+            client.clone(),
+            &base,
+            api_key.clone(),
+            model_id.clone(),
+            prompt.clone(),
+            system.clone(),
+            temperature,
+            max_tokens,
+            |mid, r| match r.error {
                 None => json!({
-                    "model": model_id,
+                    "model": mid,
                     "content": r.content,
                     "input_tokens": r.input_tokens,
                     "output_tokens": r.output_tokens,
@@ -864,14 +890,13 @@ async fn tool_compare(state: &AppState, id: Option<Value>, args: Value) -> JsonR
                     "status": "ok",
                 }),
                 Some(err) => json!({
-                    "model": model_id,
+                    "model": mid,
                     "error": err,
                     "latency_ms": r.elapsed_ms,
                     "status": "error",
                 }),
-            }
-        });
-        handles.push(handle);
+            },
+        ));
     }
 
     let results = collect_handle_results(handles).await;
@@ -975,28 +1000,18 @@ async fn tool_research(state: &AppState, id: Option<Value>, args: Value) -> Json
 
     let mut handles = Vec::new();
     for model_id in &models {
-        let url = format!("{base}/v1/messages");
-        let client = client.clone();
-        let model_id = model_id.clone();
-        let api_key = api_key.clone();
-        let system_val = system.clone();
-        let question = question.clone();
-
-        let handle = tokio::spawn(async move {
-            let r = dispatch_model_call(
-                &client,
-                &url,
-                &api_key,
-                &model_id,
-                &question,
-                system_val.as_deref(),
-                0.7,
-                max_tokens,
-            )
-            .await;
-            match r.error {
+        handles.push(spawn_model_call_task(
+            client.clone(),
+            &base,
+            api_key.clone(),
+            model_id.clone(),
+            question.clone(),
+            system.clone(),
+            0.7,
+            max_tokens,
+            |mid, r| match r.error {
                 None => json!({
-                    "model": model_id,
+                    "model": mid,
                     "response": r.content,
                     "input_tokens": r.input_tokens,
                     "output_tokens": r.output_tokens,
@@ -1004,14 +1019,13 @@ async fn tool_research(state: &AppState, id: Option<Value>, args: Value) -> Json
                     "status": "ok",
                 }),
                 Some(err) => json!({
-                    "model": model_id,
+                    "model": mid,
                     "error": err,
                     "latency_ms": r.elapsed_ms,
                     "status": "error",
                 }),
-            }
-        });
-        handles.push(handle);
+            },
+        ));
     }
 
     let results = collect_handle_results(handles).await;
@@ -1135,26 +1149,20 @@ async fn tool_batch_prompts(state: &AppState, id: Option<Value>, args: Value) ->
             .unwrap_or(0.7)
             .clamp(0.0, 2.0) as f32;
 
-        let url = format!("{base}/v1/messages");
-        let client = client.clone();
-        let api_key = api_key.clone();
-
-        let handle = tokio::spawn(async move {
-            let r = dispatch_model_call(
-                &client,
-                &url,
-                &api_key,
-                &model_id,
-                &prompt,
-                system.as_deref(),
-                temperature,
-                max_tokens,
-            )
-            .await;
-            match r.error {
+        let task_id_for_shape = task_id.clone();
+        handles.push(spawn_model_call_task(
+            client.clone(),
+            &base,
+            api_key.clone(),
+            model_id,
+            prompt,
+            system,
+            temperature,
+            max_tokens,
+            move |mid, r| match r.error {
                 None => json!({
-                    "task_id": task_id,
-                    "model": model_id,
+                    "task_id": task_id_for_shape,
+                    "model": mid,
                     "content": r.content,
                     "input_tokens": r.input_tokens,
                     "output_tokens": r.output_tokens,
@@ -1162,15 +1170,14 @@ async fn tool_batch_prompts(state: &AppState, id: Option<Value>, args: Value) ->
                     "status": "ok",
                 }),
                 Some(err) => json!({
-                    "task_id": task_id,
-                    "model": model_id,
+                    "task_id": task_id_for_shape,
+                    "model": mid,
                     "error": err,
                     "latency_ms": r.elapsed_ms,
                     "status": "error",
                 }),
-            }
-        });
-        handles.push(handle);
+            },
+        ));
     }
 
     let results = collect_handle_results(handles).await;
