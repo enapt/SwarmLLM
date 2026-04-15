@@ -415,3 +415,14 @@
 {"file":"src/api/admin_models.rs","line":1733,"kind":"error_handling","summary":"silent DB persist for encrypted pipeline toggle — now warn","status":"fixed","date":"2026-04-15"}
 {"file":"src/api/admin_hf.rs","line":747,"kind":"error_handling","summary":"silent DB persist for model trust pin — now warn","status":"fixed","date":"2026-04-15"}
 {"file":"frontend/js/components/settings.js","line":113,"kind":"antipattern","summary":"innerHTML join replaced with DOM construction","status":"fixed","date":"2026-04-15"}
+{"file":"src/credit/anti_gaming.rs","line":14,"kind":"tuning","summary":"SUBNET_EVICTION_SECS 24h → 1h","status":"fixed","date":"2026-04-15"}
+{"file":"src/credit/ledger.rs","line":398,"kind":"ordering","summary":"pending_credit_earn rollback Release → AcqRel","status":"fixed","date":"2026-04-15"}
+{"file":"src/pool/manager.rs","line":1303,"kind":"state","summary":"device_stats_report now early-returns with warn on non-member","status":"fixed","date":"2026-04-15"}
+{"file":"src/model/acquisition.rs","line":529,"kind":"concurrency","summary":"removed blocking sleeps from handle_acquire retry loop","status":"fixed","date":"2026-04-15"}
+{"file":"src/api/pool.rs","line":736,"kind":"toctou","summary":"pool pin persist now inside write lock","status":"fixed","date":"2026-04-15"}
+{"file":"src/pool/crypto.rs","line":35,"kind":"security","summary":"MemberLeft payload now includes timestamp + nonce; receiver checks freshness + replay","status":"fixed","date":"2026-04-15"}
+{"file":"src/network/manager.rs","line":2162,"kind":"bug","summary":"capacity-rejected TensorPayload now responds with error LayerResult","status":"fixed","date":"2026-04-15"}
+{"file":"src/network/manager.rs","line":3608,"kind":"observability","summary":"streaming_token send tracked in pending_rr_observability","status":"fixed","date":"2026-04-15"}
+{"file":"src/network/manager.rs","line":3635,"kind":"observability","summary":"rr-message (AllReduce/etc) send tracked","status":"fixed","date":"2026-04-15"}
+{"file":"src/pool/manager.rs","line":615,"kind":"security","summary":"credit_forward per-member rate limit (60/min)","status":"fixed","date":"2026-04-15"}
+{"file":"frontend/js/components/chat.js","line":710,"kind":"xss","summary":"renderedHtml stripped before localStorage persist","status":"fixed","date":"2026-04-15"}

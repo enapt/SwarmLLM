@@ -331,17 +331,7 @@ pub(super) fn regenerate_manifest_from_header(
         .unwrap_or_else(|| model_id.0.clone());
 
     // Map GGUF architecture string to our ModelArchitecture enum
-    let architecture = match meta.architecture.as_str() {
-        "qwen2" | "qwen3" | "qwen2moe" => crate::types::ModelArchitecture::Qwen2,
-        "qwen35" => crate::types::ModelArchitecture::Qwen35,
-        "qwen35moe" | "qwen3_5moe" => crate::types::ModelArchitecture::Qwen35Moe {
-            num_experts: 0,
-            experts_per_token: 0,
-        },
-        "mistral" => crate::types::ModelArchitecture::Mistral,
-        "phi" | "phi3" => crate::types::ModelArchitecture::Phi,
-        _ => crate::types::ModelArchitecture::Llama,
-    };
+    let architecture = crate::model::manifest::gguf_arch_to_model_architecture(&meta.architecture);
 
     let manifest = crate::model::manifest::build_manifest_from_gguf(
         crate::model::manifest::ManifestFromGguf {

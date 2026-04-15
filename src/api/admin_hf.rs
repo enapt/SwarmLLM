@@ -1384,12 +1384,7 @@ fn generate_manifest_from_header(params: &ManifestGenParams<'_>) -> Result<(), S
         .unwrap_or_else(|| params.filename.trim_end_matches(".gguf").to_string());
 
     // Architecture already extracted by GgufTensorMeta above — no need to re-read the file
-    let architecture = match meta.architecture.as_str() {
-        "qwen2" | "qwen3" | "qwen2moe" => crate::types::ModelArchitecture::Qwen2,
-        "mistral" => crate::types::ModelArchitecture::Mistral,
-        "phi" | "phi3" => crate::types::ModelArchitecture::Phi,
-        _ => crate::types::ModelArchitecture::Llama,
-    };
+    let architecture = crate::model::manifest::gguf_arch_to_model_architecture(&meta.architecture);
 
     let model_dir = header_path
         .parent()

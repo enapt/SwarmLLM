@@ -1604,28 +1604,7 @@ fn map_gguf_architecture(path: &std::path::Path) -> crate::types::ModelArchitect
         },
         Err(_) => "llama".to_string(),
     };
-    match arch_str.as_str() {
-        "qwen2" | "qwen3" | "qwen2moe" => crate::types::ModelArchitecture::Qwen2,
-        "qwen35" => crate::types::ModelArchitecture::Qwen35,
-        "qwen35moe" | "qwen3_5moe" => crate::types::ModelArchitecture::Qwen35Moe {
-            num_experts: 0,
-            experts_per_token: 0,
-        },
-        "mistral" => crate::types::ModelArchitecture::Mistral,
-        "phi" | "phi3" => crate::types::ModelArchitecture::Phi,
-        // All remaining supported transformer architectures map to Llama
-        // (they share the same manifest structure).
-        "llama" | "gemma" | "gemma2" | "starcoder2" | "deepseek2" | "glm4" | "llama4" => {
-            crate::types::ModelArchitecture::Llama
-        }
-        other => {
-            tracing::warn!(
-                arch = other,
-                "Unknown model architecture, defaulting to Llama"
-            );
-            crate::types::ModelArchitecture::Llama
-        }
-    }
+    crate::model::manifest::gguf_arch_to_model_architecture(&arch_str)
 }
 
 /// Try to open a URL in the default browser.
