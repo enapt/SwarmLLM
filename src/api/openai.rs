@@ -16,6 +16,7 @@ use crate::types::{ChatMessage, ImageData, InferenceRequest, ModelId, SamplingPa
 /// Timeout for peer-forwarded inference requests (seconds).
 const INFERENCE_FORWARD_TIMEOUT_SECS: u64 = 120;
 
+use super::sse::{send_role_preamble, StreamEvent};
 use super::{DEFAULT_MAX_TOKENS, DEFAULT_TOP_K, SSE_KEEPALIVE_INTERVAL_SECS};
 
 /// Maximum cold-start wait time before returning 503 (seconds).
@@ -1991,30 +1992,6 @@ fn stream_events_to_sse(
     Sse::new(stream).keep_alive(
         KeepAlive::new().interval(std::time::Duration::from_secs(SSE_KEEPALIVE_INTERVAL_SECS)),
     )
-}
-
-enum StreamEvent {
-    Delta {
-        content: Option<String>,
-        role: Option<String>,
-        finish_reason: Option<String>,
-    },
-    Error {
-        message: String,
-    },
-    Done,
-}
-
-/// Send the initial `role: "assistant"` delta that opens the streaming response.
-/// Returns `false` if the client has already disconnected.
-async fn send_role_preamble(tx: &tokio::sync::mpsc::Sender<StreamEvent>) -> bool {
-    tx.send(StreamEvent::Delta {
-        content: None,
-        role: Some("assistant".into()),
-        finish_reason: None,
-    })
-    .await
-    .is_ok()
 }
 
 /// GET /v1/models

@@ -148,6 +148,7 @@ pub mod openai;
 pub mod pool;
 pub mod providers;
 pub mod server;
+pub mod sse;
 pub mod websocket;
 
 /// Increment the requests_made counter (best-effort, non-blocking).
