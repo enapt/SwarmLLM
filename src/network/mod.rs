@@ -1,5 +1,6 @@
 pub mod behaviour;
 pub mod discovery;
+pub mod helpers;
 pub mod manager;
 pub mod peer_cache;
 pub mod protocol;
