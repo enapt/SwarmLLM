@@ -69,7 +69,7 @@
 
   function _shardStatusLabel(s, state) {
     if (state === 'vram') return I18n.t('shard.row.vram_label');
-    if (state === 'disk') return I18n.t('shard.row.disk_label');
+    if (state === 'disk') return I18n.t('dashboard.disk_label');
     if (state === 'gossip') {
       // Peer download in flight (gossip view). Show the leader's progress so
       // the user can see replication is moving.
@@ -77,7 +77,7 @@
         ? s.peer_downloads[0].progress_pct : 0;
       return (lead || 0) + '%\u2193';
     }
-    if (state === 'peer') return I18n.t('shard.row.peer_label');
+    if (state === 'peer') return I18n.t('dashboard.peer_col_name');
     return I18n.t('shard.row.missing_label');
   }
 
@@ -146,7 +146,7 @@
     // no per-row cancel here. Download button is offered for every non-local
     // shard (peer / missing / gossip-in-flight by other peers).
     if (state === 'peer' || state === 'missing' || state === 'gossip') {
-      parts.push('<button class="shard-row-act" data-shard-act="download" title="' + U.escapeHtml(I18n.t('shard.row.action_download')) + '">\u21E9</button>');
+      parts.push('<button class="shard-row-act" data-shard-act="download" title="' + U.escapeHtml(I18n.t('shard.download')) + '">\u21E9</button>');
     }
     if (isLocal) {
       parts.push('<button class="shard-row-act danger" data-shard-act="delete" title="' + U.escapeHtml(I18n.t('shard.row.action_delete')) + '">\u2302</button>');
@@ -210,7 +210,7 @@
   function _buildShardViewToggle() {
     var mode = S._shardView === 'matrix' ? 'matrix' : 'list';
     return '<div class="shard-view-toggle" role="tablist">' +
-      '<button type="button" data-shard-view="list" class="' + (mode === 'list' ? 'active' : '') + '" title="' + U.escapeHtml(I18n.t('shard.view.toggle_tip') || '') + '">' + U.escapeHtml(I18n.t('shard.view.list')) + '</button>' +
+      '<button type="button" data-shard-view="list" class="' + (mode === 'list' ? 'active' : '') + '" title="' + U.escapeHtml(I18n.t('shard.view.toggle_tip') || '') + '">' + U.escapeHtml(I18n.t('dashboard.info_shards')) + '</button>' +
       '<button type="button" data-shard-view="matrix" class="' + (mode === 'matrix' ? 'active' : '') + '" title="' + U.escapeHtml(I18n.t('shard.view.toggle_tip') || '') + '">' + U.escapeHtml(I18n.t('shard.view.matrix')) + '</button>' +
       '</div>';
   }
@@ -290,7 +290,7 @@
     headHtml += '</tr>';
 
     // Self row — no leading <th>; left-border accent + title tooltip identifies.
-    var selfRow = '<tr class="srm-row-self" title="' + U.escapeHtml(I18n.t('shard.matrix.peer_you')) + ' (' + U.escapeHtml(m.id) + ')">';
+    var selfRow = '<tr class="srm-row-self" title="' + U.escapeHtml(I18n.t('compare.filter_local')) + ' (' + U.escapeHtml(m.id) + ')">';
     shards.forEach(function(s, i) {
       var state = _shardState(s);
       if (state === 'peer') state = 'absent';
@@ -556,7 +556,7 @@
       var destructive = [];
       if (state === 'disk') destructive.push('<button data-shard-act="load">' + U.escapeHtml(I18n.t('shard.row.action_load')) + '</button>');
       if (state === 'vram') destructive.push('<button data-shard-act="unload">' + U.escapeHtml(I18n.t('shard.row.action_unload')) + '</button>');
-      if (state === 'peer' || state === 'missing' || state === 'gossip') destructive.push('<button data-shard-act="download">' + U.escapeHtml(I18n.t('shard.row.action_download')) + '</button>');
+      if (state === 'peer' || state === 'missing' || state === 'gossip') destructive.push('<button data-shard-act="download">' + U.escapeHtml(I18n.t('shard.download')) + '</button>');
       if (shard.local) destructive.push('<button class="danger" data-shard-act="delete">' + U.escapeHtml(I18n.t('shard.row.action_delete')) + '</button>');
 
       var panelHtml = '<div class="shard-row-expanded-panel">' +
@@ -920,7 +920,7 @@
             var short = el.textContent;
             U.copyToClipboard(fullId, {
               btn: el,
-              successLabel: I18n.t('nav.copied'),
+              successLabel: I18n.t('actions.copied'),
               resetLabel: short,
               duration: 1200,
             });
@@ -1310,7 +1310,7 @@
             '<option value="problems"' + (swarmSort === 'problems' ? ' selected' : '') + '>' + U.escapeHtml(I18n.t('dashboard.sort_problems')) + '</option>' +
             '<option value="az"' + (swarmSort === 'az' ? ' selected' : '') + '>' + U.escapeHtml(I18n.t('dashboard.sort_az')) + '</option>' +
             '<option value="za"' + (swarmSort === 'za' ? ' selected' : '') + '>' + U.escapeHtml(I18n.t('dashboard.sort_za')) + '</option>' +
-            '<option value="status"' + (swarmSort === 'status' ? ' selected' : '') + '>' + U.escapeHtml(I18n.t('dashboard.sort_status')) + '</option>' +
+            '<option value="status"' + (swarmSort === 'status' ? ' selected' : '') + '>' + U.escapeHtml(I18n.t('dashboard.section_status')) + '</option>' +
             '<option value="size"' + (swarmSort === 'size' ? ' selected' : '') + '>' + U.escapeHtml(I18n.t('dashboard.sort_size')) + '</option>' +
             '<option value="shards"' + (swarmSort === 'shards' ? ' selected' : '') + '>' + U.escapeHtml(I18n.t('dashboard.sort_local_shards')) + '</option>' +
           '</select>' +
@@ -1561,7 +1561,7 @@
           configRows.push(['dashboard.info_shards', String(shardCount)]);
         }
         // Mode (CPU/GPU) — single word
-        configRows.push(['dashboard.info_mode', S._gpuInference ? I18n.t('dashboard.mode_gpu') : I18n.t('dashboard.mode_cpu')]);
+        configRows.push(['dashboard.info_mode', S._gpuInference ? I18n.t('dashboard.gpu_label') : I18n.t('dashboard.cpu_label')]);
         // VRAM fit — only when GPU mode; in CPU mode the Mode row already conveys this.
         if (m.estimated_vram_mb && S._gpuInference) {
           var totalVram = (App.data.cache.stats && App.data.cache.stats.hardware && App.data.cache.stats.hardware.gpu_vram_mb) || 0;
@@ -1572,7 +1572,7 @@
             else if (ratio <= 1.05) { fitClass = 'fit-tight'; fitLabel = '\u2248 ' + fitLabel; }
             else { fitClass = 'fit-no'; fitLabel = '\u2717 ' + fitLabel; }
           }
-          configRows.push(['dashboard.info_vram', '<span class="vram-fit ' + fitClass + '" title="' + U.escapeHtml(I18n.t('dashboard.vram_fit_tip', { est: U.formatMB(m.estimated_vram_mb), total: totalVram > 0 ? U.formatMB(totalVram) : '?' })) + '">' + fitLabel + '</span>']);
+          configRows.push(['hw.vram', '<span class="vram-fit ' + fitClass + '" title="' + U.escapeHtml(I18n.t('dashboard.vram_fit_tip', { est: U.formatMB(m.estimated_vram_mb), total: totalVram > 0 ? U.formatMB(totalVram) : '?' })) + '">' + fitLabel + '</span>']);
         }
         // Trust is rendered in the CONFIG section header (top-right), not as
         // a grid row — frees a cell and surfaces trust next to "Config".
@@ -1780,7 +1780,7 @@
         // Auth-type pill — same styling as the top provider health bar
         // (tag-sub violet for subscription, tag-api neutral grey for API key).
         var authTagHtml = isSub
-          ? '<span class="ph-tag tag-sub" title="' + U.escapeHtml(I18n.t('dashboard.cloud_sub_note')) + '">' + U.escapeHtml(I18n.t('mode.subscription')) + '</span>'
+          ? '<span class="ph-tag tag-sub" title="' + U.escapeHtml(I18n.t('dashboard.cloud_sub_note')) + '">' + U.escapeHtml(I18n.t('dashboard.chip_subscription')) + '</span>'
           : '<span class="ph-tag tag-api" title="' + U.escapeHtml(I18n.t('dashboard.cloud_note', { provider: pLabel })) + '">' + U.escapeHtml(I18n.t('mode.api')) + '</span>';
         // Subscription cards put the auth-status badge into statusHtml (it gets
         // replaced by the CLI fetch). API-key cards have no separate status
@@ -1873,7 +1873,7 @@
             renderProviderCard({
               provider: p, models: byProvider[p], parentEl: cloudBody,
               cardClass: 'subscription-model-card', headerClass: 'subscription-card-header',
-              statusHtml: '<span class="badge badge-claude" id="sub-status-' + p + '">' + U.escapeHtml(I18n.t('dashboard.cloud_subscription')) + '</span>',
+              statusHtml: '<span class="badge badge-claude" id="sub-status-' + p + '">' + U.escapeHtml(I18n.t('dashboard.chip_subscription')) + '</span>',
               noteText: I18n.t('dashboard.cloud_sub_note'),
               idPrefix: 'sub',
             });
@@ -1967,7 +1967,7 @@
             var dlPct = sd.progress_pct || 0;
             var newState = 'missing';
             var statusText = I18n.t('shard.row.missing_label');
-            if (sd.state === 'complete') { newState = 'disk'; statusText = I18n.t('shard.row.disk_label'); }
+            if (sd.state === 'complete') { newState = 'disk'; statusText = I18n.t('dashboard.disk_label'); }
             else if (sd.state === 'verifying') { newState = 'downloading'; statusText = dlPct + '%\u2193'; }
             else if (sd.state === 'downloading') { newState = 'downloading'; statusText = dlPct + '%\u2193'; }
             else if (sd.state === 'pending') { newState = 'downloading'; statusText = '\u2022'; }
@@ -2079,8 +2079,8 @@
             var newState;
             var statusText;
             if (s.local && s.in_vram) { newState = 'vram'; statusText = I18n.t('shard.row.vram_label'); }
-            else if (s.local) { newState = 'disk'; statusText = I18n.t('shard.row.disk_label'); }
-            else if (s.holders > 0) { newState = 'peer'; statusText = I18n.t('shard.row.peer_label'); }
+            else if (s.local) { newState = 'disk'; statusText = I18n.t('dashboard.disk_label'); }
+            else if (s.holders > 0) { newState = 'peer'; statusText = I18n.t('dashboard.peer_col_name'); }
             else { newState = 'missing'; statusText = I18n.t('shard.row.missing_label'); }
 
             self._patchShardRow(row, { state: newState, statusText: statusText });
@@ -2224,9 +2224,9 @@
       var html = '<table class="peer-table"><thead><tr>' +
         '<th data-peer-sort="name"' + _thClass('name') + '>' + U.escapeHtml(I18n.t('dashboard.peer_col_name')) + _sortArrow('name') + '</th>' +
         '<th data-peer-sort="latency"' + _thClass('latency') + '>' + U.escapeHtml(I18n.t('dashboard.peer_col_latency')) + _sortArrow('latency') + '</th>' +
-        '<th data-peer-sort="shards"' + _thClass('shards') + '>' + U.escapeHtml(I18n.t('dashboard.peer_col_shards')) + _sortArrow('shards') + '</th>' +
+        '<th data-peer-sort="shards"' + _thClass('shards') + '>' + U.escapeHtml(I18n.t('dashboard.info_shards')) + _sortArrow('shards') + '</th>' +
         '<th data-peer-sort="trust"' + _thClass('trust') + '>' + U.escapeHtml(I18n.t('dashboard.peer_col_trust')) + _sortArrow('trust') + '</th>' +
-        '<th data-peer-sort="status"' + _thClass('status') + '>' + U.escapeHtml(I18n.t('dashboard.peer_col_status')) + _sortArrow('status') + '</th>' +
+        '<th data-peer-sort="status"' + _thClass('status') + '>' + U.escapeHtml(I18n.t('dashboard.section_status')) + _sortArrow('status') + '</th>' +
         '</tr></thead><tbody>';
 
       sorted.forEach(function(p) {
@@ -2237,7 +2237,7 @@
         var latency = p.latency_ms ? p.latency_ms + 'ms' : '\u2014';
         var shards = p.hosted_shards || 0;
         var trust = p.trust_score !== undefined ? (p.trust_score * 100).toFixed(0) + '%' : '\u2014';
-        var status = p.healthy ? I18n.t('dashboard.peer_healthy') : I18n.t('dashboard.peer_degraded');
+        var status = p.healthy ? I18n.t('dashboard.health_healthy') : I18n.t('dashboard.peer_degraded');
         var gpu = p.gpu ? '<div class="text-muted" style="font-size:0.62rem">' + U.escapeHtml(p.gpu) + '</div>' : '';
 
         html += '<tr>' +

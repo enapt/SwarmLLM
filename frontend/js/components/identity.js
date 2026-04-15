@@ -117,7 +117,7 @@
       if (!input || !input.value) return;
       U.copyToClipboard(input.value, {
         btn: btn,
-        successLabel: I18n.t('identity.copied'),
+        successLabel: I18n.t('actions.copied'),
         resetLabel: I18n.t('actions.copy'),
         onSuccess: function() {
           App.notifications.showToast(I18n.t('identity.code_copied'), 'success');

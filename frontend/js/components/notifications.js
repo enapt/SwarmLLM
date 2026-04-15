@@ -264,11 +264,11 @@
             applyBtn.style.display = 'none';
           } else {
             applyBtn.textContent = I18n.t('update.failed');
-            setTimeout(function() { applyBtn.textContent = I18n.t('update.retry'); applyBtn.disabled = false; }, 3000);
+            setTimeout(function() { applyBtn.textContent = I18n.t('actions.retry'); applyBtn.disabled = false; }, 3000);
           }
         } catch (e) {
           applyBtn.textContent = I18n.t('update.error');
-          setTimeout(function() { applyBtn.textContent = I18n.t('update.retry'); applyBtn.disabled = false; }, 3000);
+          setTimeout(function() { applyBtn.textContent = I18n.t('actions.retry'); applyBtn.disabled = false; }, 3000);
         }
       };
       banner.appendChild(applyBtn);
@@ -278,7 +278,7 @@
       dlBtn.style.cssText = 'background:var(--bg-primary, #0a0e14);color:var(--yellow, #eab308);border:none;border-radius:4px;padding:0.3rem 0.8rem;cursor:pointer;font-size:0.8rem;font-weight:600';
       dlBtn.onclick = async function() {
         dlBtn.disabled = true;
-        dlBtn.textContent = I18n.t('update.checking');
+        dlBtn.textContent = I18n.t('settings.detecting');
         try {
           var resp = await App.authFetch('/api/admin/update/check', { method: 'POST' });
           if (resp.ok) {
@@ -493,7 +493,7 @@
           '<span class="ph-dot ' + dotClass + '"></span>' +
           (latencyText ? '<span class="ph-latency">' + U.escapeHtml(latencyText) + '</span>' : '') +
           (typeof isSubscriptionProvider === 'function' && isSubscriptionProvider(p)
-            ? '<span class="ph-tag tag-sub">' + I18n.t('mode.subscription') + '</span>'
+            ? '<span class="ph-tag tag-sub">' + I18n.t('dashboard.chip_subscription') + '</span>'
             : '<span class="ph-tag tag-api">' + I18n.t('mode.api') + '</span>');
         item.title = name + ': ' + h.status + (h.detail ? ' \u2014 ' + h.detail : '');
         bar.appendChild(item);

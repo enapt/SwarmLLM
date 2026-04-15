@@ -233,7 +233,7 @@
       '<div class="am-row"><label><input type="checkbox" id="sched-enabled"' + (s.enabled ? ' checked' : '') + '> ' + U.escapeHtml(I18n.t('downloads.enable_reduced')) + '</label></div>' +
       '<div class="am-row"><label>' + U.escapeHtml(I18n.t('downloads.start_hour')) + '</label> <input type="number" id="sched-start" value="' + (s.reduced_hours_start || 22) + '" min="0" max="23" style="width:3rem"></div>' +
       '<div class="am-row"><label>' + U.escapeHtml(I18n.t('downloads.end_hour')) + '</label> <input type="number" id="sched-end" value="' + (s.reduced_hours_end || 8) + '" min="0" max="23" style="width:3rem"></div>' +
-      '<div class="am-row"><label>' + U.escapeHtml(I18n.t('downloads.contribution')) + '</label> <select id="sched-contrib"><option value="minimal"' + (s.reduced_contribution === 'minimal' ? ' selected' : '') + '>' + U.escapeHtml(I18n.t('downloads.level_minimal')) + '</option><option value="moderate"' + (s.reduced_contribution === 'moderate' ? ' selected' : '') + '>' + U.escapeHtml(I18n.t('downloads.level_moderate')) + '</option></select></div>' +
+      '<div class="am-row"><label>' + U.escapeHtml(I18n.t('downloads.contribution')) + '</label> <select id="sched-contrib"><option value="minimal"' + (s.reduced_contribution === 'minimal' ? ' selected' : '') + '>' + U.escapeHtml(I18n.t('setup.contrib_minimal')) + '</option><option value="moderate"' + (s.reduced_contribution === 'moderate' ? ' selected' : '') + '>' + U.escapeHtml(I18n.t('setup.contrib_moderate')) + '</option></select></div>' +
       '<div class="am-row"><label>' + U.escapeHtml(I18n.t('downloads.prune_aggressiveness')) + '</label> <select id="sched-prune-agg"><option value="conservative"' + (s.prune_aggressiveness === 'conservative' ? ' selected' : '') + '>' + U.escapeHtml(I18n.t('downloads.level_conservative')) + '</option><option value="normal"' + (s.prune_aggressiveness === 'normal' ? ' selected' : '') + '>' + U.escapeHtml(I18n.t('downloads.level_normal')) + '</option><option value="aggressive"' + (s.prune_aggressiveness === 'aggressive' ? ' selected' : '') + '>' + U.escapeHtml(I18n.t('downloads.level_aggressive')) + '</option></select></div>' +
       '<div class="am-row"><button class="btn btn-sm btn-primary" id="sched-save-btn">' + U.escapeHtml(I18n.t('downloads.save_schedule')) + '</button></div>';
     var saveBtn = document.getElementById('sched-save-btn');
@@ -256,10 +256,10 @@
       if (resp.ok) {
         App.ui.showBanner('success', I18n.t('downloads.schedule_saved'));
       } else {
-        App.ui.showBanner('error', await U.getApiErrorMessage(resp, I18n.t('downloads.save_failed')));
+        App.ui.showBanner('error', await U.getApiErrorMessage(resp, I18n.t('models.save_failed')));
       }
     } catch (e) {
-      App.ui.showBanner('error', I18n.t('downloads.save_error', { error: e.message }));
+      App.ui.showBanner('error', I18n.t('models.save_error', { error: e.message }));
     }
   }
 

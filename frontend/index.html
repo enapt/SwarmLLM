@@ -72,7 +72,7 @@
           <div id="hw-recommendation" class="text-muted text-sm mt-0"></div>
         </div>
         <div class="form-group">
-          <label class="field-label"><span data-i18n="setup.nickname_label">Nickname</span> <span class="text-muted font-normal" data-i18n="setup.nickname_optional">(optional)</span></label>
+          <label class="field-label"><span data-i18n="settings.nickname_label">Nickname</span> <span class="text-muted font-normal" data-i18n="setup.nickname_optional">(optional)</span></label>
           <input type="text" id="setup-nickname" data-i18n-placeholder="setup.nickname_placeholder" placeholder="e.g. HomePC, GamerRig, ServerBox" maxlength="32" class="mt-0">
         </div>
         <div class="form-group mt-2 divider">
@@ -96,7 +96,7 @@
       </div>
       <!-- Step 2: Connect (invite code + cloud provider) -->
       <div class="wizard-body hidden" id="step-2">
-        <h3 data-i18n="setup.connect_title">Connect</h3>
+        <h3 data-i18n="setup.connect_btn">Connect</h3>
         <p class="text-muted mb-2" data-i18n="setup.connect_subtitle">Choose one or both. You can also skip this and configure later.</p>
         <!-- Peer address section (NOT device pool — this connects to the P2P swarm) -->
         <div class="mb-2">
@@ -153,7 +153,7 @@
         <h3 data-i18n="setup.ready_title">Ready to Go</h3>
         <div class="mt-1">
           <div class="flex-between mb-1"><span class="text-muted" data-i18n="setup.summary_hw">Hardware</span><span class="mono" id="summary-gpu">---</span></div>
-          <div class="flex-between mb-1"><span class="text-muted" data-i18n="setup.summary_nickname">Nickname</span><span class="mono" id="summary-nickname">---</span></div>
+          <div class="flex-between mb-1"><span class="text-muted" data-i18n="settings.nickname_label">Nickname</span><span class="mono" id="summary-nickname">---</span></div>
           <div class="flex-between mb-1"><span class="text-muted" data-i18n="setup.summary_contribution">Contribution</span><span class="mono" id="summary-contribution">---</span></div>
           <div class="flex-between mb-1"><span class="text-muted" data-i18n="setup.summary_auto_download">Auto-Download</span><span class="mono" id="summary-auto-manage">---</span></div>
           <div id="summary-invite-row" class="flex-between mb-1 hidden"><span class="text-muted" data-i18n="setup.summary_peer">Swarm Peer</span><span class="mono" id="summary-invite">---</span></div>
@@ -184,14 +184,14 @@
       <div class="form-group">
         <label for="settings-api-key" data-i18n="settings.access_token">Access Token</label>
         <div class="flex-center gap-1">
-          <input type="text" id="settings-api-key" readonly class="flex-1 mono text-sm" style="background:var(--bg-primary)" data-i18n-placeholder="settings.loading" placeholder="Loading..." value="">
+          <input type="text" id="settings-api-key" readonly class="flex-1 mono text-sm" style="background:var(--bg-primary)" data-i18n-placeholder="dashboard.loading" placeholder="Loading..." value="">
           <button class="btn btn-sm" id="btn-copy-api-key" data-i18n-title="settings.copy_token_title" title="Copy access token" data-i18n="actions.copy">Copy</button>
         </div>
         <span class="text-muted field-hint" data-i18n="settings.access_token_hint">Your private key for connecting other apps to SwarmLLM. Keep it secret.</span>
       </div>
       <div class="form-group">
         <label for="settings-nickname" data-i18n="settings.nickname_label">Nickname</label>
-        <input type="text" id="settings-nickname" data-i18n-placeholder="settings.nickname_anon" placeholder="Anonymous" maxlength="32" pattern="[a-zA-Z0-9_-]+">
+        <input type="text" id="settings-nickname" data-i18n-placeholder="setup.summary_anonymous" placeholder="Anonymous" maxlength="32" pattern="[a-zA-Z0-9_-]+">
         <span class="text-muted field-hint" data-i18n="settings.nickname_hint">1-32 chars, letters/numbers/underscore/dash only</span>
         <span class="form-error hidden" id="nickname-error" data-i18n="settings.nickname_error">Only letters, numbers, underscore, and dash allowed</span>
       </div>
@@ -296,7 +296,7 @@
       </div>
       <div class="form-group" id="settings-auto-manage-storage-group" style="display:none">
         <label for="settings-auto-manage-storage">
-          <span data-i18n="settings.max_auto_label_short">Max Auto-Download Storage</span>
+          <span data-i18n="settings.max_auto_storage">Max Auto-Download Storage</span>
           <output class="slider-output" id="settings-auto-manage-storage-out">Auto</output>
         </label>
         <input type="range" id="settings-auto-manage-storage" class="slider" value="0" min="0" max="500000" step="1000" data-slider-format="gb-auto">
@@ -619,7 +619,7 @@
       <button class="tab-btn" data-tab="leaderboard" data-i18n="nav.leaderboard">Leaderboard</button>
       <button class="tab-btn" data-tab="network-map" data-i18n="nav.network_map">Network Map</button>
       <button class="tab-btn" data-tab="compare" data-i18n="nav.compare">Compare</button>
-      <button class="tab-btn" data-tab="devices" data-i18n="nav.devices">My Devices</button>
+      <button class="tab-btn" data-tab="devices" data-i18n="pool.title">My Devices</button>
     </div>
     <div class="header-right">
       <div class="model-selector">
@@ -649,7 +649,7 @@
           <div class="text-muted field-hint mb-0" data-i18n="network.connect_desc">Paste an address from another user to connect your nodes</div>
           <div class="flex gap-1">
             <input type="text" id="join-code-input" class="form-control mono text-2xs flex-1" placeholder="swarm://..." data-i18n-aria-label="network.peer_address_aria" aria-label="Peer address">
-            <button class="btn btn-sm btn-primary" id="btn-join-network" data-i18n="network.connect">Connect</button>
+            <button class="btn btn-sm btn-primary" id="btn-join-network" data-i18n="setup.connect_btn">Connect</button>
           </div>
           <div class="text-muted mt-0" id="join-status"></div>
           <div class="text-muted text-2xs divider" data-i18n="network.not_devices">This connects you to the SwarmLLM network. To link your own devices, use the My Devices tab instead.</div>
@@ -696,7 +696,7 @@
       <div class="sidebar-chat-tab" id="sidebar-edge-trigger" data-i18n-title="sidebar.open_chats" title="Open chats">&#128172;</div>
       <div class="sidebar-header">
         <span class="sidebar-title" data-i18n="sidebar.title">Chats</span>
-        <button class="btn btn-ghost btn-sm" id="btn-new-session" data-i18n-title="sidebar.new_chat" data-i18n-aria-label="sidebar.new_chat" title="New chat" aria-label="New chat">+</button>
+        <button class="btn btn-ghost btn-sm" id="btn-new-session" data-i18n-title="chat.new_chat" data-i18n-aria-label="chat.new_chat" title="New chat" aria-label="New chat">+</button>
         <button class="btn btn-ghost btn-sm sidebar-close" id="btn-close-sidebar" data-i18n-title="sidebar.close" data-i18n-aria-label="sidebar.close" title="Close sidebar" aria-label="Close sidebar">&times;</button>
       </div>
       <div class="session-list" id="session-list"></div>
@@ -802,7 +802,7 @@
               <div class="stat-icon blue">&#9901;</div>
               <div class="stat-body">
                 <div><span class="stat-value" id="stat-peers">0</span><span class="stat-trend trend-flat" id="stat-peers-trend"></span></div>
-                <div class="stat-label"><span data-i18n="stats.peers">Peers</span> <span class="stat-help" data-i18n-title="stats.peers_help" title="Other computers running SwarmLLM that you're connected to">?</span> <span class="badge badge-purple lan-badge" id="lan-peer-badge" style="display:none">0 LAN</span></div>
+                <div class="stat-label"><span data-i18n="dashboard.network_title">Peers</span> <span class="stat-help" data-i18n-title="stats.peers_help" title="Other computers running SwarmLLM that you're connected to">?</span> <span class="badge badge-purple lan-badge" id="lan-peer-badge" style="display:none">0 LAN</span></div>
                 <div class="stat-sparkline" id="stat-peers-spark"></div>
               </div>
             </div>
@@ -810,7 +810,7 @@
               <div class="stat-icon green">&#9733;</div>
               <div class="stat-body">
                 <div><span class="stat-value" id="stat-credits">0</span><span class="stat-trend trend-flat" id="stat-credits-trend"></span></div>
-                <div class="stat-label"><span data-i18n="stats.credits">Credits</span> <span class="stat-help" data-i18n-title="stats.credits_help" title="Earned by helping others, spent when you use the network">?</span></div>
+                <div class="stat-label"><span data-i18n="dashboard.credits_title">Credits</span> <span class="stat-help" data-i18n-title="stats.credits_help" title="Earned by helping others, spent when you use the network">?</span></div>
                 <div class="stat-sparkline" id="stat-credits-spark"></div>
               </div>
             </div>
@@ -842,7 +842,7 @@
               <div class="stat-icon red">&#9203;</div>
               <div class="stat-body">
                 <div><span class="stat-value" id="stat-active">0</span><span class="stat-trend trend-flat" id="stat-active-trend"></span></div>
-                <div class="stat-label"><span data-i18n="stats.active">Active</span> <span class="stat-help" data-i18n-title="stats.active_help" title="AI requests currently being processed right now">?</span></div>
+                <div class="stat-label"><span data-i18n="dashboard.status_active">Active</span> <span class="stat-help" data-i18n-title="stats.active_help" title="AI requests currently being processed right now">?</span></div>
                 <div class="stat-sparkline" id="stat-active-spark"></div>
               </div>
             </div>
@@ -855,7 +855,7 @@
               <span class="ph-name">Claude Code</span>
               <span class="ph-dot dot-ok"></span>
               <span class="ph-latency" id="ph-cc-plan"></span>
-              <span class="ph-tag tag-sub" data-i18n="mode.subscription">SUB</span>
+              <span class="ph-tag tag-sub" data-i18n="dashboard.chip_subscription">SUB</span>
             </div>
           </div>
 
@@ -885,7 +885,7 @@
                 <div class="node-hw-cell hw-cell-gauge">
                   <div class="hw-gauge" id="ram-gauge" style="--pct:0" data-pct="0"></div>
                   <div class="hw-cell-body">
-                    <span class="node-hw-label"><span data-i18n="dashboard.ram_label">RAM</span></span>
+                    <span class="node-hw-label"><span data-i18n="hw.ram">RAM</span></span>
                     <span class="mono node-hw-value"><span id="ram-used">...</span> <span class="text-muted" id="ram-total">/ ...</span></span>
                   </div>
                   <div class="progress-bar mini-bar hidden"><div class="fill green" id="ram-bar" style="width:0%"></div></div>
@@ -929,7 +929,7 @@
           <div class="panel mt-2">
             <div class="panel-header">
               <h2 data-i18n="dashboard.models_title">Models</h2>
-              <button class="btn btn-sm" id="btn-browse-hf" data-i18n="dashboard.find_models">Find Models</button>
+              <button class="btn btn-sm" id="btn-browse-hf" data-i18n="nav.find_models_aria">Find Models</button>
             </div>
             <div id="models-stats-bar" class="models-stats-bar" style="display:none">
               <span class="models-stat-group">
@@ -1120,7 +1120,7 @@
                     <div class="compare-filters flex gap-0 text-xs" id="compare-filters" style="margin-left:auto">
                       <button class="btn btn-xs compare-filter active" data-filter="all" data-i18n="compare.filter_all">All</button>
                       <button class="btn btn-xs compare-filter" data-filter="local" data-i18n="compare.filter_local">Local</button>
-                      <button class="btn btn-xs compare-filter" data-filter="cloud" data-i18n="compare.filter_cloud">Cloud</button>
+                      <button class="btn btn-xs compare-filter" data-filter="cloud" data-i18n="dashboard.chip_cloud">Cloud</button>
                     </div>
                   </div>
                   <div class="compare-model-list" id="compare-model-list">
@@ -1157,7 +1157,7 @@
                 <tr>
                   <th scope="col" style="width:60px" data-i18n="leaderboard.rank">#</th>
                   <th scope="col" data-i18n="leaderboard.node">Node</th>
-                  <th scope="col" data-i18n="leaderboard.credits">Credits</th>
+                  <th scope="col" data-i18n="dashboard.credits_title">Credits</th>
                   <th scope="col" data-i18n="leaderboard.tier">Tier</th>
                 </tr>
               </thead>
@@ -1201,7 +1201,7 @@
             <div id="pool-create-form" class="mt-2 hidden mx-auto" style="max-width:320px">
               <div class="form-group">
                 <label data-i18n="pool.pool_name">Pool name</label>
-                <input type="text" id="pool-create-name" data-i18n-placeholder="pool.name_placeholder" placeholder="My Devices" maxlength="64">
+                <input type="text" id="pool-create-name" data-i18n-placeholder="pool.title" placeholder="My Devices" maxlength="64">
               </div>
               <button class="btn btn-primary w-full" id="pool-create-submit" data-i18n="pool.create">Create</button>
             </div>
@@ -1251,7 +1251,7 @@
               <div class="stat-card">
                 <div class="stat-body">
                   <div class="stat-value" id="pool-online-count">0/0</div>
-                  <div class="stat-label" data-i18n="pool.online_label">Online</div>
+                  <div class="stat-label" data-i18n="pool.online">Online</div>
                 </div>
               </div>
               <div class="stat-card">
@@ -1479,10 +1479,10 @@
       <div style="display:flex;align-items:center;gap:12px;flex-shrink:0">
         <div style="text-align:right">
           <div class="pool-member-credits" style="font-size:0.9rem;font-weight:600;color:var(--green)"></div>
-          <div class="text-muted" style="font-size:0.7rem" data-i18n="pool.credits_contributed">credits</div>
+          <div class="text-muted" style="font-size:0.7rem" data-i18n="dashboard.credits_title">credits</div>
         </div>
         <div class="pool-member-contribution" style="display:none;text-align:center;min-width:60px">
-          <input type="range" class="pool-contrib-slider" min="0" max="100" value="100" style="width:56px;margin:0" data-i18n-title="pool.contribution_level" title="Contribution level">
+          <input type="range" class="pool-contrib-slider" min="0" max="100" value="100" style="width:56px;margin:0" data-i18n-title="settings.contribution_label" title="Contribution level">
           <div class="pool-contrib-label text-muted" style="font-size:0.65rem">100%</div>
         </div>
         <button class="btn btn-sm btn-ghost pool-member-remove-btn" style="color:var(--red);display:none" data-i18n-title="actions.remove" title="Remove">&times;</button>

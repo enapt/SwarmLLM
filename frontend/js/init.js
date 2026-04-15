@@ -61,7 +61,7 @@
       var key = document.getElementById('setup-provider-key').value.trim();
       var status = document.getElementById('setup-provider-status');
       if (!provider || !key) { status.textContent = I18n.t('init.select_provider'); status.style.color = 'var(--red)'; return; }
-      status.textContent = I18n.t('init.saving'); status.style.color = 'var(--text-muted)';
+      status.textContent = I18n.t('actions.saving'); status.style.color = 'var(--text-muted)';
       try {
         var body = {}; body[provider + '_key'] = key;
         var resp = await App.authFetch('/api/admin/providers', {method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});

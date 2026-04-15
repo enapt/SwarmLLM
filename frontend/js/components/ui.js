@@ -194,9 +194,9 @@
       } else if (hasLocalModel) {
         modeName = I18n.t('mode.solo'); dotClass = 'offline'; modeClass = 'mode-offline'; modeHelp = I18n.t('mode.help_solo');
       } else if (cloudCount > 0) {
-        modeName = I18n.t('mode.cloud'); dotClass = 'cloud'; modeClass = 'mode-cloud'; modeHelp = I18n.t('mode.help_cloud');
+        modeName = I18n.t('dashboard.chip_cloud'); dotClass = 'cloud'; modeClass = 'mode-cloud'; modeHelp = I18n.t('mode.help_cloud');
       } else {
-        modeName = I18n.t('mode.offline'); dotClass = 'offline'; modeClass = 'mode-offline'; modeHelp = I18n.t('mode.help_offline');
+        modeName = I18n.t('pool.offline'); dotClass = 'offline'; modeClass = 'mode-offline'; modeHelp = I18n.t('mode.help_offline');
       }
 
       dot.className = 'mode-dot ' + dotClass;

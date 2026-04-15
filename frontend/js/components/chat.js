@@ -224,7 +224,7 @@
         var badgeEl = div.querySelector('.session-model-badge');
         if (s.model) {
           var source = U.getModelSource(s.model);
-          var sourceLabel = source === 'local' ? I18n.t('chat.source_local') : source === 'subscription' ? I18n.t('dashboard.subscription_badge') : source === 'cloud' ? I18n.t('chat.source_cloud') : I18n.t('chat.source_network');
+          var sourceLabel = source === 'local' ? I18n.t('chat.source_local') : source === 'subscription' ? I18n.t('dashboard.chip_subscription') : source === 'cloud' ? I18n.t('chat.source_cloud') : I18n.t('chat.source_network');
           var _sibIconKey = (modelItem && modelItem.group && _ICON_MAP[modelItem.group]) ? modelItem.group : modelIconKey(s.model);
           var sibIconHtml = _sibIconKey ? providerIconHtml(_sibIconKey, 11) : '';
           badgeEl.removeAttribute('hidden');
@@ -320,7 +320,7 @@
       // Subscription/API badge for the model
       var authBadge = '';
       if (headerModelItem && headerModelItem.group === 'claude_subscription') {
-        authBadge = ' <span class="cc-auth-badge cc-auth-sub" title="' + U.escapeHtml(I18n.t('claude_code.subscription_tip')) + '">' + U.escapeHtml(I18n.t('mode.subscription')) + '</span>';
+        authBadge = ' <span class="cc-auth-badge cc-auth-sub" title="' + U.escapeHtml(I18n.t('claude_code.subscription_tip')) + '">' + U.escapeHtml(I18n.t('dashboard.chip_subscription')) + '</span>';
       } else if (headerSource === 'cloud') {
         authBadge = ' <span class="cc-auth-badge cc-auth-api">' + U.escapeHtml(I18n.t('mode.api')) + '</span>';
       }

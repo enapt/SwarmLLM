@@ -28,7 +28,7 @@
       var data = await resp.json();
       var errorMsg = null;
       if (!resp.ok) {
-        errorMsg = (data.error && data.error.message) || I18n.t('models.download_failed', { error: '' });
+        errorMsg = (data.error && data.error.message) || I18n.t('shard.download_failed', { error: '' });
       }
       return { ok: resp.ok, data: data, errorMsg: errorMsg };
     },
@@ -187,7 +187,7 @@
           App.notifications.showToast(result.data.message || I18n.t('models.download_could_not_start'), 'warning');
         }
       } catch (e) {
-        App.ui.showBanner('error', I18n.t('models.download_failed', { error: e.message }));
+        App.ui.showBanner('error', I18n.t('shard.download_failed', { error: e.message }));
       }
     }
   };
@@ -535,7 +535,7 @@
           App.ui.showBanner('error', await U.getApiErrorMessage(resp, I18n.t('models.remove_failed')));
         }
       } catch (e) {
-        App.ui.showBanner('error', I18n.t('models.remove_error', { error: e.message }));
+        App.ui.showBanner('error', I18n.t('shard.remove_error', { error: e.message }));
       }
     },
 
@@ -555,7 +555,7 @@
           App.notifications.showToast(await U.getApiErrorMessage(resp, I18n.t('models.unload_failed')), 'error');
         }
       } catch (e) {
-        App.notifications.showToast(I18n.t('models.unload_error', { error: e.message }), 'error');
+        App.notifications.showToast(I18n.t('shard.unload_error', { error: e.message }), 'error');
       }
     },
 

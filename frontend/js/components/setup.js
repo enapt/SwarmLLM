@@ -47,12 +47,12 @@
         var result = await App.data.loadStats();
         var data = (result && result.stats) ? result.stats : {};
         App.setup.hwData = data.hardware || {};
-        var gpuName = App.setup.hwData.gpu_name || I18n.t('setup.cpu_only');
+        var gpuName = App.setup.hwData.gpu_name || I18n.t('hw.mode_cpu_only');
         var vramMb = App.setup.hwData.gpu_vram_mb || 0;
         document.getElementById('hw-gpu').textContent = gpuName;
-        document.getElementById('hw-vram').textContent = vramMb ? U.formatMB(vramMb) + ' ' + I18n.t('setup.vram_suffix') : '';
-        document.getElementById('hw-ram').textContent = U.formatMB(App.setup.hwData.total_ram_mb || 0) + ' ' + I18n.t('setup.ram_suffix');
-        document.getElementById('hw-disk').textContent = U.formatMB(App.setup.hwData.available_disk_mb || 0) + ' ' + I18n.t('setup.disk_suffix');
+        document.getElementById('hw-vram').textContent = vramMb ? U.formatMB(vramMb) + ' ' + I18n.t('hw.vram') : '';
+        document.getElementById('hw-ram').textContent = U.formatMB(App.setup.hwData.total_ram_mb || 0) + ' ' + I18n.t('hw.ram');
+        document.getElementById('hw-disk').textContent = U.formatMB(App.setup.hwData.available_disk_mb || 0) + ' ' + I18n.t('dashboard.disk_label');
         // Hardware-aware model recommendation
         var rec = document.getElementById('hw-recommendation');
         if (rec) {
@@ -137,14 +137,14 @@
       var levels = [I18n.t('setup.contrib_minimal'), I18n.t('setup.contrib_moderate'), I18n.t('setup.contrib_maximum')];
       var val = parseInt(document.getElementById('contribution-slider').value, 10);
       document.getElementById('summary-contribution').textContent = levels[val];
-      var gpuName = App.setup.hwData && App.setup.hwData.gpu_name ? App.setup.hwData.gpu_name : I18n.t('setup.cpu_only');
+      var gpuName = App.setup.hwData && App.setup.hwData.gpu_name ? App.setup.hwData.gpu_name : I18n.t('hw.mode_cpu_only');
       document.getElementById('summary-gpu').textContent = gpuName;
       var autoManage = document.getElementById('setup-auto-manage').checked;
-      document.getElementById('summary-auto-manage').textContent = autoManage ? I18n.t('setup.summary_enabled') : I18n.t('setup.summary_disabled');
+      document.getElementById('summary-auto-manage').textContent = autoManage ? I18n.t('setup.summary_enabled') : I18n.t('settings.claude_subscription_disabled');
 
       // Only show invite/provider rows if configured
       var inviteRow = document.getElementById('summary-invite-row');
-      if (App.setup._joinedPeer) { inviteRow.classList.remove('hidden'); document.getElementById('summary-invite').textContent = I18n.t('setup.summary_connected'); }
+      if (App.setup._joinedPeer) { inviteRow.classList.remove('hidden'); document.getElementById('summary-invite').textContent = I18n.t('connection.connected'); }
       var provRow = document.getElementById('summary-provider-row');
       if (App.setup._savedProvider) {
         provRow.classList.remove('hidden');

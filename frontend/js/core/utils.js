@@ -223,7 +223,7 @@
       if (source === 'subscription') {
         var subBadge = document.createElement('span');
         subBadge.className = 'msg-source-badge source-subscription';
-        subBadge.textContent = I18n.t('dashboard.subscription_badge');
+        subBadge.textContent = I18n.t('dashboard.chip_subscription');
         roleEl.appendChild(subBadge);
       } else if (source === 'swarm') {
         var netBadge = document.createElement('span');
@@ -294,10 +294,10 @@
       var isFullLocal = modelData.hosted_shards === modelData.shard_count;
       if (isFullLocal) {
         encHint = '<div class="chat-empty-hint text-sm text-green" style="margin:6px 0">' +
-          '&#128274; ' + escapeHtml(I18n.t('chat.enc_local_hint')) + '</div>';
+          '&#128274; ' + escapeHtml(I18n.t('enc.running_locally')) + '</div>';
       } else {
         encHint = '<div class="chat-empty-hint text-sm" style="margin:6px 0;color:var(--cyan)">' +
-          '&#128274; ' + escapeHtml(I18n.t('chat.enc_e2e_hint')) +
+          '&#128274; ' + escapeHtml(I18n.t('enc.full_e2e')) +
           '<br><span class="field-hint text-muted">' + escapeHtml(I18n.t('chat.enc_e2e_latency')) + '</span></div>';
       }
     } else if (modelData && modelData.shard_count > 1 && modelData.hosted_shards < modelData.shard_count) {
@@ -519,7 +519,7 @@
       if (statusEl) { statusEl.textContent = opts.emptyMsg || ''; statusEl.style.color = 'var(--text-muted)'; }
       return false;
     }
-    if (statusEl) { statusEl.textContent = opts.pendingMsg || I18n.t('identity.connecting'); statusEl.style.color = 'var(--text-muted)'; }
+    if (statusEl) { statusEl.textContent = opts.pendingMsg || I18n.t('dashboard.connecting'); statusEl.style.color = 'var(--text-muted)'; }
     try {
       var resp = await App.authFetch(endpoint, {
         method: 'POST',

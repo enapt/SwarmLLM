@@ -148,7 +148,7 @@
 
       // Pool name
       var nameEl = document.getElementById('pool-name');
-      if (nameEl) nameEl.textContent = data.name || I18n.t('pool.default_name');
+      if (nameEl) nameEl.textContent = data.name || I18n.t('pool.title');
 
       // Role label
       var roleEl = document.getElementById('pool-role-label');
