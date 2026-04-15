@@ -1579,10 +1579,13 @@ pub async fn set_model_auto_manage(
         .insert(mid.clone(), policy.clone());
 
     // Persist to database
-    let _ = state
+    if let Err(e) = state
         .shared_state
         .db
-        .put_json("model_auto_manage_policies", &model_id, &policy);
+        .put_json("model_auto_manage_policies", &model_id, &policy)
+    {
+        tracing::warn!(error = %e, model = %model_id, "Failed to persist auto-manage policy — may be lost on restart");
+    }
 
     // Wake auto-manage to re-evaluate
     state.shared_state.models.auto_manage_notify.notify_one();
@@ -1730,10 +1733,14 @@ pub async fn set_model_encrypted_pipeline(
         .insert(mid.clone(), body.enabled);
 
     // Persist to database
-    let _ = state
-        .shared_state
-        .db
-        .put_json("encrypted_pipeline_models", &model_id, &body.enabled);
+    if let Err(e) =
+        state
+            .shared_state
+            .db
+            .put_json("encrypted_pipeline_models", &model_id, &body.enabled)
+    {
+        tracing::warn!(error = %e, model = %model_id, "Failed to persist encrypted pipeline toggle — may be lost on restart");
+    }
 
     tracing::info!(
         model = %model_id,

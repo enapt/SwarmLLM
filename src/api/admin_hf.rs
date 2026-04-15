@@ -744,10 +744,13 @@ pub async fn hf_download_shards(
                 trust.trust_level = crate::types::ModelTrustLevel::Pinned;
             }
         }
-        let _ = state
+        if let Err(e) = state
             .shared_state
             .db
-            .put_json("model_trust", &mid.0, trust.value());
+            .put_json("model_trust", &mid.0, trust.value())
+        {
+            tracing::warn!(error = %e, model = %mid.0, "Failed to persist model trust pin — may be lost on restart");
+        }
     }
 
     // ── Synchronous probe + architecture check ──────────────────────────

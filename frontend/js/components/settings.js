@@ -106,11 +106,21 @@
               if (info) info.textContent = I18n.t('settings.claude_sub_ready');
               info.style.color = 'var(--green)';
               if (detail) {
-                var parts = [];
-                parts.push(I18n.t('settings.cli_version') + ': ' + U.escapeHtml(data.cli_version || '?'));
-                if (planLabel) parts.push(I18n.t('settings.plan') + ': ' + U.escapeHtml(planLabel));
-                if (data.rate_limit_tier) parts.push(I18n.t('settings.rate_tier') + ': ' + U.escapeHtml(data.rate_limit_tier));
-                detail.innerHTML = parts.join('<span style="margin:0 6px;opacity:0.4">|</span>');
+                var parts = [
+                  I18n.t('settings.cli_version') + ': ' + (data.cli_version || '?'),
+                ];
+                if (planLabel) parts.push(I18n.t('settings.plan') + ': ' + planLabel);
+                if (data.rate_limit_tier) parts.push(I18n.t('settings.rate_tier') + ': ' + data.rate_limit_tier);
+                detail.textContent = '';
+                parts.forEach(function(p, i) {
+                  if (i > 0) {
+                    var sep = document.createElement('span');
+                    sep.style.cssText = 'margin:0 6px;opacity:0.4';
+                    sep.textContent = '|';
+                    detail.appendChild(sep);
+                  }
+                  detail.appendChild(document.createTextNode(p));
+                });
                 detail.style.display = '';
                 detail.style.color = 'var(--text-secondary)';
               }
