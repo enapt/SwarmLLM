@@ -125,6 +125,8 @@ pub enum PoolCommand {
     InboundMemberLeft {
         pool_id: PoolId,
         node_id: NodeId,
+        left_at: i64,
+        nonce: uuid::Uuid,
         signature: Vec<u8>,
     },
     GetState {

@@ -728,28 +728,6 @@ pub struct PinRequest {
     pub target_node_id: String,
 }
 
-/// Run `f` with a mutable reference to the current pool state, verifying
-/// that this node is the pool owner first. Returns the closure's result,
-/// or a 400 error if the node isn't in a pool or isn't the owner.
-///
-/// `f` runs while the pool_state write lock is held and must not await.
-async fn with_owned_pool<F, R>(state: &AppState, f: F) -> Result<R, ApiError>
-where
-    F: FnOnce(&mut crate::pool::types::PoolState) -> Result<R, ApiError>,
-{
-    let my_id = state.shared_state.identity.node_id().clone();
-    let mut ps_guard = state.shared_state.credits.pool_state.write().await;
-    let ps = ps_guard
-        .as_mut()
-        .ok_or_else(|| ApiError(SwarmError::Validation("Not in a pool".into())))?;
-    if ps.pool_id != my_id {
-        return Err(ApiError(SwarmError::Validation(
-            "Only the pool owner can manage pins".into(),
-        )));
-    }
-    f(ps)
-}
-
 /// POST /api/pool/pin — Pin a model/shards to a specific device (owner only).
 pub async fn pool_add_pin(
     State(state): State<AppState>,
@@ -763,36 +741,40 @@ pub async fn pool_add_pin(
     } = body;
     let model_id_resp = model_id.clone();
 
-    let snapshot = with_owned_pool(&state, |ps| {
-        // Verify target is a pool member
+    // Hold the pool_state write lock across the DB persist so a concurrent
+    // pin/unpin cannot write a stale snapshot.
+    {
+        let my_id = state.shared_state.identity.node_id().clone();
+        let mut ps_guard = state.shared_state.credits.pool_state.write().await;
+        let ps = ps_guard
+            .as_mut()
+            .ok_or_else(|| ApiError(SwarmError::Validation("Not in a pool".into())))?;
+        if ps.pool_id != my_id {
+            return Err(ApiError(SwarmError::Validation(
+                "Only the pool owner can manage pins".into(),
+            )));
+        }
         if !ps.members.iter().any(|m| m.node_id == target) {
             return Err(ApiError(SwarmError::Validation(
                 "Target device is not a pool member".into(),
             )));
         }
-
         let pin = crate::types::ShardPin {
             model_id,
             shard_indices,
             target_node_id: target,
         };
-
-        // Remove any existing pin for same model+target, then add
         ps.shard_pins
             .retain(|p| !(p.model_id == pin.model_id && p.target_node_id == pin.target_node_id));
         ps.shard_pins.push(pin);
 
-        Ok(ps.clone())
-    })
-    .await?;
-
-    // Persist
-    if let Err(e) = state.shared_state.db.put_json(
-        crate::pool::manager::TREE_POOL_STATE,
-        crate::pool::manager::KEY_MY_POOL,
-        &snapshot,
-    ) {
-        tracing::warn!(error = %e, "Failed to persist pool shard pin — may be lost on restart");
+        if let Err(e) = state.shared_state.db.put_json(
+            crate::pool::manager::TREE_POOL_STATE,
+            crate::pool::manager::KEY_MY_POOL,
+            &*ps,
+        ) {
+            tracing::warn!(error = %e, "Failed to persist pool shard pin — may be lost on restart");
+        }
     }
 
     // Notify auto-manage to re-evaluate
@@ -812,25 +794,30 @@ pub async fn pool_remove_pin(
     let PinRequest { model_id, .. } = body;
     let model_id_resp = model_id.clone();
 
-    let snapshot = with_owned_pool(&state, |ps| {
+    {
+        let my_id = state.shared_state.identity.node_id().clone();
+        let mut ps_guard = state.shared_state.credits.pool_state.write().await;
+        let ps = ps_guard
+            .as_mut()
+            .ok_or_else(|| ApiError(SwarmError::Validation("Not in a pool".into())))?;
+        if ps.pool_id != my_id {
+            return Err(ApiError(SwarmError::Validation(
+                "Only the pool owner can manage pins".into(),
+            )));
+        }
         let before = ps.shard_pins.len();
         ps.shard_pins
             .retain(|p| !(p.model_id == model_id && p.target_node_id == target));
-
         if ps.shard_pins.len() == before {
             return Err(ApiError(SwarmError::Validation("Pin not found".into())));
         }
-
-        Ok(ps.clone())
-    })
-    .await?;
-
-    if let Err(e) = state.shared_state.db.put_json(
-        crate::pool::manager::TREE_POOL_STATE,
-        crate::pool::manager::KEY_MY_POOL,
-        &snapshot,
-    ) {
-        tracing::warn!(error = %e, "Failed to persist pool shard unpin — may be lost on restart");
+        if let Err(e) = state.shared_state.db.put_json(
+            crate::pool::manager::TREE_POOL_STATE,
+            crate::pool::manager::KEY_MY_POOL,
+            &*ps,
+        ) {
+            tracing::warn!(error = %e, "Failed to persist pool shard unpin — may be lost on restart");
+        }
     }
 
     Ok(Json(

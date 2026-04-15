@@ -1202,6 +1202,13 @@ pub enum PoolMessage {
     MemberLeft {
         pool_id: NodeId,
         node_id: NodeId,
+        /// Unix timestamp (seconds) when the leave notice was created.
+        /// Receivers MUST reject notices more than ~5 minutes out of range,
+        /// and dedup on the UUID below to prevent replay.
+        #[serde(default)]
+        left_at: i64,
+        #[serde(default)]
+        nonce: uuid::Uuid,
         signature: Vec<u8>,
     },
     /// Join request from a device that has an invite code.

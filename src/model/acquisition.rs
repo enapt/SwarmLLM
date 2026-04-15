@@ -450,7 +450,6 @@ impl AcquisitionManager {
         // Request each needed shard from the network with retry logic
         for shard_id in &needed {
             let mut failed_peers: Vec<NodeId> = Vec::new();
-            let retry_delays = crate::config::NETWORK_RETRY_DELAYS;
             let mut success = false;
 
             for attempt in 0..3u32 {
@@ -522,15 +521,9 @@ impl AcquisitionManager {
                             tracing::warn!(
                                 error = %e,
                                 attempt = attempt + 1,
-                                "Failed to send shard request, retrying"
+                                "Failed to send shard request; NetworkManager handles actual retries on OutboundFailure"
                             );
                             failed_peers.push(target);
-                            if attempt < 2 {
-                                tokio::time::sleep(std::time::Duration::from_secs(
-                                    retry_delays[attempt as usize],
-                                ))
-                                .await;
-                            }
                             continue;
                         }
                         success = true;
@@ -542,12 +535,6 @@ impl AcquisitionManager {
                             "Cannot send shard request: peer_id_bytes not available"
                         );
                         failed_peers.push(target);
-                        if attempt < 2 {
-                            tokio::time::sleep(std::time::Duration::from_secs(
-                                retry_delays[attempt as usize],
-                            ))
-                            .await;
-                        }
                         continue;
                     }
                 }

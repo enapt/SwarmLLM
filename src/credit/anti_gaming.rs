@@ -10,8 +10,8 @@ const SUBNET_CLUSTER_THRESHOLD: usize = 5;
 const SUBNET_CLUSTER_SPOT_CHECK_RATE: f64 = 0.25;
 
 /// Age (seconds) after which a subnet registration is evicted from `subnet_counts`.
-/// Prevents unbounded growth from nodes that connect but never transact. 24 hours.
-const SUBNET_EVICTION_SECS: u64 = 86_400;
+/// Prevents unbounded growth from nodes that connect but never transact. 1 hour.
+const SUBNET_EVICTION_SECS: u64 = 3_600;
 
 /// Default rate-limit window (seconds) used by `AntiGaming::new()` — caps how
 /// recent transactions are counted toward the per-peer rate limit.

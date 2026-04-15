@@ -395,7 +395,7 @@ impl CreditLedger {
                             ).await {
                                 tracing::warn!(error = %e, pending, "Failed to flush pending credit earn");
                                 // Put it back so it's not lost
-                                ss.credits.pending_credit_earn.fetch_add(pending, std::sync::atomic::Ordering::Release);
+                                ss.credits.pending_credit_earn.fetch_add(pending, std::sync::atomic::Ordering::AcqRel);
                             } else {
                                 tracing::debug!(pending, "Flushed pending forward participation credits");
                             }

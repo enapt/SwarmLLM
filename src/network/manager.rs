@@ -2160,13 +2160,27 @@ impl NetworkManager {
                     // Store the ResponseChannel so we can send the computed result as
                     // the actual response (single substream per token, no separate request).
                     if self.pending_tensor_channels.len() >= MAX_PENDING_TENSOR_CHANNELS {
-                        tracing::warn!(%peer, "pending_tensor_channels full — rejecting with ACK");
-                        // Send ACK to avoid leaving requester hung, then skip storing
+                        tracing::warn!(%peer, %request_id, "pending_tensor_channels full — responding with error LayerResult");
+                        // Respond with an error LayerResult so the requester's oneshot resolves
+                        // immediately instead of waiting for the ~600s request_timeout.
+                        let err = crate::types::LayerResult {
+                            request_id,
+                            token_ids: vec![],
+                            finish_reason: Some(crate::types::NetworkFinishReason::Error(
+                                "server tensor-channel capacity exceeded".to_string(),
+                            )),
+                            activations: vec![],
+                            sealed_token_ids: None,
+                        };
+                        let resp = match crate::network::protocol::encode_layer_result(&err) {
+                            Ok(bytes) => SwarmResponse::TensorPayload(bytes),
+                            Err(_) => SwarmResponse::Ack,
+                        };
                         let _ = self
                             .swarm
                             .behaviour_mut()
                             .request_response
-                            .send_response(channel, SwarmResponse::Ack);
+                            .send_response(channel, resp);
                     } else {
                         self.pending_tensor_channels
                             .insert(request_id, (std::time::Instant::now(), channel));

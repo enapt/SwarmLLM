@@ -190,9 +190,11 @@ impl PoolManager {
             PoolCommand::InboundMemberLeft {
                 pool_id,
                 node_id,
+                left_at,
+                nonce,
                 signature,
             } => {
-                self.handle_inbound_member_left(pool_id, node_id, signature)
+                self.handle_inbound_member_left(pool_id, node_id, left_at, nonce, signature)
                     .await;
             }
             PoolCommand::SetDeviceName { name, reply } => {
@@ -582,12 +584,16 @@ impl PoolManager {
 
         // Broadcast signed member-left notice
         let my_id = self.shared_state.identity.node_id().clone();
-        let leave_payload = super::crypto::member_left_payload(&pool_id, &my_id);
+        let left_at = chrono::Utc::now().timestamp();
+        let nonce = uuid::Uuid::new_v4();
+        let leave_payload = super::crypto::member_left_payload(&pool_id, &my_id, left_at, &nonce);
         let leave_signature = self.shared_state.identity.sign(&leave_payload);
         let pool_id_short = hex::encode(&pool_id.0[..8]);
         let msg = SwarmMessage::PoolMessage(crate::types::PoolMessage::MemberLeft {
             pool_id,
             node_id: my_id,
+            left_at,
+            nonce,
             signature: leave_signature,
         });
         let _ = self.network_tx.send(NetworkCommand::Broadcast(msg)).await;
@@ -1120,12 +1126,35 @@ impl PoolManager {
         &mut self,
         pool_id: PoolId,
         node_id: NodeId,
+        left_at: i64,
+        nonce: uuid::Uuid,
         signature: Vec<u8>,
     ) {
         let my_id = self.shared_state.identity.node_id();
 
         // Only the pool owner processes member-left notifications
         if pool_id != *my_id {
+            return;
+        }
+
+        // Freshness check: reject notices more than 5 minutes out of range.
+        let now = chrono::Utc::now().timestamp();
+        if (now - left_at).abs() > 300 {
+            tracing::warn!(node = %node_id, left_at, now, "Stale member-left notice — rejecting");
+            return;
+        }
+
+        // Replay protection: same tree as pool removals, keyed by nonce.
+        let replay_key = format!("ml-{}", nonce);
+        if self
+            .shared_state
+            .db
+            .get_json::<bool>(TREE_POOL_REMOVAL_REPLAYS, &replay_key)
+            .ok()
+            .flatten()
+            .is_some()
+        {
+            tracing::warn!(node = %node_id, nonce = %nonce, "Member-left replay detected — ignoring");
             return;
         }
 
@@ -1137,7 +1166,7 @@ impl PoolManager {
                 return;
             }
         };
-        let payload = super::crypto::member_left_payload(&pool_id, &node_id);
+        let payload = super::crypto::member_left_payload(&pool_id, &node_id, left_at, &nonce);
         let sig_bytes: &[u8; 64] = match signature.as_slice().try_into() {
             Ok(b) => b,
             Err(_) => {
@@ -1149,6 +1178,15 @@ impl PoolManager {
         if member_key.verify(&payload, &sig).is_err() {
             tracing::warn!(node = %node_id, "Invalid signature on member-left notice");
             return;
+        }
+
+        // Record nonce to prevent replay.
+        if let Err(e) = self
+            .shared_state
+            .db
+            .put_json(TREE_POOL_REMOVAL_REPLAYS, &replay_key, &true)
+        {
+            tracing::warn!(error = %e, "Failed to persist member-left replay key");
         }
 
         // Clone+drop before DB write to avoid holding write lock across I/O.
@@ -1300,14 +1338,21 @@ impl PoolManager {
 
         let mut ps_guard = self.shared_state.credits.pool_state.write().await;
         if let Some(ref mut ps) = *ps_guard {
-            if let Some(member) = ps.members.iter_mut().find(|m| m.node_id == node_id) {
-                // Always accept the member's reported device name
-                if device_name.is_some() {
-                    member.device_name = device_name;
+            match ps.members.iter_mut().find(|m| m.node_id == node_id) {
+                Some(member) => {
+                    if device_name.is_some() {
+                        member.device_name = device_name;
+                    }
+                    member.device_stats = Some(stats);
+                    member.last_seen = Some(chrono::Utc::now());
+                    member.online = true;
                 }
-                member.device_stats = Some(stats);
-                member.last_seen = Some(chrono::Utc::now());
-                member.online = true;
+                None => {
+                    tracing::warn!(
+                        %node_id,
+                        "Dropping DeviceStatsReport from non-member (possibly stale after removal)"
+                    );
+                }
             }
         }
         drop(ps_guard);

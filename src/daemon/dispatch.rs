@@ -822,10 +822,12 @@ pub(crate) async fn dispatch_network_messages(
                                                         removal: rem,
                                                     })
                                                 }
-                                                crate::types::PoolMessage::MemberLeft { pool_id, node_id, signature } => {
+                                                crate::types::PoolMessage::MemberLeft { pool_id, node_id, left_at, nonce, signature } => {
                                                     Some(crate::pool::types::PoolCommand::InboundMemberLeft {
                                                         pool_id,
                                                         node_id,
+                                                        left_at,
+                                                        nonce,
                                                         signature,
                                                     })
                                                 }

@@ -32,11 +32,19 @@ pub(crate) fn pool_create_payload(
 }
 
 /// BLAKE3 payload for member-left notice (sign + verify).
-pub(crate) fn member_left_payload(pool_id: &PoolId, node_id: &NodeId) -> Vec<u8> {
+/// Includes a timestamp + nonce so replays can be rejected.
+pub(crate) fn member_left_payload(
+    pool_id: &PoolId,
+    node_id: &NodeId,
+    left_at: i64,
+    nonce: &uuid::Uuid,
+) -> Vec<u8> {
     let mut h = blake3::Hasher::new();
     h.update(PREFIX_MEMBER_LEFT);
     h.update(&pool_id.0);
     h.update(&node_id.0);
+    h.update(&left_at.to_le_bytes());
+    h.update(nonce.as_bytes());
     h.finalize().as_bytes().to_vec()
 }
 
