@@ -52,16 +52,16 @@ swarmllm/
 ├── src/
 │   ├── main.rs, lib.rs, config.rs, error.rs, types.rs, update.rs
 │   ├── daemon/    (mod, state, manifest, shard_loader, dispatch)
-│   ├── network/   (manager, behaviour, discovery, protocol, transport, relay, peer_cache)
+│   ├── network/   (manager, behaviour, discovery, protocol, transport, relay, peer_cache, helpers)
 │   ├── model/     (manifest, shard, distribution, registry, acquisition, huggingface, auto_manage/, lora)
 │   │   └── auto_manage/  (mod, manager, scoring, download, prune, scan, vram)
 │   ├── inference/ (router, pipeline, scheduler, executor, sampling, kv_cache, speculative, split/, layers, model_arch, tokenizer, tensor_util, shard_layout, vision, allreduce, chat_template, local_embedder, model_worker, process_pool, worker_ipc)
-│   │   └── split/        (mod, model, kv_cache, entry, gguf_meta, shard_reader, rope, tests)
+│   │   └── split/        (mod, model, loader, executor, kv_cache, entry, gguf_meta, shard_reader, rope, tests)
 │   ├── credit/    (ledger, transaction, priority, anti_gaming, trust, escrow)
 │   ├── identity/  (keypair, nickname)
 │   ├── crypto/    (session, pipeline_seal, gossip_seal, key_rotation, provider_keys)
 │   ├── pool/      (types, crypto, manager, forward, scope)
-│   ├── api/       (server, openai, anthropic, mcp, admin, admin_hf, admin_models, admin_providers, websocket, middleware, identity, pool, metrics, providers, claude_sub*)
+│   ├── api/       (server, openai, anthropic, mcp, sse, admin, admin_hf, admin_models, admin_providers, websocket, middleware, identity, pool, metrics, providers, claude_sub*)
 │   ├── storage/   (db)
 │   └── health/    (monitor, rebalancer)
 ├── frontend/      (index.html + 12 HTML templates, css/, js/{core/3,components/14,init.js,i18n.js,providers.js,neural-bg.js,topojson-client.min.js}, i18n/)
@@ -113,15 +113,15 @@ libp2p 0.55 (pin to 0.55.x), axum 0.7, candle-core/candle-transformers (CUDA), e
 ### Frontend
 - Vanilla HTML/CSS/JS — no framework, no Node.js build step
 - Embedded into binary via `include_dir!` macro at compile time
-- Component architecture: `App` global namespace, 22 JS files (3 core + 14 components + init.js + 4 standalone utilities)
-  - `js/core/` — state.js (namespace + shared state + storage keys), utils.js (format helpers, DOM builders, extractErrorMessage, getApiErrorMessage), data.js (data store + authFetch + dedup)
+- Component architecture: `App` global namespace, 23 JS files (4 core + 14 components + init.js + 4 standalone utilities)
+  - `js/core/` — state.js (namespace + shared state + storage keys), utils.js (format helpers, DOM builders, extractErrorMessage, getApiErrorMessage), data.js (data store + authFetch + dedup), tooltip.js (unified popover replacing native `title=`)
   - `js/components/` — ui.js, chat.js, claude-code.js, dashboard.js, models.js, auto-manage-status.js, settings.js, setup.js, downloads.js, notifications.js, identity.js, network-map.js, compare.js, pool.js
   - `js/init.js` — event binding, initialization, public API export
   - `js/i18n.js`, `js/providers.js`, `js/neural-bg.js`, `js/topojson-client.min.js` — standalone utilities (loaded before App)
 - 12 HTML `<template>` elements for repeating UI structures (session items, chat messages, toasts, model cards, etc.)
 - All storage keys registered as named constants on `App` (e.g., `App.SESSIONS_KEY`, `App.MODEL_SORT_KEY`)
 - Dark/light/system theme toggle, CSS custom properties for theming
-- i18n: 1089 keys across 21 languages via `frontend/i18n/{lang}.json`, `I18n.t()` + `data-i18n` attributes
+- i18n: 1117 keys across 21 languages via `frontend/i18n/{lang}.json`, `I18n.t()` + `data-i18n` attributes (28 newest keys added 2026-04-15: only en.json currently translated — other 20 locales await translation)
 - Total frontend size target: < 200KB
 - Communication: WebSocket for real-time, REST for initial load, SSE for chat streaming
 - WebSocket message types (only 5): `activity_event` (unified event bus — all subsystem events, toasts, prune history), `stats_update` (2s interval — stats, shard registry, acquisitions), `peer_list` (full peer snapshot on change), `models_changed` (shard download/load/prune signals dashboard refresh), `update_available` (new version detected)
