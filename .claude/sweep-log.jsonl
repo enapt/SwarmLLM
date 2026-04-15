@@ -426,3 +426,5 @@
 {"file":"src/network/manager.rs","line":3635,"kind":"observability","summary":"rr-message (AllReduce/etc) send tracked","status":"fixed","date":"2026-04-15"}
 {"file":"src/pool/manager.rs","line":615,"kind":"security","summary":"credit_forward per-member rate limit (60/min)","status":"fixed","date":"2026-04-15"}
 {"file":"frontend/js/components/chat.js","line":710,"kind":"xss","summary":"renderedHtml stripped before localStorage persist","status":"fixed","date":"2026-04-15"}
+{"file":"src/api/admin_hf.rs","line":1387,"kind":"duplication","summary":"GGUF arch→ModelArchitecture match duplicated in admin_hf, daemon/manifest, daemon/mod; admin_hf copy missing qwen35/qwen35moe — extracted helper","status":"fixed","date":"2026-04-15"}
+{"file":"src/crypto/session.rs","line":189,"kind":"dead_code","summary":"local_public_key reported as unused-pub but already gated #[cfg(test)] — false positive","status":"wontfix","date":"2026-04-15"}

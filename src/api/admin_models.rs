@@ -1414,6 +1414,12 @@ pub async fn download_shard(
         })
         .unwrap_or(0);
 
+    // Pre-flight disk space check (returns 507 Insufficient Storage with hint)
+    if shard_size > 0 {
+        let dest_dir = crate::model::shard::model_dir(&shared.config.node.data_dir, &mid.0);
+        crate::model::check_disk_space(&dest_dir, shard_size)?;
+    }
+
     // Try P2P: find peers who hold this shard
     let holders: Vec<_> = shared
         .model_registry

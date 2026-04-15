@@ -782,26 +782,7 @@ pub async fn download_shard(
     std::fs::create_dir_all(dest_dir).map_err(|e| format!("Failed to create dir: {e}"))?;
 
     // Pre-flight disk space check
-    let need_bytes = layout.size_bytes;
-    if let Ok(disks) = std::panic::catch_unwind(|| {
-        let mut d = sysinfo::Disks::new();
-        d.refresh(true);
-        d
-    }) {
-        let available_bytes = disks
-            .iter()
-            .filter(|d| dest_dir.starts_with(d.mount_point()))
-            .max_by_key(|d| d.mount_point().as_os_str().len())
-            .map(|d| d.available_space())
-            .unwrap_or(u64::MAX);
-        if need_bytes > available_bytes {
-            let need_mb = need_bytes / (1024 * 1024);
-            let have_mb = available_bytes / (1024 * 1024);
-            return Err(format!(
-                "Insufficient disk space: need {need_mb}MB, have {have_mb}MB"
-            ));
-        }
-    }
+    crate::model::check_disk_space(dest_dir, layout.size_bytes).map_err(|e| e.to_string())?;
 
     let dest_path = dest_dir.join(crate::model::shard::shard_filename(shard_index));
     let tmp_path = dest_dir.join(format!(
