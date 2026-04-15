@@ -712,9 +712,15 @@
           var s = S.sessions[id];
           stripped[id] = Object.assign({}, s, {
             messages: (s.messages || []).map(function(m) {
-              if (m.images && m.images.length > 0) {
+              // Always strip renderedHtml before persistence — it contains tool-rendered
+              // markup (buttons with event wiring, permission prompts) that becomes dead
+              // on restore and carries latent XSS risk if any upstream renderer regresses.
+              // Chat view falls back to m.content plaintext when renderedHtml is absent.
+              var needsCopy = (m.images && m.images.length > 0) || m.renderedHtml;
+              if (needsCopy) {
                 var copy = Object.assign({}, m);
                 delete copy.images;
+                delete copy.renderedHtml;
                 return copy;
               }
               return m;

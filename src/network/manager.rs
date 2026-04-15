@@ -132,6 +132,10 @@ pub struct NetworkManager {
     /// pipeline from here (it lives on the other peer) — it handles its own
     /// timeout via its own `pending_tensor_outbound` watchdog.
     pending_tensor_result_outbound: HashMap<OutboundRequestId, (uuid::Uuid, std::time::Instant)>,
+    /// Observability: track streaming-token + rr-message sends so OutboundFailure
+    /// events can be attributed to a label. Purely for logging — the upstream
+    /// protocol handles its own timeouts.
+    pending_rr_observability: HashMap<OutboundRequestId, (String, std::time::Instant)>,
     /// Holds ResponseChannels for pending tensor forwards, keyed by inference UUID.
     /// When a LayerForward arrives, we store the channel here instead of ACK-ing immediately.
     /// When the computed LayerResult comes back via NetworkCommand::SendTensorResult,
@@ -273,6 +277,7 @@ impl NetworkManager {
             relay_activated: false,
             pending_tensor_outbound: HashMap::new(),
             pending_tensor_result_outbound: HashMap::new(),
+            pending_rr_observability: HashMap::new(),
             pending_tensor_channels: HashMap::new(),
             connection_addrs: HashMap::new(),
             peer_remote_addrs: HashMap::new(),
@@ -641,6 +646,9 @@ impl NetworkManager {
                     self.pending_tensor_result_outbound.retain(|_id, (_, inserted)| {
                         inserted.elapsed().as_secs() < MAX_TENSOR_FORWARD_SECS
                     });
+                    self.pending_rr_observability.retain(|_id, (_, inserted)| {
+                        inserted.elapsed().as_secs() < MAX_TENSOR_FORWARD_SECS
+                    });
                     if !self.pending_tensor_outbound.is_empty() {
                         let now = std::time::Instant::now();
                         let mut stale: Vec<(OutboundRequestId, uuid::Uuid, libp2p::PeerId)> = Vec::new();
@@ -994,6 +1002,14 @@ impl NetworkManager {
                         inference_request_id = %result_uuid,
                         %error,
                         "Tensor result fallback OutboundFailure — upstream will timeout"
+                    );
+                }
+                if let Some((label, _)) = self.pending_rr_observability.remove(&request_id) {
+                    tracing::warn!(
+                        %peer,
+                        label,
+                        %error,
+                        "rr-message OutboundFailure — upstream will handle via its own timeout"
                     );
                 }
                 // Check if this was a pending shard download request
@@ -3616,10 +3632,15 @@ impl NetworkManager {
         }
         let msg = SwarmMessage::StreamingToken(token);
         let req = SwarmRequest::Message(Box::new(msg));
-        self.swarm
+        let req_id = self
+            .swarm
             .behaviour_mut()
             .request_response
             .send_request(&peer_id, req);
+        self.pending_rr_observability.insert(
+            req_id,
+            ("streaming_token".to_string(), std::time::Instant::now()),
+        );
     }
 
     /// Send an arbitrary SwarmMessage to a specific peer via request_response.
@@ -3643,10 +3664,13 @@ impl NetworkManager {
             return;
         }
         let req = SwarmRequest::Message(Box::new(msg));
-        self.swarm
+        let req_id = self
+            .swarm
             .behaviour_mut()
             .request_response
             .send_request(&peer_id, req);
+        self.pending_rr_observability
+            .insert(req_id, (label.to_string(), std::time::Instant::now()));
     }
 
     /// Update the peer count in shared state.

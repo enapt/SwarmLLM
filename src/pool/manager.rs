@@ -43,7 +43,16 @@ pub struct PoolManager {
     /// When set, auto-accept the next invitation (set by JoinWithCode).
     /// Includes a timestamp so the intent expires after 5 minutes.
     auto_accept_code_hash: Option<([u8; 32], std::time::Instant)>,
+    /// Per-member sliding window of recent credit-forward timestamps.
+    /// Caps a single member at CREDIT_FORWARD_MAX_PER_WINDOW forwards per
+    /// CREDIT_FORWARD_WINDOW_SECS — defeats the UUID-replay-with-fresh-id
+    /// vector (each forward gets a fresh UUID so the DB dedup key alone
+    /// cannot detect repeated claims).
+    credit_forward_rl: HashMap<NodeId, std::collections::VecDeque<std::time::Instant>>,
 }
+
+const CREDIT_FORWARD_WINDOW_SECS: u64 = 60;
+const CREDIT_FORWARD_MAX_PER_WINDOW: usize = 60;
 
 impl PoolManager {
     pub fn new(
@@ -62,7 +71,26 @@ impl PoolManager {
             pending_invitations: HashMap::new(),
             invite_codes: HashMap::new(),
             auto_accept_code_hash: None,
+            credit_forward_rl: HashMap::new(),
         }
+    }
+
+    /// Returns true if this member is under the credit-forward rate limit.
+    fn check_credit_forward_rate(&mut self, member: &NodeId) -> bool {
+        let window = std::time::Duration::from_secs(CREDIT_FORWARD_WINDOW_SECS);
+        let now = std::time::Instant::now();
+        let entry = self.credit_forward_rl.entry(member.clone()).or_default();
+        while entry
+            .front()
+            .is_some_and(|t| now.duration_since(*t) > window)
+        {
+            entry.pop_front();
+        }
+        if entry.len() >= CREDIT_FORWARD_MAX_PER_WINDOW {
+            return false;
+        }
+        entry.push_back(now);
+        true
     }
 
     /// Restore pool state from database on startup.
@@ -638,6 +666,19 @@ impl PoolManager {
             .get_json::<PoolCreditForward>(TREE_POOL_FORWARDS, &forward.id.to_string())
         {
             tracing::warn!(id = %forward.id, from = %forward.from_node_id, "Rejecting replayed credit forward");
+            return;
+        }
+
+        // Rate-limit per-member forwards. The UUID is member-generated, so the DB
+        // dedup above only blocks exact-UUID replays — a fresh UUID with identical
+        // amount/timestamp would bypass it. Rate-limiting bounds the exploitability.
+        if !self.check_credit_forward_rate(&forward.from_node_id) {
+            tracing::warn!(
+                from = %forward.from_node_id,
+                window_secs = CREDIT_FORWARD_WINDOW_SECS,
+                max = CREDIT_FORWARD_MAX_PER_WINDOW,
+                "Credit forward rate limit exceeded — dropping"
+            );
             return;
         }
 
