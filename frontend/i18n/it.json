@@ -763,7 +763,7 @@
   "dashboard.chip_cloud": "Cloud",
   "dashboard.chip_models": " modelli",
   "dashboard.chip_providers": " provider",
-  "dashboard.network_title": "Rete",
+  "dashboard.network_title": "Peer",
   "dashboard.no_activity": "Nessuna attività ancora.",
   "dashboard.no_network_events": "Nessun evento di rete ancora.",
   "dashboard.prune_title": "Cronologia rimozione",

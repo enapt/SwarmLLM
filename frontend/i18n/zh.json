@@ -762,7 +762,7 @@
   "dashboard.chip_cloud": "云端",
   "dashboard.chip_models": " 个模型",
   "dashboard.chip_providers": " 个提供商",
-  "dashboard.network_title": "网络",
+  "dashboard.network_title": "节点",
   "dashboard.no_activity": "暂无活动。",
   "dashboard.no_network_events": "暂无网络事件。",
   "dashboard.prune_title": "剪枝历史",

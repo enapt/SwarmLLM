@@ -762,7 +762,7 @@
   "dashboard.chip_cloud": "클라우드",
   "dashboard.chip_models": " 모델",
   "dashboard.chip_providers": " 공급자",
-  "dashboard.network_title": "네트워크",
+  "dashboard.network_title": "피어",
   "dashboard.no_activity": "아직 활동이 없습니다.",
   "dashboard.no_network_events": "아직 네트워크 이벤트가 없습니다.",
   "dashboard.prune_title": "정리 기록",

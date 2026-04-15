@@ -13,7 +13,115 @@
     _apiKeyFull: '',
     _apiKeyPromise: null,
 
+    _formatSlider: function(fmt, v) {
+      v = parseInt(v, 10) || 0;
+      switch (fmt) {
+        case 'int': return String(v);
+        case 'mbps': return v === 0 ? (I18n.t('settings.slider_unlimited') || 'Unlimited') : v + ' Mbps';
+        case 'gb': return (v / 1000).toFixed(v < 10000 ? 1 : 0) + ' GB';
+        case 'gb-auto': return v === 0 ? (I18n.t('settings.slider_auto') || 'Auto (50% of disk)') : (v / 1000).toFixed(v < 10000 ? 1 : 0) + ' GB';
+        case 'sec-off': return v === 0 ? (I18n.t('settings.slider_off') || 'Off') : v + ' s';
+        default: return String(v);
+      }
+    },
+    _wireSliders: function() {
+      var self = this;
+      document.querySelectorAll('input.slider[data-slider-format]').forEach(function(el) {
+        var out = document.getElementById(el.id + '-out');
+        if (!out) return;
+        var fmt = el.getAttribute('data-slider-format');
+        var update = function() { out.textContent = self._formatSlider(fmt, el.value); };
+        el.addEventListener('input', update);
+        el.addEventListener('change', update);
+        // Track via property so loadSettings can trigger re-render after value change
+        el._sliderUpdate = update;
+        update();
+      });
+    },
+    _wireSegmented: function() {
+      document.querySelectorAll('.segmented[data-bound-select]').forEach(function(seg) {
+        var sel = document.getElementById(seg.getAttribute('data-bound-select'));
+        if (!sel) return;
+        var sync = function() {
+          var v = sel.value;
+          seg.querySelectorAll('.segmented-btn').forEach(function(b) {
+            b.classList.toggle('active', b.getAttribute('data-value') === v);
+          });
+        };
+        seg.querySelectorAll('.segmented-btn').forEach(function(btn) {
+          btn.addEventListener('click', function() {
+            sel.value = btn.getAttribute('data-value');
+            sel.dispatchEvent(new Event('change'));
+            sync();
+          });
+        });
+        sel.addEventListener('change', sync);
+        seg._segSync = sync;
+        sync();
+      });
+    },
+
+    renderHwModeNote: function(el, isGpu) {
+      if (!el) return;
+      el.hidden = false;
+      el.classList.remove('mode-cpu', 'mode-gpu');
+      el.classList.add(isGpu ? 'mode-gpu' : 'mode-cpu');
+      var icon = isGpu ? '◈' : '≡';
+      var title = I18n.t(isGpu ? 'hw.mode_note_gpu_title' : 'hw.mode_note_cpu_title');
+      var body = I18n.t(isGpu ? 'hw.mode_note_gpu_body' : 'hw.mode_note_cpu_body');
+      el.innerHTML = '<span class="hw-mode-note-icon" aria-hidden="true">' + U.escapeHtml(icon) + '</span>' +
+        '<div class="hw-mode-note-body"><strong>' + U.escapeHtml(title) + '</strong>' + U.escapeHtml(body) + '</div>';
+    },
+    _applyHwMode: function(hw) {
+      // Fallback: dashboard caches flag on App.state._gpuInference
+      var isGpu;
+      if (hw && typeof hw.gpu_inference === 'boolean') isGpu = hw.gpu_inference;
+      else isGpu = !!(App.state && App.state._gpuInference);
+      var backend = (hw && hw.inference_backend) || 'GPU';
+      var unit = isGpu ? 'GPU' : 'CPU';
+
+      var badge = document.getElementById('settings-mode-badge');
+      if (badge) {
+        if (isGpu) {
+          badge.textContent = I18n.t('hw.gpu_mode_label', { backend: backend });
+          badge.className = 'node-mode-badge node-mode-gpu';
+          badge.title = I18n.t('hw.gpu_mode_tip');
+        } else {
+          badge.textContent = I18n.t('hw.mode_cpu');
+          badge.className = 'node-mode-badge node-mode-cpu';
+          badge.title = I18n.t('hw.cpu_mode_tip');
+        }
+      }
+
+      // Update contribution sub-labels to show only the relevant resource
+      var subs = { minimal: '≤ 25%', moderate: '≤ 50%', maximum: '≤ 75%+' };
+      document.querySelectorAll('.segmented[data-bound-select="settings-contribution"] .segmented-btn').forEach(function(btn) {
+        var v = btn.getAttribute('data-value');
+        var sub = btn.querySelector('.segmented-sub');
+        if (sub && subs[v]) sub.textContent = subs[v] + ' ' + unit;
+      });
+
+      // Update contribution hint + compute memory label
+      var hint = document.querySelector('#settings-contribution ~ .field-hint, .form-group .field-hint[data-i18n="settings.contribution_hint"]');
+      if (hint) {
+        hint.textContent = isGpu
+          ? (I18n.t('settings.contribution_hint_gpu') || 'How much of your GPU can be used to serve swarm inference.')
+          : (I18n.t('settings.contribution_hint_cpu') || 'How much of your CPU can be used to serve swarm inference.');
+      }
+      this.renderHwModeNote(document.getElementById('settings-mode-note'), isGpu);
+
+      var memLabel = document.querySelector('[data-i18n="settings.swarm_compute_memory"]');
+      if (memLabel) {
+        memLabel.textContent = isGpu
+          ? (I18n.t('settings.swarm_compute_memory_gpu') || 'Swarm GPU memory (VRAM)')
+          : (I18n.t('settings.swarm_compute_memory_cpu') || 'Swarm GPU memory (you are in CPU mode)');
+      }
+    },
+
     init: function() {
+      this._wireSliders();
+      this._wireSegmented();
+      this._applyHwMode(null);
       var autoSelect = document.getElementById('settings-auto-shards');
       if (autoSelect) {
         autoSelect.addEventListener('change', function() {
@@ -182,6 +290,10 @@
         document.getElementById('settings-storage-info').classList.toggle('hidden', !isOn);
         if (isOn) App.settings.loadStorageInfo();
         if (App.autoManageStatus) App.autoManageStatus.setEnabled(isOn);
+        // Refresh slider outputs + segmented buttons now that values are loaded
+        document.querySelectorAll('input.slider[data-slider-format]').forEach(function(el) { if (el._sliderUpdate) el._sliderUpdate(); });
+        document.querySelectorAll('.segmented[data-bound-select]').forEach(function(seg) { if (seg._segSync) seg._segSync(); });
+        App.settings._applyHwMode(result && result.hardware);
       } catch (e) {
         App.ui.showBanner('error', I18n.t('settings.load_failed') + ': ' + (e.message || I18n.t('common.request_failed')));
       }

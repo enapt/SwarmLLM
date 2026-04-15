@@ -763,7 +763,7 @@
   "dashboard.chip_cloud": "Облако",
   "dashboard.chip_models": " моделей",
   "dashboard.chip_providers": " провайдеров",
-  "dashboard.network_title": "Сеть",
+  "dashboard.network_title": "Пиры",
   "dashboard.no_activity": "Пока нет активности.",
   "dashboard.no_network_events": "Пока нет сетевых событий.",
   "dashboard.prune_title": "История сжатия",

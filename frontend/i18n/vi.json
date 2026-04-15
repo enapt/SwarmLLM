@@ -763,7 +763,7 @@
   "dashboard.chip_cloud": "Đám mây",
   "dashboard.chip_models": " mô hình",
   "dashboard.chip_providers": " nhà cung cấp",
-  "dashboard.network_title": "Mạng",
+  "dashboard.network_title": "Peers",
   "dashboard.no_activity": "Chưa có hoạt động.",
   "dashboard.no_network_events": "Chưa có sự kiện mạng.",
   "dashboard.prune_title": "Lịch sử cắt tỉa",

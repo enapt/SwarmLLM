@@ -602,6 +602,16 @@
     },
 
     // Render the per-model ticker DOM — split into activity + network columns
+    _setGauge: function(id, pct) {
+      var el = document.getElementById(id);
+      if (!el) return;
+      var p = Math.max(0, Math.min(100, pct || 0));
+      el.style.setProperty('--pct', p.toFixed(1));
+      el.setAttribute('data-pct', Math.round(p));
+      el.classList.remove('gauge-warn', 'gauge-crit');
+      if (p > 90) el.classList.add('gauge-crit');
+      else if (p > 70) el.classList.add('gauge-warn');
+    },
     _updateContribution: function(pct, memKind) {
       var el = document.getElementById('contribution-pct');
       if (!el) return;
@@ -921,7 +931,6 @@
       if (data.uptime_seconds !== undefined) document.getElementById('uptime').textContent = U.formatUptime(data.uptime_seconds);
       if (data.tier) {
         U.setTierBadge('tier-badge', data.tier);
-        U.setTierBadge('credit-tier', data.tier);
       }
 
       App.dashboard.updateStats(data);
@@ -929,6 +938,9 @@
       if (data.hardware) {
         var hw = data.hardware;
         S._gpuInference = !!hw.gpu_inference;
+        if (App.settings && App.settings.renderHwModeNote) {
+          App.settings.renderHwModeNote(document.getElementById('hw-mode-note'), S._gpuInference);
+        }
         var gpuEl = document.getElementById('node-gpu');
         var gpuBadge = document.getElementById('node-gpu-badge');
         if (hw.gpu_name) {
@@ -937,12 +949,12 @@
             if (hw.gpu_inference) {
               var backendLabel = hw.inference_backend || 'GPU';
               gpuBadge.textContent = I18n.t('hw.gpu_mode_label', { backend: backendLabel });
-              gpuBadge.className = 'node-mode-badge node-mode-gpu';
-              gpuBadge.title = I18n.t('hw.gpu_mode_tip');
+              gpuBadge.className = 'node-mode-badge node-mode-badge-interactive node-mode-gpu';
+              gpuBadge.removeAttribute('title');
             } else {
               gpuBadge.textContent = I18n.t('hw.mode_cpu');
-              gpuBadge.className = 'node-mode-badge node-mode-cpu';
-              gpuBadge.title = I18n.t('hw.cpu_mode_tip');
+              gpuBadge.className = 'node-mode-badge node-mode-badge-interactive node-mode-cpu';
+              gpuBadge.removeAttribute('title');
             }
           }
           if (hw.gpu_vram_mb) {
@@ -969,6 +981,7 @@
                 vramEl.title = '';
               }
               var vramPct = vramTotal > 0 ? (displayUsed / vramTotal * 100) : 0;
+              App.dashboard._setGauge('vram-gauge', vramPct);
               document.getElementById('vram-bar').style.width = vramPct.toFixed(1) + '%';
               document.getElementById('vram-bar').className = vramPct > 90 ? 'fill red' : (vramPct > 70 ? 'fill orange' : 'fill cyan');
               App.dashboard._updateContribution(vramPct, 'vram');
@@ -980,6 +993,7 @@
               vramEl.title = I18n.t('hw.vram_idle_tip');
               var ramForModels = hw.process_rss_mb || 0;
               var ramPctForBar = hw.total_ram_mb > 0 ? (ramForModels / hw.total_ram_mb * 100) : 0;
+              App.dashboard._setGauge('vram-gauge', vramTotal > 0 ? (vramUsed / vramTotal * 100) : 0);
               document.getElementById('vram-bar').style.width = ramPctForBar.toFixed(1) + '%';
               document.getElementById('vram-bar').className = ramPctForBar > 90 ? 'fill red' : (ramPctForBar > 70 ? 'fill orange' : 'fill cyan');
               App.dashboard._updateContribution(ramPctForBar, 'ram');
@@ -989,8 +1003,8 @@
           gpuEl.textContent = I18n.t('hw.none');
           if (gpuBadge) {
             gpuBadge.textContent = I18n.t('hw.mode_cpu_only');
-            gpuBadge.className = 'node-mode-badge node-mode-cpu';
-            gpuBadge.title = I18n.t('hw.cpu_only_tip');
+            gpuBadge.className = 'node-mode-badge node-mode-badge-interactive node-mode-cpu';
+            gpuBadge.removeAttribute('title');
           }
           document.getElementById('node-vram').textContent = '\u2014';
           document.getElementById('vram-bar').style.width = '0%';
@@ -1012,6 +1026,7 @@
           var ramPct = hw.total_ram_mb > 0 ? (ramUsed / hw.total_ram_mb * 100) : 0;
           document.getElementById('ram-bar').style.width = ramPct.toFixed(1) + '%';
           document.getElementById('ram-bar').className = ramPct > 90 ? 'fill red' : (ramPct > 70 ? 'fill orange' : 'fill green');
+          App.dashboard._setGauge('ram-gauge', ramPct);
         }
         if (hw.total_disk_mb) {
           document.getElementById('disk-total').textContent = '/ ' + U.formatMB(hw.total_disk_mb);
@@ -1021,6 +1036,7 @@
           var diskBar = document.getElementById('disk-bar');
           diskBar.style.width = diskPct.toFixed(1) + '%';
           diskBar.className = diskPct > 90 ? 'fill red' : (diskPct > 70 ? 'fill orange' : 'fill accent');
+          App.dashboard._setGauge('disk-gauge', diskPct);
         }
       }
 
@@ -1104,14 +1120,24 @@
           spent = 0;
         }
         _trackStat('credits', bal, 'stat-credits');
-        document.getElementById('credit-balance').textContent = bal.toLocaleString();
-        document.getElementById('credit-earned').textContent = '+' + earned.toLocaleString();
-        document.getElementById('credit-spent').textContent = '-' + spent.toLocaleString();
+        var balEl = document.getElementById('credit-balance');
+        if (balEl) balEl.textContent = bal.toLocaleString();
+        var headerCredits = document.querySelector('.header-credits');
+        if (headerCredits) headerCredits.title = I18n.t('dashboard.credits_header_tip', { earned: earned.toLocaleString(), spent: spent.toLocaleString() }) || ('Earned: +' + earned + ' / Spent: -' + spent);
         var prevBal = S.creditHistory.length > 0 ? S.creditHistory[S.creditHistory.length - 1]._bal : bal;
         var delta = bal - prevBal;
+        var deltaEl = document.getElementById('credit-delta');
+        if (deltaEl) {
+          if (delta !== 0) {
+            deltaEl.textContent = (delta > 0 ? '+' : '') + delta.toLocaleString();
+            deltaEl.className = 'header-credits-delta mono ' + (delta > 0 ? 'text-green' : 'text-red');
+            deltaEl.classList.remove('flash'); void deltaEl.offsetWidth; deltaEl.classList.add('flash');
+          } else {
+            deltaEl.textContent = '';
+          }
+        }
         S.creditHistory.push({ _bal: bal, v: delta });
         if (S.creditHistory.length > 30) S.creditHistory.shift();
-        U.renderSparkline('credit-sparkline', S.creditHistory.map(function(e) { return e.v; }));
       }
       if (data.requests_served !== undefined) _trackStat('served', data.requests_served, 'stat-served');
       if (data.requests_made !== undefined) _trackStat('requests', data.requests_made, 'stat-requests-made');

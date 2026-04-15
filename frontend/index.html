@@ -174,11 +174,13 @@
 
   <!-- Settings modal -->
   <div class="modal-overlay hidden" id="settings-modal" role="dialog" aria-modal="true" aria-labelledby="settings-title">
-    <div class="modal">
+    <div class="modal modal-xl settings-modal">
       <div class="modal-header">
         <h2 id="settings-title" data-i18n="settings.title">Settings</h2>
         <button class="btn btn-ghost btn-sm" id="btn-close-settings" data-i18n-aria-label="settings.close_aria" aria-label="Close settings">&times;</button>
       </div>
+      <section class="settings-section">
+        <h3 class="settings-section-title" data-i18n="settings.section_identity">Identity &amp; Access</h3>
       <div class="form-group">
         <label for="settings-api-key" data-i18n="settings.access_token">Access Token</label>
         <div class="flex-center gap-1">
@@ -200,6 +202,10 @@
           <option value="nickname" data-i18n="settings.visibility_nick">Nickname (show your name to others)</option>
         </select>
       </div>
+      </section>
+
+      <section class="settings-section">
+        <h3 class="settings-section-title" data-i18n="settings.section_preferences">Preferences</h3>
       <div class="form-group">
         <label for="settings-language" data-i18n="settings.language_label">Language</label>
         <select id="settings-language">
@@ -227,17 +233,43 @@
         </select>
         <span class="text-muted field-hint" data-i18n="settings.language_hint">Dashboard language. Community translations welcome!</span>
       </div>
+      </section>
+
+      <section class="settings-section">
+        <h3 class="settings-section-title">
+          <span data-i18n="settings.section_contribution">Contribution &amp; Storage</span>
+          <span class="node-mode-badge" id="settings-mode-badge" title=""></span>
+        </h3>
+        <div class="hw-mode-note" id="settings-mode-note" hidden></div>
       <div class="form-group">
         <label for="settings-contribution" data-i18n="settings.contribution_label">Contribution Level</label>
-        <select id="settings-contribution">
+        <div class="segmented" data-bound-select="settings-contribution">
+          <button type="button" class="segmented-btn" data-value="minimal">
+            <span class="segmented-title" data-i18n="setup.contrib_minimal">Minimal</span>
+            <span class="segmented-sub" data-i18n="settings.contrib_minimal_hw">≤ 25% CPU / GPU</span>
+          </button>
+          <button type="button" class="segmented-btn active" data-value="moderate">
+            <span class="segmented-title" data-i18n="setup.contrib_moderate">Moderate</span>
+            <span class="segmented-sub" data-i18n="settings.contrib_moderate_hw">≤ 50% CPU / GPU</span>
+          </button>
+          <button type="button" class="segmented-btn" data-value="maximum">
+            <span class="segmented-title" data-i18n="setup.contrib_maximum">Maximum</span>
+            <span class="segmented-sub" data-i18n="settings.contrib_maximum_hw">≤ 75%+ CPU / GPU</span>
+          </button>
+        </div>
+        <select id="settings-contribution" class="visually-hidden">
           <option value="minimal" data-i18n="setup.contrib_minimal">Minimal</option>
           <option value="moderate" selected data-i18n="setup.contrib_moderate">Moderate</option>
           <option value="maximum" data-i18n="setup.contrib_maximum">Maximum</option>
         </select>
+        <span class="text-muted field-hint" data-i18n="settings.contribution_hint">How much of your computer (CPU in CPU mode, GPU when available) can be used to serve swarm inference.</span>
       </div>
       <div class="form-group">
-        <label for="settings-max-requests" data-i18n="settings.max_requests">Max Concurrent Requests</label>
-        <input type="number" id="settings-max-requests" value="10" min="1" max="100">
+        <label for="settings-max-requests">
+          <span data-i18n="settings.max_requests">Max Concurrent Requests</span>
+          <output class="slider-output" id="settings-max-requests-out">10</output>
+        </label>
+        <input type="range" id="settings-max-requests" class="slider" value="10" min="1" max="100" step="1" data-slider-format="int">
       </div>
       <div class="form-group">
         <label for="settings-auto-shards" data-i18n="settings.auto_download">Auto-Download Models</label>
@@ -257,17 +289,23 @@
           <span class="mono" id="settings-storage-max">--</span>
         </div>
         <div class="flex-between mb-1 text-base">
-          <span class="text-muted" data-i18n="settings.network_gpu_memory">Network GPU memory</span>
+          <span class="text-muted" data-i18n="settings.swarm_compute_memory" data-i18n-title="settings.swarm_compute_memory_tip" title="Sum of GPU VRAM across swarm peers. CPU-only peers run inference from system RAM (memory-mapped) and report 0 here.">Swarm compute memory (GPU VRAM)</span>
           <span class="mono" id="settings-pool-vram">--</span>
         </div>
         <div id="settings-storage-models" class="text-sm mt-1"></div>
       </div>
       <div class="form-group" id="settings-auto-manage-storage-group" style="display:none">
-        <label data-i18n="settings.max_auto_label">Max Auto-Download Storage (MB, 0 = 50% of disk limit)</label>
-        <input type="number" id="settings-auto-manage-storage" value="0" min="0">
+        <label for="settings-auto-manage-storage">
+          <span data-i18n="settings.max_auto_label_short">Max Auto-Download Storage</span>
+          <output class="slider-output" id="settings-auto-manage-storage-out">Auto</output>
+        </label>
+        <input type="range" id="settings-auto-manage-storage" class="slider" value="0" min="0" max="500000" step="1000" data-slider-format="gb-auto">
+        <span class="text-muted field-hint" data-i18n="settings.max_auto_label_hint">0 = use 50% of max disk.</span>
       </div>
-      <details class="settings-providers" id="settings-providers-section">
-        <summary data-i18n="settings.cloud_providers">Cloud Providers</summary>
+      </section>
+
+      <details class="settings-section settings-collapsible settings-providers" id="settings-providers-section">
+        <summary class="settings-section-summary" data-i18n="settings.cloud_providers">Cloud Providers</summary>
         <div class="mt-2 text-sm">
           <span class="text-muted" data-i18n="settings.cloud_providers_desc">Add cloud API keys to access models from OpenAI, Anthropic, DeepSeek, and more. Keys can also be loaded automatically from a .env file in your data directory (e.g. OPENAI_API_KEY=sk-...).</span>
         </div>
@@ -281,8 +319,8 @@
           </label>
           <input type="text" id="provider-filter" data-i18n-placeholder="settings.filter_providers" placeholder="Filter providers..." class="flex-1 text-sm" style="min-width:150px">
         </div>
-        <div id="provider-cards" class="mt-2">
-          <div class="provider-card provider-card-lg hidden" id="claude-subscription-card">
+        <div id="provider-cards" class="mt-2 provider-grid">
+          <div class="provider-card provider-card-lg provider-card-wide hidden" id="claude-subscription-card">
             <div class="flex-between mb-1">
               <strong class="text-base" data-i18n="settings.claude_subscription">Claude Subscription</strong>
               <span class="badge" id="claude-subscription-status" data-i18n="settings.badge_not_set">Not set</span>
@@ -344,130 +382,175 @@
             </div>
             <div class="text-2xs text-muted mt-0" data-i18n="settings.claude_sub_note">When enabled, Claude model requests use your subscription instead of an API key. Your existing Anthropic API key (if set) is used as fallback when disabled.</div>
           </div>
-          <div class="provider-card">
-            <div class="flex-between mb-1">
-              <strong class="text-base">Anthropic</strong>
+          <div class="provider-card" data-provider="anthropic">
+            <div class="provider-card-head">
+              <img src="/static/icons/anthropic.svg" class="provider-card-icon" alt="" aria-hidden="true">
+              <strong class="provider-card-name">Anthropic</strong>
               <span class="badge" id="provider-status-anthropic" data-i18n="settings.badge_not_set">Not set</span>
             </div>
-            <input type="password" id="provider-key-anthropic" placeholder="sk-ant-..." class="text-sm mb-0">
-            <button class="btn btn-sm" data-test-provider="anthropic" data-i18n="settings.test_btn">Test</button>
+            <div class="provider-card-input-row">
+              <input type="password" id="provider-key-anthropic" placeholder="sk-ant-..." class="text-sm">
+              <button class="btn btn-sm" data-test-provider="anthropic" data-i18n="settings.test_btn">Test</button>
+            </div>
             <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noopener" class="provider-signup-link" data-i18n="settings.get_key">Get key &rarr;</a>
           </div>
-          <div class="provider-card">
-            <div class="flex-between mb-1">
-              <strong class="text-base">OpenAI</strong>
+          <div class="provider-card" data-provider="openai">
+            <div class="provider-card-head">
+              <img src="/static/icons/openai.svg" class="provider-card-icon" alt="" aria-hidden="true">
+              <strong class="provider-card-name">OpenAI</strong>
               <span class="badge" id="provider-status-openai" data-i18n="settings.badge_not_set">Not set</span>
             </div>
-            <input type="password" id="provider-key-openai" placeholder="sk-..." class="text-sm mb-0">
-            <button class="btn btn-sm" data-test-provider="openai" data-i18n="settings.test_btn">Test</button>
+            <div class="provider-card-input-row">
+              <input type="password" id="provider-key-openai" placeholder="sk-..." class="text-sm">
+              <button class="btn btn-sm" data-test-provider="openai" data-i18n="settings.test_btn">Test</button>
+            </div>
             <a href="https://platform.openai.com/api-keys" target="_blank" rel="noopener" class="provider-signup-link" data-i18n="settings.get_key">Get key &rarr;</a>
           </div>
-          <div class="provider-card">
-            <div class="flex-between mb-1">
-              <strong class="text-base">DeepSeek</strong>
+          <div class="provider-card" data-provider="deepseek">
+            <div class="provider-card-head">
+              <img src="/static/icons/deepseek-color.svg" class="provider-card-icon" alt="" aria-hidden="true">
+              <strong class="provider-card-name">DeepSeek</strong>
               <span class="badge" id="provider-status-deepseek" data-i18n="settings.badge_not_set">Not set</span>
             </div>
-            <input type="password" id="provider-key-deepseek" placeholder="sk-..." class="text-sm mb-0">
-            <button class="btn btn-sm" data-test-provider="deepseek" data-i18n="settings.test_btn">Test</button>
+            <div class="provider-card-input-row">
+              <input type="password" id="provider-key-deepseek" placeholder="sk-..." class="text-sm">
+              <button class="btn btn-sm" data-test-provider="deepseek" data-i18n="settings.test_btn">Test</button>
+            </div>
             <a href="https://platform.deepseek.com/api_keys" target="_blank" rel="noopener" class="provider-signup-link" data-i18n="settings.get_key">Get key &rarr;</a>
           </div>
-          <div class="provider-card">
-            <div class="flex-between mb-1">
-              <strong class="text-base">Mistral</strong>
+          <div class="provider-card" data-provider="mistral">
+            <div class="provider-card-head">
+              <img src="/static/icons/mistral-color.svg" class="provider-card-icon" alt="" aria-hidden="true">
+              <strong class="provider-card-name">Mistral</strong>
               <span class="badge" id="provider-status-mistral" data-i18n="settings.badge_not_set">Not set</span>
             </div>
-            <input type="password" id="provider-key-mistral" placeholder="..." class="text-sm mb-0">
-            <button class="btn btn-sm" data-test-provider="mistral" data-i18n="settings.test_btn">Test</button>
+            <div class="provider-card-input-row">
+              <input type="password" id="provider-key-mistral" placeholder="..." class="text-sm">
+              <button class="btn btn-sm" data-test-provider="mistral" data-i18n="settings.test_btn">Test</button>
+            </div>
             <a href="https://console.mistral.ai/api-keys" target="_blank" rel="noopener" class="provider-signup-link" data-i18n="settings.get_key">Get key &rarr;</a>
           </div>
-          <div class="provider-card">
-            <div class="flex-between mb-1">
-              <strong class="text-base">Groq</strong>
+          <div class="provider-card" data-provider="groq">
+            <div class="provider-card-head">
+              <img src="/static/icons/groq.svg" class="provider-card-icon" alt="" aria-hidden="true">
+              <strong class="provider-card-name">Groq</strong>
               <span class="badge" id="provider-status-groq" data-i18n="settings.badge_not_set">Not set</span>
             </div>
-            <input type="password" id="provider-key-groq" placeholder="gsk_..." class="text-sm mb-0">
-            <button class="btn btn-sm" data-test-provider="groq" data-i18n="settings.test_btn">Test</button>
+            <div class="provider-card-input-row">
+              <input type="password" id="provider-key-groq" placeholder="gsk_..." class="text-sm">
+              <button class="btn btn-sm" data-test-provider="groq" data-i18n="settings.test_btn">Test</button>
+            </div>
             <a href="https://console.groq.com/keys" target="_blank" rel="noopener" class="provider-signup-link" data-i18n="settings.get_key">Get key &rarr;</a>
           </div>
-          <div class="provider-card">
-            <div class="flex-between mb-1">
-              <strong class="text-base">NVIDIA NIM</strong>
+          <div class="provider-card" data-provider="nvidia_nim">
+            <div class="provider-card-head">
+              <img src="/static/icons/nvidia-color.svg" class="provider-card-icon" alt="" aria-hidden="true">
+              <strong class="provider-card-name">NVIDIA NIM</strong>
               <span class="badge" id="provider-status-nvidia_nim" data-i18n="settings.badge_not_set">Not set</span>
             </div>
-            <input type="password" id="provider-key-nvidia_nim" placeholder="nvapi-..." class="text-sm mb-0">
-            <button class="btn btn-sm" data-test-provider="nvidia_nim" data-i18n="settings.test_btn">Test</button>
+            <div class="provider-card-input-row">
+              <input type="password" id="provider-key-nvidia_nim" placeholder="nvapi-..." class="text-sm">
+              <button class="btn btn-sm" data-test-provider="nvidia_nim" data-i18n="settings.test_btn">Test</button>
+            </div>
             <a href="https://build.nvidia.com/" target="_blank" rel="noopener" class="provider-signup-link" data-i18n="settings.get_key">Get key &rarr;</a>
           </div>
-          <div class="provider-card">
-            <div class="flex-between mb-1">
-              <strong class="text-base">Cerebras</strong>
+          <div class="provider-card" data-provider="cerebras">
+            <div class="provider-card-head">
+              <img src="/static/icons/cerebras-color.svg" class="provider-card-icon" alt="" aria-hidden="true">
+              <strong class="provider-card-name">Cerebras</strong>
               <span class="badge" id="provider-status-cerebras" data-i18n="settings.badge_not_set">Not set</span>
             </div>
-            <input type="password" id="provider-key-cerebras" placeholder="csk-..." class="text-sm mb-0">
-            <button class="btn btn-sm" data-test-provider="cerebras" data-i18n="settings.test_btn">Test</button>
+            <div class="provider-card-input-row">
+              <input type="password" id="provider-key-cerebras" placeholder="csk-..." class="text-sm">
+              <button class="btn btn-sm" data-test-provider="cerebras" data-i18n="settings.test_btn">Test</button>
+            </div>
             <a href="https://cloud.cerebras.ai/" target="_blank" rel="noopener" class="provider-signup-link" data-i18n="settings.get_key">Get key &rarr;</a>
           </div>
-          <div class="provider-card">
-            <div class="flex-between mb-1">
-              <strong class="text-base">SambaNova</strong>
+          <div class="provider-card" data-provider="sambanova">
+            <div class="provider-card-head">
+              <img src="/static/icons/sambanova-color.svg" class="provider-card-icon" alt="" aria-hidden="true">
+              <strong class="provider-card-name">SambaNova</strong>
               <span class="badge" id="provider-status-sambanova" data-i18n="settings.badge_not_set">Not set</span>
             </div>
-            <input type="password" id="provider-key-sambanova" placeholder="..." class="text-sm mb-0">
-            <button class="btn btn-sm" data-test-provider="sambanova" data-i18n="settings.test_btn">Test</button>
+            <div class="provider-card-input-row">
+              <input type="password" id="provider-key-sambanova" placeholder="..." class="text-sm">
+              <button class="btn btn-sm" data-test-provider="sambanova" data-i18n="settings.test_btn">Test</button>
+            </div>
             <a href="https://cloud.sambanova.ai/" target="_blank" rel="noopener" class="provider-signup-link" data-i18n="settings.get_key">Get key &rarr;</a>
           </div>
-          <div class="provider-card">
-            <div class="flex-between mb-1">
-              <strong class="text-base">Fireworks AI</strong>
+          <div class="provider-card" data-provider="fireworks">
+            <div class="provider-card-head">
+              <img src="/static/icons/fireworks-color.svg" class="provider-card-icon" alt="" aria-hidden="true">
+              <strong class="provider-card-name">Fireworks AI</strong>
               <span class="badge" id="provider-status-fireworks" data-i18n="settings.badge_not_set">Not set</span>
             </div>
-            <input type="password" id="provider-key-fireworks" placeholder="fw_..." class="text-sm mb-0">
-            <button class="btn btn-sm" data-test-provider="fireworks" data-i18n="settings.test_btn">Test</button>
+            <div class="provider-card-input-row">
+              <input type="password" id="provider-key-fireworks" placeholder="fw_..." class="text-sm">
+              <button class="btn btn-sm" data-test-provider="fireworks" data-i18n="settings.test_btn">Test</button>
+            </div>
             <a href="https://fireworks.ai/account/api-keys" target="_blank" rel="noopener" class="provider-signup-link" data-i18n="settings.get_key">Get key &rarr;</a>
           </div>
-          <div class="provider-card">
-            <div class="flex-between mb-1">
-              <strong class="text-base">Together AI</strong>
+          <div class="provider-card" data-provider="together">
+            <div class="provider-card-head">
+              <img src="/static/icons/together-color.svg" class="provider-card-icon" alt="" aria-hidden="true">
+              <strong class="provider-card-name">Together AI</strong>
               <span class="badge" id="provider-status-together" data-i18n="settings.badge_not_set">Not set</span>
             </div>
-            <input type="password" id="provider-key-together" placeholder="..." class="text-sm mb-0">
-            <button class="btn btn-sm" data-test-provider="together" data-i18n="settings.test_btn">Test</button>
+            <div class="provider-card-input-row">
+              <input type="password" id="provider-key-together" placeholder="..." class="text-sm">
+              <button class="btn btn-sm" data-test-provider="together" data-i18n="settings.test_btn">Test</button>
+            </div>
             <a href="https://api.together.xyz/settings/api-keys" target="_blank" rel="noopener" class="provider-signup-link" data-i18n="settings.get_key">Get key &rarr;</a>
           </div>
-          <div class="provider-card">
-            <div class="flex-between mb-1">
-              <strong class="text-base">DeepInfra</strong>
+          <div class="provider-card" data-provider="deepinfra">
+            <div class="provider-card-head">
+              <img src="/static/icons/deepinfra-color.svg" class="provider-card-icon" alt="" aria-hidden="true">
+              <strong class="provider-card-name">DeepInfra</strong>
               <span class="badge" id="provider-status-deepinfra" data-i18n="settings.badge_not_set">Not set</span>
             </div>
-            <input type="password" id="provider-key-deepinfra" placeholder="..." class="text-sm mb-0">
-            <button class="btn btn-sm" data-test-provider="deepinfra" data-i18n="settings.test_btn">Test</button>
+            <div class="provider-card-input-row">
+              <input type="password" id="provider-key-deepinfra" placeholder="..." class="text-sm">
+              <button class="btn btn-sm" data-test-provider="deepinfra" data-i18n="settings.test_btn">Test</button>
+            </div>
             <a href="https://deepinfra.com/dash/api_keys" target="_blank" rel="noopener" class="provider-signup-link" data-i18n="settings.get_key">Get key &rarr;</a>
           </div>
-          <div class="provider-card">
-            <div class="flex-between mb-1">
-              <strong class="text-base">Moonshot (Kimi)</strong>
+          <div class="provider-card" data-provider="moonshot">
+            <div class="provider-card-head">
+              <img src="/static/icons/moonshot.svg" class="provider-card-icon" alt="" aria-hidden="true">
+              <strong class="provider-card-name">Moonshot (Kimi)</strong>
               <span class="badge" id="provider-status-moonshot" data-i18n="settings.badge_not_set">Not set</span>
             </div>
-            <input type="password" id="provider-key-moonshot" placeholder="..." class="text-sm mb-0">
-            <button class="btn btn-sm" data-test-provider="moonshot" data-i18n="settings.test_btn">Test</button>
+            <div class="provider-card-input-row">
+              <input type="password" id="provider-key-moonshot" placeholder="..." class="text-sm">
+              <button class="btn btn-sm" data-test-provider="moonshot" data-i18n="settings.test_btn">Test</button>
+            </div>
             <a href="https://platform.moonshot.cn/console/api-keys" target="_blank" rel="noopener" class="provider-signup-link" data-i18n="settings.get_key">Get key &rarr;</a>
           </div>
         </div>
       </details>
-      <details class="settings-advanced">
-        <summary data-i18n="settings.advanced">Advanced Settings</summary>
+      <details class="settings-section settings-collapsible settings-advanced">
+        <summary class="settings-section-summary" data-i18n="settings.advanced">Advanced Settings</summary>
         <div class="mt-2">
           <div class="form-group">
-            <label data-i18n="settings.max_bandwidth">Max Bandwidth (Mbps, 0 = unlimited)</label>
-            <input type="number" id="settings-bandwidth" value="0" min="0">
+            <label for="settings-bandwidth">
+              <span data-i18n="settings.max_bandwidth_short">Max Bandwidth</span>
+              <output class="slider-output" id="settings-bandwidth-out">Unlimited</output>
+            </label>
+            <input type="range" id="settings-bandwidth" class="slider" value="0" min="0" max="1000" step="10" data-slider-format="mbps">
           </div>
           <div class="form-group">
-            <label data-i18n="settings.max_disk">Max Disk (MB)</label>
-            <input type="number" id="settings-disk" value="50000" min="1000">
+            <label for="settings-disk">
+              <span data-i18n="settings.max_disk_short">Max Disk</span>
+              <output class="slider-output" id="settings-disk-out">50 GB</output>
+            </label>
+            <input type="range" id="settings-disk" class="slider" value="50000" min="1000" max="1000000" step="1000" data-slider-format="gb">
           </div>
           <div class="form-group">
-            <label for="settings-health-interval" data-i18n="settings.health_interval">Provider Health Check Interval (seconds, 0 = off)</label>
-            <input type="number" id="settings-health-interval" value="30" min="0" max="3600" step="5">
+            <label for="settings-health-interval">
+              <span data-i18n="settings.health_interval_short">Provider Health Check Interval</span>
+              <output class="slider-output" id="settings-health-interval-out">30 s</output>
+            </label>
+            <input type="range" id="settings-health-interval" class="slider" value="30" min="0" max="600" step="5" data-slider-format="sec-off">
           </div>
         </div>
       </details>
@@ -591,6 +674,11 @@
         <span class="pulse-dot"></span>
         <span class="mono" id="node-id" data-i18n-title="nav.node_id_title" title="Node ID">...</span>
         <span class="tier-badge silver" id="tier-badge">...</span>
+        <span class="header-credits" data-i18n-title="dashboard.credits_title" title="Credits">
+          <span class="header-credits-icon" aria-hidden="true">◆</span>
+          <span class="mono" id="credit-balance">0</span>
+          <span class="header-credits-delta mono" id="credit-delta"></span>
+        </span>
       </div>
       <button class="btn btn-ghost btn-sm btn-shutdown" id="btn-shutdown" data-i18n-title="nav.shutdown" title="Stop SwarmLLM" data-i18n-aria-label="nav.shutdown" aria-label="Stop SwarmLLM">&#9211;</button>
     </div>
@@ -772,38 +860,50 @@
           </div>
 
 
-          <div class="grid grid-2">
-            <!-- Node panel — compact (WI-7) -->
+            <!-- Node panel — full-width -->
             <div class="panel node-compact">
               <div class="panel-header">
                 <h2 data-i18n="dashboard.node_title">Node</h2>
                 <span class="flex-center gap-1">
-                  <span id="node-gpu-badge" class="node-mode-badge node-mode-cpu" data-i18n="hw.mode_cpu">CPU mode</span>
+                  <span class="hw-mode-wrap" tabindex="0">
+                    <span id="node-gpu-badge" class="node-mode-badge node-mode-cpu node-mode-badge-interactive" data-i18n="hw.mode_cpu">CPU mode</span>
+                    <span class="hw-mode-caret" aria-hidden="true">▾</span>
+                    <div class="hw-mode-popover hw-mode-note" id="hw-mode-note" hidden></div>
+                  </span>
                   <span class="mono text-muted field-hint"><span id="version">v...</span> &middot; Up <span id="uptime">...</span></span>
                 </span>
               </div>
               <div class="node-hw-grid">
-                <div class="node-hw-cell">
+                <div class="node-hw-cell hw-cell-text">
                   <span class="node-hw-label"><span class="node-hw-icon">⚙</span><span data-i18n="dashboard.cpu_label">CPU</span></span>
                   <span class="mono node-hw-value" id="node-cpu">...</span>
                 </div>
-                <div class="node-hw-cell">
+                <div class="node-hw-cell hw-cell-text">
                   <span class="node-hw-label"><span class="node-hw-icon">▪</span><span data-i18n="dashboard.gpu_label">GPU</span></span>
                   <span class="mono node-hw-value" id="node-gpu" data-i18n="dashboard.detecting">Detecting...</span>
                 </div>
-                <div class="node-hw-cell">
-                  <span class="node-hw-label"><span class="node-hw-icon">≡</span><span data-i18n="dashboard.ram_label">RAM</span></span>
-                  <span class="mono node-hw-value"><span id="ram-used">...</span> <span class="text-muted" id="ram-total">/ ...</span></span>
-                  <div class="progress-bar mini-bar"><div class="fill green" id="ram-bar" style="width:0%"></div></div>
+                <div class="node-hw-cell hw-cell-gauge">
+                  <div class="hw-gauge" id="ram-gauge" style="--pct:0" data-pct="0"></div>
+                  <div class="hw-cell-body">
+                    <span class="node-hw-label"><span data-i18n="dashboard.ram_label">RAM</span></span>
+                    <span class="mono node-hw-value"><span id="ram-used">...</span> <span class="text-muted" id="ram-total">/ ...</span></span>
+                  </div>
+                  <div class="progress-bar mini-bar hidden"><div class="fill green" id="ram-bar" style="width:0%"></div></div>
                 </div>
-                <div class="node-hw-cell">
-                  <span class="node-hw-label"><span class="node-hw-icon">◫</span><span data-i18n="dashboard.disk_label">Disk</span></span>
-                  <span class="mono node-hw-value"><span id="disk-used">...</span> <span class="text-muted" id="disk-total">/ ...</span></span>
-                  <div class="progress-bar mini-bar"><div class="fill accent" id="disk-bar" style="width:0%"></div></div>
+                <div class="node-hw-cell hw-cell-gauge">
+                  <div class="hw-gauge" id="disk-gauge" style="--pct:0" data-pct="0"></div>
+                  <div class="hw-cell-body">
+                    <span class="node-hw-label"><span data-i18n="dashboard.disk_label">Disk</span></span>
+                    <span class="mono node-hw-value"><span id="disk-used">...</span> <span class="text-muted" id="disk-total">/ ...</span></span>
+                  </div>
+                  <div class="progress-bar mini-bar hidden"><div class="fill accent" id="disk-bar" style="width:0%"></div></div>
                 </div>
-                <div class="node-hw-cell">
-                  <span class="node-hw-label"><span class="node-hw-icon">◈</span><span id="vram-label">VRAM</span></span>
-                  <span class="mono node-hw-value" id="node-vram">...</span>
+                <div class="node-hw-cell hw-cell-gauge">
+                  <div class="hw-gauge" id="vram-gauge" style="--pct:0" data-pct="0"></div>
+                  <div class="hw-cell-body">
+                    <span class="node-hw-label"><span id="vram-label">VRAM</span></span>
+                    <span class="mono node-hw-value" id="node-vram">...</span>
+                  </div>
                 </div>
               </div>
               <div class="vram-bar-container">
@@ -824,29 +924,6 @@
                 </div>
               </div>
             </div>
-
-            <!-- Credits panel — compact -->
-            <div class="panel credits-panel">
-              <div class="panel-header">
-                <h2 data-i18n="dashboard.credits_title">Credits</h2>
-                <span class="tier-badge silver" id="credit-tier">...</span>
-              </div>
-              <div class="credits-balance-row">
-                <span class="mono credits-balance-num" id="credit-balance">0</span>
-                <div class="credits-stats-row">
-                  <div class="credits-stat">
-                    <span class="credits-stat-label" data-i18n="dashboard.earned">Earned</span>
-                    <span class="mono credits-stat-val text-green" id="credit-earned">+0</span>
-                  </div>
-                  <div class="credits-stat">
-                    <span class="credits-stat-label" data-i18n="dashboard.spent">Spent</span>
-                    <span class="credits-stat-val mono text-red" id="credit-spent">-0</span>
-                  </div>
-                </div>
-              </div>
-              <div class="sparkline" id="credit-sparkline"></div>
-            </div>
-          </div>
 
           <!-- Models -->
           <div class="panel mt-2">
@@ -1421,6 +1498,7 @@
   <script src="/static/js/core/state.js"></script>
   <script src="/static/js/core/utils.js"></script>
   <script src="/static/js/core/data.js"></script>
+  <script src="/static/js/core/tooltip.js"></script>
   <!-- Components -->
   <script src="/static/js/components/ui.js"></script>
   <script src="/static/js/components/notifications.js"></script>

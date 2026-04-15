@@ -762,7 +762,7 @@
   "dashboard.chip_cloud": "クラウド",
   "dashboard.chip_models": " 個のモデル",
   "dashboard.chip_providers": " 個のプロバイダー",
-  "dashboard.network_title": "ネットワーク",
+  "dashboard.network_title": "ピア",
   "dashboard.no_activity": "アクティビティはまだありません。",
   "dashboard.no_network_events": "ネットワークイベントはまだありません。",
   "dashboard.prune_title": "剪定履歴",

@@ -762,7 +762,7 @@
   "dashboard.chip_cloud": "Cloud",
   "dashboard.chip_models": " modèles",
   "dashboard.chip_providers": " fournisseurs",
-  "dashboard.network_title": "Réseau",
+  "dashboard.network_title": "Pairs",
   "dashboard.no_activity": "Aucune activité pour l'instant.",
   "dashboard.no_network_events": "Aucun événement réseau pour l'instant.",
   "dashboard.prune_title": "Historique d'élagage",

@@ -763,7 +763,7 @@
   "dashboard.chip_cloud": "Awan",
   "dashboard.chip_models": " model",
   "dashboard.chip_providers": " penyedia",
-  "dashboard.network_title": "Jaringan",
+  "dashboard.network_title": "Peers",
   "dashboard.no_activity": "Belum ada aktivitas.",
   "dashboard.no_network_events": "Belum ada peristiwa jaringan.",
   "dashboard.prune_title": "Riwayat Pemangkasan",

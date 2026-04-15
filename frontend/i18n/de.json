@@ -763,7 +763,7 @@
   "dashboard.chip_cloud": "Cloud",
   "dashboard.chip_models": " Modelle",
   "dashboard.chip_providers": " Anbieter",
-  "dashboard.network_title": "Netzwerk",
+  "dashboard.network_title": "Peers",
   "dashboard.no_activity": "Noch keine Aktivität.",
   "dashboard.no_network_events": "Noch keine Netzwerkereignisse.",
   "dashboard.prune_title": "Bereinigungsverlauf",

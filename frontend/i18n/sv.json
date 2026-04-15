@@ -763,7 +763,7 @@
   "dashboard.chip_cloud": "Moln",
   "dashboard.chip_models": " modeller",
   "dashboard.chip_providers": " leverantörer",
-  "dashboard.network_title": "Nätverk",
+  "dashboard.network_title": "Peers",
   "dashboard.no_activity": "Ingen aktivitet ännu.",
   "dashboard.no_network_events": "Inga nätverkshändelser ännu.",
   "dashboard.prune_title": "Rensningshistorik",
