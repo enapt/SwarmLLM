@@ -131,7 +131,7 @@ impl PipelineExecutor {
             .shared_state
             .model_registry
             .get_manifest(model_id)
-            .ok_or_else(|| SwarmError::Internal("No manifest for model".into()))?;
+            .ok_or_else(|| SwarmError::ModelNotAvailable(model_id.clone()))?;
         let total_layers = manifest.num_layers as usize;
 
         let local_node_id = self.shared_state.identity.node_id().clone();
@@ -1568,7 +1568,11 @@ impl PipelineExecutor {
                 .shared_state
                 .split_models
                 .get(&split_key)
-                .ok_or_else(|| SwarmError::Internal("Split model not found".into()))?;
+                .ok_or_else(|| {
+                    SwarmError::ServiceUnavailable(
+                        "Split model was evicted during request — please retry".into(),
+                    )
+                })?;
             entry.value().touch();
             entry.value().eos_tokens.clone()
         };
