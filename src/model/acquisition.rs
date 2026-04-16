@@ -480,17 +480,21 @@ impl AcquisitionManager {
                 }
 
                 // Pick the best peer (lowest latency, highest trust)
-                let target = match self.select_best_peer(&eligible) {
-                    Some(peer) => peer,
-                    None => {
-                        tracing::warn!(
-                            model = %model_id,
-                            shard = shard_id.index,
-                            "All holders are local node, cannot self-download"
-                        );
-                        break;
-                    }
-                };
+                let local_id = self.shared_state.identity.node_id().clone();
+                let non_local: Vec<NodeId> = eligible
+                    .iter()
+                    .filter(|n| **n != local_id)
+                    .cloned()
+                    .collect();
+                if non_local.is_empty() {
+                    tracing::warn!(
+                        model = %model_id,
+                        shard = shard_id.index,
+                        "All holders are local node, cannot self-download"
+                    );
+                    break;
+                }
+                let target = self.shared_state.select_best_peer(&non_local);
 
                 // Send directed shard transfer request to the target peer.
                 // Resume from any existing partial `.tmp` so we don't truncate
@@ -888,38 +892,6 @@ impl AcquisitionManager {
             let vram_budget = crate::model::auto_manage::compute_vram_budget(&shared);
             crate::model::auto_manage::check_and_load_model(&shared, &mid, vram_budget).await;
         });
-    }
-
-    /// Select the best peer to download from based on latency and trust.
-    /// Returns `None` if all holders are the local node (self-download not possible).
-    fn select_best_peer(&self, holders: &[NodeId]) -> Option<NodeId> {
-        let local_id = self.shared_state.identity.node_id().clone();
-
-        let selected = holders
-            .iter()
-            .filter(|n| **n != local_id)
-            .min_by_key(|node_id| {
-                self.shared_state
-                    .peer_registry
-                    .get(node_id)
-                    .map(|peer| {
-                        // LAN peers strongly preferred for bandwidth (matches state.rs scoring)
-                        let is_lan = if peer.is_lan_peer { 0u64 } else { 1 };
-                        let latency = peer.latency_ms.unwrap_or(9999) as u64;
-                        let trust = (10000.0 - peer.trust_score * 100.0) as u64;
-                        is_lan * 100_000 + latency * 100 + trust
-                    })
-                    .unwrap_or(200_000)
-            })
-            .cloned();
-
-        tracing::debug!(
-            eligible_peers = holders.len(),
-            selected_peer = ?selected.as_ref().map(|n| n.to_string()),
-            "DIAG: select_best_peer"
-        );
-
-        selected
     }
 }
 

@@ -1218,19 +1218,14 @@ async fn anthropic_to_openai_proxy(
         .as_u64()
         .unwrap_or(0) as u32;
 
-    let response = MessagesResponse {
-        id: format!("msg_{}", uuid::Uuid::new_v4().simple()),
-        response_type: "message",
-        role: "assistant",
-        content: vec![ResponseContentBlock::Text { text: content_text }],
-        model: req.model.clone(),
-        stop_reason: Some(map_finish_reason(finish).into()),
-        stop_sequence: None,
-        usage: AnthropicUsage {
-            input_tokens,
-            output_tokens,
-        },
-    };
+    let response = MessagesResponse::text(
+        format!("msg_{}", uuid::Uuid::new_v4().simple()),
+        req.model.clone(),
+        content_text,
+        map_finish_reason(finish),
+        input_tokens,
+        output_tokens,
+    );
 
     Ok(Json(response).into_response())
 }

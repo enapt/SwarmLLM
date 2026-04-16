@@ -1572,9 +1572,9 @@ async fn resource_peers(state: &AppState, id: Option<Value>) -> JsonRpcResponse 
             .as_ref()
             .and_then(|c| c.region.as_deref())
             .unwrap_or("unknown");
-        p.as_object_mut()
-            .unwrap()
-            .insert("region".into(), json!(region));
+        if let Some(obj) = p.as_object_mut() {
+            obj.insert("region".into(), json!(region));
+        }
         peers.push(p);
     }
 

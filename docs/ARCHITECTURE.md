@@ -1249,6 +1249,7 @@ Routes Claude model requests through a locally-authenticated `claude` CLI subpro
   - `frontend/js/core/state.js` — App namespace, shared mutable state, theme, storage keys
   - `frontend/js/core/utils.js` — format helpers (`formatBytes`, `formatDlProgress`, `escapeHtml`, etc.), DOM builders (`appendMessageToDOM`, `createEmptyState`), `extractErrorMessage`, `getApiErrorMessage`
   - `frontend/js/core/data.js` — data store with in-flight deduplication, `authFetch` wrapper
+  - `frontend/js/core/tooltip.js` — unified popover replacing native `title=` attributes
   - `frontend/js/components/ui.js` — tab switching, banners, mode indicator, sidebar
   - `frontend/js/components/chat.js` — sessions, messages, SSE streaming, image upload, layout toggle
   - `frontend/js/components/claude-code.js` — Claude Code interactive sessions (subprocess, permission flow, SSE)
@@ -1277,10 +1278,10 @@ Routes Claude model requests through a locally-authenticated `claude` CLI subpro
 A lightweight cross-subsystem event bus for real-time dashboard observability.
 
 **Backend** (`src/daemon/state.rs`):
-- `ActivityEvent` struct with fields: `kind` (enum, 26 variants), `model_id` (optional), `message` (human-readable string), `timestamp` (Unix seconds)
+- `ActivityEvent` struct with fields: `category` (`&'static str`), `kind` (`&'static str`, e.g. `"shard_pruned"`), `message` (English), plus optional `model_id`, `model_name`, `node_id`, `detail_num`, `detail_str`, `toast_level`, `toast_duration_ms`, `shard_index`, `freed_bytes`, `holder_count_before`, `holder_count_after`, `remaining_local_shards`, `timestamp` (ISO 8601)
 - `activity_tx: broadcast::Sender<ActivityEvent>` in `state.events` sub-struct (capacity 256, oldest events dropped on overflow)
-- All 11 subsystems emit events via `state.events.activity_tx.send()` — fire-and-forget (send errors ignored)
-- Example event kinds: `ShardDownloaded`, `ShardPruned`, `InferenceRequest`, `InferenceComplete`, `PeerConnected`, `PeerDisconnected`, `CreditEarned`, `CreditSpent`, `ModelLoaded`, `ModelUnloaded`, `WorkerSpawned`, `WorkerKilled`, `PoolJoined`, `AutoManageCycle`, `HealthPing`, and more
+- All 11 subsystems emit events via the `state.emit_activity(ActivityEvent::new(...))` builder — fire-and-forget (send errors ignored)
+- Example event kinds (snake_case strings; see `ACTIVITY_ICONS` in `frontend/js/components/notifications.js` for the canonical list): `shard_download_complete`, `shard_pruned`, `inference_request`, `inference_completed`, `peer_connected`, `peer_disconnected`, `model_loaded`, `model_unloaded`, `worker_spawned`, `worker_unloaded`, `pool_device_joined`, `pool_created`, `config_updated`, `daemon_started`, and many more
 
 **WebSocket delivery** (`src/api/websocket.rs`):
 - ApiServer subscribes to `state.events.activity_tx` on WebSocket upgrade

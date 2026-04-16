@@ -1123,7 +1123,7 @@
         var balEl = document.getElementById('credit-balance');
         if (balEl) balEl.textContent = bal.toLocaleString();
         var headerCredits = document.querySelector('.header-credits');
-        if (headerCredits) headerCredits.title = I18n.t('dashboard.credits_header_tip', { earned: earned.toLocaleString(), spent: spent.toLocaleString() }) || ('Earned: +' + earned + ' / Spent: -' + spent);
+        if (headerCredits) headerCredits.title = I18n.t('dashboard.credits_header_tip', { earned: earned.toLocaleString(), spent: spent.toLocaleString() });
         var prevBal = S.creditHistory.length > 0 ? S.creditHistory[S.creditHistory.length - 1]._bal : bal;
         var delta = bal - prevBal;
         var deltaEl = document.getElementById('credit-delta');

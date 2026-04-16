@@ -363,69 +363,85 @@
 {"file": "src/inference/split/model.rs", "line": 998, "kind": "duplication", "summary": "Qwen35 QKV fused/split loading block (35 lines) duplicated between SSM and full-attention layer branches \u2014 extracted load_qkv_weights() helper with QkvWeights type alias", "status": "fixed", "date": "2026-04-12"}
 {"file": "src/inference/split/entry.rs", "line": 83, "kind": "magic_number", "summary": "Multi-arch EOS fallback vec![2, 107, 32000] duplicated at 2 sites \u2014 extracted FALLBACK_EOS_TOKEN_IDS const with documentation", "status": "fixed", "date": "2026-04-12"}
 {"file": "src/inference/split/model.rs", "line": 415, "kind": "duplication", "summary": "MoE expert loading 3x across DeepSeek/Llama4/Qwen35 \u2014 kept per-arch inline matching mistral.rs and candle-vllm quantized-GGUF convention; llama.cpp shared helper is for graph construction not weight loading", "status": "wontfix", "date": "2026-04-12"}
-{"file":"src/inference/router.rs","line":158,"kind":"magic_number","summary":"bare 600 KV-cache TTL literal duplicated process_pool::DEFAULT_KV_CACHE_TTL_SECS","status":"fixed","date":"2026-04-13"}
-{"file":"src/network/manager.rs","line":1470,"kind":"magic_number","summary":"MAX_CONNECTION_ADDRS defined block-scoped instead of module-level","status":"fixed","date":"2026-04-13"}
-{"file":"src/network/manager.rs","line":1487,"kind":"magic_number","summary":"MAX_PING_ENTRIES defined block-scoped instead of module-level","status":"fixed","date":"2026-04-13"}
-{"file":"src/api/pool.rs","line":271,"kind":"validation_mismatch","summary":"device name API allowed 64 chars but manager rejected >32","status":"fixed","date":"2026-04-13"}
-{"file":"src/api/pool.rs","line":86,"kind":"validation_duplication","summary":"pool name validation duplicated handler+manager with ASCII-graphic gap","status":"wontfix","date":"2026-04-13"}
-{"file":"src/inference/kv_cache.rs","line":84,"kind":"dead_visibility","summary":"register_session/get_session/invalidate_session pub used by integration tests, NOT dead","status":"wontfix","date":"2026-04-13"}
-{"file":"CLAUDE.md","line":118,"kind":"doc_mismatch","summary":"stale shard-menu.js reference in frontend component list","status":"fixed","date":"2026-04-13"}
-{"file":"docs/ARCHITECTURE.md","line":1257,"kind":"doc_mismatch","summary":"stale shard-menu.js reference - replaced with auto-manage-status.js","status":"fixed","date":"2026-04-13"}
-{"file":"frontend/js/components/auto-manage-status.js","line":134,"kind":"bug","summary":"App.data.authFetch doesn't exist; refreshEnabled() always no-ops","status":"fixed","date":"2026-04-14"}
-{"file":"src/api/pool.rs","line":790,"kind":"error_handling","summary":"Silent DB persist failure for pool shard pins","status":"fixed","date":"2026-04-14"}
-{"file":"src/api/pool.rs","line":825,"kind":"error_handling","summary":"Silent DB persist failure for pool shard unpin","status":"fixed","date":"2026-04-14"}
-{"file":"src/api/pool.rs","line":793,"kind":"magic_string","summary":"pool_state/my_pool magic strings now use pool::manager constants","status":"fixed","date":"2026-04-14"}
-{"file":"src/api/claude_session.rs","line":640,"kind":"observability","summary":"idle_warning toast missing session id","status":"fixed","date":"2026-04-14"}
-{"file":"src/api/openai.rs","line":1517,"kind":"duplication","summary":"Usage{...} block duplicated; extracted Usage::from_counts","status":"fixed","date":"2026-04-14"}
-{"file":"frontend/js/components/notifications.js","line":505,"kind":"duplication","summary":"updateBadges: merged duplicate forEach loops","status":"fixed","date":"2026-04-14"}
-{"file":"frontend/js/components/notifications.js","line":591,"kind":"duplication","summary":"modelBadgeHtml: extracted badge() helper","status":"fixed","date":"2026-04-14"}
-{"file":"docs/ARCHITECTURE.md","line":1267,"kind":"stale_doc","summary":"13 templates→12","status":"fixed","date":"2026-04-14"}
-{"file":"docs/ARCHITECTURE.md","line":1271,"kind":"stale_doc","summary":"i18n keys 1010→1089","status":"fixed","date":"2026-04-14"}
-{"file":"CLAUDE.md","line":124,"kind":"stale_doc","summary":"i18n keys 1010→1089","status":"fixed","date":"2026-04-14"}
-{"file":"frontend/i18n/*.json","line":0,"kind":"i18n","summary":"Added 5 nav.auto_manage_* keys to 20 languages","status":"fixed","date":"2026-04-14"}
-{"file":"src/credit/anti_gaming.rs","line":14,"kind":"tuning","summary":"SUBNET_EVICTION_SECS 24h long TTL; needs discussion","status":"deferred","date":"2026-04-14"}
-{"file":"src/api/pool.rs","line":736,"kind":"toctou","summary":"write-lock released before db persist; needs discussion","status":"deferred","date":"2026-04-14"}
-{"file":"src/api/admin_models.rs","line":1582,"kind":"error_handling","summary":"silent DB persist - lower severity","status":"deferred","date":"2026-04-14"}
-{"file":"frontend/js/components/settings.js","line":213,"kind":"architecture","summary":"direct authFetch to /api/admin/shard-storage","status":"deferred","date":"2026-04-14"}
-{"file":"src/inference/sampling.rs","line":235,"kind":"bug","summary":"softmax NaN collapse silently emitted last vocab token; now argmax fallback","status":"fixed","date":"2026-04-14"}
-{"file":"src/inference/model_worker.rs","line":634,"kind":"bug","summary":"max_tokens=0 emitted 1 token via off-by-one fix","status":"fixed","date":"2026-04-14"}
-{"file":"src/api/admin_models.rs","line":2061,"kind":"security","summary":"absolute adapter path bypassed traversal check; added canonical containment","status":"fixed","date":"2026-04-14"}
-{"file":"src/api/middleware.rs","line":136,"kind":"rate_limit","summary":"provider-health routed to SensitiveAdmin bucket","status":"fixed","date":"2026-04-14"}
-{"file":"src/health/monitor.rs","line":124,"kind":"concurrency","summary":"anti_gaming.lock().await -> try_lock","status":"fixed","date":"2026-04-14"}
-{"file":"frontend/js/components/claude-code.js","line":1296,"kind":"leak","summary":"setTimeout for flash restore not cancelled","status":"fixed","date":"2026-04-14"}
-{"file":"src/network/manager.rs","line":3608,"kind":"observability","summary":"send_streaming_token rr id discarded; needs discussion (hot path)","status":"deferred","date":"2026-04-14"}
-{"file":"src/network/manager.rs","line":3635,"kind":"observability","summary":"allreduce/ringchunk rr id discarded; needs discussion","status":"deferred","date":"2026-04-14"}
-{"file":"src/network/manager.rs","line":2162,"kind":"bug","summary":"capacity-rejected TensorPayload sends bare Ack; pipeline stall","status":"deferred","date":"2026-04-14"}
-{"file":"src/model/acquisition.rs","line":529,"kind":"concurrency","summary":"sleep inside handle_acquire retry loop blocks AcquisitionManager","status":"deferred","date":"2026-04-14"}
-{"file":"src/inference/pipeline.rs","line":769,"kind":"bug","summary":"completion_tokens off-by-one on stop seq vs worker","status":"deferred","date":"2026-04-14"}
-{"file":"frontend/js/components/chat.js","line":419,"kind":"xss","summary":"renderedHtml persisted raw; needs sanitization plan","status":"deferred","date":"2026-04-14"}
-{"file":"frontend/js/components/settings.js","line":113,"kind":"antipattern","summary":"innerHTML join with mixed escaped/html content","status":"deferred","date":"2026-04-14"}
-{"file":"src/network/protocol.rs","line":605,"kind":"validation","summary":"encode_layer_result: added MAX_RESULT_TOKENS/MAX_ACTIVATION_SIZE caps","status":"fixed","date":"2026-04-14"}
-{"file":"src/network/protocol.rs","line":621,"kind":"validation","summary":"error-finish msg capped to 4KB on encode","status":"fixed","date":"2026-04-14"}
-{"file":"src/update.rs","line":254,"kind":"leak","summary":"temp update.tmp cleaned up on I/O errors","status":"fixed","date":"2026-04-14"}
-{"file":"src/credit/ledger.rs","line":170,"kind":"observability","summary":"warn level on credit forward failure","status":"fixed","date":"2026-04-14"}
-{"file":"src/pool/crypto.rs","line":35,"kind":"security","summary":"MemberLeft payload lacks timestamp/nonce; replay possible","status":"deferred","date":"2026-04-14"}
-{"file":"src/pool/crypto.rs","line":154,"kind":"security","summary":"credit forward UUID dedup is client-generated","status":"deferred","date":"2026-04-14"}
-{"file":"src/credit/ledger.rs","line":383,"kind":"ordering","summary":"pending_credit_earn rollback ordering","status":"deferred","date":"2026-04-14"}
-{"file":"src/pool/manager.rs","line":1288,"kind":"state","summary":"device_stats_report member verification","status":"deferred","date":"2026-04-14"}
-{"file":"src/model/auto_manage/mod.rs","line":27,"kind":"bug","summary":"shard_size_ok missing upper bound — oversized files passed","status":"fixed","date":"2026-04-14"}
-{"file":"src/inference/pipeline.rs","line":964,"kind":"bug","summary":"completion_tokens included EOS tokens not in output text","status":"fixed","date":"2026-04-14"}
-{"file":"frontend/js/components/compare.js","line":125,"kind":"xss_preempt","summary":"escape I18n.t output before innerHTML insertion","status":"fixed","date":"2026-04-14"}
-{"file":"src/api/admin_models.rs","line":1582,"kind":"error_handling","summary":"silent DB persist for auto-manage policy — now warn","status":"fixed","date":"2026-04-15"}
-{"file":"src/api/admin_models.rs","line":1733,"kind":"error_handling","summary":"silent DB persist for encrypted pipeline toggle — now warn","status":"fixed","date":"2026-04-15"}
-{"file":"src/api/admin_hf.rs","line":747,"kind":"error_handling","summary":"silent DB persist for model trust pin — now warn","status":"fixed","date":"2026-04-15"}
-{"file":"frontend/js/components/settings.js","line":113,"kind":"antipattern","summary":"innerHTML join replaced with DOM construction","status":"fixed","date":"2026-04-15"}
-{"file":"src/credit/anti_gaming.rs","line":14,"kind":"tuning","summary":"SUBNET_EVICTION_SECS 24h → 1h","status":"fixed","date":"2026-04-15"}
-{"file":"src/credit/ledger.rs","line":398,"kind":"ordering","summary":"pending_credit_earn rollback Release → AcqRel","status":"fixed","date":"2026-04-15"}
-{"file":"src/pool/manager.rs","line":1303,"kind":"state","summary":"device_stats_report now early-returns with warn on non-member","status":"fixed","date":"2026-04-15"}
-{"file":"src/model/acquisition.rs","line":529,"kind":"concurrency","summary":"removed blocking sleeps from handle_acquire retry loop","status":"fixed","date":"2026-04-15"}
-{"file":"src/api/pool.rs","line":736,"kind":"toctou","summary":"pool pin persist now inside write lock","status":"fixed","date":"2026-04-15"}
-{"file":"src/pool/crypto.rs","line":35,"kind":"security","summary":"MemberLeft payload now includes timestamp + nonce; receiver checks freshness + replay","status":"fixed","date":"2026-04-15"}
-{"file":"src/network/manager.rs","line":2162,"kind":"bug","summary":"capacity-rejected TensorPayload now responds with error LayerResult","status":"fixed","date":"2026-04-15"}
-{"file":"src/network/manager.rs","line":3608,"kind":"observability","summary":"streaming_token send tracked in pending_rr_observability","status":"fixed","date":"2026-04-15"}
-{"file":"src/network/manager.rs","line":3635,"kind":"observability","summary":"rr-message (AllReduce/etc) send tracked","status":"fixed","date":"2026-04-15"}
-{"file":"src/pool/manager.rs","line":615,"kind":"security","summary":"credit_forward per-member rate limit (60/min)","status":"fixed","date":"2026-04-15"}
-{"file":"frontend/js/components/chat.js","line":710,"kind":"xss","summary":"renderedHtml stripped before localStorage persist","status":"fixed","date":"2026-04-15"}
-{"file":"src/api/admin_hf.rs","line":1387,"kind":"duplication","summary":"GGUF arch→ModelArchitecture match duplicated in admin_hf, daemon/manifest, daemon/mod; admin_hf copy missing qwen35/qwen35moe — extracted helper","status":"fixed","date":"2026-04-15"}
-{"file":"src/crypto/session.rs","line":189,"kind":"dead_code","summary":"local_public_key reported as unused-pub but already gated #[cfg(test)] — false positive","status":"wontfix","date":"2026-04-15"}
-{"file":"src/error.rs","line":66,"kind":"dead_code","summary":"SwarmError::InsufficientDisk never constructed in prod — extracted model::check_disk_space helper, wired into huggingface::download_shard + admin_models::download_shard handler","status":"fixed","date":"2026-04-15"}
+{"file": "src/inference/router.rs", "line": 158, "kind": "magic_number", "summary": "bare 600 KV-cache TTL literal duplicated process_pool::DEFAULT_KV_CACHE_TTL_SECS", "status": "fixed", "date": "2026-04-13"}
+{"file": "src/network/manager.rs", "line": 1470, "kind": "magic_number", "summary": "MAX_CONNECTION_ADDRS defined block-scoped instead of module-level", "status": "fixed", "date": "2026-04-13"}
+{"file": "src/network/manager.rs", "line": 1487, "kind": "magic_number", "summary": "MAX_PING_ENTRIES defined block-scoped instead of module-level", "status": "fixed", "date": "2026-04-13"}
+{"file": "src/api/pool.rs", "line": 271, "kind": "validation_mismatch", "summary": "device name API allowed 64 chars but manager rejected >32", "status": "fixed", "date": "2026-04-13"}
+{"file": "src/api/pool.rs", "line": 86, "kind": "validation_duplication", "summary": "pool name validation duplicated handler+manager with ASCII-graphic gap", "status": "wontfix", "date": "2026-04-13"}
+{"file": "src/inference/kv_cache.rs", "line": 84, "kind": "dead_visibility", "summary": "register_session/get_session/invalidate_session pub used by integration tests, NOT dead", "status": "wontfix", "date": "2026-04-13"}
+{"file": "CLAUDE.md", "line": 118, "kind": "doc_mismatch", "summary": "stale shard-menu.js reference in frontend component list", "status": "fixed", "date": "2026-04-13"}
+{"file": "docs/ARCHITECTURE.md", "line": 1257, "kind": "doc_mismatch", "summary": "stale shard-menu.js reference - replaced with auto-manage-status.js", "status": "fixed", "date": "2026-04-13"}
+{"file": "frontend/js/components/auto-manage-status.js", "line": 134, "kind": "bug", "summary": "App.data.authFetch doesn't exist; refreshEnabled() always no-ops", "status": "fixed", "date": "2026-04-14"}
+{"file": "src/api/pool.rs", "line": 790, "kind": "error_handling", "summary": "Silent DB persist failure for pool shard pins", "status": "fixed", "date": "2026-04-14"}
+{"file": "src/api/pool.rs", "line": 825, "kind": "error_handling", "summary": "Silent DB persist failure for pool shard unpin", "status": "fixed", "date": "2026-04-14"}
+{"file": "src/api/pool.rs", "line": 793, "kind": "magic_string", "summary": "pool_state/my_pool magic strings now use pool::manager constants", "status": "fixed", "date": "2026-04-14"}
+{"file": "src/api/claude_session.rs", "line": 640, "kind": "observability", "summary": "idle_warning toast missing session id", "status": "fixed", "date": "2026-04-14"}
+{"file": "src/api/openai.rs", "line": 1517, "kind": "duplication", "summary": "Usage{...} block duplicated; extracted Usage::from_counts", "status": "fixed", "date": "2026-04-14"}
+{"file": "frontend/js/components/notifications.js", "line": 505, "kind": "duplication", "summary": "updateBadges: merged duplicate forEach loops", "status": "fixed", "date": "2026-04-14"}
+{"file": "frontend/js/components/notifications.js", "line": 591, "kind": "duplication", "summary": "modelBadgeHtml: extracted badge() helper", "status": "fixed", "date": "2026-04-14"}
+{"file": "docs/ARCHITECTURE.md", "line": 1267, "kind": "stale_doc", "summary": "13 templates\u219212", "status": "fixed", "date": "2026-04-14"}
+{"file": "docs/ARCHITECTURE.md", "line": 1271, "kind": "stale_doc", "summary": "i18n keys 1010\u21921089", "status": "fixed", "date": "2026-04-14"}
+{"file": "CLAUDE.md", "line": 124, "kind": "stale_doc", "summary": "i18n keys 1010\u21921089", "status": "fixed", "date": "2026-04-14"}
+{"file": "frontend/i18n/*.json", "line": 0, "kind": "i18n", "summary": "Added 5 nav.auto_manage_* keys to 20 languages", "status": "fixed", "date": "2026-04-14"}
+{"file": "src/credit/anti_gaming.rs", "line": 14, "kind": "tuning", "summary": "SUBNET_EVICTION_SECS 24h long TTL; needs discussion", "status": "deferred", "date": "2026-04-14"}
+{"file": "src/api/pool.rs", "line": 736, "kind": "toctou", "summary": "write-lock released before db persist; needs discussion", "status": "deferred", "date": "2026-04-14"}
+{"file": "src/api/admin_models.rs", "line": 1582, "kind": "error_handling", "summary": "silent DB persist - lower severity", "status": "deferred", "date": "2026-04-14"}
+{"file": "frontend/js/components/settings.js", "line": 213, "kind": "architecture", "summary": "direct authFetch to /api/admin/shard-storage", "status": "deferred", "date": "2026-04-14"}
+{"file": "src/inference/sampling.rs", "line": 235, "kind": "bug", "summary": "softmax NaN collapse silently emitted last vocab token; now argmax fallback", "status": "fixed", "date": "2026-04-14"}
+{"file": "src/inference/model_worker.rs", "line": 634, "kind": "bug", "summary": "max_tokens=0 emitted 1 token via off-by-one fix", "status": "fixed", "date": "2026-04-14"}
+{"file": "src/api/admin_models.rs", "line": 2061, "kind": "security", "summary": "absolute adapter path bypassed traversal check; added canonical containment", "status": "fixed", "date": "2026-04-14"}
+{"file": "src/api/middleware.rs", "line": 136, "kind": "rate_limit", "summary": "provider-health routed to SensitiveAdmin bucket", "status": "fixed", "date": "2026-04-14"}
+{"file": "src/health/monitor.rs", "line": 124, "kind": "concurrency", "summary": "anti_gaming.lock().await -> try_lock", "status": "fixed", "date": "2026-04-14"}
+{"file": "frontend/js/components/claude-code.js", "line": 1296, "kind": "leak", "summary": "setTimeout for flash restore not cancelled", "status": "fixed", "date": "2026-04-14"}
+{"file": "src/network/manager.rs", "line": 3608, "kind": "observability", "summary": "send_streaming_token rr id discarded; needs discussion (hot path)", "status": "deferred", "date": "2026-04-14"}
+{"file": "src/network/manager.rs", "line": 3635, "kind": "observability", "summary": "allreduce/ringchunk rr id discarded; needs discussion", "status": "deferred", "date": "2026-04-14"}
+{"file": "src/network/manager.rs", "line": 2162, "kind": "bug", "summary": "capacity-rejected TensorPayload sends bare Ack; pipeline stall", "status": "deferred", "date": "2026-04-14"}
+{"file": "src/model/acquisition.rs", "line": 529, "kind": "concurrency", "summary": "sleep inside handle_acquire retry loop blocks AcquisitionManager", "status": "deferred", "date": "2026-04-14"}
+{"file": "src/inference/pipeline.rs", "line": 769, "kind": "bug", "summary": "completion_tokens off-by-one on stop seq vs worker", "status": "deferred", "date": "2026-04-14"}
+{"file": "frontend/js/components/chat.js", "line": 419, "kind": "xss", "summary": "renderedHtml persisted raw; needs sanitization plan", "status": "deferred", "date": "2026-04-14"}
+{"file": "frontend/js/components/settings.js", "line": 113, "kind": "antipattern", "summary": "innerHTML join with mixed escaped/html content", "status": "deferred", "date": "2026-04-14"}
+{"file": "src/network/protocol.rs", "line": 605, "kind": "validation", "summary": "encode_layer_result: added MAX_RESULT_TOKENS/MAX_ACTIVATION_SIZE caps", "status": "fixed", "date": "2026-04-14"}
+{"file": "src/network/protocol.rs", "line": 621, "kind": "validation", "summary": "error-finish msg capped to 4KB on encode", "status": "fixed", "date": "2026-04-14"}
+{"file": "src/update.rs", "line": 254, "kind": "leak", "summary": "temp update.tmp cleaned up on I/O errors", "status": "fixed", "date": "2026-04-14"}
+{"file": "src/credit/ledger.rs", "line": 170, "kind": "observability", "summary": "warn level on credit forward failure", "status": "fixed", "date": "2026-04-14"}
+{"file": "src/pool/crypto.rs", "line": 35, "kind": "security", "summary": "MemberLeft payload lacks timestamp/nonce; replay possible", "status": "deferred", "date": "2026-04-14"}
+{"file": "src/pool/crypto.rs", "line": 154, "kind": "security", "summary": "credit forward UUID dedup is client-generated", "status": "deferred", "date": "2026-04-14"}
+{"file": "src/credit/ledger.rs", "line": 383, "kind": "ordering", "summary": "pending_credit_earn rollback ordering", "status": "deferred", "date": "2026-04-14"}
+{"file": "src/pool/manager.rs", "line": 1288, "kind": "state", "summary": "device_stats_report member verification", "status": "deferred", "date": "2026-04-14"}
+{"file": "src/model/auto_manage/mod.rs", "line": 27, "kind": "bug", "summary": "shard_size_ok missing upper bound \u2014 oversized files passed", "status": "fixed", "date": "2026-04-14"}
+{"file": "src/inference/pipeline.rs", "line": 964, "kind": "bug", "summary": "completion_tokens included EOS tokens not in output text", "status": "fixed", "date": "2026-04-14"}
+{"file": "frontend/js/components/compare.js", "line": 125, "kind": "xss_preempt", "summary": "escape I18n.t output before innerHTML insertion", "status": "fixed", "date": "2026-04-14"}
+{"file": "src/api/admin_models.rs", "line": 1582, "kind": "error_handling", "summary": "silent DB persist for auto-manage policy \u2014 now warn", "status": "fixed", "date": "2026-04-15"}
+{"file": "src/api/admin_models.rs", "line": 1733, "kind": "error_handling", "summary": "silent DB persist for encrypted pipeline toggle \u2014 now warn", "status": "fixed", "date": "2026-04-15"}
+{"file": "src/api/admin_hf.rs", "line": 747, "kind": "error_handling", "summary": "silent DB persist for model trust pin \u2014 now warn", "status": "fixed", "date": "2026-04-15"}
+{"file": "frontend/js/components/settings.js", "line": 113, "kind": "antipattern", "summary": "innerHTML join replaced with DOM construction", "status": "fixed", "date": "2026-04-15"}
+{"file": "src/credit/anti_gaming.rs", "line": 14, "kind": "tuning", "summary": "SUBNET_EVICTION_SECS 24h \u2192 1h", "status": "fixed", "date": "2026-04-15"}
+{"file": "src/credit/ledger.rs", "line": 398, "kind": "ordering", "summary": "pending_credit_earn rollback Release \u2192 AcqRel", "status": "fixed", "date": "2026-04-15"}
+{"file": "src/pool/manager.rs", "line": 1303, "kind": "state", "summary": "device_stats_report now early-returns with warn on non-member", "status": "fixed", "date": "2026-04-15"}
+{"file": "src/model/acquisition.rs", "line": 529, "kind": "concurrency", "summary": "removed blocking sleeps from handle_acquire retry loop", "status": "fixed", "date": "2026-04-15"}
+{"file": "src/api/pool.rs", "line": 736, "kind": "toctou", "summary": "pool pin persist now inside write lock", "status": "fixed", "date": "2026-04-15"}
+{"file": "src/pool/crypto.rs", "line": 35, "kind": "security", "summary": "MemberLeft payload now includes timestamp + nonce; receiver checks freshness + replay", "status": "fixed", "date": "2026-04-15"}
+{"file": "src/network/manager.rs", "line": 2162, "kind": "bug", "summary": "capacity-rejected TensorPayload now responds with error LayerResult", "status": "fixed", "date": "2026-04-15"}
+{"file": "src/network/manager.rs", "line": 3608, "kind": "observability", "summary": "streaming_token send tracked in pending_rr_observability", "status": "fixed", "date": "2026-04-15"}
+{"file": "src/network/manager.rs", "line": 3635, "kind": "observability", "summary": "rr-message (AllReduce/etc) send tracked", "status": "fixed", "date": "2026-04-15"}
+{"file": "src/pool/manager.rs", "line": 615, "kind": "security", "summary": "credit_forward per-member rate limit (60/min)", "status": "fixed", "date": "2026-04-15"}
+{"file": "frontend/js/components/chat.js", "line": 710, "kind": "xss", "summary": "renderedHtml stripped before localStorage persist", "status": "fixed", "date": "2026-04-15"}
+{"file": "src/api/admin_hf.rs", "line": 1387, "kind": "duplication", "summary": "GGUF arch\u2192ModelArchitecture match duplicated in admin_hf, daemon/manifest, daemon/mod; admin_hf copy missing qwen35/qwen35moe \u2014 extracted helper", "status": "fixed", "date": "2026-04-15"}
+{"file": "src/crypto/session.rs", "line": 189, "kind": "dead_code", "summary": "local_public_key reported as unused-pub but already gated #[cfg(test)] \u2014 false positive", "status": "wontfix", "date": "2026-04-15"}
+{"file": "src/error.rs", "line": 66, "kind": "dead_code", "summary": "SwarmError::InsufficientDisk never constructed in prod \u2014 extracted model::check_disk_space helper, wired into huggingface::download_shard + admin_models::download_shard handler", "status": "fixed", "date": "2026-04-15"}
+{"file": "src/inference/pipeline.rs", "line": 134, "kind": "error_misuse", "summary": "SwarmError::Internal for missing manifest \u2192 ModelNotAvailable (404 + hint)", "status": "fixed", "date": "2026-04-16"}
+{"file": "src/inference/pipeline.rs", "line": 1571, "kind": "error_misuse", "summary": "SwarmError::Internal for evicted split model \u2192 ServiceUnavailable (503 + retry hint)", "status": "fixed", "date": "2026-04-16"}
+{"file": "CLAUDE.md", "line": 67, "kind": "doc_drift", "summary": "frontend js/core/3 \u2192 core/4 (tooltip.js was added)", "status": "fixed", "date": "2026-04-16"}
+{"file": "CLAUDE.md", "line": 124, "kind": "doc_drift", "summary": "i18n key count 1117 \u2192 972; removed stale 'only en.json translated' note", "status": "fixed", "date": "2026-04-16"}
+{"file": "docs/ARCHITECTURE.md", "line": 1271, "kind": "doc_drift", "summary": "i18n key count 1089 \u2192 972", "status": "fixed", "date": "2026-04-16"}
+{"file": "frontend/js/init.js", "line": 172, "kind": "duplication", "summary": "LANG_FLAGS duplicates country-code data from LANGS array (21 entries each)", "status": "fixed", "date": "2026-04-16"}
+{"file":"src/api/mcp.rs","line":1575,"kind":"unwrap_risk","summary":"resource_peers .as_object_mut().unwrap() \u2192 if-let Some(obj)","status":"fixed","date":"2026-04-16"}
+{"file":"src/model/acquisition.rs","line":895,"kind":"dup_fn","summary":"private select_best_peer duplicated state.rs::select_best_peer scoring \u2014 deleted, caller filters local then delegates to shared helper","status":"fixed","date":"2026-04-16"}
+{"file":"src/api/anthropic.rs","line":1221,"kind":"dup_block","summary":"anthropic_to_openai_proxy inline MessagesResponse construction \u2192 MessagesResponse::text() helper","status":"fixed","date":"2026-04-16"}
+{"file":"frontend/js/components/dashboard.js","line":1126,"kind":"hardcoded_string","summary":"dead English fallback after I18n.t() \u2014 I18n.t() never returns falsy","status":"fixed","date":"2026-04-16"}
+{"file":"docs/ARCHITECTURE.md","line":1280,"kind":"stale_doc","summary":"ActivityEvent described as 4 fields + 26-variant enum; now lists all 16 fields and notes kind is &'static str","status":"fixed","date":"2026-04-16"}
+{"file":"docs/ARCHITECTURE.md","line":1249,"kind":"stale_doc","summary":"frontend component list missing js/core/tooltip.js (4th core file)","status":"fixed","date":"2026-04-16"}
+{"file":"CLAUDE.md","line":134,"kind":"wrong_test_count","summary":"test count 646 \u2192 660 (verified via cargo test --list: 589+22+30+1+14 incl 4 ignored)","status":"fixed","date":"2026-04-16"}
+{"file":"docs/ARCHITECTURE.md","line":1283,"kind":"stale_doc","summary":"PascalCase enum-style kind examples replaced with actual snake_case strings from ACTIVITY_ICONS","status":"fixed","date":"2026-04-16"}
+{"file":"src/api/openai.rs","line":1492,"kind":"dup_block","summary":"router_inference + split_non_stream_response both build simple ChatCompletionResponse; low extraction value given logprobs divergence \u2014 deferred","status":"deferred","date":"2026-04-16"}
+{"file":"src/credit/anti_gaming.rs","line":47,"kind":"unbounded","summary":"rate_limits/subnet_counts could grow under sustained lock contention since cleanup uses try_lock only \u2014 adequately mitigated by 1h eviction TTL + health monitor cadence; deferred","status":"deferred","date":"2026-04-16"}
