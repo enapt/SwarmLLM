@@ -107,6 +107,34 @@ impl ModelArch {
     pub fn is_hybrid_ssm(&self) -> bool {
         matches!(self, ModelArch::Qwen35 | ModelArch::Qwen35Moe)
     }
+
+    /// Map to the coarser `ModelArchitecture` variant used by `ModelManifest`.
+    ///
+    /// Most arches share the standard llama-compatible manifest layout, so they
+    /// collapse to `Llama`. Only arches with distinct manifest handling (Qwen2,
+    /// Qwen35, Qwen35Moe, Mistral, Phi) get their own variants. Unknown archs
+    /// default to Llama — callers that want to log a warning should do so.
+    pub fn to_manifest_architecture(&self) -> crate::types::ModelArchitecture {
+        use crate::types::ModelArchitecture;
+        match self {
+            Self::Qwen2 => ModelArchitecture::Qwen2,
+            Self::Qwen35 => ModelArchitecture::Qwen35,
+            Self::Qwen35Moe => ModelArchitecture::Qwen35Moe {
+                num_experts: 0,
+                experts_per_token: 0,
+            },
+            Self::Mistral => ModelArchitecture::Mistral,
+            Self::Phi3 => ModelArchitecture::Phi,
+            Self::Llama
+            | Self::Gemma
+            | Self::Gemma2
+            | Self::Starcoder2
+            | Self::DeepSeek2
+            | Self::Glm4
+            | Self::Llama4
+            | Self::Unknown(_) => ModelArchitecture::Llama,
+        }
+    }
 }
 
 impl std::fmt::Display for ModelArch {

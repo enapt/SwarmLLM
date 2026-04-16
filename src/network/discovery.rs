@@ -142,7 +142,7 @@ pub const DISCOVERY_INTERVAL: Duration = Duration::from_secs(300);
 /// Returns addresses for api_port in `own_api_port-10 ..= own_api_port+10` (clamped),
 /// excluding the caller's own port. The TCP offset is api_port + 10 to match
 /// `NetworkManager::run()`.
-pub fn loopback_candidate_addrs(own_api_port: u16) -> Vec<Multiaddr> {
+fn loopback_candidate_addrs(own_api_port: u16) -> Vec<Multiaddr> {
     let mut ports: std::collections::BTreeSet<u16> = std::collections::BTreeSet::new();
     // Adjacent ports: handles tight test layouts like 8800/8801/8802.
     let lo: u16 = own_api_port.saturating_sub(10).max(1024);

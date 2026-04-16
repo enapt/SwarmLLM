@@ -115,7 +115,7 @@
       label.classList.add('hidden');
     }
 
-    var title = (App.I18n && App.I18n.t) ? App.I18n.t(s.titleKey) : s.fallback;
+    var title = (typeof I18n !== 'undefined') ? I18n.t(s.titleKey) : s.fallback;
     if (!title || title === s.titleKey) title = s.fallback;
     if (s.detail && s.cls === 'problem') title += ' — ' + s.detail;
     btn.title = title;

@@ -22,6 +22,9 @@ const AUTO_MANAGE_NOTIFY_SETTLE_SECS: u64 = 15;
 /// A spike of 100 requests persists ~30min and drops to noise after ~2h.
 const EMA_DECAY_WEIGHT: f64 = 0.85;
 const EMA_FRESH_WEIGHT: f64 = 0.15;
+/// Minimum auto-manage scan interval. Prevents pathological config values from
+/// starving other tasks with sub-10s ticks.
+const MIN_AUTO_MANAGE_INTERVAL_SECS: u64 = 10;
 
 /// Compute a position on a u32 consistent hash ring for a node's virtual slot.
 pub(super) fn hash_ring_position(node_bytes: &[u8; 32], virtual_node: u32) -> u32 {
@@ -138,7 +141,7 @@ impl AutoShardManager {
         let mut interval_secs = config
             .interval_seconds
             .unwrap_or_else(|| config.interval_minutes.max(1) as u64 * 60)
-            .max(10); // minimum 10 seconds
+            .max(MIN_AUTO_MANAGE_INTERVAL_SECS);
         let mut interval = tokio::time::interval(Duration::from_secs(interval_secs));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
@@ -220,7 +223,7 @@ impl AutoShardManager {
                 _ = config_watch_rx.changed() => {
                     let params = config_watch_rx.borrow().clone();
                     let new_secs = (params.auto_manage_interval_minutes.max(1) as u64) * 60;
-                    let new_secs = new_secs.max(10);
+                    let new_secs = new_secs.max(MIN_AUTO_MANAGE_INTERVAL_SECS);
                     if new_secs != interval_secs {
                         tracing::info!(
                             old_interval_secs = interval_secs,

@@ -64,6 +64,19 @@ const MAX_BUFFERED_GOSSIP: usize = 64;
 const MAX_CONNECTION_ADDRS: usize = 1024;
 /// Maximum entries in ping_sent_times before pruning stale entries.
 const MAX_PING_ENTRIES: usize = 2048;
+/// How often the run loop wakes to process the pending_redial queue.
+const REDIAL_CHECK_INTERVAL_SECS: u64 = 1;
+/// Polling cadence for the Kademlia bootstrap backoff schedule.
+const BOOTSTRAP_POLL_INTERVAL_SECS: u64 = 5;
+/// Cadence for the "no peers connected" WARN log while isolated.
+const NO_PEERS_WARN_INTERVAL_SECS: u64 = 30;
+/// Cadence for the liveness heartbeat that refreshes `last_seen` on connected peers.
+const LIVENESS_INTERVAL_SECS: u64 = 30;
+/// Minimum redial delay added to peers that never completed Identify handshake.
+/// Jitter breaks mDNS simultaneous-dial race symmetry.
+const REDIAL_JITTER_MIN_MS: u64 = 2000;
+/// Random window added on top of `REDIAL_JITTER_MIN_MS` (effective delay 2-5s).
+const REDIAL_JITTER_RANGE_MS: u64 = 3000;
 
 use super::helpers::{extract_ipv4_bytes, is_non_public_addr, swarm_event_name};
 
@@ -415,7 +428,8 @@ impl NetworkManager {
 
         // Periodic redial check — processes pending_redial queue for peers that failed
         // initial connection (e.g., mDNS simultaneous-dial race).
-        let mut redial_interval = tokio::time::interval(std::time::Duration::from_secs(1));
+        let mut redial_interval =
+            tokio::time::interval(std::time::Duration::from_secs(REDIAL_CHECK_INTERVAL_SECS));
         redial_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
         // Kademlia bootstrap backoff — retries at 10s, 30s, 60s, 120s after a
@@ -430,14 +444,16 @@ impl NetworkManager {
         } else {
             Some(std::time::Instant::now() + std::time::Duration::from_secs(backoff_schedule[0]))
         };
-        let mut bootstrap_retry_interval = tokio::time::interval(std::time::Duration::from_secs(5));
+        let mut bootstrap_retry_interval =
+            tokio::time::interval(std::time::Duration::from_secs(BOOTSTRAP_POLL_INTERVAL_SECS));
         bootstrap_retry_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
         // "No peers" WARN loop — surfaces the "node is running but totally
         // isolated" state (happens on fresh WSL2 installs with mDNS disabled
         // and no bootstrap peers configured). Fires every 30s while
         // connected_peers == 0.
-        let mut no_peers_interval = tokio::time::interval(std::time::Duration::from_secs(30));
+        let mut no_peers_interval =
+            tokio::time::interval(std::time::Duration::from_secs(NO_PEERS_WARN_INTERVAL_SECS));
         no_peers_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let startup_instant = std::time::Instant::now();
 
@@ -447,7 +463,8 @@ impl NetworkManager {
         // other inbound traffic in its first 90s would be evicted while still
         // having a live TCP/QUIC connection (especially on WSL2 where QUIC
         // substream negotiation is slow). This tick is the floor.
-        let mut liveness_interval = tokio::time::interval(std::time::Duration::from_secs(30));
+        let mut liveness_interval =
+            tokio::time::interval(std::time::Duration::from_secs(LIVENESS_INTERVAL_SECS));
         liveness_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
         tracing::info!(
@@ -1910,7 +1927,8 @@ impl NetworkManager {
                         use std::hash::{Hash, Hasher};
                         let mut hasher = std::collections::hash_map::DefaultHasher::new();
                         peer_id.hash(&mut hasher);
-                        let jitter_ms = 2000 + (hasher.finish() % 3000); // 2-5s
+                        let jitter_ms =
+                            REDIAL_JITTER_MIN_MS + (hasher.finish() % REDIAL_JITTER_RANGE_MS);
                         let scheduled =
                             std::time::Instant::now() + std::time::Duration::from_millis(jitter_ms);
                         tracing::info!(

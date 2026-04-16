@@ -8,6 +8,19 @@ const PEER_HEALTHY_TIMEOUT_SECS: i64 = 90;
 /// Maximum length of an invite code string accepted by the join-network endpoint.
 const MAX_INVITE_CODE_LEN: usize = 4096;
 
+/// Upper bound for `max_concurrent_requests` accepted via the config API.
+const MAX_CONCURRENT_REQUESTS_CAP: u32 = 256;
+/// Upper bound for `max_bandwidth_mbps` accepted via the config API.
+const MAX_BANDWIDTH_MBPS_CAP: u64 = 100_000;
+/// Lower bound for `max_disk_mb` accepted via the config API.
+const MIN_DISK_MB: u64 = 100;
+/// Upper bound for `max_disk_mb` accepted via the config API.
+const MAX_DISK_MB: u64 = 10_000_000;
+/// Upper bound for `auto_manage_max_storage_mb` accepted via the config API.
+const MAX_AUTO_MANAGE_STORAGE_MB: u64 = 10_000_000;
+/// Upper bound for `batch_timeout_ms` accepted via the config API.
+const MAX_BATCH_TIMEOUT_MS: u64 = 60_000;
+
 /// Serialize a peer registry entry to JSON. Used by both REST and WebSocket.
 ///
 /// When `include_addresses` is true, includes `addresses` and `last_seen` fields
@@ -204,13 +217,13 @@ pub async fn update_config(
         };
     }
     if let Some(max_reqs) = body.max_concurrent_requests {
-        config.inference.max_concurrent_requests = max_reqs.clamp(1, 256);
+        config.inference.max_concurrent_requests = max_reqs.clamp(1, MAX_CONCURRENT_REQUESTS_CAP);
     }
     if let Some(bw) = body.max_bandwidth_mbps {
-        config.resources.max_bandwidth_mbps = bw.clamp(1, 100_000);
+        config.resources.max_bandwidth_mbps = bw.clamp(1, MAX_BANDWIDTH_MBPS_CAP);
     }
     if let Some(disk) = body.max_disk_mb {
-        config.resources.max_disk_mb = disk.clamp(100, 10_000_000);
+        config.resources.max_disk_mb = disk.clamp(MIN_DISK_MB, MAX_DISK_MB);
     }
     if let Some(auto_manage) = body.auto_manage_shards {
         config.auto_manage.enabled = auto_manage;
@@ -237,7 +250,7 @@ pub async fn update_config(
         );
     }
     if let Some(max_storage) = body.auto_manage_max_storage_mb {
-        config.auto_manage.max_storage_mb = max_storage.clamp(1, 10_000_000);
+        config.auto_manage.max_storage_mb = max_storage.clamp(1, MAX_AUTO_MANAGE_STORAGE_MB);
     }
     if let Some(shard_size) = body.shard_size_mb {
         if !(crate::config::SHARD_SIZE_MIN_MB..=crate::config::SHARD_SIZE_MAX_MB)
@@ -256,7 +269,7 @@ pub async fn update_config(
         config.inference.max_batch_size = batch_size.max(1);
     }
     if let Some(timeout) = body.batch_timeout_ms {
-        config.inference.batch_timeout_ms = timeout.clamp(1, 60_000);
+        config.inference.batch_timeout_ms = timeout.clamp(1, MAX_BATCH_TIMEOUT_MS);
     }
 
     // Write updated config to disk

@@ -114,6 +114,9 @@ const MIN_LIFETIME_DAYS: u64 = 7;
 const MIN_VERIFIED_TRANSACTIONS: u32 = 10;
 /// Below this peer count, all known peers appear on the leaderboard.
 const SMALL_NETWORK_THRESHOLD: usize = 20;
+/// Upper bound on `?limit=` for the leaderboard query. Prevents clients from
+/// requesting oversized responses on large networks.
+const MAX_LEADERBOARD_LIMIT: usize = 200;
 
 /// Check if a peer is eligible for the leaderboard based on anti-spoofing rules.
 /// On small networks (<20 peers), all peers are shown. On larger networks,
@@ -140,7 +143,7 @@ pub async fn leaderboard(
     State(state): State<AppState>,
     Query(query): Query<LeaderboardQuery>,
 ) -> Json<serde_json::Value> {
-    let limit = query.limit.min(200);
+    let limit = query.limit.min(MAX_LEADERBOARD_LIMIT);
     let peer_count = state.shared_state.peer_registry.len();
 
     tracing::debug!(peer_count, limit, "DIAG: leaderboard query");

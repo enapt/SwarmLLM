@@ -16,6 +16,9 @@ use crate::types::{ChatMessage, ImageData, InferenceRequest, ModelId, SamplingPa
 /// Timeout for peer-forwarded inference requests (seconds).
 const INFERENCE_FORWARD_TIMEOUT_SECS: u64 = 120;
 
+/// TCP connect timeout for peer HTTP forwarding (seconds).
+const PEER_FORWARD_CONNECT_TIMEOUT_SECS: u64 = 10;
+
 use super::sse::{send_role_preamble, StreamEvent};
 use super::{DEFAULT_MAX_TOKENS, DEFAULT_TOP_K, SSE_KEEPALIVE_INTERVAL_SECS};
 
@@ -1406,7 +1409,9 @@ fn peer_http_url(peer: &crate::types::PeerInfo) -> Option<String> {
 /// Avoids creating a new TLS + connection pool on every request.
 static PEER_CLIENT: std::sync::LazyLock<reqwest::Client> = std::sync::LazyLock::new(|| {
     reqwest::Client::builder()
-        .connect_timeout(std::time::Duration::from_secs(10))
+        .connect_timeout(std::time::Duration::from_secs(
+            PEER_FORWARD_CONNECT_TIMEOUT_SECS,
+        ))
         .timeout(std::time::Duration::from_secs(
             INFERENCE_FORWARD_TIMEOUT_SECS,
         ))

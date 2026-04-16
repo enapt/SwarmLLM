@@ -37,6 +37,8 @@ const SLOW_DOWNLOAD_WARN_SECS: f64 = 30.0;
 /// Hard abort: seconds of zero-byte progress before we trip the cancel flag.
 /// The HF download task checks the flag every chunk, so this fires fast.
 const STALL_ABORT_SECS: u64 = 120;
+/// How often the stall-check branch wakes up to test whether STALL_ABORT_SECS has elapsed.
+const STALL_CHECK_INTERVAL_SECS: u64 = 10;
 
 /// Spawn a background task that reads download progress events and updates acquisition_progress.
 fn spawn_progress_updater(
@@ -51,7 +53,7 @@ fn spawn_progress_updater(
         let mut last_progress_at = std::time::Instant::now();
         let mut slow_since: Option<std::time::Instant> = None;
         let mut throttle_warned = false;
-        let stall_tick = std::time::Duration::from_secs(10);
+        let stall_tick = std::time::Duration::from_secs(STALL_CHECK_INTERVAL_SECS);
         loop {
             tokio::select! {
                 prog = prx.recv() => {

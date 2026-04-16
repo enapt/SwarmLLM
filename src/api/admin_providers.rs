@@ -327,7 +327,7 @@ pub async fn update_providers(
 
 /// GET /api/admin/provider-models — Fetch available models from configured providers.
 ///
-/// Returns cached results instantly if available (< 60s old), and refreshes
+/// Returns cached results instantly if available (< 30s old), and refreshes
 /// in the background. On first call (empty cache), blocks until fetch completes.
 /// This prevents slow/flaky provider APIs from making the dashboard feel broken.
 pub async fn list_provider_models(State(state): State<AppState>) -> Json<serde_json::Value> {

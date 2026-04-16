@@ -15,27 +15,22 @@ pub trait ModelManifestExt {
 /// Map a GGUF `general.architecture` string to our `ModelArchitecture` enum.
 /// Unknown architectures default to Llama (which shares the standard transformer
 /// manifest layout). Logs a warning for unrecognized values.
+///
+/// Delegates string parsing to `ModelArch::from_gguf_arch` so the two enums stay
+/// in sync. Handles the bare `"phi"` alias that split inference doesn't recognize.
 pub fn gguf_arch_to_model_architecture(arch: &str) -> crate::types::ModelArchitecture {
-    match arch {
-        "qwen2" | "qwen3" | "qwen2moe" => crate::types::ModelArchitecture::Qwen2,
-        "qwen35" => crate::types::ModelArchitecture::Qwen35,
-        "qwen35moe" | "qwen3_5moe" => crate::types::ModelArchitecture::Qwen35Moe {
-            num_experts: 0,
-            experts_per_token: 0,
-        },
-        "mistral" => crate::types::ModelArchitecture::Mistral,
-        "phi" | "phi3" => crate::types::ModelArchitecture::Phi,
-        "llama" | "gemma" | "gemma2" | "starcoder2" | "deepseek2" | "glm4" | "llama4" => {
-            crate::types::ModelArchitecture::Llama
-        }
-        other => {
-            tracing::warn!(
-                arch = other,
-                "Unknown model architecture, defaulting to Llama"
-            );
-            crate::types::ModelArchitecture::Llama
-        }
+    // Bare `"phi"` only appears in the manifest path (split inference requires phi3).
+    if arch == "phi" {
+        return crate::types::ModelArchitecture::Phi;
     }
+    let detected = crate::inference::model_arch::ModelArch::from_gguf_arch(arch);
+    if matches!(
+        detected,
+        crate::inference::model_arch::ModelArch::Unknown(_)
+    ) {
+        tracing::warn!(arch, "Unknown model architecture, defaulting to Llama");
+    }
+    detected.to_manifest_architecture()
 }
 
 /// Parameters for building a ModelManifest from GGUF metadata.
