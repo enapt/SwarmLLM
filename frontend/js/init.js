@@ -9,6 +9,21 @@
   var S = App.state;
   var U = App.utils;
 
+  // Single source of truth for supported UI languages.
+  // Tuple: [lang_code, display_name, country_code_for_flag (uppercase)]
+  var LANGS = [
+    ['en','English','GB'],['es','Espa\u00f1ol','ES'],['fr','Fran\u00e7ais','FR'],['de','Deutsch','DE'],
+    ['pt','Portugu\u00eas','BR'],['it','Italiano','IT'],['nl','Nederlands','NL'],['ru','\u0420\u0443\u0441\u0441\u043a\u0438\u0439','RU'],
+    ['zh','\u4e2d\u6587','CN'],['ja','\u65e5\u672c\u8a9e','JP'],['ko','\ud55c\uad6d\uc5b4','KR'],['ar','\u0627\u0644\u0639\u0631\u0628\u064a\u0629','SA'],
+    ['tr','T\u00fcrk\u00e7e','TR'],['pl','Polski','PL'],['sv','Svenska','SE'],['th','\u0e44\u0e17\u0e22','TH'],
+    ['hi','\u0939\u093f\u0928\u094d\u0926\u0940','IN'],['vi','Ti\u1ebfng Vi\u1ec7t','VN'],['id','Bahasa Indonesia','ID'],
+    ['uk','\u0423\u043a\u0440\u0430\u0457\u043d\u0441\u044c\u043a\u0430','UA'],['cs','\u010ce\u0161tina','CZ']
+  ];
+  function langFlagCode(lang) {
+    var entry = LANGS.find(function(l) { return l[0] === lang; });
+    return entry ? entry[2].toLowerCase() : null;
+  }
+
   // ========================================================================
   // Bind all UI event listeners
   // ========================================================================
@@ -106,15 +121,6 @@
 
     // Language picker dropdown
     (function() {
-      // [lang_code, display_name, country_code_for_flag]
-      var LANGS = [
-        ['en','English','GB'],['es','Espa\u00f1ol','ES'],['fr','Fran\u00e7ais','FR'],['de','Deutsch','DE'],
-        ['pt','Portugu\u00eas','BR'],['it','Italiano','IT'],['nl','Nederlands','NL'],['ru','\u0420\u0443\u0441\u0441\u043a\u0438\u0439','RU'],
-        ['zh','\u4e2d\u6587','CN'],['ja','\u65e5\u672c\u8a9e','JP'],['ko','\ud55c\uad6d\uc5b4','KR'],['ar','\u0627\u0644\u0639\u0631\u0628\u064a\u0629','SA'],
-        ['tr','T\u00fcrk\u00e7e','TR'],['pl','Polski','PL'],['sv','Svenska','SE'],['th','\u0e44\u0e17\u0e22','TH'],
-        ['hi','\u0939\u093f\u0928\u094d\u0926\u0940','IN'],['vi','Ti\u1ebfng Vi\u1ec7t','VN'],['id','Bahasa Indonesia','ID'],
-        ['uk','\u0423\u043a\u0440\u0430\u0457\u043d\u0441\u044c\u043a\u0430','UA'],['cs','\u010ce\u0161tina','CZ']
-      ];
       // Country flag as inline SVG img
       function countryFlag(cc) {
         return '<img src="/static/flags/' + cc.toLowerCase() + '.svg" alt="' + cc + '" class="lang-flag-img">';
@@ -168,11 +174,10 @@
       if (settingsLang) settingsLang.value = lang;
       var engBtn = document.getElementById('setup-lang-english');
       if (engBtn) engBtn.style.display = (lang !== 'en') ? '' : 'none';
-      // Update setup flag
-      var LANG_FLAGS = {en:'gb',es:'es',fr:'fr',de:'de',pt:'br',it:'it',nl:'nl',ru:'ru',zh:'cn',ja:'jp',ko:'kr',ar:'sa',tr:'tr',pl:'pl',sv:'se',th:'th',hi:'in',vi:'vn',id:'id',uk:'ua',cs:'cz'};
       var setupFlag = document.getElementById('setup-lang-flag');
-      if (setupFlag && LANG_FLAGS[lang]) {
-        setupFlag.src = '/static/flags/' + LANG_FLAGS[lang] + '.svg';
+      var flagCode = langFlagCode(lang);
+      if (setupFlag && flagCode) {
+        setupFlag.src = '/static/flags/' + flagCode + '.svg';
       }
     });
 
