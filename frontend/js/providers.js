@@ -49,6 +49,24 @@ var PROVIDER_NAMES = {
   moonshot:   'Moonshot (Kimi)',
 };
 
+// Signup / API-key URLs for each provider. Single source of truth — consumed
+// by both the setup wizard (`init.js`) and the settings panel (populated into
+// `.provider-signup-link[data-provider=X]` anchors at init time).
+var PROVIDER_SIGNUP_URLS = {
+  anthropic:  'https://console.anthropic.com/settings/keys',
+  openai:     'https://platform.openai.com/api-keys',
+  deepseek:   'https://platform.deepseek.com/api_keys',
+  mistral:    'https://console.mistral.ai/api-keys',
+  groq:       'https://console.groq.com/keys',
+  nvidia_nim: 'https://build.nvidia.com/',
+  cerebras:   'https://cloud.cerebras.ai/',
+  sambanova:  'https://cloud.sambanova.ai/',
+  fireworks:  'https://fireworks.ai/account/api-keys',
+  together:   'https://api.together.xyz/settings/api-keys',
+  deepinfra:  'https://deepinfra.com/dash/api_keys',
+  moonshot:   'https://platform.moonshot.cn/console/api-keys',
+};
+
 // Ordered list of all supported cloud provider keys.
 
 // Prebuilt <img> HTML strings for each provider (16px, avoids repeated DOM creation).

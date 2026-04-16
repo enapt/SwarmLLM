@@ -52,20 +52,34 @@ pub async fn set_nickname(
     };
     store.put_prefs(&prefs).map_err(ApiError::from)?;
 
-    // Update in-memory registry
-    state
-        .shared_state
-        .nickname_registry
-        .insert(record.node_id.clone(), record.clone());
+    let broadcast = matches!(visibility, VisibilityMode::Nickname);
 
-    tracing::debug!(nickname = %record.nickname, "DIAG: set_nickname persisted");
+    if broadcast {
+        // Update in-memory registry (peers view this node's nickname).
+        state
+            .shared_state
+            .nickname_registry
+            .insert(record.node_id.clone(), record.clone());
+    } else {
+        // Anonymous: retract any previously-broadcast self-record so the local
+        // display also falls back to the node id.
+        state.shared_state.nickname_registry.remove(&record.node_id);
+    }
 
-    // Gossip to network
-    if let Some(ref ntx) = state.network_tx {
-        let msg = SwarmMessage::NicknameGossip(NicknameGossip {
-            record: record.clone(),
-        });
-        let _ = ntx.send(NetworkCommand::Broadcast(msg)).await;
+    tracing::debug!(
+        nickname = %record.nickname,
+        broadcast,
+        "DIAG: set_nickname persisted"
+    );
+
+    // Gossip to network only when visibility allows it.
+    if broadcast {
+        if let Some(ref ntx) = state.network_tx {
+            let msg = SwarmMessage::NicknameGossip(NicknameGossip {
+                record: record.clone(),
+            });
+            let _ = ntx.send(NetworkCommand::Broadcast(msg)).await;
+        }
     }
 
     let node_id = state.shared_state.identity.node_id();

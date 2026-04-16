@@ -97,7 +97,7 @@ impl NicknameRecordExt for NicknameRecord {
 }
 
 /// How a node presents itself on the network.
-#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum VisibilityMode {
     #[default]

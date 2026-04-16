@@ -50,22 +50,9 @@
       var sel = document.getElementById('setup-provider-select');
       var inputDiv = document.getElementById('setup-provider-input');
       var signupLink = document.getElementById('setup-provider-signup');
-      var providerUrls = {
-        openai: 'https://platform.openai.com/api-keys',
-        deepseek: 'https://platform.deepseek.com/api_keys',
-        groq: 'https://console.groq.com/keys',
-        nvidia_nim: 'https://build.nvidia.com/',
-        cerebras: 'https://cloud.cerebras.ai/',
-        sambanova: 'https://cloud.sambanova.ai/',
-        anthropic: 'https://console.anthropic.com/settings/keys',
-        mistral: 'https://console.mistral.ai/api-keys',
-        fireworks: 'https://fireworks.ai/account/api-keys',
-        together: 'https://api.together.xyz/settings/api-keys',
-        deepinfra: 'https://deepinfra.com/dash/api_keys'
-      };
       if (sel.value) {
         inputDiv.classList.remove('hidden');
-        signupLink.href = providerUrls[sel.value] || '#';
+        signupLink.href = (PROVIDER_SIGNUP_URLS && PROVIDER_SIGNUP_URLS[sel.value]) || '#';
       } else {
         inputDiv.classList.add('hidden');
       }
@@ -714,12 +701,28 @@
     });
   }
 
+  // Populate .provider-signup-link[href] for each .provider-card[data-provider]
+  // from PROVIDER_SIGNUP_URLS (providers.js). Keeps one source of truth for
+  // provider signup URLs — previously duplicated in init.js + static HTML.
+  function populateProviderSignupLinks() {
+    if (typeof PROVIDER_SIGNUP_URLS === 'undefined') return;
+    var cards = document.querySelectorAll('.provider-card[data-provider]');
+    for (var i = 0; i < cards.length; i++) {
+      var key = cards[i].getAttribute('data-provider');
+      var url = PROVIDER_SIGNUP_URLS[key];
+      if (!url) continue;
+      var link = cards[i].querySelector('.provider-signup-link');
+      if (link) link.href = url;
+    }
+  }
+
   // ========================================================================
   // Init
   // ========================================================================
   function initAfterI18n() {
     bindEvents();
     initCollapsiblePanels();
+    populateProviderSignupLinks();
     App.models.initDropdown();
     App.models.initMobileSync();
 
