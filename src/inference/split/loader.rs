@@ -135,11 +135,7 @@ impl SplitModel {
         parallel_data: Option<&[u8]>,
     ) -> Result<Self, SwarmError> {
         // Detect architecture prefix from GGUF metadata
-        let arch_str = ct
-            .metadata
-            .get("general.architecture")
-            .and_then(|v| v.to_string().ok().cloned())
-            .unwrap_or_else(|| "llama".to_string());
+        let arch_str = super::gguf_arch_str(&ct);
         let model_arch = ModelArch::from_gguf_arch(&arch_str);
 
         tracing::info!(arch = %model_arch, "Detected model architecture");

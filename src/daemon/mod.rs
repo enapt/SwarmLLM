@@ -1595,11 +1595,7 @@ fn write_api_key_file(data_dir: &std::path::Path, key: &str) {
 fn map_gguf_architecture(path: &std::path::Path) -> crate::types::ModelArchitecture {
     let arch_str = match std::fs::File::open(path) {
         Ok(mut f) => match candle_core::quantized::gguf_file::Content::read(&mut f) {
-            Ok(ct) => ct
-                .metadata
-                .get("general.architecture")
-                .and_then(|v| v.to_string().ok().cloned())
-                .unwrap_or_else(|| "llama".to_string()),
+            Ok(ct) => crate::inference::split::gguf_arch_str(&ct),
             Err(_) => "llama".to_string(),
         },
         Err(_) => "llama".to_string(),

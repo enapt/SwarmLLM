@@ -425,11 +425,7 @@ fn build_tensor_meta_from_content(
 ) -> Result<crate::inference::split::GgufTensorMeta, String> {
     use std::collections::HashMap;
 
-    let arch = ct
-        .metadata
-        .get("general.architecture")
-        .and_then(|v| v.to_string().ok().cloned())
-        .unwrap_or_else(|| "llama".to_string());
+    let arch = crate::inference::split::gguf_arch_str(ct);
 
     let md_get = |suffix: &str| -> Result<&candle_core::quantized::gguf_file::Value, String> {
         let key = format!("{arch}.{suffix}");

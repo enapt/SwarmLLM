@@ -929,11 +929,7 @@ pub fn extract_gguf_metadata(path: &Path) -> Option<GgufModelMeta> {
         );
     }
 
-    let architecture = ct
-        .metadata
-        .get("general.architecture")
-        .and_then(|v| v.to_string().ok().cloned())
-        .unwrap_or_else(|| "llama".to_string());
+    let architecture = crate::inference::split::gguf_arch_str(&ct);
 
     Some(GgufModelMeta {
         name,

@@ -7,6 +7,14 @@ use candle_core::quantized::gguf_file;
 use crate::error::SwarmError;
 use crate::inference::tokenizer::SplitTokenizer;
 
+/// Extract the GGUF `general.architecture` string, defaulting to `"llama"` when absent.
+pub fn gguf_arch_str(ct: &gguf_file::Content) -> String {
+    ct.metadata
+        .get("general.architecture")
+        .and_then(|v| v.to_string().ok().cloned())
+        .unwrap_or_else(|| "llama".to_string())
+}
+
 /// Metadata extracted from GGUF header, stored in manifest for all nodes.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct GgufTensorMeta {
@@ -56,11 +64,7 @@ impl GgufTensorMeta {
             .and_then(|v| v.to_string().ok().cloned());
 
         // Detect architecture prefix from general.architecture metadata
-        let arch = ct
-            .metadata
-            .get("general.architecture")
-            .and_then(|v| v.to_string().ok().cloned())
-            .unwrap_or_else(|| "llama".to_string());
+        let arch = gguf_arch_str(&ct);
 
         let md_get = |suffix: &str| {
             let key = format!("{arch}.{suffix}");

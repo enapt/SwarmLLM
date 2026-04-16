@@ -38,6 +38,9 @@ const RR_PING_INTERVAL_SECS: u64 = 120;
 /// Interval for stale tensor forward cleanup — catches requests silently dropped by libp2p
 /// (no OutboundFailure event) due to stale ConnectionIds or handler starvation.
 const STALE_TENSOR_CLEANUP_SECS: u64 = 10;
+/// Cancel a shard download after this many seconds without any chunk progress.
+/// Catches silent connection drops and handler starvation where no OutboundFailure fires.
+const SHARD_STALL_SECS: u64 = 30;
 /// Retention cutoff (seconds) for ping_sent_times entries when pruning under pressure.
 const PING_SENT_TIMES_CUTOFF_SECS: u64 = 120;
 /// Staleness threshold for PEX health-ping bookkeeping. Entries older than this
@@ -693,9 +696,8 @@ impl NetworkManager {
 
                     // Stale shard download watchdog — catches downloads that stopped
                     // making progress without firing OutboundFailure (silent connection
-                    // drops, handler starvation). After 30s of no chunks, cancel and
-                    // retry via retry_shard_or_fallback.
-                    const SHARD_STALL_SECS: u64 = 30;
+                    // drops, handler starvation). After SHARD_STALL_SECS of no chunks,
+                    // cancel and retry via retry_shard_or_fallback.
                     let now = std::time::Instant::now();
                     let stalled: Vec<(crate::types::ShardId, libp2p::PeerId, OutboundRequestId)> = self
                         .pending_shard_requests
@@ -718,10 +720,15 @@ impl NetworkManager {
                             %peer_id,
                             model = %shard_id.model_id,
                             shard = shard_id.index,
-                            "DIAG: stalled shard download (>30s no progress) — cancelling + retrying"
+                            stall_secs = SHARD_STALL_SECS,
+                            "DIAG: stalled shard download — cancelling + retrying"
                         );
                         self.pending_shard_requests.remove(&req_id);
-                        self.retry_shard_or_fallback(shard_id, peer_id, "stalled (no progress >30s)");
+                        self.retry_shard_or_fallback(
+                            shard_id,
+                            peer_id,
+                            &format!("stalled (no progress >{SHARD_STALL_SECS}s)"),
+                        );
                     }
                 }
                 // Process pending re-dials (mDNS simultaneous-dial race recovery).

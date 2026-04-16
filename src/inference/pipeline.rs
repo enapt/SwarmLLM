@@ -1146,11 +1146,7 @@ impl PipelineExecutor {
             return None;
         }
 
-        let arch = ct
-            .metadata
-            .get("general.architecture")
-            .and_then(|v| v.to_string().ok().cloned())
-            .unwrap_or_default();
+        let arch = crate::inference::split::gguf_arch_str(&ct);
         let eos_tokens = meta.eos_tokens_with_arch_fallback(&arch);
         let tokenizer = meta.build_tokenizer();
 

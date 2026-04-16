@@ -37,7 +37,8 @@ pub use super::tokenizer::{BpeTokenizer, SplitTokenizer, SpmTokenizer};
 pub use self::entry::BatchItem;
 pub use self::entry::{evict_split_models_lru, SplitModelEntry, SplitModelKey};
 pub use self::gguf_meta::{
-    ensure_gguf_header, save_gguf_header, GgufTensorMeta, GgufTokenizerMeta, TensorLocation,
+    ensure_gguf_header, gguf_arch_str, save_gguf_header, GgufTensorMeta, GgufTokenizerMeta,
+    TensorLocation,
 };
 pub use self::kv_cache::KvCacheStore;
 pub use self::model::SplitModel;
