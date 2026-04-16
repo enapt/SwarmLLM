@@ -961,6 +961,8 @@
   "models.pricing_out": "${price}/1K 输出",
   "errors.request_timeout": "请求超时 — 服务器可能繁忙或无法访问",
   "map.tooltip_demand_rate": "{rate} 请求/10m",
+  "map.pipeline_you": "你",
+  "map.pipeline_hop": "跳",
   "dashboard.chip_subscription": "订阅",
   "dashboard.sub_authenticated": "已认证",
   "dashboard.sub_not_authenticated": "未认证",

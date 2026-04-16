@@ -961,6 +961,8 @@
   "models.pricing_out": "${price}/1K出力",
   "errors.request_timeout": "リクエストがタイムアウトしました — サーバーがビジー状態か到達不能の可能性があります",
   "map.tooltip_demand_rate": "{rate} req/10m",
+  "map.pipeline_you": "あなた",
+  "map.pipeline_hop": "ホップ",
   "dashboard.chip_subscription": "サブスクリプション",
   "dashboard.sub_authenticated": "認証済み",
   "dashboard.sub_not_authenticated": "未認証",

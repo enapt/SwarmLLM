@@ -961,6 +961,8 @@
   "models.pricing_out": "${price}/1K wyj",
   "errors.request_timeout": "Przekroczono limit czasu żądania — serwer może być zajęty lub niedostępny",
   "map.tooltip_demand_rate": "{rate} req/10m",
+  "map.pipeline_you": "Ty",
+  "map.pipeline_hop": "Skok",
   "dashboard.chip_subscription": "Subskrypcja",
   "dashboard.sub_authenticated": "Uwierzytelniony",
   "dashboard.sub_not_authenticated": "Nieuwierzytelniony",

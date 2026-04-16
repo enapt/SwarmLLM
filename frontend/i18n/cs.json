@@ -961,6 +961,8 @@
   "models.pricing_out": "${price}/1K výstup",
   "errors.request_timeout": "Časový limit požadavku vypršel — server může být zaneprázdněn nebo nedostupný",
   "map.tooltip_demand_rate": "{rate} req/10m",
+  "map.pipeline_you": "Vy",
+  "map.pipeline_hop": "Skok",
   "dashboard.chip_subscription": "Předplatné",
   "dashboard.sub_authenticated": "Ověřeno",
   "dashboard.sub_not_authenticated": "Neověřeno",

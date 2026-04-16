@@ -961,6 +961,8 @@
   "models.pricing_out": "${price}/1K إخراج",
   "errors.request_timeout": "انتهت مهلة الطلب — قد يكون الخادم مشغولاً أو غير قابل للوصول",
   "map.tooltip_demand_rate": "{rate} طلب/10دقائق",
+  "map.pipeline_you": "أنت",
+  "map.pipeline_hop": "قفزة",
   "dashboard.chip_subscription": "الاشتراك",
   "dashboard.sub_authenticated": "مصادق",
   "dashboard.sub_not_authenticated": "غير مصادق",

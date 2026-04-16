@@ -961,6 +961,8 @@
   "models.pricing_out": "${price}/1K keluar",
   "errors.request_timeout": "Permintaan habis waktu — server mungkin sibuk atau tidak dapat dijangkau",
   "map.tooltip_demand_rate": "{rate} req/10m",
+  "map.pipeline_you": "Anda",
+  "map.pipeline_hop": "Lompatan",
   "dashboard.chip_subscription": "Langganan",
   "dashboard.sub_authenticated": "Terautentikasi",
   "dashboard.sub_not_authenticated": "Belum terautentikasi",

@@ -961,6 +961,8 @@
   "models.pricing_out": "${price}/1K out",
   "errors.request_timeout": "Yêu cầu đã hết thời gian — máy chủ có thể đang bận hoặc không thể truy cập",
   "map.tooltip_demand_rate": "{rate} req/10m",
+  "map.pipeline_you": "Bạn",
+  "map.pipeline_hop": "Bước nhảy",
   "dashboard.chip_subscription": "Đăng ký",
   "dashboard.sub_authenticated": "Đã xác thực",
   "dashboard.sub_not_authenticated": "Chưa xác thực",

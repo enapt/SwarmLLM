@@ -21,6 +21,8 @@ const PREFILL_SECS_PER_LAYER: u64 = 15;
 const DECODE_SECS_PER_LAYER: u64 = 2;
 const SEGMENT_TIMEOUT_MIN_SECS: u64 = 30;
 const SEGMENT_TIMEOUT_MAX_SECS: u64 = 600;
+/// Cap pending layer results to prevent OOM under sustained load.
+const MAX_PENDING_LAYER_RESULTS: usize = 1024;
 /// Fallback EOS token ID when GGUF metadata is unavailable. Matches LLaMA family;
 /// other architectures (Qwen2, Phi-3, Gemma) have different EOS tokens.
 /// A warning is emitted when this fallback is used.
@@ -1404,8 +1406,6 @@ impl PipelineExecutor {
 
                 // Register the result channel BEFORE sending so we never miss
                 // a fast response.
-                // Cap pending entries to prevent OOM under sustained load
-                const MAX_PENDING_LAYER_RESULTS: usize = 1024;
                 if self.shared_state.pending_layer_results.len() >= MAX_PENDING_LAYER_RESULTS {
                     return Err(SwarmError::ServiceUnavailable(
                         "Pipeline overloaded — too many pending layer results".into(),

@@ -961,6 +961,8 @@
   "models.pricing_out": "${price}/1K sortie",
   "errors.request_timeout": "Délai d'attente dépassé — le serveur est peut-être occupé ou inaccessible",
   "map.tooltip_demand_rate": "{rate} req/10m",
+  "map.pipeline_you": "Vous",
+  "map.pipeline_hop": "Saut",
   "dashboard.chip_subscription": "Abonnement",
   "dashboard.sub_authenticated": "Authentifié",
   "dashboard.sub_not_authenticated": "Non authentifié",

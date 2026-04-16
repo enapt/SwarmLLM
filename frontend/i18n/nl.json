@@ -961,6 +961,8 @@
   "models.pricing_out": "${price}/1K uitvoer",
   "errors.request_timeout": "Verzoek verlopen — server is mogelijk bezet of onbereikbaar",
   "map.tooltip_demand_rate": "{rate} req/10m",
+  "map.pipeline_you": "Jij",
+  "map.pipeline_hop": "Hop",
   "dashboard.chip_subscription": "Abonnement",
   "dashboard.sub_authenticated": "Geverifieerd",
   "dashboard.sub_not_authenticated": "Niet geverifieerd",

@@ -961,6 +961,8 @@
   "models.pricing_out": "${price}/1K çıkış",
   "errors.request_timeout": "İstek zaman aşımına uğradı — sunucu meşgul veya erişilemez olabilir",
   "map.tooltip_demand_rate": "{rate} istek/10dk",
+  "map.pipeline_you": "Sen",
+  "map.pipeline_hop": "Atlama",
   "dashboard.chip_subscription": "Abonelik",
   "dashboard.sub_authenticated": "Kimlik doğrulandı",
   "dashboard.sub_not_authenticated": "Kimlik doğrulanmadı",

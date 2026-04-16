@@ -961,6 +961,8 @@
   "models.pricing_out": "${price}/1K вих",
   "errors.request_timeout": "Час очікування запиту вичерпано — сервер може бути зайнятий або недоступний",
   "map.tooltip_demand_rate": "{rate} запитів/10м",
+  "map.pipeline_you": "Ви",
+  "map.pipeline_hop": "Перехід",
   "dashboard.chip_subscription": "Підписка",
   "dashboard.sub_authenticated": "Автентифіковано",
   "dashboard.sub_not_authenticated": "Не автентифіковано",

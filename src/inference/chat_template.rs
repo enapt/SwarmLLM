@@ -459,7 +459,7 @@ fn eval_expr(expr: &str, state: &EvalState, ctx: &EvalCtx) -> Option<String> {
     }
 
     // Handle | filter (trim, tojson, etc.) — filter binds tighter than +
-    if let Some((base, filter)) = split_filter(expr) {
+    if let Some((base, filter)) = split_outside_strings(expr, '|') {
         let val = eval_expr(base, state, ctx)?;
         return Some(apply_filter(&val, filter));
     }
@@ -550,23 +550,6 @@ fn eval_messages_index(expr: &str, messages: &[ChatMessage]) -> Option<String> {
         return Some(msg.content.clone());
     }
 
-    None
-}
-
-/// Split on `| filter_name` outside strings (first occurrence).
-fn split_filter(expr: &str) -> Option<(&str, &str)> {
-    let mut in_single = false;
-    let mut in_double = false;
-    for (i, ch) in expr.char_indices() {
-        match ch {
-            '\'' if !in_double => in_single = !in_single,
-            '"' if !in_single => in_double = !in_double,
-            '|' if !in_single && !in_double => {
-                return Some((expr[..i].trim(), expr[i + 1..].trim()));
-            }
-            _ => {}
-        }
-    }
     None
 }
 
@@ -837,7 +820,7 @@ pub fn chatml_fallback(messages: &[ChatMessage]) -> String {
 /// Build a Gemma-formatted prompt (for Gemma 1/2 models).
 ///
 /// Gemma uses `<start_of_turn>role\ncontent<end_of_turn>` format.
-pub fn gemma_fallback(messages: &[ChatMessage]) -> String {
+fn gemma_fallback(messages: &[ChatMessage]) -> String {
     let mut prompt = String::from("<bos>");
     for msg in messages {
         let role = match msg.role {
@@ -862,7 +845,7 @@ const IMAGE_PLACEHOLDER: &str = "<image>";
 /// When a user message contains images, `<image>\n` is prepended to the user content
 /// so that the vision encoder embeddings can replace the `<image>` token embedding
 /// at the correct position in the sequence.
-pub fn vicuna_fallback(messages: &[ChatMessage]) -> String {
+fn vicuna_fallback(messages: &[ChatMessage]) -> String {
     let mut prompt = String::new();
     // System message
     let sys = messages.iter().find(|m| matches!(m.role, Role::System));

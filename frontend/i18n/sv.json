@@ -961,6 +961,8 @@
   "models.pricing_out": "${price}/1K ut",
   "errors.request_timeout": "Begäran tog för lång tid — servern kan vara upptagen eller oåtkomlig",
   "map.tooltip_demand_rate": "{rate} req/10m",
+  "map.pipeline_you": "Du",
+  "map.pipeline_hop": "Hopp",
   "dashboard.chip_subscription": "Prenumeration",
   "dashboard.sub_authenticated": "Autentiserad",
   "dashboard.sub_not_authenticated": "Inte autentiserad",

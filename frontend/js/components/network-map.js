@@ -315,7 +315,7 @@
           }
           var local = regionCenter(plan.local_region);
           var pts = [];
-          if (local) pts.push({ c: local, label: 'You', local: true });
+          if (local) pts.push({ c: local, label: I18n.t('map.pipeline_you'), local: true });
           plan.segments.forEach(function(seg, i) {
             if (seg.is_local && pts.length && pts[pts.length - 1].local) return;
             var c = regionCenter(seg.region);
@@ -353,7 +353,7 @@
             ring.setAttribute('cy', p.c[1]);
             ring.setAttribute('r', 8);
             ring.setAttribute('class', 'map-pipeline-node' + (p.local ? ' local' : ''));
-            var title = (p.label === 'You' ? 'You' : 'Hop ' + p.label) +
+            var title = (p.local ? I18n.t('map.pipeline_you') : I18n.t('map.pipeline_hop') + ' ' + p.label) +
               (p.nickname ? ' — ' + p.nickname : '') +
               (typeof p.latency === 'number' ? ' (' + p.latency + 'ms)' : '');
             var t = document.createElementNS(ns, 'title');

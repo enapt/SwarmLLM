@@ -960,6 +960,10 @@ pub async fn delete_model(
     // Remove from hf_sources
     shared.models.hf_sources.remove(&mid);
 
+    // Free vision encoder (mmproj) and local embedder caches
+    shared.vision_modules.remove(&mid);
+    shared.local_embedders.remove(&mid);
+
     // Evict cached segments and kill worker subprocess
     shared.evict_and_unload(&mid).await;
 
@@ -1028,6 +1032,10 @@ pub async fn unload_model(
 
     // Clear GGUF metadata cache for this model
     shared.gguf_meta.remove(&mid);
+
+    // Free vision encoder (mmproj) and local embedder caches
+    shared.vision_modules.remove(&mid);
+    shared.local_embedders.remove(&mid);
 
     // Notify dashboard
     shared.signal_dashboard(crate::daemon::state::DashboardSignal::ModelsChanged);

@@ -961,6 +961,8 @@
   "models.pricing_out": "${price}/1K out",
   "errors.request_timeout": "Richiesta scaduta — il server potrebbe essere occupato o irraggiungibile",
   "map.tooltip_demand_rate": "{rate} req/10m",
+  "map.pipeline_you": "Tu",
+  "map.pipeline_hop": "Salto",
   "dashboard.chip_subscription": "Abbonamento",
   "dashboard.sub_authenticated": "Autenticato",
   "dashboard.sub_not_authenticated": "Non autenticato",

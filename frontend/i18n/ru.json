@@ -961,6 +961,8 @@
   "models.pricing_out": "${price}/1К исх.",
   "errors.request_timeout": "Превышено время ожидания запроса — сервер может быть занят или недоступен",
   "map.tooltip_demand_rate": "{rate} запр./10мин",
+  "map.pipeline_you": "Вы",
+  "map.pipeline_hop": "Переход",
   "dashboard.chip_subscription": "Подписка",
   "dashboard.sub_authenticated": "Аутентифицировано",
   "dashboard.sub_not_authenticated": "Не аутентифицировано",

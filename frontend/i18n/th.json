@@ -961,6 +961,8 @@
   "models.pricing_out": "${price}/1K เอาต์พุต",
   "errors.request_timeout": "คำขอหมดเวลา — เซิร์ฟเวอร์อาจยุ่งหรือไม่สามารถเข้าถึงได้",
   "map.tooltip_demand_rate": "{rate} req/10m",
+  "map.pipeline_you": "คุณ",
+  "map.pipeline_hop": "Hop",
   "dashboard.chip_subscription": "การสมัคร",
   "dashboard.sub_authenticated": "ตรวจสอบแล้ว",
   "dashboard.sub_not_authenticated": "ยังไม่ตรวจสอบ",
