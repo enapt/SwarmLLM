@@ -12,7 +12,7 @@ use crate::model::registry::ModelRegistry;
 use crate::storage::db::Database;
 use crate::types::{NodeId, NodeStats, PeerInfo, PipelineAssignment};
 
-use super::resolve_api_key;
+use super::helpers::resolve_api_key;
 
 mod activity;
 mod credits;

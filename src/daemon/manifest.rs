@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use crate::model::manifest::ModelManifestExt;
 
-use super::map_gguf_architecture;
+use super::helpers::map_gguf_architecture;
 use super::state::{LoadedModelInfo, SharedState};
 
 /// Generate a ModelManifest for a locally loaded GGUF file and register it.
