@@ -23,6 +23,8 @@ use convert::{
 };
 #[cfg(test)]
 use sse::{serialize_anthropic_event, AnthropicSseEvent};
+#[cfg(feature = "claude-subscription")]
+use types::SystemContent;
 use types::{AnthropicContent, ContentBlock, MessagesRequest};
 
 // ---- Handler ----

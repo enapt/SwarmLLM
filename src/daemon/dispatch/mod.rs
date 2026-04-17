@@ -19,7 +19,7 @@ const MAX_NICKNAME_REGISTRY: usize = 10_000;
 /// Interval for sweeping stale zero-count entries from peer_forward_counts.
 const FORWARD_COUNTS_CLEANUP_SECS: u64 = 60;
 /// Zstd compression level for tensor wire payloads.
-const ZSTD_COMPRESS_LEVEL: i32 = 3;
+pub(super) const ZSTD_COMPRESS_LEVEL: i32 = 3;
 /// Maximum age (ms) for regional gossip messages before they're considered stale.
 const GOSSIP_STALENESS_MS: u64 = 15 * 60 * 1000;
 /// Maximum AllReduce partials in flight before dropping new TpAllReduceRequests (DoS guard).
@@ -32,7 +32,10 @@ const MAX_DEMAND_ENTRIES: usize = 10_000;
 /// Pipeline sealing: encrypt the token IDs in a LayerResult for the requester's X25519 key.
 /// If `requester_node_id` is present, seals `token_ids` into `sealed_token_ids` and clears
 /// the plaintext `token_ids`. Falls back silently on crypto errors (result sent unsealed).
-fn seal_layer_result(result: &mut crate::types::LayerResult, requester_node_id: Option<&[u8; 32]>) {
+pub(super) fn seal_layer_result(
+    result: &mut crate::types::LayerResult,
+    requester_node_id: Option<&[u8; 32]>,
+) {
     let requester_bytes = match requester_node_id {
         Some(b) => b,
         None => return,
@@ -119,7 +122,7 @@ pub fn estimate_vram_from_shard_dir(
     ((total_bytes as f64 * layer_fraction) / (1024.0 * 1024.0)) as u64
 }
 
-fn track_forward_participation(shared_state: &SharedState, estimated_tokens: u32) {
+pub(super) fn track_forward_participation(shared_state: &SharedState, estimated_tokens: u32) {
     if let Ok(mut stats) = shared_state.metrics.node_stats.try_write() {
         stats.forwards_served += 1;
     }
@@ -277,7 +280,7 @@ pub(crate) async fn dispatch_network_messages(
                                         let ps = peer_sender;
                                         tokio::spawn(async move {
                                             let _permit = permit;
-                                            handle_layer_forward(ss, ntx, forward).await;
+                                            layer_forward::handle_layer_forward(ss, ntx, forward).await;
                                             // Decrement per-peer count; remove entry if zero to prevent unbounded growth
                                             if let Some(c) = pfc.get(&ps) {
                                                 let prev = c.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
@@ -345,7 +348,7 @@ pub(crate) async fn dispatch_network_messages(
                                         let ntx = network_tx.clone();
                                         tokio::spawn(async move {
                                             let _permit = permit;
-                                            handle_vision_encode_request(ss, ntx, req).await;
+                                            vision::handle_vision_encode_request(ss, ntx, req).await;
                                         });
                                     }
                                     // T13: VisionEncodeResponse — fire pending oneshot
@@ -1382,423 +1385,5 @@ pub(crate) async fn dispatch_network_messages(
     }
 }
 
-async fn handle_layer_forward(
-    shared_state: Arc<SharedState>,
-    network_tx: mpsc::Sender<NetworkCommand>,
-    forward: crate::types::LayerForward,
-) {
-    let request_id = forward.request_id;
-    let sender_peer_bytes = match forward.sender_peer_bytes {
-        Some(ref bytes) => bytes.clone(),
-        None => {
-            tracing::warn!(request_id = %request_id, "LayerForward missing sender_peer_bytes");
-            return;
-        }
-    };
-
-    // Estimate token count for credit accounting: prefill carries many tokens,
-    // decode carries 1. For prefill (seq==0), estimate from activation bytes
-    // (raw prompt: ~4 bytes/token, embedded: hidden_dim*4 bytes/token).
-    let estimated_tokens: u32 = if forward.sequence_num == 0 {
-        // Rough estimate: prompt bytes / 4 chars per token
-        (forward.activations.len() / 4).max(1) as u32
-    } else {
-        1
-    };
-    let forward_start = std::time::Instant::now();
-    tracing::info!(
-        request_id = %request_id,
-        seq = forward.sequence_num,
-        activation_bytes = forward.activations.len(),
-        estimated_tokens,
-        model_id = %forward.model_id,
-        layer_range = ?forward.layer_range,
-        "DIAG: processing LayerForward locally"
-    );
-
-    let model_id = forward.model_id.clone();
-
-    // Determine our layer range from the manifest and local shards
-    let manifest = match shared_state.model_registry.get_manifest(&model_id) {
-        Some(m) => m,
-        None => {
-            send_error_result(
-                &network_tx,
-                &sender_peer_bytes,
-                request_id,
-                "No manifest for model",
-            )
-            .await;
-            return;
-        }
-    };
-
-    // Figure out which shard indices we hold locally
-    let local_node_id = shared_state.identity.node_id().clone();
-    let mut local_shard_indices: Vec<u32> = Vec::new();
-    for shard_info in &manifest.shards {
-        let shard_id = crate::types::ShardId {
-            model_id: model_id.clone(),
-            index: shard_info.index,
-        };
-        let holders = shared_state.model_registry.shard_holders(&shard_id);
-        if holders.contains(&local_node_id) {
-            local_shard_indices.push(shard_info.index);
-        }
-    }
-
-    if local_shard_indices.is_empty() {
-        send_error_result(
-            &network_tx,
-            &sender_peer_bytes,
-            request_id,
-            "No local shards for model",
-        )
-        .await;
-        return;
-    }
-
-    // Layer range is required in the forward message — no guessing
-    let (layer_start, layer_end, total_layers) = {
-        let (ls, le) = forward.layer_range;
-        let total = manifest.num_layers as usize;
-        (ls as usize, le as usize, total)
-    };
-
-    if layer_start >= layer_end || layer_end > total_layers {
-        send_error_result(
-            &network_tx,
-            &sender_peer_bytes,
-            request_id,
-            &format!(
-                "Invalid layer range [{layer_start}..{layer_end}) for model with {total_layers} layers"
-            ),
-        )
-        .await;
-        return;
-    }
-
-    let (is_first, is_last) = crate::model::shard::compute_first_last(
-        &local_shard_indices,
-        manifest.shard_count,
-        layer_start,
-        layer_end,
-        total_layers,
-    );
-
-    // Ensure the split model metadata entry exists (lightweight — no GPU loading).
-    let split_key = shared_state.ensure_split_model_entry(
-        &model_id,
-        layer_start,
-        layer_end,
-        is_first,
-        is_last,
-        total_layers,
-    );
-
-    // Touch the metadata entry
-    if let Some(entry) = shared_state.split_models.get(&split_key) {
-        entry.value().touch();
-    }
-
-    // Capture TP metadata and requester_node_id before moving forward into the process pool
-    let tp_meta = forward.tp_meta.clone();
-    let requester_node_id = forward.requester_node_id;
-
-    // Route forward pass to subprocess via process pool
-    let result = shared_state.model_process_pool.forward(forward).await;
-
-    let result = match result {
-        Ok(r) => r,
-        Err(e) => {
-            send_error_result(
-                &network_tx,
-                &sender_peer_bytes,
-                request_id,
-                &format!("Worker: {e}"),
-            )
-            .await;
-            return;
-        }
-    };
-
-    let forward_elapsed = forward_start.elapsed();
-    tracing::info!(
-        request_id = %request_id,
-        tokens = result.token_ids.len(),
-        activations_bytes = result.activations.len(),
-        is_last,
-        elapsed_ms = forward_elapsed.as_millis() as u64,
-        model_id = %model_id,
-        layers = format!("[{layer_start}..{layer_end})"),
-        tp = tp_meta.is_some(),
-        "DIAG: LayerForward processed via worker subprocess"
-    );
-
-    // TP path: send partial as AllReduceRequest to the coordinator (sender) instead of LayerResult
-    if let Some(ref tp) = tp_meta {
-        let layer_idx = match tp.phase {
-            crate::types::TpPhase::AttnOnly => tp.single_layer * 2,
-            crate::types::TpPhase::FfnOnly => tp.single_layer * 2 + 1,
-            crate::types::TpPhase::Full | crate::types::TpPhase::EmbedOnly => tp.single_layer,
-        };
-
-        // Extract raw f32 bytes from tensor format (strip header) for AllReduce.
-        // The worker returns activations in tensor_to_bytes format (ndim + shape + dtype + data).
-        // AllReduce needs just the raw f32 data to ensure consistent sizes across ranks.
-        let (raw_f32, shape) = match crate::inference::split::bytes_to_tensor(&result.activations) {
-            Ok(tensor) => {
-                let shape: Vec<u32> = tensor.dims().iter().map(|&d| d as u32).collect();
-                match crate::inference::split::tensor_to_raw_f32(&tensor) {
-                    Ok(raw) => (raw, shape),
-                    Err(e) => {
-                        tracing::warn!(error = %e, "Failed to extract raw f32 from TP partial");
-                        return;
-                    }
-                }
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "Failed to deserialize TP partial tensor");
-                return;
-            }
-        };
-
-        let compressed = match zstd::encode_all(std::io::Cursor::new(&raw_f32), 1) {
-            Ok(c) => c,
-            Err(e) => {
-                tracing::warn!(error = %e, "Failed to compress TP partial");
-                return;
-            }
-        };
-
-        let allreduce_req = crate::types::TpAllReduceRequest {
-            request_id,
-            layer_idx,
-            tp_rank: tp.tp_rank as u32,
-            tp_size: tp.tp_size as u32,
-            partial_data: compressed,
-            shape,
-            op: crate::types::AllReduceOp::Sum,
-            sender_peer_bytes: None,
-        };
-
-        // Send to the coordinator (= the node that sent us the LayerForward)
-        if let Err(e) = network_tx
-            .send(crate::types::NetworkCommand::SendAllReduceRequest {
-                target_peer_bytes: sender_peer_bytes,
-                request: allreduce_req,
-            })
-            .await
-        {
-            tracing::warn!(error = %e, "Failed to send TpAllReduceRequest");
-        }
-
-        track_forward_participation(&shared_state, estimated_tokens);
-        return;
-    }
-
-    track_forward_participation(&shared_state, estimated_tokens);
-
-    // Pipeline sealing: encrypt token IDs for requester if this is the final segment
-    let mut result = result;
-    if is_last {
-        seal_layer_result(&mut result, requester_node_id.as_ref());
-    }
-
-    // Send back as a separate request to the originating peer
-    if let Err(e) = network_tx
-        .send(NetworkCommand::SendTensorResult {
-            target_peer_bytes: sender_peer_bytes,
-            result,
-        })
-        .await
-    {
-        tracing::warn!(error = %e, "Failed to send LayerResult back to peer");
-    }
-}
-
-/// Handle a VisionEncodeRequest: encode the image using local mmproj and respond.
-async fn handle_vision_encode_request(
-    shared_state: Arc<SharedState>,
-    network_tx: mpsc::Sender<NetworkCommand>,
-    req: crate::types::VisionEncodeRequest,
-) {
-    let model_id = &req.model_id;
-
-    // SEC: Reject oversized image payloads BEFORE loading vision module to prevent
-    // a malicious peer from triggering expensive module loading with large payloads.
-    const MAX_IMAGE_BYTES: usize = 20 * 1024 * 1024; // 20 MB
-    if req.image_data.len() > MAX_IMAGE_BYTES {
-        tracing::warn!(
-            request_id = %req.request_id,
-            size = req.image_data.len(),
-            max = MAX_IMAGE_BYTES,
-            "VisionEncodeRequest image_data too large — rejecting"
-        );
-        return;
-    }
-
-    tracing::info!(
-        request_id = %req.request_id,
-        model = %model_id,
-        image_bytes = req.image_data.len(),
-        "Handling VisionEncodeRequest"
-    );
-
-    // Load or get the vision module
-    let vision_module = if let Some(entry) = shared_state.vision_modules.get(model_id) {
-        entry.value().clone()
-    } else {
-        // Try to load mmproj on-demand
-        let model_dir = shared_state.model_dir(&model_id.0);
-        let mmproj_path = model_dir.join(crate::model::shard::MMPROJ_FILENAME);
-        if !mmproj_path.exists() {
-            tracing::warn!(
-                request_id = %req.request_id,
-                model = %model_id,
-                "VisionEncodeRequest received but no mmproj.gguf found"
-            );
-            return;
-        }
-        match crate::inference::vision::load_from_mmproj_gguf(
-            &mmproj_path,
-            &candle_core::Device::Cpu,
-        ) {
-            Ok(module) => {
-                let module = Arc::new(module);
-                shared_state
-                    .vision_modules
-                    .insert(model_id.clone(), module.clone());
-                module
-            }
-            Err(e) => {
-                tracing::warn!(
-                    request_id = %req.request_id,
-                    error = %e,
-                    "Failed to load mmproj for VisionEncodeRequest"
-                );
-                return;
-            }
-        }
-    };
-
-    // Size check already done above (before module loading).
-    // This is a defense-in-depth second check.
-    if req.image_data.len() > MAX_IMAGE_BYTES {
-        return;
-    }
-
-    // Decode JPEG image into ImageData
-    let img = match image::load_from_memory(&req.image_data) {
-        Ok(dyn_img) => {
-            let rgb = dyn_img.to_rgb8();
-            let (w, h) = rgb.dimensions();
-            crate::types::ImageData {
-                rgb_bytes: rgb.into_raw(),
-                width: w,
-                height: h,
-            }
-        }
-        Err(e) => {
-            tracing::warn!(
-                request_id = %req.request_id,
-                error = %e,
-                "Failed to decode image in VisionEncodeRequest"
-            );
-            return;
-        }
-    };
-
-    // Encode image to vision embeddings (CPU-bound)
-    let encode_result = tokio::task::block_in_place(|| vision_module.encode_images(&[img]));
-    match encode_result {
-        Ok(embeddings) => {
-            // Compress embeddings with zstd for wire transfer
-            let (num_tokens, hidden_dim) = embeddings.dims2().unwrap_or((0, 0));
-            let raw_bytes: Vec<u8> = embeddings
-                .to_dtype(candle_core::DType::F16)
-                .and_then(|t| t.to_vec2::<half::f16>())
-                .map(|v: Vec<Vec<half::f16>>| {
-                    let mut bytes = Vec::with_capacity(num_tokens * hidden_dim * 2);
-                    for row in v {
-                        for f in row {
-                            bytes.extend_from_slice(&f.to_le_bytes());
-                        }
-                    }
-                    bytes
-                })
-                .unwrap_or_default();
-            let compressed =
-                zstd::encode_all(std::io::Cursor::new(&raw_bytes), ZSTD_COMPRESS_LEVEL)
-                    .unwrap_or(raw_bytes);
-
-            let response = crate::types::VisionEncodeResponse {
-                request_id: req.request_id,
-                embeddings: compressed,
-                num_tokens: num_tokens as u32,
-                hidden_dim: hidden_dim as u32,
-            };
-
-            tracing::info!(
-                request_id = %req.request_id,
-                num_tokens,
-                hidden_dim,
-                compressed_bytes = response.embeddings.len(),
-                "VisionEncodeRequest completed, sending response"
-            );
-
-            let msg = if let Some(target_bytes) = &req.sender_peer_bytes {
-                NetworkCommand::SendDirectMessage {
-                    target_peer_bytes: target_bytes.clone(),
-                    message: SwarmMessage::VisionEncodeResponse(response),
-                }
-            } else {
-                tracing::warn!(request_id = %req.request_id, "VisionEncodeResponse has no sender — dropping");
-                return;
-            };
-            if let Err(e) = network_tx.send(msg).await {
-                tracing::warn!(error = %e, "Failed to send VisionEncodeResponse");
-            }
-        }
-        Err(e) => {
-            tracing::warn!(
-                request_id = %req.request_id,
-                error = %e,
-                "Vision encoding failed"
-            );
-        }
-    }
-}
-
-/// Send an error LayerResult back to the requesting peer.
-async fn send_error_result(
-    network_tx: &mpsc::Sender<NetworkCommand>,
-    target_peer_bytes: &[u8],
-    request_id: uuid::Uuid,
-    error: &str,
-) {
-    tracing::warn!(request_id = %request_id, error, "LayerForward processing failed");
-    // Sanitize error for network — don't leak internal paths, layer counts, or model topology
-    let sanitized = if error.contains("layer range") || error.contains("layer_start") {
-        "Layer configuration error".to_string()
-    } else if error.contains("No local shards") || error.contains("shard") {
-        "Required shards not available".to_string()
-    } else {
-        // Truncate and strip paths
-        let msg = error.chars().take(100).collect::<String>();
-        msg.replace(['/', '\\'], "")
-    };
-    let result = crate::types::LayerResult {
-        request_id,
-        token_ids: vec![],
-        finish_reason: Some(crate::types::NetworkFinishReason::Error(sanitized)),
-        activations: vec![],
-        sealed_token_ids: None,
-    };
-    let _ = network_tx
-        .send(NetworkCommand::SendTensorResult {
-            target_peer_bytes: target_peer_bytes.to_vec(),
-            result,
-        })
-        .await;
-}
+mod layer_forward;
+mod vision;
