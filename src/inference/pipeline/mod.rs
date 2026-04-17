@@ -237,6 +237,7 @@ mod tests {
             segments: vec![],
             standbys: vec![],
             tp_groups: vec![],
+            supports_speculative: false,
         };
 
         let mut executor = PipelineExecutor::new(state, tx, request, assignment);
@@ -264,6 +265,7 @@ mod tests {
             }],
             standbys: vec![],
             tp_groups: vec![],
+            supports_speculative: false,
         };
 
         let mut executor = PipelineExecutor::new(state, tx, request, assignment);

@@ -200,6 +200,7 @@ impl PipelineScheduler {
                 segments: vec![segment],
                 standbys: vec![],
                 tp_groups,
+                supports_speculative: true,
             });
         }
 
@@ -239,6 +240,9 @@ impl PipelineScheduler {
             segments,
             standbys,
             tp_groups,
+            // All current nodes advertise speculative verify-batch support. Will
+            // flip to a per-peer capability check once we gate on version.
+            supports_speculative: true,
         })
     }
 

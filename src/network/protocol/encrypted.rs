@@ -56,6 +56,27 @@ pub fn encode_layer_forward_encrypted(
         buf.push(if forward.pre_embedded { 1 } else { 0 });
     }
 
+    // Optional: speculative trailer (marker 0x03). In encrypted mode, the draft
+    // tokens travel in the cleartext trailer — they are not sensitive (they
+    // are just candidate IDs). The sealed activations already carry the
+    // coordinator's position; drafts ride alongside as plaintext metadata.
+    if !forward.draft_tokens.is_empty() {
+        if forward.draft_tokens.len() > u16::MAX as usize {
+            return Err(SwarmError::Network(format!(
+                "draft_tokens too long: {} > {}",
+                forward.draft_tokens.len(),
+                u16::MAX
+            )));
+        }
+        buf.push(0x03);
+        let flags: u8 = if forward.spec_logits_requested { 1 } else { 0 };
+        buf.push(flags);
+        buf.extend_from_slice(&(forward.draft_tokens.len() as u16).to_le_bytes());
+        for t in &forward.draft_tokens {
+            buf.extend_from_slice(&t.to_le_bytes());
+        }
+    }
+
     Ok(buf)
 }
 
@@ -153,7 +174,7 @@ pub fn decode_layer_forward_encrypted(
 
     // Optional: tp_meta trailer after sealed data (marker 0x02 + 7 bytes)
     let tp_meta_start = sealed_start + sealed_len;
-    let (tp_meta, tp_pre_embedded) =
+    let (tp_meta, tp_pre_embedded, mut cursor) =
         if data.len() >= tp_meta_start + 9 && data[tp_meta_start] == 0x02 {
             let tp_rank = data[tp_meta_start + 1];
             let tp_size = data[tp_meta_start + 2];
@@ -177,10 +198,38 @@ pub fn decode_layer_forward_encrypted(
                     phase,
                 }),
                 pre_embedded,
+                tp_meta_start + 9,
             )
         } else {
-            (None, false)
+            (None, false, tp_meta_start)
         };
+
+    // Optional: speculative trailer (marker 0x03)
+    let (draft_tokens, spec_logits_requested) = if data.len() >= cursor + 4 && data[cursor] == 0x03
+    {
+        let flags = data[cursor + 1];
+        let num_drafts = u16::from_le_bytes(
+            data[cursor + 2..cursor + 4]
+                .try_into()
+                .map_err(|_| SwarmError::Network("Invalid num_drafts".into()))?,
+        ) as usize;
+        cursor += 4;
+        if data.len() < cursor + num_drafts * 4 {
+            return Err(SwarmError::Network("draft_tokens truncated".into()));
+        }
+        let mut drafts = Vec::with_capacity(num_drafts);
+        for i in 0..num_drafts {
+            let off = cursor + i * 4;
+            drafts.push(u32::from_le_bytes(
+                data[off..off + 4]
+                    .try_into()
+                    .map_err(|_| SwarmError::Network("Invalid draft token".into()))?,
+            ));
+        }
+        (drafts, flags & 0x01 != 0)
+    } else {
+        (Vec::new(), false)
+    };
 
     let forward = LayerForward {
         request_id,
@@ -196,6 +245,8 @@ pub fn decode_layer_forward_encrypted(
         requester_node_id: None,
         pre_embedded: tp_pre_embedded,
         adapter_id: None,
+        draft_tokens,
+        spec_logits_requested,
     };
 
     Ok((forward, sealed, aad))

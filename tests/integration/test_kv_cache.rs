@@ -31,6 +31,7 @@ fn make_pipeline(request_id: uuid::Uuid) -> PipelineAssignment {
         ],
         standbys: vec![],
         tp_groups: vec![],
+        supports_speculative: false,
     }
 }
 

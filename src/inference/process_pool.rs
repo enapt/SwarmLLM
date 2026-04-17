@@ -278,6 +278,8 @@ impl ModelProcessPool {
             requester_node_id,
             pre_embedded,
             adapter_id,
+            draft_tokens,
+            spec_logits_requested,
         } = forward;
 
         let ipc_fwd = IpcForward {
@@ -293,6 +295,8 @@ impl ModelProcessPool {
             pre_embedded,
             sampling: Default::default(),
             adapter_id,
+            draft_tokens,
+            spec_logits_requested,
         };
 
         let mut sock = handle.socket.lock().await;
@@ -316,6 +320,7 @@ impl ModelProcessPool {
                             finish_reason: r.finish_reason,
                             activations,
                             sealed_token_ids: if r.sealed { r.sealed_payload } else { None },
+                            spec_logits: Vec::new(),
                         });
                     }
                     WorkerMsg::Error {

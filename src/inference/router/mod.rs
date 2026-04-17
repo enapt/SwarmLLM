@@ -633,6 +633,7 @@ impl InferenceRouter {
                         segments: vec![],
                         standbys: vec![],
                         tp_groups: vec![],
+                        supports_speculative: false,
                     },
                     0,
                     prompt,

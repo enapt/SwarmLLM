@@ -205,6 +205,7 @@ where
                         ))),
                         activations: vec![],
                         sealed_token_ids: None,
+                        spec_logits: Vec::new(),
                     });
                 }
                 return;

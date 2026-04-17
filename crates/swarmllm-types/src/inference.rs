@@ -126,6 +126,12 @@ pub struct PipelineAssignment {
     /// of sequential pipeline forwarding for these layer ranges.
     #[serde(default)]
     pub tp_groups: Vec<TensorParallelGroup>,
+    /// All segment holders advertise support for speculative verify-batch
+    /// (multi-position forward with spec_logits in the result). Set by the
+    /// scheduler after checking peer capability; false disables the speculative
+    /// distributed path for this request.
+    #[serde(default)]
+    pub supports_speculative: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -240,6 +246,18 @@ pub struct LayerForward {
     /// adapter from the data_dir and applies its low-rank deltas per-layer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub adapter_id: Option<String>,
+    /// Speculative decoding: γ draft token IDs for the target model to verify.
+    /// When non-empty, the worker runs a multi-position forward pass over these
+    /// tokens and returns one logit vector per position (plus a bonus position)
+    /// in `LayerResult.spec_logits`. `activations` carries the γ token IDs as
+    /// i64 LE when `draft_tokens` is non-empty (redundant but keeps the single
+    /// decode-path tensor build happy).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub draft_tokens: Vec<u32>,
+    /// Set to true by the coordinator when it wants `spec_logits` populated on
+    /// the result. Ignored when `draft_tokens` is empty.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub spec_logits_requested: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -355,6 +373,14 @@ pub struct LayerResult {
     /// with their X25519 secret to recover the real token IDs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sealed_token_ids: Option<Vec<u8>>,
+    /// Speculative decoding: per-position logit vectors returned by the target
+    /// model when `LayerForward.spec_logits_requested` was set. One vector per
+    /// γ draft positions (the bonus logit for the "all accepted" case is the
+    /// last entry, so length == γ+1 when populated on a `seq_num >= 1` step
+    /// with a known `previous_bonus_logits` context, or just == γ when the
+    /// coordinator keeps its own rolling next-token logits).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub spec_logits: Vec<Vec<f32>>,
 }
 
 /// A single token streamed back from the final pipeline node to the originator.

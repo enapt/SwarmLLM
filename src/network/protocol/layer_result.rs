@@ -50,6 +50,28 @@ pub fn encode_layer_result(result: &LayerResult) -> Result<Vec<u8>, SwarmError> 
     buf.extend_from_slice(&(result.activations.len() as u32).to_le_bytes());
     buf.extend_from_slice(&result.activations);
 
+    // Optional: speculative logits trailer (marker 0x03 + num_positions(2 LE)
+    // + num_positions * [vocab_size(4 LE) + vocab_size * f32 LE])
+    if !result.spec_logits.is_empty() {
+        if result.spec_logits.len() > u16::MAX as usize {
+            return Err(SwarmError::Network(format!(
+                "spec_logits too many positions: {}",
+                result.spec_logits.len()
+            )));
+        }
+        buf.push(0x03);
+        buf.extend_from_slice(&(result.spec_logits.len() as u16).to_le_bytes());
+        for logits in &result.spec_logits {
+            if logits.len() > u32::MAX as usize {
+                return Err(SwarmError::Network("spec_logits vocab too large".into()));
+            }
+            buf.extend_from_slice(&(logits.len() as u32).to_le_bytes());
+            for v in logits {
+                buf.extend_from_slice(&v.to_le_bytes());
+            }
+        }
+    }
+
     Ok(buf)
 }
 
@@ -154,7 +176,9 @@ pub fn decode_layer_result(data: &[u8]) -> Result<LayerResult, SwarmError> {
             )));
         }
         if act_len > 0 && pos + act_len <= data.len() {
-            data[pos..pos + act_len].to_vec()
+            let v = data[pos..pos + act_len].to_vec();
+            pos += act_len;
+            v
         } else {
             vec![]
         }
@@ -162,12 +186,54 @@ pub fn decode_layer_result(data: &[u8]) -> Result<LayerResult, SwarmError> {
         vec![]
     };
 
+    // Optional: speculative logits trailer (marker 0x03)
+    let mut spec_logits: Vec<Vec<f32>> = Vec::new();
+    if pos < data.len() && data[pos] == 0x03 {
+        pos += 1;
+        if pos + 2 > data.len() {
+            return Err(SwarmError::Network("spec_logits header truncated".into()));
+        }
+        let num_positions = u16::from_le_bytes(
+            data[pos..pos + 2]
+                .try_into()
+                .map_err(|_| SwarmError::Network("Invalid spec_logits count".into()))?,
+        ) as usize;
+        pos += 2;
+        spec_logits.reserve(num_positions);
+        for _ in 0..num_positions {
+            if pos + 4 > data.len() {
+                return Err(SwarmError::Network(
+                    "spec_logits vocab_len truncated".into(),
+                ));
+            }
+            let vocab_len = u32::from_le_bytes(
+                data[pos..pos + 4]
+                    .try_into()
+                    .map_err(|_| SwarmError::Network("Invalid spec_logits vocab".into()))?,
+            ) as usize;
+            pos += 4;
+            if pos + vocab_len * 4 > data.len() {
+                return Err(SwarmError::Network("spec_logits payload truncated".into()));
+            }
+            let mut v = Vec::with_capacity(vocab_len);
+            for i in 0..vocab_len {
+                let o = pos + i * 4;
+                v.push(f32::from_le_bytes(data[o..o + 4].try_into().map_err(
+                    |_| SwarmError::Network("Invalid spec_logit value".into()),
+                )?));
+            }
+            pos += vocab_len * 4;
+            spec_logits.push(v);
+        }
+    }
+
     Ok(LayerResult {
         request_id,
         token_ids,
         finish_reason,
         activations,
         sealed_token_ids: None,
+        spec_logits,
     })
 }
 

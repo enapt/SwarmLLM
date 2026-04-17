@@ -10,6 +10,8 @@ use std::sync::Arc;
 
 use tokio::net::UnixStream;
 
+use candle_core::IndexOp;
+
 use crate::daemon::shard_loader::{try_load_from_shards, ShardLoadParams};
 use crate::error::SwarmError;
 use crate::inference::split::{self, KvCacheStore, SplitModel};
@@ -313,8 +315,25 @@ async fn handle_forward(
         kv_store.clear_request(&model_key, &req_id_str);
     }
 
-    // Convert activation bytes to a candle Tensor
-    let input_tensor = if pre_embedded {
+    // Speculative verify path: draft_tokens carries γ candidate IDs to verify
+    // in a single multi-position forward. We build the input tensor from
+    // draft_tokens directly (ignoring activation_bytes) and return γ logit
+    // vectors via spec_logits. Only valid when the current segment is both
+    // `is_first` (takes token IDs) AND `is_last` (produces logits) — i.e. the
+    // full model is on this peer.
+    let speculative_verify = fwd.spec_logits_requested && !fwd.draft_tokens.is_empty();
+    let input_tensor = if speculative_verify {
+        if !is_first || !is_last {
+            return Err(SwarmError::Internal(
+                "Speculative verify requested on a partial segment (needs both first & last layers)"
+                    .into(),
+            ));
+        }
+        let token_ids: Vec<i64> = fwd.draft_tokens.iter().map(|&t| t as i64).collect();
+        let seq_len = token_ids.len();
+        candle_core::Tensor::from_vec(token_ids, &[1, seq_len], &candle_core::Device::Cpu)
+            .map_err(|e| SwarmError::Internal(format!("spec verify tensor: {e}")))?
+    } else if pre_embedded {
         split::bytes_to_tensor(&activation_bytes)?
     } else if is_first {
         if fwd.index_pos == 0 {
@@ -431,6 +450,45 @@ async fn handle_forward(
     let tp_meta = fwd.tp_meta.clone();
     let compute_result =
         tokio::task::block_in_place(|| -> Result<crate::types::LayerResult, String> {
+            // Speculative verify: multi-position forward returning per-position logits.
+            if speculative_verify {
+                let output_t = model
+                    .forward_verify_all_positions(
+                        &input_tensor,
+                        fwd.index_pos as usize,
+                        kv_store,
+                        &req_id_str,
+                    )
+                    .map_err(|e| format!("Forward speculative verify: {e}"))?;
+                // output_t shape is [1, seq_len, vocab_size]
+                let dims = output_t.dims();
+                if dims.len() != 3 {
+                    return Err(format!("spec verify unexpected shape: {dims:?}"));
+                }
+                let seq_len = dims[1];
+                let mut spec_logits: Vec<Vec<f32>> = Vec::with_capacity(seq_len);
+                for pos in 0..seq_len {
+                    let row = output_t
+                        .i((0, pos, ..))
+                        .map_err(|e| format!("spec verify slice: {e}"))?;
+                    let row = row
+                        .to_dtype(candle_core::DType::F32)
+                        .map_err(|e| format!("spec verify dtype: {e}"))?;
+                    let v: Vec<f32> = row
+                        .to_vec1::<f32>()
+                        .map_err(|e| format!("spec verify to_vec1: {e}"))?;
+                    spec_logits.push(v);
+                }
+                return Ok(crate::types::LayerResult {
+                    request_id,
+                    token_ids: vec![],
+                    finish_reason: None,
+                    activations: vec![],
+                    sealed_token_ids: None,
+                    spec_logits,
+                });
+            }
+
             // TP single-layer forward: process one layer in AttnOnly or FfnOnly phase
             let output = if let Some(ref tp) = tp_meta {
                 model
@@ -489,6 +547,7 @@ async fn handle_forward(
                     finish_reason: finish,
                     activations: vec![],
                     sealed_token_ids: None,
+                    spec_logits: Vec::new(),
                 })
             } else {
                 let activation_bytes =
@@ -499,6 +558,7 @@ async fn handle_forward(
                     finish_reason: None,
                     activations: activation_bytes,
                     sealed_token_ids: None,
+                    spec_logits: Vec::new(),
                 })
             }
         });
@@ -522,6 +582,7 @@ async fn handle_forward(
         sealed_payload: result.sealed_token_ids,
         logprobs: None,
         has_activations,
+        spec_logits: result.spec_logits,
     };
 
     send_worker(

@@ -331,6 +331,7 @@ impl NetworkManager {
             finish_reason: Some(crate::types::NetworkFinishReason::Error(reason)),
             activations: vec![],
             sealed_token_ids: None,
+            spec_logits: Vec::new(),
         };
         if let Err(e) =
             self.dispatch_authenticated(Some(peer), SwarmMessage::LayerResult(error_result))
@@ -2225,6 +2226,7 @@ impl NetworkManager {
                             )),
                             activations: vec![],
                             sealed_token_ids: None,
+                            spec_logits: Vec::new(),
                         };
                         let resp = match crate::network::protocol::encode_layer_result(&err) {
                             Ok(bytes) => SwarmResponse::TensorPayload(bytes),
@@ -2981,6 +2983,7 @@ impl NetworkManager {
                         )),
                         activations: vec![],
                         sealed_token_ids: None,
+                        spec_logits: Vec::new(),
                     };
                     if let Some((_, tx)) =
                         self.shared_state.pending_layer_results.remove(&request_id)

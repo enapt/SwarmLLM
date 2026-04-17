@@ -39,6 +39,19 @@ impl PipelineExecutor {
             });
         }
 
+        // Item 2 Phase 1: wire + worker infrastructure for speculative verify
+        // is landed; the coordinator accept-reject loop with distributed KV
+        // truncation lands in a follow-up. Log the flag state so operators
+        // know the path is currently infrastructure-only.
+        if self.shared_state.config.inference.speculative_distributed
+            && self.assignment.supports_speculative
+        {
+            tracing::info!(
+                %request_id,
+                "speculative_distributed: wire infra ready; coordinator loop pending (Phase 2)"
+            );
+        }
+
         // Read GGUF header ONCE and cache for both prompt building and stop strings
         let header_data: Option<(Option<String>, String, String)> = {
             let model_id = &self.request.model_id;
@@ -540,6 +553,7 @@ impl PipelineExecutor {
                         finish_reason: finish,
                         activations: vec![],
                         sealed_token_ids: None,
+                        spec_logits: Vec::new(),
                     });
                 } else {
                     // Intermediate segment: strip the 0x00 tag and continue
@@ -614,6 +628,8 @@ impl PipelineExecutor {
                     // forward needs this flag (subsequent segments receive hidden states anyway).
                     pre_embedded: pre_embedded && idx == 0,
                     adapter_id: None,
+                    draft_tokens: Vec::new(),
+                    spec_logits_requested: false,
                 };
 
                 // Look up the peer's libp2p PeerId bytes. Use peer_id_map (persistent,
@@ -893,6 +909,8 @@ impl PipelineExecutor {
                     requester_node_id: Some(self.shared_state.identity.node_id().0),
                     pre_embedded: false,
                     adapter_id: None,
+                    draft_tokens: Vec::new(),
+                    spec_logits_requested: false,
                 };
 
                 // Use peer_id_map (persistent, survives disconnects) first,

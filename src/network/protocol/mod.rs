@@ -570,6 +570,8 @@ mod tests {
             requester_node_id: None,
             pre_embedded: false,
             adapter_id: None,
+            draft_tokens: Vec::new(),
+            spec_logits_requested: false,
         };
 
         let encoded = encode_layer_forward(&forward).unwrap();
@@ -604,6 +606,8 @@ mod tests {
                 requester_node_id: None,
                 pre_embedded: false,
                 adapter_id: None,
+                draft_tokens: Vec::new(),
+                spec_logits_requested: false,
             };
             let encoded = encode_layer_forward(&forward).unwrap();
             assert_eq!(encoded[25], tag); // tag(1) + uuid(16) + seq(4) + index_pos(4) = 25
@@ -634,6 +638,8 @@ mod tests {
             requester_node_id: None,
             pre_embedded: false,
             adapter_id: None,
+            draft_tokens: Vec::new(),
+            spec_logits_requested: false,
         };
 
         let encoded = encode_layer_forward(&forward).unwrap();
@@ -658,6 +664,8 @@ mod tests {
             requester_node_id: None,
             pre_embedded: false,
             adapter_id: None,
+            draft_tokens: Vec::new(),
+            spec_logits_requested: false,
         };
 
         let encoded = encode_layer_forward(&forward).unwrap();
@@ -687,6 +695,8 @@ mod tests {
             requester_node_id: None,
             pre_embedded: false,
             adapter_id: None,
+            draft_tokens: Vec::new(),
+            spec_logits_requested: false,
         };
         let encoded = encode_layer_forward(&forward).unwrap();
         // Trim to remove the trailer — simulates an old encoder
@@ -703,6 +713,7 @@ mod tests {
             finish_reason: Some(NetworkFinishReason::Stop),
             activations: vec![],
             sealed_token_ids: None,
+            spec_logits: Vec::new(),
         };
 
         let encoded = encode_layer_result(&result).unwrap();
@@ -724,6 +735,7 @@ mod tests {
             finish_reason: None,
             activations: vec![],
             sealed_token_ids: None,
+            spec_logits: Vec::new(),
         };
 
         let encoded = encode_layer_result(&result).unwrap();
@@ -739,6 +751,7 @@ mod tests {
             finish_reason: Some(NetworkFinishReason::Error("OOM".to_string())),
             activations: vec![],
             sealed_token_ids: None,
+            spec_logits: Vec::new(),
         };
 
         let encoded = encode_layer_result(&result).unwrap();
@@ -851,6 +864,8 @@ mod tests {
             requester_node_id: None,
             pre_embedded: false,
             adapter_id: None,
+            draft_tokens: Vec::new(),
+            spec_logits_requested: false,
         };
         let encoded = encode_layer_forward(&forward).unwrap();
 
@@ -870,5 +885,79 @@ mod tests {
         assert_eq!(decoded.activations.len(), 4096);
         assert_eq!(decoded.layer_range, (2, 8));
         assert_eq!(decoded.model_id, test_model_id());
+    }
+
+    #[test]
+    fn layer_forward_speculative_trailer_roundtrip() {
+        let forward = LayerForward {
+            request_id: uuid::Uuid::new_v4(),
+            sequence_num: 7,
+            index_pos: 100,
+            activations: vec![0; 8],
+            format: TensorFormat::FP32,
+            model_id: test_model_id(),
+            layer_range: (0, 32),
+            tp_meta: None,
+            vision_embeddings: None,
+            sender_peer_bytes: None,
+            requester_node_id: None,
+            pre_embedded: false,
+            adapter_id: None,
+            draft_tokens: vec![42, 137, 9000, 123456],
+            spec_logits_requested: true,
+        };
+
+        let encoded = encode_layer_forward(&forward).unwrap();
+        let decoded = decode_layer_forward(&encoded).unwrap();
+        assert_eq!(decoded.draft_tokens, vec![42, 137, 9000, 123456]);
+        assert!(decoded.spec_logits_requested);
+    }
+
+    #[test]
+    fn layer_forward_no_speculative_trailer_when_empty() {
+        let forward = LayerForward {
+            request_id: uuid::Uuid::new_v4(),
+            sequence_num: 0,
+            index_pos: 0,
+            activations: vec![0; 8],
+            format: TensorFormat::FP32,
+            model_id: test_model_id(),
+            layer_range: (0, 4),
+            tp_meta: None,
+            vision_embeddings: None,
+            sender_peer_bytes: None,
+            requester_node_id: None,
+            pre_embedded: false,
+            adapter_id: None,
+            draft_tokens: vec![],
+            spec_logits_requested: true,
+        };
+        // When draft_tokens is empty, spec trailer must not be emitted.
+        let encoded = encode_layer_forward(&forward).unwrap();
+        let decoded = decode_layer_forward(&encoded).unwrap();
+        assert!(decoded.draft_tokens.is_empty());
+        assert!(!decoded.spec_logits_requested);
+    }
+
+    #[test]
+    fn layer_result_speculative_logits_roundtrip() {
+        let result = LayerResult {
+            request_id: uuid::Uuid::new_v4(),
+            token_ids: vec![],
+            finish_reason: None,
+            activations: vec![],
+            sealed_token_ids: None,
+            spec_logits: vec![
+                vec![1.0, 2.0, 3.0],
+                vec![-1.5, 0.0, 2.5, 100.0],
+                vec![0.0; 16],
+            ],
+        };
+        let encoded = encode_layer_result(&result).unwrap();
+        let decoded = decode_layer_result(&encoded).unwrap();
+        assert_eq!(decoded.spec_logits.len(), 3);
+        assert_eq!(decoded.spec_logits[0], vec![1.0, 2.0, 3.0]);
+        assert_eq!(decoded.spec_logits[1], vec![-1.5, 0.0, 2.5, 100.0]);
+        assert_eq!(decoded.spec_logits[2], vec![0.0; 16]);
     }
 }

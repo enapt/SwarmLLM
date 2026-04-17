@@ -91,6 +91,13 @@ pub struct IpcForward {
     /// from the data_dir/adapters/ directory on first use.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub adapter_id: Option<String>,
+    /// Speculative decoding: γ draft tokens. When non-empty, the worker runs
+    /// a multi-position forward and returns per-position logits.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub draft_tokens: Vec<u32>,
+    /// Coordinator wants per-position logit vectors populated on the result.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub spec_logits_requested: bool,
 }
 
 /// Forward-pass result header (activation bytes are the binary payload).
@@ -111,6 +118,10 @@ pub struct IpcLayerResult {
     /// True if binary payload contains output activation bytes.
     #[serde(default)]
     pub has_activations: bool,
+    /// Speculative decoding: per-position logit vectors (one per γ draft
+    /// positions). Empty on normal forwards.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub spec_logits: Vec<Vec<f32>>,
 }
 
 /// Generate request (full decode loop in the worker).

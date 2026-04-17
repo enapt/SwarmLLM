@@ -69,6 +69,25 @@ pub fn encode_layer_forward(forward: &LayerForward) -> Result<Vec<u8>, SwarmErro
         buf.push(if forward.pre_embedded { 1 } else { 0 });
     }
 
+    // Optional: speculative trailer (marker 0x03 + flags(1) + num_drafts(2 LE) + drafts*4)
+    // Only emitted when draft_tokens is non-empty — older peers ignore unknown trailers.
+    if !forward.draft_tokens.is_empty() {
+        if forward.draft_tokens.len() > u16::MAX as usize {
+            return Err(SwarmError::Network(format!(
+                "draft_tokens too long: {} > {}",
+                forward.draft_tokens.len(),
+                u16::MAX
+            )));
+        }
+        buf.push(0x03);
+        let flags: u8 = if forward.spec_logits_requested { 1 } else { 0 };
+        buf.push(flags);
+        buf.extend_from_slice(&(forward.draft_tokens.len() as u16).to_le_bytes());
+        for t in &forward.draft_tokens {
+            buf.extend_from_slice(&t.to_le_bytes());
+        }
+    }
+
     Ok(buf)
 }
 
@@ -178,7 +197,7 @@ pub fn decode_layer_forward(data: &[u8]) -> Result<LayerForward, SwarmError> {
 
     // Optional: tp_meta trailer (marker 0x02 + tp_rank(1) + tp_size(1) + single_layer(4) + phase(1))
     let tp_meta_start = mid_start + mid_len;
-    let (tp_meta, tp_pre_embedded) =
+    let (tp_meta, tp_pre_embedded, mut cursor) =
         if data.len() >= tp_meta_start + 9 && data[tp_meta_start] == 0x02 {
             let tp_rank = data[tp_meta_start + 1];
             let tp_size = data[tp_meta_start + 2];
@@ -202,10 +221,40 @@ pub fn decode_layer_forward(data: &[u8]) -> Result<LayerForward, SwarmError> {
                     phase,
                 }),
                 pre_embedded,
+                tp_meta_start + 9,
             )
         } else {
-            (None, false)
+            (None, false, tp_meta_start)
         };
+
+    // Optional: speculative trailer (marker 0x03 + flags(1) + num_drafts(2 LE) + drafts*4)
+    // Unknown to older decoders — presence is required to be gated by
+    // PipelineAssignment.supports_speculative on the sender.
+    let (draft_tokens, spec_logits_requested) = if data.len() >= cursor + 4 && data[cursor] == 0x03
+    {
+        let flags = data[cursor + 1];
+        let num_drafts = u16::from_le_bytes(
+            data[cursor + 2..cursor + 4]
+                .try_into()
+                .map_err(|_| SwarmError::Network("Invalid num_drafts".into()))?,
+        ) as usize;
+        cursor += 4;
+        if data.len() < cursor + num_drafts * 4 {
+            return Err(SwarmError::Network("draft_tokens truncated".into()));
+        }
+        let mut drafts = Vec::with_capacity(num_drafts);
+        for i in 0..num_drafts {
+            let off = cursor + i * 4;
+            drafts.push(u32::from_le_bytes(
+                data[off..off + 4]
+                    .try_into()
+                    .map_err(|_| SwarmError::Network("Invalid draft token".into()))?,
+            ));
+        }
+        (drafts, flags & 0x01 != 0)
+    } else {
+        (Vec::new(), false)
+    };
 
     Ok(LayerForward {
         request_id,
@@ -221,6 +270,8 @@ pub fn decode_layer_forward(data: &[u8]) -> Result<LayerForward, SwarmError> {
         requester_node_id: None,
         pre_embedded: tp_pre_embedded,
         adapter_id: None,
+        draft_tokens,
+        spec_logits_requested,
     })
 }
 

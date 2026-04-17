@@ -83,6 +83,34 @@ impl SplitModel {
         self.forward_with_lora(input, index_pos, kv_cache_store, request_id, None)
     }
 
+    /// Speculative verify forward: run the model over γ positions and return
+    /// logits at EVERY position (shape `[1, seq_len, vocab_size]`) instead of
+    /// only the final one. Used by the distributed speculative-decoding path
+    /// so the coordinator can accept/reject each draft without γ round trips.
+    ///
+    /// Only valid on the last segment (has `output` head). Non-last segments
+    /// should never receive a speculative forward — the pipeline scheduler
+    /// gates `supports_speculative` by whether the full model is on one peer.
+    pub fn forward_verify_all_positions(
+        &mut self,
+        input: &Tensor,
+        index_pos: usize,
+        kv_cache_store: &KvCacheStore,
+        request_id: &str,
+    ) -> Result<Tensor, SwarmError> {
+        let (output, _) = self.forward_inner_impl(
+            input,
+            index_pos,
+            kv_cache_store,
+            request_id,
+            None,
+            None,
+            false,
+            true,
+        )?;
+        Ok(output)
+    }
+
     /// Forward pass with pre-embedded hidden states (local embedding privacy).
     ///
     /// The input tensor is already in hidden-state space (shape [1, seq, hidden_dim])
@@ -103,6 +131,7 @@ impl SplitModel {
             None,
             None,
             true,
+            false,
         )?;
         Ok(output)
     }
@@ -149,11 +178,16 @@ impl SplitModel {
             lora_adapter,
             capture_layers,
             false,
+            false,
         )
     }
 
     /// Core forward pass. When `skip_embedding` is true, the input is treated as
     /// pre-embedded hidden states even if this segment has `tok_embeddings`.
+    /// When `all_positions` is true AND this is the last segment, the logits
+    /// are computed at every input position and returned as `[1, seq_len,
+    /// vocab]` (used by speculative-decoding verification). Default: slice to
+    /// the final position only.
     #[allow(clippy::too_many_arguments)]
     fn forward_inner_impl(
         &mut self,
@@ -164,6 +198,7 @@ impl SplitModel {
         lora_adapter: Option<&LoraAdapter>,
         capture_layers: Option<&std::collections::HashSet<usize>>,
         skip_embedding: bool,
+        all_positions: bool,
     ) -> Result<(Tensor, HashMap<usize, Tensor>), SwarmError> {
         let forward_start = std::time::Instant::now();
         // Use component presence rather than layer indices for shard-aware is_first/is_last
@@ -441,9 +476,12 @@ impl SplitModel {
             let x = norm
                 .forward(&layer_in)
                 .map_err(|e| SwarmError::Internal(format!("final_norm: {e}")))?;
-            let x = x
-                .i((.., seq_len - 1, ..))
-                .map_err(|e| SwarmError::Internal(format!("last_token_select: {e}")))?;
+            let x = if all_positions {
+                x
+            } else {
+                x.i((.., seq_len - 1, ..))
+                    .map_err(|e| SwarmError::Internal(format!("last_token_select: {e}")))?
+            };
             let mut logits = output
                 .forward(&x)
                 .map_err(|e| SwarmError::Internal(format!("output_proj: {e}")))?;

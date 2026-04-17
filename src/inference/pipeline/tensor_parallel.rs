@@ -110,6 +110,8 @@ impl PipelineExecutor {
                     requester_node_id: None,
                     pre_embedded: false,
                     adapter_id: None,
+                    draft_tokens: Vec::new(),
+                    spec_logits_requested: false,
                 };
                 self.shared_state
                     .model_process_pool
@@ -143,6 +145,8 @@ impl PipelineExecutor {
                         requester_node_id: None,
                         pre_embedded: true,
                         adapter_id: None,
+                        draft_tokens: Vec::new(),
+                        spec_logits_requested: false,
                     };
                     let _ = self
                         .network_tx
@@ -173,6 +177,8 @@ impl PipelineExecutor {
                     requester_node_id: None,
                     pre_embedded: true,
                     adapter_id: None,
+                    draft_tokens: Vec::new(),
+                    spec_logits_requested: false,
                 };
                 let attn_partial = self
                     .shared_state
@@ -235,6 +241,8 @@ impl PipelineExecutor {
                         requester_node_id: None,
                         pre_embedded: true,
                         adapter_id: None,
+                        draft_tokens: Vec::new(),
+                        spec_logits_requested: false,
                     };
                     let _ = self
                         .network_tx
@@ -265,6 +273,8 @@ impl PipelineExecutor {
                     requester_node_id: None,
                     pre_embedded: true,
                     adapter_id: None,
+                    draft_tokens: Vec::new(),
+                    spec_logits_requested: false,
                 };
                 let ffn_partial = self
                     .shared_state
@@ -336,6 +346,8 @@ impl PipelineExecutor {
                 requester_node_id: None,
                 pre_embedded: false,
                 adapter_id: None,
+                draft_tokens: Vec::new(),
+                spec_logits_requested: false,
             };
             let layer_result = self
                 .shared_state

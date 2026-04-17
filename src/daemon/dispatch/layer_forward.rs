@@ -266,6 +266,7 @@ pub(super) async fn send_error_result(
         finish_reason: Some(crate::types::NetworkFinishReason::Error(sanitized)),
         activations: vec![],
         sealed_token_ids: None,
+        spec_logits: Vec::new(),
     };
     let _ = network_tx
         .send(NetworkCommand::SendTensorResult {

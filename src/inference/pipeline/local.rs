@@ -126,6 +126,8 @@ impl PipelineExecutor {
             requester_node_id: None,
             pre_embedded,
             adapter_id: None,
+            draft_tokens: Vec::new(),
+            spec_logits_requested: false,
         };
         let layer_result = self
             .shared_state

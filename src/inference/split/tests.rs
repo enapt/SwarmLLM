@@ -301,6 +301,7 @@ fn lru_eviction_protects_active_models() {
         }],
         standbys: vec![],
         tp_groups: vec![],
+        supports_speculative: false,
     };
     active_pipelines.insert(uuid::Uuid::new_v4(), pipeline);
 
