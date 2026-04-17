@@ -591,7 +591,7 @@ pub async fn proxy_via_subprocess_openai(
                                                 }]
                                             });
                                             yield Ok::<_, std::io::Error>(
-                                                bytes::Bytes::from(format!("data: {}\n\n", chunk))
+                                                crate::api::sse::data_frame(&chunk)
                                             );
                                         } else if delta_type == "thinking_delta" {
                                             // Extended thinking — pass through as a custom field
@@ -607,7 +607,7 @@ pub async fn proxy_via_subprocess_openai(
                                                     "finish_reason": null
                                                 }]
                                             });
-                                            yield Ok(bytes::Bytes::from(format!("data: {}\n\n", chunk)));
+                                            yield Ok(crate::api::sse::data_frame(&chunk));
                                         }
                                     }
                                     "message_delta" => {
@@ -624,7 +624,7 @@ pub async fn proxy_via_subprocess_openai(
                                                     "finish_reason": "stop"
                                                 }]
                                             });
-                                            yield Ok(bytes::Bytes::from(format!("data: {}\n\n", chunk)));
+                                            yield Ok(crate::api::sse::data_frame(&chunk));
                                         }
                                     }
                                     _ => {} // content_block_start, content_block_stop, message_start, message_stop — skip
@@ -652,9 +652,9 @@ pub async fn proxy_via_subprocess_openai(
                                             "total_tokens": input + output
                                         }
                                     });
-                                    yield Ok(bytes::Bytes::from(format!("data: {}\n\n", usage_chunk)));
+                                    yield Ok(crate::api::sse::data_frame(&usage_chunk));
                                 }
-                                yield Ok(bytes::Bytes::from("data: [DONE]\n\n"));
+                                yield Ok(crate::api::sse::done_frame());
                                 break;
                             }
                             _ => {} // system, rate_limit_event, assistant — skip
@@ -662,7 +662,7 @@ pub async fn proxy_via_subprocess_openai(
                     }
                     Ok(Ok(None)) => {
                         // EOF
-                        yield Ok(bytes::Bytes::from("data: [DONE]\n\n"));
+                        yield Ok(crate::api::sse::done_frame());
                         break;
                     }
                     Ok(Err(e)) => {
@@ -764,7 +764,7 @@ pub async fn proxy_via_subprocess_anthropic(
                 }
             });
             yield Ok::<_, std::io::Error>(
-                bytes::Bytes::from(format!("event: message_start\ndata: {}\n\n", msg_start))
+                crate::api::sse::event_frame("message_start", &msg_start)
             );
 
             let mut emitted_block_start = false;

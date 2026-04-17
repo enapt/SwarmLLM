@@ -1408,15 +1408,14 @@ fn peer_http_url(peer: &crate::types::PeerInfo) -> Option<String> {
 /// Lazily-initialized shared reqwest client for peer forwarding.
 /// Avoids creating a new TLS + connection pool on every request.
 static PEER_CLIENT: std::sync::LazyLock<reqwest::Client> = std::sync::LazyLock::new(|| {
-    reqwest::Client::builder()
-        .connect_timeout(std::time::Duration::from_secs(
+    crate::http::build_client(|b| {
+        b.connect_timeout(std::time::Duration::from_secs(
             PEER_FORWARD_CONNECT_TIMEOUT_SECS,
         ))
         .timeout(std::time::Duration::from_secs(
             INFERENCE_FORWARD_TIMEOUT_SECS,
         ))
-        .build()
-        .unwrap_or_else(|_| reqwest::Client::new())
+    })
 });
 
 fn get_peer_client() -> &'static reqwest::Client {

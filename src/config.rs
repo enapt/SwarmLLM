@@ -949,6 +949,20 @@ fn default_theme() -> String {
 
 // ---- Defaults ----
 
+/// Resolve the effective data dir using the same precedence as the full config
+/// loader: CLI override > `SWARMLLM_NODE_DATA_DIR` env var > [`default_data_dir`].
+/// Used by lightweight subcommands (Status, Chat, etc.) that don't load the
+/// full config but still need a data-dir path.
+pub fn resolve_data_dir(cli_data_dir: Option<&std::path::Path>) -> PathBuf {
+    if let Some(dir) = cli_data_dir {
+        return dir.to_path_buf();
+    }
+    if let Ok(val) = std::env::var("SWARMLLM_NODE_DATA_DIR") {
+        return PathBuf::from(val);
+    }
+    default_data_dir()
+}
+
 fn default_data_dir() -> PathBuf {
     dirs::data_dir()
         .unwrap_or_else(|| {

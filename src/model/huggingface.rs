@@ -16,20 +16,18 @@ const HF_DOWNLOAD_TIMEOUT_SECS: u64 = 3600;
 
 /// Shared HTTP client for metadata/search/probe requests (short timeout).
 static HF_META_CLIENT: std::sync::LazyLock<reqwest::Client> = std::sync::LazyLock::new(|| {
-    reqwest::Client::builder()
-        .connect_timeout(std::time::Duration::from_secs(HF_CONNECT_TIMEOUT_SECS))
-        .timeout(std::time::Duration::from_secs(HF_METADATA_TIMEOUT_SECS))
-        .build()
-        .unwrap_or_else(|_| reqwest::Client::new())
+    crate::http::build_client(|b| {
+        b.connect_timeout(std::time::Duration::from_secs(HF_CONNECT_TIMEOUT_SECS))
+            .timeout(std::time::Duration::from_secs(HF_METADATA_TIMEOUT_SECS))
+    })
 });
 
 /// Shared HTTP client for large file downloads (long timeout, connection pooling).
 static HF_DOWNLOAD_CLIENT: std::sync::LazyLock<reqwest::Client> = std::sync::LazyLock::new(|| {
-    reqwest::Client::builder()
-        .connect_timeout(std::time::Duration::from_secs(HF_CONNECT_TIMEOUT_SECS))
-        .timeout(std::time::Duration::from_secs(HF_DOWNLOAD_TIMEOUT_SECS))
-        .build()
-        .unwrap_or_else(|_| reqwest::Client::new())
+    crate::http::build_client(|b| {
+        b.connect_timeout(std::time::Duration::from_secs(HF_CONNECT_TIMEOUT_SECS))
+            .timeout(std::time::Duration::from_secs(HF_DOWNLOAD_TIMEOUT_SECS))
+    })
 });
 
 /// SEC: Validate HuggingFace repo ID format to prevent SSRF via crafted repo_id.
@@ -419,104 +417,13 @@ pub async fn probe_gguf_file(
     })
 }
 
-/// Build `GgufTensorMeta` from a candle `Content` that was parsed from a GGUF header.
+/// Build `GgufTensorMeta` from a pre-parsed candle `Content`.
+/// Thin adapter over [`GgufTensorMeta::from_content`] that maps `SwarmError`
+/// to `String` for the HF-download error channel.
 fn build_tensor_meta_from_content(
     ct: &candle_core::quantized::gguf_file::Content,
 ) -> Result<crate::inference::split::GgufTensorMeta, String> {
-    use std::collections::HashMap;
-
-    let arch = crate::inference::split::gguf_arch_str(ct);
-
-    let md_get = |suffix: &str| -> Result<&candle_core::quantized::gguf_file::Value, String> {
-        let key = format!("{arch}.{suffix}");
-        ct.metadata
-            .get(&key)
-            .ok_or_else(|| format!("Missing GGUF metadata: {key}"))
-    };
-
-    let head_count = md_get("attention.head_count")?
-        .to_u32()
-        .map_err(|e| e.to_string())? as usize;
-    if head_count == 0 {
-        return Err("attention.head_count is zero".into());
-    }
-    let head_count_kv = md_get("attention.head_count_kv")?
-        .to_u32()
-        .map_err(|e| e.to_string())? as usize;
-    let block_count = md_get("block_count")?.to_u32().map_err(|e| e.to_string())? as usize;
-    let embedding_length = md_get("embedding_length")?
-        .to_u32()
-        .map_err(|e| e.to_string())? as usize;
-    // head_dim: prefer attention.key_length (Qwen3 uses 128 vs embed/heads=64)
-    let head_dim_actual = ct
-        .metadata
-        .get(&format!("{arch}.attention.key_length"))
-        .and_then(|v| v.to_u32().ok())
-        .map(|v| v as usize)
-        .unwrap_or(embedding_length / head_count);
-    let rope_dim = md_get("rope.dimension_count")
-        .and_then(|v| v.to_u32().map_err(|e| e.to_string()))
-        .unwrap_or(head_dim_actual as u32) as usize;
-    let rms_norm_eps = md_get("attention.layer_norm_rms_epsilon")?
-        .to_f32()
-        .map_err(|e| e.to_string())? as f64;
-    let rope_freq_base = ct
-        .metadata
-        .get(&format!("{arch}.rope.freq_base"))
-        .and_then(|v| v.to_f32().ok())
-        .unwrap_or(10000f32);
-    let model_name = ct
-        .metadata
-        .get("general.name")
-        .and_then(|v| v.to_string().ok().cloned());
-
-    let mut tensors = HashMap::new();
-    for (name, info) in &ct.tensor_infos {
-        // SEC: Use checked arithmetic to prevent integer overflow from crafted GGUF headers.
-        // A malicious GGUF with huge elem_count can wrap around in release mode.
-        // Cap elem_count to 2^40 (~1 trillion) — no legitimate tensor exceeds this.
-        let block_size = info.ggml_dtype.block_size();
-        let elem_count = info.shape.elem_count();
-        const MAX_ELEM_COUNT: usize = 1 << 40;
-        let size = if block_size == 0 || elem_count > MAX_ELEM_COUNT {
-            0u64
-        } else {
-            info.ggml_dtype
-                .type_size()
-                .checked_mul(elem_count)
-                .map(|v| (v / block_size) as u64)
-                .unwrap_or(0)
-        };
-        tensors.insert(
-            name.clone(),
-            crate::inference::split::TensorLocation {
-                offset: info.offset,
-                size,
-            },
-        );
-    }
-
-    // Read expert count for MoE models (DeepSeek-V2/V3)
-    let expert_count = ct
-        .metadata
-        .get(&format!("{arch}.expert_count"))
-        .and_then(|v| v.to_u32().ok())
-        .unwrap_or(0) as usize;
-
-    Ok(crate::inference::split::GgufTensorMeta {
-        tensors,
-        tensor_data_offset: ct.tensor_data_offset,
-        model_name,
-        head_count,
-        head_count_kv,
-        block_count,
-        embedding_length,
-        rope_dim,
-        rope_freq_base,
-        rms_norm_eps,
-        expert_count,
-        architecture: arch.clone(),
-    })
+    crate::inference::split::GgufTensorMeta::from_content(ct).map_err(|e| e.to_string())
 }
 
 /// Download the GGUF header (metadata + tensor info table) from a remote GGUF file.

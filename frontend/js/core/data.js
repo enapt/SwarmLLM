@@ -84,17 +84,12 @@
   function loadStats() {
     return dedupe('stats', async function() {
       var stats = null;
-      var config = null;
       try {
         var r = await authFetch('/api/admin/stats');
         if (r.ok) stats = await r.json();
       } catch (e) {}
-      try {
-        var r2 = await authFetch('/api/admin/config');
-        if (r2.ok) config = await r2.json();
-      } catch (e) {}
+      var config = await loadConfig();
       cache.stats = stats;
-      cache.config = config;
       return { stats: stats, config: config };
     });
   }
@@ -108,6 +103,18 @@
       } catch (e) {}
       cache.peers = peers;
       return peers;
+    });
+  }
+
+  function loadConfig() {
+    return dedupe('config', async function() {
+      var config = null;
+      try {
+        var r = await authFetch('/api/admin/config');
+        if (r.ok) config = await r.json();
+      } catch (e) {}
+      cache.config = config;
+      return config;
     });
   }
 
@@ -140,6 +147,7 @@
   App.data = {
     loadModels: loadModels,
     loadStats: loadStats,
+    loadConfig: loadConfig,
     loadPeers: loadPeers,
     loadProviders: loadProviders,
     loadClaudeSubStatus: loadClaudeSubStatus,

@@ -49,22 +49,24 @@ pub struct TensorLocation {
 }
 
 impl GgufTensorMeta {
-    /// Extract tensor metadata from a GGUF file header.
+    /// Extract tensor metadata from a GGUF file header on disk.
     /// Only needs to read the header, not the full file.
-    /// Supports multiple architecture prefixes (llama, qwen2, mistral, etc.)
     pub fn from_gguf_file(path: &Path) -> Result<Self, SwarmError> {
         let mut file = std::fs::File::open(path).map_err(SwarmError::Io)?;
         let ct = gguf_file::Content::read(&mut file)
             .map_err(|e| SwarmError::Internal(format!("Failed to read GGUF header: {e}")))?;
+        Self::from_content(&ct)
+    }
 
-        // Extract friendly model name from GGUF metadata
+    /// Extract tensor metadata from an already-parsed GGUF `Content`.
+    /// Supports multiple architecture prefixes (llama, qwen2, mistral, etc.).
+    pub fn from_content(ct: &gguf_file::Content) -> Result<Self, SwarmError> {
         let model_name = ct
             .metadata
             .get("general.name")
             .and_then(|v| v.to_string().ok().cloned());
 
-        // Detect architecture prefix from general.architecture metadata
-        let arch = gguf_arch_str(&ct);
+        let arch = gguf_arch_str(ct);
 
         let md_get = |suffix: &str| {
             let key = format!("{arch}.{suffix}");
@@ -72,28 +74,22 @@ impl GgufTensorMeta {
                 .get(&key)
                 .ok_or_else(|| SwarmError::Internal(format!("Missing GGUF metadata: {key}")))
         };
+        let md_u32 = |suffix: &str| -> Result<usize, SwarmError> {
+            Ok(md_get(suffix)?
+                .to_u32()
+                .map_err(|e| SwarmError::Internal(format!("Bad metadata: {e}")))?
+                as usize)
+        };
 
-        let head_count = md_get("attention.head_count")?
-            .to_u32()
-            .map_err(|e| SwarmError::Internal(format!("Bad metadata: {e}")))?
-            as usize;
+        let head_count = md_u32("attention.head_count")?;
         if head_count == 0 {
             return Err(SwarmError::Inference(
                 "GGUF metadata error: attention.head_count is zero".into(),
             ));
         }
-        let head_count_kv = md_get("attention.head_count_kv")?
-            .to_u32()
-            .map_err(|e| SwarmError::Internal(format!("Bad metadata: {e}")))?
-            as usize;
-        let block_count = md_get("block_count")?
-            .to_u32()
-            .map_err(|e| SwarmError::Internal(format!("Bad metadata: {e}")))?
-            as usize;
-        let embedding_length = md_get("embedding_length")?
-            .to_u32()
-            .map_err(|e| SwarmError::Internal(format!("Bad metadata: {e}")))?
-            as usize;
+        let head_count_kv = md_u32("attention.head_count_kv")?;
+        let block_count = md_u32("block_count")?;
+        let embedding_length = md_u32("embedding_length")?;
         // head_dim: prefer attention.key_length (Qwen3 uses 128 vs embed/heads=64)
         let head_dim = ct
             .metadata
@@ -117,25 +113,25 @@ impl GgufTensorMeta {
 
         let mut tensors = HashMap::new();
         for (name, info) in &ct.tensor_infos {
-            // Use checked arithmetic to prevent integer overflow on crafted GGUF headers
-            let size = info
-                .ggml_dtype
-                .type_size()
-                .checked_mul(info.shape.elem_count())
-                .and_then(|v| {
-                    let bs = info.ggml_dtype.block_size();
-                    if bs == 0 {
-                        None
-                    } else {
-                        Some(v / bs)
-                    }
-                })
-                .unwrap_or(0);
+            // Use checked arithmetic to prevent integer overflow on crafted GGUF headers.
+            // Cap elem_count to 2^40 (~1 trillion) — no legitimate tensor exceeds this.
+            let block_size = info.ggml_dtype.block_size();
+            let elem_count = info.shape.elem_count();
+            const MAX_ELEM_COUNT: usize = 1 << 40;
+            let size = if block_size == 0 || elem_count > MAX_ELEM_COUNT {
+                0u64
+            } else {
+                info.ggml_dtype
+                    .type_size()
+                    .checked_mul(elem_count)
+                    .map(|v| (v / block_size) as u64)
+                    .unwrap_or(0)
+            };
             tensors.insert(
                 name.clone(),
                 TensorLocation {
                     offset: info.offset,
-                    size: size as u64,
+                    size,
                 },
             );
         }

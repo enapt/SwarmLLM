@@ -1640,10 +1640,7 @@ fn open_browser(url: &str) -> Result<(), String> {
 /// Returns an ISO 3166-1 alpha-2 country code (e.g. "US", "DE") or None on failure.
 /// Timeout: 5 seconds. No API key required.
 async fn detect_region_from_ip() -> Option<String> {
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(5))
-        .build()
-        .ok()?;
+    let client = crate::http::client_with_timeout(std::time::Duration::from_secs(5));
 
     // ip-api.com returns JSON with a "countryCode" field for free, no key needed.
     // Rate limit: 45 requests/min (we only call once at startup).

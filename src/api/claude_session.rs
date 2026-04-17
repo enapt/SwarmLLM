@@ -1070,14 +1070,11 @@ pub async fn send_message_handler(
                     }
 
                     // Forward the raw NDJSON event as an SSE data line
-                    let data = serde_json::to_string(&evt).unwrap_or_default();
-                    yield Ok::<_, std::io::Error>(
-                        bytes::Bytes::from(format!("data: {}\n\n", data))
-                    );
+                    yield Ok::<_, std::io::Error>(crate::api::sse::data_frame(&evt));
 
                     // result = query complete (one per query, always final)
                     if evt_type == "result" {
-                        yield Ok(bytes::Bytes::from("data: [DONE]\n\n"));
+                        yield Ok(crate::api::sse::done_frame());
                         break;
                     }
                     // control_request (permission prompt): keep the SSE stream open.
@@ -1088,8 +1085,8 @@ pub async fn send_message_handler(
                         "type": "error",
                         "message": "Claude CLI subprocess exited unexpectedly"
                     });
-                    yield Ok(bytes::Bytes::from(format!("data: {}\n\n", err)));
-                    yield Ok(bytes::Bytes::from("data: [DONE]\n\n"));
+                    yield Ok(crate::api::sse::data_frame(&err));
+                    yield Ok(crate::api::sse::done_frame());
                     break;
                 }
             }

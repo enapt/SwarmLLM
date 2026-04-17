@@ -180,27 +180,7 @@ async fn main() -> anyhow::Result<()> {
     });
 
     let resolve_data_dir = |cli_data_dir: &Option<PathBuf>| -> PathBuf {
-        cli_data_dir
-            .clone()
-            .or_else(|| {
-                std::env::var("SWARMLLM_NODE_DATA_DIR")
-                    .ok()
-                    .map(PathBuf::from)
-            })
-            .unwrap_or_else(|| {
-                dirs::data_dir()
-                    .unwrap_or_else(|| {
-                        #[cfg(unix)]
-                        {
-                            PathBuf::from("/var/lib/swarmllm")
-                        }
-                        #[cfg(not(unix))]
-                        {
-                            PathBuf::from(".")
-                        }
-                    })
-                    .join("swarmllm")
-            })
+        swarmllm::config::resolve_data_dir(cli_data_dir.as_deref())
     };
 
     match command {

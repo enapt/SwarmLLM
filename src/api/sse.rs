@@ -7,6 +7,28 @@
 
 use tokio::sync::mpsc;
 
+// ---- Raw SSE framing for non-axum-Sse streams ----
+//
+// Some handlers (Claude subscription, Claude Code sessions) produce a pre-
+// formatted byte stream wrapped in `axum::body::Body::from_stream` rather
+// than routing through `axum::response::Sse`. These helpers keep the `data:`
+// and `event:` framing uniform across those handlers.
+
+/// Format a JSON value as an SSE `data:` frame (for byte streams).
+pub fn data_frame(value: &serde_json::Value) -> bytes::Bytes {
+    bytes::Bytes::from(format!("data: {value}\n\n"))
+}
+
+/// Format a named SSE event frame (`event: ...\ndata: ...`) for byte streams.
+pub fn event_frame(event_type: &str, value: &serde_json::Value) -> bytes::Bytes {
+    bytes::Bytes::from(format!("event: {event_type}\ndata: {value}\n\n"))
+}
+
+/// Terminal `data: [DONE]` frame used by OpenAI-compatible streams.
+pub fn done_frame() -> bytes::Bytes {
+    bytes::Bytes::from_static(b"data: [DONE]\n\n")
+}
+
 /// Intermediate stream event emitted by the inference loop and consumed by
 /// the OpenAI-format SSE encoder.
 pub enum StreamEvent {

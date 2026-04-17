@@ -5,6 +5,7 @@ pub mod crypto;
 pub mod daemon;
 pub mod error;
 pub mod health;
+pub mod http;
 pub mod identity;
 pub mod inference;
 pub mod model;

@@ -17,26 +17,21 @@ const PROVIDER_HEALTH_TIMEOUT_SECS: u64 = 5;
 const PROVIDER_HEALTH_CONNECT_SECS: u64 = 3;
 
 static LIST_CLIENT: std::sync::LazyLock<reqwest::Client> = std::sync::LazyLock::new(|| {
-    reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(PROVIDER_LIST_TIMEOUT_SECS))
-        .build()
-        .unwrap_or_else(|_| reqwest::Client::new())
+    crate::http::client_with_timeout(std::time::Duration::from_secs(PROVIDER_LIST_TIMEOUT_SECS))
 });
 
 static PROBE_CLIENT: std::sync::LazyLock<reqwest::Client> = std::sync::LazyLock::new(|| {
-    reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(PROVIDER_PROBE_TIMEOUT_SECS))
-        .connect_timeout(std::time::Duration::from_secs(PROVIDER_PROBE_CONNECT_SECS))
-        .build()
-        .unwrap_or_else(|_| reqwest::Client::new())
+    crate::http::build_client(|b| {
+        b.timeout(std::time::Duration::from_secs(PROVIDER_PROBE_TIMEOUT_SECS))
+            .connect_timeout(std::time::Duration::from_secs(PROVIDER_PROBE_CONNECT_SECS))
+    })
 });
 
 static HEALTH_CLIENT: std::sync::LazyLock<reqwest::Client> = std::sync::LazyLock::new(|| {
-    reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(PROVIDER_HEALTH_TIMEOUT_SECS))
-        .connect_timeout(std::time::Duration::from_secs(PROVIDER_HEALTH_CONNECT_SECS))
-        .build()
-        .unwrap_or_else(|_| reqwest::Client::new())
+    crate::http::build_client(|b| {
+        b.timeout(std::time::Duration::from_secs(PROVIDER_HEALTH_TIMEOUT_SECS))
+            .connect_timeout(std::time::Duration::from_secs(PROVIDER_HEALTH_CONNECT_SECS))
+    })
 });
 
 // ── Cloud Provider Management ──

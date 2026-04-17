@@ -16,20 +16,18 @@ const UPDATE_DOWNLOAD_TIMEOUT_SECS: u64 = 300;
 const UPDATE_STARTUP_DELAY_SECS: u64 = 30;
 
 static UPDATE_CHECK_CLIENT: std::sync::LazyLock<reqwest::Client> = std::sync::LazyLock::new(|| {
-    reqwest::Client::builder()
-        .user_agent(concat!("SwarmLLM/", env!("CARGO_PKG_VERSION")))
-        .timeout(std::time::Duration::from_secs(UPDATE_CHECK_TIMEOUT_SECS))
-        .build()
-        .unwrap_or_else(|_| reqwest::Client::new())
+    crate::http::build_client(|b| {
+        b.user_agent(concat!("SwarmLLM/", env!("CARGO_PKG_VERSION")))
+            .timeout(std::time::Duration::from_secs(UPDATE_CHECK_TIMEOUT_SECS))
+    })
 });
 
 static UPDATE_DOWNLOAD_CLIENT: std::sync::LazyLock<reqwest::Client> =
     std::sync::LazyLock::new(|| {
-        reqwest::Client::builder()
-            .user_agent(concat!("SwarmLLM/", env!("CARGO_PKG_VERSION")))
-            .timeout(std::time::Duration::from_secs(UPDATE_DOWNLOAD_TIMEOUT_SECS))
-            .build()
-            .unwrap_or_else(|_| reqwest::Client::new())
+        crate::http::build_client(|b| {
+            b.user_agent(concat!("SwarmLLM/", env!("CARGO_PKG_VERSION")))
+                .timeout(std::time::Duration::from_secs(UPDATE_DOWNLOAD_TIMEOUT_SECS))
+        })
     });
 
 /// Information about an available update.

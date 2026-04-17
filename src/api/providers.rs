@@ -290,11 +290,10 @@ const PROVIDER_PROXY_CONNECT_SECS: u64 = 30;
 
 /// Lazily-initialized shared reqwest client for provider proxying.
 static PROVIDER_CLIENT: std::sync::LazyLock<reqwest::Client> = std::sync::LazyLock::new(|| {
-    reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(PROVIDER_PROXY_TIMEOUT_SECS))
-        .connect_timeout(std::time::Duration::from_secs(PROVIDER_PROXY_CONNECT_SECS))
-        .build()
-        .unwrap_or_else(|_| reqwest::Client::new())
+    crate::http::build_client(|b| {
+        b.timeout(std::time::Duration::from_secs(PROVIDER_PROXY_TIMEOUT_SECS))
+            .connect_timeout(std::time::Duration::from_secs(PROVIDER_PROXY_CONNECT_SECS))
+    })
 });
 
 pub(crate) fn get_provider_client() -> &'static reqwest::Client {
