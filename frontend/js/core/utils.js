@@ -437,6 +437,43 @@
     return msg;
   }
 
+  /**
+   * Run a mutating API call with uniform error handling.
+   *
+   * - fetches `url` with `opts` via App.authFetch
+   * - on resp.ok: calls onSuccess(resp) if provided; resolves to true
+   * - on !resp.ok: shows an error via the chosen sink; resolves to false
+   * - on thrown exception: shows an error via the chosen sink; resolves to false
+   *
+   * Options:
+   *   fallback  — error message prefix when no API error is parseable
+   *   display   — 'banner' (default, used by models/downloads/identity) or 'toast'
+   *
+   * Single source of truth for the try/fetch/checkOk/showError pattern
+   * repeated across models.js / downloads.js / identity.js.
+   */
+  async function apiAction(url, fetchOpts, onSuccess, displayOpts) {
+    displayOpts = displayOpts || {};
+    var fallback = displayOpts.fallback || I18n.t('common.request_failed');
+    var useToast = displayOpts.display === 'toast';
+    function showErr(msg) {
+      if (useToast) App.notifications.showToast(msg, 'error');
+      else App.ui.showBanner('error', msg);
+    }
+    try {
+      var resp = await App.authFetch(url, fetchOpts);
+      if (resp.ok) {
+        if (onSuccess) await onSuccess(resp);
+        return true;
+      }
+      showErr(await getApiErrorMessage(resp, fallback));
+      return false;
+    } catch (e) {
+      showErr(fallback + ': ' + (e && e.message ? e.message : I18n.t('common.request_failed')));
+      return false;
+    }
+  }
+
   // Copy text to the clipboard with an optional temporary button flash.
   //
   // opts: {
@@ -581,6 +618,7 @@
     updateChatAvailability: updateChatAvailability,
     updateChatDownloadProgress: updateChatDownloadProgress,
     extractErrorMessage: extractErrorMessage,
+    apiAction: apiAction,
     submitCodeForm: submitCodeForm,
     copyToClipboard: copyToClipboard,
     readSseStream: readSseStream,

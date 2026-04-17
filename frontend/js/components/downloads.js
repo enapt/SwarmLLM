@@ -241,8 +241,9 @@
   }
 
   async function saveSchedule() {
-    try {
-      var resp = await App.authFetch('/api/admin/schedule', {
+    await U.apiAction(
+      '/api/admin/schedule',
+      {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -252,15 +253,12 @@
           reduced_contribution: document.getElementById('sched-contrib').value,
           prune_aggressiveness: document.getElementById('sched-prune-agg').value,
         }),
-      });
-      if (resp.ok) {
+      },
+      function() {
         App.ui.showBanner('success', I18n.t('downloads.schedule_saved'));
-      } else {
-        App.ui.showBanner('error', await U.getApiErrorMessage(resp, I18n.t('models.save_failed')));
-      }
-    } catch (e) {
-      App.ui.showBanner('error', I18n.t('models.save_error', { error: e.message }));
-    }
+      },
+      { fallback: I18n.t('models.save_failed') }
+    );
   }
 
   App.pruneSchedule = {

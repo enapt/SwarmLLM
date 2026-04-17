@@ -491,9 +491,10 @@
 
     cancelDownload: async function(modelId) {
       if (!confirm(I18n.t('actions.confirm_cancel_download', { model: modelId }))) return;
-      try {
-        var resp = await App.authFetch('/api/admin/downloads/' + encodeURIComponent(modelId) + '/cancel', { method: 'POST' });
-        if (resp.ok) {
+      await U.apiAction(
+        '/api/admin/downloads/' + encodeURIComponent(modelId) + '/cancel',
+        { method: 'POST' },
+        function() {
           App.ui.showBanner('success', I18n.t('models.download_cancelled'));
           var card = document.querySelector('[data-model-id="' + U.cssSafeAttr(modelId) + '"]');
           if (card) {
@@ -514,35 +515,31 @@
           }
           delete S.activeAcquisitions[modelId];
           setTimeout(function() { App.dashboard.loadInitial(); }, 1000);
-        } else {
-          App.ui.showBanner('error', await U.getApiErrorMessage(resp, I18n.t('models.cancel_failed')));
-        }
-      } catch (e) {
-        App.ui.showBanner('error', I18n.t('models.cancel_error', { error: e.message }));
-      }
+        },
+        { fallback: I18n.t('models.cancel_failed') }
+      );
     },
 
     remove: async function(modelId) {
       if (!confirm(I18n.t('actions.confirm_remove_model', { model: modelId }))) return;
-      try {
-        var resp = await App.authFetch(U.modelApiUrl(modelId), { method: 'DELETE' });
-        if (resp.ok) {
+      await U.apiAction(
+        U.modelApiUrl(modelId),
+        { method: 'DELETE' },
+        function() {
           App.ui.showBanner('success', I18n.t('models.model_removed', { model: modelId }));
           var card = document.querySelector('[data-model-id="' + U.cssSafeAttr(modelId) + '"]');
           if (card) card.remove();
           setTimeout(function() { App.dashboard.loadInitial(); }, 1000);
-        } else {
-          App.ui.showBanner('error', await U.getApiErrorMessage(resp, I18n.t('models.remove_failed')));
-        }
-      } catch (e) {
-        App.ui.showBanner('error', I18n.t('shard.remove_error', { error: e.message }));
-      }
+        },
+        { fallback: I18n.t('models.remove_failed') }
+      );
     },
 
     unload: async function(modelId) {
-      try {
-        var resp = await App.authFetch(U.modelApiUrl(modelId, 'unload'), { method: 'POST' });
-        if (resp.ok) {
+      await U.apiAction(
+        U.modelApiUrl(modelId, 'unload'),
+        { method: 'POST' },
+        async function(resp) {
           var result = await resp.json().catch(function() { return {}; });
           var freedMb = result.estimated_freed_mb || 0;
           var name = result.model_name || U.formatModelDisplayName(modelId);
@@ -551,12 +548,9 @@
             : I18n.t('models.unloaded', { name: name });
           App.notifications.showToast(msg, 'success');
           App.models.load();
-        } else {
-          App.notifications.showToast(await U.getApiErrorMessage(resp, I18n.t('models.unload_failed')), 'error');
-        }
-      } catch (e) {
-        App.notifications.showToast(I18n.t('shard.unload_error', { error: e.message }), 'error');
-      }
+        },
+        { display: 'toast', fallback: I18n.t('models.unload_failed') }
+      );
     },
 
     toggleAutoManage: async function(modelId) {

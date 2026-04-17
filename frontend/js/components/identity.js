@@ -35,21 +35,19 @@
         return;
       }
 
-      try {
-        var resp = await App.authFetch('/api/identity/nickname', {
+      await U.apiAction(
+        '/api/identity/nickname',
+        {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             nickname: nickname,
             visibility: visEl ? visEl.value : 'nickname',
           }),
-        });
-        if (!resp.ok) {
-          App.ui.showBanner('error', await U.getApiErrorMessage(resp, I18n.t('identity.nickname_failed')));
-        }
-      } catch (e) {
-        App.ui.showBanner('error', I18n.t('identity.nickname_error', { error: e.message }));
-      }
+        },
+        null,
+        { fallback: I18n.t('identity.nickname_failed') }
+      );
     },
 
     loadLeaderboard: async function() {
