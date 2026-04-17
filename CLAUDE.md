@@ -150,79 +150,13 @@ libp2p 0.55 (pin to 0.55.x), axum 0.7, candle-core/candle-transformers (CUDA), e
 - **Private mode**: restricts YOUR outbound inference to pool/LAN nodes only. Nodes still serve the swarm. Single `allowed_node_set()` in `src/pool/scope.rs` gates everything. Runtime-toggleable via `AtomicBool`. Shard pinning lets pool owners assign models to devices.
 - **No full model download required**: A node NEVER needs the full GGUF or all shards to participate in inference. Shards are downloaded individually via byte-range requests. Downloading all shards (or a full model) is opt-in only — for users who want offline inference or to seed more shards to the network. Never add code that implicitly downloads a full model or reconstructs a GGUF from shards. All inference loads from shard files + gguf_header.bin.
 
-## Automated Workflow
+## Subagent Choices for This Codebase
 
-### Project Skills
-
-| Skill | Purpose |
-|---|---|
-| `/build-phase <N>` | Execute all tasks for build phase N — spawns architect + explorer subagents |
-| `/next-task` | Auto-detect next uncompleted task, implement with subagent assistance |
-| `/check` | Run fmt, clippy, test, build pipeline — report-only |
-| `/test-module <mod>` | Run tests for a specific module — report-only |
-| `/review [file]` | Review code against spec — spawns code-reviewer for security analysis |
-| `/sweep` | Parallel codebase scan for dead code, duplication, stale references |
-| `/cleanup` | Verify recent changes complete, no stale refs, docs updated |
-
-> Built-in commands worth knowing: `/effort` (interactive slider — set xhigh for coding, max for hardest tasks), `/ultrareview` (parallel multi-agent code review), `/less-permission-prompts` (auto-allowlist common bash patterns), `/recap` (context restore), `/simplify`, `/loop`, `/plan`, `/branch`, `/schedule`, `/team-onboarding`, `/ultraplan`.
-
-> **Environment**: Claude Code v2.1.112, Opus 4.7 with 1M context. Global effort: `xhigh`. Agent teams enabled.
-
-### Agent Model Strategy
-
-Model family: Opus 4.7 (`claude-opus-4-7`), Sonnet 4.6 (`claude-sonnet-4-6`), Haiku 4.5 (`claude-haiku-4-5-20251001`). All 1M context. Override defaults via `ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU}_MODEL`.
-
-| Task | Model | Why |
-|---|---|---|
-| Code implementation | opus | Complex reasoning, multi-file changes |
-| Architecture, planning, code review | sonnet | Strong reasoning at lower cost |
-| Exploration, grep/glob, command output | haiku | Fast, cheap, sufficient |
-
-When spawning subagents:
-- `Task(Explore)` model: haiku — codebase searches
-- `Task(feature-dev:code-architect)` model: sonnet — module design
-- `Task(feature-dev:code-reviewer)` model: sonnet — security/bug scans (raised from haiku — 4.7-tuned harness expects more rigor)
-- `Task(Plan)` model: sonnet — implementation planning
-- `Task(Bash)` model: haiku — running and reporting command output
-- Never delegate production code writing — opus writes it
-
-### Development Loop
-
-The standard automated development cycle:
-
-1. `/next-task` — finds and implements the next item in the build sequence (opus, uses haiku/sonnet subagents for research)
-2. `/check` — validates compilation, linting, tests (haiku, forked — cheap)
-3. `/review` — verifies implementation matches the spec (sonnet, forked)
-4. Commit when a logical unit is complete
-
-For larger sessions: `/build-phase 1` will implement an entire phase end-to-end with parallel subagent orchestration.
-
-### Hooks (configured in `.claude/settings.json`)
-
-- **PreToolUse(Edit)** with `if: Edit(*.rs)|Write(*.rs)` — blocks edits to spec documents
-- **PostToolUse(Edit|Write)** with same conditional — `cargo check` on .rs files, errors fed back
-- **PreCompact** (global) — saves snapshot of git state, modified files, processes
-- **Stop** — session summary + integrity checks → `.claude/logs/`
-
-### Prompting Opus 4.7
-
-Behavior shifted meaningfully from 4.6 — these patterns are model-specific to 4.7:
-
-- **Effort drives behavior more than prompting.** Global default is `xhigh` (best for coding/agentic per Anthropic). Toggle mid-session with `/effort` for hot loops or massive refactors. `low`/`medium` will under-think on complex tasks — raise effort instead of prompting around it.
-- **Spawns FEWER subagents by default.** Use positive framing if you want more: "spawn specialists for X, Y, Z in parallel" beats "delegate this." For simple lookups and single-file edits, work directly.
-- **Uses tools LESS, reasons MORE.** If you need more tool use (especially WebSearch), explicitly describe when and why to use them.
-- **Literal instruction following.** It will NOT silently generalize. State scope explicitly: "apply to every section, not just the first." Front-load intent, constraints, file paths, acceptance criteria in the first turn — treat it as delegating to an engineer, not pair-programming.
-- **Calibrates verbosity naturally** — drop the old "CRITICAL: you MUST" anti-laziness phrasing. If you want concise output, ask for it positively with a one-line rule.
-- **Self-verifies.** Has a stronger habit of checking its own work before reporting done. Ask for a concrete verification step (test command, file read-back) and it will run it.
-- **64k+ output budget at xhigh/max** so it has room to think across tool calls and subagent spawns.
-- **Long-context prompts**: longform data at TOP, instructions/queries at BOTTOM, wrap docs in `<document>` tags (up to 30% quality gain on multi-doc tasks).
-- **Adaptive thinking** — `thinking: {type: "adaptive"}` with `output_config.effort`. `budget_tokens` is deprecated.
-- **Prefilled assistant on final turn deprecated** — use structured outputs or tool calls.
-- **Tone is more direct** by default — fewer emoji, less validation. If your product wants warmth, ask for it.
-
-### Teams & Permissions
-
-Agent teams enabled (`CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1`, `teammateMode: "tmux"`). Permission mode: `acceptEdits`. Pre-approved: cargo, git, file ops, all Task agent types. Denied: `cargo publish`. Run `/less-permission-prompts` periodically to harvest read-only patterns from session transcripts and add them to the allowlist.
+When spawning subagents in this repo, use these model picks (overrides defaults that would otherwise pick haiku):
+- `Task(feature-dev:code-reviewer)` → sonnet (this codebase's invariants need real reasoning, not pattern-matching)
+- `Task(feature-dev:code-architect)` → sonnet
+- `Task(Plan)` → sonnet
+- Never delegate production code writing — opus (this main session) writes it
 
 ## Reference Documents
 

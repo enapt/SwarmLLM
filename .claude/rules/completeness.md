@@ -1,32 +1,31 @@
 # Completeness Rules
 
-## Never defer or suppress — fix or delete
+## Never defer or suppress
 
-When you encounter dead code, stale references, or broken patterns:
-- **Fix it now** — do not add `#[allow(dead_code)]`, `// TODO`, or `// FIXME` annotations
-- **Delete it** if it's genuinely unreachable (verify with `grep -rn` across entire codebase)
-- **If it's a deferred feature** (listed in CLAUDE.md "Deferred" section), leave it but note it's deferred
+Fix dead code, stale references, or broken patterns now — don't paper over with `#[allow(dead_code)]`, `// TODO`, or `// FIXME`. Delete genuinely unreachable code (verify with `grep -rn`). Deferred features must be listed in `docs/ARCHITECTURE.md` § "Deferred Items", not commented in source.
 
-## After every refactoring change, verify:
+## After renaming or refactoring
 
-1. `grep` for old names — renamed a function? grep for the old name across ALL files
-2. `grep` for the old pattern — changed `state.field` to `state.sub.field`? grep for bare `state.field`
-3. Check doc comments — did the behavior change? Update the `///` docs
-4. Check CLAUDE.md — does the architecture section still match?
-5. Check tests — do test assertions reference the old behavior?
+`grep -rn` for the old name across ALL files — not just `src/`. Check `docs/`, `frontend/`, `tests/`, `python/`. Fix every stale reference. Update `///` doc comments if behavior changed. Check whether `CLAUDE.md` Architecture section still matches.
 
-## After every commit, before moving on:
+## Pre-push integrity grep checks
 
-Run `/cleanup` if any of these are true:
-- You changed SharedState fields or sub-structs
-- You added/removed/renamed API endpoints
-- You added/removed JS files or changed the script load order
-- You changed broadcast channel types or WebSocket message formats
-- You modified error types or their HTTP status mappings
+Run when you've touched SharedState, frontend JS, or done a multi-commit refactor:
+```
+grep -rn "\.events\.events\.\|\.models\.models\.\|\.credits\.credits\.\|\.metrics\.metrics\." src/    # double sub-struct
+grep -rn "shared_state\.activity_tx\b" src/ | grep -v state.rs                                       # direct field bypass
+grep -rn "console\.\(log\|error\|warn\)" frontend/js/                                                # console debug left behind
+for f in frontend/js/**/*.js; do node -c "$f"; done                                                  # JS syntax
+```
 
-## Error types matter
+Run `/cleanup` after committing changes to: SharedState fields, API endpoints, JS file structure, broadcast channels, WebSocket message formats, error type → HTTP status mappings.
 
-- `SwarmError::Validation` — API input errors (400)
-- `SwarmError::Config` — config file / startup errors only
-- `SwarmError::Internal` — actual bugs / programming errors (500)
-- Never use `Config` or `Internal` for request validation
+## Error type discipline
+
+- `SwarmError::Validation` → 400, API input errors
+- `SwarmError::ModelNotAvailable` / `ShardNotFound` → 404
+- `SwarmError::Config` → startup / config file only
+- `SwarmError::Internal` → actual bugs (500)
+- `SwarmError::ProviderError` → upstream cloud errors (preserves status)
+
+Never use `Config` or `Internal` for request validation.
