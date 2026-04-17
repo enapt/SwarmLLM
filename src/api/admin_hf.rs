@@ -377,7 +377,7 @@ pub async fn hf_download(
     let model_id_str = format!("hf:{}/{}", repo_id, filename);
     let mid = crate::types::ModelId(model_id_str.clone());
 
-    // Create initial acquisition progress entry
+    // Register the download atomically: AcquisitionStatus + cancel flag.
     let status = crate::model::acquisition::AcquisitionStatus::new_downloading(
         mid.clone(),
         1,
@@ -386,17 +386,7 @@ pub async fn hf_download(
         "user",
         format!("Downloading {} from HuggingFace...", filename),
     );
-    shared
-        .models
-        .acquisition_progress
-        .insert(mid.clone(), status);
-
-    // Register cancellation flag for this download
-    let hf_cancel_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    shared
-        .models
-        .download_cancel_flags
-        .insert(mid.clone(), hf_cancel_flag.clone());
+    let _hf_cancel_flag = shared.models.begin_download(mid.clone(), status);
 
     tokio::spawn(async move {
         let mut shutdown_rx = shared.shutdown_rx();
@@ -417,12 +407,12 @@ pub async fn hf_download(
             ) => Some(result),
             _ = shutdown_rx.wait_for(|v| *v) => {
                 tracing::info!(model = %download_mid, "Download cancelled by shutdown");
-                if let Some(mut entry) = download_shared.models.acquisition_progress.get_mut(&download_mid) {
-                    entry.state = crate::model::acquisition::AcquisitionState::Failed {
+                download_shared.models.update_acquisition(&download_mid, |s| {
+                    s.state = crate::model::acquisition::AcquisitionState::Failed {
                         reason: "Cancelled by daemon shutdown".into(),
                     };
-                    entry.log_push("Cancelled by daemon shutdown".into());
-                }
+                    s.log_push("Cancelled by daemon shutdown".into());
+                });
                 None
             }
         };
@@ -433,16 +423,10 @@ pub async fn hf_download(
         match download_result {
             Ok(path) => {
                 tracing::info!(path = %path.display(), "HuggingFace download complete");
-                if let Some(mut entry) = download_shared
-                    .models
-                    .acquisition_progress
-                    .get_mut(&download_mid)
-                {
-                    entry.state = crate::model::acquisition::AcquisitionState::Complete;
-                    entry.downloaded_shards = 1;
-                    entry.verified_shards = 1;
-                    entry.log_push(format!("Download complete: {}", path.display()));
-                }
+                download_shared.models.set_acquisition_complete_single(
+                    &download_mid,
+                    format!("Download complete: {}", path.display()),
+                );
 
                 // Try to load the downloaded model
                 let executor = download_shared.executor.clone();
@@ -479,39 +463,28 @@ pub async fn hf_download(
                         download_shared
                             .model_loaded
                             .store(true, std::sync::atomic::Ordering::Release);
-                        if let Some(mut entry) = download_shared
+                        download_shared
                             .models
-                            .acquisition_progress
-                            .get_mut(&download_mid)
-                        {
-                            entry.log_push(format!("Model loaded: {}", model_name));
-                        }
+                            .update_acquisition(&download_mid, |s| {
+                                s.log_push(format!("Model loaded: {}", model_name));
+                            });
                         tracing::info!(model = %model_name, "HF model loaded for inference");
                     }
                     Err(e) => {
-                        if let Some(mut entry) = download_shared
+                        download_shared
                             .models
-                            .acquisition_progress
-                            .get_mut(&download_mid)
-                        {
-                            entry.log_push(format!("Model load failed: {}", e));
-                        }
+                            .update_acquisition(&download_mid, |s| {
+                                s.log_push(format!("Model load failed: {}", e));
+                            });
                         tracing::error!(error = %e, "Failed to load HF model");
                     }
                 }
             }
             Err(e) => {
                 tracing::error!(error = %e, "HuggingFace download failed");
-                if let Some(mut entry) = download_shared
+                download_shared
                     .models
-                    .acquisition_progress
-                    .get_mut(&download_mid)
-                {
-                    entry.state =
-                        crate::model::acquisition::AcquisitionState::Failed { reason: e.clone() };
-                    entry.failed_shards = 1;
-                    entry.log_push(format!("Download failed: {}", e));
-                }
+                    .set_acquisition_failed(&download_mid, e.clone());
                 download_shared.emit_activity(
                     crate::daemon::state::ActivityEvent::new(
                         "download",
@@ -808,21 +781,13 @@ pub async fn hf_download_shards(
     );
     status.shard_progress = initial_shard_progress;
     let shared = state.shared_state.clone();
-    shared
-        .models
-        .acquisition_progress
-        .insert(mid.clone(), status);
 
     // Clone values needed both in the spawn and the response
     let response_model_id = model_id_str.clone();
     let response_shards = shard_indices.clone();
 
-    // Register cancellation flag for this download
-    let cancel_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    shared
-        .models
-        .download_cancel_flags
-        .insert(mid.clone(), cancel_flag.clone());
+    // Register download: AcquisitionStatus + cancel flag atomically.
+    let cancel_flag = shared.models.begin_download(mid.clone(), status);
 
     // Capture network_tx for broadcasting HfSourceGossip + ModelManifest after download
     let network_tx = state.network_tx.clone();
@@ -1490,12 +1455,12 @@ pub async fn cancel_download(
     }
 
     // Mark the acquisition as failed/cancelled
-    if let Some(mut entry) = shared.models.acquisition_progress.get_mut(&mid) {
-        entry.state = crate::model::acquisition::AcquisitionState::Failed {
+    shared.models.update_acquisition(&mid, |s| {
+        s.state = crate::model::acquisition::AcquisitionState::Failed {
             reason: "Cancelled by user".to_string(),
         };
-        entry.log_push("Download cancelled by user".to_string());
-    }
+        s.log_push("Download cancelled by user".to_string());
+    });
 
     // Clean up partial .tmp files in the model directory
     let model_dir = state.model_dir(&model_id);

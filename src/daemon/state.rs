@@ -272,6 +272,68 @@ impl ModelMgmt {
             })
             .unwrap_or(false)
     }
+
+    /// Mutate a model's AcquisitionStatus if present. No-op if the model has
+    /// no acquisition entry. Locks `acquisition_progress` only for the body
+    /// of the closure — do NOT hold the closure across `.await`.
+    pub fn update_acquisition<F>(&self, model_id: &crate::types::ModelId, f: F)
+    where
+        F: FnOnce(&mut crate::model::acquisition::AcquisitionStatus),
+    {
+        if let Some(mut entry) = self.acquisition_progress.get_mut(model_id) {
+            f(&mut entry);
+        }
+    }
+
+    /// Mark an acquisition as failed — sets state, increments failed_shards,
+    /// and pushes a log line. Safe to call if the model has no acquisition
+    /// entry (no-op).
+    pub fn set_acquisition_failed(
+        &self,
+        model_id: &crate::types::ModelId,
+        reason: impl Into<String>,
+    ) {
+        let reason = reason.into();
+        self.update_acquisition(model_id, |s| {
+            s.state = crate::model::acquisition::AcquisitionState::Failed {
+                reason: reason.clone(),
+            };
+            s.failed_shards += 1;
+            s.log_push(format!("Failed: {reason}"));
+        });
+    }
+
+    /// Mark an acquisition as complete for single-file downloads (e.g., full
+    /// GGUF). Sets state + treats the single file as 1 downloaded and verified
+    /// shard. For multi-shard downloads, use `update_acquisition` directly.
+    pub fn set_acquisition_complete_single(
+        &self,
+        model_id: &crate::types::ModelId,
+        log_msg: impl Into<String>,
+    ) {
+        let msg = log_msg.into();
+        self.update_acquisition(model_id, |s| {
+            s.state = crate::model::acquisition::AcquisitionState::Complete;
+            s.downloaded_shards = 1;
+            s.verified_shards = 1;
+            s.log_push(msg);
+        });
+    }
+
+    /// Register a new download job: insert the initial AcquisitionStatus and
+    /// a cancel flag atomically from the caller's perspective, so subsystems
+    /// that observe one but not the other (auto-manage scan vs hf download)
+    /// don't race. Returns the cancel flag Arc.
+    pub fn begin_download(
+        &self,
+        model_id: crate::types::ModelId,
+        status: crate::model::acquisition::AcquisitionStatus,
+    ) -> Arc<AtomicBool> {
+        let flag = Arc::new(AtomicBool::new(false));
+        self.acquisition_progress.insert(model_id.clone(), status);
+        self.download_cancel_flags.insert(model_id, flag.clone());
+        flag
+    }
 }
 
 /// Metrics, stats, and provider configuration.
