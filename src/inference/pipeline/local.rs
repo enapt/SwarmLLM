@@ -128,6 +128,7 @@ impl PipelineExecutor {
             adapter_id: None,
             draft_tokens: Vec::new(),
             spec_logits_requested: false,
+            truncate_kv_to: None,
         };
         let layer_result = self
             .shared_state

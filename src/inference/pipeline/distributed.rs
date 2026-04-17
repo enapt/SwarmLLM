@@ -630,6 +630,7 @@ impl PipelineExecutor {
                     adapter_id: None,
                     draft_tokens: Vec::new(),
                     spec_logits_requested: false,
+                    truncate_kv_to: None,
                 };
 
                 // Look up the peer's libp2p PeerId bytes. Use peer_id_map (persistent,
@@ -911,6 +912,7 @@ impl PipelineExecutor {
                     adapter_id: None,
                     draft_tokens: Vec::new(),
                     spec_logits_requested: false,
+                    truncate_kv_to: None,
                 };
 
                 // Use peer_id_map (persistent, survives disconnects) first,

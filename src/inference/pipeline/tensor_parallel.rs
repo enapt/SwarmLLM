@@ -112,6 +112,7 @@ impl PipelineExecutor {
                     adapter_id: None,
                     draft_tokens: Vec::new(),
                     spec_logits_requested: false,
+                    truncate_kv_to: None,
                 };
                 self.shared_state
                     .model_process_pool
@@ -147,6 +148,7 @@ impl PipelineExecutor {
                         adapter_id: None,
                         draft_tokens: Vec::new(),
                         spec_logits_requested: false,
+                        truncate_kv_to: None,
                     };
                     let _ = self
                         .network_tx
@@ -179,6 +181,7 @@ impl PipelineExecutor {
                     adapter_id: None,
                     draft_tokens: Vec::new(),
                     spec_logits_requested: false,
+                    truncate_kv_to: None,
                 };
                 let attn_partial = self
                     .shared_state
@@ -243,6 +246,7 @@ impl PipelineExecutor {
                         adapter_id: None,
                         draft_tokens: Vec::new(),
                         spec_logits_requested: false,
+                        truncate_kv_to: None,
                     };
                     let _ = self
                         .network_tx
@@ -275,6 +279,7 @@ impl PipelineExecutor {
                     adapter_id: None,
                     draft_tokens: Vec::new(),
                     spec_logits_requested: false,
+                    truncate_kv_to: None,
                 };
                 let ffn_partial = self
                     .shared_state
@@ -348,6 +353,7 @@ impl PipelineExecutor {
                 adapter_id: None,
                 draft_tokens: Vec::new(),
                 spec_logits_requested: false,
+                truncate_kv_to: None,
             };
             let layer_result = self
                 .shared_state

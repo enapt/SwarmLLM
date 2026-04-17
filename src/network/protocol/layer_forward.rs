@@ -88,6 +88,14 @@ pub fn encode_layer_forward(forward: &LayerForward) -> Result<Vec<u8>, SwarmErro
         }
     }
 
+    // Optional: KV truncation trailer (marker 0x04 + target_len(4 LE)). Used
+    // by the speculative coordinator after partial acceptance to discard the
+    // trailing γ-k stale draft entries written in the previous round.
+    if let Some(target_len) = forward.truncate_kv_to {
+        buf.push(0x04);
+        buf.extend_from_slice(&target_len.to_le_bytes());
+    }
+
     Ok(buf)
 }
 
@@ -251,9 +259,22 @@ pub fn decode_layer_forward(data: &[u8]) -> Result<LayerForward, SwarmError> {
                     .map_err(|_| SwarmError::Network("Invalid draft token".into()))?,
             ));
         }
+        cursor += num_drafts * 4;
         (drafts, flags & 0x01 != 0)
     } else {
         (Vec::new(), false)
+    };
+
+    // Optional: KV truncation trailer (marker 0x04 + target_len(4 LE))
+    let truncate_kv_to = if data.len() >= cursor + 5 && data[cursor] == 0x04 {
+        let len = u32::from_le_bytes(
+            data[cursor + 1..cursor + 5]
+                .try_into()
+                .map_err(|_| SwarmError::Network("Invalid truncate_kv_to".into()))?,
+        );
+        Some(len)
+    } else {
+        None
     };
 
     Ok(LayerForward {
@@ -272,6 +293,7 @@ pub fn decode_layer_forward(data: &[u8]) -> Result<LayerForward, SwarmError> {
         adapter_id: None,
         draft_tokens,
         spec_logits_requested,
+        truncate_kv_to,
     })
 }
 

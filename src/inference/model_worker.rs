@@ -315,6 +315,27 @@ async fn handle_forward(
         kv_store.clear_request(&model_key, &req_id_str);
     }
 
+    // Speculative partial-accept KV fixup: coordinator may request truncation
+    // of this request's KV cache to a specific length before the forward runs.
+    // Discards trailing stale entries written during a prior verify round.
+    if let Some(target_len) = fwd.truncate_kv_to {
+        let model_key = format!("{}-{}-{}", layer_start, layer_end, total_layers);
+        if let Err(e) = kv_store.truncate_request_to(&model_key, &req_id_str, target_len as usize) {
+            tracing::warn!(
+                request_id = %request_id,
+                target_len,
+                error = %e,
+                "truncate_request_to failed — proceeding without truncation"
+            );
+        } else {
+            tracing::debug!(
+                request_id = %request_id,
+                target_len,
+                "DIAG: truncated KV cache for speculative partial accept"
+            );
+        }
+    }
+
     // Speculative verify path: draft_tokens carries γ candidate IDs to verify
     // in a single multi-position forward. We build the input tensor from
     // draft_tokens directly (ignoring activation_bytes) and return γ logit

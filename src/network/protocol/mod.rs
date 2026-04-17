@@ -572,6 +572,7 @@ mod tests {
             adapter_id: None,
             draft_tokens: Vec::new(),
             spec_logits_requested: false,
+            truncate_kv_to: None,
         };
 
         let encoded = encode_layer_forward(&forward).unwrap();
@@ -608,6 +609,7 @@ mod tests {
                 adapter_id: None,
                 draft_tokens: Vec::new(),
                 spec_logits_requested: false,
+                truncate_kv_to: None,
             };
             let encoded = encode_layer_forward(&forward).unwrap();
             assert_eq!(encoded[25], tag); // tag(1) + uuid(16) + seq(4) + index_pos(4) = 25
@@ -640,6 +642,7 @@ mod tests {
             adapter_id: None,
             draft_tokens: Vec::new(),
             spec_logits_requested: false,
+            truncate_kv_to: None,
         };
 
         let encoded = encode_layer_forward(&forward).unwrap();
@@ -666,6 +669,7 @@ mod tests {
             adapter_id: None,
             draft_tokens: Vec::new(),
             spec_logits_requested: false,
+            truncate_kv_to: None,
         };
 
         let encoded = encode_layer_forward(&forward).unwrap();
@@ -697,6 +701,7 @@ mod tests {
             adapter_id: None,
             draft_tokens: Vec::new(),
             spec_logits_requested: false,
+            truncate_kv_to: None,
         };
         let encoded = encode_layer_forward(&forward).unwrap();
         // Trim to remove the trailer — simulates an old encoder
@@ -866,6 +871,7 @@ mod tests {
             adapter_id: None,
             draft_tokens: Vec::new(),
             spec_logits_requested: false,
+            truncate_kv_to: None,
         };
         let encoded = encode_layer_forward(&forward).unwrap();
 
@@ -905,6 +911,7 @@ mod tests {
             adapter_id: None,
             draft_tokens: vec![42, 137, 9000, 123456],
             spec_logits_requested: true,
+            truncate_kv_to: None,
         };
 
         let encoded = encode_layer_forward(&forward).unwrap();
@@ -931,6 +938,7 @@ mod tests {
             adapter_id: None,
             draft_tokens: vec![],
             spec_logits_requested: true,
+            truncate_kv_to: None,
         };
         // When draft_tokens is empty, spec trailer must not be emitted.
         let encoded = encode_layer_forward(&forward).unwrap();

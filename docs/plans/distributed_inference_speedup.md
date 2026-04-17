@@ -104,6 +104,18 @@ Three items are executed sequentially: **1 → 2 → 3**. Each lands behind an i
 
 **Success metric:** mean tokens per round-trip ≥ 1.8 at γ=4 on TinyLlama.
 
+### Status (2026-04-17)
+
+**Phase 1 landed** (commit `49bea39`): wire types, binary codec `0x03` trailers, `SplitModel::forward_verify_all_positions()`, worker multi-position verify branch, config flag, codec tests. Flag currently logs "coordinator loop pending" when enabled.
+
+**Phase 2 landed** (this commit): KV truncation primitives.
+- `KvCacheEntry::truncate_to(len)` — snapshot narrow + reset + re-append. O(len * hidden * layers) per call.
+- `KvCacheStore::truncate_request_to(...)` — store-level wrapper.
+- `LayerForward.truncate_kv_to: Option<u32>` wire field + `0x04` codec trailer (plain + encrypted).
+- `IpcForward` pass-through; model worker applies truncation before forward.
+
+**Phase 3 remaining** — the coordinator greedy accept-reject loop. Blocker is local draft-model integration: the llama-cpp `generate_speculative_llama` entangles draft KV with verify batching (~200 lines) and isn't directly reusable because it drives both sides locally. A clean distributed coordinator loop needs a new helper `draft_tokens(gamma, last_token) -> Vec<u32>` that advances the draft model's KV by exactly γ tokens. Once that exists, the round logic is straightforward given the Phase 1+2 primitives: build `LayerForward { draft_tokens: [last_tok, ...drafts], spec_logits_requested: true, truncate_kv_to: pending }`, send, receive γ+1 spec_logits, greedy argmax-compare to find accepted prefix k, emit `[q_1..q_k, bonus]`, set `pending = current_pos + k + 1` for next round.
+
 ---
 
 ## Item 3 — Continuous Batching on Remote Segment Holder

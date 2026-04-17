@@ -98,6 +98,11 @@ pub struct IpcForward {
     /// Coordinator wants per-position logit vectors populated on the result.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub spec_logits_requested: bool,
+    /// KV cache truncation: if `Some(L)`, worker truncates per-request KV to
+    /// L sequence positions BEFORE running the forward. Used by speculative
+    /// partial-accept fixup.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub truncate_kv_to: Option<u32>,
 }
 
 /// Forward-pass result header (activation bytes are the binary payload).

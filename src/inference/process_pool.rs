@@ -280,6 +280,7 @@ impl ModelProcessPool {
             adapter_id,
             draft_tokens,
             spec_logits_requested,
+            truncate_kv_to,
         } = forward;
 
         let ipc_fwd = IpcForward {
@@ -297,6 +298,7 @@ impl ModelProcessPool {
             adapter_id,
             draft_tokens,
             spec_logits_requested,
+            truncate_kv_to,
         };
 
         let mut sock = handle.socket.lock().await;

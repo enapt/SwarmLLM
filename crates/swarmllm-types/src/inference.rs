@@ -258,6 +258,12 @@ pub struct LayerForward {
     /// the result. Ignored when `draft_tokens` is empty.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub spec_logits_requested: bool,
+    /// Speculative decoding KV-cache fixup: if `Some(L)`, the worker truncates
+    /// the per-request KV cache to exactly L sequence positions BEFORE running
+    /// this forward. Used after partial acceptance to discard the trailing γ-k
+    /// draft entries committed in the previous verify round.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub truncate_kv_to: Option<u32>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
