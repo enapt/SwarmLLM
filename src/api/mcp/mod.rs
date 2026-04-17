@@ -13,167 +13,21 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
-use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use super::{DEFAULT_MAX_TOKENS, DEFAULT_TOP_K};
 use crate::api::server::AppState;
 
-/// Collect results from spawned JoinHandles, converting join errors to error JSON.
-/// Per-task timeout for MCP multi-model calls (matches tool_chat's 120s).
-const MCP_TASK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+mod dispatch;
+mod types;
 
-async fn collect_handle_results(
-    handles: Vec<tokio::task::JoinHandle<serde_json::Value>>,
-) -> Vec<serde_json::Value> {
-    let mut results = Vec::with_capacity(handles.len());
-    for handle in handles {
-        match tokio::time::timeout(MCP_TASK_TIMEOUT, handle).await {
-            Ok(Ok(result)) => results.push(result),
-            Ok(Err(e)) => {
-                results.push(json!({"error": format!("Task failed: {e}"), "status": "error"}))
-            }
-            Err(_) => results.push(json!({"error": format!("Request timed out ({}s)", MCP_TASK_TIMEOUT.as_secs()), "status": "error"})),
-        }
-    }
-    results
-}
-
-/// Extract text content and token usage from an Anthropic Messages API response body.
-fn extract_anthropic_response(body: &serde_json::Value) -> (String, u64, u64) {
-    let content = body["content"]
-        .as_array()
-        .and_then(|arr| {
-            arr.iter()
-                .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
-                .next()
-        })
-        .unwrap_or("")
-        .to_string();
-    let input_tokens = body["usage"]["input_tokens"].as_u64().unwrap_or(0);
-    let output_tokens = body["usage"]["output_tokens"].as_u64().unwrap_or(0);
-    (content, input_tokens, output_tokens)
-}
-
-/// Result of a single model dispatch call used by MCP compare/research/batch tools.
-struct ModelCallResult {
-    pub content: String,
-    pub input_tokens: u64,
-    pub output_tokens: u64,
-    pub elapsed_ms: u64,
-    /// None on success, Some(message) on error.
-    pub error: Option<String>,
-}
-
-/// Send a prompt to a model endpoint and return the parsed result.
-///
-/// Shared core for tool_compare, tool_research, and tool_batch_prompts.
-#[allow(clippy::too_many_arguments)]
-async fn dispatch_model_call(
-    client: &reqwest::Client,
-    url: &str,
-    api_key: &str,
-    model_id: &str,
-    prompt: &str,
-    system: Option<&str>,
-    temperature: f32,
-    max_tokens: u32,
-) -> ModelCallResult {
-    let start = std::time::Instant::now();
-
-    let mut body = json!({
-        "model": model_id,
-        "max_tokens": max_tokens,
-        "temperature": temperature,
-        "messages": [{"role": "user", "content": prompt}],
-        "stream": false,
-    });
-    if let Some(sys) = system {
-        body["system"] = json!(sys);
-    }
-
-    let result = client
-        .post(url)
-        .header("Authorization", format!("Bearer {api_key}"))
-        .header("Content-Type", "application/json")
-        .json(&body)
-        .send()
-        .await;
-
-    let elapsed_ms = start.elapsed().as_millis() as u64;
-
-    match result {
-        Ok(resp) if resp.status().is_success() => {
-            let resp_body: serde_json::Value = resp
-                .json()
-                .await
-                .unwrap_or(json!({"error": "parse failed"}));
-            let (content, input_tokens, output_tokens) = extract_anthropic_response(&resp_body);
-            ModelCallResult {
-                content,
-                input_tokens,
-                output_tokens,
-                elapsed_ms,
-                error: None,
-            }
-        }
-        Ok(resp) => {
-            let status = resp.status().as_u16();
-            let body = resp.text().await.unwrap_or_default();
-            let truncated = super::scrub_truncate_error(&body);
-            ModelCallResult {
-                content: String::new(),
-                input_tokens: 0,
-                output_tokens: 0,
-                elapsed_ms,
-                error: Some(format!("HTTP {status}: {truncated}")),
-            }
-        }
-        Err(e) => ModelCallResult {
-            content: String::new(),
-            input_tokens: 0,
-            output_tokens: 0,
-            elapsed_ms,
-            error: Some(format!("{e}")),
-        },
-    }
-}
-
-/// Spawn a single model dispatch call as a detached task, with caller-supplied
-/// JSON shaping applied to the result. Shared plumbing for tool_compare,
-/// tool_research, and tool_batch_prompts, each of which uses slightly different
-/// output keys (`content` vs `response`, with or without `task_id`).
-#[allow(clippy::too_many_arguments)]
-fn spawn_model_call_task<F>(
-    client: reqwest::Client,
-    base_url: &str,
-    api_key: String,
-    model_id: String,
-    prompt: String,
-    system: Option<String>,
-    temperature: f32,
-    max_tokens: u32,
-    shape: F,
-) -> tokio::task::JoinHandle<serde_json::Value>
-where
-    F: FnOnce(&str, ModelCallResult) -> serde_json::Value + Send + 'static,
-{
-    let url = format!("{base_url}/v1/messages");
-    tokio::spawn(async move {
-        let r = dispatch_model_call(
-            &client,
-            &url,
-            &api_key,
-            &model_id,
-            &prompt,
-            system.as_deref(),
-            temperature,
-            max_tokens,
-        )
-        .await;
-        shape(&model_id, r)
-    })
-}
+use dispatch::{
+    collect_handle_results, extract_anthropic_response, spawn_model_call_task, MCP_TASK_TIMEOUT,
+};
+use types::{
+    JsonRpcRequest, JsonRpcResponse, INTERNAL_ERROR, INVALID_PARAMS, METHOD_NOT_FOUND, PARSE_ERROR,
+    RESOURCE_UNAVAILABLE,
+};
 
 const MCP_PROTOCOL_VERSION: &str = "2025-11-25";
 const SERVER_NAME: &str = "swarmllm";
@@ -190,67 +44,6 @@ models without using expensive API tokens. The 'batch_prompts' tool lets you off
 independent subtasks to specific models in parallel (e.g., summarize with one model, \
 translate with another, review code with a third).";
 
-// ---- JSON-RPC 2.0 types ----
-
-#[derive(Debug, Deserialize)]
-pub struct JsonRpcRequest {
-    pub jsonrpc: String,
-    pub id: Option<Value>,
-    pub method: String,
-    #[serde(default)]
-    pub params: Value,
-}
-
-#[derive(Debug, Serialize)]
-pub struct JsonRpcResponse {
-    pub jsonrpc: &'static str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub id: Option<Value>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub result: Option<Value>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub error: Option<JsonRpcError>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct JsonRpcError {
-    pub code: i64,
-    pub message: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub data: Option<Value>,
-}
-
-impl JsonRpcResponse {
-    fn success(id: Option<Value>, result: Value) -> Self {
-        Self {
-            jsonrpc: "2.0",
-            id,
-            result: Some(result),
-            error: None,
-        }
-    }
-
-    fn error(id: Option<Value>, code: i64, message: impl Into<String>) -> Self {
-        Self {
-            jsonrpc: "2.0",
-            id,
-            result: None,
-            error: Some(JsonRpcError {
-                code,
-                message: message.into(),
-                data: None,
-            }),
-        }
-    }
-}
-
-// JSON-RPC error codes
-const PARSE_ERROR: i64 = -32700;
-const METHOD_NOT_FOUND: i64 = -32601;
-const INVALID_PARAMS: i64 = -32602;
-const INTERNAL_ERROR: i64 = -32603;
-/// Application-level error: resource unavailable (no models loaded).
-const RESOURCE_UNAVAILABLE: i64 = -32000;
 /// Maximum prompt/question length for MCP tool inputs (4 MB, matches HTTP validation).
 const MCP_MAX_PROMPT_BYTES: usize = 4 * 1024 * 1024;
 
