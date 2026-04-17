@@ -39,6 +39,40 @@ pub(crate) const DEFAULT_TOP_K: u32 = 40;
 pub(crate) const DEFAULT_MAX_TOKENS: u32 = 32768;
 pub(crate) const SSE_KEEPALIVE_INTERVAL_SECS: u64 = 15;
 
+/// Build SamplingParams with standard clamping applied across all API handlers.
+/// All fields are pre-clamped to safe ranges:
+/// - temperature: [0.0, 2.0]
+/// - top_p: (EPSILON, 1.0]
+/// - max_tokens: [1, DEFAULT_MAX_TOKENS]
+/// - frequency/presence penalties: [-2.0, 2.0]
+/// - top_logprobs: [0, 20]
+///
+/// Single source of truth — if bounds change, they change here, not at each caller.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn build_sampling_params(
+    temperature: f32,
+    top_p: f32,
+    top_k: u32,
+    max_tokens: u32,
+    stop: Vec<String>,
+    frequency_penalty: f32,
+    presence_penalty: f32,
+    logprobs: bool,
+    top_logprobs: u32,
+) -> crate::types::SamplingParams {
+    crate::types::SamplingParams {
+        temperature: temperature.clamp(0.0, 2.0),
+        top_p: top_p.clamp(f32::EPSILON, 1.0),
+        top_k,
+        max_tokens: max_tokens.clamp(1, DEFAULT_MAX_TOKENS),
+        stop,
+        frequency_penalty: frequency_penalty.clamp(-2.0, 2.0),
+        presence_penalty: presence_penalty.clamp(-2.0, 2.0),
+        logprobs,
+        top_logprobs: top_logprobs.min(20),
+    }
+}
+
 /// Submit a non-streaming inference request to the router and await the result.
 pub(crate) async fn submit_to_router(
     router_tx: &tokio::sync::mpsc::Sender<crate::inference::router::RouterCommand>,

@@ -13,7 +13,7 @@ use crate::inference::chat_template;
 use crate::inference::router::RouterCommand;
 use crate::types::{ChatMessage, InferenceRequest, ModelId, Role, SamplingParams};
 
-use super::{DEFAULT_MAX_TOKENS, DEFAULT_TOP_K, SSE_KEEPALIVE_INTERVAL_SECS};
+use super::{DEFAULT_TOP_K, SSE_KEEPALIVE_INTERVAL_SECS};
 
 // ---- Anthropic Messages API types ----
 
@@ -281,17 +281,17 @@ fn to_internal_messages(req: &MessagesRequest) -> Vec<ChatMessage> {
 
 /// Convert Anthropic request to SamplingParams.
 fn to_sampling_params(req: &MessagesRequest) -> SamplingParams {
-    SamplingParams {
-        temperature: req.temperature.unwrap_or(1.0).clamp(0.0, 2.0),
-        top_p: req.top_p.unwrap_or(0.9).clamp(f32::EPSILON, 1.0),
-        top_k: req.top_k.unwrap_or(DEFAULT_TOP_K),
-        max_tokens: req.max_tokens.clamp(1, DEFAULT_MAX_TOKENS),
-        stop: req.stop_sequences.clone().unwrap_or_default(),
-        frequency_penalty: 0.0,
-        presence_penalty: 0.0,
-        logprobs: false,
-        top_logprobs: 0,
-    }
+    super::build_sampling_params(
+        req.temperature.unwrap_or(1.0),
+        req.top_p.unwrap_or(0.9),
+        req.top_k.unwrap_or(DEFAULT_TOP_K),
+        req.max_tokens,
+        req.stop_sequences.clone().unwrap_or_default(),
+        0.0,
+        0.0,
+        false,
+        0,
+    )
 }
 
 /// Map internal finish reason to Anthropic stop_reason.

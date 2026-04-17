@@ -20,7 +20,7 @@ const INFERENCE_FORWARD_TIMEOUT_SECS: u64 = 120;
 const PEER_FORWARD_CONNECT_TIMEOUT_SECS: u64 = 10;
 
 use super::sse::{send_role_preamble, StreamEvent};
-use super::{DEFAULT_MAX_TOKENS, DEFAULT_TOP_K, SSE_KEEPALIVE_INTERVAL_SECS};
+use super::{DEFAULT_TOP_K, SSE_KEEPALIVE_INTERVAL_SECS};
 
 /// Maximum cold-start wait time before returning 503 (seconds).
 const COLD_START_WAIT_SECS: u32 = 10;
@@ -435,19 +435,17 @@ impl ChatCompletionRequest {
             Some(StopSequence::Multiple(v)) => v.clone(),
             None => vec![],
         };
-        SamplingParams {
-            // Clamp temperature to [0.0, 2.0] to prevent invalid values
-            temperature: self.temperature.clamp(0.0, 2.0),
-            // Clamp top_p to (0.0, 1.0]
-            top_p: self.top_p.clamp(f32::EPSILON, 1.0),
-            top_k: DEFAULT_TOP_K,
-            max_tokens: self.max_tokens.clamp(1, DEFAULT_MAX_TOKENS),
+        super::build_sampling_params(
+            self.temperature,
+            self.top_p,
+            DEFAULT_TOP_K,
+            self.max_tokens,
             stop,
-            frequency_penalty: self.frequency_penalty.clamp(-2.0, 2.0),
-            presence_penalty: self.presence_penalty.clamp(-2.0, 2.0),
-            logprobs: self.logprobs,
-            top_logprobs: self.top_logprobs.unwrap_or(0).min(20),
-        }
+            self.frequency_penalty,
+            self.presence_penalty,
+            self.logprobs,
+            self.top_logprobs.unwrap_or(0),
+        )
     }
 }
 
