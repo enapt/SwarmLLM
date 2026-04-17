@@ -1,0 +1,196 @@
+//! Anthropic Messages API request/response types.
+
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Deserialize)]
+pub struct MessagesRequest {
+    pub model: String,
+    pub max_tokens: u32,
+    pub messages: Vec<AnthropicMessage>,
+    #[serde(default)]
+    pub system: Option<SystemContent>,
+    #[serde(default)]
+    pub stream: bool,
+    #[serde(default = "default_temperature")]
+    pub temperature: Option<f32>,
+    #[serde(default)]
+    pub top_p: Option<f32>,
+    #[serde(default)]
+    pub top_k: Option<u32>,
+    #[serde(default)]
+    pub stop_sequences: Option<Vec<String>>,
+    /// Tool definitions for function calling (Claude Code sends these).
+    #[serde(default)]
+    pub tools: Option<Vec<serde_json::Value>>,
+    /// Tool choice: "auto", "any", "none", or {"type":"tool","name":"..."}
+    #[serde(default)]
+    pub tool_choice: Option<serde_json::Value>,
+    /// Request metadata (e.g. user_id for abuse tracking).
+    #[serde(default)]
+    pub metadata: Option<serde_json::Value>,
+    /// Extended thinking configuration: {"type":"enabled","budget_tokens":N}
+    #[serde(default)]
+    pub thinking: Option<serde_json::Value>,
+}
+
+fn default_temperature() -> Option<f32> {
+    Some(1.0)
+}
+
+/// System content: either a plain string or an array of blocks.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+pub enum SystemContent {
+    Text(String),
+    Blocks(Vec<SystemBlock>),
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SystemBlock {
+    #[serde(rename = "type")]
+    pub block_type: String,
+    #[serde(default)]
+    pub text: Option<String>,
+    /// Cache control hint (Anthropic prompt caching).
+    #[serde(default)]
+    pub cache_control: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AnthropicMessage {
+    pub role: String,
+    pub content: AnthropicContent,
+}
+
+/// Content field: either a plain string or an array of content blocks.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+pub enum AnthropicContent {
+    Text(String),
+    Blocks(Vec<ContentBlock>),
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type")]
+pub enum ContentBlock {
+    #[serde(rename = "text")]
+    Text { text: String },
+    #[serde(rename = "image")]
+    Image { source: serde_json::Value },
+    /// Tool use request from assistant (Claude Code tool calls).
+    #[serde(rename = "tool_use")]
+    ToolUse {
+        id: String,
+        name: String,
+        input: serde_json::Value,
+    },
+    /// Tool result from user (response to tool call).
+    #[serde(rename = "tool_result")]
+    ToolResult {
+        tool_use_id: String,
+        #[serde(default)]
+        content: Option<serde_json::Value>,
+        #[serde(default)]
+        is_error: Option<bool>,
+    },
+    /// Thinking block (extended thinking / chain-of-thought).
+    #[serde(rename = "thinking")]
+    Thinking { thinking: String },
+    /// Redacted thinking block.
+    #[serde(rename = "redacted_thinking")]
+    RedactedThinking { data: String },
+}
+
+// ---- Response types ----
+
+#[derive(Debug, Serialize)]
+pub struct MessagesResponse {
+    pub id: String,
+    #[serde(rename = "type")]
+    pub response_type: &'static str,
+    pub role: &'static str,
+    pub content: Vec<ResponseContentBlock>,
+    pub model: String,
+    pub stop_reason: Option<String>,
+    pub stop_sequence: Option<String>,
+    pub usage: AnthropicUsage,
+}
+
+impl MessagesResponse {
+    /// Build a simple text-only response.
+    pub(super) fn text(
+        id: String,
+        model: String,
+        text: String,
+        stop_reason: &str,
+        input_tokens: u32,
+        output_tokens: u32,
+    ) -> Self {
+        Self {
+            id,
+            response_type: "message",
+            role: "assistant",
+            content: vec![ResponseContentBlock::Text { text }],
+            model,
+            stop_reason: Some(stop_reason.into()),
+            stop_sequence: None,
+            usage: AnthropicUsage {
+                input_tokens,
+                output_tokens,
+            },
+        }
+    }
+}
+
+/// Response content block — supports text, tool_use, and thinking.
+#[derive(Debug, Serialize)]
+#[serde(tag = "type")]
+pub enum ResponseContentBlock {
+    #[serde(rename = "text")]
+    Text { text: String },
+    #[serde(rename = "tool_use")]
+    ToolUse {
+        id: String,
+        name: String,
+        input: serde_json::Value,
+    },
+    #[serde(rename = "thinking")]
+    Thinking { thinking: String },
+}
+
+#[derive(Debug, Serialize)]
+pub struct AnthropicUsage {
+    pub input_tokens: u32,
+    pub output_tokens: u32,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn response_content_block_serialization() {
+        let text = ResponseContentBlock::Text {
+            text: "hello".into(),
+        };
+        let json = serde_json::to_value(&text).unwrap();
+        assert_eq!(json["type"], "text");
+        assert_eq!(json["text"], "hello");
+
+        let tool = ResponseContentBlock::ToolUse {
+            id: "t1".into(),
+            name: "Read".into(),
+            input: serde_json::json!({"path": "/tmp"}),
+        };
+        let json = serde_json::to_value(&tool).unwrap();
+        assert_eq!(json["type"], "tool_use");
+        assert_eq!(json["name"], "Read");
+
+        let think = ResponseContentBlock::Thinking {
+            thinking: "hmm".into(),
+        };
+        let json = serde_json::to_value(&think).unwrap();
+        assert_eq!(json["type"], "thinking");
+        assert_eq!(json["thinking"], "hmm");
+    }
+}
