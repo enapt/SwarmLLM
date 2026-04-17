@@ -284,6 +284,11 @@ pub struct MetricsProviders {
     pub providers_config: RwLock<crate::config::ProvidersConfig>,
     pub provider_model_map: DashMap<String, String>,
     pub provider_models_cache: RwLock<(Vec<serde_json::Value>, std::time::Instant)>,
+    /// Cached WebSocket stats JSON, shared across all connected clients.
+    /// (built_at, message). Built on demand by the first WS client to tick
+    /// with a stale cache; subsequent clients within TTL reuse the string.
+    /// Eliminates O(n) shard/peer registry scans per client per 2s tick.
+    pub stats_cache: parking_lot::Mutex<Option<(std::time::Instant, std::sync::Arc<String>)>>,
 }
 
 // ---- Main SharedState ----
@@ -712,6 +717,7 @@ impl SharedState {
                 }),
                 provider_model_map: DashMap::new(),
                 provider_models_cache: RwLock::new((Vec::new(), std::time::Instant::now())),
+                stats_cache: parking_lot::Mutex::new(None),
             },
             credits: CreditPool {
                 credit_balance: Arc::new(RwLock::new(CreditBalance {

@@ -128,14 +128,12 @@ async fn handle_socket(socket: WebSocket, shared_state: Arc<SharedState>) {
 
         let mut stats_interval = tokio::time::interval(Duration::from_secs(WS_STATS_INTERVAL_SECS));
         let mut ping_interval = tokio::time::interval(Duration::from_secs(WS_PING_INTERVAL_SECS));
-        // Track previous shard registry snapshot for change detection
-        let mut prev_shard_snapshot: HashMap<String, Vec<ShardSnapshot>> = HashMap::new();
         let mut tick_count: u64 = 0;
         loop {
             tokio::select! {
                 _ = stats_interval.tick() => {
-                    let msg = build_stats_message(&push_state, &mut prev_shard_snapshot).await;
-                    if sender.send(Message::Text(msg)).await.is_err() {
+                    let msg = get_or_build_stats_message(&push_state).await;
+                    if sender.send(Message::Text((*msg).clone())).await.is_err() {
                         break;
                     }
                 }
@@ -254,18 +252,32 @@ fn build_peer_list_message(state: &SharedState) -> serde_json::Value {
     })
 }
 
-/// Lightweight snapshot of a shard's holder state for change detection.
-#[derive(Clone, PartialEq)]
-struct ShardSnapshot {
-    index: u32,
-    local: bool,
-    holder_count: usize,
+/// TTL for the shared stats JSON cache. A client ticking within this window
+/// of the last build reuses the cached string instead of re-scanning registries.
+/// Set slightly below the 2s WS_STATS_INTERVAL_SECS so the first client per
+/// tick rebuilds while subsequent clients in the same tick hit the hot cache.
+const STATS_CACHE_TTL_MS: u128 = 1500;
+
+/// Return a cached stats message if still fresh, otherwise rebuild and cache.
+///
+/// Called by every WebSocket client every 2s. With N connected clients the
+/// per-client O(shards+peers) scans collapse into at most one rebuild per
+/// 1.5s, shared across all clients.
+async fn get_or_build_stats_message(state: &SharedState) -> std::sync::Arc<String> {
+    {
+        let cache = state.metrics.stats_cache.lock();
+        if let Some((built_at, msg)) = cache.as_ref() {
+            if built_at.elapsed().as_millis() < STATS_CACHE_TTL_MS {
+                return msg.clone();
+            }
+        }
+    }
+    let msg = std::sync::Arc::new(build_stats_message(state).await);
+    *state.metrics.stats_cache.lock() = Some((std::time::Instant::now(), msg.clone()));
+    msg
 }
 
-async fn build_stats_message(
-    state: &SharedState,
-    prev_shard_snapshot: &mut HashMap<String, Vec<ShardSnapshot>>,
-) -> String {
+async fn build_stats_message(state: &SharedState) -> String {
     let stats = state.metrics.node_stats.read().await;
     let credit = state.credits.credit_balance.read().await;
     let local_node_id = state.identity.node_id().clone();
@@ -278,53 +290,42 @@ async fn build_stats_message(
         .map(|entry| crate::api::admin_models::serialize_acquisition_to_json(entry.value(), state))
         .collect();
 
-    // Build shard registry snapshot — only include if changed from previous tick
-    let mut current_snapshot: HashMap<String, Vec<ShardSnapshot>> = HashMap::new();
+    // Build shard registry. Since the stats message is shared across all
+    // clients via stats_cache, always include the full registry — per-client
+    // diffing is no longer possible without per-client cache state.
+    let mut per_model: HashMap<String, Vec<(u32, bool, usize)>> = HashMap::new();
     for (shard_id, holders) in state.model_registry.all_shard_entries() {
         let model_id = shard_id.model_id.0.clone();
         let local = holders.contains(&local_node_id);
-        current_snapshot
+        per_model
             .entry(model_id)
             .or_default()
-            .push(ShardSnapshot {
-                index: shard_id.index,
-                local,
-                holder_count: holders.len(),
-            });
+            .push((shard_id.index, local, holders.len()));
     }
-
-    // Only include shard_registry in the message if it changed
-    let registry_changed = current_snapshot != *prev_shard_snapshot;
-    let shard_registry_val = if registry_changed {
-        let registry: serde_json::Value = current_snapshot
-            .iter()
-            .map(|(model_id, shards)| {
-                let shard_arr: Vec<serde_json::Value> = shards
-                    .iter()
-                    .map(|s| {
-                        let mid = crate::types::ModelId(model_id.clone());
-                        let in_vram = if s.local {
-                            state.is_shard_in_vram(&mid, s.index)
-                        } else {
-                            false
-                        };
-                        serde_json::json!({
-                            "index": s.index,
-                            "local": s.local,
-                            "holders": s.holder_count,
-                            "in_vram": in_vram,
-                        })
+    let shard_registry_val: serde_json::Value = per_model
+        .iter()
+        .map(|(model_id, shards)| {
+            let shard_arr: Vec<serde_json::Value> = shards
+                .iter()
+                .map(|(index, local, holder_count)| {
+                    let mid = crate::types::ModelId(model_id.clone());
+                    let in_vram = if *local {
+                        state.is_shard_in_vram(&mid, *index)
+                    } else {
+                        false
+                    };
+                    serde_json::json!({
+                        "index": index,
+                        "local": local,
+                        "holders": holder_count,
+                        "in_vram": in_vram,
                     })
-                    .collect();
-                (model_id.clone(), serde_json::Value::Array(shard_arr))
-            })
-            .collect::<serde_json::Map<String, serde_json::Value>>()
-            .into();
-        *prev_shard_snapshot = current_snapshot;
-        Some(registry)
-    } else {
-        None
-    };
+                })
+                .collect();
+            (model_id.clone(), serde_json::Value::Array(shard_arr))
+        })
+        .collect::<serde_json::Map<String, serde_json::Value>>()
+        .into();
 
     // Derive LAN count from the authoritative peer_registry rather than the
     // monotonically-incremented atomic counter, which can overcount after
@@ -352,9 +353,7 @@ async fn build_stats_message(
         "acquisitions": acquisitions,
     });
 
-    if let Some(registry) = shard_registry_val {
-        data["shard_registry"] = registry;
-    }
+    data["shard_registry"] = shard_registry_val;
 
     // Peer shard download progress (from gossip)
     {
