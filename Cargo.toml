@@ -88,6 +88,7 @@ redb = "3"
 
 # Concurrent state
 dashmap = "6"
+parking_lot = "0.12"
 async-trait = "0.1"
 
 # Utilities

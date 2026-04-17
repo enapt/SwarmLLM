@@ -378,17 +378,13 @@ pub async fn check_and_load_model(
                         "VRAM budget full — skipping auto-load (shards remain on disk for P2P)"
                     );
                     // Only emit once per model to avoid spamming on every scan cycle
-                    let already_notified = shared
-                        .events
-                        .activity_history
-                        .lock()
-                        .map(|h| {
-                            h.iter().any(|e| {
-                                e.kind == "model_load_skipped"
-                                    && e.model_id.as_deref() == Some(&model_id.0)
-                            })
+                    let already_notified = {
+                        let history = shared.events.activity_history.lock();
+                        history.iter().any(|e| {
+                            e.kind == "model_load_skipped"
+                                && e.model_id.as_deref() == Some(&model_id.0)
                         })
-                        .unwrap_or(false);
+                    };
                     if !already_notified {
                         shared.emit_activity(
                             crate::daemon::state::ActivityEvent::new(
@@ -510,18 +506,14 @@ manifest.name, budget - total_after
             "Loaded {} into {} — {} ready for inference",
             manifest.name, mem_type, detail_label
         );
-        let already_emitted = shared
-            .events
-            .activity_history
-            .lock()
-            .map(|h| {
-                h.iter().any(|e| {
-                    e.kind == "model_loaded"
-                        && e.model_id.as_deref() == Some(&model_id.0)
-                        && e.detail_str.as_deref() == Some(detail_label.as_str())
-                })
+        let already_emitted = {
+            let history = shared.events.activity_history.lock();
+            history.iter().any(|e| {
+                e.kind == "model_loaded"
+                    && e.model_id.as_deref() == Some(&model_id.0)
+                    && e.detail_str.as_deref() == Some(detail_label.as_str())
             })
-            .unwrap_or(false);
+        };
         if !already_emitted {
             shared.emit_activity(
                 crate::daemon::state::ActivityEvent::new("model", "model_loaded", load_msg)

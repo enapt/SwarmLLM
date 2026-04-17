@@ -188,7 +188,9 @@ pub struct LoadedModelInfo {
 /// Event bus: activity events + dashboard signals + update state.
 pub struct EventBus {
     pub activity_tx: broadcast::Sender<ActivityEvent>,
-    pub activity_history: std::sync::Mutex<VecDeque<ActivityEvent>>,
+    /// Rolling buffer of recent events — guarded by a fast parking_lot mutex so
+    /// emit_activity() does not contend on a poisoning-aware std mutex.
+    pub activity_history: parking_lot::Mutex<VecDeque<ActivityEvent>>,
     pub dashboard_tx: broadcast::Sender<DashboardSignal>,
     pub update_state: Arc<RwLock<crate::update::UpdateState>>,
 }
@@ -196,10 +198,8 @@ pub struct EventBus {
 impl EventBus {
     /// Remove stale `model_loaded` history entries for a model (e.g., after load/unload/delete).
     pub fn clear_model_load_history(&self, model_id: &str) {
-        if let Ok(mut history) = self.activity_history.lock() {
-            history
-                .retain(|e| !(e.kind == "model_loaded" && e.model_id.as_deref() == Some(model_id)));
-        }
+        let mut history = self.activity_history.lock();
+        history.retain(|e| !(e.kind == "model_loaded" && e.model_id.as_deref() == Some(model_id)));
     }
 }
 
@@ -215,6 +215,10 @@ pub struct CreditPool {
     pub escrow_manager: Arc<crate::credit::escrow::EscrowManager>,
     pub anti_gaming: tokio::sync::Mutex<crate::credit::anti_gaming::AntiGaming>,
     pub peer_credit_balances: DashMap<NodeId, i64>,
+    /// Cached (computed_at, percentile) to avoid O(n) scan of peer_credit_balances on
+    /// every inference submission. Staleness of a few hundred ms is fine — the result
+    /// is only used to pick a quantized priority tier (Bronze/Silver/Gold/Platinum).
+    pub credit_percentile_cache: parking_lot::Mutex<(std::time::Instant, f32)>,
     /// Private mode: restrict inference + auto-manage to pool members (+ optional LAN peers).
     pub private_mode: std::sync::atomic::AtomicBool,
     /// Offline mode: no internet bootstrap, mDNS-only, no automatic HF downloads.
@@ -726,6 +730,7 @@ impl SharedState {
                 escrow_manager,
                 anti_gaming: tokio::sync::Mutex::new(crate::credit::anti_gaming::AntiGaming::new()),
                 peer_credit_balances: DashMap::new(),
+                credit_percentile_cache: parking_lot::Mutex::new((std::time::Instant::now(), 0.5)),
                 private_mode: std::sync::atomic::AtomicBool::new({
                     // Restore from DB, fall back to config
                     db.get_json::<bool>("pool_state", "private_mode")
@@ -786,7 +791,7 @@ impl SharedState {
                 dashboard_tx: broadcast::channel(32).0,
                 update_state: Arc::new(RwLock::new(crate::update::UpdateState::default())),
                 activity_tx: broadcast::channel(256).0,
-                activity_history: std::sync::Mutex::new(VecDeque::new()),
+                activity_history: parking_lot::Mutex::new(VecDeque::new()),
             },
             // Root-level fields (not sub-structed)
             executor,
@@ -1069,8 +1074,9 @@ impl SharedState {
     /// Emit a rich activity event to the dashboard.
     /// Lightweight fire-and-forget — if no WebSocket subscribers, the event is dropped.
     pub fn emit_activity(&self, event: ActivityEvent) {
-        // Store in history for replay to new WS clients
-        if let Ok(mut history) = self.events.activity_history.lock() {
+        // Store in history for replay to new WS clients.
+        {
+            let mut history = self.events.activity_history.lock();
             history.push_back(event.clone());
             if history.len() > 100 {
                 history.pop_front();

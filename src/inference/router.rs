@@ -311,20 +311,33 @@ impl InferenceRouter {
         };
 
         // Compute network percentile from peer credit balances.
-        // O(n) scan instead of O(n log n) sort — we only need the rank.
+        // The raw scan is O(n) over peer_credit_balances; at high request rates on
+        // a swarm with thousands of peers this becomes an expensive per-submit cost
+        // on the single-threaded router task. Cache the result for 500ms — priority
+        // tier is quantized (Bronze/Silver/Gold/Platinum) so sub-second staleness
+        // has no observable effect on scheduling.
+        const PERCENTILE_CACHE_TTL_MS: u128 = 500;
         let network_percentile = {
-            let mut count = 0u32;
-            let mut below = 0u32;
-            for entry in self.shared_state.credits.peer_credit_balances.iter() {
-                count += 1;
-                if *entry.value() < balance {
-                    below += 1;
-                }
-            }
-            if count == 0 {
-                0.5 // No peers known, default to median
+            let now = std::time::Instant::now();
+            let mut cache = self.shared_state.credits.credit_percentile_cache.lock();
+            if now.duration_since(cache.0).as_millis() < PERCENTILE_CACHE_TTL_MS {
+                cache.1
             } else {
-                below as f32 / count as f32
+                let mut count = 0u32;
+                let mut below = 0u32;
+                for entry in self.shared_state.credits.peer_credit_balances.iter() {
+                    count += 1;
+                    if *entry.value() < balance {
+                        below += 1;
+                    }
+                }
+                let pct = if count == 0 {
+                    0.5
+                } else {
+                    below as f32 / count as f32
+                };
+                *cache = (now, pct);
+                pct
             }
         };
 

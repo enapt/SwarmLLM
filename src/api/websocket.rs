@@ -110,12 +110,10 @@ async fn handle_socket(socket: WebSocket, shared_state: Arc<SharedState>) {
 
         // Replay activity history so new clients see startup events
         {
-            let events: Vec<_> = push_state
-                .events
-                .activity_history
-                .lock()
-                .map(|h| h.iter().cloned().collect())
-                .unwrap_or_default();
+            let events: Vec<_> = {
+                let history = push_state.events.activity_history.lock();
+                history.iter().cloned().collect()
+            };
             for event in events {
                 let msg = serde_json::json!({
                     "type": "activity_event",
