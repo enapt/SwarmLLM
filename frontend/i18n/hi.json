@@ -261,6 +261,7 @@
   "connection.waiting": "डेमन के जवाब का इंतज़ार",
   "shard.row.vram_label": "लोड",
   "shard.row.missing_label": "MISSING",
+  "shard.row.size_label": "आकार",
   "shard.row.expand_tip": "विवरण दिखाएं",
   "shard.row.replicas_none": "कोई peer इस shard को नहीं रखता",
   "shard.row.replicas_local_only": "स्थानीय रूप से आयोजित — कोई अन्य peer इस shard को नहीं रखता",

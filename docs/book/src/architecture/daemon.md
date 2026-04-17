@@ -18,7 +18,7 @@ Manager  Router  Ledger  Monitor  Server ancer    tion Mgr   Dispatch   Manager 
 
 | Subsystem | File | Role |
 |---|---|---|
-| **NetworkManager** | `src/network/manager.rs` | libp2p swarm: Kademlia DHT + GossipSub + request/response |
+| **NetworkManager** | `src/network/manager/` | libp2p swarm: Kademlia DHT + GossipSub + request/response |
 | **InferenceRouter** | `src/inference/router.rs` | Request queuing, pipeline assembly, execution coordination |
 | **MessageDispatcher** | `src/daemon/dispatch.rs` | Routes inbound network messages to appropriate subsystems |
 | **CreditLedger** | `src/credit/ledger.rs` | Credit balance tracking, transaction signing, gossip |
@@ -26,7 +26,7 @@ Manager  Router  Ledger  Monitor  Server ancer    tion Mgr   Dispatch   Manager 
 | **ShardRebalancer** | `src/health/rebalancer.rs` | Shard redistribution on node join/leave |
 | **AcquisitionManager** | `src/model/acquisition.rs` | BLAKE3-verified model downloads from peers and HuggingFace |
 | **ApiServer** | `src/api/server.rs` | Axum HTTP: OpenAI + Anthropic APIs + MCP server + admin dashboard + WebSocket |
-| **PoolManager** | `src/pool/manager.rs` | Device pool management, credit forwarding |
+| **PoolManager** | `src/pool/manager/` | Device pool management, credit forwarding |
 | **AutoShardManager** | `src/model/auto_manage/` | VRAM-aware shard acquisition + smart pruning (manager, scoring, download, prune, scan, vram) |
 | **UpdateChecker** | `src/update.rs` | Periodic GitHub release polling, SHA256-verified binary download, atomic apply |
 

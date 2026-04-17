@@ -261,6 +261,7 @@
   "connection.waiting": "等待守护进程响应",
   "shard.row.vram_label": "已加载",
   "shard.row.missing_label": "缺失",
+  "shard.row.size_label": "大小",
   "shard.row.expand_tip": "显示详情",
   "shard.row.replicas_none": "没有对等节点拥有此分片",
   "shard.row.replicas_local_only": "本地持有 — 无其他对等节点拥有此分片",

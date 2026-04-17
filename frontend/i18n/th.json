@@ -261,6 +261,7 @@
   "connection.waiting": "รอให้ daemon ตอบสนอง",
   "shard.row.vram_label": "LOADED",
   "shard.row.missing_label": "MISSING",
+  "shard.row.size_label": "ขนาด",
   "shard.row.expand_tip": "แสดงรายละเอียด",
   "shard.row.replicas_none": "ไม่มี peers มี shard นี้",
   "shard.row.replicas_local_only": "ถือไว้ในเครื่องเท่านั้น — ไม่มี peers อื่นมี shard นี้",

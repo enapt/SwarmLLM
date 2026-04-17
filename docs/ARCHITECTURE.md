@@ -433,7 +433,7 @@ For a 7B model (hidden_dim=3584):
 ### Inference Correctness
 
 **Stop sequence handling**: User-provided stop sequences (`stop` in OpenAI, `stop_sequences` in Anthropic) are enforced in all three inference execution paths:
-1. `pipeline.rs` `execute_distributed` — accumulated text scanned after each token decode
+1. `pipeline/mod.rs` `execute_distributed` — accumulated text scanned after each token decode
 2. `model_worker.rs` `handle_generate` — accumulated text checked after each token in the subprocess decode loop
 3. `executor.rs` `generate_stream_llama` — accumulated text checked after each token in the llama.cpp loop
 
@@ -1254,6 +1254,7 @@ Routes Claude model requests through a locally-authenticated `claude` CLI subpro
   - `frontend/js/components/chat.js` — sessions, messages, SSE streaming, image upload, layout toggle
   - `frontend/js/components/claude-code.js` — Claude Code interactive sessions (subprocess, permission flow, SSE)
   - `frontend/js/components/dashboard.js` — stats, hardware, model cards, peers, shard grid live updates
+  - `frontend/js/components/dashboard-shards.js` — pure-function shard HTML builders (progress bar, shard row, matrix, coverage ribbon); exposes `App.dashboardShards`, loaded before `dashboard.js`
   - `frontend/js/components/models.js` — model dropdown, HF search/download, auto-manage, metadata panel
   - `frontend/js/components/auto-manage-status.js` — auto-manage scan/VRAM-pressure status display
   - `frontend/js/components/settings.js` — settings panel (API keys, config, contribution)
@@ -1385,7 +1386,7 @@ Single-node inference performance, measured with `swarmllm bench` (100 output to
 ## Deferred Items
 
 - **Speculative decoding in subprocess**: IPC scaffolding removed; speculative decoding works via the direct executor path only, not through worker subprocesses. Low priority — speculative decoding is experimental.
-- **Local executor streaming serialization**: `executor.lock().await` in openai.rs/anthropic.rs holds the Mutex for the entire streaming inference duration, serializing concurrent local streaming requests. Fix: route local streaming through `ModelProcessPool` (consistent with non-streaming path). Only affects the legacy single-GGUF executor path; split-model and distributed paths are unaffected. Low priority — legacy path rarely used.
+- **Local executor streaming serialization**: `executor.lock().await` in openai.rs/anthropic/mod.rs holds the Mutex for the entire streaming inference duration, serializing concurrent local streaming requests. Fix: route local streaming through `ModelProcessPool` (consistent with non-streaming path). Only affects the legacy single-GGUF executor path; split-model and distributed paths are unaffected. Low priority — legacy path rarely used.
 
 All sweep-deferred items from rounds 1-8 have been resolved (see `.claude/sweep-log.jsonl`).
 

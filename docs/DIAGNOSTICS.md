@@ -38,7 +38,7 @@ cargo run -- run -vv 2>&1 | grep "request_id=<UUID>"
 1. **API entry** → `Queued inference request` (router.rs)
 2. **Dispatch** → `DIAG: dispatch_single starting inference` (router.rs)
 3. **Pipeline assembly** → `DIAG: pipeline assembled` with `segments`, `standbys`, `schedule_ms` (router.rs)
-4. **Forward start** → `DIAG: starting forward_through_segments` with `seq_num`, `index_pos`, `activation_bytes` (pipeline.rs)
+4. **Forward start** → `DIAG: starting forward_through_segments` with `seq_num`, `index_pos`, `activation_bytes` (pipeline/mod.rs)
 5. **Tensor forward send** → `Sent tensor forward` with `is_connected`, `total_connections`, `pending_tensor_count`, `outbound_id` (manager.rs)
 6. **Codec write** → `DIAG: codec write_request start/done` with `frame_len` (protocol.rs)
 7. **Encryption (if enabled)** → `DIAG: encrypting tensor forward` with `aad_len`, `has_session` (manager.rs)
@@ -54,11 +54,11 @@ cargo run -- run -vv 2>&1 | grep "request_id=<UUID>"
 17. **Response received** → `DIAG: received response` with `kind`, `was_tensor_forward`, `pending_tensor_out` (manager.rs)
 18. **Response dispatch** → `DIAG: received TensorPayload response` (manager.rs)
 19. **Result delivery** → `DIAG: dispatcher received LayerResult` → `DIAG: LayerResult delivered to pipeline` (daemon/dispatch.rs)
-20. **Forward complete** → `DIAG: forward_through_segments returned OK` with `fwd_ms`, `tokens`, `activations_bytes` (pipeline.rs)
-21. **Local segment** → `DIAG: local segment complete` with `segment_ms`, `activation_bytes` (pipeline.rs)
-22. **Remote segment** → `DIAG: remote segment complete` with `segment_ms`, `activation_bytes` (pipeline.rs)
-23. **Segment result** → `DIAG: segment result received` with `elapsed_ms` (pipeline.rs)
-24. **Pipeline complete** → `DIAG: forward_through_segments completed` with `pipeline_ms` (pipeline.rs)
+20. **Forward complete** → `DIAG: forward_through_segments returned OK` with `fwd_ms`, `tokens`, `activations_bytes` (pipeline/mod.rs)
+21. **Local segment** → `DIAG: local segment complete` with `segment_ms`, `activation_bytes` (pipeline/mod.rs)
+22. **Remote segment** → `DIAG: remote segment complete` with `segment_ms`, `activation_bytes` (pipeline/mod.rs)
+23. **Segment result** → `DIAG: segment result received` with `elapsed_ms` (pipeline/mod.rs)
+24. **Pipeline complete** → `DIAG: forward_through_segments completed` with `pipeline_ms` (pipeline/mod.rs)
 25. **Execute complete** → `DIAG: execute_request completed successfully` with `schedule_ms`, `execute_ms`, `total_ms` (router.rs)
 26. **Completion** → `DIAG: inference completed` with `elapsed_ms`, `prompt_tokens`, `completion_tokens` (router.rs)
 
@@ -74,11 +74,11 @@ cargo run -- run -vv 2>&1 | grep "request_id=<UUID>"
 
 ### Failure Paths
 
-- **Timeout** → `DIAG: segment TIMED OUT after 30s` (pipeline.rs)
+- **Timeout** → `DIAG: segment TIMED OUT after 30s` (pipeline/mod.rs)
 - **Outbound failure** → `DIAG: OutboundFailure` → `Tensor forward OutboundFailure — notifying pipeline` (manager.rs)
 - **Inbound failure** → `DIAG: InboundFailure — response send may have failed` (manager.rs)
 - **Decryption fail** → `DIAG: decrypt FAILED — possible AAD mismatch` (manager.rs)
-- **No standby** → `DIAG: NO standby available for failed segment` (pipeline.rs)
+- **No standby** → `DIAG: NO standby available for failed segment` (pipeline/mod.rs)
 - **Client disconnect** → `DIAG: result_tx receiver dropped` (router.rs)
 - **Channel drop** → `DIAG: LayerResult delivered but pipeline receiver DROPPED` (daemon/dispatch.rs)
 - **No pending channel** → `DIAG: No pending channel for LayerResult — already timed out or duplicate` (daemon/dispatch.rs)
@@ -371,7 +371,7 @@ For production testing, use native Linux (dual boot or bare metal). WSL2 is suit
 |-------|------|--------|
 | DEBUG | `DIAG: speculative record_batch` | `drafted`, `accepted`, `acceptance_rate` |
 
-### Vision (vision.rs + pipeline.rs + daemon/dispatch.rs)
+### Vision (vision.rs + pipeline/mod.rs + daemon/dispatch.rs)
 
 | Level | What | Fields |
 |-------|------|--------|
@@ -473,7 +473,7 @@ For production testing, use native Linux (dual boot or bare metal). WSL2 is suit
 |-------|------|--------|
 | DEBUG | `DIAG: auth failure` | `path`, `auth_present` |
 
-### Anthropic (anthropic.rs)
+### Anthropic (anthropic/mod.rs)
 
 | Level | What | Fields |
 |-------|------|--------|
@@ -599,13 +599,13 @@ For production testing, use native Linux (dual boot or bare metal). WSL2 is suit
 |------|-------------------|
 | `src/crypto/session.rs` | seal/open success+failure logging with nonce, AAD, key state |
 | `src/crypto/key_rotation.rs` | Eviction tick, re-keying tick with session counts |
-| `src/network/manager.rs` | Encrypted tensor send/receive, connection lifecycle, gossip audit, outbound tracking, key exchange |
+| `src/network/manager/` | Encrypted tensor send/receive, connection lifecycle, gossip audit, outbound tracking, key exchange |
 | `src/network/behaviour.rs` | Connection limits, autonat/dcutr toggle state |
 | `src/network/discovery.rs` | Bootstrap failures promoted to WARN with peer counts |
 | `src/network/protocol.rs` | Tensor decompression success/failure with sizes and compression ratios |
 | `src/network/relay.rs` | Relay reservation logging |
 | `src/network/peer_cache.rs` | Peer cache save count |
-| `src/inference/pipeline.rs` | Segment timing (local + remote), pipeline total timing, failover details, wait_for_result context |
+| `src/inference/pipeline/` | Segment timing (local + remote), pipeline total timing, failover details, wait_for_result context |
 | `src/inference/router.rs` | Pipeline schedule vs execute timing breakdown, result channel delivery, streaming done event |
 | `src/inference/split/` | Per-forward-pass timing (model.rs), KV-cache cleanup (kv_cache.rs) |
 | `src/inference/kv_cache.rs` | KV-cache hit/miss with detailed miss reasons (expired, degraded, prefix mismatch, evicted) |
@@ -634,7 +634,7 @@ For production testing, use native Linux (dual boot or bare metal). WSL2 is suit
 | `src/identity/keypair.rs` | Identity key load |
 | `src/daemon/dispatch.rs` | LayerForward timing, LayerResult delivery, pending channel state |
 | `src/health/monitor.rs` | Broadcast failures, stale peer counts, channel cleanup details |
-| `src/api/anthropic.rs` | Messages API request entry, connectivity probe fast-path, inference path resolution, cloud proxy |
+| `src/api/anthropic/` | Messages API request entry, connectivity probe fast-path, inference path resolution, cloud proxy |
 | `src/api/identity.rs` | Nickname set/gossip, leaderboard query with peer filtering |
 | `src/api/internal.rs` | Hidden states request entry, gate denial |
 | `src/api/metrics.rs` | Metrics scrape, health readiness probe |

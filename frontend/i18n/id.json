@@ -261,6 +261,7 @@
   "connection.waiting": "Menunggu daemon merespons",
   "shard.row.vram_label": "DIMUAT",
   "shard.row.missing_label": "HILANG",
+  "shard.row.size_label": "Ukuran",
   "shard.row.expand_tip": "Tampilkan detail",
   "shard.row.replicas_none": "Tidak ada peer yang memiliki shard ini",
   "shard.row.replicas_local_only": "Dipegang secara lokal — tidak ada peer lain yang memiliki shard ini",

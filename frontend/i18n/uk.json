@@ -261,6 +261,7 @@
   "connection.waiting": "Очікування відповіді демона",
   "shard.row.vram_label": "ЗАВАНТАЖЕНО",
   "shard.row.missing_label": "ВІДСУТНІЙ",
+  "shard.row.size_label": "Розмір",
   "shard.row.expand_tip": "Показати деталі",
   "shard.row.replicas_none": "Жоден однорангові вузол не має цього фрагменту",
   "shard.row.replicas_local_only": "Утримується локально — жоден інший однорангові вузел не має цього фрагменту",

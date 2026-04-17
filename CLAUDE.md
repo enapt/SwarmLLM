@@ -64,7 +64,7 @@ swarmllm/
 │   ├── api/       (server, openai, anthropic, mcp, sse, admin, admin_hf, admin_models, admin_providers, websocket, middleware, identity, pool, metrics, providers, claude_sub*)
 │   ├── storage/   (db)
 │   └── health/    (monitor, rebalancer)
-├── frontend/      (index.html + 12 HTML templates, css/, js/{core/4,components/14,init.js,i18n.js,providers.js,neural-bg.js,topojson-client.min.js}, i18n/)
+├── frontend/      (index.html + 12 HTML templates, css/, js/{core/4,components/15,init.js,i18n.js,providers.js,neural-bg.js,topojson-client.min.js}, i18n/)
 ├── python/        (swarmllm-client SDK)
 ├── monitoring/    (Grafana + Prometheus + docker-compose)
 ├── docs/book/     (mdBook documentation site)
@@ -113,9 +113,9 @@ libp2p 0.55 (pin to 0.55.x), axum 0.7, candle-core/candle-transformers (CUDA), e
 ### Frontend
 - Vanilla HTML/CSS/JS — no framework, no Node.js build step
 - Embedded into binary via `include_dir!` macro at compile time
-- Component architecture: `App` global namespace, 23 JS files (4 core + 14 components + init.js + 4 standalone utilities)
-  - `js/core/` — state.js (namespace + shared state + storage keys), utils.js (format helpers, DOM builders, extractErrorMessage, getApiErrorMessage), data.js (data store + authFetch + dedup), tooltip.js (unified popover replacing native `title=`)
-  - `js/components/` — ui.js, chat.js, claude-code.js, dashboard.js, models.js, auto-manage-status.js, settings.js, setup.js, downloads.js, notifications.js, identity.js, network-map.js, compare.js, pool.js
+- Component architecture: `App` global namespace, 24 JS files (4 core + 15 components + init.js + 4 standalone utilities)
+  - `js/core/` — state.js (namespace + shared state + storage keys), utils.js (format helpers, DOM builders, extractErrorMessage, getApiErrorMessage, apiAction), data.js (data store + authFetch + dedup), tooltip.js (unified popover replacing native `title=`)
+  - `js/components/` — ui.js, chat.js, claude-code.js, dashboard.js, dashboard-shards.js (pure shard HTML builders exposed as `App.dashboardShards`), models.js, auto-manage-status.js, settings.js, setup.js, downloads.js, notifications.js, identity.js, network-map.js, compare.js, pool.js
   - `js/init.js` — event binding, initialization, public API export
   - `js/i18n.js`, `js/providers.js`, `js/neural-bg.js`, `js/topojson-client.min.js` — standalone utilities (loaded before App)
 - 12 HTML `<template>` elements for repeating UI structures (session items, chat messages, toasts, model cards, etc.)

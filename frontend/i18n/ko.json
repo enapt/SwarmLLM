@@ -261,6 +261,7 @@
   "connection.waiting": "데몬이 응답할 때까지 대기 중",
   "shard.row.vram_label": "로드됨",
   "shard.row.missing_label": "누락됨",
+  "shard.row.size_label": "크기",
   "shard.row.expand_tip": "세부정보 표시",
   "shard.row.replicas_none": "이 샤드를 보유한 피어 없음",
   "shard.row.replicas_local_only": "로컬에서 보유 — 다른 피어는 이 샤드를 보유하지 않음",

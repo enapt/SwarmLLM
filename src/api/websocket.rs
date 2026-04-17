@@ -272,8 +272,42 @@ async fn get_or_build_stats_message(state: &SharedState) -> std::sync::Arc<Strin
             }
         }
     }
+    // Stampede guard: when the cache expires and multiple WS push tasks tick
+    // at the same TTL boundary, only one performs the rebuild. Losers return
+    // the stale value (acceptable: it's at most STATS_CACHE_TTL_MS old).
+    use std::sync::atomic::Ordering;
+    struct BuildFlag<'a>(&'a std::sync::atomic::AtomicBool);
+    impl Drop for BuildFlag<'_> {
+        fn drop(&mut self) {
+            self.0.store(false, Ordering::Release);
+        }
+    }
+    let _flag = match state.metrics.stats_building.compare_exchange(
+        false,
+        true,
+        Ordering::AcqRel,
+        Ordering::Acquire,
+    ) {
+        Ok(_) => BuildFlag(&state.metrics.stats_building),
+        Err(_) => {
+            // Another task is rebuilding — return the stale value. On very
+            // first call (no cache yet), fall through and build ourselves to
+            // unblock — the race is bounded to the first tick per daemon.
+            if let Some(stale) = state
+                .metrics
+                .stats_cache
+                .lock()
+                .as_ref()
+                .map(|(_, m)| m.clone())
+            {
+                return stale;
+            }
+            BuildFlag(&state.metrics.stats_building)
+        }
+    };
     let msg = std::sync::Arc::new(build_stats_message(state).await);
     *state.metrics.stats_cache.lock() = Some((std::time::Instant::now(), msg.clone()));
+    // _flag Drop clears the atomic — panic-safe.
     msg
 }
 

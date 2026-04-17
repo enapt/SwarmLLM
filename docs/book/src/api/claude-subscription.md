@@ -10,7 +10,7 @@ When enabled, SwarmLLM spawns the `claude` CLI as a subprocess for each Claude m
 
 ```
 Client Request (OpenAI or Anthropic format)
-  → SwarmLLM API (openai.rs / anthropic.rs)
+  → SwarmLLM API (openai.rs / anthropic/mod.rs)
     → Provider resolution: model starts with "claude-"
       → Claude subscription enabled? → Spawn subprocess
       → Else: use Anthropic API key (existing behavior)

@@ -225,7 +225,7 @@
           '<div class="srep-section-label">' + U.escapeHtml(I18n.t('shard.row.holders_title')) + '</div>' +
           '<div class="srep-holders">' + holdersHtml + '</div>' +
         '</div>' +
-        (shard.size_bytes ? '<div class="srep-section"><span class="srep-section-label">Size</span> ' + U.formatBytes(shard.size_bytes) + '</div>' : '') +
+        (shard.size_bytes ? '<div class="srep-section"><span class="srep-section-label">' + U.escapeHtml(I18n.t('shard.row.size_label')) + '</span> ' + U.formatBytes(shard.size_bytes) + '</div>' : '') +
         '<div class="srep-destructive">' + destructive.join('') + '</div>' +
         '</div>';
       rowEl.insertAdjacentHTML('beforeend', panelHtml);
@@ -1712,7 +1712,21 @@
         });
       }
 
-      // Patch shard rows from shardRegistry (peer availability snapshot)
+      // Patch shard rows from shardRegistry (peer availability snapshot).
+      // The backend stats cache ships the full registry on every 2s tick;
+      // skip the DOM patch loop when the registry hasn't changed since the
+      // previous tick so we don't burn the compositor on a static swarm.
+      if (shardRegistry) {
+        var regStr = JSON.stringify(shardRegistry);
+        if (regStr === self._lastShardRegistryStr) {
+          // Unchanged — skip the patch loop. Peer downloads block below still
+          // runs to reflect in-flight state that comes from peer_downloads
+          // (a separate field on the stats payload).
+          shardRegistry = null;
+        } else {
+          self._lastShardRegistryStr = regStr;
+        }
+      }
       if (shardRegistry) {
         Object.keys(shardRegistry).forEach(function(modelId) {
           var safeId = U.safeId(modelId);

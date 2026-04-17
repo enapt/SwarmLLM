@@ -261,6 +261,7 @@
   "connection.waiting": "Daemon'ın yanıt vermesi bekleniyor",
   "shard.row.vram_label": "YÜKLÜ",
   "shard.row.missing_label": "KAYIP",
+  "shard.row.size_label": "Boyut",
   "shard.row.expand_tip": "Detayları göster",
   "shard.row.replicas_none": "Hiçbir eş bu parçaya sahip değil",
   "shard.row.replicas_local_only": "Yerel tutulmuş — başka hiçbir eş bu parçaya sahip değil",

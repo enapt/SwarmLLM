@@ -261,6 +261,7 @@
   "connection.waiting": "デーモンの応答を待っています",
   "shard.row.vram_label": "ロード済み",
   "shard.row.missing_label": "欠落",
+  "shard.row.size_label": "サイズ",
   "shard.row.expand_tip": "詳細を表示",
   "shard.row.replicas_none": "このシャードを持つピアはありません",
   "shard.row.replicas_local_only": "ローカルで保持 — 他のピアはこのシャードを持っていません",

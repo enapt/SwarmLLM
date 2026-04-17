@@ -261,6 +261,7 @@
   "connection.waiting": "Wachten tot de daemon reageert",
   "shard.row.vram_label": "GELADEN",
   "shard.row.missing_label": "ONTBREEKT",
+  "shard.row.size_label": "Grootte",
   "shard.row.expand_tip": "Details weergeven",
   "shard.row.replicas_none": "Geen peers hebben deze shard",
   "shard.row.replicas_local_only": "Lokaal gehouden — geen andere peers hebben deze shard",

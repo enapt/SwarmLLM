@@ -261,6 +261,7 @@
   "connection.waiting": "Oczekiwanie na odpowiedź demona",
   "shard.row.vram_label": "ZAŁADOWANY",
   "shard.row.missing_label": "BRAKUJĄCY",
+  "shard.row.size_label": "Rozmiar",
   "shard.row.expand_tip": "Pokaż szczegóły",
   "shard.row.replicas_none": "Żaden węzeł nie ma tego odłamka",
   "shard.row.replicas_local_only": "Przechowywany lokalnie — żaden inny węzeł nie ma tego odłamka",

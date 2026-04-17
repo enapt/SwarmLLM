@@ -351,6 +351,12 @@ pub struct MetricsProviders {
     /// with a stale cache; subsequent clients within TTL reuse the string.
     /// Eliminates O(n) shard/peer registry scans per client per 2s tick.
     pub stats_cache: parking_lot::Mutex<Option<(std::time::Instant, std::sync::Arc<String>)>>,
+    /// Stampede guard for stats_cache: when the cache expires and 100 clients
+    /// tick simultaneously, they would all observe a miss and rebuild in
+    /// parallel. CAS this flag to ensure only one rebuilder runs; the rest
+    /// return the stale value. Rebuilder clears the flag after writing the
+    /// new cache entry.
+    pub stats_building: std::sync::atomic::AtomicBool,
 }
 
 // ---- Main SharedState ----
@@ -780,6 +786,7 @@ impl SharedState {
                 provider_model_map: DashMap::new(),
                 provider_models_cache: RwLock::new((Vec::new(), std::time::Instant::now())),
                 stats_cache: parking_lot::Mutex::new(None),
+                stats_building: std::sync::atomic::AtomicBool::new(false),
             },
             credits: CreditPool {
                 credit_balance: Arc::new(RwLock::new(CreditBalance {

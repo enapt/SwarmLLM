@@ -261,6 +261,7 @@
   "connection.waiting": "في انتظار استجابة الخدمة",
   "shard.row.vram_label": "محملة",
   "shard.row.missing_label": "مفقودة",
+  "shard.row.size_label": "الحجم",
   "shard.row.expand_tip": "عرض التفاصيل",
   "shard.row.replicas_none": "لا يوجد أقران لديهم هذا الجزء",
   "shard.row.replicas_local_only": "محتفظ به محلياً — لا أحد من الأقران الآخرين لديه هذا الجزء",

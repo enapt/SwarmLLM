@@ -261,6 +261,7 @@
   "connection.waiting": "Esperando respuesta del daemon",
   "shard.row.vram_label": "CARGADO",
   "shard.row.missing_label": "FALTANTE",
+  "shard.row.size_label": "Tamaño",
   "shard.row.expand_tip": "Mostrar detalles",
   "shard.row.replicas_none": "Ningún par tiene este fragmento",
   "shard.row.replicas_local_only": "Alojado localmente — ningún otro par tiene este fragmento",

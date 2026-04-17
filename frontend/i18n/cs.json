@@ -261,6 +261,7 @@
   "connection.waiting": "Čekání na odpověď démona",
   "shard.row.vram_label": "NAČTENO",
   "shard.row.missing_label": "CHYBÍ",
+  "shard.row.size_label": "Velikost",
   "shard.row.expand_tip": "Zobrazit podrobnosti",
   "shard.row.replicas_none": "Žádný partner nemá tento fragment",
   "shard.row.replicas_local_only": "Uloženo lokálně — žádný jiný partner nemá tento fragment",

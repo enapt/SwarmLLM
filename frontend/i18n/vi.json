@@ -261,6 +261,7 @@
   "connection.waiting": "Đang chờ daemon phản hồi",
   "shard.row.vram_label": "ĐƯỢC TẢI",
   "shard.row.missing_label": "THIẾU",
+  "shard.row.size_label": "Kích thước",
   "shard.row.expand_tip": "Hiển thị chi tiết",
   "shard.row.replicas_none": "Không có peer nào có shard này",
   "shard.row.replicas_local_only": "Được lưu giữ cục bộ — không có peer nào khác có shard này",

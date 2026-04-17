@@ -261,6 +261,7 @@
   "connection.waiting": "En attente de la réponse du daemon",
   "shard.row.vram_label": "CHARGÉ",
   "shard.row.missing_label": "MANQUANT",
+  "shard.row.size_label": "Taille",
   "shard.row.expand_tip": "Afficher les détails",
   "shard.row.replicas_none": "Aucun pair n'a ce shard",
   "shard.row.replicas_local_only": "Tenu localement — aucun autre pair n'a ce shard",

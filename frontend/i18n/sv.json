@@ -261,6 +261,7 @@
   "connection.waiting": "Väntar på att daemonen ska svara",
   "shard.row.vram_label": "LADDAT",
   "shard.row.missing_label": "SAKNAS",
+  "shard.row.size_label": "Storlek",
   "shard.row.expand_tip": "Visa detaljer",
   "shard.row.replicas_none": "Ingen nätverksnode har denna shard",
   "shard.row.replicas_local_only": "Hålls lokalt — ingen annan nätverksnode har denna shard",

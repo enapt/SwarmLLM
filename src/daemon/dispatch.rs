@@ -984,21 +984,23 @@ pub(crate) async fn dispatch_network_messages(
                                                 // many peers race to download a popular shard — each access
                                                 // of this Vec is linear, so uncapped growth creates an
                                                 // O(n) scan on every gossip message. When full, evict the
-                                                // lowest-progress entry to make room for newer progress
-                                                // (behind peers likely have the least operationally useful
-                                                // state to display).
+                                                // highest-progress entry: near-complete peers will self-remove
+                                                // via the completion path (is_complete branch above) within
+                                                // seconds, so preemptively evicting them costs little. The
+                                                // in-progress peers with lower pct carry the more useful
+                                                // operational signal and stay visible.
                                                 const MAX_PEER_DOWNLOADS_PER_SHARD: usize = 64;
                                                 let mut entry = shared_state.models.peer_shard_downloads.entry(progress.shard_id.clone()).or_default();
                                                 if let Some(pos) = entry.iter().position(|(nid, _)| *nid == progress.node_id) {
                                                     entry[pos].1 = progress.progress_pct;
                                                 } else {
                                                     if entry.len() >= MAX_PEER_DOWNLOADS_PER_SHARD {
-                                                        if let Some((min_pos, _)) = entry
+                                                        if let Some((max_pos, _)) = entry
                                                             .iter()
                                                             .enumerate()
-                                                            .min_by_key(|(_, (_, pct))| *pct)
+                                                            .max_by_key(|(_, (_, pct))| *pct)
                                                         {
-                                                            entry.swap_remove(min_pos);
+                                                            entry.swap_remove(max_pos);
                                                         }
                                                     }
                                                     entry.push((progress.node_id.clone(), progress.progress_pct));

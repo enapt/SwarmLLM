@@ -261,6 +261,7 @@
   "connection.waiting": "Waiting for the daemon to respond",
   "shard.row.vram_label": "LOADED",
   "shard.row.missing_label": "MISSING",
+  "shard.row.size_label": "Size",
   "shard.row.expand_tip": "Show details",
   "shard.row.replicas_none": "No peers have this shard",
   "shard.row.replicas_local_only": "Held locally — no other peers have this shard",

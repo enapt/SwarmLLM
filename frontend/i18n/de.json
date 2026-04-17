@@ -261,6 +261,7 @@
   "connection.waiting": "Warte auf Daemon-Antwort",
   "shard.row.vram_label": "GELADEN",
   "shard.row.missing_label": "FEHLEND",
+  "shard.row.size_label": "Größe",
   "shard.row.expand_tip": "Details anzeigen",
   "shard.row.replicas_none": "Kein Peer hat diesen Shard",
   "shard.row.replicas_local_only": "Lokal gehostet — kein anderer Peer hat diesen Shard",

@@ -261,6 +261,7 @@
   "connection.waiting": "Ожидание ответа от демона",
   "shard.row.vram_label": "ЗАГРУЖЕНО",
   "shard.row.missing_label": "ОТСУТСТВУЕТ",
+  "shard.row.size_label": "Размер",
   "shard.row.expand_tip": "Показать детали",
   "shard.row.replicas_none": "Ни один узел не имеет этот осколок",
   "shard.row.replicas_local_only": "Хранится локально — ни один другой узел не имеет этот осколок",
