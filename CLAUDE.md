@@ -152,48 +152,39 @@ libp2p 0.55 (pin to 0.55.x), axum 0.7, candle-core/candle-transformers (CUDA), e
 
 ## Automated Workflow
 
-### Slash Commands
+### Project Skills
 
-| Command | Model | Runs As | Purpose |
-|---|---|---|---|
-| `/build-phase <N>` | opus | inline | Execute all tasks for build phase N — spawns architect (sonnet) + explorer (haiku) subagents |
-| `/next-task` | opus | inline | Auto-detect next uncompleted task, implement it with subagent assistance |
-| `/check` | haiku | forked | Run fmt, clippy, test, build pipeline — report-only, cheap |
-| `/test-module <mod>` | haiku | forked | Run tests for a specific module — report-only, cheap |
-| `/review [file]` | sonnet | forked | Review code against spec — spawns code-reviewer (haiku) for security analysis |
-| `/simplify` | (built-in) | inline | Review changed code for reuse, quality, and efficiency — built into Claude Code |
-| `/loop <interval> <cmd>` | — | inline | Run a prompt or slash command on a recurring interval (e.g., `/loop 5m /check`) |
-| `/plan <desc>` | — | inline | Enter plan mode and start immediately with description (v2.1.72+) |
-| `/branch` | — | inline | Fork conversation into a new branch (renamed from `/fork` in v2.1.77, `/fork` still works) |
-| `/copy [N]` | — | inline | Copy latest (or Nth-latest) assistant response to clipboard (v2.1.77+) |
-| `/powerup` | — | inline | Interactive lessons teaching Claude Code features with animated demos (v2.1.90+) |
-| `/release-notes` | — | inline | Interactive version picker showing changelog (v2.1.92+) |
-| `/schedule` | — | inline | Create/manage scheduled remote agents (cron triggers) |
-| `/team-onboarding` | — | inline | Generate teammate ramp-up guide (v2.1.101+) |
-| `/ultraplan` | — | inline | Auto-creates cloud environment for deep planning (v2.1.101+) |
+| Skill | Purpose |
+|---|---|
+| `/build-phase <N>` | Execute all tasks for build phase N — spawns architect + explorer subagents |
+| `/next-task` | Auto-detect next uncompleted task, implement with subagent assistance |
+| `/check` | Run fmt, clippy, test, build pipeline — report-only |
+| `/test-module <mod>` | Run tests for a specific module — report-only |
+| `/review [file]` | Review code against spec — spawns code-reviewer for security analysis |
+| `/sweep` | Parallel codebase scan for dead code, duplication, stale references |
+| `/cleanup` | Verify recent changes complete, no stale refs, docs updated |
 
-> Claude Code v2.1.104. Opus 4.7 with 1M context. Agent teams enabled. Default effort: high for API-key/enterprise (changed v2.1.94 from medium); dial to medium/low for latency-sensitive or simple tasks.
+> Built-in commands worth knowing: `/effort` (interactive slider — set xhigh for coding, max for hardest tasks), `/ultrareview` (parallel multi-agent code review), `/less-permission-prompts` (auto-allowlist common bash patterns), `/recap` (context restore), `/simplify`, `/loop`, `/plan`, `/branch`, `/schedule`, `/team-onboarding`, `/ultraplan`.
+
+> **Environment**: Claude Code v2.1.112, Opus 4.7 with 1M context. Global effort: `xhigh`. Agent teams enabled.
 
 ### Agent Model Strategy
 
-Use the cheapest model that can handle each task to minimize cost and latency.
-Current model family: Opus 4.7 (`claude-opus-4-7[1m]`), Sonnet 4.6 (`claude-sonnet-4-6`), Haiku 4.5 (`claude-haiku-4-5-20251001`). All support 1M context window. Default model overrides via `ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU}_MODEL` env vars (v2.1.84+).
+Model family: Opus 4.7 (`claude-opus-4-7`), Sonnet 4.6 (`claude-sonnet-4-6`), Haiku 4.5 (`claude-haiku-4-5-20251001`). All 1M context. Override defaults via `ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU}_MODEL`.
 
-| Task Type | Model | Rationale |
+| Task | Model | Why |
 |---|---|---|
-| **Code implementation** | opus | Complex reasoning, spec compliance, architecture decisions |
-| **Architecture/design** | sonnet | Module design, dependency graphs, code review |
-| **Exploration/search** | haiku | File scanning, codebase inventory, grep/glob |
-| **Command execution** | haiku | Running cargo check/test/clippy, reporting results |
-| **Security review** | sonnet | OWASP analysis, vulnerability detection |
+| Code implementation | opus | Complex reasoning, multi-file changes |
+| Architecture, planning, code review | sonnet | Strong reasoning at lower cost |
+| Exploration, grep/glob, command output | haiku | Fast, cheap, sufficient |
 
-When spawning subagents from skills or the main context:
-- `Task(Explore)` with `model: haiku` — codebase searches
-- `Task(feature-dev:code-architect)` with `model: sonnet` — module design
-- `Task(feature-dev:code-reviewer)` with `model: haiku` — bug/security scans
-- `Task(Plan)` with `model: sonnet` — implementation planning
-- `Task(Bash)` with `model: haiku` — running and reporting command output
-- Never delegate code writing to subagents — opus writes all production code
+When spawning subagents:
+- `Task(Explore)` model: haiku — codebase searches
+- `Task(feature-dev:code-architect)` model: sonnet — module design
+- `Task(feature-dev:code-reviewer)` model: sonnet — security/bug scans (raised from haiku — 4.7-tuned harness expects more rigor)
+- `Task(Plan)` model: sonnet — implementation planning
+- `Task(Bash)` model: haiku — running and reporting command output
+- Never delegate production code writing — opus writes it
 
 ### Development Loop
 
@@ -208,26 +199,30 @@ For larger sessions: `/build-phase 1` will implement an entire phase end-to-end 
 
 ### Hooks (configured in `.claude/settings.json`)
 
-- **PreToolUse(Edit)**: Blocks edits to spec documents (supports `if` conditional field, v2.1.85+)
-- **PostToolUse(Edit|Write)**: `cargo check` on .rs files — errors fed back immediately
-- **PreCompact**: Blocks compaction if uncommitted changes or build failures
-- **Stop**: Session summary + integrity checks logged to `.claude/logs/`
-- **TaskCreated** (available, v2.1.84+): Fires when tasks created via TaskCreate
-- **PermissionDenied** (available, v2.1.89+): Fires after auto mode denials, can retry
+- **PreToolUse(Edit)** with `if: Edit(*.rs)|Write(*.rs)` — blocks edits to spec documents
+- **PostToolUse(Edit|Write)** with same conditional — `cargo check` on .rs files, errors fed back
+- **PreCompact** (global) — saves snapshot of git state, modified files, processes
+- **Stop** — session summary + integrity checks → `.claude/logs/`
 
-### Prompting Opus 4.7 (per Anthropic best practices)
+### Prompting Opus 4.7
 
-- **Adaptive thinking is the default** — use `thinking: {type: "adaptive"}` with `output_config.effort` (low/medium/high/max). `budget_tokens` is deprecated. Omit `thinking` entirely when you don't need it.
-- **Prefilled assistant responses on the final turn are deprecated** — use structured outputs, clear instructions, or tool calls instead.
-- **Dial back "anti-laziness" prompting.** Opus 4.x overtriggers on aggressive "CRITICAL: you MUST..." language — use normal phrasing. Tools that undertriggered on older models now trigger appropriately.
-- **Opus 4.x tends to overengineer and overuse subagents** — explicitly scope work ("only change what's asked"), and guide subagent use ("delegate only for parallel or isolated work; use direct grep/read for simple exploration"). This aligns with the existing `simplify` + completeness rules.
-- **Structure long-context prompts** with longform data near the top, instructions/queries at the bottom, wrap docs in `<document>` XML tags. Queries-at-end yield up to 30% better quality on multi-doc tasks.
-- **Tell Claude what to do, not what not to do.** Match prompt style to desired output style.
-- For multi-context-window agent runs, inform Claude its context will be compacted so it doesn't artificially wrap up early (our PreCompact hook already enforces state-saving — prompt accordingly).
+Behavior shifted meaningfully from 4.6 — these patterns are model-specific to 4.7:
+
+- **Effort drives behavior more than prompting.** Global default is `xhigh` (best for coding/agentic per Anthropic). Toggle mid-session with `/effort` for hot loops or massive refactors. `low`/`medium` will under-think on complex tasks — raise effort instead of prompting around it.
+- **Spawns FEWER subagents by default.** Use positive framing if you want more: "spawn specialists for X, Y, Z in parallel" beats "delegate this." For simple lookups and single-file edits, work directly.
+- **Uses tools LESS, reasons MORE.** If you need more tool use (especially WebSearch), explicitly describe when and why to use them.
+- **Literal instruction following.** It will NOT silently generalize. State scope explicitly: "apply to every section, not just the first." Front-load intent, constraints, file paths, acceptance criteria in the first turn — treat it as delegating to an engineer, not pair-programming.
+- **Calibrates verbosity naturally** — drop the old "CRITICAL: you MUST" anti-laziness phrasing. If you want concise output, ask for it positively with a one-line rule.
+- **Self-verifies.** Has a stronger habit of checking its own work before reporting done. Ask for a concrete verification step (test command, file read-back) and it will run it.
+- **64k+ output budget at xhigh/max** so it has room to think across tool calls and subagent spawns.
+- **Long-context prompts**: longform data at TOP, instructions/queries at BOTTOM, wrap docs in `<document>` tags (up to 30% quality gain on multi-doc tasks).
+- **Adaptive thinking** — `thinking: {type: "adaptive"}` with `output_config.effort`. `budget_tokens` is deprecated.
+- **Prefilled assistant on final turn deprecated** — use structured outputs or tool calls.
+- **Tone is more direct** by default — fewer emoji, less validation. If your product wants warmth, ask for it.
 
 ### Teams & Permissions
 
-Agent teams enabled (`CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1`, `teammateMode: "tmux"`). Permission mode: `acceptEdits`. Pre-approved: cargo, git, file ops, all Task agent types. Denied: `cargo publish`.
+Agent teams enabled (`CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1`, `teammateMode: "tmux"`). Permission mode: `acceptEdits`. Pre-approved: cargo, git, file ops, all Task agent types. Denied: `cargo publish`. Run `/less-permission-prompts` periodically to harvest read-only patterns from session transcripts and add them to the allowlist.
 
 ## Reference Documents
 

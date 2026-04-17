@@ -1,13 +1,12 @@
 # Workflow Rules
 
-## Context Window
+## Context Window & Effort
 
-Main session runs Opus 4.7 with 1M context window (Claude Code v2.1.104). Default effort: medium. Escalate to high effort for complex tasks (multi-file refactors, architecture changes, debugging cross-system issues). This means:
-- You have massive context — use it. Don't compact prematurely.
-- Subagents should use the cheapest model that works: haiku for search/commands, sonnet for review/design, opus for complex implementation.
-- Compact at ~70% usage (not 50%) since we have 1M tokens.
-- Note: thinking summaries disabled by default since v2.1.89 (set `showThinkingSummaries: true` to restore).
-- Note: autocompact has thrash-loop detection since v2.1.89 — stops after 3x refill-to-limit cycles.
+Opus 4.7 with 1M context, global effort `xhigh` (Claude Code v2.1.112). xhigh is Anthropic's recommended default for coding/agentic work — don't downshift unless you have a reason.
+- Use the 1M window — don't compact prematurely. Compact at ~70%, not 50%.
+- Toggle effort mid-session with `/effort` for hot loops (drop to medium for repetitive lint loops; bump to max for hardest design/debug tasks).
+- Subagents pick model by task: haiku for search/commands, sonnet for review/design/planning, opus for complex implementation only.
+- Autocompact has thrash-loop detection (stops after 3 refill-to-limit cycles).
 
 ## Commit and Push After Each Task
 
@@ -44,16 +43,19 @@ If you edited `.rs` files, ALWAYS run `cargo fmt` before committing.
 3. Run `git diff HEAD~3 --stat`
 4. Do NOT re-do work that's already committed
 
-## Model Selection by Task Complexity
+## Subagent Strategy (Opus 4.7)
 
-- **Haiku**: File searches, running commands, grep/glob, simple review. Use low effort.
-- **Sonnet**: Architecture design, module planning, code review, security review. Use medium effort.
-- **Opus**: Complex multi-file implementations, spec compliance, debugging cross-system issues. Use high effort.
+4.7 spawns FEWER subagents by default than 4.6. To get parallelism, frame it positively and explicitly:
+- "Spawn specialists for frontend, backend, database in parallel"
+- "Fan out one Explore agent per directory under src/inference/"
 
-## Parallel Work
+For single-file edits, simple lookups, or sequential work — work directly. The subagent overhead doesn't pay off.
 
-Use agent teams for large parallel workloads (enabled via `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS`):
-- 3-5 teammates max for most workflows
-- Each teammate owns a different set of files — avoid conflicts
-- Lead coordinates, teammates self-claim from shared task list
-- Use `teammateMode: "tmux"` for split-pane visibility
+Model picks:
+- **Haiku**: file search, command output, simple greps — low effort
+- **Sonnet**: architecture, planning, code/security review — medium effort
+- **Opus**: production code, multi-file refactors, cross-system debugging — high or xhigh
+
+## Parallel Work via Agent Teams
+
+Agent teams enabled (`CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1`, `teammateMode: "tmux"`). 3-5 teammates max, each owns a different file set, lead coordinates.
