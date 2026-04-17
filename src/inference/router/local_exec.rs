@@ -1,0 +1,190 @@
+//! Local (in-process) batched inference path. Used when the entire model is
+//! loaded in the daemon's executor and split mode is disabled.
+
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
+
+use crate::daemon::SharedState;
+use crate::error::SwarmError;
+use crate::inference::chat_template;
+
+use super::distributed_exec::finalize_request;
+use super::types::{InferenceOutput, QueuedRequest, StreamingTokenEvent};
+
+/// RAII guard that decrements active_count for any unprocessed batch items on drop.
+/// Ensures active_count is always decremented even if batch processing panics mid-loop.
+pub(super) struct BatchCleanup {
+    pub(super) active_count: Arc<AtomicUsize>,
+    pub(super) remaining: usize,
+}
+
+impl BatchCleanup {
+    fn complete_one(&mut self) {
+        if self.remaining > 0 {
+            self.active_count.fetch_sub(1, Ordering::Relaxed);
+            self.remaining -= 1;
+        }
+    }
+}
+
+impl Drop for BatchCleanup {
+    fn drop(&mut self) {
+        if self.remaining > 0 {
+            self.active_count
+                .fetch_sub(self.remaining, Ordering::Relaxed);
+        }
+    }
+}
+
+/// Execute a batch of requests locally, sharing the model lock.
+///
+/// Acquires the executor mutex once and processes all requests sequentially.
+/// Each request gets its own generation call and independent output.
+pub(super) async fn execute_local_batch(
+    shared_state: Arc<SharedState>,
+    batch: Vec<QueuedRequest>,
+    active_count: Arc<AtomicUsize>,
+) {
+    let mut executor = shared_state.executor.lock().await;
+    let batch_size = batch.len();
+    let mut cleanup = BatchCleanup {
+        active_count: active_count.clone(),
+        remaining: batch_size,
+    };
+
+    tracing::info!(batch_size, "Executing local inference batch");
+
+    for queued in batch {
+        let request = queued.request;
+        let result_tx = queued.result_tx;
+        let token_tx = queued.token_tx;
+
+        let output = if executor.is_loaded() {
+            let prompt = {
+                let info = shared_state.loaded_model_info.read().await;
+                match info.as_ref() {
+                    Some(i) => chat_template::build_prompt(
+                        &request.messages,
+                        i.chat_template.as_deref(),
+                        &i.bos_token,
+                        &i.eos_token,
+                    ),
+                    None => chat_template::chatml_fallback(&request.messages),
+                }
+            };
+
+            tracing::info!(
+                request_id = %request.id,
+                model = %request.model_id,
+                "Executing inference locally (batched)"
+            );
+
+            // Extract chat-template stop strings (e.g. "<|user|>", "<|im_end|>")
+            let local_stop_strings = {
+                let info = shared_state.loaded_model_info.read().await;
+                let tmpl = info.as_ref().and_then(|i| i.chat_template.as_deref());
+                chat_template::extract_stop_strings(tmpl)
+            };
+
+            // Use streaming generation if the request has a token channel
+            if let Some(ref tx) = token_tx {
+                let tx = tx.clone();
+                let session_id = request.session_id.clone();
+                let mut accumulated = String::new();
+                let stop_strings = local_stop_strings.clone();
+                let mut hit_stop = false;
+                match executor.generate_stream(
+                    &prompt,
+                    &request.sampling_params,
+                    |token: &str| -> bool {
+                        accumulated.push_str(token);
+                        // Check for chat template stop strings
+                        if let Some(stop) = stop_strings
+                            .iter()
+                            .find(|s| accumulated.contains(s.as_str()))
+                        {
+                            // Truncate accumulated text at the stop string
+                            if let Some(pos) = accumulated.find(stop.as_str()) {
+                                accumulated.truncate(pos);
+                            }
+                            hit_stop = true;
+                            return false; // Signal to stop generation
+                        }
+                        let event = StreamingTokenEvent {
+                            text: token.to_string(),
+                            finish_reason: None,
+                        };
+                        tx.try_send(event).is_ok()
+                    },
+                ) {
+                    Ok(gen_result) => {
+                        let finish = if hit_stop {
+                            "stop".to_string()
+                        } else {
+                            gen_result.finish_reason.as_str().to_string()
+                        };
+                        // Send final done event
+                        let done_event = StreamingTokenEvent {
+                            text: String::new(),
+                            finish_reason: Some(finish.clone()),
+                        };
+                        let _ = tx.try_send(done_event);
+                        Ok(InferenceOutput {
+                            request_id: request.id,
+                            content: accumulated,
+                            prompt_tokens: gen_result.prompt_tokens,
+                            completion_tokens: gen_result.completion_tokens,
+                            finish_reason: finish,
+                            session_id,
+                            token_logprobs: vec![],
+                        })
+                    }
+                    Err(e) => Err(e),
+                }
+            } else {
+                match executor.generate(&prompt, &request.sampling_params) {
+                    Ok((mut content, gen_result)) => {
+                        // Check for chat template stop strings in generated content
+                        let mut finish = gen_result.finish_reason.as_str().to_string();
+                        for stop in &local_stop_strings {
+                            if let Some(pos) = content.find(stop.as_str()) {
+                                content.truncate(pos);
+                                finish = "stop".to_string();
+                                break;
+                            }
+                        }
+                        // Strip trailing partial stop strings
+                        crate::inference::trim_trailing_partial_stop(
+                            &mut content,
+                            &local_stop_strings,
+                        );
+                        Ok(InferenceOutput {
+                            request_id: request.id,
+                            content,
+                            prompt_tokens: gen_result.prompt_tokens,
+                            completion_tokens: gen_result.completion_tokens,
+                            finish_reason: finish,
+                            session_id: request.session_id.clone(),
+                            token_logprobs: vec![],
+                        })
+                    }
+                    Err(e) => Err(e),
+                }
+            }
+        } else {
+            Err(SwarmError::NoModelLoaded)
+        };
+
+        finalize_request(&shared_state, &request, &output, None).await;
+        shared_state.active_pipelines.remove(&request.id);
+        cleanup.complete_one();
+        if result_tx.send(output).is_err() {
+            tracing::warn!(
+                request_id = %request.id,
+                "DIAG: batch result_tx receiver dropped"
+            );
+        }
+    }
+
+    tracing::debug!(batch_size, "Local batch complete");
+}
