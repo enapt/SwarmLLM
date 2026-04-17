@@ -192,7 +192,10 @@ async fn handle_socket(socket: WebSocket, shared_state: Arc<SharedState>) {
                     let event = match activity {
                         Ok(e) => e,
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                            tracing::debug!(dropped = n, "WebSocket client lagged on activity channel");
+                            tracing::warn!(
+                                dropped = n,
+                                "WebSocket client lagged on activity channel — events dropped"
+                            );
                             continue;
                         }
                         Err(_) => break,

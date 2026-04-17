@@ -762,6 +762,7 @@ async fn anthropic_stream(
 
         // Stream tokens — count events as a fallback estimate
         let mut got_finish = false;
+        let mut client_disconnected = false;
         let mut streamed_token_count = 0u32;
         let mut finish_stop_reason = String::new();
         while let Some(event) = token_rx.recv().await {
@@ -789,9 +790,22 @@ async fn anthropic_stream(
                     .await
                     .is_err()
                 {
+                    tracing::warn!(
+                        token_count = streamed_token_count,
+                        "Anthropic SSE client disconnected mid-stream — cancelling pipeline"
+                    );
+                    client_disconnected = true;
                     break;
                 }
             }
+        }
+
+        // Client disconnected: drop token_rx to signal the pipeline to stop
+        // generating, and skip the result_rx await so we don't block on a
+        // now-useless pipeline holding the handler open.
+        if client_disconnected {
+            drop(token_rx);
+            return;
         }
 
         // Get authoritative token count from the result when available

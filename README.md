@@ -10,7 +10,7 @@ Decentralized peer-to-peer LLM inference network. A single Rust binary that shar
 
 **Join the swarm. Run AI together — for free.**
 
-> **Status:** Alpha — actively developed. Distributed inference stable, tested across multi-node deployments on real networks. 653 tests, comprehensive security auditing. [Report issues](https://github.com/enapt/SwarmLLM/issues).
+> **Status:** Alpha — actively developed. Distributed inference stable, tested across multi-node deployments on real networks. 656 tests, comprehensive security auditing (47 sweep rounds). [Report issues](https://github.com/enapt/SwarmLLM/issues).
 
 ---
 
@@ -70,7 +70,7 @@ Running a smart AI model (like Llama 3 70B) normally requires a $10,000+ GPU. Wi
 | **Install** | Single binary, zero dependencies | Python environments, pip, Docker, blockchain setup |
 | **Cloud + Local** | 12 cloud providers as fallback through one API | Local only, no cloud integration |
 | **Claude Code** | Full Anthropic Messages API — native Claude Code backend | No Anthropic API support (Exo added basic support recently) |
-| **Security** | ~90-fix audit (auth, SSRF, replay, caps) | No documented security audits |
+| **Security** | 47 sweep rounds (auth, SSRF, replay, caps, TOCTOU) | No documented security audits |
 
 ## How It Works
 
@@ -88,7 +88,7 @@ SwarmLLM distributes transformer model layers across a pool of peer-to-peer node
 - **No central server** — fully peer-to-peer with no single point of failure
 - **No accounts or subscriptions** — just a cryptographic identity (Ed25519 keypair)
 - **Zero configuration** — nodes find each other automatically via mDNS, peer cache, and peer exchange
-- **Single binary, zero dependencies** — one ~47MB Rust binary. No Python, no Docker, no runtime installs
+- **Single binary, zero dependencies** — one Rust binary (~33–50 MB depending on platform and features). No Python, no Docker, no runtime installs
 - **BitTorrent-inspired incentives** — contribute compute, earn priority access
 - **OpenAI + Anthropic + MCP compatible** — drop-in replacement for any tool that speaks OpenAI, Claude, or MCP
 
@@ -237,7 +237,7 @@ Or click the **shield icon** in the dashboard header — a confirmation dialog s
 - **P2P Networking** — libp2p with Kademlia DHT, GossipSub (6 topics), TCP+Yamux (primary) and QUIC transport, NAT traversal (auto-relay + DCUtR hole punching), connection limits, gossip replay protection
 - **End-to-End Encryption** — Three-tier encryption: pairwise sessions (X25519 + ChaCha20-Poly1305 with forward secrecy via key rotation), pipeline sealing (final segment encrypts output tokens for requester's X25519 key), and authenticated sealed gossip. All peer-to-peer traffic is encrypted in transit. Intermediate pipeline nodes process activation tensors but never see the plaintext output — see [Security Model](docs/book/src/architecture/security.md) for details. By comparison, Petals [explicitly warns](https://github.com/bigscience-workshop/petals/wiki/Security,-privacy,-and-AI-safety) that "peers can recover input data and model outputs" with no encryption layer, and Exo has no encryption at all
 - **Encrypted Pipeline** — Optional "boomerang" topology where the requesting node holds both the first shard (embedding) and last shard (token sampling), so **no remote node ever sees plaintext** — only intermediate activation tensors. Per-model toggle via API/dashboard or global config. Auto-enables local embedding privacy. Adds ~1 RTT per token for the return hop. Requires 3+ shard models. See [Encrypted Pipeline](docs/book/src/architecture/security.md#encrypted-pipeline)
-- **Security Hardened** — ~90-fix security audit across 5 rounds: authenticated P2P dispatch, signed DHT records, ephemeral key auth, path traversal fix, HF input validation, constant-time auth, CSP hardening, WebSocket Origin check, SSRF protection, resource caps, input limits, credit signature verification, XSS fixes
+- **Security Hardened** — 47 sweep rounds of continuous auditing across authenticated P2P dispatch, signed DHT records, ephemeral key auth, path traversal, HF input validation, constant-time auth, CSP hardening, WebSocket Origin check, SSRF protection, resource caps, input limits, credit signature verification, replay protection, XSS fixes, and TOCTOU corrections
 - **Private Mode** — Restrict all inference to your device pool only. Your prompts never leave your machines. Toggle via dashboard shield icon or API. Includes model coverage dashboard showing which models your pool can serve, estimated download sizes for gaps, and shard disk usage. Your nodes still contribute to the swarm (serve others, earn credits) — only your outbound requests are restricted. Supports three scopes: pool-only, pool+LAN, and fully offline (air-gapped mDNS-only with no internet)
 - **Pool Shard Pinning** — Pool owners can assign specific models to specific devices (e.g. GPU machine gets the 7B model, laptop gets the 1B). Auto-manage respects pins: 1000x download priority on target, never prunes pinned shards
 - **Local Embedding Privacy** — requesting node performs token→embedding locally so remote first-segment nodes never see raw tokens
@@ -261,7 +261,7 @@ Or click the **shield icon** in the dashboard header — a confirmation dialog s
 
 ## Architecture
 
-Single Rust binary (~47MB release), three simultaneous functions:
+Single Rust binary, three simultaneous functions:
 
 | Component | Responsibility | Interface |
 |-----------|---------------|-----------|
@@ -291,7 +291,7 @@ Internally, the daemon runs 11 async Tokio tasks communicating via channels:
 
 ### Codebase
 
-Cargo workspace with 3 crates, 107 Rust source files (~73K lines), plus vanilla frontend (~13K lines HTML/CSS/JS):
+Cargo workspace with 3 crates, 114 Rust source files (~78K lines), plus vanilla frontend (~19K lines HTML/CSS/JS, including 21-language translation files):
 
 | Crate | Path | Purpose |
 |-------|------|---------|
@@ -301,16 +301,17 @@ Cargo workspace with 3 crates, 107 Rust source files (~73K lines), plus vanilla 
 
 Key source directories:
 - `src/daemon/` — startup, shared state, message dispatch, shard loading
-- `src/network/` — libp2p networking, peer discovery, transport, relay, peer cache
-- `src/inference/` — router, pipeline, split inference, allreduce, KV-cache, speculative decoding, vision, chat templates
-- `src/api/` — Axum HTTP server, OpenAI/Anthropic/MCP endpoints, admin API, WebSocket, middleware
+- `src/network/` — libp2p networking, peer discovery, transport, relay, peer cache, manager helpers
+- `src/inference/` — router, pipeline, scheduler, allreduce, KV-cache, speculative decoding, vision, chat templates, worker subprocess IPC
+  - `src/inference/split/` — model definition, GGUF loader, distributed executor, KV-cache, shard reader, RoPE, tests
+- `src/api/` — Axum HTTP server, OpenAI/Anthropic/MCP endpoints, admin API, WebSocket, SSE helpers, middleware
 - `src/model/` — manifests, shards, acquisition, auto-manage, HuggingFace integration, LoRA
 - `src/credit/` — ledger, transactions, priority tiers, anti-gaming, trust, escrow
 - `src/crypto/` — session encryption, pipeline sealing, gossip sealing, key rotation, provider key encryption
-- `src/pool/` — device pool management, crypto, credit forwarding
-- `frontend/` — vanilla HTML/CSS/JS dashboard (13 component JS files, 13 HTML templates, 21 language translations)
+- `src/pool/` — device pool management, crypto, credit forwarding, private-mode scope
+- `frontend/` — vanilla HTML/CSS/JS dashboard (14 component JS files, 4 core JS files, 12 HTML templates, 21 language translations with 976 keys each)
 
-653 tests (581 unit + 22 integration + 31 module + 14 yamux + 1 VLM E2E), all passing, clippy clean.
+656 tests (589 unit + 22 integration + 30 module + 14 yamux + 1 VLM E2E), all passing, clippy clean.
 
 ## Node Tiers
 
@@ -452,6 +453,12 @@ cargo build --release --features windows-gpu
 
 # llama.cpp with Vulkan only (cross-platform local inference on NVIDIA/AMD/Intel)
 cargo build --release --features llama-vulkan
+
+# Route Claude requests through your local `claude` CLI (Pro/Max/Team/Enterprise)
+cargo build --release --features claude-subscription
+
+# Dev build — serves frontend from disk (no recompile on CSS/JS/HTML changes)
+cargo build --no-default-features --features dev,claude-subscription
 
 # Apple Silicon (CPU — Metal via llama.cpp planned)
 cargo build --release
@@ -598,7 +605,7 @@ Plus ~50 more admin routes for downloads, providers, adapters, identity, pools, 
 
 | Layer | Technology |
 |-------|-----------|
-| Language | Rust (2021 edition), ~73K lines across 107 source files |
+| Language | Rust (2021 edition), ~78K lines across 114 source files |
 | Async Runtime | Tokio (multi-threaded) |
 | Networking | libp2p 0.55 (TCP+Yamux + QUIC + mDNS + Kademlia + GossipSub) |
 | Serialization | serde_json (API), binary with type-tag (tensors), zstd compression |
@@ -607,19 +614,19 @@ Plus ~50 more admin routes for downloads, providers, adapters, identity, pools, 
 | Database | redb v3 (embedded, ACID) |
 | Cryptography | Ed25519 (identity), X25519 + ChaCha20-Poly1305 (E2E), BLAKE3 (integrity) |
 | Monitoring | Prometheus + Grafana (dashboards included) |
-| Frontend | Vanilla HTML/CSS/JS, 21 languages, light/dark/system theme, ~13K lines |
+| Frontend | Vanilla HTML/CSS/JS, 21 languages (976 i18n keys), light/dark/system theme, ~19K lines incl. translations |
 | SDK | Python, JS/TS, LangChain, LlamaIndex |
 
 ## How SwarmLLM Compares
 
 | Feature | SwarmLLM | Petals | Exo | Bittensor |
 |---------|----------|--------|-----|-----------|
-| **Language** | Rust (single ~47MB binary) | Python | Python | Python + Substrate |
+| **Language** | Rust (single binary, ~33–50 MB) | Python | Python | Python + Substrate |
 | **Install** | Download & run | pip install | pip/source/macOS app | pip + blockchain setup |
 | **Scale** | LAN + WAN + Tailscale/WireGuard (zero config) | Internet (volunteer) | LAN + Tailscale (manual) | Internet (blockchain) |
 | **E2E Encryption** | **X25519 + ChaCha20 + forward secrecy** | **None** — peers can see your prompts | **None** | Minimal (blockchain-level) |
 | **Privacy** | **Encrypted by default** + **Private Mode** (pool-only inference, offline LAN). Optional encrypted pipeline (boomerang topology). Shard pinning per device | Unencrypted — Petals' own wiki states peers can read your prompts and outputs | No encryption between nodes | Subnet-dependent |
-| **Security Audit** | **~90-fix, 5-round hardening** (auth, SSRF, replay, caps) | None documented | None documented | PoA consensus (centralized) |
+| **Security Audit** | **47 continuous sweep rounds** (auth, SSRF, replay, caps, TOCTOU) | None documented | None documented | PoA consensus (centralized) |
 | **Incentives** | Credit tiers (no token, no blockchain) | Name on monitor page | None | TAO token (real money) |
 | **Parallelism** | Pipeline + tensor (auto-detected LAN) | Pipeline | Tensor + pipeline | Subnet routing |
 | **Model Architectures** | **11** (DeepSeek MoE+MLA, GLM-4, Llama 4, Qwen 3.5 SSM) | ~5 (Llama, Mixtral, Falcon, BLOOM) | ~5 (Llama, Mistral, Qwen, DeepSeek, LLaVA) | Any (subnet-defined) |
@@ -653,7 +660,7 @@ See the full [mdBook documentation](docs/book/) for detailed guides on networkin
 
 SwarmLLM was developed collaboratively between a human developer and Claude (Anthropic's AI). The entire codebase — Rust backend, JavaScript frontend, P2P networking, distributed inference pipeline, credit system, security hardening, and documentation — was written by Claude Code across 20+ build phases. The human developer provided architecture direction, testing, and review, but zero lines of code were manually written.
 
-This is an honest disclosure. The project has been through rigorous quality assurance — 653 passing tests, continuous security auditing, dozens of parallel multi-agent code sweeps, and multi-node distributed inference tested on real networks. Every commit passes `cargo fmt`, `cargo clippy -- -D warnings`, and the full test suite before push.
+This is an honest disclosure. The project has been through rigorous quality assurance — 656 passing tests, 47 rounds of parallel multi-agent code sweeps, continuous security auditing, and multi-node distributed inference tested on real networks. Every commit passes `cargo fmt`, `cargo clippy -- -D warnings`, and the full test suite before push.
 
 We believe AI-assisted development should be transparent. Judge the code on its technical merit — contributions, scrutiny, and feedback are all welcome.
 
@@ -668,8 +675,8 @@ Contributions are welcome! Whether it's bug reports, feature ideas, code, or doc
 ```bash
 # Quick dev setup
 git clone https://github.com/enapt/SwarmLLM.git && cd SwarmLLM
-cargo test                # 653 tests
-cargo clippy -- -D warnings  # Zero warnings policy
+cargo test                # 656 tests
+cargo clippy --all-targets -- -D warnings  # Zero warnings policy
 cargo run -- run          # Start a node
 ```
 
