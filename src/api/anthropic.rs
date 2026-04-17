@@ -1357,7 +1357,7 @@ mod tests {
     #[test]
     fn connectivity_probe_detection() {
         let probe = MessagesRequest {
-            model: "claude-opus-4-6".into(),
+            model: "claude-opus-4-7".into(),
             max_tokens: 1,
             messages: vec![AnthropicMessage {
                 role: "user".into(),
@@ -1377,7 +1377,7 @@ mod tests {
         assert!(is_connectivity_probe(&probe));
 
         let normal = MessagesRequest {
-            model: "claude-opus-4-6".into(),
+            model: "claude-opus-4-7".into(),
             max_tokens: 1024,
             messages: vec![AnthropicMessage {
                 role: "user".into(),
@@ -1424,10 +1424,10 @@ mod tests {
 
     #[test]
     fn model_resolution() {
-        assert_eq!(resolve_model("claude-opus-4-6"), "claude-opus-4-6");
+        assert_eq!(resolve_model("claude-opus-4-7"), "claude-opus-4-7");
         assert_eq!(
-            resolve_model("anthropic:claude-opus-4-6"),
-            "claude-opus-4-6"
+            resolve_model("anthropic:claude-opus-4-7"),
+            "claude-opus-4-7"
         );
         assert_eq!(resolve_model("local:my-model"), "my-model");
     }
@@ -1458,7 +1458,7 @@ mod tests {
     #[test]
     fn deserialize_full_request() {
         let json = r#"{
-            "model": "claude-opus-4-6",
+            "model": "claude-opus-4-7",
             "max_tokens": 1024,
             "system": "You are helpful.",
             "messages": [
@@ -1468,7 +1468,7 @@ mod tests {
             ]
         }"#;
         let req: MessagesRequest = serde_json::from_str(json).unwrap();
-        assert_eq!(req.model, "claude-opus-4-6");
+        assert_eq!(req.model, "claude-opus-4-7");
         assert_eq!(req.max_tokens, 1024);
         assert_eq!(req.messages.len(), 3);
         assert!(matches!(req.system, Some(SystemContent::Text(_))));
@@ -1549,7 +1549,7 @@ mod tests {
     #[test]
     fn deserialize_request_with_tools() {
         let json = r#"{
-            "model": "claude-opus-4-6",
+            "model": "claude-opus-4-7",
             "max_tokens": 1024,
             "messages": [{"role": "user", "content": "Read /tmp/test.rs"}],
             "tools": [{"name": "Read", "description": "Read a file", "input_schema": {"type": "object"}}],

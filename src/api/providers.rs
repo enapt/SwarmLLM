@@ -622,7 +622,7 @@ mod tests {
             }),
             ..Default::default()
         };
-        let p = resolve_provider("claude-opus-4-6", &config).unwrap();
+        let p = resolve_provider("claude-opus-4-7", &config).unwrap();
         assert_eq!(p.name, "anthropic");
         assert!(p.is_anthropic);
     }
@@ -757,7 +757,7 @@ mod tests {
     fn resolve_unconfigured_returns_none() {
         let config = ProvidersConfig::default();
         assert!(resolve_provider("gpt-4o", &config).is_none());
-        assert!(resolve_provider("claude-opus-4-6", &config).is_none());
+        assert!(resolve_provider("claude-opus-4-7", &config).is_none());
     }
 
     #[test]

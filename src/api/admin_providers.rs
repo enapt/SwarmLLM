@@ -414,7 +414,7 @@ async fn fetch_provider_models_inner(state: &AppState) -> Vec<serde_json::Value>
     // Anthropic has no /models endpoint — use static list
     if config.anthropic.is_some() {
         for (id, name) in [
-            ("claude-opus-4-6", "Claude Opus 4.6"),
+            ("claude-opus-4-7", "Claude Opus 4.7"),
             ("claude-sonnet-4-6", "Claude Sonnet 4.6"),
             ("claude-haiku-4-5-20251001", "Claude Haiku 4.5"),
         ] {
@@ -461,7 +461,7 @@ async fn fetch_provider_models_inner(state: &AppState) -> Vec<serde_json::Value>
         if sub_config.enabled {
             let provider_label = "claude_subscription";
             for (id, name, ctx) in [
-                ("claude-opus-4-6", "Claude Opus 4.6", "1M"),
+                ("claude-opus-4-7", "Claude Opus 4.7", "1M"),
                 ("claude-sonnet-4-6", "Claude Sonnet 4.6", "200K"),
                 ("claude-haiku-4-5-20251001", "Claude Haiku 4.5", "200K"),
             ] {

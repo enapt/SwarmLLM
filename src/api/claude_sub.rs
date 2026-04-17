@@ -1024,7 +1024,7 @@ mod tests {
     #[test]
     fn test_build_cli_args_with_session() {
         let args = build_cli_args(
-            "claude-opus-4-6",
+            "claude-opus-4-7",
             "Follow up",
             Some("Be helpful"),
             Some("abc-123"),
