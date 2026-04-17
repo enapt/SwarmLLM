@@ -1,0 +1,595 @@
+use crate::types::{ChatMessage, Role};
+
+use super::parser::Token;
+
+pub(super) struct EvalCtx<'a> {
+    pub(super) tokens: &'a [Token],
+    pub(super) messages: &'a [ChatMessage],
+    pub(super) bos_token: &'a str,
+    pub(super) eos_token: &'a str,
+    pub(super) add_generation_prompt: bool,
+}
+
+/// Mutable evaluation state (changes per loop iteration, accumulates variables).
+pub(super) struct EvalState<'a> {
+    messages: &'a [ChatMessage],
+    loop_index: Option<usize>,
+    vars: std::collections::HashMap<String, String>,
+}
+
+impl<'a> EvalState<'a> {
+    pub(super) fn new(messages: &'a [ChatMessage]) -> Self {
+        Self {
+            messages,
+            loop_index: None,
+            vars: std::collections::HashMap::new(),
+        }
+    }
+
+    fn for_loop(messages: &'a [ChatMessage], index: usize) -> Self {
+        Self {
+            messages,
+            loop_index: Some(index),
+            vars: std::collections::HashMap::new(),
+        }
+    }
+
+    fn current_msg(&self) -> Option<&'a ChatMessage> {
+        self.loop_index.and_then(|i| self.messages.get(i))
+    }
+
+    fn is_last(&self) -> bool {
+        self.loop_index
+            .is_some_and(|i| i == self.messages.len().saturating_sub(1))
+    }
+
+    fn is_first(&self) -> bool {
+        self.loop_index.is_some_and(|i| i == 0)
+    }
+}
+
+/// Evaluate a block of tokens starting at `start`, returning the index after the consumed tokens.
+pub(super) fn eval_block(
+    ctx: &EvalCtx,
+    start: usize,
+    output: &mut String,
+    state: &mut EvalState,
+) -> Option<usize> {
+    let mut i = start;
+    while i < ctx.tokens.len() {
+        match &ctx.tokens[i] {
+            Token::Text(t) => {
+                output.push_str(t);
+                i += 1;
+            }
+            Token::Expr(expr) => {
+                if let Some(val) = eval_expr(expr, state, ctx) {
+                    output.push_str(&val);
+                }
+                // None (e.g. raise_exception) → silently skip
+                i += 1;
+            }
+            tok if tok.tag_content().is_some() => {
+                let content = tok.tag_content().unwrap();
+
+                if content.starts_with("for ") && content.contains(" in messages") {
+                    let body_start = i + 1;
+                    let end = find_endfor(ctx.tokens, body_start)?;
+
+                    for (idx, _msg) in ctx.messages.iter().enumerate() {
+                        let mut loop_state = EvalState::for_loop(ctx.messages, idx);
+                        eval_block(ctx, body_start, output, &mut loop_state)?;
+                    }
+                    i = end + 1;
+                } else if content.starts_with("set ") {
+                    // {% set var = expr %}
+                    if let Some((var, val_expr)) = parse_set_tag(content) {
+                        if let Some(val) = eval_expr(val_expr, state, ctx) {
+                            state.vars.insert(var.to_string(), val);
+                        }
+                    }
+                    i += 1;
+                } else if content.starts_with("if ") {
+                    i = eval_if_chain(ctx, i, output, state)?;
+                } else if content == "endfor"
+                    || content == "endif"
+                    || content.starts_with("elif ")
+                    || content == "else"
+                {
+                    return Some(i);
+                } else {
+                    // Unknown tag — skip silently
+                    i += 1;
+                }
+            }
+            _ => {
+                i += 1;
+            }
+        }
+    }
+    Some(i)
+}
+
+/// Parse `set var = expr` from a {% set %} tag.
+fn parse_set_tag(content: &str) -> Option<(&str, &str)> {
+    let rest = content.strip_prefix("set ")?.trim();
+    let eq_pos = rest.find('=')?;
+    let var = rest[..eq_pos].trim();
+    let expr = rest[eq_pos + 1..].trim();
+    Some((var, expr))
+}
+
+/// Evaluate an if/elif/else/endif chain. Returns the token index after the endif.
+fn eval_if_chain(
+    ctx: &EvalCtx,
+    start: usize,
+    output: &mut String,
+    state: &mut EvalState,
+) -> Option<usize> {
+    let content = ctx.tokens[start].tag_content()?;
+    let condition = content.strip_prefix("if ")?.trim();
+    let matched = eval_condition(condition, state, ctx);
+
+    let body_start = start + 1;
+
+    if matched {
+        let end = eval_block(ctx, body_start, output, state)?;
+        return skip_to_endif(ctx, end, output, state, true);
+    }
+
+    let end = skip_block_content(ctx.tokens, body_start)?;
+    skip_to_endif(ctx, end, output, state, matched)
+}
+
+/// Skip forward through elif/else/endif chain.
+fn skip_to_endif(
+    ctx: &EvalCtx,
+    mut i: usize,
+    output: &mut String,
+    state: &mut EvalState,
+    mut already_matched: bool,
+) -> Option<usize> {
+    while i < ctx.tokens.len() {
+        let content = ctx.tokens[i].tag_content()?;
+
+        if content == "endif" {
+            return Some(i + 1);
+        } else if content.starts_with("elif ") {
+            let cond = content.strip_prefix("elif ")?.trim();
+            let cond_result = eval_condition(cond, state, ctx);
+
+            if !already_matched && cond_result {
+                already_matched = true;
+                i = eval_block(ctx, i + 1, output, state)?;
+            } else {
+                i = skip_block_content(ctx.tokens, i + 1)?;
+            }
+        } else if content == "else" {
+            if !already_matched {
+                i = eval_block(ctx, i + 1, output, state)?;
+                if i < ctx.tokens.len() {
+                    if let Some(c) = ctx.tokens[i].tag_content() {
+                        if c == "endif" {
+                            return Some(i + 1);
+                        }
+                    }
+                }
+                return Some(i);
+            } else {
+                i = skip_block_content(ctx.tokens, i + 1)?;
+            }
+        } else {
+            return Some(i + 1);
+        }
+    }
+    Some(i)
+}
+
+/// Skip tokens until we hit a sibling elif/else/endif at the same nesting level.
+fn skip_block_content(tokens: &[Token], start: usize) -> Option<usize> {
+    let mut i = start;
+    let mut depth = 0;
+    while i < tokens.len() {
+        if let Some(content) = tokens[i].tag_content() {
+            if content.starts_with("if ") || content.starts_with("for ") {
+                depth += 1;
+            } else if content == "endif" || content == "endfor" {
+                if depth == 0 {
+                    return Some(i);
+                }
+                depth -= 1;
+            } else if depth == 0 && (content.starts_with("elif ") || content == "else") {
+                return Some(i);
+            }
+        }
+        i += 1;
+    }
+    Some(i)
+}
+
+/// Find the matching {% endfor %} for a for loop body starting at `start`.
+fn find_endfor(tokens: &[Token], start: usize) -> Option<usize> {
+    let mut depth = 0;
+    let mut i = start;
+    while i < tokens.len() {
+        if let Some(content) = tokens[i].tag_content() {
+            if content.starts_with("for ") {
+                depth += 1;
+            } else if content == "endfor" {
+                if depth == 0 {
+                    return Some(i);
+                }
+                depth -= 1;
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+// ── Expression evaluator ──
+
+/// Evaluate a `{{ ... }}` expression and return the string value.
+/// Returns `None` for undefined values or raise_exception (silent skip).
+fn eval_expr(expr: &str, state: &EvalState, ctx: &EvalCtx) -> Option<String> {
+    let expr = expr.trim();
+
+    // raise_exception(...) — silently skip
+    if expr.starts_with("raise_exception(") {
+        return None;
+    }
+
+    // Handle string concatenation with +
+    if contains_plus_outside_strings(expr) {
+        let parts = split_on_plus(expr);
+        let mut result = String::new();
+        for part in parts {
+            result.push_str(&eval_expr(part.trim(), state, ctx)?);
+        }
+        return Some(result);
+    }
+
+    // Handle | filter (trim, tojson, etc.) — filter binds tighter than +
+    if let Some((base, filter)) = split_outside_strings(expr, '|') {
+        let val = eval_expr(base, state, ctx)?;
+        return Some(apply_filter(&val, filter));
+    }
+
+    // String literal: 'foo' or "foo" (with escape sequence support)
+    if let Some(s) = parse_string_literal(expr) {
+        return Some(s);
+    }
+
+    // Numeric literal
+    if !expr.is_empty() && expr.bytes().all(|b| b.is_ascii_digit()) {
+        return Some(expr.to_string());
+    }
+
+    // Special tokens
+    match expr {
+        "bos_token" => return Some(ctx.bos_token.to_string()),
+        "eos_token" => return Some(ctx.eos_token.to_string()),
+        _ => {}
+    }
+
+    // Loop variables
+    if expr == "loop.index0" {
+        return state.loop_index.map(|i| i.to_string());
+    }
+
+    // Modulo: X % N
+    if let Some((left, right)) = split_outside_strings(expr, '%') {
+        let lv = eval_expr(left, state, ctx)?.parse::<i64>().ok()?;
+        let rv = right.parse::<i64>().ok()?;
+        return Some((lv % rv).to_string());
+    }
+
+    // messages[N]['field'] or messages[N].field — indexed message access
+    if let Some(val) = eval_messages_index(expr, ctx.messages) {
+        return Some(val);
+    }
+
+    // Current message field access (inside for loop)
+    if let Some(msg) = state.current_msg() {
+        if expr == "message['role']" || expr == "message[\"role\"]" || expr == "message.role" {
+            return Some(role_str(&msg.role).to_string());
+        }
+        if expr == "message['content']"
+            || expr == "message[\"content\"]"
+            || expr == "message.content"
+        {
+            return Some(msg.content.clone());
+        }
+    }
+
+    // Variable lookup (from {% set %})
+    if let Some(val) = state.vars.get(expr) {
+        return Some(val.clone());
+    }
+
+    // Parenthesized condition used as expression: (A == B) → "true"/"false"
+    if expr.starts_with('(') && expr.ends_with(')') {
+        if let Some(inner) = strip_balanced_parens(expr) {
+            if inner.contains(" == ")
+                || inner.contains(" != ")
+                || inner.contains(" and ")
+                || inner.contains(" or ")
+                || inner.starts_with("not ")
+            {
+                let result = eval_condition(inner, state, ctx);
+                return Some(if result { "true" } else { "false" }.to_string());
+            }
+        }
+    }
+
+    // Undefined → None (falsy in conditions)
+    None
+}
+
+/// Evaluate messages[N]['field'] or messages[N].field
+fn eval_messages_index(expr: &str, messages: &[ChatMessage]) -> Option<String> {
+    let rest = expr.strip_prefix("messages[")?;
+    let bracket_end = rest.find(']')?;
+    let idx: usize = rest[..bracket_end].trim().parse().ok()?;
+    let msg = messages.get(idx)?;
+    let after = rest[bracket_end + 1..].trim();
+
+    if after == "['role']" || after == "[\"role\"]" || after == ".role" {
+        return Some(role_str(&msg.role).to_string());
+    }
+    if after == "['content']" || after == "[\"content\"]" || after == ".content" {
+        return Some(msg.content.clone());
+    }
+
+    None
+}
+
+fn apply_filter(val: &str, filter: &str) -> String {
+    match filter {
+        "trim" => val.trim().to_string(),
+        "tojson" => {
+            use std::fmt::Write;
+            let mut out = String::with_capacity(val.len() + 2);
+            out.push('"');
+            for c in val.chars() {
+                match c {
+                    '"' => out.push_str("\\\""),
+                    '\\' => out.push_str("\\\\"),
+                    '\n' => out.push_str("\\n"),
+                    '\r' => out.push_str("\\r"),
+                    '\t' => out.push_str("\\t"),
+                    c if (c as u32) < 0x20 => {
+                        write!(out, "\\u{:04x}", c as u32).unwrap();
+                    }
+                    c => out.push(c),
+                }
+            }
+            out.push('"');
+            out
+        }
+        "upper" => val.to_uppercase(),
+        "lower" => val.to_lowercase(),
+        _ => val.to_string(),
+    }
+}
+
+/// Split on a character outside strings (returns trimmed halves).
+fn split_outside_strings(expr: &str, sep: char) -> Option<(&str, &str)> {
+    let mut in_single = false;
+    let mut in_double = false;
+    for (i, ch) in expr.char_indices() {
+        match ch {
+            '\'' if !in_double => in_single = !in_single,
+            '"' if !in_single => in_double = !in_double,
+            c if c == sep && !in_single && !in_double => {
+                return Some((expr[..i].trim(), expr[i + 1..].trim()));
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+// ── Condition evaluator ──
+
+/// Evaluate a condition expression (for {% if %} / {% elif %}).
+fn eval_condition(condition: &str, state: &EvalState, ctx: &EvalCtx) -> bool {
+    let condition = condition.trim();
+
+    if condition.is_empty() {
+        return false;
+    }
+
+    // Strip balanced outer parentheses: (X) → X
+    if condition.starts_with('(') {
+        if let Some(inner) = strip_balanced_parens(condition) {
+            return eval_condition(inner, state, ctx);
+        }
+    }
+
+    // OR (lowest precedence)
+    if let Some((left, right)) = split_condition_op(condition, " or ") {
+        return eval_condition(left, state, ctx) || eval_condition(right, state, ctx);
+    }
+
+    // AND
+    if let Some((left, right)) = split_condition_op(condition, " and ") {
+        return eval_condition(left, state, ctx) && eval_condition(right, state, ctx);
+    }
+
+    // NOT prefix (must come after or/and splitting)
+    if let Some(inner) = condition.strip_prefix("not ") {
+        return !eval_condition(inner.trim(), state, ctx);
+    }
+
+    // Comparisons: ==, !=
+    if let Some((left, right)) = split_condition_op(condition, " == ") {
+        let lv = eval_expr(left.trim(), state, ctx).unwrap_or_default();
+        let rv = eval_expr(right.trim(), state, ctx).unwrap_or_default();
+        return lv == rv;
+    }
+    if let Some((left, right)) = split_condition_op(condition, " != ") {
+        let lv = eval_expr(left.trim(), state, ctx).unwrap_or_default();
+        let rv = eval_expr(right.trim(), state, ctx).unwrap_or_default();
+        return lv != rv;
+    }
+
+    // Special boolean names
+    if condition == "add_generation_prompt" {
+        return ctx.add_generation_prompt;
+    }
+    if condition == "loop.last" {
+        return state.is_last();
+    }
+    if condition == "loop.first" {
+        return state.is_first();
+    }
+
+    // Truthiness of arbitrary expression
+    match eval_expr(condition, state, ctx) {
+        Some(val) => !val.is_empty() && val != "false" && val != "0",
+        None => false, // undefined → falsy
+    }
+}
+
+/// Split a condition string on an operator, respecting strings and parentheses.
+fn split_condition_op<'a>(condition: &'a str, op: &str) -> Option<(&'a str, &'a str)> {
+    let mut depth: i32 = 0;
+    let mut in_single = false;
+    let mut in_double = false;
+    let bytes = condition.as_bytes();
+    let op_bytes = op.as_bytes();
+
+    if bytes.len() < op_bytes.len() {
+        return None;
+    }
+
+    for i in 0..=bytes.len() - op_bytes.len() {
+        let ch = bytes[i];
+        match ch {
+            b'\'' if !in_double => in_single = !in_single,
+            b'"' if !in_single => in_double = !in_double,
+            b'(' if !in_single && !in_double => depth += 1,
+            b')' if !in_single && !in_double => depth -= 1,
+            _ => {}
+        }
+        if depth == 0 && !in_single && !in_double && bytes[i..].starts_with(op_bytes) {
+            return Some((&condition[..i], &condition[i + op.len()..]));
+        }
+    }
+    None
+}
+
+/// Strip balanced outer parentheses: "(X)" → "X" if parens match.
+fn strip_balanced_parens(s: &str) -> Option<&str> {
+    if !s.starts_with('(') || !s.ends_with(')') {
+        return None;
+    }
+    let inner = &s[1..s.len() - 1];
+    let mut depth: i32 = 0;
+    let mut in_single = false;
+    let mut in_double = false;
+    for ch in inner.chars() {
+        match ch {
+            '\'' if !in_double => in_single = !in_single,
+            '"' if !in_single => in_double = !in_double,
+            '(' if !in_single && !in_double => depth += 1,
+            ')' if !in_single && !in_double => {
+                depth -= 1;
+                if depth < 0 {
+                    return None;
+                }
+            }
+            _ => {}
+        }
+    }
+    if depth == 0 {
+        Some(inner)
+    } else {
+        None
+    }
+}
+
+// ── String helpers ──
+
+fn parse_string_literal(s: &str) -> Option<String> {
+    if (s.starts_with('\'') && s.ends_with('\'')) || (s.starts_with('"') && s.ends_with('"')) {
+        let inner = &s[1..s.len() - 1];
+        Some(unescape_string(inner))
+    } else {
+        None
+    }
+}
+
+/// Unescape Jinja2 string escape sequences: \n, \t, \\, \', \"
+fn unescape_string(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(ch) = chars.next() {
+        if ch == '\\' {
+            match chars.next() {
+                Some('n') => result.push('\n'),
+                Some('t') => result.push('\t'),
+                Some('\\') => result.push('\\'),
+                Some('\'') => result.push('\''),
+                Some('"') => result.push('"'),
+                Some(other) => {
+                    result.push('\\');
+                    result.push(other);
+                }
+                None => result.push('\\'),
+            }
+        } else {
+            result.push(ch);
+        }
+    }
+    result
+}
+
+fn role_str(role: &Role) -> &'static str {
+    match role {
+        Role::System => "system",
+        Role::User => "user",
+        Role::Assistant => "assistant",
+        Role::Tool => "tool",
+    }
+}
+
+/// Check if the expression contains a `+` operator outside of string literals.
+fn contains_plus_outside_strings(expr: &str) -> bool {
+    let mut in_single = false;
+    let mut in_double = false;
+    for ch in expr.chars() {
+        match ch {
+            '\'' if !in_double => in_single = !in_single,
+            '"' if !in_single => in_double = !in_double,
+            '+' if !in_single && !in_double => return true,
+            _ => {}
+        }
+    }
+    false
+}
+
+/// Split an expression on `+` outside of string literals.
+fn split_on_plus(expr: &str) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut start = 0;
+    let mut in_single = false;
+    let mut in_double = false;
+
+    for (i, ch) in expr.char_indices() {
+        match ch {
+            '\'' if !in_double => in_single = !in_single,
+            '"' if !in_single => in_double = !in_double,
+            '+' if !in_single && !in_double => {
+                parts.push(&expr[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    parts.push(&expr[start..]);
+    parts
+}
+
+// ── Public utility functions ──
