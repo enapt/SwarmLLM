@@ -3,6 +3,7 @@ pub mod discovery;
 pub mod helpers;
 pub mod manager;
 pub mod peer_cache;
+pub mod pipeline_stream;
 pub mod protocol;
 pub mod relay;
 pub mod transport;

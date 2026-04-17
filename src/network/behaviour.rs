@@ -61,6 +61,11 @@ pub struct SwarmBehaviour {
     pub connection_limits: connection_limits::Behaviour,
     /// mDNS for automatic LAN peer discovery (zero-config).
     pub mdns: libp2p::swarm::behaviour::toggle::Toggle<mdns::tokio::Behaviour>,
+    /// Persistent bidirectional stream protocol for per-pipeline inference
+    /// sessions. Coexists with `request_response` — the latter remains the
+    /// fallback and covers all non-streaming traffic. Only used when
+    /// `config.inference.persistent_pipeline_stream` is on.
+    pub pipeline_stream: libp2p_stream::Behaviour,
 }
 
 /// Build the combined network behaviour with all sub-protocols configured.
@@ -246,6 +251,8 @@ pub fn build_behaviour(
         None
     };
 
+    let pipeline_stream = libp2p_stream::Behaviour::new();
+
     Ok(SwarmBehaviour {
         request_response,
         kademlia,
@@ -257,6 +264,7 @@ pub fn build_behaviour(
         relay_server,
         connection_limits,
         mdns: mdns_behaviour.into(),
+        pipeline_stream,
     })
 }
 

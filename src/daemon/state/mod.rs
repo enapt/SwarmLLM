@@ -72,6 +72,12 @@ pub struct SharedState {
     pub streaming_token_txs: DashMap<uuid::Uuid, mpsc::Sender<crate::types::StreamingToken>>,
     pub pending_layer_results:
         DashMap<uuid::Uuid, tokio::sync::oneshot::Sender<crate::types::LayerResult>>,
+    /// Remote-side (segment holder) pending result routes for forwards received
+    /// on a persistent pipeline stream. Keyed by request_id; the handler task
+    /// registers a oneshot before dispatch, and NetworkManager delivers the
+    /// result here (instead of the request_response path) when a match is found.
+    pub pending_stream_result_routes:
+        DashMap<uuid::Uuid, tokio::sync::oneshot::Sender<crate::types::LayerResult>>,
     pub pending_vision_results: DashMap<
         uuid::Uuid,
         (
@@ -100,6 +106,12 @@ pub struct SharedState {
         DashMap<(String, crate::types::ModelId), crate::types::RegionShardSummary>,
     pub region_demand: DashMap<(crate::types::ModelId, String), f64>,
     pub dht_query_tx: mpsc::Sender<crate::types::ModelId>,
+
+    /// Persistent pipeline-stream client handle, installed by NetworkManager at
+    /// startup when `config.inference.persistent_pipeline_stream` is enabled.
+    /// When absent, distributed forwards fall back to the request_response path.
+    pub pipeline_stream_client:
+        tokio::sync::OnceCell<Arc<crate::network::pipeline_stream::PipelineStreamClient>>,
 
     // Sub-structs (logically grouped fields)
     pub events: EventBus,
@@ -331,6 +343,8 @@ impl SharedState {
             loaded_model_info: RwLock::new(None),
             gpu_info,
             pending_layer_results: DashMap::new(),
+            pending_stream_result_routes: DashMap::new(),
+            pipeline_stream_client: tokio::sync::OnceCell::new(),
             split_models: DashMap::new(),
             split_model_index: DashMap::new(),
             kv_cache_store: Arc::new(crate::inference::split::KvCacheStore::new(
@@ -678,5 +692,21 @@ impl SharedState {
             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
             shared.models.acquisition_progress.remove(&mid);
         });
+    }
+
+    /// Reverse lookup: PeerId → NodeId, via `peer_id_map`. O(N_peers) scan, but
+    /// peer counts are tiny in practice and this is only called on stream open.
+    pub fn peer_to_node_id_from_registry(
+        &self,
+        peer: &libp2p::PeerId,
+    ) -> Option<crate::types::NodeId> {
+        let peer_bytes = peer.to_bytes();
+        self.peer_id_map.iter().find_map(|entry| {
+            if entry.value() == &peer_bytes {
+                Some(entry.key().clone())
+            } else {
+                None
+            }
+        })
     }
 }

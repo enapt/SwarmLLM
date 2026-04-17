@@ -225,6 +225,11 @@ pub struct InferenceConfig {
     /// Enable speculative decoding when a valid draft-target model pair is available.
     #[serde(default)]
     pub speculative_decoding: bool,
+    /// Use a persistent libp2p bidirectional stream per pipeline session for
+    /// distributed inference instead of the per-token request_response path.
+    /// Off by default until validated. See `docs/plans/distributed_inference_speedup.md`.
+    #[serde(default)]
+    pub persistent_pipeline_stream: bool,
     /// Number of draft tokens to propose per verification step (default: 4).
     #[serde(default = "default_speculative_gamma")]
     pub speculative_gamma: u32,
@@ -1160,6 +1165,7 @@ impl Default for InferenceConfig {
             gpu_layers: default_gpu_layers(),
             kv_cache_ttl_secs: default_kv_cache_ttl(),
             speculative_decoding: false,
+            persistent_pipeline_stream: false,
             speculative_gamma: default_speculative_gamma(),
             draft_model_path: None,
             draft_gpu_layers: None,

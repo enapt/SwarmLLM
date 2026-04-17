@@ -375,6 +375,41 @@ impl NetworkManager {
         // Subscribe to GossipSub topics
         discovery::subscribe_topics(&mut self.swarm)?;
 
+        // Persistent pipeline stream: obtain a Control, register the protocol
+        // acceptor, publish the client to SharedState, and spawn the accept
+        // loop. Off-switch is `config.inference.persistent_pipeline_stream`,
+        // enforced at the call site in `forward_through_segments` — the
+        // protocol always registers so remote peers can connect regardless of
+        // who flipped the flag first.
+        {
+            let mut control = self.swarm.behaviour().pipeline_stream.new_control();
+            let incoming = control
+                .accept(libp2p::StreamProtocol::new(
+                    crate::network::pipeline_stream::PROTOCOL_PIPELINE,
+                ))
+                .map_err(|e| SwarmError::Network(format!("pipeline_stream accept: {e}")))?;
+            let client = std::sync::Arc::new(
+                crate::network::pipeline_stream::PipelineStreamClient::new(control),
+            );
+            if self
+                .shared_state
+                .pipeline_stream_client
+                .set(client)
+                .is_err()
+            {
+                tracing::warn!("pipeline_stream_client already set — ignoring");
+            }
+            crate::network::pipeline_stream::spawn_accept_loop(
+                incoming,
+                self.shared_state.clone(),
+                self.outbound_tx.clone(),
+            );
+            tracing::info!(
+                protocol = crate::network::pipeline_stream::PROTOCOL_PIPELINE,
+                "pipeline_stream behaviour armed"
+            );
+        }
+
         // Layer 2: Load cached peers from last session and dial them
         if config.pool.offline_mode {
             tracing::info!(
@@ -3069,6 +3104,32 @@ impl NetworkManager {
         target_peer_bytes: Vec<u8>,
         result: crate::types::LayerResult,
     ) {
+        // Persistent pipeline stream: if this request came in on a stream, the
+        // handler task registered a oneshot in `pending_stream_result_routes`.
+        // Delivering there writes the result frame back on the same stream —
+        // no request_response traffic needed.
+        if let Some((_, tx)) = self
+            .shared_state
+            .pending_stream_result_routes
+            .remove(&result.request_id)
+        {
+            let request_id = result.request_id;
+            let tokens = result.token_ids.len();
+            if tx.send(result).is_err() {
+                tracing::debug!(
+                    %request_id,
+                    "pipeline stream result route dropped — handler task exited"
+                );
+            } else {
+                tracing::debug!(
+                    %request_id,
+                    tokens,
+                    "DIAG: delivered result via pipeline stream route"
+                );
+            }
+            return;
+        }
+
         let Some(peer_id) = Self::resolve_peer_id(&target_peer_bytes, "tensor result") else {
             return;
         };

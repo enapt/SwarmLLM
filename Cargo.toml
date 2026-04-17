@@ -49,6 +49,7 @@ libp2p = { version = "0.55", features = [
     "serde",
     "mdns",
 ] }
+libp2p-stream = "0.3.0-alpha"
 
 # HTTP server
 axum = { version = "0.7", features = ["ws"] }

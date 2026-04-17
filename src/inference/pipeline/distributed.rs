@@ -377,6 +377,12 @@ impl PipelineExecutor {
             }
         }
 
+        // Tear down the persistent pipeline stream (if one was opened). Drops
+        // the client handle which aborts the per-stream reader/writer tasks.
+        if let Some(client) = self.shared_state.pipeline_stream_client.get() {
+            client.close(request_id);
+        }
+
         // Strip EOS tokens before decoding (loaded from GGUF metadata)
         let eos_tokens =
             cached_eos.unwrap_or_else(|| [LLAMA_FALLBACK_EOS_TOKEN].into_iter().collect());
@@ -651,14 +657,79 @@ impl PipelineExecutor {
                     "Sending LayerForward to remote segment"
                 );
 
-                if self
-                    .network_tx
-                    .send(NetworkCommand::SendTensor {
-                        target_peer_bytes: target_peer_bytes.clone(),
-                        forward,
-                    })
-                    .await
-                    .is_err()
+                // Persistent pipeline stream path: if enabled AND the client
+                // handle is installed, encode + seal locally and ship on the
+                // stream. Falls back to NetworkCommand::SendTensor on any
+                // setup failure (stream open error, encoding error, etc.).
+                let used_stream = if self
+                    .shared_state
+                    .config
+                    .inference
+                    .persistent_pipeline_stream
+                {
+                    if let Some(client) = self.shared_state.pipeline_stream_client.get() {
+                        match libp2p::PeerId::from_bytes(&target_peer_bytes) {
+                            Ok(peer_id) => {
+                                match crate::network::pipeline_stream::encode_forward_for_wire(
+                                    &forward,
+                                    &peer_id,
+                                    &self.shared_state,
+                                ) {
+                                    Ok(payload) => match client
+                                        .send_forward(
+                                            request_id,
+                                            peer_id,
+                                            payload,
+                                            self.shared_state.clone(),
+                                        )
+                                        .await
+                                    {
+                                        Ok(()) => true,
+                                        Err(e) => {
+                                            tracing::warn!(
+                                                %request_id,
+                                                error = %e,
+                                                "pipeline stream send failed — falling back to RR"
+                                            );
+                                            client.close(request_id);
+                                            false
+                                        }
+                                    },
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            %request_id,
+                                            error = %e,
+                                            "pipeline stream encode failed — falling back to RR"
+                                        );
+                                        false
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    %request_id,
+                                    error = %e,
+                                    "pipeline stream PeerId parse failed — falling back to RR"
+                                );
+                                false
+                            }
+                        }
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                };
+
+                if !used_stream
+                    && self
+                        .network_tx
+                        .send(NetworkCommand::SendTensor {
+                            target_peer_bytes: target_peer_bytes.clone(),
+                            forward,
+                        })
+                        .await
+                        .is_err()
                 {
                     self.shared_state.pending_layer_results.remove(&request_id);
                     return Err(SwarmError::Network(
