@@ -14,14 +14,17 @@ use tokio::sync::mpsc;
 // than routing through `axum::response::Sse`. These helpers keep the `data:`
 // and `event:` framing uniform across those handlers.
 
-/// Format a JSON value as an SSE `data:` frame (for byte streams).
-pub fn data_frame(value: &serde_json::Value) -> bytes::Bytes {
-    bytes::Bytes::from(format!("data: {value}\n\n"))
+/// Format a value as an SSE `data:` frame (for byte streams).
+/// Accepts any `serde::Serialize` — typed response structs or raw JSON values.
+pub fn data_frame<S: serde::Serialize>(value: &S) -> bytes::Bytes {
+    let json = serde_json::to_string(value).unwrap_or_default();
+    bytes::Bytes::from(format!("data: {json}\n\n"))
 }
 
 /// Format a named SSE event frame (`event: ...\ndata: ...`) for byte streams.
-pub fn event_frame(event_type: &str, value: &serde_json::Value) -> bytes::Bytes {
-    bytes::Bytes::from(format!("event: {event_type}\ndata: {value}\n\n"))
+pub fn event_frame<S: serde::Serialize>(event_type: &str, value: &S) -> bytes::Bytes {
+    let json = serde_json::to_string(value).unwrap_or_default();
+    bytes::Bytes::from(format!("event: {event_type}\ndata: {json}\n\n"))
 }
 
 /// Terminal `data: [DONE]` frame used by OpenAI-compatible streams.

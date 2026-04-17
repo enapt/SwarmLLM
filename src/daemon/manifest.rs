@@ -94,8 +94,7 @@ pub fn generate_and_register_local_manifest(
                 );
 
                 // Build shard infos from layouts (handles hashing, tensor entries, layer ranges)
-                let model_dir =
-                    crate::model::shard::model_dir(&shared_state.config.node.data_dir, &model_id.0);
+                let model_dir = shared_state.model_dir(&model_id.0);
                 let shards =
                     crate::model::manifest::build_shard_infos_from_layouts(&model_dir, &layouts);
 

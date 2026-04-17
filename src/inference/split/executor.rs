@@ -198,9 +198,7 @@ impl SplitModel {
         };
 
         // Get seq_len for mask
-        let seq_len = layer_in
-            .dim(1)
-            .map_err(|e| SwarmError::Internal(e.to_string()))?;
+        let seq_len = layer_in.dim(1).map_err(SwarmError::internal)?;
 
         // Pre-flight check: reject sequences that exceed the model's context window
         // to avoid cryptic tensor dimension errors in attention.
@@ -247,13 +245,10 @@ impl SplitModel {
             // Prefix cache: suffix query attends to (offset + seq_len) key positions
             Some(
                 self.mask_with_offset(seq_len, kv_offset + seq_len)
-                    .map_err(|e| SwarmError::Internal(e.to_string()))?,
+                    .map_err(SwarmError::internal)?,
             )
         } else {
-            Some(
-                self.mask(seq_len)
-                    .map_err(|e| SwarmError::Internal(e.to_string()))?,
-            )
+            Some(self.mask(seq_len).map_err(SwarmError::internal)?)
         };
 
         let max_seq_len = self.max_seq_len;
@@ -289,7 +284,7 @@ impl SplitModel {
                             .forward(&attn)
                             .map_err(|e| SwarmError::Internal(format!("post_attn_norm: {e}")))?;
                     }
-                    let x = (attn + residual).map_err(|e| SwarmError::Internal(e.to_string()))?;
+                    let x = (attn + residual).map_err(SwarmError::internal)?;
 
                     let residual = &x;
                     let x = lw
@@ -310,7 +305,7 @@ impl SplitModel {
                             .forward(&x)
                             .map_err(|e| SwarmError::Internal(format!("post_ffw_norm: {e}")))?;
                     }
-                    layer_in = (x + residual).map_err(|e| SwarmError::Internal(e.to_string()))?;
+                    layer_in = (x + residual).map_err(SwarmError::internal)?;
                 }
                 LayerVariant::DeepSeek {
                     attention,
@@ -330,7 +325,7 @@ impl SplitModel {
                             max_seq_len,
                         )
                         .map_err(|e| SwarmError::Internal(format!("mla: {e}")))?;
-                    let x = (attn + &layer_in).map_err(|e| SwarmError::Internal(e.to_string()))?;
+                    let x = (attn + &layer_in).map_err(SwarmError::internal)?;
                     let residual = &x;
                     let normed = ffn_norm
                         .forward(&x)
@@ -343,8 +338,7 @@ impl SplitModel {
                             .forward(&normed)
                             .map_err(|e| SwarmError::Internal(format!("moe: {e}")))?,
                     };
-                    layer_in =
-                        (ffn_out + residual).map_err(|e| SwarmError::Internal(e.to_string()))?;
+                    layer_in = (ffn_out + residual).map_err(SwarmError::internal)?;
                 }
                 LayerVariant::Qwen35Attn {
                     ref weights,
@@ -366,7 +360,7 @@ impl SplitModel {
                             max_seq_len,
                         )
                         .map_err(|e| SwarmError::Internal(format!("q35_attn: {e}")))?;
-                    let x = (attn + residual).map_err(|e| SwarmError::Internal(e.to_string()))?;
+                    let x = (attn + residual).map_err(SwarmError::internal)?;
                     let residual = &x;
                     let normed = post_attention_norm
                         .forward(&x)
@@ -379,8 +373,7 @@ impl SplitModel {
                             .forward(&normed)
                             .map_err(|e| SwarmError::Internal(format!("q35_moe: {e}")))?,
                     };
-                    layer_in =
-                        (ffn_out + residual).map_err(|e| SwarmError::Internal(e.to_string()))?;
+                    layer_in = (ffn_out + residual).map_err(SwarmError::internal)?;
                 }
                 LayerVariant::Qwen35Ssm {
                     ref weights,
@@ -396,8 +389,7 @@ impl SplitModel {
                     let ssm_out = weights
                         .forward_deltanet(&x, &mut layer_ssm_states[layer_idx])
                         .map_err(|e| SwarmError::Internal(format!("q35_deltanet: {e}")))?;
-                    let x =
-                        (ssm_out + residual).map_err(|e| SwarmError::Internal(e.to_string()))?;
+                    let x = (ssm_out + residual).map_err(SwarmError::internal)?;
                     let residual = &x;
                     let normed = post_attention_norm
                         .forward(&x)
@@ -410,8 +402,7 @@ impl SplitModel {
                             .forward(&normed)
                             .map_err(|e| SwarmError::Internal(format!("q35_ssm_moe: {e}")))?,
                     };
-                    layer_in =
-                        (ffn_out + residual).map_err(|e| SwarmError::Internal(e.to_string()))?;
+                    layer_in = (ffn_out + residual).map_err(SwarmError::internal)?;
                 }
             }
             tracing::trace!(
@@ -797,8 +788,7 @@ impl SplitModel {
                             .forward(&attn_batched)
                             .map_err(|e| SwarmError::Internal(format!("post_attn_norm: {e}")))?;
                     }
-                    let x = (&attn_batched + &residual)
-                        .map_err(|e| SwarmError::Internal(e.to_string()))?;
+                    let x = (&attn_batched + &residual).map_err(SwarmError::internal)?;
 
                     let residual2 = x.clone();
                     let x = lw
@@ -818,7 +808,7 @@ impl SplitModel {
                             .forward(&x)
                             .map_err(|e| SwarmError::Internal(format!("post_ffw_norm: {e}")))?;
                     }
-                    batched = (&x + &residual2).map_err(|e| SwarmError::Internal(e.to_string()))?;
+                    batched = (&x + &residual2).map_err(SwarmError::internal)?;
                 }
                 LayerVariant::DeepSeek {
                     attention,
@@ -851,8 +841,7 @@ impl SplitModel {
                     let attn_refs: Vec<&Tensor> = attn_outputs.iter().collect();
                     let attn_batched = Tensor::cat(&attn_refs, 0)
                         .map_err(|e| SwarmError::Internal(format!("mla restack: {e}")))?;
-                    let x = (&attn_batched + &batched)
-                        .map_err(|e| SwarmError::Internal(e.to_string()))?;
+                    let x = (&attn_batched + &batched).map_err(SwarmError::internal)?;
 
                     let residual = x.clone();
                     let normed = ffn_norm
@@ -866,8 +855,7 @@ impl SplitModel {
                             .forward(&normed)
                             .map_err(|e| SwarmError::Internal(format!("moe_batch: {e}")))?,
                     };
-                    batched =
-                        (&ffn_out + &residual).map_err(|e| SwarmError::Internal(e.to_string()))?;
+                    batched = (&ffn_out + &residual).map_err(SwarmError::internal)?;
                 }
                 LayerVariant::Qwen35Attn {
                     ref weights,
@@ -900,8 +888,7 @@ impl SplitModel {
                     let attn_refs: Vec<&Tensor> = attn_outputs.iter().collect();
                     let attn_batched = Tensor::cat(&attn_refs, 0)
                         .map_err(|e| SwarmError::Internal(format!("q35b_attn_restack: {e}")))?;
-                    let x = (&attn_batched + &residual)
-                        .map_err(|e| SwarmError::Internal(e.to_string()))?;
+                    let x = (&attn_batched + &residual).map_err(SwarmError::internal)?;
 
                     let residual2 = x.clone();
                     let normed2 = post_attention_norm
@@ -915,8 +902,7 @@ impl SplitModel {
                             .forward(&normed2)
                             .map_err(|e| SwarmError::Internal(format!("q35b_moe: {e}")))?,
                     };
-                    batched =
-                        (&ffn_out + &residual2).map_err(|e| SwarmError::Internal(e.to_string()))?;
+                    batched = (&ffn_out + &residual2).map_err(SwarmError::internal)?;
                 }
                 LayerVariant::Qwen35Ssm {
                     ref weights,
@@ -944,8 +930,7 @@ impl SplitModel {
                     let ssm_refs: Vec<&Tensor> = ssm_outputs.iter().collect();
                     let ssm_batched = Tensor::cat(&ssm_refs, 0)
                         .map_err(|e| SwarmError::Internal(format!("q35b_ssm_restack: {e}")))?;
-                    let x = (&ssm_batched + &residual)
-                        .map_err(|e| SwarmError::Internal(e.to_string()))?;
+                    let x = (&ssm_batched + &residual).map_err(SwarmError::internal)?;
 
                     let residual2 = x.clone();
                     let normed2 = post_attention_norm
@@ -959,8 +944,7 @@ impl SplitModel {
                             .forward(&normed2)
                             .map_err(|e| SwarmError::Internal(format!("q35b_ssm_moe: {e}")))?,
                     };
-                    batched =
-                        (&ffn_out + &residual2).map_err(|e| SwarmError::Internal(e.to_string()))?;
+                    batched = (&ffn_out + &residual2).map_err(SwarmError::internal)?;
                 }
             }
         }
@@ -1098,17 +1082,12 @@ impl SplitModel {
             )));
         }
 
-        let seq_len = input
-            .dim(1)
-            .map_err(|e| SwarmError::Internal(e.to_string()))?;
+        let seq_len = input.dim(1).map_err(SwarmError::internal)?;
 
         let mask = if seq_len == 1 {
             None
         } else {
-            Some(
-                self.mask(seq_len)
-                    .map_err(|e| SwarmError::Internal(e.to_string()))?,
-            )
+            Some(self.mask(seq_len).map_err(SwarmError::internal)?)
         };
 
         let num_layers = self.layers.len();

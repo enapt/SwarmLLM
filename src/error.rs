@@ -101,6 +101,14 @@ pub enum SwarmError {
     Serialization(#[from] serde_json::Error),
 }
 
+impl SwarmError {
+    /// Build `SwarmError::Internal` from any `Display`-able error. Use as
+    /// `.map_err(SwarmError::internal)` to avoid the closure boilerplate.
+    pub fn internal<E: std::fmt::Display>(e: E) -> Self {
+        SwarmError::Internal(e.to_string())
+    }
+}
+
 /// API-facing error that maps SwarmError to HTTP status codes.
 pub struct ApiError(pub SwarmError);
 

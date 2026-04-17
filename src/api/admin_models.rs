@@ -396,7 +396,7 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
 
     // Helper: compute disk-level metadata (manifest, header, probed, mmproj) for a model.
     let disk_metadata = |model_id: &str, model_display_name: &str| -> serde_json::Value {
-        let model_dir = crate::model::shard::model_dir(&state.config.node.data_dir, model_id);
+        let model_dir = state.model_dir(model_id);
         let has_manifest = model_dir
             .join(crate::model::shard::MANIFEST_FILENAME)
             .exists();
@@ -901,7 +901,7 @@ pub async fn delete_model(
     let node_id = shared.identity.node_id().clone();
 
     // Remove shard files from disk (in spawn_blocking to avoid blocking Tokio)
-    let model_dir = crate::model::shard::model_dir(&state.config.node.data_dir, &model_id);
+    let model_dir = state.model_dir(&model_id);
     let model_dir_clone = model_dir.clone();
     let files_removed = tokio::task::spawn_blocking(move || {
         let mut count = 0u32;
@@ -1424,7 +1424,7 @@ pub async fn download_shard(
 
     // Pre-flight disk space check (returns 507 Insufficient Storage with hint)
     if shard_size > 0 {
-        let dest_dir = crate::model::shard::model_dir(&shared.config.node.data_dir, &mid.0);
+        let dest_dir = shared.model_dir(&mid.0);
         crate::model::check_disk_space(&dest_dir, shard_size)?;
     }
 
@@ -1788,7 +1788,7 @@ pub async fn model_metadata(
     Path(model_id): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     validate_model_id(&model_id)?;
-    let model_dir = crate::model::shard::model_dir(&state.config.node.data_dir, &model_id);
+    let model_dir = state.model_dir(&model_id);
     let header_path = model_dir.join(crate::model::shard::HEADER_FILENAME);
 
     if !header_path.exists() {

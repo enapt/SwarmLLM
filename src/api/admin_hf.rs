@@ -366,7 +366,7 @@ pub async fn hf_download(
 
     validate_hf_inputs(&repo_id, &filename)?;
 
-    let dest_dir = crate::model::shard::model_dir(&state.config.node.data_dir, &repo_id);
+    let dest_dir = state.model_dir(&repo_id);
 
     tracing::info!(repo = %repo_id, file = %filename, "Starting HuggingFace download");
 
@@ -708,7 +708,7 @@ pub async fn hf_download_shards(
             )));
         }
         let sanitized = crate::model::shard::sanitize_path_component(mid);
-        if crate::model::shard::model_dir(&state.config.node.data_dir, &sanitized).exists() {
+        if state.model_dir(&sanitized).exists() {
             sanitized
         } else {
             gguf_filename_to_model_id(&filename)
@@ -717,7 +717,7 @@ pub async fn hf_download_shards(
         gguf_filename_to_model_id(&filename)
     };
 
-    let dest_dir = crate::model::shard::model_dir(&state.config.node.data_dir, &safe_name);
+    let dest_dir = state.model_dir(&safe_name);
 
     tracing::info!(
         repo = %repo_id,
@@ -1498,7 +1498,7 @@ pub async fn cancel_download(
     }
 
     // Clean up partial .tmp files in the model directory
-    let model_dir = crate::model::shard::model_dir(&state.config.node.data_dir, &model_id);
+    let model_dir = state.model_dir(&model_id);
     let md = model_dir.clone();
     let _ = tokio::task::spawn_blocking(move || {
         crate::model::shard::ShardStore::cleanup_tmp_files_in_dir(&md);
@@ -1594,8 +1594,7 @@ pub async fn hf_source(
                 );
 
                 // Also write hf_source.json to disk for future startups
-                let model_dir =
-                    crate::model::shard::model_dir(&state.config.node.data_dir, &model_id);
+                let model_dir = state.model_dir(&model_id);
                 if model_dir.is_dir() {
                     let hf_path = model_dir.join(crate::model::shard::HF_SOURCE_FILENAME);
                     let json_str = serde_json::to_string_pretty(&serde_json::json!({

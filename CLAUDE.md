@@ -50,7 +50,7 @@ swarmllm/
 │   ├── swarmllm-frontend/  (embedded + dev-mode frontend asset serving)
 │   └── swarmllm-types/     (shared types crate: NodeId, ModelManifest, SwarmMessage, etc.)
 ├── src/
-│   ├── main.rs, lib.rs, config.rs, error.rs, types.rs, update.rs
+│   ├── main.rs, lib.rs, config.rs, error.rs, http.rs, types.rs, update.rs
 │   ├── daemon/    (mod, state, manifest, shard_loader, dispatch)
 │   ├── network/   (manager, behaviour, discovery, protocol, transport, relay, peer_cache, helpers)
 │   ├── model/     (manifest, shard, distribution, registry, acquisition, huggingface, auto_manage/, lora)

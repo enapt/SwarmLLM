@@ -932,7 +932,7 @@ pub(crate) async fn dispatch_network_messages(
                                             // Persist to DB
                                             let _ = shared_state.db.put_json("hf_sources", &mid.0, &source);
                                             // Also write hf_source.json to disk so discover_hf_sources finds it on restart
-                                            let model_dir = crate::model::shard::model_dir(&shared_state.config.node.data_dir, &mid.0);
+                                            let model_dir = shared_state.model_dir(&mid.0);
                                             {
                                                 let json_str = serde_json::to_string_pretty(&source).unwrap_or_default();
                                                 tokio::task::spawn_blocking(move || {
@@ -1631,8 +1631,7 @@ async fn handle_vision_encode_request(
         entry.value().clone()
     } else {
         // Try to load mmproj on-demand
-        let model_dir =
-            crate::model::shard::model_dir(&shared_state.config.node.data_dir, &model_id.0);
+        let model_dir = shared_state.model_dir(&model_id.0);
         let mmproj_path = model_dir.join(crate::model::shard::MMPROJ_FILENAME);
         if !mmproj_path.exists() {
             tracing::warn!(

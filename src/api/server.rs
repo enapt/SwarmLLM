@@ -46,6 +46,15 @@ pub struct AppState {
     pub rate_limiter: middleware::RateLimiter,
 }
 
+impl AppState {
+    /// Resolve the on-disk directory for a model (proxy to
+    /// [`SharedState::model_dir`]). Keeps handler code free of the
+    /// `state.config.node.data_dir` reach-through.
+    pub fn model_dir(&self, model_id: &str) -> std::path::PathBuf {
+        self.shared_state.model_dir(model_id)
+    }
+}
+
 /// Custom JSON extractor that returns OpenAI-format error responses on parse failure.
 ///
 /// Axum's built-in `Json<T>` returns raw text on deserialization errors.

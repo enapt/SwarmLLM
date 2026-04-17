@@ -104,7 +104,7 @@ impl GgufTensorMeta {
             .unwrap_or(embedding_length / head_count);
         // rope.dimension_count may not exist for all architectures — derive from head_dim
         let rope_dim = md_get("rope.dimension_count")
-            .and_then(|v| v.to_u32().map_err(|e| SwarmError::Internal(e.to_string())))
+            .and_then(|v| v.to_u32().map_err(SwarmError::internal))
             .unwrap_or(head_dim as u32) as usize;
         let rms_norm_eps = md_get("attention.layer_norm_rms_epsilon")?
             .to_f32()

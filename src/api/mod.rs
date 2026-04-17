@@ -90,9 +90,10 @@ pub(crate) async fn resolve_chat_template(
     }
 
     // 2. GGUF header on disk
-    let header_path =
-        crate::model::shard::model_dir(&state.shared_state.config.node.data_dir, model_name)
-            .join(crate::model::shard::HEADER_FILENAME);
+    let header_path = state
+        .shared_state
+        .model_dir(model_name)
+        .join(crate::model::shard::HEADER_FILENAME);
     if header_path.exists() {
         if let Some((t, b, e)) = crate::inference::pipeline::template_from_header(&header_path) {
             return (t, b, e);
@@ -102,8 +103,7 @@ pub(crate) async fn resolve_chat_template(
     // 3. HuggingFace metadata probe
     let mid = crate::types::ModelId(model_name.to_string());
     if let Some(hf_src) = state.shared_state.models.hf_sources.get(&mid) {
-        let model_dir =
-            crate::model::shard::model_dir(&state.shared_state.config.node.data_dir, model_name);
+        let model_dir = state.shared_state.model_dir(model_name);
         let shard_size = state.shared_state.config.model.shard_size_bytes();
         if let Ok(info) = crate::model::huggingface::probe_gguf_file(
             &hf_src.repo_id,

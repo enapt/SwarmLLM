@@ -5,15 +5,13 @@ use candle_core::{DType, Device, Tensor};
 use crate::error::SwarmError;
 
 pub fn tensor_to_bytes(tensor: &Tensor) -> Result<Vec<u8>, SwarmError> {
-    let tensor = tensor
-        .to_dtype(DType::F32)
-        .map_err(|e| SwarmError::Internal(e.to_string()))?;
+    let tensor = tensor.to_dtype(DType::F32).map_err(SwarmError::internal)?;
     let shape = tensor.shape().dims();
     let data = tensor
         .flatten_all()
-        .map_err(|e| SwarmError::Internal(e.to_string()))?
+        .map_err(SwarmError::internal)?
         .to_vec1::<f32>()
-        .map_err(|e| SwarmError::Internal(e.to_string()))?;
+        .map_err(SwarmError::internal)?;
 
     let mut bytes = Vec::new();
     // ndim
@@ -45,14 +43,12 @@ pub fn tensor_bytes_add(a: &[u8], b: &[u8]) -> Result<Vec<u8>, SwarmError> {
 /// Extract raw f32 bytes from a tensor (no header, just flat f32 LE data).
 /// Used by AllReduce to ensure consistent data format across TP ranks.
 pub fn tensor_to_raw_f32(tensor: &Tensor) -> Result<Vec<u8>, SwarmError> {
-    let tensor = tensor
-        .to_dtype(DType::F32)
-        .map_err(|e| SwarmError::Internal(e.to_string()))?;
+    let tensor = tensor.to_dtype(DType::F32).map_err(SwarmError::internal)?;
     let data = tensor
         .flatten_all()
-        .map_err(|e| SwarmError::Internal(e.to_string()))?
+        .map_err(SwarmError::internal)?
         .to_vec1::<f32>()
-        .map_err(|e| SwarmError::Internal(e.to_string()))?;
+        .map_err(SwarmError::internal)?;
     Ok(data.iter().flat_map(|f| f.to_le_bytes()).collect())
 }
 
@@ -153,8 +149,8 @@ pub fn bytes_to_tensor(bytes: &[u8]) -> Result<Tensor, SwarmError> {
         pos += 4;
     }
 
-    let tensor = Tensor::from_vec(data, shape.as_slice(), &Device::Cpu)
-        .map_err(|e| SwarmError::Internal(e.to_string()))?;
+    let tensor =
+        Tensor::from_vec(data, shape.as_slice(), &Device::Cpu).map_err(SwarmError::internal)?;
     Ok(tensor)
 }
 
@@ -178,15 +174,9 @@ pub fn sample_token_with_params(
     logits: &Tensor,
     params: &crate::types::SamplingParams,
 ) -> Result<u32, SwarmError> {
-    let logits = logits
-        .squeeze(0)
-        .map_err(|e| SwarmError::Internal(e.to_string()))?;
-    let logits = logits
-        .to_dtype(DType::F32)
-        .map_err(|e| SwarmError::Internal(e.to_string()))?;
-    let mut logits_vec = logits
-        .to_vec1::<f32>()
-        .map_err(|e| SwarmError::Internal(e.to_string()))?;
+    let logits = logits.squeeze(0).map_err(SwarmError::internal)?;
+    let logits = logits.to_dtype(DType::F32).map_err(SwarmError::internal)?;
+    let mut logits_vec = logits.to_vec1::<f32>().map_err(SwarmError::internal)?;
 
     if logits_vec.is_empty() {
         return Err(SwarmError::Internal("Empty logits".into()));
@@ -207,15 +197,11 @@ pub fn sample_token_with_logprob(
     if !params.logprobs {
         return sample_token_with_params(logits, params).map(|t| (t, None));
     }
-    let logits_squeezed = logits
-        .squeeze(0)
-        .map_err(|e| SwarmError::Internal(e.to_string()))?;
+    let logits_squeezed = logits.squeeze(0).map_err(SwarmError::internal)?;
     let logits_f32 = logits_squeezed
         .to_dtype(DType::F32)
-        .map_err(|e| SwarmError::Internal(e.to_string()))?;
-    let mut logits_vec = logits_f32
-        .to_vec1::<f32>()
-        .map_err(|e| SwarmError::Internal(e.to_string()))?;
+        .map_err(SwarmError::internal)?;
+    let mut logits_vec = logits_f32.to_vec1::<f32>().map_err(SwarmError::internal)?;
     if logits_vec.is_empty() {
         return Err(SwarmError::Internal("Empty logits".into()));
     }

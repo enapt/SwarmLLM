@@ -196,6 +196,40 @@ fn cleanup_expired_sessions() {
 
 /// Extract total input tokens from a CLI usage JSON object, summing base +
 /// cache_read + cache_creation components.
+/// Build an OpenAI-format streaming chunk with a single text delta.
+/// Shared between `text_delta`, `thinking_delta`, and terminal `stop` frames
+/// so all chat.completion.chunk emissions flow through the same typed struct.
+fn build_content_chunk(
+    id: &str,
+    created: i64,
+    model: &str,
+    content: String,
+    finish_reason: Option<String>,
+) -> super::openai::ChatCompletionChunk {
+    let delta = super::openai::Delta {
+        role: None,
+        content: if content.is_empty() && finish_reason.is_some() {
+            None
+        } else {
+            Some(content)
+        },
+        tool_calls: None,
+    };
+    super::openai::ChatCompletionChunk {
+        id: id.to_string(),
+        object: "chat.completion.chunk",
+        created,
+        model: model.to_string(),
+        choices: vec![super::openai::ChunkChoice {
+            index: 0,
+            delta,
+            finish_reason,
+            logprobs: None,
+        }],
+        session_id: None,
+    }
+}
+
 fn extract_total_input_tokens(usage: &serde_json::Value) -> u64 {
     usage["input_tokens"].as_u64().unwrap_or(0)
         + usage["cache_read_input_tokens"].as_u64().unwrap_or(0)
@@ -577,53 +611,22 @@ pub async fn proxy_via_subprocess_openai(
                                 match inner_type {
                                     "content_block_delta" => {
                                         let delta_type = parsed["event"]["delta"]["type"].as_str().unwrap_or("");
-                                        if delta_type == "text_delta" {
-                                            let text = parsed["event"]["delta"]["text"].as_str().unwrap_or("");
-                                            let chunk = serde_json::json!({
-                                                "id": rid,
-                                                "object": "chat.completion.chunk",
-                                                "created": created,
-                                                "model": model_owned,
-                                                "choices": [{
-                                                    "index": 0,
-                                                    "delta": { "content": text },
-                                                    "finish_reason": null
-                                                }]
-                                            });
-                                            yield Ok::<_, std::io::Error>(
-                                                crate::api::sse::data_frame(&chunk)
-                                            );
+                                        let text_opt = if delta_type == "text_delta" {
+                                            Some(parsed["event"]["delta"]["text"].as_str().unwrap_or("").to_string())
                                         } else if delta_type == "thinking_delta" {
-                                            // Extended thinking — pass through as a custom field
-                                            let text = parsed["event"]["delta"]["thinking"].as_str().unwrap_or("");
-                                            let chunk = serde_json::json!({
-                                                "id": rid,
-                                                "object": "chat.completion.chunk",
-                                                "created": created,
-                                                "model": model_owned,
-                                                "choices": [{
-                                                    "index": 0,
-                                                    "delta": { "content": text },
-                                                    "finish_reason": null
-                                                }]
-                                            });
-                                            yield Ok(crate::api::sse::data_frame(&chunk));
+                                            // Extended thinking — pass through as content
+                                            Some(parsed["event"]["delta"]["thinking"].as_str().unwrap_or("").to_string())
+                                        } else {
+                                            None
+                                        };
+                                        if let Some(text) = text_opt {
+                                            let chunk = build_content_chunk(&rid, created, &model_owned, text, None);
+                                            yield Ok::<_, std::io::Error>(crate::api::sse::data_frame(&chunk));
                                         }
                                     }
                                     "message_delta" => {
-                                        let stop = parsed["event"]["delta"]["stop_reason"].as_str();
-                                        if stop.is_some() {
-                                            let chunk = serde_json::json!({
-                                                "id": rid,
-                                                "object": "chat.completion.chunk",
-                                                "created": created,
-                                                "model": model_owned,
-                                                "choices": [{
-                                                    "index": 0,
-                                                    "delta": {},
-                                                    "finish_reason": "stop"
-                                                }]
-                                            });
+                                        if parsed["event"]["delta"]["stop_reason"].as_str().is_some() {
+                                            let chunk = build_content_chunk(&rid, created, &model_owned, String::new(), Some("stop".into()));
                                             yield Ok(crate::api::sse::data_frame(&chunk));
                                         }
                                     }

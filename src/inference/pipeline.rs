@@ -390,9 +390,10 @@ impl PipelineExecutor {
     /// Build chat prompt by reading GGUF header from disk (convenience wrapper).
     async fn build_prompt(&self) -> String {
         let model_id = &self.request.model_id;
-        let header_path =
-            crate::model::shard::model_dir(&self.shared_state.config.node.data_dir, &model_id.0)
-                .join(crate::model::shard::HEADER_FILENAME);
+        let header_path = self
+            .shared_state
+            .model_dir(&model_id.0)
+            .join(crate::model::shard::HEADER_FILENAME);
         let header_data = template_from_header(&header_path);
         self.build_prompt_with_header(header_data.as_ref()).await
     }

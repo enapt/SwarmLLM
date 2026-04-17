@@ -881,6 +881,13 @@ impl SharedState {
         let _ = self.config_watch_tx.send(params);
     }
 
+    /// Resolve the on-disk directory for a model: `<data_dir>/models/<sanitized-id>`.
+    /// Preferred over `model::shard::model_dir(&self.config.node.data_dir, id)` —
+    /// removes the reach-through into `config.node.data_dir` at call sites.
+    pub fn model_dir(&self, model_id: &str) -> std::path::PathBuf {
+        crate::model::shard::model_dir(&self.config.node.data_dir, model_id)
+    }
+
     /// Returns "VRAM" if a GPU is available, "RAM" otherwise.
     pub fn memory_type_label(&self) -> &'static str {
         if self.gpu_info.is_some() {
