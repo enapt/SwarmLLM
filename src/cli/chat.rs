@@ -1,0 +1,97 @@
+//! `swarmllm chat` — interactive terminal REPL against a running daemon.
+
+use super::read_api_key;
+
+pub async fn run_chat(
+    port: u16,
+    data_dir: &std::path::Path,
+    model_override: Option<String>,
+    max_tokens: u32,
+    temperature: f32,
+) -> anyhow::Result<()> {
+    use std::io::{BufRead, Write};
+
+    let api_key = read_api_key(data_dir).unwrap_or_default();
+    if api_key.is_empty() {
+        anyhow::bail!(
+            "No API key at {} — is the daemon running?",
+            data_dir.join("api_key").display()
+        );
+    }
+
+    let base = format!("http://localhost:{port}");
+    let client = reqwest::Client::new();
+
+    // Discover model
+    let model = if let Some(m) = model_override {
+        m
+    } else {
+        let models_resp: serde_json::Value = client
+            .get(format!("{base}/v1/models"))
+            .header("Authorization", format!("Bearer {api_key}"))
+            .send()
+            .await?
+            .json()
+            .await?;
+        models_resp["data"][0]["id"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("No models available — load a model first"))?
+            .to_string()
+    };
+
+    println!("SwarmLLM Chat — model: {model}");
+    println!("Type your message and press Enter. Type 'quit' or Ctrl-D to exit.\n");
+
+    let mut messages: Vec<serde_json::Value> = Vec::new();
+    let stdin = std::io::stdin();
+
+    loop {
+        print!("You: ");
+        std::io::stdout().flush()?;
+
+        let mut line = String::new();
+        if stdin.lock().read_line(&mut line)? == 0 {
+            // EOF (Ctrl-D)
+            println!();
+            break;
+        }
+        let input = line.trim();
+        if input.is_empty() {
+            continue;
+        }
+        if input == "quit" || input == "exit" {
+            break;
+        }
+
+        messages.push(serde_json::json!({"role": "user", "content": input}));
+
+        let resp: serde_json::Value = client
+            .post(format!("{base}/v1/chat/completions"))
+            .header("Authorization", format!("Bearer {api_key}"))
+            .json(&serde_json::json!({
+                "model": &model,
+                "messages": &messages,
+                "max_tokens": max_tokens,
+                "temperature": temperature,
+            }))
+            .send()
+            .await?
+            .json()
+            .await?;
+
+        if let Some(err) = resp.get("error") {
+            eprintln!("Error: {}", err);
+            messages.pop();
+            continue;
+        }
+
+        let content = resp["choices"][0]["message"]["content"]
+            .as_str()
+            .unwrap_or("(no response)");
+        println!("\nAssistant: {content}\n");
+
+        messages.push(serde_json::json!({"role": "assistant", "content": content}));
+    }
+
+    Ok(())
+}
