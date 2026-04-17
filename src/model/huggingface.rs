@@ -54,18 +54,10 @@ pub(crate) fn validate_hf_repo_id(repo_id: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Read HuggingFace API token from `HF_TOKEN` env var (or `HUGGING_FACE_HUB_TOKEN` fallback).
-fn hf_token() -> Option<String> {
-    std::env::var("HF_TOKEN")
-        .or_else(|_| std::env::var("HUGGING_FACE_HUB_TOKEN"))
-        .ok()
-        .filter(|t| !t.is_empty())
-}
-
 /// Apply auth + user-agent headers to a reqwest builder.
 fn hf_headers(builder: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
     let b = builder.header("User-Agent", "SwarmLLM/0.1");
-    if let Some(token) = hf_token() {
+    if let Some(token) = crate::config::hf_api_token() {
         b.header("Authorization", format!("Bearer {token}"))
     } else {
         b

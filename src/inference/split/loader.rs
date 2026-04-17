@@ -148,7 +148,23 @@ impl SplitModel {
             )));
         }
 
-        let arch = &arch_str; // keep for metadata key lookups
+        // Extract the shared hyperparameters via the unified GgufTensorMeta
+        // path so gguf_meta.rs remains the single source of truth for field
+        // parsing. Architecture-specific extras (context_length, Gemma
+        // softcaps) stay inline since they're not part of the base metadata.
+        let meta = super::GgufTensorMeta::from_content(&ct)?;
+        let head_count = meta.head_count;
+        let head_count_kv = meta.head_count_kv;
+        let block_count = meta.block_count;
+        let embedding_length = meta.embedding_length;
+        let head_dim = meta.head_dim;
+        let rope_dim = meta.rope_dim;
+        let rms_norm_eps = meta.rms_norm_eps;
+        let rope_freq_base = meta.rope_freq_base;
+        let arch = &arch_str; // keep a reference for the extras below
+
+        // Arch-specific metadata lookups (context length, Gemma softcaps,
+        // DeepSeek MoE/MLA params) that aren't part of the shared base.
         let md_get = |suffix: &str| {
             let key = format!("{arch}.{suffix}");
             ct.metadata
@@ -156,42 +172,6 @@ impl SplitModel {
                 .ok_or_else(|| SwarmError::Internal(format!("Missing GGUF metadata: {key}")))
         };
 
-        let head_count = md_get("attention.head_count")?
-            .to_u32()
-            .map_err(|e| SwarmError::Internal(e.to_string()))? as usize;
-        if head_count == 0 {
-            return Err(SwarmError::Inference(
-                "GGUF metadata error: attention.head_count is zero".into(),
-            ));
-        }
-        let head_count_kv = md_get("attention.head_count_kv")?
-            .to_u32()
-            .map_err(|e| SwarmError::Internal(e.to_string()))? as usize;
-        let block_count = md_get("block_count")?
-            .to_u32()
-            .map_err(|e| SwarmError::Internal(e.to_string()))? as usize;
-        let embedding_length = md_get("embedding_length")?
-            .to_u32()
-            .map_err(|e| SwarmError::Internal(e.to_string()))?
-            as usize;
-        // head_dim: prefer attention.key_length from GGUF (Qwen3 uses 128 vs embed/heads=64)
-        let head_dim = ct
-            .metadata
-            .get(&format!("{arch}.attention.key_length"))
-            .and_then(|v| v.to_u32().ok())
-            .map(|v| v as usize)
-            .unwrap_or(embedding_length / head_count);
-        let rope_dim = md_get("rope.dimension_count")
-            .and_then(|v| v.to_u32().map_err(|e| SwarmError::Internal(e.to_string())))
-            .unwrap_or(head_dim as u32) as usize;
-        let rms_norm_eps = md_get("attention.layer_norm_rms_epsilon")?
-            .to_f32()
-            .map_err(|e| SwarmError::Internal(e.to_string()))? as f64;
-        let rope_freq_base = ct
-            .metadata
-            .get(&format!("{arch}.rope.freq_base"))
-            .and_then(|v| v.to_f32().ok())
-            .unwrap_or(10000f32);
         let context_length = md_get("context_length")
             .and_then(|v| v.to_u32().map_err(|e| SwarmError::Internal(e.to_string())))
             .unwrap_or(DEFAULT_MAX_SEQ_LEN as u32) as usize;

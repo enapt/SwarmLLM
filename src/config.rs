@@ -963,6 +963,16 @@ pub fn resolve_data_dir(cli_data_dir: Option<&std::path::Path>) -> PathBuf {
     default_data_dir()
 }
 
+/// Read the HuggingFace API token from standard env vars (`HF_TOKEN` preferred,
+/// `HUGGING_FACE_HUB_TOKEN` fallback). Returns `None` if unset or empty.
+/// Lives here so all external-service credentials flow through `config`.
+pub fn hf_api_token() -> Option<String> {
+    std::env::var("HF_TOKEN")
+        .or_else(|_| std::env::var("HUGGING_FACE_HUB_TOKEN"))
+        .ok()
+        .filter(|t| !t.is_empty())
+}
+
 fn default_data_dir() -> PathBuf {
     dirs::data_dir()
         .unwrap_or_else(|| {

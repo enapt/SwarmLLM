@@ -29,6 +29,11 @@ pub struct GgufTensorMeta {
     pub head_count_kv: usize,
     pub block_count: usize,
     pub embedding_length: usize,
+    /// Per-head dimension. Prefers `<arch>.attention.key_length` from GGUF
+    /// (Qwen3 uses 128 vs embed/heads=64); falls back to `embedding_length /
+    /// head_count`. `serde(default)` so older manifests still deserialize.
+    #[serde(default)]
+    pub head_dim: usize,
     pub rope_dim: usize,
     pub rope_freq_base: f32,
     pub rms_norm_eps: f64,
@@ -151,6 +156,7 @@ impl GgufTensorMeta {
             head_count_kv,
             block_count,
             embedding_length,
+            head_dim,
             rope_dim,
             rope_freq_base,
             rms_norm_eps,
