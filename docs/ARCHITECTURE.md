@@ -91,7 +91,7 @@ Single Rust binary, three simultaneous functions:
 | PoolManager | NetworkManager | `network_tx` | PoolInvitation, PoolState gossip |
 | AutoShardManager | AcquisitionManager | `acquisition_tx` | AcquisitionCommand (auto downloads) |
 
-The **MessageDispatcher** is a dedicated task in `daemon/dispatch.rs` that routes inbound network messages to the appropriate subsystem. Inference messages go to InferenceRouter, CreditGossip updates peer balance distributions, and pool messages go to PoolManager.
+The **MessageDispatcher** is a dedicated task in `daemon/dispatch/mod.rs` that routes inbound network messages to the appropriate subsystem. Inference messages go to InferenceRouter, CreditGossip updates peer balance distributions, and pool messages go to PoolManager.
 
 ## Startup Sequence
 
@@ -354,7 +354,7 @@ Node A (rank 0, coordinator)          Node B (rank 1)
 - **Weight splitting**: Dynamic slicing at inference time (`forward_attn_tp` slices attention heads, `forward_tp` slices FFN intermediate dimension)
 - **Wire format**: Partials zstd-compressed, sent via `SendAllReduceRequest` / `SendAllReduceResponse` NetworkCommand variants
 - **Registry cleanup**: `AllReduceRegistry::cleanup_stale()` runs on each HealthMonitor tick (30s), removing entries where the receiver was dropped (timed out)
-- **Files**: `src/inference/allreduce.rs` (coordinator + registry), `src/inference/scheduler.rs` (TP group detection)
+- **Files**: `src/inference/allreduce.rs` (coordinator + registry), `src/inference/scheduler/mod.rs` (TP group detection)
 
 ### Vision Language Models (VLM)
 
@@ -944,7 +944,7 @@ With privacy:        Prompt text → [tokenize + embed locally] → FP32 activat
 - `SplitModel::forward_pre_embedded()` skips embedding lookup when `pre_embedded = true`
 - Supports Gemma embedding scaling (`sqrt(hidden_dim)`)
 - Trade-off: larger wire payloads (e.g., 512 tokens × 4096 dim × 4B = 8MB vs ~2KB text)
-- Modules: `src/inference/local_embedder.rs`, `src/daemon/state.rs` (`local_embedders` DashMap)
+- Modules: `src/inference/local_embedder.rs`, `src/daemon/state/mod.rs` (`local_embedders` DashMap)
 
 ## Private Mode
 
@@ -1278,7 +1278,7 @@ Routes Claude model requests through a locally-authenticated `claude` CLI subpro
 
 A lightweight cross-subsystem event bus for real-time dashboard observability.
 
-**Backend** (`src/daemon/state.rs`):
+**Backend** (`src/daemon/state/mod.rs`):
 - `ActivityEvent` struct with fields: `category` (`&'static str`), `kind` (`&'static str`, e.g. `"shard_pruned"`), `message` (English), plus optional `model_id`, `model_name`, `node_id`, `detail_num`, `detail_str`, `toast_level`, `toast_duration_ms`, `shard_index`, `freed_bytes`, `holder_count_before`, `holder_count_after`, `remaining_local_shards`, `timestamp` (ISO 8601)
 - `activity_tx: broadcast::Sender<ActivityEvent>` in `state.events` sub-struct (capacity 256, oldest events dropped on overflow)
 - All 11 subsystems emit events via the `state.emit_activity(ActivityEvent::new(...))` builder — fire-and-forget (send errors ignored)

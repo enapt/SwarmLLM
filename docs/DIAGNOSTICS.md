@@ -44,16 +44,16 @@ cargo run -- run -vv 2>&1 | grep "request_id=<UUID>"
 7. **Encryption (if enabled)** → `DIAG: encrypting tensor forward` with `aad_len`, `has_session` (manager.rs)
 8. **Remote receive** → `DIAG: codec read_request header` with `tag`, `len` (protocol.rs)
 9. **Inbound dispatch** → `DIAG: inbound TensorPayload request` → `DIAG: stored ResponseChannel` (manager.rs)
-10. **Dispatcher** → `DIAG: dispatcher received LayerForward` with `seq`, `layer_range`, `activation_bytes` (daemon/dispatch.rs)
-11. **Local execution** → `DIAG: processing LayerForward locally` with `elapsed_ms` (daemon/dispatch.rs)
+10. **Dispatcher** → `DIAG: dispatcher received LayerForward` with `seq`, `layer_range`, `activation_bytes` (daemon/dispatch/mod.rs)
+11. **Local execution** → `DIAG: processing LayerForward locally` with `elapsed_ms` (daemon/dispatch/mod.rs)
 12. **Split model forward** → `DIAG: SplitModel forward pass complete` with `forward_ms`, `seq_len`, `num_layers` (split/model.rs)
-13. **Result send** → `DIAG: LayerForward processed, sending result back` (daemon/dispatch.rs)
+13. **Result send** → `DIAG: LayerForward processed, sending result back` (daemon/dispatch/mod.rs)
 14. **Response write** → `DIAG: codec write_response start/done` with `frame_len` (protocol.rs)
 15. **ResponseSent event** → `DIAG: ResponseSent event — response written to wire` (manager.rs)
 16. **Response read** → `DIAG: codec read_response header` with `tag`, `len` (protocol.rs)
 17. **Response received** → `DIAG: received response` with `kind`, `was_tensor_forward`, `pending_tensor_out` (manager.rs)
 18. **Response dispatch** → `DIAG: received TensorPayload response` (manager.rs)
-19. **Result delivery** → `DIAG: dispatcher received LayerResult` → `DIAG: LayerResult delivered to pipeline` (daemon/dispatch.rs)
+19. **Result delivery** → `DIAG: dispatcher received LayerResult` → `DIAG: LayerResult delivered to pipeline` (daemon/dispatch/mod.rs)
 20. **Forward complete** → `DIAG: forward_through_segments returned OK` with `fwd_ms`, `tokens`, `activations_bytes` (pipeline/mod.rs)
 21. **Local segment** → `DIAG: local segment complete` with `segment_ms`, `activation_bytes` (pipeline/mod.rs)
 22. **Remote segment** → `DIAG: remote segment complete` with `segment_ms`, `activation_bytes` (pipeline/mod.rs)
@@ -80,8 +80,8 @@ cargo run -- run -vv 2>&1 | grep "request_id=<UUID>"
 - **Decryption fail** → `DIAG: decrypt FAILED — possible AAD mismatch` (manager.rs)
 - **No standby** → `DIAG: NO standby available for failed segment` (pipeline/mod.rs)
 - **Client disconnect** → `DIAG: result_tx receiver dropped` (router.rs)
-- **Channel drop** → `DIAG: LayerResult delivered but pipeline receiver DROPPED` (daemon/dispatch.rs)
-- **No pending channel** → `DIAG: No pending channel for LayerResult — already timed out or duplicate` (daemon/dispatch.rs)
+- **Channel drop** → `DIAG: LayerResult delivered but pipeline receiver DROPPED` (daemon/dispatch/mod.rs)
+- **No pending channel** → `DIAG: No pending channel for LayerResult — already timed out or duplicate` (daemon/dispatch/mod.rs)
 - **Streaming done event** → `DIAG: streaming done_event send failed` (router.rs)
 
 ## SSE Streaming Diagnostics
@@ -371,7 +371,7 @@ For production testing, use native Linux (dual boot or bare metal). WSL2 is suit
 |-------|------|--------|
 | DEBUG | `DIAG: speculative record_batch` | `drafted`, `accepted`, `acceptance_rate` |
 
-### Vision (vision.rs + pipeline/mod.rs + daemon/dispatch.rs)
+### Vision (vision.rs + pipeline/mod.rs + daemon/dispatch/mod.rs)
 
 | Level | What | Fields |
 |-------|------|--------|
@@ -602,27 +602,27 @@ For production testing, use native Linux (dual boot or bare metal). WSL2 is suit
 | `src/network/manager/` | Encrypted tensor send/receive, connection lifecycle, gossip audit, outbound tracking, key exchange |
 | `src/network/behaviour.rs` | Connection limits, autonat/dcutr toggle state |
 | `src/network/discovery.rs` | Bootstrap failures promoted to WARN with peer counts |
-| `src/network/protocol.rs` | Tensor decompression success/failure with sizes and compression ratios |
+| `src/network/protocol/mod.rs` | Tensor decompression success/failure with sizes and compression ratios |
 | `src/network/relay.rs` | Relay reservation logging |
 | `src/network/peer_cache.rs` | Peer cache save count |
 | `src/inference/pipeline/` | Segment timing (local + remote), pipeline total timing, failover details, wait_for_result context |
 | `src/inference/router.rs` | Pipeline schedule vs execute timing breakdown, result channel delivery, streaming done event |
 | `src/inference/split/` | Per-forward-pass timing (model.rs), KV-cache cleanup (kv_cache.rs) |
 | `src/inference/kv_cache.rs` | KV-cache hit/miss with detailed miss reasons (expired, degraded, prefix mismatch, evicted) |
-| `src/inference/scheduler.rs` | Pipeline assembly timing, candidate counts, standby counts |
+| `src/inference/scheduler/mod.rs` | Pipeline assembly timing, candidate counts, standby counts |
 | `src/inference/executor.rs` | Model load timing with backend type, generate_stream params |
 | `src/inference/speculative.rs` | Batch acceptance rate tracking |
 | `src/inference/vision.rs` | Image encoding timing |
-| `src/inference/chat_template.rs` | Template matching and fallback detection |
+| `src/inference/chat_template/mod.rs` | Template matching and fallback detection |
 | `src/model/shard.rs` | Shard verification failures, load_all_local summary |
 | `src/model/registry.rs` | Manifest registration, DB load counts |
-| `src/model/huggingface.rs` | Search result counts, HF_TOKEN auth |
+| `src/model/huggingface/mod.rs` | Search result counts, HF_TOKEN auth |
 | `src/model/manifest.rs` | Manifest load with shard count |
 | `src/model/lora.rs` | Adapter load with rank, alpha, target modules |
 | `src/model/acquisition.rs` | Acquisition requests, peer selection |
 | `src/model/auto_manage/` | Prune evaluation (prune.rs), shard registration (download.rs), model readiness (scan.rs) |
 | `src/api/server.rs` | Server startup with bind address |
-| `src/api/openai.rs` | All 3 streaming paths with per-token timing, client disconnect detection, fallback path logging |
+| `src/api/openai/mod.rs` | All 3 streaming paths with per-token timing, client disconnect detection, fallback path logging |
 | `src/api/admin.rs` | HF shard download initiation |
 | `src/api/providers.rs` | Provider resolution |
 | `src/api/websocket.rs` | WebSocket connection lifecycle |
@@ -632,7 +632,7 @@ For production testing, use native Linux (dual boot or bare metal). WSL2 is suit
 | `src/credit/trust.rs` | Trust score updates |
 | `src/storage/db.rs` | Database open with path |
 | `src/identity/keypair.rs` | Identity key load |
-| `src/daemon/dispatch.rs` | LayerForward timing, LayerResult delivery, pending channel state |
+| `src/daemon/dispatch/mod.rs` | LayerForward timing, LayerResult delivery, pending channel state |
 | `src/health/monitor.rs` | Broadcast failures, stale peer counts, channel cleanup details |
 | `src/api/anthropic/` | Messages API request entry, connectivity probe fast-path, inference path resolution, cloud proxy |
 | `src/api/identity.rs` | Nickname set/gossip, leaderboard query with peer filtering |

@@ -183,7 +183,7 @@ When `local_embedding_privacy: true` is set in `[inference]` config, the request
 
 **Trade-off:** Pre-embedded activations are larger than raw text (e.g., 512 tokens × 4096 hidden × 4 bytes = 8MB vs ~2KB text). This matches the existing inter-segment activation sizes, so it does not change the bandwidth profile of distributed inference.
 
-Relevant code: `src/inference/local_embedder.rs`, `src/inference/pipeline/`, `src/daemon/state.rs` (`local_embedders` DashMap).
+Relevant code: `src/inference/local_embedder.rs`, `src/inference/pipeline/`, `src/daemon/state/mod.rs` (`local_embedders` DashMap).
 
 ## Encrypted Pipeline
 
@@ -211,7 +211,7 @@ Requester (shard 0, embed) → Remote A (middle shards) → ... → Requester (f
 - Global fallback: `encrypted_pipeline = true` in `[inference]` config
 - Per-model overrides are persisted to the database
 
-Relevant code: `src/inference/scheduler.rs` (greedy_assign), `src/inference/pipeline/` (auto-enable local embedding), `src/api/admin_models.rs` (API endpoints), `src/daemon/state.rs` (`encrypted_pipeline_models` DashMap).
+Relevant code: `src/inference/scheduler/mod.rs` (greedy_assign), `src/inference/pipeline/` (auto-enable local embedding), `src/api/admin_models/mod.rs` (API endpoints), `src/daemon/state/mod.rs` (`encrypted_pipeline_models` DashMap).
 
 ## Known Limitations
 
