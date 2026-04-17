@@ -208,6 +208,11 @@ pub struct InferenceConfig {
     pub default_model: String,
     #[serde(default = "default_session_timeout")]
     pub session_timeout_seconds: u64,
+    /// Maximum concurrent inference requests scheduled across ALL loaded models.
+    /// Note: requests for the same model are serialized at the worker IPC socket
+    /// (one subprocess per ModelId, locked per request) — this setting does not
+    /// enable intra-model parallelism. Use `max_batch_size` to amortize the
+    /// per-model lock across grouped requests.
     #[serde(default = "default_max_concurrent")]
     pub max_concurrent_requests: u32,
     #[serde(default)]

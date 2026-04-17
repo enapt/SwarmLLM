@@ -46,6 +46,25 @@ impl Drop for WorkerHandle {
 ///
 /// When a model is unloaded, its worker process is killed and the OS/CUDA
 /// driver reclaims all GPU memory immediately — no restart required.
+///
+/// ## Concurrency model
+///
+/// Each WorkerHandle holds a `Mutex` over the IPC socket, and every `forward()`
+/// and `generate()` call takes that mutex for the full request duration. This
+/// means **requests for the same model are serialized at the IPC boundary** —
+/// there is no parallelism within a single model worker, even if the router's
+/// `max_concurrent_requests` is set higher.
+///
+/// `max_concurrent_requests` controls scheduling across ALL models; parallelism
+/// is achieved by having multiple distinct models loaded, each in its own
+/// worker, or by distributing requests across multiple peer nodes via the
+/// distributed inference path. Batching (`max_batch_size > 1`) is the only way
+/// to amortize per-model serialization — the router packs compatible requests
+/// into a single forward call before acquiring the socket lock.
+///
+/// True same-model pipelining (e.g., prefill request N+1 while decode of N is
+/// still streaming tokens) would require a request-multiplexing IPC protocol,
+/// which is deferred.
 pub struct ModelProcessPool {
     workers: DashMap<ModelId, Arc<WorkerHandle>>,
     /// Serializes worker spawning to prevent TOCTOU races where two concurrent
