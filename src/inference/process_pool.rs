@@ -87,6 +87,13 @@ pub struct ModelProcessPool {
     prefix_cache_max_prompt_tokens: std::sync::atomic::AtomicU32,
     prefix_cache_block_tokens: std::sync::atomic::AtomicU32,
     prefix_cache_min_tokens: std::sync::atomic::AtomicU32,
+    /// SWIFT (arxiv 2410.06916) self-speculative decoding settings applied
+    /// to future-spawned workers.
+    swift_self_speculative: std::sync::atomic::AtomicBool,
+    swift_calibration_tokens: std::sync::atomic::AtomicU32,
+    swift_gamma: std::sync::atomic::AtomicU32,
+    /// Stored as parts-per-thousand to fit into AtomicU32 (e.g. 0.45 → 450).
+    swift_skip_ratio_milli: std::sync::atomic::AtomicU32,
 }
 
 impl ModelProcessPool {
@@ -103,7 +110,29 @@ impl ModelProcessPool {
             prefix_cache_max_prompt_tokens: std::sync::atomic::AtomicU32::new(8192),
             prefix_cache_block_tokens: std::sync::atomic::AtomicU32::new(64),
             prefix_cache_min_tokens: std::sync::atomic::AtomicU32::new(32),
+            swift_self_speculative: std::sync::atomic::AtomicBool::new(false),
+            swift_calibration_tokens: std::sync::atomic::AtomicU32::new(32),
+            swift_gamma: std::sync::atomic::AtomicU32::new(4),
+            swift_skip_ratio_milli: std::sync::atomic::AtomicU32::new(450),
         }
+    }
+
+    /// Apply SWIFT self-speculative decoding settings to future-spawned workers.
+    pub fn set_swift_config(
+        &self,
+        enabled: bool,
+        calibration_tokens: u32,
+        gamma: u32,
+        skip_ratio: f32,
+    ) {
+        use std::sync::atomic::Ordering;
+        self.swift_self_speculative
+            .store(enabled, Ordering::Relaxed);
+        self.swift_calibration_tokens
+            .store(calibration_tokens, Ordering::Relaxed);
+        self.swift_gamma.store(gamma.max(1), Ordering::Relaxed);
+        let milli = (skip_ratio.clamp(0.0, 0.95) * 1000.0).round() as u32;
+        self.swift_skip_ratio_milli.store(milli, Ordering::Relaxed);
     }
 
     /// Set the KV-cache TTL for worker subprocesses (called once after config load).
@@ -251,6 +280,23 @@ impl ModelProcessPool {
                     .load(Ordering::Relaxed)
                     .to_string(),
             );
+            args.push("--swift-self-speculative".to_string());
+            args.push(
+                self.swift_self_speculative
+                    .load(Ordering::Relaxed)
+                    .to_string(),
+            );
+            args.push("--swift-calibration-tokens".to_string());
+            args.push(
+                self.swift_calibration_tokens
+                    .load(Ordering::Relaxed)
+                    .to_string(),
+            );
+            args.push("--swift-gamma".to_string());
+            args.push(self.swift_gamma.load(Ordering::Relaxed).to_string());
+            args.push("--swift-skip-ratio".to_string());
+            let ratio = self.swift_skip_ratio_milli.load(Ordering::Relaxed) as f32 / 1000.0;
+            args.push(format!("{ratio}"));
         }
 
         // If a shard window is set for this model, pass it to the worker

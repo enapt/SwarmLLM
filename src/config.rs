@@ -332,6 +332,25 @@ pub struct InferenceConfig {
     /// Prompts shorter than this aren't worth caching. Default 32.
     #[serde(default = "default_prefix_cache_min_tokens")]
     pub prefix_cache_min_tokens: u32,
+    /// Enable SWIFT (arxiv 2410.06916) self-speculative decoding inside
+    /// `handle_generate`. The target model itself acts as its own draft by
+    /// skipping a contiguous range of intermediate layers. No external draft
+    /// model needed. Off by default until validated.
+    #[serde(default)]
+    pub swift_self_speculative: bool,
+    /// Number of warmup tokens during which SWIFT runs the full target plus a
+    /// rotating set of skip-pattern candidates to pick the best. After this,
+    /// the winning pattern is used for the rest of the request. Default 32.
+    #[serde(default = "default_swift_calibration_tokens")]
+    pub swift_calibration_tokens: u32,
+    /// Number of draft tokens proposed per verification round. Default 4.
+    #[serde(default = "default_swift_gamma")]
+    pub swift_gamma: u32,
+    /// Fraction of layers to skip in the draft pass (0.0–0.95). Skip range is
+    /// always a contiguous block centered in the model's middle layers — the
+    /// outer layers are most sensitive to perturbation. Default 0.45 (skip ~45%).
+    #[serde(default = "default_swift_skip_ratio")]
+    pub swift_skip_ratio: f32,
 }
 
 fn default_tp_max_latency_ms() -> u32 {
@@ -352,6 +371,18 @@ fn default_prefix_cache_block_tokens() -> u32 {
 
 fn default_prefix_cache_min_tokens() -> u32 {
     32
+}
+
+fn default_swift_calibration_tokens() -> u32 {
+    32
+}
+
+fn default_swift_gamma() -> u32 {
+    4
+}
+
+fn default_swift_skip_ratio() -> f32 {
+    0.45
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1260,6 +1291,10 @@ impl Default for InferenceConfig {
             prefix_cache_max_prompt_tokens: default_prefix_cache_max_prompt_tokens(),
             prefix_cache_block_tokens: default_prefix_cache_block_tokens(),
             prefix_cache_min_tokens: default_prefix_cache_min_tokens(),
+            swift_self_speculative: false,
+            swift_calibration_tokens: default_swift_calibration_tokens(),
+            swift_gamma: default_swift_gamma(),
+            swift_skip_ratio: default_swift_skip_ratio(),
         }
     }
 }

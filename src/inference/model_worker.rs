@@ -15,6 +15,7 @@ use candle_core::IndexOp;
 use crate::daemon::shard_loader::{try_load_from_shards, ShardLoadParams};
 use crate::error::SwarmError;
 use crate::inference::split::{self, KvCacheStore, PrefixCache, SplitModel};
+use crate::inference::swift::{build_skip_mask, SwiftCalibrator, SwiftConfig};
 use crate::inference::worker_ipc::*;
 use crate::types::NetworkFinishReason;
 
@@ -49,6 +50,7 @@ pub async fn run_worker(
     shard_window: Option<Vec<u32>>,
     kv_cache_ttl_secs: u64,
     prefix_cfg: PrefixCacheConfig,
+    swift_cfg: SwiftConfig,
 ) {
     // Connect to the daemon's Unix socket
     let stream = match UnixStream::connect(&socket_path).await {
@@ -89,6 +91,13 @@ pub async fn run_worker(
         block_tokens = prefix_cfg.block_tokens,
         min_tokens = prefix_cfg.min_tokens,
         "model-worker: prefix-cache configured"
+    );
+    tracing::info!(
+        enabled = swift_cfg.enabled,
+        gamma = swift_cfg.gamma,
+        skip_ratio = swift_cfg.skip_ratio,
+        calibration_tokens = swift_cfg.calibration_tokens,
+        "model-worker: SWIFT self-speculative decoding configured"
     );
 
     if let Some(ref w) = shard_window {
@@ -151,6 +160,7 @@ pub async fn run_worker(
                     &data_dir,
                     gen,
                     &shard_window,
+                    &swift_cfg,
                 )
                 .await
                 {
@@ -726,6 +736,7 @@ async fn handle_forward(
 }
 
 /// Handle a Generate IPC message — run a full tokenize+decode loop.
+#[allow(clippy::too_many_arguments)]
 async fn handle_generate(
     writer: &mut tokio::net::unix::OwnedWriteHalf,
     models: &mut HashMap<(usize, usize, usize, usize), SplitModel>,
@@ -734,6 +745,7 @@ async fn handle_generate(
     data_dir: &std::path::Path,
     gen: IpcGenerate,
     shard_window: &Option<Vec<u32>>,
+    swift_cfg: &SwiftConfig,
 ) -> Result<(), SwarmError> {
     let request_id = gen.request_id;
     let model_id = gen.model_id.clone();
@@ -820,69 +832,109 @@ async fn handle_generate(
     let mut index_pos = prompt_tokens;
     let mut finish_reason = "length".to_string();
 
-    for _ in 0..gen.sampling.max_tokens {
-        if eos.contains(&next_token) {
-            finish_reason = "stop".to_string();
-            break;
+    // SWIFT eligibility: enabled + greedy + enough layers + budget for at
+    // least one full round. Falls through to the per-token loop otherwise.
+    let swift_active = swift_cfg.enabled
+        && gen.sampling.temperature == 0.0
+        && model.total_layers >= 8
+        && gen.sampling.max_tokens >= (swift_cfg.gamma + 1);
+
+    if swift_active {
+        let skip_mask = build_skip_mask(model.total_layers, swift_cfg.skip_ratio);
+        let calibrator = SwiftCalibrator::new();
+        let outcome = swift_decode_loop(
+            writer,
+            model,
+            kv_store,
+            &req_id_str,
+            request_id,
+            &gen,
+            &eos,
+            stop_sequences,
+            use_logprobs,
+            &skip_mask,
+            swift_cfg.gamma as usize,
+            &calibrator,
+            &mut next_token,
+            token_logprob,
+            &mut index_pos,
+            &mut generated,
+            &mut accumulated_text,
+        )
+        .await?;
+        finish_reason = outcome;
+        tracing::info!(
+            request_id = %request_id,
+            rounds = calibrator.rounds(),
+            acceptance_rate = calibrator.acceptance_rate(),
+            "DIAG: SWIFT session complete"
+        );
+    } else {
+        for _ in 0..gen.sampling.max_tokens {
+            if eos.contains(&next_token) {
+                finish_reason = "stop".to_string();
+                break;
+            }
+
+            let text = decode_token(model, next_token);
+            accumulated_text.push_str(&text);
+
+            // Check user-provided stop sequences
+            if crate::inference::sampling::find_stop_sequence(&accumulated_text, stop_sequences)
+                .is_some()
+            {
+                finish_reason = "stop".to_string();
+                break;
+            }
+
+            generated.push(next_token);
+
+            send_worker(
+                writer,
+                &WorkerMsg::Token {
+                    request_id,
+                    token_id: next_token,
+                    text,
+                    is_eos: false,
+                    logprob: if use_logprobs { token_logprob } else { None },
+                },
+                &[],
+            )
+            .await
+            .map_err(|e| SwarmError::Internal(format!("send Token: {e}")))?;
+
+            let input = model.token_tensor(next_token)?;
+            let logits = tokio::task::block_in_place(|| {
+                model.forward(&input, index_pos, kv_store, &req_id_str)
+            })?;
+            let (tok, lp) =
+                crate::inference::tensor_util::sample_token_with_logprob(&logits, &gen.sampling)?;
+            next_token = tok;
+            token_logprob = lp;
+            index_pos += 1;
         }
 
-        let text = decode_token(model, next_token);
-        accumulated_text.push_str(&text);
-
-        // Check user-provided stop sequences
-        if crate::inference::sampling::find_stop_sequence(&accumulated_text, stop_sequences)
-            .is_some()
-        {
-            finish_reason = "stop".to_string();
-            break;
+        // If the loop exhausted max_tokens (not EOS/stop), the last sampled
+        // token was never sent. Emit it now to avoid the off-by-one.
+        // Skip when max_tokens == 0 — user explicitly requested no completion
+        // tokens.
+        if finish_reason == "length" && gen.sampling.max_tokens > 0 && !eos.contains(&next_token) {
+            let text = decode_token(model, next_token);
+            generated.push(next_token);
+            send_worker(
+                writer,
+                &WorkerMsg::Token {
+                    request_id,
+                    token_id: next_token,
+                    text,
+                    is_eos: false,
+                    logprob: if use_logprobs { token_logprob } else { None },
+                },
+                &[],
+            )
+            .await
+            .map_err(|e| SwarmError::Internal(format!("send final Token: {e}")))?;
         }
-
-        generated.push(next_token);
-
-        send_worker(
-            writer,
-            &WorkerMsg::Token {
-                request_id,
-                token_id: next_token,
-                text,
-                is_eos: false,
-                logprob: if use_logprobs { token_logprob } else { None },
-            },
-            &[],
-        )
-        .await
-        .map_err(|e| SwarmError::Internal(format!("send Token: {e}")))?;
-
-        let input = model.token_tensor(next_token)?;
-        let logits = tokio::task::block_in_place(|| {
-            model.forward(&input, index_pos, kv_store, &req_id_str)
-        })?;
-        let (tok, lp) =
-            crate::inference::tensor_util::sample_token_with_logprob(&logits, &gen.sampling)?;
-        next_token = tok;
-        token_logprob = lp;
-        index_pos += 1;
-    }
-
-    // If the loop exhausted max_tokens (not EOS/stop), the last sampled token
-    // was never sent. Emit it now to avoid the off-by-one.
-    // Skip when max_tokens == 0 — user explicitly requested no completion tokens.
-    if finish_reason == "length" && gen.sampling.max_tokens > 0 && !eos.contains(&next_token) {
-        let text = decode_token(model, next_token);
-        generated.push(next_token);
-        send_worker(
-            writer,
-            &WorkerMsg::Token {
-                request_id,
-                token_id: next_token,
-                text,
-                is_eos: false,
-                logprob: if use_logprobs { token_logprob } else { None },
-            },
-            &[],
-        )
-        .await
-        .map_err(|e| SwarmError::Internal(format!("send final Token: {e}")))?;
     }
 
     // Send GenerateDone
@@ -903,6 +955,280 @@ async fn handle_generate(
     kv_store.clear_request(model.kv_model_key(), &req_id_str);
 
     Ok(())
+}
+
+/// SWIFT (arxiv 2410.06916) decode loop. Greedy-only v1.
+///
+/// Each round:
+/// 1. **Draft**: feed the current `next_token` plus γ-1 just-sampled draft
+///    tokens through `forward_with_skip_mask` one position at a time. Skipped
+///    layers don't write KV — only layers in the kept set do.
+/// 2. **KV truncate**: roll non-skipped layers' KV back to the round-start
+///    position so the verify pass writes positions p..p+γ correctly. Skipped
+///    layers are no-ops here.
+/// 3. **Verify**: one full forward over `[next_token, d_0, .., d_{γ-1}]` at
+///    `index_pos = p`, returning logits at all γ+1 positions.
+/// 4. **Greedy accept-reject**: longest matching prefix where draft argmax
+///    equals target argmax. Bonus = target's argmax at the rejection point or
+///    at position γ if all accepted.
+/// 5. **Final truncate**: shrink KV to `p + accepted_count + 1` so rejected
+///    draft positions are discarded.
+///
+/// Falls through cleanly if any forward fails — the caller will report.
+#[allow(clippy::too_many_arguments)]
+async fn swift_decode_loop(
+    writer: &mut tokio::net::unix::OwnedWriteHalf,
+    model: &mut SplitModel,
+    kv_store: &Arc<KvCacheStore>,
+    req_id_str: &str,
+    request_id: uuid::Uuid,
+    gen: &IpcGenerate,
+    eos: &[u32],
+    stop_sequences: &[String],
+    use_logprobs: bool,
+    skip_mask: &[bool],
+    gamma: usize,
+    calibrator: &SwiftCalibrator,
+    next_token: &mut u32,
+    initial_logprob: Option<f32>,
+    index_pos: &mut usize,
+    generated: &mut Vec<u32>,
+    accumulated_text: &mut String,
+) -> Result<String, SwarmError> {
+    let model_key = model.kv_model_key().to_string();
+
+    // Local helper: emit a single committed token and update bookkeeping.
+    // Returns Ok(true) when the caller should break (EOS, stop, or budget
+    // exhausted). The token IS pushed to `generated` and sent.
+    async fn emit_token(
+        writer: &mut tokio::net::unix::OwnedWriteHalf,
+        model: &SplitModel,
+        request_id: uuid::Uuid,
+        eos: &[u32],
+        stop_sequences: &[String],
+        use_logprobs: bool,
+        logprob: Option<f32>,
+        max_tokens: u32,
+        token: u32,
+        generated: &mut Vec<u32>,
+        accumulated_text: &mut String,
+    ) -> Result<EmitOutcome, SwarmError> {
+        if eos.contains(&token) {
+            return Ok(EmitOutcome::Stop);
+        }
+        if generated.len() as u32 >= max_tokens {
+            return Ok(EmitOutcome::Length);
+        }
+        let text = decode_token(model, token);
+        accumulated_text.push_str(&text);
+        if crate::inference::sampling::find_stop_sequence(accumulated_text, stop_sequences)
+            .is_some()
+        {
+            return Ok(EmitOutcome::Stop);
+        }
+        generated.push(token);
+        send_worker(
+            writer,
+            &WorkerMsg::Token {
+                request_id,
+                token_id: token,
+                text,
+                is_eos: false,
+                logprob: if use_logprobs { logprob } else { None },
+            },
+            &[],
+        )
+        .await
+        .map_err(|e| SwarmError::Internal(format!("send Token: {e}")))?;
+        Ok(EmitOutcome::Continue)
+    }
+
+    // Track logprob of the most recent committed token (we only have a real
+    // logprob for the prefill-sampled token; subsequent tokens are reported
+    // without logprobs in v1 since SWIFT's verify path skips the logprob
+    // sampler bookkeeping).
+    let mut pending_logprob = initial_logprob;
+
+    loop {
+        // Stop conditions on the carried `next_token` BEFORE running a round.
+        if eos.contains(next_token) {
+            return Ok("stop".into());
+        }
+        if generated.len() as u32 >= gen.sampling.max_tokens {
+            return Ok("length".into());
+        }
+
+        let p_start = *index_pos;
+        let remaining_budget = gen.sampling.max_tokens - generated.len() as u32;
+        // Need budget for at least 1 emitted token from this round; if the
+        // budget can't cover next_token alone, just emit it via the per-token
+        // fallback.
+        if remaining_budget == 0 {
+            return Ok("length".into());
+        }
+
+        // ── Phase 1: draft γ tokens with the skip mask ──
+        let mut draft_tokens: Vec<u32> = Vec::with_capacity(gamma);
+        let mut current_token = *next_token;
+        for k_offset in 0..gamma {
+            let input = model.token_tensor(current_token)?;
+            let logits = tokio::task::block_in_place(|| {
+                model.forward_with_skip_mask(
+                    &input,
+                    p_start + k_offset,
+                    kv_store,
+                    req_id_str,
+                    skip_mask,
+                )
+            })?;
+            // Greedy argmax — SWIFT v1 is greedy-only.
+            let sampled = sample_argmax(&logits)?;
+            draft_tokens.push(sampled);
+            current_token = sampled;
+        }
+
+        // ── Phase 2: roll the KV cache back to p_start so verify writes the
+        // canonical positions for ALL layers (including the ones we skipped).
+        kv_store.truncate_request_to(&model_key, req_id_str, p_start)?;
+
+        // ── Phase 3: verify with one full forward over γ+1 inputs ──
+        let mut verify_ids = Vec::with_capacity(gamma + 1);
+        verify_ids.push(*next_token);
+        verify_ids.extend(draft_tokens.iter().copied());
+        let verify_input = model.tensor_from_ids(&verify_ids)?;
+        let verify_logits = tokio::task::block_in_place(|| {
+            model.forward_verify_all_positions(&verify_input, p_start, kv_store, req_id_str)
+        })?;
+        // Shape: [1, γ+1, vocab].
+
+        // ── Phase 4: greedy accept-reject ──
+        let mut accepted_count = 0usize;
+        let mut rejection_logits_idx: Option<usize> = None;
+        for (k_idx, &draft_tok) in draft_tokens.iter().enumerate() {
+            let pos_logits = slice_position_logits(&verify_logits, k_idx)?;
+            let target_argmax = sample_argmax(&pos_logits)?;
+            if target_argmax == draft_tok {
+                accepted_count += 1;
+            } else {
+                rejection_logits_idx = Some(k_idx);
+                break;
+            }
+        }
+        let bonus_logits_idx = rejection_logits_idx.unwrap_or(gamma);
+        let bonus_logits = slice_position_logits(&verify_logits, bonus_logits_idx)?;
+        let bonus_token = sample_argmax(&bonus_logits)?;
+
+        calibrator.record(gamma as u32, accepted_count as u32);
+
+        // ── Phase 5: emit committed tokens. The carried next_token is
+        // committed at p_start, then accepted draft tokens, then bonus.
+        let mut break_outcome: Option<String> = None;
+
+        // Commit next_token at p_start (this is the token we sampled at the
+        // end of the previous round — or from prefill on the first round).
+        match emit_token(
+            writer,
+            model,
+            request_id,
+            eos,
+            stop_sequences,
+            use_logprobs,
+            pending_logprob.take(),
+            gen.sampling.max_tokens,
+            *next_token,
+            generated,
+            accumulated_text,
+        )
+        .await?
+        {
+            EmitOutcome::Continue => {}
+            EmitOutcome::Stop => break_outcome = Some("stop".into()),
+            EmitOutcome::Length => break_outcome = Some("length".into()),
+        }
+
+        if break_outcome.is_none() {
+            for tok in draft_tokens.iter().take(accepted_count) {
+                match emit_token(
+                    writer,
+                    model,
+                    request_id,
+                    eos,
+                    stop_sequences,
+                    use_logprobs,
+                    None,
+                    gen.sampling.max_tokens,
+                    *tok,
+                    generated,
+                    accumulated_text,
+                )
+                .await?
+                {
+                    EmitOutcome::Continue => {}
+                    EmitOutcome::Stop => {
+                        break_outcome = Some("stop".into());
+                        break;
+                    }
+                    EmitOutcome::Length => {
+                        break_outcome = Some("length".into());
+                        break;
+                    }
+                }
+            }
+        }
+
+        // Truncate KV cache to the accepted prefix so rejected positions are
+        // discarded. The bonus token is NOT in the cache yet — it becomes
+        // the new `next_token` and will be committed next round.
+        kv_store.truncate_request_to(&model_key, req_id_str, p_start + accepted_count + 1)?;
+
+        if let Some(reason) = break_outcome {
+            return Ok(reason);
+        }
+
+        *next_token = bonus_token;
+        *index_pos = p_start + accepted_count + 1;
+    }
+}
+
+#[derive(Debug, PartialEq)]
+enum EmitOutcome {
+    Continue,
+    Stop,
+    Length,
+}
+
+/// Greedy argmax over a logits tensor. Accepts shapes `[1, vocab]` (decode
+/// step output) or `[vocab]` (already squeezed). Returns the argmax token id.
+fn sample_argmax(logits: &candle_core::Tensor) -> Result<u32, SwarmError> {
+    use candle_core::DType;
+    let l = if logits.dims().len() == 2 {
+        logits.squeeze(0).map_err(SwarmError::internal)?
+    } else {
+        logits.clone()
+    };
+    let l = l.to_dtype(DType::F32).map_err(SwarmError::internal)?;
+    let v: Vec<f32> = l.to_vec1::<f32>().map_err(SwarmError::internal)?;
+    let mut best = 0usize;
+    let mut best_val = f32::NEG_INFINITY;
+    for (i, &x) in v.iter().enumerate() {
+        if x > best_val {
+            best_val = x;
+            best = i;
+        }
+    }
+    Ok(best as u32)
+}
+
+/// Slice the per-position logits out of a verify-pass output of shape
+/// `[1, seq_len, vocab]`, returning `[1, vocab]`.
+fn slice_position_logits(
+    verify_logits: &candle_core::Tensor,
+    pos: usize,
+) -> Result<candle_core::Tensor, SwarmError> {
+    use candle_core::IndexOp;
+    verify_logits
+        .i((.., pos, ..))
+        .map_err(|e| SwarmError::Internal(format!("slice verify logits at pos {pos}: {e}")))
 }
 
 /// Decode a single token to text using the model's vocabulary.

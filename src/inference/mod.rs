@@ -14,6 +14,7 @@ pub mod scheduler;
 pub(crate) mod shard_layout;
 pub mod speculative;
 pub mod split;
+pub mod swift;
 pub(crate) mod tensor_util;
 pub(crate) mod tokenizer;
 pub mod vision;

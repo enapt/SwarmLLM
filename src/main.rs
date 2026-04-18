@@ -125,6 +125,18 @@ enum Commands {
         /// Minimum prefix tokens for cache to engage (default 32)
         #[arg(long, default_value = "32")]
         prefix_cache_min_tokens: u32,
+        /// Enable SWIFT self-speculative decoding inside handle_generate
+        #[arg(long, default_value_t = false, action = clap::ArgAction::Set)]
+        swift_self_speculative: bool,
+        /// Number of warmup tokens before SWIFT engages
+        #[arg(long, default_value = "32")]
+        swift_calibration_tokens: u32,
+        /// Number of draft tokens proposed per SWIFT verification round
+        #[arg(long, default_value = "4")]
+        swift_gamma: u32,
+        /// Fraction of layers to skip in SWIFT draft pass
+        #[arg(long, default_value = "0.45")]
+        swift_skip_ratio: f32,
     },
     /// Device pool management (combine credits across your devices)
     Pool {
@@ -221,6 +233,10 @@ async fn main() -> anyhow::Result<()> {
             prefix_cache_max_prompt_tokens,
             prefix_cache_block_tokens,
             prefix_cache_min_tokens,
+            swift_self_speculative,
+            swift_calibration_tokens,
+            swift_gamma,
+            swift_skip_ratio,
         } => {
             let window: Option<Vec<u32>> = shard_window.map(|s| {
                 s.split(',')
@@ -234,12 +250,19 @@ async fn main() -> anyhow::Result<()> {
                 block_tokens: prefix_cache_block_tokens as usize,
                 min_tokens: prefix_cache_min_tokens as usize,
             };
+            let swift_cfg = swarmllm::inference::swift::SwiftConfig {
+                enabled: swift_self_speculative,
+                calibration_tokens: swift_calibration_tokens,
+                gamma: swift_gamma,
+                skip_ratio: swift_skip_ratio,
+            };
             swarmllm::inference::model_worker::run_worker(
                 socket,
                 data_dir,
                 window,
                 kv_cache_ttl,
                 prefix_cfg,
+                swift_cfg,
             )
             .await;
             Ok(())

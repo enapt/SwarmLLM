@@ -413,6 +413,12 @@ impl SharedState {
             state.config.inference.prefix_cache_block_tokens,
             state.config.inference.prefix_cache_min_tokens,
         );
+        state.model_process_pool.set_swift_config(
+            state.config.inference.swift_self_speculative,
+            state.config.inference.swift_calibration_tokens,
+            state.config.inference.swift_gamma,
+            state.config.inference.swift_skip_ratio,
+        );
 
         (state, shutdown_rx, dht_query_rx)
     }

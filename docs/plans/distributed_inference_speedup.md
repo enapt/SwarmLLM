@@ -371,7 +371,45 @@ DIAG: handle_generate prefix-cache HIT — prefilling suffix only
 
 ---
 
-## Item 6 — SWIFT self-speculative decoding (layer-skip draft)
+## Item 6 — SWIFT self-speculative decoding (layer-skip draft) ✅ LANDED 2026-04-18 (flag, no measured win on TinyLlama CPU)
+
+### Status
+
+**Landed behind `swift_self_speculative=false` flag.** Implementation:
+- `src/inference/swift.rs` — `build_skip_mask()` produces a contiguous middle-band skip pattern with the outer 2 layers preserved on each side (per SWIFT paper). `SwiftCalibrator` tracks aggregate accept rate (currently observability only; v2 will rotate candidate patterns).
+- `src/inference/split/executor.rs` — added `forward_with_skip_mask()`. Inside `forward_inner_impl`, layers in the skip mask are identity-passed (no attention, no MLP, no KV write).
+- `src/inference/model_worker.rs` — `swift_decode_loop()` runs the γ-token draft → KV truncate → γ+1-token verify → greedy accept-reject → final KV truncate cycle. Falls through to baseline when SWIFT is off, temperature ≠ 0, model has < 8 layers, or `max_tokens < γ+1`.
+- Plumbed through `process_pool.rs` → `model-worker` CLI args, identical pattern to prefix-cache config.
+
+### Measured results (2026-04-18)
+
+TinyLlama-1.1B Q4_K_M, single-node loopback, CPU, 100-token greedy completion:
+
+| Path | Decode rate | Acceptance |
+|---|---|---|
+| Baseline (Item 4 fast-path) | 6.85 tok/s | — |
+| SWIFT γ=4, skip=0.45 | 1.95 tok/s | 13.8% |
+| SWIFT γ=4, skip=0.0 (sanity) | not measured (slower than baseline) | 92.0% |
+
+**SWIFT is slower than baseline on TinyLlama CPU.** Expected. Per round we run 4 skip-layer draft forwards + one verify forward over 5 tokens. On CPU with a tiny model, the verify's batched matmul has no parallelism win to amortize the extra positions, so total cost > baseline per emitted token.
+
+**Output diverges slightly from greedy baseline** (e.g. "studied and refined" vs "studied and tested"). Root cause: candle's CPU attention dispatch routes `seq_len=1` to `standard_attention` (matmul) and `seq_len≥2` to `cpu_flash_attention`. These are numerically close but not identical. Baseline's per-token decode always hits the matmul path; SWIFT's verify (γ+1=5 positions) hits flash. When the top-1 / top-2 logits are close, argmax can flip — accounting for the 92% (not 100%) sanity-check acceptance with skip=0 and the few-token differences in the output. Output is still valid greedy model text under the flash-attention numerics; just not bit-identical to per-token baseline.
+
+### Why we kept it
+
+The implementation is correct in structure (skip-mask draft + truncated KV + full verify + greedy accept-reject), and the value will appear on:
+1. **Larger models** — acceptance rate scales with model size; SWIFT paper measures 0.45–0.50 acceptance on LLaMA-2-13B/70B vs ~0.14 we saw on 1.1B.
+2. **GPU backends** — verify's batched matmul amortizes weight loads, breaking even sooner.
+3. **High-accept patterns** — Bayesian calibration (v2) should beat the fixed middle-band pattern.
+
+### Remaining work
+
+- v2 calibration: rotate candidate skip patterns during the warmup window, pick best by acceptance.
+- Force same attention kernel in verify and per-token paths (bit-equivalent output for tests).
+- GPU benchmark (CUDA path uses flash-attn for both decode and verify, so no kernel-mismatch issue).
+- Larger-model benchmark (Phi-3.5-mini, Qwen2.5-7B) to find the crossover point where SWIFT wins.
+
+### Original design (kept for reference)
 
 **Problem.** Item 2 (speculative decoding) is behind a flag and requires a pre-staged draft model. None of our pre-staged benchmark models have real draft pairs. SWIFT (arxiv 2410.06916, ICLR 2025) derives the draft from the target model itself by skipping intermediate layers — no extra weights, no training, no shard coordination. 1.3–1.6× decode speedup on every model, universally.
 
@@ -451,3 +489,102 @@ DIAG: handle_generate prefix-cache HIT — prefilling suffix only
 - **Item 9 — EAGLE-3 draft heads.** Per-target pretrained draft heads (SafeAILab HF) distributed as a new shard type. 3–6× ceiling, highest complexity.
 - **Item 10 — FlowSpec / PPSD pipelined speculation.** Addresses the multi-segment pipeline case Item 4 didn't cover. Requires Item 1 stream to be default-on.
 - **Item 11 — Lookahead decoding.** No-draft-model Jacobi iteration. Test on CPU to see if FLOP overhead beats the speedup.
+
+---
+
+# Round 3 (2026-04-18) — High-leverage P2P-specific research candidates
+
+> **Context:** Research scan after Items 5+6 landed surfaced several techniques specifically designed for P2P / pipeline-parallel deployments, distinct from the single-GPU continuous-batching wins of Item 7. Listed in priority order with arxiv links and fit assessment for SwarmLLM (libp2p + candle + sharded peers).
+
+### Item 12 — DSD: Decentralized Speculative Decoding (highest-fit)
+
+**What.** Designed *exactly* for our scenario: while waiting for an inter-peer hop, verify K speculative tokens in parallel. Semantic-aware adaptive verification window sized by measured per-link RTT (which we already track in `peer_registry`). Training-free.
+
+**Source.** [arxiv 2511.11733](https://arxiv.org/abs/2511.11733), [arxiv 2511.21669](https://arxiv.org/abs/2511.21669) (edge-cloud variant), implemented in the Parallax repo.
+
+**Reported.** 2.56× HumanEval, 2.59× GSM8K, ~37% reduction in inter-node communication.
+
+**Stacks with.** Items 4 (degenerate single-segment case), 5, 6, 7. This is the "native distributed" version of speculative decoding.
+
+**Complexity.** Medium. Adaptive accept window per link.
+
+### Item 13 — Activation compression for inter-node transfer
+
+**What.** Fine-grained group quantization (int4/int8) of hidden states between pipeline stages, link-aware (skip on fast LAN, compress on slow WAN). Highest single-add ROI flagged by research scan.
+
+**Source.** [arxiv 2411.09510](https://arxiv.org/html/2411.09510v2).
+
+**Reported.** 3.5–4.5× activation-size reduction → 1.2–2× TTFT on slow links.
+
+**Stacks with.** Every other item — orthogonal. Especially impactful for SwarmLLM's heterogeneous links (LAN 1Gbps to WAN 10–50 Mbps).
+
+**Complexity.** Small–medium. Add a compression stage to the tensor-payload codec (type tag 0x01). Per-model calibration of acceptable bits-per-activation.
+
+### Item 14 — Mirror Speculative Decoding (Apple, 2025)
+
+**What.** Bidirectional concurrency: draft speculates forward, target *simultaneously* speculates correction paths for the draft. Two parallel pipelines hide inter-peer RTT. Stacks naturally with SWIFT (Item 6) which provides the early-exit signal Mirror needs.
+
+**Source.** [arxiv 2510.13161](https://arxiv.org/abs/2510.13161), [Apple ML blog](https://machinelearning.apple.com/research/mirror).
+
+**Reported.** 2.8–5.8× wall-time on 14B–66B; 30% over EAGLE-3.
+
+**Complexity.** Large.
+
+### Item 15 — SpecPipe / PipeDec (pipeline-stage-granular speculation)
+
+**What.** Draft tokens fed into the pipeline at *each stage* so every peer is verifying real speculative tokens at every step. PipeDec demonstrates 14-stage pipelines with LLaMA-3.2 1B as draft for 70B target — closer to SwarmLLM's typical hop count than most academic setups.
+
+**Source.** [arxiv 2504.04104](https://arxiv.org/abs/2504.04104).
+
+**Reported.** 4.19–7.79× over plain PP, 2.08–2.69× over tree SD on multi-stage pipelines.
+
+**Stacks with.** Items 1 (persistent stream) + 2 (existing draft model). Partially overlaps SWIFT — pick the better fit per deployment.
+
+**Complexity.** Medium.
+
+### Item 16 — Parallax two-phase scheduler
+
+**What.** Joint optimization of layer placement across heterogeneous peers (latency + bandwidth) plus request-time path selection that *stitches layers from different replicas* into balanced end-to-end chains.
+
+**Source.** [arxiv 2509.26182](https://arxiv.org/abs/2509.26182), [github GradientHQ/parallax](https://github.com/GradientHQ/parallax) (MIT-licensed).
+
+**Reported.** Up to 3.6× throughput, 3.2× lower latency vs decentralized baselines.
+
+**Fit.** Maps directly onto our `peer_registry` + trust scores + shard announcements. Drop-in scheduler upgrade.
+
+**Complexity.** Medium.
+
+### Item 17 — Disaggregated prefill / decode (Mooncake-style for P2P)
+
+**What.** Bandwidth-rich peer runs prefill (compute-bound), streams chunked KV cache to a latency-good peer for decode (memory-bound). Item 4's "remote-generate fast path" is a degenerate same-peer version; generalizing to two different peers unlocks cases where no single peer can do both.
+
+**Source.** [Mooncake](https://kvcache-ai.github.io/Mooncake/), [DistServe arxiv 2401.09670](https://arxiv.org/abs/2401.09670), [LMCache tech report](https://lmcache.ai/tech_report.pdf).
+
+**Reported.** DistServe: 7.4× request rate, 12.6× tighter SLO. Together.ai: 40% on long-context.
+
+**Complexity.** Large. New chunked-KV transfer message type. Decode-resume semantics. Integrates with Items 5 (prefix cache) and 8 (cross-node prefix sharing).
+
+### Item 18 — Per-token early-exit with adaptive depth (HELIOS / TIDE / DREX)
+
+**What.** Some tokens exit at layer 12, others at layer 32 — natural extension of SWIFT (Item 6). In P2P, early-exiting tokens skip the trailing pipeline hops entirely, killing tail latency on multi-segment routes.
+
+**Source.** [HELIOS arxiv 2504.10724](https://arxiv.org/abs/2504.10724), [DREX arxiv 2512.15705](https://arxiv.org/abs/2512.15705).
+
+**Complexity.** Large. Per-token routers either trained per-model (TIDE) or speculative-exit signaled (SpecEE).
+
+### Sequencing recommendation (Round 3)
+
+**Order:** 13 → 12 → 16 → 14/17/18.
+
+- Item 13 (activation compression) is the highest-ROI standalone add — small complexity, orthogonal to everything, directly attacks the bandwidth bottleneck.
+- Item 12 (DSD) is the natural progression after Item 7 — turns the network round-trip from cost into compute.
+- Item 16 (Parallax scheduler) is structural — improves every other item by routing requests to better-matched peer chains.
+- Items 14, 17, 18 are larger swings; pick based on whether the dominant pain is latency hiding (14), prefill/decode imbalance (17), or tail latency on multi-hop routes (18).
+
+### Skipped as not-a-fit
+
+- Wide-EP MoE (needs NVLink-class interconnects)
+- NIXL / direct RDMA KV transport (needs RoCE hardware)
+- CXL shared-memory KV (rack-scale only)
+- DiLoCo (training, not inference)
+- Further weight quantization (we already ship Q4/Q8 GGUF; not distribution-specific)

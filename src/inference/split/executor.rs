@@ -107,6 +107,38 @@ impl SplitModel {
             None,
             false,
             true,
+            None,
+        )?;
+        Ok(output)
+    }
+
+    /// SWIFT draft forward (arxiv 2410.06916): run the model with a layer
+    /// skip mask. For each layer index `abs_layer` where
+    /// `skip_mask[abs_layer]` is true, the hidden state passes through
+    /// unchanged — no attention, no MLP, no KV-cache write. Layers outside
+    /// this segment's range are ignored.
+    ///
+    /// Skipped layers' K/V cache entries remain whatever they were before
+    /// this call. The verify pass (full forward over the same positions) is
+    /// expected to re-populate them for all accepted positions.
+    pub fn forward_with_skip_mask(
+        &mut self,
+        input: &Tensor,
+        index_pos: usize,
+        kv_cache_store: &KvCacheStore,
+        request_id: &str,
+        skip_mask: &[bool],
+    ) -> Result<Tensor, SwarmError> {
+        let (output, _) = self.forward_inner_impl(
+            input,
+            index_pos,
+            kv_cache_store,
+            request_id,
+            None,
+            None,
+            false,
+            false,
+            Some(skip_mask),
         )?;
         Ok(output)
     }
@@ -132,6 +164,7 @@ impl SplitModel {
             None,
             true,
             false,
+            None,
         )?;
         Ok(output)
     }
@@ -179,6 +212,7 @@ impl SplitModel {
             capture_layers,
             false,
             false,
+            None,
         )
     }
 
@@ -188,6 +222,9 @@ impl SplitModel {
     /// are computed at every input position and returned as `[1, seq_len,
     /// vocab]` (used by speculative-decoding verification). Default: slice to
     /// the final position only.
+    /// When `skip_mask` is `Some`, layers `i` for which `skip_mask[abs_layer_i]`
+    /// is true are skipped entirely (identity pass-through, no KV write) — the
+    /// SWIFT self-speculative draft path.
     #[allow(clippy::too_many_arguments)]
     fn forward_inner_impl(
         &mut self,
@@ -199,6 +236,7 @@ impl SplitModel {
         capture_layers: Option<&std::collections::HashSet<usize>>,
         skip_embedding: bool,
         all_positions: bool,
+        skip_mask: Option<&[bool]>,
     ) -> Result<(Tensor, HashMap<usize, Tensor>), SwarmError> {
         let forward_start = std::time::Instant::now();
         // Use component presence rather than layer indices for shard-aware is_first/is_last
@@ -293,6 +331,13 @@ impl SplitModel {
         for (layer_idx, layer) in self.layers.iter().enumerate() {
             let abs_layer = self.layer_start + layer_idx;
             let lora_param = lora_adapter.map(|a| (a, abs_layer));
+
+            // SWIFT skip: identity pass-through, no attention, no MLP, no KV write.
+            if let Some(mask) = skip_mask {
+                if mask.get(abs_layer).copied().unwrap_or(false) {
+                    continue;
+                }
+            }
 
             let layer_start_time = std::time::Instant::now();
             match layer {
