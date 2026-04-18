@@ -488,25 +488,20 @@ async fn handle_forward(
         }
     }
 
-    // Speculative verify path: draft_tokens carries γ candidate IDs to verify
-    // in a single multi-position forward. We build the input tensor from
-    // draft_tokens directly (ignoring activation_bytes) and return γ logit
-    // vectors via spec_logits. Only valid when the current segment is both
-    // `is_first` (takes token IDs) AND `is_last` (produces logits) — i.e. the
-    // full model is on this peer.
-    let speculative_verify = fwd.spec_logits_requested && !fwd.draft_tokens.is_empty();
-    let input_tensor = if speculative_verify {
-        if !is_first || !is_last {
-            return Err(SwarmError::Internal(
-                "Speculative verify requested on a partial segment (needs both first & last layers)"
-                    .into(),
-            ));
-        }
-        let token_ids: Vec<i64> = fwd.draft_tokens.iter().map(|&t| t as i64).collect();
-        let seq_len = token_ids.len();
-        candle_core::Tensor::from_vec(token_ids, &[1, seq_len], &candle_core::Device::Cpu)
-            .map_err(|e| SwarmError::Internal(format!("spec verify tensor: {e}")))?
-    } else if pre_embedded {
+    // Speculative output emission is gated on `is_last` only. Input
+    // construction goes through the same branches as a non-speculative
+    // forward — for the single-segment Item 2 case (`is_first && is_last`)
+    // the coordinator now packs all γ token IDs into `activations` (γ × 8
+    // bytes LE) so the standard first-segment multi-token decode branch
+    // produces the same `[1, γ]` tensor that the old dedicated code path did.
+    // For DSD multi-segment (`!is_first && is_last`) the input is a
+    // `[1, γ, hidden]` tensor from the previous pipeline segment.
+    //
+    // `draft_tokens` and `spec_logits_requested` propagate forward unchanged
+    // through intermediate segments so the coordinator can still trace the
+    // verify request, but only the LAST segment computes spec_logits.
+    let want_spec_output = fwd.spec_logits_requested && is_last;
+    let input_tensor = if pre_embedded {
         split::bytes_to_tensor(&activation_bytes)?
     } else if is_first {
         if fwd.index_pos == 0 {
@@ -632,16 +627,32 @@ async fn handle_forward(
     let tp_meta = fwd.tp_meta.clone();
     let compute_result =
         tokio::task::block_in_place(|| -> Result<crate::types::LayerResult, String> {
-            // Speculative verify: multi-position forward returning per-position logits.
-            if speculative_verify {
-                let output_t = model
-                    .forward_verify_all_positions(
-                        &input_tensor,
-                        fwd.index_pos as usize,
-                        kv_store,
-                        &req_id_str,
-                    )
-                    .map_err(|e| format!("Forward speculative verify: {e}"))?;
+            // Speculative verify: multi-position forward returning per-position
+            // logits. In the single-segment Item 2 case (is_first && is_last)
+            // the input is raw token IDs and we use the embedding-applying
+            // path. In the DSD multi-segment case (!is_first && is_last) the
+            // input is hidden state from the previous segment and we skip
+            // embedding via the *_pre_embedded variant.
+            if want_spec_output {
+                let output_t = if is_first {
+                    model
+                        .forward_verify_all_positions(
+                            &input_tensor,
+                            fwd.index_pos as usize,
+                            kv_store,
+                            &req_id_str,
+                        )
+                        .map_err(|e| format!("Forward speculative verify: {e}"))?
+                } else {
+                    model
+                        .forward_verify_all_positions_pre_embedded(
+                            &input_tensor,
+                            fwd.index_pos as usize,
+                            kv_store,
+                            &req_id_str,
+                        )
+                        .map_err(|e| format!("Forward speculative verify (pre-embedded): {e}"))?
+                };
                 // output_t shape is [1, seq_len, vocab_size]
                 let dims = output_t.dims();
                 if dims.len() != 3 {

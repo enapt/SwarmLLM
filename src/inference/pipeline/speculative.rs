@@ -514,12 +514,14 @@ async fn send_verify_batch(
     let (tx, rx) = tokio::sync::oneshot::channel();
     shared_state.pending_layer_results.insert(request_id, tx);
 
-    // Build the LayerForward. `activations` is unused for the speculative
-    // path but must be non-zero bytes to satisfy the decoder minimum. We
-    // encode verify_tokens[0] as i64 LE — the worker ignores it once
-    // `draft_tokens` is non-empty (see `handle_forward` speculative branch),
-    // but keeping the decoded shape sane avoids spurious warnings.
-    let activations = (verify_tokens[0] as i64).to_le_bytes().to_vec();
+    // Build the LayerForward. As of DSD Phase 4 (Item 12) the worker
+    // unifies speculative and standard input paths through the first-segment
+    // multi-token decode branch, which reads γ token IDs from `activations`
+    // (γ × 8 bytes LE). Pack all verify_tokens, not just the first.
+    let mut activations = Vec::with_capacity(verify_tokens.len() * 8);
+    for &t in verify_tokens {
+        activations.extend_from_slice(&(t as i64).to_le_bytes());
+    }
     let forward = LayerForward {
         request_id,
         sequence_num: 1, // not prefill

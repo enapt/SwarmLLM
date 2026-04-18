@@ -15,7 +15,7 @@
 > | Item 3 — Continuous batching | 🟡 Phase 1 (wire protocol) landed behind `continuous_batching=false` flag. Phase 2 (scheduler refactor + `SplitModel::forward_batch`) is the remaining work; blocker is replacing `Mutex<socket>` in `ModelProcessPool` with mpsc-fed scheduler. Not pursued in this session because Item 4 delivered the headline win. |
 > | Item 6 — SWIFT self-speculative | 🟡 Landed behind `swift_self_speculative=false` flag. Structurally slower than baseline on candle until flash-attn-with-mask lands (kernel mismatch on multi-position verify). Shelved. |
 > | **Item 13 — Activation compression (Q8_0)** | ✅ LANDED behind `activation_compression=false` flag. Codec verified (~3.76× compression, RMS error <0.005, peer-compatible auto-dispatch). End-to-end multi-segment benchmark pending. |
-> | Item 12 — DSD (decentralized speculative) | 🟡 Phases 1–3 LANDED 2026-04-18: worker γ-token decode + truncation primitives verified + γ controller. Phase 4 (coordinator loop in `pipeline/dsd.rs` + worker speculative-verify branch refactor for multi-segment) remains — that's the load-bearing piece. |
+> | Item 12 — DSD (decentralized speculative) | 🟡 Phases 1–3 + Phase 4 part 1 LANDED 2026-04-18: worker γ-token decode + truncation primitives verified + γ controller + worker speculative-verify branch decoupled (multi-segment pre-embedded verify variant added). Phase 4 part 2 (coordinator loop in `pipeline/dsd.rs`) remains — pure coordinator-side logic, ~300 LOC. |
 >
 > **If starting a new session, the most useful things to pick up are:**
 > 1. Item 3 Phase 2 (concurrent-user throughput — independent of Item 4)
@@ -596,15 +596,26 @@ accept_ema  ← α · accept_ema + (1 − α) · accept_rate_this_round
 
 Defaults `α=0.7`, `β=0.2`. 6 unit tests cover: initial-γ clamping, perfect-acceptance ratchet to max, zero-acceptance ratchet to min, EMA smoothing of alternating signal, high-α resistance to single bad rounds, zero-`proposed` safety. Per-request state (small `GammaController` struct). Will be wired into Phase 4's coordinator loop. Trained MLP variant is a future optimization.
 
-### Phase 4 (next): coordinator loop
+### Phase 4 part 1 (LANDED 2026-04-18): worker speculative branch decoupling
 
-New file `src/inference/pipeline/dsd.rs`. Mirror `try_speculative_distributed` from Item 2 but:
-1. Pick γ from the controller (Phase 3)
-2. Draft γ tokens on coordinator using the existing `draft_executor`
-3. Build `LayerForward { activations: γ_token_ids_LE, draft_tokens, spec_logits_requested: true, truncate_kv_to: pending }` and send to FIRST segment (not skipping intermediates as Item 2's single-node verify path does)
-4. Pipeline propagates `[1, γ, hidden]` through every segment — Phase 1 unblocked the first-segment side; intermediate segments already work because they go through the generic `bytes_to_tensor → forward → tensor_to_bytes` path; final segment uses the existing `forward_verify_all_positions` path from Item 2 Phase 1
-5. Receive γ+1 logit vectors back from final segment, greedy-compare → accept count `k`
-6. Set `truncate_kv_to: Some(index_pos + k + 1)` on next round to roll back stale KV (γ-k positions) across the pipeline
+Refactored `model_worker::handle_forward` to split the Item 2 single-segment
+`speculative_verify` flag into two orthogonal concerns:
+1. **Input** goes through the standard branches (Phase 1 multi-token first-segment decode for `is_first`, generic `bytes_to_tensor` for `!is_first`). The `is_first && is_last` precondition is gone.
+2. **Output emission** is gated on `is_last && spec_logits_requested`. When set, the worker calls either `SplitModel::forward_verify_all_positions` (single-segment, raw-token input) or the new `forward_verify_all_positions_pre_embedded` (multi-segment, hidden-state input) and emits γ+1 logit vectors via `LayerResult.spec_logits`.
+
+Item 2's `send_verify_batch` updated to encode all γ tokens in `activations` (γ × 8 bytes LE) instead of just the first token, matching the unified worker input path. All existing tests pass — the refactor is non-breaking for the single-segment Item 2 case.
+
+Intermediate segments now correctly pass `[1, γ, hidden]` through their layer range without taking the verify branch, and the last segment of a multi-segment DSD pipeline can run verify on hidden-state input.
+
+### Phase 4 part 2 (NEXT): coordinator loop
+
+Remaining: new `src/inference/pipeline/dsd.rs` with `try_dsd_distributed`:
+1. Eligibility (multi-segment, draft model loaded, greedy temp=0, no TP/vision/LoRA/encryption)
+2. `GammaController::new(speculative_gamma)` for adaptive γ
+3. Reuse Item 2's `draft_prefill`, `draft_next_gamma`, `draft_sync_after_round` helpers from `pipeline/speculative.rs`
+4. New `forward_through_segments_speculative` (a stripped-down sibling of `forward_through_segments`) that propagates `LayerForward { draft_tokens, spec_logits_requested: true, truncate_kv_to: pending }` through every segment — first segment receives γ × 8 byte token IDs, intermediates receive `[1, γ, hidden]`, last segment returns γ+1 logits via `spec_logits`
+5. Greedy accept-reject loop, bonus token, `controller.record_round(accepted, gamma)`, update `pending_truncate = Some(index_pos + accepted + 1)` for the next round
+6. Behind `decentralized_spec_decoding=false` config flag (default off until measured)
 
 ### Future / out of v1 scope
 

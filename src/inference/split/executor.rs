@@ -88,9 +88,10 @@ impl SplitModel {
     /// only the final one. Used by the distributed speculative-decoding path
     /// so the coordinator can accept/reject each draft without γ round trips.
     ///
-    /// Only valid on the last segment (has `output` head). Non-last segments
-    /// should never receive a speculative forward — the pipeline scheduler
-    /// gates `supports_speculative` by whether the full model is on one peer.
+    /// Used by the single-segment Item 2 path (first AND last segment on the
+    /// same peer). The DSD multi-segment path (Item 12) uses
+    /// `forward_verify_all_positions_pre_embedded` instead, since its input
+    /// is hidden states from the previous segment.
     pub fn forward_verify_all_positions(
         &mut self,
         input: &Tensor,
@@ -106,6 +107,32 @@ impl SplitModel {
             None,
             None,
             false,
+            true,
+            None,
+        )?;
+        Ok(output)
+    }
+
+    /// Multi-segment DSD verify (Item 12): like `forward_verify_all_positions`
+    /// but expects pre-embedded hidden state input (shape `[1, γ, hidden_dim]`)
+    /// from the previous pipeline segment. Skips the embedding lookup and
+    /// returns logits at every position (shape `[1, γ, vocab_size]`). Only
+    /// valid on the last segment (has `output` head).
+    pub fn forward_verify_all_positions_pre_embedded(
+        &mut self,
+        input: &Tensor,
+        index_pos: usize,
+        kv_cache_store: &KvCacheStore,
+        request_id: &str,
+    ) -> Result<Tensor, SwarmError> {
+        let (output, _) = self.forward_inner_impl(
+            input,
+            index_pos,
+            kv_cache_store,
+            request_id,
+            None,
+            None,
+            true,
             true,
             None,
         )?;
