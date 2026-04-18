@@ -804,10 +804,17 @@ impl PipelineExecutor {
                             }
                             activations = failover_result.activations;
                         } else {
+                            let seg_elapsed_ms = segment_start.elapsed().as_millis() as u64;
+                            let seg_layers = segment.layer_range.1 - segment.layer_range.0;
+                            self.shared_state.record_peer_segment_latency(
+                                &segment.node_id,
+                                seg_elapsed_ms,
+                                seg_layers,
+                            );
                             tracing::debug!(
                                 request_id = %request_id,
                                 segment = idx,
-                                segment_ms = segment_start.elapsed().as_millis() as u64,
+                                segment_ms = seg_elapsed_ms,
                                 activation_bytes = result.activations.len(),
                                 "DIAG: remote segment complete"
                             );

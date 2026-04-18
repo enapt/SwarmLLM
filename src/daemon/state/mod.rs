@@ -254,6 +254,7 @@ impl SharedState {
                 provider_models_cache: RwLock::new((Vec::new(), std::time::Instant::now())),
                 stats_cache: parking_lot::Mutex::new(None),
                 stats_building: std::sync::atomic::AtomicBool::new(false),
+                peer_segment_latency_ms_per_layer: DashMap::new(),
             },
             credits: CreditPool {
                 credit_balance: Arc::new(RwLock::new(crate::types::CreditBalance {
@@ -457,6 +458,42 @@ impl SharedState {
     /// removes the reach-through into `config.node.data_dir` at call sites.
     pub fn model_dir(&self, model_id: &str) -> std::path::PathBuf {
         crate::model::shard::model_dir(&self.config.node.data_dir, model_id)
+    }
+
+    /// Update the observed per-layer latency EMA for a peer after a successful
+    /// remote segment. `segment_ms` is the wall-clock round-trip; `layers` is
+    /// the number of transformer layers this segment covered. Per-layer
+    /// normalisation lets later lookups scale the cost to arbitrary widths.
+    /// α = 0.3 (30% weight on the new sample) — responsive but smoothed. Skips
+    /// zero-layer segments (shouldn't happen, defensive).
+    pub fn record_peer_segment_latency(
+        &self,
+        node_id: &crate::types::NodeId,
+        segment_ms: u64,
+        layers: u32,
+    ) {
+        if layers == 0 {
+            return;
+        }
+        let sample = segment_ms as f32 / layers as f32;
+        let mut entry = self
+            .metrics
+            .peer_segment_latency_ms_per_layer
+            .entry(node_id.clone())
+            .or_insert(sample);
+        // EMA: new = α·sample + (1−α)·old. Use get/set via deref to avoid entry API lock-in.
+        const ALPHA: f32 = 0.3;
+        *entry = ALPHA * sample + (1.0 - ALPHA) * (*entry);
+    }
+
+    /// Read the observed per-layer latency EMA for a peer. Returns None when
+    /// this peer has no observed samples yet (caller falls back to static
+    /// capability estimate).
+    pub fn observed_latency_ms_per_layer(&self, node_id: &crate::types::NodeId) -> Option<f32> {
+        self.metrics
+            .peer_segment_latency_ms_per_layer
+            .get(node_id)
+            .map(|r| *r.value())
     }
 
     /// Returns "VRAM" if a GPU is available, "RAM" otherwise.

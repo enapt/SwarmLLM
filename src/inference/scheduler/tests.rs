@@ -238,6 +238,7 @@ fn greedy_assign_multi_range_candidate() {
             can_be_last: true,
             region_score: 1.0,
             est_tokens_per_sec: 0.0,
+            observed_latency_ms_per_layer: None,
             is_pool_member: false,
         },
         NodeCandidate {
@@ -254,6 +255,7 @@ fn greedy_assign_multi_range_candidate() {
             can_be_last: false,
             region_score: 0.7,
             est_tokens_per_sec: 0.0,
+            observed_latency_ms_per_layer: None,
             is_pool_member: false,
         },
     ];
@@ -784,4 +786,31 @@ fn parallax_flag_picks_low_latency_peer_end_to_end() {
         .unwrap();
     assert_eq!(assignment.segments.len(), 1);
     assert_eq!(assignment.segments[0].node_id, fast);
+}
+
+#[test]
+fn peer_segment_latency_ema_math() {
+    // Verify the EMA formula: new = 0.3 * sample + 0.7 * old.
+    let state = make_shared_state();
+    let node = NodeId([7u8; 32]);
+    // First sample: 20 ms over 4 layers → 5 ms/layer. No prior → EMA = 5.
+    state.record_peer_segment_latency(&node, 20, 4);
+    let v1 = state.observed_latency_ms_per_layer(&node).unwrap();
+    assert!((v1 - 5.0).abs() < 1e-5, "first sample EMA = {v1}");
+    // Second sample: 40 ms over 4 layers → 10 ms/layer. EMA = 0.3*10 + 0.7*5 = 6.5.
+    state.record_peer_segment_latency(&node, 40, 4);
+    let v2 = state.observed_latency_ms_per_layer(&node).unwrap();
+    assert!((v2 - 6.5).abs() < 1e-5, "second sample EMA = {v2}");
+    // Width-normalised: a 2-layer segment at 20 ms → 10 ms/layer.
+    state.record_peer_segment_latency(&node, 20, 2);
+    let v3 = state.observed_latency_ms_per_layer(&node).unwrap();
+    // EMA = 0.3*10 + 0.7*6.5 = 7.55.
+    assert!((v3 - 7.55).abs() < 1e-5, "third sample EMA = {v3}");
+    // Zero-layer guard: no panic, no update.
+    state.record_peer_segment_latency(&node, 100, 0);
+    let v4 = state.observed_latency_ms_per_layer(&node).unwrap();
+    assert!((v4 - 7.55).abs() < 1e-5, "zero-layer update = {v4}");
+    // Unknown peer: None.
+    let unknown = NodeId([8u8; 32]);
+    assert!(state.observed_latency_ms_per_layer(&unknown).is_none());
 }

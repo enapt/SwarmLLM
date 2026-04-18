@@ -27,6 +27,14 @@ pub struct MetricsProviders {
     /// return the stale value. Rebuilder clears the flag after writing the
     /// new cache entry.
     pub stats_building: std::sync::atomic::AtomicBool,
+    /// Observed per-layer latency EMA (ms per layer) per remote peer. Updated
+    /// after every successful remote segment in `forward_through_segments`.
+    /// Consumed by the Parallax routing DP to replace the static
+    /// `est_tokens_per_sec` capability estimate when a live signal is
+    /// available. Per-layer normalisation makes the signal comparable across
+    /// segment widths (e.g. a 4-layer segment vs a 16-layer segment on the
+    /// same peer).
+    pub peer_segment_latency_ms_per_layer: DashMap<crate::types::NodeId, f32>,
 }
 
 /// Atomic counters for a single mpsc channel.

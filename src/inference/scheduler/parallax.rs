@@ -50,25 +50,43 @@ const LOAD_COMPENSATOR_MS: f32 = 25.0;
 const DEFAULT_TOKENS_PER_SEC: f32 = 0.0;
 
 /// Compute per-vertex cost for a (candidate, range) pair.
+///
+/// Cost priority for `compute_ms`:
+/// 1. Observed per-layer latency EMA if the candidate has any samples (Phase B).
+///    This folds the remote peer's per-segment wall-clock (already includes both
+///    compute and any peer-side queuing/load) into the DP objective, so the
+///    `network_ms` term doesn't double-count load here.
+/// 2. Static `est_tokens_per_sec` capability estimate when no observations exist.
+/// 3. Zero (pure latency + load objective) when neither is available.
 fn vertex_cost(c: &NodeCandidate, range: (u32, u32), local: &NodeId) -> VertexCost {
     let is_local = &c.node_id == local;
-    let network_ms = if is_local {
-        0.0
-    } else {
-        2.0 * c.latency_ms as f32
-    };
     let layers = (range.1 - range.0) as f32;
-    let compute_ms = if c.est_tokens_per_sec > 0.0 {
-        // Very rough: layer_compute_ms ≈ layers / (est_tokens_per_sec * some_constant).
-        // est_tokens_per_sec is a whole-model throughput estimate for a 7B Q4 model;
-        // per-layer contribution is 1/num_layers of that. We conservatively use
-        // `1000.0 / est_tokens_per_sec` as the per-token-whole-model compute cost,
-        // then scale by the fraction of layers this segment owns. Assumes 32 layers
-        // as the baseline; adjust here if we want arch-aware scaling later.
-        let whole_model_ms = 1000.0 / c.est_tokens_per_sec;
-        whole_model_ms * (layers / 32.0)
+    // When we have an observed per-layer latency, it already includes the peer's
+    // segment wall-clock round-trip (compute + peer-side load). Fold the whole
+    // `segment_ms` into `compute_ms` and skip the static `2 * latency_ms` network
+    // term to avoid double-counting. When we don't have an observation yet, use
+    // the traditional two-part cost (network + static compute estimate).
+    let (network_ms, compute_ms) = if let Some(obs_per_layer) = c.observed_latency_ms_per_layer {
+        (0.0, obs_per_layer * layers)
     } else {
-        DEFAULT_TOKENS_PER_SEC
+        let network = if is_local {
+            0.0
+        } else {
+            2.0 * c.latency_ms as f32
+        };
+        let compute = if c.est_tokens_per_sec > 0.0 {
+            // Very rough: layer_compute_ms ≈ layers / (est_tokens_per_sec * some_constant).
+            // est_tokens_per_sec is a whole-model throughput estimate for a 7B Q4 model;
+            // per-layer contribution is 1/num_layers of that. We conservatively use
+            // `1000.0 / est_tokens_per_sec` as the per-token-whole-model compute cost,
+            // then scale by the fraction of layers this segment owns. Assumes 32 layers
+            // as the baseline; adjust here if we want arch-aware scaling later.
+            let whole_model_ms = 1000.0 / c.est_tokens_per_sec;
+            whole_model_ms * (layers / 32.0)
+        } else {
+            DEFAULT_TOKENS_PER_SEC
+        };
+        (network, compute)
     };
     let load_ms = c.load * LOAD_COMPENSATOR_MS;
     VertexCost {
@@ -312,8 +330,14 @@ mod tests {
             can_be_last,
             region_score: 1.0,
             est_tokens_per_sec,
+            observed_latency_ms_per_layer: None,
             is_pool_member: false,
         }
+    }
+
+    fn cand_with_obs(mut c: NodeCandidate, observed_ms_per_layer: f32) -> NodeCandidate {
+        c.observed_latency_ms_per_layer = Some(observed_ms_per_layer);
+        c
     }
 
     #[test]
@@ -396,6 +420,21 @@ mod tests {
         ];
         let err = route_shortest_path(32, &cands, &local, false).unwrap_err();
         assert!(matches!(err, SwarmError::PipelineError(_)));
+    }
+
+    #[test]
+    fn observed_latency_overrides_static_estimate() {
+        // Two remotes, identical static latency (50 ms) and est_tokens_per_sec (0).
+        // Without observations they tie. Add an observed-latency EMA showing one
+        // is actually slow (20 ms/layer) and the other fast (2 ms/layer); DP picks
+        // the fast one.
+        let local = NodeId([99u8; 32]);
+        let slow = cand_with_obs(cand(1, vec![(0, 32)], 50, 0.0, true, true, 0.0), 20.0);
+        let fast = cand_with_obs(cand(2, vec![(0, 32)], 50, 0.0, true, true, 0.0), 2.0);
+        let cands = vec![slow, fast];
+        let segs = route_shortest_path(32, &cands, &local, false).unwrap();
+        assert_eq!(segs.len(), 1);
+        assert_eq!(segs[0].node_id, NodeId([2u8; 32]));
     }
 
     #[test]

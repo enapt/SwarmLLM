@@ -16,7 +16,7 @@
 > | Item 6 — SWIFT self-speculative | 🟡 Landed behind `swift_self_speculative=false` flag. Structurally slower than baseline on candle until flash-attn-with-mask lands (kernel mismatch on multi-position verify). Shelved. |
 > | **Item 13 — Activation compression (Q8_0)** | ✅ LANDED behind `activation_compression=false` flag. Codec verified (~3.76× compression, RMS error <0.005, peer-compatible auto-dispatch). End-to-end multi-segment benchmark pending. |
 > | **Item 12 — DSD (decentralized speculative)** | ✅ ALL PHASES LANDED 2026-04-18 behind `decentralized_spec_decoding=false`. Worker γ-token decode + KV truncation primitives + γ controller + multi-segment spec-verify worker branch + ~410 LOC coordinator loop in `pipeline/dsd.rs`. End-to-end multi-segment WAN benchmark pending. |
-> | **Item 16 — Parallax scheduler (Phase A)** | ✅ LANDED 2026-04-18 behind `parallax_routing=false`. Shortest-path DP over (node, layer_range) vertices in `src/inference/scheduler/parallax.rs`, gated in `assemble_pipeline_for` with greedy fallback on any error. 8 unit + 1 scheduler integration test. Phases B/C/D (peer signal enrichment, offline allocator, multi-pipeline) deferred. |
+> | **Item 16 — Parallax scheduler (Phases A+B)** | ✅ LANDED 2026-04-18 behind `parallax_routing=false`. Phase A: shortest-path DP over (node, layer_range) in `src/inference/scheduler/parallax.rs`. Phase B: observed per-layer latency EMA on every successful remote segment (`state.record_peer_segment_latency`), DP prefers observed over static `est_tokens_per_sec`. 10 parallax unit + 2 scheduler integration + 1 EMA math test. Phases C/D (offline allocator, multi-pipeline) deferred. |
 >
 > **If starting a new session, the most useful things to pick up are:**
 > 1. Item 3 Phase 2 (concurrent-user throughput — independent of Item 4)
@@ -719,11 +719,36 @@ Medium-large. Phase 1 is small (this commit). Phase 4 is the main coordinator lo
 - **Config.** `InferenceConfig::parallax_routing: bool` (default `false`) in `src/config.rs`.
 - **Tests.** 8 unit tests (`single_node_covers_all`, `picks_low_latency_chain`, `load_penalty_shifts_choice`, `encrypted_requires_local_first_and_last`, `no_first_capable_errors`, `no_sink_errors`, `disjoint_ranges_fail_cleanly`, `multi_hop_chain_minimizes_total_latency`) + 1 end-to-end scheduler test (`parallax_flag_picks_low_latency_peer_end_to_end`) confirming the flag routes through `PipelineScheduler` correctly. 630 lib tests pass.
 
+#### Phase B — observed-latency EMA (LANDED 2026-04-18)
+
+Local coordinator view only (not gossiped cross-cluster in v1). After each
+successful remote segment in `forward_through_segments`, the coordinator calls
+`state.record_peer_segment_latency(node_id, segment_ms, layers)` to update an
+EMA of `ms / layer` for that peer. `state.observed_latency_ms_per_layer(node)`
+exposes the smoothed value. EMA parameters: α=0.3 (30% weight on latest
+sample), stored in `metrics.peer_segment_latency_ms_per_layer: DashMap<NodeId, f32>`.
+
+**Cost model change.** When a candidate has an observed per-layer latency, the
+DP treats it as the *whole* segment cost (it already includes compute, network
+round-trip, and peer-side queuing). That replaces both the `2 * latency_ms`
+network term AND the `est_tokens_per_sec`-derived compute term. Without
+observations the DP falls back to the two-part Phase A cost model.
+
+**Why per-layer normalisation.** Different pipeline arrangements put different
+layer widths on the same peer. Per-layer EMA lets a 4-layer segment's
+observation on peer A inform the cost of a hypothetical 16-layer segment on
+the same peer (multiply by width).
+
+**Test coverage.** `observed_latency_overrides_static_estimate` proves the DP
+prefers the lower observed candidate when static signals tie;
+`peer_segment_latency_ema_math` verifies the EMA formula + width normalisation
++ zero-layer guard + unknown-peer fallback.
+
 #### Remaining phases
 
-- **Phase B — peer signal enrichment.** Track `avg_layer_latency_ms` as an observed runtime signal (gossip in `NodeCapabilityUpdate` or piggyback on health pings). Add per-peer bandwidth estimate. The current `est_tokens_per_sec` is a *static* capability estimate; Phase B would replace it with an EMA of actual observed per-forward latency for this specific model.
-- **Phase C — Phase 1 offline allocator.** Parallax's DP-based `DynamicProgrammingLayerAllocator` for cold-start layer placement recommendations. Fits naturally into `ShardRebalancer` / `AutoShardManager` — takes VRAM/compute/RTT inputs and outputs per-node layer-range targets. The `Z(k) = k² / s*(k)` objective picks the number of parallel pipelines to maintain.
+- **Phase C — offline allocator.** Parallax's DP-based `DynamicProgrammingLayerAllocator` for cold-start layer placement recommendations. Fits naturally into `ShardRebalancer` / `AutoShardManager` — takes VRAM/compute/RTT inputs and outputs per-node layer-range targets. The `Z(k) = k² / s*(k)` objective picks the number of parallel pipelines to maintain.
 - **Phase D — multi-pipeline concurrency.** Run multiple pipeline assignments in parallel for a single model when enough candidates exist; route requests across them via weighted load balancing. Relevant once Item 7 lands concurrent-user batching.
+- **Phase B follow-up — cross-node signal sharing.** Gossip observed-latency stats so new coordinators pick good peers without a warm-up period. Not started.
 
 #### Stacks with
 

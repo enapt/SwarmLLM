@@ -35,6 +35,12 @@ struct NodeCandidate {
     region_score: f32,
     /// Estimated tokens/s for a 7B Q4 model (from NodeCapability). 0 = unknown.
     est_tokens_per_sec: f32,
+    /// Observed per-layer latency EMA (ms/layer) for remote segments this peer
+    /// served for us. None = no samples yet, use `est_tokens_per_sec` as proxy.
+    /// Populated by `state.record_peer_segment_latency` after successful
+    /// `forward_through_segments` hops. Used by the Parallax routing DP to
+    /// replace the static capability estimate with live signal when available.
+    observed_latency_ms_per_layer: Option<f32>,
     /// True if this node is in our device pool (preferred for routing — free, trusted, low latency).
     is_pool_member: bool,
 }
@@ -418,6 +424,11 @@ impl PipelineScheduler {
             };
 
             let is_pool = pool_member_ids.contains(&node_id);
+            let observed_latency_ms_per_layer = if &node_id == local_node_id {
+                None
+            } else {
+                self.shared_state.observed_latency_ms_per_layer(&node_id)
+            };
             candidates.push(NodeCandidate {
                 node_id,
                 shard_id: first_shard_id,
@@ -429,6 +440,7 @@ impl PipelineScheduler {
                 can_be_last,
                 region_score,
                 est_tokens_per_sec,
+                observed_latency_ms_per_layer,
                 is_pool_member: is_pool,
             });
         }
