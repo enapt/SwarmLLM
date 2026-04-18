@@ -12,7 +12,7 @@
 > | **Item 5 — Cross-request prefix cache** | ✅ LANDED & DEFAULT-ON | **29.4× wall-clock** on cache-hit re-submission of the same 513-token prompt. |
 > | Item 1 — Persistent pipeline stream | ✅ Landed behind `persistent_pipeline_stream=false` flag. Verified end-to-end but no measured latency win (bottleneck was elsewhere). |
 > | Item 2 — Speculative decoding (distributed) | ✅ Landed in 3 phases behind `speculative_distributed=false` flag + requires loaded draft model. Working; 40–52% accept rate w/ backend mismatch (llama-cpp draft vs candle target). |
-> | Item 3 — Continuous batching | 🟡 Phase 1 (wire protocol) landed behind `continuous_batching=false` flag. Phase 2 (scheduler refactor + `SplitModel::forward_batch`) is the remaining work; blocker is replacing `Mutex<socket>` in `ModelProcessPool` with mpsc-fed scheduler. Not pursued in this session because Item 4 delivered the headline win. |
+> | Item 3 — Continuous batching | 🟡 Phase 1 (wire protocol) landed behind `continuous_batching=false`. Phase 2a landed 2026-04-18 (response multiplexing in `process_pool.rs` — concurrent same-model requests no longer serialize on a full-request mutex, independent of the flag). Phase 2b (compute-side batch scheduler + `SplitModel::forward_batch`) remains. |
 > | Item 6 — SWIFT self-speculative | 🟡 Landed behind `swift_self_speculative=false` flag. Structurally slower than baseline on candle until flash-attn-with-mask lands (kernel mismatch on multi-position verify). Shelved. |
 > | **Item 13 — Activation compression (Q8_0)** | ✅ LANDED behind `activation_compression=false` flag. Codec verified (~3.76× compression, RMS error <0.005, peer-compatible auto-dispatch). End-to-end multi-segment benchmark pending. |
 > | **Item 12 — DSD (decentralized speculative)** | ✅ ALL PHASES LANDED 2026-04-18 behind `decentralized_spec_decoding=false`. Worker γ-token decode + KV truncation primitives + γ controller + multi-segment spec-verify worker branch + ~410 LOC coordinator loop in `pipeline/dsd.rs`. End-to-end multi-segment WAN benchmark pending. |
@@ -199,9 +199,15 @@ Items 1–3 are documented below in their original "plan" voice because a lot of
 - IPC: `DaemonMsg::BatchForward { requests, activation_lens }` + `WorkerMsg::BatchResult { results, activation_lens }`.
 - Worker: `handle_batch_forward` stub that dispatches sequentially through the existing `handle_forward` path (no mutex contention win on the daemon side, no compute-side batching yet).
 
-**Phase 2 remaining**: the actual runtime benefit.
-- Replace `WorkerHandle.socket: Mutex<...>` in `src/inference/process_pool.rs` with `requests_tx: mpsc::Sender<BatchRequest>` + spawn scheduler task per worker. Scheduler implements the 5 ms collection window (degrades to ~15 ms on WSL2 but still coalesces concurrent arrivals).
-- Implement `SplitModel::forward_batch` that stacks per-request decode inputs into a single `[batch_size, 1, hidden]` tensor for a real matmul fusion (v1 sequential loop; v2 true tensor stacking).
+**Phase 2a landed 2026-04-18**: response multiplexing for concurrent same-model requests.
+- Replaced `WorkerHandle.socket: Mutex<(ReadHalf, WriteHalf)>` with `writer: Mutex<OwnedWriteHalf>` + a dedicated reader-actor task that owns the read half and routes each inbound `WorkerMsg` to a per-request `mpsc::Sender<(WorkerMsg, Vec<u8>)>` keyed by `request_id`.
+- `forward()` / `generate()` register a response channel, briefly lock the write half to send one framed message, then drain their channel off-lock until a terminal message arrives. Unregistered via RAII `ResponseGuard` on drop.
+- Concurrent requests for the same model no longer serialize on a full-request mutex — they interleave through the worker at the compute-side boundary instead.
+- All 699 tests pass unchanged.
+
+**Phase 2b remaining**: compute-side batching (the actual aggregate-throughput win).
+- Add a batch scheduler task per worker that collects concurrent requests into a time-windowed batch (target 5 ms, effective ~15 ms on WSL2).
+- Implement `SplitModel::forward_batch` that stacks per-request decode inputs into a single `[batch_size, 1, hidden]` tensor for real matmul fusion (v1 sequential loop; v2 true tensor stacking).
 - Switch `WorkerMsg::BatchResult` emission in `handle_batch_forward` (currently emits N `LayerResult` messages).
 
 ---

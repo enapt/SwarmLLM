@@ -4,12 +4,14 @@
 //! driver reclaims all GPU memory immediately — no restart required.
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use dashmap::DashMap;
 use tokio::net::UnixListener;
 use tokio::process::Child;
-use tokio::sync::Mutex;
+use tokio::sync::{mpsc, Mutex};
+use uuid::Uuid;
 
 use crate::error::SwarmError;
 use crate::inference::router::StreamingTokenEvent;
@@ -20,25 +22,126 @@ const WORKER_CONNECT_TIMEOUT_SECS: u64 = 30;
 /// Default KV-cache TTL in seconds (10 minutes). Overridden by config at startup.
 pub const DEFAULT_KV_CACHE_TTL_SECS: u64 = 600;
 
+/// Per-request buffered channel capacity for multiplexed worker responses.
+/// Long decode streams emit one WorkerMsg::Token per generated token; 256 gives
+/// plenty of headroom for a caller that's slow to consume without stalling the
+/// reader actor.
+const RESPONSE_CHANNEL_CAPACITY: usize = 256;
+
+/// Response channel entry: a bounded mpsc sender carrying `(WorkerMsg, payload_bytes)`.
+type ResponseTx = mpsc::Sender<(WorkerMsg, Vec<u8>)>;
+
+/// Shared map from `request_id` to the caller's response channel. The reader
+/// actor looks up each inbound message's `request_id` here to route the reply.
+type ResponseMap = Arc<DashMap<Uuid, ResponseTx>>;
+
 /// A handle to a running model worker subprocess.
+///
+/// The socket is split into a shared writer (one-at-a-time under `Mutex`) and
+/// a reader owned by a dedicated actor task. The reader dispatches each
+/// incoming `WorkerMsg` to the per-request channel keyed by `request_id`,
+/// allowing N concurrent `forward()` / `generate()` callers to interleave
+/// their requests through the same worker without serializing on a single
+/// full-request mutex.
 struct WorkerHandle {
     /// The worker subprocess.
     child: Child,
-    /// Socket to communicate with the worker. Locked to serialize requests.
-    socket: Mutex<(
-        tokio::net::unix::OwnedReadHalf,
-        tokio::net::unix::OwnedWriteHalf,
-    )>,
+    /// Write half of the IPC socket. Brief lock held only for the duration of
+    /// one outbound framed message (header + optional binary payload).
+    writer: Mutex<tokio::net::unix::OwnedWriteHalf>,
+    /// Per-request response channels. The reader actor inserts `(msg, payload)`
+    /// tuples keyed by `request_id`; callers register a channel before sending
+    /// their request and drain it until they get a terminal message.
+    responses: ResponseMap,
+    /// Set to true when the reader actor observes a socket error. Subsequent
+    /// callers short-circuit with an error + trigger worker eviction.
+    dead: Arc<AtomicBool>,
     /// Socket file to clean up on drop.
     socket_path: PathBuf,
+    /// Handle to the reader actor task. Aborted on drop so the task doesn't
+    /// outlive its worker; also unblocks any pending `recv_worker` in tests.
+    reader_handle: tokio::task::JoinHandle<()>,
+}
+
+/// Pull the `request_id` field out of any `WorkerMsg` variant that carries one.
+/// `Ready` / `Bye` have no request_id and are dropped by the reader actor
+/// (they're only relevant during spawn, which handshakes synchronously).
+fn worker_msg_request_id(msg: &WorkerMsg) -> Option<Uuid> {
+    match msg {
+        WorkerMsg::LayerResult(r) => Some(r.request_id),
+        WorkerMsg::BatchResult { results, .. } => results.first().map(|r| r.request_id),
+        WorkerMsg::Token { request_id, .. }
+        | WorkerMsg::GenerateDone { request_id, .. }
+        | WorkerMsg::Error { request_id, .. } => Some(*request_id),
+        WorkerMsg::Ready | WorkerMsg::Bye => None,
+    }
+}
+
+/// Reader actor: owns the read half of the worker socket, dispatches each
+/// inbound message to the right per-request channel. Exits when the socket
+/// errors out (worker died, IPC corrupted); sets `dead` and drops all
+/// in-flight response senders to wake waiting callers with `None`.
+async fn reader_actor(
+    mut reader: tokio::net::unix::OwnedReadHalf,
+    responses: ResponseMap,
+    dead: Arc<AtomicBool>,
+    model_id: ModelId,
+) {
+    loop {
+        match recv_worker(&mut reader).await {
+            Ok((msg, payload)) => {
+                if let Some(rid) = worker_msg_request_id(&msg) {
+                    // `get` returns a Ref, which holds a shard lock. Clone the
+                    // Sender and drop the Ref *before* awaiting `send` so we
+                    // don't hold a DashMap shard across an await point (that
+                    // would risk deadlock on a concurrent insert/remove).
+                    if let Some(tx) = responses.get(&rid).map(|r| r.value().clone()) {
+                        // Send best-effort; if the caller has already hung up
+                        // we just drop the message.
+                        let _ = tx.send((msg, payload)).await;
+                    } else {
+                        tracing::debug!(
+                            request_id = %rid,
+                            "Worker response for unknown request_id (caller dropped?)"
+                        );
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!(model = %model_id, error = %e, "Worker reader exiting — evicting");
+                dead.store(true, Ordering::Relaxed);
+                // Clear all pending response channels; dropping the Senders
+                // makes each caller's `recv()` return `None`, which we map
+                // to a "worker died" error.
+                responses.clear();
+                return;
+            }
+        }
+    }
 }
 
 impl Drop for WorkerHandle {
     fn drop(&mut self) {
+        // Stop the reader actor so it doesn't outlive the socket.
+        self.reader_handle.abort();
         // Kill the child process if still running
         let _ = self.child.start_kill();
         // Clean up the socket file
         let _ = std::fs::remove_file(&self.socket_path);
+    }
+}
+
+/// RAII guard: unregister a request's response channel when the caller drops
+/// it (whether the request finished, errored, or the caller was cancelled).
+/// Without this, a cancelled request leaks its entry in `responses` forever.
+struct ResponseGuard {
+    responses: ResponseMap,
+    request_id: Uuid,
+}
+
+impl Drop for ResponseGuard {
+    fn drop(&mut self) {
+        self.responses.remove(&self.request_id);
     }
 }
 
@@ -49,22 +152,20 @@ impl Drop for WorkerHandle {
 ///
 /// ## Concurrency model
 ///
-/// Each WorkerHandle holds a `Mutex` over the IPC socket, and every `forward()`
-/// and `generate()` call takes that mutex for the full request duration. This
-/// means **requests for the same model are serialized at the IPC boundary** —
-/// there is no parallelism within a single model worker, even if the router's
-/// `max_concurrent_requests` is set higher.
+/// Each WorkerHandle has a `Mutex<write_half>` and a reader-actor task that
+/// multiplexes inbound `WorkerMsg`s by `request_id` to per-request channels.
+/// `forward()` and `generate()` only hold the write mutex long enough to send
+/// one framed IPC message; waiting for the response happens off-lock on the
+/// per-request channel. **Multiple concurrent `forward()` / `generate()` calls
+/// against the same model no longer block each other**, as long as the worker
+/// itself can make progress on them.
 ///
-/// `max_concurrent_requests` controls scheduling across ALL models; parallelism
-/// is achieved by having multiple distinct models loaded, each in its own
-/// worker, or by distributing requests across multiple peer nodes via the
-/// distributed inference path. Batching (`max_batch_size > 1`) is the only way
-/// to amortize per-model serialization — the router packs compatible requests
-/// into a single forward call before acquiring the socket lock.
-///
-/// True same-model pipelining (e.g., prefill request N+1 while decode of N is
-/// still streaming tokens) would require a request-multiplexing IPC protocol,
-/// which is deferred.
+/// Compute-side serialization still applies: the worker subprocess handles one
+/// forward call at a time internally (until Item 7 BatchGenerate lands proper
+/// slot batching). So two concurrent requests share the worker in a "fair"
+/// interleaved fashion — each request's message arrives at the worker in the
+/// order it was sent, and responses flow back in whatever order the worker
+/// emits them.
 pub struct ModelProcessPool {
     workers: DashMap<ModelId, Arc<WorkerHandle>>,
     /// Serializes worker spawning to prevent TOCTOU races where two concurrent
@@ -414,10 +515,21 @@ impl ModelProcessPool {
 
         // Success — defuse the cleanup guard; WorkerHandle now owns the socket file
         std::mem::forget(socket_guard);
+        let responses: ResponseMap = Arc::new(DashMap::new());
+        let dead = Arc::new(AtomicBool::new(false));
+        let reader_handle = tokio::spawn(reader_actor(
+            read_half,
+            responses.clone(),
+            dead.clone(),
+            model_id.clone(),
+        ));
         Ok(WorkerHandle {
             child,
-            socket: Mutex::new((read_half, write_half)),
+            writer: Mutex::new(write_half),
+            responses,
+            dead,
             socket_path,
+            reader_handle,
         })
     }
 
@@ -467,19 +579,35 @@ impl ModelProcessPool {
             truncate_kv_to,
         };
 
-        let mut sock = handle.socket.lock().await;
-        let (ref mut reader, ref mut writer) = *sock;
-
-        if let Err(e) = send_daemon(writer, &DaemonMsg::Forward(ipc_fwd), &activations).await {
-            drop(sock);
+        if handle.dead.load(Ordering::Relaxed) {
             self.workers.remove(&model_id);
-            tracing::warn!(model = %model_id, error = %e, "Worker send failed — evicting dead worker");
-            return Err(SwarmError::Internal(format!("send Forward: {e}")));
+            return Err(SwarmError::Internal("worker is dead".into()));
+        }
+
+        // Register a response channel BEFORE sending so the reader actor can
+        // route any early error/reply. Unregistered on drop via ResponseGuard.
+        let (resp_tx, mut resp_rx) = mpsc::channel(RESPONSE_CHANNEL_CAPACITY);
+        handle.responses.insert(request_id, resp_tx);
+        let _guard = ResponseGuard {
+            responses: handle.responses.clone(),
+            request_id,
+        };
+
+        {
+            let mut writer = handle.writer.lock().await;
+            if let Err(e) =
+                send_daemon(&mut *writer, &DaemonMsg::Forward(ipc_fwd), &activations).await
+            {
+                drop(writer);
+                self.workers.remove(&model_id);
+                tracing::warn!(model = %model_id, error = %e, "Worker send failed — evicting dead worker");
+                return Err(SwarmError::Internal(format!("send Forward: {e}")));
+            }
         }
 
         loop {
-            match recv_worker(reader).await {
-                Ok((msg, payload)) => match msg {
+            match resp_rx.recv().await {
+                Some((msg, payload)) => match msg {
                     WorkerMsg::LayerResult(r) if r.request_id == request_id => {
                         let activations = if r.has_activations { payload } else { vec![] };
                         return Ok(crate::types::LayerResult {
@@ -499,11 +627,12 @@ impl ModelProcessPool {
                     }
                     _ => continue,
                 },
-                Err(e) => {
-                    drop(sock);
+                None => {
+                    // Reader actor closed the channel — worker died while we were waiting.
                     self.workers.remove(&model_id);
-                    tracing::warn!(model = %model_id, error = %e, "Worker recv failed — evicting dead worker");
-                    return Err(SwarmError::Internal(format!("recv worker: {e}")));
+                    return Err(SwarmError::Internal(
+                        "worker closed connection before reply".into(),
+                    ));
                 }
             }
         }
@@ -532,14 +661,26 @@ impl ModelProcessPool {
             session_id,
         };
 
-        let mut sock = handle.socket.lock().await;
-        let (ref mut reader, ref mut writer) = *sock;
-
-        if let Err(e) = send_daemon(writer, &DaemonMsg::Generate(gen), &[]).await {
-            drop(sock);
+        if handle.dead.load(Ordering::Relaxed) {
             self.workers.remove(model_id);
-            tracing::warn!(model = %model_id, error = %e, "Worker send failed — evicting dead worker");
-            return Err(SwarmError::Internal(format!("send Generate: {e}")));
+            return Err(SwarmError::Internal("worker is dead".into()));
+        }
+
+        let (resp_tx, mut resp_rx) = mpsc::channel(RESPONSE_CHANNEL_CAPACITY);
+        handle.responses.insert(request_id, resp_tx);
+        let _guard = ResponseGuard {
+            responses: handle.responses.clone(),
+            request_id,
+        };
+
+        {
+            let mut writer = handle.writer.lock().await;
+            if let Err(e) = send_daemon(&mut *writer, &DaemonMsg::Generate(gen), &[]).await {
+                drop(writer);
+                self.workers.remove(model_id);
+                tracing::warn!(model = %model_id, error = %e, "Worker send failed — evicting dead worker");
+                return Err(SwarmError::Internal(format!("send Generate: {e}")));
+            }
         }
 
         let mut content = String::new();
@@ -551,13 +692,13 @@ impl ModelProcessPool {
         let mut finish_reason = String::new();
 
         loop {
-            let (msg, _) = match recv_worker(reader).await {
-                Ok(v) => v,
-                Err(e) => {
-                    drop(sock);
+            let (msg, _) = match resp_rx.recv().await {
+                Some(v) => v,
+                None => {
                     self.workers.remove(model_id);
-                    tracing::warn!(model = %model_id, error = %e, "Worker recv failed — evicting dead worker");
-                    return Err(SwarmError::Internal(format!("recv generate: {e}")));
+                    return Err(SwarmError::Internal(
+                        "worker closed connection mid-generate".into(),
+                    ));
                 }
             };
             match msg {
@@ -624,11 +765,10 @@ impl ModelProcessPool {
     pub async fn unload_model(&self, model_id: &ModelId) {
         if let Some((_, handle)) = self.workers.remove(model_id) {
             // Try graceful shutdown first
-            if let Ok(mut sock) = handle.socket.try_lock() {
-                let (_, ref mut writer) = *sock;
-                let _ = send_daemon(writer, &DaemonMsg::Shutdown, &[]).await;
+            if let Ok(mut writer) = handle.writer.try_lock() {
+                let _ = send_daemon(&mut *writer, &DaemonMsg::Shutdown, &[]).await;
             }
-            // Drop handle → kills child process → OS frees all CUDA memory
+            // Drop handle → aborts reader, kills child process → OS frees all CUDA memory
             drop(handle);
             tracing::info!(model_id = %model_id, "Model worker killed, GPU memory freed");
             self.emit_activity(
