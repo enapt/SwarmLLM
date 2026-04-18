@@ -312,7 +312,30 @@ single-segment workloads.
 
 > **Context:** Round 1 Items 1–3 landed behind flags; Item 4 landed default-on (1.93× decode). Research scan (2026-04-18) identified three higher-leverage wins that the original plan didn't cover. Item 3 Phase 2 as originally scoped is partly obsolete because the remote-generate fast path (Item 4) bypasses `handle_forward` — so the batching scope below targets `handle_generate` instead.
 
-## Item 5 — Cross-request prefix caching (RadixAttention-style)
+## Item 5 — Cross-request prefix caching (RadixAttention-style) ✅ LANDED 2026-04-18
+
+### Validation
+
+TinyLlama-1.1B Q4_K_M on CPU, 513-token prompt, `max_tokens=5`:
+
+| Request | Latency | Notes |
+|---|---|---|
+| Cold (cache miss) | 41.66 s | Full prefill of 513 tokens + 6 decode |
+| Warm (cache hit at 512) | 1.42 s | Prefill 1 suffix token + 6 decode |
+
+**29.4× wall-clock speedup on a same-prompt re-submission.** The cache inserts
+9 block-aligned snapshots on the first completion; the second request matches
+at 512 (block-aligned, one token short of full match so one forward still runs
+to produce sampling logits).
+
+Log excerpt from the second request:
+
+```
+DIAG: prefix-cache HIT model_key="0-22-22" matched_tokens=512 prompt_tokens=513
+DIAG: handle_generate prefix-cache HIT — prefilling suffix only
+```
+
+
 
 **Problem the current design doesn't solve.** Today `KvCacheManager` (src/inference/kv_cache.rs) does same-session multi-turn prefix matching — it requires the caller to provide `session_id`, and each session has a single cached prompt prefix. Multiple simultaneous requests that share a long system prompt (Claude Code's 10 KB agent scaffold, RAG templates, MCP tool descriptions) all re-run prefill from scratch. Every other production inference engine (SGLang, vLLM V1) has a shared radix tree of token-prefix → KV blocks, hit rate is routinely 50–99% in agentic workloads.
 

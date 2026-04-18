@@ -111,7 +111,7 @@ enum Commands {
         #[arg(long, default_value = "600")]
         kv_cache_ttl: u64,
         /// Enable cross-request prefix KV-cache in the worker (default true)
-        #[arg(long, default_value = "true")]
+        #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
         prefix_cache_enabled: bool,
         /// Maximum cached prefix snapshots retained per model (default 16)
         #[arg(long, default_value = "16")]
