@@ -16,6 +16,7 @@
 > | Item 6 — SWIFT self-speculative | 🟡 Landed behind `swift_self_speculative=false` flag. Structurally slower than baseline on candle until flash-attn-with-mask lands (kernel mismatch on multi-position verify). Shelved. |
 > | **Item 13 — Activation compression (Q8_0)** | ✅ LANDED behind `activation_compression=false` flag. Codec verified (~3.76× compression, RMS error <0.005, peer-compatible auto-dispatch). End-to-end multi-segment benchmark pending. |
 > | **Item 12 — DSD (decentralized speculative)** | ✅ ALL PHASES LANDED 2026-04-18 behind `decentralized_spec_decoding=false`. Worker γ-token decode + KV truncation primitives + γ controller + multi-segment spec-verify worker branch + ~410 LOC coordinator loop in `pipeline/dsd.rs`. End-to-end multi-segment WAN benchmark pending. |
+> | **Item 16 — Parallax scheduler (Phase A)** | ✅ LANDED 2026-04-18 behind `parallax_routing=false`. Shortest-path DP over (node, layer_range) vertices in `src/inference/scheduler/parallax.rs`, gated in `assemble_pipeline_for` with greedy fallback on any error. 8 unit + 1 scheduler integration test. Phases B/C/D (peer signal enrichment, offline allocator, multi-pipeline) deferred. |
 >
 > **If starting a new session, the most useful things to pick up are:**
 > 1. Item 3 Phase 2 (concurrent-user throughput — independent of Item 4)
@@ -691,7 +692,7 @@ Medium-large. Phase 1 is small (this commit). Phase 4 is the main coordinator lo
 
 **Complexity.** Medium.
 
-### Item 16 — Parallax two-phase scheduler
+### Item 16 — Parallax two-phase scheduler 🟡 PHASE A LANDED 2026-04-18
 
 **What.** Joint optimization of layer placement across heterogeneous peers (latency + bandwidth) plus request-time path selection that *stitches layers from different replicas* into balanced end-to-end chains.
 
@@ -702,6 +703,33 @@ Medium-large. Phase 1 is small (this commit). Phase 4 is the main coordinator lo
 **Fit.** Maps directly onto our `peer_registry` + trust scores + shard announcements. Drop-in scheduler upgrade.
 
 **Complexity.** Medium.
+
+#### Phase A — Request-time routing DP (LANDED 2026-04-18, behind `parallax_routing=false`)
+
+- **Adaptation.** Parallax's Phase 2 DP assumes peer-to-peer pipeline data flow (`edge_weight = rtt(peer_A → peer_B)`). SwarmLLM pipelines are **coordinator-relayed** — every segment routes through the local coordinator — so inter-segment edge cost collapses into per-vertex cost: `2 * rtt_local_to_peer + compute_ms + load_ms` (local node: just `compute_ms`). Still a shortest-path DP, just with per-vertex weighting instead of per-edge.
+- **Algorithm.** `src/inference/scheduler/parallax.rs::route_shortest_path`:
+  - Vertex = `(candidate_idx, range_idx)`; every `(node, layer_range)` from the existing `gather_candidates` output becomes one vertex.
+  - DAG edges: `v → w` iff `ranges[v].end == ranges[w].start`.
+  - Topological order: sort by `(range.start, range.end)`.
+  - Source filter: `range.start == 0 && can_be_first` (and `node == local` when encrypted pipeline).
+  - Sink filter: `range.end == num_layers && can_be_last` (and `node == local` when encrypted pipeline).
+  - Forward DP: `best_cost[w] = min_v(best_cost[v] + cost[w])`; reconstruct the chain from `parent[]`.
+- **Cost model.** `compute_ms = (1000 / est_tokens_per_sec) * (layers / 32)` when the peer has gossiped a capability estimate, else 0 (falls back to pure latency + load). `load_ms = active_request_count * 25 ms`. Constants tuned to make network and compute the dominant terms at typical values.
+- **Integration.** `assemble_pipeline_for` calls `parallax::route_shortest_path` first when the flag is on, and **falls back to `greedy_assign` on any error** — so routing never regresses below the greedy baseline. The existing single-local-node fast path (line 178) and encrypted-pipeline local-first/last constraints are both preserved (enforced inside the DP's source/sink filters).
+- **Config.** `InferenceConfig::parallax_routing: bool` (default `false`) in `src/config.rs`.
+- **Tests.** 8 unit tests (`single_node_covers_all`, `picks_low_latency_chain`, `load_penalty_shifts_choice`, `encrypted_requires_local_first_and_last`, `no_first_capable_errors`, `no_sink_errors`, `disjoint_ranges_fail_cleanly`, `multi_hop_chain_minimizes_total_latency`) + 1 end-to-end scheduler test (`parallax_flag_picks_low_latency_peer_end_to_end`) confirming the flag routes through `PipelineScheduler` correctly. 630 lib tests pass.
+
+#### Remaining phases
+
+- **Phase B — peer signal enrichment.** Track `avg_layer_latency_ms` as an observed runtime signal (gossip in `NodeCapabilityUpdate` or piggyback on health pings). Add per-peer bandwidth estimate. The current `est_tokens_per_sec` is a *static* capability estimate; Phase B would replace it with an EMA of actual observed per-forward latency for this specific model.
+- **Phase C — Phase 1 offline allocator.** Parallax's DP-based `DynamicProgrammingLayerAllocator` for cold-start layer placement recommendations. Fits naturally into `ShardRebalancer` / `AutoShardManager` — takes VRAM/compute/RTT inputs and outputs per-node layer-range targets. The `Z(k) = k² / s*(k)` objective picks the number of parallel pipelines to maintain.
+- **Phase D — multi-pipeline concurrency.** Run multiple pipeline assignments in parallel for a single model when enough candidates exist; route requests across them via weighted load balancing. Relevant once Item 7 lands concurrent-user batching.
+
+#### Stacks with
+
+- **Item 7 BatchGenerate** — Parallax picks the best chain; Item 7 multiplexes requests through it. Complementary.
+- **Item 12 DSD** — DSD amortizes network RTT across γ tokens; Parallax picks the chain with the lowest RTT to start with. Multiplicative.
+- **Items 4, 5** — Fast path and prefix cache both bypass multi-segment routing, so Parallax Phase A helps only when pipelines span 2+ peers. Phase A flag is safe to enable universally because the single-segment local-coverage fast path still short-circuits ahead of the DP.
 
 ### Item 17 — Disaggregated prefill / decode (Mooncake-style for P2P)
 

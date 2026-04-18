@@ -204,8 +204,31 @@ impl PipelineScheduler {
             });
         }
 
-        // Greedy layer assignment (distributed path — local doesn't have full coverage)
-        let raw_segments = self.greedy_assign(num_layers, &candidates, encrypted)?;
+        // Distributed layer assignment: prefer Parallax shortest-path DP when
+        // enabled; fall back to greedy on any failure (disjoint ranges, no
+        // valid source/sink, etc.) so routing never regresses below greedy.
+        let raw_segments = if self.shared_state.config.inference.parallax_routing {
+            match parallax::route_shortest_path(num_layers, &candidates, local_node_id, encrypted) {
+                Ok(segs) => {
+                    tracing::debug!(
+                        model = %model_id,
+                        segments = segs.len(),
+                        "DIAG: parallax routing selected chain"
+                    );
+                    segs
+                }
+                Err(e) => {
+                    tracing::debug!(
+                        model = %model_id,
+                        err = %e,
+                        "parallax routing unavailable — falling back to greedy"
+                    );
+                    self.greedy_assign(num_layers, &candidates, encrypted)?
+                }
+            }
+        } else {
+            self.greedy_assign(num_layers, &candidates, encrypted)?
+        };
 
         // Merge contiguous segments on the same node into a single segment.
         // This avoids sending multiple LayerForward messages to the same node
@@ -913,6 +936,8 @@ impl PipelineScheduler {
         standbys
     }
 }
+
+mod parallax;
 
 #[cfg(test)]
 mod tests;

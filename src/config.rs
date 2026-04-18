@@ -393,6 +393,14 @@ pub struct InferenceConfig {
     /// fast-path (Item 4) since that bypasses hidden state transfer entirely.
     #[serde(default)]
     pub activation_compression: bool,
+    /// Replace the greedy pipeline assembler with a Parallax-inspired
+    /// shortest-path DP over (node, layer_range) vertices. Picks the chain
+    /// minimising total `2*rtt + compute + load_penalty` rather than greedy
+    /// next-hop coverage — see `docs/plans/distributed_inference_speedup.md`
+    /// Item 16. Off by default. Falls back to greedy when the DP has no valid
+    /// source→sink path, so routing never regresses below the greedy baseline.
+    #[serde(default)]
+    pub parallax_routing: bool,
 }
 
 fn default_tp_max_latency_ms() -> u32 {
@@ -1341,6 +1349,7 @@ impl Default for InferenceConfig {
             max_seq_len_override: None,
             decentralized_spec_decoding: false,
             activation_compression: false,
+            parallax_routing: false,
         }
     }
 }

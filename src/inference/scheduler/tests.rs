@@ -704,3 +704,84 @@ fn encrypted_pipeline_fails_without_first_shard() {
         "Error should mention shard 0: {err_msg}"
     );
 }
+
+#[test]
+fn parallax_flag_picks_low_latency_peer_end_to_end() {
+    // Integration: flag enabled → scheduler uses parallax routing and picks
+    // the lower-latency peer when two remotes both cover all layers.
+    let mut config = Config::default();
+    config.inference.parallax_routing = true;
+    let identity = Identity::generate();
+    let temp = tempfile::tempdir().unwrap();
+    let db = Database::open(temp.path()).unwrap();
+    let executor = Arc::new(Mutex::new(ModelExecutor::new()));
+    let (state, _, _) = SharedState::new(config, identity, db, executor, None);
+    let local_id = state.identity.node_id().clone();
+
+    let shards = vec![ShardInfo {
+        index: 0,
+        layer_range: (0, 32),
+        size_bytes: 4_000_000_000,
+        hash: [0u8; 32],
+        tensors: vec![],
+    }];
+    let manifest = make_manifest("test-model", 32, shards);
+    state.model_registry.register_manifest(manifest);
+
+    let slow = NodeId([2u8; 32]);
+    let fast = NodeId([3u8; 32]);
+    state.model_registry.record_shard_holder(
+        ShardId {
+            model_id: ModelId("test-model".into()),
+            index: 0,
+        },
+        slow.clone(),
+    );
+    state.model_registry.record_shard_holder(
+        ShardId {
+            model_id: ModelId("test-model".into()),
+            index: 0,
+        },
+        fast.clone(),
+    );
+
+    state.peer_registry.insert(
+        slow.clone(),
+        PeerInfo {
+            node_id: slow.clone(),
+            addresses: vec![],
+            capability: None,
+            last_seen: chrono::Utc::now(),
+            latency_ms: Some(200),
+            trust_score: 0.8,
+            peer_id_bytes: None,
+            active_request_count: 0,
+            first_seen: 0,
+            verified_transaction_count: 0,
+            is_lan_peer: false,
+        },
+    );
+    state.peer_registry.insert(
+        fast.clone(),
+        PeerInfo {
+            node_id: fast.clone(),
+            addresses: vec![],
+            capability: None,
+            last_seen: chrono::Utc::now(),
+            latency_ms: Some(10),
+            trust_score: 0.8,
+            peer_id_bytes: None,
+            active_request_count: 0,
+            first_seen: 0,
+            verified_transaction_count: 0,
+            is_lan_peer: false,
+        },
+    );
+
+    let scheduler = PipelineScheduler::new(state);
+    let assignment = scheduler
+        .assemble_pipeline(&ModelId("test-model".into()), &local_id)
+        .unwrap();
+    assert_eq!(assignment.segments.len(), 1);
+    assert_eq!(assignment.segments[0].node_id, fast);
+}
