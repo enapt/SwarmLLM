@@ -16,7 +16,7 @@
 > | Item 6 — SWIFT self-speculative | 🟡 Landed behind `swift_self_speculative=false` flag. Structurally slower than baseline on candle until flash-attn-with-mask lands (kernel mismatch on multi-position verify). Shelved. |
 > | **Item 13 — Activation compression (Q8_0)** | ✅ LANDED behind `activation_compression=false` flag. Codec verified (~3.76× compression, RMS error <0.005, peer-compatible auto-dispatch). End-to-end multi-segment benchmark pending. |
 > | **Item 12 — DSD (decentralized speculative)** | ✅ ALL PHASES LANDED 2026-04-18 behind `decentralized_spec_decoding=false`. Worker γ-token decode + KV truncation primitives + γ controller + multi-segment spec-verify worker branch + ~410 LOC coordinator loop in `pipeline/dsd.rs`. End-to-end multi-segment WAN benchmark pending. |
-> | **Item 16 — Parallax scheduler (Phases A+B)** | ✅ LANDED & DEFAULT-ON 2026-04-18 (`parallax_routing=true`). Phase A: shortest-path DP over (node, layer_range) in `src/inference/scheduler/parallax.rs`. Phase B: observed per-layer latency EMA on every successful remote segment (`state.record_peer_segment_latency`), DP prefers observed over static `est_tokens_per_sec`. 10 parallax unit + 2 scheduler integration + 1 EMA math test. Falls back to greedy when the DP has no valid source→sink path. Phases C/D (offline allocator, multi-pipeline) deferred. |
+> | **Item 16 — Parallax scheduler (Phases A+B+C)** | ✅ LANDED 2026-04-18. Phases A+B default-on (`parallax_routing=true`); Phase C recommendation-only. Phase A: shortest-path DP over (node, layer_range) in `parallax.rs`. Phase B: observed per-layer latency EMA. Phase C: `parallax_allocator.rs` offline layer allocator with `Z(k) = k²/s*(k)` objective, exposed via `PipelineScheduler::allocate_offline`. 10 routing + 7 allocator + 2 scheduler integration + 1 EMA math test. Phase C auto-wiring into `ShardRebalancer` deferred. |
 >
 > **If starting a new session, the most useful things to pick up are:**
 > 1. Item 3 Phase 2 (concurrent-user throughput — independent of Item 4)
@@ -751,10 +751,24 @@ prefers the lower observed candidate when static signals tie;
 `peer_segment_latency_ema_math` verifies the EMA formula + width normalisation
 + zero-layer guard + unknown-peer fallback.
 
+#### Phase C — offline layer allocator (LANDED 2026-04-18)
+
+`src/inference/scheduler/parallax_allocator.rs` (≈320 LOC). Greedy multi-
+pipeline packer (simpler than Parallax's DP; the DP's state space explodes on
+heterogeneous peers and we observed most of the benefit is captured by
+greedy + the `Z(k) = k² / s*(k)` objective).
+
+- **Input.** `Vec<PeerCapacity>` (one per peer: layer_capacity, tokens_per_sec, latency_ms) + `num_layers` + `max_pipelines`.
+- **Output.** `AllocationPlan { pipelines: Vec<PipelineAllocation>, throughput_score: f32 }`. Each `PipelineAllocation` is a contiguous full-coverage chain over `[0, num_layers)` plus an estimated end-to-end latency using the same cost model family as Phase A routing.
+- **Algorithm.** For each candidate `k` in `[1..=max_pipelines]`: test feasibility (`total_capacity >= k * num_layers`), then greedy-pack in fastest-first peer order with a running per-peer remaining-capacity budget. Pick the plan with the highest `Z(k) = k² / avg_stages_per_pipeline`.
+- **Integration.** `PipelineScheduler::allocate_offline(&self, &ModelId, max_pipelines) -> Option<AllocationPlan>` snapshots `peer_registry` + local node capacity (union of on-disk shard layer ranges), derives `PeerCapacity`, runs the allocator. Local capacity comes from actual shards on disk, not aspirational VRAM — keeps recommendations aligned with what this node is ready to serve today.
+- **Tests.** 7 unit tests cover: single-node full coverage, balanced cluster prefers k = num_peers, heterogeneous greedy-by-throughput, infeasible when undersized, zero-capacity peer skipping, water-filling a big peer across multiple pipelines, `Z(k)` monotonic-in-k for balanced clusters.
+- **Not wired.** `AutoShardManager` / `ShardRebalancer` don't auto-act on the recommendation yet — today it's operator-visible only. Wiring that into rebalance triggers is Phase C.2.
+
 #### Remaining phases
 
-- **Phase C — offline allocator.** Parallax's DP-based `DynamicProgrammingLayerAllocator` for cold-start layer placement recommendations. Fits naturally into `ShardRebalancer` / `AutoShardManager` — takes VRAM/compute/RTT inputs and outputs per-node layer-range targets. The `Z(k) = k² / s*(k)` objective picks the number of parallel pipelines to maintain.
 - **Phase D — multi-pipeline concurrency.** Run multiple pipeline assignments in parallel for a single model when enough candidates exist; route requests across them via weighted load balancing. Relevant once Item 7 lands concurrent-user batching.
+- **Phase C.2 — auto-rebalance from Phase C output.** Hook `allocate_offline` into `ShardRebalancer`: periodically compare the current shard distribution to the recommendation, emit acquire/prune suggestions to `AutoShardManager`.
 - **Phase B follow-up — cross-node signal sharing.** Gossip observed-latency stats so new coordinators pick good peers without a warm-up period. Not started.
 
 #### Stacks with

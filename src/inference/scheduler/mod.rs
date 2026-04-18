@@ -876,6 +876,87 @@ impl PipelineScheduler {
         groups
     }
 
+    /// Produce a Parallax-style offline allocation recommendation for the
+    /// given model. Snapshots the current peer registry + local node, derives
+    /// per-peer layer capacity from known VRAM or capability signals, and
+    /// runs the greedy multi-pipeline packer.
+    ///
+    /// Returns `None` when the manifest is missing or the cluster can't cover
+    /// the model's layer count even once. Callers should treat the result as
+    /// advisory — in v1 this is not auto-applied to `ShardRebalancer`.
+    pub fn allocate_offline(
+        &self,
+        model_id: &crate::types::ModelId,
+        max_pipelines: u32,
+    ) -> Option<parallax_allocator::AllocationPlan> {
+        let manifest = self.shared_state.model_registry.get_manifest(model_id)?;
+        let num_layers = manifest.num_layers;
+        if num_layers == 0 {
+            return None;
+        }
+        let local_node_id = self.shared_state.identity.node_id();
+        let bytes_per_layer = manifest.total_size_bytes / manifest.num_layers.max(1) as u64;
+
+        let mut peers: Vec<parallax_allocator::PeerCapacity> = Vec::new();
+        // Local node. If we have on-disk shards for this model, treat our
+        // capacity as the union of their layer ranges; otherwise assume no
+        // local capacity (Phase C won't recommend putting layers here).
+        let local_tps = self
+            .shared_state
+            .gpu_info
+            .as_ref()
+            .map(|g| {
+                let bw = crate::model::auto_manage::vram::gpu_memory_bandwidth_gbps(&g.name);
+                crate::model::auto_manage::vram::estimate_tokens_per_sec_7b(bw, true)
+            })
+            .unwrap_or(0.0);
+        let local_layer_capacity = manifest_layer_capacity_for_local(&manifest, &self.shared_state);
+        peers.push(parallax_allocator::PeerCapacity {
+            node_id: local_node_id.clone(),
+            layer_capacity: local_layer_capacity,
+            tokens_per_sec: local_tps,
+            latency_ms: 0,
+        });
+
+        for entry in self.shared_state.peer_registry.iter() {
+            let peer = entry.value();
+            let node_id = peer.node_id.clone();
+            if &node_id == local_node_id {
+                continue;
+            }
+            // Prefer VRAM when the peer has a GPU, else fall back to RAM —
+            // the worker subprocess can host layers in either.
+            let available_mb = peer
+                .capability
+                .as_ref()
+                .map(|c| match &c.gpu {
+                    Some(g) => g.vram_available_mb,
+                    None => c.ram_available_mb,
+                })
+                .unwrap_or(0);
+            let available_bytes = available_mb.saturating_mul(1_048_576);
+            let layer_capacity = if bytes_per_layer > 0 {
+                (available_bytes / bytes_per_layer) as u32
+            } else {
+                0
+            };
+            let tps = peer
+                .capability
+                .as_ref()
+                .map(|c| c.est_tokens_per_sec_7b)
+                .unwrap_or(0.0);
+            let latency_ms = peer.latency_ms.unwrap_or(200);
+            peers.push(parallax_allocator::PeerCapacity {
+                node_id,
+                layer_capacity,
+                tokens_per_sec: tps,
+                latency_ms,
+            });
+        }
+
+        parallax_allocator::recommend_allocation(&peers, num_layers, max_pipelines)
+    }
+
     /// Find standby (backup) nodes for each pipeline segment.
     fn find_standbys(
         &self,
@@ -950,6 +1031,39 @@ impl PipelineScheduler {
 }
 
 mod parallax;
+pub mod parallax_allocator;
+
+/// Estimate how many layers the local node can reasonably host for `manifest`.
+/// Uses the shards already on disk for this model as the primary signal — the
+/// union of their GGUF tensor layer ranges — falling back to 0 when the node
+/// holds none. This keeps Phase C's recommendations aligned with what the
+/// local node is ACTUALLY ready to serve, rather than an aspirational VRAM
+/// estimate.
+fn manifest_layer_capacity_for_local(manifest: &ModelManifest, shared_state: &SharedState) -> u32 {
+    let local_node = shared_state.identity.node_id();
+    let mut shard_indices: Vec<u32> = Vec::new();
+    for shard in &manifest.shards {
+        let shard_id = ShardId {
+            model_id: manifest.id.clone(),
+            index: shard.index,
+        };
+        if shared_state
+            .model_registry
+            .shard_holders(&shard_id)
+            .iter()
+            .any(|n| n == local_node)
+        {
+            shard_indices.push(shard.index);
+        }
+    }
+    let ranges =
+        crate::inference::split::available_layer_ranges_from_manifest(manifest, &shard_indices);
+    ranges
+        .iter()
+        .map(|(s, e)| (e - s) as u32)
+        .sum::<u32>()
+        .min(manifest.num_layers)
+}
 
 #[cfg(test)]
 mod tests;
