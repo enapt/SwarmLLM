@@ -25,6 +25,15 @@ pub enum DaemonMsg {
     /// Single-step forward pass (for distributed inference).
     /// Binary payload = activation bytes.
     Forward(IpcForward),
+    /// Batched forward pass — multiple requests folded into one IPC call.
+    /// Worker processes each request (v1: sequentially; v2: stacked tensor)
+    /// and returns one result per request in order. Binary payload is the
+    /// concatenation of each request's activation bytes, with `activation_lens`
+    /// providing the slice boundaries.
+    BatchForward {
+        requests: Vec<IpcForward>,
+        activation_lens: Vec<u32>,
+    },
     /// Full generation loop (for local API inference).
     /// Worker tokenizes, runs prefill + decode, streams tokens back.
     Generate(IpcGenerate),
@@ -46,6 +55,13 @@ pub enum WorkerMsg {
     /// Single-step forward result (for Forward requests).
     /// Binary payload = activation bytes (if has_activations).
     LayerResult(IpcLayerResult),
+    /// Batched forward results — one per request in `BatchForward.requests`.
+    /// `activation_lens[i]` gives the byte length of request i's activations
+    /// within the concatenated binary payload (0 if no activations).
+    BatchResult {
+        results: Vec<IpcLayerResult>,
+        activation_lens: Vec<u32>,
+    },
     /// A single decoded token (for streaming Generate).
     Token {
         request_id: Uuid,

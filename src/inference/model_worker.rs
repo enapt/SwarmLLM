@@ -84,6 +84,26 @@ pub async fn run_worker(
                     send_worker_error(&mut writer, request_id, e).await;
                 }
             }
+            DaemonMsg::BatchForward {
+                requests,
+                activation_lens,
+            } => {
+                if let Err(e) = handle_batch_forward(
+                    &mut writer,
+                    &mut models,
+                    &kv_store,
+                    &data_dir,
+                    requests,
+                    activation_lens,
+                    payload,
+                    &shard_window,
+                )
+                .await
+                {
+                    // Batch-wide error: reply to first request's id so caller can log.
+                    tracing::warn!(error = %e, "model-worker: BatchForward failed");
+                }
+            }
             DaemonMsg::Generate(gen) => {
                 let request_id = gen.request_id;
                 if let Err(e) = handle_generate(
@@ -267,6 +287,56 @@ fn ensure_model_loaded(
 }
 
 /// Handle a Forward IPC message — run a single-step forward pass.
+/// Handle a `DaemonMsg::BatchForward` — multiple forward requests folded into
+/// one IPC call. Item 3 Phase 1 (wire protocol only): dispatches each request
+/// through the existing `handle_forward` path sequentially, emitting one
+/// `WorkerMsg::LayerResult` per request. This eliminates the daemon-side IPC
+/// mutex contention (callers no longer serialize on `WorkerHandle.socket`)
+/// but does NOT yet give the compute-side tensor-batching speedup. A future
+/// phase will replace this with a true `forward_batch` in `SplitModel` that
+/// stacks the per-request inputs into a single forward pass and returns a
+/// `WorkerMsg::BatchResult`.
+#[allow(clippy::too_many_arguments)]
+async fn handle_batch_forward(
+    writer: &mut tokio::net::unix::OwnedWriteHalf,
+    models: &mut HashMap<(usize, usize, usize, usize), SplitModel>,
+    kv_store: &Arc<KvCacheStore>,
+    data_dir: &std::path::Path,
+    requests: Vec<IpcForward>,
+    activation_lens: Vec<u32>,
+    payload: Vec<u8>,
+    shard_window: &Option<Vec<u32>>,
+) -> Result<(), SwarmError> {
+    if activation_lens.len() != requests.len() {
+        return Err(SwarmError::Internal(format!(
+            "BatchForward len mismatch: requests={} activation_lens={}",
+            requests.len(),
+            activation_lens.len()
+        )));
+    }
+    let mut cursor = 0usize;
+    for (fwd, &act_len) in requests.into_iter().zip(activation_lens.iter()) {
+        let act_len = act_len as usize;
+        let slice = payload
+            .get(cursor..cursor + act_len)
+            .ok_or_else(|| {
+                SwarmError::Internal(format!(
+                    "BatchForward payload slice out of range: cursor={cursor} act_len={act_len} total={}",
+                    payload.len()
+                ))
+            })?
+            .to_vec();
+        cursor += act_len;
+        let request_id = fwd.request_id;
+        if let Err(e) =
+            handle_forward(writer, models, kv_store, data_dir, fwd, slice, shard_window).await
+        {
+            send_worker_error(writer, request_id, e).await;
+        }
+    }
+    Ok(())
+}
+
 async fn handle_forward(
     writer: &mut tokio::net::unix::OwnedWriteHalf,
     models: &mut HashMap<(usize, usize, usize, usize), SplitModel>,

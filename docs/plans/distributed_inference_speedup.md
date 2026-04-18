@@ -166,6 +166,18 @@ Three items are executed sequentially: **1 → 2 → 3**. Each lands behind an i
 
 **Success metric:** 2 concurrent requests, aggregate tokens/sec ≥ 1.6× vs. serial baseline.
 
+### Status (2026-04-18)
+
+**Phase 1 landed**: wire protocol + config flags only.
+- Config: `continuous_batching: bool`, `max_concurrent_decode_batch: u32` (default 8), `batch_collection_ms: u64` (default 5).
+- IPC: `DaemonMsg::BatchForward { requests, activation_lens }` + `WorkerMsg::BatchResult { results, activation_lens }`.
+- Worker: `handle_batch_forward` stub that dispatches sequentially through the existing `handle_forward` path (no mutex contention win on the daemon side, no compute-side batching yet).
+
+**Phase 2 remaining**: the actual runtime benefit.
+- Replace `WorkerHandle.socket: Mutex<...>` in `src/inference/process_pool.rs` with `requests_tx: mpsc::Sender<BatchRequest>` + spawn scheduler task per worker. Scheduler implements the 5 ms collection window (degrades to ~15 ms on WSL2 but still coalesces concurrent arrivals).
+- Implement `SplitModel::forward_batch` that stacks per-request decode inputs into a single `[batch_size, 1, hidden]` tensor for a real matmul fusion (v1 sequential loop; v2 true tensor stacking).
+- Switch `WorkerMsg::BatchResult` emission in `handle_batch_forward` (currently emits N `LayerResult` messages).
+
 ---
 
 ## Cross-Item Sequencing

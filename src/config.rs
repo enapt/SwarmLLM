@@ -234,6 +234,22 @@ pub struct InferenceConfig {
     /// `speculative_decoding = true` AND a loaded draft model. Off by default.
     #[serde(default)]
     pub speculative_distributed: bool,
+    /// Enable continuous batching on the remote segment holder. When on,
+    /// multiple concurrent decode requests for the same model are batched
+    /// into a single worker-subprocess forward call, amortizing IPC +
+    /// compute setup across requests. Off by default until validated.
+    #[serde(default)]
+    pub continuous_batching: bool,
+    /// Maximum number of concurrent decode requests to batch into a single
+    /// worker forward. Only consulted when `continuous_batching = true`.
+    #[serde(default = "default_max_decode_batch")]
+    pub max_concurrent_decode_batch: u32,
+    /// Time window (ms) the batch scheduler waits after the first request
+    /// arrives before dispatching, to allow additional concurrent requests to
+    /// coalesce. On WSL2 timer resolution is ~15 ms so anything below that
+    /// effectively dispatches immediately.
+    #[serde(default = "default_batch_collection_ms")]
+    pub batch_collection_ms: u64,
     /// Number of draft tokens to propose per verification step (default: 4).
     #[serde(default = "default_speculative_gamma")]
     pub speculative_gamma: u32,
@@ -1055,6 +1071,14 @@ fn default_batch_timeout_ms() -> u64 {
     50
 }
 
+fn default_max_decode_batch() -> u32 {
+    8
+}
+
+fn default_batch_collection_ms() -> u64 {
+    5
+}
+
 fn default_relay_circuit_duration() -> u64 {
     3600
 }
@@ -1171,6 +1195,9 @@ impl Default for InferenceConfig {
             speculative_decoding: false,
             persistent_pipeline_stream: false,
             speculative_distributed: false,
+            continuous_batching: false,
+            max_concurrent_decode_batch: default_max_decode_batch(),
+            batch_collection_ms: default_batch_collection_ms(),
             speculative_gamma: default_speculative_gamma(),
             draft_model_path: None,
             draft_gpu_layers: None,
