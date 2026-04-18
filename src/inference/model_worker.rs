@@ -357,15 +357,57 @@ fn ensure_model_loaded(
 }
 
 /// Handle a Forward IPC message — run a single-step forward pass.
+/// True if every request in a batch can go through `SplitModel::forward_batch`.
+///
+/// Restrictive on purpose for v1: any special feature (vision, LoRA, spec
+/// decoding, TP, pre-embedded input, prefill) falls back to the sequential
+/// per-request path. Decode-only same-model-same-layer-range is the 90% case.
+fn batch_eligible(requests: &[IpcForward]) -> bool {
+    if requests.len() < 2 {
+        return false;
+    }
+    let first = &requests[0];
+    for r in requests {
+        if r.layer_range != first.layer_range {
+            return false;
+        }
+        if r.tp_meta.is_some() {
+            return false;
+        }
+        if r.vision_embeddings.is_some() {
+            return false;
+        }
+        if r.adapter_id.is_some() {
+            return false;
+        }
+        if !r.draft_tokens.is_empty() {
+            return false;
+        }
+        if r.spec_logits_requested {
+            return false;
+        }
+        if r.pre_embedded {
+            return false;
+        }
+        if r.truncate_kv_to.is_some() {
+            return false;
+        }
+        // Prefill (index_pos == 0 or sequence_num == 0) is ineligible: input is
+        // raw prompt bytes with caller-variable length. Decode has `seq_num > 0`
+        // and one i64 token ID per request (8 bytes LE).
+        if r.sequence_num == 0 || r.index_pos == 0 {
+            return false;
+        }
+    }
+    true
+}
+
 /// Handle a `DaemonMsg::BatchForward` — multiple forward requests folded into
-/// one IPC call. Item 3 Phase 1 (wire protocol only): dispatches each request
-/// through the existing `handle_forward` path sequentially, emitting one
-/// `WorkerMsg::LayerResult` per request. This eliminates the daemon-side IPC
-/// mutex contention (callers no longer serialize on `WorkerHandle.socket`)
-/// but does NOT yet give the compute-side tensor-batching speedup. A future
-/// phase will replace this with a true `forward_batch` in `SplitModel` that
-/// stacks the per-request inputs into a single forward pass and returns a
-/// `WorkerMsg::BatchResult`.
+/// one IPC call. When the batch passes `batch_eligible`, runs one fused
+/// `SplitModel::forward_batch` pass (batched QKV + FFN matmuls, per-slot
+/// attention) and emits a single `WorkerMsg::BatchResult`. Otherwise falls
+/// through to the sequential `handle_forward` path and emits individual
+/// `LayerResult` messages (preserves wire compatibility).
 #[allow(clippy::too_many_arguments)]
 async fn handle_batch_forward(
     writer: &mut tokio::net::unix::OwnedWriteHalf,
@@ -385,6 +427,30 @@ async fn handle_batch_forward(
             activation_lens.len()
         )));
     }
+
+    if batch_eligible(&requests) {
+        match run_fused_batch_forward(
+            writer,
+            models,
+            kv_store,
+            data_dir,
+            &requests,
+            &activation_lens,
+            &payload,
+            shard_window,
+            activation_compression,
+        )
+        .await
+        {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                // Fused path failed — log and fall through to sequential path
+                // so callers still get a response for every request_id.
+                tracing::warn!(error = %e, "Fused batch forward failed — falling back to sequential");
+            }
+        }
+    }
+
     let mut cursor = 0usize;
     for (fwd, &act_len) in requests.into_iter().zip(activation_lens.iter()) {
         let act_len = act_len as usize;
@@ -414,6 +480,181 @@ async fn handle_batch_forward(
             send_worker_error(writer, request_id, e).await;
         }
     }
+    Ok(())
+}
+
+/// Run a fused `SplitModel::forward_batch` pass over N eligible requests and
+/// emit a single `WorkerMsg::BatchResult`. Caller must have verified
+/// `batch_eligible(&requests)`.
+#[allow(clippy::too_many_arguments)]
+async fn run_fused_batch_forward(
+    writer: &mut tokio::net::unix::OwnedWriteHalf,
+    models: &mut HashMap<(usize, usize, usize, usize), SplitModel>,
+    kv_store: &Arc<KvCacheStore>,
+    data_dir: &std::path::Path,
+    requests: &[IpcForward],
+    activation_lens: &[u32],
+    payload: &[u8],
+    shard_window: &Option<Vec<u32>>,
+    activation_compression: bool,
+) -> Result<(), SwarmError> {
+    let first = &requests[0];
+    let (layer_start, layer_end) = (first.layer_range.0 as usize, first.layer_range.1 as usize);
+    let model_id = first.model_id.clone();
+
+    ensure_model_loaded(
+        models,
+        data_dir,
+        &model_id,
+        layer_start,
+        layer_end,
+        0,
+        1,
+        shard_window,
+    )?;
+
+    // Build per-request input tensors + decode BatchItems.
+    let model = models
+        .get_mut(&(layer_start, layer_end, 0, 1))
+        .ok_or_else(|| SwarmError::Internal("Model vanished after load".into()))?;
+    let is_first = model.is_first();
+    let is_last = model.is_last();
+    let total_layers = model.total_layers;
+
+    // Slice payload per request and build tensor inputs.
+    let mut input_tensors: Vec<candle_core::Tensor> = Vec::with_capacity(requests.len());
+    let mut request_id_strings: Vec<String> = Vec::with_capacity(requests.len());
+    let mut cursor = 0usize;
+    for (r, &act_len) in requests.iter().zip(activation_lens.iter()) {
+        let act_len = act_len as usize;
+        let slice = payload.get(cursor..cursor + act_len).ok_or_else(|| {
+            SwarmError::Internal(format!(
+                "Fused batch payload slice out of range: cursor={cursor} act_len={act_len}"
+            ))
+        })?;
+        cursor += act_len;
+
+        let tensor = if is_first {
+            // Decode step on first segment: i64 token IDs (8 bytes LE each).
+            if slice.is_empty() || slice.len() % 8 != 0 {
+                return Err(SwarmError::Internal(format!(
+                    "Fused batch decode payload must be a non-empty multiple of 8 bytes (got {})",
+                    slice.len()
+                )));
+            }
+            let token_ids: Vec<i64> = slice
+                .chunks_exact(8)
+                .map(|c| i64::from_le_bytes(c.try_into().unwrap()))
+                .collect();
+            let seq_len = token_ids.len();
+            candle_core::Tensor::from_vec(token_ids, &[1, seq_len], &candle_core::Device::Cpu)
+                .map_err(|e| SwarmError::Internal(format!("Tensor: {e}")))?
+        } else {
+            split::bytes_to_tensor(slice)?
+        };
+        input_tensors.push(tensor);
+        request_id_strings.push(r.request_id.to_string());
+    }
+
+    // Clear prefill KV if sequence_num == 0 (shouldn't happen for eligible
+    // batches, but defensively). Eligibility guarantees sequence_num > 0.
+    let model_key = format!("{layer_start}-{layer_end}-{total_layers}");
+    let _ = model_key;
+
+    // Build BatchItems (references to our owned tensors + strings).
+    let items: Vec<split::BatchItem<'_>> = requests
+        .iter()
+        .zip(input_tensors.iter())
+        .zip(request_id_strings.iter())
+        .map(|((r, t), rid)| split::BatchItem {
+            input: t,
+            index_pos: r.index_pos as usize,
+            request_id: rid.as_str(),
+        })
+        .collect();
+
+    // Fused forward — CPU-heavy, use block_in_place so we don't starve
+    // tokio reactors waiting on other IPC messages.
+    let results: Vec<candle_core::Tensor> =
+        tokio::task::block_in_place(|| model.forward_batch(&items, kv_store))?;
+
+    if results.len() != requests.len() {
+        return Err(SwarmError::Internal(format!(
+            "forward_batch returned {} outputs for {} requests",
+            results.len(),
+            requests.len()
+        )));
+    }
+
+    // Convert per-request output tensors to IpcLayerResult + payload bytes.
+    let mut ipc_results: Vec<IpcLayerResult> = Vec::with_capacity(requests.len());
+    let mut result_lens: Vec<u32> = Vec::with_capacity(requests.len());
+    let mut concat_payload: Vec<u8> = Vec::new();
+
+    for (r, output_t) in requests.iter().zip(results.iter()) {
+        if is_last {
+            // Logits [1, vocab] → sample + EOS check.
+            let token_id = split::sample_token_with_params(output_t, &r.sampling)
+                .map_err(|e| SwarmError::Internal(format!("Sample: {e}")))?;
+            let finish = if model.eos_tokens().contains(&token_id) {
+                Some(crate::types::NetworkFinishReason::Stop)
+            } else {
+                None
+            };
+            ipc_results.push(IpcLayerResult {
+                request_id: r.request_id,
+                token_ids: vec![token_id],
+                finish_reason: finish,
+                format: None,
+                sealed: false,
+                sealed_payload: None,
+                logprobs: None,
+                has_activations: false,
+                spec_logits: Vec::new(),
+            });
+            result_lens.push(0);
+        } else {
+            // Hidden state [1, 1, hidden] → serialize.
+            let bytes = if activation_compression {
+                split::tensor_to_bytes_q8_0(output_t)
+                    .map_err(|e| SwarmError::Internal(format!("Encode Q8_0: {e}")))?
+            } else {
+                split::tensor_to_bytes(output_t)
+                    .map_err(|e| SwarmError::Internal(format!("Encode: {e}")))?
+            };
+            let len = bytes.len() as u32;
+            concat_payload.extend_from_slice(&bytes);
+            ipc_results.push(IpcLayerResult {
+                request_id: r.request_id,
+                token_ids: Vec::new(),
+                finish_reason: None,
+                format: None,
+                sealed: false,
+                sealed_payload: None,
+                logprobs: None,
+                has_activations: true,
+                spec_logits: Vec::new(),
+            });
+            result_lens.push(len);
+        }
+    }
+
+    send_worker(
+        writer,
+        &WorkerMsg::BatchResult {
+            results: ipc_results,
+            activation_lens: result_lens,
+        },
+        &concat_payload,
+    )
+    .await
+    .map_err(|e| SwarmError::Internal(format!("send BatchResult: {e}")))?;
+
+    tracing::debug!(
+        batch_size = requests.len(),
+        is_last,
+        "DIAG: fused batch forward complete"
+    );
     Ok(())
 }
 

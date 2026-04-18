@@ -205,10 +205,11 @@ Items 1–3 are documented below in their original "plan" voice because a lot of
 - Concurrent requests for the same model no longer serialize on a full-request mutex — they interleave through the worker at the compute-side boundary instead.
 - All 699 tests pass unchanged.
 
-**Phase 2b remaining**: compute-side batching (the actual aggregate-throughput win).
-- Add a batch scheduler task per worker that collects concurrent requests into a time-windowed batch (target 5 ms, effective ~15 ms on WSL2).
-- Implement `SplitModel::forward_batch` that stacks per-request decode inputs into a single `[batch_size, 1, hidden]` tensor for real matmul fusion (v1 sequential loop; v2 true tensor stacking).
-- Switch `WorkerMsg::BatchResult` emission in `handle_batch_forward` (currently emits N `LayerResult` messages).
+**Phase 2b landed 2026-04-18**: compute-side fused batching available via `ModelProcessPool::forward_batch()`.
+- `SplitModel::forward_batch` (already implemented under `#[cfg(test)]`) un-gated. Stacks per-request decode inputs into `[batch_size, 1, hidden]` for batched QKV + FFN matmul, per-slot attention on each slot's KV cache, then un-stacks outputs. Supports Dense/DeepSeek/Qwen3.5 attention + SSM variants.
+- `handle_batch_forward` in `model_worker.rs` dispatches to `forward_batch` when `batch_eligible(&requests)` passes (same layer_range, no vision/LoRA/spec/TP/pre-embedded, all decode `seq_num > 0`). Emits a single `WorkerMsg::BatchResult` with N concatenated payloads. Falls back to sequential `handle_forward` loop on ineligibility or fused-path error.
+- `ModelProcessPool::forward_batch(Vec<LayerForward>) -> Vec<LayerResult>` is the public entry point. Registers N per-request response channels, sends ONE `DaemonMsg::BatchForward` over the multiplexed path, and the reader actor fans out `BatchResult` back to the N callers (each sees a synthesized `LayerResult`).
+- Remaining work: **batch scheduler** that collects concurrent arrivals into a time-window (target 5 ms) and calls `forward_batch` instead of N individual `forward()` calls. Today callers must explicitly build a `Vec<LayerForward>` and call `forward_batch` themselves. The router batch dispatch path (`router/batch.rs`) is the obvious hook-point.
 
 ---
 

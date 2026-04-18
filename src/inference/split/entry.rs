@@ -1,6 +1,5 @@
 // ── Split model entry with LRU tracking ──
 
-#[cfg(test)]
 use candle_core::Tensor;
 
 use super::model::SplitModel;
@@ -126,7 +125,6 @@ impl SplitModelEntry {
 }
 
 /// A single item in a batched forward pass (used internally by SplitModel::forward_batch).
-#[cfg(test)]
 pub struct BatchItem<'a> {
     /// Input tensor for this request.
     pub input: &'a Tensor,

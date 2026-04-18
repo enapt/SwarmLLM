@@ -66,14 +66,15 @@ struct WorkerHandle {
 /// Pull the `request_id` field out of any `WorkerMsg` variant that carries one.
 /// `Ready` / `Bye` have no request_id and are dropped by the reader actor
 /// (they're only relevant during spawn, which handshakes synchronously).
+/// `BatchResult` carries N request_ids and is handled specially by the reader
+/// actor — this helper returns `None` for it.
 fn worker_msg_request_id(msg: &WorkerMsg) -> Option<Uuid> {
     match msg {
         WorkerMsg::LayerResult(r) => Some(r.request_id),
-        WorkerMsg::BatchResult { results, .. } => results.first().map(|r| r.request_id),
         WorkerMsg::Token { request_id, .. }
         | WorkerMsg::GenerateDone { request_id, .. }
         | WorkerMsg::Error { request_id, .. } => Some(*request_id),
-        WorkerMsg::Ready | WorkerMsg::Bye => None,
+        WorkerMsg::BatchResult { .. } | WorkerMsg::Ready | WorkerMsg::Bye => None,
     }
 }
 
@@ -90,6 +91,18 @@ async fn reader_actor(
     loop {
         match recv_worker(&mut reader).await {
             Ok((msg, payload)) => {
+                // BatchResult carries N inner results + a concatenated payload.
+                // Split it so each caller sees a synthesized LayerResult on
+                // their individual response channel — callers using the batch
+                // API register one channel per request_id up front.
+                if let WorkerMsg::BatchResult {
+                    results,
+                    activation_lens,
+                } = msg
+                {
+                    dispatch_batch_result(&responses, results, activation_lens, payload).await;
+                    continue;
+                }
                 if let Some(rid) = worker_msg_request_id(&msg) {
                     // `get` returns a Ref, which holds a shard lock. Clone the
                     // Sender and drop the Ref *before* awaiting `send` so we
@@ -116,6 +129,47 @@ async fn reader_actor(
                 responses.clear();
                 return;
             }
+        }
+    }
+}
+
+/// Fan out a BatchResult to N per-request channels. Splits the concatenated
+/// payload into per-slot byte slices by `activation_lens`, wraps each inner
+/// `IpcLayerResult` in a `WorkerMsg::LayerResult`, and delivers to the caller
+/// registered under each `request_id`.
+async fn dispatch_batch_result(
+    responses: &ResponseMap,
+    results: Vec<IpcLayerResult>,
+    activation_lens: Vec<u32>,
+    payload: Vec<u8>,
+) {
+    if results.len() != activation_lens.len() {
+        tracing::warn!(
+            results = results.len(),
+            lens = activation_lens.len(),
+            "BatchResult len mismatch — dropping batch"
+        );
+        return;
+    }
+    let mut cursor = 0usize;
+    for (r, len) in results.into_iter().zip(activation_lens.into_iter()) {
+        let len = len as usize;
+        let end = cursor.saturating_add(len);
+        let slot_payload = if r.has_activations && end <= payload.len() {
+            payload[cursor..end].to_vec()
+        } else {
+            Vec::new()
+        };
+        cursor = end;
+        let rid = r.request_id;
+        let tx_opt = responses.get(&rid).map(|e| e.value().clone());
+        if let Some(tx) = tx_opt {
+            let _ = tx.send((WorkerMsg::LayerResult(r), slot_payload)).await;
+        } else {
+            tracing::debug!(
+                request_id = %rid,
+                "Batch slot reply for unknown request_id (caller dropped?)"
+            );
         }
     }
 }
@@ -636,6 +690,153 @@ impl ModelProcessPool {
                 }
             }
         }
+    }
+
+    /// Batched forward: send N forwards in a single `DaemonMsg::BatchForward`
+    /// message. Worker runs them through the fused `SplitModel::forward_batch`
+    /// when they're compatible (same model/layer_range, decode-only, no vision
+    /// /LoRA/spec/TP) for a real matmul-fusion speedup, otherwise falls back
+    /// to the sequential path internally. Either way, callers get one
+    /// `LayerResult` per input in the same order.
+    ///
+    /// All inputs must target the same `model_id`. Returns an error if the
+    /// batch is empty or targets mixed models.
+    pub async fn forward_batch(
+        &self,
+        forwards: Vec<crate::types::LayerForward>,
+    ) -> Result<Vec<crate::types::LayerResult>, SwarmError> {
+        if forwards.is_empty() {
+            return Err(SwarmError::Validation("forward_batch: empty input".into()));
+        }
+        let model_id = forwards[0].model_id.clone();
+        if forwards.iter().any(|f| f.model_id != model_id) {
+            return Err(SwarmError::Validation(
+                "forward_batch: all inputs must share model_id".into(),
+            ));
+        }
+        let handle = self.get_or_spawn(&model_id).await?;
+        if handle.dead.load(Ordering::Relaxed) {
+            self.workers.remove(&model_id);
+            return Err(SwarmError::Internal("worker is dead".into()));
+        }
+
+        // Register one response channel per request_id BEFORE sending.
+        type SlotRx = mpsc::Receiver<(WorkerMsg, Vec<u8>)>;
+        let n = forwards.len();
+        let mut receivers: Vec<(Uuid, SlotRx)> = Vec::with_capacity(n);
+        let mut guards: Vec<ResponseGuard> = Vec::with_capacity(n);
+        for f in &forwards {
+            let (tx, rx) = mpsc::channel(RESPONSE_CHANNEL_CAPACITY);
+            handle.responses.insert(f.request_id, tx);
+            guards.push(ResponseGuard {
+                responses: handle.responses.clone(),
+                request_id: f.request_id,
+            });
+            receivers.push((f.request_id, rx));
+        }
+
+        // Build IPC requests + concatenated activation payload.
+        let mut ipc_requests: Vec<IpcForward> = Vec::with_capacity(n);
+        let mut activation_lens: Vec<u32> = Vec::with_capacity(n);
+        let mut concat_payload: Vec<u8> = Vec::new();
+        for f in forwards {
+            let crate::types::LayerForward {
+                request_id,
+                sequence_num,
+                index_pos,
+                activations,
+                format,
+                model_id,
+                layer_range,
+                tp_meta,
+                vision_embeddings,
+                sender_peer_bytes: _,
+                requester_node_id,
+                pre_embedded,
+                adapter_id,
+                draft_tokens,
+                spec_logits_requested,
+                truncate_kv_to,
+            } = f;
+            activation_lens.push(activations.len() as u32);
+            concat_payload.extend_from_slice(&activations);
+            ipc_requests.push(IpcForward {
+                request_id,
+                sequence_num,
+                index_pos,
+                format,
+                model_id,
+                layer_range,
+                tp_meta,
+                vision_embeddings,
+                requester_node_id,
+                pre_embedded,
+                sampling: Default::default(),
+                adapter_id,
+                draft_tokens,
+                spec_logits_requested,
+                truncate_kv_to,
+            });
+        }
+
+        {
+            let mut writer = handle.writer.lock().await;
+            if let Err(e) = send_daemon(
+                &mut *writer,
+                &DaemonMsg::BatchForward {
+                    requests: ipc_requests,
+                    activation_lens,
+                },
+                &concat_payload,
+            )
+            .await
+            {
+                drop(writer);
+                self.workers.remove(&model_id);
+                tracing::warn!(model = %model_id, error = %e, "Worker send failed — evicting dead worker");
+                return Err(SwarmError::Internal(format!("send BatchForward: {e}")));
+            }
+        }
+
+        // Collect results in the original request order. Each receiver fires
+        // exactly once (LayerResult or Error) before being dropped.
+        let mut results: Vec<crate::types::LayerResult> = Vec::with_capacity(n);
+        for (rid, mut rx) in receivers {
+            loop {
+                match rx.recv().await {
+                    Some((WorkerMsg::LayerResult(r), payload)) if r.request_id == rid => {
+                        let activations = if r.has_activations { payload } else { vec![] };
+                        results.push(crate::types::LayerResult {
+                            request_id: r.request_id,
+                            token_ids: r.token_ids,
+                            finish_reason: r.finish_reason,
+                            activations,
+                            sealed_token_ids: if r.sealed { r.sealed_payload } else { None },
+                            spec_logits: r.spec_logits,
+                        });
+                        break;
+                    }
+                    Some((
+                        WorkerMsg::Error {
+                            request_id: err_rid,
+                            message,
+                        },
+                        _,
+                    )) if err_rid == rid => {
+                        return Err(SwarmError::Inference(message));
+                    }
+                    Some(_) => continue,
+                    None => {
+                        self.workers.remove(&model_id);
+                        return Err(SwarmError::Internal(
+                            "worker closed connection during batch forward".into(),
+                        ));
+                    }
+                }
+            }
+        }
+        drop(guards);
+        Ok(results)
     }
 
     /// Run full generation in the worker, streaming tokens back.

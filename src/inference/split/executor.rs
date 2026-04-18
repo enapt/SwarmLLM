@@ -13,7 +13,6 @@ use candle_nn::Module;
 use crate::error::SwarmError;
 use crate::model::lora::LoraAdapter;
 
-#[cfg(test)]
 use super::entry::BatchItem;
 use super::kv_cache::KvCacheStore;
 use super::model::SplitModel;
@@ -762,7 +761,6 @@ impl SplitModel {
     ///
     /// Returns one output tensor per request in the same order as `items`.
     /// Falls back to sequential `forward()` if any item has seq_len > 1.
-    #[cfg(test)]
     pub fn forward_batch(
         &mut self,
         items: &[BatchItem<'_>],
@@ -848,7 +846,8 @@ impl SplitModel {
         let mut all_kv_caches: Vec<Vec<Option<KvCache>>> = Vec::with_capacity(batch_size);
         let mut all_ssm_states: Vec<Vec<Option<SsmState>>> = Vec::with_capacity(batch_size);
         for item in items.iter() {
-            let mut entry = kv_cache_store.get_or_create(model_key, item.request_id, num_layers);
+            let key = KvCacheStore::cache_key(model_key, item.request_id);
+            let mut entry = kv_cache_store.get_or_create_keyed(&key, num_layers);
             entry.last_accessed = std::time::Instant::now();
             all_kv_caches.push(std::mem::take(&mut entry.layers));
             all_ssm_states.push(std::mem::take(&mut entry.ssm_states));
@@ -1061,7 +1060,8 @@ impl SplitModel {
 
         // Write updated KV-caches and SSM states back (take instead of clone to avoid copying)
         for (req_idx, item) in items.iter().enumerate() {
-            let mut entry = kv_cache_store.get_or_create(model_key, item.request_id, num_layers);
+            let key = KvCacheStore::cache_key(model_key, item.request_id);
+            let mut entry = kv_cache_store.get_or_create_keyed(&key, num_layers);
             entry.layers = std::mem::take(&mut all_kv_caches[req_idx]);
             entry.ssm_states = std::mem::take(&mut all_ssm_states[req_idx]);
             entry.last_accessed = std::time::Instant::now();
