@@ -15,7 +15,7 @@
 > | Item 3 — Continuous batching | 🟡 Phase 1 (wire protocol) landed behind `continuous_batching=false` flag. Phase 2 (scheduler refactor + `SplitModel::forward_batch`) is the remaining work; blocker is replacing `Mutex<socket>` in `ModelProcessPool` with mpsc-fed scheduler. Not pursued in this session because Item 4 delivered the headline win. |
 > | Item 6 — SWIFT self-speculative | 🟡 Landed behind `swift_self_speculative=false` flag. Structurally slower than baseline on candle until flash-attn-with-mask lands (kernel mismatch on multi-position verify). Shelved. |
 > | **Item 13 — Activation compression (Q8_0)** | ✅ LANDED behind `activation_compression=false` flag. Codec verified (~3.76× compression, RMS error <0.005, peer-compatible auto-dispatch). End-to-end multi-segment benchmark pending. |
-> | Item 12 — DSD (decentralized speculative) | 🟡 Phase 1 LANDED 2026-04-18: worker accepts γ-token first-segment decode + config flag added. Phases 2–4 (coordinator loop, distributed KV rollback verification, γ controller) remain. Paper says 2.56× on InfiniBand; SwarmLLM's WAN regime should yield more. |
+> | Item 12 — DSD (decentralized speculative) | 🟡 Phases 1–3 LANDED 2026-04-18: worker γ-token decode + truncation primitives verified + γ controller. Phase 4 (coordinator loop in `pipeline/dsd.rs` + worker speculative-verify branch refactor for multi-segment) remains — that's the load-bearing piece. |
 >
 > **If starting a new session, the most useful things to pick up are:**
 > 1. Item 3 Phase 2 (concurrent-user throughput — independent of Item 4)
@@ -574,13 +574,27 @@ Worker-side groundwork: `src/inference/model_worker.rs` first-segment decode bra
 
 Config flag `InferenceConfig::decentralized_spec_decoding` (default `false`) added. Has no effect today; will gate the coordinator loop in Phase 4.
 
-### Phase 2 (next): distributed KV rollback
+### Phase 2 (LANDED 2026-04-18): KV truncation primitives verified
 
-`LayerForward.truncate_kv_to: Option<u32>` was already added in Item 2 Phase 2 for single-node spec. Need to verify it propagates correctly through every intermediate segment when the coordinator partial-accepts (k < γ). Currently the field is on the wire and the worker applies it locally — need an integration test that proves all N segments truncate consistently.
+5 unit tests in `src/inference/split/tests.rs` exercise `KvCacheStore::truncate_request_to` end-to-end:
+- `kv_truncate_to_preserves_prefix_and_drops_suffix` — narrow/contiguous/reset/append round-trip preserves first N positions exactly
+- `kv_truncate_to_target_geq_current_is_noop` — asking for more positions than exist doesn't corrupt
+- `kv_truncate_unallocated_layer_is_skipped` — `None` layers are ignored, not panicked-on
+- `kv_truncate_missing_request_is_noop` — silent no-op for unknown request_id
+- `kv_truncate_all_layers_aligned` — all layers in a multi-layer entry end at the same target_len after one call
 
-### Phase 3 (next): adaptive γ controller
+Worker-side already applies `LayerForward.truncate_kv_to` uniformly on every `handle_forward` regardless of segment position (verified at `model_worker.rs:473`). The coordinator-side responsibility — setting `truncate_kv_to` on every segment's LayerForward, not just the last — is Phase 4 work.
 
-Paper 1 fixes γ=8 and adapts the τ relaxation parameter instead. Paper 2 adapts γ via a small MLP on `[queue_depth_util, recent_acceptance_rate, recent_RTT, recent_TPOT, prev_γ]`. **MVP: ship paper 2's "Dynamic window" baseline** — `γ ← clamp(γ · (1 + α·(accept_rate - 0.5)), 2, 12)` with α≈0.2 and a 32-token EMA on accept_rate. Cheap, no model artifact, captures most of the win. Trained MLP is a future optimization.
+### Phase 3 (LANDED 2026-04-18): adaptive γ controller
+
+`src/inference/dsd_controller.rs` — paper 2's "Dynamic window" baseline:
+
+```
+accept_ema  ← α · accept_ema + (1 − α) · accept_rate_this_round
+γ_next      ← clamp(γ · (1 + β · (accept_ema − 0.5)), 2, 12)
+```
+
+Defaults `α=0.7`, `β=0.2`. 6 unit tests cover: initial-γ clamping, perfect-acceptance ratchet to max, zero-acceptance ratchet to min, EMA smoothing of alternating signal, high-α resistance to single bad rounds, zero-`proposed` safety. Per-request state (small `GammaController` struct). Will be wired into Phase 4's coordinator loop. Trained MLP variant is a future optimization.
 
 ### Phase 4 (next): coordinator loop
 

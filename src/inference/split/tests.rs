@@ -208,6 +208,117 @@ fn kv_cache_store_cleanup_request_id() {
     assert_eq!(store.active_entries(), 1);
 }
 
+// ── KV truncation (DSD Phase 2) ──
+
+/// Append a single position to a KvCache. Helper for the truncate tests.
+fn append_pos(cache: &mut KvCache, key: f32, val: f32) {
+    let k = Tensor::from_vec(vec![key, key], &[1, 1, 1, 2], &Device::Cpu).unwrap();
+    let v = Tensor::from_vec(vec![val, val], &[1, 1, 1, 2], &Device::Cpu).unwrap();
+    cache.append(&k, &v).unwrap();
+}
+
+#[test]
+fn kv_truncate_to_preserves_prefix_and_drops_suffix() {
+    let store = KvCacheStore::new(std::time::Duration::from_secs(600));
+    {
+        let mut entry = store.get_or_create("m", "r", 1);
+        let mut cache = KvCache::new(2, 128);
+        append_pos(&mut cache, 1.0, 10.0);
+        append_pos(&mut cache, 2.0, 20.0);
+        append_pos(&mut cache, 3.0, 30.0);
+        append_pos(&mut cache, 4.0, 40.0);
+        entry.layers[0] = Some(cache);
+    }
+    store.truncate_request_to("m", "r", 2).unwrap();
+
+    let entry = store.get_or_create("m", "r", 1);
+    let cache = entry.layers[0].as_ref().unwrap();
+    assert_eq!(cache.current_seq_len(), 2);
+    let k = cache.k().unwrap().unwrap();
+    let k_data = k.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+    // Each appended pos contributed 2 lanes (head_dim=2), so first 4 lanes correspond to positions 0-1.
+    assert_eq!(k_data, vec![1.0, 1.0, 2.0, 2.0]);
+    let v = cache.v().unwrap().unwrap();
+    let v_data = v.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+    assert_eq!(v_data, vec![10.0, 10.0, 20.0, 20.0]);
+}
+
+#[test]
+fn kv_truncate_to_target_geq_current_is_noop() {
+    let store = KvCacheStore::new(std::time::Duration::from_secs(600));
+    {
+        let mut entry = store.get_or_create("m", "r", 1);
+        let mut cache = KvCache::new(2, 128);
+        append_pos(&mut cache, 1.0, 10.0);
+        append_pos(&mut cache, 2.0, 20.0);
+        entry.layers[0] = Some(cache);
+    }
+    // Asking to truncate to 5 when only 2 positions exist must not corrupt the cache.
+    store.truncate_request_to("m", "r", 5).unwrap();
+
+    let entry = store.get_or_create("m", "r", 1);
+    let cache = entry.layers[0].as_ref().unwrap();
+    assert_eq!(cache.current_seq_len(), 2);
+}
+
+#[test]
+fn kv_truncate_unallocated_layer_is_skipped() {
+    let store = KvCacheStore::new(std::time::Duration::from_secs(600));
+    {
+        let mut entry = store.get_or_create("m", "r", 3);
+        // Layer 0 has data; layers 1 and 2 are None — must be skipped, not panic.
+        let mut cache = KvCache::new(2, 128);
+        append_pos(&mut cache, 1.0, 10.0);
+        append_pos(&mut cache, 2.0, 20.0);
+        entry.layers[0] = Some(cache);
+    }
+    store.truncate_request_to("m", "r", 1).unwrap();
+
+    let entry = store.get_or_create("m", "r", 3);
+    let cache = entry.layers[0].as_ref().unwrap();
+    assert_eq!(cache.current_seq_len(), 1);
+    assert!(entry.layers[1].is_none());
+    assert!(entry.layers[2].is_none());
+}
+
+#[test]
+fn kv_truncate_missing_request_is_noop() {
+    let store = KvCacheStore::new(std::time::Duration::from_secs(600));
+    // No entry inserted — must succeed silently.
+    store
+        .truncate_request_to("m", "absent-request", 4)
+        .expect("truncate on missing request should be a silent no-op");
+}
+
+#[test]
+fn kv_truncate_all_layers_aligned() {
+    // DSD partial-accept across multiple layers: every layer must end at the
+    // same target_len so subsequent forward passes find a consistent KV state.
+    let store = KvCacheStore::new(std::time::Duration::from_secs(600));
+    {
+        let mut entry = store.get_or_create("m", "r", 4);
+        for layer_idx in 0..4 {
+            let mut cache = KvCache::new(2, 128);
+            append_pos(&mut cache, 1.0, 10.0);
+            append_pos(&mut cache, 2.0, 20.0);
+            append_pos(&mut cache, 3.0, 30.0);
+            append_pos(&mut cache, 4.0, 40.0);
+            entry.layers[layer_idx] = Some(cache);
+        }
+    }
+    store.truncate_request_to("m", "r", 2).unwrap();
+
+    let entry = store.get_or_create("m", "r", 4);
+    for layer_idx in 0..4 {
+        let cache = entry.layers[layer_idx].as_ref().unwrap();
+        assert_eq!(
+            cache.current_seq_len(),
+            2,
+            "layer {layer_idx} expected len=2 after truncate"
+        );
+    }
+}
+
 #[test]
 fn kv_cache_store_cleanup_expired() {
     let store = KvCacheStore::new(std::time::Duration::from_millis(1));
