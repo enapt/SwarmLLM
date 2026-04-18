@@ -15,7 +15,7 @@ use candle_core::IndexOp;
 use crate::daemon::shard_loader::{try_load_from_shards, ShardLoadParams};
 use crate::error::SwarmError;
 use crate::inference::split::{self, KvCacheStore, PrefixCache, SplitModel};
-use crate::inference::swift::{build_skip_mask, SwiftCalibrator, SwiftConfig};
+use crate::inference::swift::{SwiftCalibrator, SwiftConfig};
 use crate::inference::worker_ipc::*;
 use crate::types::NetworkFinishReason;
 
@@ -44,6 +44,7 @@ impl Default for PrefixCacheConfig {
 /// Run the model worker subprocess.
 /// Called from main.rs when the binary is invoked with `model-worker` subcommand.
 /// `shard_window`: if Some, only load these shard indices (VRAM-saving mode).
+#[allow(clippy::too_many_arguments)]
 pub async fn run_worker(
     socket_path: PathBuf,
     data_dir: PathBuf,
@@ -51,6 +52,8 @@ pub async fn run_worker(
     kv_cache_ttl_secs: u64,
     prefix_cfg: PrefixCacheConfig,
     swift_cfg: SwiftConfig,
+    force_standard_attn: bool,
+    max_seq_len_override: Option<usize>,
 ) {
     // Connect to the daemon's Unix socket
     let stream = match UnixStream::connect(&socket_path).await {
@@ -99,6 +102,19 @@ pub async fn run_worker(
         calibration_tokens = swift_cfg.calibration_tokens,
         "model-worker: SWIFT self-speculative decoding configured"
     );
+    tracing::info!(
+        force_standard_attn,
+        max_seq_len_override = ?max_seq_len_override,
+        "model-worker: attention-kernel + KV-budget overrides"
+    );
+
+    // Apply context-length override (process-global, read by the loader on
+    // every model construction). Setting once at startup is fine — the worker
+    // is single-process and the override doesn't change per request.
+    if let Some(cap) = max_seq_len_override {
+        crate::inference::split::MAX_SEQ_LEN_OVERRIDE
+            .store(cap, std::sync::atomic::Ordering::Relaxed);
+    }
 
     if let Some(ref w) = shard_window {
         tracing::info!(window = ?w, "model-worker: shard window active — only loading specified shards");
@@ -161,6 +177,8 @@ pub async fn run_worker(
                     gen,
                     &shard_window,
                     &swift_cfg,
+                    force_standard_attn,
+                    max_seq_len_override,
                 )
                 .await
                 {
@@ -746,7 +764,10 @@ async fn handle_generate(
     gen: IpcGenerate,
     shard_window: &Option<Vec<u32>>,
     swift_cfg: &SwiftConfig,
+    force_standard_attn: bool,
+    max_seq_len_override: Option<usize>,
 ) -> Result<(), SwarmError> {
+    let _ = max_seq_len_override; // applied at worker startup (process-global)
     let request_id = gen.request_id;
     let model_id = gen.model_id.clone();
     let (layer_start, layer_end) = (gen.layer_range.0 as usize, gen.layer_range.1 as usize);
@@ -808,8 +829,19 @@ async fn handle_generate(
         (model.tensor_from_ids(&prompt_ids)?, 0)
     };
 
+    // SWIFT eligibility decided up-front so the prefill, baseline decode, and
+    // verify all run under the same attention kernel when speculative work is
+    // active. `force_standard_attn` is the manual override; SWIFT auto-enables
+    // it because draft and verify must produce identical logits.
+    let swift_active = swift_cfg.enabled
+        && gen.sampling.temperature == 0.0
+        && model.total_layers >= 8
+        && gen.sampling.max_tokens >= (swift_cfg.gamma + 1);
+    let force_attn = force_standard_attn || swift_active;
+
     // Prefill — block_in_place for CPU-bound inference
     let logits = tokio::task::block_in_place(|| {
+        let _g = crate::inference::attn_kernel::ForceStandardAttnGuard::new(force_attn);
         model.forward(&input, index_pos_start, kv_store, &req_id_str)
     })?;
 
@@ -832,16 +864,12 @@ async fn handle_generate(
     let mut index_pos = prompt_tokens;
     let mut finish_reason = "length".to_string();
 
-    // SWIFT eligibility: enabled + greedy + enough layers + budget for at
-    // least one full round. Falls through to the per-token loop otherwise.
-    let swift_active = swift_cfg.enabled
-        && gen.sampling.temperature == 0.0
-        && model.total_layers >= 8
-        && gen.sampling.max_tokens >= (swift_cfg.gamma + 1);
-
     if swift_active {
-        let skip_mask = build_skip_mask(model.total_layers, swift_cfg.skip_ratio);
-        let calibrator = SwiftCalibrator::new();
+        let calibrator = SwiftCalibrator::new(
+            model.total_layers,
+            swift_cfg.skip_ratio,
+            swift_cfg.calibration_tokens,
+        );
         let outcome = swift_decode_loop(
             writer,
             model,
@@ -852,7 +880,6 @@ async fn handle_generate(
             &eos,
             stop_sequences,
             use_logprobs,
-            &skip_mask,
             swift_cfg.gamma as usize,
             &calibrator,
             &mut next_token,
@@ -867,6 +894,8 @@ async fn handle_generate(
             request_id = %request_id,
             rounds = calibrator.rounds(),
             acceptance_rate = calibrator.acceptance_rate(),
+            num_candidates = calibrator.num_candidates(),
+            selected = ?calibrator.selected_candidate(),
             "DIAG: SWIFT session complete"
         );
     } else {
@@ -905,6 +934,7 @@ async fn handle_generate(
 
             let input = model.token_tensor(next_token)?;
             let logits = tokio::task::block_in_place(|| {
+                let _g = crate::inference::attn_kernel::ForceStandardAttnGuard::new(force_attn);
                 model.forward(&input, index_pos, kv_store, &req_id_str)
             })?;
             let (tok, lp) =
@@ -986,7 +1016,6 @@ async fn swift_decode_loop(
     eos: &[u32],
     stop_sequences: &[String],
     use_logprobs: bool,
-    skip_mask: &[bool],
     gamma: usize,
     calibrator: &SwiftCalibrator,
     next_token: &mut u32,
@@ -1068,11 +1097,16 @@ async fn swift_decode_loop(
         }
 
         // ── Phase 1: draft γ tokens with the skip mask ──
+        // The calibrator picks the candidate pattern: round-robin during the
+        // calibration window, pinned best-accept after.
+        let cand_idx = calibrator.next_candidate();
+        let skip_mask = calibrator.pattern(cand_idx);
         let mut draft_tokens: Vec<u32> = Vec::with_capacity(gamma);
         let mut current_token = *next_token;
         for k_offset in 0..gamma {
             let input = model.token_tensor(current_token)?;
             let logits = tokio::task::block_in_place(|| {
+                let _g = crate::inference::attn_kernel::ForceStandardAttnGuard::new(true);
                 model.forward_with_skip_mask(
                     &input,
                     p_start + k_offset,
@@ -1097,6 +1131,7 @@ async fn swift_decode_loop(
         verify_ids.extend(draft_tokens.iter().copied());
         let verify_input = model.tensor_from_ids(&verify_ids)?;
         let verify_logits = tokio::task::block_in_place(|| {
+            let _g = crate::inference::attn_kernel::ForceStandardAttnGuard::new(true);
             model.forward_verify_all_positions(&verify_input, p_start, kv_store, req_id_str)
         })?;
         // Shape: [1, γ+1, vocab].
@@ -1118,7 +1153,7 @@ async fn swift_decode_loop(
         let bonus_logits = slice_position_logits(&verify_logits, bonus_logits_idx)?;
         let bonus_token = sample_argmax(&bonus_logits)?;
 
-        calibrator.record(gamma as u32, accepted_count as u32);
+        calibrator.record(cand_idx, gamma as u32, accepted_count as u32);
 
         // ── Phase 5: emit committed tokens. The carried next_token is
         // committed at p_start, then accepted draft tokens, then bonus.

@@ -137,6 +137,12 @@ enum Commands {
         /// Fraction of layers to skip in SWIFT draft pass
         #[arg(long, default_value = "0.45")]
         swift_skip_ratio: f32,
+        /// Force every attention call through standard_attention (matmul)
+        #[arg(long, default_value_t = false, action = clap::ArgAction::Set)]
+        force_standard_attn: bool,
+        /// Cap GGUF context_length when allocating KV cache. 0 = use GGUF value.
+        #[arg(long, default_value = "0")]
+        max_seq_len_override: u32,
     },
     /// Device pool management (combine credits across your devices)
     Pool {
@@ -237,6 +243,8 @@ async fn main() -> anyhow::Result<()> {
             swift_calibration_tokens,
             swift_gamma,
             swift_skip_ratio,
+            force_standard_attn,
+            max_seq_len_override,
         } => {
             let window: Option<Vec<u32>> = shard_window.map(|s| {
                 s.split(',')
@@ -256,6 +264,11 @@ async fn main() -> anyhow::Result<()> {
                 gamma: swift_gamma,
                 skip_ratio: swift_skip_ratio,
             };
+            let max_seq_override = if max_seq_len_override == 0 {
+                None
+            } else {
+                Some(max_seq_len_override as usize)
+            };
             swarmllm::inference::model_worker::run_worker(
                 socket,
                 data_dir,
@@ -263,6 +276,8 @@ async fn main() -> anyhow::Result<()> {
                 kv_cache_ttl,
                 prefix_cfg,
                 swift_cfg,
+                force_standard_attn,
+                max_seq_override,
             )
             .await;
             Ok(())

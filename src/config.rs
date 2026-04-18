@@ -351,6 +351,24 @@ pub struct InferenceConfig {
     /// outer layers are most sensitive to perturbation. Default 0.45 (skip ~45%).
     #[serde(default = "default_swift_skip_ratio")]
     pub swift_skip_ratio: f32,
+    /// Force every attention call (prefill, decode, verify) through
+    /// `standard_attention` instead of letting candle pick `cpu_flash_attention`
+    /// or GPU `flash_attn` for multi-position forwards. Required for
+    /// speculative paths (SWIFT, classic spec) so draft and verify produce
+    /// numerically identical logits — otherwise even `skip_ratio=0` yields
+    /// < 100% accept due to softmax differences. Auto-enabled while SWIFT is
+    /// active; setting this manually applies it to non-SWIFT requests too
+    /// (useful for fair-comparison benchmarking). Default false.
+    #[serde(default)]
+    pub force_standard_attn: bool,
+    /// Override the GGUF-reported `context_length` when constructing the KV
+    /// cache. candle pre-allocates `[B, H, max_seq_len, D]` zeros tensors per
+    /// layer at first forward, so models with a 128K context (Phi-3.5) OOM
+    /// instantly on small VRAM. Set this to e.g. 4096 to make those models
+    /// fit at the cost of rejecting prompts longer than the override. None
+    /// = use the GGUF value.
+    #[serde(default)]
+    pub max_seq_len_override: Option<u32>,
 }
 
 fn default_tp_max_latency_ms() -> u32 {
@@ -1295,6 +1313,8 @@ impl Default for InferenceConfig {
             swift_calibration_tokens: default_swift_calibration_tokens(),
             swift_gamma: default_swift_gamma(),
             swift_skip_ratio: default_swift_skip_ratio(),
+            force_standard_attn: false,
+            max_seq_len_override: None,
         }
     }
 }

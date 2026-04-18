@@ -172,9 +172,19 @@ impl SplitModel {
                 .ok_or_else(|| SwarmError::Internal(format!("Missing GGUF metadata: {key}")))
         };
 
-        let context_length = md_get("context_length")
+        let mut context_length = md_get("context_length")
             .and_then(|v| v.to_u32().map_err(SwarmError::internal))
             .unwrap_or(DEFAULT_MAX_SEQ_LEN as u32) as usize;
+        if let Some(cap) = super::max_seq_len_override() {
+            if cap < context_length {
+                tracing::info!(
+                    gguf_context_length = context_length,
+                    override_value = cap,
+                    "Clamping context_length to MAX_SEQ_LEN_OVERRIDE — KV-cache and RoPE table sized to override"
+                );
+                context_length = cap;
+            }
+        }
 
         // Gemma 2 attention logit soft-capping (from GGUF metadata)
         let attn_logit_softcap = ct

@@ -837,6 +837,7 @@ pub(crate) fn run_attention(
     neg_inf: &Tensor,
     attn_logit_softcap: Option<f32>,
 ) -> CandleResult<Tensor> {
+    let force_standard = crate::inference::attn_kernel::is_force_standard_attn();
     match q.device() {
         Device::Cpu => {
             let seq_len = q.dim(2)?;
@@ -844,7 +845,9 @@ pub(crate) fn run_attention(
             // Fast path for decode (seq_len=1): skip CPU flash attention's
             // triple transpose+contiguous copies. Standard matmul is cheaper
             // for a single query token against the KV cache.
-            if seq_len == 1 {
+            // Also taken when SWIFT/spec sessions force standard attention so
+            // baseline + draft + verify share identical numerics.
+            if seq_len == 1 || force_standard {
                 return standard_attention(
                     q,
                     k,
@@ -906,7 +909,9 @@ pub(crate) fn run_attention(
             // has pre-populated prefix entries (k_len > q_len with q_len > 1), the
             // offset causal mask can't be expressed via flash_attn's boolean causal
             // flag. Fall back to standard matmul attention with the explicit mask.
-            if k_len > q_len && q_len > 1 {
+            // Also taken when SWIFT/spec sessions force standard attention so
+            // baseline + draft + verify share identical numerics.
+            if (k_len > q_len && q_len > 1) || force_standard {
                 return standard_attention(
                     q,
                     k,

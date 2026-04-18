@@ -46,3 +46,20 @@ pub use self::model::SplitModel;
 pub use self::prefix_cache::{KvSnapshot, PrefixCache};
 
 pub(crate) const DEFAULT_MAX_SEQ_LEN: usize = 4096;
+
+/// Process-global override for the GGUF `context_length` value. When non-zero,
+/// the loader clamps `context_length` to this number before allocating the
+/// KV cache and RoPE tables. Set at worker startup from `--max-seq-len-override`.
+/// 0 = use the GGUF value verbatim.
+pub static MAX_SEQ_LEN_OVERRIDE: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+/// Read the current override (None when 0 — unset).
+pub fn max_seq_len_override() -> Option<usize> {
+    let v = MAX_SEQ_LEN_OVERRIDE.load(std::sync::atomic::Ordering::Relaxed);
+    if v == 0 {
+        None
+    } else {
+        Some(v)
+    }
+}

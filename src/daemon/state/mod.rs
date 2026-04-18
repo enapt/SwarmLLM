@@ -419,6 +419,12 @@ impl SharedState {
             state.config.inference.swift_gamma,
             state.config.inference.swift_skip_ratio,
         );
+        state
+            .model_process_pool
+            .set_force_standard_attn(state.config.inference.force_standard_attn);
+        state
+            .model_process_pool
+            .set_max_seq_len_override(state.config.inference.max_seq_len_override);
 
         (state, shutdown_rx, dht_query_rx)
     }

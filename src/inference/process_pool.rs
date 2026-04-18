@@ -94,6 +94,12 @@ pub struct ModelProcessPool {
     swift_gamma: std::sync::atomic::AtomicU32,
     /// Stored as parts-per-thousand to fit into AtomicU32 (e.g. 0.45 → 450).
     swift_skip_ratio_milli: std::sync::atomic::AtomicU32,
+    /// Force `standard_attention` everywhere (baseline + speculative paths).
+    /// Required for SWIFT correctness; optional for benchmarking baselines.
+    force_standard_attn: std::sync::atomic::AtomicBool,
+    /// 0 means use the GGUF context_length verbatim. >0 caps it for KV-cache
+    /// pre-allocation, so 128K-context models fit on small VRAM.
+    max_seq_len_override: std::sync::atomic::AtomicU32,
 }
 
 impl ModelProcessPool {
@@ -114,7 +120,25 @@ impl ModelProcessPool {
             swift_calibration_tokens: std::sync::atomic::AtomicU32::new(32),
             swift_gamma: std::sync::atomic::AtomicU32::new(4),
             swift_skip_ratio_milli: std::sync::atomic::AtomicU32::new(450),
+            force_standard_attn: std::sync::atomic::AtomicBool::new(false),
+            max_seq_len_override: std::sync::atomic::AtomicU32::new(0),
         }
+    }
+
+    /// Force every attention call through `standard_attention` on
+    /// future-spawned workers (auto-enabled while SWIFT is on).
+    pub fn set_force_standard_attn(&self, force: bool) {
+        self.force_standard_attn
+            .store(force, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Cap the GGUF context_length when constructing the KV cache. Pass `None`
+    /// to use the GGUF value verbatim.
+    pub fn set_max_seq_len_override(&self, override_val: Option<u32>) {
+        self.max_seq_len_override.store(
+            override_val.unwrap_or(0),
+            std::sync::atomic::Ordering::Relaxed,
+        );
     }
 
     /// Apply SWIFT self-speculative decoding settings to future-spawned workers.
@@ -297,6 +321,13 @@ impl ModelProcessPool {
             args.push("--swift-skip-ratio".to_string());
             let ratio = self.swift_skip_ratio_milli.load(Ordering::Relaxed) as f32 / 1000.0;
             args.push(format!("{ratio}"));
+            args.push("--force-standard-attn".to_string());
+            args.push(self.force_standard_attn.load(Ordering::Relaxed).to_string());
+            let cap = self.max_seq_len_override.load(Ordering::Relaxed);
+            if cap > 0 {
+                args.push("--max-seq-len-override".to_string());
+                args.push(cap.to_string());
+            }
         }
 
         // If a shard window is set for this model, pass it to the worker

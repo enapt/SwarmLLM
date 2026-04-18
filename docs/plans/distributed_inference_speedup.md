@@ -409,6 +409,52 @@ Net: baseline per-token decode and SWIFT's verify pass run on **different attent
 2. **Test on larger models.** Paper measures 0.45–0.50 acceptance on LLaMA-2-13B/70B (vs our 0.10–0.14 on 1.1B). Bigger model → more layer redundancy → much higher accept. Blocker: Phi-3.5-mini reports 131072 max context in its GGUF and candle pre-allocates the full KV buffer at first forward → OOMs an 8GB GPU. Would need a `max_seq_len_override` config to make any larger model fit.
 3. **v2 calibration** of skip pattern (Bayesian / random search vs the fixed middle-band v1 ships).
 
+### Round 2.1 (2026-04-18) — All three unblockers landed; SWIFT still loses
+
+All three landed:
+- `src/inference/attn_kernel.rs` + thread-local `ForceStandardAttnGuard` — baseline + draft + verify all run through `standard_attention` when SWIFT is active.
+- `InferenceConfig::max_seq_len_override` + process-global `MAX_SEQ_LEN_OVERRIDE` — the loader clamps GGUF `context_length` so 128K-context models fit on small VRAM.
+- v2 calibration in `swift.rs`: 5 candidate skip patterns (varying start position, fixed width = `skip_ratio × num_layers`), round-robin during the warmup window, then pin the highest-accept candidate.
+
+Re-bench after the unblockers (RTX 3070 8GB, CUDA, 100-token greedy, force_standard_attn = true on baseline for fair comparison):
+
+| Model | Skip | SWIFT decode | SWIFT accept | Baseline (force_standard) |
+|---|---|---|---|---|
+| TinyLlama-1.1B (22L) | 0.45 | 21.4 tok/s | 11.8% | ~50 tok/s |
+| Phi-3.5-mini (32L) | 0.0 (sanity) | ~50 tok/s | 96.4% | ~50 tok/s |
+| Phi-3.5-mini (32L) | 0.15 | 27 tok/s | 56.3% | ~50 tok/s |
+| Phi-3.5-mini (32L) | 0.25 | 19 tok/s | 33.0% | ~50 tok/s |
+| Phi-3.5-mini (32L) | 0.35 | 14 tok/s | 14.7% | ~50 tok/s |
+| Phi-3.5-mini (32L) | 0.45 | 12 tok/s | 4.4% | ~50 tok/s |
+
+The unblockers worked individually:
+- skip=0 acceptance jumped from 92% (CPU pre-fix) → **96.4%** (GPU post-fix). The residual 3.6% is matmul-reduction-order noise between seq_len=1 and seq_len=γ+1 forwards — not a logic bug.
+- max_seq_len_override let Phi-3.5 fit on 8 GB.
+- v2 calibration runs end-to-end, picks `selected=Some(idx)` after the warmup, and the chosen pattern stays pinned for the rest of the request.
+
+But SWIFT is still **structurally slower than baseline**:
+
+```
+Per-round cost   = γ·draft_forward_cost  +  verify_forward_cost
+Per-round emit   = 1 + accepted_count
+Per-token cost   = (γ·skip_factor + verify_factor) / (1 + accept)
+
+With γ=4, skip_ratio=0.45 (skip_factor ≈ 0.55), verify_factor ≈ γ+1 = 5
+  (verify_factor scales linearly because standard_attention is O(seq_len))
+   → cost = (4·0.55 + 5) / (1 + accept) = 7.2 / (1 + accept)
+   → To beat baseline (cost = 1) we need accept > 6.2, impossible at γ=4.
+```
+
+The verify pass costs ≈ γ+1 baseline forwards under `standard_attention` (linear in seq_len), and there's no setting where γ accept tokens amortize that cost. The SWIFT paper's published 1.3–1.6× speedup assumes verify uses **flash-attention**, where multi-position forward is roughly O(seq_len)-amortized but with a much smaller constant (weight loads dominate). Our verify can't use flash-attn because the offset causal mask isn't expressible via flash-attn's boolean causal flag.
+
+### Conclusion: SWIFT shelved until candle gets flash-attn-with-mask
+
+The three unblockers are correct and useful for any future speculative path, but SWIFT itself doesn't pay off on the candle backend without flash-attention support for offset causal masks (or some other multi-position kernel that runs sub-linearly in seq_len). Recommended next steps:
+
+1. **Stop pushing SWIFT.** Leave it behind the flag. Current implementation is correct, just unprofitable.
+2. **Track candle/flash-attn support for offset causal masks** as a prerequisite. Or implement our own GPU kernel.
+3. **Move to higher-leverage items** from Round 3 (`Item 12 — DSD` for distributed-spec, `Item 13 — activation compression`, `Item 16 — Parallax scheduler`). DSD doesn't depend on the verify-cost problem because it amortizes across network round trips, not across batched decode positions.
+
 ### Why we kept it
 
 The implementation is correct in structure (skip-mask draft + truncated KV + full verify + greedy accept-reject), and the value will appear on:

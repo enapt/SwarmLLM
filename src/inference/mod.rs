@@ -1,4 +1,5 @@
 pub mod allreduce;
+pub mod attn_kernel;
 pub mod chat_template;
 pub mod executor;
 pub mod kv_cache;
