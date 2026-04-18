@@ -100,6 +100,11 @@ pub struct ModelProcessPool {
     /// 0 means use the GGUF context_length verbatim. >0 caps it for KV-cache
     /// pre-allocation, so 128K-context models fit on small VRAM.
     max_seq_len_override: std::sync::atomic::AtomicU32,
+    /// Quantize intermediate-segment hidden state activations to Q8_0 before
+    /// returning them to the daemon (which forwards to the next pipeline peer).
+    /// Receivers auto-dispatch on the dtype tag. See Item 13 in
+    /// `docs/plans/distributed_inference_speedup.md`.
+    activation_compression: std::sync::atomic::AtomicBool,
 }
 
 impl ModelProcessPool {
@@ -122,7 +127,16 @@ impl ModelProcessPool {
             swift_skip_ratio_milli: std::sync::atomic::AtomicU32::new(450),
             force_standard_attn: std::sync::atomic::AtomicBool::new(false),
             max_seq_len_override: std::sync::atomic::AtomicU32::new(0),
+            activation_compression: std::sync::atomic::AtomicBool::new(false),
         }
+    }
+
+    /// Toggle Q8_0 quantization of intermediate-segment hidden state activations
+    /// for future-spawned workers. Existing workers retain whatever flag they
+    /// were spawned with — restart the worker to apply changes.
+    pub fn set_activation_compression(&self, enabled: bool) {
+        self.activation_compression
+            .store(enabled, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Force every attention call through `standard_attention` on
@@ -328,6 +342,12 @@ impl ModelProcessPool {
                 args.push("--max-seq-len-override".to_string());
                 args.push(cap.to_string());
             }
+            args.push("--activation-compression".to_string());
+            args.push(
+                self.activation_compression
+                    .load(Ordering::Relaxed)
+                    .to_string(),
+            );
         }
 
         // If a shard window is set for this model, pass it to the worker

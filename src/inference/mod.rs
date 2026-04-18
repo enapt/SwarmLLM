@@ -9,6 +9,7 @@ pub(crate) mod model_arch;
 pub mod model_worker;
 pub mod pipeline;
 pub mod process_pool;
+pub mod quant;
 pub mod router;
 pub mod sampling;
 pub mod scheduler;

@@ -143,6 +143,12 @@ enum Commands {
         /// Cap GGUF context_length when allocating KV cache. 0 = use GGUF value.
         #[arg(long, default_value = "0")]
         max_seq_len_override: u32,
+        /// Quantize intermediate-segment hidden state activations to Q8_0
+        /// before returning them to the daemon. Compresses ~3.76× with
+        /// negligible quality loss. Off by default; receivers always
+        /// auto-dispatch on the dtype tag.
+        #[arg(long, default_value_t = false, action = clap::ArgAction::Set)]
+        activation_compression: bool,
     },
     /// Device pool management (combine credits across your devices)
     Pool {
@@ -245,6 +251,7 @@ async fn main() -> anyhow::Result<()> {
             swift_skip_ratio,
             force_standard_attn,
             max_seq_len_override,
+            activation_compression,
         } => {
             let window: Option<Vec<u32>> = shard_window.map(|s| {
                 s.split(',')
@@ -278,6 +285,7 @@ async fn main() -> anyhow::Result<()> {
                 swift_cfg,
                 force_standard_attn,
                 max_seq_override,
+                activation_compression,
             )
             .await;
             Ok(())

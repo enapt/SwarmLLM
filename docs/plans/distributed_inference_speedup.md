@@ -9,9 +9,12 @@
 > | Item | Status | Effect |
 > |---|---|---|
 > | **Item 4 — Remote-generate fast path** | ✅ LANDED & DEFAULT-ON | **1.93× decode speedup** on default config. Main user-visible win. |
+> | **Item 5 — Cross-request prefix cache** | ✅ LANDED & DEFAULT-ON | **29.4× wall-clock** on cache-hit re-submission of the same 513-token prompt. |
 > | Item 1 — Persistent pipeline stream | ✅ Landed behind `persistent_pipeline_stream=false` flag. Verified end-to-end but no measured latency win (bottleneck was elsewhere). |
 > | Item 2 — Speculative decoding (distributed) | ✅ Landed in 3 phases behind `speculative_distributed=false` flag + requires loaded draft model. Working; 40–52% accept rate w/ backend mismatch (llama-cpp draft vs candle target). |
 > | Item 3 — Continuous batching | 🟡 Phase 1 (wire protocol) landed behind `continuous_batching=false` flag. Phase 2 (scheduler refactor + `SplitModel::forward_batch`) is the remaining work; blocker is replacing `Mutex<socket>` in `ModelProcessPool` with mpsc-fed scheduler. Not pursued in this session because Item 4 delivered the headline win. |
+> | Item 6 — SWIFT self-speculative | 🟡 Landed behind `swift_self_speculative=false` flag. Structurally slower than baseline on candle until flash-attn-with-mask lands (kernel mismatch on multi-position verify). Shelved. |
+> | **Item 13 — Activation compression (Q8_0)** | ✅ LANDED behind `activation_compression=false` flag. Codec verified (~3.76× compression, RMS error <0.005, peer-compatible auto-dispatch). End-to-end multi-segment benchmark pending. |
 >
 > **If starting a new session, the most useful things to pick up are:**
 > 1. Item 3 Phase 2 (concurrent-user throughput — independent of Item 4)
@@ -568,17 +571,34 @@ The implementation is correct in structure (skip-mask draft + truncated KV + ful
 
 **Complexity.** Medium. Adaptive accept window per link.
 
-### Item 13 — Activation compression for inter-node transfer
+### Item 13 — Activation compression for inter-node transfer ✅ LANDED 2026-04-18 (flag, codec verified)
 
-**What.** Fine-grained group quantization (int4/int8) of hidden states between pipeline stages, link-aware (skip on fast LAN, compress on slow WAN). Highest single-add ROI flagged by research scan.
+**Source.** [arxiv 2411.09510](https://arxiv.org/html/2411.09510v3) (Hansen-Palmus et al., NVIDIA, v3 Jan 2026 — "Communication Compression for Tensor Parallel LLM Inference"); reference precedent llama.cpp Q8_0 wire format.
 
-**Source.** [arxiv 2411.09510](https://arxiv.org/html/2411.09510v2).
+**What landed.** Q8_0 (group-32 symmetric quantization, llama.cpp-compatible block layout: `f16 scale + 32 i8 values = 34 B per group`) for intermediate-segment hidden state activations between pipeline peers. Compresses ~3.76× vs raw f32 with measured RMS error <0.005 on synthetic activation slices and <1e-4 between blocks even when one block contains 100× outliers (per-block scale isolates them — see `inference::quant::tests::outlier_block_isolated`).
 
-**Reported.** 3.5–4.5× activation-size reduction → 1.2–2× TTFT on slow links.
+**Files.**
+- `src/inference/quant.rs` (new) — `quantize_q8_0` / `dequantize_q8_0` / `q8_0_byte_len`. 6 unit tests covering exact-block-size, partial-trailing-block, all-zeros, outlier isolation, malformed input, and 4096-element typical-hidden-state quality + compression ratio.
+- `src/inference/tensor_util.rs` — added `tensor_to_bytes_q8_0` + dtype-tag dispatch in `bytes_to_tensor` (tag `0` = legacy raw f32, tag `1` = Q8_0). Receivers auto-dispatch — peers without the flag still decode quantized inputs correctly.
+- `src/inference/model_worker.rs` — `handle_forward` takes a new `activation_compression: bool`; intermediate-segment output uses `tensor_to_bytes_q8_0` when the flag is on. Final-segment output (token IDs) is unaffected.
+- `src/inference/process_pool.rs` — `set_activation_compression`, atomic flag, `--activation-compression <bool>` arg passed to spawned worker subprocesses.
+- `src/main.rs` — new `model-worker --activation-compression` CLI flag.
+- `src/config.rs` — `InferenceConfig::activation_compression: bool` (default `false`).
+- `src/daemon/state/mod.rs` — applies the config flag to the pool at startup.
+
+**Why dtype-tag inside the tensor envelope (rather than `LayerForward.format`).** The `tensor_to_bytes` envelope already carries a 4-byte dtype tag at a stable offset. Extending it keeps the wire compatible with peers that don't run quantization — they just see a different tag and dispatch in `bytes_to_tensor`. Adding `TensorFormat::Q8_0` at the LayerForward level would require coordinating decoder branches across `layer_forward.rs`, `encrypted.rs`, `pipeline_stream.rs`, and `manager/mod.rs`, with no functional benefit since the actual byte layout of `LayerForward.activations` is what changes.
+
+**Eligibility.** Always safe to enable; receivers handle either tag. The fast-path single-segment case (Item 4) bypasses hidden state transfer entirely so this only helps when the pipeline spans 2+ peers (the actual pain point for compression). TP `AllReduce` payloads still use the legacy raw f32 path because their codec is independent (handled in `daemon/dispatch/layer_forward.rs` via `tensor_to_raw_f32`) — extending TP would be a separate increment.
+
+**Reported (paper).** 3.5–4.5× activation-size reduction → 1.2–2× TTFT on slow links. Q8_0 specifically falls between the FP4 and FP5 results in the paper's Table 2 (PPL drift well under 1%); SmoothQuant W8A8 confirms <0.5% PPL on standard activations.
 
 **Stacks with.** Every other item — orthogonal. Especially impactful for SwarmLLM's heterogeneous links (LAN 1Gbps to WAN 10–50 Mbps).
 
-**Complexity.** Small–medium. Add a compression stage to the tensor-payload codec (type tag 0x01). Per-model calibration of acceptable bits-per-activation.
+**Remaining work (future).**
+- End-to-end multi-segment benchmark with the flag on (TinyLlama is single-segment in practice; need 2+ shard ranges across 2+ peers to measure WAN-style improvement).
+- Link-aware auto-toggle: enable per-segment based on measured peer RTT/bandwidth from `peer_registry`. Cheapest implementation is a per-link bool on the segment plan rather than a global config.
+- Extend to TP AllReduce payloads (separate codec path).
+- Optional Q4_0 variant for very-slow links (~7× compression at modest quality cost).
 
 ### Item 14 — Mirror Speculative Decoding (Apple, 2025)
 
@@ -634,9 +654,8 @@ The implementation is correct in structure (skip-mask draft + truncated KV + ful
 
 ### Sequencing recommendation (Round 3)
 
-**Order:** 13 → 12 → 16 → 14/17/18.
+**Order:** ~~13~~ → 12 → 16 → 14/17/18. (Item 13 landed 2026-04-18.)
 
-- Item 13 (activation compression) is the highest-ROI standalone add — small complexity, orthogonal to everything, directly attacks the bandwidth bottleneck.
 - Item 12 (DSD) is the natural progression after Item 7 — turns the network round-trip from cost into compute.
 - Item 16 (Parallax scheduler) is structural — improves every other item by routing requests to better-matched peer chains.
 - Items 14, 17, 18 are larger swings; pick based on whether the dominant pain is latency hiding (14), prefill/decode imbalance (17), or tail latency on multi-hop routes (18).

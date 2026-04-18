@@ -20,6 +20,43 @@ fn tensor_roundtrip() {
 }
 
 #[test]
+fn tensor_q8_0_roundtrip() {
+    // Hidden-state-like tensor [1, 32] (one full Q8_0 block) — verify the
+    // tensor_to_bytes_q8_0 → bytes_to_tensor dispatch works end-to-end.
+    let data: Vec<f32> = (0..32).map(|i| (i as f32 - 16.0) * 0.1).collect();
+    let tensor = Tensor::from_vec(data.clone(), &[1, 32], &Device::Cpu).unwrap();
+    let bytes = tensor_to_bytes_q8_0(&tensor).unwrap();
+
+    // Q8_0: 4 (ndim) + 8 (shape: 2 dims × 4) + 4 (dtype tag) + 34 (one block) = 50 bytes
+    assert_eq!(bytes.len(), 4 + 8 + 4 + 34);
+
+    let restored = bytes_to_tensor(&bytes).unwrap();
+    assert_eq!(restored.shape().dims(), &[1, 32]);
+
+    let restored_data = restored.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+    let max_err = data
+        .iter()
+        .zip(restored_data.iter())
+        .map(|(a, b)| (a - b).abs())
+        .fold(0.0f32, f32::max);
+    assert!(max_err < 0.01, "Q8_0 roundtrip max err {max_err} too high");
+}
+
+#[test]
+fn tensor_q8_0_compresses_vs_f32() {
+    // 4096-element hidden state slice: f32 = 4 + 4 + 4 + 16384 = 16396 bytes;
+    // Q8_0 = 4 + 4 + 4 + (128 blocks × 34) = 4364 bytes (~3.76× smaller).
+    let data: Vec<f32> = (0..4096).map(|i| (i as f32).sin()).collect();
+    let tensor = Tensor::from_vec(data, &[1, 4096], &Device::Cpu).unwrap();
+
+    let f32_bytes = tensor_to_bytes(&tensor).unwrap();
+    let q8_bytes = tensor_to_bytes_q8_0(&tensor).unwrap();
+
+    let ratio = f32_bytes.len() as f32 / q8_bytes.len() as f32;
+    assert!(ratio > 3.5, "expected >3.5× compression, got {ratio}");
+}
+
+#[test]
 fn sample_greedy() {
     let logits = Tensor::from_vec(vec![0.1f32, 0.2, 5.0, 0.3], &[1, 4], &Device::Cpu).unwrap();
     let token = sample_token(&logits, 0.0, 1.0).unwrap();

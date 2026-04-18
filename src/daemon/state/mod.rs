@@ -425,6 +425,9 @@ impl SharedState {
         state
             .model_process_pool
             .set_max_seq_len_override(state.config.inference.max_seq_len_override);
+        state
+            .model_process_pool
+            .set_activation_compression(state.config.inference.activation_compression);
 
         (state, shutdown_rx, dht_query_rx)
     }

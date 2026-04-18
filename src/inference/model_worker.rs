@@ -54,6 +54,7 @@ pub async fn run_worker(
     swift_cfg: SwiftConfig,
     force_standard_attn: bool,
     max_seq_len_override: Option<usize>,
+    activation_compression: bool,
 ) {
     // Connect to the daemon's Unix socket
     let stream = match UnixStream::connect(&socket_path).await {
@@ -105,6 +106,7 @@ pub async fn run_worker(
     tracing::info!(
         force_standard_attn,
         max_seq_len_override = ?max_seq_len_override,
+        activation_compression,
         "model-worker: attention-kernel + KV-budget overrides"
     );
 
@@ -140,6 +142,7 @@ pub async fn run_worker(
                     fwd,
                     payload,
                     &shard_window,
+                    activation_compression,
                 )
                 .await
                 {
@@ -159,6 +162,7 @@ pub async fn run_worker(
                     activation_lens,
                     payload,
                     &shard_window,
+                    activation_compression,
                 )
                 .await
                 {
@@ -372,6 +376,7 @@ async fn handle_batch_forward(
     activation_lens: Vec<u32>,
     payload: Vec<u8>,
     shard_window: &Option<Vec<u32>>,
+    activation_compression: bool,
 ) -> Result<(), SwarmError> {
     if activation_lens.len() != requests.len() {
         return Err(SwarmError::Internal(format!(
@@ -394,8 +399,17 @@ async fn handle_batch_forward(
             .to_vec();
         cursor += act_len;
         let request_id = fwd.request_id;
-        if let Err(e) =
-            handle_forward(writer, models, kv_store, data_dir, fwd, slice, shard_window).await
+        if let Err(e) = handle_forward(
+            writer,
+            models,
+            kv_store,
+            data_dir,
+            fwd,
+            slice,
+            shard_window,
+            activation_compression,
+        )
+        .await
         {
             send_worker_error(writer, request_id, e).await;
         }
@@ -403,6 +417,7 @@ async fn handle_batch_forward(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_forward(
     writer: &mut tokio::net::unix::OwnedWriteHalf,
     models: &mut HashMap<(usize, usize, usize, usize), SplitModel>,
@@ -411,6 +426,7 @@ async fn handle_forward(
     fwd: IpcForward,
     activation_bytes: Vec<u8>,
     shard_window: &Option<Vec<u32>>,
+    activation_compression: bool,
 ) -> Result<(), SwarmError> {
     let request_id = fwd.request_id;
     let model_id = fwd.model_id.clone();
@@ -707,8 +723,11 @@ async fn handle_forward(
                     spec_logits: Vec::new(),
                 })
             } else {
-                let activation_bytes =
-                    split::tensor_to_bytes(&output).map_err(|e| format!("Encode: {e}"))?;
+                let activation_bytes = if activation_compression {
+                    split::tensor_to_bytes_q8_0(&output).map_err(|e| format!("Encode Q8_0: {e}"))?
+                } else {
+                    split::tensor_to_bytes(&output).map_err(|e| format!("Encode: {e}"))?
+                };
                 Ok(crate::types::LayerResult {
                     request_id,
                     token_ids: vec![],

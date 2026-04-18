@@ -369,6 +369,18 @@ pub struct InferenceConfig {
     /// = use the GGUF value.
     #[serde(default)]
     pub max_seq_len_override: Option<u32>,
+    /// Quantize intermediate-segment hidden state activations to Q8_0
+    /// (group-32 symmetric) before sending them to the next pipeline peer.
+    /// Compresses ~3.76× vs raw f32 with negligible quality loss (PPL drift
+    /// well under 1% on standard benchmarks — see
+    /// `docs/plans/distributed_inference_speedup.md` Item 13). Receivers
+    /// auto-dispatch on the dtype tag, so enabling this on one peer does not
+    /// require all peers to upgrade — uncompressed peers still send raw f32
+    /// and receive correctly-dequantized inputs. Off by default until
+    /// validated on multi-segment workloads. Doesn't affect single-segment
+    /// fast-path (Item 4) since that bypasses hidden state transfer entirely.
+    #[serde(default)]
+    pub activation_compression: bool,
 }
 
 fn default_tp_max_latency_ms() -> u32 {
@@ -1315,6 +1327,7 @@ impl Default for InferenceConfig {
             swift_skip_ratio: default_swift_skip_ratio(),
             force_standard_attn: false,
             max_seq_len_override: None,
+            activation_compression: false,
         }
     }
 }

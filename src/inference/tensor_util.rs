@@ -3,6 +3,13 @@
 use candle_core::{DType, Device, Tensor};
 
 use crate::error::SwarmError;
+use crate::inference::quant;
+
+/// dtype_tag values used by `tensor_to_bytes` / `bytes_to_tensor`.
+/// 0 = raw little-endian f32 (legacy default)
+/// 1 = Q8_0 group-32 symmetric quantized (see `inference::quant`)
+pub const DTYPE_TAG_F32: u32 = 0;
+pub const DTYPE_TAG_Q8_0: u32 = 1;
 
 pub fn tensor_to_bytes(tensor: &Tensor) -> Result<Vec<u8>, SwarmError> {
     let tensor = tensor.to_dtype(DType::F32).map_err(SwarmError::internal)?;
@@ -21,11 +28,38 @@ pub fn tensor_to_bytes(tensor: &Tensor) -> Result<Vec<u8>, SwarmError> {
         bytes.extend_from_slice(&(dim as u32).to_le_bytes());
     }
     // dtype tag (0 = f32)
-    bytes.extend_from_slice(&0u32.to_le_bytes());
+    bytes.extend_from_slice(&DTYPE_TAG_F32.to_le_bytes());
     // raw f32 data
     for val in &data {
         bytes.extend_from_slice(&val.to_le_bytes());
     }
+    Ok(bytes)
+}
+
+/// Q8_0-encoded variant of `tensor_to_bytes` for hidden-state activations.
+///
+/// Wire layout: same header as f32 (`ndim + shape + dtype_tag=Q8_0`), followed
+/// by Q8_0 blocks (34 bytes per group of 32 f32 values, see `inference::quant`).
+/// Compresses ~3.76× vs the f32 form. Receivers must use `bytes_to_tensor`,
+/// which dispatches on the dtype tag.
+pub fn tensor_to_bytes_q8_0(tensor: &Tensor) -> Result<Vec<u8>, SwarmError> {
+    let tensor = tensor.to_dtype(DType::F32).map_err(SwarmError::internal)?;
+    let shape = tensor.shape().dims();
+    let data = tensor
+        .flatten_all()
+        .map_err(SwarmError::internal)?
+        .to_vec1::<f32>()
+        .map_err(SwarmError::internal)?;
+
+    let qbytes = quant::quantize_q8_0(&data);
+
+    let mut bytes = Vec::with_capacity(4 + shape.len() * 4 + 4 + qbytes.len());
+    bytes.extend_from_slice(&(shape.len() as u32).to_le_bytes());
+    for &dim in shape {
+        bytes.extend_from_slice(&(dim as u32).to_le_bytes());
+    }
+    bytes.extend_from_slice(&DTYPE_TAG_Q8_0.to_le_bytes());
+    bytes.extend_from_slice(&qbytes);
     Ok(bytes)
 }
 
@@ -111,7 +145,7 @@ pub fn bytes_to_tensor(bytes: &[u8]) -> Result<Tensor, SwarmError> {
             "Tensor bytes truncated at dtype".into(),
         ));
     }
-    let _dtype_tag = u32::from_le_bytes(
+    let dtype_tag = u32::from_le_bytes(
         bytes[pos..pos + 4]
             .try_into()
             .map_err(|_| SwarmError::Internal("Tensor dtype parse error".into()))?,
@@ -134,20 +168,38 @@ pub fn bytes_to_tensor(bytes: &[u8]) -> Result<Tensor, SwarmError> {
         return Err(SwarmError::Internal("Tensor has zero elements".into()));
     }
 
-    let mut data = Vec::with_capacity(num_elements);
-    for _ in 0..num_elements {
-        if pos + 4 > bytes.len() {
-            return Err(SwarmError::Internal("Tensor data truncated".into()));
+    let data = match dtype_tag {
+        DTYPE_TAG_F32 => {
+            let mut data = Vec::with_capacity(num_elements);
+            for _ in 0..num_elements {
+                if pos + 4 > bytes.len() {
+                    return Err(SwarmError::Internal("Tensor data truncated".into()));
+                }
+                let val = f32::from_le_bytes(bytes[pos..pos + 4].try_into().unwrap());
+                if !val.is_finite() {
+                    return Err(SwarmError::Internal(
+                        "Tensor contains non-finite values (NaN/Inf)".into(),
+                    ));
+                }
+                data.push(val);
+                pos += 4;
+            }
+            data
         }
-        let val = f32::from_le_bytes(bytes[pos..pos + 4].try_into().unwrap());
-        if !val.is_finite() {
-            return Err(SwarmError::Internal(
-                "Tensor contains non-finite values (NaN/Inf)".into(),
-            ));
+        DTYPE_TAG_Q8_0 => {
+            let payload_len = quant::q8_0_byte_len(num_elements);
+            if pos + payload_len > bytes.len() {
+                return Err(SwarmError::Internal("Tensor Q8_0 payload truncated".into()));
+            }
+            quant::dequantize_q8_0(&bytes[pos..pos + payload_len], num_elements)
+                .map_err(SwarmError::Internal)?
         }
-        data.push(val);
-        pos += 4;
-    }
+        unknown => {
+            return Err(SwarmError::Internal(format!(
+                "Unknown tensor dtype tag: {unknown}"
+            )));
+        }
+    };
 
     let tensor =
         Tensor::from_vec(data, shape.as_slice(), &Device::Cpu).map_err(SwarmError::internal)?;
