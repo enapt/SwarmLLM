@@ -15,7 +15,9 @@
 //! Falls back to `greedy_assign` on any configuration the DP can't cover
 //! (e.g., no valid source, no valid sink, disconnected layers).
 //!
-//! Default off behind `InferenceConfig::parallax_routing`.
+//! Gated by `InferenceConfig::parallax_routing` (default on). Set to `false`
+//! to revert to pure greedy assembly — falls back automatically anyway when
+//! the DP has no valid source→sink path.
 
 use crate::error::SwarmError;
 use crate::types::{NodeId, PipelineSegment};

@@ -16,7 +16,7 @@
 > | Item 6 — SWIFT self-speculative | 🟡 Landed behind `swift_self_speculative=false` flag. Structurally slower than baseline on candle until flash-attn-with-mask lands (kernel mismatch on multi-position verify). Shelved. |
 > | **Item 13 — Activation compression (Q8_0)** | ✅ LANDED behind `activation_compression=false` flag. Codec verified (~3.76× compression, RMS error <0.005, peer-compatible auto-dispatch). End-to-end multi-segment benchmark pending. |
 > | **Item 12 — DSD (decentralized speculative)** | ✅ ALL PHASES LANDED 2026-04-18 behind `decentralized_spec_decoding=false`. Worker γ-token decode + KV truncation primitives + γ controller + multi-segment spec-verify worker branch + ~410 LOC coordinator loop in `pipeline/dsd.rs`. End-to-end multi-segment WAN benchmark pending. |
-> | **Item 16 — Parallax scheduler (Phases A+B)** | ✅ LANDED 2026-04-18 behind `parallax_routing=false`. Phase A: shortest-path DP over (node, layer_range) in `src/inference/scheduler/parallax.rs`. Phase B: observed per-layer latency EMA on every successful remote segment (`state.record_peer_segment_latency`), DP prefers observed over static `est_tokens_per_sec`. 10 parallax unit + 2 scheduler integration + 1 EMA math test. Phases C/D (offline allocator, multi-pipeline) deferred. |
+> | **Item 16 — Parallax scheduler (Phases A+B)** | ✅ LANDED & DEFAULT-ON 2026-04-18 (`parallax_routing=true`). Phase A: shortest-path DP over (node, layer_range) in `src/inference/scheduler/parallax.rs`. Phase B: observed per-layer latency EMA on every successful remote segment (`state.record_peer_segment_latency`), DP prefers observed over static `est_tokens_per_sec`. 10 parallax unit + 2 scheduler integration + 1 EMA math test. Falls back to greedy when the DP has no valid source→sink path. Phases C/D (offline allocator, multi-pipeline) deferred. |
 >
 > **If starting a new session, the most useful things to pick up are:**
 > 1. Item 3 Phase 2 (concurrent-user throughput — independent of Item 4)
@@ -710,7 +710,7 @@ Medium-large. Phase 1 is small (this commit). Phase 4 is the main coordinator lo
 
 **Complexity.** Medium.
 
-#### Phase A — Request-time routing DP (LANDED 2026-04-18, behind `parallax_routing=false`)
+#### Phase A — Request-time routing DP (LANDED & DEFAULT-ON 2026-04-18)
 
 - **Adaptation.** Parallax's Phase 2 DP assumes peer-to-peer pipeline data flow (`edge_weight = rtt(peer_A → peer_B)`). SwarmLLM pipelines are **coordinator-relayed** — every segment routes through the local coordinator — so inter-segment edge cost collapses into per-vertex cost: `2 * rtt_local_to_peer + compute_ms + load_ms` (local node: just `compute_ms`). Still a shortest-path DP, just with per-vertex weighting instead of per-edge.
 - **Algorithm.** `src/inference/scheduler/parallax.rs::route_shortest_path`:

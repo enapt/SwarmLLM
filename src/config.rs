@@ -397,10 +397,18 @@ pub struct InferenceConfig {
     /// shortest-path DP over (node, layer_range) vertices. Picks the chain
     /// minimising total `2*rtt + compute + load_penalty` rather than greedy
     /// next-hop coverage — see `docs/plans/distributed_inference_speedup.md`
-    /// Item 16. Off by default. Falls back to greedy when the DP has no valid
-    /// source→sink path, so routing never regresses below the greedy baseline.
-    #[serde(default)]
+    /// Item 16. **Default on as of 2026-04-18.** Falls back to greedy when
+    /// the DP has no valid source→sink path or candidate list is empty, so
+    /// routing never regresses below the greedy baseline. Uses the same
+    /// candidate signals (latency, load, region, est_tokens_per_sec) plus
+    /// Phase B observed per-layer latency. Set to `false` in config to
+    /// revert to pure greedy.
+    #[serde(default = "default_parallax_routing")]
     pub parallax_routing: bool,
+}
+
+fn default_parallax_routing() -> bool {
+    true
 }
 
 fn default_tp_max_latency_ms() -> u32 {
@@ -1349,7 +1357,7 @@ impl Default for InferenceConfig {
             max_seq_len_override: None,
             decentralized_spec_decoding: false,
             activation_compression: false,
-            parallax_routing: false,
+            parallax_routing: default_parallax_routing(),
         }
     }
 }
