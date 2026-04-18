@@ -322,7 +322,7 @@ impl ModelProcessPool {
                             finish_reason: r.finish_reason,
                             activations,
                             sealed_token_ids: if r.sealed { r.sealed_payload } else { None },
-                            spec_logits: Vec::new(),
+                            spec_logits: r.spec_logits,
                         });
                     }
                     WorkerMsg::Error {

@@ -587,7 +587,7 @@ fn argmax(logits: &[f32]) -> u32 {
 #[cfg(feature = "llama")]
 pub(crate) struct DraftState {
     pub ctx: llama_cpp_2::context::LlamaContext<'static>,
-    pub batch: llama_cpp_2::llama_batch::LlamaBatch,
+    pub batch: llama_cpp_2::llama_batch::LlamaBatch<'static>,
     pub pos: usize,
     pub n_vocab: usize,
 }
