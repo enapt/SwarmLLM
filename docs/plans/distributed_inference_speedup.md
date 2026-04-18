@@ -1,21 +1,33 @@
 # Distributed Inference Speedup Plan
 
-> **Headline result (2026-04-18)**: the remote-generate fast path for
-> single-segment distributed inference landed and gives **~1.93× decode
-> throughput** on TinyLlama (125 ms/tok vs 241 ms/tok baseline). Works with
-> default encryption on. All 594 lib tests pass, zero ERROR logs in 3-node
-> verification. The original Items 1-3 (persistent stream, speculative,
-> continuous batching) remain available as infrastructure for future gains.
+> **READ THIS FIRST (status as of 2026-04-18)**
+>
+> This doc captures a multi-session effort to speed up distributed inference.
+> Four items were scoped; the headline win came from an item that wasn't in
+> the original plan (Item 4).
+>
+> | Item | Status | Effect |
+> |---|---|---|
+> | **Item 4 — Remote-generate fast path** | ✅ LANDED & DEFAULT-ON | **1.93× decode speedup** on default config. Main user-visible win. |
+> | Item 1 — Persistent pipeline stream | ✅ Landed behind `persistent_pipeline_stream=false` flag. Verified end-to-end but no measured latency win (bottleneck was elsewhere). |
+> | Item 2 — Speculative decoding (distributed) | ✅ Landed in 3 phases behind `speculative_distributed=false` flag + requires loaded draft model. Working; 40–52% accept rate w/ backend mismatch (llama-cpp draft vs candle target). |
+> | Item 3 — Continuous batching | 🟡 Phase 1 (wire protocol) landed behind `continuous_batching=false` flag. Phase 2 (scheduler refactor + `SplitModel::forward_batch`) is the remaining work; blocker is replacing `Mutex<socket>` in `ModelProcessPool` with mpsc-fed scheduler. Not pursued in this session because Item 4 delivered the headline win. |
+>
+> **If starting a new session, the most useful things to pick up are:**
+> 1. Item 3 Phase 2 (concurrent-user throughput — independent of Item 4)
+> 2. Extending Item 4 to multi-segment pipelines
+> 3. Item 2 with a matched-backend draft model (pre-trained candle-native draft, ~5% target size — research flagged `Qwen2.5-0.5B` as draft for `Qwen2.5-7B` target with 1.4× speedup on llama.cpp benchmarks)
+>
+> See `memory/local_model_shards.md` for pre-staged benchmark assets.
 
-
-
-> **Baseline (2026-04-17, loopback, 3 nodes, TinyLlama-1.1B, 1 remote segment)**
+> **Original baseline (2026-04-17, loopback, 3 nodes, TinyLlama-1.1B, 1 remote segment)**
 > - Prefill (25 tokens): 3336 ms
 > - Per-token decode: ~148 ms (logged as `segment_ms=147..150`)
 > - Wall-clock 30-token response: 15.9 s
-> - Compute on this model ≈ 20–30 ms/token, so ~100 ms of each decode is libp2p `request_response` framing + ChaCha seal + Noise/Yamux round-trip
+> - Original hypothesis: ~100 ms/token was libp2p `request_response` framing + ChaCha seal
+> - **Actual finding**: after landing Item 1 (persistent stream), per-token `segment_ms` was unchanged — libp2p framing was NOT the bottleneck. The bottleneck was the per-token coordinator/remote IPC round trip itself, which Item 4 eliminated.
 
-Three items are executed sequentially: **1 → 2 → 3**. Each lands behind an independent feature flag with trivial rollback (single config toggle, existing code path preserved).
+Items 1–3 are documented below in their original "plan" voice because a lot of infrastructure landed under them (codec trailers, IPC types, KV truncation primitives, etc.). Items 1–3 implementations are behind feature flags so the default path uses Item 4.
 
 ---
 
