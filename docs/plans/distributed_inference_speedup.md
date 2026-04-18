@@ -383,17 +383,31 @@ DIAG: handle_generate prefix-cache HIT — prefilling suffix only
 
 ### Measured results (2026-04-18)
 
-TinyLlama-1.1B Q4_K_M, single-node loopback, CPU, 100-token greedy completion:
+TinyLlama-1.1B Q4_K_M, single-node loopback, 100-token greedy completion:
 
-| Path | Decode rate | Acceptance |
-|---|---|---|
-| Baseline (Item 4 fast-path) | 6.85 tok/s | — |
-| SWIFT γ=4, skip=0.45 | 1.95 tok/s | 13.8% |
-| SWIFT γ=4, skip=0.0 (sanity) | not measured (slower than baseline) | 92.0% |
+| Setup | Baseline | SWIFT γ=4 skip=0.45 | SWIFT acceptance |
+|---|---|---|---|
+| CPU | 6.85 tok/s | 1.95 tok/s (3.5× slower) | 13.8% |
+| GPU (CUDA, RTX 3070) | ~50 tok/s | 13.5 tok/s (3.7× slower) | 10.7% |
 
-**SWIFT is slower than baseline on TinyLlama CPU.** Expected. Per round we run 4 skip-layer draft forwards + one verify forward over 5 tokens. On CPU with a tiny model, the verify's batched matmul has no parallelism win to amortize the extra positions, so total cost > baseline per emitted token.
+Sanity checks (skip_ratio=0, draft = full target → expected 100% acceptance):
+- CPU: 92.0% (NOT 100%)
 
-**Output diverges slightly from greedy baseline** (e.g. "studied and refined" vs "studied and tested"). Root cause: candle's CPU attention dispatch routes `seq_len=1` to `standard_attention` (matmul) and `seq_len≥2` to `cpu_flash_attention`. These are numerically close but not identical. Baseline's per-token decode always hits the matmul path; SWIFT's verify (γ+1=5 positions) hits flash. When the top-1 / top-2 logits are close, argmax can flip — accounting for the 92% (not 100%) sanity-check acceptance with skip=0 and the few-token differences in the output. Output is still valid greedy model text under the flash-attention numerics; just not bit-identical to per-token baseline.
+**SWIFT loses on TinyLlama on both CPU AND GPU. Root cause is an attention-kernel-dispatch mismatch in candle, not the SWIFT algorithm itself.**
+
+**Why.** candle dispatches attention based on tensor shape:
+- **CPU path** (`run_attention`): `seq_len=1` → `standard_attention` (matmul); `seq_len≥2` → `cpu_flash_attention`.
+- **GPU path** (with `flash-attn`): single-position decode → `flash_attn`; multi-position with `k_len > q_len > 1` (KV cache pre-populated with prefix tokens) → **falls back to `standard_attention`** because flash-attn's boolean causal flag can't express the offset causal mask used in this case.
+
+Net: baseline per-token decode and SWIFT's verify pass run on **different attention kernels**. Numerically close but not identical — the top-1 and top-2 logits flip in close-call cases. Even with `skip_ratio=0` (draft = full target = no actual skipping), draft-argmax and verify-argmax disagree on ~8% of positions on CPU. With real layer skipping, acceptance collapses to 10–14%, each round emits only ~1.5 tokens, and the per-token cost stays ~3.5× higher than baseline.
+
+**Output also diverges from greedy baseline** by a few token choices (e.g. "studied and refined" vs "studied and tested" mid-paragraph) for the same reason — verify produces target's argmax under different attention numerics than per-token baseline.
+
+### What unblocks SWIFT
+
+1. **Force the same attention kernel everywhere** when SWIFT is active. Add a `force_standard_attn` flag that SWIFT sessions turn on, so baseline + draft + verify all use `standard_attention`. Costs a bit on baseline decode but makes SWIFT correct + speeds up verify amortization (verify cost grows sub-linearly with seq_len thanks to weight-load amortization, but only if both paths use the same kernel).
+2. **Test on larger models.** Paper measures 0.45–0.50 acceptance on LLaMA-2-13B/70B (vs our 0.10–0.14 on 1.1B). Bigger model → more layer redundancy → much higher accept. Blocker: Phi-3.5-mini reports 131072 max context in its GGUF and candle pre-allocates the full KV buffer at first forward → OOMs an 8GB GPU. Would need a `max_seq_len_override` config to make any larger model fit.
+3. **v2 calibration** of skip pattern (Bayesian / random search vs the fixed middle-band v1 ships).
 
 ### Why we kept it
 
