@@ -8,6 +8,7 @@
 mod distributed;
 mod local;
 mod prompt;
+mod remote_generate;
 mod speculative;
 mod tensor_parallel;
 mod vision;

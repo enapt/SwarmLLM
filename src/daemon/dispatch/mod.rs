@@ -322,6 +322,42 @@ pub(crate) async fn dispatch_network_messages(
                                             }
                                         }
                                     }
+                                    // Remote-generate fast path: single-segment coordinator
+                                    // asks us to run the full decode locally and stream tokens.
+                                    SwarmMessage::RemoteGenerateRequest(mut req) => {
+                                        if let Some(ref sender) = authenticated_sender {
+                                            if !shared_state.peer_registry.contains_key(sender) {
+                                                tracing::warn!(sender = %sender, "RemoteGenerateRequest from unknown peer — dropping");
+                                                continue;
+                                            }
+                                        } else {
+                                            tracing::warn!(msg_type = "RemoteGenerateRequest", "message without authenticated sender — dropping");
+                                            continue;
+                                        }
+                                        // Stamp the authenticated sender's peer bytes so the
+                                        // handler knows where to send StreamingTokens back.
+                                        if req.sender_peer_bytes.is_none() {
+                                            if let Some(ref sender) = authenticated_sender {
+                                                req.sender_peer_bytes = shared_state
+                                                    .peer_id_map
+                                                    .get(sender)
+                                                    .map(|r| r.value().clone());
+                                            }
+                                        }
+                                        let permit = match forward_semaphore.clone().try_acquire_owned() {
+                                            Ok(p) => p,
+                                            Err(_) => {
+                                                tracing::warn!(sender = %authenticated_sender.as_ref().map(|s| s.to_string()).unwrap_or_default(), "RemoteGenerateRequest rejected — forward semaphore full");
+                                                continue;
+                                            }
+                                        };
+                                        let ss = shared_state.clone();
+                                        let ntx = network_tx.clone();
+                                        tokio::spawn(async move {
+                                            let _permit = permit;
+                                            remote_generate::handle_remote_generate_request(ss, ntx, req).await;
+                                        });
+                                    }
                                     // T13: VisionEncodeRequest — encode image using local mmproj
                                     SwarmMessage::VisionEncodeRequest(req) => {
                                         // SEC: Only accept from known, authenticated peers
@@ -1386,4 +1422,5 @@ pub(crate) async fn dispatch_network_messages(
 }
 
 mod layer_forward;
+mod remote_generate;
 mod vision;

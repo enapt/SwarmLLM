@@ -9,8 +9,8 @@ use crate::identity::NicknameGossip;
 use crate::ids::{ModelId, NodeId, ShardId};
 use crate::inference::{
     InferenceError, InferenceRequest, LayerForward, LayerResult, PipelineAssignment,
-    StreamingToken, TpAllReduceRequest, TpAllReduceResponse, TpRingChunk, VisionEncodeRequest,
-    VisionEncodeResponse,
+    RemoteGenerateRequest, StreamingToken, TpAllReduceRequest, TpAllReduceResponse, TpRingChunk,
+    VisionEncodeRequest, VisionEncodeResponse,
 };
 use crate::model::ModelManifest;
 use crate::node::{NodeCapability, PeerExchangeResponse};
@@ -98,6 +98,9 @@ pub enum SwarmMessage {
     // Vision — distributed mmproj encoding
     VisionEncodeRequest(VisionEncodeRequest),
     VisionEncodeResponse(VisionEncodeResponse),
+
+    // Remote-generate fast path for single-segment distributed inference
+    RemoteGenerateRequest(RemoteGenerateRequest),
 
     // Tensor Parallelism — AllReduce coordination
     TpAllReduceRequest(TpAllReduceRequest),

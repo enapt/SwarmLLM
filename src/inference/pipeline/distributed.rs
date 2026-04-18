@@ -39,7 +39,15 @@ impl PipelineExecutor {
             });
         }
 
-        // Item 2 Phase 3: try the greedy distributed speculative path first.
+        // Remote-generate fast path for single-segment distributed: bypass
+        // the per-token coordinator/remote round trip entirely. Remote worker
+        // runs the full decode loop and streams tokens back. Falls through on
+        // non-eligibility (multi-segment, TP, vision, LoRA, encrypted pipeline).
+        if let Some(out) = self.try_remote_generate_fastpath(token_tx.clone()).await? {
+            return Ok(out);
+        }
+
+        // Item 2 Phase 3: try the greedy distributed speculative path.
         // Falls through (returns Ok(None)) to the standard loop below if
         // preconditions aren't met (no draft model, multi-segment, TP, non-
         // greedy, encrypted, etc.).

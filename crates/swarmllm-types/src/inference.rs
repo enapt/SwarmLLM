@@ -396,6 +396,48 @@ pub struct StreamingToken {
     pub request_id: uuid::Uuid,
     pub token_id: u32,
     pub finish_reason: Option<NetworkFinishReason>,
+    /// Pre-decoded token text. Populated by the remote-generate fast path so
+    /// the coordinator doesn't need to hold the tokenizer. Empty on the
+    /// per-token pipeline path (backward-compatible via serde default).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub text: String,
+    /// Token counts for the final "done" event. Populated only when
+    /// `finish_reason` is `Some`. Ignored on in-flight tokens.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<GenerateUsage>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+pub struct GenerateUsage {
+    pub prompt_tokens: u32,
+    pub completion_tokens: u32,
+}
+
+/// Request a remote peer to run the full generation loop for a single-segment
+/// pipeline. The remote tokenizes the prompt, prefills, runs the decode loop
+/// in its local worker subprocess (no per-token IPC round trip to the
+/// coordinator), and streams back each generated token as a `StreamingToken`.
+///
+/// Only eligible when:
+/// - the pipeline is single-segment (one peer holds the entire layer range)
+/// - no TP groups
+/// - no vision / LoRA / pipeline sealing (those need coordinator involvement)
+///
+/// Reduces the per-token latency from ~140 ms (libp2p substream + IPC round
+/// trip per token) to ~network-transit + compute (~20-30 ms on loopback).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RemoteGenerateRequest {
+    pub request_id: uuid::Uuid,
+    pub model_id: ModelId,
+    pub layer_range: (u32, u32),
+    /// Already-formatted prompt (chat template applied by coordinator).
+    pub prompt: String,
+    pub sampling: SamplingParams,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    /// Populated locally after receiving from the network — never on the wire.
+    #[serde(skip)]
+    pub sender_peer_bytes: Option<Vec<u8>>,
 }
 
 /// Finish reason for network protocol messages (distinct from inference::executor::FinishReason).
