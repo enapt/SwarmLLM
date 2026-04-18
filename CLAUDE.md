@@ -55,8 +55,9 @@ swarmllm/
 │   ├── network/   (manager, behaviour, discovery, protocol, transport, relay, peer_cache, helpers)
 │   ├── model/     (manifest, shard, distribution, registry, acquisition, huggingface, auto_manage/, lora)
 │   │   └── auto_manage/  (mod, manager, scoring, download, prune, scan, vram)
-│   ├── inference/ (router, pipeline, scheduler, executor, sampling, kv_cache, speculative, split/, layers, model_arch, tokenizer, tensor_util, shard_layout, vision, allreduce, chat_template, local_embedder, model_worker, process_pool, worker_ipc)
-│   │   └── split/        (mod, model, loader, executor, kv_cache, entry, gguf_meta, shard_reader, rope, tests)
+│   ├── inference/ (router, pipeline/, scheduler, executor, sampling, kv_cache, speculative, swift, dsd_controller, quant, split/, layers, model_arch, tokenizer, tensor_util, shard_layout, vision, allreduce, attn_kernel, chat_template, local_embedder, model_worker, process_pool, worker_ipc)
+│   │   ├── pipeline/     (mod, distributed, dsd, local, prompt, remote_generate, speculative, tensor_parallel, vision)
+│   │   └── split/        (mod, model, loader, executor, kv_cache, entry, gguf_meta, shard_reader, rope, prefix_cache, tests)
 │   ├── credit/    (ledger, transaction, priority, anti_gaming, trust, escrow)
 │   ├── identity/  (keypair, nickname)
 │   ├── crypto/    (session, pipeline_seal, gossip_seal, key_rotation, provider_keys)
@@ -131,7 +132,7 @@ libp2p 0.55 (pin to 0.55.x), axum 0.7, candle-core/candle-transformers (CUDA), e
 
 ## Testing
 
-- 656 tests total, all passing, clippy clean
+- 698 tests total, all passing, clippy clean
 - Unit tests: in-module `#[cfg(test)]` blocks
 - Integration tests: `tests/integration/` — multi-node simulations with `--test-threads=1`
 - Test model: `tests/fixtures/tiny_model/` — 2-layer, 128 hidden dim, ~1MB, 2 shards
@@ -167,7 +168,7 @@ When spawning subagents in this repo, use these model picks (overrides defaults 
 
 ## Status
 
-All 20 build phases complete. All subsystems wired — no stubs. 656 tests passing. Deferred items in `docs/ARCHITECTURE.md` § "Deferred Items". See `memory/refactor_plan.md` for remaining large-file splits.
+All 20 build phases complete. All subsystems wired — no stubs. 698 tests passing. Deferred items in `docs/ARCHITECTURE.md` § "Deferred Items". See `memory/refactor_plan.md` for remaining large-file splits.
 
 ## Common Commands
 
