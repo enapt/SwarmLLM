@@ -39,17 +39,12 @@ impl PipelineExecutor {
             });
         }
 
-        // Item 2 Phase 1: wire + worker infrastructure for speculative verify
-        // is landed; the coordinator accept-reject loop with distributed KV
-        // truncation lands in a follow-up. Log the flag state so operators
-        // know the path is currently infrastructure-only.
-        if self.shared_state.config.inference.speculative_distributed
-            && self.assignment.supports_speculative
-        {
-            tracing::info!(
-                %request_id,
-                "speculative_distributed: wire infra ready; coordinator loop pending (Phase 2)"
-            );
+        // Item 2 Phase 3: try the greedy distributed speculative path first.
+        // Falls through (returns Ok(None)) to the standard loop below if
+        // preconditions aren't met (no draft model, multi-segment, TP, non-
+        // greedy, encrypted, etc.).
+        if let Some(out) = self.try_speculative_distributed(token_tx.clone()).await? {
+            return Ok(out);
         }
 
         // Read GGUF header ONCE and cache for both prompt building and stop strings

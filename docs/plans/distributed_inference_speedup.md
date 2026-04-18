@@ -114,7 +114,13 @@ Three items are executed sequentially: **1 → 2 → 3**. Each lands behind an i
 - `LayerForward.truncate_kv_to: Option<u32>` wire field + `0x04` codec trailer (plain + encrypted).
 - `IpcForward` pass-through; model worker applies truncation before forward.
 
-**Phase 3 remaining** — the coordinator greedy accept-reject loop. Blocker is local draft-model integration: the llama-cpp `generate_speculative_llama` entangles draft KV with verify batching (~200 lines) and isn't directly reusable because it drives both sides locally. A clean distributed coordinator loop needs a new helper `draft_tokens(gamma, last_token) -> Vec<u32>` that advances the draft model's KV by exactly γ tokens. Once that exists, the round logic is straightforward given the Phase 1+2 primitives: build `LayerForward { draft_tokens: [last_tok, ...drafts], spec_logits_requested: true, truncate_kv_to: pending }`, send, receive γ+1 spec_logits, greedy argmax-compare to find accepted prefix k, emit `[q_1..q_k, bonus]`, set `pending = current_pos + k + 1` for next round.
+**Phase 3 landed** (this commit): `src/inference/pipeline/speculative.rs`. `try_speculative_distributed` runs when conditions hold (single-segment remote, greedy temp=0, draft model loaded, no encryption/vision/LoRA). Inside one `draft_executor` lock, prefills the draft's llama-cpp context and runs the spec round loop: draft γ tokens → send `LayerForward { draft_tokens: [last_tok, q_1..q_γ], spec_logits_requested: true, truncate_kv_to }` → greedy argmax compare against returned spec_logits → emit `[q_1..q_k, bonus]` → sync draft KV (via `clear_kv_cache_seq` on partial reject) → set `pending_truncate = expected_kv_len` for next round. Eligibility falls through to non-speculative when not met. Exposes `ModelExecutor::raw_model()` / `raw_backend()` so the draft context can be created and held across async network round trips.
+
+**Remaining work (future):**
+- Wire speculative under encryption (reuse `encode_forward_for_wire` pattern from `pipeline_stream.rs`)
+- Wire speculative for multi-segment pipelines (propagate spec_logits through intermediate segments)
+- Non-greedy support via `speculative::accept_reject` (needs transmitting γ draft probabilities alongside tokens)
+- Benchmark at various γ values to find sweet spot
 
 ---
 

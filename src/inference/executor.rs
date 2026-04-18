@@ -171,6 +171,20 @@ impl ModelExecutor {
         self.loaded
     }
 
+    /// Expose the underlying `LlamaModel` for callers that need to create
+    /// their own `LlamaContext` (e.g. the distributed speculative coordinator
+    /// which persists a draft context across network round trips).
+    #[cfg(feature = "llama")]
+    pub fn raw_model(&self) -> Option<&llama_cpp_2::model::LlamaModel> {
+        self.model.as_ref()
+    }
+
+    /// Expose the underlying `LlamaBackend` for the same reason as `raw_model`.
+    #[cfg(feature = "llama")]
+    pub fn raw_backend(&self) -> Option<&llama_cpp_2::llama_backend::LlamaBackend> {
+        self.backend.as_ref()
+    }
+
     /// Get the name of the currently loaded model.
     pub fn model_name(&self) -> &str {
         &self.model_name
