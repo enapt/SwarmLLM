@@ -406,6 +406,13 @@ impl SharedState {
         state
             .model_process_pool
             .set_kv_cache_ttl(state.config.inference.kv_cache_ttl_secs.unwrap_or(600));
+        state.model_process_pool.set_prefix_cache_config(
+            state.config.inference.prefix_cache_enabled,
+            state.config.inference.prefix_cache_max_entries,
+            state.config.inference.prefix_cache_max_prompt_tokens,
+            state.config.inference.prefix_cache_block_tokens,
+            state.config.inference.prefix_cache_min_tokens,
+        );
 
         (state, shutdown_rx, dht_query_rx)
     }

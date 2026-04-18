@@ -305,3 +305,126 @@ single-segment workloads.
   would make speculative drafting happen on the REMOTE with tokens streamed
   back, but the fast path already delivers most of the speculative speedup
   with far less complexity.
+
+---
+
+# Round 2 (2026-04-18) — Prefix caching, self-speculation, proper batching
+
+> **Context:** Round 1 Items 1–3 landed behind flags; Item 4 landed default-on (1.93× decode). Research scan (2026-04-18) identified three higher-leverage wins that the original plan didn't cover. Item 3 Phase 2 as originally scoped is partly obsolete because the remote-generate fast path (Item 4) bypasses `handle_forward` — so the batching scope below targets `handle_generate` instead.
+
+## Item 5 — Cross-request prefix caching (RadixAttention-style)
+
+**Problem the current design doesn't solve.** Today `KvCacheManager` (src/inference/kv_cache.rs) does same-session multi-turn prefix matching — it requires the caller to provide `session_id`, and each session has a single cached prompt prefix. Multiple simultaneous requests that share a long system prompt (Claude Code's 10 KB agent scaffold, RAG templates, MCP tool descriptions) all re-run prefill from scratch. Every other production inference engine (SGLang, vLLM V1) has a shared radix tree of token-prefix → KV blocks, hit rate is routinely 50–99% in agentic workloads.
+
+**Design.**
+- Worker-side only (no cross-node sharing in v1 — that's Item 9 below).
+- New `PrefixKvCache` type in `src/inference/split/kv_cache.rs` parallel to the existing per-request `KvCacheStore`. Data model:
+  - Token-level radix tree: each node stores a `Vec<u32>` token sequence plus per-layer `(K, V)` tensors covering those tokens
+  - Ref-counted (`Arc`) nodes; LRU eviction by last-hit timestamp
+  - Bounded by a new `prefix_cache_max_tokens: u64` config field (default 262_144 — 256 K tokens worth of cached KV, ~1 GB for a 7B model at fp16)
+- Hit flow: on `handle_generate`, after tokenizing the prompt, walk the radix tree to find the longest matching token prefix. Materialize a per-request `KvCacheEntry` by cloning the cached K/V tensors for matched layers (shallow clone — candle Tensors are reference-counted). Set `index_pos = matched_len`. Then run prefill only on the suffix.
+- Miss flow: run full prefill, then call `prefix_cache.insert(token_prefix, kv_entry)` with a copy of the final KV state. Insertion is chunked into blocks (configurable, default 32 tokens) so the tree branches cleanly.
+- Integration point: `handle_generate` in `src/inference/model_worker.rs` (and later `handle_batch_forward` too). The `KvCacheStore` per-request entries stay as they are — we're adding a read-through layer on top.
+- Multi-turn session cache still works as-is, now backed by the shared radix tree instead of its own HashMap.
+
+**Eligibility.**
+- Only `handle_generate` path in v1 (covers the Item 4 fast path and local API). Extend to `handle_batch_forward` in Item 7.
+- Skip if `privacy_mode` is on (don't persist prompts across requests).
+- Skip if prompt has been templated with a time-varying component (detect this by checking whether prompt is stable — we just always cache and let the LRU evict low-hit entries).
+
+**Files.**
+- `src/inference/split/kv_cache.rs` — add `PrefixKvCache`, `RadixNode`, `insert`, `lookup` (returns `Option<MatchedPrefix { kv: KvCacheEntry, token_len: usize }>`), `evict_lru`.
+- `src/inference/model_worker.rs` — `handle_generate`: lookup → populate KvCacheStore → prefill suffix only → on completion, insert final KV back.
+- `src/config.rs` — add `prefix_cache_max_tokens: u64` (default 262_144), `prefix_cache_block_tokens: usize` (default 32), `prefix_cache_enabled: bool` (default **true** — this is a pure win).
+- `src/daemon/state/mod.rs` — `ModelProcessPool` already owns the worker; prefix cache is per-worker-subprocess, stored in worker-local static.
+
+**Success metric.** TTFT on a second request with matching 2048-token prefix: drops from prefill-time (~3 s on TinyLlama) to <100 ms on CPU. On repeated agent-scaffold requests, effective decode p50 should match single-user baseline regardless of prompt size.
+
+**Build order.**
+1. Add config fields + plumb through to worker.
+2. Implement `PrefixKvCache` + radix tree in isolation with unit tests.
+3. Wire into `handle_generate` behind config flag.
+4. Benchmark: 10 sequential requests with same 2048-token system prompt, measure TTFT.
+
+---
+
+## Item 6 — SWIFT self-speculative decoding (layer-skip draft)
+
+**Problem.** Item 2 (speculative decoding) is behind a flag and requires a pre-staged draft model. None of our pre-staged benchmark models have real draft pairs. SWIFT (arxiv 2410.06916, ICLR 2025) derives the draft from the target model itself by skipping intermediate layers — no extra weights, no training, no shard coordination. 1.3–1.6× decode speedup on every model, universally.
+
+**Design.**
+- Two-phase operation:
+  1. **Calibration phase** (first N tokens, default 32): run both full-layer forward AND skip-candidate forwards for each position, measure per-candidate acceptance rate, select the best skip pattern (e.g., "skip layers 8–15 out of 32").
+  2. **Acceleration phase** (remaining tokens): draft γ tokens using the skip-layer pass; verify all γ with one full forward; apply standard accept-reject.
+- SWIFT calibration runs cheaply because the full forward has to happen anyway (we verify); we piggyback.
+- Layer skipping is already supported structurally by our shard system — each layer is independently loaded. We just need a runtime "skip mask" in the forward loop.
+- Config: `swift_self_speculative: bool` (default `false`; enable after validation), `swift_calibration_tokens: u32` (default 32), `swift_gamma: u8` (default 4), `swift_skip_range: (u8, u8)` (default start_pct=25%, end_pct=75% — skip candidates are contiguous ranges within the middle half of layers).
+
+**Files.**
+- `src/inference/split/executor.rs` — add `forward_with_skip_mask(skip_mask: &[bool])` that zeros the contribution of masked layers. For a transformer, this means: for each masked layer i, pass hidden state through UNCHANGED (identity), skipping the attn + FFN compute entirely. This IS what SWIFT does.
+- `src/inference/swift.rs` (new) — `SwiftCalibrator` tracks per-skip-pattern acceptance; `pick_best_pattern` returns the winner after calibration.
+- `src/inference/model_worker.rs` — `handle_generate`: integrate SWIFT as an alternative to the existing speculative path when `swift_self_speculative` is on and no external draft model is configured.
+
+**Interaction with Item 5.** Orthogonal — Item 5 fixes prefill TTFT, Item 6 speeds decode. They stack multiplicatively.
+
+**Success metric.** Acceptance rate ≥40% at γ=4 after calibration on TinyLlama. Decode rate improvement ≥1.3× vs baseline Item 4 fast path.
+
+**Build order.**
+1. Implement `forward_with_skip_mask` in executor; unit test that output matches full forward when no layers skipped.
+2. Implement `SwiftCalibrator`.
+3. Wire into `handle_generate` behind config flag.
+4. Benchmark against Item 4 fast path baseline.
+
+---
+
+## Item 7 — `BatchGenerate` (replaces obsolete Item 3 Phase 2)
+
+**Why the original Phase 2 was obsolete.** The landed Phase 1 batched `handle_forward`, which is only invoked on the per-token round-trip path. Item 4 bypasses that entirely — the dominant distributed flow is now `handle_generate`, not `handle_forward`. To serve concurrent users from one model worker, we need a `BatchGenerate` IPC verb that multiplexes many in-flight decode loops through a single worker process.
+
+**Design.**
+- New IPC verb `DaemonMsg::BatchGenerateStep { active_requests: Vec<DecodeStep> }` where `DecodeStep` contains `{ request_id, last_token_id, sampling_params }`. Response: `WorkerMsg::BatchStepResult { per_request: Vec<(request_id, next_token_id, finish_reason)> }`.
+- Worker subprocess holds a `SlotTable` of up to `max_concurrent_decode_batch` slots. Each slot owns a `KvCacheEntry` and a `SamplingState`. Adding a request: prefill its prompt (optionally with prefix-cache from Item 5), allocate a slot, seed with sampled first token. Removing: on `finish_reason`, free slot.
+- Per step: worker does a single `forward_batch` over all active slots' last tokens stacked into `[N, 1, hidden]`. Per-slot sampling locally (CPU cheap). Return `N` tokens in one response.
+- Scheduler in `process_pool.rs`:
+  - Replace `Mutex<socket>` with an actor task owning the socket.
+  - Actor maintains per-worker `VecDeque<PendingRequest>` for new requests + `HashMap<RequestId, StreamingTokenTx>` for active requests.
+  - Every loop iteration: try to admit new requests (up to `max_concurrent_decode_batch`), send `BatchGenerateStep` with all active slots, forward results to each request's `StreamingTokenTx`.
+  - Sarathi-style chunked prefill (optional v2): when a new request needs prefill, chunk it into `prefill_chunk_tokens` and interleave chunks with ongoing decode steps instead of stalling decode.
+
+**Eligibility.**
+- Only for `handle_generate` / `pool.generate()` callers. Per-token `handle_forward` path stays single-request (Item 3 Phase 1 already in place, sufficient).
+- Gated by `continuous_batching` config (existing flag, already plumbed through to InferenceRouter).
+
+**Files.**
+- `src/inference/worker_ipc.rs` — new `DaemonMsg::BatchGenerateStep`, `WorkerMsg::BatchStepResult` variants.
+- `src/inference/model_worker.rs` — new `handle_batch_generate_step` with `SlotTable`; `SplitModel::forward_batch(inputs: &[Tensor], positions: &[usize])` — stacks along batch dim, runs one forward, unstacks.
+- `src/inference/split/executor.rs` — `forward_batch` method.
+- `src/inference/split/kv_cache.rs` — multi-request coexistence already works (per-request keys); just need to document that `forward_batch` reads/writes N separate entries per step.
+- `src/inference/process_pool.rs` — replace `socket: Mutex<...>` on `WorkerHandle` with `requests_tx: mpsc::Sender<GenerateRequest>` + spawn actor task per worker. Actor owns the socket, drives the batched step loop.
+- `src/config.rs` — already has `continuous_batching`, `max_concurrent_decode_batch`, `batch_collection_ms`. Add `prefill_chunk_tokens: u32` (default 512) for future Sarathi chunking.
+
+**Success metric.** Two concurrent requests against the same model: aggregate tok/s ≥ 1.7× single-request baseline.
+
+**Build order.**
+1. Add `forward_batch` to `SplitModel` (stack → forward → unstack). Unit test against sequential forwards for identical outputs.
+2. Add `BatchGenerateStep` / `BatchStepResult` wire types.
+3. Implement worker-side `SlotTable` + `handle_batch_generate_step`.
+4. Refactor `process_pool.rs` to actor model.
+5. Integration test: 2 concurrent `pool.generate()` calls, assert correct outputs + aggregate throughput.
+
+---
+
+## Cross-item sequencing (Round 2)
+
+**Order:** 5 → 6 → 7.
+
+- **Item 5 (prefix cache)** is foundational and self-contained. Biggest single TTFT win. Doesn't touch async/scheduler surface.
+- **Item 6 (SWIFT)** is a decode-loop mod inside `handle_generate`. Builds on top of Item 5 without conflict.
+- **Item 7 (BatchGenerate)** is the largest refactor (actor model + SlotTable). Builds on Items 5 & 6 because both must work within a batched decode step.
+
+## Deferred to future sessions
+
+- **Item 8 — Cross-node prefix cache sharing.** Announce BLAKE3 prompt-prefix hashes over gossip; peers that already prefilled a shared prefix serve KV blocks on demand. Content-addressed KV shards — fits our existing shard announcement infrastructure. Potentially novel for P2P.
+- **Item 9 — EAGLE-3 draft heads.** Per-target pretrained draft heads (SafeAILab HF) distributed as a new shard type. 3–6× ceiling, highest complexity.
+- **Item 10 — FlowSpec / PPSD pipelined speculation.** Addresses the multi-segment pipeline case Item 4 didn't cover. Requires Item 1 stream to be default-on.
+- **Item 11 — Lookahead decoding.** No-draft-model Jacobi iteration. Test on CPU to see if FLOP overhead beats the speedup.

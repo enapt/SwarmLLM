@@ -110,6 +110,21 @@ enum Commands {
         /// KV-cache session TTL in seconds (default 600)
         #[arg(long, default_value = "600")]
         kv_cache_ttl: u64,
+        /// Enable cross-request prefix KV-cache in the worker (default true)
+        #[arg(long, default_value = "true")]
+        prefix_cache_enabled: bool,
+        /// Maximum cached prefix snapshots retained per model (default 16)
+        #[arg(long, default_value = "16")]
+        prefix_cache_max_entries: u32,
+        /// Prompts longer than this (tokens) are not inserted (default 8192)
+        #[arg(long, default_value = "8192")]
+        prefix_cache_max_prompt_tokens: u32,
+        /// Block-alignment granularity for multi-point inserts (default 64)
+        #[arg(long, default_value = "64")]
+        prefix_cache_block_tokens: u32,
+        /// Minimum prefix tokens for cache to engage (default 32)
+        #[arg(long, default_value = "32")]
+        prefix_cache_min_tokens: u32,
     },
     /// Device pool management (combine credits across your devices)
     Pool {
@@ -201,14 +216,32 @@ async fn main() -> anyhow::Result<()> {
             data_dir,
             shard_window,
             kv_cache_ttl,
+            prefix_cache_enabled,
+            prefix_cache_max_entries,
+            prefix_cache_max_prompt_tokens,
+            prefix_cache_block_tokens,
+            prefix_cache_min_tokens,
         } => {
             let window: Option<Vec<u32>> = shard_window.map(|s| {
                 s.split(',')
                     .filter_map(|x| x.trim().parse::<u32>().ok())
                     .collect()
             });
-            swarmllm::inference::model_worker::run_worker(socket, data_dir, window, kv_cache_ttl)
-                .await;
+            let prefix_cfg = swarmllm::inference::model_worker::PrefixCacheConfig {
+                enabled: prefix_cache_enabled,
+                max_entries: prefix_cache_max_entries as usize,
+                max_prompt_tokens: prefix_cache_max_prompt_tokens as usize,
+                block_tokens: prefix_cache_block_tokens as usize,
+                min_tokens: prefix_cache_min_tokens as usize,
+            };
+            swarmllm::inference::model_worker::run_worker(
+                socket,
+                data_dir,
+                window,
+                kv_cache_ttl,
+                prefix_cfg,
+            )
+            .await;
             Ok(())
         }
         Commands::Pool { action } => {

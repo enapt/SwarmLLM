@@ -302,10 +302,56 @@ pub struct InferenceConfig {
     /// Default: 10ms (LAN-only).
     #[serde(default = "default_tp_max_latency_ms")]
     pub tp_max_latency_ms: u32,
+    /// Enable cross-request prefix KV-cache on worker subprocesses. When on,
+    /// the worker keeps a small LRU cache of prefill KV snapshots keyed by
+    /// the prompt's token prefix and reuses them on subsequent requests
+    /// that share the prefix. Covers same-session multi-turn AND
+    /// cross-request reuse (same system prompt from different users).
+    /// Default: true.
+    #[serde(default = "default_true")]
+    pub prefix_cache_enabled: bool,
+    /// Maximum cached prefix snapshots retained per model on a worker.
+    /// Each entry stores the full KV state up to its prefix boundary, so
+    /// memory scales as `entries × prefix_tokens × hidden × layers`. Keep
+    /// this low if you have many distinct models loaded. Default 16.
+    #[serde(default = "default_prefix_cache_max_entries")]
+    pub prefix_cache_max_entries: u32,
+    /// Prompts longer than this many tokens are NOT inserted into the
+    /// prefix cache (too memory-heavy). Lookups still run against the
+    /// existing cache. Default 8192.
+    #[serde(default = "default_prefix_cache_max_prompt_tokens")]
+    pub prefix_cache_max_prompt_tokens: u32,
+    /// Insertion block granularity. When a prefill completes with N tokens,
+    /// snapshots are inserted at positions `block, 2*block, ..., N` so that
+    /// later prompts sharing only a shorter prefix (e.g. same system prompt,
+    /// different user turn) can still hit at a block boundary. Set to 0 to
+    /// only insert at the full-prompt tail. Default 64.
+    #[serde(default = "default_prefix_cache_block_tokens")]
+    pub prefix_cache_block_tokens: u32,
+    /// Minimum prefix length (in tokens) for which the cache is active.
+    /// Prompts shorter than this aren't worth caching. Default 32.
+    #[serde(default = "default_prefix_cache_min_tokens")]
+    pub prefix_cache_min_tokens: u32,
 }
 
 fn default_tp_max_latency_ms() -> u32 {
     10
+}
+
+fn default_prefix_cache_max_entries() -> u32 {
+    16
+}
+
+fn default_prefix_cache_max_prompt_tokens() -> u32 {
+    8192
+}
+
+fn default_prefix_cache_block_tokens() -> u32 {
+    64
+}
+
+fn default_prefix_cache_min_tokens() -> u32 {
+    32
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1209,6 +1255,11 @@ impl Default for InferenceConfig {
             local_embedding_privacy: false,
             encrypted_pipeline: false,
             tp_max_latency_ms: default_tp_max_latency_ms(),
+            prefix_cache_enabled: true,
+            prefix_cache_max_entries: default_prefix_cache_max_entries(),
+            prefix_cache_max_prompt_tokens: default_prefix_cache_max_prompt_tokens(),
+            prefix_cache_block_tokens: default_prefix_cache_block_tokens(),
+            prefix_cache_min_tokens: default_prefix_cache_min_tokens(),
         }
     }
 }

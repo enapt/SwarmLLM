@@ -11,6 +11,7 @@ mod gguf_meta;
 mod kv_cache;
 mod loader;
 mod model;
+mod prefix_cache;
 mod rope;
 mod shard_reader;
 #[cfg(test)]
@@ -42,5 +43,6 @@ pub use self::gguf_meta::{
 };
 pub use self::kv_cache::KvCacheStore;
 pub use self::model::SplitModel;
+pub use self::prefix_cache::{KvSnapshot, PrefixCache};
 
 pub(crate) const DEFAULT_MAX_SEQ_LEN: usize = 4096;

@@ -1,0 +1,512 @@
+//! Cross-request prefix KV-cache.
+//!
+//! Stores per-model snapshots of the full KV-cache state captured at the end
+//! of prompt prefill. On a subsequent request, looks up the longest cached
+//! token prefix that is a strict prefix of the new prompt's tokens; on hit,
+//! materialises a fresh `KvCacheEntry` seeded with the cached tensors so
+//! prefill skips those positions and only processes the suffix.
+//!
+//! Scope (v1):
+//! - Per-worker-subprocess, per-model-key. One instance manages all models
+//!   inside a worker.
+//! - Flat set of entries per model, bounded by `max_entries`. No radix tree;
+//!   insertion happens at block boundaries AND at the full prompt tail so
+//!   cross-user "same system prompt" sharing still hits (first N block
+//!   boundaries coincide) while staying simple.
+//! - LRU eviction by `last_hit` timestamp.
+//! - Tensors are cloned on restore (candle `append` copies into a fresh
+//!   pre-allocated buffer). No reference-counted sharing across live
+//!   requests.
+//!
+//! What this does NOT do:
+//! - SSM / hybrid-model state (Qwen3.5-SSM). Caches containing SSM state
+//!   are skipped; the model runs a full prefill.
+//! - Cross-node sharing. The snapshot lives only in this worker process.
+//! - True radix-tree de-duplication. Storage is `O(entries * prompt_len *
+//!   hidden * layers)` in the worst case — configure `max_entries` with
+//!   this in mind.
+
+use std::collections::HashMap;
+use std::sync::{Arc, RwLock};
+use std::time::Instant;
+
+use candle_core::Tensor;
+use candle_nn::kv_cache::KvCache;
+
+use crate::error::SwarmError;
+
+use super::kv_cache::{KvCacheEntry, KvCacheStore};
+
+/// Per-layer KV snapshot at a specific token position.
+pub struct KvSnapshot {
+    /// Number of tokens covered by this snapshot (== K/V seq dim).
+    pub token_count: usize,
+    /// One `(K, V)` per layer in the same order as `KvCacheEntry.layers`.
+    /// `None` for layers that had no cache at capture time (shouldn't happen
+    /// for a completed prefill, but we tolerate it to avoid losing the entire
+    /// cache to one missing layer).
+    pub layers: Vec<Option<(Tensor, Tensor)>>,
+    /// KV cache's per-layer seq dim (candle `KvCache::dim()`). Used when
+    /// reconstructing a fresh `KvCache`.
+    pub dim: usize,
+    /// Pre-allocated capacity of the source KvCache (`max_seq_len`). Reused
+    /// when rebuilding so the restored cache has the same headroom as a
+    /// freshly-created one.
+    pub max_seq_len: usize,
+}
+
+struct Entry {
+    tokens: Vec<u32>,
+    snapshot: Arc<KvSnapshot>,
+    last_hit: Instant,
+}
+
+struct Inner {
+    /// Per-model entries keyed by `SplitModel::kv_model_key()`.
+    per_model: HashMap<String, Vec<Entry>>,
+}
+
+/// Flat, longest-prefix prefix KV-cache shared across requests on a worker.
+pub struct PrefixCache {
+    inner: RwLock<Inner>,
+    /// Maximum entries retained per model. Older entries (by `last_hit`)
+    /// are evicted when the cap is exceeded.
+    max_entries: usize,
+    /// Minimum prefix length (tokens) below which lookups return miss and
+    /// inserts are skipped. Avoids caching trivial prompts.
+    min_tokens: usize,
+    /// Prompts longer than this (in tokens) are not inserted — they'd blow
+    /// memory. Lookups against long prompts still walk the cache.
+    max_prompt_tokens: usize,
+    /// Granularity for multi-point inserts. For a prompt of length L, inserts
+    /// happen at positions `block_tokens, 2*block_tokens, ...` that are `≥
+    /// min_tokens` and `< L`, plus one at L itself. 0 disables multi-point
+    /// inserts (only the full prompt is stored).
+    block_tokens: usize,
+    enabled: bool,
+}
+
+impl PrefixCache {
+    pub fn new(
+        enabled: bool,
+        max_entries: usize,
+        block_tokens: usize,
+        min_tokens: usize,
+        max_prompt_tokens: usize,
+    ) -> Self {
+        Self {
+            inner: RwLock::new(Inner {
+                per_model: HashMap::new(),
+            }),
+            max_entries,
+            min_tokens,
+            max_prompt_tokens,
+            block_tokens,
+            enabled,
+        }
+    }
+
+    pub fn enabled(&self) -> bool {
+        self.enabled
+    }
+
+    /// Find the longest cached token prefix of `input_tokens` for `model_key`.
+    /// Returns `None` if no suitable prefix is cached or the cache is disabled.
+    pub fn lookup(&self, model_key: &str, input_tokens: &[u32]) -> Option<Arc<KvSnapshot>> {
+        if !self.enabled || input_tokens.len() < self.min_tokens {
+            return None;
+        }
+        // Must keep at least one token to forward — otherwise the model has
+        // nothing to compute logits for. Clamp the usable prefix length.
+        let usable_max = input_tokens.len().saturating_sub(1);
+
+        // Fast path: read lock only. Clone the winning snapshot arc, then
+        // upgrade to write lock to bump last_hit.
+        let (best_idx, snapshot) = {
+            let inner = self.inner.read().ok()?;
+            let entries = inner.per_model.get(model_key)?;
+            let mut best: Option<(usize, &Entry)> = None;
+            for (i, e) in entries.iter().enumerate() {
+                if e.tokens.len() < self.min_tokens || e.tokens.len() > usable_max {
+                    continue;
+                }
+                if input_tokens.starts_with(&e.tokens) {
+                    match best {
+                        None => best = Some((i, e)),
+                        Some((_, cur)) if e.tokens.len() > cur.tokens.len() => {
+                            best = Some((i, e));
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            let (i, e) = best?;
+            (i, e.snapshot.clone())
+        };
+
+        if let Ok(mut inner) = self.inner.write() {
+            if let Some(entries) = inner.per_model.get_mut(model_key) {
+                if let Some(e) = entries.get_mut(best_idx) {
+                    e.last_hit = Instant::now();
+                }
+            }
+        }
+        tracing::info!(
+            model_key,
+            matched_tokens = snapshot.token_count,
+            prompt_tokens = input_tokens.len(),
+            "DIAG: prefix-cache HIT"
+        );
+        Some(snapshot)
+    }
+
+    /// Capture the current KV state of `kv_store` for `request_id` into
+    /// snapshots at block boundaries and insert them into the cache. Called
+    /// after prefill (or at end of decode) when the full prompt KV is
+    /// populated.
+    ///
+    /// `prompt_tokens` is the token sequence that produced the KV state —
+    /// its length must equal the current KV cache seq_len for this request.
+    pub fn insert_from_kv(
+        &self,
+        model_key: &str,
+        request_id: &str,
+        kv_store: &KvCacheStore,
+        prompt_tokens: &[u32],
+    ) {
+        if !self.enabled
+            || prompt_tokens.len() < self.min_tokens
+            || prompt_tokens.len() > self.max_prompt_tokens
+        {
+            return;
+        }
+        let key = KvCacheStore::cache_key(model_key, request_id);
+        let Some(entry_ref) = kv_store_get(kv_store, &key) else {
+            tracing::debug!(
+                model_key,
+                request_id,
+                "prefix-cache: no KV entry to snapshot"
+            );
+            return;
+        };
+        let entry = entry_ref;
+
+        // Skip SSM/hybrid models — snapshot support not yet implemented.
+        if entry.ssm_states.iter().any(|s| s.is_some()) {
+            tracing::debug!(
+                model_key,
+                "prefix-cache: SSM state present, skipping snapshot"
+            );
+            return;
+        }
+
+        // Figure out the seq dim / max_seq_len from the first populated layer.
+        let Some(first_kv) = entry.layers.iter().flatten().next() else {
+            return;
+        };
+        let dim = first_kv.k_cache().dim();
+        let max_seq_len = first_kv.k_cache().max_seq_len();
+        let available = first_kv.current_seq_len();
+        // Bound insertion points by what the KV actually holds.
+        let available = available.min(prompt_tokens.len());
+        if available < self.min_tokens {
+            return;
+        }
+
+        let insert_points = self.compute_insert_points(available);
+        if insert_points.is_empty() {
+            return;
+        }
+
+        let mut snapshots: Vec<(usize, Arc<KvSnapshot>)> = Vec::with_capacity(insert_points.len());
+        for pos in insert_points {
+            match snapshot_at(&entry.layers, pos, dim, max_seq_len) {
+                Ok(snap) => snapshots.push((pos, Arc::new(snap))),
+                Err(e) => {
+                    tracing::warn!(
+                        model_key,
+                        pos,
+                        error = %e,
+                        "prefix-cache: snapshot failed — skipping this insert point"
+                    );
+                }
+            }
+        }
+        drop(entry);
+
+        if snapshots.is_empty() {
+            return;
+        }
+
+        let Ok(mut inner) = self.inner.write() else {
+            return;
+        };
+        let bucket = inner.per_model.entry(model_key.to_string()).or_default();
+        let now = Instant::now();
+        for (pos, snap) in snapshots {
+            let tokens = prompt_tokens[..pos].to_vec();
+            // Skip if an entry for this exact prefix already exists; bump LRU.
+            if let Some(existing) = bucket.iter_mut().find(|e| e.tokens == tokens) {
+                existing.last_hit = now;
+                existing.snapshot = snap;
+                continue;
+            }
+            bucket.push(Entry {
+                tokens,
+                snapshot: snap,
+                last_hit: now,
+            });
+        }
+
+        // Evict LRU until within cap.
+        if bucket.len() > self.max_entries {
+            bucket.sort_by_key(|e| e.last_hit);
+            let drop_count = bucket.len() - self.max_entries;
+            bucket.drain(..drop_count);
+        }
+
+        tracing::info!(
+            model_key,
+            entries = bucket.len(),
+            "DIAG: prefix-cache inserted snapshot"
+        );
+    }
+
+    /// Seed a fresh `KvCacheEntry` for `request_id` from `snapshot`. Returns
+    /// the number of tokens seeded. Creates the entry if it doesn't exist.
+    pub fn hydrate_request_from_snapshot(
+        &self,
+        kv_store: &KvCacheStore,
+        model_key: &str,
+        request_id: &str,
+        snapshot: &KvSnapshot,
+    ) -> Result<usize, SwarmError> {
+        let num_layers = snapshot.layers.len();
+        let key = KvCacheStore::cache_key(model_key, request_id);
+        let mut entry = kv_store.get_or_create_keyed(&key, num_layers);
+        for (i, layer_kv) in snapshot.layers.iter().enumerate() {
+            let Some((k_src, v_src)) = layer_kv else {
+                continue;
+            };
+            let kv_slot = &mut entry.layers[i];
+            // Create a fresh KvCache with the same dim/max_seq_len and append.
+            let mut kv = KvCache::new(snapshot.dim, snapshot.max_seq_len);
+            kv.append(k_src, v_src).map_err(|e| {
+                SwarmError::Internal(format!(
+                    "prefix-cache hydrate layer {i}: append failed: {e}"
+                ))
+            })?;
+            *kv_slot = Some(kv);
+        }
+        entry.last_accessed = Instant::now();
+        Ok(snapshot.token_count)
+    }
+
+    fn compute_insert_points(&self, available: usize) -> Vec<usize> {
+        let mut points = Vec::new();
+        if self.block_tokens > 0 {
+            let mut p = self.block_tokens;
+            while p < available {
+                if p >= self.min_tokens {
+                    points.push(p);
+                }
+                p += self.block_tokens;
+            }
+        }
+        if available >= self.min_tokens {
+            points.push(available);
+        }
+        points.dedup();
+        points
+    }
+
+    #[cfg(test)]
+    pub fn entry_count(&self, model_key: &str) -> usize {
+        self.inner
+            .read()
+            .ok()
+            .and_then(|i| i.per_model.get(model_key).map(|v| v.len()))
+            .unwrap_or(0)
+    }
+}
+
+fn kv_store_get<'a>(
+    kv_store: &'a KvCacheStore,
+    key: &str,
+) -> Option<dashmap::mapref::one::Ref<'a, String, KvCacheEntry>> {
+    kv_store.get_entry(key)
+}
+
+fn snapshot_at(
+    layers: &[Option<KvCache>],
+    pos: usize,
+    dim: usize,
+    max_seq_len: usize,
+) -> Result<KvSnapshot, SwarmError> {
+    let mut out: Vec<Option<(Tensor, Tensor)>> = Vec::with_capacity(layers.len());
+    for kv_opt in layers.iter() {
+        let Some(kv) = kv_opt else {
+            out.push(None);
+            continue;
+        };
+        let cur = kv.current_seq_len();
+        if cur < pos {
+            return Err(SwarmError::Internal(format!(
+                "snapshot_at: layer seq_len {cur} < requested pos {pos}"
+            )));
+        }
+        let k_src = kv
+            .k()
+            .map_err(|e| SwarmError::Internal(format!("snapshot_at: k() failed: {e}")))?
+            .ok_or_else(|| SwarmError::Internal("snapshot_at: k() returned None".into()))?;
+        let v_src = kv
+            .v()
+            .map_err(|e| SwarmError::Internal(format!("snapshot_at: v() failed: {e}")))?
+            .ok_or_else(|| SwarmError::Internal("snapshot_at: v() returned None".into()))?;
+        // Narrow to [0..pos] on seq dim and force contiguous so the snapshot
+        // doesn't alias the live KvCache buffer.
+        let k_snap = k_src
+            .narrow(dim, 0, pos)
+            .and_then(|t| t.contiguous())
+            .map_err(|e| SwarmError::Internal(format!("snapshot k narrow: {e}")))?;
+        let v_snap = v_src
+            .narrow(dim, 0, pos)
+            .and_then(|t| t.contiguous())
+            .map_err(|e| SwarmError::Internal(format!("snapshot v narrow: {e}")))?;
+        out.push(Some((k_snap, v_snap)));
+    }
+    Ok(KvSnapshot {
+        token_count: pos,
+        layers: out,
+        dim,
+        max_seq_len,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use candle_core::{DType, Device};
+
+    fn make_fake_kv(
+        kv_store: &KvCacheStore,
+        model_key: &str,
+        request_id: &str,
+        num_layers: usize,
+        seq_len: usize,
+    ) {
+        // Build tiny KV tensors [1, 1, seq_len, 4] on CPU so snapshot math has
+        // something concrete to narrow.
+        let device = Device::Cpu;
+        let mut entry = kv_store.get_or_create(model_key, request_id, num_layers);
+        for slot in entry.layers.iter_mut() {
+            let k = Tensor::zeros((1usize, 1, seq_len, 4), DType::F32, &device).unwrap();
+            let v = Tensor::zeros((1usize, 1, seq_len, 4), DType::F32, &device).unwrap();
+            // dim=2 is the sequence dim for this shape
+            let mut kv = KvCache::new(2, 4096);
+            kv.append(&k, &v).unwrap();
+            *slot = Some(kv);
+        }
+    }
+
+    #[test]
+    fn lookup_miss_when_disabled() {
+        let pc = PrefixCache::new(false, 8, 32, 8, 8192);
+        assert!(pc.lookup("m", &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]).is_none());
+    }
+
+    #[test]
+    fn lookup_miss_below_min_tokens() {
+        let pc = PrefixCache::new(true, 8, 32, 8, 8192);
+        assert!(pc.lookup("m", &[1, 2, 3]).is_none());
+    }
+
+    #[test]
+    fn insert_and_lookup_exact_prefix() {
+        let pc = PrefixCache::new(true, 8, 0, 4, 8192);
+        let kv_store = KvCacheStore::new(std::time::Duration::from_secs(600));
+        make_fake_kv(&kv_store, "m", "req-a", 2, 10);
+
+        let tokens: Vec<u32> = (1..=10).collect();
+        pc.insert_from_kv("m", "req-a", &kv_store, &tokens);
+        assert_eq!(pc.entry_count("m"), 1);
+
+        // New request with same tokens + 5 more: should hit at 10.
+        let new_tokens: Vec<u32> = (1..=15).collect();
+        let snap = pc.lookup("m", &new_tokens).expect("hit");
+        assert_eq!(snap.token_count, 10);
+    }
+
+    #[test]
+    fn block_aligned_inserts_enable_partial_match() {
+        // block=4, so after a 10-token prompt we insert at 4, 8, 10.
+        let pc = PrefixCache::new(true, 16, 4, 4, 8192);
+        let kv_store = KvCacheStore::new(std::time::Duration::from_secs(600));
+        make_fake_kv(&kv_store, "m", "req-a", 2, 10);
+
+        let tokens_a: Vec<u32> = (1..=10).collect();
+        pc.insert_from_kv("m", "req-a", &kv_store, &tokens_a);
+        assert_eq!(pc.entry_count("m"), 3);
+
+        // A different prompt that shares first 6 tokens should hit at 4
+        // (longest block boundary that is a prefix).
+        let mut tokens_b: Vec<u32> = (1..=6).collect();
+        tokens_b.extend_from_slice(&[99, 99, 99, 99]);
+        let snap = pc.lookup("m", &tokens_b).expect("hit");
+        assert_eq!(snap.token_count, 4);
+    }
+
+    #[test]
+    fn miss_when_no_shared_prefix() {
+        let pc = PrefixCache::new(true, 8, 0, 4, 8192);
+        let kv_store = KvCacheStore::new(std::time::Duration::from_secs(600));
+        make_fake_kv(&kv_store, "m", "req-a", 2, 10);
+        let tokens_a: Vec<u32> = (1..=10).collect();
+        pc.insert_from_kv("m", "req-a", &kv_store, &tokens_a);
+
+        let tokens_b: Vec<u32> = vec![99, 98, 97, 96, 95, 94, 93, 92];
+        assert!(pc.lookup("m", &tokens_b).is_none());
+    }
+
+    #[test]
+    fn hydrate_copies_snapshot_into_kv_store() {
+        let pc = PrefixCache::new(true, 8, 0, 4, 8192);
+        let kv_store = KvCacheStore::new(std::time::Duration::from_secs(600));
+        make_fake_kv(&kv_store, "m", "req-a", 2, 10);
+        let tokens: Vec<u32> = (1..=10).collect();
+        pc.insert_from_kv("m", "req-a", &kv_store, &tokens);
+        // lookup requires at least one token left to forward, so query with a
+        // longer prompt that still has `tokens` as its strict prefix.
+        let lookup_tokens: Vec<u32> = (1..=12).collect();
+        let snap = pc.lookup("m", &lookup_tokens).expect("hit");
+
+        let seeded = pc
+            .hydrate_request_from_snapshot(&kv_store, "m", "req-b", &snap)
+            .unwrap();
+        assert_eq!(seeded, 10);
+
+        // req-b now has a KV entry with 10 positions per layer.
+        let key = KvCacheStore::cache_key("m", "req-b");
+        let entry = kv_store.get_entry(&key).unwrap();
+        for l in entry.layers.iter() {
+            let kv = l.as_ref().expect("layer populated");
+            assert_eq!(kv.current_seq_len(), 10);
+        }
+    }
+
+    #[test]
+    fn lru_eviction_drops_oldest() {
+        let pc = PrefixCache::new(true, 2, 0, 4, 8192);
+        let kv_store = KvCacheStore::new(std::time::Duration::from_secs(600));
+
+        for (i, req) in ["r1", "r2", "r3"].iter().enumerate() {
+            make_fake_kv(&kv_store, "m", req, 2, 10);
+            let tokens: Vec<u32> = (i as u32 * 10..i as u32 * 10 + 10).collect();
+            pc.insert_from_kv("m", req, &kv_store, &tokens);
+            // Ensure last_hit timestamps differ so LRU order is deterministic.
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+
+        assert_eq!(pc.entry_count("m"), 2);
+    }
+}

@@ -118,10 +118,37 @@ impl SplitModel {
         self.output.is_some()
     }
 
-    /// Tokenize a prompt string and return the embedded hidden states.
-    ///
-    /// Used by tensor-parallel execution where embedding happens before
-    /// layer-by-layer forwarding. Only works on the first segment (has embeddings).
+    /// Tokenize a prompt to token IDs as `Vec<u32>`. Used by the prefix
+    /// cache for key lookup and by the batched-decode path. Cheap — it's
+    /// the same work `tokenize()` does, minus the tensor construction.
+    pub fn encode_ids(&self, prompt: &str) -> Vec<u32> {
+        if let Some(ref tokenizer) = self.tokenizer {
+            tokenizer
+                .encode(prompt)
+                .into_iter()
+                .map(|t| t as u32)
+                .collect()
+        } else {
+            prompt.bytes().map(|b| b as u32).collect()
+        }
+    }
+
+    /// Build an input tensor from an already-tokenized token id slice.
+    /// Mirrors `tokenize()`'s output shape (1, seq_len), i64 dtype. Returns
+    /// an error if `ids` is empty.
+    pub fn tensor_from_ids(&self, ids: &[u32]) -> Result<Tensor, SwarmError> {
+        if ids.is_empty() {
+            return Err(SwarmError::Internal(
+                "tensor_from_ids: empty token slice".into(),
+            ));
+        }
+        let as_i64: Vec<i64> = ids.iter().map(|&t| t as i64).collect();
+        Tensor::new(as_i64.as_slice(), &self.device)
+            .map_err(|e| SwarmError::Internal(format!("Token tensor: {e}")))?
+            .unsqueeze(0)
+            .map_err(|e| SwarmError::Internal(format!("Unsqueeze: {e}")))
+    }
+
     /// Tokenize a prompt and return (token_ids_tensor, num_tokens).
     ///
     /// Returns the token IDs as an I64 tensor with shape (1, seq_len),

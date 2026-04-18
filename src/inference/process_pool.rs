@@ -79,6 +79,14 @@ pub struct ModelProcessPool {
         std::sync::OnceLock<tokio::sync::broadcast::Sender<crate::daemon::state::ActivityEvent>>,
     /// KV-cache session TTL passed to worker subprocesses (from config).
     kv_cache_ttl_secs: std::sync::atomic::AtomicU64,
+    /// Prefix-cache config snapshot applied to future-spawned workers.
+    /// Reading/writing is Relaxed — workers are spawned rarely enough that
+    /// we don't care about cross-thread immediacy.
+    prefix_cache_enabled: std::sync::atomic::AtomicBool,
+    prefix_cache_max_entries: std::sync::atomic::AtomicU32,
+    prefix_cache_max_prompt_tokens: std::sync::atomic::AtomicU32,
+    prefix_cache_block_tokens: std::sync::atomic::AtomicU32,
+    prefix_cache_min_tokens: std::sync::atomic::AtomicU32,
 }
 
 impl ModelProcessPool {
@@ -90,6 +98,11 @@ impl ModelProcessPool {
             active_shard_windows: DashMap::new(),
             activity_tx: std::sync::OnceLock::new(),
             kv_cache_ttl_secs: std::sync::atomic::AtomicU64::new(DEFAULT_KV_CACHE_TTL_SECS),
+            prefix_cache_enabled: std::sync::atomic::AtomicBool::new(true),
+            prefix_cache_max_entries: std::sync::atomic::AtomicU32::new(16),
+            prefix_cache_max_prompt_tokens: std::sync::atomic::AtomicU32::new(8192),
+            prefix_cache_block_tokens: std::sync::atomic::AtomicU32::new(64),
+            prefix_cache_min_tokens: std::sync::atomic::AtomicU32::new(32),
         }
     }
 
@@ -97,6 +110,27 @@ impl ModelProcessPool {
     pub fn set_kv_cache_ttl(&self, ttl_secs: u64) {
         self.kv_cache_ttl_secs
             .store(ttl_secs, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Apply the prefix-cache section of inference config to future-spawned workers.
+    pub fn set_prefix_cache_config(
+        &self,
+        enabled: bool,
+        max_entries: u32,
+        max_prompt_tokens: u32,
+        block_tokens: u32,
+        min_tokens: u32,
+    ) {
+        use std::sync::atomic::Ordering;
+        self.prefix_cache_enabled.store(enabled, Ordering::Relaxed);
+        self.prefix_cache_max_entries
+            .store(max_entries, Ordering::Relaxed);
+        self.prefix_cache_max_prompt_tokens
+            .store(max_prompt_tokens, Ordering::Relaxed);
+        self.prefix_cache_block_tokens
+            .store(block_tokens, Ordering::Relaxed);
+        self.prefix_cache_min_tokens
+            .store(min_tokens, Ordering::Relaxed);
     }
 
     /// Set the activity event sender (called once after SharedState is created).
@@ -183,6 +217,41 @@ impl ModelProcessPool {
             .load(std::sync::atomic::Ordering::Relaxed);
         args.push("--kv-cache-ttl".to_string());
         args.push(ttl.to_string());
+
+        // Pass prefix-cache config from the active inference settings.
+        {
+            use std::sync::atomic::Ordering;
+            args.push("--prefix-cache-enabled".to_string());
+            args.push(
+                self.prefix_cache_enabled
+                    .load(Ordering::Relaxed)
+                    .to_string(),
+            );
+            args.push("--prefix-cache-max-entries".to_string());
+            args.push(
+                self.prefix_cache_max_entries
+                    .load(Ordering::Relaxed)
+                    .to_string(),
+            );
+            args.push("--prefix-cache-max-prompt-tokens".to_string());
+            args.push(
+                self.prefix_cache_max_prompt_tokens
+                    .load(Ordering::Relaxed)
+                    .to_string(),
+            );
+            args.push("--prefix-cache-block-tokens".to_string());
+            args.push(
+                self.prefix_cache_block_tokens
+                    .load(Ordering::Relaxed)
+                    .to_string(),
+            );
+            args.push("--prefix-cache-min-tokens".to_string());
+            args.push(
+                self.prefix_cache_min_tokens
+                    .load(Ordering::Relaxed)
+                    .to_string(),
+            );
+        }
 
         // If a shard window is set for this model, pass it to the worker
         if let Some(window) = self.active_shard_windows.get(model_id) {

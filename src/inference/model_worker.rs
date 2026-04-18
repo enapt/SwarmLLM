@@ -14,9 +14,31 @@ use candle_core::IndexOp;
 
 use crate::daemon::shard_loader::{try_load_from_shards, ShardLoadParams};
 use crate::error::SwarmError;
-use crate::inference::split::{self, KvCacheStore, SplitModel};
+use crate::inference::split::{self, KvCacheStore, PrefixCache, SplitModel};
 use crate::inference::worker_ipc::*;
 use crate::types::NetworkFinishReason;
+
+/// Configuration for the worker's cross-request prefix KV-cache.
+#[derive(Debug, Clone, Copy)]
+pub struct PrefixCacheConfig {
+    pub enabled: bool,
+    pub max_entries: usize,
+    pub max_prompt_tokens: usize,
+    pub block_tokens: usize,
+    pub min_tokens: usize,
+}
+
+impl Default for PrefixCacheConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max_entries: 16,
+            max_prompt_tokens: 8192,
+            block_tokens: 64,
+            min_tokens: 32,
+        }
+    }
+}
 
 /// Run the model worker subprocess.
 /// Called from main.rs when the binary is invoked with `model-worker` subcommand.
@@ -26,6 +48,7 @@ pub async fn run_worker(
     data_dir: PathBuf,
     shard_window: Option<Vec<u32>>,
     kv_cache_ttl_secs: u64,
+    prefix_cfg: PrefixCacheConfig,
 ) {
     // Connect to the daemon's Unix socket
     let stream = match UnixStream::connect(&socket_path).await {
@@ -53,6 +76,20 @@ pub async fn run_worker(
     let kv_store = Arc::new(KvCacheStore::new(std::time::Duration::from_secs(
         kv_cache_ttl_secs,
     )));
+    let prefix_cache = Arc::new(PrefixCache::new(
+        prefix_cfg.enabled,
+        prefix_cfg.max_entries,
+        prefix_cfg.block_tokens,
+        prefix_cfg.min_tokens,
+        prefix_cfg.max_prompt_tokens,
+    ));
+    tracing::info!(
+        enabled = prefix_cfg.enabled,
+        max_entries = prefix_cfg.max_entries,
+        block_tokens = prefix_cfg.block_tokens,
+        min_tokens = prefix_cfg.min_tokens,
+        "model-worker: prefix-cache configured"
+    );
 
     if let Some(ref w) = shard_window {
         tracing::info!(window = ?w, "model-worker: shard window active — only loading specified shards");
@@ -110,6 +147,7 @@ pub async fn run_worker(
                     &mut writer,
                     &mut models,
                     &kv_store,
+                    &prefix_cache,
                     &data_dir,
                     gen,
                     &shard_window,
@@ -692,6 +730,7 @@ async fn handle_generate(
     writer: &mut tokio::net::unix::OwnedWriteHalf,
     models: &mut HashMap<(usize, usize, usize, usize), SplitModel>,
     kv_store: &Arc<KvCacheStore>,
+    prefix_cache: &Arc<PrefixCache>,
     data_dir: &std::path::Path,
     gen: IpcGenerate,
     shard_window: &Option<Vec<u32>>,
@@ -717,12 +756,56 @@ async fn handle_generate(
         .ok_or_else(|| SwarmError::Internal("Model vanished after load".into()))?;
 
     let req_id_str = request_id.to_string();
+    let model_key_string = model.kv_model_key().to_string();
 
-    // Tokenize the prompt
-    let (input, prompt_tokens) = model.tokenize(&gen.prompt)?;
+    // Tokenize the prompt to u32 IDs first so we can probe the prefix cache.
+    // Probe BEFORE building the input tensor — on hit we forward only the suffix.
+    let prompt_ids = model.encode_ids(&gen.prompt);
+    let prompt_tokens = prompt_ids.len();
+    if prompt_tokens == 0 {
+        return Err(SwarmError::Internal(
+            "empty prompt after tokenization".into(),
+        ));
+    }
+
+    // Prefix-cache lookup: if a cached prefix is a strict prefix of this
+    // prompt, hydrate the request's KV with the snapshot and only forward
+    // the suffix.
+    let matched = prefix_cache.lookup(&model_key_string, &prompt_ids);
+    let prefix_len = match matched.as_ref() {
+        Some(snap) => prefix_cache
+            .hydrate_request_from_snapshot(kv_store, &model_key_string, &req_id_str, snap)
+            .unwrap_or(0),
+        None => 0,
+    };
+    // Guard: must have at least one token left to run a forward pass.
+    let prefix_len = prefix_len.min(prompt_tokens.saturating_sub(1));
+
+    let (input, index_pos_start) = if prefix_len > 0 {
+        tracing::info!(
+            %request_id,
+            matched_tokens = prefix_len,
+            total_tokens = prompt_tokens,
+            "DIAG: handle_generate prefix-cache HIT — prefilling suffix only"
+        );
+        (
+            model.tensor_from_ids(&prompt_ids[prefix_len..])?,
+            prefix_len,
+        )
+    } else {
+        (model.tensor_from_ids(&prompt_ids)?, 0)
+    };
 
     // Prefill — block_in_place for CPU-bound inference
-    let logits = tokio::task::block_in_place(|| model.forward(&input, 0, kv_store, &req_id_str))?;
+    let logits = tokio::task::block_in_place(|| {
+        model.forward(&input, index_pos_start, kv_store, &req_id_str)
+    })?;
+
+    // After prefill the KV cache holds exactly `prompt_tokens` positions.
+    // Snapshot it into the prefix cache so future prompts sharing this
+    // prefix skip the prefill work. insert_from_kv is a no-op when the
+    // prompt is shorter than the configured floor or the cache is off.
+    prefix_cache.insert_from_kv(&model_key_string, &req_id_str, kv_store, &prompt_ids);
 
     let use_logprobs = gen.sampling.logprobs;
     let (mut next_token, mut token_logprob) =

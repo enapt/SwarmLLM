@@ -137,6 +137,16 @@ impl KvCacheStore {
         self.get_or_create_keyed(&key, num_layers)
     }
 
+    /// Look up the entry for a pre-formatted key. Returns an immutable
+    /// reference (DashMap `Ref`); drop it before taking any mutable lock on
+    /// the same key.
+    pub(crate) fn get_entry<'a>(
+        &'a self,
+        key: &str,
+    ) -> Option<dashmap::mapref::one::Ref<'a, String, KvCacheEntry>> {
+        self.caches.get(key)
+    }
+
     /// Truncate a request's KV cache (all layers) to `target_len`. No-op if
     /// no entry is present. Used by the speculative-decoding partial-accept
     /// fixup on the segment holder.
