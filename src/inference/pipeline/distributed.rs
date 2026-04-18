@@ -47,10 +47,17 @@ impl PipelineExecutor {
             return Ok(out);
         }
 
-        // Item 2 Phase 3: try the greedy distributed speculative path.
-        // Falls through (returns Ok(None)) to the standard loop below if
-        // preconditions aren't met (no draft model, multi-segment, TP, non-
-        // greedy, encrypted, etc.).
+        // Item 12 Phase 4: DSD multi-segment greedy speculative. Falls through
+        // when fewer than 2 segments (Item 2 covers single-segment) or any
+        // other precondition fails (TP groups, non-greedy, no draft, etc.).
+        if let Some(out) = self.try_dsd_distributed(token_tx.clone()).await? {
+            return Ok(out);
+        }
+
+        // Item 2 Phase 3: try the greedy distributed speculative path
+        // (single-segment). Falls through (returns Ok(None)) to the standard
+        // loop below if preconditions aren't met (no draft model, multi-
+        // segment, TP, non-greedy, encrypted, etc.).
         if let Some(out) = self.try_speculative_distributed(token_tx.clone()).await? {
             return Ok(out);
         }
@@ -475,7 +482,7 @@ impl PipelineExecutor {
     /// If tensor-parallel groups are available for a segment's layer range,
     /// the executor uses layer-by-layer AllReduce across the TP group instead
     /// of sending the full layer range to a single node.
-    async fn forward_through_segments(
+    pub(super) async fn forward_through_segments(
         &mut self,
         request_id: uuid::Uuid,
         sequence_num: u32,

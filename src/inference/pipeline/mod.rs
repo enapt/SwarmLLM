@@ -6,6 +6,7 @@
 //! files (`local`, `distributed`, `vision`, `prompt`, `tensor_parallel`).
 
 mod distributed;
+mod dsd;
 mod local;
 mod prompt;
 mod remote_generate;

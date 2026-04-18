@@ -572,7 +572,7 @@ async fn send_verify_batch(
     Ok(result.spec_logits)
 }
 
-fn argmax(logits: &[f32]) -> u32 {
+pub(super) fn argmax(logits: &[f32]) -> u32 {
     let mut best_idx: usize = 0;
     let mut best_val = f32::NEG_INFINITY;
     for (i, &v) in logits.iter().enumerate() {
@@ -609,7 +609,7 @@ unsafe impl Send for DraftState {}
 /// Prefill the draft model with `prompt`. Returns a `DraftState` holding the
 /// llama-cpp context positioned at `prompt_tokens.len()`.
 #[cfg(feature = "llama")]
-fn draft_prefill(
+pub(super) fn draft_prefill(
     draft: &mut crate::inference::executor::ModelExecutor,
     prompt: &str,
 ) -> Result<DraftState, SwarmError> {
@@ -661,7 +661,7 @@ fn draft_prefill(
 }
 
 #[cfg(not(feature = "llama"))]
-fn draft_prefill(
+pub(super) fn draft_prefill(
     _draft: &mut crate::inference::executor::ModelExecutor,
     _prompt: &str,
 ) -> Result<DraftState, SwarmError> {
@@ -674,7 +674,7 @@ fn draft_prefill(
 /// token) then greedily sampling γ tokens from the draft. Returns the γ
 /// tokens. Draft KV ends γ+1 positions ahead of where it started.
 #[cfg(feature = "llama")]
-fn draft_next_gamma(
+pub(super) fn draft_next_gamma(
     state: &mut DraftState,
     _draft: &mut crate::inference::executor::ModelExecutor,
     bootstrap: u32,
@@ -715,7 +715,7 @@ fn draft_next_gamma(
 }
 
 #[cfg(not(feature = "llama"))]
-fn draft_next_gamma(
+pub(super) fn draft_next_gamma(
     _state: &mut DraftState,
     _draft: &mut crate::inference::executor::ModelExecutor,
     _bootstrap: u32,
@@ -731,7 +731,7 @@ fn draft_next_gamma(
 /// After this call, draft_state.pos matches target_pos and the draft is
 /// ready to bootstrap the next round from `bonus`.
 #[cfg(feature = "llama")]
-fn draft_sync_after_round(
+pub(super) fn draft_sync_after_round(
     state: &mut DraftState,
     _draft: &mut crate::inference::executor::ModelExecutor,
     drafts: &[u32],
@@ -757,7 +757,7 @@ fn draft_sync_after_round(
 }
 
 #[cfg(not(feature = "llama"))]
-fn draft_sync_after_round(
+pub(super) fn draft_sync_after_round(
     _state: &mut DraftState,
     _draft: &mut crate::inference::executor::ModelExecutor,
     _drafts: &[u32],
