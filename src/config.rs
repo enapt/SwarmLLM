@@ -369,6 +369,18 @@ pub struct InferenceConfig {
     /// = use the GGUF value.
     #[serde(default)]
     pub max_seq_len_override: Option<u32>,
+    /// Enable Decentralized Speculative Decoding (DSD, arxiv 2511.11733) for
+    /// multi-segment distributed inference. Coordinator drafts γ tokens
+    /// locally, pushes the whole γ-window through every pipeline segment in a
+    /// single round trip, then accept-rejects on the returned γ+1 logits.
+    /// Eliminates `(N-1)·t1·(γ-1)/γ` of inter-node round-trip latency at the
+    /// cost of N·γ× the per-link payload (still small after Item 13's Q8_0).
+    /// Single-segment workloads continue to use the Item 4 fast path. Off by
+    /// default until the coordinator loop and adaptive γ controller land
+    /// (DSD Phases 2–4 — see `docs/plans/distributed_inference_speedup.md`
+    /// Item 12). Worker (Phase 1) accepts the γ-token wire format already.
+    #[serde(default)]
+    pub decentralized_spec_decoding: bool,
     /// Quantize intermediate-segment hidden state activations to Q8_0
     /// (group-32 symmetric) before sending them to the next pipeline peer.
     /// Compresses ~3.76× vs raw f32 with negligible quality loss (PPL drift
@@ -1327,6 +1339,7 @@ impl Default for InferenceConfig {
             swift_skip_ratio: default_swift_skip_ratio(),
             force_standard_attn: false,
             max_seq_len_override: None,
+            decentralized_spec_decoding: false,
             activation_compression: false,
         }
     }

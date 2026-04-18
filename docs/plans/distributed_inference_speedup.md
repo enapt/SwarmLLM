@@ -15,6 +15,7 @@
 > | Item 3 — Continuous batching | 🟡 Phase 1 (wire protocol) landed behind `continuous_batching=false` flag. Phase 2 (scheduler refactor + `SplitModel::forward_batch`) is the remaining work; blocker is replacing `Mutex<socket>` in `ModelProcessPool` with mpsc-fed scheduler. Not pursued in this session because Item 4 delivered the headline win. |
 > | Item 6 — SWIFT self-speculative | 🟡 Landed behind `swift_self_speculative=false` flag. Structurally slower than baseline on candle until flash-attn-with-mask lands (kernel mismatch on multi-position verify). Shelved. |
 > | **Item 13 — Activation compression (Q8_0)** | ✅ LANDED behind `activation_compression=false` flag. Codec verified (~3.76× compression, RMS error <0.005, peer-compatible auto-dispatch). End-to-end multi-segment benchmark pending. |
+> | Item 12 — DSD (decentralized speculative) | 🟡 Phase 1 LANDED 2026-04-18: worker accepts γ-token first-segment decode + config flag added. Phases 2–4 (coordinator loop, distributed KV rollback verification, γ controller) remain. Paper says 2.56× on InfiniBand; SwarmLLM's WAN regime should yield more. |
 >
 > **If starting a new session, the most useful things to pick up are:**
 > 1. Item 3 Phase 2 (concurrent-user throughput — independent of Item 4)
@@ -559,17 +560,54 @@ The implementation is correct in structure (skip-mask draft + truncated KV + ful
 
 > **Context:** Research scan after Items 5+6 landed surfaced several techniques specifically designed for P2P / pipeline-parallel deployments, distinct from the single-GPU continuous-batching wins of Item 7. Listed in priority order with arxiv links and fit assessment for SwarmLLM (libp2p + candle + sharded peers).
 
-### Item 12 — DSD: Decentralized Speculative Decoding (highest-fit)
+### Item 12 — DSD: Decentralized Speculative Decoding 🟡 PHASE 1 LANDED 2026-04-18
 
-**What.** Designed *exactly* for our scenario: while waiting for an inter-peer hop, verify K speculative tokens in parallel. Semantic-aware adaptive verification window sized by measured per-link RTT (which we already track in `peer_registry`). Training-free.
+**Source.** [arxiv 2511.11733](https://arxiv.org/abs/2511.11733) (Song et al., Gradient Network, Nov 2025) — primary DSD paper. [arxiv 2511.21669](https://arxiv.org/abs/2511.21669) — edge-cloud variant with the Adaptive Window Control (AWC) γ controller. Note: Parallax repo (`GradientHQ/parallax`) does NOT contain the DSD implementation in `main` as of audit (paper-only).
 
-**Source.** [arxiv 2511.11733](https://arxiv.org/abs/2511.11733), [arxiv 2511.21669](https://arxiv.org/abs/2511.21669) (edge-cloud variant), implemented in the Parallax repo.
+**Why it fits SwarmLLM.** The `T_DSD = γ·t0 + (N-1)·t1` vs `T_std = γ·(t0 + (N-1)·t1)` analysis says DSD's win grows with the `(N-1)·t1` term — i.e. with WAN RTT and pipeline depth. Paper 1's "most pronounced" regime is `3·t0 < t1 < 10·t0`, matching SwarmLLM's typical 50–150 ms WAN RTT vs 10–100 ms candle-CPU/GPU per-segment compute. Expected gains LARGER than the paper's 2.56× InfiniBand baseline, because their RTT was tens-of-µs and ours is tens-of-ms.
 
-**Reported.** 2.56× HumanEval, 2.59× GSM8K, ~37% reduction in inter-node communication.
+**Eligibility (when implemented).** All of: `multi-segment distributed pipeline (N ≥ 2)`, `draft model loaded on coordinator`, `greedy temp=0` for v1, no vision/LoRA/encrypted-pipeline. Single-segment workloads keep using the Item 4 fast path.
 
-**Stacks with.** Items 4 (degenerate single-segment case), 5, 6, 7. This is the "native distributed" version of speculative decoding.
+### Phase 1 (LANDED 2026-04-18, this commit)
 
-**Complexity.** Medium. Adaptive accept window per link.
+Worker-side groundwork: `src/inference/model_worker.rs` first-segment decode branch now accepts γ token IDs (`γ × 8` bytes LE) instead of just one. Output tensor is `[1, γ]`; candle's transformer forward writes KV at positions `[index_pos..index_pos+γ]` automatically because every layer is shape-polymorphic in seq_len. Single-token decode (γ=1, the legacy default) continues to work identically — validated as a strict no-op refactor.
+
+Config flag `InferenceConfig::decentralized_spec_decoding` (default `false`) added. Has no effect today; will gate the coordinator loop in Phase 4.
+
+### Phase 2 (next): distributed KV rollback
+
+`LayerForward.truncate_kv_to: Option<u32>` was already added in Item 2 Phase 2 for single-node spec. Need to verify it propagates correctly through every intermediate segment when the coordinator partial-accepts (k < γ). Currently the field is on the wire and the worker applies it locally — need an integration test that proves all N segments truncate consistently.
+
+### Phase 3 (next): adaptive γ controller
+
+Paper 1 fixes γ=8 and adapts the τ relaxation parameter instead. Paper 2 adapts γ via a small MLP on `[queue_depth_util, recent_acceptance_rate, recent_RTT, recent_TPOT, prev_γ]`. **MVP: ship paper 2's "Dynamic window" baseline** — `γ ← clamp(γ · (1 + α·(accept_rate - 0.5)), 2, 12)` with α≈0.2 and a 32-token EMA on accept_rate. Cheap, no model artifact, captures most of the win. Trained MLP is a future optimization.
+
+### Phase 4 (next): coordinator loop
+
+New file `src/inference/pipeline/dsd.rs`. Mirror `try_speculative_distributed` from Item 2 but:
+1. Pick γ from the controller (Phase 3)
+2. Draft γ tokens on coordinator using the existing `draft_executor`
+3. Build `LayerForward { activations: γ_token_ids_LE, draft_tokens, spec_logits_requested: true, truncate_kv_to: pending }` and send to FIRST segment (not skipping intermediates as Item 2's single-node verify path does)
+4. Pipeline propagates `[1, γ, hidden]` through every segment — Phase 1 unblocked the first-segment side; intermediate segments already work because they go through the generic `bytes_to_tensor → forward → tensor_to_bytes` path; final segment uses the existing `forward_verify_all_positions` path from Item 2 Phase 1
+5. Receive γ+1 logit vectors back from final segment, greedy-compare → accept count `k`
+6. Set `truncate_kv_to: Some(index_pos + k + 1)` on next round to roll back stale KV (γ-k positions) across the pipeline
+
+### Future / out of v1 scope
+
+- Paper 1 semantic key-token detection (entropy ratio + top-1 gap + NormMatch) for τ relaxation — only matters for non-greedy sampling
+- Paper 2's trained MLP γ predictor — replace simple controller after measuring
+- Activation compression (Item 13) on the γ-batched payload — already works because Q8_0 is shape-agnostic; no extra integration
+
+### Stacks with
+
+- **Item 4** stays as-is for single-segment fast path. DSD only kicks in when `N ≥ 2`.
+- **Item 5** prefix cache: orthogonal — cache hit reduces prefill, DSD reduces decode.
+- **Item 13** Q8_0: stacks. The γ-wide hidden state goes through the same compressed wire.
+- **Item 2 single-node spec**: kept as the local-segment alternative when no remote pipeline exists.
+
+### Complexity assessment (revised post-research)
+
+Medium-large. Phase 1 is small (this commit). Phase 4 is the main coordinator loop refactor. Phase 2 needs a multi-node integration test. Phase 3 is trivial (heuristic).
 
 ### Item 13 — Activation compression for inter-node transfer ✅ LANDED 2026-04-18 (flag, codec verified)
 

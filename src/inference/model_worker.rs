@@ -524,19 +524,28 @@ async fn handle_forward(
             )
             .map_err(|e| SwarmError::Internal(format!("Tensor: {e}")))?
         } else {
-            // Decode step: single i64 token ID (8 bytes LE)
-            let token_id = if activation_bytes.len() >= 8 {
-                let bytes: [u8; 8] = activation_bytes[..8]
-                    .try_into()
-                    .map_err(|_| SwarmError::Internal("Invalid activation data".into()))?;
-                i64::from_le_bytes(bytes)
-            } else {
+            // Decode step: one or more i64 token IDs (8 bytes each, LE).
+            //
+            // The single-token case (8 bytes) is the standard per-token decode
+            // round trip. The multi-token case (γ × 8 bytes, γ ≥ 2) is the
+            // distributed-speculative entry point (Item 12 / DSD): the
+            // coordinator drafts γ tokens locally and pushes the entire window
+            // through the pipeline in one round. Candle's transformer forward
+            // is shape-polymorphic in the seq_len dim and will write KV at
+            // positions `[index_pos..index_pos+γ]`, so no other layer changes
+            // are needed.
+            if activation_bytes.is_empty() || activation_bytes.len() % 8 != 0 {
                 return Err(SwarmError::Internal(format!(
-                    "Decode step activation payload too short: {} bytes (need 8)",
+                    "Decode step activation payload must be a non-empty multiple of 8 bytes (got {})",
                     activation_bytes.len()
                 )));
-            };
-            candle_core::Tensor::from_vec(vec![token_id], &[1, 1], &candle_core::Device::Cpu)
+            }
+            let token_ids: Vec<i64> = activation_bytes
+                .chunks_exact(8)
+                .map(|c| i64::from_le_bytes(c.try_into().unwrap()))
+                .collect();
+            let seq_len = token_ids.len();
+            candle_core::Tensor::from_vec(token_ids, &[1, seq_len], &candle_core::Device::Cpu)
                 .map_err(|e| SwarmError::Internal(format!("Tensor: {e}")))?
         }
     } else {
