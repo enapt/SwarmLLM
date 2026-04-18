@@ -2692,3 +2692,98 @@ fn gemma2_output_projection_qmatmul_vs_deq() {
         "QMatMul and dequantized matmul should agree: corr={corr}"
     );
 }
+
+/// Benchmark `SplitModel::forward_batch` vs sequential `forward()` across
+/// batch sizes 1/2/4/8 on a medium test model (22 layers, 1024 hidden_dim).
+/// Not a correctness test — prints timing to stdout when invoked with
+/// `cargo test --release forward_batch_timing -- --nocapture --ignored`.
+///
+/// Ignored by default because it takes ~10 seconds on CPU and doesn't
+/// assert anything; intended for hand-running during perf investigations.
+#[test]
+#[ignore]
+fn forward_batch_timing() {
+    let hidden_dim = 1024;
+    let num_layers = 22;
+    let mut model = make_test_split_model(num_layers, hidden_dim);
+    let kv_store = KvCacheStore::new(std::time::Duration::from_secs(600));
+
+    let iters = 20usize;
+    let batch_sizes = [1usize, 2, 4, 8];
+
+    eprintln!(
+        "\nforward_batch timing | hidden={hidden_dim} layers={num_layers} iters={iters} device=CPU\n"
+    );
+    eprintln!(
+        "{:<10} {:<18} {:<18} {:<10}",
+        "batch", "batch_ms/iter", "sequential_ms/iter", "speedup"
+    );
+    eprintln!("{:-<60}", "");
+
+    for &batch_size in &batch_sizes {
+        // Fresh inputs per batch size.
+        let inputs: Vec<Tensor> = (0..batch_size)
+            .map(|_| Tensor::randn(0f32, 1.0, (1, 1, hidden_dim), &Device::Cpu).unwrap())
+            .collect();
+
+        // Warm up
+        for (slot, input) in inputs.iter().enumerate() {
+            let rid = format!("warm-{slot}");
+            let _ = model.forward(input, 0, &kv_store, &rid);
+            kv_store.clear_request(
+                &format!(
+                    "{}-{}-{}",
+                    model.layer_start, model.layer_end, model.total_layers
+                ),
+                &rid,
+            );
+        }
+
+        // Time batched
+        let items: Vec<BatchItem> = inputs
+            .iter()
+            .enumerate()
+            .map(|(i, t)| BatchItem {
+                input: t,
+                index_pos: 0,
+                request_id: Box::leak(format!("bench-batch-{i}").into_boxed_str()),
+            })
+            .collect();
+        let start = std::time::Instant::now();
+        for _ in 0..iters {
+            // Reset KV per iter so each call does equal work
+            for item in &items {
+                kv_store.clear_request(
+                    &format!(
+                        "{}-{}-{}",
+                        model.layer_start, model.layer_end, model.total_layers
+                    ),
+                    item.request_id,
+                );
+            }
+            let _ = model.forward_batch(&items, &kv_store).unwrap();
+        }
+        let batch_ms = start.elapsed().as_secs_f64() * 1000.0 / iters as f64;
+
+        // Time sequential
+        let start = std::time::Instant::now();
+        for _ in 0..iters {
+            for (i, t) in inputs.iter().enumerate() {
+                let rid = format!("bench-seq-{i}");
+                kv_store.clear_request(
+                    &format!(
+                        "{}-{}-{}",
+                        model.layer_start, model.layer_end, model.total_layers
+                    ),
+                    &rid,
+                );
+                let _ = model.forward(t, 0, &kv_store, &rid).unwrap();
+            }
+        }
+        let seq_ms = start.elapsed().as_secs_f64() * 1000.0 / iters as f64;
+
+        let speedup = seq_ms / batch_ms.max(1e-9);
+        eprintln!("{batch_size:<10} {batch_ms:<18.2} {seq_ms:<18.2} {speedup:<10.2}x");
+    }
+    eprintln!();
+}
