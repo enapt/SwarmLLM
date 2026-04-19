@@ -730,8 +730,31 @@ pub(crate) async fn dispatch_network_messages(
                                         tracing::debug!(
                                             node_id = %cap.node_id,
                                             hosted_shards = cap.hosted_shards.len(),
+                                            observed_latencies = cap.observed_latencies.len(),
                                             "Received capability update from peer"
                                         );
+                                        // Merge the sender's observed-latency snapshot into
+                                        // our local EMA before installing the capability (so
+                                        // the snapshot doesn't have to survive the clone).
+                                        // Trust-weighted: weight = sender's trust score; a
+                                        // zero-trust sender is a no-op. Own-node observations
+                                        // are skipped — we already have direct samples.
+                                        let sender_trust = shared_state
+                                            .peer_registry
+                                            .get(&cap.node_id)
+                                            .map(|p| p.trust_score)
+                                            .unwrap_or(0.5);
+                                        let own_id = shared_state.identity.node_id();
+                                        for obs in &cap.observed_latencies {
+                                            if &obs.peer == own_id || obs.peer == cap.node_id {
+                                                continue;
+                                            }
+                                            shared_state.merge_peer_segment_latency(
+                                                &obs.peer,
+                                                obs.ms_per_layer,
+                                                sender_trust,
+                                            );
+                                        }
                                         if let Some(mut peer) = shared_state.peer_registry.get_mut(&cap.node_id) {
                                             peer.capability = Some(cap.clone());
                                             peer.last_seen = chrono::Utc::now();

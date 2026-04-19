@@ -814,3 +814,122 @@ fn peer_segment_latency_ema_math() {
     let unknown = NodeId([8u8; 32]);
     assert!(state.observed_latency_ms_per_layer(&unknown).is_none());
 }
+
+#[test]
+fn merge_peer_segment_latency_zero_trust_is_noop() {
+    // A zero-trust (or negative) sender cannot influence our EMA in either
+    // direction — neither seeding a new entry nor moving an existing one.
+    let state = make_shared_state();
+    let node = NodeId([11u8; 32]);
+
+    // No entry yet + weight 0 → no insert.
+    state.merge_peer_segment_latency(&node, 100.0, 0.0);
+    assert!(state.observed_latency_ms_per_layer(&node).is_none());
+
+    // Seed a direct observation, then try to poison it with weight 0.
+    state.record_peer_segment_latency(&node, 20, 4);
+    let before = state.observed_latency_ms_per_layer(&node).unwrap();
+    state.merge_peer_segment_latency(&node, 9999.0, 0.0);
+    let after = state.observed_latency_ms_per_layer(&node).unwrap();
+    assert!(
+        (after - before).abs() < 1e-6,
+        "zero-trust merge must be a no-op (before={before}, after={after})"
+    );
+}
+
+#[test]
+fn merge_peer_segment_latency_below_seed_threshold_skips_insert() {
+    // A low-trust sender (weight < 0.3) cannot seed a fresh entry, even
+    // though it would shift an existing one. Defends against a low-trust
+    // peer painting us an out-of-band picture of a stranger.
+    let state = make_shared_state();
+    let stranger = NodeId([12u8; 32]);
+
+    state.merge_peer_segment_latency(&stranger, 500.0, 0.1);
+    assert!(state.observed_latency_ms_per_layer(&stranger).is_none());
+
+    state.merge_peer_segment_latency(&stranger, 500.0, 0.29);
+    assert!(state.observed_latency_ms_per_layer(&stranger).is_none());
+
+    // Exactly at the threshold seeds.
+    state.merge_peer_segment_latency(&stranger, 500.0, 0.3);
+    assert_eq!(
+        state.observed_latency_ms_per_layer(&stranger).unwrap(),
+        500.0
+    );
+}
+
+#[test]
+fn merge_peer_segment_latency_trust_weighted_ema() {
+    // Weight-scaled α: effective_α = 0.3 * weight. Direct samples move
+    // the EMA more than foreign samples from less-trusted peers.
+    let state = make_shared_state();
+    let node = NodeId([13u8; 32]);
+
+    // Start with a direct sample of 10 ms/layer (20 ms over 2 layers).
+    state.record_peer_segment_latency(&node, 20, 2);
+    let v0 = state.observed_latency_ms_per_layer(&node).unwrap();
+    assert!((v0 - 10.0).abs() < 1e-5);
+
+    // Foreign sample of 100 ms/layer at weight 1.0 →
+    // effective_α = 0.3, EMA = 0.3*100 + 0.7*10 = 37.0.
+    state.merge_peer_segment_latency(&node, 100.0, 1.0);
+    let v1 = state.observed_latency_ms_per_layer(&node).unwrap();
+    assert!(
+        (v1 - 37.0).abs() < 1e-4,
+        "weight=1.0 merge, expected 37.0, got {v1}"
+    );
+
+    // Reset and try with weight 0.5 →
+    // effective_α = 0.15, EMA = 0.15*100 + 0.85*10 = 23.5.
+    let state2 = make_shared_state();
+    state2.record_peer_segment_latency(&node, 20, 2);
+    state2.merge_peer_segment_latency(&node, 100.0, 0.5);
+    let v2 = state2.observed_latency_ms_per_layer(&node).unwrap();
+    assert!(
+        (v2 - 23.5).abs() < 1e-4,
+        "weight=0.5 merge, expected 23.5, got {v2}"
+    );
+
+    // Verify ordering: higher weight moves the EMA farther from baseline.
+    assert!(
+        v1 > v2,
+        "weight=1.0 ({v1}) should move farther than 0.5 ({v2})"
+    );
+}
+
+#[test]
+fn merge_peer_segment_latency_preserves_direct_observations() {
+    // Scenario: we've been sampling a peer directly for a while. A foreign
+    // gossip arrives with the same EMA value at trust 1.0. The merge
+    // shouldn't move our EMA (sample == old → blend is a no-op).
+    let state = make_shared_state();
+    let node = NodeId([15u8; 32]);
+    // Three direct samples at identical per-layer rate converge exactly.
+    for _ in 0..3 {
+        state.record_peer_segment_latency(&node, 50, 5);
+    }
+    let before = state.observed_latency_ms_per_layer(&node).unwrap();
+    assert!((before - 10.0).abs() < 1e-5);
+
+    // Foreign reports our own observed value back to us at full trust.
+    state.merge_peer_segment_latency(&node, before, 1.0);
+    let after = state.observed_latency_ms_per_layer(&node).unwrap();
+    assert!(
+        (after - before).abs() < 1e-5,
+        "matching foreign sample must not move the EMA (before={before}, after={after})"
+    );
+}
+
+#[test]
+fn merge_peer_segment_latency_ignores_bad_samples() {
+    // Guards: non-finite samples, non-positive samples.
+    let state = make_shared_state();
+    let node = NodeId([14u8; 32]);
+
+    state.merge_peer_segment_latency(&node, f32::NAN, 1.0);
+    state.merge_peer_segment_latency(&node, f32::INFINITY, 1.0);
+    state.merge_peer_segment_latency(&node, 0.0, 1.0);
+    state.merge_peer_segment_latency(&node, -5.0, 1.0);
+    assert!(state.observed_latency_ms_per_layer(&node).is_none());
+}

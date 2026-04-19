@@ -25,27 +25,12 @@
 > | Item 6 — SWIFT self-speculative | 🟡 Landed behind `swift_self_speculative=false` flag. Structurally slower than baseline on candle until flash-attn-with-mask lands (kernel mismatch on multi-position verify). Shelved. |
 > | **Item 13 — Activation compression (Q8_0)** | ✅ LANDED behind `activation_compression=false` flag. Codec verified (~3.76× compression, RMS error <0.005, peer-compatible auto-dispatch). End-to-end multi-segment benchmark pending. |
 > | **Item 12 — DSD (decentralized speculative)** | ✅ ALL PHASES LANDED 2026-04-18 behind `decentralized_spec_decoding=false`. Worker γ-token decode + KV truncation primitives + γ controller + multi-segment spec-verify worker branch + ~410 LOC coordinator loop in `pipeline/dsd.rs`. End-to-end multi-segment WAN benchmark pending. |
-> | **Item 16 — Parallax scheduler (Phases A+B+C)** | ✅ LANDED 2026-04-18. Phases A+B default-on (`parallax_routing=true`); Phase C recommendation-only. Phase A: shortest-path DP over (node, layer_range) in `parallax.rs`. Phase B: observed per-layer latency EMA. Phase C: `parallax_allocator.rs` offline layer allocator with `Z(k) = k²/s*(k)` objective, exposed via `PipelineScheduler::allocate_offline`. 10 routing + 7 allocator + 2 scheduler integration + 1 EMA math test. Phase C auto-wiring into `ShardRebalancer` deferred. |
+> | **Item 16 — Parallax scheduler (Phases A+B+B.2+C)** | ✅ LANDED 2026-04-18/19. Phases A+B+B.2 default-on (`parallax_routing=true`); Phase C recommendation-only. Phase A: shortest-path DP over (node, layer_range) in `parallax.rs`. Phase B: observed per-layer latency EMA. Phase B.2 (2026-04-19): cross-node gossip of top-32 observed latencies via `NodeCapability.observed_latencies`, trust-weighted EMA merge on receive — cold-start routing works from t=0. Phase C: `parallax_allocator.rs` offline layer allocator with `Z(k) = k²/s*(k)` objective. 10 routing + 7 allocator + 2 scheduler integration + 1 EMA math + 5 merge tests. Phase C auto-wiring into `ShardRebalancer` deferred. |
 >
-> **NEXT SESSION — pick one of these three and `/continue` on it.**
+> **NEXT SESSION — pick one of the two remaining and `/continue` on it.**
 >
-> Picks are in order of scope. Start with the one that matches your appetite.
->
-> **Small (1–2 hours) — Phase B cross-node latency gossip.**
-> New-joining nodes have no `peer_segment_latency_ms_per_layer` samples until
-> they actually route requests to a peer. The Parallax DP therefore falls back
-> to static `est_tokens_per_sec` until the EMA warms up. Fix: extend the
-> existing `NodeCapabilityUpdate` gossip message with a small snapshot of the
-> sender's observed-latency map (e.g. top-N peers by trust, f16 per-layer-ms
-> value per entry). Receivers merge into their own EMA with a trust-weighted
-> discount so we don't fully trust foreign observations. Makes cold-start
-> routing good from t=0.
-> - Touch: `crates/swarmllm-types/src/node.rs` (extend `NodeCapability`),
->   `src/daemon/dispatch/mod.rs` (merge on receive), `src/daemon/state/mod.rs`
->   (`record_peer_segment_latency` already idempotent, add a `merge_*` variant
->   with a weight factor).
-> - Tests: EMA merge preserves local observations on tied weights; foreign
->   observations decay to zero when trust is 0.
+> (Phase B.2 cross-node latency gossip landed 2026-04-19 — see Item 16
+> Phase B.2 section below.)
 >
 > **Medium (half-day) — Phase C.2 auto-rebalance from `allocate_offline`.**
 > `PipelineScheduler::allocate_offline` returns a `Vec<PipelineAllocation>` but
@@ -73,15 +58,15 @@
 > - Scope sketch in the `Item 7 — BatchGenerate` section below (line ~505).
 > - Probably 3–4 sessions of careful work.
 >
-> **Recommendation:** start with Phase B gossip — cheap, directly leverages the
-> Parallax DP we just landed, makes routing good on new nodes from t=0.
+> **Recommendation:** with Phase B gossip landed, the next natural pick is
+> Phase C.2 (medium) — it's the other half of the Parallax routing work.
 > Item 7 is the biggest leverage for real multi-tenant deployments but is a
 > major refactor — tackle it once the small wins are in.
 >
 > **Session state to recall on resume:**
-> - Last commit: `8d5dede` — Item 3 Phase 2b auto-coalescing scheduler default-on
-> - Tests: 706 lib tests passing, clippy clean on `dev,claude-subscription`
->   and `dev,candle-cuda`
+> - Last session: Phase B.2 cross-node latency gossip landed 2026-04-19
+> - Tests: 659 lib tests passing on `dev,claude-subscription` (5 new EMA
+>   merge tests this session)
 > - Bench doc: `docs/plans/benchmarks/round3.md` — GPU validated 1.55× at batch=8
 > - Pre-staged models: TinyLlama-1.1B, Phi-3.5-mini, Qwen2.5-Coder-7B — see
 >   `memory/local_model_shards.md`
@@ -805,6 +790,38 @@ Medium-large. Phase 1 is small (this commit). Phase 4 is the main coordinator lo
 - **Config.** `InferenceConfig::parallax_routing: bool` (default `false`) in `src/config.rs`.
 - **Tests.** 8 unit tests (`single_node_covers_all`, `picks_low_latency_chain`, `load_penalty_shifts_choice`, `encrypted_requires_local_first_and_last`, `no_first_capable_errors`, `no_sink_errors`, `disjoint_ranges_fail_cleanly`, `multi_hop_chain_minimizes_total_latency`) + 1 end-to-end scheduler test (`parallax_flag_picks_low_latency_peer_end_to_end`) confirming the flag routes through `PipelineScheduler` correctly. 630 lib tests pass.
 
+#### Phase B.2 — cross-node latency gossip (LANDED 2026-04-19)
+
+Newly-joining nodes no longer need to route requests through a peer
+before Parallax can price it. `NodeCapability` gained an
+`observed_latencies: Vec<LatencyObservation>` field: each broadcast
+carries the sender's top-32 observed per-layer-ms samples, ordered by
+the sender's trust in the *observed peer*. Receivers merge each entry
+through `SharedState::merge_peer_segment_latency(peer, sample, weight)`
+where `weight` = the sender's own `trust_score` in `peer_registry`.
+
+- **Trust-weighted EMA.** Effective α collapses to `0.3 · weight`, so
+  trust=0 is a no-op and trust=1 matches a direct local sample.
+- **Seed threshold.** A completely fresh entry can only be seeded by a
+  sender with trust ≥ 0.3 (default trust is 0.5). Prevents a low-trust
+  sender from painting us an out-of-band picture of a stranger.
+- **Self + sender skip.** Merge loop skips entries where `obs.peer`
+  equals our own `node_id` (we have direct data) or equals the sender
+  (no self-promotion).
+- **Serde-default.** `observed_latencies` has `#[serde(default, skip_serializing_if = "Vec::is_empty")]` — older peers keep interoperating.
+- **Wire budget.** 32 entries × (32 B NodeId + 4 B f32) ≈ 1.2 KB per
+  gossip, well under the 4 MB gossipsub cap.
+
+Files: `crates/swarmllm-types/src/node.rs` (field + `LatencyObservation`),
+`src/daemon/state/mod.rs` (`merge_peer_segment_latency`),
+`src/health/monitor.rs` (outbound top-N snapshot),
+`src/daemon/dispatch/mod.rs` (receive-side merge).
+
+5 unit tests in `src/inference/scheduler/tests.rs` cover: zero-trust
+no-op, below-seed-threshold skip-insert, weight-scaled EMA math
+(weight 1.0 vs 0.5), matching-sample preserves direct observations,
+non-finite/non-positive sample guards.
+
 #### Phase B — observed-latency EMA (LANDED 2026-04-18)
 
 Local coordinator view only (not gossiped cross-cluster in v1). After each
@@ -848,7 +865,7 @@ greedy + the `Z(k) = k² / s*(k)` objective).
 
 - **Phase D — multi-pipeline concurrency.** Run multiple pipeline assignments in parallel for a single model when enough candidates exist; route requests across them via weighted load balancing. Relevant once Item 7 lands concurrent-user batching.
 - **Phase C.2 — auto-rebalance from Phase C output.** Hook `allocate_offline` into `ShardRebalancer`: periodically compare the current shard distribution to the recommendation, emit acquire/prune suggestions to `AutoShardManager`.
-- **Phase B follow-up — cross-node signal sharing.** Gossip observed-latency stats so new coordinators pick good peers without a warm-up period. Not started.
+- **Phase B follow-up — cross-node signal sharing.** Landed as Phase B.2 (2026-04-19) — see section above.
 
 #### Stacks with
 

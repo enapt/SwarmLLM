@@ -504,6 +504,45 @@ impl SharedState {
             .map(|r| *r.value())
     }
 
+    /// Merge a foreign observation (received via `NodeCapabilityUpdate`
+    /// gossip) into the local EMA, weighted by the gossip sender's trust.
+    /// `weight` is the sender's trust score clamped to `[0, 1]`; the
+    /// effective α collapses to `0.3 * weight` so trust=0 is a no-op and
+    /// trust=1 matches a direct local sample. When no local entry exists
+    /// yet, only moderately-trusted sources (weight ≥ 0.3) may seed it
+    /// with the raw sample — this prevents a low-trust peer from painting
+    /// us an out-of-band picture of a peer we've never observed.
+    pub fn merge_peer_segment_latency(
+        &self,
+        node_id: &crate::types::NodeId,
+        sample_ms_per_layer: f32,
+        weight: f32,
+    ) {
+        if weight <= 0.0 || !sample_ms_per_layer.is_finite() || sample_ms_per_layer <= 0.0 {
+            return;
+        }
+        let weight = weight.clamp(0.0, 1.0);
+        const BASE_ALPHA: f32 = 0.3;
+        const SEED_THRESHOLD: f32 = 0.3;
+        let effective_alpha = BASE_ALPHA * weight;
+        use dashmap::mapref::entry::Entry;
+        match self
+            .metrics
+            .peer_segment_latency_ms_per_layer
+            .entry(node_id.clone())
+        {
+            Entry::Occupied(mut e) => {
+                let old = *e.get();
+                e.insert(effective_alpha * sample_ms_per_layer + (1.0 - effective_alpha) * old);
+            }
+            Entry::Vacant(v) => {
+                if weight >= SEED_THRESHOLD {
+                    v.insert(sample_ms_per_layer);
+                }
+            }
+        }
+    }
+
     /// Returns "VRAM" if a GPU is available, "RAM" otherwise.
     pub fn memory_type_label(&self) -> &'static str {
         if self.gpu_info.is_some() {

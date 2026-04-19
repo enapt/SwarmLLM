@@ -236,6 +236,42 @@ impl HealthMonitor {
                 crate::model::auto_manage::vram::estimate_tokens_per_sec_7b(50.0, false)
             });
 
+        // Top-N observed-latency snapshot, ordered by the trust we have in
+        // each *observed peer* (not the sender). Gives receivers a pre-warm
+        // Parallax DP signal so newly-joining nodes don't need to route
+        // requests through a peer to price it. Kept to 32 entries → ≈1.2 KB
+        // extra per broadcast, well under the 4 MB gossip cap.
+        const MAX_OBSERVED: usize = 32;
+        let observed_latencies = {
+            let mut entries: Vec<(crate::types::NodeId, f32, f32)> = self
+                .shared_state
+                .metrics
+                .peer_segment_latency_ms_per_layer
+                .iter()
+                .map(|r| {
+                    let peer_id = r.key().clone();
+                    let trust = self
+                        .shared_state
+                        .peer_registry
+                        .get(&peer_id)
+                        .map(|p| p.trust_score)
+                        .unwrap_or(0.5);
+                    (peer_id, *r.value(), trust)
+                })
+                .collect();
+            // Higher trust first. Stable ordering (partial_cmp handles NaN by
+            // treating as Less — but trust_scores are clamped [0,1]).
+            entries.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+            entries.truncate(MAX_OBSERVED);
+            entries
+                .into_iter()
+                .map(|(peer, ms_per_layer, _)| crate::types::LatencyObservation {
+                    peer,
+                    ms_per_layer,
+                })
+                .collect::<Vec<_>>()
+        };
+
         let cap = crate::types::NodeCapability {
             node_id: node_id.clone(),
             gpu: gpu_info,
@@ -249,6 +285,7 @@ impl HealthMonitor {
             version: env!("CARGO_PKG_VERSION").to_string(),
             region: self.shared_state.config.identity.region.clone(),
             est_tokens_per_sec_7b,
+            observed_latencies,
         };
 
         let msg = NetworkCommand::Broadcast(SwarmMessage::NodeCapabilityUpdate(cap));

@@ -41,7 +41,8 @@ pub use network::{
     ShardDownloadProgress, ShardRequest, ShardResponse, SwarmMessage,
 };
 pub use node::{
-    ContributionLevel, GpuInfo, NodeCapability, NodeStats, PeerExchangeResponse, PeerInfo,
+    ContributionLevel, GpuInfo, LatencyObservation, NodeCapability, NodeStats,
+    PeerExchangeResponse, PeerInfo,
 };
 pub use pool::{
     BlindedPoolInvitation, ContributionMode, PoolAcceptance, PoolCreditForward, PoolDeviceStats,

@@ -24,6 +24,22 @@ pub struct NodeCapability {
     /// Used by the scheduler as a speed tie-breaker.
     #[serde(default)]
     pub est_tokens_per_sec_7b: f32,
+    /// Snapshot of the sender's observed per-layer latency EMA for other
+    /// peers. Lets newly-joining nodes bootstrap Parallax routing from
+    /// gossiped foreign observations instead of waiting for their own
+    /// direct samples. Receivers merge each entry with a trust-weighted
+    /// discount so low-trust senders can't poison routing.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub observed_latencies: Vec<LatencyObservation>,
+}
+
+/// One entry in `NodeCapability::observed_latencies`: the sender observed
+/// this `peer` takes `ms_per_layer` to serve a distributed-inference
+/// segment (averaged via the sender's local EMA).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct LatencyObservation {
+    pub peer: NodeId,
+    pub ms_per_layer: f32,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
