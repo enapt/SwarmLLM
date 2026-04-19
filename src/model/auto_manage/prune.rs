@@ -269,6 +269,15 @@ impl AutoShardManager {
                     score -= 0.2;
                 }
 
+                // Phase C.2 Parallax bonus: the allocator consistently
+                // wants this shard off this node across the stability
+                // window. Additive, so it stacks with pressure/cold-shard
+                // bonuses but still obeys the region / load / reacquire
+                // guards above (which already filtered out hard blocks).
+                if self.parallax_should_boost_prune(&shard_id) {
+                    score += super::parallax::PARALLAX_PRUNE_BONUS;
+                }
+
                 // Regional demand penalty: protect shards for models with active
                 // demand in our region. Higher demand -> harder to prune.
                 {

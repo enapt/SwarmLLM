@@ -255,6 +255,12 @@ impl AutoShardManager {
     /// and coordinates pruning with downloads (only prune when there's resource
     /// pressure or when making room for higher-value shards).
     async fn evaluate(&self) {
+        // Phase C.2: refresh Parallax stability counters before scoring so
+        // both download and prune paths see the same up-to-date bias view.
+        // No-op when `parallax_auto_rebalance=false` or the cluster is
+        // infeasible for the given model.
+        self.update_parallax_stability();
+
         let local_node_id = self.shared_state.identity.node_id().clone();
         let hosted_before = self
             .shared_state
@@ -654,6 +660,7 @@ mod tests {
             min_replicas: 2,
             prune_cooldown_secs: 300,
             max_holder_load_for_prune: 3,
+            parallax_auto_rebalance: true,
         };
         assert_eq!(config.max_shards, 0); // unlimited
     }

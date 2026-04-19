@@ -32,6 +32,13 @@ pub struct ModelMgmt {
     pub model_request_counts: DashMap<crate::types::ModelId, AtomicU64>,
     pub resource_schedule: RwLock<crate::config::ResourceSchedule>,
     pub prune_history: RwLock<VecDeque<crate::types::PruneEvent>>,
+    /// Parallax Phase C.2 stability counter per shard. Positive values mean
+    /// the allocator has recommended this node hold the shard for N
+    /// consecutive auto-manage ticks; negative values mean the allocator
+    /// wants it off this node. Score biases trigger once the magnitude
+    /// crosses `PARALLAX_STABILITY_THRESHOLD`. Clamped to `[-10, 10]` so a
+    /// long-stable recommendation can't be flipped by a single noisy tick.
+    pub parallax_stability: DashMap<crate::types::ShardId, i32>,
 }
 
 impl ModelMgmt {

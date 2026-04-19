@@ -25,25 +25,12 @@
 > | Item 6 — SWIFT self-speculative | 🟡 Landed behind `swift_self_speculative=false` flag. Structurally slower than baseline on candle until flash-attn-with-mask lands (kernel mismatch on multi-position verify). Shelved. |
 > | **Item 13 — Activation compression (Q8_0)** | ✅ LANDED behind `activation_compression=false` flag. Codec verified (~3.76× compression, RMS error <0.005, peer-compatible auto-dispatch). End-to-end multi-segment benchmark pending. |
 > | **Item 12 — DSD (decentralized speculative)** | ✅ ALL PHASES LANDED 2026-04-18 behind `decentralized_spec_decoding=false`. Worker γ-token decode + KV truncation primitives + γ controller + multi-segment spec-verify worker branch + ~410 LOC coordinator loop in `pipeline/dsd.rs`. End-to-end multi-segment WAN benchmark pending. |
-> | **Item 16 — Parallax scheduler (Phases A+B+B.2+C)** | ✅ LANDED 2026-04-18/19. Phases A+B+B.2 default-on (`parallax_routing=true`); Phase C recommendation-only. Phase A: shortest-path DP over (node, layer_range) in `parallax.rs`. Phase B: observed per-layer latency EMA. Phase B.2 (2026-04-19): cross-node gossip of top-32 observed latencies via `NodeCapability.observed_latencies`, trust-weighted EMA merge on receive — cold-start routing works from t=0. Phase C: `parallax_allocator.rs` offline layer allocator with `Z(k) = k²/s*(k)` objective. 10 routing + 7 allocator + 2 scheduler integration + 1 EMA math + 5 merge tests. Phase C auto-wiring into `ShardRebalancer` deferred. |
+> | **Item 16 — Parallax scheduler (Phases A+B+B.2+C+C.2)** | ✅ LANDED 2026-04-18/19. All phases default-on except Phase D (multi-pipeline concurrency, deferred). Phase A: shortest-path DP. Phase B: observed per-layer latency EMA. Phase B.2: cross-node gossip of top-32 observed latencies via `NodeCapability.observed_latencies`. Phase C: `parallax_allocator.rs` offline layer allocator with `Z(k) = k²/s*(k)` objective. Phase C.2 (2026-04-19): soft acquire/prune bias in `AutoShardManager` driven by a per-shard stability counter (≥3 ticks of consistent signal) — respects every existing hard constraint. Tests: 10 routing + 7 allocator + 2 scheduler integration + 1 EMA math + 5 merge + 8 stability. |
 >
-> **NEXT SESSION — pick one of the two remaining and `/continue` on it.**
+> **NEXT SESSION — Item 7 BatchGenerate is the main remaining pick.**
 >
-> (Phase B.2 cross-node latency gossip landed 2026-04-19 — see Item 16
-> Phase B.2 section below.)
->
-> **Medium (half-day) — Phase C.2 auto-rebalance from `allocate_offline`.**
-> `PipelineScheduler::allocate_offline` returns a `Vec<PipelineAllocation>` but
-> today it's advisory. Wire into `ShardRebalancer`: periodically compare the
-> current shard distribution to the recommendation, emit suggested
-> acquire/prune actions to `AutoShardManager`. Respect existing trust +
-> credit + locked-shard constraints.
-> - Touch: `src/health/rebalancer.rs` or `src/model/auto_manage/scoring.rs`.
->   Add a `RebalanceHint` variant. Probably needs to not act on every tick —
->   use a stability threshold (only act when recommendation differs from
->   current for N consecutive ticks).
-> - Validation: simulate a 3-peer cluster with skewed shard coverage, verify
->   allocator recommendation + acquire/prune suggestions agree.
+> (Phase B.2 cross-node latency gossip + Phase C.2 auto-rebalance both
+> landed 2026-04-19 — see Item 16 sections below.)
 >
 > **Large (multi-session) — Item 7 full BatchGenerate.**
 > Today's Phase 2b batches per-token forwards (`DaemonMsg::Forward`). It does
@@ -58,15 +45,15 @@
 > - Scope sketch in the `Item 7 — BatchGenerate` section below (line ~505).
 > - Probably 3–4 sessions of careful work.
 >
-> **Recommendation:** with Phase B gossip landed, the next natural pick is
-> Phase C.2 (medium) — it's the other half of the Parallax routing work.
-> Item 7 is the biggest leverage for real multi-tenant deployments but is a
-> major refactor — tackle it once the small wins are in.
+> **Recommendation:** Parallax Phases A/B/B.2/C/C.2 are all landed. The next
+> big lever is Item 7 BatchGenerate — the real multi-tenant story that
+> Phase 2b of Item 3 laid groundwork for but didn't fully deliver.
 >
 > **Session state to recall on resume:**
-> - Last session: Phase B.2 cross-node latency gossip landed 2026-04-19
-> - Tests: 659 lib tests passing on `dev,claude-subscription` (5 new EMA
->   merge tests this session)
+> - Last session: Phase C.2 Parallax auto-rebalance landed 2026-04-19
+> - Tests: 662 lib tests passing on `dev,claude-subscription` (8 new
+>   stability + overlap tests this session, +3 net after accounting for
+>   existing tests updated for the `parallax_auto_rebalance` field)
 > - Bench doc: `docs/plans/benchmarks/round3.md` — GPU validated 1.55× at batch=8
 > - Pre-staged models: TinyLlama-1.1B, Phi-3.5-mini, Qwen2.5-Coder-7B — see
 >   `memory/local_model_shards.md`
@@ -790,6 +777,52 @@ Medium-large. Phase 1 is small (this commit). Phase 4 is the main coordinator lo
 - **Config.** `InferenceConfig::parallax_routing: bool` (default `false`) in `src/config.rs`.
 - **Tests.** 8 unit tests (`single_node_covers_all`, `picks_low_latency_chain`, `load_penalty_shifts_choice`, `encrypted_requires_local_first_and_last`, `no_first_capable_errors`, `no_sink_errors`, `disjoint_ranges_fail_cleanly`, `multi_hop_chain_minimizes_total_latency`) + 1 end-to-end scheduler test (`parallax_flag_picks_low_latency_peer_end_to_end`) confirming the flag routes through `PipelineScheduler` correctly. 630 lib tests pass.
 
+#### Phase C.2 — auto-rebalance from `allocate_offline` (LANDED 2026-04-19)
+
+Phase C's layer-allocation recommendation was advisory-only. Phase C.2
+plumbs it into `AutoShardManager` as a soft score bias — no hard-coded
+action, but the allocator's preferred shard placement nudges both
+acquire and prune decisions once a stability window has passed.
+
+- **Stability counter.** `ModelMgmt::parallax_stability: DashMap<ShardId, i32>`,
+  clamped to `[-10, 10]`. Each auto-manage evaluation cycle calls
+  `update_parallax_stability`: runs `PipelineScheduler::allocate_offline`
+  for every known model, unions the `layer_range`s the allocator assigned
+  to the local node across all recommended pipelines, and `+1`s any
+  shard whose range overlaps one of those ranges — `-1` everything else.
+- **Threshold.** `PARALLAX_STABILITY_THRESHOLD = 3`. The bias only
+  activates after the allocator has consistently recommended (or
+  consistently rejected) a shard for three ticks. A single noisy tick
+  can't flip the bias; a long-stable recommendation is hard to dislodge.
+- **Acquire bias.** `gather_candidates` multiplies the shard's score by
+  `1.5` when stability is `≥ +3`. Same order of magnitude as
+  `source_bonus` (regional peer presence) — noticeable without
+  overriding rarity/popularity/configured-range signals.
+- **Prune bias.** `evaluate_and_prune` adds `+0.5` to the prune score
+  when stability is `≤ -3`. Additive, so it stacks with cold-shard /
+  pressure bonuses but comes after every existing hard block (locked,
+  pinned, encrypted pipeline, configured range, region-elimination,
+  holder-busy, reacquire-possible).
+- **Feasibility handling.** When `allocate_offline` returns `None` for
+  a model (cluster can't cover it), that model's shards are skipped
+  entirely — no spurious "not recommended" signal.
+- **Flag.** `AutoManageConfig::parallax_auto_rebalance: bool`, default
+  `true`. Disabling it makes both stability update and both bias queries
+  no-ops in one line.
+
+Files: `src/daemon/state/models.rs` (`parallax_stability` field),
+`src/config.rs` (flag), `src/model/auto_manage/parallax.rs` (new —
+stability update, bias queries, constants, overlap helper),
+`src/model/auto_manage/manager.rs` (`evaluate` calls
+`update_parallax_stability` first), `src/model/auto_manage/scoring.rs`
+(acquire bias hook), `src/model/auto_manage/prune.rs` (prune bias hook).
+
+8 unit tests in `parallax.rs` cover: overlap math (full/partial/edge/
+disjoint/multi-candidate), single-node cluster increments all shards,
+counter clamps at `+10` after 20 ticks, feature-flag-off is a no-op
+everywhere, unknown shards are neutral, two-peer cluster where a fast
+remote preempts local decrements every shard.
+
 #### Phase B.2 — cross-node latency gossip (LANDED 2026-04-19)
 
 Newly-joining nodes no longer need to route requests through a peer
@@ -864,7 +897,7 @@ greedy + the `Z(k) = k² / s*(k)` objective).
 #### Remaining phases
 
 - **Phase D — multi-pipeline concurrency.** Run multiple pipeline assignments in parallel for a single model when enough candidates exist; route requests across them via weighted load balancing. Relevant once Item 7 lands concurrent-user batching.
-- **Phase C.2 — auto-rebalance from Phase C output.** Hook `allocate_offline` into `ShardRebalancer`: periodically compare the current shard distribution to the recommendation, emit acquire/prune suggestions to `AutoShardManager`.
+- **Phase C.2 — auto-rebalance from Phase C output.** LANDED 2026-04-19 — wired through `AutoShardManager`, not `ShardRebalancer`. See Phase C.2 section below.
 - **Phase B follow-up — cross-node signal sharing.** Landed as Phase B.2 (2026-04-19) — see section above.
 
 #### Stacks with

@@ -329,6 +329,7 @@ impl SharedState {
                 resource_schedule: RwLock::new(config.resources.schedule.clone()),
                 prune_history: RwLock::new(VecDeque::new()),
                 shard_p2p_failed: dashmap::DashSet::new(),
+                parallax_stability: DashMap::new(),
             },
             events: EventBus {
                 dashboard_tx: broadcast::channel(32).0,

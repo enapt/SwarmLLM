@@ -683,6 +683,16 @@ pub struct AutoManageConfig {
     /// Block pruning if remaining holders have avg load above this threshold.
     #[serde(default = "default_max_holder_load_for_prune")]
     pub max_holder_load_for_prune: u32,
+    /// Phase C.2 (Parallax) auto-rebalance: when enabled, the auto-manage
+    /// loop runs `PipelineScheduler::allocate_offline` each cycle and
+    /// biases shard acquire / prune scores toward the allocator's
+    /// recommendation. Requires `PARALLAX_STABILITY_THRESHOLD` consecutive
+    /// ticks of consistent signal before the bias kicks in — a single
+    /// noisy tick can't flip anything. Respects all existing trust,
+    /// credit, locked-shard, pin, encrypted-pipeline, and configured-range
+    /// constraints (the bias is purely additive on score).
+    #[serde(default = "default_true")]
+    pub parallax_auto_rebalance: bool,
 }
 
 /// Per-model auto-manage policy controlling whether a model participates
@@ -715,6 +725,7 @@ impl Default for AutoManageConfig {
             min_replicas: default_min_replicas(),
             prune_cooldown_secs: default_prune_cooldown_secs(),
             max_holder_load_for_prune: default_max_holder_load_for_prune(),
+            parallax_auto_rebalance: true,
         }
     }
 }

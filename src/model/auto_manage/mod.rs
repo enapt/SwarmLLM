@@ -5,6 +5,7 @@
 //! over-replicated ones.
 
 mod download;
+mod parallax;
 mod prune;
 mod scoring;
 pub mod vram;

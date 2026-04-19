@@ -482,6 +482,18 @@ impl AutoShardManager {
                     hash.as_bytes()[0] as f64 / 2550.0 // 0.0-0.1 range
                 };
 
+                // Phase C.2 Parallax bonus: the allocator has consistently
+                // placed some part of this shard's layer range on us across
+                // the stability window. Small multiplicative boost so the
+                // allocator's view of balanced pipeline coverage nudges
+                // scoring without overriding the existing rarity/popularity/
+                // configured-range signals.
+                let parallax_bonus = if self.parallax_should_boost_acquire(&shard_id) {
+                    super::parallax::PARALLAX_ACQUIRE_BONUS
+                } else {
+                    1.0
+                };
+
                 let score = model_popularity
                     * regional_rarity
                     * configured_bonus
@@ -489,6 +501,7 @@ impl AutoShardManager {
                     * vram_fitness
                     * spread_bonus
                     * source_bonus
+                    * parallax_bonus
                     + jitter;
 
                 candidates.push(ShardCandidate {
