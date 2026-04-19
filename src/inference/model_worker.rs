@@ -69,6 +69,7 @@ pub async fn run_worker(
     batch_generate: bool,
     batch_generate_max_slots: u32,
     prefill_chunk_tokens: u32,
+    batched_prefill_forward: bool,
 ) {
     // Connect to the daemon's Unix socket
     let stream = match UnixStream::connect(&socket_path).await {
@@ -140,6 +141,7 @@ pub async fn run_worker(
         enabled = batch_generate,
         max_slots = batch_generate_max_slots,
         prefill_chunk_tokens,
+        batched_prefill_forward,
         "model-worker: BatchGenerate (Item 7) configured"
     );
 
@@ -250,6 +252,7 @@ pub async fn run_worker(
                 &mut slot_table,
                 chunk_size_tokens,
                 force_standard_attn,
+                batched_prefill_forward,
             )
             .await
             {
@@ -1820,6 +1823,7 @@ async fn step_decode_pool(
     slot_table: &mut SlotTable,
     chunk_size: usize,
     force_standard_attn: bool,
+    batched_prefill_forward: bool,
 ) -> Result<(), SwarmError> {
     if slot_table.is_empty() {
         return Ok(());
@@ -1889,18 +1893,27 @@ async fn step_decode_pool(
         if !steps.is_empty() {
             // Stage 2: group by (chunk_len, index_pos). BTreeMap keeps it
             // deterministic so fused calls run in a stable order.
-            use std::collections::BTreeMap;
-            let mut groups: BTreeMap<(usize, usize), Vec<usize>> = BTreeMap::new();
-            for (i, s) in steps.iter().enumerate() {
-                groups.entry((s.chunk_len, s.pos)).or_default().push(i);
-            }
+            // When the flag is on, group by `(chunk_len, index_pos)` so
+            // same-shape chunks fuse into one `forward_batch` call. When off,
+            // every step is its own singleton (forces Phase A to run
+            // sequentially — useful for Phase 4 A/B benchmarks).
+            let groups: Vec<Vec<usize>> = if batched_prefill_forward {
+                use std::collections::BTreeMap;
+                let mut map: BTreeMap<(usize, usize), Vec<usize>> = BTreeMap::new();
+                for (i, s) in steps.iter().enumerate() {
+                    map.entry((s.chunk_len, s.pos)).or_default().push(i);
+                }
+                map.into_values().collect()
+            } else {
+                (0..steps.len()).map(|i| vec![i]).collect()
+            };
 
             // Stage 3: forward each group. `logits_per_step[i]` ends up Some
             // on success, None on error (slot already marked errored).
             let mut logits_per_step: Vec<Option<candle_core::Tensor>> =
                 std::iter::repeat_with(|| None).take(steps.len()).collect();
 
-            for ((chunk_len, pos), indices) in groups {
+            for indices in groups {
                 if indices.len() == 1 {
                     // Singleton: sequential forward, cheapest path.
                     let i = indices[0];
@@ -1921,6 +1934,8 @@ async fn step_decode_pool(
                     }
                 } else {
                     // Fused forward over same-shape, same-position chunks.
+                    let chunk_len = steps[indices[0]].chunk_len;
+                    let pos = steps[indices[0]].pos;
                     let items: Vec<BatchItem<'_>> = indices
                         .iter()
                         .map(|&i| BatchItem {

@@ -29,52 +29,65 @@
 > | **Item 12 — DSD (decentralized speculative)** | ✅ ALL PHASES LANDED 2026-04-18 behind `decentralized_spec_decoding=false`. Worker γ-token decode + KV truncation primitives + γ controller + multi-segment spec-verify worker branch + ~410 LOC coordinator loop in `pipeline/dsd.rs`. End-to-end multi-segment WAN benchmark pending. |
 > | **Item 16 — Parallax scheduler (Phases A+B+B.2+C+C.2)** | ✅ LANDED 2026-04-18/19. All phases default-on except Phase D (multi-pipeline concurrency, deferred). Phase A: shortest-path DP. Phase B: observed per-layer latency EMA. Phase B.2: cross-node gossip of top-32 observed latencies via `NodeCapability.observed_latencies`. Phase C: `parallax_allocator.rs` offline layer allocator with `Z(k) = k²/s*(k)` objective. Phase C.2 (2026-04-19): soft acquire/prune bias in `AutoShardManager` driven by a per-shard stability counter (≥3 ticks of consistent signal) — respects every existing hard constraint. Tests: 10 routing + 7 allocator + 2 scheduler integration + 1 EMA math + 5 merge + 8 stability. |
 > | **Item 7 — BatchGenerate Phases 1 + 2** | ✅ LANDED 2026-04-19, **measured 2026-04-19** (RTX 3070 + TinyLlama-1.1B Q4, 3-iter avg): **18.2× TTFT @ c=2, 21.7× TTFT @ c=4, 23.5× TTFT @ c=8**, with equivalent aggregate throughput vs Phase 1+2 OFF. The win is TTFT fairness — Sarathi chunked prefill prevents new admits from waiting behind the full prior prefill+decode. Aggregate throughput is unchanged because TinyLlama is too small for fused `forward_batch` to add tok/s on this GPU. See `docs/plans/benchmarks/round4.md`. |
-> | **Item 7 — Phase 4 batched chunked prefill + admit-coalescing** | ✅ LANDED & MEASURED 2026-04-19. `forward_batch` generalized for homogeneous prefill-chunk groups (same `seq_len > 1` + same `index_pos`). Admit-coalescing drain (extract `handle_daemon_msg`, `try_recv` up to 16 queued messages before each tick) unlocks fusion under HTTP-paced concurrent admits. Measured RTX 3070 + TinyLlama Q4: **49.1 tok/s aggregate @ c=4 (+57% vs pre-fix 31.2)**, TTFT uniform **180 / 180 / 180 ms** across 4 requests (vs pre-fix **52 / 235 / 447 ms** spread), `DIAG chunk fused batch_size=4` confirmed. Synthetic bench + full recipe in `benchmarks/round5.md`. Heterogeneous batches fall back to sequential. 745 tests pass. |
+> | **Item 7 — Phase 4 batched chunked prefill + admit-coalescing** | ✅ LANDED & MEASURED 2026-04-19. `forward_batch` generalized for homogeneous prefill-chunk groups (same `seq_len > 1` + same `index_pos`). Admit-coalescing drain (extract `handle_daemon_msg`, `try_recv` up to 16 queued messages before each tick) unlocks fusion under HTTP-paced concurrent admits. Measured RTX 3070 + TinyLlama Q4: **49.1 tok/s aggregate @ c=4 (+57% vs pre-fix 31.2)**, TTFT uniform **180 / 180 / 180 ms** across 4 requests (vs pre-fix **52 / 235 / 447 ms** spread), `DIAG chunk fused batch_size=4` confirmed. `InferenceConfig::batched_prefill_forward` (default `true`) toggles fusion in isolation from Phases 1+2. Synthetic + E2E bench recipe in `benchmarks/round5.md`. 745 tests pass. |
 >
-> **NEXT SESSION — pick a new direction (Item 7 Phase 4 + admit-coalescing done).**
+> **NEXT SESSION — Item 8 (cross-node prefix cache sharing).**
 >
-> Item 7 Phase 4 landed and **measured end-to-end** on the RTX 3070 with
-> TinyLlama Q4. The admit-coalescing drain was the surprise fix — without
-> it, the worker's strict admit→tick→admit→tick interleaving kept
-> concurrent slots desynced at different `index_pos`, so Phase 4's
-> grouping never batched. Drain loop lands fusion ×4 and ×8, TTFT
-> collapses to uniform-ms across all concurrent requests.
+> Item 7 Phase 4 + admit-coalescing + isolation flag all landed and
+> measured on the RTX 3070 with TinyLlama Q4. The **next direction is
+> Item 8 — cross-node prefix cache sharing**, a multi-session arc that
+> is SwarmLLM's biggest distinguishing P2P speedup story (Items 4–7 and
+> 12 are mostly single-node wins or pipeline-parallelism refinements;
+> Item 8 is the one that makes the swarm qualitatively more valuable
+> than a single node).
 >
-> **Candidate next picks:**
-> - **Item 8 — cross-node prefix cache sharing** (large, multi-session):
->   announce BLAKE3 prompt-prefix hashes via gossip; peers serve KV
->   blocks for shared prefixes on demand. Distinguishing P2P feature.
-> - **Larger-model Phase 4 bench** (small): measure on Phi-3.5-mini and
->   Qwen2.5-7B — OOM on RTX 3070 8 GB at default `max_seq_len_override=8192`
->   × 8 slots of KV, so drop the override to 2048 or shrink
->   `batch_generate_max_slots` to 2–4. Bigger hidden_dim should show
->   larger FFN-fusion wins than TinyLlama's 1.57×.
+> **Scope sketch (Item 8):**
+> - Each worker announces BLAKE3 prompt-prefix hashes (64- or 128-token
+>   blocks) it has in its local `PrefixCache`.
+> - Announcements go over gossip with TTL, similar to shard announces.
+> - Coordinator builds a `prefix_hash → {peer_id}` index per model.
+> - On admit, compute the incoming prompt's block hashes; on cache miss
+>   locally but hit on the index, fetch the KV block from the
+>   announcing peer over a new IPC / stream message and seed the
+>   per-request KV cache.
+> - Content-addressed, so it naturally fits the existing shard
+>   announcement infrastructure. Verify each block by BLAKE3 on receipt.
+>
+> **Phase 1 suggested:** wire hash announcement + index + loopback
+> verification (coordinator fetches from its own peer loopback). Phase
+> 2: real multi-peer KV transfer. Phase 3: authentication + trust
+> integration so untrusted peers' KV blocks get re-verified. Phase 4:
+> bench.
+>
+> **Other candidates (deferred for a later session):**
+> - **Larger-model Phase 4 bench** (small): Phi-3.5-mini / Qwen-7B
+>   numbers. OOMs on RTX 3070 8 GB at default `max_seq_len_override=8192`
+>   × 8 slots; drop override to 2048 or shrink `batch_generate_max_slots`
+>   to 2–4. Bigger hidden_dim should show more FFN-fusion win than
+>   TinyLlama's 1.57×. Isolation flag `batched_prefill_forward` is now
+>   available for clean A/B.
 > - **Items 14 / 17 / 18** (large research items, see Round 3 list):
 >   Mirror Speculative Decoding (Apple), disaggregated prefill/decode,
 >   per-token early-exit.
-> - **`batched_prefill_forward` isolation flag** (tiny): a dedicated
->   config flag + atomic + CLI so Phase 4 can be A/B'd without also
->   disabling Phases 1+2 via `continuous_batching`. Useful for perf
->   regression tracking.
 >
 > **Session state to recall on resume:**
-> - Last session: Item 7 Phase 4 landed + admit-coalescing fix + GPU
->   E2E measurement (2026-04-19). Commits `7bb306c` (Phase 4),
->   `a29f273` (admit-coalescing + E2E). See `docs/plans/benchmarks/round5.md`.
+> - Last session: Item 7 Phase 4 + admit-coalescing + isolation flag
+>   landed + GPU E2E measurement (2026-04-19). Commits `7bb306c`,
+>   `a29f273`, plus latest (flag). See `docs/plans/benchmarks/round5.md`.
 > - Tests: 678 lib + 67 integration = **745 total** on `dev,claude-subscription`.
-> - Bench docs: `round3.md` GPU Item 3 @ 1.55× batch=8; `round4.md` Item 7
->   Phases 1+2 @ 17–23× TTFT; `round5.md` Item 7 Phase 4 @ 1.57× aggregate
->   tok/s + uniform TTFT.
-> - Pre-staged models: TinyLlama-1.1B, Phi-3.5-mini, Qwen2.5-Coder-7B — see
->   `memory/local_model_shards.md`. Phi and Qwen OOM on RTX 3070 at default
->   `max_seq_len_override=8192`; drop to 2048 or reduce
->   `batch_generate_max_slots` to fit.
+> - Default-on speedup stack: Items 4, 5, 3, 16 (A+B), 7 Phases 1+2, 7 Phase 4.
+> - Config flags added: `batched_prefill_forward` (default `true`).
+> - Pre-staged models: TinyLlama-1.1B, Phi-3.5-mini, Qwen2.5-Coder-7B
+>   (see `memory/local_model_shards.md`). **Use Qwen2.5-7B or Phi-3.5
+>   for GPU benchmarks, not TinyLlama** (too small — `memory/bench_large_models.md`).
+>   Both OOM at default `max_seq_len_override=8192` × 8 slots; drop to
+>   2048 or shrink `batch_generate_max_slots` to fit.
 > - User env: RTX 3070 Laptop 8 GB, WSL2, CUDA works via `/usr/lib/wsl/lib`.
 >   Default test build: `cargo build --no-default-features --features dev,claude-subscription`.
->   GPU work: `dev,candle-cuda` (release build adds ~7 min compile for
->   LTO + codegen-units=1; use `--profile release-fast` alternative if
->   we add one). Worker subprocess picks up log level from config.toml's
->   `[logging] level` — set to `"debug"` for DIAG trace visibility.
+>   GPU work: `dev,candle-cuda` (release build takes ~7 min for LTO +
+>   codegen-units=1 on full swarmllm crate). Worker subprocess picks up
+>   log level from config.toml `[logging] level` — set to `"debug"` for
+>   DIAG trace visibility.
 >
 > **Other work items (not prioritized for the next session but tracked):**
 > - Item 2 with a matched-backend draft model (research flagged `Qwen2.5-0.5B`

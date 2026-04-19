@@ -164,6 +164,11 @@ enum Commands {
         /// up to this many tokens before its first decode token is sampled.
         #[arg(long, default_value = "128")]
         prefill_chunk_tokens: u32,
+        /// Item 7 Phase 4: fuse concurrent same-shape Prefilling slots into
+        /// one `forward_batch` call inside `step_decode_pool`'s Phase A.
+        /// Off → Phase A runs singleton forwards per slot (useful for A/B).
+        #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+        batched_prefill_forward: bool,
     },
     /// Device pool management (combine credits across your devices)
     Pool {
@@ -284,6 +289,7 @@ async fn main() -> anyhow::Result<()> {
             batch_generate,
             batch_generate_max_slots,
             prefill_chunk_tokens,
+            batched_prefill_forward,
         } => {
             let window: Option<Vec<u32>> = shard_window.map(|s| {
                 s.split(',')
@@ -321,6 +327,7 @@ async fn main() -> anyhow::Result<()> {
                 batch_generate,
                 batch_generate_max_slots,
                 prefill_chunk_tokens,
+                batched_prefill_forward,
             )
             .await;
             Ok(())

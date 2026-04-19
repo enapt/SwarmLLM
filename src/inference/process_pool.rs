@@ -387,6 +387,12 @@ pub struct ModelProcessPool {
     /// into spawned workers as `--prefill-chunk-tokens`. Matches
     /// `InferenceConfig::prefill_chunk_tokens`.
     prefill_chunk_tokens: std::sync::atomic::AtomicU32,
+    /// Item 7 Phase 4: fuse concurrent same-shape Prefilling slots into one
+    /// `forward_batch` call. Passed into spawned workers as
+    /// `--batched-prefill-forward`. Matches
+    /// `InferenceConfig::batched_prefill_forward`. When false, Phase A always
+    /// runs singleton forwards (useful for A/B benchmarks).
+    batched_prefill_forward: std::sync::atomic::AtomicBool,
     /// Global batch scheduler. Created once by `start_batch_scheduler` from
     /// daemon setup (where `Arc<Self>` is available). When unset, `forward()`
     /// bypasses batching entirely regardless of the `continuous_batching` flag.
@@ -458,6 +464,7 @@ impl ModelProcessPool {
             batch_collection_ms: std::sync::atomic::AtomicU64::new(5),
             max_concurrent_decode_batch: std::sync::atomic::AtomicU32::new(8),
             prefill_chunk_tokens: std::sync::atomic::AtomicU32::new(128),
+            batched_prefill_forward: std::sync::atomic::AtomicBool::new(true),
             batch_scheduler: std::sync::OnceLock::new(),
         }
     }
@@ -506,6 +513,13 @@ impl ModelProcessPool {
     pub fn set_prefill_chunk_tokens(&self, chunk_tokens: u32) {
         self.prefill_chunk_tokens
             .store(chunk_tokens.max(1), std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Item 7 Phase 4: toggle prefill-chunk fusion inside the worker's
+    /// `step_decode_pool` Phase A. Takes effect on the next spawned worker.
+    pub fn set_batched_prefill_forward(&self, enabled: bool) {
+        self.batched_prefill_forward
+            .store(enabled, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Toggle Q8_0 quantization of intermediate-segment hidden state activations
@@ -738,6 +752,12 @@ impl ModelProcessPool {
             args.push("--prefill-chunk-tokens".to_string());
             args.push(
                 self.prefill_chunk_tokens
+                    .load(Ordering::Relaxed)
+                    .to_string(),
+            );
+            args.push("--batched-prefill-forward".to_string());
+            args.push(
+                self.batched_prefill_forward
                     .load(Ordering::Relaxed)
                     .to_string(),
             );

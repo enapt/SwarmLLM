@@ -263,6 +263,17 @@ pub struct InferenceConfig {
     /// degenerate to one-token-per-tick prefill.
     #[serde(default = "default_prefill_chunk_tokens")]
     pub prefill_chunk_tokens: u32,
+    /// Item 7 Phase 4: fuse concurrent same-shape Prefilling slots into one
+    /// `forward_batch` call inside `step_decode_pool`'s Phase A. Groups are
+    /// formed by `(chunk_len, index_pos)`; non-matching chunks fall back to
+    /// sequential forwards automatically. **Default on as of 2026-04-19.**
+    /// Set to `false` to disable the grouping so Phase A always runs
+    /// singleton-per-slot — useful for A/B benchmarks that want to isolate
+    /// Phase 4 from Phases 1+2 (toggling `continuous_batching` would disable
+    /// both). When `continuous_batching = false`, this flag has no effect
+    /// because the SlotTable never activates.
+    #[serde(default = "default_batched_prefill_forward")]
+    pub batched_prefill_forward: bool,
     /// Number of draft tokens to propose per verification step (default: 4).
     #[serde(default = "default_speculative_gamma")]
     pub speculative_gamma: u32,
@@ -425,6 +436,10 @@ fn default_parallax_routing() -> bool {
 }
 
 fn default_continuous_batching() -> bool {
+    true
+}
+
+fn default_batched_prefill_forward() -> bool {
     true
 }
 
@@ -1369,6 +1384,7 @@ impl Default for InferenceConfig {
             max_concurrent_decode_batch: default_max_decode_batch(),
             batch_collection_ms: default_batch_collection_ms(),
             prefill_chunk_tokens: default_prefill_chunk_tokens(),
+            batched_prefill_forward: default_batched_prefill_forward(),
             speculative_gamma: default_speculative_gamma(),
             draft_model_path: None,
             draft_gpu_layers: None,
