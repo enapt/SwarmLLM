@@ -29,29 +29,25 @@
 > | **Item 16 — Parallax scheduler (Phases A+B+B.2+C+C.2)** | ✅ LANDED 2026-04-18/19. All phases default-on except Phase D (multi-pipeline concurrency, deferred). Phase A: shortest-path DP. Phase B: observed per-layer latency EMA. Phase B.2: cross-node gossip of top-32 observed latencies via `NodeCapability.observed_latencies`. Phase C: `parallax_allocator.rs` offline layer allocator with `Z(k) = k²/s*(k)` objective. Phase C.2 (2026-04-19): soft acquire/prune bias in `AutoShardManager` driven by a per-shard stability counter (≥3 ticks of consistent signal) — respects every existing hard constraint. Tests: 10 routing + 7 allocator + 2 scheduler integration + 1 EMA math + 5 merge + 8 stability. |
 > | **Item 7 — BatchGenerate Phases 1 + 2** | ✅ LANDED 2026-04-19. Phase 1: worker-side `SlotTable` + slot-driven decode loop (concurrent `pool.generate()` callers interleave through one `SplitModel::forward_batch` per tick). Phase 2: Sarathi-style chunked prefill — slots register in `Prefilling { remaining_ids, next_chunk_index_pos }`, advance by `prefill_chunk_tokens` (default 128) per tick before transitioning to `Decoding`. Decode interruption from a long-prompt admission now bounded by chunk size instead of full prefill duration. End-to-end concurrent-generate benchmark is Phase 3 work. |
 >
-> **NEXT SESSION — Item 7 Phase 3 (concurrent-generate benchmark) + measure default-on impact.**
+> **NEXT SESSION — run the Item 7 benchmark recipe.**
 >
-> Item 7 Phase 1 + Phase 2 both landed 2026-04-19. Phase 1: worker-side
-> `SlotTable` + slot-driven decode loop. Phase 2: Sarathi-style chunked
-> prefill — slots admit in `Prefilling { remaining_ids,
-> next_chunk_index_pos }`, advance by `prefill_chunk_tokens` (default 128)
-> per tick before transitioning to `Decoding`. Long-prompt admission no
-> longer stalls active decode for the full prefill duration — bounded by
-> chunk size per tick.
+> Item 7 Phase 1 + Phase 2 + per-slot error containment + DIAG tracing
+> all landed 2026-04-19. Bench recipe doc at
+> `docs/plans/benchmarks/round4.md` documents the `swarmllm bench
+> --concurrency N` workflow against a live daemon (sidesteps the
+> `current_exe()` integration-test gotcha by using real HTTP).
 >
-> **Phase 3 scope.** Build a concurrent-generate benchmark. Needs a
-> launcher that spawns the swarmllm binary (because `current_exe()` in a
-> Cargo test context resolves to the test binary, which doesn't have the
-> `model-worker` subcommand). Two concurrent `pool.generate()` calls
-> against TinyLlama-1.1B, measure aggregate tok/s vs serial baseline.
-> Target ≥1.7× throughput at concurrency=2 on GPU. Once validated,
-> document the speedup and consider flipping defaults for production.
+> **Phase 3 = empirical validation.** Follow round4.md, capture
+> aggregate tok/s at concurrency 1/2/4/8 on the user's GPU box,
+> drop the numbers back into the doc, then decide whether
+> `continuous_batching` defaults stay on.
 >
 > **Session state to recall on resume:**
-> - Last session: Item 7 Phase 1 + Phase 2 both landed 2026-04-19
-> - Tests: 674 lib + 67 integration = 741 total on `dev,claude-subscription`
->   (12 SlotTable tests; +6 net from Phase 2)
-> - Bench doc: `docs/plans/benchmarks/round3.md` — GPU validated 1.55× at batch=8
+> - Last session: Item 7 Phase 1 + Phase 2 + error containment landed 2026-04-19
+> - Tests: 675 lib + 67 integration = 742 total on `dev,claude-subscription`
+>   (13 SlotTable tests; +1 net from `finish_error` test)
+> - Bench docs: `round3.md` GPU validated 1.55× at batch=8;
+>   `round4.md` recipe pending real numbers
 > - Pre-staged models: TinyLlama-1.1B, Phi-3.5-mini, Qwen2.5-Coder-7B — see
 >   `memory/local_model_shards.md`
 > - User env: RTX 3070 Laptop 8GB, WSL2, CUDA works via `/usr/lib/wsl/lib`.
@@ -739,13 +735,39 @@ to active streams instead of seconds — essentially the design goal.
 741 lib + integration tests pass on `dev,claude-subscription` (+6 net
 from 6 new SlotTable prefill state tests).
 
-### Phase 3 (next session): concurrent-generate benchmark
+### Phase 2 follow-up (LANDED 2026-04-19): per-slot error containment + DIAG tracing + bench recipe
 
-End-to-end benchmark needs a launcher that can spawn the swarmllm
-binary in test mode (point `current_exe` override or build a release
-binary first), start two concurrent `pool.generate` calls against a
-tiny model, measure aggregate tok/s vs. serial baseline. Target ≥1.7×
-throughput on GPU at concurrency=2.
+- **Per-slot error containment.** Phase 1+2 originally bubbled any
+  forward / sample error out of `step_decode_pool`, which the outer
+  loop then turned into a "BatchGenerate decode failed" Error for every
+  in-flight slot. Now `Slot` carries an optional `error_message`,
+  `Slot::finish_error(msg)` records it (first-write-wins like
+  `finish_stop`/`finish_length`), and `step_decode_pool` catches per-slot
+  errors at every hot point — Phase A `tensor_from_ids`, Phase A chunk
+  forward, Phase A first-token sample, Phase B `token_tensor`, Phase B
+  per-slot sample. `finalize_slot` routes errored slots to
+  `WorkerMsg::Error`. One bad slot can no longer take down its
+  neighbors.
+- **DIAG tracing.** Worker logs at debug:
+  `BatchGenerate slot registered`, `BatchGenerate prefill chunk ran`,
+  plus a `slot errored` line on each containment branch. Discoverable
+  via `grep "DIAG: BatchGenerate"`.
+- **Benchmark recipe.** New `docs/plans/benchmarks/round4.md` documents
+  the `swarmllm bench --concurrency N` workflow + a manual streaming
+  test for the Phase 2 mixed-load scenario (long admit during active
+  decode). Sidesteps the `current_exe()` integration-test gotcha and
+  uses real HTTP to a live daemon.
+
+742 lib + integration tests pass on `dev,claude-subscription` (+1 net
+from the new `finish_error_records_message_and_blocks_other_finishers`
+slot_table test).
+
+### Phase 3 (next session): run the bench and measure
+
+Follow `docs/plans/benchmarks/round4.md` to capture concurrent-generate
+numbers on GPU. Target ≥1.7× aggregate tok/s at concurrency=2 on
+TinyLlama-1.1B Q4. Then drop the measured numbers into the round4 doc
++ flip `continuous_batching` defaults if validated.
 
 ---
 

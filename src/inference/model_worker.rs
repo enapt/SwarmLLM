@@ -1832,8 +1832,19 @@ fn try_register_generate_slot(
         prompt_tokens,
         prompt_ids,
         finish_reason: None,
+        error_message: None,
     };
+    let prompt_len = slot.prompt_tokens;
+    let remaining_after_prefix = prompt_len.saturating_sub(prefix_len);
     slot_table.admit(slot);
+    tracing::debug!(
+        %request_id,
+        prompt_tokens = prompt_len,
+        prefix_matched = prefix_len,
+        remaining_to_prefill = remaining_after_prefix,
+        slots_active = slot_table.len(),
+        "DIAG: BatchGenerate slot registered"
+    );
     Ok(())
 }
 
@@ -1874,6 +1885,9 @@ async fn step_decode_pool(
         })?;
 
     // ---- PHASE A: chunked prefill ----
+    // Per-slot error containment: a forward / sample failure on slot X
+    // marks X errored (caller will receive `WorkerMsg::Error`) without
+    // disturbing other slots in the same tick.
     {
         let active = slot_table.active();
         for slot in active.iter_mut() {
@@ -1884,19 +1898,49 @@ async fn step_decode_pool(
                 Some(t) => t,
                 None => continue,
             };
-            let input = model.tensor_from_ids(&chunk)?;
-            let logits = tokio::task::block_in_place(|| {
+            let request_id = slot.request_id;
+            let chunk_len = chunk.len();
+            let input = match model.tensor_from_ids(&chunk) {
+                Ok(t) => t,
+                Err(e) => {
+                    tracing::warn!(%request_id, error = %e, "DIAG: BatchGenerate prefill chunk tensor build failed — slot errored");
+                    slot.finish_error(format!("prefill tensor build: {e}"));
+                    continue;
+                }
+            };
+            let forward_result = tokio::task::block_in_place(|| {
                 let _g =
                     crate::inference::attn_kernel::ForceStandardAttnGuard::new(force_standard_attn);
                 model.forward(&input, pos, kv_store, &slot.req_id_str)
-            })?;
+            });
+            let logits = match forward_result {
+                Ok(l) => l,
+                Err(e) => {
+                    tracing::warn!(%request_id, error = %e, "DIAG: BatchGenerate prefill chunk forward failed — slot errored");
+                    slot.finish_error(format!("prefill forward: {e}"));
+                    continue;
+                }
+            };
+            tracing::debug!(
+                %request_id,
+                chunk_tokens = chunk_len,
+                index_pos = pos,
+                remaining_after,
+                "DIAG: BatchGenerate prefill chunk ran"
+            );
             if remaining_after == 0 {
-                // Final chunk — sample first token, snapshot prompt KV, transition.
                 let (first_token, first_logprob) =
-                    crate::inference::tensor_util::sample_token_with_logprob(
+                    match crate::inference::tensor_util::sample_token_with_logprob(
                         &logits,
                         &slot.sampling,
-                    )?;
+                    ) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            tracing::warn!(%request_id, error = %e, "DIAG: BatchGenerate first-token sample failed — slot errored");
+                            slot.finish_error(format!("first-token sample: {e}"));
+                            continue;
+                        }
+                    };
                 prefix_cache.insert_from_kv(
                     &slot.model_key,
                     &slot.req_id_str,
@@ -1906,7 +1950,6 @@ async fn step_decode_pool(
                 let is_eos_first = slot.eos.contains(&first_token);
                 slot.promote_to_decoding(first_token, first_logprob);
                 if is_eos_first {
-                    // Mirrors handle_generate's "EOS on first sample → 0-token stop".
                     slot.finish_stop();
                 }
             }
@@ -1988,6 +2031,10 @@ async fn step_decode_pool(
     let mut sampling_clones: Vec<crate::types::SamplingParams> =
         Vec::with_capacity(still_active_indices.len());
     let mut index_positions: Vec<usize> = Vec::with_capacity(still_active_indices.len());
+    // Per-slot tensor build with error containment. If one slot's
+    // token_tensor fails (e.g. impossibly large token id), mark it errored
+    // and skip — keeping the rest of the batch intact.
+    let mut keep_indices: Vec<usize> = Vec::with_capacity(still_active_indices.len());
     for &i in &still_active_indices {
         let slot = &active[i];
         let (last_token, index_pos) = match &slot.state {
@@ -1998,11 +2045,25 @@ async fn step_decode_pool(
             } => (*last_token, *index_pos),
             _ => unreachable!("filtered to is_decoding above"),
         };
-        let t = model.token_tensor(last_token)?;
-        input_tensors.push(t);
-        req_id_strs.push(slot.req_id_str.clone());
-        sampling_clones.push(slot.sampling.clone());
-        index_positions.push(index_pos);
+        match model.token_tensor(last_token) {
+            Ok(t) => {
+                input_tensors.push(t);
+                req_id_strs.push(slot.req_id_str.clone());
+                sampling_clones.push(slot.sampling.clone());
+                index_positions.push(index_pos);
+                keep_indices.push(i);
+            }
+            Err(e) => {
+                tracing::warn!(request_id = %slot.request_id, error = %e, "DIAG: BatchGenerate decode token_tensor failed — slot errored");
+                // Re-borrow as mut for finish_error.
+                let slot_mut = &mut active[i];
+                slot_mut.finish_error(format!("decode token_tensor: {e}"));
+            }
+        }
+    }
+    let still_active_indices = keep_indices;
+    if still_active_indices.is_empty() {
+        return Ok(());
     }
 
     let items: Vec<BatchItem<'_>> = still_active_indices
@@ -2030,10 +2091,18 @@ async fn step_decode_pool(
 
     for (j, &i) in still_active_indices.iter().enumerate() {
         let slot = &mut active[i];
-        let (next_tok, next_logprob) = crate::inference::tensor_util::sample_token_with_logprob(
-            &outputs[j],
-            &sampling_clones[j],
-        )?;
+        let (next_tok, next_logprob) =
+            match crate::inference::tensor_util::sample_token_with_logprob(
+                &outputs[j],
+                &sampling_clones[j],
+            ) {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::warn!(request_id = %slot.request_id, error = %e, "DIAG: BatchGenerate decode sample failed — slot errored");
+                    slot.finish_error(format!("decode sample: {e}"));
+                    continue;
+                }
+            };
         let new_generated_count = match &mut slot.state {
             crate::inference::slot_table::SlotState::Decoding {
                 last_token,
@@ -2097,9 +2166,27 @@ async fn finalize_slot(
         model_key,
         prompt_tokens,
         finish_reason,
+        error_message,
         ..
     } = slot;
     let finish_label = finish_reason.unwrap_or("length").to_string();
+
+    if finish_label == "error" {
+        let message = error_message
+            .unwrap_or_else(|| "BatchGenerate slot failed without a recorded message".to_string());
+        send_worker(
+            writer,
+            &WorkerMsg::Error {
+                request_id,
+                message,
+            },
+            &[],
+        )
+        .await
+        .map_err(|e| SwarmError::Internal(format!("send Error: {e}")))?;
+        kv_store.clear_request(&model_key, &req_id_str);
+        return Ok(());
+    }
 
     send_worker(
         writer,

@@ -74,8 +74,15 @@ pub struct Slot {
     /// once the snapshot is inserted.
     pub prompt_ids: Vec<u32>,
     /// Set when the slot decides to stop. The slot driver reads this on
-    /// the next pass and removes the slot.
+    /// the next pass and removes the slot. Possible values:
+    /// - `"stop"`  — EOS or stop-sequence match
+    /// - `"length"` — generated_count reached max_tokens
+    /// - `"error"` — per-slot forward / sample failure (see `error_message`)
     pub finish_reason: Option<&'static str>,
+    /// When `finish_reason == Some("error")`, the human-readable message that
+    /// gets emitted to the daemon as `WorkerMsg::Error`. Lets one bad slot
+    /// fail in isolation without aborting its neighbors.
+    pub error_message: Option<String>,
 }
 
 impl Slot {
@@ -95,6 +102,16 @@ impl Slot {
     pub fn finish_stop(&mut self) {
         if self.finish_reason.is_none() {
             self.finish_reason = Some("stop");
+        }
+    }
+
+    /// Mark `error` finish with a message. First-write-wins like the other
+    /// finish helpers, so a per-slot decode error doesn't get clobbered by
+    /// a downstream length check on the same tick.
+    pub fn finish_error(&mut self, message: impl Into<String>) {
+        if self.finish_reason.is_none() {
+            self.finish_reason = Some("error");
+            self.error_message = Some(message.into());
         }
     }
 
@@ -295,6 +312,7 @@ mod tests {
             prompt_tokens: 8,
             prompt_ids: vec![1, 2, 3, 4, 5, 6, 7, 8],
             finish_reason: None,
+            error_message: None,
         }
     }
 
@@ -333,6 +351,7 @@ mod tests {
             prompt_tokens: prompt_len,
             prompt_ids: (1..=prompt_len as u32).collect(),
             finish_reason: None,
+            error_message: None,
         }
     }
 
@@ -482,5 +501,18 @@ mod tests {
     fn take_prefill_chunk_on_decoding_slot_returns_none() {
         let mut s = dummy_decoding_slot(Uuid::new_v4(), (0, 22));
         assert!(s.take_prefill_chunk(4).is_none());
+    }
+
+    #[test]
+    fn finish_error_records_message_and_blocks_other_finishers() {
+        let mut s = dummy_decoding_slot(Uuid::new_v4(), (0, 22));
+        s.finish_error("forward failed: OOM");
+        assert_eq!(s.finish_reason, Some("error"));
+        assert_eq!(s.error_message.as_deref(), Some("forward failed: OOM"));
+        // First-write-wins — a downstream length check shouldn't overwrite the error.
+        s.finish_length();
+        s.finish_stop();
+        assert_eq!(s.finish_reason, Some("error"));
+        assert_eq!(s.error_message.as_deref(), Some("forward failed: OOM"));
     }
 }
