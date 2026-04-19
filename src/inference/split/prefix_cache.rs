@@ -370,6 +370,55 @@ impl PrefixCache {
         manifest
     }
 
+    /// Item 8 Phase 2b: look up a cached snapshot whose chained-hash
+    /// manifest contains `block_hash`, serialize it, and return the wire
+    /// bytes. Returns `None` when no matching entry exists (eviction race
+    /// or never cached for this hash). Used by the serving-side
+    /// `ExportPrefixSnapshot` handler.
+    ///
+    /// We must return a snapshot whose `token_count` equals the block
+    /// boundary the hash represents — so we build a fresh snapshot by
+    /// narrowing the entry's live KV tensors to that position. The
+    /// PrefixCache doesn't store per-block sub-snapshots (would bloat
+    /// memory); it stores one snapshot per entry at the entry's full
+    /// length, plus the ability to re-narrow to any block boundary at
+    /// serve time via the entry's KvSnapshot layers (already
+    /// complete-seq-len copies narrowed at insert time).
+    pub fn export_snapshot_bytes(&self, model_key: &str, block_hash: &[u8; 32]) -> Option<Vec<u8>> {
+        if self.block_tokens == 0 {
+            return None;
+        }
+        let inner = self.inner.read().ok()?;
+        let bucket = inner.per_model.get(model_key)?;
+        let block_size = self.block_tokens;
+        // Find the entry whose manifest contains `block_hash`, along with
+        // the block index where it appears (== token boundary).
+        for entry in bucket {
+            let manifest = entry.manifest(block_size);
+            if let Some((i, bm)) = manifest
+                .iter()
+                .enumerate()
+                .find(|(_, bm)| bm.block_hash == *block_hash)
+            {
+                let target_tokens = bm.token_count as usize;
+                // Narrow the stored snapshot to the target boundary if the
+                // entry itself is longer — each entry holds a snapshot at
+                // `entry.tokens.len()` tokens but we want `target_tokens`.
+                let narrowed = narrow_snapshot(&entry.snapshot, target_tokens).ok()?;
+                let bytes = serialize_snapshot(&narrowed, &entry.tokens[..target_tokens]).ok()?;
+                tracing::debug!(
+                    model_key,
+                    block_index = i,
+                    target_tokens,
+                    bytes_len = bytes.len(),
+                    "DIAG: export_snapshot_bytes HIT"
+                );
+                return Some(bytes);
+            }
+        }
+        None
+    }
+
     /// Snapshot the current per-model BLAKE3 block-hash manifest. Used by the
     /// daemon at startup or after configuration changes to re-announce a
     /// worker's full prefix-cache state to peers without waiting for a new
@@ -386,6 +435,23 @@ impl PrefixCache {
             return Vec::new();
         };
         enumerate_manifest_locked(bucket, self.block_tokens)
+    }
+
+    /// Item 8 Phase 2b: hydrate a per-request KV entry directly from
+    /// serialized snapshot bytes returned by a remote peer. Returns the
+    /// number of tokens seeded, or an error if deserialization failed.
+    /// Does NOT re-BLAKE3-verify — that happens earlier in the daemon's
+    /// `try_fetch_cross_node_prefix` helper.
+    pub fn hydrate_request_from_bytes(
+        &self,
+        kv_store: &KvCacheStore,
+        model_key: &str,
+        request_id: &str,
+        bytes: &[u8],
+        device: &candle_core::Device,
+    ) -> Result<usize, SwarmError> {
+        let (snap, _tokens) = deserialize_snapshot(bytes, device)?;
+        self.hydrate_request_from_snapshot(kv_store, model_key, request_id, &snap)
     }
 
     /// Seed a fresh `KvCacheEntry` for `request_id` from `snapshot`. Returns
@@ -472,6 +538,55 @@ fn enumerate_manifest_locked(bucket: &[Entry], block_size: usize) -> Vec<PrefixB
         }
     }
     out
+}
+
+/// Narrow an existing `KvSnapshot` to `target_tokens` on the seq dim.
+/// Returns a fresh snapshot with independent tensors (contiguous copies),
+/// so the caller can safely serialize + ship it without aliasing the
+/// source. `target_tokens` must be `<= snap.token_count`.
+fn narrow_snapshot(snap: &KvSnapshot, target_tokens: usize) -> Result<KvSnapshot, SwarmError> {
+    if target_tokens > snap.token_count {
+        return Err(SwarmError::Internal(format!(
+            "narrow_snapshot: target {} > current {}",
+            target_tokens, snap.token_count
+        )));
+    }
+    if target_tokens == snap.token_count {
+        // Shallow clone — candle Tensors are ref-counted.
+        let layers: Vec<Option<(Tensor, Tensor)>> = snap
+            .layers
+            .iter()
+            .map(|kv| kv.as_ref().map(|(k, v)| (k.clone(), v.clone())))
+            .collect();
+        return Ok(KvSnapshot {
+            token_count: target_tokens,
+            layers,
+            dim: snap.dim,
+            max_seq_len: snap.max_seq_len,
+        });
+    }
+    let mut out: Vec<Option<(Tensor, Tensor)>> = Vec::with_capacity(snap.layers.len());
+    for kv_opt in &snap.layers {
+        let Some((k, v)) = kv_opt else {
+            out.push(None);
+            continue;
+        };
+        let k_narrow = k
+            .narrow(snap.dim, 0, target_tokens)
+            .and_then(|t| t.contiguous())
+            .map_err(|e| SwarmError::Internal(format!("narrow_snapshot k: {e}")))?;
+        let v_narrow = v
+            .narrow(snap.dim, 0, target_tokens)
+            .and_then(|t| t.contiguous())
+            .map_err(|e| SwarmError::Internal(format!("narrow_snapshot v: {e}")))?;
+        out.push(Some((k_narrow, v_narrow)));
+    }
+    Ok(KvSnapshot {
+        token_count: target_tokens,
+        layers: out,
+        dim: snap.dim,
+        max_seq_len: snap.max_seq_len,
+    })
 }
 
 fn snapshot_at(
@@ -1024,6 +1139,47 @@ mod tests {
         buf.extend_from_slice(&999u32.to_le_bytes());
         buf.extend_from_slice(&0u64.to_le_bytes());
         assert!(deserialize_snapshot(&buf, &Device::Cpu).is_err());
+    }
+
+    #[test]
+    fn export_snapshot_bytes_roundtrips_to_hashed_block() {
+        // block=4 so a 12-token prompt inserts hashes at 4, 8, 12.
+        let pc = PrefixCache::new(true, 8, 4, 4, 8192);
+        let kv_store = KvCacheStore::new(std::time::Duration::from_secs(600));
+        make_fake_kv(&kv_store, "m", "req-a", 2, 12);
+        let tokens: Vec<u32> = (1..=12).collect();
+        let manifest = pc.insert_from_kv("m", "req-a", &kv_store, &tokens);
+        assert_eq!(manifest.len(), 3);
+        // Request the middle block. Serving side should produce bytes
+        // whose header `tokens` equal tokens[..8].
+        let bytes = pc
+            .export_snapshot_bytes("m", &manifest[1].block_hash)
+            .expect("hit");
+        let (snap, decoded_tokens) =
+            deserialize_snapshot(&bytes, &candle_core::Device::Cpu).unwrap();
+        assert_eq!(snap.token_count, 8);
+        assert_eq!(decoded_tokens, tokens[..8]);
+        // Same bytes should BLAKE3-verify against the requested hash.
+        assert!(verify_token_hash_chain(
+            &decoded_tokens,
+            4,
+            snap.token_count,
+            &manifest[1].block_hash
+        ));
+    }
+
+    #[test]
+    fn export_snapshot_bytes_miss_on_unknown_hash() {
+        let pc = PrefixCache::new(true, 8, 4, 4, 8192);
+        let kv_store = KvCacheStore::new(std::time::Duration::from_secs(600));
+        make_fake_kv(&kv_store, "m", "req-a", 2, 8);
+        let tokens: Vec<u32> = (1..=8).collect();
+        let _ = pc.insert_from_kv("m", "req-a", &kv_store, &tokens);
+        // Hash derived from a different prompt should miss.
+        let other = compute_block_hashes(&[99, 99, 99, 99, 99, 99, 99, 99], 4);
+        assert!(pc
+            .export_snapshot_bytes("m", &other[0].block_hash)
+            .is_none());
     }
 
     #[test]

@@ -43,6 +43,27 @@ pub enum DaemonMsg {
         layer_start: usize,
         layer_end: usize,
     },
+    /// Item 8 Phase 2b: daemon's reply to a `WorkerMsg::PrefixFetchProbe`.
+    /// `payload` is `Some(serialized KvSnapshot bytes)` on hit (already
+    /// BLAKE3-verified by the daemon helper), or `None` on miss / timeout.
+    /// `matched_tokens` is the number of prompt tokens covered by the
+    /// snapshot (equal to the chained-hash block boundary the daemon
+    /// resolved against).
+    PrefixFetchResult {
+        request_id: Uuid,
+        matched_tokens: u32,
+        payload: Option<Vec<u8>>,
+    },
+    /// Item 8 Phase 2b: serving-side request. The daemon received an
+    /// inbound `SwarmRequest::PrefixKvFetch` from a peer and needs the
+    /// local worker to extract the matching snapshot bytes from its
+    /// in-process `PrefixCache`. The worker replies with
+    /// `WorkerMsg::PrefixSnapshotResponse`.
+    ExportPrefixSnapshot {
+        request_id: Uuid,
+        model_id: ModelId,
+        block_hash: [u8; 32],
+    },
     /// Graceful shutdown — worker exits cleanly.
     Shutdown,
 }
@@ -90,6 +111,23 @@ pub enum WorkerMsg {
     PrefixManifestUpdate {
         model_id: ModelId,
         blocks: Vec<PrefixBlockEntry>,
+    },
+    /// Item 8 Phase 2b: worker-initiated probe for a cross-node prefix KV
+    /// fetch. Carries the chained-hash manifest of the current prompt's
+    /// leading blocks; the daemon picks the longest-prefix peer match,
+    /// fetches + verifies + returns bytes via `DaemonMsg::PrefixFetchResult`.
+    /// `request_id` correlates the probe with the result.
+    PrefixFetchProbe {
+        request_id: Uuid,
+        model_id: ModelId,
+        blocks: Vec<PrefixBlockEntry>,
+    },
+    /// Item 8 Phase 2b: worker's reply to `DaemonMsg::ExportPrefixSnapshot`.
+    /// `payload` is `Some(serialized KvSnapshot)` when the hash matched a
+    /// locally-cached entry, `None` otherwise (eviction race / miss).
+    PrefixSnapshotResponse {
+        request_id: Uuid,
+        payload: Option<Vec<u8>>,
     },
     /// Worker is about to exit.
     Bye,

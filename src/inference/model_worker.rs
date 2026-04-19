@@ -8,12 +8,20 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use dashmap::DashMap;
 use tokio::net::UnixStream;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
+use uuid::Uuid;
 
 use candle_core::IndexOp;
 
 use crate::daemon::shard_loader::{try_load_from_shards, ShardLoadParams};
+
+/// Item 8 Phase 2b: per-probe waiter. `handle_generate` /
+/// `try_register_generate_slot` register a oneshot keyed by a fresh probe
+/// `Uuid` and await the daemon's response. The reader task fulfils
+/// matching `DaemonMsg::PrefixFetchResult` arrivals inline.
+type PrefixFetchWaiterMap = Arc<DashMap<Uuid, oneshot::Sender<(u32, Option<Vec<u8>>)>>>;
 use crate::error::SwarmError;
 use crate::inference::slot_table::{Slot, SlotTable};
 use crate::inference::split::{self, BatchItem, KvCacheStore, PrefixCache, SplitModel};
@@ -148,15 +156,43 @@ pub async fn run_worker(
     let mut slot_table = SlotTable::new(batch_generate_max_slots as usize);
     let chunk_size_tokens = prefill_chunk_tokens.max(1) as usize;
 
+    // Item 8 Phase 2b: cross-node prefix-KV probe waiters. `handle_generate`
+    // and `try_register_generate_slot` register a oneshot keyed by the
+    // probe's `request_id` before sending `WorkerMsg::PrefixFetchProbe`;
+    // the reader task intercepts matching `DaemonMsg::PrefixFetchResult`
+    // and fulfils the oneshot inline (short-circuiting the main loop).
+    let pending_fetches: PrefixFetchWaiterMap = Arc::new(DashMap::new());
+
     // Spawn a reader task that pushes framed IPC messages onto an mpsc.
     // Decoupling read-from-socket from the main select! loop keeps frame
     // alignment safe under cancellation (recv_framed itself is not cancel-safe).
     let (ipc_tx, mut ipc_rx) = mpsc::channel::<(DaemonMsg, Vec<u8>)>(16);
+    let reader_pending = pending_fetches.clone();
     let reader_task = tokio::spawn(async move {
         loop {
             match recv_daemon(&mut reader).await {
-                Ok(framed) => {
-                    if ipc_tx.send(framed).await.is_err() {
+                Ok((msg, payload)) => {
+                    // Short-circuit cross-node prefix fetch results so
+                    // `handle_generate` can await its oneshot without
+                    // relying on the main loop to pump ipc_rx (which it
+                    // can't, since it's blocked inside handle_generate).
+                    if let DaemonMsg::PrefixFetchResult {
+                        request_id,
+                        matched_tokens,
+                        payload: kv_bytes,
+                    } = msg
+                    {
+                        if let Some((_, tx)) = reader_pending.remove(&request_id) {
+                            let _ = tx.send((matched_tokens, kv_bytes));
+                        } else {
+                            tracing::debug!(
+                                %request_id,
+                                "prefix-fetch result without waiting probe (timed out?)"
+                            );
+                        }
+                        continue;
+                    }
+                    if ipc_tx.send((msg, payload)).await.is_err() {
                         break;
                     }
                 }
@@ -198,6 +234,7 @@ pub async fn run_worker(
                 activation_compression,
                 batch_generate,
                 &mut slot_table,
+                &pending_fetches,
             )
             .await;
 
@@ -226,6 +263,7 @@ pub async fn run_worker(
                             activation_compression,
                             batch_generate,
                             &mut slot_table,
+                            &pending_fetches,
                         )
                         .await;
                     }
@@ -1128,6 +1166,117 @@ async fn handle_forward(
     Ok(())
 }
 
+/// Item 8 Phase 2b: runtime timeout (in milliseconds) for the cross-node
+/// prefix-KV probe. Picked to be short relative to prefill latency —
+/// missing the window means the local prefill runs, which is no worse
+/// than not having the feature at all. WAN peers should respond in
+/// ~50-300 ms depending on snapshot size + RTT.
+const PREFIX_FETCH_TIMEOUT_MS: u64 = 500;
+
+/// Item 8 Phase 2b: probe the daemon for a cross-node prefix KV hit and,
+/// if one arrives inside the timeout, hydrate the request's KV entry from
+/// the returned snapshot bytes. Returns the number of tokens seeded (0
+/// when no hit or any step fails — caller unconditionally falls through
+/// to normal prefill). Non-fatal: any error here is a degraded path, not
+/// a correctness issue.
+#[allow(clippy::too_many_arguments)]
+async fn try_remote_prefix_hydrate(
+    writer: &mut tokio::net::unix::OwnedWriteHalf,
+    model: &SplitModel,
+    kv_store: &Arc<KvCacheStore>,
+    prefix_cache: &Arc<PrefixCache>,
+    pending_fetches: &PrefixFetchWaiterMap,
+    model_id: &crate::types::ModelId,
+    model_key: &str,
+    req_id_str: &str,
+    prompt_ids: &[u32],
+    prompt_tokens: usize,
+) -> usize {
+    let block_size = prefix_cache.block_tokens();
+    if block_size == 0 {
+        return 0;
+    }
+    let blocks = crate::inference::split::compute_block_hashes(prompt_ids, block_size);
+    if blocks.is_empty() {
+        return 0;
+    }
+    let probe_id = Uuid::new_v4();
+    let (tx, rx) = oneshot::channel::<(u32, Option<Vec<u8>>)>();
+    pending_fetches.insert(probe_id, tx);
+    struct ProbeGuard<'a> {
+        map: &'a PrefixFetchWaiterMap,
+        id: Uuid,
+    }
+    impl<'a> Drop for ProbeGuard<'a> {
+        fn drop(&mut self) {
+            self.map.remove(&self.id);
+        }
+    }
+    let _guard = ProbeGuard {
+        map: pending_fetches,
+        id: probe_id,
+    };
+    if let Err(e) = send_worker(
+        writer,
+        &WorkerMsg::PrefixFetchProbe {
+            request_id: probe_id,
+            model_id: model_id.clone(),
+            blocks,
+        },
+        &[],
+    )
+    .await
+    {
+        tracing::debug!(error = %e, "prefix-fetch probe: send failed");
+        return 0;
+    }
+    let (matched_tokens, payload) = match tokio::time::timeout(
+        std::time::Duration::from_millis(PREFIX_FETCH_TIMEOUT_MS),
+        rx,
+    )
+    .await
+    {
+        Ok(Ok(v)) => v,
+        Ok(Err(_)) => {
+            tracing::debug!(%probe_id, "prefix-fetch probe: oneshot dropped");
+            return 0;
+        }
+        Err(_) => {
+            tracing::debug!(%probe_id, "prefix-fetch probe: timed out");
+            return 0;
+        }
+    };
+    let Some(bytes) = payload else { return 0 };
+    // Leave at least one token for the forward pass — same rule as the
+    // local-hit path, keeps sampling-logits invariants intact.
+    let usable = (matched_tokens as usize).min(prompt_tokens.saturating_sub(1));
+    if usable == 0 {
+        return 0;
+    }
+    match prefix_cache.hydrate_request_from_bytes(
+        kv_store,
+        model_key,
+        req_id_str,
+        &bytes,
+        model.device(),
+    ) {
+        Ok(n) => {
+            let n = n.min(usable);
+            tracing::info!(
+                matched_tokens = n,
+                total_tokens = prompt_tokens,
+                bytes = bytes.len(),
+                "DIAG: cross-node prefix HIT — hydrated KV"
+            );
+            n
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "prefix-fetch: hydrate from bytes failed");
+            0
+        }
+    }
+}
+
 /// Handle a Generate IPC message — run a full tokenize+decode loop.
 #[allow(clippy::too_many_arguments)]
 async fn handle_generate(
@@ -1141,6 +1290,7 @@ async fn handle_generate(
     swift_cfg: &SwiftConfig,
     force_standard_attn: bool,
     max_seq_len_override: Option<usize>,
+    pending_fetches: &PrefixFetchWaiterMap,
 ) -> Result<(), SwarmError> {
     let _ = max_seq_len_override; // applied at worker startup (process-global)
     let request_id = gen.request_id;
@@ -1178,16 +1328,34 @@ async fn handle_generate(
 
     // Prefix-cache lookup: if a cached prefix is a strict prefix of this
     // prompt, hydrate the request's KV with the snapshot and only forward
-    // the suffix.
+    // the suffix. Try local first (free); on miss, probe cross-node (Item 8
+    // Phase 2b).
     let matched = prefix_cache.lookup(&model_key_string, &prompt_ids);
-    let prefix_len = match matched.as_ref() {
+    let mut prefix_len = match matched.as_ref() {
         Some(snap) => prefix_cache
             .hydrate_request_from_snapshot(kv_store, &model_key_string, &req_id_str, snap)
             .unwrap_or(0),
         None => 0,
     };
-    // Guard: must have at least one token left to run a forward pass.
-    let prefix_len = prefix_len.min(prompt_tokens.saturating_sub(1));
+    // Clamp to keep at least one token for the forward pass.
+    prefix_len = prefix_len.min(prompt_tokens.saturating_sub(1));
+    if prefix_len == 0 {
+        // Only probe when the local cache missed — avoids wasting a round
+        // trip when we already have a good hydration source.
+        prefix_len = try_remote_prefix_hydrate(
+            writer,
+            model,
+            kv_store,
+            prefix_cache,
+            pending_fetches,
+            &model_id,
+            &model_key_string,
+            &req_id_str,
+            &prompt_ids,
+            prompt_tokens,
+        )
+        .await;
+    }
 
     let (input, index_pos_start) = if prefix_len > 0 {
         tracing::info!(
@@ -1692,11 +1860,12 @@ fn slot_admission_eligible(
 /// Tokenizes the prompt, performs the prefix-cache lookup + KV hydration if
 /// applicable, and pushes a `Slot` in `Prefilling` state into the table. Does
 /// NO compute — the chunked prefill happens inside `step_decode_pool`'s
-/// Phase A on subsequent ticks. Synchronous (no `.await`) because every
-/// operation here is fast enough that yielding mid-admit isn't worth the
-/// complexity.
+/// Phase A on subsequent ticks. `async` because Item 8 Phase 2b may issue a
+/// cross-node prefix-KV probe when the local cache misses; the probe
+/// round-trip is bounded by `PREFIX_FETCH_TIMEOUT_MS`.
 #[allow(clippy::too_many_arguments)]
-fn try_register_generate_slot(
+async fn try_register_generate_slot(
+    writer: &mut tokio::net::unix::OwnedWriteHalf,
     models: &mut HashMap<(usize, usize, usize, usize), SplitModel>,
     kv_store: &Arc<KvCacheStore>,
     prefix_cache: &Arc<PrefixCache>,
@@ -1704,6 +1873,7 @@ fn try_register_generate_slot(
     gen: IpcGenerate,
     shard_window: &Option<Vec<u32>>,
     slot_table: &mut SlotTable,
+    pending_fetches: &PrefixFetchWaiterMap,
 ) -> Result<(), SlotAdmitError> {
     let request_id = gen.request_id;
     let model_id = gen.model_id.clone();
@@ -1745,7 +1915,7 @@ fn try_register_generate_slot(
     // Prefix-cache lookup + per-request KV hydration if we hit. Cheap clone of
     // K/V tensors — no compute.
     let matched = prefix_cache.lookup(&model_key_string, &prompt_ids);
-    let prefix_len = match matched.as_ref() {
+    let mut prefix_len = match matched.as_ref() {
         Some(snap) => prefix_cache
             .hydrate_request_from_snapshot(kv_store, &model_key_string, &req_id_str, snap)
             .unwrap_or(0),
@@ -1753,7 +1923,23 @@ fn try_register_generate_slot(
     };
     // Always leave at least one prompt token for the first chunk's forward —
     // we need that forward to produce logits for the first sample.
-    let prefix_len = prefix_len.min(prompt_tokens.saturating_sub(1));
+    prefix_len = prefix_len.min(prompt_tokens.saturating_sub(1));
+    if prefix_len == 0 {
+        // Item 8 Phase 2b: probe cross-node only when local missed.
+        prefix_len = try_remote_prefix_hydrate(
+            writer,
+            model,
+            kv_store,
+            prefix_cache,
+            pending_fetches,
+            &model_id,
+            &model_key_string,
+            &req_id_str,
+            &prompt_ids,
+            prompt_tokens,
+        )
+        .await;
+    }
     if prefix_len > 0 {
         tracing::info!(
             %request_id,
@@ -2333,6 +2519,7 @@ async fn handle_daemon_msg(
     activation_compression: bool,
     batch_generate: bool,
     slot_table: &mut SlotTable,
+    pending_fetches: &PrefixFetchWaiterMap,
 ) -> bool {
     match msg {
         DaemonMsg::Forward(fwd) => {
@@ -2383,6 +2570,7 @@ async fn handle_daemon_msg(
             {
                 let g = pending.take().expect("checked above");
                 match try_register_generate_slot(
+                    writer,
                     models,
                     kv_store,
                     prefix_cache,
@@ -2390,7 +2578,10 @@ async fn handle_daemon_msg(
                     g,
                     shard_window,
                     slot_table,
-                ) {
+                    pending_fetches,
+                )
+                .await
+                {
                     Ok(_) => { /* registered — chunked prefill happens in step_decode_pool */ }
                     Err(SlotAdmitError::Fatal(e)) => {
                         send_worker_error(writer, request_id, e).await;
@@ -2412,6 +2603,7 @@ async fn handle_daemon_msg(
                     swift_cfg,
                     force_standard_attn,
                     max_seq_len_override,
+                    pending_fetches,
                 )
                 .await
                 {
@@ -2426,12 +2618,65 @@ async fn handle_daemon_msg(
             models.retain(|&(ls, le, _, _), _| !(ls == layer_start && le == layer_end));
             tracing::info!(layer_start, layer_end, "model-worker: unloaded shard range");
         }
+        DaemonMsg::ExportPrefixSnapshot {
+            request_id,
+            model_id,
+            block_hash,
+        } => {
+            // Item 8 Phase 2b: serving-side handler. The daemon received an
+            // inbound PrefixKvFetch from a peer; look up the hash in our
+            // local PrefixCache (the `model_key` depends on the model's
+            // layer range, which we can't know without loading — but the
+            // cache is keyed by the kv_model_key the SplitModel already
+            // uses, so we iterate every loaded model's key to find it).
+            let payload = export_snapshot_for_hash(models, prefix_cache, &model_id, &block_hash);
+            let _ = send_worker(
+                writer,
+                &WorkerMsg::PrefixSnapshotResponse {
+                    request_id,
+                    payload,
+                },
+                &[],
+            )
+            .await;
+        }
+        DaemonMsg::PrefixFetchResult { request_id, .. } => {
+            // The reader task short-circuits these and routes them through
+            // `pending_fetches` before they reach this path. If we ever see
+            // one here it's a routing bug or a late arrival — drop it.
+            tracing::debug!(
+                %request_id,
+                "model-worker: unexpected PrefixFetchResult in main loop (reader short-circuit missed?)"
+            );
+            let _ = pending_fetches; // quiet unused-param warning when the reader short-circuit is comprehensive
+        }
         DaemonMsg::Shutdown => {
             let _ = send_worker(writer, &WorkerMsg::Bye, &[]).await;
             return true;
         }
     }
     false
+}
+
+/// Item 8 Phase 2b: find a cached prefix snapshot matching `block_hash`
+/// across every loaded model's `kv_model_key`. `kv_model_key` is layer-range
+/// scoped (format `{start}-{end}-{block_count}`), NOT model-id scoped, so
+/// we try every loaded key and return the first hit. The incoming
+/// `model_id` arrives for future trust / rate-limiting but doesn't narrow
+/// the cache bucket today.
+fn export_snapshot_for_hash(
+    models: &HashMap<(usize, usize, usize, usize), SplitModel>,
+    prefix_cache: &Arc<PrefixCache>,
+    _model_id: &crate::types::ModelId,
+    block_hash: &[u8; 32],
+) -> Option<Vec<u8>> {
+    for model in models.values() {
+        let key = model.kv_model_key().to_string();
+        if let Some(bytes) = prefix_cache.export_snapshot_bytes(&key, block_hash) {
+            return Some(bytes);
+        }
+    }
+    None
 }
 
 /// Decode a single token to text using the model's vocabulary.

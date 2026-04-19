@@ -473,6 +473,19 @@ impl Daemon {
             shutdown_rx.clone(),
         );
 
+        // Item 8 Phase 2b: worker-initiated fetch probes go here.
+        let (prefix_probe_tx, prefix_probe_rx) =
+            mpsc::channel::<crate::inference::process_pool::PrefixProbeEvent>(256);
+        shared_state
+            .model_process_pool
+            .set_prefix_probe_tx(prefix_probe_tx);
+        background::spawn_prefix_probe_handler(
+            shared_state.clone(),
+            network_tx.clone(),
+            prefix_probe_rx,
+            shutdown_rx.clone(),
+        );
+
         background::spawn_shard_verification(
             shared_state.clone(),
             self.config.node.data_dir.clone(),

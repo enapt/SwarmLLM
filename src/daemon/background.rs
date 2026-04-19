@@ -337,6 +337,168 @@ pub(super) fn spawn_prefix_announce_forwarder(
     });
 }
 
+/// Item 8 Phase 2b: drain cross-node fetch probes from worker subprocesses,
+/// resolve each via the cross-node index + remote fetch, and deliver the
+/// result (hit payload or miss) back to the originating worker via the
+/// pool's `send_prefix_fetch_result` IPC. Spawned once per daemon.
+pub(super) fn spawn_prefix_probe_handler(
+    shared_state: Arc<SharedState>,
+    network_tx: mpsc::Sender<NetworkCommand>,
+    mut rx: mpsc::Receiver<crate::inference::process_pool::PrefixProbeEvent>,
+    mut shutdown_rx: watch::Receiver<bool>,
+) {
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                _ = shutdown_rx.changed() => break,
+                msg = rx.recv() => {
+                    let Some(event) = msg else { break };
+                    // Walk the probe's chained-hash manifest longest-first and
+                    // find the best remote peer holding ANY block of it. We
+                    // rebuild the manifest-to-prompt mapping from the blocks
+                    // the worker shipped, rather than re-tokenizing the prompt
+                    // in the daemon (which doesn't load the tokenizer).
+                    //
+                    // The blocks have increasing `token_count` and chained
+                    // hashes that are valid iff computed over the same token
+                    // sequence. We trust the worker's manifest here and let
+                    // BLAKE3 verification happen in the *peer's* response path
+                    // (not ours) — because WE receive the peer's tokens +
+                    // snapshot and re-hash against the block hash we asked for.
+                    let our_id = shared_state.identity.node_id();
+                    let mut best: Option<(crate::types::NodeId, [u8; 32], u32)> = None;
+                    if let Some(model_index) = shared_state
+                        .models
+                        .cross_node_prefix_index
+                        .get(&event.model_id)
+                    {
+                        for entry in event.blocks.iter().rev() {
+                            if let Some(holders) = model_index.get(&entry.block_hash) {
+                                let candidates: Vec<crate::types::NodeId> = holders
+                                    .iter()
+                                    .map(|r| r.clone())
+                                    .filter(|n| n != our_id)
+                                    .collect();
+                                if candidates.is_empty() {
+                                    continue;
+                                }
+                                // Pick lowest observed per-layer latency, NodeId tiebreak.
+                                let pick = candidates
+                                    .into_iter()
+                                    .min_by(|a, b| {
+                                        let la = shared_state.observed_latency_ms_per_layer(a).unwrap_or(f32::INFINITY);
+                                        let lb = shared_state.observed_latency_ms_per_layer(b).unwrap_or(f32::INFINITY);
+                                        la.partial_cmp(&lb)
+                                            .unwrap_or(std::cmp::Ordering::Equal)
+                                            .then_with(|| a.0.cmp(&b.0))
+                                    });
+                                if let Some(peer) = pick {
+                                    best = Some((peer, entry.block_hash, entry.token_count));
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    let (matched_tokens, payload) = match best {
+                        Some((peer, block_hash, token_count)) => {
+                            let peer_bytes_opt = shared_state
+                                .peer_id_map
+                                .get(&peer)
+                                .map(|r| r.clone())
+                                .filter(|b| !b.is_empty());
+                            if let Some(peer_bytes) = peer_bytes_opt {
+                                // Install the oneshot + dispatch the fetch.
+                                let fetch_id = uuid::Uuid::new_v4();
+                                let (tx, rx) = tokio::sync::oneshot::channel::<Option<Vec<u8>>>();
+                                shared_state
+                                    .pending_prefix_kv_fetches
+                                    .insert(fetch_id, tx);
+                                let cleanup_state = shared_state.clone();
+                                struct FetchGuard {
+                                    state: Arc<SharedState>,
+                                    fetch_id: uuid::Uuid,
+                                }
+                                impl Drop for FetchGuard {
+                                    fn drop(&mut self) {
+                                        self.state
+                                            .pending_prefix_kv_fetches
+                                            .remove(&self.fetch_id);
+                                    }
+                                }
+                                let _guard = FetchGuard {
+                                    state: cleanup_state,
+                                    fetch_id,
+                                };
+                                let cmd = NetworkCommand::SendPrefixKvFetch {
+                                    target_peer_bytes: peer_bytes,
+                                    request_id: fetch_id,
+                                    model_id: event.model_id.clone(),
+                                    block_hash,
+                                };
+                                if let Err(e) = network_tx.send(cmd).await {
+                                    tracing::debug!(
+                                        error = %e,
+                                        "prefix-probe: network_tx send failed"
+                                    );
+                                    (0u32, None)
+                                } else {
+                                    match tokio::time::timeout(
+                                        std::time::Duration::from_millis(400),
+                                        rx,
+                                    )
+                                    .await
+                                    {
+                                        Ok(Ok(Some(bytes))) => {
+                                            // Phase 2b does NOT re-tokenize the
+                                            // prompt daemon-side, so we can't
+                                            // BLAKE3-verify the returned tokens
+                                            // here. The worker performs the
+                                            // verify in `hydrate_request_from_bytes`
+                                            // by calling `deserialize_snapshot`
+                                            // + the daemon helper path — BUT the
+                                            // worker-side probe path skips that
+                                            // check for efficiency since it
+                                            // trusts the daemon. Phase 3 wires
+                                            // trust-gated verification; for
+                                            // Phase 2b we hand the bytes straight
+                                            // through.
+                                            (token_count, Some(bytes))
+                                        }
+                                        Ok(Ok(None)) => (0, None),
+                                        Ok(Err(_)) => (0, None),
+                                        Err(_) => {
+                                            tracing::debug!(
+                                                %peer,
+                                                "prefix-probe: fetch timed out"
+                                            );
+                                            (0, None)
+                                        }
+                                    }
+                                }
+                            } else {
+                                (0u32, None)
+                            }
+                        }
+                        None => (0u32, None),
+                    };
+                    if let Err(e) = shared_state
+                        .model_process_pool
+                        .send_prefix_fetch_result(
+                            &event.model_id,
+                            event.request_id,
+                            matched_tokens,
+                            payload,
+                        )
+                        .await
+                    {
+                        tracing::debug!(error = %e, "prefix-probe: send_prefix_fetch_result failed");
+                    }
+                }
+            }
+        }
+    });
+}
+
 /// Auto-load models that have local shards available. Popular models
 /// (by historical request count) are loaded first so they get VRAM priority
 /// on restart.

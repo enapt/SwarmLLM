@@ -29,6 +29,17 @@ pub struct PrefixManifestEvent {
     pub blocks: Vec<PrefixBlockEntry>,
 }
 
+/// Item 8 Phase 2b: worker-initiated cross-node prefix-KV probe. The
+/// daemon's probe handler drains these off the channel, runs
+/// `SharedState::try_fetch_cross_node_prefix`, and sends the (possibly
+/// empty) result back via `ModelProcessPool::send_prefix_fetch_result`.
+#[derive(Clone, Debug)]
+pub struct PrefixProbeEvent {
+    pub model_id: ModelId,
+    pub request_id: Uuid,
+    pub blocks: Vec<PrefixBlockEntry>,
+}
+
 const WORKER_CONNECT_TIMEOUT_SECS: u64 = 30;
 /// Default KV-cache TTL in seconds (10 minutes). Overridden by config at startup.
 pub const DEFAULT_KV_CACHE_TTL_SECS: u64 = 600;
@@ -87,8 +98,13 @@ fn worker_msg_request_id(msg: &WorkerMsg) -> Option<Uuid> {
         WorkerMsg::Token { request_id, .. }
         | WorkerMsg::GenerateDone { request_id, .. }
         | WorkerMsg::Error { request_id, .. } => Some(*request_id),
+        // `PrefixSnapshotResponse` is correlated by `request_id` via the
+        // normal response-routing channel — `fetch_local_snapshot`
+        // registers a receiver up-front and waits for the reply.
+        WorkerMsg::PrefixSnapshotResponse { request_id, .. } => Some(*request_id),
         WorkerMsg::BatchResult { .. }
         | WorkerMsg::PrefixManifestUpdate { .. }
+        | WorkerMsg::PrefixFetchProbe { .. }
         | WorkerMsg::Ready
         | WorkerMsg::Bye => None,
     }
@@ -104,6 +120,7 @@ async fn reader_actor(
     dead: Arc<AtomicBool>,
     model_id: ModelId,
     prefix_manifest_tx: Option<mpsc::Sender<PrefixManifestEvent>>,
+    prefix_probe_tx: Option<mpsc::Sender<PrefixProbeEvent>>,
 ) {
     loop {
         match recv_worker(&mut reader).await {
@@ -134,6 +151,22 @@ async fn reader_actor(
                         // slow or absent must not stall worker responses.
                         let _ = tx.try_send(PrefixManifestEvent {
                             model_id: announce_model,
+                            blocks,
+                        });
+                    }
+                    continue;
+                }
+                // Worker-initiated cross-node probe (Item 8 Phase 2b).
+                if let WorkerMsg::PrefixFetchProbe {
+                    request_id,
+                    model_id: probe_model,
+                    blocks,
+                } = msg
+                {
+                    if let Some(tx) = prefix_probe_tx.as_ref() {
+                        let _ = tx.try_send(PrefixProbeEvent {
+                            model_id: probe_model,
+                            request_id,
                             blocks,
                         });
                     }
@@ -439,6 +472,9 @@ pub struct ModelProcessPool {
     /// IPC reader. When unset (e.g. unit tests constructing a bare pool),
     /// inbound `PrefixManifestUpdate` messages are dropped silently.
     prefix_manifest_tx: std::sync::OnceLock<mpsc::Sender<PrefixManifestEvent>>,
+    /// Item 8 Phase 2b: worker-initiated fetch probes land here. Daemon
+    /// drains and responds via `send_prefix_fetch_result`. Unset → drop.
+    prefix_probe_tx: std::sync::OnceLock<mpsc::Sender<PrefixProbeEvent>>,
 }
 
 /// Command into the batch scheduler task.
@@ -509,6 +545,7 @@ impl ModelProcessPool {
             batched_prefill_forward: std::sync::atomic::AtomicBool::new(true),
             batch_scheduler: std::sync::OnceLock::new(),
             prefix_manifest_tx: std::sync::OnceLock::new(),
+            prefix_probe_tx: std::sync::OnceLock::new(),
         }
     }
 
@@ -517,6 +554,97 @@ impl ModelProcessPool {
     /// local-index update. Idempotent — a second call is a no-op.
     pub fn set_prefix_manifest_tx(&self, tx: mpsc::Sender<PrefixManifestEvent>) {
         let _ = self.prefix_manifest_tx.set(tx);
+    }
+
+    /// Install the prefix-probe sink. Daemon owns the receiver and answers
+    /// each probe via `send_prefix_fetch_result`.
+    pub fn set_prefix_probe_tx(&self, tx: mpsc::Sender<PrefixProbeEvent>) {
+        let _ = self.prefix_probe_tx.set(tx);
+    }
+
+    /// Item 8 Phase 2b: deliver a cross-node-fetch result back to the
+    /// worker that emitted the probe. Worker correlates by `request_id`
+    /// via its `pending_fetches` map. Sends `None` when the daemon
+    /// couldn't resolve a hit (no index match, peer miss, BLAKE3 fail,
+    /// timeout) — caller falls through to normal prefill.
+    pub async fn send_prefix_fetch_result(
+        &self,
+        model_id: &ModelId,
+        request_id: Uuid,
+        matched_tokens: u32,
+        payload: Option<Vec<u8>>,
+    ) -> Result<(), SwarmError> {
+        let handle = self.get_existing(model_id).ok_or_else(|| {
+            SwarmError::Internal(format!(
+                "send_prefix_fetch_result: no worker for model {model_id}"
+            ))
+        })?;
+        if handle.dead.load(Ordering::Relaxed) {
+            return Err(SwarmError::Internal("worker dead".into()));
+        }
+        let mut writer = handle.writer.lock().await;
+        send_daemon(
+            &mut *writer,
+            &DaemonMsg::PrefixFetchResult {
+                request_id,
+                matched_tokens,
+                payload,
+            },
+            &[],
+        )
+        .await
+        .map_err(|e| SwarmError::Internal(format!("prefix fetch result send: {e}")))
+    }
+
+    /// Item 8 Phase 2b: serving side. The daemon received an inbound
+    /// `SwarmRequest::PrefixKvFetch` — ask the local worker to extract a
+    /// matching snapshot from its `PrefixCache`. Returns `Some(bytes)` on
+    /// hit, `None` on miss / worker-unreachable (caller replies
+    /// `PrefixKvData { payload: None }`).
+    pub async fn fetch_local_snapshot(
+        &self,
+        model_id: &ModelId,
+        block_hash: [u8; 32],
+    ) -> Option<Vec<u8>> {
+        let handle = self.get_existing(model_id)?;
+        if handle.dead.load(Ordering::Relaxed) {
+            return None;
+        }
+        let request_id = Uuid::new_v4();
+        let (tx, mut rx) = mpsc::channel::<(WorkerMsg, Vec<u8>)>(2);
+        handle.responses.insert(request_id, tx);
+        let _guard = ResponseGuard {
+            responses: handle.responses.clone(),
+            request_id,
+        };
+        {
+            let mut writer = handle.writer.lock().await;
+            let msg = DaemonMsg::ExportPrefixSnapshot {
+                request_id,
+                model_id: model_id.clone(),
+                block_hash,
+            };
+            if let Err(e) = send_daemon(&mut *writer, &msg, &[]).await {
+                tracing::debug!(error = %e, "fetch_local_snapshot: send failed");
+                return None;
+            }
+        }
+        // Wait briefly for the worker's reply. Bounded so a stalled worker
+        // can't block the manager — serving-side misses are fine, and the
+        // network peer will get a `None` reply.
+        match tokio::time::timeout(std::time::Duration::from_millis(500), rx.recv()).await {
+            Ok(Some((WorkerMsg::PrefixSnapshotResponse { payload, .. }, _))) => payload,
+            Ok(Some(_)) => None,
+            Ok(None) => None,
+            Err(_) => {
+                tracing::debug!("fetch_local_snapshot: timed out");
+                None
+            }
+        }
+    }
+
+    fn get_existing(&self, model_id: &ModelId) -> Option<Arc<WorkerHandle>> {
+        self.workers.get(model_id).map(|r| r.clone())
     }
 
     /// Start the global auto-coalescing batch scheduler task. Must be called
@@ -885,6 +1013,7 @@ impl ModelProcessPool {
             dead.clone(),
             model_id.clone(),
             self.prefix_manifest_tx.get().cloned(),
+            self.prefix_probe_tx.get().cloned(),
         ));
         Ok(WorkerHandle {
             child,

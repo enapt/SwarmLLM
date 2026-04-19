@@ -289,6 +289,16 @@ pub enum NetworkCommand {
         model_id: ModelId,
         block_hash: [u8; 32],
     },
+    /// Item 8 Phase 2b: deliver an inbound-served PrefixKv response. The
+    /// serving task extracts a snapshot from the local worker and posts
+    /// this command; NetworkManager looks up the stored ResponseChannel
+    /// by `ticket` and emits the reply. `payload=None` produces a miss
+    /// reply; `Some(bytes)` produces a hit reply.
+    DeliverPrefixKvResponse {
+        ticket: uuid::Uuid,
+        request_id: uuid::Uuid,
+        payload: Option<Vec<u8>>,
+    },
 }
 
 /// Events that trigger shard rebalancing.

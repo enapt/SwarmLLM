@@ -172,6 +172,28 @@ pub struct NetworkManager {
     /// and fulfil it with the payload. On `OutboundFailure` we resolve
     /// with `None`.
     pending_prefix_kv_outbound: HashMap<OutboundRequestId, uuid::Uuid>,
+    /// Item 8 Phase 2b: inbound `SwarmRequest::PrefixKvFetch` reply
+    /// channels. Manager stashes the `ResponseChannel` here keyed by a
+    /// fresh `ticket` Uuid, spawns a task that fetches from the local
+    /// worker, and emits `NetworkCommand::DeliverPrefixKvResponse {
+    /// ticket, ... }` when the worker replies. Manager pops the stored
+    /// channel and sends the response on its substream.
+    pending_prefix_kv_inbound: HashMap<
+        uuid::Uuid,
+        (
+            uuid::Uuid,
+            std::time::Instant,
+            request_response::ResponseChannel<SwarmResponse>,
+        ),
+    >,
+    /// Item 8 Phase 2b: internal sender used by the manager's own spawned
+    /// tasks to push commands back into the event loop (e.g. the
+    /// `DeliverPrefixKvResponse` reply after the serving-side worker
+    /// IPC completes). Bounded — full queue means the manager is
+    /// overloaded; callers (internal tasks) drop their reply rather than
+    /// block.
+    internal_cmd_tx: mpsc::Sender<NetworkCommand>,
+    internal_cmd_rx: mpsc::Receiver<NetworkCommand>,
 }
 
 impl NetworkManager {
@@ -260,6 +282,7 @@ impl NetworkManager {
             .build();
 
         let shard_store = ShardStore::new(&config.node.data_dir);
+        let (internal_cmd_tx, internal_cmd_rx) = mpsc::channel::<NetworkCommand>(256);
 
         Ok(Self {
             shared_state,
@@ -288,6 +311,9 @@ impl NetworkManager {
             dht_query_rx,
             pending_provider_queries: HashMap::new(),
             pending_prefix_kv_outbound: HashMap::new(),
+            pending_prefix_kv_inbound: HashMap::new(),
+            internal_cmd_tx,
+            internal_cmd_rx,
             pex_inbound_timestamps: Vec::new(),
         })
     }
@@ -855,6 +881,12 @@ impl NetworkManager {
                             break;
                         }
                     }
+                }
+                // Item 8 Phase 2b: internal commands from spawned serve
+                // tasks (e.g. `DeliverPrefixKvResponse` after an inbound
+                // fetch has been served by the local worker).
+                Some(cmd) = self.internal_cmd_rx.recv() => {
+                    self.handle_outbound_command(cmd).await;
                 }
                 // Swarm events from the network
                 event = self.swarm.select_next_some() => {
@@ -2205,12 +2237,11 @@ impl NetworkManager {
                 }
             }
             SwarmRequest::PrefixKvFetch(req) => {
-                // Item 8 Phase 2: inbound cross-node prefix KV fetch. The
-                // serving side (worker-side KV extraction) lands in Phase 2b
-                // — for now we respond "miss" so the fetcher falls through to
-                // normal prefill. Authenticated-peer gate mirrors the
-                // TensorPayload handling: only peers in peer_registry can
-                // probe us, which we'd want anyway for trust-weighted serving.
+                // Item 8 Phase 2b: inbound cross-node prefix KV fetch.
+                // Authenticated-peer gate mirrors TensorPayload. Spawn a
+                // task to pull the snapshot from the local worker via IPC,
+                // and stash the ResponseChannel so the eventual
+                // `DeliverPrefixKvResponse` command can emit the reply.
                 let peer_node_id = self.peer_to_node.get(&peer).map(|r| r.clone());
                 let is_authenticated = match &peer_node_id {
                     Some(nid) => self.shared_state.peer_registry.contains_key(nid),
@@ -2218,26 +2249,63 @@ impl NetworkManager {
                 };
                 if !is_authenticated {
                     tracing::warn!(%peer, "PrefixKvFetch from unauthenticated peer — rejecting");
+                    let resp = SwarmResponse::PrefixKvData(PrefixKvDataResp {
+                        request_id: req.request_id,
+                        payload: None,
+                    });
+                    let _ = self
+                        .swarm
+                        .behaviour_mut()
+                        .request_response
+                        .send_response(channel, resp);
+                    return;
                 }
+                const MAX_INBOUND_PREFIX_FETCHES: usize = 256;
+                if self.pending_prefix_kv_inbound.len() >= MAX_INBOUND_PREFIX_FETCHES {
+                    tracing::warn!(%peer, "PrefixKvFetch: inbound queue full, replying miss");
+                    let resp = SwarmResponse::PrefixKvData(PrefixKvDataResp {
+                        request_id: req.request_id,
+                        payload: None,
+                    });
+                    let _ = self
+                        .swarm
+                        .behaviour_mut()
+                        .request_response
+                        .send_response(channel, resp);
+                    return;
+                }
+                let ticket = uuid::Uuid::new_v4();
+                let inner_request_id = req.request_id;
+                self.pending_prefix_kv_inbound.insert(
+                    ticket,
+                    (inner_request_id, std::time::Instant::now(), channel),
+                );
+                let state = self.shared_state.clone();
+                let net_tx = self.internal_cmd_tx.clone();
+                let model_id = req.model_id.clone();
+                let model_id_for_task = model_id.clone();
+                let block_hash = req.block_hash;
+                tokio::spawn(async move {
+                    let payload = state
+                        .model_process_pool
+                        .fetch_local_snapshot(&model_id_for_task, block_hash)
+                        .await;
+                    let cmd = NetworkCommand::DeliverPrefixKvResponse {
+                        ticket,
+                        request_id: inner_request_id,
+                        payload,
+                    };
+                    if let Err(e) = net_tx.send(cmd).await {
+                        tracing::debug!(error = %e, "PrefixKvFetch serve: command send failed");
+                    }
+                });
                 tracing::debug!(
                     %peer,
-                    request_id = %req.request_id,
-                    model = %req.model_id,
-                    "DIAG: PrefixKvFetch received (Phase 2b will serve; currently reply None)"
+                    request_id = %inner_request_id,
+                    model = %model_id,
+                    %ticket,
+                    "DIAG: PrefixKvFetch: serving inbound fetch via worker IPC"
                 );
-                let resp = SwarmResponse::PrefixKvData(PrefixKvDataResp {
-                    request_id: req.request_id,
-                    payload: None,
-                });
-                if self
-                    .swarm
-                    .behaviour_mut()
-                    .request_response
-                    .send_response(channel, resp)
-                    .is_err()
-                {
-                    tracing::debug!(%peer, "Failed to send PrefixKvData miss (channel closed)");
-                }
             }
             SwarmRequest::TensorPayload(payload) => {
                 // SEC: Only accept tensor payloads from authenticated peers in peer_registry.
@@ -2781,6 +2849,7 @@ impl NetworkManager {
             NetworkCommand::StartProviding(_) => "StartProviding",
             NetworkCommand::StopProviding(_) => "StopProviding",
             NetworkCommand::SendPrefixKvFetch { .. } => "SendPrefixKvFetch",
+            NetworkCommand::DeliverPrefixKvResponse { .. } => "DeliverPrefixKvResponse",
         };
         tracing::debug!(cmd = cmd_name, "DIAG: handling outbound command");
         match cmd {
@@ -2888,6 +2957,47 @@ impl NetworkManager {
             }
             NetworkCommand::StopProviding(shards) => {
                 crate::network::discovery::stop_providing_shards(&mut self.swarm, &shards);
+            }
+            NetworkCommand::DeliverPrefixKvResponse {
+                ticket,
+                request_id,
+                payload,
+            } => {
+                let Some((stored_request_id, stored_at, channel)) =
+                    self.pending_prefix_kv_inbound.remove(&ticket)
+                else {
+                    tracing::debug!(%ticket, "DeliverPrefixKvResponse: no pending inbound fetch");
+                    return;
+                };
+                if stored_request_id != request_id {
+                    tracing::warn!(
+                        %ticket,
+                        stored = %stored_request_id,
+                        got = %request_id,
+                        "DeliverPrefixKvResponse: request_id mismatch — sending miss"
+                    );
+                }
+                let age_ms = stored_at.elapsed().as_millis();
+                let resp = SwarmResponse::PrefixKvData(PrefixKvDataResp {
+                    request_id: stored_request_id,
+                    payload: payload.clone(),
+                });
+                if self
+                    .swarm
+                    .behaviour_mut()
+                    .request_response
+                    .send_response(channel, resp)
+                    .is_err()
+                {
+                    tracing::debug!(%ticket, "DeliverPrefixKvResponse: channel closed");
+                }
+                tracing::debug!(
+                    %ticket,
+                    request_id = %stored_request_id,
+                    age_ms,
+                    hit = payload.is_some(),
+                    "DIAG: served PrefixKvFetch"
+                );
             }
             NetworkCommand::SendPrefixKvFetch {
                 target_peer_bytes,
