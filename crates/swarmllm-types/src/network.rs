@@ -278,6 +278,17 @@ pub enum NetworkCommand {
     /// S5: Stop providing the given shards via Kademlia.
     /// Called on shard deletion.
     StopProviding(Vec<ShardId>),
+    /// Item 8 Phase 2: send a cross-node prefix KV fetch to `target_peer`.
+    /// The daemon caller installs a `tokio::sync::oneshot::Sender<Option<Vec<u8>>>`
+    /// in `SharedState` keyed by `request_id` BEFORE sending this command;
+    /// NetworkManager resolves it with the payload bytes on
+    /// `SwarmResponse::PrefixKvData` arrival (or `None` on failure/timeout).
+    SendPrefixKvFetch {
+        target_peer_bytes: Vec<u8>,
+        request_id: uuid::Uuid,
+        model_id: ModelId,
+        block_hash: [u8; 32],
+    },
 }
 
 /// Events that trigger shard rebalancing.

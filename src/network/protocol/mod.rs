@@ -75,6 +75,12 @@ pub enum SwarmRequest {
     /// Binary tensor data (LayerForward or LayerResult, already encoded).
     /// Sent as raw bytes to avoid JSON overhead on large activation tensors.
     TensorPayload(Vec<u8>),
+    /// Item 8 Phase 2: cross-node KV-block fetch request. JSON-encoded
+    /// because the payload is small (model_id + 32-byte hash). The matching
+    /// response is `SwarmResponse::PrefixKvData`, carrying the serialized
+    /// `KvSnapshot` as a binary frame so the large reply avoids JSON
+    /// inflation.
+    PrefixKvFetch(PrefixKvFetchReq),
 }
 
 /// Response type for the request_response protocol.
@@ -85,6 +91,29 @@ pub enum SwarmResponse {
     Ack,
     /// Binary tensor response data (already encoded).
     TensorPayload(Vec<u8>),
+    /// Item 8 Phase 2: cross-node KV-block fetch response. `None` means
+    /// the serving peer doesn't hold the requested block (negative cache).
+    /// `Some(bytes)` is a serialized `KvSnapshot` (see `KV_SNAPSHOT_MAGIC`).
+    PrefixKvData(PrefixKvDataResp),
+}
+
+/// Phase 2: wire request for a cross-node prefix KV fetch.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct PrefixKvFetchReq {
+    pub request_id: uuid::Uuid,
+    pub model_id: crate::types::ModelId,
+    pub block_hash: [u8; 32],
+}
+
+/// Phase 2: wire response carrying a serialized `KvSnapshot`, or `None`
+/// if the serving peer doesn't have the requested block anymore (eviction
+/// race). `request_id` echoes the fetcher's ID for correlation on the
+/// off-chance the caller is multiplexing multiple requests on one
+/// substream (not today, but the field is cheap and future-proof).
+#[derive(Debug, Clone)]
+pub struct PrefixKvDataResp {
+    pub request_id: uuid::Uuid,
+    pub payload: Option<Vec<u8>>,
 }
 
 /// Wire format type tags for the unified codec.
@@ -97,6 +126,11 @@ const WIRE_TAG_TENSOR_COMPRESSED: u8 = 0x02;
 /// Binary shard data frame: [tag][4B total_size_le][data...]
 /// Avoids JSON serialization overhead for large shard chunks (32MB+).
 const WIRE_TAG_SHARD: u8 = 0x03;
+/// Item 8 Phase 2: cross-node prefix KV snapshot binary frame:
+///   [tag][4B payload_len_be][16B request_id UUID][1B flag][data...]
+/// Flag=0: no payload (miss). Flag=1: `data` is a serialized `KvSnapshot`.
+/// Avoids JSON inflation on multi-MB KV payloads.
+const WIRE_TAG_PREFIX_KV: u8 = 0x04;
 
 /// Read a wire frame header (tag byte + 4-byte BE length) and body from a stream.
 /// `large_tags` lists tag values that get the larger `MAX_MESSAGE_SIZE` limit;
@@ -221,7 +255,12 @@ impl request_response::Codec for SwarmCodec {
         let (tag, buf) = read_wire_frame(
             io,
             "read_response",
-            &[WIRE_TAG_TENSOR, WIRE_TAG_TENSOR_COMPRESSED, WIRE_TAG_SHARD],
+            &[
+                WIRE_TAG_TENSOR,
+                WIRE_TAG_TENSOR_COMPRESSED,
+                WIRE_TAG_SHARD,
+                WIRE_TAG_PREFIX_KV,
+            ],
         )
         .await?;
         tracing::trace!(tag, len = buf.len(), "DIAG: codec read_response done");
@@ -250,6 +289,33 @@ impl request_response::Codec for SwarmCodec {
             WIRE_TAG_TENSOR_COMPRESSED => Ok(SwarmResponse::TensorPayload(
                 decompress_tensor_payload(buf, "response")?,
             )),
+            WIRE_TAG_PREFIX_KV => {
+                // Layout: [16B request_id][1B flag][optional data...]
+                if buf.len() < 17 {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "PrefixKv frame too short",
+                    ));
+                }
+                let mut uuid_bytes = [0u8; 16];
+                uuid_bytes.copy_from_slice(&buf[..16]);
+                let request_id = uuid::Uuid::from_bytes(uuid_bytes);
+                let flag = buf[16];
+                let payload = match flag {
+                    0 => None,
+                    1 => Some(buf[17..].to_vec()),
+                    other => {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            format!("Unknown PrefixKv flag: {other}"),
+                        ))
+                    }
+                };
+                Ok(SwarmResponse::PrefixKvData(PrefixKvDataResp {
+                    request_id,
+                    payload,
+                }))
+            }
             unknown => Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!("Unknown wire tag: 0x{:02x}", unknown),
@@ -314,6 +380,20 @@ impl request_response::Codec for SwarmCodec {
                 frame.extend_from_slice(&len_bytes);
                 frame.extend_from_slice(&shard.total_size.to_le_bytes());
                 frame.extend_from_slice(&shard.data);
+                frame
+            }
+            SwarmResponse::PrefixKvData(ref resp) => {
+                // Binary prefix-KV frame: [tag][4B payload_len_be][16B uuid][1B flag][data...]
+                let data_ref: &[u8] = resp.payload.as_deref().unwrap_or(&[]);
+                let flag: u8 = if resp.payload.is_some() { 1 } else { 0 };
+                let payload_len = 16 + 1 + data_ref.len();
+                let len_bytes = (payload_len as u32).to_be_bytes();
+                let mut frame = Vec::with_capacity(1 + 4 + payload_len);
+                frame.push(WIRE_TAG_PREFIX_KV);
+                frame.extend_from_slice(&len_bytes);
+                frame.extend_from_slice(resp.request_id.as_bytes());
+                frame.push(flag);
+                frame.extend_from_slice(data_ref);
                 frame
             }
             other => build_json_frame(&other, "response")?,
@@ -384,11 +464,15 @@ impl serde::Serialize for SwarmRequest {
         enum Inner<'a> {
             Message { data: &'a SwarmMessage },
             ShardTransfer { data: &'a ShardRequest },
+            PrefixKvFetch { data: &'a PrefixKvFetchReq },
         }
         match self {
             SwarmRequest::Message(m) => Inner::Message { data: m }.serialize(serializer),
             SwarmRequest::ShardTransfer(s) => {
                 Inner::ShardTransfer { data: s }.serialize(serializer)
+            }
+            SwarmRequest::PrefixKvFetch(r) => {
+                Inner::PrefixKvFetch { data: r }.serialize(serializer)
             }
             SwarmRequest::TensorPayload(_) => Err(serde::ser::Error::custom(
                 "TensorPayload should not be JSON-serialized",
@@ -405,10 +489,12 @@ impl<'de> serde::Deserialize<'de> for SwarmRequest {
         enum Inner {
             Message { data: SwarmMessage },
             ShardTransfer { data: ShardRequest },
+            PrefixKvFetch { data: PrefixKvFetchReq },
         }
         match Inner::deserialize(deserializer)? {
             Inner::Message { data } => Ok(SwarmRequest::Message(Box::new(data))),
             Inner::ShardTransfer { data } => Ok(SwarmRequest::ShardTransfer(data)),
+            Inner::PrefixKvFetch { data } => Ok(SwarmRequest::PrefixKvFetch(data)),
         }
     }
 }
@@ -426,9 +512,9 @@ impl serde::Serialize for SwarmResponse {
             SwarmResponse::Message(m) => Inner::Message { data: m }.serialize(serializer),
             SwarmResponse::ShardData(s) => Inner::ShardData { data: s }.serialize(serializer),
             SwarmResponse::Ack => Inner::Ack.serialize(serializer),
-            SwarmResponse::TensorPayload(_) => Err(serde::ser::Error::custom(
-                "TensorPayload should not be JSON-serialized",
-            )),
+            SwarmResponse::TensorPayload(_) | SwarmResponse::PrefixKvData(_) => Err(
+                serde::ser::Error::custom("binary response variants should not be JSON-serialized"),
+            ),
         }
     }
 }

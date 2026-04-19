@@ -78,6 +78,14 @@ pub struct SharedState {
     /// result here (instead of the request_response path) when a match is found.
     pub pending_stream_result_routes:
         DashMap<uuid::Uuid, tokio::sync::oneshot::Sender<crate::types::LayerResult>>,
+    /// Item 8 Phase 2: in-flight cross-node prefix KV fetches keyed by the
+    /// fetcher's `request_id`. Daemon caller installs the oneshot BEFORE
+    /// sending `NetworkCommand::SendPrefixKvFetch`; NetworkManager resolves
+    /// it with `Some(bytes)` on hit or `None` on miss/failure. RAII guard on
+    /// the caller side removes the entry on drop so a cancelled fetch
+    /// doesn't leak.
+    pub pending_prefix_kv_fetches:
+        DashMap<uuid::Uuid, tokio::sync::oneshot::Sender<Option<Vec<u8>>>>,
     pub pending_vision_results: DashMap<
         uuid::Uuid,
         (
@@ -348,6 +356,7 @@ impl SharedState {
             gpu_info,
             pending_layer_results: DashMap::new(),
             pending_stream_result_routes: DashMap::new(),
+            pending_prefix_kv_fetches: DashMap::new(),
             pipeline_stream_client: tokio::sync::OnceCell::new(),
             split_models: DashMap::new(),
             split_model_index: DashMap::new(),
@@ -511,6 +520,189 @@ impl SharedState {
             .peer_segment_latency_ms_per_layer
             .get(node_id)
             .map(|r| *r.value())
+    }
+
+    /// Item 8 Phase 2: longest-prefix cross-node cache lookup. Walks the
+    /// chained BLAKE3 manifest of `prompt_tokens` at `block_size` granularity
+    /// from longest → shortest, returning the first `(peer, block_hash,
+    /// token_count)` triple whose peer set contains a non-self member. The
+    /// caller then dispatches a KV-fetch to that peer.
+    ///
+    /// Self-entries recorded by the loopback forwarder are SKIPPED here —
+    /// local hits are already served by the in-process `PrefixCache`, so a
+    /// "remote" fetch to ourselves would only waste a round trip.
+    ///
+    /// Observed per-peer latency (via `observed_latency_ms_per_layer`) breaks
+    /// ties at the same block_hash so the fastest peer wins when multiple
+    /// holders are available. Peers without observed samples tie-break by
+    /// NodeId for determinism.
+    pub fn best_cross_node_prefix_match(
+        &self,
+        model_id: &crate::types::ModelId,
+        prompt_tokens: &[u32],
+        block_size: usize,
+    ) -> Option<(crate::types::NodeId, [u8; 32], u32)> {
+        if block_size == 0 || prompt_tokens.is_empty() {
+            return None;
+        }
+        let manifest = crate::inference::split::compute_block_hashes(prompt_tokens, block_size);
+        if manifest.is_empty() {
+            return None;
+        }
+        let our_id = self.identity.node_id();
+        let model_index = self.models.cross_node_prefix_index.get(model_id)?;
+        // Walk longest-first. First peer that isn't self wins.
+        for entry in manifest.iter().rev() {
+            let Some(holders) = model_index.get(&entry.block_hash) else {
+                continue;
+            };
+            let candidates: Vec<crate::types::NodeId> = holders
+                .iter()
+                .map(|r| r.clone())
+                .filter(|n| n != our_id)
+                .collect();
+            if candidates.is_empty() {
+                continue;
+            }
+            // Pick the peer with the lowest observed per-layer latency; if
+            // none have observed samples, fall back to the NodeId that sorts
+            // first (deterministic).
+            let best = candidates.into_iter().min_by(|a, b| {
+                let la = self
+                    .observed_latency_ms_per_layer(a)
+                    .unwrap_or(f32::INFINITY);
+                let lb = self
+                    .observed_latency_ms_per_layer(b)
+                    .unwrap_or(f32::INFINITY);
+                la.partial_cmp(&lb)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| a.0.cmp(&b.0))
+            });
+            if let Some(peer) = best {
+                return Some((peer, entry.block_hash, entry.token_count));
+            }
+        }
+        None
+    }
+
+    /// Item 8 Phase 2: end-to-end helper used by the admit-time KV-fetch
+    /// path. Looks up the longest cross-node prefix match for `prompt_tokens`,
+    /// installs a oneshot, dispatches `NetworkCommand::SendPrefixKvFetch` to
+    /// the best peer, awaits the reply with `timeout_ms`, BLAKE3-verifies
+    /// the returned snapshot tokens match the requested block hash, then
+    /// deserializes the snapshot onto `device`.
+    ///
+    /// Returns `Ok(None)` for any "no hit" outcome (no index entry, peer
+    /// miss, timeout, verification failure) so callers can unconditionally
+    /// fall through to normal prefill. Returns `Ok(Some((snap, token_count)))`
+    /// when a trusted KV snapshot is available — caller hydrates.
+    pub async fn try_fetch_cross_node_prefix(
+        &self,
+        network_tx: &tokio::sync::mpsc::Sender<crate::types::NetworkCommand>,
+        model_id: &crate::types::ModelId,
+        prompt_tokens: &[u32],
+        block_size: usize,
+        device: &candle_core::Device,
+        timeout_ms: u64,
+    ) -> Result<Option<(crate::inference::split::KvSnapshot, usize)>, crate::error::SwarmError>
+    {
+        let Some((peer, block_hash, token_count)) =
+            self.best_cross_node_prefix_match(model_id, prompt_tokens, block_size)
+        else {
+            return Ok(None);
+        };
+        let Some(peer_bytes) = self.peer_id_map.get(&peer).map(|r| r.clone()) else {
+            tracing::debug!(%peer, "prefix-kv fetch: no peer_id_bytes in map — skipping");
+            return Ok(None);
+        };
+        let fetch_id = uuid::Uuid::new_v4();
+        let (tx, rx) = tokio::sync::oneshot::channel::<Option<Vec<u8>>>();
+        self.pending_prefix_kv_fetches.insert(fetch_id, tx);
+        // RAII cleanup: if the caller is cancelled before the response
+        // lands, the oneshot drops automatically; the manager's later
+        // resolve attempt becomes a no-op. Also remove ourselves so we
+        // don't leak the DashMap entry on the cancellation path.
+        struct FetchGuard<'a> {
+            state: &'a SharedState,
+            fetch_id: uuid::Uuid,
+        }
+        impl<'a> Drop for FetchGuard<'a> {
+            fn drop(&mut self) {
+                self.state.pending_prefix_kv_fetches.remove(&self.fetch_id);
+            }
+        }
+        let _guard = FetchGuard {
+            state: self,
+            fetch_id,
+        };
+        let cmd = crate::types::NetworkCommand::SendPrefixKvFetch {
+            target_peer_bytes: peer_bytes,
+            request_id: fetch_id,
+            model_id: model_id.clone(),
+            block_hash,
+        };
+        if let Err(e) = network_tx.send(cmd).await {
+            tracing::debug!(error = %e, "prefix-kv fetch: network_tx send failed");
+            return Ok(None);
+        }
+        let bytes_opt =
+            match tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), rx).await {
+                Ok(Ok(payload)) => payload,
+                Ok(Err(_)) => {
+                    tracing::debug!("prefix-kv fetch: oneshot dropped before response");
+                    None
+                }
+                Err(_) => {
+                    tracing::debug!(timeout_ms, "prefix-kv fetch: timed out");
+                    None
+                }
+            };
+        let Some(bytes) = bytes_opt else {
+            return Ok(None);
+        };
+        let (snap, tokens_from_peer) =
+            match crate::inference::split::deserialize_snapshot(&bytes, device) {
+                Ok(x) => x,
+                Err(e) => {
+                    tracing::warn!(%peer, error = %e, "prefix-kv: deserialize failed");
+                    return Ok(None);
+                }
+            };
+        // BLAKE3 verify: re-hash the peer-provided tokens and compare against
+        // the hash we asked for. Untrusted peers can't forge a matching chain.
+        if !crate::inference::split::verify_token_hash_chain(
+            &tokens_from_peer,
+            block_size,
+            snap.token_count,
+            &block_hash,
+        ) {
+            tracing::warn!(
+                %peer,
+                fetch_id = %fetch_id,
+                "prefix-kv: BLAKE3 verify failed — peer returned mismatched tokens (rejected)"
+            );
+            return Ok(None);
+        }
+        // Also require that `tokens_from_peer` is a strict prefix of OUR
+        // prompt — otherwise the peer could hand us a VALID snapshot from
+        // some other prompt that happens to have the same prefix length.
+        // Chained-hash property already guarantees this, but belt + braces.
+        if tokens_from_peer.len() > prompt_tokens.len()
+            || &prompt_tokens[..tokens_from_peer.len()] != tokens_from_peer.as_slice()
+        {
+            tracing::warn!(
+                %peer,
+                "prefix-kv: peer tokens don't prefix-match our prompt (rejected)"
+            );
+            return Ok(None);
+        }
+        tracing::info!(
+            %peer,
+            matched_tokens = token_count,
+            snapshot_bytes = bytes.len(),
+            "DIAG: prefix-kv fetch HIT"
+        );
+        Ok(Some((snap, token_count as usize)))
     }
 
     /// Merge a foreign observation (received via `NodeCapabilityUpdate`

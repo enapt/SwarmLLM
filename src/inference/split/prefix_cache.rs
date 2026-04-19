@@ -74,6 +74,41 @@ pub fn compute_block_hashes(tokens: &[u32], block_size: usize) -> Vec<PrefixBloc
     out
 }
 
+/// Magic bytes identifying a serialized `KvSnapshot` on the wire.
+/// `SKVX` = "SwarmLLM KV eXchange". Helps early-reject garbled payloads.
+pub const KV_SNAPSHOT_MAGIC: &[u8; 4] = b"SKVX";
+/// Snapshot wire format version. Bump when the frame layout changes
+/// incompatibly; older nodes reject unknown versions on receive.
+pub const KV_SNAPSHOT_VERSION: u32 = 1;
+
+/// BLAKE3-verify that the chained hash over `tokens[..expected_token_count]`
+/// at `block_size` granularity produces `expected_hash` at its last block.
+/// Returns `true` iff the final chained hash matches — Phase 2 fetchers use
+/// this to reject peers that return KV data not matching the requested
+/// block hash.
+pub fn verify_token_hash_chain(
+    tokens: &[u32],
+    block_size: usize,
+    expected_token_count: usize,
+    expected_hash: &[u8; 32],
+) -> bool {
+    if block_size == 0 || expected_token_count == 0 || expected_token_count > tokens.len() {
+        return false;
+    }
+    if expected_token_count % block_size != 0 {
+        // `token_count` must land on a block boundary — the chain hash is
+        // only defined at complete-block positions.
+        return false;
+    }
+    let manifest = compute_block_hashes(&tokens[..expected_token_count], block_size);
+    match manifest.last() {
+        Some(last) => {
+            last.token_count as usize == expected_token_count && last.block_hash == *expected_hash
+        }
+        None => false,
+    }
+}
+
 /// Per-layer KV snapshot at a specific token position.
 pub struct KvSnapshot {
     /// Number of tokens covered by this snapshot (== K/V seq dim).
@@ -485,6 +520,192 @@ fn snapshot_at(
     })
 }
 
+// ---- Item 8 Phase 2: KvSnapshot wire serialization -------------------------
+//
+// Format (all lengths little-endian):
+//
+//   [0..4]    magic = KV_SNAPSHOT_MAGIC ("SKVX")
+//   [4..8]    version = KV_SNAPSHOT_VERSION (u32)
+//   [8..16]   header_len (u64)
+//   [16..16+H] serde_json header (see `SnapshotHeader`)
+//   [16+H..]  concatenated per-layer [K f32 LE | V f32 LE] bytes, in the
+//             same order as `header.layers`. Only layers with `Some(meta)`
+//             contribute bytes; `None` entries emit zero bytes.
+//
+// Every K/V tensor is cast to `DType::F32` on the sender side before
+// encoding. The receiver casts back to whatever its local `KvCache`
+// expects (usually f32 on CPU, f16 on CUDA). This costs 2× wire size for
+// an f16 sender but is portable across GPU/CPU peer pairings — a common
+// configuration on SwarmLLM's heterogeneous swarm. Compression is
+// handled one level up by the request_response zstd wrapper.
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct SnapshotLayerMeta {
+    k_shape: Vec<usize>,
+    v_shape: Vec<usize>,
+    /// Number of f32 values in K (same count for V). Used to offset the
+    /// binary body on receive.
+    k_count: usize,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct SnapshotHeader {
+    token_count: usize,
+    /// Full u32 token IDs covering the snapshot. Receiver uses these to
+    /// BLAKE3-verify the returned block matches the hash they requested.
+    tokens: Vec<u32>,
+    dim: usize,
+    max_seq_len: usize,
+    /// Per-layer metadata; `None` marks layers the sender had no cache for
+    /// (shouldn't happen for a completed prefill, tolerated for robustness).
+    layers: Vec<Option<SnapshotLayerMeta>>,
+}
+
+/// Serialize a `KvSnapshot` (plus the token IDs it covers) to a wire frame.
+///
+/// `tokens.len()` must be `>= snap.token_count`; only `tokens[..token_count]`
+/// is recorded in the header. Every tensor in `snap.layers` is cast to f32
+/// before encoding so the frame is device-independent.
+pub fn serialize_snapshot(snap: &KvSnapshot, tokens: &[u32]) -> Result<Vec<u8>, SwarmError> {
+    if tokens.len() < snap.token_count {
+        return Err(SwarmError::Internal(format!(
+            "serialize_snapshot: tokens.len() {} < token_count {}",
+            tokens.len(),
+            snap.token_count
+        )));
+    }
+    let mut layer_meta: Vec<Option<SnapshotLayerMeta>> = Vec::with_capacity(snap.layers.len());
+    let mut body: Vec<u8> = Vec::new();
+    for kv_opt in &snap.layers {
+        let Some((k, v)) = kv_opt else {
+            layer_meta.push(None);
+            continue;
+        };
+        let k_f32 = k
+            .to_dtype(candle_core::DType::F32)
+            .and_then(|t| t.contiguous())
+            .map_err(|e| SwarmError::Internal(format!("serialize_snapshot k cast: {e}")))?;
+        let v_f32 = v
+            .to_dtype(candle_core::DType::F32)
+            .and_then(|t| t.contiguous())
+            .map_err(|e| SwarmError::Internal(format!("serialize_snapshot v cast: {e}")))?;
+        let k_shape: Vec<usize> = k_f32.shape().dims().to_vec();
+        let v_shape: Vec<usize> = v_f32.shape().dims().to_vec();
+        let k_vec: Vec<f32> = k_f32
+            .flatten_all()
+            .and_then(|t| t.to_vec1::<f32>())
+            .map_err(|e| SwarmError::Internal(format!("serialize_snapshot k flatten: {e}")))?;
+        let v_vec: Vec<f32> = v_f32
+            .flatten_all()
+            .and_then(|t| t.to_vec1::<f32>())
+            .map_err(|e| SwarmError::Internal(format!("serialize_snapshot v flatten: {e}")))?;
+        let k_count = k_vec.len();
+        body.reserve(4 * (k_vec.len() + v_vec.len()));
+        for f in &k_vec {
+            body.extend_from_slice(&f.to_le_bytes());
+        }
+        for f in &v_vec {
+            body.extend_from_slice(&f.to_le_bytes());
+        }
+        layer_meta.push(Some(SnapshotLayerMeta {
+            k_shape,
+            v_shape,
+            k_count,
+        }));
+    }
+    let header = SnapshotHeader {
+        token_count: snap.token_count,
+        tokens: tokens[..snap.token_count].to_vec(),
+        dim: snap.dim,
+        max_seq_len: snap.max_seq_len,
+        layers: layer_meta,
+    };
+    let header_bytes =
+        serde_json::to_vec(&header).map_err(|e| SwarmError::Internal(format!("header: {e}")))?;
+    let header_len = header_bytes.len() as u64;
+    let mut out = Vec::with_capacity(4 + 4 + 8 + header_bytes.len() + body.len());
+    out.extend_from_slice(KV_SNAPSHOT_MAGIC);
+    out.extend_from_slice(&KV_SNAPSHOT_VERSION.to_le_bytes());
+    out.extend_from_slice(&header_len.to_le_bytes());
+    out.extend_from_slice(&header_bytes);
+    out.extend_from_slice(&body);
+    Ok(out)
+}
+
+/// Deserialize a wire-format KV snapshot on `device`. Returns the
+/// reconstructed `KvSnapshot` plus the token IDs the sender claimed the
+/// snapshot covers (caller MUST re-hash these and match against the
+/// requested block hash before trusting the data).
+pub fn deserialize_snapshot(
+    bytes: &[u8],
+    device: &candle_core::Device,
+) -> Result<(KvSnapshot, Vec<u32>), SwarmError> {
+    // Header framing: magic(4) + version(4) + header_len(8) = 16 bytes.
+    if bytes.len() < 16 {
+        return Err(SwarmError::Internal("snapshot: frame too short".into()));
+    }
+    if &bytes[..4] != KV_SNAPSHOT_MAGIC {
+        return Err(SwarmError::Internal("snapshot: magic mismatch".into()));
+    }
+    let version = u32::from_le_bytes(bytes[4..8].try_into().unwrap());
+    if version != KV_SNAPSHOT_VERSION {
+        return Err(SwarmError::Internal(format!(
+            "snapshot: unsupported version {version}"
+        )));
+    }
+    let header_len = u64::from_le_bytes(bytes[8..16].try_into().unwrap()) as usize;
+    if bytes.len() < 16 + header_len {
+        return Err(SwarmError::Internal("snapshot: truncated header".into()));
+    }
+    let header: SnapshotHeader = serde_json::from_slice(&bytes[16..16 + header_len])
+        .map_err(|e| SwarmError::Internal(format!("snapshot header decode: {e}")))?;
+    let body = &bytes[16 + header_len..];
+    let mut cursor = 0usize;
+    let mut layers: Vec<Option<(Tensor, Tensor)>> = Vec::with_capacity(header.layers.len());
+    for meta_opt in header.layers {
+        let Some(meta) = meta_opt else {
+            layers.push(None);
+            continue;
+        };
+        let k_bytes = meta.k_count * 4;
+        let v_count: usize = meta.v_shape.iter().product();
+        let v_bytes = v_count * 4;
+        if cursor + k_bytes + v_bytes > body.len() {
+            return Err(SwarmError::Internal(format!(
+                "snapshot: body too short at layer (have {}, need {})",
+                body.len() - cursor,
+                k_bytes + v_bytes
+            )));
+        }
+        let k_vec: Vec<f32> = (0..meta.k_count)
+            .map(|i| {
+                let off = cursor + i * 4;
+                f32::from_le_bytes([body[off], body[off + 1], body[off + 2], body[off + 3]])
+            })
+            .collect();
+        cursor += k_bytes;
+        let v_vec: Vec<f32> = (0..v_count)
+            .map(|i| {
+                let off = cursor + i * 4;
+                f32::from_le_bytes([body[off], body[off + 1], body[off + 2], body[off + 3]])
+            })
+            .collect();
+        cursor += v_bytes;
+        let k_tensor = Tensor::from_vec(k_vec, meta.k_shape.as_slice(), device)
+            .map_err(|e| SwarmError::Internal(format!("snapshot k rebuild: {e}")))?;
+        let v_tensor = Tensor::from_vec(v_vec, meta.v_shape.as_slice(), device)
+            .map_err(|e| SwarmError::Internal(format!("snapshot v rebuild: {e}")))?;
+        layers.push(Some((k_tensor, v_tensor)));
+    }
+    let snap = KvSnapshot {
+        token_count: header.token_count,
+        layers,
+        dim: header.dim,
+        max_seq_len: header.max_seq_len,
+    };
+    Ok((snap, header.tokens))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -678,6 +899,152 @@ mod tests {
         // block_tokens=0 → enumerate_manifest is empty even though the
         // entry exists (it was inserted via the always-store-tail rule).
         assert!(pc.enumerate_manifest("m").is_empty());
+    }
+
+    #[test]
+    fn verify_token_hash_chain_matches_manifest() {
+        let tokens: Vec<u32> = (1..=12).collect();
+        let manifest = compute_block_hashes(&tokens, 4);
+        // Each manifest entry should verify against its own final block.
+        for entry in &manifest {
+            assert!(verify_token_hash_chain(
+                &tokens,
+                4,
+                entry.token_count as usize,
+                &entry.block_hash,
+            ));
+        }
+    }
+
+    #[test]
+    fn verify_token_hash_chain_rejects_wrong_tokens() {
+        let tokens_a: Vec<u32> = vec![1, 2, 3, 4, 5, 6, 7, 8];
+        let manifest = compute_block_hashes(&tokens_a, 4);
+        let last = manifest.last().unwrap();
+        // Different tokens must NOT verify against the original hash.
+        let tokens_b: Vec<u32> = vec![9, 9, 9, 9, 9, 9, 9, 9];
+        assert!(!verify_token_hash_chain(
+            &tokens_b,
+            4,
+            last.token_count as usize,
+            &last.block_hash,
+        ));
+    }
+
+    #[test]
+    fn verify_token_hash_chain_rejects_non_boundary() {
+        let tokens: Vec<u32> = (1..=8).collect();
+        let h = compute_block_hashes(&tokens, 4);
+        let last = h.last().unwrap();
+        // Off-boundary count (e.g. 5 with block_size=4) must be rejected.
+        assert!(!verify_token_hash_chain(&tokens, 4, 5, &last.block_hash));
+    }
+
+    #[test]
+    fn snapshot_roundtrip_preserves_tensors() {
+        use candle_core::{DType, Device};
+        let device = Device::Cpu;
+        // Construct a tiny snapshot by hand — 2 layers, seq=4, head_dim=3.
+        let k0 = Tensor::from_vec(
+            (0..24).map(|i| i as f32).collect::<Vec<_>>(),
+            (1usize, 2, 4, 3),
+            &device,
+        )
+        .unwrap();
+        let v0 = Tensor::from_vec(
+            (0..24).map(|i| (i * 2) as f32).collect::<Vec<_>>(),
+            (1usize, 2, 4, 3),
+            &device,
+        )
+        .unwrap();
+        let k1 = Tensor::from_vec(
+            (0..24).map(|i| (i + 100) as f32).collect::<Vec<_>>(),
+            (1usize, 2, 4, 3),
+            &device,
+        )
+        .unwrap();
+        let v1 = Tensor::from_vec(
+            (0..24).map(|i| (i + 200) as f32).collect::<Vec<_>>(),
+            (1usize, 2, 4, 3),
+            &device,
+        )
+        .unwrap();
+        let snap = KvSnapshot {
+            token_count: 4,
+            layers: vec![Some((k0, v0)), Some((k1, v1))],
+            dim: 2,
+            max_seq_len: 4096,
+        };
+        let tokens: Vec<u32> = vec![7, 8, 9, 10];
+        let bytes = serialize_snapshot(&snap, &tokens).expect("serialize");
+        let (decoded, decoded_tokens) = deserialize_snapshot(&bytes, &device).expect("deserialize");
+        assert_eq!(decoded.token_count, 4);
+        assert_eq!(decoded.dim, 2);
+        assert_eq!(decoded.max_seq_len, 4096);
+        assert_eq!(decoded_tokens, tokens);
+        assert_eq!(decoded.layers.len(), 2);
+        for (orig, got) in snap.layers.iter().zip(decoded.layers.iter()) {
+            let (ok, ov) = orig.as_ref().expect("orig some");
+            let (dk, dv) = got.as_ref().expect("decoded some");
+            assert_eq!(ok.shape().dims(), dk.shape().dims());
+            assert_eq!(ov.shape().dims(), dv.shape().dims());
+            let ok_vec: Vec<f32> = ok.flatten_all().unwrap().to_vec1().unwrap();
+            let dk_vec: Vec<f32> = dk
+                .to_dtype(DType::F32)
+                .unwrap()
+                .flatten_all()
+                .unwrap()
+                .to_vec1()
+                .unwrap();
+            assert_eq!(ok_vec, dk_vec);
+            let ov_vec: Vec<f32> = ov.flatten_all().unwrap().to_vec1().unwrap();
+            let dv_vec: Vec<f32> = dv
+                .to_dtype(DType::F32)
+                .unwrap()
+                .flatten_all()
+                .unwrap()
+                .to_vec1()
+                .unwrap();
+            assert_eq!(ov_vec, dv_vec);
+        }
+    }
+
+    #[test]
+    fn snapshot_rejects_bad_magic() {
+        use candle_core::Device;
+        let bad = vec![0u8; 32];
+        assert!(deserialize_snapshot(&bad, &Device::Cpu).is_err());
+    }
+
+    #[test]
+    fn snapshot_rejects_bad_version() {
+        use candle_core::Device;
+        let mut buf = Vec::new();
+        buf.extend_from_slice(KV_SNAPSHOT_MAGIC);
+        buf.extend_from_slice(&999u32.to_le_bytes());
+        buf.extend_from_slice(&0u64.to_le_bytes());
+        assert!(deserialize_snapshot(&buf, &Device::Cpu).is_err());
+    }
+
+    #[test]
+    fn snapshot_preserves_none_layers() {
+        use candle_core::Device;
+        let device = Device::Cpu;
+        let k = Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0], (1usize, 1, 2, 2), &device).unwrap();
+        let v = Tensor::from_vec(vec![5.0f32, 6.0, 7.0, 8.0], (1usize, 1, 2, 2), &device).unwrap();
+        let snap = KvSnapshot {
+            token_count: 2,
+            layers: vec![None, Some((k, v)), None],
+            dim: 2,
+            max_seq_len: 128,
+        };
+        let tokens: Vec<u32> = vec![11, 12];
+        let bytes = serialize_snapshot(&snap, &tokens).unwrap();
+        let (decoded, _) = deserialize_snapshot(&bytes, &device).unwrap();
+        assert_eq!(decoded.layers.len(), 3);
+        assert!(decoded.layers[0].is_none());
+        assert!(decoded.layers[1].is_some());
+        assert!(decoded.layers[2].is_none());
     }
 
     #[test]

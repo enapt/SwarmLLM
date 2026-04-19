@@ -42,7 +42,10 @@ pub use self::gguf_meta::{
 };
 pub use self::kv_cache::KvCacheStore;
 pub use self::model::SplitModel;
-pub use self::prefix_cache::{KvSnapshot, PrefixCache};
+pub use self::prefix_cache::{
+    compute_block_hashes, deserialize_snapshot, serialize_snapshot, verify_token_hash_chain,
+    KvSnapshot, PrefixCache, KV_SNAPSHOT_MAGIC, KV_SNAPSHOT_VERSION,
+};
 
 pub(crate) const DEFAULT_MAX_SEQ_LEN: usize = 4096;
 

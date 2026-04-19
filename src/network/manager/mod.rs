@@ -17,7 +17,7 @@ use crate::model::acquisition::AcquisitionCommand;
 use crate::model::shard::ShardStore;
 use crate::network::behaviour::{self, SwarmBehaviour, SwarmBehaviourEvent};
 use crate::network::discovery;
-use crate::network::protocol::{self, SwarmRequest, SwarmResponse, TOPIC_MODELS};
+use crate::network::protocol::{self, PrefixKvDataResp, SwarmRequest, SwarmResponse, TOPIC_MODELS};
 use crate::network::relay::RelayServerConfig;
 use crate::network::transport;
 use crate::types::{NetworkCommand, PeerInfo, SwarmMessage};
@@ -165,6 +165,13 @@ pub struct NetworkManager {
     /// Aggregate PEX rate limiter: timestamps of recent inbound PEX requests.
     /// Bounded to a sliding window — rejects requests when the budget is exhausted.
     pex_inbound_timestamps: Vec<std::time::Instant>,
+    /// Item 8 Phase 2: maps libp2p `OutboundRequestId` (minted on
+    /// `send_request`) to the fetcher's `request_id` Uuid. On
+    /// `SwarmResponse::PrefixKvData` arrival we pop the mapping, look up
+    /// the caller-installed oneshot in `state.pending_prefix_kv_fetches`,
+    /// and fulfil it with the payload. On `OutboundFailure` we resolve
+    /// with `None`.
+    pending_prefix_kv_outbound: HashMap<OutboundRequestId, uuid::Uuid>,
 }
 
 impl NetworkManager {
@@ -280,6 +287,7 @@ impl NetworkManager {
             pending_redial: Vec::new(),
             dht_query_rx,
             pending_provider_queries: HashMap::new(),
+            pending_prefix_kv_outbound: HashMap::new(),
             pex_inbound_timestamps: Vec::new(),
         })
     }
@@ -962,6 +970,7 @@ impl NetworkManager {
                         SwarmRequest::Message(_) => "message",
                         SwarmRequest::ShardTransfer(_) => "shard",
                         SwarmRequest::TensorPayload(_) => "tensor",
+                        SwarmRequest::PrefixKvFetch(_) => "prefix_kv_fetch",
                     };
                     tracing::info!(%peer, kind, "Received request");
                     self.handle_request(peer, request, channel).await;
@@ -975,6 +984,7 @@ impl NetworkManager {
                         SwarmResponse::ShardData(_) => "shard",
                         SwarmResponse::Ack => "ack",
                         SwarmResponse::TensorPayload(_) => "tensor",
+                        SwarmResponse::PrefixKvData(_) => "prefix_kv_data",
                     };
                     let was_tensor = self.pending_tensor_outbound.contains_key(&request_id);
                     tracing::info!(
@@ -1049,6 +1059,13 @@ impl NetworkManager {
                         %error,
                         "rr-message OutboundFailure — upstream will handle via its own timeout"
                     );
+                }
+                // Item 8 Phase 2: unblock a pending prefix-KV fetch on failure.
+                if let Some(uuid) = self.pending_prefix_kv_outbound.remove(&request_id) {
+                    if let Some((_, tx)) = self.shared_state.pending_prefix_kv_fetches.remove(&uuid)
+                    {
+                        let _ = tx.send(None);
+                    }
                 }
                 // Check if this was a pending shard download request
                 if let Some((_peer_id, shard_id)) = self.pending_shard_requests.remove(&request_id)
@@ -2187,6 +2204,41 @@ impl NetworkManager {
                     tracing::debug!(%peer, "Failed to send shard data response (channel closed)");
                 }
             }
+            SwarmRequest::PrefixKvFetch(req) => {
+                // Item 8 Phase 2: inbound cross-node prefix KV fetch. The
+                // serving side (worker-side KV extraction) lands in Phase 2b
+                // — for now we respond "miss" so the fetcher falls through to
+                // normal prefill. Authenticated-peer gate mirrors the
+                // TensorPayload handling: only peers in peer_registry can
+                // probe us, which we'd want anyway for trust-weighted serving.
+                let peer_node_id = self.peer_to_node.get(&peer).map(|r| r.clone());
+                let is_authenticated = match &peer_node_id {
+                    Some(nid) => self.shared_state.peer_registry.contains_key(nid),
+                    None => false,
+                };
+                if !is_authenticated {
+                    tracing::warn!(%peer, "PrefixKvFetch from unauthenticated peer — rejecting");
+                }
+                tracing::debug!(
+                    %peer,
+                    request_id = %req.request_id,
+                    model = %req.model_id,
+                    "DIAG: PrefixKvFetch received (Phase 2b will serve; currently reply None)"
+                );
+                let resp = SwarmResponse::PrefixKvData(PrefixKvDataResp {
+                    request_id: req.request_id,
+                    payload: None,
+                });
+                if self
+                    .swarm
+                    .behaviour_mut()
+                    .request_response
+                    .send_response(channel, resp)
+                    .is_err()
+                {
+                    tracing::debug!(%peer, "Failed to send PrefixKvData miss (channel closed)");
+                }
+            }
             SwarmRequest::TensorPayload(payload) => {
                 // SEC: Only accept tensor payloads from authenticated peers in peer_registry.
                 // Without this, any node completing a Noise handshake can inject activations
@@ -2676,6 +2728,40 @@ impl NetworkManager {
             SwarmResponse::Ack => {
                 tracing::debug!(%peer, "Received ACK");
             }
+            SwarmResponse::PrefixKvData(resp) => {
+                // Item 8 Phase 2: route to the caller's oneshot via the
+                // Uuid→libp2p OutboundRequestId mapping. SharedState owns
+                // the oneshot so the daemon caller's RAII guard can clean
+                // up on cancellation without us noticing.
+                let bytes_len = resp.payload.as_ref().map(|b| b.len()).unwrap_or(0);
+                let hit = resp.payload.is_some();
+                tracing::debug!(
+                    %peer,
+                    ?request_id,
+                    inner_request_id = %resp.request_id,
+                    hit,
+                    bytes_len,
+                    "DIAG: received PrefixKvData response"
+                );
+                if let Some(uuid) = self.pending_prefix_kv_outbound.remove(&request_id) {
+                    if let Some((_, tx)) = self.shared_state.pending_prefix_kv_fetches.remove(&uuid)
+                    {
+                        let _ = tx.send(resp.payload);
+                    } else {
+                        tracing::debug!(
+                            %peer,
+                            fetch_uuid = %uuid,
+                            "PrefixKvData response: no matching oneshot (caller cancelled?)"
+                        );
+                    }
+                } else {
+                    tracing::debug!(
+                        %peer,
+                        ?request_id,
+                        "PrefixKvData response for unknown fetch (already timed out?)"
+                    );
+                }
+            }
         }
     }
 
@@ -2694,6 +2780,7 @@ impl NetworkManager {
             NetworkCommand::DialAddress(_) => "DialAddress",
             NetworkCommand::StartProviding(_) => "StartProviding",
             NetworkCommand::StopProviding(_) => "StopProviding",
+            NetworkCommand::SendPrefixKvFetch { .. } => "SendPrefixKvFetch",
         };
         tracing::debug!(cmd = cmd_name, "DIAG: handling outbound command");
         match cmd {
@@ -2801,6 +2888,56 @@ impl NetworkManager {
             }
             NetworkCommand::StopProviding(shards) => {
                 crate::network::discovery::stop_providing_shards(&mut self.swarm, &shards);
+            }
+            NetworkCommand::SendPrefixKvFetch {
+                target_peer_bytes,
+                request_id,
+                model_id,
+                block_hash,
+            } => {
+                let peer_id = match libp2p::PeerId::from_bytes(&target_peer_bytes) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        tracing::warn!(error = %e, "SendPrefixKvFetch: invalid peer bytes");
+                        // Resolve the caller's oneshot with None so they don't hang.
+                        if let Some((_, tx)) = self
+                            .shared_state
+                            .pending_prefix_kv_fetches
+                            .remove(&request_id)
+                        {
+                            let _ = tx.send(None);
+                        }
+                        return;
+                    }
+                };
+                if !self.swarm.is_connected(&peer_id) {
+                    tracing::debug!(%peer_id, "SendPrefixKvFetch: peer not connected, aborting");
+                    if let Some((_, tx)) = self
+                        .shared_state
+                        .pending_prefix_kv_fetches
+                        .remove(&request_id)
+                    {
+                        let _ = tx.send(None);
+                    }
+                    return;
+                }
+                let req = SwarmRequest::PrefixKvFetch(protocol::PrefixKvFetchReq {
+                    request_id,
+                    model_id,
+                    block_hash,
+                });
+                let outbound = self
+                    .swarm
+                    .behaviour_mut()
+                    .request_response
+                    .send_request(&peer_id, req);
+                self.pending_prefix_kv_outbound.insert(outbound, request_id);
+                tracing::debug!(
+                    %peer_id,
+                    ?outbound,
+                    fetch_id = %request_id,
+                    "DIAG: dispatched PrefixKvFetch"
+                );
             }
         }
     }
