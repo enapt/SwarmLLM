@@ -237,8 +237,12 @@ pub struct InferenceConfig {
     /// Enable continuous batching on the remote segment holder. When on,
     /// multiple concurrent decode requests for the same model are batched
     /// into a single worker-subprocess forward call, amortizing IPC +
-    /// compute setup across requests. Off by default until validated.
-    #[serde(default)]
+    /// compute setup across requests. **Default on as of 2026-04-19.** Worker
+    /// falls back to sequential on CPU (measured neutral-to-loss on CPU, see
+    /// `docs/plans/benchmarks/round3.md`); delivers 1.34–1.55× on GPU at
+    /// batch 2–8. Single-request workloads are unaffected. Set to `false`
+    /// to bypass the scheduler entirely.
+    #[serde(default = "default_continuous_batching")]
     pub continuous_batching: bool,
     /// Maximum number of concurrent decode requests to batch into a single
     /// worker forward. Only consulted when `continuous_batching = true`.
@@ -408,6 +412,10 @@ pub struct InferenceConfig {
 }
 
 fn default_parallax_routing() -> bool {
+    true
+}
+
+fn default_continuous_batching() -> bool {
     true
 }
 
@@ -1330,7 +1338,7 @@ impl Default for InferenceConfig {
             speculative_decoding: false,
             persistent_pipeline_stream: false,
             speculative_distributed: false,
-            continuous_batching: false,
+            continuous_batching: default_continuous_batching(),
             max_concurrent_decode_batch: default_max_decode_batch(),
             batch_collection_ms: default_batch_collection_ms(),
             speculative_gamma: default_speculative_gamma(),

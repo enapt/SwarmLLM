@@ -429,6 +429,14 @@ impl SharedState {
         state
             .model_process_pool
             .set_activation_compression(state.config.inference.activation_compression);
+        state
+            .model_process_pool
+            .set_continuous_batching(state.config.inference.continuous_batching);
+        state.model_process_pool.set_batch_params(
+            state.config.inference.batch_collection_ms,
+            state.config.inference.max_concurrent_decode_batch,
+        );
+        state.model_process_pool.start_batch_scheduler();
 
         (state, shutdown_rx, dht_query_rx)
     }

@@ -199,6 +199,116 @@ impl Drop for ResponseGuard {
     }
 }
 
+/// Auto-coalescing batch scheduler loop. One per `ModelProcessPool`. Collects
+/// `Forward` requests into time-windowed batches grouped by `model_id`, then
+/// dispatches each group via `pool.forward_batch(...)`. Responses are fanned
+/// out to the per-request `oneshot::Sender`s.
+///
+/// Worker-side CPU fallback (`run_fused_batch_forward` errors out on CPU, which
+/// `handle_batch_forward` catches and runs sequentially) means this is safe on
+/// every device — GPU workers run the fused `SplitModel::forward_batch` path,
+/// CPU workers run the sequential path with zero regression.
+async fn batch_scheduler_loop(
+    pool: Arc<ModelProcessPool>,
+    mut rx: mpsc::Receiver<BatchSchedulerMsg>,
+) {
+    use std::collections::HashMap;
+    use std::time::{Duration, Instant};
+    while let Some(first) = rx.recv().await {
+        let collection_ms = pool
+            .batch_collection_ms
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let max_batch = pool
+            .max_concurrent_decode_batch
+            .load(std::sync::atomic::Ordering::Relaxed) as usize;
+        let max_batch = max_batch.max(1);
+
+        let mut pending: Vec<BatchSchedulerMsg> = vec![first];
+        if collection_ms > 0 {
+            let deadline = Instant::now() + Duration::from_millis(collection_ms);
+            while pending.len() < max_batch {
+                let now = Instant::now();
+                if now >= deadline {
+                    break;
+                }
+                match tokio::time::timeout(deadline - now, rx.recv()).await {
+                    Ok(Some(msg)) => pending.push(msg),
+                    Ok(None) => {
+                        // Sender dropped — process what we have and exit.
+                        dispatch_scheduler_pending(&pool, pending).await;
+                        return;
+                    }
+                    Err(_) => break, // deadline elapsed
+                }
+            }
+        }
+
+        // Group by model_id — forward_batch requires a single model.
+        let mut by_model: HashMap<ModelId, Vec<BatchSchedulerMsg>> = HashMap::new();
+        for msg in pending {
+            let BatchSchedulerMsg::Forward { ref fwd, .. } = msg;
+            by_model.entry(fwd.model_id.clone()).or_default().push(msg);
+        }
+        for (_, msgs) in by_model {
+            dispatch_scheduler_group(&pool, msgs).await;
+        }
+    }
+}
+
+async fn dispatch_scheduler_pending(pool: &Arc<ModelProcessPool>, pending: Vec<BatchSchedulerMsg>) {
+    use std::collections::HashMap;
+    let mut by_model: HashMap<ModelId, Vec<BatchSchedulerMsg>> = HashMap::new();
+    for msg in pending {
+        let BatchSchedulerMsg::Forward { ref fwd, .. } = msg;
+        by_model.entry(fwd.model_id.clone()).or_default().push(msg);
+    }
+    for (_, msgs) in by_model {
+        dispatch_scheduler_group(pool, msgs).await;
+    }
+}
+
+/// Dispatch a same-model group: 1 request → `pool.forward_direct`, ≥2 →
+/// `pool.forward_batch`. Fan out to each `resp_tx`.
+async fn dispatch_scheduler_group(pool: &Arc<ModelProcessPool>, msgs: Vec<BatchSchedulerMsg>) {
+    if msgs.is_empty() {
+        return;
+    }
+    if msgs.len() == 1 {
+        let BatchSchedulerMsg::Forward { fwd, resp_tx } = msgs.into_iter().next().unwrap();
+        let result = pool.forward_direct(fwd).await;
+        let _ = resp_tx.send(result);
+        return;
+    }
+    let (forwards, resp_txs): (Vec<_>, Vec<_>) = msgs
+        .into_iter()
+        .map(|BatchSchedulerMsg::Forward { fwd, resp_tx }| (fwd, resp_tx))
+        .unzip();
+    let n = forwards.len();
+    match pool.forward_batch(forwards).await {
+        Ok(results) => {
+            if results.len() != n {
+                for tx in resp_txs {
+                    let _ = tx.send(Err(SwarmError::Internal(format!(
+                        "batch result count mismatch: expected {n}, got {}",
+                        results.len()
+                    ))));
+                }
+                return;
+            }
+            // Fan out in sender order (forward_batch preserves input order).
+            for (tx, result) in resp_txs.into_iter().zip(results.into_iter()) {
+                let _ = tx.send(Ok(result));
+            }
+        }
+        Err(e) => {
+            let msg = e.to_string();
+            for tx in resp_txs {
+                let _ = tx.send(Err(SwarmError::Internal(format!("batch failed: {msg}"))));
+            }
+        }
+    }
+}
+
 /// Manages one worker subprocess per loaded ModelId.
 ///
 /// When a model is unloaded, its worker process is killed and the OS/CUDA
@@ -260,6 +370,63 @@ pub struct ModelProcessPool {
     /// Receivers auto-dispatch on the dtype tag. See Item 13 in
     /// `docs/plans/distributed_inference_speedup.md`.
     activation_compression: std::sync::atomic::AtomicBool,
+    /// Continuous batching: when on, `forward()` routes through an
+    /// auto-coalescing scheduler that collects concurrent arrivals into a
+    /// time-windowed batch and dispatches via `forward_batch` (one
+    /// `DaemonMsg::BatchForward` IPC message, one fused `SplitModel::forward_batch`
+    /// call on GPU, falls through to sequential on CPU). Off → `forward()`
+    /// bypasses the scheduler and sends a single `DaemonMsg::Forward`.
+    continuous_batching: std::sync::atomic::AtomicBool,
+    /// Time-window in milliseconds for the scheduler to wait for additional
+    /// arrivals after the first request lands in an empty batch. Matches
+    /// `InferenceConfig::batch_collection_ms`.
+    batch_collection_ms: std::sync::atomic::AtomicU64,
+    /// Maximum batch size. Matches `InferenceConfig::max_concurrent_decode_batch`.
+    max_concurrent_decode_batch: std::sync::atomic::AtomicU32,
+    /// Global batch scheduler. Created once by `start_batch_scheduler` from
+    /// daemon setup (where `Arc<Self>` is available). When unset, `forward()`
+    /// bypasses batching entirely regardless of the `continuous_batching` flag.
+    batch_scheduler: std::sync::OnceLock<mpsc::Sender<BatchSchedulerMsg>>,
+}
+
+/// Command into the batch scheduler task.
+enum BatchSchedulerMsg {
+    Forward {
+        fwd: crate::types::LayerForward,
+        resp_tx: tokio::sync::oneshot::Sender<Result<crate::types::LayerResult, SwarmError>>,
+    },
+}
+
+/// Can this `LayerForward` share a `BatchForward` message with others? Matches
+/// the worker-side `batch_eligible` check: same layer_range + decode-only + no
+/// vision/LoRA/spec/TP/pre-embedded/truncate. If any of these trip, we send a
+/// single `DaemonMsg::Forward` instead.
+fn forward_is_schedulable(f: &crate::types::LayerForward) -> bool {
+    if f.sequence_num == 0 || f.index_pos == 0 {
+        return false;
+    }
+    if f.tp_meta.is_some() {
+        return false;
+    }
+    if f.vision_embeddings.is_some() {
+        return false;
+    }
+    if f.adapter_id.is_some() {
+        return false;
+    }
+    if !f.draft_tokens.is_empty() {
+        return false;
+    }
+    if f.spec_logits_requested {
+        return false;
+    }
+    if f.pre_embedded {
+        return false;
+    }
+    if f.truncate_kv_to.is_some() {
+        return false;
+    }
+    true
 }
 
 impl ModelProcessPool {
@@ -283,7 +450,50 @@ impl ModelProcessPool {
             force_standard_attn: std::sync::atomic::AtomicBool::new(false),
             max_seq_len_override: std::sync::atomic::AtomicU32::new(0),
             activation_compression: std::sync::atomic::AtomicBool::new(false),
+            continuous_batching: std::sync::atomic::AtomicBool::new(false),
+            batch_collection_ms: std::sync::atomic::AtomicU64::new(5),
+            max_concurrent_decode_batch: std::sync::atomic::AtomicU32::new(8),
+            batch_scheduler: std::sync::OnceLock::new(),
         }
+    }
+
+    /// Start the global auto-coalescing batch scheduler task. Must be called
+    /// from within a Tokio runtime; no-op if no runtime is available (sync
+    /// tests constructing `SharedState` directly). Safe to call more than
+    /// once (second call is a no-op via `OnceLock::set`).
+    pub fn start_batch_scheduler(self: &Arc<Self>) {
+        if tokio::runtime::Handle::try_current().is_err() {
+            tracing::debug!("start_batch_scheduler called outside a tokio runtime — skipping");
+            return;
+        }
+        let pool = self.clone();
+        let (tx, rx) = mpsc::channel::<BatchSchedulerMsg>(1024);
+        if self.batch_scheduler.set(tx).is_err() {
+            return;
+        }
+        tokio::spawn(async move {
+            batch_scheduler_loop(pool, rx).await;
+        });
+    }
+
+    /// Toggle auto-coalescing batch scheduler. When on, concurrent `forward()`
+    /// calls for the same model are collected into one `BatchForward` IPC
+    /// message. CPU workers fall through to sequential automatically; GPU
+    /// workers run the fused `SplitModel::forward_batch` path. See Item 3
+    /// Phase 2b in `docs/plans/distributed_inference_speedup.md`.
+    pub fn set_continuous_batching(&self, enabled: bool) {
+        self.continuous_batching
+            .store(enabled, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Set continuous-batching scheduler parameters. Takes effect on the next
+    /// scheduler task creation (existing per-model scheduler loops keep the
+    /// window they were spawned with).
+    pub fn set_batch_params(&self, collection_ms: u64, max_batch: u32) {
+        self.batch_collection_ms
+            .store(collection_ms, std::sync::atomic::Ordering::Relaxed);
+        self.max_concurrent_decode_batch
+            .store(max_batch.max(1), std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Toggle Q8_0 quantization of intermediate-segment hidden state activations
@@ -588,7 +798,46 @@ impl ModelProcessPool {
     }
 
     /// Send a LayerForward to the worker, get a LayerResult back.
+    /// Send a single forward. When `continuous_batching` is on and the request
+    /// is schedulable (decode-only, no vision/LoRA/spec/TP/pre-embedded), routes
+    /// through the auto-coalescing scheduler which collects concurrent
+    /// arrivals within `batch_collection_ms` and dispatches via
+    /// `forward_batch`. Otherwise goes direct.
     pub async fn forward(
+        &self,
+        forward: crate::types::LayerForward,
+    ) -> Result<crate::types::LayerResult, SwarmError> {
+        if self
+            .continuous_batching
+            .load(std::sync::atomic::Ordering::Relaxed)
+            && forward_is_schedulable(&forward)
+        {
+            if let Some(tx) = self.batch_scheduler.get() {
+                let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+                if tx
+                    .send(BatchSchedulerMsg::Forward {
+                        fwd: forward,
+                        resp_tx,
+                    })
+                    .await
+                    .is_ok()
+                {
+                    return resp_rx.await.unwrap_or_else(|_| {
+                        Err(SwarmError::Internal(
+                            "batch scheduler dropped response".into(),
+                        ))
+                    });
+                }
+                // If the scheduler channel is closed, fall through to direct.
+                return Err(SwarmError::Internal(
+                    "batch scheduler channel closed".into(),
+                ));
+            }
+        }
+        self.forward_direct(forward).await
+    }
+
+    async fn forward_direct(
         &self,
         forward: crate::types::LayerForward,
     ) -> Result<crate::types::LayerResult, SwarmError> {
