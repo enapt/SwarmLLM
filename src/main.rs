@@ -159,6 +159,11 @@ enum Commands {
         /// fall through to the sequential `handle_generate` path.
         #[arg(long, default_value = "8")]
         batch_generate_max_slots: u32,
+        /// Item 7 Phase 2: Sarathi-style chunked prefill chunk size (in
+        /// prompt tokens). Per decode tick each Prefilling slot advances by
+        /// up to this many tokens before its first decode token is sampled.
+        #[arg(long, default_value = "128")]
+        prefill_chunk_tokens: u32,
     },
     /// Device pool management (combine credits across your devices)
     Pool {
@@ -264,6 +269,7 @@ async fn main() -> anyhow::Result<()> {
             activation_compression,
             batch_generate,
             batch_generate_max_slots,
+            prefill_chunk_tokens,
         } => {
             let window: Option<Vec<u32>> = shard_window.map(|s| {
                 s.split(',')
@@ -300,6 +306,7 @@ async fn main() -> anyhow::Result<()> {
                 activation_compression,
                 batch_generate,
                 batch_generate_max_slots,
+                prefill_chunk_tokens,
             )
             .await;
             Ok(())

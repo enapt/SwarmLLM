@@ -12,7 +12,7 @@
 > - **Item 5** prefix cache — 29.4× wall-clock on cache hit
 > - **Item 3** continuous batching — 1.34–1.55× GPU throughput for concurrent requests (CPU falls through to sequential, no regression)
 > - **Item 16 A+B** Parallax routing — shortest-path pipeline chain via DP + observed per-peer latency EMA
-> - **Item 7 Phase 1** worker-side SlotTable — concurrent `pool.generate()` callers interleave through one `forward_batch` per tick (gated by the same `continuous_batching` flag; benchmark pending)
+> - **Item 7 Phases 1 + 2** worker-side SlotTable + Sarathi chunked prefill — concurrent `pool.generate()` callers interleave through one `forward_batch` per tick, and a long-prompt admission only stalls decode for one prefill chunk per tick (gated by the same `continuous_batching` flag; benchmark pending)
 >
 > Everything else is behind a flag (`speculative_distributed`, `persistent_pipeline_stream`, `decentralized_spec_decoding`, `activation_compression`, `swift_self_speculative`) or advisory (Phase C allocator).
 >
@@ -27,27 +27,30 @@
 > | **Item 13 — Activation compression (Q8_0)** | ✅ LANDED behind `activation_compression=false` flag. Codec verified (~3.76× compression, RMS error <0.005, peer-compatible auto-dispatch). End-to-end multi-segment benchmark pending. |
 > | **Item 12 — DSD (decentralized speculative)** | ✅ ALL PHASES LANDED 2026-04-18 behind `decentralized_spec_decoding=false`. Worker γ-token decode + KV truncation primitives + γ controller + multi-segment spec-verify worker branch + ~410 LOC coordinator loop in `pipeline/dsd.rs`. End-to-end multi-segment WAN benchmark pending. |
 > | **Item 16 — Parallax scheduler (Phases A+B+B.2+C+C.2)** | ✅ LANDED 2026-04-18/19. All phases default-on except Phase D (multi-pipeline concurrency, deferred). Phase A: shortest-path DP. Phase B: observed per-layer latency EMA. Phase B.2: cross-node gossip of top-32 observed latencies via `NodeCapability.observed_latencies`. Phase C: `parallax_allocator.rs` offline layer allocator with `Z(k) = k²/s*(k)` objective. Phase C.2 (2026-04-19): soft acquire/prune bias in `AutoShardManager` driven by a per-shard stability counter (≥3 ticks of consistent signal) — respects every existing hard constraint. Tests: 10 routing + 7 allocator + 2 scheduler integration + 1 EMA math + 5 merge + 8 stability. |
-> | **Item 7 — BatchGenerate Phase 1** | ✅ LANDED 2026-04-19. Worker-side `SlotTable` (`src/inference/slot_table.rs`) + slot-driven decode loop (`run_worker` restructured into select! over IPC + decode tick). Concurrent `pool.generate()` callers now interleave through a single `SplitModel::forward_batch` per tick instead of running serially. Default-off — gated by the same `continuous_batching` flag that gates daemon-side Item 3 batching. End-to-end concurrent-generate benchmark + Sarathi chunked prefill are Phase 2 work. |
+> | **Item 7 — BatchGenerate Phases 1 + 2** | ✅ LANDED 2026-04-19. Phase 1: worker-side `SlotTable` + slot-driven decode loop (concurrent `pool.generate()` callers interleave through one `SplitModel::forward_batch` per tick). Phase 2: Sarathi-style chunked prefill — slots register in `Prefilling { remaining_ids, next_chunk_index_pos }`, advance by `prefill_chunk_tokens` (default 128) per tick before transitioning to `Decoding`. Decode interruption from a long-prompt admission now bounded by chunk size instead of full prefill duration. End-to-end concurrent-generate benchmark is Phase 3 work. |
 >
-> **NEXT SESSION — Item 7 Phase 2 (Sarathi chunked prefill) + concurrent-generate benchmark.**
+> **NEXT SESSION — Item 7 Phase 3 (concurrent-generate benchmark) + measure default-on impact.**
 >
-> Item 7 Phase 1 landed 2026-04-19: worker-side `SlotTable` + slot-driven
-> decode loop in `src/inference/slot_table.rs` + restructured
-> `model_worker::run_worker` (select! over IPC + decode tick). Concurrent
-> `pool.generate()` calls now interleave through a single
-> `SplitModel::forward_batch` per tick instead of running serially.
-> Default-off until benchmarked end-to-end.
+> Item 7 Phase 1 + Phase 2 both landed 2026-04-19. Phase 1: worker-side
+> `SlotTable` + slot-driven decode loop. Phase 2: Sarathi-style chunked
+> prefill — slots admit in `Prefilling { remaining_ids,
+> next_chunk_index_pos }`, advance by `prefill_chunk_tokens` (default 128)
+> per tick before transitioning to `Decoding`. Long-prompt admission no
+> longer stalls active decode for the full prefill duration — bounded by
+> chunk size per tick.
 >
-> **Phase 2 scope.** Sarathi-style chunked prefill (a long-prompt admission
-> currently stalls all active decode slots until prefill completes — chunk
-> it into `prefill_chunk_tokens` and round-robin with decode steps).
-> Plus a launcher for the concurrent-generate benchmark — needs to spawn
-> the swarmllm binary because `current_exe()` in test context isn't it.
+> **Phase 3 scope.** Build a concurrent-generate benchmark. Needs a
+> launcher that spawns the swarmllm binary (because `current_exe()` in a
+> Cargo test context resolves to the test binary, which doesn't have the
+> `model-worker` subcommand). Two concurrent `pool.generate()` calls
+> against TinyLlama-1.1B, measure aggregate tok/s vs serial baseline.
+> Target ≥1.7× throughput at concurrency=2 on GPU. Once validated,
+> document the speedup and consider flipping defaults for production.
 >
 > **Session state to recall on resume:**
-> - Last session: Item 7 Phase 1 landed 2026-04-19
-> - Tests: 668 lib + 67 integration = 735 total on `dev,claude-subscription`
->   (6 new SlotTable unit tests, +6 net)
+> - Last session: Item 7 Phase 1 + Phase 2 both landed 2026-04-19
+> - Tests: 674 lib + 67 integration = 741 total on `dev,claude-subscription`
+>   (12 SlotTable tests; +6 net from Phase 2)
 > - Bench doc: `docs/plans/benchmarks/round3.md` — GPU validated 1.55× at batch=8
 > - Pre-staged models: TinyLlama-1.1B, Phi-3.5-mini, Qwen2.5-Coder-7B — see
 >   `memory/local_model_shards.md`
@@ -655,22 +658,94 @@ prefill are Phase 2 work — gated until we can spin up two real
 `tests/integration` doesn't cover the pool because `current_exe()` in
 test context isn't the swarmllm binary).
 
-### Phase 2 (next session): Sarathi chunked prefill + benchmark
+### Phase 2 (LANDED 2026-04-19): Sarathi-style chunked prefill
 
-Today admit blocks until prefill completes — a long-prompt admission
-stalls every active slot's decode for hundreds of ms. Sarathi chops
-prefill into `prefill_chunk_tokens` sized chunks and round-robins them
-with batched decode steps. Adds a `Slot::PrefillState { remaining_ids,
-chunk_size, index_pos }` enum branch and a per-tick scheduler choice:
-"do one prefill chunk for slot X" vs "batched decode over all decode
-slots". Decode latency stays bounded by the chunk size instead of by
-the longest pending prefill.
+Slots now register in a `Prefilling { remaining_ids, next_chunk_index_pos }`
+state at admit time and only sample their first decode token after the
+final prefill chunk runs. Each tick:
 
-The end-to-end concurrent-generate benchmark needs a launcher that can
-spawn the swarmllm binary in test mode (point `current_exe` override
-or build a release binary first), start two concurrent `pool.generate`
-calls against a tiny model, measure aggregate tok/s vs. serial
-baseline. Target ≥1.7× throughput on GPU at concurrency=2.
+1. **Phase A** — every `Prefilling` slot advances by up to
+   `prefill_chunk_tokens` prompt tokens (default 128, configurable via
+   `InferenceConfig::prefill_chunk_tokens`). When a slot's final chunk
+   runs, it samples the first decode token, snapshots the completed
+   prompt KV into the prefix cache, and transitions to
+   `Decoding { last_token, last_token_logprob, generated_count, index_pos }`
+   — joining the same tick's batched decode (Phase B).
+2. **Phase B** — unchanged from Phase 1: per-slot EOS / stop-string
+   gate, Token emit, batched `forward_batch` over all `Decoding` slots,
+   per-slot sampling, off-by-one Token on `length` finish.
+
+**Why it matters.** Phase 1 admit ran the entire prefill inside the
+admit handler — a long-prompt admission (think 4 KB system prompt)
+stalled every already-active decode slot for the full prefill duration
+(seconds on TinyLlama CPU). Phase 2 bounds that interruption to
+`prefill_chunk_tokens` of compute per tick, so a long admission costs
+each in-flight decode at most ~one extra chunk of latency before the
+next decode token streams.
+
+**Slot state machine** (`src/inference/slot_table.rs`):
+
+```rust
+pub enum SlotState {
+    Prefilling {
+        remaining_ids: Vec<u32>,
+        next_chunk_index_pos: usize,
+    },
+    Decoding {
+        last_token: u32,
+        last_token_logprob: Option<f32>,
+        generated_count: usize,
+        index_pos: usize,
+    },
+}
+```
+
+Helpers added: `take_prefill_chunk(chunk_size)`,
+`promote_to_decoding(first_token, first_logprob)`, `is_prefilling()`,
+`is_decoding()`. 6 new unit tests cover chunk math (drain/cap/zero-size/
+prefix-cache-hit), `Decoding`-state rejection of `take_prefill_chunk`,
+and `Prefilling → Decoding` transition. Total slot_table tests: 12.
+
+**Files touched.**
+- `src/inference/slot_table.rs` — state-machine refactor + `prompt_ids`
+  field carried for prefix-cache snapshot at prefill completion.
+- `src/inference/model_worker.rs` — `try_register_generate_slot`
+  replaces the prefill-in-admit `try_admit_generate_slot`. New
+  `step_decode_pool` two-phase tick. `finalize_slot` reads
+  `generated_count` via `Slot::generated_count()` accessor (which
+  returns 0 for `Prefilling` and the Decoding counter otherwise).
+- `src/config.rs` — new `InferenceConfig::prefill_chunk_tokens` (u32,
+  default 128). 0/1 degenerate to one-token-per-tick prefill.
+- `src/inference/process_pool.rs` — `prefill_chunk_tokens` AtomicU32 +
+  `set_prefill_chunk_tokens(u32)` setter; spawns workers with
+  `--prefill-chunk-tokens`.
+- `src/main.rs` — ModelWorker subcommand grew the new CLI flag.
+- `src/daemon/state/mod.rs` — applies the config value to the pool at
+  startup.
+
+**Single-user perf.** Single Generate, no contention: tick 1 prefills
+the whole prompt as one chunk (when `chunk_size >= prompt_len`) and
+samples first token; tick 2 emits first token + decodes second; etc.
+Same total compute as Phase 1, just shifted by one tick. For prompts
+longer than `chunk_size`, single-user latency to first token grows
+linearly with chunk count — operators can raise `prefill_chunk_tokens`
+if running mostly single-user workloads.
+
+**Multi-user perf.** Decode interruption bounded by chunk size. With
+`prefill_chunk_tokens=128` on TinyLlama Q4 CPU (~1 ms/token in
+prefill mode), an admit during active decode adds ~128 ms tick latency
+to active streams instead of seconds — essentially the design goal.
+
+741 lib + integration tests pass on `dev,claude-subscription` (+6 net
+from 6 new SlotTable prefill state tests).
+
+### Phase 3 (next session): concurrent-generate benchmark
+
+End-to-end benchmark needs a launcher that can spawn the swarmllm
+binary in test mode (point `current_exe` override or build a release
+binary first), start two concurrent `pool.generate` calls against a
+tiny model, measure aggregate tok/s vs. serial baseline. Target ≥1.7×
+throughput on GPU at concurrency=2.
 
 ---
 

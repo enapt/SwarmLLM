@@ -437,6 +437,9 @@ impl SharedState {
             state.config.inference.batch_collection_ms,
             state.config.inference.max_concurrent_decode_batch,
         );
+        state
+            .model_process_pool
+            .set_prefill_chunk_tokens(state.config.inference.prefill_chunk_tokens);
         state.model_process_pool.start_batch_scheduler();
 
         (state, shutdown_rx, dht_query_rx)

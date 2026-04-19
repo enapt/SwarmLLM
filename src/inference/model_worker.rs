@@ -50,6 +50,11 @@ impl Default for PrefixCacheConfig {
 ///   share one `forward_batch` per decode tick instead of running serially.
 /// `batch_generate_max_slots`: cap on the slot table; admissions beyond this
 ///   fall through to sequential `handle_generate`.
+/// `prefill_chunk_tokens`: Sarathi-style chunked prefill (Phase 2). Each
+///   admitted slot starts in `Prefilling` state — every decode tick advances
+///   it by this many prompt tokens before the batched decode runs, so a long
+///   admission can no longer block decode for more than one chunk's worth of
+///   compute.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_worker(
     socket_path: PathBuf,
@@ -63,6 +68,7 @@ pub async fn run_worker(
     activation_compression: bool,
     batch_generate: bool,
     batch_generate_max_slots: u32,
+    prefill_chunk_tokens: u32,
 ) {
     // Connect to the daemon's Unix socket
     let stream = match UnixStream::connect(&socket_path).await {
@@ -133,10 +139,12 @@ pub async fn run_worker(
     tracing::info!(
         enabled = batch_generate,
         max_slots = batch_generate_max_slots,
+        prefill_chunk_tokens,
         "model-worker: BatchGenerate (Item 7) configured"
     );
 
     let mut slot_table = SlotTable::new(batch_generate_max_slots as usize);
+    let chunk_size_tokens = prefill_chunk_tokens.max(1) as usize;
 
     // Spawn a reader task that pushes framed IPC messages onto an mpsc.
     // Decoupling read-from-socket from the main select! loop keeps frame
@@ -225,25 +233,22 @@ pub async fn run_worker(
                             .unwrap_or(false)
                     {
                         let g = pending.take().expect("checked above");
-                        match try_admit_generate_slot(
-                            &mut writer,
+                        match try_register_generate_slot(
                             &mut models,
                             &kv_store,
                             &prefix_cache,
                             &data_dir,
                             g,
                             &shard_window,
-                            force_standard_attn,
                             &mut slot_table,
-                        )
-                        .await
-                        {
-                            Ok(_) => { /* admitted (or finished during admit) */ }
+                        ) {
+                            Ok(_) => { /* registered — chunked prefill happens in step_decode_pool */
+                            }
                             Err(SlotAdmitError::Fatal(e)) => {
                                 send_worker_error(&mut writer, request_id, e).await;
                             }
                             Err(SlotAdmitError::FallThrough(g)) => {
-                                pending = Some(g);
+                                pending = Some(*g);
                             }
                         }
                     }
@@ -283,11 +288,20 @@ pub async fn run_worker(
             break;
         }
 
-        // Decode tick: one batched forward over all currently-active slots,
-        // sample per slot, emit Token messages, mark finished slots.
+        // Decode tick: per-slot prefill chunk (Phase A) + one batched forward
+        // across all decoding slots (Phase B). Marks finished slots which the
+        // drain step then collects.
         if !slot_table.is_empty() {
-            if let Err(e) =
-                step_decode_pool(&mut writer, &mut models, &kv_store, &mut slot_table).await
+            if let Err(e) = step_decode_pool(
+                &mut writer,
+                &mut models,
+                &kv_store,
+                &prefix_cache,
+                &mut slot_table,
+                chunk_size_tokens,
+                force_standard_attn,
+            )
+            .await
             {
                 tracing::warn!(error = %e, "model-worker: decode tick failed — finishing all slots with error");
                 let drained = std::mem::replace(
@@ -1677,11 +1691,10 @@ fn slice_position_logits(
 /// Reasons a slot admission can fail.
 enum SlotAdmitError {
     /// Caller should fall back to sequential `handle_generate` with the
-    /// original `IpcGenerate`. Used when prefill works but the admit decided
-    /// the request is better off serial (e.g. layer_range mismatch detected
-    /// late, or the slot table was full when we got to it).
-    FallThrough(IpcGenerate),
-    /// Unrecoverable error from the prefill itself; emit Error to the daemon.
+    /// original `IpcGenerate`. Boxed to keep the `Err` variant small (the
+    /// `Result<(), SlotAdmitError>` happy path wins on layout).
+    FallThrough(Box<IpcGenerate>),
+    /// Unrecoverable error from admission; emit Error to the daemon.
     Fatal(SwarmError),
 }
 
@@ -1709,29 +1722,28 @@ fn slot_admission_eligible(
     true
 }
 
-/// Run prefill for a new `Generate` and (if it produces a non-EOS first token)
-/// push a `Slot` into the table. Returns `Ok(true)` when the slot was pushed
-/// (decode tick will handle it next), `Ok(false)` when the request finished
-/// during admit (max_tokens=0 already filtered, but EOS-on-first-sample can
-/// happen for already-saturated prompts), `Err(SlotAdmitError)` on fall-back
-/// or fatal error.
+/// Lightweight slot registration — Phase 2 chunked-prefill version.
+///
+/// Tokenizes the prompt, performs the prefix-cache lookup + KV hydration if
+/// applicable, and pushes a `Slot` in `Prefilling` state into the table. Does
+/// NO compute — the chunked prefill happens inside `step_decode_pool`'s
+/// Phase A on subsequent ticks. Synchronous (no `.await`) because every
+/// operation here is fast enough that yielding mid-admit isn't worth the
+/// complexity.
 #[allow(clippy::too_many_arguments)]
-async fn try_admit_generate_slot(
-    writer: &mut tokio::net::unix::OwnedWriteHalf,
+fn try_register_generate_slot(
     models: &mut HashMap<(usize, usize, usize, usize), SplitModel>,
     kv_store: &Arc<KvCacheStore>,
     prefix_cache: &Arc<PrefixCache>,
     data_dir: &std::path::Path,
     gen: IpcGenerate,
     shard_window: &Option<Vec<u32>>,
-    force_standard_attn: bool,
     slot_table: &mut SlotTable,
-) -> Result<bool, SlotAdmitError> {
+) -> Result<(), SlotAdmitError> {
     let request_id = gen.request_id;
     let model_id = gen.model_id.clone();
     let (layer_start, layer_end) = (gen.layer_range.0 as usize, gen.layer_range.1 as usize);
 
-    // Generate is always non-TP (full local inference).
     if let Err(e) = ensure_model_loaded(
         models,
         data_dir,
@@ -1765,7 +1777,8 @@ async fn try_admit_generate_slot(
         )));
     }
 
-    // Prefix-cache lookup.
+    // Prefix-cache lookup + per-request KV hydration if we hit. Cheap clone of
+    // K/V tensors — no compute.
     let matched = prefix_cache.lookup(&model_key_string, &prompt_ids);
     let prefix_len = match matched.as_ref() {
         Some(snap) => prefix_cache
@@ -1773,87 +1786,43 @@ async fn try_admit_generate_slot(
             .unwrap_or(0),
         None => 0,
     };
+    // Always leave at least one prompt token for the first chunk's forward —
+    // we need that forward to produce logits for the first sample.
     let prefix_len = prefix_len.min(prompt_tokens.saturating_sub(1));
-
-    let (input, index_pos_start) = if prefix_len > 0 {
+    if prefix_len > 0 {
         tracing::info!(
             %request_id,
             matched_tokens = prefix_len,
             total_tokens = prompt_tokens,
-            "DIAG: try_admit_generate_slot prefix-cache HIT"
+            "DIAG: try_register_generate_slot prefix-cache HIT"
         );
-        match model.tensor_from_ids(&prompt_ids[prefix_len..]) {
-            Ok(t) => (t, prefix_len),
-            Err(e) => return Err(SlotAdmitError::Fatal(e)),
-        }
-    } else {
-        match model.tensor_from_ids(&prompt_ids) {
-            Ok(t) => (t, 0),
-            Err(e) => return Err(SlotAdmitError::Fatal(e)),
-        }
-    };
-
-    let prefill_result = tokio::task::block_in_place(|| {
-        let _g = crate::inference::attn_kernel::ForceStandardAttnGuard::new(force_standard_attn);
-        model.forward(&input, index_pos_start, kv_store, &req_id_str)
-    });
-    let logits = match prefill_result {
-        Ok(l) => l,
-        Err(e) => return Err(SlotAdmitError::Fatal(e)),
-    };
-
-    prefix_cache.insert_from_kv(&model_key_string, &req_id_str, kv_store, &prompt_ids);
-
-    let (first_token, first_token_logprob) =
-        match crate::inference::tensor_util::sample_token_with_logprob(&logits, &gen.sampling) {
-            Ok(v) => v,
-            Err(e) => return Err(SlotAdmitError::Fatal(e)),
-        };
-
-    let eos = model.eos_tokens().to_vec();
-    // EOS on the very first sample: emit GenerateDone with no tokens. Mirrors
-    // handle_generate which would just break out of the for loop immediately.
-    if eos.contains(&first_token) {
-        let _ = send_worker(
-            writer,
-            &WorkerMsg::GenerateDone {
-                request_id,
-                prompt_tokens,
-                completion_tokens: 0,
-                finish_reason: "stop".to_string(),
-            },
-            &[],
-        )
-        .await;
-        kv_store.clear_request(model.kv_model_key(), &req_id_str);
-        return Ok(false);
     }
 
-    // Re-check capacity now that prefill is done — another concurrent admit
-    // may have raced ahead. If it did, fall through and let sequential handle
-    // it (also re-runs prefill, which is wasteful but correct).
+    // Re-check capacity — admission gate already checked, but a second admit
+    // may have raced ahead. If so, drop the hydrated KV state and fall back
+    // to sequential handling.
     let lr = (layer_start, layer_end);
     if !slot_table.can_admit(lr) {
-        // Drop the per-request KV we just primed so the sequential path
-        // starts fresh and doesn't double-prefill into a polluted slot.
         kv_store.clear_request(model.kv_model_key(), &req_id_str);
-        return Err(SlotAdmitError::FallThrough(gen));
+        return Err(SlotAdmitError::FallThrough(Box::new(gen)));
     }
 
+    let remaining_ids: Vec<u32> = prompt_ids[prefix_len..].to_vec();
     let max_tokens = gen.sampling.max_tokens;
     let use_logprobs = gen.sampling.logprobs;
     let stop_sequences = gen.sampling.stop.clone();
     let sampling = gen.sampling.clone();
+    let eos = model.eos_tokens().to_vec();
 
     let slot = Slot {
         request_id,
         req_id_str,
         model_key: model_key_string,
         layer_range: lr,
-        index_pos: prompt_tokens,
-        last_token: first_token,
-        last_token_logprob: first_token_logprob,
-        generated_count: 0,
+        state: crate::inference::slot_table::SlotState::Prefilling {
+            remaining_ids,
+            next_chunk_index_pos: prefix_len,
+        },
         max_tokens,
         use_logprobs,
         eos,
@@ -1861,28 +1830,35 @@ async fn try_admit_generate_slot(
         accumulated_text: String::new(),
         sampling,
         prompt_tokens,
+        prompt_ids,
         finish_reason: None,
     };
     slot_table.admit(slot);
-    Ok(true)
+    Ok(())
 }
 
 /// One decode tick across every active slot in the table.
 ///
-/// Steps (mirrors the per-token flow inside `handle_generate`):
-/// 1. **Pre-emit gate** per slot: EOS on `last_token` → finish "stop" without
-///    emit; decode-and-stop-string match → finish "stop" without emit.
-/// 2. **Emit** `Token(last_token)` for every slot that passed the gate.
-/// 3. **Batched forward** over the still-active slots' `last_token`s.
-/// 4. **Sample** per slot from its logits → set `last_token`, advance
-///    `index_pos`, increment `generated_count`. Slots that hit `max_tokens`
-///    are marked `length`; their newly-sampled token is emitted as the
-///    "off-by-one" extra inside `finalize_slot`.
+/// **Phase A — Sarathi-style chunked prefill.** Every `Prefilling` slot
+/// advances by up to `chunk_size` prompt tokens. When a slot's final chunk
+/// runs, we sample its first decode token, snapshot its KV into the prefix
+/// cache, and transition the slot to `Decoding` so it joins this same
+/// tick's batched decode (Phase B).
+///
+/// **Phase B — batched decode.** Every `Decoding` slot's `last_token` is
+/// fed through `forward_batch`. Per-slot sampling, EOS / stop-string gate
+/// (mirrors `handle_generate` byte-for-byte), and Token emit happen inline.
+/// Slots that hit `max_tokens` emit the off-by-one Token in the same tick
+/// and get marked `length`.
+#[allow(clippy::too_many_arguments)]
 async fn step_decode_pool(
     writer: &mut tokio::net::unix::OwnedWriteHalf,
     models: &mut HashMap<(usize, usize, usize, usize), SplitModel>,
     kv_store: &Arc<KvCacheStore>,
+    prefix_cache: &Arc<PrefixCache>,
     slot_table: &mut SlotTable,
+    chunk_size: usize,
+    force_standard_attn: bool,
 ) -> Result<(), SwarmError> {
     if slot_table.is_empty() {
         return Ok(());
@@ -1897,19 +1873,66 @@ async fn step_decode_pool(
             SwarmError::Internal("model variant evicted between admit and tick".into())
         })?;
 
-    // Phase 1: pre-emit gate + Token emit. Borrow the model immutably here
-    // for vocab/eos lookup while the slot table is mutated.
+    // ---- PHASE A: chunked prefill ----
     {
         let active = slot_table.active();
         for slot in active.iter_mut() {
-            if slot.is_finished() {
+            if !slot.is_prefilling() || slot.is_finished() {
                 continue;
             }
-            if slot.eos.contains(&slot.last_token) {
+            let (chunk, pos, remaining_after) = match slot.take_prefill_chunk(chunk_size) {
+                Some(t) => t,
+                None => continue,
+            };
+            let input = model.tensor_from_ids(&chunk)?;
+            let logits = tokio::task::block_in_place(|| {
+                let _g =
+                    crate::inference::attn_kernel::ForceStandardAttnGuard::new(force_standard_attn);
+                model.forward(&input, pos, kv_store, &slot.req_id_str)
+            })?;
+            if remaining_after == 0 {
+                // Final chunk — sample first token, snapshot prompt KV, transition.
+                let (first_token, first_logprob) =
+                    crate::inference::tensor_util::sample_token_with_logprob(
+                        &logits,
+                        &slot.sampling,
+                    )?;
+                prefix_cache.insert_from_kv(
+                    &slot.model_key,
+                    &slot.req_id_str,
+                    kv_store,
+                    &slot.prompt_ids,
+                );
+                let is_eos_first = slot.eos.contains(&first_token);
+                slot.promote_to_decoding(first_token, first_logprob);
+                if is_eos_first {
+                    // Mirrors handle_generate's "EOS on first sample → 0-token stop".
+                    slot.finish_stop();
+                }
+            }
+        }
+    }
+
+    // ---- PHASE B: batched decode (gate + emit + forward + sample) ----
+    {
+        let active = slot_table.active();
+        for slot in active.iter_mut() {
+            if !slot.is_decoding() || slot.is_finished() {
+                continue;
+            }
+            let (last_token, last_logprob) = match &slot.state {
+                crate::inference::slot_table::SlotState::Decoding {
+                    last_token,
+                    last_token_logprob,
+                    ..
+                } => (*last_token, *last_token_logprob),
+                _ => continue,
+            };
+            if slot.eos.contains(&last_token) {
                 slot.finish_stop();
                 continue;
             }
-            let text = decode_token(model, slot.last_token);
+            let text = decode_token(model, last_token);
             slot.accumulated_text.push_str(&text);
             if crate::inference::sampling::find_stop_sequence(
                 &slot.accumulated_text,
@@ -1920,20 +1943,17 @@ async fn step_decode_pool(
                 slot.finish_stop();
                 continue;
             }
-            // Emit Token. Logprob is the one collected at the previous sample
-            // (or from prefill for the very first iteration).
-            let request_id = slot.request_id;
-            let token_id = slot.last_token;
             let logprob = if slot.use_logprobs {
-                slot.last_token_logprob
+                last_logprob
             } else {
                 None
             };
+            let request_id = slot.request_id;
             send_worker(
                 writer,
                 &WorkerMsg::Token {
                     request_id,
-                    token_id,
+                    token_id: last_token,
                     text,
                     is_eos: false,
                     logprob,
@@ -1942,18 +1962,20 @@ async fn step_decode_pool(
             )
             .await
             .map_err(|e| SwarmError::Internal(format!("send Token: {e}")))?;
-            slot.generated_count += 1;
+            if let crate::inference::slot_table::SlotState::Decoding {
+                generated_count, ..
+            } = &mut slot.state
+            {
+                *generated_count += 1;
+            }
         }
     }
 
-    // Phase 2: build the BatchItems for slots still active after the gate.
-    // Stage per-slot input tensors + request_id strings in lockstep so the
-    // BatchItem refs stay valid for the forward call.
     let active = slot_table.active();
     let still_active_indices: Vec<usize> = active
         .iter()
         .enumerate()
-        .filter(|(_, s)| !s.is_finished())
+        .filter(|(_, s)| s.is_decoding() && !s.is_finished())
         .map(|(i, _)| i)
         .collect();
     if still_active_indices.is_empty() {
@@ -1968,11 +1990,19 @@ async fn step_decode_pool(
     let mut index_positions: Vec<usize> = Vec::with_capacity(still_active_indices.len());
     for &i in &still_active_indices {
         let slot = &active[i];
-        let t = model.token_tensor(slot.last_token)?;
+        let (last_token, index_pos) = match &slot.state {
+            crate::inference::slot_table::SlotState::Decoding {
+                last_token,
+                index_pos,
+                ..
+            } => (*last_token, *index_pos),
+            _ => unreachable!("filtered to is_decoding above"),
+        };
+        let t = model.token_tensor(last_token)?;
         input_tensors.push(t);
         req_id_strs.push(slot.req_id_str.clone());
         sampling_clones.push(slot.sampling.clone());
-        index_positions.push(slot.index_pos);
+        index_positions.push(index_pos);
     }
 
     let items: Vec<BatchItem<'_>> = still_active_indices
@@ -1985,11 +2015,8 @@ async fn step_decode_pool(
         })
         .collect();
 
-    // forward_batch already falls back to sequential single-forward when N=1
-    // and to a sequential loop on CPU (per Item 3 Phase 2b). Both still produce
-    // per-slot logits we can sample from below.
     let outputs: Vec<candle_core::Tensor> = tokio::task::block_in_place(|| {
-        let _g = crate::inference::attn_kernel::ForceStandardAttnGuard::new(false);
+        let _g = crate::inference::attn_kernel::ForceStandardAttnGuard::new(force_standard_attn);
         model.forward_batch(&items, kv_store)
     })?;
 
@@ -2001,20 +2028,27 @@ async fn step_decode_pool(
         )));
     }
 
-    // Phase 3: per-slot sample, advance state, mark "length" if exhausted.
-    // When a slot exhausts max_tokens it also gets the off-by-one Token here
-    // (mirrors the post-loop block in `handle_generate`).
     for (j, &i) in still_active_indices.iter().enumerate() {
         let slot = &mut active[i];
         let (next_tok, next_logprob) = crate::inference::tensor_util::sample_token_with_logprob(
             &outputs[j],
             &sampling_clones[j],
         )?;
-        slot.last_token = next_tok;
-        slot.last_token_logprob = next_logprob;
-        slot.index_pos += 1;
-        if slot.generated_count >= slot.max_tokens as usize {
-            // Off-by-one: emit the just-sampled token before finishing.
+        let new_generated_count = match &mut slot.state {
+            crate::inference::slot_table::SlotState::Decoding {
+                last_token,
+                last_token_logprob,
+                index_pos,
+                generated_count,
+            } => {
+                *last_token = next_tok;
+                *last_token_logprob = next_logprob;
+                *index_pos += 1;
+                *generated_count
+            }
+            _ => unreachable!("filtered to is_decoding above"),
+        };
+        if new_generated_count >= slot.max_tokens as usize {
             if slot.max_tokens > 0 && !slot.eos.contains(&next_tok) {
                 let text = decode_token(model, next_tok);
                 let logprob = if slot.use_logprobs {
@@ -2035,7 +2069,12 @@ async fn step_decode_pool(
                 )
                 .await
                 .map_err(|e| SwarmError::Internal(format!("send final Token: {e}")))?;
-                slot.generated_count += 1;
+                if let crate::inference::slot_table::SlotState::Decoding {
+                    generated_count, ..
+                } = &mut slot.state
+                {
+                    *generated_count += 1;
+                }
             }
             slot.finish_length();
         }
@@ -2051,12 +2090,12 @@ async fn finalize_slot(
     kv_store: &Arc<KvCacheStore>,
     slot: Slot,
 ) -> Result<(), SwarmError> {
+    let generated_count = slot.generated_count();
     let Slot {
         request_id,
         req_id_str,
         model_key,
         prompt_tokens,
-        generated_count,
         finish_reason,
         ..
     } = slot;

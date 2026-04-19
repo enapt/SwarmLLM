@@ -383,6 +383,10 @@ pub struct ModelProcessPool {
     batch_collection_ms: std::sync::atomic::AtomicU64,
     /// Maximum batch size. Matches `InferenceConfig::max_concurrent_decode_batch`.
     max_concurrent_decode_batch: std::sync::atomic::AtomicU32,
+    /// Item 7 Phase 2: Sarathi prefill chunk size (in prompt tokens). Passed
+    /// into spawned workers as `--prefill-chunk-tokens`. Matches
+    /// `InferenceConfig::prefill_chunk_tokens`.
+    prefill_chunk_tokens: std::sync::atomic::AtomicU32,
     /// Global batch scheduler. Created once by `start_batch_scheduler` from
     /// daemon setup (where `Arc<Self>` is available). When unset, `forward()`
     /// bypasses batching entirely regardless of the `continuous_batching` flag.
@@ -453,6 +457,7 @@ impl ModelProcessPool {
             continuous_batching: std::sync::atomic::AtomicBool::new(false),
             batch_collection_ms: std::sync::atomic::AtomicU64::new(5),
             max_concurrent_decode_batch: std::sync::atomic::AtomicU32::new(8),
+            prefill_chunk_tokens: std::sync::atomic::AtomicU32::new(128),
             batch_scheduler: std::sync::OnceLock::new(),
         }
     }
@@ -494,6 +499,13 @@ impl ModelProcessPool {
             .store(collection_ms, std::sync::atomic::Ordering::Relaxed);
         self.max_concurrent_decode_batch
             .store(max_batch.max(1), std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Sarathi prefill chunk size for future-spawned workers. Existing
+    /// workers retain whatever chunk size they were spawned with.
+    pub fn set_prefill_chunk_tokens(&self, chunk_tokens: u32) {
+        self.prefill_chunk_tokens
+            .store(chunk_tokens.max(1), std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Toggle Q8_0 quantization of intermediate-segment hidden state activations
@@ -720,6 +732,12 @@ impl ModelProcessPool {
             args.push("--batch-generate-max-slots".to_string());
             args.push(
                 self.max_concurrent_decode_batch
+                    .load(Ordering::Relaxed)
+                    .to_string(),
+            );
+            args.push("--prefill-chunk-tokens".to_string());
+            args.push(
+                self.prefill_chunk_tokens
                     .load(Ordering::Relaxed)
                     .to_string(),
             );

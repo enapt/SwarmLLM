@@ -1,9 +1,17 @@
 //! Slot table for the worker's batched-generate decode pool (Item 7).
 //!
-//! Each `Slot` is one in-flight `Generate` request that has finished its
-//! prefill and is now in the decode loop. The worker batches all active
-//! slots into a single `SplitModel::forward_batch` call per tick, sampling
-//! per-slot from the returned logits.
+//! Each `Slot` is one in-flight `Generate` request being driven through the
+//! worker's slot-driven decode loop. Phase 1 admits a slot only after running
+//! its full prefill in the admit handler — fast for one slot at a time, but a
+//! long admission stalls every active decode slot for the duration of the
+//! prefill.
+//!
+//! Phase 2 (Sarathi-style chunked prefill) replaces that with a state machine:
+//! every slot starts in `Prefilling` (the prompt is held in the slot, the
+//! admit handler does no compute). Each decode tick processes one prefill
+//! chunk per `Prefilling` slot before running the batched decode over
+//! `Decoding` slots — so a long admission can no longer block decode for
+//! more than `prefill_chunk_tokens` of compute.
 //!
 //! The slot table itself is single-threaded — it lives in `run_worker`'s
 //! task and is mutated under direct ownership.
@@ -12,13 +20,36 @@ use uuid::Uuid;
 
 use crate::types::SamplingParams;
 
-/// One active decoding stream inside the worker.
+/// Per-slot state machine.
 ///
-/// `last_token` is the next token to feed to the model on the upcoming
-/// decode step. `index_pos` is the position that token will write into
-/// the per-request KV cache. After every step we push the just-emitted
-/// token into `generated`, advance `index_pos`, and check EOS / stop /
-/// max_tokens.
+/// `Prefilling` slots haven't sampled their first token yet — every decode
+/// tick advances them by `prefill_chunk_tokens` until the prompt is consumed,
+/// then samples and transitions to `Decoding` in the same tick.
+pub enum SlotState {
+    /// Prompt is being prefilled in chunks.
+    ///
+    /// `remaining_ids` are the prompt tokens still to feed into the model
+    /// (already advanced past any prefix-cache hit). `next_chunk_index_pos`
+    /// is the KV-cache position the next chunk will write into (== prompt
+    /// position of the first token in `remaining_ids`).
+    Prefilling {
+        remaining_ids: Vec<u32>,
+        next_chunk_index_pos: usize,
+    },
+    /// Prompt prefill is complete; slot is in the per-token decode loop.
+    Decoding {
+        /// Next token to feed into the model on the upcoming decode tick.
+        last_token: u32,
+        /// Optional logprob of `last_token` collected at sample time.
+        last_token_logprob: Option<f32>,
+        /// Number of `Token` IPC messages emitted to the daemon so far.
+        generated_count: usize,
+        /// KV-cache write position for the upcoming decode forward.
+        index_pos: usize,
+    },
+}
+
+/// One active in-flight `Generate` inside the worker.
 pub struct Slot {
     pub request_id: Uuid,
     pub req_id_str: String,
@@ -27,19 +58,21 @@ pub struct Slot {
     pub model_key: String,
     /// (layer_start, layer_end) — every slot in a single SlotTable shares
     /// these so they all dispatch to the same `models[(start, end, 0, 1)]`
-    /// variant when batched.
+    /// variant.
     pub layer_range: (usize, usize),
-    pub index_pos: usize,
-    pub last_token: u32,
-    pub last_token_logprob: Option<f32>,
-    pub generated_count: usize,
+    pub state: SlotState,
     pub max_tokens: u32,
     pub use_logprobs: bool,
     pub eos: Vec<u32>,
     pub stop_sequences: Vec<String>,
     pub accumulated_text: String,
     pub sampling: SamplingParams,
+    /// Total prompt token count — set at admission, used in `GenerateDone`.
     pub prompt_tokens: usize,
+    /// Full prompt token IDs — held so the prefix-cache can snapshot the
+    /// completed prefill back into the radix tree for future hits. Cleared
+    /// once the snapshot is inserted.
+    pub prompt_ids: Vec<u32>,
     /// Set when the slot decides to stop. The slot driver reads this on
     /// the next pass and removes the slot.
     pub finish_reason: Option<&'static str>,
@@ -63,6 +96,72 @@ impl Slot {
         if self.finish_reason.is_none() {
             self.finish_reason = Some("stop");
         }
+    }
+
+    pub fn is_prefilling(&self) -> bool {
+        matches!(self.state, SlotState::Prefilling { .. })
+    }
+
+    pub fn is_decoding(&self) -> bool {
+        matches!(self.state, SlotState::Decoding { .. })
+    }
+
+    /// `generated_count` is only meaningful in `Decoding` state — `Prefilling`
+    /// hasn't emitted any tokens yet.
+    pub fn generated_count(&self) -> usize {
+        match &self.state {
+            SlotState::Decoding {
+                generated_count, ..
+            } => *generated_count,
+            SlotState::Prefilling { .. } => 0,
+        }
+    }
+
+    /// Pop up to `chunk_size` tokens from the front of `remaining_ids`. Caller
+    /// must verify the slot is `Prefilling` first.
+    ///
+    /// Returns `(chunk, chunk_index_pos, remaining_after_chunk)` so the caller
+    /// can run one forward over `chunk` at `chunk_index_pos` and immediately
+    /// know whether this was the final chunk (`remaining_after_chunk == 0`).
+    pub fn take_prefill_chunk(&mut self, chunk_size: usize) -> Option<(Vec<u32>, usize, usize)> {
+        let chunk_size = chunk_size.max(1);
+        match &mut self.state {
+            SlotState::Prefilling {
+                remaining_ids,
+                next_chunk_index_pos,
+            } => {
+                if remaining_ids.is_empty() {
+                    return None;
+                }
+                let take = chunk_size.min(remaining_ids.len());
+                let chunk: Vec<u32> = remaining_ids.drain(..take).collect();
+                let pos = *next_chunk_index_pos;
+                *next_chunk_index_pos += take;
+                let remaining_after = remaining_ids.len();
+                Some((chunk, pos, remaining_after))
+            }
+            SlotState::Decoding { .. } => None,
+        }
+    }
+
+    /// Transition `Prefilling` → `Decoding` after the final chunk has been
+    /// processed and the first decode token has been sampled. The new
+    /// `index_pos` is `prompt_tokens` (KV cache now holds every prompt
+    /// position).
+    pub fn promote_to_decoding(&mut self, first_token: u32, first_logprob: Option<f32>) {
+        let new_index_pos = match &self.state {
+            SlotState::Prefilling {
+                next_chunk_index_pos,
+                ..
+            } => *next_chunk_index_pos,
+            SlotState::Decoding { index_pos, .. } => *index_pos,
+        };
+        self.state = SlotState::Decoding {
+            last_token: first_token,
+            last_token_logprob: first_logprob,
+            generated_count: 0,
+            index_pos: new_index_pos,
+        };
     }
 }
 
@@ -165,16 +264,18 @@ mod tests {
     use super::*;
     use crate::types::SamplingParams;
 
-    fn dummy_slot(rid: Uuid, layer_range: (usize, usize)) -> Slot {
+    fn dummy_decoding_slot(rid: Uuid, layer_range: (usize, usize)) -> Slot {
         Slot {
             request_id: rid,
             req_id_str: rid.to_string(),
             model_key: "test-key".to_string(),
             layer_range,
-            index_pos: 5,
-            last_token: 42,
-            last_token_logprob: None,
-            generated_count: 0,
+            state: SlotState::Decoding {
+                last_token: 42,
+                last_token_logprob: None,
+                generated_count: 0,
+                index_pos: 5,
+            },
             max_tokens: 16,
             use_logprobs: false,
             eos: vec![2],
@@ -192,6 +293,45 @@ mod tests {
                 top_logprobs: 0,
             },
             prompt_tokens: 8,
+            prompt_ids: vec![1, 2, 3, 4, 5, 6, 7, 8],
+            finish_reason: None,
+        }
+    }
+
+    fn dummy_prefilling_slot(
+        rid: Uuid,
+        layer_range: (usize, usize),
+        remaining_ids: Vec<u32>,
+        prompt_len: usize,
+    ) -> Slot {
+        let prefilled = prompt_len.saturating_sub(remaining_ids.len());
+        Slot {
+            request_id: rid,
+            req_id_str: rid.to_string(),
+            model_key: "test-key".to_string(),
+            layer_range,
+            state: SlotState::Prefilling {
+                remaining_ids,
+                next_chunk_index_pos: prefilled,
+            },
+            max_tokens: 16,
+            use_logprobs: false,
+            eos: vec![2],
+            stop_sequences: vec![],
+            accumulated_text: String::new(),
+            sampling: SamplingParams {
+                temperature: 0.0,
+                top_p: 1.0,
+                top_k: 0,
+                max_tokens: 16,
+                stop: vec![],
+                frequency_penalty: 0.0,
+                presence_penalty: 0.0,
+                logprobs: false,
+                top_logprobs: 0,
+            },
+            prompt_tokens: prompt_len,
+            prompt_ids: (1..=prompt_len as u32).collect(),
             finish_reason: None,
         }
     }
@@ -208,7 +348,7 @@ mod tests {
     #[test]
     fn first_admit_pins_layer_range_and_blocks_others() {
         let mut table = SlotTable::new(4);
-        table.admit(dummy_slot(Uuid::new_v4(), (0, 22)));
+        table.admit(dummy_decoding_slot(Uuid::new_v4(), (0, 22)));
         assert_eq!(table.current_layer_range(), Some((0, 22)));
         assert!(table.can_admit((0, 22)));
         assert!(!table.can_admit((0, 32)));
@@ -218,8 +358,8 @@ mod tests {
     #[test]
     fn full_table_rejects_admission() {
         let mut table = SlotTable::new(2);
-        table.admit(dummy_slot(Uuid::new_v4(), (0, 22)));
-        table.admit(dummy_slot(Uuid::new_v4(), (0, 22)));
+        table.admit(dummy_decoding_slot(Uuid::new_v4(), (0, 22)));
+        table.admit(dummy_decoding_slot(Uuid::new_v4(), (0, 22)));
         assert!(table.is_full());
         assert!(!table.can_admit((0, 22)));
     }
@@ -230,9 +370,9 @@ mod tests {
         let r1 = Uuid::new_v4();
         let r2 = Uuid::new_v4();
         let r3 = Uuid::new_v4();
-        table.admit(dummy_slot(r1, (0, 22)));
-        table.admit(dummy_slot(r2, (0, 22)));
-        table.admit(dummy_slot(r3, (0, 22)));
+        table.admit(dummy_decoding_slot(r1, (0, 22)));
+        table.admit(dummy_decoding_slot(r2, (0, 22)));
+        table.admit(dummy_decoding_slot(r3, (0, 22)));
         table.active()[1].finish_stop();
         let finished = table.drain_finished();
         assert_eq!(finished.len(), 1);
@@ -246,7 +386,7 @@ mod tests {
     #[test]
     fn drain_to_empty_releases_layer_range_pin() {
         let mut table = SlotTable::new(4);
-        table.admit(dummy_slot(Uuid::new_v4(), (0, 22)));
+        table.admit(dummy_decoding_slot(Uuid::new_v4(), (0, 22)));
         table.active()[0].finish_stop();
         let _ = table.drain_finished();
         assert!(table.is_empty());
@@ -256,9 +396,91 @@ mod tests {
 
     #[test]
     fn finish_length_only_sets_when_unset() {
-        let mut s = dummy_slot(Uuid::new_v4(), (0, 22));
+        let mut s = dummy_decoding_slot(Uuid::new_v4(), (0, 22));
         s.finish_stop();
         s.finish_length();
         assert_eq!(s.finish_reason, Some("stop"));
+    }
+
+    #[test]
+    fn prefill_chunk_advances_index_pos_and_drains_remaining() {
+        let mut s = dummy_prefilling_slot(Uuid::new_v4(), (0, 22), vec![1, 2, 3, 4, 5], 5);
+        let (chunk, pos, remaining_after) = s.take_prefill_chunk(2).unwrap();
+        assert_eq!(chunk, vec![1, 2]);
+        assert_eq!(pos, 0);
+        assert_eq!(remaining_after, 3);
+        let (chunk, pos, remaining_after) = s.take_prefill_chunk(2).unwrap();
+        assert_eq!(chunk, vec![3, 4]);
+        assert_eq!(pos, 2);
+        assert_eq!(remaining_after, 1);
+        let (chunk, pos, remaining_after) = s.take_prefill_chunk(2).unwrap();
+        assert_eq!(chunk, vec![5]);
+        assert_eq!(pos, 4);
+        assert_eq!(remaining_after, 0);
+        // Drained — next call returns None.
+        assert!(s.take_prefill_chunk(2).is_none());
+    }
+
+    #[test]
+    fn prefill_chunk_with_prefix_cache_hit_starts_at_prefix_len() {
+        // Prompt is 8 tokens; prefix-cache matched 5 → remaining is the last 3,
+        // and chunk_index_pos starts at the prefix length.
+        let mut s = dummy_prefilling_slot(Uuid::new_v4(), (0, 22), vec![6, 7, 8], 8);
+        let (chunk, pos, remaining_after) = s.take_prefill_chunk(8).unwrap();
+        assert_eq!(chunk, vec![6, 7, 8]);
+        assert_eq!(pos, 5);
+        assert_eq!(remaining_after, 0);
+    }
+
+    #[test]
+    fn prefill_chunk_caps_at_remaining_when_chunk_size_too_big() {
+        let mut s = dummy_prefilling_slot(Uuid::new_v4(), (0, 22), vec![1, 2, 3], 3);
+        let (chunk, pos, remaining_after) = s.take_prefill_chunk(1024).unwrap();
+        assert_eq!(chunk, vec![1, 2, 3]);
+        assert_eq!(pos, 0);
+        assert_eq!(remaining_after, 0);
+    }
+
+    #[test]
+    fn prefill_chunk_zero_size_treated_as_one() {
+        let mut s = dummy_prefilling_slot(Uuid::new_v4(), (0, 22), vec![1, 2, 3], 3);
+        let (chunk, _, remaining_after) = s.take_prefill_chunk(0).unwrap();
+        assert_eq!(chunk, vec![1]);
+        assert_eq!(remaining_after, 2);
+    }
+
+    #[test]
+    fn promote_to_decoding_clears_remaining_and_seeds_first_token() {
+        let mut s = dummy_prefilling_slot(Uuid::new_v4(), (0, 22), vec![], 8);
+        // Simulate next_chunk_index_pos already at prompt_tokens (last chunk drained).
+        if let SlotState::Prefilling {
+            next_chunk_index_pos,
+            ..
+        } = &mut s.state
+        {
+            *next_chunk_index_pos = 8;
+        }
+        s.promote_to_decoding(99, Some(-2.5));
+        assert!(s.is_decoding());
+        match s.state {
+            SlotState::Decoding {
+                last_token,
+                last_token_logprob,
+                generated_count,
+                index_pos,
+            } => {
+                assert_eq!(last_token, 99);
+                assert_eq!(last_token_logprob, Some(-2.5));
+                assert_eq!(generated_count, 0);
+                assert_eq!(index_pos, 8);
+            }
+            _ => panic!("expected Decoding"),
+        }
+    }
+
+    #[test]
+    fn take_prefill_chunk_on_decoding_slot_returns_none() {
+        let mut s = dummy_decoding_slot(Uuid::new_v4(), (0, 22));
+        assert!(s.take_prefill_chunk(4).is_none());
     }
 }

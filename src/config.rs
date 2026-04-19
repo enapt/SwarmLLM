@@ -254,6 +254,15 @@ pub struct InferenceConfig {
     /// effectively dispatches immediately.
     #[serde(default = "default_batch_collection_ms")]
     pub batch_collection_ms: u64,
+    /// Item 7 Phase 2: Sarathi-style chunked prefill chunk size (in prompt
+    /// tokens). When `continuous_batching = true`, every admitted slot
+    /// advances by this many prompt tokens per decode tick before its first
+    /// token is sampled — bounding the latency a long admission can impose
+    /// on already-active decode slots. Smaller = lower decode interruption
+    /// at the cost of more prefill ticks; larger = the opposite. 0 / 1
+    /// degenerate to one-token-per-tick prefill.
+    #[serde(default = "default_prefill_chunk_tokens")]
+    pub prefill_chunk_tokens: u32,
     /// Number of draft tokens to propose per verification step (default: 4).
     #[serde(default = "default_speculative_gamma")]
     pub speculative_gamma: u32,
@@ -1229,6 +1238,13 @@ fn default_max_decode_batch() -> u32 {
     8
 }
 
+fn default_prefill_chunk_tokens() -> u32 {
+    // Sized to keep a single chunk's compute well under typical per-decode
+    // latency on small models (TinyLlama Q4 ~ a few ms per token at 128
+    // chunk on CPU). Bigger models / GPU users can raise via config.
+    128
+}
+
 fn default_batch_collection_ms() -> u64 {
     5
 }
@@ -1352,6 +1368,7 @@ impl Default for InferenceConfig {
             continuous_batching: default_continuous_batching(),
             max_concurrent_decode_batch: default_max_decode_batch(),
             batch_collection_ms: default_batch_collection_ms(),
+            prefill_chunk_tokens: default_prefill_chunk_tokens(),
             speculative_gamma: default_speculative_gamma(),
             draft_model_path: None,
             draft_gpu_layers: None,
