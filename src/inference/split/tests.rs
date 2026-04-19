@@ -2940,3 +2940,117 @@ fn forward_batch_timing() {
     }
     eprintln!();
 }
+
+/// Item 7 Phase 4 timing: fused prefill-chunk `forward_batch` vs N sequential
+/// `forward()` calls at seq_len > 1.  Measures the synthetic ceiling of the
+/// Phase A batching win under burst-admit of same-shape prompts — the
+/// end-to-end bench (`swarmllm bench --concurrency N`) translates this into
+/// TTFT improvement once the same admits queue up in the worker's mpsc.
+///
+/// Run with:
+///   cargo test --release forward_prefill_batch_timing -- --nocapture --ignored
+#[test]
+#[ignore]
+fn forward_prefill_batch_timing() {
+    let hidden_dim = 1024;
+    let num_layers = 22;
+    let (device, device_label) = match candle_core::Device::new_cuda(0) {
+        Ok(d) => (d, "CUDA:0"),
+        Err(_) => (candle_core::Device::Cpu, "CPU"),
+    };
+    let mut model = make_test_split_model_on(num_layers, hidden_dim, device);
+    let kv_store = KvCacheStore::new(std::time::Duration::from_secs(600));
+
+    let iters = 10usize;
+    // Filter chunk sizes to what the test model's context window permits.
+    // `make_test_split_model_on` uses max_seq_len = 128, so 512 won't fit.
+    let raw_chunk_sizes = [32usize, 64, 128];
+    let batch_sizes = [2usize, 4, 8];
+    let chunk_sizes: Vec<usize> = raw_chunk_sizes
+        .into_iter()
+        .filter(|&c| c <= model.max_seq_len)
+        .collect();
+
+    eprintln!(
+        "\nforward_prefill_batch timing | hidden={hidden_dim} layers={num_layers} iters={iters} device={device_label}"
+    );
+    eprintln!("(batch of N `[1, chunk]` inputs vs N sequential `forward()` calls)\n");
+    eprintln!(
+        "{:<8} {:<8} {:<18} {:<18} {:<10}",
+        "chunk", "batch", "batch_ms/iter", "sequential_ms/iter", "speedup"
+    );
+    eprintln!("{:-<66}", "");
+
+    let cache_prefix = format!(
+        "{}-{}-{}",
+        model.layer_start, model.layer_end, model.total_layers
+    );
+
+    for &chunk_size in chunk_sizes.iter() {
+        for &batch_size in &batch_sizes {
+            let inputs: Vec<Tensor> = (0..batch_size)
+                .map(|_| {
+                    Tensor::randn(0f32, 1.0, (1, chunk_size, hidden_dim), model.device()).unwrap()
+                })
+                .collect();
+
+            // Warm up one batched call.
+            {
+                let items: Vec<BatchItem> = inputs
+                    .iter()
+                    .enumerate()
+                    .map(|(i, t)| BatchItem {
+                        input: t,
+                        index_pos: 0,
+                        request_id: Box::leak(
+                            format!("warm-{chunk_size}-{batch_size}-{i}").into_boxed_str(),
+                        ),
+                    })
+                    .collect();
+                let _ = model.forward_batch(&items, &kv_store).unwrap();
+                for item in &items {
+                    kv_store.clear_request(&cache_prefix, item.request_id);
+                }
+            }
+
+            // Time batched.
+            let items: Vec<BatchItem> = inputs
+                .iter()
+                .enumerate()
+                .map(|(i, t)| BatchItem {
+                    input: t,
+                    index_pos: 0,
+                    request_id: Box::leak(
+                        format!("bench-prefill-batch-{chunk_size}-{batch_size}-{i}")
+                            .into_boxed_str(),
+                    ),
+                })
+                .collect();
+            let start = std::time::Instant::now();
+            for _ in 0..iters {
+                for item in &items {
+                    kv_store.clear_request(&cache_prefix, item.request_id);
+                }
+                let _ = model.forward_batch(&items, &kv_store).unwrap();
+            }
+            let batch_ms = start.elapsed().as_secs_f64() * 1000.0 / iters as f64;
+
+            // Time sequential.
+            let start = std::time::Instant::now();
+            for _ in 0..iters {
+                for (i, t) in inputs.iter().enumerate() {
+                    let rid = format!("bench-prefill-seq-{chunk_size}-{batch_size}-{i}");
+                    kv_store.clear_request(&cache_prefix, &rid);
+                    let _ = model.forward(t, 0, &kv_store, &rid).unwrap();
+                }
+            }
+            let seq_ms = start.elapsed().as_secs_f64() * 1000.0 / iters as f64;
+
+            let speedup = seq_ms / batch_ms.max(1e-9);
+            eprintln!(
+                "{chunk_size:<8} {batch_size:<8} {batch_ms:<18.2} {seq_ms:<18.2} {speedup:<10.2}x"
+            );
+        }
+    }
+    eprintln!();
+}

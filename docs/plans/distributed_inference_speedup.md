@@ -851,6 +851,45 @@ times). On TinyLlama + RTX 3070, single-user prefill is already fast
 enough that the measurable win requires burst-admit of same-chunk-size
 prompts; open item for round 5 benchmarks.
 
+### Phase 4 synthetic bench (LANDED 2026-04-19)
+
+`src/inference/split/tests.rs::forward_prefill_batch_timing` — ignored
+timing test that compares `forward_batch` vs N sequential `forward`
+calls across chunk sizes {32, 64, 128} × batch sizes {2, 4, 8} on a
+22-layer / 1024-hidden test model. CPU debug: 1.11–1.63× speedup
+depending on (chunk, batch). GPU release (RTX 3070): mostly wash at
+this small hidden_dim, maxing at 1.13× at (128, 8). Numbers in
+`docs/plans/benchmarks/round5.md`.
+
+### Phase 4 E2E bench + admit-coalescing fix (LANDED 2026-04-19)
+
+**The fix.** End-to-end measurement surfaced that Phase 4's batching
+never fired under real HTTP-paced traffic. Root cause: the worker's
+`tokio::select!` strictly interleaved admit → tick → admit → tick, so
+even concurrent admits ended up at different `index_pos` by the time
+they were in the slot table simultaneously. Fix: after handling any
+mpsc message, drain up to 16 further messages via `try_recv()` *before*
+running the next decode tick (see `src/inference/model_worker.rs`'s
+`handle_daemon_msg` helper). The refactor extracted the message-handling
+match into a free async function so it can be reused inside the drain
+loop.
+
+**Measured (RTX 3070, TinyLlama-1.1B Q4_K_M, same ~100-token prompt
+across all concurrent requests):**
+
+| Mode | Concurrency | Aggregate tok/s | TTFT min / avg / max (ms) | DIAG `chunk fused` |
+|---|---|---|---|---|
+| Before fix | 4 | 31.2 | 52 / 235 / 447 | 0 |
+| After fix  | 4 | **49.1** (+57%) | **180 / 180 / 180** | 1 (batch_size=4) |
+| After fix  | 8 | **42.4** | **321 / 321 / 321** | 1 (batch_size=8) |
+
+TTFT uniformity (all concurrent requests served in the same ms after
+the fix) is the headline. Aggregate tok/s uplift reflects fused-FFN
+amortization on the prefill tick. Larger-model numbers (Phi-3.5-mini,
+Qwen-7B) are pending — those OOM on the 8 GB RTX 3070 under the
+current default `max_seq_len_override=8192` × 8-slot KV reservation.
+See `docs/plans/benchmarks/round5.md` for the full reproducing recipe.
+
 ---
 
 ## Cross-item sequencing (Round 2)

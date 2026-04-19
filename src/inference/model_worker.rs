@@ -179,112 +179,62 @@ pub async fn run_worker(
             }
         };
 
+        let mut shutdown = false;
         if let Some((msg, payload)) = next_msg {
-            match msg {
-                DaemonMsg::Forward(fwd) => {
-                    let request_id = fwd.request_id;
-                    if let Err(e) = handle_forward(
-                        &mut writer,
-                        &mut models,
-                        &kv_store,
-                        &data_dir,
-                        fwd,
-                        payload,
-                        &shard_window,
-                        activation_compression,
-                    )
-                    .await
-                    {
-                        send_worker_error(&mut writer, request_id, e).await;
-                    }
-                }
-                DaemonMsg::BatchForward {
-                    requests,
-                    activation_lens,
-                } => {
-                    if let Err(e) = handle_batch_forward(
-                        &mut writer,
-                        &mut models,
-                        &kv_store,
-                        &data_dir,
-                        requests,
-                        activation_lens,
-                        payload,
-                        &shard_window,
-                        activation_compression,
-                    )
-                    .await
-                    {
-                        tracing::warn!(error = %e, "model-worker: BatchForward failed");
-                    }
-                }
-                DaemonMsg::Generate(gen) => {
-                    let request_id = gen.request_id;
-                    // Try to admit into the BatchGenerate slot table when the
-                    // flag is on and the request is eligible (no SWIFT, simple
-                    // sampling, room in the table, matching layer_range). On
-                    // ineligibility or FallThrough, the IpcGenerate is restored
-                    // here and runs through sequential `handle_generate`.
-                    let mut pending: Option<IpcGenerate> = Some(gen);
-                    if batch_generate
-                        && pending
-                            .as_ref()
-                            .map(|g| slot_admission_eligible(g, &swift_cfg, &slot_table))
-                            .unwrap_or(false)
-                    {
-                        let g = pending.take().expect("checked above");
-                        match try_register_generate_slot(
-                            &mut models,
-                            &kv_store,
-                            &prefix_cache,
-                            &data_dir,
-                            g,
-                            &shard_window,
-                            &mut slot_table,
-                        ) {
-                            Ok(_) => { /* registered — chunked prefill happens in step_decode_pool */
-                            }
-                            Err(SlotAdmitError::Fatal(e)) => {
-                                send_worker_error(&mut writer, request_id, e).await;
-                            }
-                            Err(SlotAdmitError::FallThrough(g)) => {
-                                pending = Some(*g);
-                            }
-                        }
-                    }
-                    if let Some(g) = pending {
-                        if let Err(e) = handle_generate(
+            shutdown |= handle_daemon_msg(
+                msg,
+                payload,
+                &mut writer,
+                &mut models,
+                &kv_store,
+                &prefix_cache,
+                &data_dir,
+                &shard_window,
+                &swift_cfg,
+                force_standard_attn,
+                max_seq_len_override,
+                activation_compression,
+                batch_generate,
+                &mut slot_table,
+            )
+            .await;
+
+            // Admit-coalescing: drain any further messages already queued on
+            // the mpsc before the next decode tick runs. This lets Phase 4
+            // (Item 7) batch concurrent admits whose Generates arrive in a
+            // cluster — without this drain, each admit gets its own tick,
+            // and prefill chunks at different `(chunk_len, index_pos)` never
+            // group together. Bounded by the channel capacity (16) so a
+            // rogue sender can't starve the tick.
+            for _ in 0..16 {
+                match ipc_rx.try_recv() {
+                    Ok((m2, p2)) => {
+                        shutdown |= handle_daemon_msg(
+                            m2,
+                            p2,
                             &mut writer,
                             &mut models,
                             &kv_store,
                             &prefix_cache,
                             &data_dir,
-                            g,
                             &shard_window,
                             &swift_cfg,
                             force_standard_attn,
                             max_seq_len_override,
+                            activation_compression,
+                            batch_generate,
+                            &mut slot_table,
                         )
-                        .await
-                        {
-                            send_worker_error(&mut writer, request_id, e).await;
-                        }
+                        .await;
                     }
-                }
-                DaemonMsg::Unload {
-                    layer_start,
-                    layer_end,
-                } => {
-                    models.retain(|&(ls, le, _, _), _| !(ls == layer_start && le == layer_end));
-                    tracing::info!(layer_start, layer_end, "model-worker: unloaded shard range");
-                }
-                DaemonMsg::Shutdown => {
-                    let _ = send_worker(&mut writer, &WorkerMsg::Bye, &[]).await;
-                    break;
+                    Err(_) => break,
                 }
             }
         } else if slot_table.is_empty() {
             // ipc_rx returned None and no slots — daemon socket closed, exit cleanly.
+            break;
+        }
+        if shutdown {
             break;
         }
 
@@ -2313,6 +2263,128 @@ async fn finalize_slot(
 
     kv_store.clear_request(&model_key, &req_id_str);
     Ok(())
+}
+
+/// Handle a single `DaemonMsg` from the daemon. Extracted from the main select
+/// loop so it can be reused inside the admit-coalescing drain loop (drain any
+/// messages already queued on the mpsc before running the next decode tick).
+///
+/// Returns `true` iff the message was `Shutdown` (caller should break).
+#[allow(clippy::too_many_arguments)]
+async fn handle_daemon_msg(
+    msg: DaemonMsg,
+    payload: Vec<u8>,
+    writer: &mut tokio::net::unix::OwnedWriteHalf,
+    models: &mut HashMap<(usize, usize, usize, usize), SplitModel>,
+    kv_store: &Arc<KvCacheStore>,
+    prefix_cache: &Arc<PrefixCache>,
+    data_dir: &std::path::Path,
+    shard_window: &Option<Vec<u32>>,
+    swift_cfg: &SwiftConfig,
+    force_standard_attn: bool,
+    max_seq_len_override: Option<usize>,
+    activation_compression: bool,
+    batch_generate: bool,
+    slot_table: &mut SlotTable,
+) -> bool {
+    match msg {
+        DaemonMsg::Forward(fwd) => {
+            let request_id = fwd.request_id;
+            if let Err(e) = handle_forward(
+                writer,
+                models,
+                kv_store,
+                data_dir,
+                fwd,
+                payload,
+                shard_window,
+                activation_compression,
+            )
+            .await
+            {
+                send_worker_error(writer, request_id, e).await;
+            }
+        }
+        DaemonMsg::BatchForward {
+            requests,
+            activation_lens,
+        } => {
+            if let Err(e) = handle_batch_forward(
+                writer,
+                models,
+                kv_store,
+                data_dir,
+                requests,
+                activation_lens,
+                payload,
+                shard_window,
+                activation_compression,
+            )
+            .await
+            {
+                tracing::warn!(error = %e, "model-worker: BatchForward failed");
+            }
+        }
+        DaemonMsg::Generate(gen) => {
+            let request_id = gen.request_id;
+            let mut pending: Option<IpcGenerate> = Some(gen);
+            if batch_generate
+                && pending
+                    .as_ref()
+                    .map(|g| slot_admission_eligible(g, swift_cfg, slot_table))
+                    .unwrap_or(false)
+            {
+                let g = pending.take().expect("checked above");
+                match try_register_generate_slot(
+                    models,
+                    kv_store,
+                    prefix_cache,
+                    data_dir,
+                    g,
+                    shard_window,
+                    slot_table,
+                ) {
+                    Ok(_) => { /* registered — chunked prefill happens in step_decode_pool */ }
+                    Err(SlotAdmitError::Fatal(e)) => {
+                        send_worker_error(writer, request_id, e).await;
+                    }
+                    Err(SlotAdmitError::FallThrough(g)) => {
+                        pending = Some(*g);
+                    }
+                }
+            }
+            if let Some(g) = pending {
+                if let Err(e) = handle_generate(
+                    writer,
+                    models,
+                    kv_store,
+                    prefix_cache,
+                    data_dir,
+                    g,
+                    shard_window,
+                    swift_cfg,
+                    force_standard_attn,
+                    max_seq_len_override,
+                )
+                .await
+                {
+                    send_worker_error(writer, request_id, e).await;
+                }
+            }
+        }
+        DaemonMsg::Unload {
+            layer_start,
+            layer_end,
+        } => {
+            models.retain(|&(ls, le, _, _), _| !(ls == layer_start && le == layer_end));
+            tracing::info!(layer_start, layer_end, "model-worker: unloaded shard range");
+        }
+        DaemonMsg::Shutdown => {
+            let _ = send_worker(writer, &WorkerMsg::Bye, &[]).await;
+            return true;
+        }
+    }
+    false
 }
 
 /// Decode a single token to text using the model's vocabulary.
