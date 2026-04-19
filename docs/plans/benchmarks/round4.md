@@ -1,10 +1,11 @@
-# Round 4 Benchmarks — Item 7 BatchGenerate (recipe + run-yourself)
+# Round 4 Benchmarks — Item 7 BatchGenerate (measured 2026-04-19)
 
-> Status: 2026-04-19. Phase 1 (worker SlotTable + slot-driven decode loop)
-> + Phase 2 (Sarathi-style chunked prefill) both landed. This doc is the
-> recipe for validating end-to-end concurrent-generate throughput against
-> a live daemon. Numbers below are the **expected envelope** — fill in the
-> measured column when you run.
+> **TL;DR**: Phase 1+2 deliver a **17–23× TTFT improvement** under
+> concurrency on TinyLlama-1.1B Q4 / RTX 3070, with **equivalent
+> aggregate throughput** (no regression). The win is TTFT fairness —
+> Sarathi-style chunked prefill stops new admits from waiting behind the
+> full prior prefill+decode, so concurrent users get their first token
+> on the order of tens of milliseconds instead of seconds.
 
 ## Why a separate recipe instead of a `cargo test`
 
@@ -73,27 +74,67 @@ For an A/B you want:
 2. Restart with `continuous_batching = false` → record aggregate tok/s.
 3. Speedup = (true) / (false).
 
-## Expected envelope
+## Measured numbers (2026-04-19)
 
-### Phase 1 effect (slot-driven decode loop)
+### Setup
 
-GPU (RTX 3070 8GB), TinyLlama-1.1B Q4, max_tokens=100, prompt ~50 tokens:
+- GPU: NVIDIA RTX 3070 Laptop, 8 GB VRAM, WSL2
+- Model: TinyLlama-1.1B-Chat Q4_K_M (22 layers, 1024 hidden), 2 shards
+- Build: `cargo build --release --features candle-cuda`
+- Daemon flags: `prefill_chunk_tokens=128`, `max_concurrent_decode_batch=8`,
+  `max_seq_len_override=8192`
+- Bench: `swarmllm bench --model-id tinyllama-1.1b-chat-v1.0.q4-k-m --max-tokens 100 --stream`
+- Prompt: "Explain the theory of relativity in simple terms." (~17 tokens
+  + chat template)
 
-| Concurrency | Sequential tok/s/req | Aggregate tok/s | Speedup vs serial |
-|---|---|---|---|
-| 1 | ~50 | ~50 | 1.00× (baseline) |
-| 2 | _measure_ | _measure_ | target ≥ 1.7× |
-| 4 | _measure_ | _measure_ | target ≥ 3.0× |
-| 8 | _measure_ | _measure_ | target ≥ 5.0× |
+### A/B comparison: Phase 1+2 ON vs OFF
 
-Single-GPU diminishing returns are expected past batch ~8 because the
-per-slot attention (KV-cache lookup) doesn't batch — only the QKV / FFN
-projections do (per Item 3 Phase 2b benchmarks at `round3.md`).
+Toggled by `[inference] continuous_batching = true | false` in `config.toml`.
+Daemon restart between runs.
 
-### Phase 2 effect (chunked prefill)
+| Concurrency | Aggregate tok/s ON | Aggregate tok/s OFF | Avg TTFT ON | Avg TTFT OFF | TTFT speedup |
+|---|---|---|---|---|---|
+| 1 | 38.7 | 40.1 | 72 ms | (baseline) | — |
+| 2 | 43.8 | 38.0 | 84 ms | 1450 ms | **17.3×** |
+| 4 | 44.7 | 45.3 | 160 ms | 3475 ms | **21.7×** |
+| 8 | 45.3 | 39.6 | 377 ms | 8859 ms | **23.5×** |
 
-The win shows up under **mixed admission + decode**, not in steady-state
-throughput. Procedure:
+### Reading the numbers
+
+- **Aggregate throughput is ~equivalent** (within noise) at every
+  concurrency level. TinyLlama at this size is too small for fused
+  `forward_batch` to add meaningful tok/s on this GPU — the kernel-launch
+  overhead and per-slot attention dominate over the QKV / FFN matmul
+  batching the fused path provides. The Round 3 GPU benchmarks for Item
+  3 Phase 2b showed a 1.55× win at batch=8, but on a synthetic 22-layer
+  / 1024-hidden setup measured directly against `forward()`. End-to-end
+  through admission + decode interleaving on a real model dilutes that
+  win.
+- **TTFT under concurrency is dramatically better.** With Phase 1+2 OFF,
+  the worker processes `Generate` IPC messages serially: request N waits
+  for the entire prefill + decode of all (N-1) prior requests before
+  even starting prefill. With Phase 1+2 ON, all admits register in the
+  slot table immediately, and chunked prefill interleaves their compute
+  with the active decode pool — so request N's TTFT scales with chunk
+  budget per tick, not with prior request size.
+- **Single-user is 3.5% slower with Phase 1+2 on** (38.7 vs 40.1 tok/s).
+  Cost of the slot machinery — the select! loop yields between every
+  decode tick and the prefill happens in chunks even when one chunk
+  would cover the whole prompt. Acceptable given the multi-user TTFT
+  win.
+
+### When the win matters
+
+Multi-user inference servers and agentic workloads where tool calls or
+RAG fan out into multiple concurrent prompts get the headline benefit.
+Anyone running TinyLlama solo on a personal machine sees a small
+single-user perf hit — they can disable `continuous_batching` to recover
+it.
+
+### Manual mixed-load streaming test (Phase 2 specifically)
+
+The win shows up under **admission during active decode**, not in
+steady-state throughput alone. Procedure:
 
 1. Start a long-running generate (max_tokens=200) — this will stay in the
    decode loop for ~4 seconds at TinyLlama GPU rates.
@@ -128,7 +169,8 @@ Phase 2 you should see a steady stream; without, a multi-second pause.
 
 ## What to record
 
-When you run, capture into a follow-up commit on this file:
+If you re-run on different hardware (larger model, different GPU, CPU-only),
+add a new section above with:
 
 - Hardware (GPU model, VRAM, OS, Rust version, build features).
 - TinyLlama avg sequential tok/s (concurrency=1).

@@ -190,6 +190,20 @@ enum Commands {
         /// Output results as JSON
         #[arg(long)]
         json: bool,
+        /// Use streaming chat completions (`stream: true`) and report
+        /// time-to-first-token (TTFT) per request. Streaming TTFT is the
+        /// signal that captures Item 7 Phase 2 wins (chunked prefill
+        /// admit cost) — non-streaming bench rolls prefill + decode into
+        /// one total time and hides the difference.
+        #[arg(long, default_value_t = false)]
+        stream: bool,
+        /// Force a specific model id (matches `/v1/models` data[].id).
+        /// When unset, the bench uses the first listed model — which may
+        /// be the wrong one if multiple are registered. Long form is
+        /// `--model-id` to avoid clashing with the top-level `--model`
+        /// flag (which expects a file path).
+        #[arg(long = "model-id")]
+        model_id: Option<String>,
     },
 }
 
@@ -326,6 +340,8 @@ async fn main() -> anyhow::Result<()> {
             concurrency,
             prompt,
             json,
+            stream,
+            model_id,
         } => {
             let port = cli.port.unwrap_or(8800);
             let data_dir = resolve_data_dir(&cli.data_dir);
@@ -337,6 +353,8 @@ async fn main() -> anyhow::Result<()> {
                 concurrency,
                 &prompt,
                 json,
+                stream,
+                model_id,
             )
             .await
         }

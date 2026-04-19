@@ -12,7 +12,7 @@
 > - **Item 5** prefix cache — 29.4× wall-clock on cache hit
 > - **Item 3** continuous batching — 1.34–1.55× GPU throughput for concurrent requests (CPU falls through to sequential, no regression)
 > - **Item 16 A+B** Parallax routing — shortest-path pipeline chain via DP + observed per-peer latency EMA
-> - **Item 7 Phases 1 + 2** worker-side SlotTable + Sarathi chunked prefill — concurrent `pool.generate()` callers interleave through one `forward_batch` per tick, and a long-prompt admission only stalls decode for one prefill chunk per tick (gated by the same `continuous_batching` flag; benchmark pending)
+> - **Item 7 Phases 1 + 2** worker-side SlotTable + Sarathi chunked prefill — measured **17–23× TTFT improvement** at concurrency 2/4/8 on RTX 3070 + TinyLlama Q4 with equivalent aggregate throughput (no regression). See `benchmarks/round4.md`.
 >
 > Everything else is behind a flag (`speculative_distributed`, `persistent_pipeline_stream`, `decentralized_spec_decoding`, `activation_compression`, `swift_self_speculative`) or advisory (Phase C allocator).
 >
@@ -27,32 +27,36 @@
 > | **Item 13 — Activation compression (Q8_0)** | ✅ LANDED behind `activation_compression=false` flag. Codec verified (~3.76× compression, RMS error <0.005, peer-compatible auto-dispatch). End-to-end multi-segment benchmark pending. |
 > | **Item 12 — DSD (decentralized speculative)** | ✅ ALL PHASES LANDED 2026-04-18 behind `decentralized_spec_decoding=false`. Worker γ-token decode + KV truncation primitives + γ controller + multi-segment spec-verify worker branch + ~410 LOC coordinator loop in `pipeline/dsd.rs`. End-to-end multi-segment WAN benchmark pending. |
 > | **Item 16 — Parallax scheduler (Phases A+B+B.2+C+C.2)** | ✅ LANDED 2026-04-18/19. All phases default-on except Phase D (multi-pipeline concurrency, deferred). Phase A: shortest-path DP. Phase B: observed per-layer latency EMA. Phase B.2: cross-node gossip of top-32 observed latencies via `NodeCapability.observed_latencies`. Phase C: `parallax_allocator.rs` offline layer allocator with `Z(k) = k²/s*(k)` objective. Phase C.2 (2026-04-19): soft acquire/prune bias in `AutoShardManager` driven by a per-shard stability counter (≥3 ticks of consistent signal) — respects every existing hard constraint. Tests: 10 routing + 7 allocator + 2 scheduler integration + 1 EMA math + 5 merge + 8 stability. |
-> | **Item 7 — BatchGenerate Phases 1 + 2** | ✅ LANDED 2026-04-19. Phase 1: worker-side `SlotTable` + slot-driven decode loop (concurrent `pool.generate()` callers interleave through one `SplitModel::forward_batch` per tick). Phase 2: Sarathi-style chunked prefill — slots register in `Prefilling { remaining_ids, next_chunk_index_pos }`, advance by `prefill_chunk_tokens` (default 128) per tick before transitioning to `Decoding`. Decode interruption from a long-prompt admission now bounded by chunk size instead of full prefill duration. End-to-end concurrent-generate benchmark is Phase 3 work. |
+> | **Item 7 — BatchGenerate Phases 1 + 2** | ✅ LANDED 2026-04-19, **measured 2026-04-19** (RTX 3070 + TinyLlama-1.1B Q4): **17–23× TTFT improvement** under concurrency, with equivalent aggregate throughput vs Phase 1+2 OFF. The win is TTFT fairness — Sarathi chunked prefill prevents new admits from waiting behind the full prior prefill+decode. Aggregate throughput is unchanged because TinyLlama is too small for fused `forward_batch` to add tok/s on this GPU. See `docs/plans/benchmarks/round4.md`. |
 >
-> **NEXT SESSION — run the Item 7 benchmark recipe.**
+> **NEXT SESSION — pick a new direction (Item 7 measured + done).**
 >
-> Item 7 Phase 1 + Phase 2 + per-slot error containment + DIAG tracing
-> all landed 2026-04-19. Bench recipe doc at
-> `docs/plans/benchmarks/round4.md` documents the `swarmllm bench
-> --concurrency N` workflow against a live daemon (sidesteps the
-> `current_exe()` integration-test gotcha by using real HTTP).
+> Item 7 Phases 1 + 2 + 3 (benchmark) all landed 2026-04-19. Headline:
+> **17–23× TTFT improvement** under concurrency on RTX 3070 + TinyLlama
+> Q4, equivalent aggregate throughput. See `benchmarks/round4.md` for
+> the full A/B table.
 >
-> **Phase 3 = empirical validation.** Follow round4.md, capture
-> aggregate tok/s at concurrency 1/2/4/8 on the user's GPU box,
-> drop the numbers back into the doc, then decide whether
-> `continuous_batching` defaults stay on.
+> **Candidate next picks:**
+> - **Phase 4 batched chunked prefill** (small): stack same-index_pos
+>   prefill chunks into a single forward to tighten TTFT further under
+>   burst-admit. Probably ~1 session.
+> - **Item 8 — cross-node prefix cache sharing** (large): announce
+>   BLAKE3 prompt-prefix hashes via gossip; peers serve KV blocks for
+>   shared prefixes on demand. Distinguishing P2P feature; multi-session.
+> - **Items 14 / 17 / 18** (large research items, see Round 3 list).
 >
 > **Session state to recall on resume:**
-> - Last session: Item 7 Phase 1 + Phase 2 + error containment landed 2026-04-19
+> - Last session: Item 7 Phases 1+2 landed + benchmark measured 2026-04-19
 > - Tests: 675 lib + 67 integration = 742 total on `dev,claude-subscription`
->   (13 SlotTable tests; +1 net from `finish_error` test)
-> - Bench docs: `round3.md` GPU validated 1.55× at batch=8;
->   `round4.md` recipe pending real numbers
+>   (13 SlotTable tests)
+> - Bench docs: `round3.md` GPU 1.55× at batch=8; `round4.md` Item 7
+>   measured at 17–23× TTFT improvement
 > - Pre-staged models: TinyLlama-1.1B, Phi-3.5-mini, Qwen2.5-Coder-7B — see
 >   `memory/local_model_shards.md`
 > - User env: RTX 3070 Laptop 8GB, WSL2, CUDA works via `/usr/lib/wsl/lib`.
 >   Default test build is `cargo build --no-default-features --features dev,claude-subscription`;
->   GPU work needs `dev,candle-cuda`.
+>   GPU work needs `dev,candle-cuda`. Daemon needs `max_seq_len_override`
+>   in config.toml to fit Phi-3.5-mini's 128K context (try 8192).
 >
 > **Other work items (not prioritized for the next session but tracked):**
 > - Item 2 with a matched-backend draft model (research flagged `Qwen2.5-0.5B`
@@ -762,12 +766,38 @@ from 6 new SlotTable prefill state tests).
 from the new `finish_error_records_message_and_blocks_other_finishers`
 slot_table test).
 
-### Phase 3 (next session): run the bench and measure
+### Phase 3 (LANDED 2026-04-19): bench measured
 
-Follow `docs/plans/benchmarks/round4.md` to capture concurrent-generate
-numbers on GPU. Target ≥1.7× aggregate tok/s at concurrency=2 on
-TinyLlama-1.1B Q4. Then drop the measured numbers into the round4 doc
-+ flip `continuous_batching` defaults if validated.
+Ran the bench recipe end-to-end on the user's RTX 3070 setup. Results
+are in `docs/plans/benchmarks/round4.md`. Headline:
+
+| Concurrency | Aggregate tok/s ON | Aggregate tok/s OFF | Avg TTFT ON | Avg TTFT OFF | TTFT speedup |
+|---|---|---|---|---|---|
+| 2 | 43.8 | 38.0 | 84 ms | 1450 ms | **17.3×** |
+| 4 | 44.7 | 45.3 | 160 ms | 3475 ms | **21.7×** |
+| 8 | 45.3 | 39.6 | 377 ms | 8859 ms | **23.5×** |
+
+Throughput is equivalent (TinyLlama is too small for the fused
+`forward_batch` matmul win at this batch size on this GPU). The
+real-world impact is TTFT fairness under concurrency — concurrent users
+get their first token in tens of ms instead of seconds. Single-user is
+3.5% slower with Phase 1+2 on (slot-loop overhead) but well within the
+range an operator would happily trade for multi-user UX.
+
+The bench tool also gained `--stream` + `--model-id` flags this session.
+Streaming mode parses SSE chunks and reports per-request TTFT; the
+`--model-id` override avoids picking the wrong model when multiple are
+registered (the auto-pick was hitting OOM on Qwen-7B).
+
+### Phase 4 (next session, optional): batched chunked prefill
+
+Today every Prefilling slot's chunk forward runs sequentially in
+Phase A. Eight admits → eight sequential 50-ms forwards → 400 ms of
+TTFT padding before any of them sample their first decode token. Could
+stack the chunks (each is `[1, chunk_size]`) into one `[N, chunk_size]`
+forward via a new prefill-mode `forward_batch` variant. Would tighten
+TTFT under burst-admit further. Keep simple: only batch chunks that
+share `index_pos` exactly, fall back to sequential otherwise.
 
 ---
 
