@@ -1433,6 +1433,74 @@ pub(crate) async fn dispatch_network_messages(
                                         );
                                     }
 
+                                    // Item 8 Phase 1: cross-node prefix-cache announcement.
+                                    // Each peer broadcasts the BLAKE3 chained-hash list of
+                                    // its locally-cached prompt-prefix blocks for `model_id`.
+                                    // We update the local index so Phase 2's KV-fetch path
+                                    // can ask "who has this block hash?" and pick a peer.
+                                    SwarmMessage::PrefixCacheAnnounce(announce) => {
+                                        match &authenticated_sender {
+                                            Some(sender) if *sender != announce.node_id => {
+                                                tracing::warn!(
+                                                    sender = %sender,
+                                                    claimed = %announce.node_id,
+                                                    "PrefixCacheAnnounce sender mismatch — dropping"
+                                                );
+                                                continue;
+                                            }
+                                            None => {
+                                                tracing::debug!("Dropping unauthenticated PrefixCacheAnnounce");
+                                                continue;
+                                            }
+                                            Some(_) => {}
+                                        }
+                                        // Drop self-announces — local cache hits are served
+                                        // from the in-process PrefixCache directly.
+                                        if announce.node_id == *shared_state.identity.node_id() {
+                                            continue;
+                                        }
+                                        // Memory DoS guard: cap blocks per announce. A 7B model
+                                        // at 64-token blocks tops out at ~120 blocks per 8K
+                                        // prompt; 1024 leaves generous headroom for larger
+                                        // contexts without unbounded growth.
+                                        const MAX_BLOCKS_PER_ANNOUNCE: usize = 1024;
+                                        if announce.blocks.len() > MAX_BLOCKS_PER_ANNOUNCE {
+                                            tracing::warn!(
+                                                node_id = %announce.node_id,
+                                                blocks = announce.blocks.len(),
+                                                max = MAX_BLOCKS_PER_ANNOUNCE,
+                                                "PrefixCacheAnnounce exceeds block limit — dropping"
+                                            );
+                                            continue;
+                                        }
+                                        if announce.model_id.0.len() > 256 {
+                                            tracing::warn!(
+                                                node_id = %announce.node_id,
+                                                "PrefixCacheAnnounce oversized model_id — dropping"
+                                            );
+                                            continue;
+                                        }
+                                        let block_hashes: Vec<[u8; 32]> = announce
+                                            .blocks
+                                            .iter()
+                                            .map(|b| b.block_hash)
+                                            .collect();
+                                        let blocks_count = block_hashes.len();
+                                        let (added, removed) = shared_state.models.replace_peer_prefix_blocks(
+                                            announce.node_id.clone(),
+                                            announce.model_id.clone(),
+                                            block_hashes,
+                                        );
+                                        tracing::debug!(
+                                            node_id = %announce.node_id,
+                                            model = %announce.model_id,
+                                            blocks = blocks_count,
+                                            added,
+                                            removed,
+                                            "DIAG: PrefixCacheAnnounce indexed"
+                                        );
+                                    }
+
                                     // Other messages handled by NetworkManager
                                     _ => {}
                                 }

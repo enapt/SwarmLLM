@@ -456,6 +456,23 @@ impl Daemon {
             .with_detail_num(self.config.node.listen_port as i64),
         );
 
+        // Item 8 Phase 1: install the prefix-cache manifest channel + spawn
+        // the forwarder. Worker processes emit `WorkerMsg::PrefixManifestUpdate`
+        // each time they snapshot a new prefix into their local cache; the
+        // forwarder turns those into gossip + folds them into the cross-node
+        // index (also recording our own NodeId for loopback verification).
+        let (prefix_manifest_tx, prefix_manifest_rx) =
+            mpsc::channel::<crate::inference::process_pool::PrefixManifestEvent>(256);
+        shared_state
+            .model_process_pool
+            .set_prefix_manifest_tx(prefix_manifest_tx);
+        background::spawn_prefix_announce_forwarder(
+            shared_state.clone(),
+            network_tx.clone(),
+            prefix_manifest_rx,
+            shutdown_rx.clone(),
+        );
+
         background::spawn_shard_verification(
             shared_state.clone(),
             self.config.node.data_dir.clone(),

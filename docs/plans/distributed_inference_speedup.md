@@ -31,15 +31,34 @@
 > | **Item 7 — BatchGenerate Phases 1 + 2** | ✅ LANDED 2026-04-19, **measured 2026-04-19** (RTX 3070 + TinyLlama-1.1B Q4, 3-iter avg): **18.2× TTFT @ c=2, 21.7× TTFT @ c=4, 23.5× TTFT @ c=8**, with equivalent aggregate throughput vs Phase 1+2 OFF. The win is TTFT fairness — Sarathi chunked prefill prevents new admits from waiting behind the full prior prefill+decode. Aggregate throughput is unchanged because TinyLlama is too small for fused `forward_batch` to add tok/s on this GPU. See `docs/plans/benchmarks/round4.md`. |
 > | **Item 7 — Phase 4 batched chunked prefill + admit-coalescing** | ✅ LANDED & MEASURED 2026-04-19. `forward_batch` generalized for homogeneous prefill-chunk groups (same `seq_len > 1` + same `index_pos`). Admit-coalescing drain (extract `handle_daemon_msg`, `try_recv` up to 16 queued messages before each tick) unlocks fusion under HTTP-paced concurrent admits. Measured RTX 3070 + TinyLlama Q4: **49.1 tok/s aggregate @ c=4 (+57% vs pre-fix 31.2)**, TTFT uniform **180 / 180 / 180 ms** across 4 requests (vs pre-fix **52 / 235 / 447 ms** spread), `DIAG chunk fused batch_size=4` confirmed. `InferenceConfig::batched_prefill_forward` (default `true`) toggles fusion in isolation from Phases 1+2. Synthetic + E2E bench recipe in `benchmarks/round5.md`. 745 tests pass. |
 >
-> **NEXT SESSION — Item 8 (cross-node prefix cache sharing).**
+> **Item 8 — Phase 1 LANDED 2026-04-19. Next: Phase 2 (real KV
+> transfer).**
+>
+> Phase 1 wired the bookkeeping: BLAKE3 chained block-hash computation
+> in `PrefixCache`, new `WorkerMsg::PrefixManifestUpdate` IPC verb,
+> daemon-side `prefix_manifest_tx` channel + `spawn_prefix_announce_forwarder`,
+> new `SwarmMessage::PrefixCacheAnnounce` gossip variant, daemon
+> dispatch handler that validates sender + replaces the per-`(peer,
+> model)` index entry, `state.models.cross_node_prefix_index` +
+> `peer_prefix_blocks` reverse index for O(1) cleanup on peer departure
+> (wired into `ShardRebalancer::PeerLeft`). Single-node loopback
+> verification: forwarder records our own NodeId under our blocks so a
+> 1-node setup can confirm the wire path end-to-end via
+> `cross_node_prefix_holders`. Tests: +6 prefix_cache (chain math,
+> partial-block handling, zero-size guard, insert returns manifest,
+> enumerate dedups, enumerate-zero is empty) +5 model index
+> (replace/supersede/multi-peer/forget/empty-announce) = +11 net, **756
+> total** on `dev,claude-subscription`.
+>
+> **NEXT SESSION — Item 8 Phase 2 (real multi-peer KV block transfer).**
 >
 > Item 7 Phase 4 + admit-coalescing + isolation flag all landed and
-> measured on the RTX 3070 with TinyLlama Q4. The **next direction is
-> Item 8 — cross-node prefix cache sharing**, a multi-session arc that
-> is SwarmLLM's biggest distinguishing P2P speedup story (Items 4–7 and
-> 12 are mostly single-node wins or pipeline-parallelism refinements;
-> Item 8 is the one that makes the swarm qualitatively more valuable
-> than a single node).
+> measured on the RTX 3070 with TinyLlama Q4. **Item 8 — cross-node
+> prefix cache sharing** is a multi-session arc that is SwarmLLM's
+> biggest distinguishing P2P speedup story (Items 4–7 and 12 are mostly
+> single-node wins or pipeline-parallelism refinements; Item 8 is the
+> one that makes the swarm qualitatively more valuable than a single
+> node).
 >
 > **Scope sketch (Item 8):**
 > - Each worker announces BLAKE3 prompt-prefix hashes (64- or 128-token
@@ -928,7 +947,19 @@ See `docs/plans/benchmarks/round5.md` for the full reproducing recipe.
 
 ## Deferred to future sessions
 
-- **Item 8 — Cross-node prefix cache sharing.** Announce BLAKE3 prompt-prefix hashes over gossip; peers that already prefilled a shared prefix serve KV blocks on demand. Content-addressed KV shards — fits our existing shard announcement infrastructure. Potentially novel for P2P.
+- **Item 8 — Cross-node prefix cache sharing** 🟡 PHASE 1 LANDED 2026-04-19. Announce BLAKE3 prompt-prefix hashes over gossip; peers that already prefilled a shared prefix serve KV blocks on demand. Content-addressed KV shards — fits our existing shard announcement infrastructure. Potentially novel for P2P.
+  - **Phase 1 (this commit, 2026-04-19).** Hash announcement + cross-node index + loopback verification.
+    - Chained BLAKE3 hashing in `src/inference/split/prefix_cache.rs`: `compute_block_hashes(tokens, block_size)` returns `Vec<PrefixBlockEntry { block_hash: [u8;32], token_count: u32 }>`. Hash chain: `h[0] = blake3(u32_le(tokens[0..B]))`, `h[i] = blake3(h[i-1] || u32_le(tokens[i*B..(i+1)*B]))`. Two prompts that share the first `k` blocks under the same `block_size` produce identical `block_hash[0..k]`.
+    - `PrefixCache::insert_from_kv` returns the deduped post-insert manifest for the model so the caller can broadcast it. `enumerate_manifest(model_key)` exposes the same union for re-announce on demand. Trailing partial blocks are intentionally NOT hashed so cross-peer block boundaries align.
+    - New IPC verb `WorkerMsg::PrefixManifestUpdate { model_id, blocks }` emitted by the worker after every prefix-cache insert (both `handle_generate` and the BatchGenerate Phase A path). Reader actor in `process_pool.rs` intercepts and routes through a daemon-installed `prefix_manifest_tx` channel using `try_send` so a slow daemon never backpressures the IPC reader.
+    - New gossip variant `SwarmMessage::PrefixCacheAnnounce(PrefixCacheAnnounce)` with `node_id`, `model_id`, `blocks: Vec<PrefixBlockEntry>`, `timestamp`. Dispatch handler in `src/daemon/dispatch/mod.rs` validates the authenticated sender against `announce.node_id`, drops self-announces, caps blocks per announce at 1024 (memory DoS guard), then calls `state.models.replace_peer_prefix_blocks` to update the index.
+    - State additions in `state.models`: `cross_node_prefix_index: DashMap<ModelId, DashMap<[u8;32], DashSet<NodeId>>>` and `peer_prefix_blocks: DashMap<NodeId, DashMap<ModelId, DashSet<[u8;32]>>>` (reverse index for O(1) cleanup). Helpers: `replace_peer_prefix_blocks` (diff-replace semantics, keeps other peers' entries), `forget_peer_prefix_blocks` (peer-departure cleanup), `cross_node_prefix_holders` (Phase 2 lookup hook).
+    - `spawn_prefix_announce_forwarder` in `daemon/background.rs` drains the worker channel, broadcasts gossip, AND records our own blocks under our `node_id` in the index — that way a single-node loopback test can call `cross_node_prefix_holders(model, hash)` and observe the full wire path without needing a peer.
+    - `RebalanceEvent::PeerLeft` now calls `forget_peer_prefix_blocks` so Phase 2's KV-fetch path will never dial a departed peer.
+    - Tests: 6 prefix_cache (chain math, partial-block handling, zero-size guard, insert returns manifest, enumerate dedups, enumerate-zero is empty) + 5 cross-node index (replace, supersede, multi-peer, forget-only-their-entries, empty-announce) = 11 net new. **756 lib + integration on `dev,claude-subscription`** (up from 745).
+  - **Phase 2 (next session).** Real multi-peer KV block transfer. Add `SwarmMessage::FetchPrefixKvBlock { model_id, block_hash } -> snapshot bytes` (over `request_response` since it's a single round-trip), worker IPC `DaemonMsg::ExportPrefixSnapshot` + `DaemonMsg::ImportPrefixSnapshot`, BLAKE3 verification on receipt. At admit time in the worker: hash incoming prompt blocks, on local miss but cross-node hit, send fetch request via the daemon → coordinator path, hydrate the per-request KV.
+  - **Phase 3 (later).** Trust-gated re-verification: untrusted peers' KV gets re-verified by re-running a single forward at the boundary; high-trust peers skip re-verification. Wire to `state.credits.trust_manager`.
+  - **Phase 4.** Bench against Item 5 baseline + multi-node setup + plan/memory updates.
 - **Item 9 — EAGLE-3 draft heads.** Per-target pretrained draft heads (SafeAILab HF) distributed as a new shard type. 3–6× ceiling, highest complexity.
 - **Item 10 — FlowSpec / PPSD pipelined speculation.** Addresses the multi-segment pipeline case Item 4 didn't cover. Requires Item 1 stream to be default-on.
 - **Item 11 — Lookahead decoding.** No-draft-model Jacobi iteration. Test on CPU to see if FLOP overhead beats the speedup.

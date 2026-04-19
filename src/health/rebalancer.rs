@@ -98,6 +98,19 @@ impl ShardRebalancer {
                     .with_node(format!("{}", departed_peer))
                     .with_detail_str("peer_left".to_string()),
                 );
+                // Item 8 Phase 1: drop the departed peer's prefix-cache index
+                // entries so Phase 2's KV-fetch path never tries to dial them.
+                let dropped = self
+                    .shared_state
+                    .models
+                    .forget_peer_prefix_blocks(&departed_peer);
+                if dropped > 0 {
+                    tracing::debug!(
+                        peer = %departed_peer,
+                        dropped,
+                        "DIAG: cleared prefix-cache index entries for departed peer"
+                    );
+                }
                 self.pending_peer_left.push(departed_peer);
                 self.process_pending_departures().await;
             }

@@ -37,8 +37,9 @@ pub use model::{
 };
 pub use network::{
     AuthenticatedMessage, DownloadState, EphemeralKeyExchange, HfSourceGossip, ModelDemandGossip,
-    NetworkCommand, PruneEvent, RebalanceEvent, RegionShardSummary, ShardAnnounce,
-    ShardDownloadProgress, ShardRequest, ShardResponse, SwarmMessage,
+    NetworkCommand, PrefixBlockEntry, PrefixCacheAnnounce, PruneEvent, RebalanceEvent,
+    RegionShardSummary, ShardAnnounce, ShardDownloadProgress, ShardRequest, ShardResponse,
+    SwarmMessage,
 };
 pub use node::{
     ContributionLevel, GpuInfo, LatencyObservation, NodeCapability, NodeStats,

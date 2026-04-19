@@ -280,6 +280,63 @@ pub(super) fn spawn_browser_open(config: &Config, mut shutdown_rx: watch::Receiv
     });
 }
 
+/// Item 8 Phase 1: drain the model-process pool's prefix-cache manifest
+/// channel and (a) gossip each update as `SwarmMessage::PrefixCacheAnnounce`
+/// so peers can index our cached blocks, (b) fold our own blocks into the
+/// loopback view by recording them under our `node_id` in the cross-node
+/// index. This lets a single-node setup verify the wire path end-to-end —
+/// after sending a prompt we should see our own NodeId returned by
+/// `cross_node_prefix_holders` on the matching block hashes.
+pub(super) fn spawn_prefix_announce_forwarder(
+    shared_state: Arc<SharedState>,
+    network_tx: mpsc::Sender<NetworkCommand>,
+    mut rx: mpsc::Receiver<crate::inference::process_pool::PrefixManifestEvent>,
+    mut shutdown_rx: watch::Receiver<bool>,
+) {
+    tokio::spawn(async move {
+        let our_id = shared_state.identity.node_id().clone();
+        loop {
+            tokio::select! {
+                _ = shutdown_rx.changed() => break,
+                msg = rx.recv() => {
+                    let Some(event) = msg else { break };
+                    let block_count = event.blocks.len();
+                    // Loopback verification: record our own blocks under our
+                    // NodeId so a single-node test can `cross_node_prefix_holders`
+                    // and observe end-to-end indexing without needing a peer.
+                    let block_hashes: Vec<[u8; 32]> = event
+                        .blocks
+                        .iter()
+                        .map(|b| b.block_hash)
+                        .collect();
+                    let (added, removed) = shared_state.models.replace_peer_prefix_blocks(
+                        our_id.clone(),
+                        event.model_id.clone(),
+                        block_hashes,
+                    );
+                    tracing::debug!(
+                        model = %event.model_id,
+                        blocks = block_count,
+                        added,
+                        removed,
+                        "DIAG: prefix-cache loopback indexed (self)"
+                    );
+                    let announce = crate::types::PrefixCacheAnnounce {
+                        node_id: our_id.clone(),
+                        model_id: event.model_id,
+                        blocks: event.blocks,
+                        timestamp: chrono::Utc::now(),
+                    };
+                    let cmd = NetworkCommand::Broadcast(SwarmMessage::PrefixCacheAnnounce(announce));
+                    if let Err(e) = network_tx.send(cmd).await {
+                        tracing::debug!(error = %e, "prefix-cache announce: network_tx send failed");
+                    }
+                }
+            }
+        }
+    });
+}
+
 /// Auto-load models that have local shards available. Popular models
 /// (by historical request count) are loaded first so they get VRAM priority
 /// on restart.

@@ -111,6 +111,9 @@ pub enum SwarmMessage {
     // Geo-aware regional gossip — Phase 18
     RegionShardSummary(RegionShardSummary),
     ModelDemandGossip(ModelDemandGossip),
+
+    // Cross-node prefix-cache sharing (Item 8 Phase 1)
+    PrefixCacheAnnounce(PrefixCacheAnnounce),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -295,6 +298,44 @@ pub struct ShardRequest {
 pub struct ShardResponse {
     pub data: Vec<u8>,
     pub total_size: u64,
+}
+
+/// One block in a `PrefixCacheAnnounce`. The hash is a chained BLAKE3
+/// rollup over the token IDs of the prompt prefix that produced this KV
+/// snapshot, with `token_count` total tokens covered.
+///
+/// Hash chain: `block_hash[0] = blake3(u32_le(tokens[0..B]))`,
+/// `block_hash[i] = blake3(block_hash[i-1] || u32_le(tokens[i*B..(i+1)*B]))`.
+/// Two prompts that share the first `i` blocks (under the same block size
+/// `B`) have identical `block_hash[0..i]`, so longest-prefix match by hash
+/// works without ever transmitting tokens.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PrefixBlockEntry {
+    /// Chained BLAKE3 hash uniquely identifying this token-prefix block.
+    pub block_hash: [u8; 32],
+    /// Number of prompt tokens covered by the prefix this block ends at
+    /// (i.e. the strict prefix length the snapshot represents).
+    pub token_count: u32,
+}
+
+/// Cross-node prefix cache announcement (Item 8 Phase 1).
+///
+/// Each worker broadcasts the BLAKE3 hashes of cached prompt-prefix blocks
+/// it currently holds for a given model. Receivers build a per-model
+/// `block_hash → {peer_id}` index that lets them, in Phase 2+, fetch a
+/// pre-computed KV snapshot from the announcing peer instead of re-running
+/// prefill.
+///
+/// Announcements supersede prior announcements from the same `(node_id,
+/// model_id)` pair — the receiver replaces all prior entries for that pair
+/// with the new `blocks` set, so the index reflects the announcer's
+/// current cache state (including evictions).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PrefixCacheAnnounce {
+    pub node_id: NodeId,
+    pub model_id: ModelId,
+    pub blocks: Vec<PrefixBlockEntry>,
+    pub timestamp: chrono::DateTime<chrono::Utc>,
 }
 
 /// Event emitted when auto-manage prunes (deletes) an over-replicated shard.

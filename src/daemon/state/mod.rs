@@ -330,6 +330,8 @@ impl SharedState {
                 prune_history: RwLock::new(VecDeque::new()),
                 shard_p2p_failed: dashmap::DashSet::new(),
                 parallax_stability: DashMap::new(),
+                cross_node_prefix_index: DashMap::new(),
+                peer_prefix_blocks: DashMap::new(),
             },
             events: EventBus {
                 dashboard_tx: broadcast::channel(32).0,

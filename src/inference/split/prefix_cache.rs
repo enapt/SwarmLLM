@@ -34,8 +34,45 @@ use candle_core::Tensor;
 use candle_nn::kv_cache::KvCache;
 
 use crate::error::SwarmError;
+use crate::types::PrefixBlockEntry;
 
 use super::kv_cache::{KvCacheEntry, KvCacheStore};
+
+/// Compute the chained BLAKE3 hash chain over a token sequence, in blocks of
+/// `block_size` tokens. Returns one entry per block boundary that lies inside
+/// `tokens` (i.e. positions `block_size, 2*block_size, ...`). The trailing
+/// partial block (if any) is NOT hashed — only complete blocks count, so two
+/// peers running the same `block_size` will agree on every hash value for
+/// every shared prefix.
+///
+/// Each block's hash is `blake3(prev_hash || u32_le(tokens[i*B..(i+1)*B]))`,
+/// with `prev_hash` empty for the first block. This gives prefix-property:
+/// two prompts that share the first `k` blocks have identical `block_hash[0..k]`.
+pub fn compute_block_hashes(tokens: &[u32], block_size: usize) -> Vec<PrefixBlockEntry> {
+    if block_size == 0 {
+        return Vec::new();
+    }
+    let block_count = tokens.len() / block_size;
+    let mut out = Vec::with_capacity(block_count);
+    let mut prev: Option<[u8; 32]> = None;
+    for i in 0..block_count {
+        let mut hasher = blake3::Hasher::new();
+        if let Some(p) = prev {
+            hasher.update(&p);
+        }
+        let start = i * block_size;
+        for &tok in &tokens[start..start + block_size] {
+            hasher.update(&tok.to_le_bytes());
+        }
+        let h: [u8; 32] = hasher.finalize().into();
+        prev = Some(h);
+        out.push(PrefixBlockEntry {
+            block_hash: h,
+            token_count: ((i + 1) * block_size) as u32,
+        });
+    }
+    out
+}
 
 /// Per-layer KV snapshot at a specific token position.
 pub struct KvSnapshot {
@@ -59,6 +96,16 @@ struct Entry {
     tokens: Vec<u32>,
     snapshot: Arc<KvSnapshot>,
     last_hit: Instant,
+}
+
+impl Entry {
+    /// Compute the chained BLAKE3 manifest for this entry's tokens at the
+    /// configured block size. Only complete blocks contribute; the entry's
+    /// trailing partial block (if any, when `tokens.len() % block_size != 0`)
+    /// is omitted so cross-peer block boundaries align deterministically.
+    fn manifest(&self, block_size: usize) -> Vec<PrefixBlockEntry> {
+        compute_block_hashes(&self.tokens, block_size)
+    }
 }
 
 struct Inner {
@@ -108,6 +155,14 @@ impl PrefixCache {
 
     pub fn enabled(&self) -> bool {
         self.enabled
+    }
+
+    /// Block-size used to chunk prompt tokens into chained BLAKE3 hashes for
+    /// cross-node prefix-cache sharing. Returns 0 when multi-point inserts
+    /// are disabled — callers should treat 0 as "no manifest" and skip
+    /// announcing.
+    pub fn block_tokens(&self) -> usize {
+        self.block_tokens
     }
 
     /// Find the longest cached token prefix of `input_tokens` for `model_key`.
@@ -173,12 +228,12 @@ impl PrefixCache {
         request_id: &str,
         kv_store: &KvCacheStore,
         prompt_tokens: &[u32],
-    ) {
+    ) -> Vec<PrefixBlockEntry> {
         if !self.enabled
             || prompt_tokens.len() < self.min_tokens
             || prompt_tokens.len() > self.max_prompt_tokens
         {
-            return;
+            return Vec::new();
         }
         let key = KvCacheStore::cache_key(model_key, request_id);
         let Some(entry_ref) = kv_store_get(kv_store, &key) else {
@@ -187,7 +242,7 @@ impl PrefixCache {
                 request_id,
                 "prefix-cache: no KV entry to snapshot"
             );
-            return;
+            return Vec::new();
         };
         let entry = entry_ref;
 
@@ -197,12 +252,12 @@ impl PrefixCache {
                 model_key,
                 "prefix-cache: SSM state present, skipping snapshot"
             );
-            return;
+            return Vec::new();
         }
 
         // Figure out the seq dim / max_seq_len from the first populated layer.
         let Some(first_kv) = entry.layers.iter().flatten().next() else {
-            return;
+            return Vec::new();
         };
         let dim = first_kv.k_cache().dim();
         let max_seq_len = first_kv.k_cache().max_seq_len();
@@ -210,12 +265,12 @@ impl PrefixCache {
         // Bound insertion points by what the KV actually holds.
         let available = available.min(prompt_tokens.len());
         if available < self.min_tokens {
-            return;
+            return Vec::new();
         }
 
         let insert_points = self.compute_insert_points(available);
         if insert_points.is_empty() {
-            return;
+            return Vec::new();
         }
 
         let mut snapshots: Vec<(usize, Arc<KvSnapshot>)> = Vec::with_capacity(insert_points.len());
@@ -235,11 +290,11 @@ impl PrefixCache {
         drop(entry);
 
         if snapshots.is_empty() {
-            return;
+            return Vec::new();
         }
 
         let Ok(mut inner) = self.inner.write() else {
-            return;
+            return Vec::new();
         };
         let bucket = inner.per_model.entry(model_key.to_string()).or_default();
         let now = Instant::now();
@@ -265,11 +320,37 @@ impl PrefixCache {
             bucket.drain(..drop_count);
         }
 
+        let entry_count = bucket.len();
+        // Compute the full post-insert manifest for this model so the caller
+        // can announce our current cache state (not just the delta). Cheap:
+        // BLAKE3 on a few KB of token IDs.
+        let manifest = enumerate_manifest_locked(bucket, self.block_tokens);
+
         tracing::info!(
             model_key,
-            entries = bucket.len(),
+            entries = entry_count,
+            manifest_len = manifest.len(),
             "DIAG: prefix-cache inserted snapshot"
         );
+        manifest
+    }
+
+    /// Snapshot the current per-model BLAKE3 block-hash manifest. Used by the
+    /// daemon at startup or after configuration changes to re-announce a
+    /// worker's full prefix-cache state to peers without waiting for a new
+    /// insert. Returns an empty vec when the model has no entries or
+    /// `block_tokens == 0`.
+    pub fn enumerate_manifest(&self, model_key: &str) -> Vec<PrefixBlockEntry> {
+        if self.block_tokens == 0 {
+            return Vec::new();
+        }
+        let Ok(inner) = self.inner.read() else {
+            return Vec::new();
+        };
+        let Some(bucket) = inner.per_model.get(model_key) else {
+            return Vec::new();
+        };
+        enumerate_manifest_locked(bucket, self.block_tokens)
     }
 
     /// Seed a fresh `KvCacheEntry` for `request_id` from `snapshot`. Returns
@@ -335,6 +416,27 @@ fn kv_store_get<'a>(
     key: &str,
 ) -> Option<dashmap::mapref::one::Ref<'a, String, KvCacheEntry>> {
     kv_store.get_entry(key)
+}
+
+/// Build the deduped union of every entry's chained block manifest in a
+/// bucket. Two entries in the same bucket whose tokens share a common prefix
+/// produce identical block hashes for the shared portion (chained-hash
+/// prefix property), so dedup-by-`block_hash` is correct and avoids
+/// re-broadcasting the same block under multiple entries.
+fn enumerate_manifest_locked(bucket: &[Entry], block_size: usize) -> Vec<PrefixBlockEntry> {
+    if block_size == 0 || bucket.is_empty() {
+        return Vec::new();
+    }
+    let mut seen: std::collections::HashSet<[u8; 32]> = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for entry in bucket {
+        for block in entry.manifest(block_size) {
+            if seen.insert(block.block_hash) {
+                out.push(block);
+            }
+        }
+    }
+    out
 }
 
 fn snapshot_at(
@@ -492,6 +594,90 @@ mod tests {
             let kv = l.as_ref().expect("layer populated");
             assert_eq!(kv.current_seq_len(), 10);
         }
+    }
+
+    #[test]
+    fn block_hash_chain_matches_for_shared_prefix() {
+        // Two prompts that share the first two 4-token blocks must have
+        // identical block_hash[0..2]. The third block diverges so
+        // block_hash[2] must differ.
+        let a: Vec<u32> = vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
+        let b: Vec<u32> = vec![1, 2, 3, 4, 5, 6, 7, 8, 99, 99, 99, 99];
+        let ha = compute_block_hashes(&a, 4);
+        let hb = compute_block_hashes(&b, 4);
+        assert_eq!(ha.len(), 3);
+        assert_eq!(hb.len(), 3);
+        assert_eq!(ha[0].block_hash, hb[0].block_hash);
+        assert_eq!(ha[1].block_hash, hb[1].block_hash);
+        assert_ne!(ha[2].block_hash, hb[2].block_hash);
+        assert_eq!(ha[0].token_count, 4);
+        assert_eq!(ha[1].token_count, 8);
+        assert_eq!(ha[2].token_count, 12);
+    }
+
+    #[test]
+    fn block_hash_chain_handles_partial_trailing_block() {
+        // Last 3 tokens are incomplete and must NOT be hashed (block_size=4).
+        let toks: Vec<u32> = (0..11).collect();
+        let h = compute_block_hashes(&toks, 4);
+        assert_eq!(h.len(), 2);
+        assert_eq!(h[1].token_count, 8);
+    }
+
+    #[test]
+    fn block_hash_chain_zero_block_size_is_empty() {
+        let h = compute_block_hashes(&[1, 2, 3, 4], 0);
+        assert!(h.is_empty());
+    }
+
+    #[test]
+    fn insert_from_kv_returns_block_manifest() {
+        // block=4 → 12 tokens → 3 blocks
+        let pc = PrefixCache::new(true, 8, 4, 4, 8192);
+        let kv_store = KvCacheStore::new(std::time::Duration::from_secs(600));
+        make_fake_kv(&kv_store, "m", "req-a", 2, 12);
+        let tokens: Vec<u32> = (1..=12).collect();
+        let manifest = pc.insert_from_kv("m", "req-a", &kv_store, &tokens);
+        assert_eq!(manifest.len(), 3);
+        // token_count grows by block_size (4) each entry.
+        assert_eq!(manifest[0].token_count, 4);
+        assert_eq!(manifest[1].token_count, 8);
+        assert_eq!(manifest[2].token_count, 12);
+    }
+
+    #[test]
+    fn enumerate_manifest_dedups_across_entries() {
+        // Two entries whose tokens share a 4-token prefix. They each insert
+        // their own snapshot, but the chained hash for the shared block is
+        // identical → manifest must dedup.
+        let pc = PrefixCache::new(true, 8, 4, 4, 8192);
+        let kv_store = KvCacheStore::new(std::time::Duration::from_secs(600));
+        make_fake_kv(&kv_store, "m", "req-a", 2, 8);
+        make_fake_kv(&kv_store, "m", "req-b", 2, 8);
+        let a: Vec<u32> = vec![1, 2, 3, 4, 50, 51, 52, 53];
+        let b: Vec<u32> = vec![1, 2, 3, 4, 60, 61, 62, 63];
+        let _ = pc.insert_from_kv("m", "req-a", &kv_store, &a);
+        let _ = pc.insert_from_kv("m", "req-b", &kv_store, &b);
+        let manifest = pc.enumerate_manifest("m");
+        // Block 0 (shared) appears once, plus block 1 from each prompt = 3.
+        assert_eq!(manifest.len(), 3);
+        // Compare against direct chain hashes to confirm dedup logic.
+        let ha = compute_block_hashes(&a, 4);
+        let hb = compute_block_hashes(&b, 4);
+        assert!(manifest.iter().any(|e| e.block_hash == ha[0].block_hash));
+        assert!(manifest.iter().any(|e| e.block_hash == ha[1].block_hash));
+        assert!(manifest.iter().any(|e| e.block_hash == hb[1].block_hash));
+    }
+
+    #[test]
+    fn enumerate_manifest_zero_block_size_is_empty() {
+        let pc = PrefixCache::new(true, 8, 0, 4, 8192);
+        let kv_store = KvCacheStore::new(std::time::Duration::from_secs(600));
+        make_fake_kv(&kv_store, "m", "req-a", 2, 8);
+        let _ = pc.insert_from_kv("m", "req-a", &kv_store, &(1..=8).collect::<Vec<_>>());
+        // block_tokens=0 → enumerate_manifest is empty even though the
+        // entry exists (it was inserted via the always-store-tail rule).
+        assert!(pc.enumerate_manifest("m").is_empty());
     }
 
     #[test]

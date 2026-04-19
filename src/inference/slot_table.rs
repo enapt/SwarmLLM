@@ -18,7 +18,7 @@
 
 use uuid::Uuid;
 
-use crate::types::SamplingParams;
+use crate::types::{ModelId, SamplingParams};
 
 /// Per-slot state machine.
 ///
@@ -56,6 +56,11 @@ pub struct Slot {
     /// KV-cache key — same string `SplitModel::kv_model_key()` returns. Used
     /// by `KvCacheStore` lookups inside `forward_batch`.
     pub model_key: String,
+    /// `ModelId` the slot belongs to. The worker hosts a single `model_id`
+    /// per process today, but cross-node prefix announcements need the
+    /// canonical id (not the layer-range-suffixed `model_key`) so peers can
+    /// match against their own catalog entries.
+    pub model_id: ModelId,
     /// (layer_start, layer_end) — every slot in a single SlotTable shares
     /// these so they all dispatch to the same `models[(start, end, 0, 1)]`
     /// variant.
@@ -286,6 +291,7 @@ mod tests {
             request_id: rid,
             req_id_str: rid.to_string(),
             model_key: "test-key".to_string(),
+            model_id: ModelId("test-model".to_string()),
             layer_range,
             state: SlotState::Decoding {
                 last_token: 42,
@@ -327,6 +333,7 @@ mod tests {
             request_id: rid,
             req_id_str: rid.to_string(),
             model_key: "test-key".to_string(),
+            model_id: ModelId("test-model".to_string()),
             layer_range,
             state: SlotState::Prefilling {
                 remaining_ids,

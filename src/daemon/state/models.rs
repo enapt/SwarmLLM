@@ -39,6 +39,23 @@ pub struct ModelMgmt {
     /// crosses `PARALLAX_STABILITY_THRESHOLD`. Clamped to `[-10, 10]` so a
     /// long-stable recommendation can't be flipped by a single noisy tick.
     pub parallax_stability: DashMap<crate::types::ShardId, i32>,
+    /// Item 8 Phase 1: cross-node prefix-cache index. Outer key = `model_id`,
+    /// inner key = chained BLAKE3 block hash, value = the set of remote
+    /// peers known to hold a KV snapshot ending at that block. Updated from
+    /// `SwarmMessage::PrefixCacheAnnounce` and consulted by Phase 2's
+    /// remote-KV fetch path. We never insert ourselves here — local cache
+    /// hits are served by the in-process `PrefixCache` directly.
+    pub cross_node_prefix_index:
+        DashMap<crate::types::ModelId, DashMap<[u8; 32], dashmap::DashSet<NodeId>>>,
+    /// Reverse index from `peer_id → list of (model_id, block_hash)` so that
+    /// when a peer disconnects (or sends a fresh announce that supersedes
+    /// the previous one) we can remove every entry attributed to them
+    /// without rescanning the per-model maps. Wrapped in an `RwLock` rather
+    /// than `DashMap<_, Mutex<_>>` because peer announces are rare relative
+    /// to lookups; a single short write lock per announce is cheaper than
+    /// per-bucket locking.
+    pub peer_prefix_blocks:
+        DashMap<NodeId, DashMap<crate::types::ModelId, dashmap::DashSet<[u8; 32]>>>,
 }
 
 impl ModelMgmt {
@@ -124,5 +141,226 @@ impl ModelMgmt {
         self.acquisition_progress.insert(model_id.clone(), status);
         self.download_cancel_flags.insert(model_id, flag.clone());
         flag
+    }
+
+    /// Item 8 Phase 1: replace this peer's known set of prefix-cache block
+    /// hashes for `model_id` with `new_blocks`. Drops any previously-recorded
+    /// blocks for the same `(peer, model)` pair, preserving entries from
+    /// other peers in the per-block holder set. A peer announcing an empty
+    /// set is treated as "I no longer hold any blocks for this model".
+    ///
+    /// Returns `(added, removed)` counts for logging — strictly diagnostic.
+    pub fn replace_peer_prefix_blocks(
+        &self,
+        peer: NodeId,
+        model_id: crate::types::ModelId,
+        new_blocks: Vec<[u8; 32]>,
+    ) -> (usize, usize) {
+        // Snapshot the previous block set for this (peer, model) pair, then
+        // compute the diff so we only touch the per-block holder sets that
+        // actually changed.
+        let new_set: std::collections::HashSet<[u8; 32]> = new_blocks.iter().copied().collect();
+        let peer_models = self.peer_prefix_blocks.entry(peer.clone()).or_default();
+        let prev: Vec<[u8; 32]> = peer_models
+            .get(&model_id)
+            .map(|s| s.iter().map(|r| *r.key()).collect())
+            .unwrap_or_default();
+
+        let model_index = self
+            .cross_node_prefix_index
+            .entry(model_id.clone())
+            .or_default();
+
+        let mut removed = 0usize;
+        for h in &prev {
+            if !new_set.contains(h) {
+                if let Some(holders) = model_index.get(h) {
+                    holders.remove(&peer);
+                    let now_empty = holders.is_empty();
+                    drop(holders);
+                    if now_empty {
+                        model_index.remove(h);
+                    }
+                }
+                removed += 1;
+            }
+        }
+
+        let prev_set: std::collections::HashSet<[u8; 32]> = prev.iter().copied().collect();
+        let mut added = 0usize;
+        for h in &new_blocks {
+            if !prev_set.contains(h) {
+                let holders = model_index.entry(*h).or_default();
+                holders.insert(peer.clone());
+                added += 1;
+            }
+        }
+
+        // Refresh the reverse index for this (peer, model) pair.
+        let new_per_peer = dashmap::DashSet::new();
+        for h in &new_blocks {
+            new_per_peer.insert(*h);
+        }
+        if new_per_peer.is_empty() {
+            peer_models.remove(&model_id);
+        } else {
+            peer_models.insert(model_id, new_per_peer);
+        }
+
+        (added, removed)
+    }
+
+    /// Drop every entry attributed to `peer` from the cross-node prefix-cache
+    /// index. Called when a peer disconnects or is evicted — leaving stale
+    /// entries would point Phase 2's KV-fetch path at unreachable peers.
+    pub fn forget_peer_prefix_blocks(&self, peer: &NodeId) -> usize {
+        let Some((_, models)) = self.peer_prefix_blocks.remove(peer) else {
+            return 0;
+        };
+        let mut removed = 0usize;
+        for entry in models.iter() {
+            let model_id = entry.key();
+            let blocks = entry.value();
+            if let Some(model_index) = self.cross_node_prefix_index.get(model_id) {
+                for hash in blocks.iter() {
+                    if let Some(holders) = model_index.get(hash.key()) {
+                        holders.remove(peer);
+                        let now_empty = holders.is_empty();
+                        drop(holders);
+                        if now_empty {
+                            model_index.remove(hash.key());
+                        }
+                        removed += 1;
+                    }
+                }
+            }
+        }
+        removed
+    }
+
+    /// Lookup the set of remote peers that announced holding a KV snapshot
+    /// for this `(model_id, block_hash)` pair. Empty when no peer has it.
+    /// Phase 2 will use this to decide where to fetch from; Phase 1 only
+    /// exposes it for tests + diagnostics.
+    pub fn cross_node_prefix_holders(
+        &self,
+        model_id: &crate::types::ModelId,
+        block_hash: &[u8; 32],
+    ) -> Vec<NodeId> {
+        self.cross_node_prefix_index
+            .get(model_id)
+            .and_then(|m| {
+                m.get(block_hash)
+                    .map(|s| s.iter().map(|r| r.clone()).collect())
+            })
+            .unwrap_or_default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::ModelId;
+
+    fn make_mgmt() -> ModelMgmt {
+        ModelMgmt {
+            acquisition_progress: DashMap::new(),
+            hf_sources: DashMap::new(),
+            auto_manage_notify: Arc::new(tokio::sync::Notify::new()),
+            auto_manage_enabled: AtomicBool::new(false),
+            auto_manage_default_model_cap: AtomicU32::new(0),
+            model_auto_manage_policies: DashMap::new(),
+            hf_probe_cache: DashMap::new(),
+            peer_shard_downloads: DashMap::new(),
+            download_cancel_flags: DashMap::new(),
+            model_trust: DashMap::new(),
+            loading_models: DashMap::new(),
+            locked_shards: DashMap::new(),
+            shard_p2p_failed: dashmap::DashSet::new(),
+            model_request_counts: DashMap::new(),
+            resource_schedule: RwLock::new(Default::default()),
+            prune_history: RwLock::new(VecDeque::new()),
+            parallax_stability: DashMap::new(),
+            cross_node_prefix_index: DashMap::new(),
+            peer_prefix_blocks: DashMap::new(),
+        }
+    }
+
+    fn h(b: u8) -> [u8; 32] {
+        [b; 32]
+    }
+
+    #[test]
+    fn replace_inserts_announced_blocks() {
+        let m = make_mgmt();
+        let peer = NodeId([1u8; 32]);
+        let model = ModelId("m".into());
+        let (added, removed) =
+            m.replace_peer_prefix_blocks(peer.clone(), model.clone(), vec![h(1), h(2), h(3)]);
+        assert_eq!(added, 3);
+        assert_eq!(removed, 0);
+        assert_eq!(m.cross_node_prefix_holders(&model, &h(2)), vec![peer]);
+    }
+
+    #[test]
+    fn replace_supersedes_previous_announcement_from_same_peer() {
+        let m = make_mgmt();
+        let peer = NodeId([1u8; 32]);
+        let model = ModelId("m".into());
+        let _ = m.replace_peer_prefix_blocks(peer.clone(), model.clone(), vec![h(1), h(2), h(3)]);
+        // Second announcement drops blocks 2/3 and adds 4.
+        let (added, removed) =
+            m.replace_peer_prefix_blocks(peer.clone(), model.clone(), vec![h(1), h(4)]);
+        assert_eq!(added, 1);
+        assert_eq!(removed, 2);
+        assert_eq!(
+            m.cross_node_prefix_holders(&model, &h(1)),
+            vec![peer.clone()]
+        );
+        assert!(m.cross_node_prefix_holders(&model, &h(2)).is_empty());
+        assert_eq!(m.cross_node_prefix_holders(&model, &h(4)), vec![peer]);
+    }
+
+    #[test]
+    fn multiple_peers_share_block_holders() {
+        let m = make_mgmt();
+        let p1 = NodeId([1u8; 32]);
+        let p2 = NodeId([2u8; 32]);
+        let model = ModelId("m".into());
+        let _ = m.replace_peer_prefix_blocks(p1.clone(), model.clone(), vec![h(1), h(2)]);
+        let _ = m.replace_peer_prefix_blocks(p2.clone(), model.clone(), vec![h(2), h(3)]);
+        let mut holders = m.cross_node_prefix_holders(&model, &h(2));
+        holders.sort_by_key(|n| n.0);
+        assert_eq!(holders, vec![p1.clone(), p2.clone()]);
+        assert_eq!(m.cross_node_prefix_holders(&model, &h(1)), vec![p1]);
+        assert_eq!(m.cross_node_prefix_holders(&model, &h(3)), vec![p2]);
+    }
+
+    #[test]
+    fn forget_peer_drops_only_their_entries() {
+        let m = make_mgmt();
+        let p1 = NodeId([1u8; 32]);
+        let p2 = NodeId([2u8; 32]);
+        let model = ModelId("m".into());
+        let _ = m.replace_peer_prefix_blocks(p1.clone(), model.clone(), vec![h(1), h(2)]);
+        let _ = m.replace_peer_prefix_blocks(p2.clone(), model.clone(), vec![h(2), h(3)]);
+        let removed = m.forget_peer_prefix_blocks(&p1);
+        assert_eq!(removed, 2);
+        assert!(m.cross_node_prefix_holders(&model, &h(1)).is_empty());
+        assert_eq!(m.cross_node_prefix_holders(&model, &h(2)), vec![p2.clone()]);
+        assert_eq!(m.cross_node_prefix_holders(&model, &h(3)), vec![p2]);
+    }
+
+    #[test]
+    fn empty_announce_drops_all_entries_for_peer_model() {
+        let m = make_mgmt();
+        let peer = NodeId([1u8; 32]);
+        let model = ModelId("m".into());
+        let _ = m.replace_peer_prefix_blocks(peer.clone(), model.clone(), vec![h(1), h(2)]);
+        let (added, removed) = m.replace_peer_prefix_blocks(peer.clone(), model.clone(), vec![]);
+        assert_eq!(added, 0);
+        assert_eq!(removed, 2);
+        assert!(m.cross_node_prefix_holders(&model, &h(1)).is_empty());
+        assert!(m.cross_node_prefix_holders(&model, &h(2)).is_empty());
     }
 }

@@ -1224,7 +1224,19 @@ async fn handle_generate(
     // Snapshot it into the prefix cache so future prompts sharing this
     // prefix skip the prefill work. insert_from_kv is a no-op when the
     // prompt is shorter than the configured floor or the cache is off.
-    prefix_cache.insert_from_kv(&model_key_string, &req_id_str, kv_store, &prompt_ids);
+    let manifest =
+        prefix_cache.insert_from_kv(&model_key_string, &req_id_str, kv_store, &prompt_ids);
+    if !manifest.is_empty() {
+        let _ = send_worker(
+            writer,
+            &WorkerMsg::PrefixManifestUpdate {
+                model_id: model_id.clone(),
+                blocks: manifest,
+            },
+            &[],
+        )
+        .await;
+    }
 
     let use_logprobs = gen.sampling.logprobs;
     let (mut next_token, mut token_logprob) =
@@ -1771,6 +1783,7 @@ fn try_register_generate_slot(
         request_id,
         req_id_str,
         model_key: model_key_string,
+        model_id: model_id.clone(),
         layer_range: lr,
         state: crate::inference::slot_table::SlotState::Prefilling {
             remaining_ids,
@@ -1989,6 +2002,12 @@ async fn step_decode_pool(
 
             // Stage 4: per-step finalize (DIAG trace; first-token sample +
             // prefix-cache insert + promote-to-decoding on the final chunk).
+            // Announces are accumulated here and dispatched after the
+            // mutable borrow on `active` drops below.
+            let mut pending_announces: Vec<(
+                crate::types::ModelId,
+                Vec<crate::types::PrefixBlockEntry>,
+            )> = Vec::new();
             for (i, step) in steps.iter().enumerate() {
                 let Some(logits) = logits_per_step[i].take() else {
                     continue;
@@ -2015,18 +2034,31 @@ async fn step_decode_pool(
                                 continue;
                             }
                         };
-                    prefix_cache.insert_from_kv(
+                    let manifest = prefix_cache.insert_from_kv(
                         &slot.model_key,
                         &slot.req_id_str,
                         kv_store,
                         &slot.prompt_ids,
                     );
+                    if !manifest.is_empty() {
+                        pending_announces.push((slot.model_id.clone(), manifest));
+                    }
                     let is_eos_first = slot.eos.contains(&first_token);
                     slot.promote_to_decoding(first_token, first_logprob);
                     if is_eos_first {
                         slot.finish_stop();
                     }
                 }
+            }
+            // The `active` borrow ends here (NLL) — `pending_announces` is
+            // owned, so we can hop onto the writer without re-borrowing.
+            for (model_id, blocks) in pending_announces {
+                let _ = send_worker(
+                    writer,
+                    &WorkerMsg::PrefixManifestUpdate { model_id, blocks },
+                    &[],
+                )
+                .await;
             }
         }
     }

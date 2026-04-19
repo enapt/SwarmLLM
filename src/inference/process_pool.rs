@@ -16,7 +16,18 @@ use uuid::Uuid;
 use crate::error::SwarmError;
 use crate::inference::router::StreamingTokenEvent;
 use crate::inference::worker_ipc::*;
-use crate::types::{ModelId, SamplingParams};
+use crate::types::{ModelId, PrefixBlockEntry, SamplingParams};
+
+/// Item 8 Phase 1: each prefix-cache insert in a worker emits one of these
+/// over the pool's `prefix_manifest_tx`. The daemon-side forwarder drains
+/// the channel, broadcasts a `SwarmMessage::PrefixCacheAnnounce`, and folds
+/// the blocks into the local cross-node index (so a single-node loopback
+/// test sees the wire path end-to-end).
+#[derive(Clone, Debug)]
+pub struct PrefixManifestEvent {
+    pub model_id: ModelId,
+    pub blocks: Vec<PrefixBlockEntry>,
+}
 
 const WORKER_CONNECT_TIMEOUT_SECS: u64 = 30;
 /// Default KV-cache TTL in seconds (10 minutes). Overridden by config at startup.
@@ -67,14 +78,19 @@ struct WorkerHandle {
 /// `Ready` / `Bye` have no request_id and are dropped by the reader actor
 /// (they're only relevant during spawn, which handshakes synchronously).
 /// `BatchResult` carries N request_ids and is handled specially by the reader
-/// actor — this helper returns `None` for it.
+/// actor — this helper returns `None` for it. `PrefixManifestUpdate` also
+/// carries no request_id; the reader actor routes it through the dedicated
+/// `prefix_manifest_tx` channel instead.
 fn worker_msg_request_id(msg: &WorkerMsg) -> Option<Uuid> {
     match msg {
         WorkerMsg::LayerResult(r) => Some(r.request_id),
         WorkerMsg::Token { request_id, .. }
         | WorkerMsg::GenerateDone { request_id, .. }
         | WorkerMsg::Error { request_id, .. } => Some(*request_id),
-        WorkerMsg::BatchResult { .. } | WorkerMsg::Ready | WorkerMsg::Bye => None,
+        WorkerMsg::BatchResult { .. }
+        | WorkerMsg::PrefixManifestUpdate { .. }
+        | WorkerMsg::Ready
+        | WorkerMsg::Bye => None,
     }
 }
 
@@ -87,6 +103,7 @@ async fn reader_actor(
     responses: ResponseMap,
     dead: Arc<AtomicBool>,
     model_id: ModelId,
+    prefix_manifest_tx: Option<mpsc::Sender<PrefixManifestEvent>>,
 ) {
     loop {
         match recv_worker(&mut reader).await {
@@ -101,6 +118,25 @@ async fn reader_actor(
                 } = msg
                 {
                     dispatch_batch_result(&responses, results, activation_lens, payload).await;
+                    continue;
+                }
+                // Cross-node prefix-cache announcement (Item 8 Phase 1).
+                // No request_id; route through the daemon-installed
+                // forwarder channel. Drop silently when no forwarder is
+                // installed (unit tests / pre-startup).
+                if let WorkerMsg::PrefixManifestUpdate {
+                    model_id: announce_model,
+                    blocks,
+                } = msg
+                {
+                    if let Some(tx) = prefix_manifest_tx.as_ref() {
+                        // try_send: never block the IPC reader. Daemon being
+                        // slow or absent must not stall worker responses.
+                        let _ = tx.try_send(PrefixManifestEvent {
+                            model_id: announce_model,
+                            blocks,
+                        });
+                    }
                     continue;
                 }
                 if let Some(rid) = worker_msg_request_id(&msg) {
@@ -397,6 +433,12 @@ pub struct ModelProcessPool {
     /// daemon setup (where `Arc<Self>` is available). When unset, `forward()`
     /// bypasses batching entirely regardless of the `continuous_batching` flag.
     batch_scheduler: std::sync::OnceLock<mpsc::Sender<BatchSchedulerMsg>>,
+    /// Item 8 Phase 1: cross-node prefix-cache announcement sink. Set by
+    /// `SharedState::new` after the daemon spawns its forwarder task; reader
+    /// actors call `try_send` so a slow daemon never backpressures the worker
+    /// IPC reader. When unset (e.g. unit tests constructing a bare pool),
+    /// inbound `PrefixManifestUpdate` messages are dropped silently.
+    prefix_manifest_tx: std::sync::OnceLock<mpsc::Sender<PrefixManifestEvent>>,
 }
 
 /// Command into the batch scheduler task.
@@ -466,7 +508,15 @@ impl ModelProcessPool {
             prefill_chunk_tokens: std::sync::atomic::AtomicU32::new(128),
             batched_prefill_forward: std::sync::atomic::AtomicBool::new(true),
             batch_scheduler: std::sync::OnceLock::new(),
+            prefix_manifest_tx: std::sync::OnceLock::new(),
         }
+    }
+
+    /// Install the prefix-manifest sink. The daemon spawns a forwarder task
+    /// that owns the receiver and turns each event into a gossip broadcast +
+    /// local-index update. Idempotent — a second call is a no-op.
+    pub fn set_prefix_manifest_tx(&self, tx: mpsc::Sender<PrefixManifestEvent>) {
+        let _ = self.prefix_manifest_tx.set(tx);
     }
 
     /// Start the global auto-coalescing batch scheduler task. Must be called
@@ -834,6 +884,7 @@ impl ModelProcessPool {
             responses.clone(),
             dead.clone(),
             model_id.clone(),
+            self.prefix_manifest_tx.get().cloned(),
         ));
         Ok(WorkerHandle {
             child,

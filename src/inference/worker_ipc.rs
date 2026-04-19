@@ -9,7 +9,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use uuid::Uuid;
 
 use crate::types::{
-    ModelId, NetworkFinishReason, SamplingParams, TensorFormat, TensorParallelMeta,
+    ModelId, NetworkFinishReason, PrefixBlockEntry, SamplingParams, TensorFormat,
+    TensorParallelMeta,
 };
 
 use crate::inference::router::TokenLogProbEntry;
@@ -80,6 +81,16 @@ pub enum WorkerMsg {
     },
     /// Error for a specific request.
     Error { request_id: Uuid, message: String },
+    /// Item 8 Phase 1: notify the daemon that the worker just inserted (or
+    /// refreshed) prefix-cache entries for `model_id`. The daemon broadcasts
+    /// this as a `SwarmMessage::PrefixCacheAnnounce` and updates its own
+    /// cross-node index. Carries no `request_id` and is fanned out by the
+    /// reader actor through a dedicated channel rather than per-request
+    /// response routing.
+    PrefixManifestUpdate {
+        model_id: ModelId,
+        blocks: Vec<PrefixBlockEntry>,
+    },
     /// Worker is about to exit.
     Bye,
 }
