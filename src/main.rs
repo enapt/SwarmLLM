@@ -149,6 +149,16 @@ enum Commands {
         /// auto-dispatch on the dtype tag.
         #[arg(long, default_value_t = false, action = clap::ArgAction::Set)]
         activation_compression: bool,
+        /// Enable Item 7 BatchGenerate: multiple concurrent `Generate`
+        /// requests interleave through one `forward_batch` per decode tick.
+        /// Off → each `Generate` runs sequentially through the worker.
+        #[arg(long, default_value_t = false, action = clap::ArgAction::Set)]
+        batch_generate: bool,
+        /// Maximum number of concurrent decode slots when `batch_generate` is
+        /// on. Caps the BatchGenerate slot table; new admissions beyond this
+        /// fall through to the sequential `handle_generate` path.
+        #[arg(long, default_value = "8")]
+        batch_generate_max_slots: u32,
     },
     /// Device pool management (combine credits across your devices)
     Pool {
@@ -252,6 +262,8 @@ async fn main() -> anyhow::Result<()> {
             force_standard_attn,
             max_seq_len_override,
             activation_compression,
+            batch_generate,
+            batch_generate_max_slots,
         } => {
             let window: Option<Vec<u32>> = shard_window.map(|s| {
                 s.split(',')
@@ -286,6 +298,8 @@ async fn main() -> anyhow::Result<()> {
                 force_standard_attn,
                 max_seq_override,
                 activation_compression,
+                batch_generate,
+                batch_generate_max_slots,
             )
             .await;
             Ok(())

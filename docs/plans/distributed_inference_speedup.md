@@ -6,12 +6,13 @@
 > Four items were scoped originally; headline wins came from Items 4 and 5
 > (not in the original plan), followed by Items 3 + 16 in later sessions.
 >
-> **Default-on speedup stack today (as of 2026-04-19 commit `8d5dede`):**
+> **Default-on speedup stack today (as of 2026-04-19):**
 >
 > - **Item 4** fast path — 1.93× decode for single-segment distributed inference
 > - **Item 5** prefix cache — 29.4× wall-clock on cache hit
 > - **Item 3** continuous batching — 1.34–1.55× GPU throughput for concurrent requests (CPU falls through to sequential, no regression)
 > - **Item 16 A+B** Parallax routing — shortest-path pipeline chain via DP + observed per-peer latency EMA
+> - **Item 7 Phase 1** worker-side SlotTable — concurrent `pool.generate()` callers interleave through one `forward_batch` per tick (gated by the same `continuous_batching` flag; benchmark pending)
 >
 > Everything else is behind a flag (`speculative_distributed`, `persistent_pipeline_stream`, `decentralized_spec_decoding`, `activation_compression`, `swift_self_speculative`) or advisory (Phase C allocator).
 >
@@ -26,34 +27,27 @@
 > | **Item 13 — Activation compression (Q8_0)** | ✅ LANDED behind `activation_compression=false` flag. Codec verified (~3.76× compression, RMS error <0.005, peer-compatible auto-dispatch). End-to-end multi-segment benchmark pending. |
 > | **Item 12 — DSD (decentralized speculative)** | ✅ ALL PHASES LANDED 2026-04-18 behind `decentralized_spec_decoding=false`. Worker γ-token decode + KV truncation primitives + γ controller + multi-segment spec-verify worker branch + ~410 LOC coordinator loop in `pipeline/dsd.rs`. End-to-end multi-segment WAN benchmark pending. |
 > | **Item 16 — Parallax scheduler (Phases A+B+B.2+C+C.2)** | ✅ LANDED 2026-04-18/19. All phases default-on except Phase D (multi-pipeline concurrency, deferred). Phase A: shortest-path DP. Phase B: observed per-layer latency EMA. Phase B.2: cross-node gossip of top-32 observed latencies via `NodeCapability.observed_latencies`. Phase C: `parallax_allocator.rs` offline layer allocator with `Z(k) = k²/s*(k)` objective. Phase C.2 (2026-04-19): soft acquire/prune bias in `AutoShardManager` driven by a per-shard stability counter (≥3 ticks of consistent signal) — respects every existing hard constraint. Tests: 10 routing + 7 allocator + 2 scheduler integration + 1 EMA math + 5 merge + 8 stability. |
+> | **Item 7 — BatchGenerate Phase 1** | ✅ LANDED 2026-04-19. Worker-side `SlotTable` (`src/inference/slot_table.rs`) + slot-driven decode loop (`run_worker` restructured into select! over IPC + decode tick). Concurrent `pool.generate()` callers now interleave through a single `SplitModel::forward_batch` per tick instead of running serially. Default-off — gated by the same `continuous_batching` flag that gates daemon-side Item 3 batching. End-to-end concurrent-generate benchmark + Sarathi chunked prefill are Phase 2 work. |
 >
-> **NEXT SESSION — Item 7 BatchGenerate is the main remaining pick.**
+> **NEXT SESSION — Item 7 Phase 2 (Sarathi chunked prefill) + concurrent-generate benchmark.**
 >
-> (Phase B.2 cross-node latency gossip + Phase C.2 auto-rebalance both
-> landed 2026-04-19 — see Item 16 sections below.)
+> Item 7 Phase 1 landed 2026-04-19: worker-side `SlotTable` + slot-driven
+> decode loop in `src/inference/slot_table.rs` + restructured
+> `model_worker::run_worker` (select! over IPC + decode tick). Concurrent
+> `pool.generate()` calls now interleave through a single
+> `SplitModel::forward_batch` per tick instead of running serially.
+> Default-off until benchmarked end-to-end.
 >
-> **Large (multi-session) — Item 7 full BatchGenerate.**
-> Today's Phase 2b batches per-token forwards (`DaemonMsg::Forward`). It does
-> NOT batch inside `generate()` — two concurrent long `generate()` calls on
-> the same model still serialize compute inside the worker subprocess. True
-> multi-user throughput requires a slot-driven decode coordinator on the
-> worker: SlotTable with per-slot `KvCacheEntry` + `SamplingState`, admit new
-> requests mid-batch, Sarathi-style chunked prefill to avoid stalling decode,
-> step through all active slots via `forward_batch` each iteration. This is
-> the real multi-tenant story that Phase 2b lays groundwork for but doesn't
-> fully deliver.
-> - Scope sketch in the `Item 7 — BatchGenerate` section below (line ~505).
-> - Probably 3–4 sessions of careful work.
->
-> **Recommendation:** Parallax Phases A/B/B.2/C/C.2 are all landed. The next
-> big lever is Item 7 BatchGenerate — the real multi-tenant story that
-> Phase 2b of Item 3 laid groundwork for but didn't fully deliver.
+> **Phase 2 scope.** Sarathi-style chunked prefill (a long-prompt admission
+> currently stalls all active decode slots until prefill completes — chunk
+> it into `prefill_chunk_tokens` and round-robin with decode steps).
+> Plus a launcher for the concurrent-generate benchmark — needs to spawn
+> the swarmllm binary because `current_exe()` in test context isn't it.
 >
 > **Session state to recall on resume:**
-> - Last session: Phase C.2 Parallax auto-rebalance landed 2026-04-19
-> - Tests: 662 lib tests passing on `dev,claude-subscription` (8 new
->   stability + overlap tests this session, +3 net after accounting for
->   existing tests updated for the `parallax_auto_rebalance` field)
+> - Last session: Item 7 Phase 1 landed 2026-04-19
+> - Tests: 668 lib + 67 integration = 735 total on `dev,claude-subscription`
+>   (6 new SlotTable unit tests, +6 net)
 > - Bench doc: `docs/plans/benchmarks/round3.md` — GPU validated 1.55× at batch=8
 > - Pre-staged models: TinyLlama-1.1B, Phi-3.5-mini, Qwen2.5-Coder-7B — see
 >   `memory/local_model_shards.md`
@@ -595,6 +589,88 @@ The implementation is correct in structure (skip-mask draft + truncated KV + ful
 3. Implement worker-side `SlotTable` + `handle_batch_generate_step`.
 4. Refactor `process_pool.rs` to actor model.
 5. Integration test: 2 concurrent `pool.generate()` calls, assert correct outputs + aggregate throughput.
+
+### Phase 1 (LANDED 2026-04-19): worker-side SlotTable + slot-driven decode loop
+
+Scope cut vs. original design: **no new IPC verbs.** The `Generate` /
+`Token` / `GenerateDone` / `Error` messages already multiplex per-request
+through Phase 2a's reader actor in `process_pool.rs`, so the slot table
+lives entirely inside the worker subprocess and the daemon side is
+unchanged. Concurrent `pool.generate()` calls fan into the worker via
+the existing multiplexed write path; the worker now interleaves their
+decode steps instead of running them serially.
+
+- **`src/inference/slot_table.rs`** (new, ~250 LOC). `Slot { request_id,
+  req_id_str, model_key, layer_range, index_pos, last_token,
+  last_token_logprob, generated_count, max_tokens, use_logprobs, eos,
+  stop_sequences, accumulated_text, sampling, prompt_tokens,
+  finish_reason }` + `SlotTable { slots, layer_range, capacity }`. The
+  table pins a single `(layer_start, layer_end)` while non-empty —
+  admits with a different range fall through to sequential
+  `handle_generate`. 6 unit tests cover admission gating, capacity
+  bound, layer-range pinning + release on drain, finish-reason
+  one-shot semantics.
+- **`src/inference/model_worker.rs::run_worker`** restructured into a
+  `tokio::select!` loop over (a) `mpsc::Receiver<DaemonMsg>` fed by a
+  spawned reader task — keeps `recv_framed` cancel-safe — and (b)
+  `tokio::task::yield_now` whenever the slot table is non-empty. Every
+  `Generate` first attempts admission via `try_admit_generate_slot`
+  (prefill, prefix-cache lookup, sample first token, push slot). Slots
+  ineligible for batching (SWIFT-active, max_tokens=0, layer_range
+  mismatch, table full) fall through to the existing
+  `handle_generate` path with the IpcGenerate restored.
+- **`step_decode_pool`** runs once per tick when slots are active.
+  Phase 1 emits `Token(last_token)` per slot (after EOS / stop-string
+  gate); Phase 2 builds `BatchItem`s from the still-active subset and
+  calls `SplitModel::forward_batch` (already CPU-falls-through, GPU
+  fused); Phase 3 samples per-slot logits, advances `index_pos`, marks
+  slots that hit `max_tokens` with `finish_reason=length`, and emits the
+  off-by-one final Token inline. `finalize_slot` then sends
+  `GenerateDone` and clears the per-request KV. Mirrors the per-token
+  semantics of `handle_generate` byte-for-byte (including the off-by-one
+  emit for `finish="length"` and the no-emit-on-EOS-first-sample case).
+- **`process_pool.rs`** now passes `--batch-generate <bool>` and
+  `--batch-generate-max-slots <u32>` to spawned workers. Driven by the
+  same `continuous_batching` + `max_concurrent_decode_batch` atomics
+  that gate the daemon-side `forward()` coalescer (Item 3 Phase 2b).
+  Restart of an existing worker is needed to pick up flag changes —
+  matches the prefix-cache / SWIFT settings, which behave the same way.
+- **`src/main.rs`** ModelWorker subcommand grew `--batch-generate` and
+  `--batch-generate-max-slots` flags, plumbed into `run_worker`.
+
+Default-off for now: the daemon's `continuous_batching` flag controls
+both the daemon-side scheduler (default-on as of 2026-04-19) and the
+new worker-side slot loop. Leaving today's default-on continues to be
+safe — workers that aren't passed `--batch-generate true` still
+execute the legacy serial `handle_generate` path; workers that ARE
+passed `true` admit eligible Generates into the slot table, fall
+through cleanly when not eligible, and never block the runtime
+between IPC reads and decode ticks (the select! arms guarantee one
+yield between every tick).
+
+735 lib + integration tests pass on `dev,claude-subscription`. End-to-
+end concurrent-generate throughput benchmark + Sarathi-style chunked
+prefill are Phase 2 work — gated until we can spin up two real
+`pool.generate()` callers against a model worker (existing
+`tests/integration` doesn't cover the pool because `current_exe()` in
+test context isn't the swarmllm binary).
+
+### Phase 2 (next session): Sarathi chunked prefill + benchmark
+
+Today admit blocks until prefill completes — a long-prompt admission
+stalls every active slot's decode for hundreds of ms. Sarathi chops
+prefill into `prefill_chunk_tokens` sized chunks and round-robins them
+with batched decode steps. Adds a `Slot::PrefillState { remaining_ids,
+chunk_size, index_pos }` enum branch and a per-tick scheduler choice:
+"do one prefill chunk for slot X" vs "batched decode over all decode
+slots". Decode latency stays bounded by the chunk size instead of by
+the longest pending prefill.
+
+The end-to-end concurrent-generate benchmark needs a launcher that can
+spawn the swarmllm binary in test mode (point `current_exe` override
+or build a release binary first), start two concurrent `pool.generate`
+calls against a tiny model, measure aggregate tok/s vs. serial
+baseline. Target ≥1.7× throughput on GPU at concurrency=2.
 
 ---
 

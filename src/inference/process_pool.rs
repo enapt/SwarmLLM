@@ -713,6 +713,16 @@ impl ModelProcessPool {
                     .load(Ordering::Relaxed)
                     .to_string(),
             );
+            // BatchGenerate (Item 7): enabled iff the same `continuous_batching`
+            // flag that gates daemon-side `forward()` coalescing is on.
+            args.push("--batch-generate".to_string());
+            args.push(self.continuous_batching.load(Ordering::Relaxed).to_string());
+            args.push("--batch-generate-max-slots".to_string());
+            args.push(
+                self.max_concurrent_decode_batch
+                    .load(Ordering::Relaxed)
+                    .to_string(),
+            );
         }
 
         // If a shard window is set for this model, pass it to the worker

@@ -9,12 +9,14 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use tokio::net::UnixStream;
+use tokio::sync::mpsc;
 
 use candle_core::IndexOp;
 
 use crate::daemon::shard_loader::{try_load_from_shards, ShardLoadParams};
 use crate::error::SwarmError;
-use crate::inference::split::{self, KvCacheStore, PrefixCache, SplitModel};
+use crate::inference::slot_table::{Slot, SlotTable};
+use crate::inference::split::{self, BatchItem, KvCacheStore, PrefixCache, SplitModel};
 use crate::inference::swift::{SwiftCalibrator, SwiftConfig};
 use crate::inference::worker_ipc::*;
 use crate::types::NetworkFinishReason;
@@ -44,6 +46,10 @@ impl Default for PrefixCacheConfig {
 /// Run the model worker subprocess.
 /// Called from main.rs when the binary is invoked with `model-worker` subcommand.
 /// `shard_window`: if Some, only load these shard indices (VRAM-saving mode).
+/// `batch_generate`: Item 7 — multiple concurrent `Generate` IPC requests
+///   share one `forward_batch` per decode tick instead of running serially.
+/// `batch_generate_max_slots`: cap on the slot table; admissions beyond this
+///   fall through to sequential `handle_generate`.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_worker(
     socket_path: PathBuf,
@@ -55,6 +61,8 @@ pub async fn run_worker(
     force_standard_attn: bool,
     max_seq_len_override: Option<usize>,
     activation_compression: bool,
+    batch_generate: bool,
+    batch_generate_max_slots: u32,
 ) {
     // Connect to the daemon's Unix socket
     let stream = match UnixStream::connect(&socket_path).await {
@@ -122,89 +130,188 @@ pub async fn run_worker(
         tracing::info!(window = ?w, "model-worker: shard window active — only loading specified shards");
     }
 
+    tracing::info!(
+        enabled = batch_generate,
+        max_slots = batch_generate_max_slots,
+        "model-worker: BatchGenerate (Item 7) configured"
+    );
+
+    let mut slot_table = SlotTable::new(batch_generate_max_slots as usize);
+
+    // Spawn a reader task that pushes framed IPC messages onto an mpsc.
+    // Decoupling read-from-socket from the main select! loop keeps frame
+    // alignment safe under cancellation (recv_framed itself is not cancel-safe).
+    let (ipc_tx, mut ipc_rx) = mpsc::channel::<(DaemonMsg, Vec<u8>)>(16);
+    let reader_task = tokio::spawn(async move {
+        loop {
+            match recv_daemon(&mut reader).await {
+                Ok(framed) => {
+                    if ipc_tx.send(framed).await.is_err() {
+                        break;
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "model-worker: socket read error");
+                    break;
+                }
+            }
+        }
+    });
+
     loop {
-        let (msg, payload) = match recv_daemon(&mut reader).await {
-            Ok(m) => m,
-            Err(e) => {
-                tracing::warn!(error = %e, "model-worker: socket read error");
-                break;
+        // Either block on the next IPC message (no slots are decoding) OR race
+        // a fresh IPC arrival against an immediate decode tick (slots active).
+        let next_msg: Option<(DaemonMsg, Vec<u8>)> = if slot_table.is_empty() {
+            ipc_rx.recv().await
+        } else {
+            tokio::select! {
+                biased;
+                m = ipc_rx.recv() => m,
+                _ = tokio::task::yield_now() => None,
             }
         };
 
-        match msg {
-            DaemonMsg::Forward(fwd) => {
-                let request_id = fwd.request_id;
-                if let Err(e) = handle_forward(
-                    &mut writer,
-                    &mut models,
-                    &kv_store,
-                    &data_dir,
-                    fwd,
-                    payload,
-                    &shard_window,
-                    activation_compression,
-                )
-                .await
-                {
-                    send_worker_error(&mut writer, request_id, e).await;
+        if let Some((msg, payload)) = next_msg {
+            match msg {
+                DaemonMsg::Forward(fwd) => {
+                    let request_id = fwd.request_id;
+                    if let Err(e) = handle_forward(
+                        &mut writer,
+                        &mut models,
+                        &kv_store,
+                        &data_dir,
+                        fwd,
+                        payload,
+                        &shard_window,
+                        activation_compression,
+                    )
+                    .await
+                    {
+                        send_worker_error(&mut writer, request_id, e).await;
+                    }
                 }
-            }
-            DaemonMsg::BatchForward {
-                requests,
-                activation_lens,
-            } => {
-                if let Err(e) = handle_batch_forward(
-                    &mut writer,
-                    &mut models,
-                    &kv_store,
-                    &data_dir,
+                DaemonMsg::BatchForward {
                     requests,
                     activation_lens,
-                    payload,
-                    &shard_window,
-                    activation_compression,
-                )
-                .await
-                {
-                    // Batch-wide error: reply to first request's id so caller can log.
-                    tracing::warn!(error = %e, "model-worker: BatchForward failed");
+                } => {
+                    if let Err(e) = handle_batch_forward(
+                        &mut writer,
+                        &mut models,
+                        &kv_store,
+                        &data_dir,
+                        requests,
+                        activation_lens,
+                        payload,
+                        &shard_window,
+                        activation_compression,
+                    )
+                    .await
+                    {
+                        tracing::warn!(error = %e, "model-worker: BatchForward failed");
+                    }
+                }
+                DaemonMsg::Generate(gen) => {
+                    let request_id = gen.request_id;
+                    // Try to admit into the BatchGenerate slot table when the
+                    // flag is on and the request is eligible (no SWIFT, simple
+                    // sampling, room in the table, matching layer_range). On
+                    // ineligibility or FallThrough, the IpcGenerate is restored
+                    // here and runs through sequential `handle_generate`.
+                    let mut pending: Option<IpcGenerate> = Some(gen);
+                    if batch_generate
+                        && pending
+                            .as_ref()
+                            .map(|g| slot_admission_eligible(g, &swift_cfg, &slot_table))
+                            .unwrap_or(false)
+                    {
+                        let g = pending.take().expect("checked above");
+                        match try_admit_generate_slot(
+                            &mut writer,
+                            &mut models,
+                            &kv_store,
+                            &prefix_cache,
+                            &data_dir,
+                            g,
+                            &shard_window,
+                            force_standard_attn,
+                            &mut slot_table,
+                        )
+                        .await
+                        {
+                            Ok(_) => { /* admitted (or finished during admit) */ }
+                            Err(SlotAdmitError::Fatal(e)) => {
+                                send_worker_error(&mut writer, request_id, e).await;
+                            }
+                            Err(SlotAdmitError::FallThrough(g)) => {
+                                pending = Some(g);
+                            }
+                        }
+                    }
+                    if let Some(g) = pending {
+                        if let Err(e) = handle_generate(
+                            &mut writer,
+                            &mut models,
+                            &kv_store,
+                            &prefix_cache,
+                            &data_dir,
+                            g,
+                            &shard_window,
+                            &swift_cfg,
+                            force_standard_attn,
+                            max_seq_len_override,
+                        )
+                        .await
+                        {
+                            send_worker_error(&mut writer, request_id, e).await;
+                        }
+                    }
+                }
+                DaemonMsg::Unload {
+                    layer_start,
+                    layer_end,
+                } => {
+                    models.retain(|&(ls, le, _, _), _| !(ls == layer_start && le == layer_end));
+                    tracing::info!(layer_start, layer_end, "model-worker: unloaded shard range");
+                }
+                DaemonMsg::Shutdown => {
+                    let _ = send_worker(&mut writer, &WorkerMsg::Bye, &[]).await;
+                    break;
                 }
             }
-            DaemonMsg::Generate(gen) => {
-                let request_id = gen.request_id;
-                if let Err(e) = handle_generate(
-                    &mut writer,
-                    &mut models,
-                    &kv_store,
-                    &prefix_cache,
-                    &data_dir,
-                    gen,
-                    &shard_window,
-                    &swift_cfg,
-                    force_standard_attn,
-                    max_seq_len_override,
-                )
-                .await
-                {
-                    send_worker_error(&mut writer, request_id, e).await;
+        } else if slot_table.is_empty() {
+            // ipc_rx returned None and no slots — daemon socket closed, exit cleanly.
+            break;
+        }
+
+        // Decode tick: one batched forward over all currently-active slots,
+        // sample per slot, emit Token messages, mark finished slots.
+        if !slot_table.is_empty() {
+            if let Err(e) =
+                step_decode_pool(&mut writer, &mut models, &kv_store, &mut slot_table).await
+            {
+                tracing::warn!(error = %e, "model-worker: decode tick failed — finishing all slots with error");
+                let drained = std::mem::replace(
+                    &mut slot_table,
+                    SlotTable::new(batch_generate_max_slots as usize),
+                );
+                for slot in drained.into_active() {
+                    send_worker_error(
+                        &mut writer,
+                        slot.request_id,
+                        SwarmError::Internal(format!("BatchGenerate decode failed: {e}")),
+                    )
+                    .await;
                 }
             }
-            DaemonMsg::Unload {
-                layer_start,
-                layer_end,
-            } => {
-                // Remove all entries for this layer range (both TP and non-TP variants)
-                models.retain(|&(ls, le, _, _), _| !(ls == layer_start && le == layer_end));
-                tracing::info!(layer_start, layer_end, "model-worker: unloaded shard range");
-            }
-            DaemonMsg::Shutdown => {
-                let _ = send_worker(&mut writer, &WorkerMsg::Bye, &[]).await;
-                break;
+            for finished in slot_table.drain_finished() {
+                if let Err(e) = finalize_slot(&mut writer, &kv_store, finished).await {
+                    tracing::warn!(error = %e, "model-worker: finalize_slot failed");
+                }
             }
         }
     }
 
-    // Explicitly drop all models before exiting — CUDA contexts will be freed
+    reader_task.abort();
     drop(models);
     tracing::info!("model-worker: exiting cleanly");
 }
@@ -1565,6 +1672,411 @@ fn slice_position_logits(
     verify_logits
         .i((.., pos, ..))
         .map_err(|e| SwarmError::Internal(format!("slice verify logits at pos {pos}: {e}")))
+}
+
+/// Reasons a slot admission can fail.
+enum SlotAdmitError {
+    /// Caller should fall back to sequential `handle_generate` with the
+    /// original `IpcGenerate`. Used when prefill works but the admit decided
+    /// the request is better off serial (e.g. layer_range mismatch detected
+    /// late, or the slot table was full when we got to it).
+    FallThrough(IpcGenerate),
+    /// Unrecoverable error from the prefill itself; emit Error to the daemon.
+    Fatal(SwarmError),
+}
+
+/// Cheap admission gate. Mirrors the carve-outs in `handle_generate`: SWIFT
+/// gets its own decode loop, so SWIFT-eligible requests always go sequential.
+/// Anything that doesn't fit inside one batched `forward_batch` per tick also
+/// goes sequential.
+fn slot_admission_eligible(
+    gen: &IpcGenerate,
+    swift_cfg: &SwiftConfig,
+    slot_table: &SlotTable,
+) -> bool {
+    if gen.sampling.max_tokens == 0 {
+        return false;
+    }
+    // Layer range must match if anything is already in the table.
+    let lr = (gen.layer_range.0 as usize, gen.layer_range.1 as usize);
+    if !slot_table.can_admit(lr) {
+        return false;
+    }
+    // SWIFT decoding has its own self-speculative loop; not batchable v1.
+    if swift_cfg.enabled && gen.sampling.temperature == 0.0 {
+        return false;
+    }
+    true
+}
+
+/// Run prefill for a new `Generate` and (if it produces a non-EOS first token)
+/// push a `Slot` into the table. Returns `Ok(true)` when the slot was pushed
+/// (decode tick will handle it next), `Ok(false)` when the request finished
+/// during admit (max_tokens=0 already filtered, but EOS-on-first-sample can
+/// happen for already-saturated prompts), `Err(SlotAdmitError)` on fall-back
+/// or fatal error.
+#[allow(clippy::too_many_arguments)]
+async fn try_admit_generate_slot(
+    writer: &mut tokio::net::unix::OwnedWriteHalf,
+    models: &mut HashMap<(usize, usize, usize, usize), SplitModel>,
+    kv_store: &Arc<KvCacheStore>,
+    prefix_cache: &Arc<PrefixCache>,
+    data_dir: &std::path::Path,
+    gen: IpcGenerate,
+    shard_window: &Option<Vec<u32>>,
+    force_standard_attn: bool,
+    slot_table: &mut SlotTable,
+) -> Result<bool, SlotAdmitError> {
+    let request_id = gen.request_id;
+    let model_id = gen.model_id.clone();
+    let (layer_start, layer_end) = (gen.layer_range.0 as usize, gen.layer_range.1 as usize);
+
+    // Generate is always non-TP (full local inference).
+    if let Err(e) = ensure_model_loaded(
+        models,
+        data_dir,
+        &model_id,
+        layer_start,
+        layer_end,
+        0,
+        1,
+        shard_window,
+    ) {
+        return Err(SlotAdmitError::Fatal(e));
+    }
+
+    let model = match models.get_mut(&(layer_start, layer_end, 0, 1)) {
+        Some(m) => m,
+        None => {
+            return Err(SlotAdmitError::Fatal(SwarmError::Internal(
+                "Model vanished after load".into(),
+            )))
+        }
+    };
+
+    let req_id_str = request_id.to_string();
+    let model_key_string = model.kv_model_key().to_string();
+
+    let prompt_ids = model.encode_ids(&gen.prompt);
+    let prompt_tokens = prompt_ids.len();
+    if prompt_tokens == 0 {
+        return Err(SlotAdmitError::Fatal(SwarmError::Internal(
+            "empty prompt after tokenization".into(),
+        )));
+    }
+
+    // Prefix-cache lookup.
+    let matched = prefix_cache.lookup(&model_key_string, &prompt_ids);
+    let prefix_len = match matched.as_ref() {
+        Some(snap) => prefix_cache
+            .hydrate_request_from_snapshot(kv_store, &model_key_string, &req_id_str, snap)
+            .unwrap_or(0),
+        None => 0,
+    };
+    let prefix_len = prefix_len.min(prompt_tokens.saturating_sub(1));
+
+    let (input, index_pos_start) = if prefix_len > 0 {
+        tracing::info!(
+            %request_id,
+            matched_tokens = prefix_len,
+            total_tokens = prompt_tokens,
+            "DIAG: try_admit_generate_slot prefix-cache HIT"
+        );
+        match model.tensor_from_ids(&prompt_ids[prefix_len..]) {
+            Ok(t) => (t, prefix_len),
+            Err(e) => return Err(SlotAdmitError::Fatal(e)),
+        }
+    } else {
+        match model.tensor_from_ids(&prompt_ids) {
+            Ok(t) => (t, 0),
+            Err(e) => return Err(SlotAdmitError::Fatal(e)),
+        }
+    };
+
+    let prefill_result = tokio::task::block_in_place(|| {
+        let _g = crate::inference::attn_kernel::ForceStandardAttnGuard::new(force_standard_attn);
+        model.forward(&input, index_pos_start, kv_store, &req_id_str)
+    });
+    let logits = match prefill_result {
+        Ok(l) => l,
+        Err(e) => return Err(SlotAdmitError::Fatal(e)),
+    };
+
+    prefix_cache.insert_from_kv(&model_key_string, &req_id_str, kv_store, &prompt_ids);
+
+    let (first_token, first_token_logprob) =
+        match crate::inference::tensor_util::sample_token_with_logprob(&logits, &gen.sampling) {
+            Ok(v) => v,
+            Err(e) => return Err(SlotAdmitError::Fatal(e)),
+        };
+
+    let eos = model.eos_tokens().to_vec();
+    // EOS on the very first sample: emit GenerateDone with no tokens. Mirrors
+    // handle_generate which would just break out of the for loop immediately.
+    if eos.contains(&first_token) {
+        let _ = send_worker(
+            writer,
+            &WorkerMsg::GenerateDone {
+                request_id,
+                prompt_tokens,
+                completion_tokens: 0,
+                finish_reason: "stop".to_string(),
+            },
+            &[],
+        )
+        .await;
+        kv_store.clear_request(model.kv_model_key(), &req_id_str);
+        return Ok(false);
+    }
+
+    // Re-check capacity now that prefill is done — another concurrent admit
+    // may have raced ahead. If it did, fall through and let sequential handle
+    // it (also re-runs prefill, which is wasteful but correct).
+    let lr = (layer_start, layer_end);
+    if !slot_table.can_admit(lr) {
+        // Drop the per-request KV we just primed so the sequential path
+        // starts fresh and doesn't double-prefill into a polluted slot.
+        kv_store.clear_request(model.kv_model_key(), &req_id_str);
+        return Err(SlotAdmitError::FallThrough(gen));
+    }
+
+    let max_tokens = gen.sampling.max_tokens;
+    let use_logprobs = gen.sampling.logprobs;
+    let stop_sequences = gen.sampling.stop.clone();
+    let sampling = gen.sampling.clone();
+
+    let slot = Slot {
+        request_id,
+        req_id_str,
+        model_key: model_key_string,
+        layer_range: lr,
+        index_pos: prompt_tokens,
+        last_token: first_token,
+        last_token_logprob: first_token_logprob,
+        generated_count: 0,
+        max_tokens,
+        use_logprobs,
+        eos,
+        stop_sequences,
+        accumulated_text: String::new(),
+        sampling,
+        prompt_tokens,
+        finish_reason: None,
+    };
+    slot_table.admit(slot);
+    Ok(true)
+}
+
+/// One decode tick across every active slot in the table.
+///
+/// Steps (mirrors the per-token flow inside `handle_generate`):
+/// 1. **Pre-emit gate** per slot: EOS on `last_token` → finish "stop" without
+///    emit; decode-and-stop-string match → finish "stop" without emit.
+/// 2. **Emit** `Token(last_token)` for every slot that passed the gate.
+/// 3. **Batched forward** over the still-active slots' `last_token`s.
+/// 4. **Sample** per slot from its logits → set `last_token`, advance
+///    `index_pos`, increment `generated_count`. Slots that hit `max_tokens`
+///    are marked `length`; their newly-sampled token is emitted as the
+///    "off-by-one" extra inside `finalize_slot`.
+async fn step_decode_pool(
+    writer: &mut tokio::net::unix::OwnedWriteHalf,
+    models: &mut HashMap<(usize, usize, usize, usize), SplitModel>,
+    kv_store: &Arc<KvCacheStore>,
+    slot_table: &mut SlotTable,
+) -> Result<(), SwarmError> {
+    if slot_table.is_empty() {
+        return Ok(());
+    }
+    let layer_range = slot_table
+        .current_layer_range()
+        .ok_or_else(|| SwarmError::Internal("slot table non-empty but layer_range unset".into()))?;
+    let (layer_start, layer_end) = layer_range;
+    let model = models
+        .get_mut(&(layer_start, layer_end, 0, 1))
+        .ok_or_else(|| {
+            SwarmError::Internal("model variant evicted between admit and tick".into())
+        })?;
+
+    // Phase 1: pre-emit gate + Token emit. Borrow the model immutably here
+    // for vocab/eos lookup while the slot table is mutated.
+    {
+        let active = slot_table.active();
+        for slot in active.iter_mut() {
+            if slot.is_finished() {
+                continue;
+            }
+            if slot.eos.contains(&slot.last_token) {
+                slot.finish_stop();
+                continue;
+            }
+            let text = decode_token(model, slot.last_token);
+            slot.accumulated_text.push_str(&text);
+            if crate::inference::sampling::find_stop_sequence(
+                &slot.accumulated_text,
+                &slot.stop_sequences,
+            )
+            .is_some()
+            {
+                slot.finish_stop();
+                continue;
+            }
+            // Emit Token. Logprob is the one collected at the previous sample
+            // (or from prefill for the very first iteration).
+            let request_id = slot.request_id;
+            let token_id = slot.last_token;
+            let logprob = if slot.use_logprobs {
+                slot.last_token_logprob
+            } else {
+                None
+            };
+            send_worker(
+                writer,
+                &WorkerMsg::Token {
+                    request_id,
+                    token_id,
+                    text,
+                    is_eos: false,
+                    logprob,
+                },
+                &[],
+            )
+            .await
+            .map_err(|e| SwarmError::Internal(format!("send Token: {e}")))?;
+            slot.generated_count += 1;
+        }
+    }
+
+    // Phase 2: build the BatchItems for slots still active after the gate.
+    // Stage per-slot input tensors + request_id strings in lockstep so the
+    // BatchItem refs stay valid for the forward call.
+    let active = slot_table.active();
+    let still_active_indices: Vec<usize> = active
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| !s.is_finished())
+        .map(|(i, _)| i)
+        .collect();
+    if still_active_indices.is_empty() {
+        return Ok(());
+    }
+
+    let mut input_tensors: Vec<candle_core::Tensor> =
+        Vec::with_capacity(still_active_indices.len());
+    let mut req_id_strs: Vec<String> = Vec::with_capacity(still_active_indices.len());
+    let mut sampling_clones: Vec<crate::types::SamplingParams> =
+        Vec::with_capacity(still_active_indices.len());
+    let mut index_positions: Vec<usize> = Vec::with_capacity(still_active_indices.len());
+    for &i in &still_active_indices {
+        let slot = &active[i];
+        let t = model.token_tensor(slot.last_token)?;
+        input_tensors.push(t);
+        req_id_strs.push(slot.req_id_str.clone());
+        sampling_clones.push(slot.sampling.clone());
+        index_positions.push(slot.index_pos);
+    }
+
+    let items: Vec<BatchItem<'_>> = still_active_indices
+        .iter()
+        .enumerate()
+        .map(|(j, _)| BatchItem {
+            input: &input_tensors[j],
+            index_pos: index_positions[j],
+            request_id: req_id_strs[j].as_str(),
+        })
+        .collect();
+
+    // forward_batch already falls back to sequential single-forward when N=1
+    // and to a sequential loop on CPU (per Item 3 Phase 2b). Both still produce
+    // per-slot logits we can sample from below.
+    let outputs: Vec<candle_core::Tensor> = tokio::task::block_in_place(|| {
+        let _g = crate::inference::attn_kernel::ForceStandardAttnGuard::new(false);
+        model.forward_batch(&items, kv_store)
+    })?;
+
+    if outputs.len() != still_active_indices.len() {
+        return Err(SwarmError::Internal(format!(
+            "forward_batch returned {} outputs for {} active slots",
+            outputs.len(),
+            still_active_indices.len()
+        )));
+    }
+
+    // Phase 3: per-slot sample, advance state, mark "length" if exhausted.
+    // When a slot exhausts max_tokens it also gets the off-by-one Token here
+    // (mirrors the post-loop block in `handle_generate`).
+    for (j, &i) in still_active_indices.iter().enumerate() {
+        let slot = &mut active[i];
+        let (next_tok, next_logprob) = crate::inference::tensor_util::sample_token_with_logprob(
+            &outputs[j],
+            &sampling_clones[j],
+        )?;
+        slot.last_token = next_tok;
+        slot.last_token_logprob = next_logprob;
+        slot.index_pos += 1;
+        if slot.generated_count >= slot.max_tokens as usize {
+            // Off-by-one: emit the just-sampled token before finishing.
+            if slot.max_tokens > 0 && !slot.eos.contains(&next_tok) {
+                let text = decode_token(model, next_tok);
+                let logprob = if slot.use_logprobs {
+                    next_logprob
+                } else {
+                    None
+                };
+                send_worker(
+                    writer,
+                    &WorkerMsg::Token {
+                        request_id: slot.request_id,
+                        token_id: next_tok,
+                        text,
+                        is_eos: false,
+                        logprob,
+                    },
+                    &[],
+                )
+                .await
+                .map_err(|e| SwarmError::Internal(format!("send final Token: {e}")))?;
+                slot.generated_count += 1;
+            }
+            slot.finish_length();
+        }
+    }
+    Ok(())
+}
+
+/// Wrap up a finished slot: send GenerateDone + free its per-request KV.
+/// The off-by-one Token (when finish="length") is already emitted inside
+/// `step_decode_pool` so this is purely bookkeeping.
+async fn finalize_slot(
+    writer: &mut tokio::net::unix::OwnedWriteHalf,
+    kv_store: &Arc<KvCacheStore>,
+    slot: Slot,
+) -> Result<(), SwarmError> {
+    let Slot {
+        request_id,
+        req_id_str,
+        model_key,
+        prompt_tokens,
+        generated_count,
+        finish_reason,
+        ..
+    } = slot;
+    let finish_label = finish_reason.unwrap_or("length").to_string();
+
+    send_worker(
+        writer,
+        &WorkerMsg::GenerateDone {
+            request_id,
+            prompt_tokens,
+            completion_tokens: generated_count,
+            finish_reason: finish_label,
+        },
+        &[],
+    )
+    .await
+    .map_err(|e| SwarmError::Internal(format!("send GenerateDone: {e}")))?;
+
+    kv_store.clear_request(&model_key, &req_id_str);
+    Ok(())
 }
 
 /// Decode a single token to text using the model's vocabulary.

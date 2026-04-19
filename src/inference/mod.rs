@@ -15,6 +15,7 @@ pub mod router;
 pub mod sampling;
 pub mod scheduler;
 pub(crate) mod shard_layout;
+pub mod slot_table;
 pub mod speculative;
 pub mod split;
 pub mod swift;
