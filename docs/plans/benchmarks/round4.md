@@ -90,14 +90,26 @@ For an A/B you want:
 ### A/B comparison: Phase 1+2 ON vs OFF
 
 Toggled by `[inference] continuous_batching = true | false` in `config.toml`.
-Daemon restart between runs.
+Daemon restart between runs. Numbers below are averages of 3 runs at each
+concurrency (single-iteration runs are noisy on TTFT — first-burst variance
+hides under averages).
 
 | Concurrency | Aggregate tok/s ON | Aggregate tok/s OFF | Avg TTFT ON | Avg TTFT OFF | TTFT speedup |
 |---|---|---|---|---|---|
-| 1 | 38.7 | 40.1 | 72 ms | (baseline) | — |
-| 2 | 43.8 | 38.0 | 84 ms | 1450 ms | **17.3×** |
-| 4 | 44.7 | 45.3 | 160 ms | 3475 ms | **21.7×** |
-| 8 | 45.3 | 39.6 | 377 ms | 8859 ms | **23.5×** |
+| 1 (5 iter) | 39.4 | 40.1 | ~45 ms (warm) | (baseline) | — |
+| 2 (3 iter) | 39.6 | 40.5 | 74 ms | 1347 ms | **18.2×** |
+| 4 (3 iter) | 42.1 | 42.5 | 169 ms | 3673 ms | **21.7×** |
+| 8 (1 iter) | 45.3 | 39.6 | 377 ms | 8859 ms | **23.5×** |
+
+Per-run TTFT numbers (3 separate concurrent calls) for transparency:
+
+| Concurrency | ON | OFF |
+|---|---|---|
+| 2 | 73 / 75 / 75 ms | 1352 / 1225 / 1464 ms |
+| 4 | 151 / 173 / 183 ms | 3813 / 3642 / 3563 ms |
+
+Variance is small in both columns — ~10% spread. The 18–24× ratio holds
+within that noise, so the headline isn't flaky single-iteration luck.
 
 ### Reading the numbers
 

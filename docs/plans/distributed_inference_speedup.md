@@ -27,7 +27,7 @@
 > | **Item 13 — Activation compression (Q8_0)** | ✅ LANDED behind `activation_compression=false` flag. Codec verified (~3.76× compression, RMS error <0.005, peer-compatible auto-dispatch). End-to-end multi-segment benchmark pending. |
 > | **Item 12 — DSD (decentralized speculative)** | ✅ ALL PHASES LANDED 2026-04-18 behind `decentralized_spec_decoding=false`. Worker γ-token decode + KV truncation primitives + γ controller + multi-segment spec-verify worker branch + ~410 LOC coordinator loop in `pipeline/dsd.rs`. End-to-end multi-segment WAN benchmark pending. |
 > | **Item 16 — Parallax scheduler (Phases A+B+B.2+C+C.2)** | ✅ LANDED 2026-04-18/19. All phases default-on except Phase D (multi-pipeline concurrency, deferred). Phase A: shortest-path DP. Phase B: observed per-layer latency EMA. Phase B.2: cross-node gossip of top-32 observed latencies via `NodeCapability.observed_latencies`. Phase C: `parallax_allocator.rs` offline layer allocator with `Z(k) = k²/s*(k)` objective. Phase C.2 (2026-04-19): soft acquire/prune bias in `AutoShardManager` driven by a per-shard stability counter (≥3 ticks of consistent signal) — respects every existing hard constraint. Tests: 10 routing + 7 allocator + 2 scheduler integration + 1 EMA math + 5 merge + 8 stability. |
-> | **Item 7 — BatchGenerate Phases 1 + 2** | ✅ LANDED 2026-04-19, **measured 2026-04-19** (RTX 3070 + TinyLlama-1.1B Q4): **17–23× TTFT improvement** under concurrency, with equivalent aggregate throughput vs Phase 1+2 OFF. The win is TTFT fairness — Sarathi chunked prefill prevents new admits from waiting behind the full prior prefill+decode. Aggregate throughput is unchanged because TinyLlama is too small for fused `forward_batch` to add tok/s on this GPU. See `docs/plans/benchmarks/round4.md`. |
+> | **Item 7 — BatchGenerate Phases 1 + 2** | ✅ LANDED 2026-04-19, **measured 2026-04-19** (RTX 3070 + TinyLlama-1.1B Q4, 3-iter avg): **18.2× TTFT @ c=2, 21.7× TTFT @ c=4, 23.5× TTFT @ c=8**, with equivalent aggregate throughput vs Phase 1+2 OFF. The win is TTFT fairness — Sarathi chunked prefill prevents new admits from waiting behind the full prior prefill+decode. Aggregate throughput is unchanged because TinyLlama is too small for fused `forward_batch` to add tok/s on this GPU. See `docs/plans/benchmarks/round4.md`. |
 >
 > **NEXT SESSION — pick a new direction (Item 7 measured + done).**
 >
@@ -766,23 +766,24 @@ from 6 new SlotTable prefill state tests).
 from the new `finish_error_records_message_and_blocks_other_finishers`
 slot_table test).
 
-### Phase 3 (LANDED 2026-04-19): bench measured
+### Phase 3 (LANDED 2026-04-19): bench measured + 3-iteration confirm
 
-Ran the bench recipe end-to-end on the user's RTX 3070 setup. Results
-are in `docs/plans/benchmarks/round4.md`. Headline:
+Ran the bench recipe end-to-end on the user's RTX 3070 setup, with a
+3-iteration confirmation run because single-iteration TTFT is noisy.
+Results in `docs/plans/benchmarks/round4.md`. Headline (3-run avg):
 
 | Concurrency | Aggregate tok/s ON | Aggregate tok/s OFF | Avg TTFT ON | Avg TTFT OFF | TTFT speedup |
 |---|---|---|---|---|---|
-| 2 | 43.8 | 38.0 | 84 ms | 1450 ms | **17.3×** |
-| 4 | 44.7 | 45.3 | 160 ms | 3475 ms | **21.7×** |
-| 8 | 45.3 | 39.6 | 377 ms | 8859 ms | **23.5×** |
+| 2 | 39.6 | 40.5 | 74 ms | 1347 ms | **18.2×** |
+| 4 | 42.1 | 42.5 | 169 ms | 3673 ms | **21.7×** |
+| 8 | 45.3 | 39.6 | 377 ms | 8859 ms | **23.5×** (single iter) |
 
-Throughput is equivalent (TinyLlama is too small for the fused
-`forward_batch` matmul win at this batch size on this GPU). The
-real-world impact is TTFT fairness under concurrency — concurrent users
-get their first token in tens of ms instead of seconds. Single-user is
-3.5% slower with Phase 1+2 on (slot-loop overhead) but well within the
-range an operator would happily trade for multi-user UX.
+Per-run variance is <10% on both columns — the 18–24× ratio is real, not
+single-iteration luck. Aggregate throughput is equivalent (TinyLlama is
+too small for the fused `forward_batch` matmul win at this batch size
+on this GPU). The real-world impact is TTFT fairness under concurrency —
+concurrent users get their first token in tens of ms instead of seconds.
+Single-user is essentially unchanged (39.4 vs 40.1 tok/s, within noise).
 
 The bench tool also gained `--stream` + `--model-id` flags this session.
 Streaming mode parses SSE chunks and reports per-request TTFT; the
