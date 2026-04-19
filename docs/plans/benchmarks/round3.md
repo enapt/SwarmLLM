@@ -1,8 +1,8 @@
-# Round 3 Benchmarks — 2026-04-18
+# Round 3 Benchmarks — 2026-04-18 (CPU), 2026-04-19 (GPU)
 
 Captures measured throughput for the Item 3 Phase 2b fused-batch forward and summarises
 known numbers for items landed earlier (4, 5, 12, 13, 16). Tied to commit
-`365d73a` (Phase C offline allocator).
+`365d73a` (Phase C offline allocator) + CPU-fallback guard in `run_fused_batch_forward`.
 
 ## Environment
 
@@ -41,11 +41,34 @@ The wire protocol and worker fused path are correct (see unit tests
 `forward_batch_matches_sequential` and `forward_batch_single_item_matches_forward`),
 but the default-off flag is appropriate.
 
-**Next step.** Re-run on GPU (CUDA) where the kernel-launch cost amortization
-is the usual batching win. Expected outcome based on published transformer
-batching results: 1.5–2× aggregate throughput at batch 4–8 on mid-range GPUs.
-This is pending — need GPU time + larger test model (1024-hidden-dim is small
-for a GPU).
+**Next step (done 2026-04-19).** Re-run on GPU (CUDA) where the kernel-launch
+cost amortization is the usual batching win.
+
+## Item 3 Phase 2b — `SplitModel::forward_batch` on GPU (CUDA, RTX 3070)
+
+Same synthetic model (22 layers, 1024 hidden_dim, 20 iters), CUDA:0 backend.
+
+| Batch | Fused ms/iter | Sequential ms/iter | Speedup |
+|---|---|---|---|
+| 1 | 18.6 | 12.3 | **0.66×** (batch=1 pays only the cat/narrow overhead — expected) |
+| 2 | 18.9 | 25.2 | **1.34×** |
+| 4 | 32.1 | 46.8 | **1.46×** |
+| 8 | 64.7 | 99.9 | **1.55×** |
+
+**Finding.** GPU delivers the predicted batching win. Per-kernel launch cost on
+the QKV + FFN matmuls amortizes across slots; per-slot attention still
+serializes but doesn't eat the gains because the batched projections dominate
+at these sizes. At batch=1 the tensor stacking overhead slightly dominates —
+expected, and why the worker's CPU-fallback guard also skips batch=1 already
+via `batch_eligible` (minimum 2 requests).
+
+Cross-platform policy now:
+- **CPU**: `run_fused_batch_forward` short-circuits with an error (caller falls
+  through to sequential). See the CPU-fallback guard in `model_worker.rs`.
+- **GPU**: fused path delivers 1.34–1.55× at batch 2–8.
+
+The `continuous_batching` config flag is now **safe to enable on any device** —
+worker picks the profitable path per request automatically.
 
 ## Reference: known measurements from earlier rounds
 
@@ -104,12 +127,18 @@ cargo test --release --lib forward_batch_timing \
     --no-default-features --features dev,claude-subscription \
     -- --nocapture --ignored
 
+# Phase 2b GPU timing (takes ~20s after build)
+LD_LIBRARY_PATH=/usr/lib/wsl/lib \
+    cargo test --release --lib forward_batch_timing \
+    --no-default-features --features dev,candle-cuda \
+    -- --nocapture --ignored
+
 # Item 4 / Item 5 end-to-end require a running daemon + prompt injection;
 # not automated in this session.
 ```
 
 ## Outstanding benchmarks
 
-- **Item 3 Phase 2b on GPU** (primary gap): should unlock the expected 1.5–2× aggregate throughput for concurrent requests.
+- **Item 3 Phase 2b**: ~~GPU benchmark~~ ✅ done 2026-04-19 (1.55× at batch=8). Next: wire a time-window batch scheduler into the router's batch dispatch path so concurrent arrivals auto-coalesce into `forward_batch`. Today callers must explicitly build a `Vec<LayerForward>` and call `ModelProcessPool::forward_batch()`.
 - **Items 12 / 13 / 16 Phase A multi-segment** (real WAN topology): need a 2+-peer setup where no single peer covers all layers. Loopback doesn't exercise these paths because the local-full-coverage fast path takes over.
 - **Parallax routing A/B** on a cluster with mixed peer latencies: compare 100-prompt aggregate tail latency with the flag on vs off.

@@ -444,9 +444,15 @@ async fn handle_batch_forward(
         {
             Ok(()) => return Ok(()),
             Err(e) => {
-                // Fused path failed — log and fall through to sequential path
-                // so callers still get a response for every request_id.
-                tracing::warn!(error = %e, "Fused batch forward failed — falling back to sequential");
+                let msg = e.to_string();
+                // Expected fall-through cases (CPU device, etc.) log at debug;
+                // real failures log at warn. Either way, callers still get a
+                // response via the sequential path below.
+                if msg.contains("not profitable") {
+                    tracing::debug!(reason = %msg, "Skipping fused batch (CPU)");
+                } else {
+                    tracing::warn!(error = %msg, "Fused batch forward failed — falling back to sequential");
+                }
             }
         }
     }
@@ -517,6 +523,21 @@ async fn run_fused_batch_forward(
     let model = models
         .get_mut(&(layer_start, layer_end, 0, 1))
         .ok_or_else(|| SwarmError::Internal("Model vanished after load".into()))?;
+
+    // CPU fused batching is a net loss at typical decode batch sizes (1-8):
+    // candle's CPU matmul is memory-bandwidth-bound so the batched QKV/FFN
+    // doesn't amortize a per-call cost, and per-layer Tensor::cat / narrow
+    // adds real wall-clock. Measured on a 22-layer 1024-hidden model, batch
+    // 2-8 runs 0.5–1.0× sequential (see docs/plans/benchmarks/round3.md).
+    // Return an error here so the caller falls through to the sequential
+    // handle_forward loop — keeps continuous_batching safe to enable on
+    // CPU-only nodes.
+    if matches!(model.device(), candle_core::Device::Cpu) {
+        return Err(SwarmError::Internal(
+            "fused batch not profitable on CPU — falling back to sequential".into(),
+        ));
+    }
+
     let is_first = model.is_first();
     let is_last = model.is_last();
     let total_layers = model.total_layers;

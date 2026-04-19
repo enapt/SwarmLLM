@@ -486,11 +486,28 @@ fn lru_eviction_multiple_models() {
 
 // ── Batch forward tests ──
 
+/// Create a minimal SplitModel on the given device. Used by benchmarks that
+/// want to test GPU paths.
+fn make_test_split_model_on(
+    num_layers: usize,
+    hidden_dim: usize,
+    device: candle_core::Device,
+) -> SplitModel {
+    make_test_split_model_impl(num_layers, hidden_dim, device)
+}
+
 /// Create a minimal SplitModel with real layers for testing forward/forward_batch.
 fn make_test_split_model(num_layers: usize, hidden_dim: usize) -> SplitModel {
+    make_test_split_model_impl(num_layers, hidden_dim, candle_core::Device::Cpu)
+}
+
+fn make_test_split_model_impl(
+    num_layers: usize,
+    hidden_dim: usize,
+    device: candle_core::Device,
+) -> SplitModel {
     // Build a minimal model with random weights for testing.
-    // Uses CPU device and identity-like weight matrices.
-    let device = candle_core::Device::Cpu;
+    // Identity-like weight matrices on the caller-chosen device.
     let head_dim = 64;
     let n_head = hidden_dim / head_dim;
     let n_kv_head = n_head; // no GQA in test model
@@ -2705,14 +2722,19 @@ fn gemma2_output_projection_qmatmul_vs_deq() {
 fn forward_batch_timing() {
     let hidden_dim = 1024;
     let num_layers = 22;
-    let mut model = make_test_split_model(num_layers, hidden_dim);
+    // Try CUDA first (the batching win's home turf); fall back to CPU.
+    let (device, device_label) = match candle_core::Device::new_cuda(0) {
+        Ok(d) => (d, "CUDA:0"),
+        Err(_) => (candle_core::Device::Cpu, "CPU"),
+    };
+    let mut model = make_test_split_model_on(num_layers, hidden_dim, device);
     let kv_store = KvCacheStore::new(std::time::Duration::from_secs(600));
 
     let iters = 20usize;
     let batch_sizes = [1usize, 2, 4, 8];
 
     eprintln!(
-        "\nforward_batch timing | hidden={hidden_dim} layers={num_layers} iters={iters} device=CPU\n"
+        "\nforward_batch timing | hidden={hidden_dim} layers={num_layers} iters={iters} device={device_label}\n"
     );
     eprintln!(
         "{:<10} {:<18} {:<18} {:<10}",
@@ -2721,9 +2743,9 @@ fn forward_batch_timing() {
     eprintln!("{:-<60}", "");
 
     for &batch_size in &batch_sizes {
-        // Fresh inputs per batch size.
+        // Fresh inputs on the test device per batch size.
         let inputs: Vec<Tensor> = (0..batch_size)
-            .map(|_| Tensor::randn(0f32, 1.0, (1, 1, hidden_dim), &Device::Cpu).unwrap())
+            .map(|_| Tensor::randn(0f32, 1.0, (1, 1, hidden_dim), model.device()).unwrap())
             .collect();
 
         // Warm up
