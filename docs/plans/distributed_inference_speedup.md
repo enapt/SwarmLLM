@@ -1,10 +1,19 @@
 # Distributed Inference Speedup Plan
 
-> **READ THIS FIRST (status as of 2026-04-18)**
+> **READ THIS FIRST (status as of 2026-04-19)**
 >
 > This doc captures a multi-session effort to speed up distributed inference.
-> Four items were scoped; the headline win came from an item that wasn't in
-> the original plan (Item 4).
+> Four items were scoped originally; headline wins came from Items 4 and 5
+> (not in the original plan), followed by Items 3 + 16 in later sessions.
+>
+> **Default-on speedup stack today (as of 2026-04-19 commit `8d5dede`):**
+>
+> - **Item 4** fast path — 1.93× decode for single-segment distributed inference
+> - **Item 5** prefix cache — 29.4× wall-clock on cache hit
+> - **Item 3** continuous batching — 1.34–1.55× GPU throughput for concurrent requests (CPU falls through to sequential, no regression)
+> - **Item 16 A+B** Parallax routing — shortest-path pipeline chain via DP + observed per-peer latency EMA
+>
+> Everything else is behind a flag (`speculative_distributed`, `persistent_pipeline_stream`, `decentralized_spec_decoding`, `activation_compression`, `swift_self_speculative`) or advisory (Phase C allocator).
 >
 > | Item | Status | Effect |
 > |---|---|---|
@@ -18,10 +27,79 @@
 > | **Item 12 — DSD (decentralized speculative)** | ✅ ALL PHASES LANDED 2026-04-18 behind `decentralized_spec_decoding=false`. Worker γ-token decode + KV truncation primitives + γ controller + multi-segment spec-verify worker branch + ~410 LOC coordinator loop in `pipeline/dsd.rs`. End-to-end multi-segment WAN benchmark pending. |
 > | **Item 16 — Parallax scheduler (Phases A+B+C)** | ✅ LANDED 2026-04-18. Phases A+B default-on (`parallax_routing=true`); Phase C recommendation-only. Phase A: shortest-path DP over (node, layer_range) in `parallax.rs`. Phase B: observed per-layer latency EMA. Phase C: `parallax_allocator.rs` offline layer allocator with `Z(k) = k²/s*(k)` objective, exposed via `PipelineScheduler::allocate_offline`. 10 routing + 7 allocator + 2 scheduler integration + 1 EMA math test. Phase C auto-wiring into `ShardRebalancer` deferred. |
 >
-> **If starting a new session, the most useful things to pick up are:**
-> 1. Item 3 Phase 2 (concurrent-user throughput — independent of Item 4)
-> 2. Extending Item 4 to multi-segment pipelines
-> 3. Item 2 with a matched-backend draft model (pre-trained candle-native draft, ~5% target size — research flagged `Qwen2.5-0.5B` as draft for `Qwen2.5-7B` target with 1.4× speedup on llama.cpp benchmarks)
+> **NEXT SESSION — pick one of these three and `/continue` on it.**
+>
+> Picks are in order of scope. Start with the one that matches your appetite.
+>
+> **Small (1–2 hours) — Phase B cross-node latency gossip.**
+> New-joining nodes have no `peer_segment_latency_ms_per_layer` samples until
+> they actually route requests to a peer. The Parallax DP therefore falls back
+> to static `est_tokens_per_sec` until the EMA warms up. Fix: extend the
+> existing `NodeCapabilityUpdate` gossip message with a small snapshot of the
+> sender's observed-latency map (e.g. top-N peers by trust, f16 per-layer-ms
+> value per entry). Receivers merge into their own EMA with a trust-weighted
+> discount so we don't fully trust foreign observations. Makes cold-start
+> routing good from t=0.
+> - Touch: `crates/swarmllm-types/src/node.rs` (extend `NodeCapability`),
+>   `src/daemon/dispatch/mod.rs` (merge on receive), `src/daemon/state/mod.rs`
+>   (`record_peer_segment_latency` already idempotent, add a `merge_*` variant
+>   with a weight factor).
+> - Tests: EMA merge preserves local observations on tied weights; foreign
+>   observations decay to zero when trust is 0.
+>
+> **Medium (half-day) — Phase C.2 auto-rebalance from `allocate_offline`.**
+> `PipelineScheduler::allocate_offline` returns a `Vec<PipelineAllocation>` but
+> today it's advisory. Wire into `ShardRebalancer`: periodically compare the
+> current shard distribution to the recommendation, emit suggested
+> acquire/prune actions to `AutoShardManager`. Respect existing trust +
+> credit + locked-shard constraints.
+> - Touch: `src/health/rebalancer.rs` or `src/model/auto_manage/scoring.rs`.
+>   Add a `RebalanceHint` variant. Probably needs to not act on every tick —
+>   use a stability threshold (only act when recommendation differs from
+>   current for N consecutive ticks).
+> - Validation: simulate a 3-peer cluster with skewed shard coverage, verify
+>   allocator recommendation + acquire/prune suggestions agree.
+>
+> **Large (multi-session) — Item 7 full BatchGenerate.**
+> Today's Phase 2b batches per-token forwards (`DaemonMsg::Forward`). It does
+> NOT batch inside `generate()` — two concurrent long `generate()` calls on
+> the same model still serialize compute inside the worker subprocess. True
+> multi-user throughput requires a slot-driven decode coordinator on the
+> worker: SlotTable with per-slot `KvCacheEntry` + `SamplingState`, admit new
+> requests mid-batch, Sarathi-style chunked prefill to avoid stalling decode,
+> step through all active slots via `forward_batch` each iteration. This is
+> the real multi-tenant story that Phase 2b lays groundwork for but doesn't
+> fully deliver.
+> - Scope sketch in the `Item 7 — BatchGenerate` section below (line ~505).
+> - Probably 3–4 sessions of careful work.
+>
+> **Recommendation:** start with Phase B gossip — cheap, directly leverages the
+> Parallax DP we just landed, makes routing good on new nodes from t=0.
+> Item 7 is the biggest leverage for real multi-tenant deployments but is a
+> major refactor — tackle it once the small wins are in.
+>
+> **Session state to recall on resume:**
+> - Last commit: `8d5dede` — Item 3 Phase 2b auto-coalescing scheduler default-on
+> - Tests: 706 lib tests passing, clippy clean on `dev,claude-subscription`
+>   and `dev,candle-cuda`
+> - Bench doc: `docs/plans/benchmarks/round3.md` — GPU validated 1.55× at batch=8
+> - Pre-staged models: TinyLlama-1.1B, Phi-3.5-mini, Qwen2.5-Coder-7B — see
+>   `memory/local_model_shards.md`
+> - User env: RTX 3070 Laptop 8GB, WSL2, CUDA works via `/usr/lib/wsl/lib`.
+>   Default test build is `cargo build --no-default-features --features dev,claude-subscription`;
+>   GPU work needs `dev,candle-cuda`.
+>
+> **Other work items (not prioritized for the next session but tracked):**
+> - Item 2 with a matched-backend draft model (research flagged `Qwen2.5-0.5B`
+>   as draft for `Qwen2.5-7B` target; 1.4× on llama.cpp benchmarks).
+> - Item 13 Q8_0 end-to-end multi-segment benchmark (codec verified; needs
+>   2+-peer pipeline to measure wire savings).
+> - Item 12 DSD multi-segment WAN benchmark (needs real WAN topology; loopback
+>   can't exercise it because `N≥2` pipelines route to a peer that holds more
+>   layers via Item 4 fast path first).
+> - Item 16 Phase A routing A/B on a cluster with mixed peer latencies.
+> - Extending Item 4 to multi-segment (requires a "leader peer" model that
+>   pulls hidden states from earlier segments — larger scope).
 >
 > See `memory/local_model_shards.md` for pre-staged benchmark assets.
 
