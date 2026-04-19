@@ -1884,13 +1884,31 @@ async fn step_decode_pool(
             SwarmError::Internal("model variant evicted between admit and tick".into())
         })?;
 
-    // ---- PHASE A: chunked prefill ----
-    // Per-slot error containment: a forward / sample failure on slot X
-    // marks X errored (caller will receive `WorkerMsg::Error`) without
-    // disturbing other slots in the same tick.
+    // ---- PHASE A: chunked prefill (Item 7 Phase 4 batched variant) ----
+    //
+    // Every `Prefilling` slot contributes one `PrefillStep` (a tensor +
+    // index_pos + remaining_after). Steps sharing `(chunk_len, index_pos)`
+    // are fused into one `forward_batch` call; singletons fall through to
+    // sequential `forward`. Per-slot error containment: tensor build failure
+    // marks THAT slot; a batched-forward failure errors every slot in the
+    // group (strict fall-back would duplicate work and rarely helps in
+    // practice — catastrophic OOM / kernel failures apply to every slot).
     {
+        struct PrefillStep {
+            slot_idx: usize,
+            request_id: uuid::Uuid,
+            req_id_str: String,
+            input: candle_core::Tensor,
+            pos: usize,
+            chunk_len: usize,
+            remaining_after: usize,
+        }
+
         let active = slot_table.active();
-        for slot in active.iter_mut() {
+
+        // Stage 1: collect chunks + build input tensors.
+        let mut steps: Vec<PrefillStep> = Vec::new();
+        for (slot_idx, slot) in active.iter_mut().enumerate() {
             if !slot.is_prefilling() || slot.is_finished() {
                 continue;
             }
@@ -1899,58 +1917,150 @@ async fn step_decode_pool(
                 None => continue,
             };
             let request_id = slot.request_id;
+            let req_id_str = slot.req_id_str.clone();
             let chunk_len = chunk.len();
-            let input = match model.tensor_from_ids(&chunk) {
-                Ok(t) => t,
+            match model.tensor_from_ids(&chunk) {
+                Ok(input) => steps.push(PrefillStep {
+                    slot_idx,
+                    request_id,
+                    req_id_str,
+                    input,
+                    pos,
+                    chunk_len,
+                    remaining_after,
+                }),
                 Err(e) => {
                     tracing::warn!(%request_id, error = %e, "DIAG: BatchGenerate prefill chunk tensor build failed — slot errored");
                     slot.finish_error(format!("prefill tensor build: {e}"));
-                    continue;
                 }
-            };
-            let forward_result = tokio::task::block_in_place(|| {
-                let _g =
-                    crate::inference::attn_kernel::ForceStandardAttnGuard::new(force_standard_attn);
-                model.forward(&input, pos, kv_store, &slot.req_id_str)
-            });
-            let logits = match forward_result {
-                Ok(l) => l,
-                Err(e) => {
-                    tracing::warn!(%request_id, error = %e, "DIAG: BatchGenerate prefill chunk forward failed — slot errored");
-                    slot.finish_error(format!("prefill forward: {e}"));
-                    continue;
-                }
-            };
-            tracing::debug!(
-                %request_id,
-                chunk_tokens = chunk_len,
-                index_pos = pos,
-                remaining_after,
-                "DIAG: BatchGenerate prefill chunk ran"
-            );
-            if remaining_after == 0 {
-                let (first_token, first_logprob) =
-                    match crate::inference::tensor_util::sample_token_with_logprob(
-                        &logits,
-                        &slot.sampling,
-                    ) {
-                        Ok(v) => v,
+            }
+        }
+
+        if !steps.is_empty() {
+            // Stage 2: group by (chunk_len, index_pos). BTreeMap keeps it
+            // deterministic so fused calls run in a stable order.
+            use std::collections::BTreeMap;
+            let mut groups: BTreeMap<(usize, usize), Vec<usize>> = BTreeMap::new();
+            for (i, s) in steps.iter().enumerate() {
+                groups.entry((s.chunk_len, s.pos)).or_default().push(i);
+            }
+
+            // Stage 3: forward each group. `logits_per_step[i]` ends up Some
+            // on success, None on error (slot already marked errored).
+            let mut logits_per_step: Vec<Option<candle_core::Tensor>> =
+                std::iter::repeat_with(|| None).take(steps.len()).collect();
+
+            for ((chunk_len, pos), indices) in groups {
+                if indices.len() == 1 {
+                    // Singleton: sequential forward, cheapest path.
+                    let i = indices[0];
+                    let step = &steps[i];
+                    let forward_result = tokio::task::block_in_place(|| {
+                        let _g = crate::inference::attn_kernel::ForceStandardAttnGuard::new(
+                            force_standard_attn,
+                        );
+                        model.forward(&step.input, step.pos, kv_store, &step.req_id_str)
+                    });
+                    match forward_result {
+                        Ok(l) => logits_per_step[i] = Some(l),
                         Err(e) => {
-                            tracing::warn!(%request_id, error = %e, "DIAG: BatchGenerate first-token sample failed — slot errored");
-                            slot.finish_error(format!("first-token sample: {e}"));
-                            continue;
+                            let request_id = step.request_id;
+                            tracing::warn!(%request_id, error = %e, "DIAG: BatchGenerate prefill chunk forward failed — slot errored");
+                            active[step.slot_idx].finish_error(format!("prefill forward: {e}"));
                         }
-                    };
-                prefix_cache.insert_from_kv(
-                    &slot.model_key,
-                    &slot.req_id_str,
-                    kv_store,
-                    &slot.prompt_ids,
+                    }
+                } else {
+                    // Fused forward over same-shape, same-position chunks.
+                    let items: Vec<BatchItem<'_>> = indices
+                        .iter()
+                        .map(|&i| BatchItem {
+                            input: &steps[i].input,
+                            index_pos: steps[i].pos,
+                            request_id: steps[i].req_id_str.as_str(),
+                        })
+                        .collect();
+                    let forward_result = tokio::task::block_in_place(|| {
+                        let _g = crate::inference::attn_kernel::ForceStandardAttnGuard::new(
+                            force_standard_attn,
+                        );
+                        model.forward_batch(&items, kv_store)
+                    });
+                    match forward_result {
+                        Ok(outs) if outs.len() == indices.len() => {
+                            tracing::debug!(
+                                batch_size = indices.len(),
+                                chunk_tokens = chunk_len,
+                                index_pos = pos,
+                                "DIAG: BatchGenerate prefill chunk fused"
+                            );
+                            for (j, &i) in indices.iter().enumerate() {
+                                logits_per_step[i] = Some(outs[j].clone());
+                            }
+                        }
+                        Ok(outs) => {
+                            let err = format!(
+                                "forward_batch returned {} outputs for {} prefill chunks",
+                                outs.len(),
+                                indices.len()
+                            );
+                            for &i in &indices {
+                                let slot_idx = steps[i].slot_idx;
+                                let request_id = steps[i].request_id;
+                                tracing::warn!(%request_id, %err, "DIAG: BatchGenerate fused prefill output mismatch — slot errored");
+                                active[slot_idx].finish_error(err.clone());
+                            }
+                        }
+                        Err(e) => {
+                            for &i in &indices {
+                                let slot_idx = steps[i].slot_idx;
+                                let request_id = steps[i].request_id;
+                                tracing::warn!(%request_id, error = %e, "DIAG: BatchGenerate fused prefill forward failed — slot errored");
+                                active[slot_idx].finish_error(format!("prefill forward: {e}"));
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Stage 4: per-step finalize (DIAG trace; first-token sample +
+            // prefix-cache insert + promote-to-decoding on the final chunk).
+            for (i, step) in steps.iter().enumerate() {
+                let Some(logits) = logits_per_step[i].take() else {
+                    continue;
+                };
+                let slot = &mut active[step.slot_idx];
+                let request_id = step.request_id;
+                tracing::debug!(
+                    %request_id,
+                    chunk_tokens = step.chunk_len,
+                    index_pos = step.pos,
+                    remaining_after = step.remaining_after,
+                    "DIAG: BatchGenerate prefill chunk ran"
                 );
-                let is_eos_first = slot.eos.contains(&first_token);
-                slot.promote_to_decoding(first_token, first_logprob);
-                if is_eos_first {
-                    slot.finish_stop();
+                if step.remaining_after == 0 {
+                    let (first_token, first_logprob) =
+                        match crate::inference::tensor_util::sample_token_with_logprob(
+                            &logits,
+                            &slot.sampling,
+                        ) {
+                            Ok(v) => v,
+                            Err(e) => {
+                                tracing::warn!(%request_id, error = %e, "DIAG: BatchGenerate first-token sample failed — slot errored");
+                                slot.finish_error(format!("first-token sample: {e}"));
+                                continue;
+                            }
+                        };
+                    prefix_cache.insert_from_kv(
+                        &slot.model_key,
+                        &slot.req_id_str,
+                        kv_store,
+                        &slot.prompt_ids,
+                    );
+                    let is_eos_first = slot.eos.contains(&first_token);
+                    slot.promote_to_decoding(first_token, first_logprob);
+                    if is_eos_first {
+                        slot.finish_stop();
+                    }
                 }
             }
         }

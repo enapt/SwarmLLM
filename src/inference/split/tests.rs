@@ -705,6 +705,137 @@ fn forward_batch_empty_returns_empty() {
 }
 
 #[test]
+fn forward_batch_prefill_chunks_match_sequential() {
+    // Item 7 Phase 4: when all items share (seq_len > 1, index_pos), the
+    // fused prefill-batch forward should match sequential forwards.
+    let hidden_dim = 128;
+    let num_layers = 2;
+    let mut model = make_test_split_model(num_layers, hidden_dim);
+    let kv_store = KvCacheStore::new(std::time::Duration::from_secs(600));
+
+    let chunk_len = 8;
+    let input_a = Tensor::randn(0f32, 1.0, (1, chunk_len, hidden_dim), &Device::Cpu).unwrap();
+    let input_b = Tensor::randn(0f32, 1.0, (1, chunk_len, hidden_dim), &Device::Cpu).unwrap();
+    let index_pos = 0;
+
+    let out_a = model
+        .forward(&input_a, index_pos, &kv_store, "seq-a")
+        .unwrap();
+    kv_store.clear_request(
+        &format!(
+            "{}-{}-{}",
+            model.layer_start, model.layer_end, model.total_layers
+        ),
+        "seq-a",
+    );
+    let out_b = model
+        .forward(&input_b, index_pos, &kv_store, "seq-b")
+        .unwrap();
+    kv_store.clear_request(
+        &format!(
+            "{}-{}-{}",
+            model.layer_start, model.layer_end, model.total_layers
+        ),
+        "seq-b",
+    );
+
+    let items = vec![
+        BatchItem {
+            input: &input_a,
+            index_pos,
+            request_id: "batch-a",
+        },
+        BatchItem {
+            input: &input_b,
+            index_pos,
+            request_id: "batch-b",
+        },
+    ];
+    let batch_out = model.forward_batch(&items, &kv_store).unwrap();
+
+    assert_eq!(batch_out.len(), 2);
+    assert_eq!(out_a.shape(), batch_out[0].shape());
+    assert_eq!(out_b.shape(), batch_out[1].shape());
+
+    let max_diff = |a: &Tensor, b: &Tensor| -> f32 {
+        (a - b)
+            .unwrap()
+            .abs()
+            .unwrap()
+            .flatten_all()
+            .unwrap()
+            .max(0)
+            .unwrap()
+            .to_vec0()
+            .unwrap()
+    };
+    let da = max_diff(&out_a, &batch_out[0]);
+    let db = max_diff(&out_b, &batch_out[1]);
+    assert!(da < 1e-4, "prefill batch A differs: max_diff={da}");
+    assert!(db < 1e-4, "prefill batch B differs: max_diff={db}");
+}
+
+#[test]
+fn forward_batch_mixed_seq_len_falls_back() {
+    // Heterogeneous seq_len: one item seq_len=1 (decode), one item seq_len=4
+    // (prefill). Batching is unsafe — fall back to sequential forwards.
+    let hidden_dim = 128;
+    let mut model = make_test_split_model(2, hidden_dim);
+    let kv_store = KvCacheStore::new(std::time::Duration::from_secs(600));
+
+    let decode_input = Tensor::randn(0f32, 1.0, (1, 1, hidden_dim), &Device::Cpu).unwrap();
+    let prefill_input = Tensor::randn(0f32, 1.0, (1, 4, hidden_dim), &Device::Cpu).unwrap();
+
+    let items = vec![
+        BatchItem {
+            input: &decode_input,
+            index_pos: 0,
+            request_id: "decoder",
+        },
+        BatchItem {
+            input: &prefill_input,
+            index_pos: 0,
+            request_id: "prefiller",
+        },
+    ];
+    let out = model.forward_batch(&items, &kv_store).unwrap();
+    assert_eq!(out.len(), 2);
+    // Intermediate segment returns hidden states; shape is
+    // [1, seq_len, hidden_dim] per item.
+    assert_eq!(out[0].dims(), &[1, 1, hidden_dim]);
+    assert_eq!(out[1].dims(), &[1, 4, hidden_dim]);
+}
+
+#[test]
+fn forward_batch_mixed_index_pos_falls_back() {
+    // Heterogeneous index_pos at seq_len > 1: mask would differ per item, so
+    // batching is unsafe. Must fall back and still produce per-item output.
+    let hidden_dim = 128;
+    let mut model = make_test_split_model(2, hidden_dim);
+    let kv_store = KvCacheStore::new(std::time::Duration::from_secs(600));
+
+    let input_a = Tensor::randn(0f32, 1.0, (1, 4, hidden_dim), &Device::Cpu).unwrap();
+    let input_b = Tensor::randn(0f32, 1.0, (1, 4, hidden_dim), &Device::Cpu).unwrap();
+
+    let items = vec![
+        BatchItem {
+            input: &input_a,
+            index_pos: 0,
+            request_id: "pos-0",
+        },
+        BatchItem {
+            input: &input_b,
+            index_pos: 3,
+            request_id: "pos-3",
+        },
+    ];
+    let out = model.forward_batch(&items, &kv_store).unwrap();
+    assert_eq!(out.len(), 2);
+    assert_eq!(out[0].dims(), &[1, 4, hidden_dim]);
+    assert_eq!(out[1].dims(), &[1, 4, hidden_dim]);
+}
+
+#[test]
 fn flash_attn_cpu_vs_standard_attention() {
     // Compare CPU flash attention output vs standard matmul attention
     let device = Device::Cpu;

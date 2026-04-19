@@ -753,14 +753,22 @@ impl SplitModel {
         }
     }
 
-    /// Run a batched forward pass for multiple decode-step requests (seq_len=1 each).
+    /// Run a batched forward pass for multiple requests.
+    ///
+    /// Supports two homogeneous batch shapes:
+    /// - **Decode batch**: every item has `seq_len = 1` (no mask needed).
+    /// - **Prefill-chunk batch (Item 7 Phase 4)**: every item has the same
+    ///   `seq_len > 1` AND the same `index_pos`. One causal mask (built once
+    ///   from the first slot's KV length) serves every per-request attention
+    ///   call because same index_pos ⇒ same kv_offset ⇒ same mask.
     ///
     /// Stacks inputs along the batch dimension so that MLP/norm computations
-    /// benefit from GPU parallelism.  Attention is still per-request because
-    /// each request has its own `index_pos` and KV-cache.
+    /// benefit from GPU parallelism. Attention is still per-request because
+    /// each request has its own KV-cache.
     ///
     /// Returns one output tensor per request in the same order as `items`.
-    /// Falls back to sequential `forward()` if any item has seq_len > 1.
+    /// Falls back to sequential `forward()` when the batch is heterogeneous
+    /// (mixed seq_lens or differing index_pos for seq_len > 1).
     pub fn forward_batch(
         &mut self,
         items: &[BatchItem<'_>],
@@ -770,7 +778,7 @@ impl SplitModel {
             return Ok(Vec::new());
         }
 
-        // Fallback: if only 1 item or any item is a prefill (seq_len > 1), run sequentially
+        // Single-item fast path: no stacking benefit.
         if items.len() == 1 {
             let item = &items[0];
             let out = self.forward(item.input, item.index_pos, kv_cache_store, item.request_id)?;
@@ -808,11 +816,19 @@ impl SplitModel {
             per_request.push(hidden);
         }
 
-        // Check if all items have seq_len=1 (decode mode) — only then can we batch
-        let all_decode = per_request.iter().all(|t| t.dim(1).unwrap_or(0) == 1);
+        // Homogeneity check: batching only kicks in when every item shares
+        // (seq_len, index_pos). Mixed batches fall back to sequential forwards
+        // so a slow slot doesn't block the fast ones.
+        let first_seq_len = per_request[0].dim(1).unwrap_or(0);
+        let first_index_pos = items[0].index_pos;
+        let all_same_seq = per_request
+            .iter()
+            .all(|t| t.dim(1).unwrap_or(0) == first_seq_len);
+        let all_same_pos = items.iter().all(|i| i.index_pos == first_index_pos);
+        let homogeneous = first_seq_len > 0 && all_same_seq && all_same_pos;
 
-        if !all_decode {
-            // Mixed or prefill batch: fall back to sequential processing
+        if !homogeneous {
+            // Mixed seq_lens or differing index_pos: fall back to sequential.
             let mut results = Vec::with_capacity(items.len());
             for item in items {
                 results.push(self.forward(
@@ -825,20 +841,25 @@ impl SplitModel {
             return Ok(results);
         }
 
-        // Context window check: reject any item whose index_pos exceeds max_seq_len
-        // (same guard as forward_inner_impl, prevents RoPE table out-of-bounds).
+        let seq_len = first_seq_len;
+
+        // Context window check: reject any item whose index_pos + seq_len
+        // exceeds max_seq_len (same guard as forward_inner_impl, prevents RoPE
+        // table out-of-bounds).
         for item in items {
-            if item.index_pos + 1 > self.max_seq_len {
+            if item.index_pos + seq_len > self.max_seq_len {
                 return Err(SwarmError::Validation(format!(
-                    "Batch item index_pos ({}) exceeds model context window ({})",
-                    item.index_pos + 1,
+                    "Batch item index_pos+seq_len ({}) exceeds model context window ({})",
+                    item.index_pos + seq_len,
                     self.max_seq_len
                 )));
             }
         }
 
         let batch_size = items.len();
-        let model_key = &self.kv_model_key;
+        // Clone rather than borrow so the later `self.mask(...)` mutable borrow
+        // doesn't conflict with reuse of this key below.
+        let model_key: String = self.kv_model_key.clone();
         let num_layers = self.layers.len();
 
         // Extract all per-request KV-caches and SSM states up front (drop DashMap guards immediately).
@@ -846,7 +867,7 @@ impl SplitModel {
         let mut all_kv_caches: Vec<Vec<Option<KvCache>>> = Vec::with_capacity(batch_size);
         let mut all_ssm_states: Vec<Vec<Option<SsmState>>> = Vec::with_capacity(batch_size);
         for item in items.iter() {
-            let key = KvCacheStore::cache_key(model_key, item.request_id);
+            let key = KvCacheStore::cache_key(&model_key, item.request_id);
             let mut entry = kv_cache_store.get_or_create_keyed(&key, num_layers);
             entry.last_accessed = std::time::Instant::now();
             all_kv_caches.push(std::mem::take(&mut entry.layers));
@@ -855,11 +876,33 @@ impl SplitModel {
 
         let max_seq_len = self.max_seq_len;
 
-        // Stack all hidden states into a single batch tensor: [batch, 1, hidden_dim]
+        // Build one causal mask for the whole batch when seq_len > 1. Every
+        // slot shares (seq_len, index_pos) at this point, so they also share
+        // `kv_offset` (== first slot's layer-0 KV length), hence share a mask.
+        let mask = if seq_len == 1 {
+            None
+        } else {
+            let kv_offset = all_kv_caches
+                .first()
+                .and_then(|per_layer| per_layer.first())
+                .and_then(|l| l.as_ref())
+                .map(|c| c.current_seq_len())
+                .unwrap_or(0);
+            if kv_offset > 0 {
+                Some(
+                    self.mask_with_offset(seq_len, kv_offset + seq_len)
+                        .map_err(SwarmError::internal)?,
+                )
+            } else {
+                Some(self.mask(seq_len).map_err(SwarmError::internal)?)
+            }
+        };
+
+        // Stack all hidden states into a single batch tensor:
+        // [batch, seq_len, hidden_dim] (seq_len is 1 for decode, >1 for prefill chunks).
         let batch_refs: Vec<&Tensor> = per_request.iter().collect();
         let mut batched = Tensor::cat(&batch_refs, 0)
             .map_err(|e| SwarmError::Internal(format!("Batch stack: {e}")))?;
-        // Shape is now [batch_size, 1, hidden_dim]
 
         // Process through layers
         for (layer_idx, layer) in self.layers.iter().enumerate() {
@@ -879,7 +922,7 @@ impl SplitModel {
                         let attn_out = lw
                             .forward_attn(
                                 &x_i,
-                                None,
+                                mask.as_ref(),
                                 item.index_pos,
                                 &mut all_kv_caches[req_idx][layer_idx],
                                 max_seq_len,
@@ -938,7 +981,7 @@ impl SplitModel {
                         let attn_out = attention
                             .forward_mla(
                                 &x_i,
-                                None,
+                                mask.as_ref(),
                                 item.index_pos,
                                 &mut all_kv_caches[req_idx][layer_idx],
                                 max_seq_len,
@@ -986,7 +1029,7 @@ impl SplitModel {
                         let attn_out = weights
                             .forward_attn(
                                 &x_i,
-                                None,
+                                mask.as_ref(),
                                 item.index_pos,
                                 &mut all_kv_caches[req_idx][layer_idx],
                                 max_seq_len,
@@ -1060,7 +1103,7 @@ impl SplitModel {
 
         // Write updated KV-caches and SSM states back (take instead of clone to avoid copying)
         for (req_idx, item) in items.iter().enumerate() {
-            let key = KvCacheStore::cache_key(model_key, item.request_id);
+            let key = KvCacheStore::cache_key(&model_key, item.request_id);
             let mut entry = kv_cache_store.get_or_create_keyed(&key, num_layers);
             entry.layers = std::mem::take(&mut all_kv_caches[req_idx]);
             entry.ssm_states = std::mem::take(&mut all_ssm_states[req_idx]);
@@ -1086,9 +1129,11 @@ impl SplitModel {
                 let x = norm
                     .forward(&per_req)
                     .map_err(|e| SwarmError::Internal(format!("final_norm: {e}")))?;
-                // seq_len=1, so i((.., 0, ..)) selects the single token
+                // Slice the LAST position of this request (decode: seq_len=1 ⇒ 0;
+                // prefill chunk: seq_len>1 ⇒ seq_len-1). Matches
+                // `forward_inner_impl`'s non-`all_positions` output path.
                 let x = x
-                    .i((.., 0, ..))
+                    .i((.., seq_len - 1, ..))
                     .map_err(|e| SwarmError::Internal(format!("last_token: {e}")))?;
                 let mut logits = output
                     .forward(&x)

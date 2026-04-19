@@ -13,6 +13,7 @@
 > - **Item 3** continuous batching — 1.34–1.55× GPU throughput for concurrent requests (CPU falls through to sequential, no regression)
 > - **Item 16 A+B** Parallax routing — shortest-path pipeline chain via DP + observed per-peer latency EMA
 > - **Item 7 Phases 1 + 2** worker-side SlotTable + Sarathi chunked prefill — measured **17–23× TTFT improvement** at concurrency 2/4/8 on RTX 3070 + TinyLlama Q4 with equivalent aggregate throughput (no regression). See `benchmarks/round4.md`.
+> - **Item 7 Phase 4** batched chunked prefill — fused `forward_batch` over same-shape Prefilling slots; TTFT tightening on burst-admit of same-chunk-size prompts (not yet benchmarked end-to-end).
 >
 > Everything else is behind a flag (`speculative_distributed`, `persistent_pipeline_stream`, `decentralized_spec_decoding`, `activation_compression`, `swift_self_speculative`) or advisory (Phase C allocator).
 >
@@ -28,29 +29,33 @@
 > | **Item 12 — DSD (decentralized speculative)** | ✅ ALL PHASES LANDED 2026-04-18 behind `decentralized_spec_decoding=false`. Worker γ-token decode + KV truncation primitives + γ controller + multi-segment spec-verify worker branch + ~410 LOC coordinator loop in `pipeline/dsd.rs`. End-to-end multi-segment WAN benchmark pending. |
 > | **Item 16 — Parallax scheduler (Phases A+B+B.2+C+C.2)** | ✅ LANDED 2026-04-18/19. All phases default-on except Phase D (multi-pipeline concurrency, deferred). Phase A: shortest-path DP. Phase B: observed per-layer latency EMA. Phase B.2: cross-node gossip of top-32 observed latencies via `NodeCapability.observed_latencies`. Phase C: `parallax_allocator.rs` offline layer allocator with `Z(k) = k²/s*(k)` objective. Phase C.2 (2026-04-19): soft acquire/prune bias in `AutoShardManager` driven by a per-shard stability counter (≥3 ticks of consistent signal) — respects every existing hard constraint. Tests: 10 routing + 7 allocator + 2 scheduler integration + 1 EMA math + 5 merge + 8 stability. |
 > | **Item 7 — BatchGenerate Phases 1 + 2** | ✅ LANDED 2026-04-19, **measured 2026-04-19** (RTX 3070 + TinyLlama-1.1B Q4, 3-iter avg): **18.2× TTFT @ c=2, 21.7× TTFT @ c=4, 23.5× TTFT @ c=8**, with equivalent aggregate throughput vs Phase 1+2 OFF. The win is TTFT fairness — Sarathi chunked prefill prevents new admits from waiting behind the full prior prefill+decode. Aggregate throughput is unchanged because TinyLlama is too small for fused `forward_batch` to add tok/s on this GPU. See `docs/plans/benchmarks/round4.md`. |
+> | **Item 7 — Phase 4 batched chunked prefill** | ✅ LANDED 2026-04-19. `forward_batch` generalized to accept homogeneous prefill-chunk groups (same `seq_len > 1` + same `index_pos`) in addition to decode batches. Phase A in `step_decode_pool` groups Prefilling slots by `(chunk_len, index_pos)`; groups of ≥2 fuse into one `forward_batch` (`[N, chunk_size]`) instead of N sequential `[1, chunk_size]` forwards. Heterogeneous batches transparently fall back to sequential. +3 tests (homogeneous-equals-sequential + two mixed-shape fallbacks); 745 total. End-to-end TTFT measurement under burst-admit deferred to round 5. |
 >
-> **NEXT SESSION — pick a new direction (Item 7 measured + done).**
+> **NEXT SESSION — pick a new direction (Item 7 Phase 4 landed).**
 >
-> Item 7 Phases 1 + 2 + 3 (benchmark) all landed 2026-04-19. Headline:
-> **17–23× TTFT improvement** under concurrency on RTX 3070 + TinyLlama
-> Q4, equivalent aggregate throughput. See `benchmarks/round4.md` for
-> the full A/B table.
+> Item 7 Phase 4 (batched chunked prefill) landed 2026-04-19. `forward_batch`
+> now handles both decode (seq_len=1) and prefill-chunk (homogeneous
+> seq_len>1 + same index_pos) batches through one code path; Phase A
+> fuses same-shape chunks automatically. Not benchmarked end-to-end yet —
+> the measurable win requires burst-admit of same-chunk-size prompts.
 >
 > **Candidate next picks:**
-> - **Phase 4 batched chunked prefill** (small): stack same-index_pos
->   prefill chunks into a single forward to tighten TTFT further under
->   burst-admit. Probably ~1 session.
 > - **Item 8 — cross-node prefix cache sharing** (large): announce
 >   BLAKE3 prompt-prefix hashes via gossip; peers serve KV blocks for
 >   shared prefixes on demand. Distinguishing P2P feature; multi-session.
+> - **Phase 4 benchmark** (small): extend `swarmllm bench --concurrency N`
+>   (or a new flag) to issue same-prompt-size admits in a tight burst so
+>   Phase 4's fused forwards fire, then measure TTFT improvement vs the
+>   sequential fallback. Probably ~1 session.
 > - **Items 14 / 17 / 18** (large research items, see Round 3 list).
 >
 > **Session state to recall on resume:**
-> - Last session: Item 7 Phases 1+2 landed + benchmark measured 2026-04-19
-> - Tests: 675 lib + 67 integration = 742 total on `dev,claude-subscription`
->   (13 SlotTable tests)
+> - Last session: Item 7 Phase 4 landed (batched chunked prefill). Not
+>   measured end-to-end.
+> - Tests: 678 lib + 67 integration = 745 total on `dev,claude-subscription`
+>   (+3 from Phase 4 vs prior 742)
 > - Bench docs: `round3.md` GPU 1.55× at batch=8; `round4.md` Item 7
->   measured at 17–23× TTFT improvement
+>   Phases 1+2 measured at 17–23× TTFT improvement. Phase 4 bench TBD.
 > - Pre-staged models: TinyLlama-1.1B, Phi-3.5-mini, Qwen2.5-Coder-7B — see
 >   `memory/local_model_shards.md`
 > - User env: RTX 3070 Laptop 8GB, WSL2, CUDA works via `/usr/lib/wsl/lib`.
@@ -790,15 +795,61 @@ Streaming mode parses SSE chunks and reports per-request TTFT; the
 `--model-id` override avoids picking the wrong model when multiple are
 registered (the auto-pick was hitting OOM on Qwen-7B).
 
-### Phase 4 (next session, optional): batched chunked prefill
+### Phase 4 (LANDED 2026-04-19): batched chunked prefill
 
-Today every Prefilling slot's chunk forward runs sequentially in
-Phase A. Eight admits → eight sequential 50-ms forwards → 400 ms of
-TTFT padding before any of them sample their first decode token. Could
-stack the chunks (each is `[1, chunk_size]`) into one `[N, chunk_size]`
-forward via a new prefill-mode `forward_batch` variant. Would tighten
-TTFT under burst-admit further. Keep simple: only batch chunks that
-share `index_pos` exactly, fall back to sequential otherwise.
+`SplitModel::forward_batch` now accepts any *homogeneous* batch —
+either every item has `seq_len = 1` (the original decode path) or every
+item has the **same** `seq_len > 1` and the **same** `index_pos` (the
+new prefill-chunk path). When homogeneous with `seq_len > 1`, one
+causal mask is built once from the first slot's KV length (identical
+across slots by construction) and passed to each per-request
+`forward_attn` / `forward_mla` call. FFN and norms already benefited
+from the existing batched path. For `is_last` segments the output head
+now slices `i((.., seq_len - 1, ..))` instead of the hardcoded
+`i((.., 0, ..))`. Heterogeneous batches (mixed seq_lens or differing
+`index_pos` at seq_len > 1) transparently fall back to sequential
+forwards — no behavior change for callers.
+
+`step_decode_pool`'s Phase A is a four-stage loop now:
+
+1. **Collect** — every `Prefilling` slot's `take_prefill_chunk` plus a
+   tensor build. Tensor build errors mark only that slot.
+2. **Group** by `(chunk_len, index_pos)` into a `BTreeMap` for
+   deterministic ordering.
+3. **Forward** — singletons go through `model.forward`; groups of ≥2
+   through `model.forward_batch`. A fused-forward failure errors every
+   slot in that group (strict retry-sequential isn't worth the
+   complexity — catastrophic forward failures would repeat
+   per-request anyway).
+4. **Finalize** per step — DIAG trace + first-token sample +
+   prefix-cache insert + promote-to-decoding when `remaining_after ==
+   0`.
+
+Eight concurrent admits with the same chunk size now collapse into a
+single `forward_batch` of shape `[8, chunk_size]`, replacing eight
+sequential `[1, chunk_size]` forwards. The TTFT tightening only helps
+when multiple admits land in the same tick with same-shape chunks —
+single-user workloads stay on the singleton path with no overhead.
+
+**Tests** (`src/inference/split/tests.rs`): 3 new, all green on CPU.
+
+- `forward_batch_prefill_chunks_match_sequential` — batched vs.
+  sequential forwards agree within `max_diff < 1e-4` at `seq_len=8,
+  index_pos=0` across 2 requests.
+- `forward_batch_mixed_seq_len_falls_back` — one decode + one prefill
+  item stays correct and returns per-item shapes unchanged.
+- `forward_batch_mixed_index_pos_falls_back` — two prefill items at
+  differing `index_pos` stay correct via the sequential fallback.
+
+Totals: 745 tests pass on `dev,claude-subscription` (+3 net, no
+regressions).
+
+**Not benchmarked end-to-end.** TTFT under concurrent same-prompt-size
+admits should drop in rough proportion to group size (8 fused vs 8
+sequential ≈ one `forward_batch` wall time vs eight `forward` wall
+times). On TinyLlama + RTX 3070, single-user prefill is already fast
+enough that the measurable win requires burst-admit of same-chunk-size
+prompts; open item for round 5 benchmarks.
 
 ---
 
