@@ -13,7 +13,7 @@
 > - **Item 3** continuous batching — 1.34–1.55× GPU throughput for concurrent requests (CPU falls through to sequential, no regression)
 > - **Item 16 A+B** Parallax routing — shortest-path pipeline chain via DP + observed per-peer latency EMA
 > - **Item 7 Phases 1 + 2** worker-side SlotTable + Sarathi chunked prefill — measured **17–23× TTFT improvement** at concurrency 2/4/8 on RTX 3070 + TinyLlama Q4 with equivalent aggregate throughput (no regression). See `benchmarks/round4.md`.
-> - **Item 7 Phase 4** batched chunked prefill — fused `forward_batch` over same-shape Prefilling slots; TTFT tightening on burst-admit of same-chunk-size prompts (not yet benchmarked end-to-end).
+> - **Item 7 Phase 4** batched chunked prefill + admit-coalescing — fused `forward_batch` over same-shape Prefilling slots; drain-before-tick unlocks fusion under HTTP-paced concurrent admits. Measured **1.57× aggregate tok/s @ c=4 and uniform-ms TTFT fairness** on RTX 3070 + TinyLlama Q4 vs pre-fix singleton path. See `benchmarks/round5.md`.
 >
 > Everything else is behind a flag (`speculative_distributed`, `persistent_pipeline_stream`, `decentralized_spec_decoding`, `activation_compression`, `swift_self_speculative`) or advisory (Phase C allocator).
 >
@@ -29,39 +29,52 @@
 > | **Item 12 — DSD (decentralized speculative)** | ✅ ALL PHASES LANDED 2026-04-18 behind `decentralized_spec_decoding=false`. Worker γ-token decode + KV truncation primitives + γ controller + multi-segment spec-verify worker branch + ~410 LOC coordinator loop in `pipeline/dsd.rs`. End-to-end multi-segment WAN benchmark pending. |
 > | **Item 16 — Parallax scheduler (Phases A+B+B.2+C+C.2)** | ✅ LANDED 2026-04-18/19. All phases default-on except Phase D (multi-pipeline concurrency, deferred). Phase A: shortest-path DP. Phase B: observed per-layer latency EMA. Phase B.2: cross-node gossip of top-32 observed latencies via `NodeCapability.observed_latencies`. Phase C: `parallax_allocator.rs` offline layer allocator with `Z(k) = k²/s*(k)` objective. Phase C.2 (2026-04-19): soft acquire/prune bias in `AutoShardManager` driven by a per-shard stability counter (≥3 ticks of consistent signal) — respects every existing hard constraint. Tests: 10 routing + 7 allocator + 2 scheduler integration + 1 EMA math + 5 merge + 8 stability. |
 > | **Item 7 — BatchGenerate Phases 1 + 2** | ✅ LANDED 2026-04-19, **measured 2026-04-19** (RTX 3070 + TinyLlama-1.1B Q4, 3-iter avg): **18.2× TTFT @ c=2, 21.7× TTFT @ c=4, 23.5× TTFT @ c=8**, with equivalent aggregate throughput vs Phase 1+2 OFF. The win is TTFT fairness — Sarathi chunked prefill prevents new admits from waiting behind the full prior prefill+decode. Aggregate throughput is unchanged because TinyLlama is too small for fused `forward_batch` to add tok/s on this GPU. See `docs/plans/benchmarks/round4.md`. |
-> | **Item 7 — Phase 4 batched chunked prefill** | ✅ LANDED 2026-04-19. `forward_batch` generalized to accept homogeneous prefill-chunk groups (same `seq_len > 1` + same `index_pos`) in addition to decode batches. Phase A in `step_decode_pool` groups Prefilling slots by `(chunk_len, index_pos)`; groups of ≥2 fuse into one `forward_batch` (`[N, chunk_size]`) instead of N sequential `[1, chunk_size]` forwards. Heterogeneous batches transparently fall back to sequential. +3 tests (homogeneous-equals-sequential + two mixed-shape fallbacks); 745 total. End-to-end TTFT measurement under burst-admit deferred to round 5. |
+> | **Item 7 — Phase 4 batched chunked prefill + admit-coalescing** | ✅ LANDED & MEASURED 2026-04-19. `forward_batch` generalized for homogeneous prefill-chunk groups (same `seq_len > 1` + same `index_pos`). Admit-coalescing drain (extract `handle_daemon_msg`, `try_recv` up to 16 queued messages before each tick) unlocks fusion under HTTP-paced concurrent admits. Measured RTX 3070 + TinyLlama Q4: **49.1 tok/s aggregate @ c=4 (+57% vs pre-fix 31.2)**, TTFT uniform **180 / 180 / 180 ms** across 4 requests (vs pre-fix **52 / 235 / 447 ms** spread), `DIAG chunk fused batch_size=4` confirmed. Synthetic bench + full recipe in `benchmarks/round5.md`. Heterogeneous batches fall back to sequential. 745 tests pass. |
 >
-> **NEXT SESSION — pick a new direction (Item 7 Phase 4 landed).**
+> **NEXT SESSION — pick a new direction (Item 7 Phase 4 + admit-coalescing done).**
 >
-> Item 7 Phase 4 (batched chunked prefill) landed 2026-04-19. `forward_batch`
-> now handles both decode (seq_len=1) and prefill-chunk (homogeneous
-> seq_len>1 + same index_pos) batches through one code path; Phase A
-> fuses same-shape chunks automatically. Not benchmarked end-to-end yet —
-> the measurable win requires burst-admit of same-chunk-size prompts.
+> Item 7 Phase 4 landed and **measured end-to-end** on the RTX 3070 with
+> TinyLlama Q4. The admit-coalescing drain was the surprise fix — without
+> it, the worker's strict admit→tick→admit→tick interleaving kept
+> concurrent slots desynced at different `index_pos`, so Phase 4's
+> grouping never batched. Drain loop lands fusion ×4 and ×8, TTFT
+> collapses to uniform-ms across all concurrent requests.
 >
 > **Candidate next picks:**
-> - **Item 8 — cross-node prefix cache sharing** (large): announce
->   BLAKE3 prompt-prefix hashes via gossip; peers serve KV blocks for
->   shared prefixes on demand. Distinguishing P2P feature; multi-session.
-> - **Phase 4 benchmark** (small): extend `swarmllm bench --concurrency N`
->   (or a new flag) to issue same-prompt-size admits in a tight burst so
->   Phase 4's fused forwards fire, then measure TTFT improvement vs the
->   sequential fallback. Probably ~1 session.
-> - **Items 14 / 17 / 18** (large research items, see Round 3 list).
+> - **Item 8 — cross-node prefix cache sharing** (large, multi-session):
+>   announce BLAKE3 prompt-prefix hashes via gossip; peers serve KV
+>   blocks for shared prefixes on demand. Distinguishing P2P feature.
+> - **Larger-model Phase 4 bench** (small): measure on Phi-3.5-mini and
+>   Qwen2.5-7B — OOM on RTX 3070 8 GB at default `max_seq_len_override=8192`
+>   × 8 slots of KV, so drop the override to 2048 or shrink
+>   `batch_generate_max_slots` to 2–4. Bigger hidden_dim should show
+>   larger FFN-fusion wins than TinyLlama's 1.57×.
+> - **Items 14 / 17 / 18** (large research items, see Round 3 list):
+>   Mirror Speculative Decoding (Apple), disaggregated prefill/decode,
+>   per-token early-exit.
+> - **`batched_prefill_forward` isolation flag** (tiny): a dedicated
+>   config flag + atomic + CLI so Phase 4 can be A/B'd without also
+>   disabling Phases 1+2 via `continuous_batching`. Useful for perf
+>   regression tracking.
 >
 > **Session state to recall on resume:**
-> - Last session: Item 7 Phase 4 landed (batched chunked prefill). Not
->   measured end-to-end.
-> - Tests: 678 lib + 67 integration = 745 total on `dev,claude-subscription`
->   (+3 from Phase 4 vs prior 742)
-> - Bench docs: `round3.md` GPU 1.55× at batch=8; `round4.md` Item 7
->   Phases 1+2 measured at 17–23× TTFT improvement. Phase 4 bench TBD.
+> - Last session: Item 7 Phase 4 landed + admit-coalescing fix + GPU
+>   E2E measurement (2026-04-19). Commits `7bb306c` (Phase 4),
+>   `a29f273` (admit-coalescing + E2E). See `docs/plans/benchmarks/round5.md`.
+> - Tests: 678 lib + 67 integration = **745 total** on `dev,claude-subscription`.
+> - Bench docs: `round3.md` GPU Item 3 @ 1.55× batch=8; `round4.md` Item 7
+>   Phases 1+2 @ 17–23× TTFT; `round5.md` Item 7 Phase 4 @ 1.57× aggregate
+>   tok/s + uniform TTFT.
 > - Pre-staged models: TinyLlama-1.1B, Phi-3.5-mini, Qwen2.5-Coder-7B — see
->   `memory/local_model_shards.md`
-> - User env: RTX 3070 Laptop 8GB, WSL2, CUDA works via `/usr/lib/wsl/lib`.
->   Default test build is `cargo build --no-default-features --features dev,claude-subscription`;
->   GPU work needs `dev,candle-cuda`. Daemon needs `max_seq_len_override`
->   in config.toml to fit Phi-3.5-mini's 128K context (try 8192).
+>   `memory/local_model_shards.md`. Phi and Qwen OOM on RTX 3070 at default
+>   `max_seq_len_override=8192`; drop to 2048 or reduce
+>   `batch_generate_max_slots` to fit.
+> - User env: RTX 3070 Laptop 8 GB, WSL2, CUDA works via `/usr/lib/wsl/lib`.
+>   Default test build: `cargo build --no-default-features --features dev,claude-subscription`.
+>   GPU work: `dev,candle-cuda` (release build adds ~7 min compile for
+>   LTO + codegen-units=1; use `--profile release-fast` alternative if
+>   we add one). Worker subprocess picks up log level from config.toml's
+>   `[logging] level` — set to `"debug"` for DIAG trace visibility.
 >
 > **Other work items (not prioritized for the next session but tracked):**
 > - Item 2 with a matched-backend draft model (research flagged `Qwen2.5-0.5B`
