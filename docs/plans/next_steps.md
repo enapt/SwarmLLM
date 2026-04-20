@@ -69,8 +69,11 @@ lever second.
 - macOS CI matrix: currently Linux-only. macOS build is believed to
   work (uses Metal via candle's default) but untested in CI.
 - Benchmarks for already-shipped Items still under flags that we
-  haven't measured: multi-segment DSD (Item 12), Q8_0 activation
-  compression (Item 13).
+  haven't measured: multi-segment DSD (Item 12) still pending (needs
+  3+ daemons + draft model + WAN RTT — see `round7.md` § Item 12 for
+  recipe). Q8_0 activation compression (Item 13) measured 2026-04-20
+  in `round7.md`: 3.15× wire reduction, localhost decode neutral-to-
+  slightly-negative as predicted; WAN bench will decide default-on.
 
 ## Anti-goals
 

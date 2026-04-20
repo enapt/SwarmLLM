@@ -37,7 +37,7 @@
 | Item 2 — Distributed speculative decoding | ✅ Landed in 3 phases behind `speculative_distributed=false`. 40–52% accept rate in llama-cpp-draft / candle-target pairing |
 | Item 6 — SWIFT self-speculative | 🟡 Landed behind `swift_self_speculative=false`. Structurally slower than baseline on candle CPU until flash-attn-with-mask lands. Shelved |
 | Item 12 — DSD multi-segment spec decoding (2026-04-18) | ✅ All phases landed behind `decentralized_spec_decoding=false`. End-to-end multi-segment WAN benchmark pending |
-| Item 13 — Activation compression (Q8_0) | ✅ Codec verified (~3.76× compression, RMS error <0.005, peer-compatible auto-dispatch). Behind `activation_compression=false`. End-to-end multi-segment benchmark pending |
+| Item 13 — Activation compression (Q8_0) | ✅ Codec verified (~3.76× compression, RMS error <0.005, peer-compatible auto-dispatch). End-to-end 2-daemon bench in `round7.md` (2026-04-20): measured **3.15× wire reduction** per forward, −13.5% decode tok/s on loopback (expected — wall-clock win requires WAN RTT). Still behind `activation_compression=false` pending WAN numbers |
 
 ## Round 6 measurements (2026-04-20, RTX 3070 Laptop + WSL2 loopback)
 
@@ -106,6 +106,8 @@ Full pipeline validated on both: announce → index → probe → trust-gate
 - **Items 14 / 17 / 18** research candidates (Mirror Spec Decoding,
   disaggregated prefill/decode, per-token early-exit) — research first,
   decide if worth building.
-- **End-to-end benches** for Items 12 (DSD) + 13 (activation compression)
-  + 2 (distributed spec decoding with matched-backend draft) — all
-  landed, unmeasured.
+- **End-to-end benches** for Item 13 (activation compression) measured in
+  `round7.md`; Item 12 (DSD) + Item 2 (distributed spec decoding with
+  matched-backend draft) still deferred — both need 3+ daemons + WAN-class
+  RTT to produce a meaningful speedup number (see `round7.md` § Item 12
+  for the recipe and why localhost can't answer).
