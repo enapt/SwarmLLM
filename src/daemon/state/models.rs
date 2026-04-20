@@ -363,4 +363,130 @@ mod tests {
         assert!(m.cross_node_prefix_holders(&model, &h(1)).is_empty());
         assert!(m.cross_node_prefix_holders(&model, &h(2)).is_empty());
     }
+
+    /// Item 8 Phase 4: simulates the core resolver logic inside
+    /// `spawn_prefix_probe_handler` against a scenario with three peers
+    /// holding progressively longer prefix matches. Validates that the
+    /// longest-prefix hit wins AND that a trust-gate filter correctly
+    /// excludes low-trust peers even when they hold a longer match.
+    /// We mirror the probe-handler's inline logic here rather than
+    /// constructing a SharedState (which needs a full runtime harness).
+    #[test]
+    fn probe_resolver_picks_longest_prefix_above_trust_floor() {
+        use crate::types::PrefixBlockEntry;
+        let m = make_mgmt();
+        let model = ModelId("m".into());
+        let high_trust_peer = NodeId([1u8; 32]);
+        let med_trust_peer = NodeId([2u8; 32]);
+        let low_trust_peer = NodeId([3u8; 32]);
+
+        // Manifest over a prompt with 3 blocks. The low-trust peer has
+        // ALL three blocks (longest match); the medium-trust peer has the
+        // first two; the high-trust peer only the first.
+        let blocks = [
+            PrefixBlockEntry {
+                block_hash: h(10),
+                token_count: 64,
+            },
+            PrefixBlockEntry {
+                block_hash: h(20),
+                token_count: 128,
+            },
+            PrefixBlockEntry {
+                block_hash: h(30),
+                token_count: 192,
+            },
+        ];
+        let _ = m.replace_peer_prefix_blocks(high_trust_peer.clone(), model.clone(), vec![h(10)]);
+        let _ =
+            m.replace_peer_prefix_blocks(med_trust_peer.clone(), model.clone(), vec![h(10), h(20)]);
+        let _ = m.replace_peer_prefix_blocks(
+            low_trust_peer.clone(),
+            model.clone(),
+            vec![h(10), h(20), h(30)],
+        );
+
+        // Trust scores: low-trust peer is below threshold 0.4.
+        let trust = |peer: &NodeId| -> f32 {
+            if peer == &high_trust_peer {
+                0.9
+            } else if peer == &med_trust_peer {
+                0.6
+            } else {
+                0.2
+            }
+        };
+        let trust_min: f32 = 0.4;
+
+        // Resolver mirror: walk manifest longest-first, pick a peer above
+        // the trust floor.
+        let mut best: Option<(NodeId, [u8; 32], u32)> = None;
+        if let Some(model_index) = m.cross_node_prefix_index.get(&model) {
+            for entry in blocks.iter().rev() {
+                if let Some(holders) = model_index.get(&entry.block_hash) {
+                    let candidates: Vec<NodeId> = holders
+                        .iter()
+                        .map(|r| r.clone())
+                        .filter(|n| trust(n) >= trust_min)
+                        .collect();
+                    if !candidates.is_empty() {
+                        // Sort by NodeId for determinism — the actual
+                        // resolver uses latency EMA as tiebreak, absent
+                        // here, so pick first sorted.
+                        let mut c = candidates;
+                        c.sort_by_key(|n| n.0);
+                        best = Some((c[0].clone(), entry.block_hash, entry.token_count));
+                        break;
+                    }
+                }
+            }
+        }
+        // Low-trust peer holds the longest match (h(30) at 192 tokens)
+        // but is below the floor — so we should fall back to h(20) at
+        // 128 tokens, served by the medium-trust peer.
+        let (peer, hash, token_count) = best.expect("should find a match");
+        assert_eq!(peer, med_trust_peer);
+        assert_eq!(hash, h(20));
+        assert_eq!(token_count, 128);
+    }
+
+    /// Phase 4: when ALL candidate peers are below the trust threshold,
+    /// the resolver must return no match — the fetcher falls through to
+    /// a full local prefill instead of risking a poisoned KV.
+    #[test]
+    fn probe_resolver_returns_none_when_all_peers_below_trust_floor() {
+        use crate::types::PrefixBlockEntry;
+        let m = make_mgmt();
+        let model = ModelId("m".into());
+        let p1 = NodeId([1u8; 32]);
+        let p2 = NodeId([2u8; 32]);
+        let _ = m.replace_peer_prefix_blocks(p1.clone(), model.clone(), vec![h(10)]);
+        let _ = m.replace_peer_prefix_blocks(p2.clone(), model.clone(), vec![h(10)]);
+        let blocks = [PrefixBlockEntry {
+            block_hash: h(10),
+            token_count: 64,
+        }];
+        let trust = |_: &NodeId| -> f32 { 0.1 };
+        let trust_min: f32 = 0.5;
+
+        let mut best: Option<(NodeId, [u8; 32], u32)> = None;
+        if let Some(model_index) = m.cross_node_prefix_index.get(&model) {
+            for entry in blocks.iter().rev() {
+                if let Some(holders) = model_index.get(&entry.block_hash) {
+                    let candidates: Vec<NodeId> = holders
+                        .iter()
+                        .map(|r| r.clone())
+                        .filter(|n| trust(n) >= trust_min)
+                        .collect();
+                    if !candidates.is_empty() {
+                        let mut c = candidates;
+                        c.sort_by_key(|n| n.0);
+                        best = Some((c[0].clone(), entry.block_hash, entry.token_count));
+                        break;
+                    }
+                }
+            }
+        }
+        assert!(best.is_none());
+    }
 }

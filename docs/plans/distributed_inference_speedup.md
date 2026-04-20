@@ -31,8 +31,9 @@
 > | **Item 7 — BatchGenerate Phases 1 + 2** | ✅ LANDED 2026-04-19, **measured 2026-04-19** (RTX 3070 + TinyLlama-1.1B Q4, 3-iter avg): **18.2× TTFT @ c=2, 21.7× TTFT @ c=4, 23.5× TTFT @ c=8**, with equivalent aggregate throughput vs Phase 1+2 OFF. The win is TTFT fairness — Sarathi chunked prefill prevents new admits from waiting behind the full prior prefill+decode. Aggregate throughput is unchanged because TinyLlama is too small for fused `forward_batch` to add tok/s on this GPU. See `docs/plans/benchmarks/round4.md`. |
 > | **Item 7 — Phase 4 batched chunked prefill + admit-coalescing** | ✅ LANDED & MEASURED 2026-04-19. `forward_batch` generalized for homogeneous prefill-chunk groups (same `seq_len > 1` + same `index_pos`). Admit-coalescing drain (extract `handle_daemon_msg`, `try_recv` up to 16 queued messages before each tick) unlocks fusion under HTTP-paced concurrent admits. Measured RTX 3070 + TinyLlama Q4: **49.1 tok/s aggregate @ c=4 (+57% vs pre-fix 31.2)**, TTFT uniform **180 / 180 / 180 ms** across 4 requests (vs pre-fix **52 / 235 / 447 ms** spread), `DIAG chunk fused batch_size=4` confirmed. `InferenceConfig::batched_prefill_forward` (default `true`) toggles fusion in isolation from Phases 1+2. Synthetic + E2E bench recipe in `benchmarks/round5.md`. 745 tests pass. |
 >
-> **Item 8 — Phases 1, 2a, 2b, 3 LANDED 2026-04-19/20. Next: Phase 4
-> (end-to-end 2-node bench + measured numbers).**
+> **Item 8 — Phases 1, 2a, 2b, 3, 4 LANDED 2026-04-19/20. Bench recipe
+> in `docs/plans/benchmarks/round6.md`; measured numbers pending GPU
+> time on the user's RTX 3070.**
 >
 > Phase 1 wired the bookkeeping: BLAKE3 chained block-hash computation
 > in `PrefixCache`, new `WorkerMsg::PrefixManifestUpdate` IPC verb,
@@ -983,7 +984,21 @@ See `docs/plans/benchmarks/round5.md` for the full reproducing recipe.
     - New public helpers: `serialize_snapshot_with_block_size`, `deserialize_snapshot_full`, `snapshot_is_finite`. `export_snapshot_bytes` now threads the cache's configured block size into the header so fetched bytes carry the verification context.
     - Tests: +4 `snapshot_is_finite` (plain tensors accept, NaN reject, Inf reject, None-layer ignore) + +4 `verify_fetched_snapshot` (ok on matching hash + finite tensors, reject bad magic, reject hash mismatch, reject non-finite). **773 lib + integration** on `dev,claude-subscription` (up from 765). Clippy clean.
     - Trust-manager call path: existing `TrustEvent::SpotCheckFail` with its -0.1 delta is reused (same event that fires for bogus shard transfers), so the decay curve is unified.
-  - **Phase 4 (next).** End-to-end 2-node benchmark against the Item 5 single-node baseline. Measure: same-prompt TTFT reduction for a 2KB system prompt where peer-A prefilled first and peer-B fetches; cold-hit vs warm-hit latency breakdown; bandwidth usage per fetch. Document in `docs/plans/benchmarks/round6.md`.
+  - **Phase 4 (this commit, 2026-04-20).** Bench recipe + probe-resolver sanity tests.
+    - `docs/plans/benchmarks/round6.md`: full two-daemon loopback walkthrough — build, spin up two daemons on non-overlapping ports, load the same model on both, warm up node A with a ~500-token system prompt, wait for `PrefixCacheAnnounce` to propagate, measure TTFT on node B with the same prompt, compare against a control run with `cross_node_prefix_trust_min = 2.0` (gate everything out). Includes expected DIAG log lines to grep for at each stage, a troubleshooting section (hash mismatch → check `prefix_cache_block_tokens` alignment, trust-floor blocks → check peer score via admin API), and deferred items (larger-model numbers, WAN bench, wire compression).
+    - New tests (`src/daemon/state/models.rs`): `probe_resolver_picks_longest_prefix_above_trust_floor` simulates a three-peer scenario where the peer holding the longest match is below the trust floor — resolver must correctly fall back to the second-longest match held by a trusted peer. `probe_resolver_returns_none_when_all_peers_below_trust_floor` validates the fall-through-to-local-prefill path. Both mirror the inline logic in `spawn_prefix_probe_handler` without needing a full SharedState harness.
+    - Not yet measured: the actual TTFT numbers. The recipe is self-contained and ready to run on the RTX 3070 machine; numbers will be filled in a follow-up commit after the hardware-side run.
+    - Tests: +2 resolver. **775 lib + integration** on `dev,claude-subscription` (up from 773). Clippy clean.
+
+## Item 8 rollup
+
+- Phase 1 (commit `814d121`) — hash announce + cross-node index + loopback verification.
+- Phase 2a (commit `e6fa1dd`) — KvSnapshot wire format + `NetworkCommand::SendPrefixKvFetch` + one-call fetch helper.
+- Phase 2b (commit `ef358c8`) — worker↔daemon↔network IPC cascade + admit-time hook + serving-side extraction.
+- Phase 3 (commit `f1ecbc1`) — trust gating + snapshot integrity checks + peer trust penalties.
+- Phase 4 (this commit) — bench recipe + probe-resolver sanity tests; measurement deferred.
+
+End-to-end the pipeline is content-addressed (BLAKE3 chained block hashes), defense-in-depth (trust gate + hash verify + NaN/Inf check), and observable (rich DIAG log taxonomy). The architecture is ready for real-hardware validation.
   - **Phase 3 (later).** Trust-gated re-verification: untrusted peers' KV gets re-verified by re-running a single forward at the boundary; high-trust peers skip re-verification. Wire to `state.credits.trust_manager`.
   - **Phase 4.** Bench against Item 5 baseline + multi-node setup + plan/memory updates.
 - **Item 9 — EAGLE-3 draft heads.** Per-target pretrained draft heads (SafeAILab HF) distributed as a new shard type. 3–6× ceiling, highest complexity.
