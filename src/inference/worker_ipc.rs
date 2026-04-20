@@ -44,15 +44,16 @@ pub enum DaemonMsg {
         layer_end: usize,
     },
     /// Item 8 Phase 2b: daemon's reply to a `WorkerMsg::PrefixFetchProbe`.
-    /// `payload` is `Some(serialized KvSnapshot bytes)` on hit (already
-    /// BLAKE3-verified by the daemon helper), or `None` on miss / timeout.
+    /// When `present == true`, the BLAKE3-verified `KvSnapshot` bytes are
+    /// carried in the IPC binary-payload slot (not inside this JSON header).
+    /// `present == false` means miss / timeout / verification failure.
     /// `matched_tokens` is the number of prompt tokens covered by the
     /// snapshot (equal to the chained-hash block boundary the daemon
     /// resolved against).
     PrefixFetchResult {
         request_id: Uuid,
         matched_tokens: u32,
-        payload: Option<Vec<u8>>,
+        present: bool,
     },
     /// Item 8 Phase 2b: serving-side request. The daemon received an
     /// inbound `SwarmRequest::PrefixKvFetch` from a peer and needs the
@@ -123,12 +124,12 @@ pub enum WorkerMsg {
         blocks: Vec<PrefixBlockEntry>,
     },
     /// Item 8 Phase 2b: worker's reply to `DaemonMsg::ExportPrefixSnapshot`.
-    /// `payload` is `Some(serialized KvSnapshot)` when the hash matched a
-    /// locally-cached entry, `None` otherwise (eviction race / miss).
-    PrefixSnapshotResponse {
-        request_id: Uuid,
-        payload: Option<Vec<u8>>,
-    },
+    /// When `present == true`, the serialized `KvSnapshot` bytes are carried
+    /// in the IPC binary-payload slot (not inside this JSON header).
+    /// Snapshots can be tens of MB; JSON-encoding a `Vec<u8>` bloats by ~5×
+    /// and overflows the 64 MiB header cap. `present == false` means the
+    /// worker couldn't produce a snapshot (eviction race / miss).
+    PrefixSnapshotResponse { request_id: Uuid, present: bool },
     /// Worker is about to exit.
     Bye,
 }

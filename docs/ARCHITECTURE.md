@@ -465,6 +465,27 @@ Long prompts are split into chunks for overlapped prefill and decode:
 - Decode steps for other requests can interleave between prefill chunks
 - Chunk size auto-tuned based on available VRAM
 
+### Prefix-Cache KV Sharing (Cross-Node)
+
+Each worker stores a local prefix-cache keyed by BLAKE3 chained hashes over
+fixed-size token blocks (`prefix_cache_block_tokens`, default 64). Blocks are
+announced to peers via `SwarmMessage::PrefixCacheAnnounce` on the
+`swarm/models` gossipsub topic, indexed by each recipient in
+`state.models.cross_node_prefix_index`. When a local worker sees a prompt
+whose prefix it hasn't prefilled, it emits `WorkerMsg::PrefixFetchProbe`; the
+daemon walks the index (longest-match first), trust-gates candidate peers by
+`cross_node_prefix_trust_min` (default 0.5), and issues a `SendPrefixKvFetch`
+request-response to the best holder. The serving daemon re-issues
+`DaemonMsg::ExportPrefixSnapshot` to its worker, which narrows a stored
+`KvSnapshot` to the requested block boundary and returns the serialized bytes
+in the IPC binary-payload slot. Back on the requesting side, the bytes are
+BLAKE3-reverified against the requested hash and NaN/Inf-scanned before
+hydrating a new `KvCacheEntry` for the in-flight request, which then only has
+to prefill the suffix beyond the cached block boundary. See
+`docs/plans/benchmarks/round6.md` for the two-daemon loopback bench recipe,
+measured TTFT numbers, and the "TinyLlama is too small to demonstrate the
+win on GPU+localhost" interpretation.
+
 ### Speculative Decoding
 
 - Draft model (small/fast) proposes K candidate tokens per step (default 4)

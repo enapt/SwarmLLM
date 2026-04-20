@@ -179,10 +179,11 @@ pub async fn run_worker(
                     if let DaemonMsg::PrefixFetchResult {
                         request_id,
                         matched_tokens,
-                        payload: kv_bytes,
+                        present,
                     } = msg
                     {
                         if let Some((_, tx)) = reader_pending.remove(&request_id) {
+                            let kv_bytes = if present { Some(payload) } else { None };
                             let _ = tx.send((matched_tokens, kv_bytes));
                         } else {
                             tracing::debug!(
@@ -2630,13 +2631,15 @@ async fn handle_daemon_msg(
             // cache is keyed by the kv_model_key the SplitModel already
             // uses, so we iterate every loaded model's key to find it).
             let payload = export_snapshot_for_hash(models, prefix_cache, &model_id, &block_hash);
+            let present = payload.is_some();
+            let payload_slice: &[u8] = payload.as_deref().unwrap_or(&[]);
             let _ = send_worker(
                 writer,
                 &WorkerMsg::PrefixSnapshotResponse {
                     request_id,
-                    payload,
+                    present,
                 },
-                &[],
+                payload_slice,
             )
             .await;
         }

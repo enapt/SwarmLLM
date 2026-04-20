@@ -33,6 +33,33 @@ on GPU; RTT on loopback is ~1 ms; KV snapshot for 22 layers × 4 kv_heads
 localhost bandwidth (several GB/s) the transfer is <10 ms. So the
 fetched path should win by ~200 ms on a 500-token prefix cache hit.
 
+## Results (2026-04-20, RTX 3070 Laptop 8GB, WSL2, localhost loopback)
+
+Measured per the recipe below. Both daemons on the same machine, loopback TCP; TinyLlama-1.1B Q4_K_M; 672-token prompt (640 fall inside cached prefix blocks, 32-token suffix + 100 decode tokens); model pre-loaded on B with a short unrelated prompt before the long-prompt measurement so the 672-token TTFT excludes weight-load latency.
+
+| Scenario | TTFT iter 1 (ms) | TTFT iter 2 (ms) | TTFT iter 3 (ms) | DIAG `cross-node prefix HIT` |
+|---|---|---|---|---|
+| A cold (full prefill + model load) | 1548 | 249 | 246 | 0 |
+| B with cross-node fetch (model pre-warm) | **809** | 256 | 231 | 1 (iter 1) |
+| B control, fetch gated via `cross_node_prefix_trust_min=2.0` | **713** | 253 | 253 | 0 |
+
+DIAG trace on iter 1 (fetch-enabled run) confirmed the full pipeline:
+
+```
+A: DIAG: PrefixKvFetch: serving inbound fetch via worker IPC ticket=...
+A: DIAG: served PrefixKvFetch ticket=... age_ms=147 hit=true
+B: DIAG: received PrefixKvData response ... hit=true bytes_len=28840528
+B: DIAG: cross-node prefix HIT — hydrated KV matched_tokens=640 total_tokens=672 bytes=28840528
+B: DIAG: try_register_generate_slot prefix-cache HIT matched_tokens=640 total_tokens=672
+```
+
+**Interpretation.** The cross-node KV-hydration path works end-to-end — announce → index → probe → trust-gate → fetch → BLAKE3 verify → hydrate → suffix-prefill — and passes all integrity checks. But on localhost + RTX 3070 + TinyLlama-1.1B, **the fetched path is ~100 ms slower than re-doing the prefill locally** (809 ms vs 713 ms). TinyLlama-1.1B prefill on a 640-token prefix takes only ~460 ms on this GPU, while the wire round trip for a 28 MB uncompressed f32 KV snapshot is ~160 ms + ~96 ms of hydrate/deserialize. This is exactly the "TinyLlama is too small to demonstrate the win" outcome the recipe predicted — prefill cost grows super-linearly in `hidden_dim × tokens` while wire size scales linearly, so larger models shift the cross-over. See `Deferred for a future bench` below.
+
+**Two bugs the bench uncovered and fixed in-tree before the numbers above:**
+
+1. `SwarmMessage::PrefixCacheAnnounce` was never mapped to a GossipSub topic in `NetworkManager::handle_broadcast` (`src/network/manager/mod.rs`), so Phase 1 announces were silently dropped at the wire. The loopback self-index path masked it in single-node tests. Fix: add `PrefixCacheAnnounce` to the `TOPIC_MODELS` arm.
+2. `WorkerMsg::PrefixSnapshotResponse` and `DaemonMsg::PrefixFetchResult` both carried `payload: Option<Vec<u8>>` inside the JSON-framed header. `serde_json` encodes `Vec<u8>` as a JSON array of integers, which inflates 28 MB of binary → ~102 MB of header bytes and blows past the 64 MiB IPC header cap, killing the worker. Fix: move the payload bytes onto the IPC binary-payload slot and keep a `present: bool` tag in the header.
+
 ## Recipe
 
 ### 0. Build
@@ -160,16 +187,20 @@ Save TTFT distribution to `/tmp/bench_b_control.json`.
 
 ### 7. Report
 
-Fill in:
+See the **Results** section at the top of this doc for measured TTFT numbers
+from the 2026-04-20 RTX 3070 run. Key caveats when re-running:
 
-| Scenario | TTFT mean (ms) | TTFT min / max | Decode tok/s | DIAG `cross-node prefix HIT` count |
-|---|---|---|---|---|
-| B with cross-node fetch (step 5) | TODO | TODO | TODO | 3 |
-| B without cross-node fetch (step 6) | TODO | TODO | TODO | 0 |
-| A single-node baseline (step 3 iter 2+) | TODO | TODO | TODO | 0 |
-
-Expected win: step 5 ≈ step 3 iter 2+ (both serve from a cached prefix),
-step 6 ≈ full prefill latency (baseline miss).
+- Pre-warm node B's model with a short unrelated prompt (e.g., `"Hi there."`)
+  before the long-prompt measurement. If you skip this, iter 1 TTFT includes
+  ~1 s of weight-load cost and completely dominates the fetch-vs-prefill
+  signal.
+- Both fetch-enabled and control runs only surface the cross-node path on
+  **iter 1**. Iter 2+ always hits B's own newly-populated local prefix cache,
+  so identical TTFTs across iter 2/3 in both scenarios are expected and not
+  a bug.
+- Verify `hit=true` + `DIAG: cross-node prefix HIT` appears in B's logs on
+  iter 1 of the fetch-enabled run. If not, re-check that A's announce reached
+  B's index (step 4) and that A's `trust_score ≥ cross_node_prefix_trust_min`.
 
 ## Troubleshooting
 

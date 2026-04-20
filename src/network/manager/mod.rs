@@ -3059,7 +3059,8 @@ impl NetworkManager {
             | SwarmMessage::NodeCapabilityUpdate(_)
             | SwarmMessage::ModelManifest(_)
             | SwarmMessage::ShardDownloadProgress(_)
-            | SwarmMessage::HfSourceGossip(_) => TOPIC_MODELS,
+            | SwarmMessage::HfSourceGossip(_)
+            | SwarmMessage::PrefixCacheAnnounce(_) => TOPIC_MODELS,
             SwarmMessage::CreditGossip(_) => crate::network::protocol::TOPIC_CREDITS,
             SwarmMessage::HealthPing { .. } | SwarmMessage::HealthPong { .. } => {
                 crate::network::protocol::TOPIC_HEALTH

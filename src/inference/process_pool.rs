@@ -583,14 +583,16 @@ impl ModelProcessPool {
             return Err(SwarmError::Internal("worker dead".into()));
         }
         let mut writer = handle.writer.lock().await;
+        let present = payload.is_some();
+        let payload_slice: &[u8] = payload.as_deref().unwrap_or(&[]);
         send_daemon(
             &mut *writer,
             &DaemonMsg::PrefixFetchResult {
                 request_id,
                 matched_tokens,
-                payload,
+                present,
             },
-            &[],
+            payload_slice,
         )
         .await
         .map_err(|e| SwarmError::Internal(format!("prefix fetch result send: {e}")))
@@ -633,7 +635,13 @@ impl ModelProcessPool {
         // can't block the manager — serving-side misses are fine, and the
         // network peer will get a `None` reply.
         match tokio::time::timeout(std::time::Duration::from_millis(500), rx.recv()).await {
-            Ok(Some((WorkerMsg::PrefixSnapshotResponse { payload, .. }, _))) => payload,
+            Ok(Some((WorkerMsg::PrefixSnapshotResponse { present, .. }, payload))) => {
+                if present {
+                    Some(payload)
+                } else {
+                    None
+                }
+            }
             Ok(Some(_)) => None,
             Ok(None) => None,
             Err(_) => {

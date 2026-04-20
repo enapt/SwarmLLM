@@ -31,9 +31,44 @@
 > | **Item 7 — BatchGenerate Phases 1 + 2** | ✅ LANDED 2026-04-19, **measured 2026-04-19** (RTX 3070 + TinyLlama-1.1B Q4, 3-iter avg): **18.2× TTFT @ c=2, 21.7× TTFT @ c=4, 23.5× TTFT @ c=8**, with equivalent aggregate throughput vs Phase 1+2 OFF. The win is TTFT fairness — Sarathi chunked prefill prevents new admits from waiting behind the full prior prefill+decode. Aggregate throughput is unchanged because TinyLlama is too small for fused `forward_batch` to add tok/s on this GPU. See `docs/plans/benchmarks/round4.md`. |
 > | **Item 7 — Phase 4 batched chunked prefill + admit-coalescing** | ✅ LANDED & MEASURED 2026-04-19. `forward_batch` generalized for homogeneous prefill-chunk groups (same `seq_len > 1` + same `index_pos`). Admit-coalescing drain (extract `handle_daemon_msg`, `try_recv` up to 16 queued messages before each tick) unlocks fusion under HTTP-paced concurrent admits. Measured RTX 3070 + TinyLlama Q4: **49.1 tok/s aggregate @ c=4 (+57% vs pre-fix 31.2)**, TTFT uniform **180 / 180 / 180 ms** across 4 requests (vs pre-fix **52 / 235 / 447 ms** spread), `DIAG chunk fused batch_size=4` confirmed. `InferenceConfig::batched_prefill_forward` (default `true`) toggles fusion in isolation from Phases 1+2. Synthetic + E2E bench recipe in `benchmarks/round5.md`. 745 tests pass. |
 >
-> **Item 8 — Phases 1, 2a, 2b, 3, 4 LANDED 2026-04-19/20. Bench recipe
-> in `docs/plans/benchmarks/round6.md`; measured numbers pending GPU
-> time on the user's RTX 3070.**
+> **Item 8 — Phases 1, 2a, 2b, 3, 4 LANDED 2026-04-19/20. MEASURED
+> 2026-04-20 on RTX 3070 Laptop + TinyLlama-1.1B Q4_K_M (two daemons on
+> localhost loopback, 672-token prompt, model pre-warmed on B):**
+>
+> | Scenario | iter-1 TTFT | iter 2 | iter 3 |
+> |---|---|---|---|
+> | A cold (full prefill + model load) | 1548 ms | 249 ms | 246 ms |
+> | B with cross-node fetch enabled | **809 ms** | 256 ms | 231 ms |
+> | B control, `cross_node_prefix_trust_min=2.0` | **713 ms** | 253 ms | 253 ms |
+>
+> End-to-end pipeline validated — announce → index → probe → trust-gate
+> → fetch → BLAKE3 verify → hydrate → suffix prefill, with all the
+> expected DIAG taxonomy firing. On TinyLlama on a fast GPU with
+> localhost networking, the 28 MB uncompressed f32 KV snapshot takes
+> ~260 ms to pull + hydrate while the local prefill it saves takes only
+> ~460 ms, so the fetched path is **~100 ms slower** than re-prefilling.
+> This is the "TinyLlama is too small to demonstrate the win" outcome
+> the recipe predicted: prefill cost grows super-linearly in
+> `hidden_dim × tokens` while wire size scales linearly, so the
+> cross-over is at larger models. WAN tests and a ≥7B-parameter run
+> remain deferred. Full numbers + interpretation in
+> `docs/plans/benchmarks/round6.md`.
+>
+> **Two bugs the bench uncovered and fixed in-tree:**
+>
+> 1. `SwarmMessage::PrefixCacheAnnounce` was missing from
+>    `NetworkManager::handle_broadcast`'s topic match, so Phase 1
+>    announces silently dropped at the wire. The loopback self-index
+>    path hid the bug in single-node tests. Fix: add the variant to the
+>    `TOPIC_MODELS` arm.
+> 2. Phase 2b IPC messages (`WorkerMsg::PrefixSnapshotResponse` and
+>    `DaemonMsg::PrefixFetchResult`) carried `payload: Option<Vec<u8>>`
+>    inside their JSON-framed headers. `serde_json` encodes `Vec<u8>`
+>    as a JSON array of integers (~5× bloat), so a 28 MB snapshot
+>    became a ~102 MB header and blew past the 64 MiB IPC header cap,
+>    killing the worker on the first real cross-node fetch. Fix: move
+>    snapshot bytes to the IPC binary-payload slot; keep a
+>    `present: bool` tag in the header.
 >
 > Phase 1 wired the bookkeeping: BLAKE3 chained block-hash computation
 > in `PrefixCache`, new `WorkerMsg::PrefixManifestUpdate` IPC verb,
