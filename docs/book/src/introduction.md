@@ -32,6 +32,14 @@ Single-node inference on an NVIDIA RTX 3070 Laptop (8GB VRAM):
 | Phi-3.5 3.8B Q4 | 46.4 tok/s | 1.8 tok/s |
 | Qwen2.5-Coder 7B Q4 | 29.0 tok/s | 2.4 tok/s |
 
+**Distributed-inference speedups (all default-on):** a stack of
+prefix-caching + batched prefill + Parallax scheduling + cross-node KV
+sharing. Round 6 bench (2026-04-20) measured a **12.9× iter-1 TTFT
+speedup** when a peer has the same prompt prefix already prefilled
+(672-token Qwen-7B prompt on CPU-CPU localhost: 151.7 s → 11.8 s). Full
+stack and the knobs to turn each on/off are documented in
+[Performance & Inference Speedups](./operations/performance.md).
+
 ## How It Works
 
 ```

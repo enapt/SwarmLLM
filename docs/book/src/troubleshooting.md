@@ -92,6 +92,84 @@ CPU inference is 5-20x slower but works for any model size. To avoid OOM:
 - The scheduler needs enough shard coverage to build a complete pipeline
 - Check `DIAG: assemble_pipeline_for` for candidate counts
 
+## Cross-Node Prefix KV Sharing (Item 8)
+
+The cross-node prefix fetch is default-on. Expected logs on a successful
+first hit of a peer's cached prefix:
+
+```
+B: DIAG: cross-node prefix HIT — hydrated KV matched_tokens=N total_tokens=M
+A: DIAG: served PrefixKvFetch ... hit=true
+```
+
+**I never see `cross-node prefix HIT`:**
+- Only fires on iter 1 of a prompt whose prefix your local node hasn't
+  prefilled yet. Iter 2/3 hit the local cache (populated by iter 1).
+- Check the peer even announced the prefix: look for
+  `DIAG: PrefixCacheAnnounce indexed node_id=... blocks=N` in your log.
+  No announce → peer's gossip never reached you (check
+  `grep 'Published message to GossipSub' | grep 'swarm/models'`).
+- Check the peer passes the trust gate: default
+  `cross_node_prefix_trust_min = 0.5` equals `DEFAULT_TRUST`, so a
+  freshly-seen peer should just barely pass. Any misbehavior drops it
+  below.
+
+**I see `prefix-probe: fetch timed out`:**
+- The peer didn't return a snapshot inside the worker-probe window
+  (3000 ms by default). On a large model (7B+) with cold CPU this can
+  happen if the snapshot is >100 MB. The path degrades to local prefill
+  — no worse than not having the feature. Round 6 bench found the
+  original 500/400/500 ms chained timeouts were TinyLlama-sized; current
+  values (3000/2500/2000 ms) handle 7B snapshots.
+
+**I see `rejected KV snapshot — penalizing peer trust`:**
+- The returned snapshot failed BLAKE3 reverification or contained
+  NaN/Inf. Three rejection reasons:
+  - `hash_chain_mismatch` → `prefix_cache_block_tokens` differs between
+    nodes (default 64, common alternatives 32/128)
+  - `non_finite_tensors` → GPU overflow on the serving side
+  - `deserialize_failed` → wire corruption — open an issue
+
+**Disable cross-node fetch entirely:**
+Set `inference.cross_node_prefix_trust_min = 2.0` in `config.toml`. The
+probe never fires because no peer passes the trust gate.
+
+## Running the Test Suite
+
+SwarmLLM ships 775 tests (unit + integration + VLM E2E).
+
+```bash
+# Run all tests (release, used in CI)
+cargo test --release
+
+# Unit tests only (fastest feedback loop)
+cargo test --lib
+
+# Integration tests only
+cargo test --test '*'
+
+# A specific test by name substring
+cargo test --release prefix_cache
+
+# With CUDA features on (requires NVIDIA GPU)
+cargo test --release --features candle-cuda
+```
+
+If a test fails, the release build shows the name + line; rerun with
+`--nocapture` to see its stderr:
+
+```bash
+cargo test failing_test_name -- --nocapture
+```
+
+Integration tests under `tests/integration/` simulate multi-node P2P on
+loopback — they're the slow ones, and CI runs them with
+`--test-threads=1` to avoid port contention.
+
+See [Benchmarking](./operations/benchmarking.md) for reproducing the
+speedup-arc benchmarks and [Performance](./operations/performance.md)
+for which knobs turn each speedup on/off.
+
 ## Model Trust
 
 Models go through trust levels: Discovered → Pinned → DemandVerified → NetworkPopular. Auto-manage only downloads shards for models at sufficient trust levels.

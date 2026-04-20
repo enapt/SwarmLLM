@@ -45,5 +45,7 @@
 # Operations
 
 - [Deployment Guide](./operations/deployment.md)
+- [Performance & Inference Speedups](./operations/performance.md)
+- [Benchmarking](./operations/benchmarking.md)
 - [Tailscale & WAN Access](./operations/tailscale-wan.md)
 - [Monitoring with Grafana](./operations/monitoring.md)

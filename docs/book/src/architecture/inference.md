@@ -57,14 +57,18 @@ Client → API Server → InferenceRouter → Pipeline Assembly
 2. **Pipeline affinity check**: if multi-turn session has a previous pipeline and all nodes are still connected, reuse it (KV cache locality)
 3. Query model_registry.shard_holders for hosting nodes
 4. Fetch node load/latency from peer_registry
-5. Sort candidates by (latency ASC, load ASC, trust DESC)
+5. **Parallax scheduler** (Item 16): shortest-path dynamic programming over observed per-layer latencies (EMA over recent forwards), rather than a greedy latency-only sort. Cross-gossips top-32 observed latencies via `NodeCapability.observed_latencies` so every node has a current view of the network's compute profile
 6. **Encrypted pipeline check**: if enabled for this model, force first and last segments to the local node (boomerang topology)
-7. Greedy assignment: widest contiguous layer range per node
-8. Merge contiguous segments on same node
-9. Identify standby nodes per segment (failover)
-10. Send PipelineAssignment, wait for ACKs, begin forwarding
+7. Assignment: widest contiguous layer range per node, merging on same-node
+8. Identify standby nodes per segment (failover)
+9. Send PipelineAssignment, wait for ACKs, begin forwarding
 
 Pipeline affinity means that multi-turn conversations (with `session_id`) prefer to route through the same nodes, preserving KV-cache state and avoiding cold restarts on every turn.
+
+The Parallax allocator also runs offline in `AutoShardManager` (Phase C.2)
+with a soft acquire/prune bias driven by a per-shard stability counter
+(≥3 consistent ticks of "this shard wants to move here" before it acts).
+Hard constraints (pinning, trust gates, VRAM caps) always win.
 
 ## Architecture Detection
 
@@ -90,10 +94,46 @@ The SplitModel loader reads `general.architecture` from GGUF metadata and applie
 - Configurable TTL (default 10 min)
 - VRAM-aware LRU eviction for split model cache
 
+## Prefix-Cache KV Sharing (Cross-Node)
+
+Item 8 in the distributed-inference speedup arc. Each worker stores a
+local prefix-cache keyed by BLAKE3 chained hashes over fixed-size token
+blocks (`prefix_cache_block_tokens`, default 64). Blocks are announced
+to peers via `SwarmMessage::PrefixCacheAnnounce` on the `swarm/models`
+gossipsub topic and indexed in `state.models.cross_node_prefix_index`.
+
+When a local worker sees a prompt whose prefix it hasn't prefilled, it
+emits `WorkerMsg::PrefixFetchProbe`; the daemon walks the index
+(longest-match first), trust-gates candidate peers by
+`cross_node_prefix_trust_min` (default 0.5), and issues a
+`SendPrefixKvFetch` request-response to the best holder. The serving
+daemon re-issues `DaemonMsg::ExportPrefixSnapshot` to its worker, which
+narrows a stored `KvSnapshot` to the requested block boundary and returns
+the serialized bytes in the IPC binary-payload slot. Back on the
+requesting side, the bytes are BLAKE3-reverified against the requested
+hash and NaN/Inf-scanned before hydrating a new `KvCacheEntry` for the
+in-flight request, which then only has to prefill the suffix beyond the
+cached block boundary.
+
+Three chained timeouts (worker probe 3000 ms, daemon network 2500 ms,
+serving IPC 2000 ms — sized for 7B-class f32 snapshots) guarantee that a
+stuck peer degrades to a clean miss rather than blocking the request.
+See the [Performance chapter](../operations/performance.md#item-8--cross-node-prefix-kv-sharing)
+for measured TTFT numbers on TinyLlama (GPU, corner case where fetch is
+slightly slower than prefill) vs Qwen2.5-7B (**12.9× iter-1 TTFT
+speedup** on CPU-CPU localhost).
+
 ## Advanced Features
 
-- **Speculative Decoding** — Draft model proposes K tokens, target verifies in one pass
-- **Chunked Prefill** — Long prompts split into chunks to reduce peak memory
+- **Speculative Decoding** — Draft model proposes K tokens, target verifies in one pass (Item 2, flag-gated `speculative_distributed`)
+- **SWIFT self-speculative** — Target model acts as its own draft by skipping a layer range (Item 6, flag-gated `swift_self_speculative`)
+- **DSD (Decentralized Speculative Decoding)** — Multi-segment pipeline with γ-token speculation woven in (Item 12, flag-gated `decentralized_spec_decoding`)
+- **Chunked Prefill** — Sarathi-style (Item 7 Phase 2): each Prefilling slot advances by `prefill_chunk_tokens` (default 128) per decode tick so a long admission can't block decode
+- **Continuous Batching** — Item 3, default-on: concurrent `Generate` requests share one `forward_batch` per decode tick; GPU uses fused kernel, CPU falls through to sequential
+- **Batched Prefill Forward** — Item 7 Phase 4, default-on: fuses concurrent same-shape Prefilling chunks into one `forward_batch` call
+- **Remote-generate Fast Path** — Item 4, default-on: single-segment distributed inference runs the full decode loop on the remote worker instead of per-token coordinator round-trips (measured 1.93× decode speedup)
+- **Cross-request Prefix Cache** — Item 5, default-on: see "Prefix-Cache KV Sharing" above for the cross-node extension; the local cache alone is a 29.4× wall-clock win on prompt re-submission
+- **Activation Compression (Q8_0)** — Intermediate pipeline activations wire-quantized ~3.76× (Item 13, flag-gated `activation_compression`)
 - **Flash Attention** — CPU and GPU fast paths (GQA-native, no `repeat_kv`)
 - **PagedAttention** — Deferred; `paged-attn` feature flag reserved for future use (module removed, never wired to production)
 - **Logprobs** — Per-token log probabilities via `sample_token_with_params_and_logprobs()`. When `logprobs: true` in the request, the sampling layer collects top-N token probabilities and returns them in the OpenAI-compatible response. Available on split model (candle) inference paths

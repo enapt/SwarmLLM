@@ -2,7 +2,101 @@
 
 All notable changes to SwarmLLM are documented here.
 
-## [Unreleased] - Post-0.1.0 Hardening
+## [Unreleased] - Post-0.1.0
+
+> Released v0.1.0 snapshot: 2026-03-18 with 674 tests. The work below has
+> landed after that tag and is the basis for an upcoming v0.1.1 release.
+> Test count as of HEAD: 775.
+
+### Distributed Inference Speedup Arc
+
+A multi-session effort to speed up distributed inference, tracked in
+`docs/plans/distributed_inference_speedup.md`. Items 1–16 numbered in
+plan order; default-on items landed as they shipped, flag-gated items
+are off until benchmarked on real workloads.
+
+**Default-on stack (user-facing in [Performance chapter](docs/book/src/operations/performance.md)):**
+
+- **Item 3 — Continuous batching** (2026-04-19): fused `forward_batch`
+  over concurrent Generate requests. 1.34–1.55× GPU throughput at batch
+  2–8. CPU falls through to sequential with no regression.
+- **Item 4 — Remote-generate fast path**: single-segment distributed
+  inference runs the full decode loop on the remote worker instead of
+  per-token coordinator round-trips. **1.93× decode speedup**.
+- **Item 5 — Cross-request prefix cache**: worker keeps an LRU of prefill
+  KV snapshots keyed by prompt prefix. **29.4× wall-clock** on
+  re-submission of the same 513-token prompt.
+- **Item 7 Phase 1+2 — BatchGenerate + Sarathi chunked prefill**
+  (2026-04-19): SlotTable admits concurrent requests, each Prefilling
+  slot advances by `prefill_chunk_tokens` (default 128) per decode tick.
+  **17–23× TTFT fairness** at concurrency 2/4/8 on RTX 3070 +
+  TinyLlama Q4. See `docs/plans/benchmarks/round4.md`.
+- **Item 7 Phase 4 — Batched prefill forward** (2026-04-19): fuses
+  concurrent same-shape prefill chunks into one `forward_batch`.
+  **1.57× aggregate tok/s @ c=4** with uniform 180/180/180 ms TTFT.
+  See `docs/plans/benchmarks/round5.md`.
+- **Item 8 — Cross-node prefix KV sharing** (2026-04-19/20): when node B
+  receives a prompt whose prefix peer A already prefilled, B fetches
+  A's KV snapshot over the wire instead of re-prefilling locally.
+  Full pipeline: PrefixCacheAnnounce gossip → cross-node index →
+  PrefixFetchProbe → trust-gated SendPrefixKvFetch → BLAKE3 verify →
+  NaN/Inf scan → hydrate → suffix-prefill.
+  **Measured 12.9× iter-1 TTFT speedup on Qwen-7B CPU-CPU localhost**
+  (151.7 s → 11.8 s on a 672-token prompt, Round 6 bench 2026-04-20).
+  TinyLlama on GPU is the fast-prefill corner case where the fetch path
+  is ~100 ms slower than re-prefilling (28 MB snapshot vs 460 ms
+  prefill).
+- **Item 16 — Parallax scheduler** (2026-04-18/19): shortest-path DP
+  over observed per-layer latencies (EMA over recent forwards), replacing
+  the greedy latency-only sort. Phase B.2 cross-gossips top-32 observed
+  latencies via `NodeCapability.observed_latencies`. Phase C.2 adds a
+  soft acquire/prune bias in `AutoShardManager` driven by a per-shard
+  stability counter (≥3 consistent ticks before it acts); hard
+  constraints (pinning, trust, VRAM) always win.
+
+**Flag-gated:**
+
+- **Item 2 — Distributed speculative decoding** (`speculative_distributed`):
+  draft-target speculation across nodes. 40–52% accept rate in a
+  llama-cpp-draft / candle-target pairing.
+- **Item 6 — SWIFT self-speculative** (`swift_self_speculative`):
+  target model acts as its own draft by skipping a layer range. Shelved
+  on CPU until flash-attn-with-mask lands.
+- **Item 12 — DSD (decentralized speculative decoding)**
+  (`decentralized_spec_decoding`, 2026-04-18): multi-segment pipeline
+  with γ-token speculation + KV truncation primitives + ~410 LOC
+  coordinator loop in `pipeline/dsd.rs`. End-to-end WAN benchmark
+  pending.
+- **Item 13 — Activation compression Q8_0** (`activation_compression`):
+  intermediate pipeline hidden states quantized to Q8_0 on the wire.
+  ~3.76× compression, RMS error <0.005. End-to-end multi-segment
+  benchmark pending.
+- **Item 1 — Persistent pipeline stream** (`persistent_pipeline_stream`):
+  one long-lived libp2p bidirectional stream per pipeline session.
+  Wire-verified; no measured latency win because the bottleneck was
+  elsewhere (Items 4 + 7 solved it).
+
+### Round 6 Bench Findings (2026-04-20)
+
+The Item 8 two-daemon loopback bench caught three wire bugs before the
+measured numbers above landed:
+
+1. `SwarmMessage::PrefixCacheAnnounce` missing from the `TOPIC_MODELS`
+   arm in `NetworkManager::handle_broadcast` — Phase 1 announces
+   silently dropped at the gossip layer. Loopback self-index path
+   masked it in single-node tests.
+2. `WorkerMsg::PrefixSnapshotResponse` / `DaemonMsg::PrefixFetchResult`
+   carried `payload: Option<Vec<u8>>` inside the JSON-framed IPC header.
+   `serde_json` encodes `Vec<u8>` as a JSON array of integers (~5× size
+   bloat), so a 28 MB snapshot became a ~102 MB header and blew past
+   the 64 MiB `MAX_HEADER` cap.
+3. Three chained cross-node-fetch timeouts (`PREFIX_FETCH_TIMEOUT_MS=500`
+   in the worker, 400 ms daemon network timeout, 500 ms serving-worker
+   IPC timeout) were sized for TinyLlama's 28 MB snapshot. A Qwen-7B
+   snapshot is 73 MB and takes ~500–1000 ms to serialize+wire — every
+   timeout fired and silently converted real hits into misses. Bumped
+   to 3000 / 2500 / 2000 ms respectively, keeping the worker timeout as
+   the outer bound.
 
 ### Code Sweep (105 issues found, 58 fixed)
 - **Round 1**: 10 parallel review agents across all 109 .rs files — 68 issues (9 CRITICAL, 32 HIGH, 22 MEDIUM), 41 fixed

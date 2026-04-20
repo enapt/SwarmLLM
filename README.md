@@ -10,7 +10,7 @@ Decentralized peer-to-peer LLM inference network. A single Rust binary that shar
 
 **Join the swarm. Run AI together — for free.**
 
-> **Status:** Alpha — actively developed. Distributed inference stable, tested across multi-node deployments on real networks. 656 tests, comprehensive security auditing (47 sweep rounds). [Report issues](https://github.com/enapt/SwarmLLM/issues).
+> **Status:** Alpha — actively developed, moving into broader testing. Distributed inference stable (20 build phases + a full speedup arc landed), tested across multi-node deployments on real networks. Recent headline wins: Item 8 cross-node prefix-KV sharing ships a **12.9× iter-1 TTFT speedup** on 7B prompts with a warm peer (Round 6 bench, 2026-04-20). 775 tests, 47 sweep rounds of security auditing. [Report issues](https://github.com/enapt/SwarmLLM/issues).
 
 ---
 
@@ -217,6 +217,8 @@ Or click the **shield icon** in the dashboard header — a confirmation dialog s
 
 ### Inference
 - **Distributed Inference** — Model layers sharded across nodes with automatic pipeline assembly, verified on multi-node LAN deployments with 5 models, crash recovery, auto-reconnect. Candle-based direct tensor computation with E2E encryption
+- **Speedup Stack (all default-on)** — **Remote-generate fast path** (1.93× decode on single-segment pipelines), **cross-request prefix cache** (29.4× wall-clock on prompt re-submission), **cross-node prefix KV sharing** (12.9× iter-1 TTFT on 7B CPU prompts when a peer has the same prefix cached, Round 6 bench), **continuous batching** (1.34–1.55× GPU throughput at batch 2–8), **Sarathi chunked prefill + batched fusion** (17–23× TTFT fairness at concurrency, 1.57× aggregate tok/s @ c=4), **Parallax scheduler** (shortest-path DP over observed per-layer latencies with cross-gossiped EMA). See [Performance & Inference Speedups](docs/book/src/operations/performance.md) for the full stack and knobs
+- **Flag-gated Speedups** — Distributed speculative decoding (`speculative_distributed`), SWIFT self-speculative (`swift_self_speculative`), DSD multi-segment speculation (`decentralized_spec_decoding`), Q8_0 activation compression (`activation_compression`, ~3.76× wire)
 - **Architecture-Aware** — Automatic detection of model architecture (Llama, Llama 4, Qwen2, Qwen 3.5, Gemma/2, Phi-3, Mistral, Starcoder2, DeepSeek-V2/V3, GLM-4) with correct RoPE, attention biases, EOS tokens, embedding scaling, logit softcapping, and context lengths from GGUF metadata
 - **DeepSeek MoE+MLA** — Full support for DeepSeek-V2/V3 models: Multi-head Latent Attention (low-rank Q/KV compression), Mixture-of-Experts (router-based top-k expert selection with shared experts), per-layer dense/MoE detection
 - **Qwen 3.5 Hybrid SSM** — Gated Delta Networks (3 SSM + 1 attention per 4 layers), recurrent state + KV-cache coexistence
@@ -291,7 +293,7 @@ Internally, the daemon runs 11 async Tokio tasks communicating via channels:
 
 ### Codebase
 
-Cargo workspace with 3 crates, 114 Rust source files (~78K lines), plus vanilla frontend (~19K lines HTML/CSS/JS, including 21-language translation files):
+Cargo workspace with 3 crates, 216 Rust source files (~92K lines), plus vanilla frontend (~19K lines HTML/CSS/JS, including 21-language translation files):
 
 | Crate | Path | Purpose |
 |-------|------|---------|
@@ -309,9 +311,9 @@ Key source directories:
 - `src/credit/` — ledger, transactions, priority tiers, anti-gaming, trust, escrow
 - `src/crypto/` — session encryption, pipeline sealing, gossip sealing, key rotation, provider key encryption
 - `src/pool/` — device pool management, crypto, credit forwarding, private-mode scope
-- `frontend/` — vanilla HTML/CSS/JS dashboard (14 component JS files, 4 core JS files, 12 HTML templates, 21 language translations with 976 keys each)
+- `frontend/` — vanilla HTML/CSS/JS dashboard (15 component JS files, 4 core JS files, 4 standalone utilities, 12 HTML templates, 21 language translations with 972 keys each)
 
-656 tests (589 unit + 22 integration + 30 module + 14 yamux + 1 VLM E2E), all passing, clippy clean.
+775 tests (unit + integration + phase10_11 + yamux + 1 VLM E2E), all passing, clippy clean.
 
 ## Node Tiers
 
@@ -374,6 +376,8 @@ Measured on a single node with `swarmllm bench`. Prompt: "Explain the theory of 
 | Qwen2.5-Coder 7B | 7.6B | Q4_K_M | **29.0 tok/s** | 2.4 tok/s | 12.1x |
 
 **Distributed (2-node LAN, TinyLlama):** ~29 tok/s with split inference across WSL2 laptop + Proxmox server.
+
+**Cross-node prefix KV sharing (Item 8, Round 6 bench, 2026-04-20):** two daemons on loopback, Qwen2.5-Coder-7B Q4, 672-token prompt. When the second node fetches the first node's prefix KV snapshot instead of re-prefilling locally, **iter-1 TTFT drops from 151.7 s → 11.8 s (12.9×)**. Details in [Performance chapter](docs/book/src/operations/performance.md#item-8--cross-node-prefix-kv-sharing) and [round6.md](docs/plans/benchmarks/round6.md).
 
 > GPU inference uses candle with CUDA (`--features candle-cuda`). CPU inference uses candle with native BLAS. All models Q4_K_M quantized, loaded from GGUF shard files. Phi-3.5 benefits most from GPU due to its fused QKV/FFN architecture.
 
@@ -605,7 +609,7 @@ Plus ~50 more admin routes for downloads, providers, adapters, identity, pools, 
 
 | Layer | Technology |
 |-------|-----------|
-| Language | Rust (2021 edition), ~78K lines across 114 source files |
+| Language | Rust (2021 edition), ~92K lines across 216 source files |
 | Async Runtime | Tokio (multi-threaded) |
 | Networking | libp2p 0.55 (TCP+Yamux + QUIC + mDNS + Kademlia + GossipSub) |
 | Serialization | serde_json (API), binary with type-tag (tensors), zstd compression |
@@ -647,6 +651,8 @@ Plus ~50 more admin routes for downloads, providers, adapters, identity, pools, 
 - **[Getting Started](docs/book/src/getting-started.md)** — Download, install, and start chatting in minutes
 - **[Configuration Reference](docs/book/src/configuration/reference.md)** — All config options with defaults
 - **[Configuration Guide](docs/book/src/configuration.md)** — Environment variables, CLI flags, `.env` files
+- **[Performance & Inference Speedups](docs/book/src/operations/performance.md)** — Items 3/4/5/7/8/16 default-on stack + flag-gated options with measured wins
+- **[Benchmarking](docs/book/src/operations/benchmarking.md)** — `swarmllm bench`, cross-node KV-sharing recipes, speedup-arc reproducibility
 - **[API Reference](docs/ARCHITECTURE.md#http-api-routes)** — Complete HTTP API route documentation
 - **[Architecture](docs/ARCHITECTURE.md)** — Deep dive into subsystems, protocols, and security model
 - **[Tailscale & WAN Access](docs/book/src/operations/tailscale-wan.md)** — Access your node remotely via Tailscale, WireGuard, or any VPN
@@ -660,7 +666,7 @@ See the full [mdBook documentation](docs/book/) for detailed guides on networkin
 
 SwarmLLM was developed collaboratively between a human developer and Claude (Anthropic's AI). The entire codebase — Rust backend, JavaScript frontend, P2P networking, distributed inference pipeline, credit system, security hardening, and documentation — was written by Claude Code across 20+ build phases. The human developer provided architecture direction, testing, and review, but zero lines of code were manually written.
 
-This is an honest disclosure. The project has been through rigorous quality assurance — 656 passing tests, 47 rounds of parallel multi-agent code sweeps, continuous security auditing, and multi-node distributed inference tested on real networks. Every commit passes `cargo fmt`, `cargo clippy -- -D warnings`, and the full test suite before push.
+This is an honest disclosure. The project has been through rigorous quality assurance — 775 passing tests, 47 rounds of parallel multi-agent code sweeps, continuous security auditing, 20 build phases, a full distributed-inference speedup arc (with Round 6 benchmarks landing a measured 12.9× iter-1 TTFT win), and multi-node distributed inference tested on real networks. Every commit passes `cargo fmt`, `cargo clippy -- -D warnings`, and the full test suite before push.
 
 We believe AI-assisted development should be transparent. Judge the code on its technical merit — contributions, scrutiny, and feedback are all welcome.
 
@@ -675,7 +681,7 @@ Contributions are welcome! Whether it's bug reports, feature ideas, code, or doc
 ```bash
 # Quick dev setup
 git clone https://github.com/enapt/SwarmLLM.git && cd SwarmLLM
-cargo test                # 656 tests
+cargo test                # 775 tests
 cargo clippy --all-targets -- -D warnings  # Zero warnings policy
 cargo run -- run          # Start a node
 ```
