@@ -631,10 +631,14 @@ impl ModelProcessPool {
                 return None;
             }
         }
-        // Wait briefly for the worker's reply. Bounded so a stalled worker
-        // can't block the manager — serving-side misses are fine, and the
-        // network peer will get a `None` reply.
-        match tokio::time::timeout(std::time::Duration::from_millis(500), rx.recv()).await {
+        // Wait for the worker's reply. Bounded so a stalled worker can't
+        // block the manager — serving-side misses are fine, and the network
+        // peer will get a `None` reply. Sized for 7B-class model snapshots:
+        // 28 MB (TinyLlama) serializes in <200 ms on CPU; 73 MB (Qwen-7B
+        // GQA @ 640 tokens) measured at ~500 ms. Kept under the daemon's
+        // network-probe window (~2.5 s) so a stuck worker still lets the
+        // network peer see a clean miss.
+        match tokio::time::timeout(std::time::Duration::from_millis(2000), rx.recv()).await {
             Ok(Some((WorkerMsg::PrefixSnapshotResponse { present, .. }, payload))) => {
                 if present {
                     Some(payload)

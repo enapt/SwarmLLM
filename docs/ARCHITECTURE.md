@@ -481,10 +481,20 @@ request-response to the best holder. The serving daemon re-issues
 in the IPC binary-payload slot. Back on the requesting side, the bytes are
 BLAKE3-reverified against the requested hash and NaN/Inf-scanned before
 hydrating a new `KvCacheEntry` for the in-flight request, which then only has
-to prefill the suffix beyond the cached block boundary. See
-`docs/plans/benchmarks/round6.md` for the two-daemon loopback bench recipe,
-measured TTFT numbers, and the "TinyLlama is too small to demonstrate the
-win on GPU+localhost" interpretation.
+to prefill the suffix beyond the cached block boundary.
+
+The fetch path uses three chained timeouts so a stuck peer or worker always
+degrades to a clean miss rather than blocking the request: worker-side probe
+(`PREFIX_FETCH_TIMEOUT_MS`, 3000 ms outer bound), daemon-side network
+dispatch (2500 ms), and serving-side worker IPC
+(`fetch_local_snapshot`, 2000 ms). Sized for 7B-class snapshots
+(~70–150 MB f32) — a clean miss is no worse than not having the feature.
+
+See `docs/plans/benchmarks/round6.md` for the two-daemon loopback bench
+recipe and measured TTFT numbers: TinyLlama on GPU is too small to win on
+localhost (28 MB fetch ≈ 460 ms prefill), but Qwen-7B on CPU crosses over
+decisively at **12.9× iter-1 TTFT speedup** (151.7 s full local prefill
+→ 11.8 s with fetch).
 
 ### Speculative Decoding
 

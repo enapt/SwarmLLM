@@ -32,8 +32,9 @@
 > | **Item 7 — Phase 4 batched chunked prefill + admit-coalescing** | ✅ LANDED & MEASURED 2026-04-19. `forward_batch` generalized for homogeneous prefill-chunk groups (same `seq_len > 1` + same `index_pos`). Admit-coalescing drain (extract `handle_daemon_msg`, `try_recv` up to 16 queued messages before each tick) unlocks fusion under HTTP-paced concurrent admits. Measured RTX 3070 + TinyLlama Q4: **49.1 tok/s aggregate @ c=4 (+57% vs pre-fix 31.2)**, TTFT uniform **180 / 180 / 180 ms** across 4 requests (vs pre-fix **52 / 235 / 447 ms** spread), `DIAG chunk fused batch_size=4` confirmed. `InferenceConfig::batched_prefill_forward` (default `true`) toggles fusion in isolation from Phases 1+2. Synthetic + E2E bench recipe in `benchmarks/round5.md`. 745 tests pass. |
 >
 > **Item 8 — Phases 1, 2a, 2b, 3, 4 LANDED 2026-04-19/20. MEASURED
-> 2026-04-20 on RTX 3070 Laptop + TinyLlama-1.1B Q4_K_M (two daemons on
-> localhost loopback, 672-token prompt, model pre-warmed on B):**
+> 2026-04-20 on RTX 3070 Laptop (WSL2 + localhost loopback, two daemons):**
+>
+> TinyLlama-1.1B Q4_K_M (GPU both sides), 672-token prompt:
 >
 > | Scenario | iter-1 TTFT | iter 2 | iter 3 |
 > |---|---|---|---|
@@ -41,20 +42,29 @@
 > | B with cross-node fetch enabled | **809 ms** | 256 ms | 231 ms |
 > | B control, `cross_node_prefix_trust_min=2.0` | **713 ms** | 253 ms | 253 ms |
 >
-> End-to-end pipeline validated — announce → index → probe → trust-gate
-> → fetch → BLAKE3 verify → hydrate → suffix prefill, with all the
-> expected DIAG taxonomy firing. On TinyLlama on a fast GPU with
-> localhost networking, the 28 MB uncompressed f32 KV snapshot takes
-> ~260 ms to pull + hydrate while the local prefill it saves takes only
-> ~460 ms, so the fetched path is **~100 ms slower** than re-prefilling.
-> This is the "TinyLlama is too small to demonstrate the win" outcome
-> the recipe predicted: prefill cost grows super-linearly in
-> `hidden_dim × tokens` while wire size scales linearly, so the
-> cross-over is at larger models. WAN tests and a ≥7B-parameter run
-> remain deferred. Full numbers + interpretation in
+> Qwen2.5-Coder-7B Q4_K_M (CPU both sides; 7B weights + CUDA scratch OOM on 8 GB card), 672-token prompt:
+>
+> | Scenario | iter-1 TTFT | iter 2 | iter 3 |
+> |---|---|---|---|
+> | B with cross-node fetch enabled | **11.8 s** | 9.5 s | 9.2 s |
+> | B control, `cross_node_prefix_trust_min=2.0` | **151.7 s** | 9.6 s | 9.5 s |
+>
+> End-to-end pipeline validated on both — announce → index → probe →
+> trust-gate → fetch → BLAKE3 verify → hydrate → suffix prefill, with
+> the expected DIAG taxonomy firing. TinyLlama on GPU: the 28 MB
+> uncompressed f32 snapshot takes ~260 ms to pull + hydrate while the
+> local prefill it saves is only ~460 ms, so the fetched path is
+> **~100 ms slower** than re-prefilling — the "too-small" corner case.
+> Qwen-7B on CPU flips the sign decisively: **12.9× TTFT speedup** on
+> iter 1 (151.7 s → 11.8 s), because CPU prefill of 640 Qwen-7B tokens
+> runs ~150 s while the 73 MB snapshot transfers in ~1 s over loopback.
+> This is the cross-over demo the original `next_steps.md` plan called
+> for. Iter 2/3 are equal across scenarios in both models because B's
+> local prefix cache populates after iter 1. GPU-mixed (A on GPU,
+> B on CPU) and WAN deferred. Full numbers + interpretation in
 > `docs/plans/benchmarks/round6.md`.
 >
-> **Two bugs the bench uncovered and fixed in-tree:**
+> **Three bugs the bench uncovered and fixed in-tree:**
 >
 > 1. `SwarmMessage::PrefixCacheAnnounce` was missing from
 >    `NetworkManager::handle_broadcast`'s topic match, so Phase 1
@@ -69,6 +79,16 @@
 >    killing the worker on the first real cross-node fetch. Fix: move
 >    snapshot bytes to the IPC binary-payload slot; keep a
 >    `present: bool` tag in the header.
+> 3. All three cross-node-fetch timeouts (`PREFIX_FETCH_TIMEOUT_MS=500`
+>    in the worker; 400 ms daemon-side network timeout in
+>    `src/daemon/background.rs`; 500 ms serving-worker IPC timeout in
+>    `src/inference/process_pool.rs::fetch_local_snapshot`) were sized
+>    for TinyLlama's 28 MB snapshot. A Qwen-7B snapshot is 73 MB —
+>    serialization + wire round trip measured at ~500–1000 ms — which
+>    tripped every timeout and silently forced local-prefill fallback
+>    on iter 1 of the Qwen bench. Fix: bump to 3000 / 2500 / 2000 ms
+>    respectively, keeping the worker timeout as the outer bound so a
+>    stuck daemon still returns a clean miss.
 >
 > Phase 1 wired the bookkeeping: BLAKE3 chained block-hash computation
 > in `PrefixCache`, new `WorkerMsg::PrefixManifestUpdate` IPC verb,

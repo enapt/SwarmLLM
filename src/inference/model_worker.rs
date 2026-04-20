@@ -1170,9 +1170,18 @@ async fn handle_forward(
 /// Item 8 Phase 2b: runtime timeout (in milliseconds) for the cross-node
 /// prefix-KV probe. Picked to be short relative to prefill latency —
 /// missing the window means the local prefill runs, which is no worse
-/// than not having the feature at all. WAN peers should respond in
-/// ~50-300 ms depending on snapshot size + RTT.
-const PREFIX_FETCH_TIMEOUT_MS: u64 = 500;
+/// than not having the feature at all.
+///
+/// Sized for 7B-class models on commodity hardware: the serving peer
+/// has to route through worker IPC, pull the snapshot from its local
+/// PrefixCache, serialize f32 tensors (~70–150 MB for a 7B at
+/// 500-token prefix), and ship them back. 500 ms was enough for
+/// TinyLlama (28 MB snapshot, Round 6 bench) but too tight for larger
+/// models — the Qwen-7B two-daemon bench saw the fetch complete in
+/// ~1400 ms while the probe timed out at 500 ms, forcing full local
+/// re-prefill. 3000 ms keeps the fallback window reasonable without
+/// starving decode on peers that never respond.
+const PREFIX_FETCH_TIMEOUT_MS: u64 = 3000;
 
 /// Item 8 Phase 2b: probe the daemon for a cross-node prefix KV hit and,
 /// if one arrives inside the timeout, hydrate the request's KV entry from

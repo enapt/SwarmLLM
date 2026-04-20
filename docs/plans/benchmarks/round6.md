@@ -35,7 +35,9 @@ fetched path should win by ~200 ms on a 500-token prefix cache hit.
 
 ## Results (2026-04-20, RTX 3070 Laptop 8GB, WSL2, localhost loopback)
 
-Measured per the recipe below. Both daemons on the same machine, loopback TCP; TinyLlama-1.1B Q4_K_M; 672-token prompt (640 fall inside cached prefix blocks, 32-token suffix + 100 decode tokens); model pre-loaded on B with a short unrelated prompt before the long-prompt measurement so the 672-token TTFT excludes weight-load latency.
+Measured per the recipe below. Both daemons on the same machine, loopback TCP; 672-token prompt (640 fall inside cached prefix blocks, 32-token suffix + 100 decode tokens); model pre-loaded on B with a short unrelated prompt before the long-prompt measurement so the 672-token TTFT excludes weight-load latency.
+
+### TinyLlama-1.1B Q4_K_M (GPU A / GPU B)
 
 | Scenario | TTFT iter 1 (ms) | TTFT iter 2 (ms) | TTFT iter 3 (ms) | DIAG `cross-node prefix HIT` |
 |---|---|---|---|---|
@@ -53,14 +55,49 @@ B: DIAG: cross-node prefix HIT — hydrated KV matched_tokens=640 total_tokens=6
 B: DIAG: try_register_generate_slot prefix-cache HIT matched_tokens=640 total_tokens=672
 ```
 
-**Interpretation.** The cross-node KV-hydration path works end-to-end — announce → index → probe → trust-gate → fetch → BLAKE3 verify → hydrate → suffix-prefill — and passes all integrity checks. But on localhost + RTX 3070 + TinyLlama-1.1B, **the fetched path is ~100 ms slower than re-doing the prefill locally** (809 ms vs 713 ms). TinyLlama-1.1B prefill on a 640-token prefix takes only ~460 ms on this GPU, while the wire round trip for a 28 MB uncompressed f32 KV snapshot is ~160 ms + ~96 ms of hydrate/deserialize. This is exactly the "TinyLlama is too small to demonstrate the win" outcome the recipe predicted — prefill cost grows super-linearly in `hidden_dim × tokens` while wire size scales linearly, so larger models shift the cross-over. See `Deferred for a future bench` below.
+**Interpretation.** The cross-node KV-hydration path works end-to-end — announce → index → probe → trust-gate → fetch → BLAKE3 verify → hydrate → suffix-prefill — and passes all integrity checks. But on localhost + RTX 3070 + TinyLlama-1.1B, **the fetched path is ~100 ms slower than re-doing the prefill locally** (809 ms vs 713 ms). TinyLlama-1.1B prefill on a 640-token prefix takes only ~460 ms on this GPU, while the wire round trip for a 28 MB uncompressed f32 KV snapshot is ~160 ms + ~96 ms of hydrate/deserialize. This is exactly the "TinyLlama is too small to demonstrate the win" outcome the recipe predicted — prefill cost grows super-linearly in `hidden_dim × tokens` while wire size scales linearly, so larger models shift the cross-over.
 
-**Two bugs the bench uncovered and fixed in-tree before the numbers above:**
+### Qwen2.5-Coder-7B Q4_K_M (CPU A / CPU B)
+
+Qwen-7B Q4 weights sit at 4.7 GB; loading + CUDA scratch maxes out the 8 GB RTX 3070 card on iter-1 prefill (`CUDA_ERROR_OUT_OF_MEMORY` during the batched attention kernel). Both daemons were run CPU-only (`CUDA_VISIBLE_DEVICES=""`) so the comparison stayed apples-to-apples — 640-token CPU prefill takes ~2.5 min on this host, which is exactly the regime where cross-node fetch is supposed to pay off.
+
+| Scenario | TTFT iter 1 (ms) | TTFT iter 2 (ms) | TTFT iter 3 (ms) | DIAG `cross-node prefix HIT` |
+|---|---|---|---|---|
+| B with cross-node fetch (model pre-warm) | **11 755** | 9 509 | 9 226 | 1 (iter 1) |
+| B control, fetch gated via `cross_node_prefix_trust_min=2.0` | **151 749** | 9 572 | 9 529 | 0 |
+
+DIAG trace on iter 1 (fetch-enabled run):
+
+```
+A: DIAG: PrefixKvFetch: serving inbound fetch via worker IPC ticket=36decb66-...
+A: DIAG: served PrefixKvFetch ticket=36decb66-... age_ms=286 hit=true
+B: DIAG: received prefix_kv_data response request_id=OutboundRequestId(19)
+B: DIAG: cross-node prefix HIT — hydrated KV matched_tokens=640 total_tokens=672 bytes=73405355
+```
+
+**Interpretation.** This is the cross-over point. Iter 1 TTFT drops from **151.7 s → 11.8 s** when B fetches A's KV snapshot instead of re-prefilling — a 12.9× speedup, saving ~140 seconds on a 672-token prompt. The 73 MB f32 snapshot transfers end-to-end (serialize + wire + BLAKE3 verify + hydrate) in ~1.0 s on loopback, versus ~150 s of 640-token Qwen-7B CPU prefill. Iter 2 and 3 are effectively identical across scenarios (9.2–9.6 s) because both B runs have B's own local prefix cache populated after iter 1 — the cross-node path is only consulted on local cache miss. Prune-only control (iter 1 fetch gate) confirms B never emitted a probe when `trust_min=2.0` locked out A as a fetch peer.
+
+**Three bugs the bench uncovered and fixed in-tree before the numbers above:**
 
 1. `SwarmMessage::PrefixCacheAnnounce` was never mapped to a GossipSub topic in `NetworkManager::handle_broadcast` (`src/network/manager/mod.rs`), so Phase 1 announces were silently dropped at the wire. The loopback self-index path masked it in single-node tests. Fix: add `PrefixCacheAnnounce` to the `TOPIC_MODELS` arm.
 2. `WorkerMsg::PrefixSnapshotResponse` and `DaemonMsg::PrefixFetchResult` both carried `payload: Option<Vec<u8>>` inside the JSON-framed header. `serde_json` encodes `Vec<u8>` as a JSON array of integers, which inflates 28 MB of binary → ~102 MB of header bytes and blows past the 64 MiB IPC header cap, killing the worker. Fix: move the payload bytes onto the IPC binary-payload slot and keep a `present: bool` tag in the header.
+3. All three cross-node-fetch timeouts (`PREFIX_FETCH_TIMEOUT_MS=500` in the worker, the 400 ms daemon-side network timeout in `src/daemon/background.rs`, and the 500 ms serving-worker IPC timeout in `src/inference/process_pool.rs::fetch_local_snapshot`) were sized for TinyLlama's 28 MB snapshot. A Qwen-7B snapshot is 73 MB — serialization + wire round trip measured at ~500–1000 ms — which tripped every timeout and silently forced the local-prefill fallback on iter 1. Fix: bump to 3000 / 2500 / 2000 ms respectively, keeping the worker timeout as the outer bound so a stuck daemon still returns a clean miss.
 
 ## Recipe
+
+The recipe is model-agnostic — swap the model id and daemon-start env
+vars to reproduce either row.
+
+- **TinyLlama (GPU both sides):** start each daemon with the default
+  `candle-cuda` enabled; replace `<model-id>` with
+  `tinyllama-1.1b-chat-v1.0.q4-k-m`.
+- **Qwen-7B (CPU both sides):** prefix each `swarmllm run` command with
+  `CUDA_VISIBLE_DEVICES=""` and replace `<model-id>` with
+  `qwen2.5-coder-7b-instruct-q4-k-m`. Candle falls through to
+  `Device::Cpu` when CUDA has no visible devices. On an 8 GB GPU the
+  Qwen weights fit but prefill scratch does not, so GPU-mode iter 1
+  OOMs; CPU-mode is required for this host. Iter 1 will take ~2.5 min
+  of CPU prefill on the control run — budget accordingly.
 
 ### 0. Build
 
@@ -100,17 +137,18 @@ The fastest path is to copy the pre-staged shards from your primary
 data dir (`~/.local/share/swarmllm/models/`) into both test dirs:
 
 ```bash
-cp -r ~/.local/share/swarmllm/models/<tinyllama-model-id> /tmp/swarm_a/models/
-cp -r ~/.local/share/swarmllm/models/<tinyllama-model-id> /tmp/swarm_b/models/
+cp -r ~/.local/share/swarmllm/models/<model-id> /tmp/swarm_a/models/
+cp -r ~/.local/share/swarmllm/models/<model-id> /tmp/swarm_b/models/
 
 # Force both daemons to re-scan
 curl -X POST http://localhost:8800/api/admin/models/rescan -H "Authorization: Bearer $(cat /tmp/swarm_a/api_key)"
 curl -X POST http://localhost:8900/api/admin/models/rescan -H "Authorization: Bearer $(cat /tmp/swarm_b/api_key)"
 ```
 
-Replace `<tinyllama-model-id>` with the actual slug under your models
-directory (e.g., `tinyllama-1.1b-chat-v1.0.q4_k_m`). Check
-`memory/local_model_shards.md` for the canonical path.
+Replace `<model-id>` with the slug under your models directory
+(`tinyllama-1.1b-chat-v1.0.q4-k-m` or
+`qwen2.5-coder-7b-instruct-q4-k-m`). Check
+`memory/local_model_shards.md` for the canonical paths.
 
 ### 3. Warm up node A with a long system-prompt request
 
@@ -124,14 +162,14 @@ PROMPT='You are a meticulous Rust systems programmer working on SwarmLLM, a dece
     -p 8800 \
     --iterations 3 --max-tokens 100 --stream \
     --prompt "$PROMPT" \
-    --model-id <tinyllama-model-id>
+    --model-id <model-id>
 ```
 
 The first iteration warms the prefix cache on A. Expected log on A:
 
 ```
 DIAG: prefix-cache inserted snapshot model_key="0-22-24" entries=<N>
-DIAG: prefix-cache loopback indexed (self) model=<tinyllama-model-id> ...
+DIAG: prefix-cache loopback indexed (self) model=<model-id> ...
 ```
 
 ### 4. Wait for announce to reach B
@@ -153,7 +191,7 @@ grep "PrefixCacheAnnounce indexed" /tmp/swarm_b.log | tail -3
     -p 8900 \
     --iterations 3 --max-tokens 100 --stream \
     --prompt "$PROMPT" \
-    --model-id <tinyllama-model-id> \
+    --model-id <model-id> \
     --json > /tmp/bench_b_with_fetch.json
 ```
 
@@ -228,10 +266,18 @@ from the 2026-04-20 RTX 3070 run. Key caveats when re-running:
 
 ## Deferred for a future bench
 
-- **Larger model numbers** (Phi-3.5-mini, Qwen2.5-7B). TinyLlama's
-  prefix-cache tensors are small enough that wire transfer + dtype
-  cast overhead is barely a win on localhost. The real payoff is WAN
-  where the round trip is dominated by the network, not the compute.
+- **GPU-mixed asymmetry** (Qwen-7B on GPU-A, CPU-B). The original
+  plan in `docs/plans/next_steps.md` called for A on the RTX 3070 and
+  B on CPU so the fetch-vs-prefill ratio favored fetch even harder.
+  Qwen-7B Q4 doesn't fit in 8 GB VRAM with headroom for
+  prefill scratch on this host — the card OOM'd during the batched
+  attention kernel on iter 1. The CPU-CPU run above demonstrates the
+  cross-over cleanly on its own; reproducing the GPU-asymmetric case
+  wants either a 12 GB+ card or a smaller model (Phi-3.5-mini).
+- **Phi-3.5-mini numbers**. Phi is 3.8B with MHA (32 kv-heads), so a
+  snapshot at 640 tokens is ~470 MB — 6× Qwen's GQA snapshot, 17×
+  TinyLlama's. Useful stress test for the wire path and a natural
+  candidate to isolate where localhost bandwidth becomes the limit.
 - **WAN bench**: two daemons on different machines, different regions.
   Expected 50–150 ms RTT per fetch — still a win vs. seconds of
   prefill on long prompts, but a different shape of curve.

@@ -511,8 +511,16 @@ pub(super) fn spawn_prefix_probe_handler(
                                     );
                                     (0u32, None)
                                 } else {
+                                    // Sized for 7B-class model snapshots over loopback:
+                                    // the serving peer has to route through worker IPC,
+                                    // pull the snapshot, f32-serialize it, and ship it
+                                    // back. Measured Qwen-7B round trip on loopback is
+                                    // ~500 ms. Kept under the worker-side probe timeout
+                                    // (model_worker::PREFIX_FETCH_TIMEOUT_MS) so the
+                                    // worker still sees a miss verdict before its own
+                                    // window closes.
                                     match tokio::time::timeout(
-                                        std::time::Duration::from_millis(400),
+                                        std::time::Duration::from_millis(2500),
                                         rx,
                                     )
                                     .await
