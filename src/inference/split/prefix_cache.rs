@@ -405,7 +405,12 @@ impl PrefixCache {
                 // entry itself is longer — each entry holds a snapshot at
                 // `entry.tokens.len()` tokens but we want `target_tokens`.
                 let narrowed = narrow_snapshot(&entry.snapshot, target_tokens).ok()?;
-                let bytes = serialize_snapshot(&narrowed, &entry.tokens[..target_tokens]).ok()?;
+                let bytes = serialize_snapshot_with_block_size(
+                    &narrowed,
+                    &entry.tokens[..target_tokens],
+                    Some(block_size),
+                )
+                .ok()?;
                 tracing::debug!(
                     model_key,
                     block_index = i,
@@ -671,6 +676,13 @@ struct SnapshotHeader {
     tokens: Vec<u32>,
     dim: usize,
     max_seq_len: usize,
+    /// Block size the sender used to chain-hash the prompt prefix. The
+    /// receiver re-hashes `tokens[..token_count]` at this `block_size` to
+    /// verify against the requested `block_hash`. Optional for backward
+    /// compatibility with pre-Phase-3 snapshots — when absent, the
+    /// verifier falls back to a list of common block sizes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    block_size: Option<usize>,
     /// Per-layer metadata; `None` marks layers the sender had no cache for
     /// (shouldn't happen for a completed prefill, tolerated for robustness).
     layers: Vec<Option<SnapshotLayerMeta>>,
@@ -681,7 +693,22 @@ struct SnapshotHeader {
 /// `tokens.len()` must be `>= snap.token_count`; only `tokens[..token_count]`
 /// is recorded in the header. Every tensor in `snap.layers` is cast to f32
 /// before encoding so the frame is device-independent.
+///
+/// For Item 8 Phase 3: pass `block_size: Some(N)` so the receiver can
+/// BLAKE3-verify `tokens[..token_count]` against the requested block
+/// hash without guessing a block size. `None` is tolerated (pre-Phase-3
+/// compatibility) — the verifier falls back to common defaults.
 pub fn serialize_snapshot(snap: &KvSnapshot, tokens: &[u32]) -> Result<Vec<u8>, SwarmError> {
+    serialize_snapshot_with_block_size(snap, tokens, None)
+}
+
+/// Phase 3 variant: serialize + record the sender's `block_size` so
+/// the receiver can verify deterministically.
+pub fn serialize_snapshot_with_block_size(
+    snap: &KvSnapshot,
+    tokens: &[u32],
+    block_size: Option<usize>,
+) -> Result<Vec<u8>, SwarmError> {
     if tokens.len() < snap.token_count {
         return Err(SwarmError::Internal(format!(
             "serialize_snapshot: tokens.len() {} < token_count {}",
@@ -733,6 +760,7 @@ pub fn serialize_snapshot(snap: &KvSnapshot, tokens: &[u32]) -> Result<Vec<u8>, 
         tokens: tokens[..snap.token_count].to_vec(),
         dim: snap.dim,
         max_seq_len: snap.max_seq_len,
+        block_size,
         layers: layer_meta,
     };
     let header_bytes =
@@ -747,6 +775,32 @@ pub fn serialize_snapshot(snap: &KvSnapshot, tokens: &[u32]) -> Result<Vec<u8>, 
     Ok(out)
 }
 
+/// Item 8 Phase 3: sanity-check a just-deserialized KV snapshot for
+/// numerical corruption. Returns `true` if every populated layer's K and
+/// V tensors contain only finite values (no NaN, no ±Inf). A failure
+/// here almost always indicates a malicious or broken peer — the caller
+/// drops the snapshot and penalizes trust. Called BEFORE hydration so a
+/// bad peer can never poison our KV cache.
+pub fn snapshot_is_finite(snap: &KvSnapshot) -> bool {
+    for kv_opt in &snap.layers {
+        let Some((k, v)) = kv_opt else { continue };
+        for tensor in [k, v] {
+            let flat: Vec<f32> = match tensor
+                .to_dtype(candle_core::DType::F32)
+                .and_then(|t| t.flatten_all())
+                .and_then(|t| t.to_vec1::<f32>())
+            {
+                Ok(v) => v,
+                Err(_) => return false,
+            };
+            if flat.iter().any(|f| !f.is_finite()) {
+                return false;
+            }
+        }
+    }
+    true
+}
+
 /// Deserialize a wire-format KV snapshot on `device`. Returns the
 /// reconstructed `KvSnapshot` plus the token IDs the sender claimed the
 /// snapshot covers (caller MUST re-hash these and match against the
@@ -755,6 +809,15 @@ pub fn deserialize_snapshot(
     bytes: &[u8],
     device: &candle_core::Device,
 ) -> Result<(KvSnapshot, Vec<u32>), SwarmError> {
+    deserialize_snapshot_full(bytes, device).map(|(s, t, _)| (s, t))
+}
+
+/// Phase 3 variant: also returns the sender's `block_size` from the
+/// header (`None` for pre-Phase-3 senders that didn't record it).
+pub fn deserialize_snapshot_full(
+    bytes: &[u8],
+    device: &candle_core::Device,
+) -> Result<(KvSnapshot, Vec<u32>, Option<usize>), SwarmError> {
     // Header framing: magic(4) + version(4) + header_len(8) = 16 bytes.
     if bytes.len() < 16 {
         return Err(SwarmError::Internal("snapshot: frame too short".into()));
@@ -818,7 +881,7 @@ pub fn deserialize_snapshot(
         dim: header.dim,
         max_seq_len: header.max_seq_len,
     };
-    Ok((snap, header.tokens))
+    Ok((snap, header.tokens, header.block_size))
 }
 
 #[cfg(test)]
@@ -1166,6 +1229,68 @@ mod tests {
             snap.token_count,
             &manifest[1].block_hash
         ));
+    }
+
+    #[test]
+    fn snapshot_is_finite_accepts_plain_tensors() {
+        use candle_core::Device;
+        let device = Device::Cpu;
+        let k = Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0], (1usize, 1, 2, 2), &device).unwrap();
+        let v = Tensor::from_vec(vec![5.0f32, 6.0, 7.0, 8.0], (1usize, 1, 2, 2), &device).unwrap();
+        let snap = KvSnapshot {
+            token_count: 2,
+            layers: vec![Some((k, v))],
+            dim: 2,
+            max_seq_len: 128,
+        };
+        assert!(snapshot_is_finite(&snap));
+    }
+
+    #[test]
+    fn snapshot_is_finite_rejects_nan() {
+        use candle_core::Device;
+        let device = Device::Cpu;
+        let k =
+            Tensor::from_vec(vec![1.0f32, f32::NAN, 3.0, 4.0], (1usize, 1, 2, 2), &device).unwrap();
+        let v = Tensor::from_vec(vec![5.0f32, 6.0, 7.0, 8.0], (1usize, 1, 2, 2), &device).unwrap();
+        let snap = KvSnapshot {
+            token_count: 2,
+            layers: vec![Some((k, v))],
+            dim: 2,
+            max_seq_len: 128,
+        };
+        assert!(!snapshot_is_finite(&snap));
+    }
+
+    #[test]
+    fn snapshot_is_finite_rejects_inf() {
+        use candle_core::Device;
+        let device = Device::Cpu;
+        let k = Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0], (1usize, 1, 2, 2), &device).unwrap();
+        let v = Tensor::from_vec(
+            vec![5.0f32, 6.0, f32::INFINITY, 8.0],
+            (1usize, 1, 2, 2),
+            &device,
+        )
+        .unwrap();
+        let snap = KvSnapshot {
+            token_count: 2,
+            layers: vec![Some((k, v))],
+            dim: 2,
+            max_seq_len: 128,
+        };
+        assert!(!snapshot_is_finite(&snap));
+    }
+
+    #[test]
+    fn snapshot_is_finite_ignores_none_layers() {
+        let snap = KvSnapshot {
+            token_count: 0,
+            layers: vec![None, None],
+            dim: 2,
+            max_seq_len: 128,
+        };
+        assert!(snapshot_is_finite(&snap));
     }
 
     #[test]

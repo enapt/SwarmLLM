@@ -337,6 +337,58 @@ pub(super) fn spawn_prefix_announce_forwarder(
     });
 }
 
+/// Item 8 Phase 3: outcome of a post-fetch sanity check. `Reject` carries a
+/// short reason string used for logging + informing trust-penalty decisions.
+#[derive(Debug, Clone)]
+enum SnapshotVerdict {
+    Ok,
+    Reject(&'static str),
+}
+
+/// Item 8 Phase 3: sanity-check a freshly-fetched KV snapshot against the
+/// requested `block_hash` before handing the bytes to the worker. Three
+/// layers of check, cheapest first:
+///   1. Deserialize succeeds (magic, version, framing all valid).
+///   2. BLAKE3 chain over the declared tokens at the configured block
+///      size matches `requested_hash` at `snap.token_count`. This is the
+///      same check the worker would do — we just short-circuit so a bad
+///      peer never even gets its KV into our worker process.
+///   3. Every populated layer's K/V tensors contain only finite values.
+///
+/// `block_size` matches the sender's `prefix_cache_block_tokens`; for
+/// Phase 3 we use the local `block_tokens` as a reasonable swarm
+/// convention. When the sender used a different block size the chain
+/// hash check will fail (correctly) — Phase 4 will normalize block size
+/// as part of the announce protocol.
+fn verify_fetched_snapshot(bytes: &[u8], requested_hash: &[u8; 32]) -> SnapshotVerdict {
+    use crate::inference::split;
+    let device = candle_core::Device::Cpu;
+    let (snap, tokens, block_size_opt) = match split::deserialize_snapshot_full(bytes, &device) {
+        Ok(x) => x,
+        Err(e) => {
+            tracing::debug!(error = %e, "verify_fetched_snapshot: deserialize failed");
+            return SnapshotVerdict::Reject("deserialize_failed");
+        }
+    };
+    // BLAKE3 chain check — the sender claims these tokens produce
+    // `requested_hash`; verify. Phase 3 senders record `block_size` in the
+    // header so we know exactly what to hash against. Older snapshots fall
+    // back to trying the common defaults (32, 64, 128).
+    let matched = match block_size_opt {
+        Some(bs) => split::verify_token_hash_chain(&tokens, bs, snap.token_count, requested_hash),
+        None => [32usize, 64, 128].iter().any(|&bs| {
+            split::verify_token_hash_chain(&tokens, bs, snap.token_count, requested_hash)
+        }),
+    };
+    if !matched {
+        return SnapshotVerdict::Reject("hash_chain_mismatch");
+    }
+    if !split::snapshot_is_finite(&snap) {
+        return SnapshotVerdict::Reject("non_finite_tensors");
+    }
+    SnapshotVerdict::Ok
+}
+
 /// Item 8 Phase 2b: drain cross-node fetch probes from worker subprocesses,
 /// resolve each via the cross-node index + remote fetch, and deliver the
 /// result (hit payload or miss) back to the originating worker via the
@@ -366,6 +418,16 @@ pub(super) fn spawn_prefix_probe_handler(
                     // (not ours) — because WE receive the peer's tokens +
                     // snapshot and re-hash against the block hash we asked for.
                     let our_id = shared_state.identity.node_id();
+                    // Item 8 Phase 3: trust-gate candidate peers. Peers below
+                    // the threshold are locked out entirely — no wire round
+                    // trip, no chance to poison our cache. Default threshold
+                    // is DEFAULT_TRUST (0.5), which means any peer that has
+                    // incurred a `SpotCheckFail` is excluded until they
+                    // decay/repair their score.
+                    let trust_min = shared_state
+                        .config
+                        .inference
+                        .cross_node_prefix_trust_min;
                     let mut best: Option<(crate::types::NodeId, [u8; 32], u32)> = None;
                     if let Some(model_index) = shared_state
                         .models
@@ -378,6 +440,13 @@ pub(super) fn spawn_prefix_probe_handler(
                                     .iter()
                                     .map(|r| r.clone())
                                     .filter(|n| n != our_id)
+                                    .filter(|n| {
+                                        shared_state
+                                            .credits
+                                            .trust_manager
+                                            .get_trust(n)
+                                            >= trust_min
+                                    })
                                     .collect();
                                 if candidates.is_empty() {
                                     continue;
@@ -449,20 +518,38 @@ pub(super) fn spawn_prefix_probe_handler(
                                     .await
                                     {
                                         Ok(Ok(Some(bytes))) => {
-                                            // Phase 2b does NOT re-tokenize the
-                                            // prompt daemon-side, so we can't
-                                            // BLAKE3-verify the returned tokens
-                                            // here. The worker performs the
-                                            // verify in `hydrate_request_from_bytes`
-                                            // by calling `deserialize_snapshot`
-                                            // + the daemon helper path — BUT the
-                                            // worker-side probe path skips that
-                                            // check for efficiency since it
-                                            // trusts the daemon. Phase 3 wires
-                                            // trust-gated verification; for
-                                            // Phase 2b we hand the bytes straight
-                                            // through.
-                                            (token_count, Some(bytes))
+                                            // Item 8 Phase 3: verify the
+                                            // returned snapshot's tensors are
+                                            // finite before handing the bytes
+                                            // to the worker. A malicious peer
+                                            // could supply BLAKE3-valid tokens
+                                            // with poisoned KV tensors that
+                                            // produce NaN/Inf on forward; we
+                                            // reject those and penalize trust.
+                                            let verdict = verify_fetched_snapshot(
+                                                &bytes,
+                                                &block_hash,
+                                            );
+                                            match verdict {
+                                                SnapshotVerdict::Ok => (token_count, Some(bytes)),
+                                                SnapshotVerdict::Reject(reason) => {
+                                                    tracing::warn!(
+                                                        %peer,
+                                                        reason = reason,
+                                                        bytes = bytes.len(),
+                                                        "prefix-probe: rejected KV snapshot — penalizing peer trust"
+                                                    );
+                                                    shared_state
+                                                        .credits
+                                                        .trust_manager
+                                                        .update_trust(
+                                                            &shared_state.peer_registry,
+                                                            &peer,
+                                                            crate::credit::trust::TrustEvent::SpotCheckFail,
+                                                        );
+                                                    (0, None)
+                                                }
+                                            }
                                         }
                                         Ok(Ok(None)) => (0, None),
                                         Ok(Err(_)) => (0, None),
@@ -603,4 +690,121 @@ pub(super) fn spawn_sighup_handler(
     _config: Config,
     _shutdown_rx: watch::Receiver<bool>,
 ) {
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{verify_fetched_snapshot, SnapshotVerdict};
+    use crate::inference::split::{
+        compute_block_hashes, serialize_snapshot_with_block_size, KvSnapshot, KV_SNAPSHOT_MAGIC,
+    };
+    use candle_core::{Device, Tensor};
+
+    fn make_snapshot(device: &Device, token_count: usize) -> KvSnapshot {
+        let shape = (1usize, 1, token_count, 2);
+        let n = token_count * 2;
+        let k =
+            Tensor::from_vec((0..n).map(|i| i as f32).collect::<Vec<_>>(), shape, device).unwrap();
+        let v = Tensor::from_vec(
+            (0..n).map(|i| (i + 100) as f32).collect::<Vec<_>>(),
+            shape,
+            device,
+        )
+        .unwrap();
+        KvSnapshot {
+            token_count,
+            layers: vec![Some((k, v))],
+            dim: 2,
+            max_seq_len: 4096,
+        }
+    }
+
+    #[test]
+    fn verify_ok_when_hash_matches_and_tensors_finite() {
+        let device = Device::Cpu;
+        let tokens: Vec<u32> = (1..=8).collect();
+        let hashes = compute_block_hashes(&tokens, 4);
+        let snap = make_snapshot(&device, 8);
+        let bytes = serialize_snapshot_with_block_size(&snap, &tokens, Some(4)).unwrap();
+        let last_hash = hashes.last().unwrap().block_hash;
+        assert!(matches!(
+            verify_fetched_snapshot(&bytes, &last_hash),
+            SnapshotVerdict::Ok
+        ));
+    }
+
+    #[test]
+    fn verify_rejects_hash_mismatch() {
+        let device = Device::Cpu;
+        let tokens: Vec<u32> = (1..=8).collect();
+        let snap = make_snapshot(&device, 8);
+        let bytes = serialize_snapshot_with_block_size(&snap, &tokens, Some(4)).unwrap();
+        let bogus = [0xAB; 32];
+        match verify_fetched_snapshot(&bytes, &bogus) {
+            SnapshotVerdict::Reject("hash_chain_mismatch") => {}
+            v => panic!("unexpected verdict: {:?}", v),
+        }
+    }
+
+    #[test]
+    fn verify_rejects_non_finite_tensors() {
+        let device = Device::Cpu;
+        let tokens: Vec<u32> = (1..=8).collect();
+        let hashes = compute_block_hashes(&tokens, 4);
+        // Build a snapshot with NaN inside.
+        let k = Tensor::from_vec(
+            vec![
+                1.0f32,
+                f32::NAN,
+                3.0,
+                4.0,
+                5.0,
+                6.0,
+                7.0,
+                8.0,
+                9.0,
+                10.0,
+                11.0,
+                12.0,
+                13.0,
+                14.0,
+                15.0,
+                16.0,
+            ],
+            (1usize, 1, 8, 2),
+            &device,
+        )
+        .unwrap();
+        let v = Tensor::from_vec(
+            (0..16).map(|i| (i + 100) as f32).collect::<Vec<_>>(),
+            (1usize, 1, 8, 2),
+            &device,
+        )
+        .unwrap();
+        let snap = KvSnapshot {
+            token_count: 8,
+            layers: vec![Some((k, v))],
+            dim: 2,
+            max_seq_len: 4096,
+        };
+        let bytes = serialize_snapshot_with_block_size(&snap, &tokens, Some(4)).unwrap();
+        let last_hash = hashes.last().unwrap().block_hash;
+        match verify_fetched_snapshot(&bytes, &last_hash) {
+            SnapshotVerdict::Reject("non_finite_tensors") => {}
+            v => panic!("unexpected verdict: {:?}", v),
+        }
+    }
+
+    #[test]
+    fn verify_rejects_bad_magic() {
+        let mut bad = vec![0u8; 32];
+        bad[..4].copy_from_slice(b"NOPE");
+        // Magic mismatch → deserialize_failed.
+        match verify_fetched_snapshot(&bad, &[0; 32]) {
+            SnapshotVerdict::Reject("deserialize_failed") => {}
+            v => panic!("unexpected verdict: {:?}", v),
+        }
+        // Sanity: the real magic is 4 bytes.
+        assert_eq!(KV_SNAPSHOT_MAGIC.len(), 4);
+    }
 }

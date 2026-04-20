@@ -356,6 +356,16 @@ pub struct InferenceConfig {
     /// Prompts shorter than this aren't worth caching. Default 32.
     #[serde(default = "default_prefix_cache_min_tokens")]
     pub prefix_cache_min_tokens: u32,
+    /// Item 8 Phase 3: minimum peer trust score to accept a cross-node
+    /// prefix-KV fetch from. Peers below this threshold are skipped
+    /// entirely at probe-time (no wire round-trip). On a successful
+    /// fetch the bytes are still sanity-checked (no NaN/Inf) before
+    /// hydration — any check failure triggers
+    /// `TrustEvent::SpotCheckFail` on the sender. Default 0.5 (the
+    /// DEFAULT_TRUST level for a freshly-seen peer — any peer that has
+    /// misbehaved drops below and is locked out).
+    #[serde(default = "default_cross_node_prefix_trust_min")]
+    pub cross_node_prefix_trust_min: f32,
     /// Enable SWIFT (arxiv 2410.06916) self-speculative decoding inside
     /// `handle_generate`. The target model itself acts as its own draft by
     /// skipping a contiguous range of intermediate layers. No external draft
@@ -461,6 +471,10 @@ fn default_prefix_cache_block_tokens() -> u32 {
 
 fn default_prefix_cache_min_tokens() -> u32 {
     32
+}
+
+fn default_cross_node_prefix_trust_min() -> f32 {
+    0.5
 }
 
 fn default_swift_calibration_tokens() -> u32 {
@@ -1401,6 +1415,7 @@ impl Default for InferenceConfig {
             prefix_cache_max_prompt_tokens: default_prefix_cache_max_prompt_tokens(),
             prefix_cache_block_tokens: default_prefix_cache_block_tokens(),
             prefix_cache_min_tokens: default_prefix_cache_min_tokens(),
+            cross_node_prefix_trust_min: default_cross_node_prefix_trust_min(),
             swift_self_speculative: false,
             swift_calibration_tokens: default_swift_calibration_tokens(),
             swift_gamma: default_swift_gamma(),
