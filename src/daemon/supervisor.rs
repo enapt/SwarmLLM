@@ -24,18 +24,12 @@ pub(super) async fn run(
     // Track restart attempts per subsystem name
     let mut restart_counts: std::collections::HashMap<&str, u32> = std::collections::HashMap::new();
 
-    // Register SIGTERM handler ONCE before the loop to avoid re-registering on each iteration.
-    // On non-Unix platforms, this is always None and the select branch awaits forever (pending).
-    let mut sigterm_stream: Option<tokio::signal::unix::Signal> = {
-        #[cfg(unix)]
-        {
-            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).ok()
-        }
-        #[cfg(not(unix))]
-        {
-            None
-        }
-    };
+    // Register SIGTERM handler ONCE before the loop to avoid re-registering
+    // on each iteration. Windows has no SIGTERM — the select branch below
+    // pends forever on that platform and Ctrl+C / API shutdown take over.
+    #[cfg(unix)]
+    let mut sigterm_stream: Option<tokio::signal::unix::Signal> =
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).ok();
 
     loop {
         tokio::select! {
@@ -44,11 +38,18 @@ pub(super) async fn run(
                 tracing::info!("Shutdown signal received (Ctrl+C)");
                 break;
             }
-            // Handle SIGTERM (Unix) — on non-Unix, sigterm_stream is None so this pends forever
+            // SIGTERM on Unix; pends forever on Windows (no SIGTERM there).
             _ = async {
-                match sigterm_stream.as_mut() {
-                    Some(s) => { s.recv().await; }
-                    None => { std::future::pending::<()>().await; }
+                #[cfg(unix)]
+                {
+                    match sigterm_stream.as_mut() {
+                        Some(s) => { let _ = s.recv().await; }
+                        None => { std::future::pending::<()>().await; }
+                    }
+                }
+                #[cfg(not(unix))]
+                {
+                    std::future::pending::<()>().await;
                 }
             } => {
                 tracing::info!("Shutdown signal received (SIGTERM)");
