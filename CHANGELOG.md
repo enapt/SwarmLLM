@@ -2,11 +2,12 @@
 
 All notable changes to SwarmLLM are documented here.
 
-## [Unreleased] - Post-0.1.0
+## [0.1.0] - 2026-04-21
 
-> Released v0.1.0 snapshot: 2026-03-18 with 674 tests. The work below has
-> landed after that tag and is the basis for an upcoming v0.1.1 release.
-> Test count as of HEAD: 775.
+> First public release. 765 tests, all 20 build phases complete, distributed
+> inference speedup arc (Items 1–16) landed. An internal snapshot was taken
+> 2026-03-18 with 674 tests; the sole prior tag was `v0.1.0-alpha.1`. The
+> work below is the full surface of this release.
 
 ### Distributed Inference Speedup Arc
 

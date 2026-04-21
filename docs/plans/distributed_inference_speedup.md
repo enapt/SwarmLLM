@@ -5,7 +5,7 @@
 > session logs that used to live here have been trimmed out — the
 > canonical references now are:
 >
-> - **[CHANGELOG.md](../../CHANGELOG.md)** → `[Unreleased] - Post-0.1.0`
+> - **[CHANGELOG.md](../../CHANGELOG.md)** → `[0.1.0]`
 >   → Distributed Inference Speedup Arc — user-facing summary with
 >   measured wins
 > - **[docs/book/src/operations/performance.md](../book/src/operations/performance.md)** —
