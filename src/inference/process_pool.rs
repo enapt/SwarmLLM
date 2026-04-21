@@ -8,7 +8,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use dashmap::DashMap;
-use tokio::net::UnixListener;
 use tokio::process::Child;
 use tokio::sync::{mpsc, Mutex};
 use uuid::Uuid;
@@ -17,6 +16,12 @@ use crate::error::SwarmError;
 use crate::inference::router::StreamingTokenEvent;
 use crate::inference::worker_ipc::*;
 use crate::types::{ModelId, PrefixBlockEntry, SamplingParams};
+
+/// Cross-platform IPC stream halves between daemon and model worker.
+/// Unix: AF_UNIX socket with 0o600 filesystem perms (current user only).
+/// Windows: named pipe with default DACL (current logon session only).
+pub(crate) type IpcReader = interprocess::local_socket::tokio::RecvHalf;
+pub(crate) type IpcWriter = interprocess::local_socket::tokio::SendHalf;
 
 /// Item 8 Phase 1: each prefix-cache insert in a worker emits one of these
 /// over the pool's `prefix_manifest_tx`. The daemon-side forwarder drains
@@ -70,7 +75,7 @@ struct WorkerHandle {
     child: Child,
     /// Write half of the IPC socket. Brief lock held only for the duration of
     /// one outbound framed message (header + optional binary payload).
-    writer: Mutex<tokio::net::unix::OwnedWriteHalf>,
+    writer: Mutex<IpcWriter>,
     /// Per-request response channels. The reader actor inserts `(msg, payload)`
     /// tuples keyed by `request_id`; callers register a channel before sending
     /// their request and drain it until they get a terminal message.
@@ -78,8 +83,9 @@ struct WorkerHandle {
     /// Set to true when the reader actor observes a socket error. Subsequent
     /// callers short-circuit with an error + trigger worker eviction.
     dead: Arc<AtomicBool>,
-    /// Socket file to clean up on drop.
-    socket_path: PathBuf,
+    /// Socket name used to connect (Unix filesystem path / Windows namespace
+    /// name). Only the Unix filesystem variant requires drop-time cleanup.
+    socket_name: String,
     /// Handle to the reader actor task. Aborted on drop so the task doesn't
     /// outlive its worker; also unblocks any pending `recv_worker` in tests.
     reader_handle: tokio::task::JoinHandle<()>,
@@ -115,7 +121,7 @@ fn worker_msg_request_id(msg: &WorkerMsg) -> Option<Uuid> {
 /// errors out (worker died, IPC corrupted); sets `dead` and drops all
 /// in-flight response senders to wake waiting callers with `None`.
 async fn reader_actor(
-    mut reader: tokio::net::unix::OwnedReadHalf,
+    mut reader: IpcReader,
     responses: ResponseMap,
     dead: Arc<AtomicBool>,
     model_id: ModelId,
@@ -249,8 +255,10 @@ impl Drop for WorkerHandle {
         self.reader_handle.abort();
         // Kill the child process if still running
         let _ = self.child.start_kill();
-        // Clean up the socket file
-        let _ = std::fs::remove_file(&self.socket_path);
+        // Clean up the socket file (Unix only — Windows named pipes are
+        // reclaimed by the kernel when all handles close).
+        #[cfg(unix)]
+        let _ = std::fs::remove_file(&self.socket_name);
     }
 }
 
@@ -814,39 +822,72 @@ impl ModelProcessPool {
     }
 
     async fn spawn_worker(&self, model_id: &ModelId) -> Result<WorkerHandle, SwarmError> {
-        // Create a unique socket path
-        let socket_name = format!("swarmllm-worker-{}.sock", uuid::Uuid::new_v4());
-        let socket_path = std::env::temp_dir().join(&socket_name);
+        use interprocess::local_socket::{tokio::prelude::*, ListenerOptions};
 
-        // RAII guard: clean up socket file if spawn fails at any step.
-        // Defused (forgotten) on success when WorkerHandle takes ownership.
-        struct SocketCleanup(std::path::PathBuf);
-        impl Drop for SocketCleanup {
-            fn drop(&mut self) {
-                let _ = std::fs::remove_file(&self.0);
+        // Cross-platform socket naming:
+        //  * Unix: filesystem path under `$TMPDIR/swarmllm-worker-<uuid>.sock`.
+        //    `chmod 0o600` below restricts connect() to the current user.
+        //  * Windows: namespace name `swarmllm-worker-<uuid>` (becomes
+        //    `\\.\pipe\swarmllm-worker-<uuid>`). The default DACL on a named
+        //    pipe grants access only to the current logon session — the
+        //    equivalent of 0o600 for cross-user isolation.
+        let uuid_str = uuid::Uuid::new_v4().to_string();
+        #[cfg(unix)]
+        let socket_name: String = std::env::temp_dir()
+            .join(format!("swarmllm-worker-{uuid_str}.sock"))
+            .to_str()
+            .ok_or_else(|| SwarmError::Internal("socket path not UTF-8".into()))?
+            .to_string();
+        #[cfg(windows)]
+        let socket_name: String = format!("swarmllm-worker-{uuid_str}");
+
+        // RAII guard: remove the Unix socket file if spawn errors out partway.
+        // Defused on success; WorkerHandle's Drop then owns the cleanup.
+        // Windows named pipes are kernel-reclaimed — no guard needed.
+        #[cfg(unix)]
+        let socket_guard = {
+            struct SocketCleanup(String);
+            impl Drop for SocketCleanup {
+                fn drop(&mut self) {
+                    let _ = std::fs::remove_file(&self.0);
+                }
             }
-        }
+            SocketCleanup(socket_name.clone())
+        };
 
-        // Start listening before spawning so the worker can connect immediately
-        let listener = UnixListener::bind(&socket_path)
+        // Build the interprocess `Name` — filesystem path on Unix, namespace
+        // name on Windows. The Name borrows from socket_name, which outlives
+        // create_tokio() below.
+        #[cfg(unix)]
+        let ipc_name = socket_name
+            .as_str()
+            .to_fs_name::<interprocess::local_socket::GenericFilePath>()
+            .map_err(|e| SwarmError::Internal(format!("ipc name: {e}")))?;
+        #[cfg(windows)]
+        let ipc_name = socket_name
+            .as_str()
+            .to_ns_name::<interprocess::local_socket::GenericNamespaced>()
+            .map_err(|e| SwarmError::Internal(format!("ipc name: {e}")))?;
+
+        // Start listening before spawning so the worker can connect immediately.
+        let listener = ListenerOptions::new()
+            .name(ipc_name)
+            .create_tokio()
             .map_err(|e| SwarmError::Internal(format!("socket bind: {e}")))?;
-        let socket_guard = SocketCleanup(socket_path.clone());
 
-        // SEC: Restrict socket permissions so only the current user can connect.
-        // Without this, any local process can impersonate the worker and intercept
-        // inference data (prompts, activations).
+        // SEC: Restrict Unix filesystem socket to the current user only.
+        // On Windows the default named-pipe DACL already scopes to the
+        // current logon session — equivalent isolation, no extra call.
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600));
+            let _ = std::fs::set_permissions(&socket_name, std::fs::Permissions::from_mode(0o600));
         }
 
         // Spawn the worker subprocess (same binary, model-worker subcommand)
         let exe = std::env::current_exe()
             .map_err(|e| SwarmError::Internal(format!("current_exe: {e}")))?;
-        let socket_str = socket_path
-            .to_str()
-            .ok_or_else(|| SwarmError::Internal("socket path is not valid UTF-8".into()))?;
+        let socket_str = socket_name.as_str();
         let data_dir_str = self
             .data_dir
             .to_str()
@@ -977,10 +1018,9 @@ impl ModelProcessPool {
         )
         .await
         .map_err(|_| SwarmError::Internal("worker connect timeout".into()))?
-        .map_err(|e| SwarmError::Internal(format!("accept: {e}")))?
-        .0;
+        .map_err(|e| SwarmError::Internal(format!("accept: {e}")))?;
 
-        let (mut read_half, write_half) = conn.into_split();
+        let (mut read_half, write_half) = conn.split();
 
         // Read Ready message
         let (ready_msg, _) = recv_worker(&mut read_half)
@@ -1015,7 +1055,9 @@ impl ModelProcessPool {
                 .with_model(model_id.0.clone()),
         );
 
-        // Success — defuse the cleanup guard; WorkerHandle now owns the socket file
+        // Success — defuse the cleanup guard on Unix; WorkerHandle now owns
+        // the socket file and its Drop will unlink on process exit.
+        #[cfg(unix)]
         std::mem::forget(socket_guard);
         let responses: ResponseMap = Arc::new(DashMap::new());
         let dead = Arc::new(AtomicBool::new(false));
@@ -1032,7 +1074,7 @@ impl ModelProcessPool {
             writer: Mutex::new(write_half),
             responses,
             dead,
-            socket_path,
+            socket_name,
             reader_handle,
         })
     }

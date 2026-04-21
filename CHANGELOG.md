@@ -2,12 +2,20 @@
 
 All notable changes to SwarmLLM are documented here.
 
-## [0.1.0] - 2026-04-21
+## [Unreleased] - alpha
 
-> First public release. 765 tests, all 20 build phases complete, distributed
-> inference speedup arc (Items 1–16) landed. An internal snapshot was taken
-> 2026-03-18 with 674 tests; the sole prior tag was `v0.1.0-alpha.1`. The
-> work below is the full surface of this release.
+> Prior tag: `v0.1.0-alpha.1` (2026-03-18, 674 tests). This section
+> accumulates work landed after that alpha, distributed to alpha testers
+> as point builds. Test count as of HEAD: 765.
+
+### Cross-Platform IPC
+
+Daemon ↔ model-worker IPC was Unix-socket-only between 2026-04-18 and
+now, silently breaking Windows builds. Ported to the `interprocess`
+crate (`local_socket` + tokio): AF_UNIX with 0o600 perms on
+Linux/macOS, named pipes with default-DACL (current-logon-session)
+on Windows. Security parity, no protocol changes (the framed codec
+was already transport-agnostic).
 
 ### Distributed Inference Speedup Arc
 

@@ -98,9 +98,11 @@ enum Commands {
     /// [Internal] Run a model worker subprocess (managed by daemon, not for direct use)
     #[command(hide = true)]
     ModelWorker {
-        /// Unix socket path to connect to the daemon
+        /// IPC socket name to connect to the daemon.
+        /// On Unix this is a filesystem path (AF_UNIX); on Windows it is a
+        /// named-pipe namespace name. The daemon chooses the right form.
         #[arg(long)]
-        socket: PathBuf,
+        socket: String,
         /// Data directory
         #[arg(long)]
         data_dir: PathBuf,

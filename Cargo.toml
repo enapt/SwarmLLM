@@ -92,6 +92,10 @@ dashmap = "6"
 parking_lot = "0.12"
 async-trait = "0.1"
 
+# Cross-platform local IPC (Unix sockets / Windows named pipes)
+# Used by the daemon ↔ model-worker subprocess IPC layer.
+interprocess = { version = "2.4", features = ["tokio"] }
+
 # Utilities
 clap = { version = "4", features = ["derive"] }
 tracing = "0.1"

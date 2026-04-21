@@ -9,9 +9,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use dashmap::DashMap;
-use tokio::net::UnixStream;
 use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
+
+use crate::inference::process_pool::IpcWriter;
 
 use candle_core::IndexOp;
 
@@ -65,7 +66,7 @@ impl Default for PrefixCacheConfig {
 ///   compute.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_worker(
-    socket_path: PathBuf,
+    socket_name: String,
     data_dir: PathBuf,
     shard_window: Option<Vec<u32>>,
     kv_cache_ttl_secs: u64,
@@ -79,18 +80,40 @@ pub async fn run_worker(
     prefill_chunk_tokens: u32,
     batched_prefill_forward: bool,
 ) {
-    // Connect to the daemon's Unix socket
-    let stream = match UnixStream::connect(&socket_path).await {
-        Ok(s) => s,
+    // Connect to the daemon's IPC socket. The name matches what the daemon
+    // bound: a filesystem path on Unix, a namespace name on Windows.
+    use interprocess::local_socket::tokio::{prelude::*, Stream};
+
+    #[cfg(unix)]
+    let ipc_name = match socket_name
+        .as_str()
+        .to_fs_name::<interprocess::local_socket::GenericFilePath>()
+    {
+        Ok(n) => n,
         Err(e) => {
-            eprintln!(
-                "model-worker: failed to connect to {}: {e}",
-                socket_path.display()
-            );
+            eprintln!("model-worker: invalid socket name {socket_name:?}: {e}");
             std::process::exit(1);
         }
     };
-    let (mut reader, mut writer) = stream.into_split();
+    #[cfg(windows)]
+    let ipc_name = match socket_name
+        .as_str()
+        .to_ns_name::<interprocess::local_socket::GenericNamespaced>()
+    {
+        Ok(n) => n,
+        Err(e) => {
+            eprintln!("model-worker: invalid socket name {socket_name:?}: {e}");
+            std::process::exit(1);
+        }
+    };
+    let stream = match Stream::connect(ipc_name).await {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("model-worker: failed to connect to {socket_name:?}: {e}");
+            std::process::exit(1);
+        }
+    };
+    let (mut reader, mut writer) = stream.split();
 
     // Send Ready
     if let Err(e) = send_worker(&mut writer, &WorkerMsg::Ready, &[]).await {
@@ -324,11 +347,7 @@ pub async fn run_worker(
 
 /// Send a `WorkerMsg::Error` back to the daemon. Used by the `run_worker`
 /// dispatch loop to report handler failures without crashing the subprocess.
-async fn send_worker_error(
-    writer: &mut tokio::net::unix::OwnedWriteHalf,
-    request_id: uuid::Uuid,
-    err: SwarmError,
-) {
+async fn send_worker_error(writer: &mut IpcWriter, request_id: uuid::Uuid, err: SwarmError) {
     let _ = send_worker(
         writer,
         &WorkerMsg::Error {
@@ -523,7 +542,7 @@ fn batch_eligible(requests: &[IpcForward]) -> bool {
 /// `LayerResult` messages (preserves wire compatibility).
 #[allow(clippy::too_many_arguments)]
 async fn handle_batch_forward(
-    writer: &mut tokio::net::unix::OwnedWriteHalf,
+    writer: &mut IpcWriter,
     models: &mut HashMap<(usize, usize, usize, usize), SplitModel>,
     kv_store: &Arc<KvCacheStore>,
     data_dir: &std::path::Path,
@@ -607,7 +626,7 @@ async fn handle_batch_forward(
 /// `batch_eligible(&requests)`.
 #[allow(clippy::too_many_arguments)]
 async fn run_fused_batch_forward(
-    writer: &mut tokio::net::unix::OwnedWriteHalf,
+    writer: &mut IpcWriter,
     models: &mut HashMap<(usize, usize, usize, usize), SplitModel>,
     kv_store: &Arc<KvCacheStore>,
     data_dir: &std::path::Path,
@@ -794,7 +813,7 @@ async fn run_fused_batch_forward(
 
 #[allow(clippy::too_many_arguments)]
 async fn handle_forward(
-    writer: &mut tokio::net::unix::OwnedWriteHalf,
+    writer: &mut IpcWriter,
     models: &mut HashMap<(usize, usize, usize, usize), SplitModel>,
     kv_store: &Arc<KvCacheStore>,
     data_dir: &std::path::Path,
@@ -1191,7 +1210,7 @@ const PREFIX_FETCH_TIMEOUT_MS: u64 = 3000;
 /// a correctness issue.
 #[allow(clippy::too_many_arguments)]
 async fn try_remote_prefix_hydrate(
-    writer: &mut tokio::net::unix::OwnedWriteHalf,
+    writer: &mut IpcWriter,
     model: &SplitModel,
     kv_store: &Arc<KvCacheStore>,
     prefix_cache: &Arc<PrefixCache>,
@@ -1290,7 +1309,7 @@ async fn try_remote_prefix_hydrate(
 /// Handle a Generate IPC message — run a full tokenize+decode loop.
 #[allow(clippy::too_many_arguments)]
 async fn handle_generate(
-    writer: &mut tokio::net::unix::OwnedWriteHalf,
+    writer: &mut IpcWriter,
     models: &mut HashMap<(usize, usize, usize, usize), SplitModel>,
     kv_store: &Arc<KvCacheStore>,
     prefix_cache: &Arc<PrefixCache>,
@@ -1572,7 +1591,7 @@ async fn handle_generate(
 /// Falls through cleanly if any forward fails — the caller will report.
 #[allow(clippy::too_many_arguments)]
 async fn swift_decode_loop(
-    writer: &mut tokio::net::unix::OwnedWriteHalf,
+    writer: &mut IpcWriter,
     model: &mut SplitModel,
     kv_store: &Arc<KvCacheStore>,
     req_id_str: &str,
@@ -1595,7 +1614,7 @@ async fn swift_decode_loop(
     // Returns Ok(true) when the caller should break (EOS, stop, or budget
     // exhausted). The token IS pushed to `generated` and sent.
     async fn emit_token(
-        writer: &mut tokio::net::unix::OwnedWriteHalf,
+        writer: &mut IpcWriter,
         model: &SplitModel,
         request_id: uuid::Uuid,
         eos: &[u32],
@@ -1875,7 +1894,7 @@ fn slot_admission_eligible(
 /// round-trip is bounded by `PREFIX_FETCH_TIMEOUT_MS`.
 #[allow(clippy::too_many_arguments)]
 async fn try_register_generate_slot(
-    writer: &mut tokio::net::unix::OwnedWriteHalf,
+    writer: &mut IpcWriter,
     models: &mut HashMap<(usize, usize, usize, usize), SplitModel>,
     kv_store: &Arc<KvCacheStore>,
     prefix_cache: &Arc<PrefixCache>,
@@ -2025,7 +2044,7 @@ async fn try_register_generate_slot(
 /// and get marked `length`.
 #[allow(clippy::too_many_arguments)]
 async fn step_decode_pool(
-    writer: &mut tokio::net::unix::OwnedWriteHalf,
+    writer: &mut IpcWriter,
     models: &mut HashMap<(usize, usize, usize, usize), SplitModel>,
     kv_store: &Arc<KvCacheStore>,
     prefix_cache: &Arc<PrefixCache>,
@@ -2458,7 +2477,7 @@ async fn step_decode_pool(
 /// The off-by-one Token (when finish="length") is already emitted inside
 /// `step_decode_pool` so this is purely bookkeeping.
 async fn finalize_slot(
-    writer: &mut tokio::net::unix::OwnedWriteHalf,
+    writer: &mut IpcWriter,
     kv_store: &Arc<KvCacheStore>,
     slot: Slot,
 ) -> Result<(), SwarmError> {
@@ -2517,7 +2536,7 @@ async fn finalize_slot(
 async fn handle_daemon_msg(
     msg: DaemonMsg,
     payload: Vec<u8>,
-    writer: &mut tokio::net::unix::OwnedWriteHalf,
+    writer: &mut IpcWriter,
     models: &mut HashMap<(usize, usize, usize, usize), SplitModel>,
     kv_store: &Arc<KvCacheStore>,
     prefix_cache: &Arc<PrefixCache>,

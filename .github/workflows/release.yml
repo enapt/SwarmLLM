@@ -10,6 +10,14 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  # Override `.cargo/config.toml`'s `target-cpu=native`. Runner CPU features
+  # drift from default target baselines and trip feature-detection asserts
+  # in deps (e.g. `ring` 0.17.14 on aarch64-apple-darwin). Release binaries
+  # must be portable regardless, so always compile to the default target.
+  RUSTFLAGS: ""
+  # Opt in to Node.js 24 for JS-based actions (checkout, upload-artifact, ...)
+  # ahead of the June 2026 deprecation cutoff. Silences the Node 20 warnings.
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
 jobs:
   build:
@@ -144,6 +152,7 @@ jobs:
         with:
           name: ${{ matrix.archive }}
           path: ${{ matrix.archive }}
+          retention-days: 7
 
       # Upload launcher once (from CPU build — identical binary regardless of features)
       - name: Upload launcher artifact
@@ -152,6 +161,7 @@ jobs:
         with:
           name: swarmllm-launcher.exe
           path: target/release/swarmllm-launcher.exe
+          retention-days: 7
 
       # .deb package (Linux CPU only)
       - name: Build .deb package
@@ -167,6 +177,7 @@ jobs:
         with:
           name: swarmllm_${{ github.ref_name }}_amd64.deb
           path: swarmllm_${{ github.ref_name }}_amd64.deb
+          retention-days: 7
 
       # .rpm package (Linux CPU only)
       - name: Build .rpm package
@@ -182,6 +193,7 @@ jobs:
         with:
           name: swarmllm_${{ github.ref_name }}.x86_64.rpm
           path: swarmllm_${{ github.ref_name }}.x86_64.rpm
+          retention-days: 7
 
   # Bundle GPU + CPU Windows binaries + launcher into a single Setup.exe
   windows-installer:
@@ -242,6 +254,7 @@ jobs:
         with:
           name: SwarmLLM-Setup.exe
           path: installer\Output\SwarmLLM-Setup.exe
+          retention-days: 7
 
   release:
     name: Publish Release

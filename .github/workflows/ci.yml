@@ -13,6 +13,12 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  # Override `.cargo/config.toml`'s `target-cpu=native` — CI builds must be
+  # portable and survive deps like `ring` 0.17.14 whose static feature
+  # asserts trip when native CPU flags leak in on aarch64-apple-darwin.
+  RUSTFLAGS: ""
+  # Opt in to Node.js 24 for JS-based actions ahead of June 2026 deprecation.
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
 jobs:
   fmt:
