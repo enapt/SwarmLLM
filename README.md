@@ -10,7 +10,7 @@ Decentralized peer-to-peer LLM inference network. A single Rust binary that shar
 
 **Join the swarm. Run AI together — for free.**
 
-> **Status:** Alpha — actively developed, moving into broader testing. Distributed inference stable (20 build phases + a full speedup arc landed), tested across multi-node deployments on real networks. Recent headline wins: Item 8 cross-node prefix-KV sharing ships a **12.9× iter-1 TTFT speedup** on 7B prompts with a warm peer (Round 6 bench, 2026-04-20). 775 tests, 47 sweep rounds of security auditing. [Report issues](https://github.com/enapt/SwarmLLM/issues).
+> **Status:** Alpha — actively developed, moving into broader testing. Distributed inference stable and tested on multi-node deployments. Most recent headline: cross-node prefix-KV sharing delivers a **12.9× iter-1 TTFT speedup** on 7B prompts when a peer has the same prefix cached (Round 6 bench, 2026-04-20). 765 tests, continuous security sweeps. [Report issues](https://github.com/enapt/SwarmLLM/issues).
 
 ---
 
@@ -21,14 +21,16 @@ Decentralized peer-to-peer LLM inference network. A single Rust binary that shar
 - [How It Works](#how-it-works)
 - [Quick Start](#quick-start)
 - [Connecting to the Network](#connecting-to-the-network)
+- [Private Mode](#private-mode)
 - [Features](#features)
-- [Architecture](#architecture)
 - [Supported Models](#supported-models)
 - [Benchmarks](#benchmarks)
+- [Architecture](#architecture)
 - [Installation](#installation)
 - [CLI](#cli)
 - [Configuration](#configuration)
 - [API Endpoints](#api-endpoints)
+- [Platform Support](#platform-support)
 - [How SwarmLLM Compares](#how-swarmllm-compares)
 - [Documentation](#documentation)
 - [Development Transparency](#development-transparency)
@@ -41,18 +43,15 @@ Decentralized peer-to-peer LLM inference network. A single Rust binary that shar
 
 SwarmLLM lets you run AI chatbots (like ChatGPT, but open-source) on your own computer — or share the work with others across the internet. Think of it like BitTorrent, but for AI: instead of downloading movies, you're sharing the computing power needed to run large language models.
 
-**Why does this matter?**
-
-Running a smart AI model (like Llama 3 70B) normally requires a $10,000+ GPU. With SwarmLLM, the model gets split into pieces — your computer handles some layers, your friend's handles others, and together you can run models none of you could run alone. No cloud subscription, no API fees, and **all traffic is encrypted end-to-end** — relay nodes never see your data.
+Running a smart AI model (like Llama 3 70B) normally requires a $10,000+ GPU. With SwarmLLM, the model gets split into pieces — your computer handles some layers, your friend's handles others, and together you can run models none of you could run alone. No cloud subscription, no API fees, and all peer-to-peer traffic is encrypted end-to-end.
 
 **What can you do with it?**
 
-- **Chat with AI** — Open `localhost:8800` in your browser, pick a model, and start chatting. Works just like ChatGPT.
-- **Use it as an API** — Any tool that works with OpenAI (LangChain, Open WebUI, SillyTavern, etc.) works with SwarmLLM. Just point it at `localhost:8800`.
-- **Use it with Claude Code** — SwarmLLM speaks the Anthropic API natively, so you can use it as a backend for Claude Code with any model.
-- **Access cloud models too** — Configure API keys for OpenAI, Anthropic, DeepSeek, or 9 other providers, and access everything through one endpoint.
-- **Run it on a LAN** — Two laptops on the same Wi-Fi find each other automatically. No configuration needed.
-- **Access remotely via Tailscale** — Connect nodes across the internet with [Tailscale](https://tailscale.com), WireGuard, or any VPN. Chat with your home GPU from anywhere. [Setup guide →](docs/book/src/operations/tailscale-wan.md)
+- **Chat with AI** — Open `localhost:8800` in your browser, pick a model, start chatting.
+- **Use it as an API** — Any tool that speaks OpenAI (LangChain, Open WebUI, SillyTavern, etc.) works with SwarmLLM.
+- **Use it with Claude Code** — SwarmLLM speaks the Anthropic Messages API natively. Full tool use, thinking, and streaming.
+- **Route to cloud too** — Configure keys for 12 cloud providers and reach them through one endpoint.
+- **LAN or WAN** — Two laptops on the same Wi-Fi find each other automatically. For remote access, [Tailscale](docs/book/src/operations/tailscale-wan.md) works out of the box.
 
 **Who is this for?**
 
@@ -62,19 +61,9 @@ Running a smart AI model (like Llama 3 70B) normally requires a $10,000+ GPU. Wi
 - Anyone who wants to contribute spare compute to a public AI network
 - Privacy-conscious users who don't want their prompts leaving their machine
 
-**What makes it different from Petals, Exo, or Bittensor?**
-
-| | SwarmLLM | Others |
-|---|---|---|
-| **Privacy** | E2E encrypted + **Private Mode** (pool-only inference) + offline LAN + shard pinning | Unencrypted — peers can read your prompts and outputs (Petals); no encryption (Exo) |
-| **Install** | Single binary, zero dependencies | Python environments, pip, Docker, blockchain setup |
-| **Cloud + Local** | 12 cloud providers as fallback through one API | Local only, no cloud integration |
-| **Claude Code** | Full Anthropic Messages API — native Claude Code backend | No Anthropic API support (Exo added basic support recently) |
-| **Security** | 47 sweep rounds (auth, SSRF, replay, caps, TOCTOU) | No documented security audits |
-
 ## How It Works
 
-SwarmLLM distributes transformer model layers across a pool of peer-to-peer nodes. Each participant contributes a fraction of the required compute, and the network orchestrates inference pipelines that chain these nodes together. The result: anyone can run state-of-the-art open-weight models by pooling resources with others.
+SwarmLLM distributes transformer model layers across a pool of peer-to-peer nodes. Each participant contributes a fraction of the required compute, and the network orchestrates inference pipelines that chain these nodes together.
 
 ```
 ┌──────────┐     ┌──────────┐     ┌──────────┐
@@ -84,13 +73,15 @@ SwarmLLM distributes transformer model layers across a pool of peer-to-peer node
 └──────────┘     └──────────┘     └──────────┘
 ```
 
-- **Private by default** — all P2P traffic is end-to-end encrypted (X25519 + ChaCha20-Poly1305). Relay nodes never see your data, unlike Petals or Exo where peers have no encryption layer
-- **No central server** — fully peer-to-peer with no single point of failure
-- **No accounts or subscriptions** — just a cryptographic identity (Ed25519 keypair)
-- **Zero configuration** — nodes find each other automatically via mDNS, peer cache, and peer exchange
-- **Single binary, zero dependencies** — one Rust binary (~33–50 MB depending on platform and features). No Python, no Docker, no runtime installs
-- **BitTorrent-inspired incentives** — contribute compute, earn priority access
-- **OpenAI + Anthropic + MCP compatible** — drop-in replacement for any tool that speaks OpenAI, Claude, or MCP
+**Key properties**
+
+- **Encrypted by default** — X25519 + ChaCha20-Poly1305 with forward secrecy on all P2P traffic. Relay nodes can't read your prompts or outputs. Optional boomerang pipeline ensures no remote node ever sees plaintext.
+- **No central server** — fully peer-to-peer, no single point of failure, no accounts.
+- **Zero configuration** — nodes find each other via mDNS, peer cache, invite codes, peer exchange, and Kademlia DHT.
+- **Single binary** — one Rust binary (~33–50 MB depending on platform and features). No Python, no Docker, no runtime installs.
+- **BitTorrent-inspired incentives** — contribute compute, earn priority access.
+- **OpenAI + Anthropic + MCP compatible** — drop-in replacement for any tool that speaks OpenAI, Claude, or MCP.
+- **Shard-only nodes** — a node never needs the full model to participate; shards download individually via byte-range requests.
 
 ## Quick Start
 
@@ -103,6 +94,7 @@ SwarmLLM distributes transformer model layers across a pool of peer-to-peer node
 Your browser opens to `localhost:8800`. The setup wizard auto-detects your hardware. Pick a model, download it, start chatting.
 
 Available binaries:
+
 | Platform | File | Notes |
 |----------|------|-------|
 | Linux x86_64 | `swarmllm-linux-x86_64.tar.gz` | CPU inference |
@@ -112,11 +104,11 @@ Available binaries:
 | Windows x86_64 (CPU) | `swarmllm-windows-x86_64-cpu.zip` | Raw binary: CPU-only fallback |
 | macOS Apple Silicon | `swarmllm-macos-aarch64.tar.gz` | CPU inference (Metal planned) |
 
-**Windows users**: just download `SwarmLLM-Setup.exe` and run it. The installer automatically detects your GPU (NVIDIA, AMD, or Intel) and picks the right binary — no CUDA Toolkit or special drivers needed beyond your normal graphics drivers.
+**Windows users**: download `SwarmLLM-Setup.exe` and run it. The installer detects your GPU (NVIDIA, AMD, or Intel) and picks the right binary — no CUDA Toolkit or special drivers beyond normal graphics drivers.
 
-See the full [Getting Started Guide](docs/book/src/getting-started.md) for platform-specific instructions.
+See the [Getting Started Guide](docs/book/src/getting-started.md) for platform-specific instructions.
 
-**Or use the API directly:**
+**Use the API directly:**
 
 ```bash
 # Get your API key from the dashboard or:
@@ -133,9 +125,7 @@ curl http://localhost:8800/v1/chat/completions \
   }'
 ```
 
-**Or use as a Claude Code backend:**
-
-Point Claude Code directly at your SwarmLLM node — it speaks the full Anthropic Messages API (`/v1/messages`) with tools, thinking, and streaming:
+**As a Claude Code backend** — full Anthropic Messages API with tools, thinking, and streaming:
 
 ```bash
 ANTHROPIC_BASE_URL="http://localhost:8800" \
@@ -143,11 +133,9 @@ ANTHROPIC_AUTH_TOKEN="YOUR_API_KEY" \
 claude --model "qwen2.5-coder-7b"
 ```
 
-Claude Code now has access to every model in the swarm — local GGUF, distributed across peers, or any of 12 cloud providers. Use `claude --model gpt-4o` to route through OpenAI, or `claude --model claude-sonnet-4-6` to proxy to Anthropic — all through your SwarmLLM node.
+Claude Code gets access to every model in the swarm — local GGUF, distributed across peers, or any of 12 cloud providers. Use `claude --model gpt-4o` to route through OpenAI, or `claude --model claude-sonnet-4-6` to proxy to Anthropic.
 
-**Or use with MCP (Claude Code / Cursor):**
-
-Add SwarmLLM as an MCP server for tool-based access. The `compare` tool sends the same prompt to multiple models simultaneously:
+**As an MCP server** — add to `~/.claude/settings.json`:
 
 ```json
 {
@@ -159,7 +147,7 @@ Add SwarmLLM as an MCP server for tool-based access. The `compare` tool sends th
 }
 ```
 
-MCP tools: `chat` (inference), `models` (list available), `compare` (multi-model side-by-side), `research` (fan out to multiple models), `batch_prompts` (batch processing), `delegate` (route to provider), `node_info` (node status).
+MCP tools: `chat`, `models`, `compare` (multi-model side-by-side), `research` (fan out to multiple models), `batch_prompts`, `delegate` (route to provider), `node_info`.
 
 ## Connecting to the Network
 
@@ -173,93 +161,110 @@ SwarmLLM uses a 5-layer discovery stack — no manual configuration needed:
 | **Peer Exchange** | Connected peers share their known peer lists with you | On each new connection |
 | **Kademlia DHT** | Distributed hash table for network-wide peer routing | Continuously |
 
-**First launch on a LAN:** Two nodes on the same network find each other in seconds — zero config.
+**First launch on a LAN:** two nodes on the same network find each other in seconds — zero config.
 
-**First launch alone:** The dashboard shows your invite code. Share it with a friend. Once you're connected to one peer, PEX and DHT discover the rest of the network automatically.
+**First launch alone:** the dashboard shows your invite code. Share it with a friend. Once connected to one peer, PEX and DHT discover the rest of the network automatically.
 
-**Returning user:** Cached peers reconnect in under a second. The invite code UI auto-hides once your node knows 20+ peers.
+**Returning user:** cached peers reconnect in under a second. The invite code UI auto-hides once your node knows 20+ peers.
 
 > For private networks, set `gossip_network_id = "my-private-net"` in config to isolate your nodes from the public network.
 
 ## Private Mode
 
-For maximum privacy, enable **Private Mode** to restrict all inference to your device pool. Your prompts never leave your machines.
+For maximum privacy, enable **Private Mode** to restrict all your outbound inference to your device pool. Your prompts never leave your machines. Toggle via the dashboard shield icon or the API; a confirmation dialog shows your pool's model coverage before activating.
 
 ```bash
-# Toggle via API
 curl -X PUT http://localhost:8800/api/pool/private-mode \
   -H "Authorization: Bearer $KEY" \
-  -H "Content-Type: application/json" \
   -d '{"enabled": true}'
-
-# Check what models your pool can serve
-curl http://localhost:8800/api/pool/coverage -H "Authorization: Bearer $KEY"
 ```
 
-Or click the **shield icon** in the dashboard header — a confirmation dialog shows your pool's model coverage before activating.
-
-**What's restricted:** Your outbound inference requests only route to pool members (and optionally LAN peers). Auto-manage scoring, pruning, downloads, and VRAM calculations all scope to your pool.
-
-**What's NOT restricted:** Your nodes still serve the swarm — processing inference for others, hosting shards, earning credits. Private mode is one-way: your data stays private, but you still contribute.
-
-**Three levels:**
 | Mode | Config | Behavior |
 |------|--------|----------|
 | **Pool Only** | `private_mode = true` | Inference restricted to pool members |
-| **Pool + LAN** | `private_mode = true, private_mode_allow_lan = true` (default) | Pool + mDNS-discovered LAN peers |
-| **Offline** | `private_mode = true, offline_mode = true` | Air-gapped: no internet, mDNS only |
+| **Pool + LAN** | `private_mode_allow_lan = true` (default) | Pool + mDNS-discovered LAN peers |
+| **Offline** | `offline_mode = true` | Air-gapped: no internet, mDNS only |
 
-**Shard Pinning:** Pool owners can assign specific models to specific devices — e.g., the GPU machine gets the 7B model, the laptop gets the 1B. Auto-manage downloads pinned shards with highest priority and never prunes them.
-
-**Coverage Dashboard:** Shows per-model availability in your pool with color-coded bars, missing shard counts, and estimated download sizes to fill gaps.
+Private mode is one-way: your data stays private, but your nodes still serve the swarm (processing inference for others, hosting shards, earning credits). **Shard Pinning** lets pool owners assign specific models to specific devices — auto-manage downloads pinned shards with highest priority and never prunes them. The **Coverage Dashboard** shows per-model availability with color-coded bars and estimated download sizes to fill gaps.
 
 ## Features
 
 ### Inference
-- **Distributed Inference** — Model layers sharded across nodes with automatic pipeline assembly, verified on multi-node LAN deployments with 5 models, crash recovery, auto-reconnect. Candle-based direct tensor computation with E2E encryption
-- **Speedup Stack (all default-on)** — **Remote-generate fast path** (1.93× decode on single-segment pipelines), **cross-request prefix cache** (29.4× wall-clock on prompt re-submission), **cross-node prefix KV sharing** (12.9× iter-1 TTFT on 7B CPU prompts when a peer has the same prefix cached, Round 6 bench), **continuous batching** (1.34–1.55× GPU throughput at batch 2–8), **Sarathi chunked prefill + batched fusion** (17–23× TTFT fairness at concurrency, 1.57× aggregate tok/s @ c=4), **Parallax scheduler** (shortest-path DP over observed per-layer latencies with cross-gossiped EMA). See [Performance & Inference Speedups](docs/book/src/operations/performance.md) for the full stack and knobs
-- **Flag-gated Speedups** — Distributed speculative decoding (`speculative_distributed`), SWIFT self-speculative (`swift_self_speculative`), DSD multi-segment speculation (`decentralized_spec_decoding`), Q8_0 activation compression (`activation_compression`, ~3.76× wire)
-- **Architecture-Aware** — Automatic detection of model architecture (Llama, Llama 4, Qwen2, Qwen 3.5, Gemma/2, Phi-3, Mistral, Starcoder2, DeepSeek-V2/V3, GLM-4) with correct RoPE, attention biases, EOS tokens, embedding scaling, logit softcapping, and context lengths from GGUF metadata
-- **DeepSeek MoE+MLA** — Full support for DeepSeek-V2/V3 models: Multi-head Latent Attention (low-rank Q/KV compression), Mixture-of-Experts (router-based top-k expert selection with shared experts), per-layer dense/MoE detection
-- **Qwen 3.5 Hybrid SSM** — Gated Delta Networks (3 SSM + 1 attention per 4 layers), recurrent state + KV-cache coexistence
-- **Cloud Providers** — Route to 12 cloud providers (OpenAI, Anthropic, DeepSeek, Mistral, Groq, NVIDIA NIM, Cerebras, SambaNova, Fireworks, Together, DeepInfra, Moonshot/Kimi). API keys can be set via the dashboard, config.toml, environment variables (`OPENAI_API_KEY`, etc.), or a `.env` file in your data directory
-- **OpenAI-Compatible API** — `POST /v1/chat/completions` with streaming, tool calling, logprobs, embeddings. Drop-in for Open WebUI, SillyTavern, LangChain, etc.
-- **Anthropic Messages API** — `POST /v1/messages` with full Claude Code compatibility: tools, tool_choice, thinking blocks, cache_control, streaming SSE. Use SwarmLLM as a drop-in Claude Code backend (`ANTHROPIC_BASE_URL=http://localhost:8800`). Non-Claude models auto-translated from Anthropic→OpenAI format and routed to cloud providers
-- **MCP Server** — Native Model Context Protocol server with 7 tools: `chat`, `models`, `compare` (multi-model side-by-side), `research` (fan out to multiple models), `batch_prompts`, `delegate` (route to specific provider), and `node_info`
-- **Prompt Cache Control** — Client-directed KV caching with Anthropic-compatible `cache_control` fields (ephemeral/persistent)
-- **Tensor Parallelism** — Automatic tensor-parallel splitting for LAN peers (auto-detected via RTT measurement ≤10ms), with ring-allreduce for 4+ ranks. Complements pipeline parallelism for WAN
-- **Vision & Adapters** — VLM support (LLaVA-v1.5-7B verified, Qwen2-VL) with chat UI image upload (camera button, paste, drag-drop), distributed mmproj encoding, and per-request LoRA adapter loading
-- **Speculative Decoding** — Draft model + rejection sampling for 2-3x local inference throughput (requires `llama` feature flag)
-- **Batched Inference** — True GPU batching: multiple concurrent requests stacked into batch tensors for parallel computation, filling pipeline bubbles in distributed inference
-- **Multi-turn KV-cache** — Session-aware cache reuse with pipeline affinity (multi-turn sessions reuse the same nodes for KV-cache locality), cross-request prefix caching, chunked prefill, flash attention (CPU + GPU), VRAM-aware LRU eviction
-- **On-Demand Loading** — Models with shards on disk auto-load into VRAM on first inference request, with LRU eviction to make room
+- **Distributed pipelines** — layers sharded across nodes with automatic pipeline assembly, crash recovery, and auto-reconnect. Candle-based direct tensor computation with E2E encryption.
+- **Speedup stack (default-on)** — remote-generate fast path (1.93× decode on single-segment pipelines), cross-request prefix cache (29.4× wall-clock on prompt re-submission), cross-node prefix-KV sharing (12.9× iter-1 TTFT on 7B CPU prompts when a peer has the same prefix cached), continuous batching (1.34–1.55× GPU throughput at batch 2–8), Sarathi chunked prefill + batched fusion (17–23× TTFT fairness at concurrency), Parallax scheduler (shortest-path DP over observed per-layer latencies). See [Performance & Inference Speedups](docs/book/src/operations/performance.md) for the full stack.
+- **Flag-gated speedups** — distributed speculative decoding (`speculative_distributed`), SWIFT self-speculative (`swift_self_speculative`), DSD multi-segment speculation (`decentralized_spec_decoding`), Q8_0 activation compression (`activation_compression`, ~3.76× wire).
+- **Tensor parallelism** — automatic TP splitting for LAN peers (RTT ≤10ms), ring-allreduce for 4+ ranks. Complements pipeline parallelism for WAN.
+- **Vision & LoRA** — VLM support (LLaVA-v1.5-7B verified, Qwen2-VL) with distributed mmproj encoding and per-request LoRA adapter loading.
+- **KV-cache reuse** — session-aware cache with pipeline affinity, cross-request prefix caching, chunked prefill, flash attention (CPU + GPU), VRAM-aware LRU eviction.
+- **On-demand loading** — models with shards on disk auto-load into VRAM on first request, with LRU eviction to make room.
+
+### APIs
+- **OpenAI-compatible** — `POST /v1/chat/completions` with streaming, tool calling, logprobs, embeddings.
+- **Anthropic Messages API** — `POST /v1/messages` with full Claude Code compatibility: tools, tool_choice, thinking blocks, `cache_control`, streaming SSE. Non-Claude models auto-translated from Anthropic→OpenAI format and routed to cloud providers.
+- **MCP server** — native Model Context Protocol with 7 tools: `chat`, `models`, `compare`, `research`, `batch_prompts`, `delegate`, `node_info`.
+- **Cloud fallback** — route to 12 cloud providers (OpenAI, Anthropic, DeepSeek, Mistral, Groq, NVIDIA NIM, Cerebras, SambaNova, Fireworks, Together, DeepInfra, Moonshot/Kimi). Keys via dashboard, config, env vars, or `.env` file.
+- **Prompt cache control** — client-directed KV caching with Anthropic-compatible `cache_control` fields.
 
 ### Networking & Security
-- **Zero-Config Discovery** — 5-layer stack: mDNS, persistent peer cache, shareable invite codes, peer exchange (PEX), Kademlia DHT
-- **P2P Networking** — libp2p with Kademlia DHT, GossipSub (6 topics), TCP+Yamux (primary) and QUIC transport, NAT traversal (auto-relay + DCUtR hole punching), connection limits, gossip replay protection
-- **End-to-End Encryption** — Three-tier encryption: pairwise sessions (X25519 + ChaCha20-Poly1305 with forward secrecy via key rotation), pipeline sealing (final segment encrypts output tokens for requester's X25519 key), and authenticated sealed gossip. All peer-to-peer traffic is encrypted in transit. Intermediate pipeline nodes process activation tensors but never see the plaintext output — see [Security Model](docs/book/src/architecture/security.md) for details. By comparison, Petals [explicitly warns](https://github.com/bigscience-workshop/petals/wiki/Security,-privacy,-and-AI-safety) that "peers can recover input data and model outputs" with no encryption layer, and Exo has no encryption at all
-- **Encrypted Pipeline** — Optional "boomerang" topology where the requesting node holds both the first shard (embedding) and last shard (token sampling), so **no remote node ever sees plaintext** — only intermediate activation tensors. Per-model toggle via API/dashboard or global config. Auto-enables local embedding privacy. Adds ~1 RTT per token for the return hop. Requires 3+ shard models. See [Encrypted Pipeline](docs/book/src/architecture/security.md#encrypted-pipeline)
-- **Security Hardened** — 47 sweep rounds of continuous auditing across authenticated P2P dispatch, signed DHT records, ephemeral key auth, path traversal, HF input validation, constant-time auth, CSP hardening, WebSocket Origin check, SSRF protection, resource caps, input limits, credit signature verification, replay protection, XSS fixes, and TOCTOU corrections
-- **Private Mode** — Restrict all inference to your device pool only. Your prompts never leave your machines. Toggle via dashboard shield icon or API. Includes model coverage dashboard showing which models your pool can serve, estimated download sizes for gaps, and shard disk usage. Your nodes still contribute to the swarm (serve others, earn credits) — only your outbound requests are restricted. Supports three scopes: pool-only, pool+LAN, and fully offline (air-gapped mDNS-only with no internet)
-- **Pool Shard Pinning** — Pool owners can assign specific models to specific devices (e.g. GPU machine gets the 7B model, laptop gets the 1B). Auto-manage respects pins: 1000x download priority on target, never prunes pinned shards
-- **Local Embedding Privacy** — requesting node performs token→embedding locally so remote first-segment nodes never see raw tokens
-- **Sybil Resistance** — Ed25519-signed balance reports, peer reputation scoring with trust decay, subnet clustering detection, leaderboard spoofing protection
-- **API Authentication** — Bearer token middleware with auto-generated keys, CORS lockdown, SSRF protection, Content-Security-Policy, IP-based rate limiting
+- **libp2p transport** — Kademlia DHT, GossipSub (6 topics), TCP+Yamux (primary) and QUIC, NAT traversal (auto-relay + DCUtR hole punching), connection limits, gossip replay protection.
+- **Three-tier encryption** — pairwise sessions (X25519 + ChaCha20-Poly1305 with forward secrecy via key rotation), pipeline sealing (final segment encrypts output tokens for the requester's key), authenticated sealed gossip. Intermediate pipeline nodes process activation tensors but never see plaintext output. See [Security Model](docs/book/src/architecture/security.md).
+- **Encrypted pipeline (optional)** — "boomerang" topology where the requesting node holds both first (embedding) and last (sampling) shards, so no remote node ever sees plaintext. Adds ~1 RTT per token for the return hop. Requires 3+ shard models.
+- **Local embedding privacy** — the requesting node performs token→embedding locally so remote first-segment nodes never see raw tokens.
+- **Sybil resistance** — Ed25519-signed balance reports, peer reputation with trust decay, subnet clustering detection, leaderboard spoofing protection.
+- **API auth** — Bearer token middleware with auto-generated keys, CORS lockdown, SSRF protection, CSP headers, IP-based rate limiting.
 
 ### Economy & Identity
-- **Credit System** — Earn credits by serving inference, forwarding activations, hosting shards (hourly), seeding data, and relaying traffic. Priority tiers enforced per-request (Platinum/Gold/Silver/Bronze) with concurrent limits. Anti-gaming protection, failure penalties, transaction replay prevention, credit escrow with automatic refund on failure
-- **Identity & Pools** — Cryptographic nicknames, leaderboard, multi-device credit pooling with dual-signature invitation protocol
-- **Model Trust** — Demand-driven trust system (Discovered→Pinned→DemandVerified→NetworkPopular) gates auto-manage to prevent trash model propagation
-- **Auto-Shard Management** — VRAM-aware automatic shard acquisition from HuggingFace (with resume, retry, and Range headers) and peers with popularity/rarity scoring. Smart pruning auto-removes over-replicated shards based on demand, resource pressure, and region diversity
+- **Credits** — earn by serving inference, forwarding activations, hosting shards, seeding data, and relaying. Priority tiers (Platinum/Gold/Silver/Bronze) enforced per-request with concurrent limits. Anti-gaming, failure penalties, transaction replay prevention, credit escrow with automatic refund on failure.
+- **Pools** — cryptographic nicknames, leaderboard, multi-device credit pooling with dual-signature invitation protocol.
+- **Model trust** — demand-driven states (Discovered→Pinned→DemandVerified→NetworkPopular) gate auto-manage to prevent trash model propagation.
+- **Auto-shard management** — VRAM-aware shard acquisition from HuggingFace (resume, retry, Range headers) and peers with popularity/rarity scoring. Smart pruning auto-removes over-replicated shards based on demand, resource pressure, and region diversity.
 
 ### Operations
-- **Built-in Web UI** — Swarm-first dashboard with chat interface (image upload for VLM), model browser, shard visualization, first-run setup wizard, network map, leaderboard, model compare page, mobile-responsive layout. 21 languages (i18n), light/dark/system theme
-- **Fault Tolerant** — JoinSet-based task supervisor with restart-on-crash for all 11 subsystems, hot-standby failover, shard replication, automatic rebalancing, atomic shard writes, download retry with backoff
-- **Observability** — Prometheus `/metrics` endpoint, readiness probe `/health/ready`, structured tracing with request ID correlation, database integrity checks
-- **Config Hot-Reload** — Change operational parameters without restarting via SIGHUP or API (`/api/admin/config/reload`)
-- **Auto-Updater** — Checks GitHub releases for new versions, downloads and replaces binary with restart prompt
-- **Packaging** — Homebrew formula, AUR PKGBUILD, deb/rpm packages, systemd service file, Docker (CPU + CUDA + docker-compose cluster)
-- **Multi-SDK Ecosystem** — Python (`pip install swarmllm-client`), JavaScript/TypeScript (zero-dep), LangChain (`ChatSwarmLLM`), LlamaIndex (`SwarmLLM`)
+- **Web UI** — swarm-first dashboard with chat (image upload for VLM), model browser, shard visualization, first-run setup wizard, network map, leaderboard, compare page, mobile-responsive. 21 languages, light/dark/system theme.
+- **Fault tolerance** — JoinSet-based task supervisor with restart-on-crash for all 11 subsystems, hot-standby failover, shard replication, automatic rebalancing, atomic shard writes.
+- **Observability** — Prometheus `/metrics`, readiness probe `/health/ready`, structured tracing with request-ID correlation, database integrity checks.
+- **Config hot-reload** — change operational parameters without restarting via SIGHUP or `/api/admin/config/reload`.
+- **Auto-updater** — checks GitHub releases, downloads and replaces binary with restart prompt.
+- **Packaging** — Homebrew, AUR, deb/rpm, systemd, Docker (CPU + CUDA + docker-compose cluster).
+- **SDKs** — Python (`pip install swarmllm-client`), JavaScript/TypeScript (zero-dep), LangChain (`ChatSwarmLLM`), LlamaIndex (`SwarmLLM`).
+
+## Supported Models
+
+12 transformer architectures via native candle inference with GGUF quantization:
+
+| Architecture | Examples | Special Features |
+|-------------|----------|-----------------|
+| **Llama** | Llama 2/3, CodeLlama, TinyLlama | Interleaved RoPE, GQA |
+| **Llama 4** | Llama 4 Scout (17B), Maverick (400B) | iRoPE (NoPE every 4th layer), MoE |
+| **Qwen2** | Qwen2.5-Coder-7B/32B | QKV biases, 32k context |
+| **Qwen 3.5** | Qwen3.5-3B/14B/32B (incl. MoE) | Hybrid SSM+attention (Gated Delta Networks) |
+| **DeepSeek-V2/V3** | DeepSeek-V2-Lite, DeepSeek-V3 (671B) | MLA attention + MoE FFN |
+| **GLM-4** | GLM-4-9B, GLM-4.7 MoE | Partial RoPE, extreme GQA (16:1) |
+| **Gemma / Gemma2** | Gemma 2B/7B, Gemma2 9B/27B | Gemma RmsNorm (+1), embedding scaling, logit softcapping |
+| **Phi-3** | Phi-3-mini, Phi-3-medium | Su/YaRN RoPE, fused QKV/FFN |
+| **Mistral** | Mistral 7B, Mistral Nemo | GQA, interleaved RoPE |
+| **Starcoder2** | Starcoder2 3B/7B/15B | Code-optimized, biases |
+| **Mixtral** | Mixtral 8x7B, 8x22B | MoE (via llama.cpp backend) |
+
+Quantization formats: Q4_K_M, Q5_K_M, Q6_K, Q8_0, FP16. Context length, RoPE type, attention biases, EOS tokens, and embedding scaling are all detected from GGUF metadata.
+
+## Benchmarks
+
+Single-node, `swarmllm bench`. Prompt: *"Explain the theory of relativity in simple terms."* 100 output tokens, average of 3 runs. **Hardware:** AMD Ryzen 7 5800H (8C/16T), NVIDIA RTX 3070 Laptop (8GB VRAM), WSL2.
+
+| Model | Params | Quant | GPU (RTX 3070) | CPU Only | GPU Speedup |
+|-------|--------|-------|----------------|----------|-------------|
+| TinyLlama 1.1B | 1.1B | Q4_K_M | **27.2 tok/s** | 4.2 tok/s | 6.5× |
+| Gemma-2 2B IT | 2.5B | Q4_K_M | **20.6 tok/s** | 3.5 tok/s | 5.9× |
+| Phi-3.5 Mini | 3.8B | Q4_K_M | **46.4 tok/s** | 1.8 tok/s | 25.8× |
+| Qwen2.5-Coder 7B | 7.6B | Q4_K_M | **29.0 tok/s** | 2.4 tok/s | 12.1× |
+
+**Cross-node prefix-KV sharing** (Round 6 bench, 2026-04-20): two daemons on loopback, Qwen2.5-Coder-7B Q4, 672-token prompt. When the second node fetches the first node's prefix-KV snapshot instead of re-prefilling locally, **iter-1 TTFT drops from 151.7 s → 11.8 s (12.9×)**. See [Performance chapter](docs/book/src/operations/performance.md#item-8--cross-node-prefix-kv-sharing) and [round6.md](docs/plans/benchmarks/round6.md).
+
+Run your own:
+```bash
+swarmllm bench --max-tokens 100 --iterations 5 --concurrency 4 --json
+```
 
 ## Architecture
 
@@ -271,51 +276,25 @@ Single Rust binary, three simultaneous functions:
 | LLM API Server | OpenAI + Anthropic + MCP inference endpoints | `localhost:8800/v1/*` |
 | Management UI | Dashboard, settings, model browser, chat | `localhost:8800/admin` |
 
-Internally, the daemon runs 11 async Tokio tasks communicating via channels:
+Internally the daemon runs 11 async Tokio tasks wired via mpsc channels, sharing `Arc<SharedState>` + DashMap:
 
 ```
 ┌──────────────────────────────────────────────────────────────────────┐
-│                           daemon/                                     │
+│                              daemon/                                 │
 │                                                                      │
 │  NetworkManager ──── InferenceRouter ──── CreditLedger               │
-│       │                    │                   │                      │
-│  MessageDispatcher    ApiServer          HealthMonitor                │
-│       │                    │                   │                      │
-│  PoolManager        AutoShardManager    ShardRebalancer               │
-│       │                    │                   │                      │
+│       │                    │                   │                     │
+│  MessageDispatcher    ApiServer          HealthMonitor               │
+│       │                    │                   │                     │
+│  PoolManager        AutoShardManager    ShardRebalancer              │
+│       │                    │                   │                     │
 │  AcquisitionManager    UpdateChecker                                 │
-│       └────────────────────┴───────────────────┘                     │
-│                                                                      │
-│              All connected via mpsc channels                         │
-│              Shared state via Arc<SharedState> + DashMap              │
 └──────────────────────────────────────────────────────────────────────┘
 ```
 
-### Codebase
+Cargo workspace with 3 crates (`swarmllm`, `swarmllm-types`, `swarmllm-frontend`). See [ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full subsystem deep-dive.
 
-Cargo workspace with 3 crates, 216 Rust source files (~92K lines), plus vanilla frontend (~19K lines HTML/CSS/JS, including 21-language translation files):
-
-| Crate | Path | Purpose |
-|-------|------|---------|
-| `swarmllm` | `/` (root) | Main binary — daemon, networking, inference, API, all subsystems |
-| `swarmllm-types` | `crates/swarmllm-types/` | Shared data types (75 types: NodeId, ModelManifest, SwarmMessage, etc.) |
-| `swarmllm-frontend` | `crates/swarmllm-frontend/` | Frontend asset serving (embedded in release, disk-based in dev mode) |
-
-Key source directories:
-- `src/daemon/` — startup, shared state, message dispatch, shard loading
-- `src/network/` — libp2p networking, peer discovery, transport, relay, peer cache, manager helpers
-- `src/inference/` — router, pipeline, scheduler, allreduce, KV-cache, speculative decoding, vision, chat templates, worker subprocess IPC
-  - `src/inference/split/` — model definition, GGUF loader, distributed executor, KV-cache, shard reader, RoPE, tests
-- `src/api/` — Axum HTTP server, OpenAI/Anthropic/MCP endpoints, admin API, WebSocket, SSE helpers, middleware
-- `src/model/` — manifests, shards, acquisition, auto-manage, HuggingFace integration, LoRA
-- `src/credit/` — ledger, transactions, priority tiers, anti-gaming, trust, escrow
-- `src/crypto/` — session encryption, pipeline sealing, gossip sealing, key rotation, provider key encryption
-- `src/pool/` — device pool management, crypto, credit forwarding, private-mode scope
-- `frontend/` — vanilla HTML/CSS/JS dashboard (15 component JS files, 4 core JS files, 4 standalone utilities, 12 HTML templates, 21 language translations with 972 keys each)
-
-775 tests (unit + integration + phase10_11 + yamux + 1 VLM E2E), all passing, clippy clean.
-
-## Node Tiers
+### Node Tiers
 
 | Tier | Requirements | Role |
 |------|-------------|------|
@@ -323,150 +302,55 @@ Key source directories:
 | Standard Node | Partial VRAM/RAM, moderate bandwidth | Holds layer shards, joins inference pipelines |
 | Light Node | Minimal resources | Primarily consumer, contributes bandwidth |
 
-## Credit System
+### Credit Priority
 
-| Action | Effect | Status |
-|--------|--------|--------|
-| Serve inference | +credits (per layer per token) | Active |
-| Forward activations | +credits (per layer processed) | Active |
-| Host model shards | +credits (per GB per hour) | Active |
-| Seed shard data | +credits (per GB transferred) | Active |
-| Relay traffic | +credits (per connection hour) | Active |
-| Submit inference request | -credits (per layer per token) | Active |
-| Distributed failure | -credits (penalty) | Active |
-
-Credits determine your priority tier:
+Credits determine your request priority. Everyone is served — Bronze just waits longer.
 
 - **Platinum** (top 10%) — near-instant responses
-- **Gold** (top 30%) — 1-3 second queue
-- **Silver** (positive balance) — 5-15 second queue
-- **Bronze** (zero/negative) — 30+ second queue, but never locked out
-
-## Supported Models
-
-SwarmLLM supports 11 transformer architectures via native candle inference with GGUF quantization:
-
-| Architecture | Examples | Special Features |
-|-------------|----------|-----------------|
-| **Llama** | Llama 2/3, CodeLlama, TinyLlama | Interleaved RoPE, GQA |
-| **Llama 4** | Llama 4 Scout (17B), Maverick (400B) | iRoPE (NoPE every 4th layer), MoE |
-| **Qwen2** | Qwen2.5-Coder-7B/32B | QKV biases, 32k context |
-| **Qwen 3.5** | Qwen3.5-3B/14B/32B | Hybrid SSM+attention (Gated Delta Networks) |
-| **DeepSeek-V2/V3** | DeepSeek-V2-Lite, DeepSeek-V3 (671B) | MLA attention + MoE FFN |
-| **GLM-4** | GLM-4-9B, GLM-4.7 MoE | Partial RoPE, extreme GQA (16:1) |
-| **Gemma/Gemma2** | Gemma 2B/7B, Gemma2 9B/27B | Gemma RmsNorm (+1), embedding scaling, logit softcapping |
-| **Phi-3** | Phi-3-mini, Phi-3-medium | Su/YaRN RoPE, fused QKV/FFN |
-| **Mistral** | Mistral 7B, Mistral Nemo | GQA, interleaved RoPE |
-| **Starcoder2** | Starcoder2 3B/7B/15B | Code-optimized, biases |
-| **Mixtral** | Mixtral 8x7B, 8x22B | MoE (via llama.cpp) |
-
-Quantization formats: Q4_K_M, Q5_K_M, Q6_K, Q8_0, FP16
-
-## Benchmarks
-
-Measured on a single node with `swarmllm bench`. Prompt: "Explain the theory of relativity in simple terms." 100 output tokens, average of 3 runs.
-
-**Hardware:** AMD Ryzen 7 5800H (8C/16T), NVIDIA RTX 3070 Laptop (8GB VRAM), WSL2
-
-| Model | Params | Quant | GPU (RTX 3070) | CPU Only | GPU Speedup |
-|-------|--------|-------|----------------|----------|-------------|
-| TinyLlama 1.1B | 1.1B | Q4_K_M | **27.2 tok/s** | 4.2 tok/s | 6.5x |
-| Gemma-2 2B IT | 2.5B | Q4_K_M | **20.6 tok/s** | 3.5 tok/s | 5.9x |
-| Phi-3.5 Mini | 3.8B | Q4_K_M | **46.4 tok/s** | 1.8 tok/s | 25.8x |
-| Qwen2.5-Coder 7B | 7.6B | Q4_K_M | **29.0 tok/s** | 2.4 tok/s | 12.1x |
-
-**Distributed (2-node LAN, TinyLlama):** ~29 tok/s with split inference across WSL2 laptop + Proxmox server.
-
-**Cross-node prefix KV sharing (Item 8, Round 6 bench, 2026-04-20):** two daemons on loopback, Qwen2.5-Coder-7B Q4, 672-token prompt. When the second node fetches the first node's prefix KV snapshot instead of re-prefilling locally, **iter-1 TTFT drops from 151.7 s → 11.8 s (12.9×)**. Details in [Performance chapter](docs/book/src/operations/performance.md#item-8--cross-node-prefix-kv-sharing) and [round6.md](docs/plans/benchmarks/round6.md).
-
-> GPU inference uses candle with CUDA (`--features candle-cuda`). CPU inference uses candle with native BLAS. All models Q4_K_M quantized, loaded from GGUF shard files. Phi-3.5 benefits most from GPU due to its fused QKV/FFN architecture.
-
-Run your own benchmarks:
-```bash
-swarmllm bench --max-tokens 100 --iterations 5 --concurrency 4 --json
-```
+- **Gold** (top 30%) — 1–3 second queue
+- **Silver** (positive balance) — 5–15 second queue
+- **Bronze** (zero/negative) — 30+ second queue, never locked out
 
 ## Installation
 
-### Pre-built Binaries (Recommended)
+### Pre-built Binaries (recommended)
 
-Download from [GitHub Releases](https://github.com/enapt/SwarmLLM/releases) — available for Linux (CPU and CUDA) and Windows. Extract and run `./swarmllm run`.
+Download from [GitHub Releases](https://github.com/enapt/SwarmLLM/releases) for Linux (CPU + CUDA), Windows, and macOS. Extract and run `./swarmllm run`.
 
 ### Package Managers
 
 ```bash
-# Homebrew (macOS/Linux)
-brew tap enapt/swarmllm
-brew install swarmllm
-
-# AUR (Arch Linux)
-yay -S swarmllm
-
-# Debian/Ubuntu
-sudo dpkg -i swarmllm_0.1.0_amd64.deb
-
-# RPM (Fedora/RHEL)
-sudo rpm -i swarmllm-0.1.0-1.x86_64.rpm
+brew tap enapt/swarmllm && brew install swarmllm       # Homebrew (macOS/Linux)
+yay -S swarmllm                                        # AUR (Arch Linux)
+sudo dpkg -i swarmllm_0.1.0_amd64.deb                  # Debian/Ubuntu
+sudo rpm -i swarmllm-0.1.0-1.x86_64.rpm                # Fedora/RHEL
 ```
 
 ### Docker
 
 ```bash
-# Pre-built images (recommended)
 docker run -p 8800:8800 -v swarmllm-data:/data ghcr.io/enapt/swarmllm:latest
 
 # GPU (requires NVIDIA Container Toolkit)
 docker run --gpus all -p 8800:8800 -v swarmllm-data:/data ghcr.io/enapt/swarmllm:latest-cuda
 
-# Or use docker compose (see docker-compose.yml)
+# docker-compose and 3-node dev cluster also provided
 cp .env.example .env && docker compose up -d
-
-# 3-node dev cluster
-docker compose -f docker-compose.dev.yml up
 ```
 
-### Cargo Install
+### From Source
 
 ```bash
 # Requires Rust 1.80+
-cargo install --git https://github.com/enapt/SwarmLLM.git
-swarmllm run
+git clone https://github.com/enapt/SwarmLLM.git && cd SwarmLLM
+
+cargo build --release                             # CPU (candle)
+cargo build --release --features candle-cuda      # NVIDIA GPU
+cargo build --release --features windows-gpu      # Windows: Vulkan + CUDA static
+cargo build --release --features llama-vulkan     # Cross-platform Vulkan (NVIDIA/AMD/Intel)
 ```
 
-### Building from Source
-
-```bash
-git clone https://github.com/enapt/SwarmLLM.git
-cd SwarmLLM
-
-# CPU-only build (candle inference engine)
-cargo build --release
-
-# With CUDA GPU acceleration (candle + flash attention)
-cargo build --release --features candle-cuda
-
-# With llama.cpp backend (optional, requires cmake + libclang)
-cargo build --release --features llama
-
-# Full CUDA build (candle + llama.cpp + flash attention)
-cargo build --release --features cuda
-
-# Windows GPU build: llama.cpp via Vulkan (all vendors) + candle CUDA static runtime
-# Users need only standard GPU drivers — no CUDA Toolkit installation required
-cargo build --release --features windows-gpu
-
-# llama.cpp with Vulkan only (cross-platform local inference on NVIDIA/AMD/Intel)
-cargo build --release --features llama-vulkan
-
-# Route Claude requests through your local `claude` CLI (Pro/Max/Team/Enterprise)
-cargo build --release --features claude-subscription
-
-# Dev build — serves frontend from disk (no recompile on CSS/JS/HTML changes)
-cargo build --no-default-features --features dev,claude-subscription
-
-# Apple Silicon (CPU — Metal via llama.cpp planned)
-cargo build --release
-```
+Full feature-flag matrix in [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## CLI
 
@@ -483,20 +367,13 @@ Commands:
   test-split  Test split inference locally (single-node diagnostic)
   update      Check for and download updates
   version     Print version information
-
-Options:
-  -c, --config <PATH>       Config file path
-  -p, --port <PORT>         Listen port [default: 8800]
-  -d, --data-dir <PATH>     Data directory [default: ~/.local/share/swarmllm]
-  -m, --model <PATH>        Path to a GGUF model file to load
-      --gpu-layers <N>      Number of layers to offload to GPU (0 = CPU only)
-      --bootstrap <ADDR>    Bootstrap peer multiaddr
-  -v, --verbose             Increase log verbosity (-v, -vv, -vvv)
 ```
+
+Run `swarmllm --help` for the full flag list.
 
 ## Configuration
 
-Config lives at `~/.local/share/swarmllm/config.toml` (Linux), `~/Library/Application Support/swarmllm/config.toml` (macOS), or `%APPDATA%\swarmllm\config.toml` (Windows). All values can be overridden with environment variables using the `SWARMLLM_` prefix:
+Config lives at `~/.local/share/swarmllm/config.toml` (Linux), `~/Library/Application Support/swarmllm/config.toml` (macOS), or `%APPDATA%\swarmllm\config.toml` (Windows). Every value can be overridden with a `SWARMLLM_`-prefixed environment variable:
 
 ```bash
 SWARMLLM_NODE_LISTEN_PORT=9000
@@ -504,186 +381,144 @@ SWARMLLM_RESOURCES_MAX_GPU_VRAM_MB=6000
 SWARMLLM_LOGGING_LEVEL=debug
 ```
 
-### .env File Support
-
-Provider API keys can be loaded from a `.env` file placed in your data directory or the current working directory:
+Provider API keys are also loaded from a `.env` file in the data directory:
 
 ```bash
 # ~/.local/share/swarmllm/.env
 OPENAI_API_KEY=sk-...
 ANTHROPIC_API_KEY=sk-ant-...
 DEEPSEEK_API_KEY=sk-...
-NVIDIA_NIM_API_KEY=nvapi-...
 ```
 
-The `.env` file is loaded at startup and does not override existing environment variables or keys already configured via the dashboard/database.
-
-### Key Config Sections
+### Key Sections
 
 | Section | Key Settings |
 |---------|-------------|
-| `[node]` | `listen_port`, `contribution` (minimal/moderate/maximum), `data_dir` |
+| `[node]` | `listen_port`, `contribution`, `data_dir` |
 | `[resources]` | `max_gpu_vram_mb`, `max_ram_mb`, `max_disk_mb`, `max_bandwidth_mbps` |
-| `[resources.schedule]` | `enabled`, `reduced_hours_start/end`, `prune_aggressiveness` |
-| `[network]` | `bootstrap_peers`, `enable_mdns`, `enable_encryption`, `gossip_network_id`, `enable_relay`, `max_peers`, `tensor_compression` |
-| `[inference]` | `model_path`, `gpu_layers`, `session_timeout_seconds`, `max_batch_size`, `speculative_decoding`, `tp_max_latency_ms`, `local_embedding_privacy`, `encrypted_pipeline` |
-| `[api]` | `api_key`, `rate_limit_rpm` |
-| `[pool]` | `max_pool_size`, `invitation_ttl_hours`, `rate_limit_per_hour`, `private_mode`, `private_mode_allow_lan`, `offline_mode` |
-| `[auto_manage]` | `enabled`, `max_storage_mb`, `interval_minutes`, `max_concurrent_downloads`, `prune_enabled`, `min_replicas` |
-| `[providers]` | API keys for cloud providers (also via `OPENAI_API_KEY` env var / `.env` file), custom providers |
-| `[logging]` | `level`, `format` (pretty/json), `file` |
-| `[ui]` | `open_browser_on_start`, `theme` |
+| `[network]` | `bootstrap_peers`, `enable_mdns`, `gossip_network_id`, `enable_relay`, `max_peers` |
+| `[inference]` | `gpu_layers`, `session_timeout_seconds`, `max_batch_size`, `tp_max_latency_ms`, `encrypted_pipeline` |
+| `[pool]` | `private_mode`, `private_mode_allow_lan`, `offline_mode`, `invitation_ttl_hours` |
+| `[auto_manage]` | `enabled`, `max_storage_mb`, `prune_enabled`, `min_replicas` |
+| `[providers]` | API keys for 12 cloud providers, custom providers |
 | `[updates]` | `auto_update` (disabled/stable/all), `check_interval_hours` |
-| `[identity]` | `region` (country code for network map) |
 
 See the [Configuration Reference](docs/book/src/configuration/reference.md) for the full list.
 
 ## API Endpoints
 
-### Inference (Bearer auth required)
+### Inference (Bearer auth)
+
 | Method | Path | Description |
 |--------|------|-------------|
-| POST | `/v1/chat/completions` | OpenAI-compatible chat completions (streaming + non-streaming) |
+| POST | `/v1/chat/completions` | OpenAI-compatible chat (streaming + non-streaming) |
 | POST | `/v1/messages` | Anthropic Messages API (full Claude Code compatibility) |
 | POST | `/v1/embeddings` | Text embeddings |
 | GET | `/v1/models` | List available models |
 | GET | `/v1/providers` | List configured cloud providers |
-| GET | `/v1/status` | Node status |
-
-### MCP Server
-| Method | Path | Description |
-|--------|------|-------------|
-| POST | `/mcp` | JSON-RPC 2.0 MCP endpoint (7 tools: chat, models, compare, research, batch_prompts, delegate, node_info) |
+| POST | `/mcp` | MCP JSON-RPC endpoint (7 tools) |
 
 ### Admin (CORS-protected)
+
 | Method | Path | Description |
 |--------|------|-------------|
-| GET/PUT | `/api/admin/config` | Configuration read/update |
+| GET/PUT | `/api/admin/config` | Read / update config |
 | POST | `/api/admin/config/reload` | Hot-reload config |
 | GET | `/api/admin/stats` | Node statistics + hardware info |
 | GET | `/api/admin/models` | Model list with shard status |
 | GET | `/api/admin/peers` | Connected peers with latency/trust |
 | GET | `/api/admin/credits` | Credit balance and tier info |
 | GET | `/api/admin/ws` | WebSocket for live updates |
-| GET | `/api/admin/hf/search` | Search HuggingFace for GGUF models |
-| POST | `/api/admin/hf/download-shards` | Download specific shards |
-| GET/PUT | `/api/admin/models/:id/encrypted-pipeline` | Per-model encrypted pipeline toggle |
-| POST | `/api/admin/shutdown` | Graceful shutdown (localhost only) |
+| POST | `/api/admin/hf/download-shards` | Download specific shards from HuggingFace |
 
-### Device Pools & Private Mode
+### Pools & Private Mode
+
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/api/pool/state` | Pool membership, members, stats, private_mode status |
-| POST | `/api/pool/create` | Create a device pool |
-| POST | `/api/pool/join` | Join pool with invite code |
-| GET/PUT | `/api/pool/private-mode` | Toggle private mode (pool-only inference) |
-| GET | `/api/pool/coverage` | Per-model pool coverage with shard gaps + disk usage |
-| GET | `/api/pool/pins` | List shard pins |
-| POST/DELETE | `/api/pool/pin` | Pin/unpin model to specific device |
-
-Plus ~50 more admin routes for downloads, providers, adapters, identity, pools, scheduling, and more. See [ARCHITECTURE.md](docs/ARCHITECTURE.md) for the complete list.
+| GET | `/api/pool/state` | Pool membership, stats, private_mode status |
+| POST | `/api/pool/create` \| `/api/pool/join` | Create or join a device pool |
+| GET/PUT | `/api/pool/private-mode` | Toggle private mode |
+| GET | `/api/pool/coverage` | Per-model pool coverage with shard gaps |
+| GET/POST/DELETE | `/api/pool/pins` | Manage shard-to-device pins |
 
 ### Monitoring
+
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/metrics` | Prometheus/OpenMetrics endpoint |
+| GET | `/metrics` | Prometheus / OpenMetrics |
 | GET | `/health` | Health check |
 | GET | `/health/ready` | Readiness probe with subsystem status |
+
+Plus ~50 more admin routes for downloads, providers, adapters, identity, and scheduling. See [ARCHITECTURE.md](docs/ARCHITECTURE.md#http-api-routes) for the complete list.
 
 ## Platform Support
 
 | Platform | GPU Support | Status |
 |----------|------------|--------|
-| Linux x86_64 | CUDA (candle + llama.cpp) | Primary target, release binaries available |
+| Linux x86_64 | CUDA (candle + llama.cpp) | Primary target, release binaries |
 | Windows x86_64 | **Vulkan** (NVIDIA/AMD/Intel local) + **CUDA static** (NVIDIA distributed) | Installer — no CUDA Toolkit needed |
-| macOS aarch64 | CPU only (Metal via llama.cpp planned) | Binary available (beta) |
+| macOS aarch64 | CPU only (Metal planned) | Binary available (beta) |
 | macOS x86_64 | CPU only | Best-effort |
 | Linux aarch64 | CPU only | Best-effort |
 
-**Windows GPU detection** is automatic — the installer bundles GPU and CPU binaries and a launcher that picks the right one at startup:
-- **NVIDIA GPU**: GPU-accelerated local inference (Vulkan) + GPU-accelerated distributed inference (CUDA, static runtime)
-- **AMD / Intel GPU**: GPU-accelerated local inference (Vulkan), CPU distributed inference
-- **No GPU**: CPU for everything (still participates fully in the network)
-
-## Tech Stack
-
-| Layer | Technology |
-|-------|-----------|
-| Language | Rust (2021 edition), ~92K lines across 216 source files |
-| Async Runtime | Tokio (multi-threaded) |
-| Networking | libp2p 0.55 (TCP+Yamux + QUIC + mDNS + Kademlia + GossipSub) |
-| Serialization | serde_json (API), binary with type-tag (tensors), zstd compression |
-| HTTP Server | Axum 0.7 with WebSocket |
-| Inference | candle (split/distributed, CUDA, flash attention), llama.cpp (single-node, optional) |
-| Database | redb v3 (embedded, ACID) |
-| Cryptography | Ed25519 (identity), X25519 + ChaCha20-Poly1305 (E2E), BLAKE3 (integrity) |
-| Monitoring | Prometheus + Grafana (dashboards included) |
-| Frontend | Vanilla HTML/CSS/JS, 21 languages (976 i18n keys), light/dark/system theme, ~19K lines incl. translations |
-| SDK | Python, JS/TS, LangChain, LlamaIndex |
+**Windows GPU detection** is automatic — the installer bundles GPU and CPU binaries and a launcher that picks the right one at startup. NVIDIA gets GPU local + GPU distributed, AMD/Intel get GPU local + CPU distributed, no-GPU machines run everything on CPU.
 
 ## How SwarmLLM Compares
 
 | Feature | SwarmLLM | Petals | Exo | Bittensor |
 |---------|----------|--------|-----|-----------|
-| **Language** | Rust (single binary, ~33–50 MB) | Python | Python | Python + Substrate |
+| **Language** | Rust (single binary) | Python | Python | Python + Substrate |
 | **Install** | Download & run | pip install | pip/source/macOS app | pip + blockchain setup |
-| **Scale** | LAN + WAN + Tailscale/WireGuard (zero config) | Internet (volunteer) | LAN + Tailscale (manual) | Internet (blockchain) |
-| **E2E Encryption** | **X25519 + ChaCha20 + forward secrecy** | **None** — peers can see your prompts | **None** | Minimal (blockchain-level) |
-| **Privacy** | **Encrypted by default** + **Private Mode** (pool-only inference, offline LAN). Optional encrypted pipeline (boomerang topology). Shard pinning per device | Unencrypted — Petals' own wiki states peers can read your prompts and outputs | No encryption between nodes | Subnet-dependent |
-| **Security Audit** | **47 continuous sweep rounds** (auth, SSRF, replay, caps, TOCTOU) | None documented | None documented | PoA consensus (centralized) |
+| **Scale** | LAN + WAN + Tailscale (zero config) | Internet (volunteer) | LAN + Tailscale (manual) | Internet (blockchain) |
+| **E2E Encryption** | **X25519 + ChaCha20 + forward secrecy** | **None** — peers can see prompts | **None** | Minimal (blockchain-level) |
+| **Privacy** | Encrypted by default + Private Mode + encrypted pipeline | Unencrypted ([per Petals wiki](https://github.com/bigscience-workshop/petals/wiki/Security,-privacy,-and-AI-safety)) | No encryption between nodes | Subnet-dependent |
 | **Incentives** | Credit tiers (no token, no blockchain) | Name on monitor page | None | TAO token (real money) |
 | **Parallelism** | Pipeline + tensor (auto-detected LAN) | Pipeline | Tensor + pipeline | Subnet routing |
-| **Model Architectures** | **11** (DeepSeek MoE+MLA, GLM-4, Llama 4, Qwen 3.5 SSM) | ~5 (Llama, Mixtral, Falcon, BLOOM) | ~5 (Llama, Mistral, Qwen, DeepSeek, LLaVA) | Any (subnet-defined) |
-| **Shard-Only Mode** | **Yes** (no full model download needed) | No (loads full blocks) | No | N/A |
-| **Cloud Fallback** | **12 providers** (OpenAI, Anthropic, DeepSeek, etc.) | No | No | No |
+| **Architectures** | **12** (DeepSeek MoE+MLA, GLM-4, Llama 4, Qwen 3.5 SSM) | ~5 (Llama, Mixtral, Falcon, BLOOM) | ~5 (Llama, Mistral, Qwen, DeepSeek, LLaVA) | Any (subnet-defined) |
+| **Shard-only** | **Yes** (no full model download) | No (loads full blocks) | No | N/A |
+| **Cloud Fallback** | **12 providers** | No | No | No |
 | **VLM + LoRA** | Both (LLaVA verified + per-request LoRA) | LoRA only | VLM experimental | Subnet-specific |
-| **API Compatibility** | **OpenAI + Anthropic + MCP** (full Claude Code) | PyTorch/Transformers | OpenAI + Claude + Ollama | Subnet-defined |
-| **Web UI** | Full dashboard, chat, model browser, setup wizard | Basic chatbot | Basic chat UI | No built-in UI |
+| **API** | **OpenAI + Anthropic + MCP** (full Claude Code) | PyTorch/Transformers | OpenAI + Claude + Ollama | Subnet-defined |
+| **Web UI** | Full dashboard + chat + setup wizard | Basic chatbot | Basic chat UI | No built-in UI |
 | **SDKs** | Python + JS/TS + LangChain + LlamaIndex | Python native | — | Python |
-| **i18n** | **21 languages**, light/dark theme | English | English | English |
-| **Auto-Update** | Built-in self-update | No | No | No |
+| **i18n** | **21 languages** | English | English | English |
 | **Maintained** | **Active** (2026) | Last release Sep 2023 | **Active** (2025) | **Active** (2025) |
-
-**Why SwarmLLM?** If privacy matters to you, SwarmLLM is the only option with real E2E encryption — all peer-to-peer traffic is encrypted with forward secrecy, pipeline sealing ensures output tokens are encrypted for the requester, and the optional encrypted pipeline mode guarantees no remote node ever sees plaintext (prompt or response). It's also the only one that works as a drop-in backend for Claude Code, supports 12 cloud providers as fallback, and runs as a single binary with zero dependencies.
 
 ## Documentation
 
-- **[Getting Started](docs/book/src/getting-started.md)** — Download, install, and start chatting in minutes
-- **[Configuration Reference](docs/book/src/configuration/reference.md)** — All config options with defaults
-- **[Configuration Guide](docs/book/src/configuration.md)** — Environment variables, CLI flags, `.env` files
-- **[Performance & Inference Speedups](docs/book/src/operations/performance.md)** — Items 3/4/5/7/8/16 default-on stack + flag-gated options with measured wins
-- **[Benchmarking](docs/book/src/operations/benchmarking.md)** — `swarmllm bench`, cross-node KV-sharing recipes, speedup-arc reproducibility
-- **[API Reference](docs/ARCHITECTURE.md#http-api-routes)** — Complete HTTP API route documentation
-- **[Architecture](docs/ARCHITECTURE.md)** — Deep dive into subsystems, protocols, and security model
-- **[Tailscale & WAN Access](docs/book/src/operations/tailscale-wan.md)** — Access your node remotely via Tailscale, WireGuard, or any VPN
-- **[Troubleshooting](docs/book/src/troubleshooting.md)** — Common issues and solutions
+- **[Getting Started](docs/book/src/getting-started.md)** — download, install, start chatting
+- **[Configuration Reference](docs/book/src/configuration/reference.md)** — all config options with defaults
+- **[Performance & Inference Speedups](docs/book/src/operations/performance.md)** — the default-on speedup stack and flag-gated options
+- **[Benchmarking](docs/book/src/operations/benchmarking.md)** — `swarmllm bench`, cross-node KV-sharing recipes
+- **[Architecture](docs/ARCHITECTURE.md)** — subsystems, protocols, security model
+- **[Tailscale & WAN Access](docs/book/src/operations/tailscale-wan.md)** — remote access via Tailscale, WireGuard, or any VPN
+- **[Troubleshooting](docs/book/src/troubleshooting.md)** — common issues and solutions
 - **[Diagnostics Guide](docs/DIAGNOSTICS.md)** — DIAG: log instrumentation for debugging
-- **[Security Policy](SECURITY.md)** — Responsible disclosure
+- **[Security Policy](SECURITY.md)** — responsible disclosure
 
 See the full [mdBook documentation](docs/book/) for detailed guides on networking, inference, credits, security, deployment, and monitoring.
 
 ## Development Transparency
 
-SwarmLLM was developed collaboratively between a human developer and Claude (Anthropic's AI). The entire codebase — Rust backend, JavaScript frontend, P2P networking, distributed inference pipeline, credit system, security hardening, and documentation — was written by Claude Code across 20+ build phases. The human developer provided architecture direction, testing, and review, but zero lines of code were manually written.
+SwarmLLM was developed collaboratively between a human developer and Claude (Anthropic's AI). The entire codebase — Rust backend, JavaScript frontend, P2P networking, distributed inference pipeline, credit system, security hardening, and documentation — was written by Claude Code. The human developer provided architecture direction, testing, and review, but zero lines of code were manually written.
 
-This is an honest disclosure. The project has been through rigorous quality assurance — 775 passing tests, 47 rounds of parallel multi-agent code sweeps, continuous security auditing, 20 build phases, a full distributed-inference speedup arc (with Round 6 benchmarks landing a measured 12.9× iter-1 TTFT win), and multi-node distributed inference tested on real networks. Every commit passes `cargo fmt`, `cargo clippy -- -D warnings`, and the full test suite before push.
+This is an honest disclosure. The project has been through rigorous QA: 765 passing tests, continuous multi-agent code sweeps, security auditing, and multi-node distributed inference tested on real networks. Every commit passes `cargo fmt`, `cargo clippy -- -D warnings`, and the full test suite before push.
 
 We believe AI-assisted development should be transparent. Judge the code on its technical merit — contributions, scrutiny, and feedback are all welcome.
 
 ## Contributing
 
-Contributions are welcome! Whether it's bug reports, feature ideas, code, or documentation — all help is appreciated.
+Contributions are welcome — bug reports, feature ideas, code, and documentation all help.
 
-- **[Contributing Guide](CONTRIBUTING.md)** — Build from source, run tests, submit PRs
-- **[Open Issues](https://github.com/enapt/SwarmLLM/issues)** — Browse or file bug reports and feature requests
-- **Security vulnerabilities** — See [SECURITY.md](SECURITY.md) for responsible disclosure
+- **[Contributing Guide](CONTRIBUTING.md)** — build from source, run tests, submit PRs
+- **[Open Issues](https://github.com/enapt/SwarmLLM/issues)** — browse or file bug reports and feature requests
+- **Security vulnerabilities** — see [SECURITY.md](SECURITY.md) for responsible disclosure
 
 ```bash
-# Quick dev setup
 git clone https://github.com/enapt/SwarmLLM.git && cd SwarmLLM
-cargo test                # 775 tests
-cargo clippy --all-targets -- -D warnings  # Zero warnings policy
-cargo run -- run          # Start a node
+cargo test
+cargo clippy --all-targets -- -D warnings
+cargo run -- run
 ```
 
 ## License
