@@ -126,7 +126,12 @@ jobs:
       - name: Build release binary
         run: cargo build --release ${{ matrix.features }}
         env:
-          CUDA_COMPUTE_CAP: ${{ matrix.cuda_linux && '80' || '' }}
+          # Compute capability passed to candle-kernels / bindgen_cuda for
+          # nvcc `-arch=compute_NN`. Generated PTX is JIT-compiled at runtime
+          # to the user's actual GPU, so 80 (Ampere) is a sensible minimum
+          # targeting RTX 3060+, A100, H100, etc. Set for any CUDA build —
+          # leaving it empty panics bindgen_cuda with `ParseIntError { kind: Empty }`.
+          CUDA_COMPUTE_CAP: ${{ (matrix.cuda_linux || matrix.cuda_windows) && '80' || '' }}
 
       - name: Build launcher (Windows)
         if: matrix.windows

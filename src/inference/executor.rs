@@ -453,7 +453,7 @@ impl ModelExecutor {
         prompt: &str,
         params: &SamplingParams,
         gamma: u32,
-        mut callback: F,
+        callback: F,
     ) -> Result<
         (
             GenerationResult,
@@ -486,7 +486,9 @@ impl ModelExecutor {
 
         #[cfg(not(feature = "llama"))]
         {
-            // Stub mode: fall back to standard generation, no speculative benefit
+            // Stub mode: fall back to standard generation, no speculative benefit.
+            // Shadow binding adds `mut` for generate_stream's &mut callback borrow.
+            let mut callback = callback;
             let mut state = crate::inference::speculative::SpeculativeDraftState::new(
                 crate::types::ModelId(draft.model_name.clone()),
                 crate::types::ModelId(self.model_name.clone()),

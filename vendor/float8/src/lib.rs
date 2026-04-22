@@ -1571,12 +1571,32 @@ macro_rules! from_t {
 from_t!(F8E4M3);
 from_t!(F8E5M2);
 
-#[cfg(any(feature = "cuda-dynamic", feature = "cuda-static"))]
+// SwarmLLM patch: was `any(feature = "cuda-dynamic", feature = "cuda-static")`.
+// Since our `cuda` feature now pulls `dep:cudarc` directly without forcing
+// a linking mode, gate these impls on `feature = "cuda"` so they're active
+// for any downstream linking choice (dynamic-loading / dynamic-linking /
+// static-linking).
+#[cfg(feature = "cuda")]
 unsafe impl cudarc::driver::DeviceRepr for F8E4M3 {}
-#[cfg(any(feature = "cuda-dynamic", feature = "cuda-static"))]
+// SwarmLLM patch: was `any(feature = "cuda-dynamic", feature = "cuda-static")`.
+// Since our `cuda` feature now pulls `dep:cudarc` directly without forcing
+// a linking mode, gate these impls on `feature = "cuda"` so they're active
+// for any downstream linking choice (dynamic-loading / dynamic-linking /
+// static-linking).
+#[cfg(feature = "cuda")]
 unsafe impl cudarc::driver::ValidAsZeroBits for F8E4M3 {}
 
-#[cfg(any(feature = "cuda-dynamic", feature = "cuda-static"))]
+// SwarmLLM patch: was `any(feature = "cuda-dynamic", feature = "cuda-static")`.
+// Since our `cuda` feature now pulls `dep:cudarc` directly without forcing
+// a linking mode, gate these impls on `feature = "cuda"` so they're active
+// for any downstream linking choice (dynamic-loading / dynamic-linking /
+// static-linking).
+#[cfg(feature = "cuda")]
 unsafe impl cudarc::driver::safe::DeviceRepr for F8E5M2 {}
-#[cfg(any(feature = "cuda-dynamic", feature = "cuda-static"))]
+// SwarmLLM patch: was `any(feature = "cuda-dynamic", feature = "cuda-static")`.
+// Since our `cuda` feature now pulls `dep:cudarc` directly without forcing
+// a linking mode, gate these impls on `feature = "cuda"` so they're active
+// for any downstream linking choice (dynamic-loading / dynamic-linking /
+// static-linking).
+#[cfg(feature = "cuda")]
 unsafe impl cudarc::driver::ValidAsZeroBits for F8E5M2 {}
