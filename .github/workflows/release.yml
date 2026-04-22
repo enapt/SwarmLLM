@@ -15,13 +15,48 @@ env:
   # in deps (e.g. `ring` 0.17.14 on aarch64-apple-darwin). Release binaries
   # must be portable regardless, so always compile to the default target.
   RUSTFLAGS: ""
-  # Opt in to Node.js 24 for JS-based actions (checkout, upload-artifact, ...)
-  # ahead of the June 2026 deprecation cutoff. Silences the Node 20 warnings.
+  # Opt in to Node.js 24 for JS-based actions (checkout, softprops/gh-release,
+  # ...) ahead of the June 2026 deprecation cutoff. Silences Node 20 warnings.
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
 jobs:
+  # Pre-create the draft release so each build job can attach assets to it
+  # directly via `gh release upload`, bypassing actions/upload-artifact
+  # (which shares the Actions storage quota). Release assets are stored
+  # against the repo's release storage quota instead, which is not the
+  # same pool that artifact storage saturates.
+  create-release:
+    name: Create draft release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create or reuse draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euxo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          # Build jobs upload with --clobber, so an existing release is fine.
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG exists — build jobs will append/clobber assets"
+          else
+            # Mark prerelease automatically for alpha/beta/rc tags.
+            if echo "$TAG" | grep -qiE '(alpha|beta|rc)'; then
+              PRERELEASE=--prerelease
+            else
+              PRERELEASE=
+            fi
+            gh release create "$TAG" \
+              --draft \
+              --title "$TAG" \
+              --generate-notes \
+              $PRERELEASE
+          fi
+
   build:
     name: Build ${{ matrix.name }}
+    needs: create-release
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -61,7 +96,7 @@ jobs:
 
           # Windows GPU: llama.cpp Vulkan (all GPU vendors, local inference) +
           #              candle CUDA via dynamic-loading (NVIDIA, split inference).
-          # The installer bundles NVIDIA CUDA redist DLLs next to swarmllm-gpu.exe
+          # The archive bundles NVIDIA CUDA redist DLLs next to swarmllm-gpu.exe
           # so end users need only the NVIDIA display driver (no CUDA Toolkit).
           - name: Windows x86_64 GPU
             runner: windows-2022
@@ -112,7 +147,7 @@ jobs:
           method: 'network'
           # Full set needed for cudarc with `dynamic-loading`: headers for
           # bindgen at build time, and runtime DLLs we harvest post-build
-          # and bundle into the installer archive.
+          # and bundle into the archive.
           sub-packages: '["nvcc", "cudart", "cublas", "cublas_dev", "curand", "curand_dev", "nvrtc", "nvrtc_dev", "visual_studio_integration"]'
 
       - name: Install Vulkan SDK
@@ -155,11 +190,6 @@ jobs:
           # leaving it empty panics bindgen_cuda with `ParseIntError { kind: Empty }`.
           CUDA_COMPUTE_CAP: ${{ (matrix.cuda_linux || matrix.cuda_windows) && '80' || '' }}
 
-      - name: Build launcher (Windows)
-        if: matrix.windows
-        shell: pwsh
-        run: cargo build --release --bin swarmllm-launcher
-
       - name: Package archive (Linux/macOS)
         if: runner.os != 'Windows'
         shell: bash
@@ -179,9 +209,14 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $binaryName = if ("${{ matrix.windows_gpu }}" -eq "true") { "swarmllm-gpu.exe" } else { "swarmllm-cpu.exe" }
+          # Archive layout: one swarmllm.exe (the main binary for this variant)
+          # + config + docs. The GPU archive additionally bundles NVIDIA CUDA
+          # redist DLLs (see the cuda_windows block below). The launcher
+          # (swarmllm-launcher.exe) is reserved for the Windows installer
+          # which ships both CPU and GPU variants side-by-side — for a
+          # single-variant archive it is redundant.
           New-Item -ItemType Directory -Force -Path staging
-          Copy-Item "target\release\swarmllm.exe" "staging\$binaryName"
+          Copy-Item "target\release\swarmllm.exe" "staging\swarmllm.exe"
           Copy-Item "config\default.toml" staging\
           Copy-Item "INSTALL.txt" staging\
           Copy-Item LICENSE-* staging\
@@ -204,145 +239,61 @@ jobs:
           }
           Compress-Archive -Path staging\* -DestinationPath ${{ matrix.archive }}
 
-      - name: Upload archive artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ matrix.archive }}
-          path: ${{ matrix.archive }}
-          retention-days: 7
-
-      # Upload launcher once (from CPU build — identical binary regardless of features)
-      - name: Upload launcher artifact
-        if: matrix.name == 'Windows x86_64 CPU'
-        uses: actions/upload-artifact@v4
-        with:
-          name: swarmllm-launcher.exe
-          path: target/release/swarmllm-launcher.exe
-          retention-days: 7
+      - name: Upload archive to release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euxo pipefail
+          gh release upload "${GITHUB_REF_NAME}" "${{ matrix.archive }}" --clobber
 
       # .deb package (Linux CPU only)
-      - name: Build .deb package
+      - name: Build and upload .deb
         if: matrix.name == 'Linux x86_64'
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
+          set -euxo pipefail
           cargo install cargo-deb --locked 2>/dev/null || true
           cargo deb --no-build
-          cp target/debian/*.deb swarmllm_${{ github.ref_name }}_amd64.deb
-
-      - name: Upload .deb
-        if: matrix.name == 'Linux x86_64'
-        uses: actions/upload-artifact@v4
-        with:
-          name: swarmllm_${{ github.ref_name }}_amd64.deb
-          path: swarmllm_${{ github.ref_name }}_amd64.deb
-          retention-days: 7
+          DEB="swarmllm_${GITHUB_REF_NAME}_amd64.deb"
+          cp target/debian/*.deb "$DEB"
+          gh release upload "$GITHUB_REF_NAME" "$DEB" --clobber
 
       # .rpm package (Linux CPU only)
-      - name: Build .rpm package
+      - name: Build and upload .rpm
         if: matrix.name == 'Linux x86_64'
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
+          set -euxo pipefail
           cargo install cargo-generate-rpm --locked 2>/dev/null || true
           cargo generate-rpm
-          cp target/generate-rpm/*.rpm swarmllm_${{ github.ref_name }}.x86_64.rpm
+          RPM="swarmllm_${GITHUB_REF_NAME}.x86_64.rpm"
+          cp target/generate-rpm/*.rpm "$RPM"
+          gh release upload "$GITHUB_REF_NAME" "$RPM" --clobber
 
-      - name: Upload .rpm
-        if: matrix.name == 'Linux x86_64'
-        uses: actions/upload-artifact@v4
-        with:
-          name: swarmllm_${{ github.ref_name }}.x86_64.rpm
-          path: swarmllm_${{ github.ref_name }}.x86_64.rpm
-          retention-days: 7
-
-  # Bundle GPU + CPU Windows binaries + launcher into a single Setup.exe
-  windows-installer:
-    name: Build Windows Installer
-    needs: build
-    runs-on: windows-latest
-    if: always() && !cancelled()
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Download GPU archive
-        uses: actions/download-artifact@v4
-        with:
-          name: swarmllm-windows-x86_64-gpu.zip
-          path: dl
-
-      - name: Download CPU archive
-        uses: actions/download-artifact@v4
-        with:
-          name: swarmllm-windows-x86_64-cpu.zip
-          path: dl
-
-      - name: Download launcher
-        uses: actions/download-artifact@v4
-        with:
-          name: swarmllm-launcher.exe
-          path: dl
-
-      - name: Extract binaries and assemble staging dir
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force -Path installer-bin
-          Expand-Archive -Path "dl\swarmllm-windows-x86_64-gpu.zip" -DestinationPath dl\gpu
-          Expand-Archive -Path "dl\swarmllm-windows-x86_64-cpu.zip" -DestinationPath dl\cpu
-          Copy-Item "dl\gpu\swarmllm-gpu.exe" installer-bin\
-          Copy-Item "dl\cpu\swarmllm-cpu.exe" installer-bin\
-          Copy-Item "dl\swarmllm-launcher.exe" "installer-bin\swarmllm.exe"
-          Copy-Item "config\default.toml" installer-bin\
-          Copy-Item "INSTALL.txt" installer-bin\
-          # CUDA redist DLLs (bundled with the GPU build — see Package archive step)
-          Copy-Item "dl\gpu\*.dll" installer-bin\
-          Copy-Item "dl\gpu\NOTICE-NVIDIA-CUDA.txt" installer-bin\
-
-      - name: Build installer with Inno Setup
-        shell: pwsh
-        run: |
-          $version = "${{ github.ref_name }}".TrimStart("v")
-          $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
-          if (-not (Test-Path $iscc)) {
-            Write-Error "Inno Setup 6 not found at expected path: $iscc"
-            exit 1
-          }
-          & $iscc `
-            /DAppVersion=$version `
-            /DBinDir="${{ github.workspace }}\installer-bin" `
-            installer\windows.iss
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
-      - name: Upload installer
-        uses: actions/upload-artifact@v4
-        with:
-          name: SwarmLLM-Setup.exe
-          path: installer\Output\SwarmLLM-Setup.exe
-          retention-days: 7
-
-  release:
-    name: Publish Release
-    needs: [build, windows-installer]
-    if: always() && !cancelled()
+  # Publish the draft release — only if at least one build succeeded. Uses
+  # `always() && !cancelled()` so a single-platform failure (e.g. macOS flake)
+  # doesn't block shipping the platforms that did build.
+  publish:
+    name: Publish release
+    needs: [create-release, build]
+    if: always() && !cancelled() && needs.create-release.result == 'success'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Download all artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: artifacts
-          merge-multiple: true
-
-      - name: Determine pre-release
-        id: prerelease
+      - name: Mark release as published
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
+          set -euxo pipefail
           TAG="${GITHUB_REF_NAME}"
-          if echo "$TAG" | grep -qiE '(alpha|beta|rc)'; then
-            echo "is_prerelease=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "is_prerelease=false" >> "$GITHUB_OUTPUT"
+          # Verify at least one asset was uploaded — refuse to publish an
+          # empty release that would show up as "no binaries" to testers.
+          ASSET_COUNT=$(gh release view "$TAG" --json assets --jq '.assets | length')
+          if [ "$ASSET_COUNT" -lt 1 ]; then
+            echo "Refusing to publish: no build jobs uploaded assets to $TAG"
+            exit 1
           fi
-
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          files: artifacts/*
-          generate_release_notes: true
-          prerelease: ${{ steps.prerelease.outputs.is_prerelease }}
+          gh release edit "$TAG" --draft=false
+          echo "Published $TAG with $ASSET_COUNT asset(s)"

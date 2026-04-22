@@ -239,7 +239,13 @@ opt-level = 2
 opt-level = 3
 lto = "thin"
 strip = true
-codegen-units = 1
+# codegen-units = 16 is Rust's default for the release profile. Using 1
+# trades ~10% more compile time for ~2–3% runtime perf via better cross-
+# unit inlining, but on CUDA-enabled CI jobs it serializes LLVM enough
+# to push build over 3h — past the GitHub runner's practical timeout.
+# Tuned back to 16 so Linux CUDA completes in ~1h; thin LTO still bundles
+# the hot path across crates.
+codegen-units = 16
 
 [profile.test]
 # Faster test compilation
