@@ -50,18 +50,21 @@ jobs:
             features: ""
 
           # Windows CPU: works on any Windows PC, no GPU drivers required.
+          # Pinned to windows-2022 (not windows-latest) to avoid monthly image
+          # MSVC toolchain churn breaking the build unexpectedly.
           - name: Windows x86_64 CPU
-            runner: windows-latest
+            runner: windows-2022
             target: x86_64-pc-windows-msvc
             archive: swarmllm-windows-x86_64-cpu.zip
             features: ""
             windows: true
 
           # Windows GPU: llama.cpp Vulkan (all GPU vendors, local inference) +
-          #              candle CUDA static runtime (NVIDIA, split inference).
-          #              Users need only standard GPU drivers — no CUDA Toolkit.
+          #              candle CUDA via dynamic-loading (NVIDIA, split inference).
+          # The installer bundles NVIDIA CUDA redist DLLs next to swarmllm-gpu.exe
+          # so end users need only the NVIDIA display driver (no CUDA Toolkit).
           - name: Windows x86_64 GPU
-            runner: windows-latest
+            runner: windows-2022
             target: x86_64-pc-windows-msvc
             archive: swarmllm-windows-x86_64-gpu.zip
             features: "--features windows-gpu"
@@ -101,10 +104,16 @@ jobs:
         if: matrix.cuda_windows
         uses: Jimver/cuda-toolkit@v0.2.19
         with:
+          # Pinned to 12.4 — CUDA 13 + RTX 50-series has an open candle bug
+          # (huggingface/candle#3249). Widely-compatible with GeForce drivers
+          # from 2023 onward; the dynamic-loading cudarc features only need
+          # a driver >= the runtime version.
           cuda: '12.4.0'
           method: 'network'
-          # Install only what cudarc needs: compiler, runtime, cublas, VS integration
-          sub-packages: '["nvcc", "cudart", "cublas", "cublas_dev", "visual_studio_integration"]'
+          # Full set needed for cudarc with `dynamic-loading`: headers for
+          # bindgen at build time, and runtime DLLs we harvest post-build
+          # and bundle into the installer archive.
+          sub-packages: '["nvcc", "cudart", "cublas", "cublas_dev", "curand", "curand_dev", "nvrtc", "nvrtc_dev", "visual_studio_integration"]'
 
       - name: Install Vulkan SDK
         if: matrix.vulkan
@@ -145,6 +154,23 @@ jobs:
           Copy-Item "config\default.toml" staging\
           Copy-Item "INSTALL.txt" staging\
           Copy-Item LICENSE-* staging\
+          # Windows GPU: bundle NVIDIA CUDA redist DLLs next to swarmllm-gpu.exe.
+          # cudarc uses LoadLibraryW at runtime (dynamic-loading feature) to
+          # find these — placing them in the same directory as the .exe lets
+          # Windows' standard DLL search path resolve them without requiring
+          # CUDA Toolkit installation on the end-user machine.
+          # See NOTICE-NVIDIA-CUDA.txt for CUDA EULA §2.6 redistribution notice.
+          if ("${{ matrix.windows_gpu }}" -eq "true") {
+            $cudaBin = "$env:CUDA_PATH\bin"
+            $dlls = @("cudart64_*.dll", "cublas64_*.dll", "cublasLt64_*.dll",
+                     "curand64_*.dll", "nvrtc64_*.dll", "nvrtc-builtins64_*.dll")
+            foreach ($pat in $dlls) {
+              Get-ChildItem "$cudaBin\$pat" | ForEach-Object { Copy-Item $_.FullName staging\ }
+            }
+            Copy-Item "NOTICE-NVIDIA-CUDA.txt" staging\
+            Write-Host "Bundled CUDA redist DLLs:"
+            Get-ChildItem "staging\*.dll" | Select-Object Name, Length | Format-Table
+          }
           Compress-Archive -Path staging\* -DestinationPath ${{ matrix.archive }}
 
       - name: Upload archive artifact
@@ -233,6 +259,9 @@ jobs:
           Copy-Item "dl\swarmllm-launcher.exe" "installer-bin\swarmllm.exe"
           Copy-Item "config\default.toml" installer-bin\
           Copy-Item "INSTALL.txt" installer-bin\
+          # CUDA redist DLLs (bundled with the GPU build — see Package archive step)
+          Copy-Item "dl\gpu\*.dll" installer-bin\
+          Copy-Item "dl\gpu\NOTICE-NVIDIA-CUDA.txt" installer-bin\
 
       - name: Build installer with Inno Setup
         shell: pwsh

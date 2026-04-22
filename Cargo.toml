@@ -1,7 +1,12 @@
 [workspace]
 resolver = "2"
 members = [".", "crates/swarmllm-frontend", "crates/swarmllm-types"]
-exclude = ["vendor/candle-paged-attention", "vendor/libp2p-request-response"]
+exclude = [
+    "vendor/candle-paged-attention",
+    "vendor/libp2p-request-response",
+    "vendor/candle",
+    "vendor/float8",
+]
 
 [package]
 name = "swarmllm"
@@ -75,8 +80,22 @@ rand = "0.8"
 # LLM inference
 llama-cpp-2 = { version = "0.1", optional = true }
 
-# CUDA runtime static linking (Windows GPU distribution — users need only GeForce drivers, not CUDA Toolkit)
-cudarc = { version = "0.19", features = ["static-linking"], optional = true }
+# CUDA runtime dynamic loading — cudarc dlopens the CUDA redist DLLs (cudart,
+# cublas, cublasLt, curand, nvrtc + builtins) at runtime rather than linking
+# them at build time. Used by both Linux CUDA and Windows GPU builds.
+#
+# Users need:
+#  - NVIDIA display driver (provides libcuda.so / nvcuda.dll — always present
+#    on a system with an NVIDIA GPU).
+#  - CUDA redist DLLs on the library search path. On Windows we bundle them
+#    next to swarmllm-gpu.exe in the installer (onnxruntime/pytorch pattern).
+#    On Linux, CUDA Toolkit or the redist tarball provides them.
+#
+# Why not `static-linking`? Shrinks the binary by ~150 MB but requires the
+# CUDA static libs at build time (many CI images ship only the shared libs).
+# Why not `dynamic-linking`? Requires import libs (*.lib / *.so) at link time
+# AND the matching DLLs at runtime — worst of both worlds for distribution.
+cudarc = { version = "0.19", features = ["dynamic-loading"], optional = true }
 
 # Split inference (candle-based, layer-range execution)
 candle-core = { version = "0.9", default-features = false }
@@ -140,7 +159,16 @@ dev = ["swarmllm-frontend/dev"]
 
 # --- Core inference backends ---
 llama = ["llama-cpp-2", "encoding_rs"]
-candle-cuda = ["candle-core/cuda", "candle-nn/cuda", "candle-transformers/cuda"]
+# candle-cuda enables candle's CUDA code paths AND activates our top-level
+# cudarc dep with dynamic-loading. The [patch.crates-io] pins of candle-core
+# and float8 remove their upstream-hardcoded `cudarc/dynamic-linking`
+# activation; our dep then picks the linking mode (dynamic-loading).
+candle-cuda = [
+    "candle-core/cuda",
+    "candle-nn/cuda",
+    "candle-transformers/cuda",
+    "dep:cudarc",
+]
 flash-attn = ["candle-cuda", "dep:candle-flash-attn"]
 
 # Linux/macOS: full CUDA (llama.cpp CUDA + candle CUDA + flash attention)
@@ -151,15 +179,11 @@ cuda = ["llama", "llama-cpp-2/cuda", "candle-cuda", "flash-attn"]
 # Build requirement: VULKAN_SDK env var pointing to installed Vulkan SDK.
 llama-vulkan = ["llama", "llama-cpp-2/vulkan"]
 
-# candle CUDA with static runtime — links cudart_static into the binary.
-# Users need only standard GeForce/Radeon drivers; CUDA Toolkit not required at runtime.
-# Enables dep:cudarc with static-linking feature to force static cudart linkage.
-candle-cuda-static = ["candle-cuda", "dep:cudarc"]
-
 # Windows GPU: llama.cpp via Vulkan (all GPU vendors, local inference) +
-#              candle via CUDA with static runtime (NVIDIA split/distributed inference).
-# Single binary covers all Windows GPU users. CPU fallback automatic when no CUDA GPU detected.
-windows-gpu = ["llama-vulkan", "candle-cuda-static"]
+# candle via CUDA dynamic-loading (NVIDIA split/distributed inference).
+# Installer bundles NVIDIA redist DLLs next to swarmllm-gpu.exe so end users
+# need only the GeForce driver installed (no CUDA Toolkit).
+windows-gpu = ["llama-vulkan", "candle-cuda"]
 
 # Future — wgpu/WebGPU backend for candle (cross-platform GPU for split/distributed inference).
 # Would enable NVIDIA, AMD, and Intel GPU acceleration for distributed inference on all platforms
@@ -191,6 +215,16 @@ path = "tests/integration/test_yamux_substream.rs"
 
 [patch.crates-io]
 libp2p-request-response = { path = "vendor/libp2p-request-response" }
+# Upstream candle 0.9.2 and float8 0.6.1 hardcode `cudarc/dynamic-linking`
+# in their Cargo.toml, preventing downstream consumers from choosing a
+# different linking mode (e.g. `dynamic-loading` so the binary can ship
+# the NVIDIA redist DLLs next to itself instead of requiring the CUDA
+# Toolkit on end-user machines). These vendored copies remove the
+# hardcode — see vendor/candle/candle-core/Cargo.toml and
+# vendor/float8/Cargo.toml for the annotated `# SwarmLLM patch:` diffs.
+# Tracked upstream; will be dropped when candle accepts a gated-feature PR.
+candle-core = { path = "vendor/candle/candle-core" }
+float8 = { path = "vendor/float8" }
 
 [profile.dev]
 # Faster dev builds: reduce debug info, enable incremental

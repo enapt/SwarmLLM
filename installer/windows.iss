@@ -1,10 +1,15 @@
 ; SwarmLLM Windows Installer
 ; Built with Inno Setup 6 — https://jrsoftware.org/isinfo.php
 ;
-; Bundles three binaries:
+; Bundles three binaries + NVIDIA CUDA redist DLLs:
 ;   swarmllm.exe        — launcher: detects GPU at runtime, runs gpu or cpu variant
-;   swarmllm-gpu.exe    — Vulkan (local inference, all GPU vendors) + CUDA static (split inference, NVIDIA)
+;   swarmllm-gpu.exe    — Vulkan (local inference, all GPU vendors) + CUDA
+;                         dynamic-loading (split inference, NVIDIA)
 ;   swarmllm-cpu.exe    — CPU-only fallback (works on any Windows PC)
+;   cudart64_*.dll + cublas* + curand* + nvrtc* — NVIDIA CUDA runtime DLLs,
+;                         loaded at runtime by cudarc via LoadLibraryW.
+;                         Redistributed under CUDA EULA §2.6 — see
+;                         NOTICE-NVIDIA-CUDA.txt.
 ;
 ; Usage from CI:
 ;   ISCC.exe /DAppVersion=0.1.0 /DBinDir=C:\path\to\bins installer\windows.iss
@@ -69,6 +74,17 @@ Source: "{#BinDir}\swarmllm-cpu.exe"; DestDir: "{app}"; Flags: ignoreversion
 ; Config and docs
 Source: "{#BinDir}\default.toml";     DestDir: "{app}"; Flags: ignoreversion onlyifdoesntexist
 Source: "{#BinDir}\INSTALL.txt";      DestDir: "{app}"; Flags: ignoreversion
+
+; NVIDIA CUDA redist DLLs — loaded at runtime by swarmllm-gpu.exe via
+; cudarc's dynamic-loading feature (LoadLibraryW). Placed next to the .exe
+; so Windows' standard DLL search path resolves them.
+Source: "{#BinDir}\cudart64_*.dll";        DestDir: "{app}"; Flags: ignoreversion
+Source: "{#BinDir}\cublas64_*.dll";        DestDir: "{app}"; Flags: ignoreversion
+Source: "{#BinDir}\cublasLt64_*.dll";      DestDir: "{app}"; Flags: ignoreversion
+Source: "{#BinDir}\curand64_*.dll";        DestDir: "{app}"; Flags: ignoreversion
+Source: "{#BinDir}\nvrtc64_*.dll";         DestDir: "{app}"; Flags: ignoreversion
+Source: "{#BinDir}\nvrtc-builtins64_*.dll"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#BinDir}\NOTICE-NVIDIA-CUDA.txt"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
 Name: "{group}\SwarmLLM"; Filename: "{app}\{#AppExeName}"

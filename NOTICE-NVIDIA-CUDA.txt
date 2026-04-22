@@ -1,0 +1,33 @@
+NVIDIA CUDA Redistributable Files Notice
+=========================================
+
+This software contains source code provided by NVIDIA Corporation.
+
+SwarmLLM's Windows GPU distribution bundles the following NVIDIA CUDA
+runtime DLLs, each redistributed under the terms of the NVIDIA CUDA
+Toolkit End User License Agreement ("CUDA EULA"), specifically the
+redistribution rights described in Attachment A, §2.6:
+
+    cudart64_*.dll          — CUDA runtime
+    cublas64_*.dll          — cuBLAS linear algebra library
+    cublasLt64_*.dll        — cuBLAS Lt extensions
+    curand64_*.dll          — cuRAND random number generation
+    nvrtc64_*.dll           — NVRTC runtime compilation
+    nvrtc-builtins64_*.dll  — NVRTC built-in headers
+
+These files are loaded at runtime by cudarc (https://github.com/coreylowman/cudarc)
+via LoadLibraryW, which is how the `swarmllm-gpu.exe` binary uses the
+CUDA runtime without requiring users to install the full CUDA Toolkit.
+
+The NVIDIA CUDA driver library (nvcuda.dll) is NOT bundled — it ships
+as part of the NVIDIA display driver installed on the user's system.
+
+The full text of the CUDA EULA is available at:
+
+    https://docs.nvidia.com/cuda/eula/index.html
+
+NVIDIA and CUDA are trademarks of NVIDIA Corporation. Nothing in this
+notice grants any trademark rights, and SwarmLLM is neither endorsed by
+nor affiliated with NVIDIA Corporation.
+
+Questions about the SwarmLLM distribution: https://github.com/enapt/SwarmLLM
