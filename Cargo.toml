@@ -171,8 +171,13 @@ candle-cuda = [
 ]
 flash-attn = ["candle-cuda", "dep:candle-flash-attn"]
 
-# Linux/macOS: full CUDA (llama.cpp CUDA + candle CUDA + flash attention)
-cuda = ["llama", "llama-cpp-2/cuda", "candle-cuda", "flash-attn"]
+# Linux/macOS: full CUDA (llama.cpp CUDA + candle CUDA).
+# flash-attn is NOT included by default — its build.rs compiles a large
+# matrix of CUDA kernels (head-dim × softcap × causal × splitkv) which
+# added ~60 min to CI builds and pushed Linux CUDA past 3h. Testers who
+# want flash-attention-2 kernels opt in explicitly with
+# `--features cuda,flash-attn`.
+cuda = ["llama", "llama-cpp-2/cuda", "candle-cuda"]
 
 # llama.cpp with Vulkan backend — works on NVIDIA, AMD, and Intel GPUs without CUDA install.
 # Runtime requirement: vulkan-1.dll (bundled with standard GPU drivers — no user action needed).
