@@ -123,6 +123,17 @@ jobs:
           install_runtime: true
           cache: true
 
+      # nvcc on Windows shells out to `cl.exe` (MSVC) to compile CUDA .cu
+      # kernels. Without this, bindgen_cuda panics with
+      # `nvcc fatal: Cannot find compiler 'cl.exe' in PATH` when building
+      # candle-kernels. ilammy/msvc-dev-cmd injects the MSVC toolchain env
+      # (PATH, INCLUDE, LIB) for subsequent steps in this job.
+      - name: Setup MSVC (Windows GPU — nvcc needs cl.exe)
+        if: matrix.cuda_windows
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
       - name: Build release binary
         run: cargo build --release ${{ matrix.features }}
         env:
@@ -140,14 +151,27 @@ jobs:
 
       - name: Package archive (Linux/macOS)
         if: runner.os != 'Windows'
+        shell: bash
         run: |
+          set -euxo pipefail
+          # Free disk space after heavy CUDA builds. The Linux CUDA job in
+          # particular hovers near the runner's 14 GB limit after compiling
+          # candle-kernels + llama.cpp CUDA, and tarballing into the same FS
+          # can push it over. Keep target/release/$binary but drop intermediates.
+          du -sh target/ || true
+          find target -maxdepth 2 -type d ! -name release -exec rm -rf {} + 2>/dev/null || true
+          find target/release -mindepth 1 -maxdepth 1 ! -name "${{ matrix.binary }}" \
+               ! -name "build" ! -name "deps" -exec rm -rf {} + 2>/dev/null || true
+          rm -rf target/release/build target/release/deps target/release/incremental || true
+          df -h . || true
           mkdir -p staging
-          cp target/release/${{ matrix.binary }} staging/
-          cp config/default.toml staging/
-          cp INSTALL.txt staging/
-          cp LICENSE-* staging/
-          cd staging
-          tar czf ../${{ matrix.archive }} .
+          cp -v "target/release/${{ matrix.binary }}" staging/
+          cp -v config/default.toml staging/
+          cp -v INSTALL.txt staging/
+          cp -v LICENSE-MIT LICENSE-APACHE staging/
+          ls -la staging/
+          tar -C staging -czf "${{ matrix.archive }}" .
+          ls -la "${{ matrix.archive }}"
 
       - name: Package archive (Windows)
         if: runner.os == 'Windows'
