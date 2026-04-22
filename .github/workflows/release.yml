@@ -134,6 +134,17 @@ jobs:
         with:
           arch: x64
 
+      # Make CUDA's import libraries (cudart.lib etc.) findable by the MSVC
+      # linker. Jimver/cuda-toolkit sets CUDA_PATH but does not extend the
+      # LIB env var. candle-kernels emits `cargo:rustc-link-lib=cudart` in
+      # its build.rs — without this step the link fails with
+      # `LINK : fatal error LNK1181: cannot open input file 'cudart.lib'`.
+      - name: Extend LIB with CUDA lib dir (Windows GPU)
+        if: matrix.cuda_windows
+        shell: pwsh
+        run: |
+          "LIB=$env:CUDA_PATH\lib\x64;$env:LIB" | Out-File -Append -FilePath $env:GITHUB_ENV -Encoding utf8
+
       - name: Build release binary
         run: cargo build --release ${{ matrix.features }}
         env:
@@ -154,21 +165,12 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
-          # Free disk space after heavy CUDA builds. The Linux CUDA job in
-          # particular hovers near the runner's 14 GB limit after compiling
-          # candle-kernels + llama.cpp CUDA, and tarballing into the same FS
-          # can push it over. Keep target/release/$binary but drop intermediates.
-          du -sh target/ || true
-          find target -maxdepth 2 -type d ! -name release -exec rm -rf {} + 2>/dev/null || true
-          find target/release -mindepth 1 -maxdepth 1 ! -name "${{ matrix.binary }}" \
-               ! -name "build" ! -name "deps" -exec rm -rf {} + 2>/dev/null || true
-          rm -rf target/release/build target/release/deps target/release/incremental || true
-          df -h . || true
+          ls -la "target/release/${{ matrix.binary }}"
           mkdir -p staging
-          cp -v "target/release/${{ matrix.binary }}" staging/
-          cp -v config/default.toml staging/
-          cp -v INSTALL.txt staging/
-          cp -v LICENSE-MIT LICENSE-APACHE staging/
+          cp "target/release/${{ matrix.binary }}" staging/
+          cp config/default.toml staging/
+          cp INSTALL.txt staging/
+          cp LICENSE-MIT LICENSE-APACHE staging/
           ls -la staging/
           tar -C staging -czf "${{ matrix.archive }}" .
           ls -la "${{ matrix.archive }}"
