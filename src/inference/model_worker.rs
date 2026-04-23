@@ -1153,15 +1153,13 @@ async fn handle_forward(
             }
         });
 
-    let result = compute_result.map_err(SwarmError::Internal)?;
+    let mut result = compute_result.map_err(SwarmError::Internal)?;
 
-    // Build IPC response
+    // Build IPC response. Take ownership of the activation buffer rather
+    // than cloning it: this path runs on every non-last-segment forward
+    // (per-token) and the buffer can be tens of KB on f32 hidden states.
     let has_activations = !result.activations.is_empty();
-    let activation_payload = if has_activations {
-        result.activations.clone()
-    } else {
-        vec![]
-    };
+    let activation_payload = std::mem::take(&mut result.activations);
 
     let ipc_result = IpcLayerResult {
         request_id: result.request_id,

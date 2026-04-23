@@ -187,7 +187,7 @@ impl PipelineExecutor {
                 (last_token.to_le_bytes().to_vec(), false)
             };
 
-            tracing::info!(
+            tracing::debug!(
                 request_id = %request_id,
                 seq_num,
                 index_pos,
