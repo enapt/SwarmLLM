@@ -720,6 +720,22 @@ impl NetworkManager {
                     self.pending_rr_observability.retain(|_id, (_, inserted)| {
                         inserted.elapsed().as_secs() < MAX_TENSOR_FORWARD_SECS
                     });
+                    // Sweep pending_prefix_kv_inbound tickets whose serving task
+                    // panicked or whose DeliverPrefixKvResponse command was dropped
+                    // (internal_cmd_tx full). Without this, under load the 256-entry
+                    // cap silently fills with orphans and all new fetches reply miss.
+                    let before_prefix = self.pending_prefix_kv_inbound.len();
+                    self.pending_prefix_kv_inbound.retain(|_ticket, (_, inserted, _chan)| {
+                        inserted.elapsed().as_secs() < MAX_TENSOR_FORWARD_SECS
+                    });
+                    let removed_prefix = before_prefix - self.pending_prefix_kv_inbound.len();
+                    if removed_prefix > 0 {
+                        tracing::warn!(
+                            removed = removed_prefix,
+                            remaining = self.pending_prefix_kv_inbound.len(),
+                            "Swept stale pending_prefix_kv_inbound tickets"
+                        );
+                    }
                     if !self.pending_tensor_outbound.is_empty() {
                         let now = std::time::Instant::now();
                         let mut stale: Vec<(OutboundRequestId, uuid::Uuid, libp2p::PeerId)> = Vec::new();
