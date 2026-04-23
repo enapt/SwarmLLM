@@ -256,7 +256,12 @@ jobs:
           set -euxo pipefail
           cargo install cargo-deb --locked 2>/dev/null || true
           cargo deb --no-build
-          DEB="swarmllm_${GITHUB_REF_NAME}_amd64.deb"
+          # GITHUB_REF_NAME is "v0.1.0" but cargo-deb names the file
+          # "swarmllm_0.1.0_amd64.deb" (Debian policy disallows "v" in
+          # version strings). Strip the leading "v" so our upload name
+          # matches the produced artifact convention.
+          VERSION="${GITHUB_REF_NAME#v}"
+          DEB="swarmllm_${VERSION}_amd64.deb"
           cp target/debian/*.deb "$DEB"
           gh release upload "$GITHUB_REF_NAME" "$DEB" --clobber
 
@@ -269,7 +274,9 @@ jobs:
           set -euxo pipefail
           cargo install cargo-generate-rpm --locked 2>/dev/null || true
           cargo generate-rpm
-          RPM="swarmllm_${GITHUB_REF_NAME}.x86_64.rpm"
+          # Same naming rule as the .deb build — RPM tools strip the "v".
+          VERSION="${GITHUB_REF_NAME#v}"
+          RPM="swarmllm_${VERSION}.x86_64.rpm"
           cp target/generate-rpm/*.rpm "$RPM"
           gh release upload "$GITHUB_REF_NAME" "$RPM" --clobber
 
