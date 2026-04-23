@@ -130,8 +130,15 @@ fn apply_top_k_with_ctx(logits: &mut [f32], k: u32, ctx: &mut SamplingContext) {
 
 /// Apply top-p (nucleus) sampling using pre-allocated scratch buffers.
 ///
-/// Uses a bitmap instead of HashSet for the keep set, and partial sort
-/// (select_nth_unstable_by) to avoid full O(V log V) sort.
+/// Fast path: partial-sort the top TOP_P_PARTIAL_K indices with
+/// `select_nth_unstable_by` (O(len)), sort just that prefix descending,
+/// and walk until cumulative probability ≥ p. For typical p=0.9 on a
+/// 32K–151K-vocab LLM, the nucleus is ~10–500 tokens, so 4096 is deep
+/// enough to contain it with wide margin.
+///
+/// Fallback: if cumulative doesn't reach p in the top-K (pathologically
+/// flat distribution, or p very close to 1), sort the remaining tail
+/// descending and continue. This is O(len log len) but happens rarely.
 fn apply_top_p_with_ctx(logits: &mut [f32], p: f32, ctx: &mut SamplingContext) {
     if p >= 1.0 {
         return;
@@ -154,25 +161,52 @@ fn apply_top_p_with_ctx(logits: &mut [f32], p: f32, ctx: &mut SamplingContext) {
         *prob *= inv_sum;
     }
 
-    // Sort indices by probability descending — reuse indices buffer
     ctx.indices.clear();
     ctx.indices.extend(0..len);
-    ctx.indices.sort_unstable_by(|&a, &b| {
-        ctx.probs[b]
-            .partial_cmp(&ctx.probs[a])
+    // Borrow probs out of ctx once — sort_unstable_by needs an exclusive
+    // borrow of ctx.indices and a shared borrow of probs simultaneously.
+    let probs: &[f32] = &ctx.probs;
+    let cmp_desc = |&a: &usize, &b: &usize| {
+        probs[b]
+            .partial_cmp(&probs[a])
             .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    };
 
-    // Find cutoff and build keep bitmap (replaces HashSet)
+    const TOP_P_PARTIAL_K: usize = 4096;
+    let k = len.min(TOP_P_PARTIAL_K);
+    if k < len {
+        // Push the top-k indices (in any order) into ctx.indices[..k].
+        let (_, _, _) = ctx.indices.select_nth_unstable_by(k - 1, cmp_desc);
+        ctx.indices[..k].sort_unstable_by(cmp_desc);
+    } else {
+        ctx.indices.sort_unstable_by(cmp_desc);
+    }
+
+    // Clear keep mask, then walk the sorted prefix accumulating mass.
     for v in ctx.keep_mask[..len].iter_mut() {
         *v = false;
     }
     let mut cumulative = 0.0;
-    for &idx in &ctx.indices {
+    let mut reached = false;
+    for &idx in &ctx.indices[..k] {
         cumulative += ctx.probs[idx];
         ctx.keep_mask[idx] = true;
         if cumulative >= p {
+            reached = true;
             break;
+        }
+    }
+
+    // Fallback: pathological case — top-k didn't contain the full
+    // nucleus. Sort the tail and continue walking.
+    if !reached && k < len {
+        ctx.indices[k..].sort_unstable_by(cmp_desc);
+        for &idx in &ctx.indices[k..] {
+            cumulative += ctx.probs[idx];
+            ctx.keep_mask[idx] = true;
+            if cumulative >= p {
+                break;
+            }
         }
     }
 
