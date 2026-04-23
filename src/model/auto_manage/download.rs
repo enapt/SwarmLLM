@@ -208,16 +208,16 @@ impl AutoShardManager {
                         candidate.shard_index, candidate.score
                     ));
                 } else {
-                    let total_shards = self
+                    let (total_shards, total_bytes) = self
                         .shared_state
                         .model_registry
                         .get_manifest(&mid)
-                        .map(|m| m.shard_count)
-                        .unwrap_or(1);
+                        .map(|m| (m.shard_count, m.total_size_bytes))
+                        .unwrap_or((1, candidate.shard_size_bytes));
                     let mut status = crate::model::acquisition::AcquisitionStatus::new_downloading(
                         mid.clone(),
                         total_shards,
-                        candidate.shard_size_bytes,
+                        total_bytes,
                         "peers",
                         "auto_manage",
                         format!(
@@ -530,7 +530,7 @@ display
                                 .try_send(crate::types::NetworkCommand::Broadcast(complete_msg));
 
                             // Update progress
-                            if let Some(mut entry) =
+                            let model_just_completed = if let Some(mut entry) =
                                 shared.models.acquisition_progress.get_mut(&model_id)
                             {
                                 let was_complete = entry
@@ -552,14 +552,21 @@ display
                                         entry.downloaded_shards.saturating_add(1);
                                     entry.verified_shards = entry.verified_shards.saturating_add(1);
                                 }
-                                if entry.total_shards > 0
-                                    && entry.verified_shards >= entry.total_shards
-                                {
+                                let all_shards_done = entry.total_shards > 0
+                                    && entry.verified_shards >= entry.total_shards;
+                                let was_already_complete = matches!(
+                                    entry.state,
+                                    crate::model::acquisition::AcquisitionState::Complete
+                                );
+                                if all_shards_done {
                                     entry.state =
                                         crate::model::acquisition::AcquisitionState::Complete;
                                 }
                                 entry.log_push("Shard downloaded and registered".into());
-                            }
+                                all_shards_done && !was_already_complete
+                            } else {
+                                false
+                            };
                             // Emit shard registered activity
                             {
                                 let display = shared.model_registry.display_name(&model_id);
@@ -582,8 +589,10 @@ display
                             let vram_budget = compute_vram_budget(&shared);
                             check_and_load_model(&shared, &model_id, vram_budget).await;
 
-                            // Emit activity event for shard download complete
-                            {
+                            // Emit model_download_complete only when this shard finished
+                            // the model. Without the guard every single shard triggers the
+                            // "model ready" toast.
+                            if model_just_completed {
                                 let display = shared.model_registry.display_name(&model_id);
                                 shared.emit_activity(
                                     crate::daemon::state::ActivityEvent::new(
@@ -595,7 +604,7 @@ display
 ),
                                     )
                                     .with_model(model_id.0.clone())
-                                    .with_detail_str("p2p".to_string())
+                                    .with_detail_str("huggingface".to_string())
                                     .with_toast("success", 8000),
                                 );
                             }

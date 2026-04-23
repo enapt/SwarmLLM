@@ -301,13 +301,14 @@ impl EscrowManager {
                     continue;
                 }
                 drop(entry);
-                // Remove from in-memory map — entry is persisted to DB
-                self.entries.remove(&id);
+                // Do NOT remove from in-memory map yet — the balance persist below
+                // may fail, in which case we need the entry present to revert it
+                // back to Pending for retry. Remove only after the refund succeeds.
 
                 // Refund the expired amount (lifetime_spent is monotonic — not decremented).
                 // Persist balance inside the write lock to ensure crash-safety:
                 // if persist fails, revert in-memory to prevent credits existing only in RAM.
-                {
+                let balance_persisted = {
                     let mut bal = balance.write().await;
                     let old_balance = bal.balance;
                     bal.balance = bal.balance.saturating_add(amount);
@@ -335,7 +336,15 @@ impl EscrowManager {
                             error = %e,
                             "Failed to persist credit balance after escrow expiry — reverted escrow to Pending for retry"
                         );
+                        false
+                    } else {
+                        true
                     }
+                };
+
+                if balance_persisted {
+                    // Refund completed successfully — safe to remove from in-memory map
+                    self.entries.remove(&id);
                 }
 
                 tracing::info!(

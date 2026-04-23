@@ -155,7 +155,12 @@ pub(super) fn spawn_region_detection(
                         }
                     }
                 }
-                _ = shutdown_rx.changed() => {}
+                _ = async {
+                    loop {
+                        if shutdown_rx.changed().await.is_err() { return; }
+                        if *shutdown_rx.borrow() { return; }
+                    }
+                } => {}
             }
         });
     } else {

@@ -525,8 +525,11 @@ impl NetworkManager {
         // isolated" state (happens on fresh WSL2 installs with mDNS disabled
         // and no bootstrap peers configured). Fires every 30s while
         // connected_peers == 0.
-        let mut no_peers_interval =
-            tokio::time::interval(std::time::Duration::from_secs(NO_PEERS_WARN_INTERVAL_SECS));
+        let mut no_peers_interval = tokio::time::interval_at(
+            tokio::time::Instant::now()
+                + std::time::Duration::from_secs(NO_PEERS_WARN_INTERVAL_SECS),
+            std::time::Duration::from_secs(NO_PEERS_WARN_INTERVAL_SECS),
+        );
         no_peers_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let startup_instant = std::time::Instant::now();
 
