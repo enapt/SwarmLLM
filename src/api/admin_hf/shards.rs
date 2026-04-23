@@ -134,7 +134,8 @@ pub async fn hf_download_shards(
             .map_err(|e| {
                 tracing::error!(error = %e, "HuggingFace probe failed");
                 ApiError(crate::error::SwarmError::ServiceUnavailable(format!(
-                    "HuggingFace probe failed: {e}"
+                    "HuggingFace probe failed: {}",
+                    crate::api::scrub_truncate_error(&e)
                 )))
             })?;
 

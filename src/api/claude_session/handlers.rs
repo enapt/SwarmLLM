@@ -357,6 +357,19 @@ pub async fn send_message_handler(
     axum::extract::Path(session_id): axum::extract::Path<String>,
     Json(req): Json<SendMessageRequest>,
 ) -> Result<axum::response::Response, ApiError> {
+    // Per-field size cap — the global 32 MiB body limit exists for VLM image
+    // payloads and is far too generous for a text message written to the
+    // Claude CLI subprocess stdin. A multi-MB message blocks the stdin writer
+    // or OOMs the CLI; 1 MiB is well above any realistic prompt.
+    const MAX_MESSAGE_BYTES: usize = 1_000_000;
+    if req.content.len() > MAX_MESSAGE_BYTES {
+        return Err(ApiError(crate::error::SwarmError::Validation(format!(
+            "Message content too large: {} bytes (max {} bytes)",
+            req.content.len(),
+            MAX_MESSAGE_BYTES
+        ))));
+    }
+
     let session_arc = SessionManager::global()
         .get_session(&session_id)
         .ok_or_else(|| {

@@ -285,9 +285,10 @@ pub async fn update_config(
     })
     .await
     .map_err(|e| {
-        ApiError(crate::error::SwarmError::Internal(format!(
-            "spawn_blocking join: {e}"
-        )))
+        tracing::error!(error = %e, "Config save task panicked");
+        ApiError(crate::error::SwarmError::Internal(
+            "Failed to save configuration".into(),
+        ))
     })?
     .map_err(|e| ApiError(crate::error::SwarmError::Io(e)))?;
 

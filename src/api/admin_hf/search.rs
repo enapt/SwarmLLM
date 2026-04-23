@@ -37,7 +37,11 @@ pub async fn hf_search(
 
     let results = crate::model::huggingface::search_gguf_models(&query)
         .await
-        .map_err(|e| ApiError(crate::error::SwarmError::ServiceUnavailable(e)))?;
+        .map_err(|e| {
+            ApiError(crate::error::SwarmError::ServiceUnavailable(
+                crate::api::scrub_truncate_error(&e),
+            ))
+        })?;
 
     // Available VRAM for fits_vram check (pool VRAM or local GPU)
     let available_vram_bytes: u64 = state
