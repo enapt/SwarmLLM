@@ -134,7 +134,6 @@ async-stream = "0.3"
 sysinfo = "0.38"
 half = "2"
 fancy-regex = "0.17"
-tokenizers = { version = "0.22", default-features = false, features = ["fancy-regex"] }
 encoding_rs = { version = "0.8", optional = true }
 reqwest = { version = "0.12", features = ["json", "stream"] }
 
@@ -204,7 +203,6 @@ claude-subscription = []
 
 [dev-dependencies]
 tempfile = "3"
-tokio-test = "0.4"
 
 [[test]]
 name = "integration"
