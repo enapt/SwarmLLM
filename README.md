@@ -455,9 +455,10 @@ Plus ~50 more admin routes for downloads, providers, adapters, identity, and sch
 
 | Platform | GPU Support | Status |
 |----------|------------|--------|
-| Linux x86_64 | CUDA (candle + llama.cpp) | Primary target, release binaries |
-| Windows x86_64 | **Vulkan** (NVIDIA/AMD/Intel local) + **CUDA static** (NVIDIA distributed) | Installer — no CUDA Toolkit needed |
-| macOS aarch64 | CPU only (Metal planned) | Binary available (beta) |
+| Linux x86_64 | CUDA (candle + llama.cpp) | Primary target, release binaries, full CI test suite |
+| Windows x86_64 (CPU) | — | Runtime-validated 2026-04-23 — single-node, multi-node loopback, split-shard 2-segment pipeline, graceful shutdown all green |
+| Windows x86_64 (GPU) | **Vulkan** (NVIDIA/AMD/Intel local) + **CUDA dynamic-loading** (NVIDIA distributed) | Installer bundles CUDA redist DLLs — no CUDA Toolkit needed. Runtime-validated 2026-04-23 (RTX 3070, model loaded on `device=Cuda`) |
+| macOS aarch64 | CPU only (Metal planned) | Binary available, compile-validated only |
 | macOS x86_64 | CPU only | Best-effort |
 | Linux aarch64 | CPU only | Best-effort |
 

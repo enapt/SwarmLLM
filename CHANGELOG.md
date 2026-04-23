@@ -17,6 +17,42 @@ Linux/macOS, named pipes with default-DACL (current-logon-session)
 on Windows. Security parity, no protocol changes (the framed codec
 was already transport-agnostic).
 
+**Runtime-validated on Windows (2026-04-23):** Both the CPU
+(`swarmllm-windows-x86_64-cpu.zip`) and GPU
+(`swarmllm-windows-x86_64-gpu.zip`) Windows binaries from this release
+were smoke-tested on a real Windows host (Ryzen 7 5800H + RTX 3070
+Laptop, 8 GB VRAM).
+
+- **CPU single-node:** startup → BLAKE3 shard verify → named-pipe IPC
+  handshake → worker subprocess model load → inference (HTTP 200 in
+  5 s on TinyLlama 1.1B Q4_K_M) → API-triggered graceful shutdown
+  (drain in 3 s, no orphaned worker).
+- **CPU multi-node, single-segment:** node B bootstrapped from node A
+  over loopback TCP. Noise + Yamux handshake green, GossipSub
+  propagated model availability, node B's `/v1/models` listed
+  TinyLlama as `owned_by: network`. Cross-node inference via Item 4
+  remote-generate fast path: 8 tokens, trust score updated.
+- **CPU multi-node, split shards (forced 2-segment pipeline):** A
+  hosting shard 0 (layers 0-12), B hosting shard 1 (layers 12-22),
+  auto-manage disabled to prevent cross-fill. Pipeline scheduler
+  assembled `["A:0-12", "B:12-22"]`, encrypted activation tensor
+  (172 KB) shipped over libp2p, B's worker subprocess computed the
+  tail layers, response channel returned tokens. Generated coherent
+  output ("The capital of France is Paris…") in 6 s.
+- **GPU single-node:** dynamic-loading cudarc resolved bundled CUDA
+  redist DLLs (cublas64_12.dll, cublasLt64_12.dll, cudart64_12.dll,
+  curand64_10.dll, nvrtc64_120_0.dll, nvrtc-builtins64_124.dll) at
+  process load — no CUDA Toolkit on the test host. RTX 3070 detected,
+  worker subprocess loaded model on `device=Cuda(CudaDevice(1))`,
+  inference returned coherent content. Graceful shutdown clean.
+
+**Side-effect validation:** auto-manage's peer-to-peer shard transfer
+also exercised on Windows during the multi-node run — A's missing
+shard 1 was downloaded from B and vice versa via libp2p
+request-response before auto-manage was disabled for the split test.
+
+macOS aarch64 binary remains compile-validated only.
+
 ### Distributed Inference Speedup Arc
 
 A multi-session effort to speed up distributed inference, tracked in
