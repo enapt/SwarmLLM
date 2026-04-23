@@ -6,7 +6,7 @@ All notable changes to SwarmLLM are documented here.
 
 > Prior tag: `v0.1.0-alpha.1` (2026-03-18, 674 tests). This section
 > accumulates work landed after that alpha, distributed to alpha testers
-> as point builds. Test count as of HEAD: 765.
+> as point builds. Test count as of HEAD: 771.
 
 ### Cross-Platform IPC
 

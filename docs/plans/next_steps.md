@@ -64,7 +64,7 @@ lever second.
 
 ### 4. Release hygiene *(2–4 h mechanical)*
 
-- Tag `v0.1.0`. All 20 phases complete + 765 tests passing + Item 8
+- Tag `v0.1.0`. All 20 phases complete + 771 tests passing + Item 8
   validated (including cross-over demo) is a reasonable version cut.
 - macOS CI matrix: currently Linux-only. macOS build is believed to
   work (uses Metal via candle's default) but untested in CI.

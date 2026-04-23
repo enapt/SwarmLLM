@@ -52,7 +52,7 @@ Zero clippy warnings. No exceptions.
 - **Is it tested?** New functionality should have unit tests. Bug fixes should have a regression test where practical.
 - **Is it focused?** PRs that do one thing well get reviewed faster than sprawling changes.
 - **Does it match existing patterns?** Follow the conventions in `CLAUDE.md` — error handling with `thiserror`, `DashMap` for shared state, `mpsc` channels between subsystems, structured `tracing` logging.
-- **No unnecessary dependencies.** The binary is ~31MB. We want to keep it lean.
+- **No unnecessary dependencies.** The binary is ~33–50 MB depending on platform and features. We want to keep it lean.
 
 ## Reporting Bugs
 
@@ -87,7 +87,7 @@ docker compose up
 The codebase is a Cargo workspace with three crates:
 
 - **`swarmllm`** (root) — main binary and all subsystem logic
-- **`crates/swarmllm-types/`** — shared data types (69 types: NodeId, ModelManifest, SwarmMessage, etc.)
+- **`crates/swarmllm-types/`** — shared data types (78 types: NodeId, ModelManifest, SwarmMessage, etc.)
 - **`crates/swarmllm-frontend/`** — embedded or dev-mode frontend asset serving
 
 Key directories:
@@ -96,7 +96,7 @@ Key directories:
 - `src/inference/` — router, pipeline, executor, split inference
 - `src/api/` — HTTP server, OpenAI/Anthropic endpoints, admin dashboard
 - `src/credit/` — credit system, transactions, anti-gaming
-- `frontend/` — vanilla HTML/CSS/JS dashboard (no build step): `js/core/` (state, utils, data), `js/components/` (8 UI modules), `js/init.js`, 12 HTML `<template>` elements
+- `frontend/` — vanilla HTML/CSS/JS dashboard (no build step): `js/core/` (4 modules: state, utils, data, tooltip), `js/components/` (15 UI modules), `js/init.js`, 4 standalone utilities (i18n, providers, neural-bg, topojson-client), 12 HTML `<template>` elements, 21 i18n languages
 
 ## Security Issues
 
