@@ -17,10 +17,10 @@
       v = parseInt(v, 10) || 0;
       switch (fmt) {
         case 'int': return String(v);
-        case 'mbps': return v === 0 ? (I18n.t('settings.slider_unlimited') || 'Unlimited') : v + ' Mbps';
+        case 'mbps': return v === 0 ? I18n.t('settings.slider_unlimited') : v + ' Mbps';
         case 'gb': return (v / 1000).toFixed(v < 10000 ? 1 : 0) + ' GB';
-        case 'gb-auto': return v === 0 ? (I18n.t('settings.slider_auto') || 'Auto (50% of disk)') : (v / 1000).toFixed(v < 10000 ? 1 : 0) + ' GB';
-        case 'sec-off': return v === 0 ? (I18n.t('settings.slider_off') || 'Off') : v + ' s';
+        case 'gb-auto': return v === 0 ? I18n.t('settings.slider_auto') : (v / 1000).toFixed(v < 10000 ? 1 : 0) + ' GB';
+        case 'sec-off': return v === 0 ? I18n.t('settings.slider_off') : v + ' s';
         default: return String(v);
       }
     },

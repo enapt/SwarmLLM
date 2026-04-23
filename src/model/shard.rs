@@ -150,14 +150,6 @@ impl ShardStore {
 
         let actual = hash_file_blake3(&path)?;
 
-        if actual == info.hash {
-            tracing::debug!(
-                model = %model_id,
-                shard = info.index,
-                "DIAG: verify_shard OK"
-            );
-        }
-
         if actual != info.hash {
             tracing::info!(
                 model = %model_id,
