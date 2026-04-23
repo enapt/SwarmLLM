@@ -208,6 +208,36 @@ async fn reader_actor(
     }
 }
 
+/// Split an incoming IpcLayerResult's binary payload back into the two
+/// mutually exclusive fields it can carry (activations XOR spec_logits).
+/// The worker guarantees only one of `has_activations` / `has_spec_logits`
+/// is true; if the invariant is violated we preserve activations and drop
+/// spec_logits with a warning (safer than panicking on the hot path).
+fn reconstruct_layer_payload(
+    has_activations: bool,
+    has_spec_logits: bool,
+    spec_logits_dims: Option<(u32, u32)>,
+    payload: Vec<u8>,
+) -> Result<(Vec<u8>, Vec<Vec<f32>>), SwarmError> {
+    if has_activations && has_spec_logits {
+        tracing::warn!(
+            "IpcLayerResult has both has_activations and has_spec_logits — treating as activations"
+        );
+        return Ok((payload, Vec::new()));
+    }
+    if has_spec_logits {
+        let dims = spec_logits_dims
+            .ok_or_else(|| SwarmError::Internal("spec_logits flagged but dims missing".into()))?;
+        let logits = crate::inference::worker_ipc::decode_spec_logits(&payload, dims)
+            .map_err(SwarmError::Internal)?;
+        Ok((Vec::new(), logits))
+    } else if has_activations {
+        Ok((payload, Vec::new()))
+    } else {
+        Ok((Vec::new(), Vec::new()))
+    }
+}
+
 /// Fan out a BatchResult to N per-request channels. Splits the concatenated
 /// payload into per-slot byte slices by `activation_lens`, wraps each inner
 /// `IpcLayerResult` in a `WorkerMsg::LayerResult`, and delivers to the caller
@@ -1194,14 +1224,19 @@ impl ModelProcessPool {
             match resp_rx.recv().await {
                 Some((msg, payload)) => match msg {
                     WorkerMsg::LayerResult(r) if r.request_id == request_id => {
-                        let activations = if r.has_activations { payload } else { vec![] };
+                        let (activations, spec_logits) = reconstruct_layer_payload(
+                            r.has_activations,
+                            r.has_spec_logits,
+                            r.spec_logits_dims,
+                            payload,
+                        )?;
                         return Ok(crate::types::LayerResult {
                             request_id: r.request_id,
                             token_ids: r.token_ids,
                             finish_reason: r.finish_reason,
                             activations,
                             sealed_token_ids: if r.sealed { r.sealed_payload } else { None },
-                            spec_logits: r.spec_logits,
+                            spec_logits,
                         });
                     }
                     WorkerMsg::Error {
@@ -1336,14 +1371,19 @@ impl ModelProcessPool {
             loop {
                 match rx.recv().await {
                     Some((WorkerMsg::LayerResult(r), payload)) if r.request_id == rid => {
-                        let activations = if r.has_activations { payload } else { vec![] };
+                        let (activations, spec_logits) = reconstruct_layer_payload(
+                            r.has_activations,
+                            r.has_spec_logits,
+                            r.spec_logits_dims,
+                            payload,
+                        )?;
                         results.push(crate::types::LayerResult {
                             request_id: r.request_id,
                             token_ids: r.token_ids,
                             finish_reason: r.finish_reason,
                             activations,
                             sealed_token_ids: if r.sealed { r.sealed_payload } else { None },
-                            spec_logits: r.spec_logits,
+                            spec_logits,
                         });
                         break;
                     }

@@ -763,7 +763,8 @@ async fn run_fused_batch_forward(
                 sealed_payload: None,
                 logprobs: None,
                 has_activations: false,
-                spec_logits: Vec::new(),
+                has_spec_logits: false,
+                spec_logits_dims: None,
             });
             result_lens.push(0);
         } else {
@@ -786,7 +787,8 @@ async fn run_fused_batch_forward(
                 sealed_payload: None,
                 logprobs: None,
                 has_activations: true,
-                spec_logits: Vec::new(),
+                has_spec_logits: false,
+                spec_logits_dims: None,
             });
             result_lens.push(len);
         }
@@ -1155,11 +1157,20 @@ async fn handle_forward(
 
     let mut result = compute_result.map_err(SwarmError::Internal)?;
 
-    // Build IPC response. Take ownership of the activation buffer rather
-    // than cloning it: this path runs on every non-last-segment forward
-    // (per-token) and the buffer can be tens of KB on f32 hidden states.
+    // Build IPC response. The payload slot is single-use: activations and
+    // spec_logits are mutually exclusive (spec fires only on the last
+    // segment; activations only on non-last). Take ownership of whichever
+    // is populated.
     let has_activations = !result.activations.is_empty();
-    let activation_payload = std::mem::take(&mut result.activations);
+    let has_spec_logits = !result.spec_logits.is_empty();
+    let (payload, spec_logits_dims): (Vec<u8>, Option<(u32, u32)>) = if has_spec_logits {
+        let (bytes, dims) = crate::inference::worker_ipc::encode_spec_logits(&result.spec_logits);
+        (bytes, Some(dims))
+    } else if has_activations {
+        (std::mem::take(&mut result.activations), None)
+    } else {
+        (Vec::new(), None)
+    };
 
     let ipc_result = IpcLayerResult {
         request_id: result.request_id,
@@ -1170,16 +1181,13 @@ async fn handle_forward(
         sealed_payload: result.sealed_token_ids,
         logprobs: None,
         has_activations,
-        spec_logits: result.spec_logits,
+        has_spec_logits,
+        spec_logits_dims,
     };
 
-    send_worker(
-        writer,
-        &WorkerMsg::LayerResult(ipc_result),
-        &activation_payload,
-    )
-    .await
-    .map_err(|e| SwarmError::Internal(format!("send LayerResult: {e}")))?;
+    send_worker(writer, &WorkerMsg::LayerResult(ipc_result), &payload)
+        .await
+        .map_err(|e| SwarmError::Internal(format!("send LayerResult: {e}")))?;
 
     Ok(())
 }
