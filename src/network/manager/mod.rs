@@ -1265,8 +1265,7 @@ impl NetworkManager {
                     connection_id,
                 },
             )) => {
-                self.handle_identify_received(peer_id, info, connection_id)
-                    .await;
+                self.handle_identify_received(peer_id, info, connection_id);
             }
 
             // ── Kademlia ──
@@ -1480,7 +1479,12 @@ impl NetworkManager {
     }
 
     /// Handle Identify protocol — peer identified, establish encryption, register in peer_registry.
-    async fn handle_identify_received(
+    ///
+    /// Must remain `fn` (not `async fn`): this is called from inside the
+    /// swarm event loop and any `.await` on a lock / I/O would stall the
+    /// entire NetworkManager. All state access below uses `try_lock` /
+    /// DashMap / atomics for exactly this reason.
+    fn handle_identify_received(
         &mut self,
         peer_id: libp2p::PeerId,
         info: libp2p::identify::Info,
