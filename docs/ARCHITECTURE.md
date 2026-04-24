@@ -1142,13 +1142,28 @@ allowing candle to parse the full tensor index while only loading assigned layer
 ## HTTP API Routes
 
 ### OpenAI-Compatible (Bearer auth required)
-- `POST /v1/chat/completions` — Chat completions (streaming + non-streaming, tool_calls + logprobs support)
-- `POST /v1/messages` — Anthropic Messages API (full Claude Code compatibility — tools, tool_choice, thinking, cache_control, metadata)
-- `POST /v1/embeddings` — Text embeddings
-- `GET  /v1/models` — List available models
-- `GET  /v1/providers` — List configured cloud providers and their available models
-- `GET  /v1/status` — SwarmLLM node status
+- `POST   /v1/chat/completions` — Chat completions (streaming + non-streaming, tool_calls + logprobs support)
+- `POST   /v1/responses` — OpenAI Responses API (gpt-5 / o-series default)
+- `GET    /v1/responses/:id` — Retrieve a stored response (30-day TTL)
+- `DELETE /v1/responses/:id` — Delete a stored response
+- `POST   /v1/responses/:id/cancel` — Cancel a background response
+- `POST   /v1/messages` — Anthropic Messages API (full Claude Code compatibility — tools, tool_choice, thinking, cache_control, metadata)
+- `POST   /v1/embeddings` — Text embeddings
+- `GET    /v1/models` — List available models
+- `GET    /v1/providers` — List configured cloud providers and their available models
+- `GET    /v1/status` — SwarmLLM node status
 - ~~`POST /v1/internal/hidden-states`~~ — **Removed** (was always returning "not supported with subprocess inference"; endpoint and module deleted)
+
+### OpenAI Responses API (`/v1/responses`)
+OpenAI-compatible Responses endpoint — the 2026 default API for o-series / gpt-5 / reasoning-era callers:
+- **Request fields:** `input` (string or array of items), `instructions`, `previous_response_id`, `max_output_tokens`, `tools` (`function`), `tool_choice`, `reasoning`, `text.format`, `text.verbosity`, `service_tier`, `include[]`, `store`, `background`, `parallel_tool_calls`, `stream`, plus arbitrary forward-compat fields via `#[serde(flatten)] extras`.
+- **Input items:** `message`, `function_call`, `function_call_output`, `reasoning` (cloud-proxy path), with content parts `input_text`, `input_image`, `input_file`, `input_audio`. Unknown item types round-trip via a `Raw(Value)` fallback.
+- **Routing:** OpenAI-compatible cloud model (gpt-5, o-series, nvidia/*, etc.) → proxy verbatim to upstream `/responses`; Claude / subprocess provider → 400 pointing at `/v1/messages`; otherwise local inference via Chat Completions translation.
+- **Built-in tools** (`web_search`, `file_search`, `computer_use_preview`, `code_interpreter`, `image_generation`, `mcp`, `custom`): rejected on local path (400); forwarded verbatim on cloud path (OpenAI hosts them).
+- **Streaming:** SSE with monotonic `sequence_number`. Events: `response.created`, `response.in_progress`, `response.output_item.added`, `response.content_part.added`, `response.output_text.delta`, `response.output_text.done`, `response.content_part.done`, `response.output_item.done`, `response.function_call_arguments.delta/done`, terminal `response.completed` | `response.incomplete` | `response.failed`.
+- **Persistence:** redb tree `responses`, 30-day TTL, hourly background sweep. `store=false` opts out.
+- **Chaining:** `previous_response_id` loads the stored record and flattens prior request.input + response.output into chat messages.
+- **Background:** `background=true` spawns a tokio task, returns `status="queued"` immediately; `GET /v1/responses/:id` polls; `POST /v1/responses/:id/cancel` flips the cancel flag (cancel-wins: worker's final result is discarded if cancelled).
 
 ### Anthropic Messages API (`/v1/messages`)
 Full Anthropic Messages API compatibility for use as a Claude Code backend:
