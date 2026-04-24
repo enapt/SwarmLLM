@@ -19,6 +19,10 @@ use crate::inference::router::TokenLogProbEntry;
 const MAX_HEADER: u32 = 64 * 1024 * 1024;
 const MAX_PAYLOAD: u32 = 512 * 1024 * 1024;
 
+fn is_zero_u32_vision(v: &u32) -> bool {
+    *v == 0
+}
+
 /// Message from daemon → worker.
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(tag = "t")]
@@ -145,9 +149,17 @@ pub struct IpcForward {
     pub layer_range: (u32, u32),
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tp_meta: Option<TensorParallelMeta>,
-    /// Vision embeddings (zstd FP16) included in JSON — only on first pass.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub vision_embeddings: Option<Vec<u8>>,
+    /// Byte length of the vision-embedding prefix at the head of the IPC
+    /// binary payload (zero when absent). Vision embeddings used to live
+    /// inside this JSON header as `Option<Vec<u8>>`, but serde_json encodes
+    /// `Vec<u8>` as a JSON array of integers (~5× bloat). LLaVA-class
+    /// mmproj output can exceed 1 MiB before zstd compression and tens of
+    /// MiB after decompression in pathological cases, and the same latent
+    /// bomb as spec_logits (gotcha #24) can push the JSON header past
+    /// `MAX_HEADER` (64 MiB). Payload layout: `[vision_bytes][activation_bytes]`
+    /// with the vision prefix length given here.
+    #[serde(default, skip_serializing_if = "is_zero_u32_vision")]
+    pub vision_embeddings_len: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub requester_node_id: Option<[u8; 32]>,
     #[serde(default)]
@@ -397,6 +409,64 @@ mod tests {
     fn spec_logits_decode_rejects_len_mismatch() {
         let err = decode_spec_logits(&[0u8; 3], (1, 2)).unwrap_err();
         assert!(err.contains("mismatch"));
+    }
+
+    #[test]
+    fn vision_embeddings_len_elided_when_zero() {
+        use crate::types::{ModelId, TensorFormat};
+        use uuid::Uuid;
+        let fwd = IpcForward {
+            request_id: Uuid::nil(),
+            sequence_num: 1,
+            index_pos: 5,
+            format: TensorFormat::FP32,
+            model_id: ModelId("test".into()),
+            layer_range: (0, 4),
+            tp_meta: None,
+            vision_embeddings_len: 0,
+            requester_node_id: None,
+            pre_embedded: false,
+            sampling: Default::default(),
+            adapter_id: None,
+            draft_tokens: vec![],
+            spec_logits_requested: false,
+            truncate_kv_to: None,
+        };
+        let json = serde_json::to_string(&fwd).unwrap();
+        // When no vision payload, the field is elided to match pre-fix wire
+        // shape and avoid bloating decode-hot-path forwards.
+        assert!(
+            !json.contains("vision_embeddings_len"),
+            "expected vision_embeddings_len to be elided from JSON when zero, got: {json}"
+        );
+        assert!(!json.contains("vision_embeddings"));
+    }
+
+    #[test]
+    fn vision_embeddings_len_present_when_nonzero() {
+        use crate::types::{ModelId, TensorFormat};
+        use uuid::Uuid;
+        let fwd = IpcForward {
+            request_id: Uuid::nil(),
+            sequence_num: 0,
+            index_pos: 0,
+            format: TensorFormat::FP32,
+            model_id: ModelId("test".into()),
+            layer_range: (0, 4),
+            tp_meta: None,
+            vision_embeddings_len: 12345,
+            requester_node_id: None,
+            pre_embedded: false,
+            sampling: Default::default(),
+            adapter_id: None,
+            draft_tokens: vec![],
+            spec_logits_requested: false,
+            truncate_kv_to: None,
+        };
+        let json = serde_json::to_string(&fwd).unwrap();
+        assert!(json.contains("\"vision_embeddings_len\":12345"));
+        let back: IpcForward = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.vision_embeddings_len, 12345);
     }
 
     #[test]

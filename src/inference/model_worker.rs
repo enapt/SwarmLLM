@@ -506,7 +506,7 @@ fn batch_eligible(requests: &[IpcForward]) -> bool {
         if r.tp_meta.is_some() {
             return false;
         }
-        if r.vision_embeddings.is_some() {
+        if r.vision_embeddings_len != 0 {
             return false;
         }
         if r.adapter_id.is_some() {
@@ -820,13 +820,31 @@ async fn handle_forward(
     kv_store: &Arc<KvCacheStore>,
     data_dir: &std::path::Path,
     fwd: IpcForward,
-    activation_bytes: Vec<u8>,
+    mut activation_bytes: Vec<u8>,
     shard_window: &Option<Vec<u32>>,
     activation_compression: bool,
 ) -> Result<(), SwarmError> {
     let request_id = fwd.request_id;
     let model_id = fwd.model_id.clone();
     let (layer_start, layer_end) = (fwd.layer_range.0 as usize, fwd.layer_range.1 as usize);
+
+    // Split the compound payload: daemon sends `[vision_bytes][activation_bytes]`
+    // with `vision_embeddings_len` giving the prefix boundary. Before
+    // gotcha #24's spec_logits fix generalized to vision, these lived
+    // inside the JSON header as `Vec<u8>` and bloated ~5× through serde_json.
+    let vision_bytes: Vec<u8> = if fwd.vision_embeddings_len == 0 {
+        Vec::new()
+    } else {
+        let vlen = fwd.vision_embeddings_len as usize;
+        if vlen > activation_bytes.len() {
+            return Err(SwarmError::Internal(format!(
+                "vision_embeddings_len={vlen} exceeds payload len={}",
+                activation_bytes.len()
+            )));
+        }
+        let rest = activation_bytes.split_off(vlen);
+        std::mem::replace(&mut activation_bytes, rest)
+    };
 
     // Determine TP config for the cache key
     let (tp_rank, tp_size) = fwd
@@ -945,9 +963,10 @@ async fn handle_forward(
 
     // Decompress vision embeddings if present.
     // Wire format: 8-byte header (num_tokens u32 LE + hidden_dim u32 LE) + zstd(FP16 data)
-    let vision_tensor: Option<candle_core::Tensor> = if let Some(ref compressed) =
-        fwd.vision_embeddings
-    {
+    let vision_tensor: Option<candle_core::Tensor> = if vision_bytes.is_empty() {
+        None
+    } else {
+        let compressed = &vision_bytes;
         if compressed.len() < 8 {
             tracing::warn!(request_id = %fwd.request_id, bytes = compressed.len(), "Vision embedding too short — dropping vision tensor");
             None
@@ -993,8 +1012,6 @@ async fn handle_forward(
                 }
             }
         }
-    } else {
-        None
     };
 
     // Load LoRA adapter if requested

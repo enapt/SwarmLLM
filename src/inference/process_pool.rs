@@ -1176,6 +1176,21 @@ impl ModelProcessPool {
             truncate_kv_to,
         } = forward;
 
+        // Split vision embeddings out of the JSON header into the binary
+        // payload prefix — serde_json encodes `Vec<u8>` as a JSON array of
+        // integers (~5× bloat) and can push the header past `MAX_HEADER`.
+        // Layout: `[vision_bytes][activation_bytes]` with
+        // `vision_embeddings_len` recording the prefix length.
+        let (vision_prefix, vision_len) = match vision_embeddings {
+            Some(bytes) => {
+                let len = u32::try_from(bytes.len()).map_err(|_| {
+                    SwarmError::Internal("vision embeddings > u32::MAX bytes".into())
+                })?;
+                (bytes, len)
+            }
+            None => (Vec::new(), 0u32),
+        };
+
         let ipc_fwd = IpcForward {
             request_id,
             sequence_num,
@@ -1184,7 +1199,7 @@ impl ModelProcessPool {
             model_id: fwd_model_id,
             layer_range,
             tp_meta,
-            vision_embeddings,
+            vision_embeddings_len: vision_len,
             requester_node_id,
             pre_embedded,
             sampling: Default::default(),
@@ -1208,10 +1223,19 @@ impl ModelProcessPool {
             request_id,
         };
 
+        let payload_buf: Vec<u8> = if vision_len == 0 {
+            activations
+        } else {
+            let mut buf = Vec::with_capacity(vision_prefix.len() + activations.len());
+            buf.extend_from_slice(&vision_prefix);
+            buf.extend_from_slice(&activations);
+            buf
+        };
+
         {
             let mut writer = handle.writer.lock().await;
             if let Err(e) =
-                send_daemon(&mut *writer, &DaemonMsg::Forward(ipc_fwd), &activations).await
+                send_daemon(&mut *writer, &DaemonMsg::Forward(ipc_fwd), &payload_buf).await
             {
                 drop(writer);
                 self.workers.remove(&model_id);
@@ -1315,7 +1339,11 @@ impl ModelProcessPool {
                 model_id,
                 layer_range,
                 tp_meta,
-                vision_embeddings,
+                // `forward_is_schedulable` / `batch_eligible` reject vision
+                // forwards before they reach this path, so we assert here
+                // rather than forward anything — any non-None value would
+                // imply a scheduler bug.
+                vision_embeddings: _,
                 sender_peer_bytes: _,
                 requester_node_id,
                 pre_embedded,
@@ -1334,7 +1362,7 @@ impl ModelProcessPool {
                 model_id,
                 layer_range,
                 tp_meta,
-                vision_embeddings,
+                vision_embeddings_len: 0,
                 requester_node_id,
                 pre_embedded,
                 sampling: Default::default(),

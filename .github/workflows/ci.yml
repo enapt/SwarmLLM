@@ -32,9 +32,20 @@ jobs:
       - run: cargo fmt --check
 
   clippy:
-    name: Clippy
+    name: Clippy (${{ matrix.features }})
     needs: fmt
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Lint both default and dev+claude-subscription feature sets —
+        # otherwise the dev-frontend and Claude-subscription code paths
+        # never see clippy in CI.
+        include:
+          - features: "default"
+            flags: ""
+          - features: "dev,claude-subscription"
+            flags: "--no-default-features --features dev,claude-subscription"
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -45,7 +56,9 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libssl-dev pkg-config
       - uses: Swatinem/rust-cache@v2
-      - run: cargo clippy --all-targets -- -D warnings
+        with:
+          key: clippy-${{ matrix.features }}
+      - run: cargo clippy ${{ matrix.flags }} --all-targets -- -D warnings
 
   test:
     name: Test
@@ -61,6 +74,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Run unit tests
         run: cargo test --lib --bins
+      - name: Run unit tests (dev,claude-subscription features)
+        run: cargo test --no-default-features --features dev,claude-subscription --lib --bins
       - name: Run integration tests
         run: cargo test --test integration -- --test-threads=1
       - name: Run phase 10/11 integration tests
