@@ -174,6 +174,104 @@ Proxy shape for local inference:
 - `include` keys (`message.output_text.logprobs`, `web_search_call.action.sources`, `computer_call_output.output.image_url`) — preserve via `include` array forwarding.
 - MCP auth tightening — already out of scope, but note.
 
+## Session-1 pickup guide
+
+This section gives a fresh Claude Code session the exact starting sequence so no rediscovery is needed. Read the top of this file for the design decisions, then follow the milestones below.
+
+### Code patterns to mirror
+
+- **Router registration**: `src/api/server.rs` lines 96–104 show the existing `/v1/*` pattern. Add Responses routes directly under the `/v1/messages` block. Use the same `JsonBody<T>` extractor + `ApiError` return type that `anthropic::messages` uses.
+- **Handler skeleton**: `src/api/openai/mod.rs::chat_completions` (line 149) and `src/api/anthropic/mod.rs::messages` (line 34) are the two closest handlers — structure the Responses handler the same way: validate → activity event → route decision (local vs cloud proxy) → emit.
+- **Cloud-proxy pattern**: `src/api/anthropic/proxy.rs::proxy_to_anthropic` is the most up-to-date (has the `#[serde(flatten)] extras` pattern, `anthropic-beta` forwarding, and unknown-field preservation from commits `35a0191` / `0ecd38e` / `4347992`). Copy the `extras: HashMap<String, Value>` catch-all idiom into `ResponsesRequest` and `ResponsesResponse` at the top level and inside every content-part / tool-def / output-item struct that OpenAI might extend in-place.
+- **Streaming SSE**: `src/api/anthropic/sse.rs` and `src/api/openai/streaming.rs` show the two conventions. Responses uses a new event schema closer to Anthropic's (`type: "response.output_text.delta"` etc.) than Chat's bare choices delta. The Anthropic sse module is a better template.
+- **Activity events**: use `state.emit_activity(ActivityEvent::new("inference", "...", msg).with_model(...).with_toast("info", ...))` — see the existing chat_completions handler for the exact shape. Do NOT create a new event category; reuse `"inference"`.
+- **Cancel**: `background=true` + `POST /v1/responses/{id}/cancel` maps to our existing cancel-shutdown flow. Spawn an `Arc<AtomicBool>` cancel flag per stored response; the cancel handler sets it, the inference path checks it at token boundaries (same pattern as HF download cancel flags in `state.models.download_cancel_flags`).
+
+### redb persistence
+
+- Tree name: `"responses"` (convention: lowercase, plural, matches `"models"`, `"responses"`, `"transactions"`). The database uses composite keys via `put_json(tree, key, value)` — see `src/storage/db.rs::put_json`.
+- Record shape: `ResponsesRecord { id, created_at, request: ResponsesRequest, response: ResponsesResponse, expires_at }`.
+- TTL: 30-day sweep. Add to the existing `stale_tensor_interval` sweep in `src/daemon/background.rs` rather than a new interval — it already runs every 10s and iterates quickly.
+- Do NOT put ResponsesRecord in SharedState as a DashMap. redb is the source of truth; hitting disk is fine at Responses-create cadence. Cache only the "currently-streaming-a-background-response" map in memory, keyed by `resp_id → Arc<AtomicBool>` cancel flag + `Arc<RwLock<Vec<StreamEvent>>>` resume buffer (for the resume-from-seq path in v2).
+
+### Milestones — each gets its own commit
+
+**Milestone 1 — request parsing (no handler yet).** Create `src/api/openai/responses/types.rs` with all the request/response structs. Add 5+ serde roundtrip tests covering: string `input`, array `input` with mixed message + function_call + reasoning items, nested content parts, tool array with 3+ tool types, all numeric edge cases. `cargo test` green. No routes wired. **Checkpoint**: `cargo test --lib api::openai::responses::types` passes + 10+ tests green.
+
+**Milestone 2 — reject-and-400 for built-in tools.** Wire the `POST /v1/responses` route to a handler that parses the request, rejects `tools[*].type` ∈ {`web_search`, `file_search`, `computer_use_preview`, `code_interpreter`, `image_generation`, `mcp`, `custom`} with a clear 400 message naming which tool is unsupported, and 501 for everything else. Curl test. **Checkpoint**: built-in tool rejection returns 400 with specific tool name in body; plain text request returns 501 (not yet implemented).
+
+**Milestone 3 — Responses → Chat translation (local inference path).** Implement `translate::request_to_chat(responses_request) -> ChatCompletionRequest` and `translate::chat_to_response(chat_response) -> ResponsesResponse`. Plain text in/out, no tools, no streaming. Wire handler: translate, call existing `chat_completions` path, translate back. **Checkpoint**: `curl POST /v1/responses` with `{"model":"<local>","input":"Hello"}` returns a non-streaming ResponsesResponse with `output[0].content[0].text` set.
+
+**Milestone 4 — function tools.** Translate `tools[{type:function, name, description, parameters, strict}]` ↔ Chat's `tools[{type:function, function:{...}}]`. Translate `tool_choice` both directions. Translate assistant `function_call` output item ↔ Chat's `tool_calls`. **Checkpoint**: OpenAI Python SDK's `client.responses.create(..., tools=[...])` round-trips a function call correctly.
+
+**Milestone 5 — cloud proxy path.** For Claude / gpt-5 / o-series model IDs, bypass local translation and proxy verbatim to the upstream provider. Use `#[serde(flatten)] extras` to preserve unknown fields. Forward `anthropic-beta` header when targeting Claude. Add matching `ProviderError` status preservation. **Checkpoint**: `reasoning.effort`, `service_tier`, `include`, `text.verbosity` all round-trip verbatim end-to-end (test with a real upstream if available, or with a local echo server).
+
+**Milestone 6 — streaming (SSE).** Map the internal `StreamingToken` stream to the shortlist of event types in the "Streaming events" section above. Emit `sequence_number` monotonically starting at 0 per response. Handle `response.completed` / `response.incomplete` / `response.failed` terminal states. **Checkpoint**: OpenAI Python SDK's `async for event in await client.responses.create(..., stream=True)` iterates events in the correct order.
+
+**Milestone 7 — `store=true` + retrieve + delete.** redb-backed `ResponsesRecord` storage, `GET /v1/responses/{id}` deserializes and returns, `DELETE /v1/responses/{id}` removes. 30-day TTL sweep. **Checkpoint**: create → retrieve → delete round trip green; stored record survives daemon restart; expired records pruned.
+
+**Milestone 8 — `previous_response_id` chaining (local).** On follow-up call, if `previous_response_id` is set, fetch the stored record, flatten its `output` items back into `messages[]`, prepend to the new `input`, and call the chat path as normal. Cloud proxy path forwards `previous_response_id` verbatim. **Checkpoint**: two-turn conversation via `previous_response_id` produces the same behavior as passing the full messages array.
+
+**Milestone 9 — `background=true` + `cancel`.** Spawn inference in a tokio task keyed by `resp_id`. Return `{status:"queued"}` immediately. `GET /v1/responses/{id}` polls status. `POST /v1/responses/{id}/cancel` sets the cancel flag. **Checkpoint**: curl matrix covering: create background → poll status → cancel mid-stream → status flips to `cancelled`.
+
+### Scope out of v1 (explicit deferrals)
+
+These are tracked in the "Watch-list" section; explicitly return 400/501 with a clear error message rather than silently accepting:
+
+- `GET /v1/responses/{id}/input_items` pagination (return 501)
+- `GET /v1/responses/{id}?stream=true&starting_after={seq}` resumable streaming (return 400 — only `stream=true` on create is supported)
+- `POST /v1/responses/compact` server-side compaction (return 501)
+- `conversation` parameter — accept but log a one-line warn that conversation-resource CRUD is not implemented (pass through for cloud proxy; ignore for local inference)
+- Built-in tools (every type listed above) — reject at parse time with a clear error naming the tool
+
+### Gotchas carried over from this session
+
+1. **Unknown field preservation is load-bearing**: the OpenAI proxy fix in `0ecd38e` added `#[serde(flatten)] extras: HashMap<String, Value>` specifically because dropping unknown fields broke real SDKs' passthrough of `reasoning_effort` / `service_tier` / etc. Responses will have 10× more field churn than Chat — default-apply flatten+extras to every struct at top-level and in any nested type OpenAI might extend.
+2. **Large payloads go in the IPC binary payload, not JSON header** (gotcha #24 in MEMORY.md). If Responses ever carries images or audio input items, decode them to the internal representation at handler time — don't pass `Vec<u8>` through `WorkerMsg` JSON.
+3. **i18n error messages**: any user-facing error message must have a key in `frontend/i18n/en.json` and be propagated to all 20 non-English locales. For Responses this matters for error responses the dashboard might surface (frontend chat component renders upstream error messages).
+4. **Per-session Claude Code interaction**: `src/api/claude_sub.rs` (feature `claude-subscription`) routes Claude models through a local subprocess instead of the cloud API. Responses hitting Claude models should check this feature flag and route through `claude_sub` when enabled — mirror the pattern in `anthropic::messages`.
+5. **CPU decode ≥ 2048 KV with GQA** now uses fused flash attention (commit `16ed1e8`) — Responses doesn't need to care, but if you add perf tests against long-context Responses calls, that's where the speedup comes from.
+6. **Frontend authFetch pattern**: `App.authFetch` already handles Bearer auth for any `/v1/*` call; the Responses endpoint works from the dashboard without frontend changes, as long as the new routes are registered on the server before the catch-all.
+
+### Validation matrix (run before each milestone commit)
+
+```bash
+cargo fmt && cargo clippy --all-targets --no-default-features --features dev,claude-subscription -- -D warnings
+cargo test --lib --no-default-features --features dev,claude-subscription
+cargo build --release --no-default-features --features dev,claude-subscription
+```
+
+And for the end-to-end curl smoke test (reuse the pattern from the auth-hardening commit `5a19acc`):
+
+```bash
+# start daemon on a test port
+mkdir -p /tmp/resp_test
+SWARMLLM_NODE_DATA_DIR=/tmp/resp_test SWARMLLM_FRONTEND_DIR=$PWD/frontend \
+  ./target/release/swarmllm run -p 8821 >/tmp/resp_test/log 2>&1 &
+sleep 3
+API_KEY=$(grep "Generated new API key" /tmp/resp_test/log | sed 's/.*: //')
+
+# plain generation
+curl -s -H "Authorization: Bearer $API_KEY" -H "Content-Type: application/json" \
+  http://localhost:8821/v1/responses \
+  -d '{"model":"<local-model-id>","input":"Hello"}'
+
+# built-in tool rejection (expect 400)
+curl -s -o /dev/null -w "%{http_code}\n" -H "Authorization: Bearer $API_KEY" -H "Content-Type: application/json" \
+  http://localhost:8821/v1/responses \
+  -d '{"model":"<local-model-id>","input":"x","tools":[{"type":"web_search"}]}'
+```
+
+### Anchors this plan relies on (verify before starting)
+
+- `src/api/openai/mod.rs::chat_completions` (line 149) — handler template.
+- `src/api/anthropic/mod.rs::messages` (line 34) — second handler template, closer in structure.
+- `src/api/anthropic/proxy.rs::proxy_to_anthropic` — cloud-proxy pattern with serde flatten.
+- `src/api/server.rs` lines 96–104 — `/v1/*` route registration style.
+- `src/storage/db.rs::put_json` — redb helper convention.
+- `src/daemon/background.rs::stale_tensor_interval` — sweep interval to reuse for TTL.
+- MEMORY.md gotchas #18 (stop sequences), #24 (JSON header size), #25 (cross-node prefix-fetch timeouts) — general discipline that Responses implementation should follow.
+
 ## References
 
 - [Create a model response — OpenAI API Reference](https://platform.openai.com/docs/api-reference/responses/create)
