@@ -82,7 +82,10 @@ pub async fn handler(
     State(state): State<AppState>,
 ) -> impl IntoResponse {
     // Origin validation — defense in depth against cross-site WS hijacking.
-    // Missing Origin is allowed (non-browser clients like CLIs don't send it).
+    // Browsers always send Origin on WebSocket upgrades (unlike same-origin
+    // GETs), so we can require a match when it's present. Missing Origin
+    // is allowed (non-browser clients like the Rust integration tests
+    // don't send it).
     if let Some(origin) = headers.get(axum::http::header::ORIGIN) {
         let origin_str = origin.to_str().unwrap_or("");
         let port = state.config.node.listen_port;

@@ -314,15 +314,27 @@ pub async fn auth_middleware(
         return next.run(req).await;
     }
 
-    // Exempt API key retrieval — loopback only AND Origin header must match
-    // the dashboard's own origin. The endpoint is the bootstrap path (the
+    // Exempt API key retrieval — loopback only AND the request must carry
+    // a browser-only signal. The endpoint is the bootstrap path (the
     // dashboard has no way to obtain the key otherwise on first load), so
-    // it stays loopback-exempt, but an Origin check blocks other local
-    // processes doing direct curl/python (which send no Origin header) and
-    // localhost pages served from a different port. This is defense in
-    // depth — a malicious browser extension that can inject scripts into
-    // the dashboard origin still wins, but that class of attacker also has
-    // direct access to localStorage.
+    // it stays loopback-exempt, but a header check raises the bar against
+    // other local processes doing direct curl/python.
+    //
+    // Two acceptable signals:
+    //   * `Origin` matches this daemon's own origin (sent by fetch() for
+    //     CORS-relevant requests — POST, DELETE, or GETs to a different
+    //     origin).
+    //   * `Sec-Fetch-Site: same-origin` (modern browsers auto-send this
+    //     for every same-origin request; curl/python don't send it).
+    //
+    // `Origin` alone is NOT sufficient: browsers typically omit `Origin`
+    // on same-origin simple GETs, so the dashboard's bootstrap fetch
+    // wouldn't match. `Sec-Fetch-Site` fills that gap.
+    //
+    // This is defense in depth, not a hard security boundary. A
+    // determined local attacker can set either header manually; but a
+    // malicious extension that can inject script into the dashboard
+    // origin already has DOM / localStorage access anyway.
     if path == "/api/admin/api-key" && method == Method::GET && addr.ip().is_loopback() {
         let port = state.shared_state.config.node.listen_port;
         let allowed_origins = [
@@ -335,7 +347,13 @@ pub async fn auth_middleware(
             .and_then(|v| v.to_str().ok())
             .map(|o| allowed_origins.iter().any(|a| a == o))
             .unwrap_or(false);
-        if origin_ok {
+        let same_site_ok = req
+            .headers()
+            .get("sec-fetch-site")
+            .and_then(|v| v.to_str().ok())
+            .map(|v| v.eq_ignore_ascii_case("same-origin"))
+            .unwrap_or(false);
+        if origin_ok || same_site_ok {
             return next.run(req).await;
         }
         // Fall through — the handler will fail auth normally with 401.
