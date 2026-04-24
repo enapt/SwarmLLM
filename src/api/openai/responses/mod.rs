@@ -10,6 +10,7 @@
 //! - **M6**: SSE streaming.
 //! - **M7-M9**: persistence, chaining, background.
 
+pub mod stream;
 pub mod translate;
 pub mod types;
 
@@ -115,12 +116,10 @@ pub async fn create_response(
         }
     }
 
-    // Streaming — wired in M6.
+    // Streaming (M6) — local-inference SSE. Cloud proxy already streamed
+    // above if it matched.
     if stream {
-        return Ok(not_implemented(
-            "Streaming on /v1/responses is not yet implemented (planned for M6). \
-             Set stream=false or use /v1/chat/completions with streaming.",
-        ));
+        return stream::run_streaming(state, headers, req).await;
     }
 
     // Background mode — wired in M9.
