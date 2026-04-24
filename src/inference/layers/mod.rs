@@ -842,12 +842,27 @@ pub(crate) fn run_attention(
         Device::Cpu => {
             let seq_len = q.dim(2)?;
 
-            // Fast path for decode (seq_len=1): skip CPU flash attention's
-            // triple transpose+contiguous copies. Standard matmul is cheaper
-            // for a single query token against the KV cache.
-            // Also taken when SWIFT/spec sessions force standard attention so
-            // baseline + draft + verify share identical numerics.
-            if seq_len == 1 || force_standard {
+            // Decode (seq_len=1) routing — measured crossover, see
+            // `cpu_decode_bench::decode_seq1_fused_vs_standard`:
+            //
+            // * MHA (n_head == n_kv_head): standard_attention is 7-20×
+            //   faster than fused flash at every KV length — repeat_kv is
+            //   a no-op so fused's BHSD→BSHD transposes are pure overhead.
+            // * GQA (n_head != n_kv_head): standard is faster up to ~1024
+            //   KV, then repeat_kv's expansion-to-n_head cost dominates
+            //   and fused wins. Crossover ~2048 on Qwen2.5-7B (28/4 GQA)
+            //   and Llama-70B-style (32/8 GQA); at 4096 KV fused is 4-5×
+            //   faster.
+            //
+            // SWIFT / spec sessions force standard regardless so prefill +
+            // draft + verify share identical numerics (tiny softmax drift
+            // breaks accept rate even at skip_ratio=0).
+            const CPU_FUSED_DECODE_GQA_MIN_KV: usize = 2048;
+            let is_gqa = n_head != n_kv_head;
+            let kv_len = k.dim(2)?;
+            let use_standard_for_decode =
+                seq_len == 1 && (!is_gqa || kv_len < CPU_FUSED_DECODE_GQA_MIN_KV);
+            if use_standard_for_decode || force_standard {
                 return standard_attention(
                     q,
                     k,
@@ -1129,3 +1144,143 @@ impl LayerWeights {
 }
 
 mod qwen35;
+
+#[cfg(test)]
+mod cpu_decode_bench {
+    //! Benchmark: fused CPU flash attention vs standard matmul on decode
+    //! (`seq_len = 1`) across varied KV cache lengths. Answers whether the
+    //! deliberate skip in `run_attention` at the top of this file is still
+    //! the right call.
+    //!
+    //! Run with:
+    //!   cargo test --release --no-default-features --features dev,claude-subscription \
+    //!       --lib -- --ignored --nocapture inference::layers::cpu_decode_bench
+    //!
+    //! The test is `#[ignore]` so normal `cargo test` doesn't pay the time.
+
+    use candle_core::{Device, Tensor};
+
+    fn bench_one(
+        n_head: usize,
+        n_kv_head: usize,
+        head_dim: usize,
+        kv_len: usize,
+        iters: usize,
+    ) -> (f64, f64) {
+        let device = Device::Cpu;
+        let b = 1;
+        let q_len = 1;
+
+        // BHSD tensors (b, h, s, d) — matching run_attention's input layout.
+        let q = Tensor::randn(0f32, 1.0, (b, n_head, q_len, head_dim), &device).expect("q alloc");
+        let k =
+            Tensor::randn(0f32, 1.0, (b, n_kv_head, kv_len, head_dim), &device).expect("k alloc");
+        let v =
+            Tensor::randn(0f32, 1.0, (b, n_kv_head, kv_len, head_dim), &device).expect("v alloc");
+        let neg_inf = Tensor::new(f32::NEG_INFINITY, &device).expect("neg_inf alloc");
+
+        // --- warm up standard path ---
+        for _ in 0..3 {
+            let _ = super::standard_attention(
+                &q, &k, &v, None, head_dim, n_head, n_kv_head, &neg_inf, None,
+            )
+            .expect("std warm");
+        }
+
+        let t0 = std::time::Instant::now();
+        for _ in 0..iters {
+            let _ = super::standard_attention(
+                &q, &k, &v, None, head_dim, n_head, n_kv_head, &neg_inf, None,
+            )
+            .expect("std iter");
+        }
+        let std_ms = t0.elapsed().as_secs_f64() * 1000.0 / iters as f64;
+
+        // --- warm up fused path ---
+        // The fused path ALWAYS includes BHSD→BSHD transposes + contiguous
+        // copies; we time that as part of the cost because the real code
+        // pays it on every call.
+        let softmax_scale = 1.0 / (head_dim as f32).sqrt();
+        for _ in 0..3 {
+            let q_bshd = q.transpose(1, 2).unwrap().contiguous().unwrap();
+            let k_bshd = k.transpose(1, 2).unwrap().contiguous().unwrap();
+            let v_bshd = v.transpose(1, 2).unwrap().contiguous().unwrap();
+            let _ = candle_nn::cpu_flash_attention::run_flash_attn_cpu::<f32>(
+                &q_bshd,
+                &k_bshd,
+                &v_bshd,
+                None,
+                softmax_scale,
+                None,
+                None,
+            )
+            .expect("fused warm");
+        }
+
+        let t0 = std::time::Instant::now();
+        for _ in 0..iters {
+            let q_bshd = q.transpose(1, 2).unwrap().contiguous().unwrap();
+            let k_bshd = k.transpose(1, 2).unwrap().contiguous().unwrap();
+            let v_bshd = v.transpose(1, 2).unwrap().contiguous().unwrap();
+            let _ = candle_nn::cpu_flash_attention::run_flash_attn_cpu::<f32>(
+                &q_bshd,
+                &k_bshd,
+                &v_bshd,
+                None,
+                softmax_scale,
+                None,
+                None,
+            )
+            .expect("fused iter");
+        }
+        let fused_ms = t0.elapsed().as_secs_f64() * 1000.0 / iters as f64;
+
+        (std_ms, fused_ms)
+    }
+
+    fn report(
+        label: &str,
+        n_head: usize,
+        n_kv_head: usize,
+        head_dim: usize,
+        kv_lens: &[usize],
+        iters: usize,
+    ) {
+        println!("\n=== {label}  heads={n_head}  kv_heads={n_kv_head}  head_dim={head_dim} ===",);
+        println!(
+            "{:>6}  {:>10}  {:>10}  {:>8}",
+            "kv_len", "std_ms", "fused_ms", "ratio"
+        );
+        for &kv in kv_lens {
+            let (s, f) = bench_one(n_head, n_kv_head, head_dim, kv, iters);
+            let ratio = f / s;
+            let winner = if ratio < 0.95 {
+                "fused WIN"
+            } else if ratio > 1.05 {
+                "std WIN"
+            } else {
+                "~tie"
+            };
+            println!(
+                "{:>6}  {:>10.3}  {:>10.3}  {:>8.2}x  {}",
+                kv, s, f, ratio, winner
+            );
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn decode_seq1_fused_vs_standard() {
+        let kv_lens: &[usize] = &[128, 512, 1024, 2048, 4096, 8192];
+        let iters = 50;
+
+        // TinyLlama (MHA: n_head = n_kv = 32, head_dim = 64)
+        report("TinyLlama-style MHA", 32, 32, 64, kv_lens, iters);
+        // Llama-2-7B / -3-8B style (MHA: 32/32, head_dim=128)
+        report("Llama-7B-style MHA", 32, 32, 128, kv_lens, iters);
+        // Qwen2.5-7B (GQA: 28 heads / 4 kv_heads, head_dim=128)
+        report("Qwen2.5-7B-style GQA", 28, 4, 128, kv_lens, iters);
+        // Llama-3-70B / Mistral-7B style (GQA: 32/8, head_dim=128)
+        report("Llama-70B-style GQA", 32, 8, 128, kv_lens, iters);
+    }
+}
