@@ -13,6 +13,33 @@ use super::sse::{
 };
 use super::types::{MessagesRequest, MessagesResponse};
 
+/// Tool `type` strings on the Anthropic side that designate hosted server
+/// tools (executed by Anthropic, not by the caller). These have no OpenAI
+/// function-calling equivalent.
+fn is_anthropic_server_tool(kind: &str) -> bool {
+    matches!(
+        kind,
+        "web_search_20250305"
+            | "web_search"
+            | "code_execution_20250522"
+            | "code_execution"
+            | "computer_20241022"
+            | "computer_20250124"
+            | "computer"
+            | "bash_20241022"
+            | "bash_20250124"
+            | "bash"
+            | "text_editor_20241022"
+            | "text_editor_20250124"
+            | "text_editor"
+    ) || kind.starts_with("web_search_")
+        || kind.starts_with("code_execution_")
+        || kind.starts_with("computer_")
+        || kind.starts_with("bash_")
+        || kind.starts_with("text_editor_")
+        || kind.starts_with("tool_search_")
+}
+
 pub(super) async fn anthropic_non_stream(
     router_tx: tokio::sync::mpsc::Sender<RouterCommand>,
     _req: &MessagesRequest,
@@ -256,7 +283,19 @@ pub(super) async fn anthropic_to_openai_proxy(
     base_url: &str,
     api_key: &str,
 ) -> Result<axum::response::Response, ApiError> {
-    // Build OpenAI-compatible request body
+    if let Some(ref tools) = req.tools {
+        for tool in tools {
+            let kind = tool.get("type").and_then(|v| v.as_str()).unwrap_or("");
+            if is_anthropic_server_tool(kind) {
+                return Err(ApiError(crate::error::SwarmError::Validation(format!(
+                    "Tool type `{kind}` is an Anthropic-hosted server tool and cannot be \
+                     translated to OpenAI function-calling. Route this request to an \
+                     Anthropic-compatible provider, or remove the server tool."
+                ))));
+            }
+        }
+    }
+
     let openai_messages: Vec<serde_json::Value> = messages
         .iter()
         .map(|m| {
@@ -410,4 +449,30 @@ pub(super) async fn anthropic_to_openai_proxy(
     );
 
     Ok(Json(response).into_response())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn detects_anthropic_server_tools() {
+        // Exact known types.
+        assert!(is_anthropic_server_tool("web_search_20250305"));
+        assert!(is_anthropic_server_tool("code_execution_20250522"));
+        assert!(is_anthropic_server_tool("bash_20250124"));
+        assert!(is_anthropic_server_tool("text_editor_20250124"));
+        assert!(is_anthropic_server_tool("computer_20250124"));
+
+        // Future-dated variants via prefix match.
+        assert!(is_anthropic_server_tool("web_search_99991231"));
+        assert!(is_anthropic_server_tool("tool_search_20260101"));
+
+        // Caller-defined function tools must NOT trip the filter — these
+        // are legitimately translatable to OpenAI function-calling.
+        assert!(!is_anthropic_server_tool("function"));
+        assert!(!is_anthropic_server_tool("custom"));
+        assert!(!is_anthropic_server_tool(""));
+        assert!(!is_anthropic_server_tool("my_tool"));
+    }
 }

@@ -298,6 +298,7 @@ pub async fn messages(
                 tool_choice: &req.tool_choice,
                 metadata: &req.metadata,
                 thinking: &req.thinking,
+                extras: &req.extras,
             })
             .map_err(|e| {
                 ApiError(crate::error::SwarmError::Validation(format!(
@@ -395,6 +396,7 @@ mod tests {
             tool_choice: None,
             metadata: None,
             thinking: None,
+            extras: std::collections::HashMap::new(),
         };
         let msgs = to_internal_messages(&req);
         assert_eq!(msgs.len(), 2);
@@ -431,6 +433,7 @@ mod tests {
             tool_choice: None,
             metadata: None,
             thinking: None,
+            extras: std::collections::HashMap::new(),
         };
         let msgs = to_internal_messages(&req);
         assert_eq!(msgs.len(), 1);
@@ -456,6 +459,7 @@ mod tests {
             tool_choice: None,
             metadata: None,
             thinking: None,
+            extras: std::collections::HashMap::new(),
         };
         let msgs = to_internal_messages(&req);
         assert_eq!(msgs.len(), 1);
@@ -488,6 +492,7 @@ mod tests {
             tool_choice: None,
             metadata: None,
             thinking: None,
+            extras: std::collections::HashMap::new(),
         };
         assert!(is_connectivity_probe(&probe));
 
@@ -508,6 +513,7 @@ mod tests {
             tool_choice: None,
             metadata: None,
             thinking: None,
+            extras: std::collections::HashMap::new(),
         };
         assert!(!is_connectivity_probe(&normal));
     }
@@ -528,6 +534,7 @@ mod tests {
             tool_choice: None,
             metadata: None,
             thinking: None,
+            extras: std::collections::HashMap::new(),
         };
         let params = to_sampling_params(&req);
         assert!((params.temperature - 0.5).abs() < f32::EPSILON);
@@ -707,10 +714,52 @@ mod tests {
             tool_choice: None,
             metadata: None,
             thinking: None,
+            extras: std::collections::HashMap::new(),
         };
         let msgs = to_internal_messages(&req);
         assert_eq!(msgs.len(), 1);
         assert!(msgs[0].content.contains("I'll read it."));
         assert!(msgs[0].content.contains("[Tool call: Read("));
+    }
+
+    #[test]
+    fn unknown_anthropic_fields_preserved_for_proxy() {
+        // Caller-supplied fields our struct doesn't model (service_tier,
+        // container, hypothetical future knob) must round-trip through the
+        // ProxyMessagesRequest serializer verbatim. Regression for the audit
+        // finding that these were silently dropped.
+        let json = r#"{
+            "model": "claude-opus-4-7",
+            "max_tokens": 128,
+            "messages": [{"role": "user", "content": "Hi"}],
+            "service_tier": "standard_only",
+            "container": "container_abc123",
+            "extra_future_field": {"nested": true}
+        }"#;
+        let req: MessagesRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.extras.get("service_tier").unwrap(), "standard_only");
+        assert_eq!(req.extras.get("container").unwrap(), "container_abc123");
+        assert!(req.extras.contains_key("extra_future_field"));
+
+        let proxy = proxy::ProxyMessagesRequest {
+            model: &req.model,
+            max_tokens: req.max_tokens,
+            messages: &req.messages,
+            system: &req.system,
+            stream: false,
+            temperature: req.temperature,
+            top_p: req.top_p,
+            top_k: req.top_k,
+            stop_sequences: &req.stop_sequences,
+            tools: &req.tools,
+            tool_choice: &req.tool_choice,
+            metadata: &req.metadata,
+            thinking: &req.thinking,
+            extras: &req.extras,
+        };
+        let v = serde_json::to_value(&proxy).unwrap();
+        assert_eq!(v["service_tier"], "standard_only");
+        assert_eq!(v["container"], "container_abc123");
+        assert_eq!(v["extra_future_field"]["nested"], true);
     }
 }

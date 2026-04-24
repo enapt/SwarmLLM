@@ -28,6 +28,11 @@ pub(super) struct ProxyMessagesRequest<'a> {
     pub(super) metadata: &'a Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) thinking: &'a Option<serde_json::Value>,
+    /// Forwarded verbatim — preserves `service_tier`, `container`, and any
+    /// future Anthropic request fields the caller supplied that we don't
+    /// explicitly model. Captured by `MessagesRequest::extras` via flatten.
+    #[serde(flatten)]
+    pub(super) extras: &'a std::collections::HashMap<String, serde_json::Value>,
 }
 
 // We need Serialize for AnthropicMessage/Content to proxy them

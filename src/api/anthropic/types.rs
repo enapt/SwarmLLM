@@ -31,6 +31,13 @@ pub struct MessagesRequest {
     /// Extended thinking configuration: {"type":"enabled","budget_tokens":N}
     #[serde(default)]
     pub thinking: Option<serde_json::Value>,
+    /// Catch-all for Anthropic request fields we don't explicitly model
+    /// (`service_tier`, `container`, future extensions). `#[serde(flatten)]`
+    /// preserves them verbatim so the proxy round-trip
+    /// (mod.rs → ProxyMessagesRequest → upstream) forwards the original
+    /// caller's knobs instead of silently dropping anything new.
+    #[serde(flatten)]
+    pub extras: std::collections::HashMap<String, serde_json::Value>,
 }
 
 fn default_temperature() -> Option<f32> {
