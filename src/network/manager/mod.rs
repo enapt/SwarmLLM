@@ -2778,6 +2778,14 @@ impl NetworkManager {
                         }
                         self.shared_state.models.auto_manage_notify.notify_one();
 
+                        // Release the P2P download semaphore permit parked by
+                        // AutoShardManager::trigger_download. The shard is
+                        // verified on disk; the slot is free for the next one.
+                        self.shared_state
+                            .models
+                            .p2p_download_permits
+                            .remove(&shard_id);
+
                         tracing::info!(
                             model = %shard_id.model_id,
                             index = shard_id.index,

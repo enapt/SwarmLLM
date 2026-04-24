@@ -102,7 +102,14 @@ impl NetworkManager {
         }
 
         // Retries exhausted or no more peers — fall back to HuggingFace.
+        // Release the P2P semaphore permit so the HF path (which acquires
+        // its own permit in a separate trigger_download call) doesn't
+        // starve behind the dead P2P request.
         self.shard_p2p_retries.remove(&shard_id);
+        self.shared_state
+            .models
+            .p2p_download_permits
+            .remove(&shard_id);
         self.shared_state
             .models
             .shard_p2p_failed

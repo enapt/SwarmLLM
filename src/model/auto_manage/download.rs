@@ -14,7 +14,11 @@ impl AutoShardManager {
     pub(super) async fn trigger_download(&self, candidate: &ShardCandidate) {
         // Try to acquire a semaphore permit non-blocking. If all download slots
         // are occupied, defer to next evaluation cycle instead of blocking the loop.
-        let permit = match self.download_semaphore.clone().try_acquire_owned() {
+        // Wrapped in an Option so both the HF branch (moves permit into a
+        // spawned task) and the P2P branch (parks permit in p2p_download_permits
+        // until the network event loop releases it) can `.take()` without the
+        // compiler seeing a use-after-move across mutually-exclusive paths.
+        let mut permit = Some(match self.download_semaphore.clone().try_acquire_owned() {
             Ok(p) => p,
             Err(_) => {
                 tracing::debug!(
@@ -24,7 +28,7 @@ impl AutoShardManager {
                 );
                 return;
             }
-        };
+        });
 
         // Reject duplicate downloads early. Without this, a re-trigger that
         // arrives while a download is mid-flight (and the .bin doesn't exist
@@ -65,7 +69,8 @@ impl AutoShardManager {
 
         // -- T8: mmproj full-file download (not byte-range) --
         if candidate.shard_index == crate::types::MMPROJ_SHARD_INDEX {
-            self.trigger_mmproj_download(candidate, model_dir, permit)
+            let mmproj_permit = permit.take().expect("permit present on entry");
+            self.trigger_mmproj_download(candidate, model_dir, mmproj_permit)
                 .await;
             return;
         }
@@ -271,8 +276,9 @@ impl AutoShardManager {
                 // Spawn the download so we don't block the evaluation loop.
                 // The semaphore permit is moved into the task and dropped on completion,
                 // releasing the slot for the next download.
+                let hf_permit = permit.take().expect("permit present on entry");
                 tokio::spawn(async move {
-                    let _permit = permit; // Hold permit for duration of download
+                    let _permit = hf_permit; // Hold permit for duration of download
                     let (ptx, mut prx) = tokio::sync::mpsc::channel::<
                         crate::model::huggingface::DownloadProgress,
                     >(32);
@@ -818,6 +824,17 @@ e
                             .with_detail_str("p2p".to_string()),
                         );
                     }
+                    // Park the semaphore permit under this shard_id — the
+                    // P2P flow is request/response across the network event
+                    // loop, so we can't hold the permit on this stack.
+                    // Released from network/manager/mod.rs on shard completion,
+                    // from shard_transfer.rs when retry_shard_or_fallback
+                    // gives up, or from the stall watchdog on silent drop.
+                    let p2p_permit = permit.take().expect("permit present on entry");
+                    self.shared_state
+                        .models
+                        .p2p_download_permits
+                        .insert(sid.clone(), p2p_permit);
                     let cmd = NetworkCommand::SendShardRequest {
                         target_peer_bytes: bytes,
                         request,
@@ -828,6 +845,10 @@ e
                             model = %candidate.model_id,
                             "Failed to send P2P shard request"
                         );
+                        // Request never left — drop the parked permit so the
+                        // slot isn't held indefinitely waiting for a
+                        // completion event that will never fire.
+                        self.shared_state.models.p2p_download_permits.remove(&sid);
                     }
                 } else {
                     tracing::debug!(

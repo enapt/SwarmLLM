@@ -56,6 +56,16 @@ pub struct ModelMgmt {
     /// per-bucket locking.
     pub peer_prefix_blocks:
         DashMap<NodeId, DashMap<crate::types::ModelId, dashmap::DashSet<[u8; 32]>>>,
+    /// OwnedSemaphorePermits for in-flight P2P shard downloads. The P2P
+    /// path queues a `NetworkCommand::SendShardRequest` and returns
+    /// immediately, so the permit can't be held on `trigger_download`'s
+    /// stack — it's parked here keyed by `ShardId` and released from the
+    /// network event loop (success path + retry-fallback give-up + stall
+    /// watchdog). HF and mmproj paths hold their permits in-task and
+    /// don't touch this map. Without this, `max_concurrent_downloads`
+    /// only bounded HF — P2P permits dropped the moment the request was
+    /// queued, so the semaphore had no effect on P2P load.
+    pub p2p_download_permits: DashMap<crate::types::ShardId, tokio::sync::OwnedSemaphorePermit>,
 }
 
 impl ModelMgmt {
@@ -283,6 +293,7 @@ mod tests {
             parallax_stability: DashMap::new(),
             cross_node_prefix_index: DashMap::new(),
             peer_prefix_blocks: DashMap::new(),
+            p2p_download_permits: DashMap::new(),
         }
     }
 

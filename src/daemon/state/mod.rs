@@ -340,6 +340,7 @@ impl SharedState {
                 parallax_stability: DashMap::new(),
                 cross_node_prefix_index: DashMap::new(),
                 peer_prefix_blocks: DashMap::new(),
+                p2p_download_permits: DashMap::new(),
             },
             events: EventBus {
                 dashboard_tx: broadcast::channel(32).0,
