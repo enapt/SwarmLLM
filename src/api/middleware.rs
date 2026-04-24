@@ -274,28 +274,24 @@ fn is_exempt_request(path: &str, method: &Method, is_loopback: bool) -> bool {
         return true;
     }
 
-    // Read-only dashboard data endpoints — GET only, LOCALHOST only.
-    // Remote clients (other machines on the network) must authenticate.
-    // This prevents unauthenticated network reconnaissance.
-    if *method == Method::GET && is_loopback {
-        return matches!(
-            path,
-            "/api/admin/stats"
-                | "/api/admin/config"
-                | "/api/admin/models"
-                | "/api/admin/peers"
-                | "/api/admin/shard-storage"
-                | "/api/admin/hf/search"
-                | "/api/admin/hf/probe"
-                | "/api/admin/network-map"
-                | "/api/admin/schedule"
-        ) || path.starts_with("/api/admin/hf/source/")
-            || (path.starts_with("/api/admin/models/") && path.ends_with("/auto-manage"))
-            || (path.starts_with("/api/admin/models/") && path.ends_with("/encrypted-pipeline"))
-            || path.starts_with("/api/identity/")
-            || path.starts_with("/api/pool/");
+    // /api/admin/ws is Bearer-exempt because WebSocket upgrades can't carry
+    // an Authorization header from a browser. The handler (api/websocket.rs)
+    // instead validates a single-use short-lived ticket obtained via
+    // `POST /api/admin/ws-ticket` — that endpoint IS Bearer-authed via this
+    // same middleware. Without a valid ticket the handler returns 401
+    // regardless of origin, so exposing the upgrade path here is safe.
+    if path == "/api/admin/ws" && *method == Method::GET {
+        return true;
     }
 
+    // Historical note: read-only admin GET endpoints used to be exempt from
+    // Bearer auth on loopback. The exemption was removed — any local process
+    // (malicious browser extension, rogue service) could otherwise scrape
+    // live peer / model / network data without credentials. The dashboard
+    // already authenticates every call through `App.authFetch` in
+    // frontend/js/core/data.js, so removing the exemption is transparent
+    // to it. CLI / remote clients were already required to authenticate.
+    let _ = (method, is_loopback); // silence unused-arg warnings in this arm
     false
 }
 
@@ -318,25 +314,38 @@ pub async fn auth_middleware(
         return next.run(req).await;
     }
 
-    // Exempt API key retrieval — loopback only.
-    // The dashboard needs the key to bootstrap auth for all other requests.
-    // Only accessible from localhost to prevent remote key theft.
+    // Exempt API key retrieval — loopback only AND Origin header must match
+    // the dashboard's own origin. The endpoint is the bootstrap path (the
+    // dashboard has no way to obtain the key otherwise on first load), so
+    // it stays loopback-exempt, but an Origin check blocks other local
+    // processes doing direct curl/python (which send no Origin header) and
+    // localhost pages served from a different port. This is defense in
+    // depth — a malicious browser extension that can inject scripts into
+    // the dashboard origin still wins, but that class of attacker also has
+    // direct access to localStorage.
     if path == "/api/admin/api-key" && method == Method::GET && addr.ip().is_loopback() {
-        return next.run(req).await;
+        let port = state.shared_state.config.node.listen_port;
+        let allowed_origins = [
+            format!("http://localhost:{port}"),
+            format!("http://127.0.0.1:{port}"),
+        ];
+        let origin_ok = req
+            .headers()
+            .get(axum::http::header::ORIGIN)
+            .and_then(|v| v.to_str().ok())
+            .map(|o| allowed_origins.iter().any(|a| a == o))
+            .unwrap_or(false);
+        if origin_ok {
+            return next.run(req).await;
+        }
+        // Fall through — the handler will fail auth normally with 401.
     }
 
-    // Exempt WebSocket upgrade requests at /api/admin/ws — loopback only
-    if path == "/api/admin/ws"
-        && addr.ip().is_loopback()
-        && req
-            .headers()
-            .get(axum::http::header::UPGRADE)
-            .and_then(|v| v.to_str().ok())
-            .map(|v| v.eq_ignore_ascii_case("websocket"))
-            .unwrap_or(false)
-    {
-        return next.run(req).await;
-    }
+    // WebSocket upgrades at /api/admin/ws: no Bearer exemption.
+    // Browsers can't set an Authorization header on WebSocket upgrades, so
+    // the WS handler itself validates a short-lived single-use ticket from
+    // `POST /api/admin/ws-ticket` (Bearer-authed) passed as `?t=<hex>`.
+    // See api/websocket.rs::handler and api/websocket.rs::issue_ticket.
 
     // Exempt internal forwarded requests authenticated with per-process secret token.
     // Only on loopback — this is for local inter-process communication only.
@@ -470,7 +479,7 @@ mod tests {
     }
 
     #[test]
-    fn exempt_get_requests_loopback() {
+    fn exempt_only_frontend_and_metrics() {
         let get = Method::GET;
         // Frontend routes, health, static — always exempt (any origin)
         assert!(is_exempt_request("/", &get, false));
@@ -482,29 +491,32 @@ mod tests {
         assert!(is_exempt_request("/static/css/style.css", &get, false));
         assert!(is_exempt_request("/static/js/app.js", &get, false));
         assert!(is_exempt_request("/favicon.ico", &get, false));
-        // /metrics exempt only from loopback
+        // /metrics exempt only from loopback (standard Prometheus convention).
         assert!(is_exempt_request("/metrics", &get, true));
         assert!(!is_exempt_request("/metrics", &get, false));
-        // Read-only dashboard endpoints — GET exempt from loopback only
-        assert!(is_exempt_request("/api/admin/stats", &get, true));
-        assert!(is_exempt_request("/api/admin/config", &get, true));
-        assert!(is_exempt_request("/api/admin/models", &get, true));
-        assert!(is_exempt_request("/api/admin/peers", &get, true));
-        assert!(is_exempt_request("/api/admin/shard-storage", &get, true));
-        assert!(is_exempt_request("/api/admin/hf/search", &get, true));
-        assert!(is_exempt_request("/api/admin/hf/probe", &get, true));
-        assert!(is_exempt_request("/api/admin/network-map", &get, true));
-        assert!(is_exempt_request("/api/admin/schedule", &get, true));
-        // provider-models requires auth (makes live API calls with stored keys)
+        // Read-only admin GETs are NO LONGER loopback-exempt — any local
+        // process doing a direct curl to these used to receive live peer /
+        // model / network data without credentials. The dashboard
+        // authenticates every call through App.authFetch (Bearer), so
+        // removing the exemption is transparent to it.
+        assert!(!is_exempt_request("/api/admin/stats", &get, true));
+        assert!(!is_exempt_request("/api/admin/config", &get, true));
+        assert!(!is_exempt_request("/api/admin/models", &get, true));
+        assert!(!is_exempt_request("/api/admin/peers", &get, true));
+        assert!(!is_exempt_request("/api/admin/shard-storage", &get, true));
+        assert!(!is_exempt_request("/api/admin/hf/search", &get, true));
+        assert!(!is_exempt_request("/api/admin/hf/probe", &get, true));
+        assert!(!is_exempt_request("/api/admin/network-map", &get, true));
+        assert!(!is_exempt_request("/api/admin/schedule", &get, true));
         assert!(!is_exempt_request("/api/admin/provider-models", &get, true));
-        assert!(is_exempt_request("/api/identity/nickname", &get, true));
-        assert!(is_exempt_request("/api/pool/state", &get, true));
-        // Same endpoints NOT exempt from remote IPs
+        assert!(!is_exempt_request("/api/identity/nickname", &get, true));
+        assert!(!is_exempt_request("/api/pool/state", &get, true));
+        // Same endpoints NOT exempt from remote IPs (unchanged).
         assert!(!is_exempt_request("/api/admin/stats", &get, false));
         assert!(!is_exempt_request("/api/admin/peers", &get, false));
         assert!(!is_exempt_request("/api/admin/network-map", &get, false));
         assert!(!is_exempt_request("/api/admin/models", &get, false));
-        // Sensitive endpoints require auth even from loopback
+        // Sensitive endpoints still require auth everywhere (unchanged).
         assert!(!is_exempt_request("/api/admin/credits", &get, true));
         assert!(!is_exempt_request("/api/admin/network-code", &get, true));
         assert!(!is_exempt_request("/api/admin/providers", &get, true));
@@ -562,10 +574,11 @@ mod tests {
     }
 
     #[test]
-    fn exempt_new_read_only_endpoints() {
+    fn admin_read_only_endpoints_always_require_auth() {
         let get = Method::GET;
-        // GET /api/admin/hf/source/:id is exempt from loopback
-        assert!(is_exempt_request(
+        // Parametric read-only admin GETs used to be loopback-exempt. The
+        // exemption was removed — they now require Bearer auth from any IP.
+        assert!(!is_exempt_request(
             "/api/admin/hf/source/test-model",
             &get,
             true
@@ -575,8 +588,7 @@ mod tests {
             &get,
             false
         ));
-        // GET /api/admin/models/:id/auto-manage is exempt from loopback
-        assert!(is_exempt_request(
+        assert!(!is_exempt_request(
             "/api/admin/models/test-model/auto-manage",
             &get,
             true

@@ -347,6 +347,7 @@ impl SharedState {
                 update_state: Arc::new(RwLock::new(crate::update::UpdateState::default())),
                 activity_tx: broadcast::channel(256).0,
                 activity_history: parking_lot::Mutex::new(VecDeque::new()),
+                ws_tickets: DashMap::new(),
             },
             // Root-level fields (not sub-structed)
             executor,

@@ -336,12 +336,34 @@
     }
   }
 
-  function connectWebSocket() {
+  async function connectWebSocket() {
     // Guard against stacking parallel reconnects
     if (S.ws && (S.ws.readyState === WebSocket.CONNECTING || S.ws.readyState === WebSocket.OPEN)) return;
     if (!S.wsWasConnected) setDashboardCover(true);
+    // Obtain a short-lived single-use ticket (Bearer-authed POST) — the
+    // browser can't set an Authorization header on the WS upgrade, so we
+    // pass the ticket as ?t=<hex>. The ticket is atomically consumed and
+    // expires in 30 seconds server-side.
+    var ticket = '';
+    try {
+      var tr = await App.authFetch('/api/admin/ws-ticket', { method: 'POST' });
+      if (tr.ok) {
+        var tj = await tr.json();
+        ticket = tj && tj.ticket ? tj.ticket : '';
+      }
+    } catch (e) {
+      // Fall through — WS will be rejected 401 and the reconnect loop
+      // will retry. Still surface so the onclose banner path runs.
+      console.warn('ws-ticket fetch failed', e);
+    }
+    if (!ticket) {
+      // Reconnect path will try again after backoff. Don't hard-error the
+      // dashboard — stats_update + activity_event just won't arrive.
+      setTimeout(function() { connectWebSocket(); }, 3000);
+      return;
+    }
     var protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    S.ws = new WebSocket(protocol + '//' + window.location.host + '/api/admin/ws');
+    S.ws = new WebSocket(protocol + '//' + window.location.host + '/api/admin/ws?t=' + encodeURIComponent(ticket));
 
     S.ws.onopen = function() {
       _suppressToasts = true;

@@ -311,8 +311,9 @@ pub fn build_router(state: AppState) -> Router {
             "/api/admin/pools/:id/rates",
             get(pool::pool_rates_get).put(pool::pool_rates_set),
         )
-        // WebSocket
+        // WebSocket (Bearer-authed via short-lived ticket in ?t=<hex>)
         .route("/api/admin/ws", get(websocket::handler))
+        .route("/api/admin/ws-ticket", post(websocket::issue_ticket))
         // Static files (embedded frontend)
         // SPA catch-all: serve index.html for all frontend sub-routes
         // so direct URL access (bookmarks, refresh) works

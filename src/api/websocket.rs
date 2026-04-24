@@ -19,20 +19,69 @@ const WS_PING_INTERVAL_SECS: u64 = 30;
 const WS_PONG_TIMEOUT_SECS: u64 = 35;
 /// Maximum concurrent WebSocket connections (prevents resource exhaustion).
 const MAX_WS_CONNECTIONS: usize = 100;
+/// Time-to-live for a WebSocket upgrade ticket. Client obtains via
+/// `POST /api/admin/ws-ticket` (Bearer-authed) then immediately opens the
+/// socket — 30s is ample for a round trip + constructor latency without
+/// leaving a useful replay window.
+const WS_TICKET_TTL: Duration = Duration::from_secs(30);
+
+#[derive(serde::Deserialize)]
+pub struct WsQuery {
+    /// Short-lived single-use ticket from `POST /api/admin/ws-ticket`.
+    /// Required because browsers cannot set an `Authorization` header on
+    /// WebSocket upgrades — the ticket-in-URL round trip is how we keep
+    /// Bearer-only auth on `/api/admin/ws`.
+    #[serde(default)]
+    pub t: Option<String>,
+}
+
+/// POST /api/admin/ws-ticket — issue a short-lived WS upgrade ticket.
+///
+/// Bearer-authed via the normal middleware. Returns `{"ticket": "<hex>"}`
+/// which the frontend passes as `/api/admin/ws?t=<ticket>` on the next
+/// upgrade. Ticket is single-use (atomic `remove` on consume) with a
+/// `WS_TICKET_TTL` expiry. Uses 32 bytes of OS randomness — the ticket
+/// is a lookup key, not a self-contained credential, so no HMAC / JWT
+/// signing overhead.
+pub async fn issue_ticket(State(state): State<AppState>) -> impl IntoResponse {
+    use rand::RngCore;
+    let mut bytes = [0u8; 32];
+    rand::rngs::OsRng.fill_bytes(&mut bytes);
+    let ticket = hex::encode(bytes);
+    state
+        .shared_state
+        .events
+        .ws_tickets
+        .insert(ticket.clone(), std::time::Instant::now());
+    // Opportunistically prune expired entries so the map can't grow
+    // unbounded from unused tickets (browser tab closed before WS open).
+    let now = std::time::Instant::now();
+    state
+        .shared_state
+        .events
+        .ws_tickets
+        .retain(|_, issued| now.duration_since(*issued) < WS_TICKET_TTL);
+    axum::Json(serde_json::json!({ "ticket": ticket })).into_response()
+}
 
 /// GET /api/admin/ws — WebSocket handler for real-time dashboard updates.
 ///
-/// Validates the Origin header to prevent cross-site WebSocket hijacking.
-/// Only connections from the same host (localhost) are accepted.
+/// Authentication: requires a valid single-use ticket in `?t=<hex>` (issued
+/// by `POST /api/admin/ws-ticket`). The ticket is consumed atomically by
+/// `DashMap::remove` and rejected if older than `WS_TICKET_TTL`.
+///
+/// Also validates the `Origin` header as defense in depth against DNS
+/// rebinding attacks — a malicious page cannot rebind to `127.0.0.1` and
+/// open this WebSocket because the ticket is obtained through an
+/// authenticated POST first.
 pub async fn handler(
     ws: WebSocketUpgrade,
     axum::extract::ConnectInfo(addr): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    axum::extract::Query(q): axum::extract::Query<WsQuery>,
     headers: axum::http::HeaderMap,
     State(state): State<AppState>,
 ) -> impl IntoResponse {
-    // Validate Origin header for ALL connections (including loopback) to prevent
-    // DNS rebinding attacks where a malicious page rebinds to 127.0.0.1 and opens
-    // a WebSocket to exfiltrate dashboard data.
+    // Origin validation — defense in depth against cross-site WS hijacking.
     // Missing Origin is allowed (non-browser clients like CLIs don't send it).
     if let Some(origin) = headers.get(axum::http::header::ORIGIN) {
         let origin_str = origin.to_str().unwrap_or("");
@@ -50,6 +99,24 @@ pub async fn handler(
             return axum::http::StatusCode::FORBIDDEN.into_response();
         }
     }
+
+    // Ticket validation — single-use, time-bounded.
+    let ticket = match q.t {
+        Some(t) if !t.is_empty() => t,
+        _ => {
+            tracing::warn!(remote = %addr, "WebSocket rejected: missing ticket");
+            return axum::http::StatusCode::UNAUTHORIZED.into_response();
+        }
+    };
+    let Some((_, issued)) = state.shared_state.events.ws_tickets.remove(&ticket) else {
+        tracing::warn!(remote = %addr, "WebSocket rejected: unknown or already-consumed ticket");
+        return axum::http::StatusCode::UNAUTHORIZED.into_response();
+    };
+    if issued.elapsed() >= WS_TICKET_TTL {
+        tracing::warn!(remote = %addr, "WebSocket rejected: ticket expired");
+        return axum::http::StatusCode::UNAUTHORIZED.into_response();
+    }
+
     let shared = state.shared_state.clone();
     ws.on_upgrade(move |socket| handle_socket(socket, shared))
 }
