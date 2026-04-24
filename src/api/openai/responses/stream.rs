@@ -35,10 +35,12 @@ use axum::response::{IntoResponse, Response};
 use bytes::{Buf, BytesMut};
 use futures::{Stream, StreamExt};
 
+use super::store;
 use super::translate;
 use super::types::*;
 use crate::api::server::{AppState, JsonBody};
 use crate::error::ApiError;
+use crate::storage::db::Database;
 
 const SSE_KEEPALIVE_INTERVAL_SECS: u64 = 15;
 
@@ -71,6 +73,11 @@ pub async fn run_streaming(
     let chat_body: Body = chat_response.into_body();
     let chat_stream = chat_body.into_data_stream();
 
+    // M7: streaming responses are persisted at stream-end when store=true
+    // (OpenAI default). Pass both into the generator so it can write after
+    // the final_response is built but before the terminal event yields.
+    let store_db = req.store.unwrap_or(true).then(|| state.db.clone());
+
     let sse_stream = build_response_event_stream(
         chat_stream,
         req,
@@ -78,6 +85,7 @@ pub async fn run_streaming(
         response_id,
         item_id,
         created_at,
+        store_db,
     );
 
     Ok(Sse::new(sse_stream)
@@ -140,6 +148,7 @@ fn build_response_event_stream<S>(
     response_id: String,
     item_id: String,
     created_at: i64,
+    store_db: Option<Database>,
 ) -> impl Stream<Item = Result<Event, Infallible>>
 where
     S: Stream<Item = Result<bytes::Bytes, axum::Error>> + Send + 'static,
@@ -548,6 +557,21 @@ where
             background: original.background,
             extras: HashMap::new(),
         };
+
+        // Persist the fully-assembled response before emitting the
+        // terminal event so a subsequent GET sees the same record the
+        // caller just observed close the stream.
+        if let Some(db) = store_db.as_ref() {
+            let record = store::ResponsesRecord::new(
+                original.clone(),
+                final_response.clone(),
+                created_at,
+                store::DEFAULT_TTL_SECS,
+            );
+            if let Err(e) = store::store(db, &record) {
+                tracing::warn!(error = %e, id = %response_id, "responses stream store failed");
+            }
+        }
 
         let terminal_event = if status == ResponseStatus::Failed {
             "response.failed"

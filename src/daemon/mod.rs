@@ -529,6 +529,11 @@ impl Daemon {
             self.config.clone(),
             shutdown_rx.clone(),
         );
+        background::spawn_responses_sweep(
+            &mut background_tasks,
+            self.db.clone(),
+            shutdown_rx.clone(),
+        );
 
         supervisor::run(subsystems, shutdown_rx, shared_state).await;
 

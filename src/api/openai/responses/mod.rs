@@ -10,6 +10,7 @@
 //! - **M6**: SSE streaming.
 //! - **M7-M9**: persistence, chaining, background.
 
+pub mod store;
 pub mod stream;
 pub mod translate;
 pub mod types;
@@ -174,6 +175,22 @@ pub async fn create_response(
     let created_at = chrono::Utc::now().timestamp();
     let resp = translate::chat_response_to_responses(&chat_value, &req, &response_id, created_at)?;
 
+    // M7: persist the completed response when store=true (the OpenAI default).
+    if req.store.unwrap_or(true) {
+        let record = store::ResponsesRecord::new(
+            req.clone(),
+            resp.clone(),
+            created_at,
+            store::DEFAULT_TTL_SECS,
+        );
+        if let Err(e) = store::store(&state.db, &record) {
+            // Failure to persist should not kill the response — log and
+            // return the generated answer. Caller can retry a GET if they
+            // care (they'll get 404 and know to pass the full turn inline).
+            tracing::warn!(error = %e, id = %resp.id, "responses store failed");
+        }
+    }
+
     let mut out = (StatusCode::OK, Json(resp)).into_response();
     // Preserve any non-content headers the chat handler set (rate-limit
     // headers, custom auth echoes, etc.). Keep our own status.
@@ -184,6 +201,36 @@ pub async fn create_response(
         out.headers_mut().insert(name.clone(), value.clone());
     }
     Ok(out)
+}
+
+/// `GET /v1/responses/:id` — retrieve a stored response.
+pub async fn get_response(
+    State(state): State<AppState>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Result<Response, ApiError> {
+    match store::load(&state.db, &id).map_err(ApiError)? {
+        Some(record) => Ok((StatusCode::OK, Json(record.response)).into_response()),
+        None => Err(ApiError(SwarmError::Validation(format!(
+            "Response `{id}` not found or expired. Retention is 30 days; \
+             pass store=false to opt out of persistence."
+        )))),
+    }
+}
+
+/// `DELETE /v1/responses/:id` — remove a stored response.
+pub async fn delete_response(
+    State(state): State<AppState>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Result<Response, ApiError> {
+    // Check existence so we can return a meaningful success body.
+    let existed = store::load(&state.db, &id).map_err(ApiError)?.is_some();
+    store::delete(&state.db, &id).map_err(ApiError)?;
+    let body = serde_json::json!({
+        "id": id,
+        "object": "response.deleted",
+        "deleted": existed,
+    });
+    Ok((StatusCode::OK, Json(body)).into_response())
 }
 
 #[cfg(test)]

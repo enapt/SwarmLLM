@@ -787,6 +787,42 @@ pub(super) fn spawn_sighup_handler(
 ) {
 }
 
+/// Periodically prune `/v1/responses` records whose 30-day retention has
+/// elapsed. Runs hourly; the TTL is coarse so there's no value in
+/// sweeping faster.
+pub(super) fn spawn_responses_sweep(
+    tasks: &mut BackgroundTasks,
+    db: crate::storage::db::Database,
+    mut shutdown_rx: watch::Receiver<bool>,
+) {
+    const SWEEP_INTERVAL_SECS: u64 = 3600;
+    tasks.spawn(async move {
+        let mut tick =
+            tokio::time::interval(std::time::Duration::from_secs(SWEEP_INTERVAL_SECS));
+        // Skip the first tick (runs immediately) — the daemon just started
+        // and there's nothing to clean up yet.
+        tick.tick().await;
+        loop {
+            tokio::select! {
+                _ = shutdown_rx.changed() => {
+                    if *shutdown_rx.borrow() {
+                        break;
+                    }
+                }
+                _ = tick.tick() => {
+                    let now = chrono::Utc::now().timestamp();
+                    match crate::api::openai::responses::store::sweep_expired(&db, now) {
+                        Ok(0) => {}
+                        Ok(n) => tracing::info!(count = n, "responses sweep: pruned expired records"),
+                        Err(e) => tracing::warn!(error = %e, "responses sweep failed"),
+                    }
+                }
+            }
+        }
+        "responses_sweep"
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::{verify_fetched_snapshot, SnapshotVerdict};
