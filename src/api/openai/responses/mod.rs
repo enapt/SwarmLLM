@@ -1,14 +1,19 @@
-//! OpenAI `/v1/responses` endpoint — request/response types and (in later
-//! milestones) handlers, translation, streaming, and persistence.
+//! OpenAI `/v1/responses` endpoint — request/response types, translation
+//! to/from Chat Completions, and HTTP handler.
 //!
-//! Milestone 2 wires the route + the built-in-tool rejection. Anything past
-//! the rejection currently returns 501 Not Implemented; M3 fills in local
-//! inference, M5 adds the cloud-proxy passthrough.
+//! Milestone scope:
+//! - **M1**: types + serde roundtrip.
+//! - **M2**: route wired, built-in-tool rejection, 501 stub.
+//! - **M3 (current)**: plain-text local inference via Chat translation.
+//!   Streaming and tools intentionally still return 501 — they land in
+//!   M6 and M4 respectively.
 
+pub mod translate;
 pub mod types;
 
 pub use types::*;
 
+use axum::body::to_bytes;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -18,11 +23,7 @@ use crate::api::server::{AppState, JsonBody};
 use crate::error::{ApiError, SwarmError};
 
 /// Tool `type` strings that map to OpenAI-hosted infrastructure SwarmLLM
-/// does not run. Listed in the plan under "Tool types we accept and pass
-/// through to local inference as `function`: just the `function` tool."
-///
-/// Order matters only for the error message; we surface the first one we
-/// find so the caller gets a single, specific name to fix.
+/// does not run.
 pub(crate) const BUILTIN_TOOL_TYPES: &[&str] = &[
     "web_search",
     "file_search",
@@ -33,9 +34,13 @@ pub(crate) const BUILTIN_TOOL_TYPES: &[&str] = &[
     "custom",
 ];
 
-/// Walk a tools array and return the first built-in tool type encountered,
-/// or `None` if every entry is a `function` (or unknown — those round-trip
-/// via Raw and we don't preemptively reject).
+/// Cap on the body size we'll buffer when forwarding a Chat Completions
+/// response into the translation layer. 16 MiB is a generous bound — local
+/// inference responses are normally well under 1 MiB; the cap exists to
+/// prevent an unbounded internal allocation if something goes sideways.
+const MAX_CHAT_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
+
+/// Walk a tools array and return the first built-in tool type encountered.
 pub(crate) fn first_builtin_tool(tools: &[ToolDef]) -> Option<&'static str> {
     for t in tools {
         let kind = t.type_str()?;
@@ -48,16 +53,27 @@ pub(crate) fn first_builtin_tool(tools: &[ToolDef]) -> Option<&'static str> {
     None
 }
 
-/// `POST /v1/responses` — Milestone 2 stub.
-///
-/// Parses the request, rejects built-in tools with a clear 400, and
-/// returns 501 for everything else. M3 replaces the 501 path with local
-/// inference via the Chat Completions translation.
+/// Build a 501 JSON response with a stable shape.
+fn not_implemented(message: &str) -> Response {
+    let body = serde_json::json!({
+        "error": {
+            "message": message,
+            "type": "not_implemented",
+            "param": null,
+            "code": "not_implemented",
+        }
+    });
+    (StatusCode::NOT_IMPLEMENTED, Json(body)).into_response()
+}
+
+/// `POST /v1/responses` — local inference path (M3 plain text only).
 pub async fn create_response(
-    State(_state): State<AppState>,
-    _headers: axum::http::HeaderMap,
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
     JsonBody(req): JsonBody<ResponsesRequest>,
 ) -> Result<Response, ApiError> {
+    // 1. Built-in tool gate (M2). Even when M3 supports tools, the built-in
+    //    set still requires backing infra we don't run.
     if let Some(tools) = req.tools.as_deref() {
         if let Some(builtin) = first_builtin_tool(tools) {
             return Err(ApiError(SwarmError::Validation(format!(
@@ -68,18 +84,88 @@ pub async fn create_response(
                  infrastructure SwarmLLM does not run."
             ))));
         }
+
+        // 2. Function tools — wired in M4. Until then, fail loud rather
+        //    than silently dropping them.
+        if !tools.is_empty() {
+            return Ok(not_implemented(
+                "Function tools on /v1/responses are not yet implemented \
+                 (planned for M4). Use /v1/chat/completions for tool-calling \
+                 inference today.",
+            ));
+        }
     }
 
-    let body = serde_json::json!({
-        "error": {
-            "message": "/v1/responses is not yet implemented on this server. \
-                        Use /v1/chat/completions for OpenAI-compatible inference.",
-            "type": "not_implemented",
-            "param": null,
-            "code": "not_implemented",
+    // 3. Streaming — wired in M6.
+    if req.stream.unwrap_or(false) {
+        return Ok(not_implemented(
+            "Streaming on /v1/responses is not yet implemented (planned for M6). \
+             Set stream=false or use /v1/chat/completions with streaming.",
+        ));
+    }
+
+    // 4. Background mode — wired in M9.
+    if req.background.unwrap_or(false) {
+        return Ok(not_implemented(
+            "background=true on /v1/responses is not yet implemented \
+             (planned for M9).",
+        ));
+    }
+
+    // 5. previous_response_id — wired in M8.
+    if req.previous_response_id.is_some() {
+        return Ok(not_implemented(
+            "previous_response_id chaining is not yet implemented \
+             (planned for M8). Pass the prior turn's messages directly via \
+             `input` for now.",
+        ));
+    }
+
+    // 6. Translate to a Chat Completions request and call the existing
+    //    handler. Any translation failure (unsupported input items,
+    //    invalid roles) bubbles up as a 400 via SwarmError::Validation.
+    let chat_req = translate::request_to_chat(&req)?;
+
+    let chat_response = crate::api::openai::chat_completions(
+        State(state.clone()),
+        headers.clone(),
+        JsonBody(chat_req),
+    )
+    .await?;
+
+    // 7. If the chat handler returned an error response, pass it through
+    //    verbatim — error JSON has the same shape both APIs use.
+    if !chat_response.status().is_success() {
+        return Ok(chat_response);
+    }
+
+    // 8. Parse the chat response body and translate to a Responses shape.
+    let (parts, body) = chat_response.into_parts();
+    let bytes = to_bytes(body, MAX_CHAT_RESPONSE_BYTES).await.map_err(|e| {
+        ApiError(SwarmError::Internal(format!(
+            "Failed to buffer chat response body: {e}"
+        )))
+    })?;
+    let chat_value: serde_json::Value = serde_json::from_slice(&bytes).map_err(|e| {
+        ApiError(SwarmError::Internal(format!(
+            "Failed to parse chat response JSON: {e}"
+        )))
+    })?;
+
+    let response_id = format!("resp_{}", uuid::Uuid::new_v4().simple());
+    let created_at = chrono::Utc::now().timestamp();
+    let resp = translate::chat_response_to_responses(&chat_value, &req, &response_id, created_at)?;
+
+    let mut out = (StatusCode::OK, Json(resp)).into_response();
+    // Preserve any non-content headers the chat handler set (rate-limit
+    // headers, custom auth echoes, etc.). Keep our own status.
+    for (name, value) in parts.headers.iter() {
+        if name == axum::http::header::CONTENT_TYPE || name == axum::http::header::CONTENT_LENGTH {
+            continue;
         }
-    });
-    Ok((StatusCode::NOT_IMPLEMENTED, Json(body)).into_response())
+        out.headers_mut().insert(name.clone(), value.clone());
+    }
+    Ok(out)
 }
 
 #[cfg(test)]
