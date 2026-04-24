@@ -137,6 +137,7 @@ impl MessagesResponse {
             usage: AnthropicUsage {
                 input_tokens,
                 output_tokens,
+                ..Default::default()
             },
         }
     }
@@ -158,10 +159,23 @@ pub enum ResponseContentBlock {
     Thinking { thinking: String },
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Default, Serialize)]
 pub struct AnthropicUsage {
     pub input_tokens: u32,
     pub output_tokens: u32,
+    /// Tokens written to the prompt cache on this request (Anthropic extension).
+    /// Only emitted when non-zero so existing clients / snapshot tests are
+    /// unaffected.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub cache_creation_input_tokens: u32,
+    /// Tokens served from the prompt cache on this request. Same policy —
+    /// elided when zero.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub cache_read_input_tokens: u32,
+}
+
+fn is_zero_u32(v: &u32) -> bool {
+    *v == 0
 }
 
 #[cfg(test)]

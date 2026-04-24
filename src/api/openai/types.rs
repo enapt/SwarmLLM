@@ -14,7 +14,13 @@ pub struct ChatCompletionRequest {
     pub temperature: f32,
     #[serde(default = "default_top_p")]
     pub top_p: f32,
-    #[serde(default = "default_max_tokens")]
+    /// Upper bound on generated tokens. Accept either `max_tokens` (legacy)
+    /// or `max_completion_tokens` (the spelling current OpenAI SDKs default to
+    /// for o-series / gpt-5 reasoning models). Without this alias, a caller
+    /// targeting a reasoning model through our proxy silently gets the 2048
+    /// default, and reasoning tokens eat the whole budget before any content
+    /// is emitted.
+    #[serde(default = "default_max_tokens", alias = "max_completion_tokens")]
     pub max_tokens: u32,
     #[serde(default)]
     pub stream: bool,

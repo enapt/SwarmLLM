@@ -126,7 +126,21 @@ pub(super) fn map_finish_reason(reason: &str) -> &'static str {
     }
 }
 
-/// Resolve model name: strip `provider:` prefix if present.
+/// Resolve model name: strip `provider:` prefix if present, then expand the
+/// bare family aliases `opus` / `sonnet` / `haiku` to the current full IDs.
+///
+/// Claude Code + the official SDK often send the full model ID (e.g.
+/// `claude-opus-4-7-20250917`), but users / `.claude/settings.json` configs
+/// sometimes use the shorthand. Without alias expansion the router
+/// at mod.rs:241 (`.starts_with("claude")`) drops the bare alias to the
+/// non-Claude path, which then fails to find a provider. Keep the bump point
+/// here — if/when Anthropic ships new aliases we only edit this table.
 pub(super) fn resolve_model(model: &str) -> &str {
-    crate::api::strip_provider_prefix(model)
+    let stripped = crate::api::strip_provider_prefix(model);
+    match stripped {
+        "opus" => "claude-opus-4-7",
+        "sonnet" => "claude-sonnet-4-6",
+        "haiku" => "claude-haiku-4-5",
+        _ => stripped,
+    }
 }

@@ -1,4 +1,5 @@
 use axum::extract::State;
+use axum::http::HeaderMap;
 use axum::response::IntoResponse;
 use axum::Json;
 
@@ -32,8 +33,22 @@ use types::{AnthropicContent, ContentBlock, MessagesRequest};
 /// POST /v1/messages — Anthropic Messages API endpoint.
 pub async fn messages(
     State(state): State<AppState>,
+    headers: HeaderMap,
     crate::api::server::JsonBody(req): crate::api::server::JsonBody<MessagesRequest>,
 ) -> Result<axum::response::Response, ApiError> {
+    // Capture Anthropic beta/version headers for forwarding on the proxy path.
+    // `anthropic-beta` is the big one: Claude Code + SDK users enable features
+    // like advanced-tool-use-*, context-1m-*, token-efficient-tools-*,
+    // code-execution-* through this header. Silently dropping it means those
+    // features degrade to vanilla 2023-06-01 behaviour without any error.
+    let proxy_beta = headers
+        .get("anthropic-beta")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned);
+    let proxy_version = headers
+        .get("anthropic-version")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned);
     super::validate_common_params(
         req.model.len(),
         req.messages.len(),
@@ -266,7 +281,14 @@ pub async fn messages(
                 )))
             })?;
 
-            return providers::proxy_to_anthropic(&api_key, &body, req.stream).await;
+            return providers::proxy_to_anthropic(
+                &api_key,
+                &body,
+                req.stream,
+                proxy_beta.as_deref(),
+                proxy_version.as_deref(),
+            )
+            .await;
         }
     }
 

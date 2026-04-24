@@ -501,28 +501,37 @@ pub async fn proxy_openai_compatible(
 }
 
 /// Proxy a request to the Anthropic Messages API.
+///
+/// `beta_header` is the caller's `anthropic-beta` value (forwarded verbatim when
+/// present) — unlocks features like advanced-tool-use, context-1m, token-
+/// efficient-tools, code-execution on the upstream API.
+/// `version_header` overrides the default `anthropic-version` when the caller
+/// supplied one; otherwise we pin `2023-06-01` (the release the rest of our
+/// type surface was built against).
 pub async fn proxy_to_anthropic(
     api_key: &str,
     body: &serde_json::Value,
     stream: bool,
+    beta_header: Option<&str>,
+    version_header: Option<&str>,
 ) -> Result<axum::response::Response, ApiError> {
     let client = get_provider_client();
     let url = "https://api.anthropic.com/v1/messages";
 
-    let resp = client
+    let mut req = client
         .post(url)
         .header("x-api-key", api_key)
-        .header("anthropic-version", "2023-06-01")
-        .header("Content-Type", "application/json")
-        .json(body)
-        .send()
-        .await
-        .map_err(|e| {
-            tracing::warn!(error = %e, "Anthropic proxy request failed");
-            ApiError(crate::error::SwarmError::Network(format!(
-                "Anthropic proxy failed: {e}"
-            )))
-        })?;
+        .header("anthropic-version", version_header.unwrap_or("2023-06-01"))
+        .header("Content-Type", "application/json");
+    if let Some(beta) = beta_header {
+        req = req.header("anthropic-beta", beta);
+    }
+    let resp = req.json(body).send().await.map_err(|e| {
+        tracing::warn!(error = %e, "Anthropic proxy request failed");
+        ApiError(crate::error::SwarmError::Network(format!(
+            "Anthropic proxy failed: {e}"
+        )))
+    })?;
 
     if !resp.status().is_success() {
         let status = resp.status();
