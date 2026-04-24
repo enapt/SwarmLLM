@@ -49,8 +49,9 @@ pub async fn run_streaming(
     state: AppState,
     headers: axum::http::HeaderMap,
     req: ResponsesRequest,
+    prior: Option<store::ResponsesRecord>,
 ) -> Result<Response, ApiError> {
-    let mut chat_req = translate::request_to_chat(&req)?;
+    let mut chat_req = translate::request_to_chat(&req, prior.as_ref())?;
     chat_req.stream = true;
 
     let chat_response = crate::api::openai::chat_completions(

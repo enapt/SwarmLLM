@@ -117,10 +117,29 @@ pub async fn create_response(
         }
     }
 
+    // M8: load the prior record when the caller is chaining. Both the
+    // streaming and non-streaming paths below pass it through to
+    // translate::request_to_chat so the prior turn's messages prepend
+    // to the current input. (Cloud proxy already returned above with
+    // the field forwarded verbatim.)
+    let prior = match req.previous_response_id.as_ref() {
+        Some(prev_id) => match store::load(&state.db, prev_id).map_err(ApiError)? {
+            Some(record) => Some(record),
+            None => {
+                return Err(ApiError(SwarmError::Validation(format!(
+                    "previous_response_id `{prev_id}` not found or expired. \
+                     Either pass the prior turn's messages inline via `input` \
+                     or re-run the original call with store=true (default)."
+                ))));
+            }
+        },
+        None => None,
+    };
+
     // Streaming (M6) — local-inference SSE. Cloud proxy already streamed
     // above if it matched.
     if stream {
-        return stream::run_streaming(state, headers, req).await;
+        return stream::run_streaming(state, headers, req, prior).await;
     }
 
     // Background mode — wired in M9.
@@ -131,19 +150,9 @@ pub async fn create_response(
         ));
     }
 
-    // previous_response_id — wired in M8 for the local path. (Cloud proxy
-    // already returned above with the field forwarded verbatim.)
-    if req.previous_response_id.is_some() {
-        return Ok(not_implemented(
-            "previous_response_id chaining is not yet implemented for local \
-             models (planned for M8). Pass the prior turn's messages directly \
-             via `input` for now.",
-        ));
-    }
-
     // Translate to a Chat Completions request and call the existing
     // handler. Translation failures bubble up as 400 via Validation.
-    let chat_req = translate::request_to_chat(&req)?;
+    let chat_req = translate::request_to_chat(&req, prior.as_ref())?;
 
     let chat_response = crate::api::openai::chat_completions(
         State(state.clone()),

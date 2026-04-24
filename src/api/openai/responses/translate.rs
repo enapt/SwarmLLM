@@ -11,6 +11,7 @@
 
 use std::collections::HashMap;
 
+use crate::api::openai::responses::store::ResponsesRecord;
 use crate::api::openai::responses::types::*;
 use crate::api::openai::types::{
     ApiChatMessage, ChatCompletionRequest, FunctionCall as ChatFunctionCall, FunctionDefinition,
@@ -33,10 +34,15 @@ const DEFAULT_TOP_P: f32 = 0.9;
 /// Convert a Responses API request into a Chat Completions request the
 /// existing `chat_completions` handler can consume.
 ///
-/// M3 plain-text scope. Returns `Validation` errors for inputs M3 doesn't
-/// translate yet (caller should emit a clear "not yet implemented" message
-/// pointing to the milestone that adds support).
-pub fn request_to_chat(req: &ResponsesRequest) -> Result<ChatCompletionRequest, SwarmError> {
+/// `prior` is an optional previous-turn record from redb. When set, its
+/// request input + response output are flattened into messages and
+/// prepended to the current request's input — that's how
+/// `previous_response_id` chaining (M8) feeds prior context to the local
+/// chat path.
+pub fn request_to_chat(
+    req: &ResponsesRequest,
+    prior: Option<&ResponsesRecord>,
+) -> Result<ChatCompletionRequest, SwarmError> {
     let mut messages = Vec::new();
 
     // `instructions` becomes a leading system message.
@@ -51,6 +57,12 @@ pub fn request_to_chat(req: &ResponsesRequest) -> Result<ChatCompletionRequest, 
                 cache_control: None,
             });
         }
+    }
+
+    // M8: prior turn (if any) goes before the current input, in order:
+    // prior request → prior response → current input.
+    if let Some(prior_record) = prior {
+        append_prior_turn(prior_record, &mut messages)?;
     }
 
     match &req.input {
@@ -171,6 +183,93 @@ fn translate_tool_choice(tc: &ToolChoice) -> serde_json::Value {
             serde_json::to_value(obj).unwrap_or(serde_json::Value::String("auto".into()))
         }
     }
+}
+
+/// Flatten a previously-stored Responses turn into chat messages.
+///
+/// The record's `request.input` re-creates the inputs that preceded the
+/// prior call; the record's `response.output` becomes the assistant's
+/// reply (including any tool calls). Reasoning items and unknown output
+/// types are dropped — they only matter on the cloud-proxy path, which
+/// doesn't reach this helper.
+fn append_prior_turn(
+    prior: &ResponsesRecord,
+    messages: &mut Vec<ApiChatMessage>,
+) -> Result<(), SwarmError> {
+    // Prior request input.
+    match &prior.request.input {
+        ResponsesInput::Text(s) => {
+            messages.push(ApiChatMessage {
+                role: Role::User,
+                content: MessageContent::Text(s.clone()),
+                tool_calls: None,
+                tool_call_id: None,
+                name: None,
+                cache_control: None,
+            });
+        }
+        ResponsesInput::Items(items) => {
+            for item in items {
+                push_input_item(item, messages)?;
+            }
+        }
+    }
+
+    // Prior response output — turn assistant messages and function_calls
+    // back into chat messages.
+    for item in &prior.response.output {
+        match item {
+            OutputItem::Typed(TypedOutputItem::Message(m)) => {
+                let mut text = String::new();
+                for part in &m.content {
+                    if let OutputContentPart::Typed(TypedOutputContentPart::Text {
+                        text: t, ..
+                    }) = part
+                    {
+                        if !text.is_empty() {
+                            text.push('\n');
+                        }
+                        text.push_str(t);
+                    }
+                }
+                messages.push(ApiChatMessage {
+                    role: Role::Assistant,
+                    content: MessageContent::Text(text),
+                    tool_calls: None,
+                    tool_call_id: None,
+                    name: None,
+                    cache_control: None,
+                });
+            }
+            OutputItem::Typed(TypedOutputItem::FunctionCall(fc)) => {
+                messages.push(ApiChatMessage {
+                    role: Role::Assistant,
+                    content: MessageContent::Text(String::new()),
+                    tool_calls: Some(vec![ChatToolCall {
+                        id: fc.call_id.clone(),
+                        tool_type: "function".into(),
+                        function: ChatFunctionCall {
+                            name: fc.name.clone(),
+                            arguments: fc.arguments.clone(),
+                        },
+                    }]),
+                    tool_call_id: None,
+                    name: None,
+                    cache_control: None,
+                });
+            }
+            OutputItem::Typed(TypedOutputItem::Reasoning(_)) => {
+                // Local inference can't consume reasoning items — they
+                // only matter for cloud-provider chaining.
+            }
+            OutputItem::Raw(_) => {
+                // Unknown output item types (future / cloud-only) drop
+                // silently; the current call will run without them.
+            }
+        }
+    }
+
+    Ok(())
 }
 
 fn push_input_item(item: &InputItem, messages: &mut Vec<ApiChatMessage>) -> Result<(), SwarmError> {
@@ -498,7 +597,7 @@ mod tests {
     #[test]
     fn text_input_becomes_user_message() {
         let req = req_text("Hello, world");
-        let chat = request_to_chat(&req).unwrap();
+        let chat = request_to_chat(&req, None).unwrap();
         assert_eq!(chat.model, "test-model");
         assert_eq!(chat.messages.len(), 1);
         assert!(matches!(chat.messages[0].role, Role::User));
@@ -513,7 +612,7 @@ mod tests {
     fn instructions_become_leading_system_message() {
         let mut req = req_text("Hi");
         req.instructions = Some("You are helpful.".into());
-        let chat = request_to_chat(&req).unwrap();
+        let chat = request_to_chat(&req, None).unwrap();
         assert_eq!(chat.messages.len(), 2);
         assert!(matches!(chat.messages[0].role, Role::System));
         assert!(matches!(chat.messages[1].role, Role::User));
@@ -529,7 +628,7 @@ mod tests {
             ]},
         ]))
         .unwrap();
-        let chat = request_to_chat(&req).unwrap();
+        let chat = request_to_chat(&req, None).unwrap();
         assert_eq!(chat.messages.len(), 1);
         match &chat.messages[0].content {
             MessageContent::Text(s) => assert_eq!(s, "first\nsecond"),
@@ -545,7 +644,7 @@ mod tests {
             {"type": "message", "role": "user", "content": "hi"},
         ]))
         .unwrap();
-        let chat = request_to_chat(&req).unwrap();
+        let chat = request_to_chat(&req, None).unwrap();
         assert!(matches!(chat.messages[0].role, Role::System));
         assert!(matches!(chat.messages[1].role, Role::User));
     }
@@ -557,7 +656,7 @@ mod tests {
             {"type": "function_call", "call_id": "c1", "name": "f", "arguments": "{\"x\":1}"},
         ]))
         .unwrap();
-        let chat = request_to_chat(&req).unwrap();
+        let chat = request_to_chat(&req, None).unwrap();
         assert_eq!(chat.messages.len(), 1);
         assert!(matches!(chat.messages[0].role, Role::Assistant));
         let tcs = chat.messages[0].tool_calls.as_ref().unwrap();
@@ -575,7 +674,7 @@ mod tests {
             {"type": "function_call_output", "call_id": "c1", "output": "{\"result\":42}"},
         ]))
         .unwrap();
-        let chat = request_to_chat(&req).unwrap();
+        let chat = request_to_chat(&req, None).unwrap();
         assert_eq!(chat.messages.len(), 1);
         assert!(matches!(chat.messages[0].role, Role::Tool));
         assert_eq!(chat.messages[0].tool_call_id.as_deref(), Some("c1"));
@@ -601,7 +700,7 @@ mod tests {
         ])).unwrap());
         req.tool_choice = Some(ToolChoice::Mode("auto".into()));
 
-        let chat = request_to_chat(&req).unwrap();
+        let chat = request_to_chat(&req, None).unwrap();
         assert_eq!(chat.messages.len(), 4);
         assert!(matches!(chat.messages[0].role, Role::User));
         assert!(matches!(chat.messages[1].role, Role::Assistant));
@@ -631,7 +730,7 @@ mod tests {
             name: Some("lookup".into()),
             extras: HashMap::new(),
         }));
-        let chat = request_to_chat(&req).unwrap();
+        let chat = request_to_chat(&req, None).unwrap();
         assert_eq!(
             chat.tool_choice,
             Some(json!({"type": "function", "function": {"name": "lookup"}}))
@@ -645,7 +744,7 @@ mod tests {
         // landing here should also produce a clear validation error.
         let mut req = req_text("hi");
         req.tools = Some(vec![ToolDef::Raw(json!({"type": "future_kind"}))]);
-        let err = request_to_chat(&req).unwrap_err();
+        let err = request_to_chat(&req, None).unwrap_err();
         match err {
             SwarmError::Validation(msg) => assert!(msg.contains("future_kind")),
             _ => panic!(),
@@ -694,6 +793,113 @@ mod tests {
         }
     }
 
+    fn sample_record(prior_text_in: &str, prior_text_out: &str) -> ResponsesRecord {
+        let mut req = req_text(prior_text_in);
+        req.instructions = Some("You are helpful.".into());
+        let resp = ResponsesResponse {
+            id: "resp_prior".into(),
+            object: "response".into(),
+            created_at: 1_700_000_000,
+            status: ResponseStatus::Completed,
+            model: "test".into(),
+            output: vec![OutputItem::Typed(TypedOutputItem::Message(
+                OutputMessageItem {
+                    id: "msg_1".into(),
+                    role: "assistant".into(),
+                    status: Some("completed".into()),
+                    content: vec![OutputContentPart::Typed(TypedOutputContentPart::Text {
+                        text: prior_text_out.into(),
+                        annotations: Vec::new(),
+                        logprobs: None,
+                        extras: HashMap::new(),
+                    })],
+                    extras: HashMap::new(),
+                },
+            ))],
+            output_text: Some(prior_text_out.into()),
+            usage: ResponsesUsage::default(),
+            error: None,
+            incomplete_details: None,
+            previous_response_id: None,
+            instructions: req.instructions.clone(),
+            tools: None,
+            tool_choice: None,
+            parallel_tool_calls: None,
+            temperature: Some(0.7),
+            top_p: Some(0.9),
+            max_output_tokens: Some(2048),
+            truncation: None,
+            metadata: None,
+            user: None,
+            reasoning: None,
+            text: None,
+            modalities: None,
+            service_tier: None,
+            background: None,
+            extras: HashMap::new(),
+        };
+        ResponsesRecord {
+            id: "resp_prior".into(),
+            created_at: resp.created_at,
+            expires_at: resp.created_at + 1_000_000,
+            request: req,
+            response: resp,
+        }
+    }
+
+    #[test]
+    fn prior_turn_prepends_user_and_assistant_messages() {
+        let prior = sample_record("What's 2+2?", "4");
+        let current = req_text("And 3+3?");
+        let chat = request_to_chat(&current, Some(&prior)).unwrap();
+        // System (from current.instructions — None here) +
+        // (from prior: user "What's 2+2?" + assistant "4") +
+        // current user "And 3+3?"
+        assert_eq!(chat.messages.len(), 3);
+        assert!(matches!(chat.messages[0].role, Role::User));
+        if let MessageContent::Text(s) = &chat.messages[0].content {
+            assert_eq!(s, "What's 2+2?");
+        } else {
+            panic!()
+        };
+        assert!(matches!(chat.messages[1].role, Role::Assistant));
+        if let MessageContent::Text(s) = &chat.messages[1].content {
+            assert_eq!(s, "4");
+        } else {
+            panic!()
+        };
+        assert!(matches!(chat.messages[2].role, Role::User));
+        if let MessageContent::Text(s) = &chat.messages[2].content {
+            assert_eq!(s, "And 3+3?");
+        } else {
+            panic!()
+        };
+    }
+
+    #[test]
+    fn prior_turn_with_function_call_output() {
+        // Prior: user → assistant function_call → tool result output.
+        // Current: user follow-up. Full chain should land in chat messages.
+        let mut prior = sample_record("weather?", "unused");
+        prior.response.output = vec![OutputItem::Typed(TypedOutputItem::FunctionCall(
+            FunctionCallItem {
+                call_id: "c1".into(),
+                name: "get_weather".into(),
+                arguments: "{\"city\":\"NYC\"}".into(),
+                id: Some("fc_c1".into()),
+                status: Some("completed".into()),
+                extras: HashMap::new(),
+            },
+        ))];
+        let current = req_text("and tomorrow?");
+        let chat = request_to_chat(&current, Some(&prior)).unwrap();
+        // prior user + prior assistant(tool_calls) + current user.
+        assert_eq!(chat.messages.len(), 3);
+        assert!(chat.messages[1].tool_calls.is_some());
+        let tc = &chat.messages[1].tool_calls.as_ref().unwrap()[0];
+        assert_eq!(tc.function.name, "get_weather");
+    }
+
     #[test]
     fn chat_response_with_text_and_tool_calls_emits_both() {
         let chat = json!({
@@ -734,7 +940,7 @@ mod tests {
             {"type": "reasoning", "id": "rs", "summary": []},
         ]))
         .unwrap();
-        let chat = request_to_chat(&req).unwrap();
+        let chat = request_to_chat(&req, None).unwrap();
         assert_eq!(chat.messages.len(), 1);
     }
 
@@ -745,7 +951,7 @@ mod tests {
             {"type": "computer_call_output", "call_id": "x", "output": {}},
         ]))
         .unwrap();
-        let err = request_to_chat(&req).unwrap_err();
+        let err = request_to_chat(&req, None).unwrap_err();
         match err {
             SwarmError::Validation(msg) => assert!(msg.contains("computer_call_output")),
             _ => panic!(),
@@ -761,7 +967,7 @@ mod tests {
         req.frequency_penalty = Some(0.1);
         req.presence_penalty = Some(-0.2);
         req.stop = Some(StopField::Many(vec!["END".into(), "STOP".into()]));
-        let chat = request_to_chat(&req).unwrap();
+        let chat = request_to_chat(&req, None).unwrap();
         assert_eq!(chat.temperature, 0.3);
         assert_eq!(chat.top_p, 0.5);
         assert_eq!(chat.max_tokens, 100);
