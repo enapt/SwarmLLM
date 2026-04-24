@@ -910,4 +910,42 @@ mod tests {
         assert!(msgs[0].content.contains("valid JSON"));
         assert!(msgs[0].content.contains("result"));
     }
+
+    #[test]
+    fn max_completion_tokens_alias_parses() {
+        let json = r#"{
+            "model": "o3-mini",
+            "messages": [{"role": "user", "content": "hi"}],
+            "max_completion_tokens": 5000
+        }"#;
+        let req: ChatCompletionRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.max_tokens, 5000);
+    }
+
+    #[test]
+    fn unknown_openai_fields_preserved_for_proxy() {
+        // Reasoning-model / Responses-era fields SwarmLLM doesn't parse:
+        // reasoning_effort, service_tier, seed, store, metadata,
+        // parallel_tool_calls, stream_options, prediction.
+        // They should survive the deserialize → serialize round-trip so
+        // the cloud-proxy path doesn't silently drop them.
+        let json = r#"{
+            "model": "gpt-5",
+            "messages": [{"role": "user", "content": "hi"}],
+            "reasoning_effort": "high",
+            "service_tier": "priority",
+            "seed": 42,
+            "metadata": {"run": "eval-batch-1"},
+            "parallel_tool_calls": false,
+            "stream_options": {"include_usage": true}
+        }"#;
+        let req: ChatCompletionRequest = serde_json::from_str(json).unwrap();
+        let round_tripped = serde_json::to_value(&req).unwrap();
+        assert_eq!(round_tripped["reasoning_effort"], "high");
+        assert_eq!(round_tripped["service_tier"], "priority");
+        assert_eq!(round_tripped["seed"], 42);
+        assert_eq!(round_tripped["metadata"]["run"], "eval-batch-1");
+        assert_eq!(round_tripped["parallel_tool_calls"], false);
+        assert_eq!(round_tripped["stream_options"]["include_usage"], true);
+    }
 }

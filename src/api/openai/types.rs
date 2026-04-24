@@ -56,6 +56,15 @@ pub struct ChatCompletionRequest {
     /// Optional cache control hints for prefix caching (Anthropic-compatible).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_control: Option<CacheControl>,
+    /// Catch-all for OpenAI request fields we don't explicitly model
+    /// (`reasoning_effort`, `service_tier`, `seed`, `metadata`, `store`,
+    /// `parallel_tool_calls`, `stream_options`, `prediction`, …).
+    /// `#[serde(flatten)]` preserves them verbatim through the round-trip, so
+    /// the cloud-proxy path (handlers::try_cloud_proxy → serde_json::to_value)
+    /// forwards the original caller's knobs instead of silently dropping
+    /// anything unknown to our struct.
+    #[serde(flatten)]
+    pub extras: std::collections::HashMap<String, serde_json::Value>,
 }
 
 /// Cache control hints for prefix caching (Anthropic-compatible).
