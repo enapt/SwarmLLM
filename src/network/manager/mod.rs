@@ -1165,15 +1165,34 @@ impl NetworkManager {
                 tracing::info!(%peer, ?request_id, "DIAG: ResponseSent event — response written to wire");
             }
 
-            // ── GossipSub peer subscribed — flush buffered messages (NET-I4) ──
+            // ── GossipSub peer subscribed — flush matching buffered messages (NET-I4) ──
+            //
+            // Only the just-subscribed topic is eligible for replay — a
+            // Subscribed{peer_id, topic=X} event tells us the mesh now has
+            // at least one peer on topic X, but says nothing about topic Y.
+            // Before this filter, ANY Subscribed event iterated the whole
+            // buffer and called publish() on every entry; publish() would
+            // still return Err for topics with no subscribers (gossipsub
+            // routes correctly, so this wasn't an info leak), but the
+            // entry got re-buffered, wasting a full O(buffer) pass per
+            // Subscribed event on a multi-topic mesh.
             SwarmEvent::Behaviour(SwarmBehaviourEvent::Gossipsub(
                 gossipsub::Event::Subscribed { peer_id, topic },
             )) => {
                 tracing::debug!(%peer_id, %topic, "Peer subscribed to topic");
-                if !self.buffered_gossip.is_empty() {
-                    let buffered = std::mem::take(&mut self.buffered_gossip);
+                let subscribed_topic_str = topic.to_string();
+                let has_match = self
+                    .buffered_gossip
+                    .iter()
+                    .any(|(t, _)| t == &subscribed_topic_str);
+                if has_match {
+                    let mut remaining = Vec::with_capacity(self.buffered_gossip.len());
                     let mut replayed = 0;
-                    for (topic_str, data) in buffered {
+                    for (topic_str, data) in std::mem::take(&mut self.buffered_gossip) {
+                        if topic_str != subscribed_topic_str {
+                            remaining.push((topic_str, data));
+                            continue;
+                        }
                         let gossip_topic = IdentTopic::new(&topic_str);
                         match self
                             .swarm
@@ -1181,17 +1200,17 @@ impl NetworkManager {
                             .gossipsub
                             .publish(gossip_topic, data.clone())
                         {
-                            Ok(_) => {
-                                replayed += 1;
-                            }
-                            Err(_) => {
-                                // Still can't publish — re-buffer
-                                self.buffered_gossip.push((topic_str, data));
-                            }
+                            Ok(_) => replayed += 1,
+                            Err(_) => remaining.push((topic_str, data)),
                         }
                     }
+                    self.buffered_gossip = remaining;
                     if replayed > 0 {
-                        tracing::info!(count = replayed, "Replayed buffered GossipSub messages");
+                        tracing::info!(
+                            topic = %subscribed_topic_str,
+                            count = replayed,
+                            "Replayed buffered GossipSub messages for newly-subscribed topic"
+                        );
                     }
                 }
             }
