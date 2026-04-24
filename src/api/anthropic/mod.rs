@@ -85,6 +85,30 @@ pub async fn messages(
                     }
                     ContentBlock::Thinking { thinking } => thinking.len(),
                     ContentBlock::RedactedThinking { data } => data.len(),
+                    // Server-tool variants contribute their serialized size —
+                    // approximates the echo-back weight of a multi-turn
+                    // Claude Code conversation with server-tool results.
+                    ContentBlock::ServerToolUse { input, name, id } => {
+                        name.len() + id.len() + input.to_string().len()
+                    }
+                    ContentBlock::WebSearchToolResult { content, .. }
+                    | ContentBlock::CodeExecutionToolResult { content, .. }
+                    | ContentBlock::BashToolResult { content, .. }
+                    | ContentBlock::TextEditorToolResult { content, .. } => {
+                        content.to_string().len()
+                    }
+                    ContentBlock::Document {
+                        source, citations, ..
+                    } => {
+                        source.to_string().len()
+                            + citations.as_ref().map(|c| c.to_string().len()).unwrap_or(0)
+                    }
+                    ContentBlock::SearchResult {
+                        source, citations, ..
+                    } => {
+                        source.as_ref().map(|s| s.to_string().len()).unwrap_or(0)
+                            + citations.as_ref().map(|c| c.to_string().len()).unwrap_or(0)
+                    }
                 })
                 .sum(),
         }

@@ -102,6 +102,88 @@ impl Serialize for ContentBlock {
                 map.serialize_entry("data", data)?;
                 map.end()
             }
+            ContentBlock::ServerToolUse { id, name, input } => {
+                let mut map = serializer.serialize_map(Some(4))?;
+                map.serialize_entry("type", "server_tool_use")?;
+                map.serialize_entry("id", id)?;
+                map.serialize_entry("name", name)?;
+                map.serialize_entry("input", input)?;
+                map.end()
+            }
+            ContentBlock::WebSearchToolResult {
+                tool_use_id,
+                content,
+            } => {
+                let mut map = serializer.serialize_map(Some(3))?;
+                map.serialize_entry("type", "web_search_tool_result")?;
+                map.serialize_entry("tool_use_id", tool_use_id)?;
+                map.serialize_entry("content", content)?;
+                map.end()
+            }
+            ContentBlock::CodeExecutionToolResult {
+                tool_use_id,
+                content,
+            } => {
+                let mut map = serializer.serialize_map(Some(3))?;
+                map.serialize_entry("type", "code_execution_tool_result")?;
+                map.serialize_entry("tool_use_id", tool_use_id)?;
+                map.serialize_entry("content", content)?;
+                map.end()
+            }
+            ContentBlock::BashToolResult {
+                tool_use_id,
+                content,
+            } => {
+                let mut map = serializer.serialize_map(Some(3))?;
+                map.serialize_entry("type", "bash_tool_result")?;
+                map.serialize_entry("tool_use_id", tool_use_id)?;
+                map.serialize_entry("content", content)?;
+                map.end()
+            }
+            ContentBlock::TextEditorToolResult {
+                tool_use_id,
+                content,
+            } => {
+                let mut map = serializer.serialize_map(Some(3))?;
+                map.serialize_entry("type", "text_editor_tool_result")?;
+                map.serialize_entry("tool_use_id", tool_use_id)?;
+                map.serialize_entry("content", content)?;
+                map.end()
+            }
+            ContentBlock::Document {
+                source,
+                title,
+                citations,
+            } => {
+                let mut map = serializer.serialize_map(Some(4))?;
+                map.serialize_entry("type", "document")?;
+                map.serialize_entry("source", source)?;
+                if let Some(t) = title {
+                    map.serialize_entry("title", t)?;
+                }
+                if let Some(c) = citations {
+                    map.serialize_entry("citations", c)?;
+                }
+                map.end()
+            }
+            ContentBlock::SearchResult {
+                source,
+                title,
+                citations,
+            } => {
+                let mut map = serializer.serialize_map(Some(4))?;
+                map.serialize_entry("type", "search_result")?;
+                if let Some(s) = source {
+                    map.serialize_entry("source", s)?;
+                }
+                if let Some(t) = title {
+                    map.serialize_entry("title", t)?;
+                }
+                if let Some(c) = citations {
+                    map.serialize_entry("citations", c)?;
+                }
+                map.end()
+            }
         }
     }
 }

@@ -87,6 +87,24 @@ pub(super) fn to_internal_messages(req: &MessagesRequest) -> Vec<ChatMessage> {
                             texts.push(format!("<thinking>{thinking}</thinking>"));
                         }
                         ContentBlock::RedactedThinking { .. } => {}
+                        // Server-tool & citation blocks: the local-inference path
+                        // doesn't execute server tools, so flatten them to text
+                        // hints that preserve conversational continuity. The
+                        // proxy path never takes this branch (it re-serializes
+                        // the raw request before forwarding).
+                        ContentBlock::ServerToolUse { name, input, .. } => {
+                            texts.push(format!("[Server tool call: {name}({input})]"));
+                        }
+                        ContentBlock::WebSearchToolResult { content, .. }
+                        | ContentBlock::CodeExecutionToolResult { content, .. }
+                        | ContentBlock::BashToolResult { content, .. }
+                        | ContentBlock::TextEditorToolResult { content, .. } => {
+                            texts.push(format!("[Tool result: {content}]"));
+                        }
+                        ContentBlock::Document { .. } | ContentBlock::SearchResult { .. } => {
+                            // Citations sources — local models can't index into them
+                            // meaningfully, skip.
+                        }
                     }
                 }
                 texts.join("\n")

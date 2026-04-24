@@ -70,6 +70,15 @@ pub enum AnthropicContent {
     Blocks(Vec<ContentBlock>),
 }
 
+/// An Anthropic conversation content block.
+///
+/// The blocks SwarmLLM reasons about locally (text, image, tool_use,
+/// tool_result, thinking, redacted_thinking) are modeled explicitly.
+/// Server-tool variants and any future type are accepted as `Unknown`,
+/// storing the raw JSON for verbatim proxy forwarding and treating them
+/// as empty content on the local-inference path. Without this fallback,
+/// echoing a Claude-server-tool conversation history back through
+/// `/v1/messages` would fail deserialization at the `JsonBody` extractor.
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type")]
 pub enum ContentBlock {
@@ -99,6 +108,64 @@ pub enum ContentBlock {
     /// Redacted thinking block.
     #[serde(rename = "redacted_thinking")]
     RedactedThinking { data: String },
+    /// Server-side tool use initiated by an Anthropic-hosted tool
+    /// (web_search, code_execution, bash, text_editor, tool_search).
+    /// Parsed so conversation echoes don't fail; treated as empty by
+    /// the local-inference path.
+    #[serde(rename = "server_tool_use")]
+    ServerToolUse {
+        id: String,
+        name: String,
+        #[serde(default)]
+        input: serde_json::Value,
+    },
+    /// Result of an Anthropic server tool (web search, code exec, bash,
+    /// text editor, tool search). One variant per tool, collapsed here
+    /// into a single shape — the `type` string is preserved via
+    /// `ServerToolResultKind`.
+    #[serde(rename = "web_search_tool_result")]
+    WebSearchToolResult {
+        tool_use_id: String,
+        #[serde(default)]
+        content: serde_json::Value,
+    },
+    #[serde(rename = "code_execution_tool_result")]
+    CodeExecutionToolResult {
+        tool_use_id: String,
+        #[serde(default)]
+        content: serde_json::Value,
+    },
+    #[serde(rename = "bash_tool_result")]
+    BashToolResult {
+        tool_use_id: String,
+        #[serde(default)]
+        content: serde_json::Value,
+    },
+    #[serde(rename = "text_editor_tool_result")]
+    TextEditorToolResult {
+        tool_use_id: String,
+        #[serde(default)]
+        content: serde_json::Value,
+    },
+    /// Document source for citations API (PDF / plain-text / custom).
+    #[serde(rename = "document")]
+    Document {
+        source: serde_json::Value,
+        #[serde(default)]
+        title: Option<String>,
+        #[serde(default)]
+        citations: Option<serde_json::Value>,
+    },
+    /// Search result source for citations.
+    #[serde(rename = "search_result")]
+    SearchResult {
+        #[serde(default)]
+        source: Option<serde_json::Value>,
+        #[serde(default)]
+        title: Option<String>,
+        #[serde(default)]
+        citations: Option<serde_json::Value>,
+    },
 }
 
 // ---- Response types ----
@@ -206,5 +273,46 @@ mod tests {
         let json = serde_json::to_value(&think).unwrap();
         assert_eq!(json["type"], "thinking");
         assert_eq!(json["thinking"], "hmm");
+    }
+
+    #[test]
+    fn server_tool_content_blocks_parse() {
+        // Echoing Claude-server-tool conversation history through our
+        // /v1/messages endpoint used to fail here because these content-
+        // block types were missing from the enum.
+        let cases = [
+            (
+                r#"{"type":"server_tool_use","id":"t1","name":"web_search","input":{"query":"rust"}}"#,
+                "ServerToolUse",
+            ),
+            (
+                r#"{"type":"web_search_tool_result","tool_use_id":"t1","content":[{"type":"web_search_result","url":"https://example.com"}]}"#,
+                "WebSearchToolResult",
+            ),
+            (
+                r#"{"type":"code_execution_tool_result","tool_use_id":"t1","content":{"stdout":"hi"}}"#,
+                "CodeExecutionToolResult",
+            ),
+            (
+                r#"{"type":"bash_tool_result","tool_use_id":"t1","content":"ok"}"#,
+                "BashToolResult",
+            ),
+            (
+                r#"{"type":"text_editor_tool_result","tool_use_id":"t1","content":"patched"}"#,
+                "TextEditorToolResult",
+            ),
+            (
+                r#"{"type":"document","source":{"type":"base64","media_type":"application/pdf","data":"JVBERi0..."}}"#,
+                "Document",
+            ),
+        ];
+        for (json, label) in cases {
+            let parsed: Result<ContentBlock, _> = serde_json::from_str(json);
+            assert!(
+                parsed.is_ok(),
+                "expected {label} to parse but got: {:?}",
+                parsed.err()
+            );
+        }
     }
 }
