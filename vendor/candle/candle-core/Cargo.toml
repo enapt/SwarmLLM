@@ -12,7 +12,7 @@
 [package]
 edition = "2021"
 name = "candle-core"
-version = "0.9.2"
+version = "0.10.1"
 build = false
 autolib = false
 autobins = false
@@ -39,7 +39,6 @@ cuda = [
     "cudarc",
     "dep:candle-kernels",
     "candle-ug?/cuda",
-    "float8/cuda",
 ]
 cudnn = [
     "cuda",
@@ -149,15 +148,15 @@ optional = true
 version = "1.4.3"
 
 [dependencies.candle-kernels]
-version = "0.9.2"
+version = "0.10.1"
 optional = true
 
 [dependencies.candle-metal-kernels]
-version = "0.9.2"
+version = "0.10.1"
 optional = true
 
 [dependencies.cudarc]
-version = "0.19.0"
+version = "0.19.4"
 features = [
     "std",
     "cublas",
@@ -173,14 +172,14 @@ optional = true
 default-features = false
 # NOTE (SwarmLLM patch): "dynamic-linking" removed from features above so
 # downstream consumers can choose their own linking mode (`dynamic-loading`,
-# `dynamic-linking`, or `static-linking`). Upstream candle 0.9.2 hardcoded
+# `dynamic-linking`, or `static-linking`). Upstream candle 0.10.1 hardcodes
 # `dynamic-linking`, forcing a Toolkit-install requirement on end users.
 # SwarmLLM's top-level cudarc dep selects `dynamic-loading` (LoadLibraryW
 # the NVIDIA redist DLLs at runtime) so the Windows GPU binary runs with
 # just the NVIDIA display driver + bundled redist DLLs.
 
 [dependencies.float8]
-version = "0.6.0"
+version = "0.7.0"
 features = [
     "num-traits",
     "rand_distr",
@@ -264,5 +263,10 @@ version = "0.8"
 default-features = false
 
 [target.'cfg(all(not(target_arch = "wasm32"), not(target_os = "ios")))'.dependencies.candle-ug]
-version = "0.9.2"
+version = "0.10.1"
 optional = true
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies.tokenizers]
+version = "0.22.0"
+features = ["onig"]
+default-features = false

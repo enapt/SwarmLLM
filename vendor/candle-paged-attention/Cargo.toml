@@ -3,14 +3,14 @@ name = "candle-paged-attention"
 version = "0.0.2"
 edition = "2021"
 
-description = "Paged Attention layer for the candle ML framework (vendored for candle 0.9)."
+description = "Paged Attention layer for the candle ML framework (vendored for candle 0.10)."
 keywords = ["tensor", "machine-learning"]
 categories = ["science"]
 license = "MIT OR Apache-2.0"
 readme = "README.md"
 
 [dependencies]
-candle = { version = "0.9", package = "candle-core", features = ["cuda"] }
+candle = { version = "0.10", package = "candle-core", features = ["cuda"] }
 half = { version = "2", features = ["num-traits"] }
 
 [build-dependencies]
@@ -20,4 +20,4 @@ rayon = "1.7.0"
 
 [dev-dependencies]
 anyhow = { version = "1", features = ["backtrace"] }
-candle-nn = { version = "0.9", features = ["cuda"] }
+candle-nn = { version = "0.10", features = ["cuda"] }

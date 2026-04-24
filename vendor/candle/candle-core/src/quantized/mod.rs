@@ -14,6 +14,8 @@ pub mod imatrix_file;
 pub mod k_quants;
 #[cfg(feature = "metal")]
 pub mod metal;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod tokenizer;
 #[cfg(not(feature = "metal"))]
 mod metal {
     pub use super::dummy_metal::*;
