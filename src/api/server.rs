@@ -96,6 +96,8 @@ pub fn build_router(state: AppState) -> Router {
         .route("/v1/chat/completions", post(openai::chat_completions))
         .route("/v1/embeddings", post(openai::embeddings))
         .route("/v1/models", get(openai::list_models))
+        // OpenAI Responses API (gpt-5 / o-series default)
+        .route("/v1/responses", post(openai::responses::create_response))
         // Anthropic Messages API
         .route("/v1/messages", post(anthropic::messages))
         // Provider listing
