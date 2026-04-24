@@ -4,9 +4,11 @@
 //! Milestone scope:
 //! - **M1**: types + serde roundtrip.
 //! - **M2**: route wired, built-in-tool rejection, 501 stub.
-//! - **M3 (current)**: plain-text local inference via Chat translation.
-//!   Streaming and tools intentionally still return 501 — they land in
-//!   M6 and M4 respectively.
+//! - **M3**: plain-text local inference via Chat translation.
+//! - **M4 (current)**: function tools and tool_choice translation.
+//! - **M5**: cloud-proxy verbatim path.
+//! - **M6**: SSE streaming.
+//! - **M7-M9**: persistence, chaining, background.
 
 pub mod translate;
 pub mod types;
@@ -72,8 +74,8 @@ pub async fn create_response(
     headers: axum::http::HeaderMap,
     JsonBody(req): JsonBody<ResponsesRequest>,
 ) -> Result<Response, ApiError> {
-    // 1. Built-in tool gate (M2). Even when M3 supports tools, the built-in
-    //    set still requires backing infra we don't run.
+    // 1. Built-in tool gate. The built-in set requires backing infra we
+    //    don't run; `function` tools translate through to Chat (M4).
     if let Some(tools) = req.tools.as_deref() {
         if let Some(builtin) = first_builtin_tool(tools) {
             return Err(ApiError(SwarmError::Validation(format!(
@@ -83,16 +85,6 @@ pub async fn create_response(
                  code_interpreter, image_generation, mcp, custom) require backing \
                  infrastructure SwarmLLM does not run."
             ))));
-        }
-
-        // 2. Function tools — wired in M4. Until then, fail loud rather
-        //    than silently dropping them.
-        if !tools.is_empty() {
-            return Ok(not_implemented(
-                "Function tools on /v1/responses are not yet implemented \
-                 (planned for M4). Use /v1/chat/completions for tool-calling \
-                 inference today.",
-            ));
         }
     }
 

@@ -2,9 +2,10 @@
 //! Chat Completions (the existing `crate::api::openai::types`).
 //!
 //! Milestone scope:
-//! - **M3 (current)**: plain-text input ↔ plain-text output. Tools and
-//!   streaming explicitly returned as 501 by the handler (M4 / M6).
-//! - **M4**: function tools and tool_choice in both directions.
+//! - **M3**: plain-text input ↔ plain-text output.
+//! - **M4 (current)**: function tools and tool_choice in both directions
+//!   plus function_call / function_call_output input items and assistant
+//!   tool_calls → function_call output items in the response.
 //! - **M5**: cloud-proxy verbatim — no translation runs at all.
 //! - **M6**: streaming token map.
 
@@ -12,7 +13,8 @@ use std::collections::HashMap;
 
 use crate::api::openai::responses::types::*;
 use crate::api::openai::types::{
-    ApiChatMessage, ChatCompletionRequest, MessageContent, StopSequence,
+    ApiChatMessage, ChatCompletionRequest, FunctionCall as ChatFunctionCall, FunctionDefinition,
+    MessageContent, StopSequence, ToolCall as ChatToolCall, ToolDefinition,
 };
 use crate::error::SwarmError;
 use crate::types::Role;
@@ -74,6 +76,12 @@ pub fn request_to_chat(req: &ResponsesRequest) -> Result<ChatCompletionRequest, 
         StopField::Many(v) => StopSequence::Multiple(v.clone()),
     });
 
+    let tools = match req.tools.as_deref() {
+        Some(t) if !t.is_empty() => Some(translate_tools(t)?),
+        _ => None,
+    };
+    let tool_choice = req.tool_choice.as_ref().map(translate_tool_choice);
+
     Ok(ChatCompletionRequest {
         model: req.model.clone(),
         messages,
@@ -85,10 +93,8 @@ pub fn request_to_chat(req: &ResponsesRequest) -> Result<ChatCompletionRequest, 
         stop,
         frequency_penalty: req.frequency_penalty.unwrap_or(0.0),
         presence_penalty: req.presence_penalty.unwrap_or(0.0),
-        // M4 wires tools/tool_choice. The handler rejects requests that
-        // would land here with tools set, so leaving these as None is safe.
-        tools: None,
-        tool_choice: None,
+        tools,
+        tool_choice,
         logprobs: false,
         top_logprobs: None,
         response_format: None,
@@ -97,6 +103,74 @@ pub fn request_to_chat(req: &ResponsesRequest) -> Result<ChatCompletionRequest, 
         cache_control: None,
         extras: HashMap::new(),
     })
+}
+
+/// Translate Responses tool definitions to Chat tool definitions. Only
+/// `function` tools translate; built-in tools are rejected upstream by the
+/// handler, and any remaining `Raw` variant is an unmodeled type we can't
+/// translate to the Chat format.
+fn translate_tools(tools: &[ToolDef]) -> Result<Vec<ToolDefinition>, SwarmError> {
+    let mut out = Vec::with_capacity(tools.len());
+    for t in tools {
+        match t {
+            ToolDef::Typed(TypedToolDef::Function {
+                name,
+                description,
+                parameters,
+                strict: _,
+                extras: _,
+            }) => {
+                // `strict` is an OpenAI-cloud-side schema-enforcement flag;
+                // local inference doesn't honor it (the existing chat tool
+                // definition has no slot for it).
+                out.push(ToolDefinition {
+                    tool_type: "function".into(),
+                    function: FunctionDefinition {
+                        name: name.clone(),
+                        description: description.clone(),
+                        parameters: parameters.clone(),
+                    },
+                });
+            }
+            ToolDef::Raw(value) => {
+                let kind = value
+                    .get("type")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("<unknown>");
+                return Err(SwarmError::Validation(format!(
+                    "Tool type `{kind}` is not supported by /v1/responses on \
+                     this server. Only `function` tools are translated for \
+                     local inference."
+                )));
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Translate Responses `tool_choice` to the Chat-shaped value.
+///
+/// - `"auto" | "none" | "required"` → same string (Chat accepts these
+///   directly).
+/// - `{type:"function", name:"x"}` → `{type:"function", function:{name:"x"}}`
+///   (Chat's nested form).
+/// - Any other object form is forwarded as-is so future Responses-only
+///   tool_choice shapes don't get silently dropped.
+fn translate_tool_choice(tc: &ToolChoice) -> serde_json::Value {
+    match tc {
+        ToolChoice::Mode(s) => serde_json::Value::String(s.clone()),
+        ToolChoice::Object(obj) if obj.kind == "function" => serde_json::json!({
+            "type": "function",
+            "function": { "name": obj.name.clone().unwrap_or_default() },
+        }),
+        ToolChoice::Object(obj) => {
+            // Pass-through for unmodeled object forms (allowed_tools,
+            // mcp tool selectors, etc.). Local inference will likely
+            // ignore them, but cloud-proxy paths benefit from the
+            // verbatim shape.
+            serde_json::to_value(obj).unwrap_or(serde_json::Value::String("auto".into()))
+        }
+    }
 }
 
 fn push_input_item(item: &InputItem, messages: &mut Vec<ApiChatMessage>) -> Result<(), SwarmError> {
@@ -119,13 +193,39 @@ fn push_input_item(item: &InputItem, messages: &mut Vec<ApiChatMessage>) -> Resu
                 cache_control: None,
             });
         }
-        InputItem::Typed(TypedInputItem::FunctionCall(_))
-        | InputItem::Typed(TypedInputItem::FunctionCallOutput(_)) => {
-            return Err(SwarmError::Validation(
-                "Function-tool input items are not yet supported by /v1/responses on this \
-                 server (planned for M4). Use plain message items for now."
-                    .into(),
-            ));
+        InputItem::Typed(TypedInputItem::FunctionCall(fc)) => {
+            // A prior assistant tool call being re-fed. Chat models it as
+            // an assistant message with `content: null` and a single
+            // `tool_calls` entry. Multiple consecutive Responses
+            // function_call items become multiple assistant messages
+            // each with one tool_call — chat models handle this either
+            // way, and merging them would silently change the wire shape
+            // for callers that care about parallelism semantics.
+            messages.push(ApiChatMessage {
+                role: Role::Assistant,
+                content: MessageContent::Text(String::new()),
+                tool_calls: Some(vec![ChatToolCall {
+                    id: fc.call_id.clone(),
+                    tool_type: "function".into(),
+                    function: ChatFunctionCall {
+                        name: fc.name.clone(),
+                        arguments: fc.arguments.clone(),
+                    },
+                }]),
+                tool_call_id: None,
+                name: None,
+                cache_control: None,
+            });
+        }
+        InputItem::Typed(TypedInputItem::FunctionCallOutput(out)) => {
+            messages.push(ApiChatMessage {
+                role: Role::Tool,
+                content: MessageContent::Text(out.output.clone()),
+                tool_calls: None,
+                tool_call_id: Some(out.call_id.clone()),
+                name: None,
+                cache_control: None,
+            });
         }
         InputItem::Typed(TypedInputItem::Reasoning(_)) => {
             // Drop silently. Local inference does not consume reasoning items
@@ -183,9 +283,12 @@ fn collect_text_from_parts(parts: &[InputContentPart]) -> String {
 /// since `ChatCompletionResponse` is `Serialize`-only) into a
 /// `ResponsesResponse`.
 ///
-/// Plain-text path only — `tool_calls` in the chat response are surfaced as
-/// the message text (M4 will replace this with a `function_call` output
-/// item).
+/// Output item ordering when the model both emitted text and called tools:
+/// the message item comes first, followed by one `function_call` item per
+/// chat `tool_call`. When `finish_reason` is `tool_calls` and `content` is
+/// empty, no message item is emitted — just the function_call items.
+/// `output_text` always reflects only the text content, never the
+/// arguments JSON (matches OpenAI's wire format).
 pub fn chat_response_to_responses(
     chat: &serde_json::Value,
     original: &ResponsesRequest,
@@ -245,18 +348,79 @@ pub fn chat_response_to_responses(
         })
         .unwrap_or_default();
 
-    let output_message = OutputMessageItem {
-        id: format!("msg_{}", uuid::Uuid::new_v4().simple()),
-        role: "assistant".into(),
-        status: Some("completed".into()),
-        content: vec![OutputContentPart::Typed(TypedOutputContentPart::Text {
-            text: text.clone(),
-            annotations: Vec::new(),
-            logprobs: None,
+    let mut output: Vec<OutputItem> = Vec::new();
+
+    // Emit a message item only when there's actual text content. Empty
+    // assistant content during a tool_calls finish should NOT show up as
+    // an empty `output_text` item; OpenAI's spec keeps the output array
+    // pure (function_calls only) in that case.
+    if !text.is_empty() {
+        let output_message = OutputMessageItem {
+            id: format!("msg_{}", uuid::Uuid::new_v4().simple()),
+            role: "assistant".into(),
+            status: Some("completed".into()),
+            content: vec![OutputContentPart::Typed(TypedOutputContentPart::Text {
+                text: text.clone(),
+                annotations: Vec::new(),
+                logprobs: None,
+                extras: HashMap::new(),
+            })],
             extras: HashMap::new(),
-        })],
-        extras: HashMap::new(),
-    };
+        };
+        output.push(OutputItem::Typed(TypedOutputItem::Message(output_message)));
+    }
+
+    if let Some(tool_calls) = message.get("tool_calls").and_then(|tc| tc.as_array()) {
+        for tc in tool_calls {
+            let call_id = tc
+                .get("id")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| SwarmError::Internal("tool_call missing `id`".into()))?
+                .to_string();
+            let func = tc
+                .get("function")
+                .ok_or_else(|| SwarmError::Internal("tool_call missing `function`".into()))?;
+            let name = func
+                .get("name")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| SwarmError::Internal("tool_call function missing `name`".into()))?
+                .to_string();
+            let arguments = func
+                .get("arguments")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            output.push(OutputItem::Typed(TypedOutputItem::FunctionCall(
+                FunctionCallItem {
+                    call_id: call_id.clone(),
+                    name,
+                    arguments,
+                    id: Some(format!("fc_{call_id}")),
+                    status: Some("completed".into()),
+                    extras: HashMap::new(),
+                },
+            )));
+        }
+    }
+
+    // If neither text nor tool_calls produced an item, surface an empty
+    // assistant message so the response shape stays valid.
+    if output.is_empty() {
+        output.push(OutputItem::Typed(TypedOutputItem::Message(
+            OutputMessageItem {
+                id: format!("msg_{}", uuid::Uuid::new_v4().simple()),
+                role: "assistant".into(),
+                status: Some("completed".into()),
+                content: vec![OutputContentPart::Typed(TypedOutputContentPart::Text {
+                    text: String::new(),
+                    annotations: Vec::new(),
+                    logprobs: None,
+                    extras: HashMap::new(),
+                })],
+                extras: HashMap::new(),
+            },
+        )));
+    }
 
     Ok(ResponsesResponse {
         id: response_id.into(),
@@ -264,7 +428,7 @@ pub fn chat_response_to_responses(
         created_at,
         status,
         model,
-        output: vec![OutputItem::Typed(TypedOutputItem::Message(output_message))],
+        output,
         output_text: Some(text),
         usage,
         error: None,
@@ -387,17 +551,179 @@ mod tests {
     }
 
     #[test]
-    fn function_call_input_items_rejected_for_now() {
+    fn function_call_input_translates_to_assistant_with_tool_calls() {
         let mut req = req_text("");
         req.input = serde_json::from_value(json!([
-            {"type": "function_call", "call_id": "c1", "name": "f", "arguments": "{}"},
+            {"type": "function_call", "call_id": "c1", "name": "f", "arguments": "{\"x\":1}"},
         ]))
         .unwrap();
+        let chat = request_to_chat(&req).unwrap();
+        assert_eq!(chat.messages.len(), 1);
+        assert!(matches!(chat.messages[0].role, Role::Assistant));
+        let tcs = chat.messages[0].tool_calls.as_ref().unwrap();
+        assert_eq!(tcs.len(), 1);
+        assert_eq!(tcs[0].id, "c1");
+        assert_eq!(tcs[0].tool_type, "function");
+        assert_eq!(tcs[0].function.name, "f");
+        assert_eq!(tcs[0].function.arguments, "{\"x\":1}");
+    }
+
+    #[test]
+    fn function_call_output_input_translates_to_tool_message() {
+        let mut req = req_text("");
+        req.input = serde_json::from_value(json!([
+            {"type": "function_call_output", "call_id": "c1", "output": "{\"result\":42}"},
+        ]))
+        .unwrap();
+        let chat = request_to_chat(&req).unwrap();
+        assert_eq!(chat.messages.len(), 1);
+        assert!(matches!(chat.messages[0].role, Role::Tool));
+        assert_eq!(chat.messages[0].tool_call_id.as_deref(), Some("c1"));
+        match &chat.messages[0].content {
+            MessageContent::Text(s) => assert_eq!(s, "{\"result\":42}"),
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn full_tool_calling_round_trip_request() {
+        // user → assistant tool_call → tool result → user — the standard
+        // multi-turn function calling shape Responses callers re-feed.
+        let mut req = req_text("");
+        req.input = serde_json::from_value(json!([
+            {"type": "message", "role": "user", "content": "weather in NYC?"},
+            {"type": "function_call", "call_id": "c1", "name": "get_weather", "arguments": "{\"city\":\"NYC\"}"},
+            {"type": "function_call_output", "call_id": "c1", "output": "{\"temp\":72}"},
+            {"type": "message", "role": "user", "content": "and tomorrow?"},
+        ])).unwrap();
+        req.tools = Some(serde_json::from_value(json!([
+            {"type": "function", "name": "get_weather", "description": "Look up weather", "parameters": {"type": "object"}, "strict": true},
+        ])).unwrap());
+        req.tool_choice = Some(ToolChoice::Mode("auto".into()));
+
+        let chat = request_to_chat(&req).unwrap();
+        assert_eq!(chat.messages.len(), 4);
+        assert!(matches!(chat.messages[0].role, Role::User));
+        assert!(matches!(chat.messages[1].role, Role::Assistant));
+        assert!(chat.messages[1].tool_calls.is_some());
+        assert!(matches!(chat.messages[2].role, Role::Tool));
+        assert!(matches!(chat.messages[3].role, Role::User));
+
+        let tools = chat.tools.as_ref().unwrap();
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].tool_type, "function");
+        assert_eq!(tools[0].function.name, "get_weather");
+
+        assert_eq!(chat.tool_choice, Some(json!("auto")));
+    }
+
+    #[test]
+    fn tool_choice_function_object_nests_for_chat() {
+        let mut req = req_text("hi");
+        req.tools = Some(
+            serde_json::from_value(json!([
+                {"type": "function", "name": "lookup", "parameters": {"type": "object"}},
+            ]))
+            .unwrap(),
+        );
+        req.tool_choice = Some(ToolChoice::Object(ToolChoiceObject {
+            kind: "function".into(),
+            name: Some("lookup".into()),
+            extras: HashMap::new(),
+        }));
+        let chat = request_to_chat(&req).unwrap();
+        assert_eq!(
+            chat.tool_choice,
+            Some(json!({"type": "function", "function": {"name": "lookup"}}))
+        );
+    }
+
+    #[test]
+    fn unsupported_tool_type_is_rejected() {
+        // Built-in tools are stopped at the handler before reaching
+        // request_to_chat. But a synthetic Raw variant (unmodeled type)
+        // landing here should also produce a clear validation error.
+        let mut req = req_text("hi");
+        req.tools = Some(vec![ToolDef::Raw(json!({"type": "future_kind"}))]);
         let err = request_to_chat(&req).unwrap_err();
         match err {
-            SwarmError::Validation(msg) => assert!(msg.contains("M4")),
-            _ => panic!("expected Validation"),
+            SwarmError::Validation(msg) => assert!(msg.contains("future_kind")),
+            _ => panic!(),
         }
+    }
+
+    #[test]
+    fn chat_response_with_tool_calls_emits_function_call_items() {
+        let chat = json!({
+            "id": "chatcmpl_1",
+            "model": "tinyllama",
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": [
+                        {"id": "call_a", "type": "function", "function": {"name": "f1", "arguments": "{\"x\":1}"}},
+                        {"id": "call_b", "type": "function", "function": {"name": "f2", "arguments": "{}"}},
+                    ],
+                },
+                "finish_reason": "tool_calls",
+            }],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 20, "total_tokens": 30},
+        });
+        let original = req_text("x");
+        let resp = chat_response_to_responses(&chat, &original, "resp_x", 0).unwrap();
+        assert_eq!(resp.status, ResponseStatus::Completed);
+        assert_eq!(resp.output.len(), 2);
+        for (i, expected_call) in [("call_a", "f1", "{\"x\":1}"), ("call_b", "f2", "{}")]
+            .iter()
+            .enumerate()
+        {
+            match &resp.output[i] {
+                OutputItem::Typed(TypedOutputItem::FunctionCall(fc)) => {
+                    assert_eq!(fc.call_id, expected_call.0);
+                    assert_eq!(fc.name, expected_call.1);
+                    assert_eq!(fc.arguments, expected_call.2);
+                    assert_eq!(
+                        fc.id.as_deref(),
+                        Some(format!("fc_{}", expected_call.0).as_str())
+                    );
+                }
+                _ => panic!("expected function_call at index {i}"),
+            }
+        }
+    }
+
+    #[test]
+    fn chat_response_with_text_and_tool_calls_emits_both() {
+        let chat = json!({
+            "id": "x",
+            "model": "m",
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": "Looking that up.",
+                    "tool_calls": [
+                        {"id": "c1", "type": "function", "function": {"name": "f", "arguments": "{}"}},
+                    ],
+                },
+                "finish_reason": "tool_calls",
+            }],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        });
+        let original = req_text("x");
+        let resp = chat_response_to_responses(&chat, &original, "r", 0).unwrap();
+        assert_eq!(resp.output.len(), 2);
+        assert!(matches!(
+            &resp.output[0],
+            OutputItem::Typed(TypedOutputItem::Message(_))
+        ));
+        assert!(matches!(
+            &resp.output[1],
+            OutputItem::Typed(TypedOutputItem::FunctionCall(_))
+        ));
+        assert_eq!(resp.output_text.as_deref(), Some("Looking that up."));
     }
 
     #[test]
