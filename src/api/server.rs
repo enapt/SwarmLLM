@@ -102,6 +102,10 @@ pub fn build_router(state: AppState) -> Router {
             "/v1/responses/:id",
             get(openai::responses::get_response).delete(openai::responses::delete_response),
         )
+        .route(
+            "/v1/responses/:id/cancel",
+            post(openai::responses::cancel_response),
+        )
         // Anthropic Messages API
         .route("/v1/messages", post(anthropic::messages))
         // Provider listing
