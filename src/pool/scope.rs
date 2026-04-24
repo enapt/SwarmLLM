@@ -21,13 +21,23 @@ pub fn allowed_node_set(shared: &SharedState) -> Option<HashSet<NodeId>> {
     // Always include ourselves
     allowed.insert(shared.identity.node_id().clone());
 
-    // Add all pool members
-    // Use try_read to avoid blocking in sync contexts; fall back to just self if contended
-    if let Ok(guard) = shared.credits.pool_state.try_read() {
-        if let Some(ref ps) = *guard {
-            for m in &ps.members {
-                allowed.insert(m.node_id.clone());
+    // Add all pool members.
+    // `try_read` avoids blocking in sync callers; on contention we'd silently
+    // fall back to the self-only set (too-restrictive, not a bypass) so at
+    // least log it so recurring contention is visible.
+    match shared.credits.pool_state.try_read() {
+        Ok(guard) => {
+            if let Some(ref ps) = *guard {
+                for m in &ps.members {
+                    allowed.insert(m.node_id.clone());
+                }
             }
+        }
+        Err(_) => {
+            tracing::warn!(
+                "pool_state contended during allowed_node_set() — falling back to self-only; \
+                 inference scope may be briefly too restrictive"
+            );
         }
     }
 

@@ -76,8 +76,19 @@ fn extract_subkey(composite: &[u8]) -> Option<&[u8]> {
 #[derive(Clone)]
 pub struct Database {
     inner: Arc<redb::Database>,
-    /// Holds the temp directory alive for `open_temp()` databases.
+    /// Holds the temp directory (or temp file guard) alive for `open_temp()`
+    /// databases. `Arc` lets the guard survive across Database clones;
+    /// the last drop releases the underlying file.
     _temp_dir: Option<Arc<dyn std::any::Any + Send + Sync>>,
+}
+
+/// RAII guard for `open_temp()` files — removes the path on drop so test
+/// runs don't leak redb files into the system temp directory.
+struct TempFileGuard(std::path::PathBuf);
+impl Drop for TempFileGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
 }
 
 impl Database {
@@ -121,9 +132,10 @@ impl Database {
 
     /// Open a temporary database (for testing).
     ///
-    /// Creates a uniquely-named database in the system temp directory.
-    /// The file is not auto-deleted; callers should use `tempfile::tempdir()`
-    /// + `Database::open()` if cleanup is needed.
+    /// Creates a uniquely-named database in the system temp directory. The
+    /// path is held alive by `_temp_dir` via a small RAII guard that removes
+    /// the file when the last `Database` clone drops, so test runs don't
+    /// leak redb files into `/tmp`.
     pub fn open_temp() -> Result<Self, SwarmError> {
         let temp_path =
             std::env::temp_dir().join(format!("swarmllm_test_{}.redb", uuid::Uuid::new_v4()));
@@ -131,7 +143,7 @@ impl Database {
             .map_err(|e| SwarmError::Database(format!("Failed to create temp db: {e}")))?;
         Ok(Self {
             inner: Arc::new(inner),
-            _temp_dir: None,
+            _temp_dir: Some(Arc::new(TempFileGuard(temp_path))),
         })
     }
 

@@ -2,11 +2,16 @@
 #
 # Usage:
 #   cd monitoring/
+#   cp .env.example .env         # optional — set a real password
 #   docker compose up -d
 #
 # Then open:
-#   - Grafana:    http://localhost:3000  (admin/admin)
+#   - Grafana:    http://localhost:3000
 #   - Prometheus: http://localhost:9090
+#
+# Grafana admin credentials default to admin/admin (dev-only). For anything
+# exposed beyond localhost, set GRAFANA_ADMIN_USER and GRAFANA_ADMIN_PASSWORD
+# in a .env file next to this compose file — see .env.example.
 #
 # The SwarmLLM dashboard is auto-provisioned on first start.
 
@@ -27,8 +32,8 @@ services:
     ports:
       - "3000:3000"
     environment:
-      GF_SECURITY_ADMIN_USER: admin
-      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
       GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/swarmllm/grafana-dashboard.json
     volumes:
       - grafana-data:/var/lib/grafana
