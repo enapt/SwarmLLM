@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use arc_swap::ArcSwap;
 use dashmap::DashMap;
 use ed25519_dalek::VerifyingKey;
 use tokio::sync::{mpsc, watch, RwLock};
@@ -52,7 +53,15 @@ pub struct CreditLedger {
     network_tx: mpsc::Sender<NetworkCommand>,
     shutdown_rx: watch::Receiver<bool>,
     /// Bucketed balances from other nodes, used for percentile estimation.
-    peer_balances: Arc<RwLock<Vec<i64>>>,
+    ///
+    /// `ArcSwap` gives lock-free reads on the inference credit-gate hot
+    /// path: `estimate_percentile` → `.load_full()` is a single atomic Arc
+    /// clone with no await, even while `process_balance_gossip` is storing
+    /// a fresh snapshot on the dispatcher task. Previously this was an
+    /// `Arc<RwLock<Vec<i64>>>` — writes (one per inbound `CreditGossip`
+    /// in the dispatcher) and reads (inference credit-gate check) held
+    /// the same RwLock, so a busy swarm could serialize the two.
+    peer_balances: Arc<ArcSwap<Vec<i64>>>,
     /// Reference to SharedState for pool credit forwarding.
     shared_state: Option<std::sync::Arc<crate::daemon::SharedState>>,
     /// Node identity for signing balance reports (Sybil resistance).
@@ -66,7 +75,7 @@ impl CreditLedger {
         db: Database,
         network_tx: mpsc::Sender<NetworkCommand>,
         shutdown_rx: watch::Receiver<bool>,
-        peer_balances: Arc<RwLock<Vec<i64>>>,
+        peer_balances: Arc<ArcSwap<Vec<i64>>>,
     ) -> Self {
         // Restore persisted balance synchronously to avoid race condition.
         // redb reads are fast, so this is safe in constructor.
@@ -252,7 +261,7 @@ impl CreditLedger {
     /// Calculate the current priority tier based on balance and network percentile.
     pub async fn calculate_tier(&self) -> PriorityTier {
         let bal = self.balance.read().await;
-        let percentile = self.estimate_percentile(bal.balance).await;
+        let percentile = self.estimate_percentile(bal.balance);
         super::priority::calculate_tier(bal.balance, percentile)
     }
 
@@ -263,13 +272,13 @@ impl CreditLedger {
     }
 
     #[cfg(test)]
-    pub fn peer_balances(&self) -> &Arc<RwLock<Vec<i64>>> {
+    pub fn peer_balances(&self) -> &Arc<ArcSwap<Vec<i64>>> {
         &self.peer_balances
     }
 
     /// Estimate this node's percentile in the network.
-    async fn estimate_percentile(&self, balance: i64) -> f32 {
-        let balances = self.peer_balances.read().await;
+    fn estimate_percentile(&self, balance: i64) -> f32 {
+        let balances = self.peer_balances.load_full();
         if balances.is_empty() {
             // With no network data, use balance sign as a proxy
             return if balance > 0 { 0.5 } else { 0.1 };
@@ -641,7 +650,7 @@ pub fn verify_balance_report(gossip: &CreditGossip) -> Result<(), SwarmError> {
 /// This prevents a single peer from dominating the percentile distribution by
 /// re-gossiping frequently (Sybil percentile stuffing).
 pub async fn process_balance_gossip(
-    peer_balances: &Arc<RwLock<Vec<i64>>>,
+    peer_balances: &Arc<ArcSwap<Vec<i64>>>,
     gossip: &CreditGossip,
     peer_balance_map: Option<&DashMap<NodeId, i64>>,
 ) {
@@ -658,7 +667,9 @@ pub async fn process_balance_gossip(
     match verify_balance_report(gossip) {
         Ok(()) => {
             // If a peer_balance_map is provided, use it for deduplication.
-            // The Vec is rebuilt from the map's values for percentile calculation.
+            // The Vec snapshot is rebuilt from the map's values for
+            // percentile estimation and swapped atomically via ArcSwap —
+            // readers on the inference hot path never block.
             if let Some(map) = peer_balance_map {
                 // Cap the map to prevent unbounded growth from departed peers
                 const MAX_PEERS: usize = 10_000;
@@ -666,21 +677,22 @@ pub async fn process_balance_gossip(
                     map.insert(gossip.node_id.clone(), gossip.balance_bucket);
                 }
 
-                // Collect values outside the write lock to avoid blocking
-                // estimate_percentile (inference hot path) during iteration
                 let new_values: Vec<i64> = map.iter().map(|e| *e.value()).collect();
-                let mut balances = peer_balances.write().await;
-                balances.clear();
-                balances.extend(new_values);
+                peer_balances.store(Arc::new(new_values));
             } else {
-                // Fallback: raw push (used in tests without SharedState)
+                // Fallback: raw push (used in tests without SharedState).
+                // ArcSwap has no read-modify-write primitive, so do the
+                // update by load + clone + store. Contention is a non-
+                // issue in this test-only branch.
                 const MAX_BALANCE_VEC_PEERS: usize = 1000;
-                let mut balances = peer_balances.write().await;
+                let prev = peer_balances.load_full();
+                let mut balances: Vec<i64> = (*prev).clone();
                 balances.push(gossip.balance_bucket);
                 if balances.len() > MAX_BALANCE_VEC_PEERS {
                     let excess = balances.len() - MAX_BALANCE_VEC_PEERS;
                     balances.drain(..excess);
                 }
+                peer_balances.store(Arc::new(balances));
             }
 
             tracing::debug!(
@@ -742,7 +754,7 @@ mod tests {
             db,
             network_tx,
             shutdown_rx,
-            Arc::new(RwLock::new(Vec::new())),
+            Arc::new(ArcSwap::from_pointee(Vec::new())),
         );
 
         let earned = ledger
@@ -780,7 +792,7 @@ mod tests {
             db,
             network_tx,
             shutdown_rx,
-            Arc::new(RwLock::new(Vec::new())),
+            Arc::new(ArcSwap::from_pointee(Vec::new())),
         );
 
         let spent = ledger
@@ -817,7 +829,7 @@ mod tests {
             db,
             network_tx,
             shutdown_rx,
-            Arc::new(RwLock::new(Vec::new())),
+            Arc::new(ArcSwap::from_pointee(Vec::new())),
         );
 
         // No peers: default percentile
@@ -825,12 +837,9 @@ mod tests {
         assert_eq!(tier, PriorityTier::Silver); // balance > 0, percentile 0.5
 
         // Add peer balances: our 500 should be above most
-        {
-            let mut balances = ledger.peer_balances().write().await;
-            for b in [100, 200, 300, 150, 250, 50, 400, 350, 180, 220] {
-                balances.push(b);
-            }
-        }
+        ledger.peer_balances().store(Arc::new(vec![
+            100, 200, 300, 150, 250, 50, 400, 350, 180, 220,
+        ]));
 
         let tier = ledger.calculate_tier().await;
         // 500 > all 10 peers, percentile = 1.0, so Platinum
@@ -858,7 +867,7 @@ mod tests {
             db.clone(),
             network_tx,
             shutdown_rx,
-            Arc::new(RwLock::new(Vec::new())),
+            Arc::new(ArcSwap::from_pointee(Vec::new())),
         );
 
         ledger
@@ -992,7 +1001,7 @@ mod tests {
         let timestamp = chrono::Utc::now();
         let signature = sign_balance_report(&node_id, 500, timestamp, &identity);
 
-        let peer_balances = Arc::new(RwLock::new(Vec::new()));
+        let peer_balances = Arc::new(ArcSwap::from_pointee(Vec::new()));
 
         let gossip = CreditGossip {
             node_id,
@@ -1003,7 +1012,7 @@ mod tests {
 
         process_balance_gossip(&peer_balances, &gossip, None).await;
 
-        let balances = peer_balances.read().await;
+        let balances = peer_balances.load_full();
         assert_eq!(balances.len(), 1);
         assert_eq!(balances[0], 500);
     }
@@ -1017,7 +1026,7 @@ mod tests {
         // Imposter signs a report claiming to be identity
         let signature = sign_balance_report(identity.node_id(), 500, timestamp, &imposter);
 
-        let peer_balances = Arc::new(RwLock::new(Vec::new()));
+        let peer_balances = Arc::new(ArcSwap::from_pointee(Vec::new()));
 
         let gossip = CreditGossip {
             node_id: identity.node_id().clone(),
@@ -1029,7 +1038,7 @@ mod tests {
         process_balance_gossip(&peer_balances, &gossip, None).await;
 
         // Should have been rejected — no balance added
-        let balances = peer_balances.read().await;
+        let balances = peer_balances.load_full();
         assert_eq!(balances.len(), 0);
     }
 
@@ -1040,7 +1049,7 @@ mod tests {
         let timestamp = chrono::Utc::now();
         let signature = sign_balance_report(&node_id, 200_000_000, timestamp, &identity);
 
-        let peer_balances = Arc::new(RwLock::new(Vec::new()));
+        let peer_balances = Arc::new(ArcSwap::from_pointee(Vec::new()));
 
         let gossip = CreditGossip {
             node_id,
@@ -1051,7 +1060,7 @@ mod tests {
 
         process_balance_gossip(&peer_balances, &gossip, None).await;
 
-        let balances = peer_balances.read().await;
+        let balances = peer_balances.load_full();
         assert_eq!(balances.len(), 0);
     }
 }

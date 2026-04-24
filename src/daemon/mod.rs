@@ -13,7 +13,6 @@ use crate::model::acquisition::{AcquisitionCommand, AcquisitionManager};
 use crate::network::manager::NetworkManager;
 use crate::storage::db::Database;
 use crate::types::{AuthenticatedMessage, NetworkCommand, RebalanceEvent};
-use tokio::sync::RwLock;
 
 mod background;
 mod dispatch;
@@ -294,7 +293,8 @@ impl Daemon {
         });
 
         // Spawn message dispatcher: routes network inbound messages to the right subsystem
-        let dispatcher_credit_balances: Arc<RwLock<Vec<i64>>> = Arc::new(RwLock::new(Vec::new()));
+        let dispatcher_credit_balances: Arc<arc_swap::ArcSwap<Vec<i64>>> =
+            Arc::new(arc_swap::ArcSwap::from_pointee(Vec::new()));
         let dispatcher_router_tx = router_cmd_tx.clone();
         let dispatcher_shutdown = shutdown_rx.clone();
         let dispatcher_credit_ref = dispatcher_credit_balances.clone();

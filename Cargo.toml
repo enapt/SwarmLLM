@@ -110,6 +110,10 @@ redb = "3"
 dashmap = "6"
 parking_lot = "0.12"
 async-trait = "0.1"
+# Lock-free atomic Arc swaps — used for hot-path read-mostly snapshots
+# like `peer_balances` where every inbound CreditGossip rebuilds the
+# snapshot and every inference credit-gate check reads it.
+arc-swap = "1.7"
 
 # Cross-platform local IPC (Unix sockets / Windows named pipes)
 # Used by the daemon ↔ model-worker subprocess IPC layer.

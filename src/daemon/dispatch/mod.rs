@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use tokio::sync::{mpsc, watch, RwLock};
+use tokio::sync::{mpsc, watch};
 
 use crate::identity::nickname::NicknameRecordExt;
 use crate::inference::router::RouterCommand;
@@ -148,7 +148,7 @@ pub(super) fn track_forward_participation(shared_state: &SharedState, estimated_
 pub(crate) async fn dispatch_network_messages(
     network_out_rx: &mut mpsc::Receiver<AuthenticatedMessage>,
     router_tx: &mpsc::Sender<RouterCommand>,
-    credit_peer_balances: Arc<RwLock<Vec<i64>>>,
+    credit_peer_balances: Arc<arc_swap::ArcSwap<Vec<i64>>>,
     shared_state: &Arc<SharedState>,
     network_tx: mpsc::Sender<NetworkCommand>,
     mut shutdown_rx: watch::Receiver<bool>,
