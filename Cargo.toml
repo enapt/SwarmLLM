@@ -218,6 +218,14 @@ path = "tests/integration/test_yamux_substream.rs"
 
 [patch.crates-io]
 libp2p-request-response = { path = "vendor/libp2p-request-response" }
+# Vendor of libp2p-gossipsub 0.48.0 with CVE-2026-33040 + CVE-2026-34219
+# backported (clamp peer-supplied PRUNE.backoff Duration + checked_add in
+# heartbeat expiry). Both are remote panic/DoS vulnerabilities reachable by
+# any mesh peer with no auth. Upstream fixed them in 0.49.3 / 0.49.4, but
+# that release track requires libp2p 0.56; until the umbrella upgrade, this
+# vendor keeps the 0.48 API while closing the DoS. See
+# vendor/libp2p-gossipsub/src/backoff.rs for the annotated diffs.
+libp2p-gossipsub = { path = "vendor/libp2p-gossipsub" }
 # Upstream candle 0.9.2 and float8 0.6.1 hardcode `cudarc/dynamic-linking`
 # in their Cargo.toml, preventing downstream consumers from choosing a
 # different linking mode (e.g. `dynamic-loading` so the binary can ship
