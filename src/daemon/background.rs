@@ -1,15 +1,23 @@
 //! Post-spawn background tasks kicked off by the daemon's run loop.
 //!
-//! Each `spawn_*` function fires off a `tokio::spawn` that runs until the
-//! shutdown channel fires (or the task completes naturally). These are
-//! best-effort background chores: shard verification, IP geolocation,
-//! startup broadcasts, key rotation, opening a browser, auto-loading
-//! models, and handling SIGHUP config reloads.
+//! Each `spawn_*` function adds a task to a shared `JoinSet<&'static str>`
+//! (see [`BackgroundTasks`]) that runs until the shutdown channel fires
+//! (or the task completes naturally). These are best-effort background
+//! chores: shard verification, IP geolocation, startup broadcasts, key
+//! rotation, opening a browser, auto-loading models, and handling SIGHUP
+//! config reloads.
+//!
+//! Pre-2026-04-24 these used bare `tokio::spawn`, which silently swallowed
+//! panics and left no way to drain the tasks during shutdown. Routing
+//! through a `JoinSet` lets the supervisor surface panics in the drain
+//! phase and ensures pending background work has a chance to land before
+//! the daemon exits.
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use tokio::sync::{mpsc, watch};
+use tokio::task::JoinSet;
 
 use crate::config::Config;
 use crate::types::{NetworkCommand, SwarmMessage};
@@ -17,17 +25,69 @@ use crate::types::{NetworkCommand, SwarmMessage};
 use super::helpers::{detect_region_from_ip, open_browser};
 use super::state::SharedState;
 
+/// Shared `JoinSet` for the daemon's best-effort background tasks. Each
+/// task returns a static name string, used by the drain phase to attribute
+/// panics in logs.
+pub(super) type BackgroundTasks = JoinSet<&'static str>;
+
+/// Drain the background `JoinSet` after the supervisor has signaled
+/// shutdown. Logs any task that panicked (otherwise silent under bare
+/// `tokio::spawn`) and gives in-flight chores a brief window to land
+/// before the daemon exits.
+pub(super) async fn drain(mut tasks: BackgroundTasks) {
+    const DRAIN_TIMEOUT_SECS: u64 = 5;
+    if tasks.is_empty() {
+        return;
+    }
+    tracing::debug!(
+        remaining = tasks.len(),
+        timeout_secs = DRAIN_TIMEOUT_SECS,
+        "Draining background tasks"
+    );
+    let deadline = tokio::time::sleep(std::time::Duration::from_secs(DRAIN_TIMEOUT_SECS));
+    tokio::pin!(deadline);
+    loop {
+        tokio::select! {
+            _ = &mut deadline => {
+                if !tasks.is_empty() {
+                    tracing::debug!(
+                        remaining = tasks.len(),
+                        "Background drain timeout — aborting remaining tasks"
+                    );
+                    tasks.abort_all();
+                }
+                break;
+            }
+            result = tasks.join_next() => {
+                match result {
+                    None => break,
+                    Some(Ok(name)) => {
+                        tracing::debug!(task = name, "Background task exited");
+                    }
+                    Some(Err(e)) if e.is_panic() => {
+                        tracing::error!(error = %e, "Background task panicked");
+                    }
+                    Some(Err(_)) => {
+                        // cancellation during shutdown — expected
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// BLAKE3 hash check runs after API is up so the dashboard is responsive
 /// immediately. Bad shards are quarantined.
 pub(super) fn spawn_shard_verification(
+    tasks: &mut BackgroundTasks,
     shared_state: Arc<SharedState>,
     data_dir: PathBuf,
     mut shutdown_rx: watch::Receiver<bool>,
 ) {
-    tokio::spawn(async move {
+    tasks.spawn(async move {
         // Small delay to let the API server bind and first WS clients connect
         tokio::select! {
-            _ = shutdown_rx.changed() => { return; }
+            _ = shutdown_rx.changed() => { return "shard_verification_aborted"; }
             _ = tokio::time::sleep(std::time::Duration::from_secs(2)) => {}
         }
         let shard_store = crate::model::shard::ShardStore::new(&data_dir);
@@ -129,18 +189,20 @@ pub(super) fn spawn_shard_verification(
             )
             .with_detail_num(verified as i64),
         );
+        "shard_verification"
     });
 }
 
 /// Auto-detect region via IP geolocation (non-blocking, best-effort). If the
 /// user configured a region explicitly, apply that instead.
 pub(super) fn spawn_region_detection(
+    tasks: &mut BackgroundTasks,
     shared_state: Arc<SharedState>,
     mut shutdown_rx: watch::Receiver<bool>,
 ) {
     if shared_state.config.identity.region.is_none() {
         let geo_state = shared_state.clone();
-        tokio::spawn(async move {
+        tasks.spawn(async move {
             tokio::select! {
                 result = detect_region_from_ip() => {
                     match result {
@@ -162,11 +224,13 @@ pub(super) fn spawn_region_detection(
                     }
                 } => {}
             }
+            "region_detection_geo"
         });
     } else {
         let state = shared_state.clone();
-        tokio::spawn(async move {
+        tasks.spawn(async move {
             *state.detected_region.write().await = state.config.identity.region.clone();
+            "region_detection_configured"
         });
     }
 }
@@ -174,15 +238,16 @@ pub(super) fn spawn_region_detection(
 /// Broadcast shard announcements and manifests shortly after startup so peers
 /// discover our shards quickly (don't wait for the 30s health tick).
 pub(super) fn spawn_initial_announcements(
+    tasks: &mut BackgroundTasks,
     shared_state: Arc<SharedState>,
     network_tx: mpsc::Sender<NetworkCommand>,
     mut shutdown_rx: watch::Receiver<bool>,
 ) {
-    tokio::spawn(async move {
+    tasks.spawn(async move {
         // Wait for peer connections to establish, abort on shutdown
         tokio::select! {
             _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => {}
-            _ = shutdown_rx.changed() => { return; }
+            _ = shutdown_rx.changed() => { return "initial_announcements_aborted"; }
         }
 
         let node_id = shared_state.identity.node_id().clone();
@@ -236,18 +301,20 @@ pub(super) fn spawn_initial_announcements(
                     .await;
             }
         }
+        "initial_announcements"
     });
 }
 
 /// Spawn key rotation task (evicts stale sessions + ephemeral re-keying).
 pub(super) fn spawn_key_rotation(
+    tasks: &mut BackgroundTasks,
     shared_state: Arc<SharedState>,
     network_tx: mpsc::Sender<NetworkCommand>,
     shutdown_rx: watch::Receiver<bool>,
 ) {
     let sm = shared_state.session_manager.clone();
     let node_id = shared_state.identity.node_id().clone();
-    tokio::spawn(async move {
+    tasks.spawn(async move {
         crate::crypto::key_rotation::run_key_rotation(
             sm,
             network_tx,
@@ -256,11 +323,16 @@ pub(super) fn spawn_key_rotation(
             shutdown_rx,
         )
         .await;
+        "key_rotation"
     });
 }
 
 /// Open browser on first start if configured.
-pub(super) fn spawn_browser_open(config: &Config, mut shutdown_rx: watch::Receiver<bool>) {
+pub(super) fn spawn_browser_open(
+    tasks: &mut BackgroundTasks,
+    config: &Config,
+    mut shutdown_rx: watch::Receiver<bool>,
+) {
     if !config.ui.open_browser_on_start {
         return;
     }
@@ -272,7 +344,7 @@ pub(super) fn spawn_browser_open(config: &Config, mut shutdown_rx: watch::Receiv
     } else {
         format!("{url}/setup")
     };
-    tokio::spawn(async move {
+    tasks.spawn(async move {
         // Small delay to let the server bind, abort on shutdown
         tokio::select! {
             _ = tokio::time::sleep(std::time::Duration::from_millis(500)) => {
@@ -282,6 +354,7 @@ pub(super) fn spawn_browser_open(config: &Config, mut shutdown_rx: watch::Receiv
             }
             _ = shutdown_rx.changed() => {}
         }
+        "browser_open"
     });
 }
 
@@ -293,12 +366,13 @@ pub(super) fn spawn_browser_open(config: &Config, mut shutdown_rx: watch::Receiv
 /// after sending a prompt we should see our own NodeId returned by
 /// `cross_node_prefix_holders` on the matching block hashes.
 pub(super) fn spawn_prefix_announce_forwarder(
+    tasks: &mut BackgroundTasks,
     shared_state: Arc<SharedState>,
     network_tx: mpsc::Sender<NetworkCommand>,
     mut rx: mpsc::Receiver<crate::inference::process_pool::PrefixManifestEvent>,
     mut shutdown_rx: watch::Receiver<bool>,
 ) {
-    tokio::spawn(async move {
+    tasks.spawn(async move {
         let our_id = shared_state.identity.node_id().clone();
         loop {
             tokio::select! {
@@ -339,6 +413,7 @@ pub(super) fn spawn_prefix_announce_forwarder(
                 }
             }
         }
+        "prefix_announce_forwarder"
     });
 }
 
@@ -399,12 +474,13 @@ fn verify_fetched_snapshot(bytes: &[u8], requested_hash: &[u8; 32]) -> SnapshotV
 /// result (hit payload or miss) back to the originating worker via the
 /// pool's `send_prefix_fetch_result` IPC. Spawned once per daemon.
 pub(super) fn spawn_prefix_probe_handler(
+    tasks: &mut BackgroundTasks,
     shared_state: Arc<SharedState>,
     network_tx: mpsc::Sender<NetworkCommand>,
     mut rx: mpsc::Receiver<crate::inference::process_pool::PrefixProbeEvent>,
     mut shutdown_rx: watch::Receiver<bool>,
 ) {
-    tokio::spawn(async move {
+    tasks.spawn(async move {
         loop {
             tokio::select! {
                 _ = shutdown_rx.changed() => break,
@@ -596,6 +672,7 @@ pub(super) fn spawn_prefix_probe_handler(
                 }
             }
         }
+        "prefix_probe_handler"
     });
 }
 
@@ -603,14 +680,15 @@ pub(super) fn spawn_prefix_probe_handler(
 /// (by historical request count) are loaded first so they get VRAM priority
 /// on restart.
 pub(super) fn spawn_model_autoload(
+    tasks: &mut BackgroundTasks,
     shared_state: Arc<SharedState>,
     mut shutdown_rx: watch::Receiver<bool>,
 ) {
-    tokio::spawn(async move {
+    tasks.spawn(async move {
         // Brief delay to let shard announcements propagate, abort on shutdown
         tokio::select! {
             _ = tokio::time::sleep(std::time::Duration::from_secs(2)) => {}
-            _ = shutdown_rx.changed() => { return; }
+            _ = shutdown_rx.changed() => { return "model_autoload_aborted"; }
         }
         let mut manifests = shared_state.model_registry.models();
         manifests.sort_by(|a, b| {
@@ -637,23 +715,25 @@ pub(super) fn spawn_model_autoload(
             crate::model::auto_manage::check_and_load_model(&shared_state, &m.id, vram_budget)
                 .await;
         }
+        "model_autoload"
     });
 }
 
 /// SIGHUP config reload handler. No-op on non-Unix platforms.
 #[cfg(unix)]
 pub(super) fn spawn_sighup_handler(
+    tasks: &mut BackgroundTasks,
     shared_state: Arc<SharedState>,
     config: Config,
     mut shutdown_rx: watch::Receiver<bool>,
 ) {
-    tokio::spawn(async move {
+    tasks.spawn(async move {
         let mut sighup = match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
         {
             Ok(s) => s,
             Err(e) => {
                 tracing::warn!(error = %e, "Failed to register SIGHUP handler — config reload via signal disabled");
-                return;
+                return "sighup_handler_failed_init";
             }
         };
         loop {
@@ -694,11 +774,13 @@ pub(super) fn spawn_sighup_handler(
                 }
             }
         }
+        "sighup_handler"
     });
 }
 
 #[cfg(not(unix))]
 pub(super) fn spawn_sighup_handler(
+    _tasks: &mut BackgroundTasks,
     _shared_state: Arc<SharedState>,
     _config: Config,
     _shutdown_rx: watch::Receiver<bool>,

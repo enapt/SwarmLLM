@@ -456,6 +456,12 @@ impl Daemon {
             .with_detail_num(self.config.node.listen_port as i64),
         );
 
+        // Best-effort background tasks share a `JoinSet` so panics surface
+        // (logged in the drain phase below) and pending work has a chance
+        // to land before the daemon exits. Pre-2026-04-24 these used bare
+        // `tokio::spawn`, which silently swallowed panics.
+        let mut background_tasks: background::BackgroundTasks = tokio::task::JoinSet::new();
+
         // Item 8 Phase 1: install the prefix-cache manifest channel + spawn
         // the forwarder. Worker processes emit `WorkerMsg::PrefixManifestUpdate`
         // each time they snapshot a new prefix into their local cache; the
@@ -467,6 +473,7 @@ impl Daemon {
             .model_process_pool
             .set_prefix_manifest_tx(prefix_manifest_tx);
         background::spawn_prefix_announce_forwarder(
+            &mut background_tasks,
             shared_state.clone(),
             network_tx.clone(),
             prefix_manifest_rx,
@@ -480,6 +487,7 @@ impl Daemon {
             .model_process_pool
             .set_prefix_probe_tx(prefix_probe_tx);
         background::spawn_prefix_probe_handler(
+            &mut background_tasks,
             shared_state.clone(),
             network_tx.clone(),
             prefix_probe_rx,
@@ -487,30 +495,46 @@ impl Daemon {
         );
 
         background::spawn_shard_verification(
+            &mut background_tasks,
             shared_state.clone(),
             self.config.node.data_dir.clone(),
             shutdown_rx.clone(),
         );
-        background::spawn_region_detection(shared_state.clone(), shutdown_rx.clone());
+        background::spawn_region_detection(
+            &mut background_tasks,
+            shared_state.clone(),
+            shutdown_rx.clone(),
+        );
         background::spawn_initial_announcements(
+            &mut background_tasks,
             shared_state.clone(),
             network_tx.clone(),
             shutdown_rx.clone(),
         );
         background::spawn_key_rotation(
+            &mut background_tasks,
             shared_state.clone(),
             network_tx.clone(),
             shutdown_rx.clone(),
         );
-        background::spawn_browser_open(&self.config, shutdown_rx.clone());
-        background::spawn_model_autoload(shared_state.clone(), shutdown_rx.clone());
+        background::spawn_browser_open(&mut background_tasks, &self.config, shutdown_rx.clone());
+        background::spawn_model_autoload(
+            &mut background_tasks,
+            shared_state.clone(),
+            shutdown_rx.clone(),
+        );
         background::spawn_sighup_handler(
+            &mut background_tasks,
             shared_state.clone(),
             self.config.clone(),
             shutdown_rx.clone(),
         );
 
         supervisor::run(subsystems, shutdown_rx, shared_state).await;
+
+        // Drain the background JoinSet so panics surface and tasks get a
+        // brief window to run their own cleanup paths before exit.
+        background::drain(background_tasks).await;
 
         // redb writes are durable on commit — no flush needed
 

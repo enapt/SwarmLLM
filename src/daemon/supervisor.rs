@@ -11,7 +11,7 @@ use std::sync::Arc;
 use tokio::sync::watch;
 use tokio::task::JoinSet;
 
-use super::helpers::{SubsystemCriticality, MAX_RESTART_ATTEMPTS};
+use super::helpers::{SubsystemCriticality, MAX_NONCRITICAL_FAILURES};
 use super::state::SharedState;
 
 /// Run the supervisor loop until a shutdown condition is hit, then drain
@@ -21,8 +21,10 @@ pub(super) async fn run(
     mut shutdown_rx: watch::Receiver<bool>,
     shared_state: Arc<SharedState>,
 ) {
-    // Track restart attempts per subsystem name
-    let mut restart_counts: std::collections::HashMap<&str, u32> = std::collections::HashMap::new();
+    // Track failure count per subsystem name. Counter only meaningfully
+    // grows above 1 in a future world that re-spawns failed subsystems —
+    // today each subsystem launches exactly once at startup.
+    let mut failure_counts: std::collections::HashMap<&str, u32> = std::collections::HashMap::new();
 
     // Register SIGTERM handler ONCE before the loop to avoid re-registering
     // on each iteration. Windows has no SIGTERM — the select branch below
@@ -91,7 +93,7 @@ pub(super) async fn run(
                             }
                         }
 
-                        let count = restart_counts.entry(name).or_insert(0);
+                        let count = failure_counts.entry(name).or_insert(0);
                         *count += 1;
 
                         if criticality == SubsystemCriticality::Critical {
@@ -100,19 +102,19 @@ pub(super) async fn run(
                                 "Critical subsystem failed — triggering graceful shutdown"
                             );
                             break;
-                        } else if *count >= MAX_RESTART_ATTEMPTS {
+                        } else if *count >= MAX_NONCRITICAL_FAILURES {
                             tracing::error!(
                                 subsystem = name,
-                                restart_count = *count,
-                                max_restarts = MAX_RESTART_ATTEMPTS,
-                                "Non-critical subsystem exceeded max restarts — triggering shutdown"
+                                failure_count = *count,
+                                max_failures = MAX_NONCRITICAL_FAILURES,
+                                "Non-critical subsystem exceeded max failure count — triggering shutdown"
                             );
                             break;
                         } else {
                             tracing::warn!(
                                 subsystem = name,
-                                restart_count = *count,
-                                max_restarts = MAX_RESTART_ATTEMPTS,
+                                failure_count = *count,
+                                max_failures = MAX_NONCRITICAL_FAILURES,
                                 "Non-critical subsystem failed — daemon continues without it"
                             );
                         }
@@ -248,23 +250,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn supervisor_restart_counting() {
-        let mut restart_counts: std::collections::HashMap<&str, u32> =
+    async fn supervisor_failure_counting() {
+        let mut failure_counts: std::collections::HashMap<&str, u32> =
             std::collections::HashMap::new();
 
         for i in 1..=5 {
-            let count = restart_counts.entry("HealthMonitor").or_insert(0);
+            let count = failure_counts.entry("HealthMonitor").or_insert(0);
             *count += 1;
             assert_eq!(*count, i);
         }
 
         assert_eq!(
-            *restart_counts.get("HealthMonitor").unwrap(),
-            MAX_RESTART_ATTEMPTS
+            *failure_counts.get("HealthMonitor").unwrap(),
+            MAX_NONCRITICAL_FAILURES
         );
 
-        let count = restart_counts.entry("HealthMonitor").or_insert(0);
+        let count = failure_counts.entry("HealthMonitor").or_insert(0);
         *count += 1;
-        assert!(*count > MAX_RESTART_ATTEMPTS);
+        assert!(*count > MAX_NONCRITICAL_FAILURES);
     }
 }

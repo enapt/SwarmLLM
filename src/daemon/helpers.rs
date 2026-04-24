@@ -4,8 +4,16 @@
 use crate::config::Config;
 use crate::storage::db::Database;
 
-/// Maximum restart attempts before a subsystem is considered permanently failed.
-pub(super) const MAX_RESTART_ATTEMPTS: u32 = 5;
+/// Maximum number of times a non-critical subsystem may exit (with Ok or
+/// Err) before the supervisor treats it as permanently failed and shuts
+/// the daemon down.
+///
+/// Naming note: nothing actually re-spawns a failed subsystem — each one
+/// is launched once at startup. This counter exists so a subsystem that
+/// somehow re-enters the JoinSet (e.g. via a future redesign that does
+/// re-spawn) won't loop forever. Today the count effectively reaches 1
+/// per name in practice.
+pub(super) const MAX_NONCRITICAL_FAILURES: u32 = 5;
 
 /// Whether a subsystem is critical to daemon operation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -151,7 +159,7 @@ mod tests {
     }
 
     #[test]
-    fn max_restart_attempts_is_five() {
-        assert_eq!(MAX_RESTART_ATTEMPTS, 5);
+    fn max_noncritical_failures_is_five() {
+        assert_eq!(MAX_NONCRITICAL_FAILURES, 5);
     }
 }
