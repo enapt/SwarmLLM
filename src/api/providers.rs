@@ -448,6 +448,115 @@ fn is_private_ip(ip: std::net::IpAddr) -> bool {
     }
 }
 
+/// Try to proxy an OpenAI Responses request (`POST /v1/responses`) to a
+/// cloud provider. Mirrors `try_proxy_openai` but targets the `/responses`
+/// path on the upstream provider.
+///
+/// Returns:
+/// - `Ok(Some(response))` when an OpenAI-compatible provider matched and
+///   the request was proxied (provider's response, including non-2xx).
+/// - `Err(_)` when an Anthropic / subprocess provider matched (those don't
+///   speak the OpenAI Responses API — caller should surface the message
+///   instead of falling through), or when the upstream request errored.
+/// - `Ok(None)` when no cloud provider matches the model — caller should
+///   continue with local inference.
+pub async fn try_proxy_openai_responses(
+    state: &AppState,
+    body: &serde_json::Value,
+    stream: bool,
+) -> Result<Option<axum::response::Response>, ApiError> {
+    let model = body
+        .get("model")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+
+    let config = state.shared_state.metrics.providers_config.read().await;
+    let provider = match resolve_provider(model, &config).or_else(|| {
+        // Same model_map fallback try_proxy_openai uses.
+        state
+            .shared_state
+            .metrics
+            .provider_model_map
+            .get(model)
+            .and_then(|e| resolve_by_name(&e.value().clone(), &config))
+    }) {
+        Some(p) => p,
+        None => return Ok(None),
+    };
+    drop(config);
+
+    if provider.is_subprocess || provider.is_anthropic {
+        return Err(ApiError(crate::error::SwarmError::Validation(format!(
+            "Model `{model}` routes to provider `{name}`, which uses the \
+             Anthropic Messages API. Send this request to POST /v1/messages \
+             instead.",
+            name = provider.name,
+        ))));
+    }
+
+    tracing::info!(
+        provider = %provider.name,
+        model = %model,
+        "Proxying /v1/responses request to cloud provider"
+    );
+
+    let response =
+        proxy_openai_responses(&provider.base_url, &provider.api_key, body, stream).await?;
+    Ok(Some(response))
+}
+
+/// Low-level proxy: POST `body` verbatim to `{base_url}/responses`.
+/// `body` should already include the original caller's `extras` so unknown
+/// fields (`reasoning.effort`, `service_tier`, `text.verbosity`, `include`,
+/// `previous_response_id`, ...) round-trip without translation.
+pub async fn proxy_openai_responses(
+    base_url: &str,
+    api_key: &str,
+    body: &serde_json::Value,
+    stream: bool,
+) -> Result<axum::response::Response, ApiError> {
+    validate_provider_url(base_url).await.map_err(ApiError)?;
+
+    let client = get_provider_client();
+    let url = format!("{}/responses", base_url);
+
+    let resp = client
+        .post(&url)
+        .header("Authorization", format!("Bearer {}", api_key))
+        .header("Content-Type", "application/json")
+        .json(body)
+        .send()
+        .await
+        .map_err(|e| {
+            tracing::warn!(error = %e, url = %url, "Provider /responses proxy request failed");
+            let msg = if e.is_timeout() {
+                "Provider request timed out. The model may be slow to respond — try again or use a different model.".to_string()
+            } else if e.is_connect() {
+                "Could not connect to provider API. Check your internet connection.".to_string()
+            } else {
+                format!("Provider request failed: {e}")
+            };
+            ApiError(crate::error::SwarmError::ProviderError {
+                status: 504,
+                body: msg,
+            })
+        })?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let raw_body = resp.text().await.unwrap_or_default();
+        return Err(extract_provider_error(
+            &raw_body,
+            status,
+            "Provider",
+            OPENAI_ERROR_KEYS,
+        ));
+    }
+
+    let response = build_passthrough_response(resp, stream).await?;
+    Ok(response.into_response())
+}
+
 /// Generic OpenAI-compatible proxy: rewrite base URL + auth header, forward as-is.
 pub async fn proxy_openai_compatible(
     base_url: &str,

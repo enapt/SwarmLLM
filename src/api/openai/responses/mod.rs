@@ -68,14 +68,41 @@ fn not_implemented(message: &str) -> Response {
     (StatusCode::NOT_IMPLEMENTED, Json(body)).into_response()
 }
 
-/// `POST /v1/responses` — local inference path (M3 plain text only).
+/// `POST /v1/responses`.
+///
+/// Routing order:
+/// 1. Cloud proxy: if the model resolves to an OpenAI-compatible provider,
+///    proxy the request body verbatim to the upstream `/responses`
+///    endpoint. Built-in tools, streaming, background, reasoning effort,
+///    text.verbosity, include[], previous_response_id, and any future
+///    field all round-trip via `#[serde(flatten)] extras` and the upstream
+///    handles them. Anthropic / subprocess providers return a clear 400
+///    pointing the caller at `/v1/messages`.
+/// 2. Local inference: built-in-tool gate, M6/M8/M9 stubs, then translate
+///    to Chat Completions and run the local model.
 pub async fn create_response(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
     JsonBody(req): JsonBody<ResponsesRequest>,
 ) -> Result<Response, ApiError> {
-    // 1. Built-in tool gate. The built-in set requires backing infra we
-    //    don't run; `function` tools translate through to Chat (M4).
+    // ---- 1. Cloud proxy passthrough (M5). ----
+    // Serialize the request struct back to JSON so flatten-extras and any
+    // unmodeled OpenAI knobs reach the upstream verbatim.
+    let body_value = serde_json::to_value(&req).map_err(|e| {
+        ApiError(SwarmError::Internal(format!(
+            "Failed to serialize Responses request for cloud proxy: {e}"
+        )))
+    })?;
+    let stream = req.stream.unwrap_or(false);
+    if let Some(response) =
+        crate::api::providers::try_proxy_openai_responses(&state, &body_value, stream).await?
+    {
+        return Ok(response);
+    }
+
+    // ---- 2. Local inference path. ----
+    // Built-in tool gate. Built-ins require backing infra we don't run;
+    // `function` tools translate through to Chat (M4).
     if let Some(tools) = req.tools.as_deref() {
         if let Some(builtin) = first_builtin_tool(tools) {
             return Err(ApiError(SwarmError::Validation(format!(
@@ -88,15 +115,15 @@ pub async fn create_response(
         }
     }
 
-    // 3. Streaming — wired in M6.
-    if req.stream.unwrap_or(false) {
+    // Streaming — wired in M6.
+    if stream {
         return Ok(not_implemented(
             "Streaming on /v1/responses is not yet implemented (planned for M6). \
              Set stream=false or use /v1/chat/completions with streaming.",
         ));
     }
 
-    // 4. Background mode — wired in M9.
+    // Background mode — wired in M9.
     if req.background.unwrap_or(false) {
         return Ok(not_implemented(
             "background=true on /v1/responses is not yet implemented \
@@ -104,18 +131,18 @@ pub async fn create_response(
         ));
     }
 
-    // 5. previous_response_id — wired in M8.
+    // previous_response_id — wired in M8 for the local path. (Cloud proxy
+    // already returned above with the field forwarded verbatim.)
     if req.previous_response_id.is_some() {
         return Ok(not_implemented(
-            "previous_response_id chaining is not yet implemented \
-             (planned for M8). Pass the prior turn's messages directly via \
-             `input` for now.",
+            "previous_response_id chaining is not yet implemented for local \
+             models (planned for M8). Pass the prior turn's messages directly \
+             via `input` for now.",
         ));
     }
 
-    // 6. Translate to a Chat Completions request and call the existing
-    //    handler. Any translation failure (unsupported input items,
-    //    invalid roles) bubbles up as a 400 via SwarmError::Validation.
+    // Translate to a Chat Completions request and call the existing
+    // handler. Translation failures bubble up as 400 via Validation.
     let chat_req = translate::request_to_chat(&req)?;
 
     let chat_response = crate::api::openai::chat_completions(
