@@ -8,6 +8,7 @@ use crate::inference::chat_template;
 
 mod peer_forward;
 mod resolver;
+pub mod responses;
 mod streaming;
 mod types;
 
