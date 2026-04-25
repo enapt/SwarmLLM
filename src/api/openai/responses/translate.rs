@@ -1255,6 +1255,117 @@ mod tests {
         assert_eq!(chat.messages.len(), 1);
     }
 
+    // ------------------------------------------------------------------
+    // V7: reasoning item propagation
+    // ------------------------------------------------------------------
+    //
+    // Two guarantees:
+    //   (1) `include` round-trips through the cloud-proxy path because
+    //       it's an explicit ResponsesRequest field — an o-series caller
+    //       passing include:["reasoning.encrypted_content"] expects the
+    //       upstream to echo those blocks back.
+    //   (2) When a stored record from a prior turn contains reasoning
+    //       output items (e.g. from an o-series cloud response), M8
+    //       flatten MUST leave them in the stored record (so a second
+    //       GET returns the same data) but MUST NOT re-inject them as
+    //       chat messages on the next local turn — chat can't consume
+    //       them and adding empty assistant stubs would confuse the
+    //       prompt.
+
+    #[test]
+    fn include_field_round_trips_through_request_serialization() {
+        // The cloud-proxy code path is `serde_json::to_value(&req)`
+        // inside create_response. Verify `include` survives.
+        let mut req = req_text("check");
+        req.include = Some(vec![
+            "reasoning.encrypted_content".into(),
+            "reasoning.summary".into(),
+        ]);
+        let v = serde_json::to_value(&req).unwrap();
+        let arr = v["include"].as_array().expect("include present");
+        let strings: Vec<&str> = arr.iter().filter_map(|x| x.as_str()).collect();
+        assert_eq!(
+            strings,
+            vec!["reasoning.encrypted_content", "reasoning.summary"]
+        );
+    }
+
+    #[test]
+    fn prior_turn_with_reasoning_items_preserves_record_but_skips_chat_injection() {
+        // Simulate a prior record that a cloud o-series call produced:
+        // a reasoning item plus a final assistant message.
+        let mut prior = sample_record("question", "the answer");
+        prior.response.output = vec![
+            OutputItem::Typed(TypedOutputItem::Reasoning(ReasoningItem {
+                id: Some("rs_1".into()),
+                summary: Some(vec![ReasoningSummaryPart::SummaryText {
+                    text: "private chain of thought".into(),
+                    extras: HashMap::new(),
+                }]),
+                encrypted_content: Some("opaque-cloud-blob-xyz".into()),
+                status: Some("completed".into()),
+                extras: HashMap::new(),
+            })),
+            OutputItem::Typed(TypedOutputItem::Message(OutputMessageItem {
+                id: "msg_1".into(),
+                role: "assistant".into(),
+                status: Some("completed".into()),
+                content: vec![OutputContentPart::Typed(TypedOutputContentPart::Text {
+                    text: "the answer".into(),
+                    annotations: Vec::new(),
+                    logprobs: None,
+                    extras: HashMap::new(),
+                })],
+                extras: HashMap::new(),
+            })),
+        ];
+
+        // Sanity: the stored record still carries the reasoning item
+        // (so a subsequent GET /v1/responses/:id sees encrypted_content
+        // round-trip).
+        let reasoning_item_count = prior
+            .response
+            .output
+            .iter()
+            .filter(|o| matches!(o, OutputItem::Typed(TypedOutputItem::Reasoning(_))))
+            .count();
+        assert_eq!(reasoning_item_count, 1);
+        let roundtrip: ResponsesResponse =
+            serde_json::from_value(serde_json::to_value(&prior.response).unwrap()).unwrap();
+        let enc = roundtrip
+            .output
+            .iter()
+            .find_map(|o| match o {
+                OutputItem::Typed(TypedOutputItem::Reasoning(r)) => r.encrypted_content.clone(),
+                _ => None,
+            })
+            .expect("encrypted_content round-trips through serde");
+        assert_eq!(enc, "opaque-cloud-blob-xyz");
+
+        // Now the local chat_completions flatten: reasoning must be
+        // dropped, the assistant message must survive.
+        let current = req_text("follow-up");
+        let chat = request_to_chat(&current, Some(&prior)).unwrap();
+        // prior_user + prior_assistant_message + current_user = 3.
+        // If reasoning leaked in we'd see 4.
+        assert_eq!(
+            chat.messages.len(),
+            3,
+            "reasoning should not be re-injected as chat messages"
+        );
+        // The assistant message content must be the text output item's
+        // content, NOT reasoning summary text.
+        if let MessageContent::Text(s) = &chat.messages[1].content {
+            assert_eq!(s, "the answer");
+            assert!(
+                !s.contains("private chain of thought"),
+                "reasoning summary must not leak into chat history"
+            );
+        } else {
+            panic!("assistant message should be text content");
+        }
+    }
+
     #[test]
     fn unknown_input_item_rejected_with_named_type() {
         let mut req = req_text("");
