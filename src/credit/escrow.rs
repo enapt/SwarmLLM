@@ -226,7 +226,7 @@ impl EscrowManager {
             .map_err(|e| {
                 // Revert in-memory status since DB failed
                 entry.status = EscrowStatus::Pending;
-                SwarmError::Internal(format!("Failed to persist escrow refund: {e}"))
+                SwarmError::Database(format!("Failed to persist escrow refund: {e}"))
             })?;
 
         drop(entry);

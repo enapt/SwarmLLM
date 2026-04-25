@@ -4,7 +4,7 @@ SwarmLLM is a single Rust binary that simultaneously functions as:
 
 1. **A P2P network node** — connects to peers over TCP (Noise+Yamux) and QUIC/UDP using libp2p
 2. **An HTTP API server** — serves OpenAI + Anthropic-compatible endpoints, MCP server, and cloud provider proxy via Axum
-3. **A web dashboard** — embedded frontend (component-based vanilla HTML/CSS/JS, 13 HTML templates, no build step)
+3. **A web dashboard** — embedded frontend (component-based vanilla HTML/CSS/JS, 12 HTML templates, no build step)
 
 All three share a single port (default 8800) and a common `Arc<SharedState>`.
 
@@ -43,8 +43,8 @@ All three share a single port (default 8800) and a common `Arc<SharedState>`.
 | Component | Library |
 |---|---|
 | Async runtime | Tokio (multi-threaded) |
-| P2P networking | libp2p 0.55 (Kademlia, GossipSub, QUIC) |
-| HTTP server | Axum 0.7 |
+| P2P networking | libp2p 0.56 (Kademlia, GossipSub, QUIC) |
+| HTTP server | Axum 0.8 |
 | Tensor compute | candle-core/candle-transformers |
 | GGUF inference | llama-cpp-2 (optional backend) |
 | Cryptography | ed25519-dalek, x25519-dalek, chacha20poly1305 |

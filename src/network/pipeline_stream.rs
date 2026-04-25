@@ -126,8 +126,6 @@ impl PipelineStreamClient {
         let writer = tokio::spawn(writer_task(write_half, rx, writer_request_id));
         let reader_state = shared_state.clone();
         let reader_request_id = request_id;
-        let streams_map = Arc::new(());
-        let _ = streams_map;
         let reader = tokio::spawn(async move {
             reader_task_outbound(read_half, reader_request_id, reader_state).await
         });

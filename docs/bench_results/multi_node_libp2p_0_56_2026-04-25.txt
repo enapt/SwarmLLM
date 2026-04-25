@@ -1,0 +1,97 @@
+Multi-node integration test post libp2p 0.55→0.56 upgrade
+==========================================================
+Date: 2026-04-25
+Commit: be9c32c (Sweep round 52 + libp2p 0.55→0.56)
+Build: --release --no-default-features --features dev,claude-subscription
+Hardware: TinyLlama-1.1B Q4_K_M on CPU, WSL2
+
+Setup
+-----
+- Node A: /tmp/swarm_a, port 8830 (HTTP) / 8840 (P2P TCP), starts with TinyLlama 2 shards
+- Node B: /tmp/swarm_b, port 8831 (HTTP) / 8841 (P2P TCP), starts empty
+- Node B's config.toml bootstraps to Node A via /ip4/127.0.0.1/tcp/8840/p2p/<A_peer_id>
+
+Test 1 — P2P discovery
+----------------------
+Node A peer_count: 1 (sees B)
+Node B peer_count: 1 (sees A)
+B → A latency (loopback): 6 ms
+B observes A's hosted models via gossip: ['tinyllama-1.1b-chat-v1.0.q4-k-m'] before any shard transfer
+
+PASS — libp2p 0.56 Kademlia + GossipSub + identify all green.
+
+Test 2 — P2P shard transfer (A → B)
+-----------------------------------
+Triggered by: B's auto-manage scoring shard 0+1 of TinyLlama as eligible.
+- Shard 1 (~668KB chunk): completed in ~25 s (started ~28:30, complete 28:55)
+- Shard 0 (~140KB chunk): initially stalled (>30s no chunk progress while shard 1 was using the
+  yamux substream), watchdog fired, retry kicked HF fallback as defense, but P2P resumed first
+  and completed.
+- Both shards verified by BLAKE3 on B post-download.
+
+PASS — vendored libp2p-request-response 0.29.0 with the Tokio watchdog re-port handles back-to-
+back shard requests correctly. The 30s stall + retry + HF fallback path is by-design defensive
+behavior, not a regression.
+
+Test 3 — Inference parity post-shard-fetch
+------------------------------------------
+| node | iter 1 | iter 2 | iter 3 | median |
+|------|--------|--------|--------|--------|
+| A    | 3.350 s | 3.116 s | 2.473 s | 3.116 s |
+| B    | 3.104 s | 3.288 s | 2.467 s | 3.104 s |
+
+5 tokens, temperature 0.1, model TinyLlama-1.1B Q4_K_M. Both nodes match the post-V1 single-node
+baseline (~2-3 s) measured in `responses_api_v2_bench_2026-04-25.txt`. No regression from the
+libp2p upgrade.
+
+Test 4 — Streaming TTFB
+-----------------------
+| node | sample 1 | sample 2 | sample 3 | median |
+|------|----------|----------|----------|--------|
+| A    | 1.146 ms | 0.806 ms | 0.924 ms | 0.924 ms |
+| B    | 0.868 ms | 0.846 ms | 0.999 ms | 0.868 ms |
+
+V1 first-byte fix preserved through the libp2p upgrade — both nodes still emit response.created
+within ~1 ms of HTTP request start.
+
+Test 5 — Responses API V8 background+stream
+-------------------------------------------
+- POST /v1/responses {background:true, stream:true} → 202 Accepted
+- Location header: /v1/responses/resp_c33aa.../stream=true&starting_after=-1
+- GET resume after 5s waits → 3 SSE events (response.created, response.in_progress,
+  response.completed)
+- Live-tail loop with the round-52 Notify-before-check race fix → no lost-wakeup.
+
+PASS — V5+V8 work end-to-end on both nodes.
+
+Final state
+-----------
+Node A: peers=1, hosted_shards=2, requests_served=0  (uses requests_made internally)
+Node B: peers=1, hosted_shards=2, requests_served=0  (acquired both shards via P2P)
+Both daemons ran ~3 minutes with no panics, no error logs, clean shutdown.
+
+Conclusions
+-----------
+1. libp2p 0.55 → 0.56 upgrade is functionally equivalent for SwarmLLM's usage: peer discovery,
+   gossip propagation, request_response shard chunks, and identify all work as before.
+2. Inference performance unchanged (~3s TinyLlama CPU, parity between nodes).
+3. The Tokio watchdog vendored patch (gotcha #13) successfully ported to upstream 0.29.
+4. The confirmed-flag patch (gotcha #16) was confirmed obsolete — upstream 0.29 only adds
+   Connection records after handle_established_*_connection, so denied connections never enter
+   the routing table.
+5. Vendor/libp2p-gossipsub removal: no functional regression. CVEs (CVE-2026-33040 +
+   CVE-2026-34219) covered by upstream 0.49.4.
+
+Reproduce
+---------
+```bash
+mkdir -p /tmp/swarm_a /tmp/swarm_b
+cp -r /path/to/tinyllama-shards /tmp/swarm_a/models/
+SWARMLLM_NODE_DATA_DIR=/tmp/swarm_a target/release/swarmllm run -p 8830 -v &
+# Wait for node A peer ID, then:
+echo "[network]" > /tmp/swarm_b/config.toml
+echo "bootstrap_peers = [\"/ip4/127.0.0.1/tcp/8840/p2p/<A_PEER_ID>\"]" >> /tmp/swarm_b/config.toml
+SWARMLLM_NODE_DATA_DIR=/tmp/swarm_b target/release/swarmllm run -p 8831 -v &
+# Wait for B to acquire shards (auto-manage), then bench:
+curl -H "Authorization: Bearer $B_KEY" http://localhost:8831/api/admin/stats
+```

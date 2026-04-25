@@ -84,7 +84,7 @@ Scores decay toward 0.5 over time (1% per health cycle, default 30 seconds). Tru
 - Auto-generated 32-byte hex Bearer token (constant-time comparison)
 - Protected: `/v1/*`, `/api/admin/provider-models`, config PUT, shutdown, HF downloads, API key endpoint
 - Exempt: `/`, `/health`, `/admin` (read-only dashboard), static assets
-- Request body limit: 2 MB
+- Request body limit: 32 MB (raised from 2 MB to support VLM image payloads)
 - Content-Security-Policy: `default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self' ws: wss:; img-src 'self' data: blob:; frame-ancestors 'none'; base-uri 'self'; form-action 'self'`
 - X-Content-Type-Options: nosniff
 - X-Frame-Options: DENY

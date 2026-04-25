@@ -30,7 +30,7 @@ use std::convert::Infallible;
 
 use axum::body::to_bytes;
 use axum::extract::State;
-use axum::response::sse::{Event, KeepAlive, Sse};
+use axum::response::sse::{KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use bytes::{Buf, BytesMut};
 use futures::{Stream, StreamExt};
@@ -114,7 +114,7 @@ pub async fn run_streaming(
     );
 
     // Live SSE: wrap the BufferedEvent stream as axum Events.
-    let sse_stream = buffered_stream.map(|ev| Ok::<_, Infallible>(buffered_to_event(&ev)));
+    let sse_stream = buffered_stream.map(|ev| Ok::<_, Infallible>(ev.to_event()));
 
     Ok(Sse::new(sse_stream)
         .keep_alive(
@@ -149,13 +149,6 @@ where
         created_at,
         store_db,
     )
-}
-
-/// Convert a buffered event back into the axum SSE Event representation.
-fn buffered_to_event(ev: &BufferedEvent) -> Event {
-    Event::default()
-        .event(&ev.event_name)
-        .data(serde_json::to_string(&ev.data).unwrap_or_default())
 }
 
 // ============================================================================

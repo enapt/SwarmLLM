@@ -61,7 +61,7 @@ pub struct BufferedEvent {
 }
 
 impl BufferedEvent {
-    fn to_event(&self) -> Event {
+    pub(super) fn to_event(&self) -> Event {
         Event::default()
             .event(&self.event_name)
             .data(serde_json::to_string(&self.data).unwrap_or_default())
@@ -74,7 +74,7 @@ impl BufferedEvent {
 /// `completed` flag and by dropping the notifier's final wake.
 pub(crate) struct BackgroundState {
     pub cancel: Arc<AtomicBool>,
-    pub events: Mutex<Vec<BufferedEvent>>,
+    pub events: Mutex<std::collections::VecDeque<BufferedEvent>>,
     pub completed: AtomicBool,
     pub notify: Notify,
 }
@@ -83,7 +83,7 @@ impl BackgroundState {
     fn new(cancel: Arc<AtomicBool>) -> Self {
         Self {
             cancel,
-            events: Mutex::new(Vec::new()),
+            events: Mutex::new(std::collections::VecDeque::new()),
             completed: AtomicBool::new(false),
             notify: Notify::new(),
         }
@@ -96,11 +96,11 @@ impl BackgroundState {
         {
             let mut events = self.events.lock().await;
             if events.len() >= EVENT_BUFFER_CAP {
-                // Drop the oldest event. `remove(0)` is O(n) but n is small
-                // (2000) and writes are infrequent.
-                events.remove(0);
+                // Drop the oldest event. VecDeque's pop_front is O(1) so
+                // this stays cheap even at the cap (2000).
+                events.pop_front();
             }
-            events.push(event);
+            events.push_back(event);
             // Drop the guard before notifying so woken resumers don't
             // immediately contend on the same lock.
         }
@@ -574,9 +574,9 @@ mod tests {
         let events = state.events.lock().await;
         assert_eq!(events.len(), EVENT_BUFFER_CAP);
         // Oldest should be 50 (we dropped 0..50).
-        assert_eq!(events.first().unwrap().sequence_number, 50);
+        assert_eq!(events.front().unwrap().sequence_number, 50);
         assert_eq!(
-            events.last().unwrap().sequence_number,
+            events.back().unwrap().sequence_number,
             (EVENT_BUFFER_CAP + 49) as u64
         );
     }

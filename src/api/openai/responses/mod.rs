@@ -203,16 +203,33 @@ pub async fn create_response(
     // to the current input. (Cloud proxy already returned above with
     // the field forwarded verbatim.)
     let prior = match req.previous_response_id.as_ref() {
-        Some(prev_id) => match store::load(&state.db, prev_id).map_err(ApiError)? {
-            Some(record) => Some(record),
-            None => {
-                return Err(ApiError(SwarmError::Validation(format!(
-                    "previous_response_id `{prev_id}` not found or expired. \
-                     Either pass the prior turn's messages inline via `input` \
-                     or re-run the original call with store=true (default)."
-                ))));
+        Some(prev_id) => {
+            // Validate the id shape before hitting the DB. Generation format
+            // is `resp_<32-hex>`; cap at 64 chars and ASCII alphanumeric +
+            // `_` / `-` so a 1 MB junk string can't allocate an unbounded
+            // composite redb key on every request (DoS pre-validation).
+            if prev_id.len() > 64
+                || !prev_id
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+            {
+                return Err(ApiError(SwarmError::Validation(
+                    "previous_response_id must be ≤64 ASCII alphanumeric characters \
+                     (with `_` / `-`); generation format is `resp_<32-hex>`."
+                        .into(),
+                )));
             }
-        },
+            match store::load(&state.db, prev_id).map_err(ApiError)? {
+                Some(record) => Some(record),
+                None => {
+                    return Err(ApiError(SwarmError::Validation(format!(
+                        "previous_response_id `{prev_id}` not found or expired. \
+                         Either pass the prior turn's messages inline via `input` \
+                         or re-run the original call with store=true (default)."
+                    ))));
+                }
+            }
+        }
         None => None,
     };
 
