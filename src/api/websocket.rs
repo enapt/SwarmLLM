@@ -174,7 +174,9 @@ async fn handle_socket(socket: WebSocket, shared_state: Arc<SharedState>) {
         let initial_peers = build_peer_list_message(&push_state);
         let _ = sender
             .send(Message::Text(
-                serde_json::to_string(&initial_peers).unwrap_or_default(),
+                serde_json::to_string(&initial_peers)
+                    .unwrap_or_default()
+                    .into(),
             ))
             .await;
 
@@ -190,7 +192,7 @@ async fn handle_socket(socket: WebSocket, shared_state: Arc<SharedState>) {
                     "data": event,
                 });
                 let msg_str = serde_json::to_string(&msg).unwrap_or_default();
-                if sender.send(Message::Text(msg_str)).await.is_err() {
+                if sender.send(Message::Text(msg_str.into())).await.is_err() {
                     break;
                 }
             }
@@ -203,7 +205,7 @@ async fn handle_socket(socket: WebSocket, shared_state: Arc<SharedState>) {
             tokio::select! {
                 _ = stats_interval.tick() => {
                     let msg = get_or_build_stats_message(&push_state).await;
-                    if sender.send(Message::Text((*msg).clone())).await.is_err() {
+                    if sender.send(Message::Text((*msg).clone().into())).await.is_err() {
                         break;
                     }
                 }
@@ -221,7 +223,8 @@ async fn handle_socket(socket: WebSocket, shared_state: Arc<SharedState>) {
                         tracing::debug!("WebSocket client failed pong check — closing");
                         break;
                     }
-                    let ping_data = chrono::Utc::now().timestamp().to_le_bytes().to_vec();
+                    let ping_data: bytes::Bytes =
+                        chrono::Utc::now().timestamp().to_le_bytes().to_vec().into();
                     if sender.send(Message::Ping(ping_data)).await.is_err() {
                         break;
                     }
@@ -249,7 +252,7 @@ async fn handle_socket(socket: WebSocket, shared_state: Arc<SharedState>) {
                                 })).unwrap_or_default()
                             }
                         };
-                        if sender.send(Message::Text(msg_str)).await.is_err() {
+                        if sender.send(Message::Text(msg_str.into())).await.is_err() {
                             break;
                         }
                     }
@@ -271,7 +274,7 @@ async fn handle_socket(socket: WebSocket, shared_state: Arc<SharedState>) {
                         "data": event,
                     });
                     let msg_str = serde_json::to_string(&msg).unwrap_or_default();
-                    if sender.send(Message::Text(msg_str)).await.is_err() {
+                    if sender.send(Message::Text(msg_str.into())).await.is_err() {
                         break;
                     }
                 }

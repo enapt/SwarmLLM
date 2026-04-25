@@ -61,7 +61,6 @@ impl AppState {
 /// This wrapper converts those into proper `{"error": {...}}` JSON responses.
 pub struct JsonBody<T>(pub T);
 
-#[axum::async_trait]
 impl<S, T> FromRequest<S> for JsonBody<T>
 where
     T: DeserializeOwned,
@@ -99,16 +98,16 @@ pub fn build_router(state: AppState) -> Router {
         // OpenAI Responses API (gpt-5 / o-series default)
         .route("/v1/responses", post(openai::responses::create_response))
         .route(
-            "/v1/responses/:id",
+            "/v1/responses/{id}",
             get(openai::responses::background::get_response_maybe_stream)
                 .delete(openai::responses::delete_response),
         )
         .route(
-            "/v1/responses/:id/cancel",
+            "/v1/responses/{id}/cancel",
             post(openai::responses::cancel_response),
         )
         .route(
-            "/v1/responses/:id/input_items",
+            "/v1/responses/{id}/input_items",
             get(openai::responses::list_input_items),
         )
         // Anthropic Messages API
@@ -126,9 +125,12 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route("/api/admin/config/reload", post(admin::reload_config))
         .route("/api/admin/models", get(admin::list_models))
-        .route("/api/admin/models/:id/add", post(admin::add_model_interest))
         .route(
-            "/api/admin/models/:id/status",
+            "/api/admin/models/{id}/add",
+            post(admin::add_model_interest),
+        )
+        .route(
+            "/api/admin/models/{id}/status",
             get(admin::model_acquisition_status),
         )
         .route("/api/admin/peers", get(admin::list_peers))
@@ -150,32 +152,35 @@ pub fn build_router(state: AppState) -> Router {
         // Download management
         .route("/api/admin/downloads", get(admin::download_queue))
         .route(
-            "/api/admin/downloads/:model_id/cancel",
+            "/api/admin/downloads/{model_id}/cancel",
             post(admin::cancel_download),
         )
         // GGUF metadata browser
-        .route("/api/admin/models/:id/metadata", get(admin::model_metadata))
         .route(
-            "/api/admin/models/:id/pipeline-plan",
+            "/api/admin/models/{id}/metadata",
+            get(admin::model_metadata),
+        )
+        .route(
+            "/api/admin/models/{id}/pipeline-plan",
             get(admin::pipeline_plan),
         )
         // Single-shard management
         .route(
-            "/api/admin/models/:id/shards/:index",
+            "/api/admin/models/{id}/shards/{index}",
             delete(admin::delete_shard),
         )
         .route(
-            "/api/admin/models/:id/shards/:index/download",
+            "/api/admin/models/{id}/shards/{index}/download",
             post(admin::download_shard),
         )
         // Per-model auto-manage policy
         .route(
-            "/api/admin/models/:id/auto-manage",
+            "/api/admin/models/{id}/auto-manage",
             get(admin::get_model_auto_manage).put(admin::set_model_auto_manage),
         )
         // Per-model encrypted pipeline toggle
         .route(
-            "/api/admin/models/:id/encrypted-pipeline",
+            "/api/admin/models/{id}/encrypted-pipeline",
             get(admin::get_model_encrypted_pipeline).put(admin::set_model_encrypted_pipeline),
         )
         // Resource schedule
@@ -187,29 +192,29 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/admin/prune-history", get(admin::prune_history))
         // Shard lock
         .route(
-            "/api/admin/models/:id/shards/:index/lock",
+            "/api/admin/models/{id}/shards/{index}/lock",
             put(admin::lock_shard),
         )
         // Shard unload/load (memory management, keep files)
         .route(
-            "/api/admin/models/:id/shards/:index/unload",
+            "/api/admin/models/{id}/shards/{index}/unload",
             post(admin::unload_shard),
         )
         .route(
-            "/api/admin/models/:id/shards/:index/load",
+            "/api/admin/models/{id}/shards/{index}/load",
             post(admin::load_shard),
         )
         // HF source lookup
-        .route("/api/admin/hf/source/:model_id", get(admin::hf_source))
+        .route("/api/admin/hf/source/{model_id}", get(admin::hf_source))
         // Model management
-        .route("/api/admin/models/:id", delete(admin::delete_model))
-        .route("/api/admin/models/:id/unload", post(admin::unload_model))
+        .route("/api/admin/models/{id}", delete(admin::delete_model))
+        .route("/api/admin/models/{id}/unload", post(admin::unload_model))
         // LoRA adapters
         .route(
             "/api/admin/adapters",
             get(admin::list_adapters).post(admin::register_adapter),
         )
-        .route("/api/admin/adapters/:id", delete(admin::delete_adapter))
+        .route("/api/admin/adapters/{id}", delete(admin::delete_adapter))
         // Cloud provider configuration
         .route(
             "/api/admin/providers",
@@ -257,16 +262,16 @@ pub fn build_router(state: AppState) -> Router {
                         post(crate::api::claude_session::create_session_handler),
                     )
                     .route(
-                        "/api/claude-code/session/:id",
+                        "/api/claude-code/session/{id}",
                         get(crate::api::claude_session::get_session_handler)
                             .delete(crate::api::claude_session::close_session_handler),
                     )
                     .route(
-                        "/api/claude-code/session/:id/message",
+                        "/api/claude-code/session/{id}/message",
                         post(crate::api::claude_session::send_message_handler),
                     )
                     .route(
-                        "/api/claude-code/session/:id/permission",
+                        "/api/claude-code/session/{id}/permission",
                         post(crate::api::claude_session::permission_handler),
                     )
                     .with_state(state.clone())
@@ -324,7 +329,7 @@ pub fn build_router(state: AppState) -> Router {
         )
         // Pool credit rates
         .route(
-            "/api/admin/pools/:id/rates",
+            "/api/admin/pools/{id}/rates",
             get(pool::pool_rates_get).put(pool::pool_rates_set),
         )
         // WebSocket (Bearer-authed via short-lived ticket in ?t=<hex>)
@@ -334,11 +339,11 @@ pub fn build_router(state: AppState) -> Router {
         // SPA catch-all: serve index.html for all frontend sub-routes
         // so direct URL access (bookmarks, refresh) works
         .route("/admin", get(assets::serve_dashboard))
-        .route("/admin/*path", get(assets::serve_dashboard_catchall))
+        .route("/admin/{*path}", get(assets::serve_dashboard_catchall))
         .route("/chat", get(assets::serve_dashboard))
-        .route("/chat/*path", get(assets::serve_dashboard_catchall))
+        .route("/chat/{*path}", get(assets::serve_dashboard_catchall))
         .route("/setup", get(assets::serve_dashboard))
-        .route("/static/*path", get(assets::serve_static))
+        .route("/static/{*path}", get(assets::serve_static))
         // Root redirect
         .route("/", get(|| async { Redirect::to("/admin") }))
         // Health check
@@ -359,7 +364,8 @@ pub fn build_router(state: AppState) -> Router {
         // Streaming responses (SSE) are not affected — the timeout applies to the
         // initial request processing, not the response stream. Long inference
         // requests complete within this window; the 30s inference timeout fires first.
-        .layer(tower_http::timeout::TimeoutLayer::new(
+        .layer(tower_http::timeout::TimeoutLayer::with_status_code(
+            axum::http::StatusCode::REQUEST_TIMEOUT,
             std::time::Duration::from_secs(REQUEST_TIMEOUT_SECS),
         ))
         .layer(axum::middleware::from_fn_with_state(
