@@ -1451,7 +1451,7 @@ Single-node inference performance, measured with `swarmllm bench` (100 output to
 - **Audio input on `/v1/responses`** — `input_audio` returns 400 today; needs a Whisper-class transcription model that SwarmLLM doesn't currently expose.
 - **Binary file inputs** — `input_file{file_data}` accepts UTF-8 only; PDF / docx / image-bytes payloads are rejected with a clear hint pointing at `input_image` (for images) or server-side text extraction (for documents). Adding a PDF parser is a deferred call-site question.
 
-All sweep-deferred items from rounds 1-8 have been resolved (see `.claude/sweep-log.jsonl`).
+Per-sweep-round findings (status, resolution, deferral) are tracked in `.claude/sweep-log.jsonl`.
 
 ## Scalability (Phase 19)
 

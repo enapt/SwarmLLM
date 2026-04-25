@@ -63,6 +63,11 @@ pub(super) fn gguf_filename_to_model_id(filename: &str) -> String {
 }
 
 /// Validate HF repo_id and filename inputs, returning ApiError on failure.
+///
+/// Path-traversal safety: rejects `..`, `/` outside the single owner/repo
+/// separator, and any non-allowlisted character. Callers MUST invoke this
+/// before passing either string to filesystem APIs (`state.model_dir()`,
+/// fs::write, etc.) — every handler in `admin_hf/` is structured this way.
 pub(super) fn validate_hf_inputs(repo_id: &str, filename: &str) -> Result<(), ApiError> {
     if repo_id.is_empty() || filename.is_empty() {
         return Err(ApiError(crate::error::SwarmError::Validation(

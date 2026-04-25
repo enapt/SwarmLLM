@@ -126,16 +126,12 @@ impl AutoShardManager {
                 // Skip shards pinned to this node via pool shard pinning
                 {
                     let local_id = self.shared_state.identity.node_id();
-                    if let Ok(ps) = self.shared_state.credits.pool_state.try_read() {
-                        if let Some(ref pool) = *ps {
-                            let is_pinned = pool
-                                .shard_pins
-                                .iter()
-                                .any(|p| p.matches(&manifest.id.0, local_id, shard.index));
-                            if is_pinned {
-                                continue;
-                            }
-                        }
+                    let shard_pins = super::manager::read_shard_pins(&self.shared_state);
+                    if shard_pins
+                        .iter()
+                        .any(|p| p.matches(&manifest.id.0, local_id, shard.index))
+                    {
+                        continue;
                     }
                 }
 

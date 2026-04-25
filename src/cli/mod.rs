@@ -21,3 +21,27 @@ pub(crate) fn read_api_key(data_dir: &std::path::Path) -> Option<String> {
         .ok()
         .map(|s| s.trim().to_string())
 }
+
+/// Resolve a model id: explicit override wins, otherwise pick the first
+/// listing from the daemon's `/v1/models`.
+pub(crate) async fn discover_model(
+    client: &reqwest::Client,
+    base: &str,
+    api_key: &str,
+    model_override: Option<String>,
+) -> anyhow::Result<String> {
+    if let Some(m) = model_override {
+        return Ok(m);
+    }
+    let models_resp: serde_json::Value = client
+        .get(format!("{base}/v1/models"))
+        .header("Authorization", format!("Bearer {api_key}"))
+        .send()
+        .await?
+        .json()
+        .await?;
+    models_resp["data"][0]["id"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("No models available — load a model first"))
+        .map(str::to_string)
+}

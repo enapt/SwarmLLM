@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use swarmllm::update::{UpdateChecker, UpdateState};
+use swarmllm::update::{UpdateChecker, UpdateState, SWARMLLM_GITHUB_REPO};
 use tokio::sync::RwLock;
 
 pub async fn run_update_command(check_only: bool) -> anyhow::Result<()> {
@@ -15,7 +15,12 @@ pub async fn run_update_command(check_only: bool) -> anyhow::Result<()> {
     let state = Arc::new(RwLock::new(UpdateState::default()));
     let (dashboard_tx, _) =
         tokio::sync::broadcast::channel::<swarmllm::daemon::state::DashboardSignal>(16);
-    let checker = UpdateChecker::new(config, "enapt/SwarmLLM".to_string(), state, dashboard_tx);
+    let checker = UpdateChecker::new(
+        config,
+        SWARMLLM_GITHUB_REPO.to_string(),
+        state,
+        dashboard_tx,
+    );
 
     match checker.check_for_update().await {
         Ok(Some(info)) => {

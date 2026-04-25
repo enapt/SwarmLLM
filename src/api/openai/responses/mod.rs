@@ -160,7 +160,8 @@ pub async fn create_response(
     // unmodeled OpenAI knobs reach the upstream verbatim.
     let body_value = serde_json::to_value(&req).map_err(|e| {
         ApiError(SwarmError::Internal(format!(
-            "Failed to serialize Responses request for cloud proxy: {e}"
+            "Failed to serialize Responses request for cloud proxy (model={}): {e}",
+            req.model
         )))
     })?;
     let stream = req.stream.unwrap_or(false);
@@ -273,12 +274,14 @@ pub async fn create_response(
     let (parts, body) = chat_response.into_parts();
     let bytes = to_bytes(body, MAX_CHAT_RESPONSE_BYTES).await.map_err(|e| {
         ApiError(SwarmError::Internal(format!(
-            "Failed to buffer chat response body: {e}"
+            "Failed to buffer chat response body (model={}): {e}",
+            req.model
         )))
     })?;
     let chat_value: serde_json::Value = serde_json::from_slice(&bytes).map_err(|e| {
         ApiError(SwarmError::Internal(format!(
-            "Failed to parse chat response JSON: {e}"
+            "Failed to parse chat response JSON (model={}): {e}",
+            req.model
         )))
     })?;
 

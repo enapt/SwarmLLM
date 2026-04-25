@@ -72,15 +72,7 @@ impl AutoShardManager {
         // Allowed node set for private mode holder filtering (None = unrestricted)
         let allowed_set = crate::pool::scope::allowed_node_set(&self.shared_state);
         // Shard pins from pool state (for scoring bonus)
-        let shard_pins: Vec<crate::types::ShardPin> = {
-            if let Ok(ps) = self.shared_state.credits.pool_state.try_read() {
-                ps.as_ref()
-                    .map(|s| s.shard_pins.clone())
-                    .unwrap_or_default()
-            } else {
-                Vec::new()
-            }
-        };
+        let shard_pins = super::manager::read_shard_pins(&self.shared_state);
 
         // Build consistent hash ring ONCE for the entire evaluation cycle.
         // Each node gets VIRTUAL_SLOTS positions. Ring is sorted for binary search.

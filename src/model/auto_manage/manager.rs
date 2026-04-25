@@ -26,6 +26,20 @@ const EMA_FRESH_WEIGHT: f64 = 0.15;
 /// starving other tasks with sub-10s ticks.
 const MIN_AUTO_MANAGE_INTERVAL_SECS: u64 = 10;
 
+/// Read pool shard pins via a non-blocking try_read on `pool_state`.
+/// Returns an empty Vec on lock contention or when the node isn't in a pool.
+/// Used by both scoring (full pin list for bonuses) and prune (per-shard
+/// pin checks) so the lock-acquisition shape stays consistent.
+pub(super) fn read_shard_pins(state: &SharedState) -> Vec<crate::types::ShardPin> {
+    state
+        .credits
+        .pool_state
+        .try_read()
+        .ok()
+        .and_then(|ps| ps.as_ref().map(|s| s.shard_pins.clone()))
+        .unwrap_or_default()
+}
+
 /// Compute a position on a u32 consistent hash ring for a node's virtual slot.
 pub(super) fn hash_ring_position(node_bytes: &[u8; 32], virtual_node: u32) -> u32 {
     let mut hasher = blake3::Hasher::new();

@@ -104,17 +104,13 @@
       // Update contribution hint + compute memory label
       var hint = document.querySelector('#settings-contribution ~ .field-hint, .form-group .field-hint[data-i18n="settings.contribution_hint"]');
       if (hint) {
-        hint.textContent = isGpu
-          ? (I18n.t('settings.contribution_hint_gpu') || 'How much of your GPU can be used to serve swarm inference.')
-          : (I18n.t('settings.contribution_hint_cpu') || 'How much of your CPU can be used to serve swarm inference.');
+        hint.textContent = I18n.t(isGpu ? 'settings.contribution_hint_gpu' : 'settings.contribution_hint_cpu');
       }
       this.renderHwModeNote(document.getElementById('settings-mode-note'), isGpu);
 
       var memLabel = document.querySelector('[data-i18n="settings.swarm_compute_memory"]');
       if (memLabel) {
-        memLabel.textContent = isGpu
-          ? (I18n.t('settings.swarm_compute_memory_gpu') || 'Swarm GPU memory (VRAM)')
-          : (I18n.t('settings.swarm_compute_memory_cpu') || 'Swarm GPU memory (you are in CPU mode)');
+        memLabel.textContent = I18n.t(isGpu ? 'settings.swarm_compute_memory_gpu' : 'settings.swarm_compute_memory_cpu');
       }
     },
 

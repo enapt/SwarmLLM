@@ -251,7 +251,6 @@ pub fn build_router(state: AppState) -> Router {
         .merge({
             #[cfg(feature = "claude-subscription")]
             {
-                use axum::routing::{get, post};
                 Router::new()
                     .route(
                         "/api/claude-code/sessions",

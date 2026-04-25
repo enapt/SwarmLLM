@@ -1,6 +1,6 @@
 //! `swarmllm chat` — interactive terminal REPL against a running daemon.
 
-use super::read_api_key;
+use super::{discover_model, read_api_key};
 
 pub async fn run_chat(
     port: u16,
@@ -22,22 +22,7 @@ pub async fn run_chat(
     let base = format!("http://localhost:{port}");
     let client = reqwest::Client::new();
 
-    // Discover model
-    let model = if let Some(m) = model_override {
-        m
-    } else {
-        let models_resp: serde_json::Value = client
-            .get(format!("{base}/v1/models"))
-            .header("Authorization", format!("Bearer {api_key}"))
-            .send()
-            .await?
-            .json()
-            .await?;
-        models_resp["data"][0]["id"]
-            .as_str()
-            .ok_or_else(|| anyhow::anyhow!("No models available — load a model first"))?
-            .to_string()
-    };
+    let model = discover_model(&client, &base, &api_key, model_override).await?;
 
     println!("SwarmLLM Chat — model: {model}");
     println!("Type your message and press Enter. Type 'quit' or Ctrl-D to exit.\n");

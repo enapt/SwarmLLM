@@ -36,6 +36,13 @@ pub use types::{
 const KV_CACHE_CLEANUP_INTERVAL_SECS: u64 = 30;
 /// Maximum depth of the inference request queue. Requests are rejected with 503 when full.
 const MAX_QUEUE_DEPTH: usize = 512;
+/// TTL for the cached network credit percentile used in priority tiering.
+/// The raw scan is O(n) over peer_credit_balances; at high request rates on
+/// a swarm with thousands of peers this becomes an expensive per-submit cost
+/// on the single-threaded router task. Priority tier is quantized
+/// (Bronze/Silver/Gold/Platinum) so sub-second staleness has no observable
+/// effect on scheduling.
+const PERCENTILE_CACHE_TTL_MS: u128 = 500;
 
 /// The InferenceRouter is the brain of distributed inference.
 ///
@@ -233,13 +240,8 @@ impl InferenceRouter {
             }
         };
 
-        // Compute network percentile from peer credit balances.
-        // The raw scan is O(n) over peer_credit_balances; at high request rates on
-        // a swarm with thousands of peers this becomes an expensive per-submit cost
-        // on the single-threaded router task. Cache the result for 500ms — priority
-        // tier is quantized (Bronze/Silver/Gold/Platinum) so sub-second staleness
-        // has no observable effect on scheduling.
-        const PERCENTILE_CACHE_TTL_MS: u128 = 500;
+        // Compute network percentile from peer credit balances, cached at the
+        // module-level PERCENTILE_CACHE_TTL_MS interval.
         let network_percentile = {
             let now = std::time::Instant::now();
             let mut cache = self.shared_state.credits.credit_percentile_cache.lock();

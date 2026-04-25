@@ -6,8 +6,17 @@
 //! decode interruption from a long admission, so concurrent TTFT
 //! distributions get tighter).
 
-use super::read_api_key;
+use super::{discover_model, read_api_key};
 use futures::StreamExt;
+
+/// Throughput in tokens/sec, guarded against zero-duration division.
+fn tokens_per_sec(completion_tokens: u32, total_ms: f64) -> f64 {
+    if total_ms > 0.0 && completion_tokens > 0 {
+        completion_tokens as f64 / (total_ms / 1000.0)
+    } else {
+        0.0
+    }
+}
 
 struct BenchResult {
     prompt_tokens: u32,
@@ -42,22 +51,7 @@ pub async fn run_bench(
     let base = format!("http://localhost:{port}");
     let client = reqwest::Client::new();
 
-    // Discover model — explicit --model override wins, else first listed.
-    let model = if let Some(m) = model_override {
-        m
-    } else {
-        let models_resp: serde_json::Value = client
-            .get(format!("{base}/v1/models"))
-            .header("Authorization", format!("Bearer {api_key}"))
-            .send()
-            .await?
-            .json()
-            .await?;
-        models_resp["data"][0]["id"]
-            .as_str()
-            .ok_or_else(|| anyhow::anyhow!("No models available — load a model first"))?
-            .to_string()
-    };
+    let model = discover_model(&client, &base, &api_key, model_override).await?;
 
     if !json_output {
         println!("SwarmLLM Benchmark");
@@ -285,16 +279,11 @@ async fn run_one_blocking(
     let prompt_tokens = resp["usage"]["prompt_tokens"].as_u64().unwrap_or(0) as u32;
     let completion_tokens = resp["usage"]["completion_tokens"].as_u64().unwrap_or(0) as u32;
     let total_ms = elapsed.as_millis() as f64;
-    let tokens_per_sec = if total_ms > 0.0 {
-        completion_tokens as f64 / (total_ms / 1000.0)
-    } else {
-        0.0
-    };
     Ok(BenchResult {
         prompt_tokens,
         completion_tokens,
         total_ms,
-        tokens_per_sec,
+        tokens_per_sec: tokens_per_sec(completion_tokens, total_ms),
         ttft_ms: None,
     })
 }
@@ -330,7 +319,6 @@ async fn run_one_stream(
     let mut ttft_ms: Option<f64> = None;
     let mut completion_tokens: u32 = 0;
     let mut prompt_tokens: u32 = 0;
-    let mut accumulated_chars: usize = 0;
 
     while let Some(chunk) = byte_stream.next().await {
         let chunk = chunk?;
@@ -354,13 +342,7 @@ async fn run_one_stream(
                 let payload = line.trim_start_matches("data:").trim();
                 if payload == "[DONE]" {
                     // Done — fall out of the inner loop; outer loop hits EOS on next read.
-                    return finalize_stream(
-                        start,
-                        ttft_ms,
-                        prompt_tokens,
-                        completion_tokens,
-                        accumulated_chars,
-                    );
+                    return finalize_stream(start, ttft_ms, prompt_tokens, completion_tokens);
                 }
                 if payload.is_empty() {
                     continue;
@@ -375,7 +357,6 @@ async fn run_one_stream(
                         if ttft_ms.is_none() {
                             ttft_ms = Some(start.elapsed().as_millis() as f64);
                         }
-                        accumulated_chars += content.len();
                         // Approximate token count from chunk count — the
                         // server emits one Token per chunk in practice. This
                         // overcounts when a stop-string trim happens but is
@@ -394,13 +375,7 @@ async fn run_one_stream(
             }
         }
     }
-    finalize_stream(
-        start,
-        ttft_ms,
-        prompt_tokens,
-        completion_tokens,
-        accumulated_chars,
-    )
+    finalize_stream(start, ttft_ms, prompt_tokens, completion_tokens)
 }
 
 fn finalize_stream(
@@ -408,20 +383,13 @@ fn finalize_stream(
     ttft_ms: Option<f64>,
     prompt_tokens: u32,
     completion_tokens: u32,
-    accumulated_chars: usize,
 ) -> anyhow::Result<BenchResult> {
     let total_ms = start.elapsed().as_millis() as f64;
-    let tokens_per_sec = if total_ms > 0.0 && completion_tokens > 0 {
-        completion_tokens as f64 / (total_ms / 1000.0)
-    } else {
-        0.0
-    };
-    let _ = accumulated_chars;
     Ok(BenchResult {
         prompt_tokens,
         completion_tokens,
         total_ms,
-        tokens_per_sec,
+        tokens_per_sec: tokens_per_sec(completion_tokens, total_ms),
         ttft_ms,
     })
 }

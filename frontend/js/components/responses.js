@@ -186,27 +186,24 @@
       }
     },
 
-    cancel: async function(id) {
+    _action: async function(url, method, successKey, errorKey, id) {
       try {
-        var resp = await App.data.authFetch('/v1/responses/' + encodeURIComponent(id) + '/cancel', { method: 'POST' });
+        var resp = await App.data.authFetch(url, { method: method });
         if (!resp.ok) throw new Error('HTTP ' + resp.status);
-        App.notifications.toast(I18n.t('responses.cancelled_toast', { id: id }), 'info', 3000);
+        App.notifications.showToast(I18n.t(successKey, { id: id }), 'info', 3000);
         this.load();
       } catch (e) {
-        App.notifications.toast(I18n.t('responses.cancel_error', { error: String(e) }), 'error', 4000);
+        App.notifications.showToast(I18n.t(errorKey, { error: String(e) }), 'error', 4000);
       }
     },
 
-    del: async function(id) {
+    cancel: function(id) {
+      return this._action('/v1/responses/' + encodeURIComponent(id) + '/cancel', 'POST', 'responses.cancelled_toast', 'responses.cancel_error', id);
+    },
+
+    del: function(id) {
       if (!confirm(I18n.t('responses.delete_confirm', { id: id }))) return;
-      try {
-        var resp = await App.data.authFetch('/v1/responses/' + encodeURIComponent(id), { method: 'DELETE' });
-        if (!resp.ok) throw new Error('HTTP ' + resp.status);
-        App.notifications.toast(I18n.t('responses.deleted_toast', { id: id }), 'info', 3000);
-        this.load();
-      } catch (e) {
-        App.notifications.toast(I18n.t('responses.delete_error', { error: String(e) }), 'error', 4000);
-      }
+      return this._action('/v1/responses/' + encodeURIComponent(id), 'DELETE', 'responses.deleted_toast', 'responses.delete_error', id);
     },
   };
 })();

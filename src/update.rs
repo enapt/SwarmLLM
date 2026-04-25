@@ -7,6 +7,12 @@ use tokio::sync::{watch, RwLock};
 use crate::config::UpdateConfig;
 use crate::error::SwarmError;
 
+/// Canonical GitHub repo slug used by both the daemon's UpdateChecker
+/// subsystem and the standalone `swarmllm update` CLI. Single source of
+/// truth — keep `swarmllm::update::SWARMLLM_GITHUB_REPO` in sync if the
+/// repository moves.
+pub const SWARMLLM_GITHUB_REPO: &str = "enapt/SwarmLLM";
+
 /// HTTP timeout for update-check requests (small GitHub API call).
 const UPDATE_CHECK_TIMEOUT_SECS: u64 = 15;
 /// HTTP timeout for the update-download request (binary transfer).

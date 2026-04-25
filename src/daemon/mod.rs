@@ -408,7 +408,7 @@ impl Daemon {
             let update_shutdown = shutdown_rx.clone();
             let checker = crate::update::UpdateChecker::new(
                 update_config,
-                "enapt/SwarmLLM".to_string(),
+                crate::update::SWARMLLM_GITHUB_REPO.to_string(),
                 update_state,
                 dash_tx,
             );
