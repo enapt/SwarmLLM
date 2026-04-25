@@ -1,0 +1,1 @@
+[pre-V1] first data: line — chat median=1.9ms (mean 1.8, max 2.3)  resp median=2.5ms (mean 2.6, max 4.2)  gap=0.6ms

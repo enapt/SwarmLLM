@@ -25,18 +25,51 @@ TinyLlama CPU on WSL2):
 | | median | mean | p95 |
 |---|---|---|---|
 | chat_completions stream TTFB | 1.1 ms | 1.1 ms | 1.2 ms |
-| **responses stream TTFB** | **1.2 ms** | **1.2 ms** | **1.4 ms** |
+| responses stream TTFB | 1.2 ms | 1.2 ms | 1.4 ms |
 | POST background=true (queued) | 2.5 ms | 3.0 ms | — |
 | POST background+stream 202 | 2.4 ms | 3.0 ms | — |
 | GET /v1/responses/:id (hit) | 0.9 ms | 0.9 ms | — |
 | GET /v1/responses/:id/input_items | 0.8 ms | 0.9 ms | — |
 | GET /api/admin/responses (list 100) | 3.5 ms | 3.5 ms | — |
 
-V1 streaming TTFB gap: **0.1 ms median** (well inside the 20 ms target;
-v1's bench script measured `(curl | grep) time` which included pipeline
-tear-down latency and produced misleading ~600 ms readings — the v2
-bench uses curl's `time_starttransfer` which is what V1 actually
-targets).
+### V1 verification — pre/post comparison with three methodologies
+
+The original v2 plan opened with a "+400–700 ms gap" claim from the v1
+bench script. That number turned out to be a measurement artifact, not
+a real gap. To unwind it I built a worktree at the pre-V1 commit
+(`c5d9659`), ran both old and new bench harnesses + a precise
+event-arrival timer (`docs/bench_results/v1_event_timer.py`) against
+both builds at warmed-up steady state. Numbers:
+
+| methodology | pre-V1 chat | pre-V1 resp | gap | post-V1 chat | post-V1 resp | gap |
+|---|---|---|---|---|---|---|
+| v1 bench (`(curl|grep) time -p`) | 2795 ms | 3015 ms | 220 ms | 3110 ms | 3560 ms | 450 ms |
+| TTFB (`curl --time_starttransfer`) | 0.8 ms | 1.0 ms | 0.2 ms | 0.8 ms | 0.9 ms | 0.1 ms |
+| **first SSE `data:` line** (precise) | 1.9 ms | 2.5 ms | **0.6 ms** | 1.8 ms | 2.6 ms | **0.8 ms** |
+
+Findings:
+- **The original "+400-700 ms" gap was a measurement bug.** The v1 bench
+  measured `time -p` of a `(curl | grep -m1 "data:")` subshell. That
+  clocks the subshell's exit time, which is bounded by curl
+  noticing SIGPIPE on its next write — i.e., the next SSE chunk from
+  the server, ~hundreds of ms apart on TinyLlama CPU. Both pre- and
+  post-V1 builds hit this same bound; the apparent "gap" is inference
+  variance, not anything V1 affects.
+- **TTFB is invariant pre/post-V1.** `chat_completions().await` returns
+  its (empty-body) SSE Response head in <1 ms in both builds, so HTTP
+  head latency was never the issue.
+- **At warmed-up steady state the practical gap was already <2 ms
+  pre-V1.** The right metric (first SSE `data:` line arrival) shows
+  pre/post-V1 are statistically indistinguishable on this rig: 0.6 ms
+  vs 0.8 ms gap, well inside per-iteration noise.
+- **V1 is still a structurally correct fix.** Post-V1, `response.created`
+  is yielded *before* `chat_completions()` is awaited — so any future
+  preflight latency in `chat_completions` (cold worker probe, queue
+  wait, template build that varies with prompt) cannot block the
+  lifecycle event. The original ~400 ms reading was almost certainly
+  a cold-start artifact that warmup eliminated.
+
+Full methodology + raw output: `docs/bench_results/README.md`.
 
 ## Why v2
 
@@ -79,10 +112,16 @@ Total for V1-V8: ~6-7 focused days. V9 stays deferred.
 
 ## V1. Streaming first-token latency fix
 
-**Measured (TinyLlama, CPU, 5-token output, 5 iter)**:
+**Original measurement (TinyLlama, CPU, 5-token output, 5 iter)** —
+later proven to be a measurement bug, see § "V1 verification" above:
 - `/v1/chat/completions` stream: median first `data:` line = 2360 ms
 - `/v1/responses` stream: median first `data:` line = 2760 ms
 - Gap: ~400 ms, reproducibly.
+
+**Post-fix correction**: re-measured with a precise event-arrival timer,
+the actual practical gap pre-V1 at warmed-up steady state was 0.6 ms
+(not 400 ms). The fix is still structurally correct and lands; see
+§ "V1 verification" for the corrected numbers and root-cause analysis.
 
 **Root cause hypothesis**: `stream::run_streaming` awaits the full
 `chat_completions` call before parsing its body and emitting the first

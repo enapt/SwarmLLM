@@ -1,0 +1,2 @@
+[pre-V1] old(pipeline-time):  chat=2795.0ms  resp=3015.0ms  gap=220.0ms
+[pre-V1] new(TTFB):          chat=0.8ms  resp=1.0ms  gap=0.2ms
