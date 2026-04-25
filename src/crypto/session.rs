@@ -4,8 +4,6 @@ use std::time::Instant;
 use chacha20poly1305::aead::{Aead, KeyInit};
 use chacha20poly1305::{ChaCha20Poly1305, Nonce};
 use dashmap::DashMap;
-use hkdf::Hkdf;
-use sha2::Sha256;
 use x25519_dalek::{EphemeralSecret, PublicKey, StaticSecret};
 
 use crate::error::SwarmError;
@@ -581,11 +579,7 @@ fn derive_cipher_key(shared_secret: &[u8], pub_a: &PublicKey, pub_b: &PublicKey)
     salt.extend_from_slice(first);
     salt.extend_from_slice(second);
 
-    let hk = Hkdf::<Sha256>::new(Some(&salt), shared_secret);
-    let mut okm = [0u8; 32];
-    hk.expand(b"swarmllm-session-v1", &mut okm)
-        .expect("32 bytes is a valid HKDF-SHA256 output length");
-    okm
+    super::hkdf_sha256_derive_32(shared_secret, Some(&salt), b"swarmllm-session-v1")
 }
 
 #[cfg(test)]

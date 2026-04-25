@@ -292,6 +292,7 @@
   "dashboard.contribution_tier_idle": "холостой",
   "dashboard.contribution_tier_minimal": "минимальный",
   "dashboard.contribution_tier_moderate": "умеренный",
+  "dashboard.contribution_tier_maximum": "максимум",
   "dashboard.chip_shards_locally": " осколков локально",
   "shard.cancel_download": "Отменить загрузку",
   "shard.download": "Загрузить эту часть",

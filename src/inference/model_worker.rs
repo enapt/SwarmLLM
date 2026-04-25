@@ -189,7 +189,16 @@ pub async fn run_worker(
     // Spawn a reader task that pushes framed IPC messages onto an mpsc.
     // Decoupling read-from-socket from the main select! loop keeps frame
     // alignment safe under cancellation (recv_framed itself is not cancel-safe).
-    let (ipc_tx, mut ipc_rx) = mpsc::channel::<(DaemonMsg, Vec<u8>)>(16);
+    //
+    // Capacity 64: the admit-coalescing drain loop pulls up to 16 messages
+    // per tick, but a single decode tick can be 100-500ms on CPU for a 7B
+    // model. During that window the reader task may receive a burst of
+    // Generate requests + cross-node PrefixFetchResult replies. Capacity 16
+    // would block the reader on send, delaying the fast-path PrefixFetchResult
+    // short-circuit (see lines below) and degrading cross-node prefix-cache
+    // efficiency. 64 gives 4× the drain budget without bounding socket-buffer
+    // backpressure too loosely.
+    let (ipc_tx, mut ipc_rx) = mpsc::channel::<(DaemonMsg, Vec<u8>)>(64);
     let reader_pending = pending_fetches.clone();
     let reader_task = tokio::spawn(async move {
         loop {

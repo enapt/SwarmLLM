@@ -196,8 +196,15 @@ impl PipelineExecutor {
                 "DIAG: starting forward_through_segments"
             );
 
-            // Forward through each segment
-            let fwd_start = std::time::Instant::now();
+            // Forward through each segment. Time only when DEBUG is enabled —
+            // the DIAG log below is at debug! level (matches the rest of the
+            // DIAG instrumentation in this file), so info-level operation
+            // doesn't pay for the per-token Instant::now syscall.
+            let fwd_start = if tracing::enabled!(tracing::Level::DEBUG) {
+                Some(std::time::Instant::now())
+            } else {
+                None
+            };
             // Attach pre-computed vision on first forward only (take ownership to avoid clone)
             let vision_for_forward = if seq_num == 0 {
                 precomputed_vision.take()
@@ -216,10 +223,10 @@ impl PipelineExecutor {
                 .await
             {
                 Ok(result) => {
-                    tracing::info!(
+                    tracing::debug!(
                         request_id = %request_id,
                         seq_num,
-                        fwd_ms = fwd_start.elapsed().as_millis() as u64,
+                        fwd_ms = fwd_start.map(|s| s.elapsed().as_millis() as u64).unwrap_or(0),
                         tokens = result.token_ids.len(),
                         activations_bytes = result.activations.len(),
                         finish = ?result.finish_reason,

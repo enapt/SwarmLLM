@@ -292,6 +292,7 @@
   "dashboard.contribution_tier_idle": "chưa hoạt động",
   "dashboard.contribution_tier_minimal": "tối thiểu",
   "dashboard.contribution_tier_moderate": "trung bình",
+  "dashboard.contribution_tier_maximum": "tối đa",
   "dashboard.chip_shards_locally": " shard cục bộ",
   "shard.cancel_download": "Hủy tải xuống",
   "shard.download": "Tải phần này",

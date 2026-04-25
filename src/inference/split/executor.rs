@@ -365,7 +365,16 @@ impl SplitModel {
                 }
             }
 
-            let layer_start_time = std::time::Instant::now();
+            // Time per-layer only when TRACE is enabled — at default log
+            // level the syscall and Instant allocation are pure overhead
+            // on the per-token decode hot path (28 syscalls/token on a
+            // 28-layer model). Compute once outside the match so the
+            // .elapsed() call below has something to measure.
+            let layer_start_time = if tracing::enabled!(tracing::Level::TRACE) {
+                Some(std::time::Instant::now())
+            } else {
+                None
+            };
             match layer {
                 LayerVariant::Dense(lw) => {
                     let x = layer_in;
@@ -511,11 +520,13 @@ impl SplitModel {
                     layer_in = (ffn_out + residual).map_err(SwarmError::internal)?;
                 }
             }
-            tracing::trace!(
-                layer = abs_layer,
-                layer_ms = layer_start_time.elapsed().as_millis() as u64,
-                "DIAG: layer forward complete"
-            );
+            if let Some(start) = layer_start_time {
+                tracing::trace!(
+                    layer = abs_layer,
+                    layer_ms = start.elapsed().as_millis() as u64,
+                    "DIAG: layer forward complete"
+                );
+            }
 
             // Capture hidden state if requested (zero overhead when not capturing)
             if let Some(layers_to_capture) = capture_layers {

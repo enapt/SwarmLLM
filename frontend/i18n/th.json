@@ -292,6 +292,7 @@
   "dashboard.contribution_tier_idle": "idle",
   "dashboard.contribution_tier_minimal": "minimal",
   "dashboard.contribution_tier_moderate": "moderate",
+  "dashboard.contribution_tier_maximum": "สูงสุด",
   "dashboard.chip_shards_locally": " shards ในเครื่อง",
   "shard.cancel_download": "ยกเลิกการดาวน์โหลด",
   "shard.download": "ดาวน์โหลดส่วนนี้",

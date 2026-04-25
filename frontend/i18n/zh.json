@@ -292,6 +292,7 @@
   "dashboard.contribution_tier_idle": "闲置",
   "dashboard.contribution_tier_minimal": "最小",
   "dashboard.contribution_tier_moderate": "中等",
+  "dashboard.contribution_tier_maximum": "最大",
   "dashboard.chip_shards_locally": "个分片本地",
   "shard.cancel_download": "取消下载",
   "shard.download": "下载此部分",

@@ -107,7 +107,9 @@ pub fn request_to_chat(
         temperature: req.temperature.unwrap_or(DEFAULT_TEMPERATURE),
         top_p: req.top_p.unwrap_or(DEFAULT_TOP_P),
         max_tokens: req.max_output_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
-        // M6 will replace the `false` here with a streaming pipeline.
+        // The streaming entry point in `stream.rs` sets stream=true after
+        // calling this translator; the non-streaming path in `mod.rs` keeps
+        // it false. Both share this builder.
         stream: false,
         stop,
         frequency_penalty: req.frequency_penalty.unwrap_or(0.0),

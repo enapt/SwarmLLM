@@ -329,6 +329,7 @@
   "dashboard.contribution_tier_idle": "idle",
   "dashboard.contribution_tier_minimal": "minimal",
   "dashboard.contribution_tier_moderate": "moderate",
+  "dashboard.contribution_tier_maximum": "maximum",
   "dashboard.chip_shards_locally": " shards locally",
   "shard.cancel_download": "Cancel download",
   "shard.download": "Download this part",

@@ -8,9 +8,7 @@
 
 use chacha20poly1305::aead::{Aead, KeyInit};
 use chacha20poly1305::{ChaCha20Poly1305, Nonce};
-use hkdf::Hkdf;
 use rand::RngCore;
-use sha2::Sha256;
 
 use crate::config::{ProviderEntry, ProvidersConfig};
 use crate::error::SwarmError;
@@ -23,11 +21,11 @@ const MAX_KEY_LENGTH: usize = 256;
 
 /// Derive a 32-byte symmetric key from the node's Ed25519 signing key for provider key encryption.
 fn derive_encryption_key(signing_key_bytes: &[u8; 32]) -> [u8; 32] {
-    let hk = Hkdf::<Sha256>::new(None, signing_key_bytes);
-    let mut okm = [0u8; 32];
-    hk.expand(b"swarmllm-provider-key-encryption-v1", &mut okm)
-        .expect("32 bytes is a valid HKDF-SHA256 output length");
-    okm
+    super::hkdf_sha256_derive_32(
+        signing_key_bytes,
+        None,
+        b"swarmllm-provider-key-encryption-v1",
+    )
 }
 
 /// Encrypt a plaintext API key string. Returns a string with the `$SWARM_ENC$` prefix.

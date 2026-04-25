@@ -292,6 +292,7 @@
   "dashboard.contribution_tier_idle": "nečinný",
   "dashboard.contribution_tier_minimal": "minimální",
   "dashboard.contribution_tier_moderate": "mírný",
+  "dashboard.contribution_tier_maximum": "maximum",
   "dashboard.chip_shards_locally": " fragmenty lokálně",
   "shard.cancel_download": "Zrušit stahování",
   "shard.download": "Stáhnout tuto část",

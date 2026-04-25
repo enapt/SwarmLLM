@@ -32,55 +32,76 @@ jobs:
       - run: cargo fmt --check
 
   clippy:
-    name: Clippy (${{ matrix.features }})
+    name: Clippy (${{ matrix.os }} / ${{ matrix.features }})
     needs: fmt
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        # Lint both default and dev+claude-subscription feature sets —
-        # otherwise the dev-frontend and Claude-subscription code paths
-        # never see clippy in CI.
+        # Lint both default and dev+claude-subscription feature sets on
+        # Linux. macOS only lints the default feature set — the dev/claude
+        # paths are platform-agnostic, so the redundancy across OSes isn't
+        # worth doubling the macOS minute spend.
         include:
-          - features: "default"
+          - os: ubuntu-latest
+            features: "default"
             flags: ""
-          - features: "dev,claude-subscription"
+          - os: ubuntu-latest
+            features: "dev,claude-subscription"
             flags: "--no-default-features --features dev,claude-subscription"
+          - os: macos-15
+            features: "default"
+            flags: ""
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
-      - name: Install system dependencies
+      - name: Install system dependencies (Linux)
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y libssl-dev pkg-config
       - uses: Swatinem/rust-cache@v2
         with:
-          key: clippy-${{ matrix.features }}
+          key: clippy-${{ matrix.os }}-${{ matrix.features }}
       - run: cargo clippy ${{ matrix.flags }} --all-targets -- -D warnings
 
   test:
-    name: Test
+    name: Test (${{ matrix.os }})
     needs: fmt
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-15]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - name: Install system dependencies
+      - name: Install system dependencies (Linux)
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y libssl-dev pkg-config
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: test-${{ matrix.os }}
       - name: Run unit tests
         run: cargo test --lib --bins
       - name: Run unit tests (dev,claude-subscription features)
         run: cargo test --no-default-features --features dev,claude-subscription --lib --bins
-      - name: Run integration tests
+      # Integration tests use multi-process spawning + named-pipe IPC that
+      # has been validated on Linux + Windows but not exercised on macOS.
+      # Run them only on Linux until we catch the first failure on macOS
+      # and decide whether to fix or skip-list per test.
+      - name: Run integration tests (Linux only)
+        if: runner.os == 'Linux'
         run: cargo test --test integration -- --test-threads=1
-      - name: Run phase 10/11 integration tests
+      - name: Run phase 10/11 integration tests (Linux only)
+        if: runner.os == 'Linux'
         run: cargo test --test integration_phase10_11 -- --test-threads=1
-      - name: Run yamux substream tests
+      - name: Run yamux substream tests (Linux only)
+        if: runner.os == 'Linux'
         run: cargo test --test yamux_substream
 
   build:

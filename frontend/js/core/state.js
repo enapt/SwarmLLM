@@ -17,6 +17,7 @@ window.App = {
     _expandedModels: {},
     activeAcquisitions: {},
     _swarmModelSort: 'problems', // initialized below after App is defined, using App.MODEL_SORT_KEY
+    _shardView: 'list', // initialized below after App is defined, using App.SHARD_VIEW_KEY
     isStreaming: false,
     currentModel: '',
     currentSessionId: null,

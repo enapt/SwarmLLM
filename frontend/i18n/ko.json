@@ -292,6 +292,7 @@
   "dashboard.contribution_tier_idle": "유휴",
   "dashboard.contribution_tier_minimal": "최소",
   "dashboard.contribution_tier_moderate": "중간",
+  "dashboard.contribution_tier_maximum": "최대",
   "dashboard.chip_shards_locally": "개 샤드 로컬",
   "shard.cancel_download": "다운로드 취소",
   "shard.download": "이 파트 다운로드",

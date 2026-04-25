@@ -292,6 +292,7 @@
   "dashboard.contribution_tier_idle": "アイドル",
   "dashboard.contribution_tier_minimal": "最小限",
   "dashboard.contribution_tier_moderate": "中程度",
+  "dashboard.contribution_tier_maximum": "最大",
   "dashboard.chip_shards_locally": "個のシャードがローカルに存在",
   "shard.cancel_download": "ダウンロードをキャンセル",
   "shard.download": "このパートをダウンロード",

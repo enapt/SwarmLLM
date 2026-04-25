@@ -1,23 +1,26 @@
 //! OpenAI `/v1/responses` endpoint — request/response types, translation
 //! to/from Chat Completions, and HTTP handler.
 //!
-//! Milestone scope:
-//! - **M1**: types + serde roundtrip.
-//! - **M2**: route wired, built-in-tool rejection, 501 stub.
-//! - **M3**: plain-text local inference via Chat translation.
-//! - **M4**: function tools and tool_choice translation.
-//! - **M5**: cloud-proxy verbatim path.
-//! - **M6**: SSE streaming.
-//! - **M7**: redb persistence (store=true + retrieve + delete).
-//! - **M8**: previous_response_id chaining.
-//! - **M9**: background=true + POST .../cancel.
-//! - **V1 (v2 plan)**: streaming first-token latency fix.
-//! - **V2 (v2 plan)**: multimodal input parts.
-//! - **V3 (v2 plan)**: Claude → Anthropic Messages translation.
-//! - **V4 (v2 plan)**: input_items pagination endpoint.
-//! - **V5 (v2 plan)**: resumable SSE via GET ?stream=true&starting_after=N.
-//! - **V7 (v2 plan)**: explicit reasoning round-trip guarantees (tests).
-//! - **V8 (v2 plan)**: background=true && stream=true (202 + Location).
+//! Capabilities (all shipped, see `docs/plans/responses_api{,_v2}.md` for
+//! the per-milestone history):
+//! - Local inference via translation to `/v1/chat/completions`, including
+//!   function tools and `tool_choice`.
+//! - Cloud-proxy verbatim path for OpenAI-routed models, plus an
+//!   Anthropic-translated bridge for Claude models (delegates to
+//!   `anthropic_bridge`).
+//! - SSE streaming (`stream.rs`), with V1 first-token latency fix.
+//! - Multimodal input parts (`input_image`, `input_file` UTF-8 only).
+//! - redb persistence (`store=true`, the OpenAI default), with
+//!   `previous_response_id` chaining and `GET /v1/responses/:id/input_items`
+//!   pagination.
+//! - `background=true` (M9) — non-streaming returns 202 + Location;
+//!   `background=true && stream=true` (V8) returns SSE backed by a
+//!   resumable replay buffer at `GET /v1/responses/:id?stream=true`.
+//!
+//! Built-in tools (`web_search`, `file_search`, `computer_use_preview`,
+//! `code_interpreter`, `image_generation`, `mcp`, `custom`) are rejected
+//! with 400 on the local path and forwarded verbatim on the cloud path —
+//! they require backing infra SwarmLLM does not run.
 
 pub mod anthropic_bridge;
 pub mod background;

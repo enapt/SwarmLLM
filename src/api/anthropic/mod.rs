@@ -211,8 +211,6 @@ pub async fn messages(
             if req.stream {
                 return handlers::anthropic_stream(
                     router_tx.clone(),
-                    &state,
-                    &req,
                     internal_messages,
                     sampling_params,
                     request_id,
@@ -222,7 +220,6 @@ pub async fn messages(
             } else {
                 return handlers::anthropic_non_stream(
                     router_tx.clone(),
-                    &req,
                     internal_messages,
                     sampling_params,
                     request_id,

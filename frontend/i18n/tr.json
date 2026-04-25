@@ -292,6 +292,7 @@
   "dashboard.contribution_tier_idle": "boş",
   "dashboard.contribution_tier_minimal": "minimal",
   "dashboard.contribution_tier_moderate": "orta",
+  "dashboard.contribution_tier_maximum": "maksimum",
   "dashboard.chip_shards_locally": " parça yerel olarak",
   "shard.cancel_download": "İndirmeyi iptal et",
   "shard.download": "Bu parçayı indir",

@@ -292,6 +292,7 @@
   "dashboard.contribution_tier_idle": "menganggur",
   "dashboard.contribution_tier_minimal": "minimal",
   "dashboard.contribution_tier_moderate": "sedang",
+  "dashboard.contribution_tier_maximum": "maksimum",
   "dashboard.chip_shards_locally": " shard secara lokal",
   "shard.cancel_download": "Batalkan unduhan",
   "shard.download": "Unduh bagian ini",

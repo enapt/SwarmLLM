@@ -292,6 +292,7 @@
   "dashboard.contribution_tier_idle": "inaktiv",
   "dashboard.contribution_tier_minimal": "minimal",
   "dashboard.contribution_tier_moderate": "måttlig",
+  "dashboard.contribution_tier_maximum": "maximum",
   "dashboard.chip_shards_locally": " shards lokalt",
   "shard.cancel_download": "Avbryt nedladdning",
   "shard.download": "Ladda ner den här delen",

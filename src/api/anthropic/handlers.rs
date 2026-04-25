@@ -42,7 +42,6 @@ fn is_anthropic_server_tool(kind: &str) -> bool {
 
 pub(super) async fn anthropic_non_stream(
     router_tx: tokio::sync::mpsc::Sender<RouterCommand>,
-    _req: &MessagesRequest,
     messages: Vec<ChatMessage>,
     params: SamplingParams,
     request_id: String,
@@ -68,8 +67,6 @@ pub(super) async fn anthropic_non_stream(
 /// Streaming inference via router, returning Anthropic SSE format.
 pub(super) async fn anthropic_stream(
     router_tx: tokio::sync::mpsc::Sender<RouterCommand>,
-    _state: &AppState,
-    _req: &MessagesRequest,
     messages: Vec<ChatMessage>,
     params: SamplingParams,
     request_id: String,

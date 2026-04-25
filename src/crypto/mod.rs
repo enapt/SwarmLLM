@@ -6,6 +6,25 @@ pub mod session;
 
 use crate::error::SwarmError;
 use ed25519_dalek::Verifier;
+use hkdf::Hkdf;
+use sha2::Sha256;
+
+/// Derive a 32-byte symmetric key via HKDF-SHA256. Used by every subsystem
+/// that needs a symmetric key from a higher-entropy secret (provider key
+/// encryption, gossip epoch keys, session ChaCha keys). Pre-existing call
+/// sites duplicated the 5-line `Hkdf::new + expand` pattern with the same
+/// `.expect("32 bytes is a valid HKDF-SHA256 output length")` string —
+/// consolidated here.
+///
+/// `salt = None` is HKDF's spec-correct null-salt path (semantically
+/// equivalent to a zero-byte salt of the hash output length).
+pub fn hkdf_sha256_derive_32(ikm: &[u8], salt: Option<&[u8]>, info: &[u8]) -> [u8; 32] {
+    let hk = Hkdf::<Sha256>::new(salt, ikm);
+    let mut okm = [0u8; 32];
+    hk.expand(info, &mut okm)
+        .expect("32 bytes is a valid HKDF-SHA256 output length");
+    okm
+}
 
 /// Verify an Ed25519 signature from raw bytes.
 /// Reusable primitive for all subsystems that verify signatures.

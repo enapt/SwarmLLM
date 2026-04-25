@@ -1,9 +1,7 @@
 use chacha20poly1305::aead::{Aead, KeyInit};
 use chacha20poly1305::{ChaCha20Poly1305, Nonce};
 use ed25519_dalek::VerifyingKey;
-use hkdf::Hkdf;
 use rand::RngCore;
-use sha2::Sha256;
 
 use crate::error::SwarmError;
 use crate::identity::Identity;
@@ -29,11 +27,7 @@ impl GossipSealer {
         ikm.extend_from_slice(&(self.network_id.len() as u32).to_le_bytes());
         ikm.extend_from_slice(&self.network_id);
         ikm.extend_from_slice(&epoch.to_le_bytes());
-        let hk = Hkdf::<Sha256>::new(None, &ikm);
-        let mut okm = [0u8; 32];
-        hk.expand(b"swarmllm-gossip-v1", &mut okm)
-            .expect("32 bytes is valid HKDF output length");
-        okm
+        super::hkdf_sha256_derive_32(&ikm, None, b"swarmllm-gossip-v1")
     }
 
     /// Get the current epoch (unix timestamp / 3600).

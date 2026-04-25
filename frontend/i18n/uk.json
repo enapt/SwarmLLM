@@ -292,6 +292,7 @@
   "dashboard.contribution_tier_idle": "неактивне",
   "dashboard.contribution_tier_minimal": "мінімальне",
   "dashboard.contribution_tier_moderate": "помірне",
+  "dashboard.contribution_tier_maximum": "максимальний",
   "dashboard.chip_shards_locally": " фрагментів локально",
   "shard.cancel_download": "Скасувати завантаження",
   "shard.download": "Завантажити цю частину",

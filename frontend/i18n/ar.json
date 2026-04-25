@@ -292,6 +292,7 @@
   "dashboard.contribution_tier_idle": "خامل",
   "dashboard.contribution_tier_minimal": "أدنى",
   "dashboard.contribution_tier_moderate": "معتدل",
+  "dashboard.contribution_tier_maximum": "الأقصى",
   "dashboard.chip_shards_locally": " أجزاء محلياً",
   "shard.cancel_download": "إلغاء التنزيل",
   "shard.download": "تنزيل هذا الجزء",
