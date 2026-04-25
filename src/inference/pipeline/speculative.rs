@@ -116,15 +116,7 @@ impl PipelineExecutor {
         let segment = self.assignment.segments[0].clone();
         let target_peer_bytes = self
             .shared_state
-            .peer_id_map
-            .get(&segment.node_id)
-            .map(|r| r.value().clone())
-            .or_else(|| {
-                self.shared_state
-                    .peer_registry
-                    .get(&segment.node_id)
-                    .and_then(|p| p.peer_id_bytes.clone())
-            })
+            .resolve_peer_id_bytes(&segment.node_id)
             .ok_or_else(|| {
                 SwarmError::Network(format!("No peer_id_bytes for node {}", segment.node_id))
             })?;

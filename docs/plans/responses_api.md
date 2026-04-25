@@ -1,6 +1,8 @@
 # OpenAI `/v1/responses` — Design Plan
 
-**Status**: research + scoping. No implementation landed yet.
+**Status**: V1 (Milestones 1–9) shipped 2026-04-24. See `responses_api_v2.md`
+for the V1–V8 follow-on work (also shipped 2026-04-25). This file is preserved
+as the original design rationale.
 **Target**: SwarmLLM exposes a proxy-compatible `/v1/responses` endpoint that covers the ~80% of real-world use (plain generation + function calling + reasoning) and explicitly surfaces what it can't translate (built-in tools, server-side conversation state, compaction).
 **Non-goal**: feature parity with OpenAI's managed Responses API. Built-in tools (`web_search`, `file_search`, `computer_use_preview`, `code_interpreter`, `image_generation`, `mcp`) stay out of scope for v1 — they require backing infra we don't run.
 

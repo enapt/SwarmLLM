@@ -206,7 +206,7 @@ Requester (shard 0, embed) → Remote A (middle shards) → ... → Requester (f
 - No bandwidth overhead vs normal distributed inference (activation sizes are the same)
 
 **Per-model configuration:**
-- API: `GET/PUT /api/admin/models/:id/encrypted-pipeline`
+- API: `GET/PUT /api/admin/models/{id}/encrypted-pipeline`
 - Dashboard: gear icon on model card → "Encrypted pipeline" checkbox
 - Global fallback: `encrypted_pipeline = true` in `[inference]` config
 - Per-model overrides are persisted to the database

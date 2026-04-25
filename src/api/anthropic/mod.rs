@@ -28,6 +28,12 @@ use sse::{serialize_anthropic_event, AnthropicSseEvent};
 use types::SystemContent;
 use types::{AnthropicContent, ContentBlock, MessagesRequest};
 
+/// Hard cap on `max_tokens`. Matches the local sampling-params clamp ceiling
+/// (`build_sampling_params` clamps to DEFAULT_MAX_TOKENS=32768). Anything
+/// larger lands as a clean 400 at ingress instead of being silently clamped
+/// for local inference and forwarded raw to upstream proxies.
+const MAX_TOKENS_HARD_CAP: u32 = 32768;
+
 // ---- Handler ----
 
 /// POST /v1/messages — Anthropic Messages API endpoint.
@@ -54,6 +60,18 @@ pub async fn messages(
         req.messages.len(),
         req.temperature.unwrap_or(1.0).into(),
     )?;
+
+    // Cap max_tokens at the same upper bound the local sampling clamp uses
+    // (`build_sampling_params` clamps to DEFAULT_MAX_TOKENS=32768). Without
+    // this, callers can send max_tokens=u32::MAX which (a) confuses upstream
+    // proxy targets with a value larger than the model context, and
+    // (b) lands raw in our DIAG log fields. The clamp still protects local
+    // inference; this just produces a clean 400 at ingress.
+    if req.max_tokens == 0 || req.max_tokens > MAX_TOKENS_HARD_CAP {
+        return Err(ApiError(crate::error::SwarmError::Validation(format!(
+            "max_tokens must be 1..={MAX_TOKENS_HARD_CAP}"
+        ))));
+    }
 
     if let Some(ref stops) = req.stop_sequences {
         super::validate_stop_sequences(stops)?;

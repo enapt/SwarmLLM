@@ -157,7 +157,10 @@ pub async fn leaderboard(
     State(state): State<AppState>,
     Query(query): Query<LeaderboardQuery>,
 ) -> Json<serde_json::Value> {
-    let limit = query.limit.min(MAX_LEADERBOARD_LIMIT);
+    // Clamp to [1, MAX_LEADERBOARD_LIMIT]. Silent clamp rather than 400
+    // so the dashboard doesn't have to special-case validation here; a
+    // bottom of 1 prevents the surprising "limit=0 returns empty array".
+    let limit = query.limit.clamp(1, MAX_LEADERBOARD_LIMIT);
     let peer_count = state.shared_state.peer_registry.len();
 
     tracing::debug!(peer_count, limit, "DIAG: leaderboard query");

@@ -1018,4 +1018,23 @@ impl SharedState {
             }
         })
     }
+
+    /// Resolve a `NodeId` to its libp2p `PeerId` bytes. The persistent
+    /// `peer_id_map` (indexed at first connect, survives disconnects) is the
+    /// primary source; `peer_registry` is a fallback for nodes seen via
+    /// gossip but not yet connected. Returns `None` only when neither source
+    /// has a record — typically a fresh node we've never observed.
+    ///
+    /// Replaces the duplicated 8-line lookup pattern that lived in 5 inference
+    /// pipeline call sites; keep the fallback order in sync here.
+    pub fn resolve_peer_id_bytes(&self, node_id: &crate::types::NodeId) -> Option<Vec<u8>> {
+        self.peer_id_map
+            .get(node_id)
+            .map(|r| r.value().clone())
+            .or_else(|| {
+                self.peer_registry
+                    .get(node_id)
+                    .and_then(|p| p.peer_id_bytes.clone())
+            })
+    }
 }

@@ -68,15 +68,8 @@ impl PipelineExecutor {
                 .filter(|(rank, _)| *rank != tp_rank)
                 .filter_map(|(rank, node_id)| {
                     self.shared_state
-                        .peer_id_map
-                        .get(node_id)
-                        .map(|r| (rank, r.value().clone()))
-                        .or_else(|| {
-                            self.shared_state
-                                .peer_registry
-                                .get(node_id)
-                                .and_then(|p| p.peer_id_bytes.clone().map(|b| (rank, b)))
-                        })
+                        .resolve_peer_id_bytes(node_id)
+                        .map(|b| (rank, b))
                 })
                 .collect();
 

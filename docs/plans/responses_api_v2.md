@@ -7,9 +7,9 @@ concrete caller has asked for it yet.
 **Inputs**: v1 commit log, `docs/plans/responses_api.md` § Watch-list, end-to-end matrix
 (38/38 pass) and benchmarks captured in `/tmp/resp_final/`.
 
-**Final test count**: 814 lib tests passing (up from 769 at v1 close —
-45 new tests across V1–V6/V7/V5+V8). Clippy clean both with and without
-`claude-subscription`.
+**Final test count**: 816 lib tests passing (up from 769 at v1 close —
+47 new tests across V1–V6/V7/V5+V8 plus subsequent sweep additions).
+Clippy clean both with and without `claude-subscription`.
 
 **End-to-end curl matrix**: 38/38 M1–M9 (`docs/bench_results/responses_api_v2_matrix.sh`
 covers the new V1–V8 surfaces; the original `/tmp/resp_final/matrix.sh` for

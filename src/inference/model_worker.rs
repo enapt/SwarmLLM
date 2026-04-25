@@ -871,13 +871,12 @@ async fn handle_forward(
 
     let is_first = model.is_first();
     let is_last = model.is_last();
-    let total_layers = model.total_layers;
+    let model_key = model.kv_model_key().to_string();
     let req_id_str = request_id.to_string();
     let pre_embedded = fwd.pre_embedded;
 
     // Clear per-request KV-cache at the start of a new request (prefill)
     if fwd.sequence_num == 0 {
-        let model_key = format!("{}-{}-{}", layer_start, layer_end, total_layers);
         kv_store.clear_request(&model_key, &req_id_str);
     }
 
@@ -885,7 +884,6 @@ async fn handle_forward(
     // of this request's KV cache to a specific length before the forward runs.
     // Discards trailing stale entries written during a prior verify round.
     if let Some(target_len) = fwd.truncate_kv_to {
-        let model_key = format!("{}-{}-{}", layer_start, layer_end, total_layers);
         if let Err(e) = kv_store.truncate_request_to(&model_key, &req_id_str, target_len as usize) {
             tracing::warn!(
                 request_id = %request_id,

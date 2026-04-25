@@ -4,7 +4,7 @@
 //! to isolate whether the 2nd-substream stall is yamux-specific, WSL2-specific,
 //! or related to libp2p polling.
 //!
-//! Run with: cargo test --test integration test_yamux -- --nocapture --test-threads=1
+//! Run with: cargo test --test yamux_substream -- --nocapture --test-threads=1
 
 use std::time::{Duration, Instant};
 
@@ -122,6 +122,15 @@ fn build_tcp_yamux_swarm() -> Swarm<MinimalBehaviour> {
         .build()
 }
 
+/// Compile/run guard for the yamux 0.13 deprecated-config path
+/// (`set_receive_window_size` / `set_max_buffer_size`). The tests using this
+/// helper assert correctness only — they do NOT measure that the deprecated
+/// configuration degrades performance, since the documented degradation is
+/// substream-opening latency that's hard to reproduce deterministically in
+/// CI. Production code in `manager/mod.rs` explicitly forbids these calls
+/// (see the comment near `with_yamux_config`); this test exists so a future
+/// refactor that re-enables them shows up as a behaviour change rather than
+/// a silent regression.
 fn build_tcp_yamux_16mb_swarm() -> Swarm<MinimalBehaviour> {
     let protocol = StreamProtocol::new("/test/1.0.0");
     SwarmBuilder::with_new_identity()

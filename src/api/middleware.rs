@@ -206,9 +206,15 @@ pub async fn rate_limit_middleware(
     // Exempt localhost admin GET requests from rate limiting — the dashboard
     // polls these frequently and rate limiting causes a feedback loop
     // (429 → error banner → reconnect → more requests → more 429s).
+    //
+    // BUT carve out endpoints that proxy to external services (HF probe /
+    // search) so a runaway local script — or a malicious browser extension
+    // running on localhost:8800 — can't loop-call them and burn HuggingFace
+    // API quota or get our IP banned.
     let is_loopback = addr.ip().is_loopback();
     let is_admin_get = path.starts_with("/api/admin/") && !is_mutating;
-    if is_loopback && is_admin_get {
+    let is_outbound_admin = path == "/api/admin/hf/probe" || path == "/api/admin/hf/search";
+    if is_loopback && is_admin_get && !is_outbound_admin {
         return next.run(req).await;
     }
 

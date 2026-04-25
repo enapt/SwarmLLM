@@ -236,10 +236,11 @@ The split inference engine (`src/inference/split/`) enables true distributed inf
 using candle for direct tensor computation with quantized GGUF weights. Each node loads
 only the transformer layers it owns, forwarding hidden-state activations between nodes.
 
-The module is split into focused subfiles: `model.rs` (SplitModel struct + load + forward),
+The module is split into focused subfiles: `model.rs` (SplitModel struct + accessors),
+`loader.rs` (GGUF/shard load), `executor.rs` (forward pass + tensor-parallel),
 `kv_cache.rs` (per-request KV-cache store), `entry.rs` (model entry + LRU eviction),
 `gguf_meta.rs` (GGUF header parsing), `shard_reader.rs` (multi-shard virtual reader),
-`rope.rs` (RoPE precomputation).
+`rope.rs` (RoPE precomputation), `prefix_cache.rs` (cross-request prefix-KV reuse).
 
 ```
 Client → API Server → InferenceRouter → Pipeline Assembly

@@ -42,6 +42,82 @@ use dashmap::DashMap;
 use crate::api::server::{AppState, JsonBody};
 use crate::error::{ApiError, SwarmError};
 
+/// Caps applied at the `/v1/responses` ingress so caller-controlled strings
+/// don't reach cloud-proxy serializers (where they'd burn upstream quota or
+/// pollute log lines), redb keys, or the translation layer with megabyte
+/// payloads. Match the `validate_chat_request` shape so the local path keeps
+/// the same overall budget after Responses → Chat translation.
+const MAX_PREVIOUS_RESPONSE_ID_LEN: usize = 64;
+const MAX_RESPONSES_INSTRUCTIONS_BYTES: usize = 2 * 1024 * 1024;
+const MAX_RESPONSES_USER_BYTES: usize = 256;
+const MAX_RESPONSES_MODEL_LEN: usize = 256;
+const MAX_RESPONSES_SHORT_FIELD_LEN: usize = 64;
+const MAX_RESPONSES_METADATA_BYTES: usize = 64 * 1024;
+
+/// Validate caller-supplied identifiers and bounded strings BEFORE the
+/// cloud-proxy / Anthropic-bridge / local-inference branches. Each branch
+/// otherwise has its own validation surface (or none) — running this once at
+/// the top closes the gap.
+fn validate_responses_ingress(req: &ResponsesRequest) -> Result<(), ApiError> {
+    if req.model.is_empty() || req.model.len() > MAX_RESPONSES_MODEL_LEN {
+        return Err(ApiError(SwarmError::Validation(format!(
+            "model must be 1..={MAX_RESPONSES_MODEL_LEN} characters"
+        ))));
+    }
+    if let Some(prev_id) = req.previous_response_id.as_deref() {
+        if prev_id.len() > MAX_PREVIOUS_RESPONSE_ID_LEN
+            || !prev_id
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+        {
+            return Err(ApiError(SwarmError::Validation(
+                "previous_response_id must be ≤64 ASCII alphanumeric characters \
+                 (with `_` / `-`); generation format is `resp_<32-hex>`."
+                    .into(),
+            )));
+        }
+    }
+    if let Some(instructions) = req.instructions.as_deref() {
+        if instructions.len() > MAX_RESPONSES_INSTRUCTIONS_BYTES {
+            return Err(ApiError(SwarmError::Validation(format!(
+                "instructions too large ({} bytes, max {MAX_RESPONSES_INSTRUCTIONS_BYTES})",
+                instructions.len()
+            ))));
+        }
+    }
+    if let Some(user) = req.user.as_deref() {
+        if user.len() > MAX_RESPONSES_USER_BYTES {
+            return Err(ApiError(SwarmError::Validation(format!(
+                "user identifier too long (max {MAX_RESPONSES_USER_BYTES} chars)"
+            ))));
+        }
+    }
+    for (name, value) in [
+        ("truncation", req.truncation.as_deref()),
+        ("service_tier", req.service_tier.as_deref()),
+    ] {
+        if let Some(s) = value {
+            if s.len() > MAX_RESPONSES_SHORT_FIELD_LEN {
+                return Err(ApiError(SwarmError::Validation(format!(
+                    "{name} too long (max {MAX_RESPONSES_SHORT_FIELD_LEN} chars)"
+                ))));
+            }
+        }
+    }
+    if let Some(metadata) = req.metadata.as_ref() {
+        let total: usize = metadata
+            .iter()
+            .map(|(k, v)| k.len() + v.to_string().len())
+            .sum();
+        if total > MAX_RESPONSES_METADATA_BYTES {
+            return Err(ApiError(SwarmError::Validation(format!(
+                "metadata too large ({total} bytes, max {MAX_RESPONSES_METADATA_BYTES})"
+            ))));
+        }
+    }
+    Ok(())
+}
+
 /// Tool `type` strings that map to OpenAI-hosted infrastructure SwarmLLM
 /// does not run.
 pub(crate) const BUILTIN_TOOL_TYPES: &[&str] = &[
@@ -155,6 +231,11 @@ pub async fn create_response(
     headers: axum::http::HeaderMap,
     JsonBody(req): JsonBody<ResponsesRequest>,
 ) -> Result<Response, ApiError> {
+    // Validate caller-supplied identifiers BEFORE any routing decision so the
+    // cloud-proxy paths don't forward attacker-sized strings to upstream
+    // providers (where they'd land in our log lines or burn quota).
+    validate_responses_ingress(&req)?;
+
     // ---- 1a. Cloud proxy passthrough (M5 / V3). ----
     // Serialize the request struct back to JSON so flatten-extras and any
     // unmodeled OpenAI knobs reach the upstream verbatim.
@@ -204,33 +285,18 @@ pub async fn create_response(
     // to the current input. (Cloud proxy already returned above with
     // the field forwarded verbatim.)
     let prior = match req.previous_response_id.as_ref() {
-        Some(prev_id) => {
-            // Validate the id shape before hitting the DB. Generation format
-            // is `resp_<32-hex>`; cap at 64 chars and ASCII alphanumeric +
-            // `_` / `-` so a 1 MB junk string can't allocate an unbounded
-            // composite redb key on every request (DoS pre-validation).
-            if prev_id.len() > 64
-                || !prev_id
-                    .chars()
-                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
-            {
-                return Err(ApiError(SwarmError::Validation(
-                    "previous_response_id must be ≤64 ASCII alphanumeric characters \
-                     (with `_` / `-`); generation format is `resp_<32-hex>`."
-                        .into(),
-                )));
+        // Shape was validated at ingress (validate_responses_ingress); here we
+        // only need the not-found path.
+        Some(prev_id) => match store::load(&state.db, prev_id).map_err(ApiError)? {
+            Some(record) => Some(record),
+            None => {
+                return Err(ApiError(SwarmError::Validation(format!(
+                    "previous_response_id `{prev_id}` not found or expired. \
+                     Either pass the prior turn's messages inline via `input` \
+                     or re-run the original call with store=true (default)."
+                ))));
             }
-            match store::load(&state.db, prev_id).map_err(ApiError)? {
-                Some(record) => Some(record),
-                None => {
-                    return Err(ApiError(SwarmError::Validation(format!(
-                        "previous_response_id `{prev_id}` not found or expired. \
-                         Either pass the prior turn's messages inline via `input` \
-                         or re-run the original call with store=true (default)."
-                    ))));
-                }
-            }
-        }
+        },
         None => None,
     };
 

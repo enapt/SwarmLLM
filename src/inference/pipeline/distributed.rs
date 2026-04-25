@@ -643,25 +643,12 @@ impl PipelineExecutor {
                     truncate_kv_to: None,
                 };
 
-                // Look up the peer's libp2p PeerId bytes. Use peer_id_map (persistent,
-                // survives disconnects) first, fall back to peer_registry.
                 let target_peer_bytes = self
                     .shared_state
-                    .peer_id_map
-                    .get(&segment.node_id)
-                    .map(|r| r.value().clone())
-                    .or_else(|| {
-                        self.shared_state
-                            .peer_registry
-                            .get(&segment.node_id)
-                            .and_then(|p| p.peer_id_bytes.clone())
-                    })
+                    .resolve_peer_id_bytes(&segment.node_id)
                     .ok_or_else(|| {
-                        SwarmError::Network(format!(
-                            "No peer_id_bytes for node {}",
-                            segment.node_id
-                        ))
-                    })?;
+                    SwarmError::Network(format!("No peer_id_bytes for node {}", segment.node_id))
+                })?;
 
                 // Register the result channel BEFORE sending so we never miss
                 // a fast response.
@@ -932,28 +919,17 @@ impl PipelineExecutor {
                     truncate_kv_to: None,
                 };
 
-                // Use peer_id_map (persistent, survives disconnects) first,
-                // fall back to peer_registry — same as the normal forward path.
-                let target_peer_bytes = match self
-                    .shared_state
-                    .peer_id_map
-                    .get(&backup.node_id)
-                    .map(|r| r.value().clone())
-                    .or_else(|| {
-                        self.shared_state
-                            .peer_registry
-                            .get(&backup.node_id)
-                            .and_then(|p| p.peer_id_bytes.clone())
-                    }) {
-                    Some(b) => b,
-                    None => {
-                        self.shared_state.pending_layer_results.remove(&request_id);
-                        return Err(SwarmError::Network(format!(
-                            "No peer_id_bytes for backup node {}",
-                            backup.node_id
-                        )));
-                    }
-                };
+                let target_peer_bytes =
+                    match self.shared_state.resolve_peer_id_bytes(&backup.node_id) {
+                        Some(b) => b,
+                        None => {
+                            self.shared_state.pending_layer_results.remove(&request_id);
+                            return Err(SwarmError::Network(format!(
+                                "No peer_id_bytes for backup node {}",
+                                backup.node_id
+                            )));
+                        }
+                    };
                 if self
                     .network_tx
                     .send(NetworkCommand::SendTensor {

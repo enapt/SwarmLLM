@@ -350,9 +350,9 @@ pub async fn pool_join(
     Json(body): Json<PoolJoinRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let code = body.code.trim().to_uppercase();
-    if code.len() != 8 {
+    if code.len() != 8 || !code.chars().all(|c| c.is_ascii_alphanumeric()) {
         return Err(ApiError(crate::error::SwarmError::Validation(
-            "Invite code must be 8 characters".into(),
+            "Invite code must be 8 uppercase alphanumeric characters".into(),
         )));
     }
 

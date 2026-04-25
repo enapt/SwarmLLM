@@ -143,18 +143,7 @@ impl PipelineExecutor {
         let mut peer_id_for_segment: Vec<Vec<u8>> =
             Vec::with_capacity(self.assignment.segments.len());
         for segment in &self.assignment.segments {
-            let peer = self
-                .shared_state
-                .peer_id_map
-                .get(&segment.node_id)
-                .map(|r| r.value().clone())
-                .or_else(|| {
-                    self.shared_state
-                        .peer_registry
-                        .get(&segment.node_id)
-                        .and_then(|p| p.peer_id_bytes.clone())
-                });
-            match peer {
+            match self.shared_state.resolve_peer_id_bytes(&segment.node_id) {
                 Some(p) => peer_id_for_segment.push(p),
                 None => {
                     tracing::debug!(%request_id, node = %segment.node_id, "DSD: missing peer_id_bytes — falling back");

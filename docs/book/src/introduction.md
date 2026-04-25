@@ -82,8 +82,8 @@ See the [Getting Started](./getting-started.md) chapter for full instructions.
 |---|---|---|
 | Linux x86_64 | Available | CUDA |
 | Windows x86_64 | Available | CUDA |
-| macOS aarch64 (Apple Silicon) | Coming soon | Metal (planned) |
-| macOS x86_64 (Intel) | Coming soon | CPU only |
-| Linux aarch64 | Planned | CPU only |
+| macOS aarch64 (Apple Silicon) | Binary available (compile-validated) | CPU only (Metal planned) |
+| macOS x86_64 (Intel) | Best-effort | CPU only |
+| Linux aarch64 | Best-effort | CPU only |
 
-> **Note:** macOS builds are not yet available in the current release due to a build dependency issue. Linux and Windows builds are available on the [Releases page](https://github.com/enapt/SwarmLLM/releases).
+> **Note:** macOS binaries are compile-validated but not yet exercised in CI; treat them as best-effort until the macOS CI matrix lands. All platform binaries are on the [Releases page](https://github.com/enapt/SwarmLLM/releases).

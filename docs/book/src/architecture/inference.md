@@ -32,7 +32,7 @@ unload_model()               ─────►  kill process → OS frees all V
 
 ## Split Inference Engine
 
-The split inference engine (`src/inference/split/`) enables distributed inference using candle for direct tensor computation with quantized GGUF weights. Each node loads only its assigned transformer layers (in the worker subprocess), forwarding hidden-state activations between nodes. The module is split into: `model.rs` (SplitModel load + forward), `kv_cache.rs`, `entry.rs`, `gguf_meta.rs`, `shard_reader.rs`, `rope.rs`.
+The split inference engine (`src/inference/split/`) enables distributed inference using candle for direct tensor computation with quantized GGUF weights. Each node loads only its assigned transformer layers (in the worker subprocess), forwarding hidden-state activations between nodes. The module is split into: `model.rs` (SplitModel struct + accessors), `loader.rs` (GGUF/shard load), `executor.rs` (forward pass + tensor-parallel), `kv_cache.rs`, `entry.rs`, `gguf_meta.rs`, `shard_reader.rs`, `rope.rs`, `prefix_cache.rs`.
 
 ```
 Client → API Server → InferenceRouter → Pipeline Assembly
