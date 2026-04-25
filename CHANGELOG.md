@@ -2,6 +2,89 @@
 
 All notable changes to SwarmLLM are documented here.
 
+## [Unreleased] — post-v0.1.0
+
+Working changelog for commits after the v0.1.0 tag. Will roll into the
+next tagged release.
+
+### Performance
+
+- **zstd compression on `WIRE_TAG_PREFIX_KV`** — flag-gated via
+  `NetworkConfig::prefix_kv_compression` (default off). Send-side reuses
+  the existing tensor-compression helpers and falls back to raw when the
+  compressed form isn't smaller. Receivers always decompress regardless
+  of the flag, so flipping it on a single peer doesn't require a
+  coordinated upgrade. Expect 30–50% wire reduction on KV snapshots
+  (zero-padded regions compress well); WAN bench will decide default-on.
+- **Hot-path syscall savings** — gated per-layer `Instant::now()` in
+  `split/executor.rs` behind `tracing::enabled!(TRACE)` (28 syscalls/token
+  on a 28-layer model wasted at default log level), and same for
+  `pipeline/distributed.rs` per-token `fwd_start` behind `enabled!(DEBUG)`
+  with the matching DIAG emit dropped to debug-level for consistency.
+- **Worker IPC capacity** — bumped reader→main channel from 16 to 64 in
+  `model_worker.rs`. The admit-coalescing drain loop pulls 16/tick and a
+  single decode tick can be 100–500 ms on CPU 7B; bursts would block the
+  reader on `.send()` and delay the cross-node `PrefixFetchResult`
+  fast-path short-circuit.
+
+### Security & validation
+
+- **`/v1/responses` ingress validation** — `validate_responses_ingress`
+  runs BEFORE the cloud-proxy / Anthropic-bridge / local-inference
+  branches. Caps `previous_response_id` ≤64, `instructions` ≤2 MB,
+  `user` ≤256, `model` 1..=256, `truncation`/`service_tier` ≤64,
+  `metadata` aggregate ≤64 KB. Closes a path where attacker-sized
+  strings could reach upstream provider request bodies and log lines.
+- **`/v1/messages` `max_tokens` cap** — Anthropic handler now rejects
+  `max_tokens > 32768` (matches the local sampling-params clamp ceiling)
+  at ingress instead of silently clamping for local + forwarding raw to
+  upstream proxies.
+- **HF-proxy rate limiting** — `/api/admin/hf/probe` and
+  `/api/admin/hf/search` no longer get the loopback admin-GET exemption.
+  A runaway local script or a malicious browser extension on
+  `localhost:8800` can no longer loop-call them and burn HuggingFace
+  API quota.
+- **Pool invite-code validator** — now checks ASCII alphanumeric AND
+  length (was: length only after trim+uppercase, accepting some malformed
+  inputs silently).
+- **Identity leaderboard `?limit=`** — clamped to `[1, MAX]` (was: silent
+  empty array on `limit=0`).
+
+### CI
+
+- **macOS test + clippy** — `.github/workflows/ci.yml` matrix now runs
+  `cargo test --lib --bins` and clippy on `macos-15` in addition to
+  Linux. Integration tests stay Linux-only with explicit guards until
+  the first macOS failure decides whether to fix or skip-list per test.
+  Build job already had macOS — this closes the test-coverage gap from
+  `docs/plans/next_steps.md` § 4.
+
+### Refactor / dedup
+
+- `SharedState::resolve_peer_id_bytes` helper replaces a 5-site
+  `peer_id_map.or_else(peer_registry)` lookup duplication across
+  `inference/pipeline/{distributed,remote_generate,speculative,dsd,
+  tensor_parallel}.rs`.
+- `crypto::hkdf_sha256_derive_32` helper replaces 3 sites that
+  duplicated the same `Hkdf::new + expand + .expect("32 bytes is a
+  valid HKDF-SHA256 output length")` pattern across `provider_keys`,
+  `gossip_seal`, `session`.
+- `cli::discover_model` helper replaces a 14-line `GET /v1/models`
+  block duplicated in `bench.rs` + `chat.rs`.
+- `auto_manage::manager::read_shard_pins` helper replaces a `pool_state.try_read()`
+  + `shard_pins` extraction duplicated in `scoring.rs` + `prune.rs`.
+- `cli::bench::tokens_per_sec` and a `pub const SWARMLLM_GITHUB_REPO`
+  in `update.rs` (previously bare `"enapt/SwarmLLM"` string in two
+  places).
+- Various small stale-doc + dead-code cleanups; see commits `36af419`,
+  `c9acbfc`, `c10956e`, `ccfbf14` for the per-sweep summaries.
+
+### Tests
+
+- 821 lib tests passing (was 816 at v0.1.0). Clippy clean both feature
+  sets. Pre-push hooks enforce `cargo fmt && cargo clippy --all-targets
+  -- -D warnings` on every commit.
+
 ## v0.1.0 — 2026-04-25
 
 First non-alpha tag. Cuts off the v0.1.0-alpha.2 line and rolls every
@@ -67,10 +150,12 @@ release.
 
 ### Known deferred items (post-v0.1.0)
 
-- **libp2p 0.55 → 0.56** — needs vendor re-port (libp2p-request-
-  response 0.28 → 0.29, libp2p-gossipsub 0.48 → 0.49, libp2p-stream
-  alpha → 0.4). Tried in this session, hit incompatibility with the
-  vendored crates; needs its own session.
+- **libp2p 0.55 → 0.56** — ✅ landed post-v0.1.0 (commit `be9c32c`).
+  Vendored libp2p-request-response re-ported to upstream 0.29.0 with the
+  Tokio watchdog patch re-applied; the `confirmed`-flag patch (gotcha
+  #16) is OBSOLETE in 0.29 and was dropped. Vendored libp2p-gossipsub
+  removed entirely — upstream 0.49.4 ships the CVE-2026-33040 +
+  CVE-2026-34219 fixes our backport carried.
 - **`POST /v1/responses/compact`** — V9 of the v2 plan, deferred
   indefinitely until a concrete caller asks for it.
 - See `docs/ARCHITECTURE.md` § "Deferred Items" for the full list.
