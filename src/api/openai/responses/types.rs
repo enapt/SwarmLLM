@@ -582,18 +582,6 @@ pub struct ResponsesUsage {
     pub output_tokens_details: Option<OutputTokensDetails>,
 }
 
-impl ResponsesUsage {
-    pub fn from_counts(input: u32, output: u32) -> Self {
-        Self {
-            input_tokens: input,
-            output_tokens: output,
-            total_tokens: input + output,
-            input_tokens_details: None,
-            output_tokens_details: None,
-        }
-    }
-}
-
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct InputTokensDetails {
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -1144,10 +1144,10 @@ allowing candle to parse the full tensor index while only loading assigned layer
 ### OpenAI-Compatible (Bearer auth required)
 - `POST   /v1/chat/completions` — Chat completions (streaming + non-streaming, tool_calls + logprobs support)
 - `POST   /v1/responses` — OpenAI Responses API (gpt-5 / o-series default)
-- `GET    /v1/responses/:id` — Retrieve a stored response (30-day TTL); pass `?stream=true&starting_after={seq}` to resume a background SSE stream
-- `DELETE /v1/responses/:id` — Delete a stored response
-- `POST   /v1/responses/:id/cancel` — Cancel a background response
-- `GET    /v1/responses/:id/input_items` — Paginated list of the original input items (synthetic ids `item_N`)
+- `GET    /v1/responses/{id}` — Retrieve a stored response (30-day TTL); pass `?stream=true&starting_after={seq}` to resume a background SSE stream
+- `DELETE /v1/responses/{id}` — Delete a stored response
+- `POST   /v1/responses/{id}/cancel` — Cancel a background response
+- `GET    /v1/responses/{id}/input_items` — Paginated list of the original input items (synthetic ids `item_N`)
 - `POST   /v1/messages` — Anthropic Messages API (full Claude Code compatibility — tools, tool_choice, thinking, cache_control, metadata)
 - `POST   /v1/embeddings` — Text embeddings
 - `GET    /v1/models` — List available models
@@ -1165,10 +1165,10 @@ OpenAI-compatible Responses endpoint — the 2026 default API for o-series / gpt
 - **Streaming:** SSE with monotonic `sequence_number`. V1 of v2 plan emits `response.created` + `response.in_progress` *before* the chat handler is awaited so the lifecycle events can never be blocked by preflight inside `chat_completions` (cold worker probe, queue wait, template build). Measured first-`data:` line arrival is ~2 ms on TinyLlama CPU at warmed-up steady state (see `docs/bench_results/README.md` for the full pre/post comparison). Events: `response.created`, `response.in_progress`, `response.output_item.added`, `response.content_part.added`, `response.output_text.delta`, `response.output_text.done`, `response.content_part.done`, `response.output_item.done`, `response.function_call_arguments.delta/done`, terminal `response.completed` | `response.incomplete` | `response.failed` | `response.cancelled`.
 - **Persistence:** redb tree `responses`, 30-day TTL, hourly background sweep. `store=false` opts out.
 - **Chaining:** `previous_response_id` loads the stored record and flattens prior request.input + response.output into chat messages. Reasoning items round-trip in the stored record (so `encrypted_content` survives byte-for-byte for o-series chains) but are *not* re-injected as chat messages — local inference can't consume them and an empty assistant stub would confuse the prompt.
-- **Background:** `background=true` spawns a tokio task, returns `status="queued"` immediately; `GET /v1/responses/:id` polls; `POST /v1/responses/:id/cancel` flips the cancel flag (cancel-wins: worker's final result is discarded if cancelled).
-- **Background streaming (V8 of v2 plan):** `background=true && stream=true` returns **202 Accepted** + a `Location` header pointing at `/v1/responses/:id?stream=true&starting_after=-1`. The server runs the inference internally via a spawned task that writes every SSE event into a per-response buffer (cap 2000 events, oldest-first eviction). State lives in `BACKGROUND_STATE: DashMap<id, Arc<BackgroundState>>` (cancel flag + buffer + completion flag + `tokio::sync::Notify`).
-- **Resumable SSE (V5 of v2 plan):** `GET /v1/responses/:id?stream=true&starting_after={seq}` replays buffered events whose `sequence_number > seq`, then live-tails new events until the response is marked completed. If the response already finished and there's no live `BackgroundState`, a synthetic minimal lifecycle (`response.created` + `response.in_progress` + terminal) is built from the stored record so reconnecting clients still close cleanly.
-- **input_items pagination (V4 of v2 plan):** `GET /v1/responses/:id/input_items?after={cursor}&limit={n}&order={asc|desc}`. Synthetic ids `item_N` map to the zero-based position in the original request. Returns the OpenAI list shape `{object: "list", data: [...], first_id, last_id, has_more}`. Default limit 20, max 100. `Text` input produces a single synthetic message item.
+- **Background:** `background=true` spawns a tokio task, returns `status="queued"` immediately; `GET /v1/responses/{id}` polls; `POST /v1/responses/{id}/cancel` flips the cancel flag (cancel-wins: worker's final result is discarded if cancelled).
+- **Background streaming (V8 of v2 plan):** `background=true && stream=true` returns **202 Accepted** + a `Location` header pointing at `/v1/responses/{id}?stream=true&starting_after=-1`. The server runs the inference internally via a spawned task that writes every SSE event into a per-response buffer (cap 2000 events, oldest-first eviction). State lives in `BACKGROUND_STATE: DashMap<id, Arc<BackgroundState>>` (cancel flag + buffer + completion flag + `tokio::sync::Notify`).
+- **Resumable SSE (V5 of v2 plan):** `GET /v1/responses/{id}?stream=true&starting_after={seq}` replays buffered events whose `sequence_number > seq`, then live-tails new events until the response is marked completed. If the response already finished and there's no live `BackgroundState`, a synthetic minimal lifecycle (`response.created` + `response.in_progress` + terminal) is built from the stored record so reconnecting clients still close cleanly.
+- **input_items pagination (V4 of v2 plan):** `GET /v1/responses/{id}/input_items?after={cursor}&limit={n}&order={asc|desc}`. Synthetic ids `item_N` map to the zero-based position in the original request. Returns the OpenAI list shape `{object: "list", data: [...], first_id, last_id, has_more}`. Default limit 20, max 100. `Text` input produces a single synthetic message item.
 
 ### Anthropic Messages API (`/v1/messages`)
 Full Anthropic Messages API compatibility for use as a Claude Code backend:
@@ -1215,8 +1215,8 @@ Routes Claude model requests through a locally-authenticated `claude` CLI subpro
 - `GET     /api/admin/stats` — Node statistics + hardware info
 - `GET     /api/admin/responses` — List stored `/v1/responses` records for the dashboard (filter by `?status=…&limit=…`)
 - `GET     /api/admin/models` — Model list with shard status, VRAM estimates, acquisition state
-- `POST    /api/admin/models/:id/add` — Trigger model acquisition
-- `GET     /api/admin/models/:id/status` — Model acquisition progress
+- `POST    /api/admin/models/{id}/add` — Trigger model acquisition
+- `GET     /api/admin/models/{id}/status` — Model acquisition progress
 - `GET     /api/admin/peers` — Connected peers with latency/trust
 - `GET     /api/admin/credits` — Credit balance and tier info
 - `GET     /api/admin/shard-storage` — Per-model storage breakdown, disk/VRAM usage
@@ -1229,7 +1229,7 @@ Routes Claude model requests through a locally-authenticated `claude` CLI subpro
 - `GET  /api/admin/hf/probe?repo_id=...&filename=...` — Probe remote GGUF (size, shard layout)
 - `POST /api/admin/hf/download` — Download full GGUF model
 - `POST /api/admin/hf/download-shards` — Download specific shard indices (supports `peer_fair_share` for smart distribution)
-- `GET  /api/admin/hf/source/:model_id` — Lookup HuggingFace source info for a model
+- `GET  /api/admin/hf/source/{model_id}` — Lookup HuggingFace source info for a model
 
 ### Identity API
 - `GET/PUT/DELETE /api/identity/nickname` — Manage local nickname
@@ -1258,19 +1258,19 @@ Routes Claude model requests through a locally-authenticated `claude` CLI subpro
 ### Utility
 - `POST   /api/admin/shutdown` — Gracefully shut down the node (localhost only)
 - `POST   /api/admin/config/reload` — Hot-reload operational config parameters
-- `POST   /api/admin/downloads/:model_id/cancel` — Cancel in-progress HF download
-- `DELETE /api/admin/models/:model_id` — Remove model (shards + manifest + state)
-- `POST   /api/admin/models/:id/unload` — Unload model from VRAM (keep shards on disk)
-- `DELETE /api/admin/models/:id/shards/:index` — Delete a single shard
-- `GET/PUT /api/admin/models/:id/auto-manage` — Per-model auto-manage policy (incl. prune toggle)
-- `PUT    /api/admin/models/:id/shards/:index/lock` — Lock/unlock a shard (prevent auto-pruning)
-- `POST   /api/admin/models/:id/shards/:index/download` — Download a single shard from P2P network
-- `POST   /api/admin/models/:id/shards/:index/load` — Load a shard into memory (expands shard window, restarts worker)
-- `POST   /api/admin/models/:id/shards/:index/unload` — Unload a shard from memory (narrows shard window, restarts worker, frees RAM/VRAM)
+- `POST   /api/admin/downloads/{model_id}/cancel` — Cancel in-progress HF download
+- `DELETE /api/admin/models/{model_id}` — Remove model (shards + manifest + state)
+- `POST   /api/admin/models/{id}/unload` — Unload model from VRAM (keep shards on disk)
+- `DELETE /api/admin/models/{id}/shards/{index}` — Delete a single shard
+- `GET/PUT /api/admin/models/{id}/auto-manage` — Per-model auto-manage policy (incl. prune toggle)
+- `PUT    /api/admin/models/{id}/shards/{index}/lock` — Lock/unlock a shard (prevent auto-pruning)
+- `POST   /api/admin/models/{id}/shards/{index}/download` — Download a single shard from P2P network
+- `POST   /api/admin/models/{id}/shards/{index}/load` — Load a shard into memory (expands shard window, restarts worker)
+- `POST   /api/admin/models/{id}/shards/{index}/unload` — Unload a shard from memory (narrows shard window, restarts worker, frees RAM/VRAM)
 - `GET/PUT /api/admin/schedule` — Resource schedule management
 - `GET    /api/admin/prune-history` — Recent auto-prune events
 - `GET/POST /api/admin/adapters` — List/register LoRA adapters
-- `DELETE /api/admin/adapters/:id` — Delete a LoRA adapter
+- `DELETE /api/admin/adapters/{id}` — Delete a LoRA adapter
 - `GET/PUT /api/admin/providers` — View/configure cloud provider API keys
 - `GET    /api/admin/provider-models` — List models available from cloud providers
 - `GET    /api/admin/provider-health` — Probe cloud provider availability
@@ -1279,10 +1279,10 @@ Routes Claude model requests through a locally-authenticated `claude` CLI subpro
 - `POST   /api/admin/update/check` — Check for new SwarmLLM releases
 - `POST   /api/admin/update/apply` — Download and apply update
 - `GET    /api/admin/network-map` — Network topology heatmap data
-- `GET    /api/admin/models/:id/metadata` — GGUF metadata (context length, quantization, layers)
-- `GET/PUT /api/admin/models/:id/encrypted-pipeline` — Per-model encrypted pipeline policy
+- `GET    /api/admin/models/{id}/metadata` — GGUF metadata (context length, quantization, layers)
+- `GET/PUT /api/admin/models/{id}/encrypted-pipeline` — Per-model encrypted pipeline policy
 - `POST   /api/admin/rescan-shards` — Hot-reload shard files from disk without restart
-- `GET/PUT /api/admin/pools/:id/rates` — Get/set credit rate configuration for a pool
+- `GET/PUT /api/admin/pools/{id}/rates` — Get/set credit rate configuration for a pool
 - `GET    /metrics` — Prometheus/OpenMetrics endpoint (no auth)
 - `GET    /health/ready` — Readiness probe with subsystem status (no auth)
 

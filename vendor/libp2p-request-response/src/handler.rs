@@ -23,7 +23,6 @@ pub(crate) mod protocol;
 use std::{
     collections::VecDeque,
     fmt, io,
-    pin::Pin,
     sync::{
         atomic::{AtomicU64, Ordering},
         Arc,
@@ -83,6 +82,7 @@ where
 
     worker_streams: futures_bounded::FuturesMap<RequestId, Result<Event<TCodec>, io::Error>>,
 
+    // ─────── SwarmLLM patch (gotcha #13: futures_timer::Delay unreliable on WSL2/Tokio) ───────
     /// Tracks when each entry in `requested_outbound` was submitted (FIFO order).
     /// Used by the Tokio-based watchdog to detect requests stuck waiting for a yamux
     /// substream — the `futures_timer::Delay` used by libp2p-swarm's `SubstreamRequested`
@@ -91,10 +91,11 @@ where
 
     /// Tokio interval that wakes the handler every 5s so it can check for stuck
     /// `requested_outbound` entries even when the yamux muxer is not waking us.
-    watchdog: Pin<Box<tokio::time::Interval>>,
+    watchdog: std::pin::Pin<Box<tokio::time::Interval>>,
 
     /// The substream timeout used for the watchdog (mirrors the SubstreamProtocol timeout).
     substream_timeout: Duration,
+    // ─────── /SwarmLLM patch ───────
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -115,6 +116,9 @@ where
         max_concurrent_streams: usize,
     ) -> Self {
         let (inbound_sender, inbound_receiver) = mpsc::channel(0);
+        // SwarmLLM patch (gotcha #13): Tokio interval drives the watchdog
+        // so stuck requested_outbound entries get cleared even when the
+        // yamux muxer is not waking the handler.
         let mut watchdog = tokio::time::interval(Duration::from_secs(5));
         watchdog.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         Self {
@@ -200,13 +204,8 @@ where
             .requested_outbound
             .pop_front()
             .expect("negotiated a stream without a pending message");
+        // SwarmLLM patch (gotcha #13): keep watchdog FIFO in sync.
         self.requested_outbound_times.pop_front();
-        tracing::debug!(
-            request_id = ?message.request_id,
-            remaining_requested = self.requested_outbound.len(),
-            worker_streams = self.worker_streams.len(),
-            "RR-HANDLER: on_fully_negotiated_outbound — substream ready"
-        );
 
         let mut codec = self.codec.clone();
         let request_id = message.request_id;
@@ -231,7 +230,7 @@ where
         {
             self.pending_events.push_back(Event::OutboundStreamFailed {
                 request_id: message.request_id,
-                error: io::Error::new(io::ErrorKind::Other, "max sub-streams reached"),
+                error: io::Error::other("max sub-streams reached"),
             });
         }
     }
@@ -247,16 +246,8 @@ where
             .requested_outbound
             .pop_front()
             .expect("negotiated a stream without a pending message");
+        // SwarmLLM patch (gotcha #13): keep watchdog FIFO in sync.
         self.requested_outbound_times.pop_front();
-
-        tracing::warn!(
-            request_id = ?message.request_id,
-            error = ?error,
-            pending_outbound = self.pending_outbound.len(),
-            requested_outbound = self.requested_outbound.len(),
-            worker_streams = self.worker_streams.len(),
-            "RR-HANDLER: on_dial_upgrade_error — substream negotiation failed"
-        );
 
         match error {
             StreamUpgradeError::Timeout => {
@@ -272,8 +263,6 @@ where
                 self.pending_events
                     .push_back(Event::OutboundUnsupportedProtocols(message.request_id));
             }
-            // TODO: remove when Rust 1.82 is MSRV
-            #[allow(unreachable_patterns)]
             StreamUpgradeError::Apply(e) => libp2p_core::util::unreachable(e),
             StreamUpgradeError::Io(e) => {
                 self.pending_events.push_back(Event::OutboundStreamFailed {
@@ -290,8 +279,6 @@ where
             <Self as ConnectionHandler>::InboundProtocol,
         >,
     ) {
-        // TODO: remove when Rust 1.82 is MSRV
-        #[allow(unreachable_patterns)]
         libp2p_core::util::unreachable(error)
     }
 }
@@ -423,27 +410,21 @@ where
     }
 
     fn on_behaviour_event(&mut self, request: Self::FromBehaviour) {
-        tracing::debug!(
-            request_id = ?request.request_id,
-            pending_outbound_before = self.pending_outbound.len(),
-            worker_streams_len = self.worker_streams.len(),
-            requested_outbound = self.requested_outbound.len(),
-            pending_events = self.pending_events.len(),
-            "RR-HANDLER: on_behaviour_event — pushing to pending_outbound"
-        );
         self.pending_outbound.push_back(request);
     }
 
+    #[tracing::instrument(level = "trace", name = "ConnectionHandler::poll", skip(self, cx))]
     fn poll(
         &mut self,
         cx: &mut Context<'_>,
     ) -> Poll<ConnectionHandlerEvent<Protocol<TCodec::Protocol>, (), Self::ToBehaviour>> {
-        // Watchdog: check for requests stuck in requested_outbound longer than
-        // the substream timeout. The libp2p-swarm SubstreamRequested uses
-        // futures_timer::Delay which doesn't reliably fire in Tokio runtimes
-        // (especially on WSL2). This Tokio-based interval ensures we still
-        // detect and fail stuck requests.
-        if self.watchdog.poll_tick(cx).is_ready() && !self.requested_outbound.is_empty() {
+        // SwarmLLM patch (gotcha #13): check for requests stuck in
+        // requested_outbound longer than the substream timeout. The
+        // libp2p-swarm SubstreamRequested uses futures_timer::Delay which
+        // doesn't reliably fire in Tokio runtimes (especially on WSL2).
+        // This Tokio-based interval ensures we still detect + fail stuck
+        // requests.
+        if self.watchdog.as_mut().poll_tick(cx).is_ready() && !self.requested_outbound.is_empty() {
             let now = std::time::Instant::now();
             while let Some(&submitted_at) = self.requested_outbound_times.front() {
                 if now.duration_since(submitted_at) > self.substream_timeout {
@@ -517,14 +498,12 @@ where
         // Emit outbound requests.
         if let Some(request) = self.pending_outbound.pop_front() {
             let protocols = request.protocols.clone();
-            tracing::debug!(
-                request_id = ?request.request_id,
-                remaining_outbound = self.pending_outbound.len(),
-                requested_outbound = self.requested_outbound.len(),
-                "RR-HANDLER: returning OutboundSubstreamRequest"
-            );
             self.requested_outbound.push_back(request);
-            self.requested_outbound_times.push_back(std::time::Instant::now());
+            // SwarmLLM patch (gotcha #13): record submit time so the
+            // watchdog above can detect stuck requests in FIFO order.
+            self.requested_outbound_times
+                .push_back(std::time::Instant::now());
+
             return Poll::Ready(ConnectionHandlerEvent::OutboundSubstreamRequest {
                 protocol: SubstreamProtocol::new(Protocol { protocols }, ()),
             });
@@ -534,16 +513,6 @@ where
 
         if self.pending_outbound.capacity() > EMPTY_QUEUE_SHRINK_THRESHOLD {
             self.pending_outbound.shrink_to_fit();
-        }
-
-        // Log when handler goes Pending with requests waiting for substream allocation.
-        // This means yamux hasn't provided an outbound substream yet for these requests.
-        if !self.requested_outbound.is_empty() {
-            tracing::debug!(
-                requested_outbound = self.requested_outbound.len(),
-                worker_streams = self.worker_streams.len(),
-                "RR-HANDLER: poll Pending — waiting for yamux outbound substream"
-            );
         }
 
         Poll::Pending
@@ -563,8 +532,6 @@ where
             ConnectionEvent::DialUpgradeError(dial_upgrade_error) => {
                 self.on_dial_upgrade_error(dial_upgrade_error)
             }
-            // TODO: remove when Rust 1.82 is MSRV
-            #[allow(unreachable_patterns)]
             ConnectionEvent::ListenUpgradeError(listen_upgrade_error) => {
                 self.on_listen_upgrade_error(listen_upgrade_error)
             }

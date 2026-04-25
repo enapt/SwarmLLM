@@ -13,7 +13,7 @@
 edition = "2021"
 rust-version = "1.83.0"
 name = "libp2p-request-response"
-version = "0.28.0"
+version = "0.29.0"
 authors = ["Parity Technologies <admin@parity.io>"]
 build = false
 autolib = false
@@ -37,6 +37,18 @@ repository = "https://github.com/libp2p/rust-libp2p"
 
 [package.metadata.docs.rs]
 all-features = true
+
+[features]
+cbor = [
+    "dep:serde",
+    "dep:cbor4ii",
+    "libp2p-swarm/macros",
+]
+json = [
+    "dep:serde",
+    "dep:serde_json",
+    "libp2p-swarm/macros",
+]
 
 [lib]
 name = "libp2p_request_response"
@@ -72,13 +84,13 @@ version = "0.3.30"
 version = "0.2.4"
 
 [dependencies.libp2p-core]
-version = "0.43.0"
+version = "0.43.1"
 
 [dependencies.libp2p-identity]
-version = "0.2.10"
+version = "0.2.12"
 
 [dependencies.libp2p-swarm]
-version = "0.46.0"
+version = "0.47.0"
 
 [dependencies.rand]
 version = "0.8"
@@ -94,19 +106,19 @@ optional = true
 [dependencies.smallvec]
 version = "1.13.2"
 
-[dependencies.tokio]
-version = "1"
-features = ["time"]
-
 [dependencies.tracing]
 version = "0.1.41"
 
+# SwarmLLM patch (gotcha #13): the handler needs tokio::time::Interval
+# for its Tokio-driven watchdog (futures_timer::Delay used by upstream
+# libp2p-swarm SubstreamRequested doesn't reliably fire on WSL2/Tokio).
+[dependencies.tokio]
+version = "1"
+features = ["time"]
+default-features = false
+
 [dev-dependencies.anyhow]
 version = "1.0.86"
-
-[dev-dependencies.async-std]
-version = "1.6.2"
-features = ["attributes"]
 
 [dev-dependencies.futures_ringbuf]
 version = "0.4.0"
@@ -118,21 +130,18 @@ version = "0.8"
 version = "1.0"
 features = ["derive"]
 
+[dev-dependencies.tokio]
+version = "1.38"
+features = [
+    "macros",
+    "rt-multi-thread",
+    "time",
+]
+default-features = false
+
 [dev-dependencies.tracing-subscriber]
 version = "0.3.19"
 features = ["env-filter"]
-
-[features]
-cbor = [
-    "dep:serde",
-    "dep:cbor4ii",
-    "libp2p-swarm/macros",
-]
-json = [
-    "dep:serde",
-    "dep:serde_json",
-    "libp2p-swarm/macros",
-]
 
 [lints.clippy]
 dbg_macro = "warn"

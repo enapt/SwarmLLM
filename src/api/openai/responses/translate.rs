@@ -28,9 +28,9 @@ use crate::error::SwarmError;
 use crate::types::Role;
 
 /// Default `max_tokens` when the caller did not set `max_output_tokens`.
-/// Matches `crate::api::openai::types::default_max_tokens` so behaviour
-/// lines up between the two endpoints.
-const DEFAULT_MAX_TOKENS: u32 = 2048;
+/// Re-export of the shared constant from `super` so the chat-translation
+/// path uses the same default as the local + Anthropic skeleton sites.
+const DEFAULT_MAX_TOKENS: u32 = super::DEFAULT_MAX_OUTPUT_TOKENS;
 const DEFAULT_TEMPERATURE: f32 = 0.7;
 const DEFAULT_TOP_P: f32 = 0.9;
 

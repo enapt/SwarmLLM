@@ -73,6 +73,11 @@ const MAX_CHAT_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 static BACKGROUND_CANCEL: std::sync::LazyLock<DashMap<String, Arc<AtomicBool>>> =
     std::sync::LazyLock::new(DashMap::new);
 
+/// Default `max_output_tokens` when the caller didn't specify one.
+/// Single source of truth for the four response-skeleton sites — keep
+/// in sync if upstream OpenAI changes their default.
+pub(super) const DEFAULT_MAX_OUTPUT_TOKENS: u32 = 2048;
+
 /// Build a `ResponsesResponse` skeleton from a request — used by every
 /// path that needs to emit a response object before inference produces
 /// any content. Status is parameterized: `InProgress` for the lifecycle
@@ -107,7 +112,7 @@ pub(super) fn build_response_skeleton(
         parallel_tool_calls: req.parallel_tool_calls,
         temperature: Some(req.temperature.unwrap_or(0.7)),
         top_p: Some(req.top_p.unwrap_or(0.9)),
-        max_output_tokens: Some(req.max_output_tokens.unwrap_or(2048)),
+        max_output_tokens: Some(req.max_output_tokens.unwrap_or(DEFAULT_MAX_OUTPUT_TOKENS)),
         truncation: req.truncation.clone(),
         metadata: req.metadata.clone(),
         user: req.user.clone(),

@@ -740,7 +740,11 @@ where
             parallel_tool_calls: original.parallel_tool_calls,
             temperature: Some(original.temperature.unwrap_or(0.7)),
             top_p: Some(original.top_p.unwrap_or(0.9)),
-            max_output_tokens: Some(original.max_output_tokens.unwrap_or(2048)),
+            max_output_tokens: Some(
+                original
+                    .max_output_tokens
+                    .unwrap_or(super::DEFAULT_MAX_OUTPUT_TOKENS),
+            ),
             truncation: original.truncation.clone(),
             metadata: original.metadata.clone(),
             user: original.user.clone(),

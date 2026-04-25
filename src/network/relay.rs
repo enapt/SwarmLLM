@@ -118,17 +118,29 @@ pub fn handle_relay_server_event(
                 "Relay circuit closed"
             );
         }
-        // NET-M6: Log relay denial events at warn level
-        Event::ReservationReqDenied { src_peer_id } => {
-            tracing::warn!(peer = %src_peer_id, "Relay reservation denied");
+        // NET-M6: Log relay denial events at warn level. libp2p 0.56 added
+        // a `status` field describing the denial reason (rate-limit /
+        // resource-cap / explicit reject) — surface it in logs so operators
+        // can tell apart the categories.
+        Event::ReservationReqDenied {
+            src_peer_id,
+            status,
+        } => {
+            tracing::warn!(
+                peer = %src_peer_id,
+                ?status,
+                "Relay reservation denied"
+            );
         }
         Event::CircuitReqDenied {
             src_peer_id,
             dst_peer_id,
+            status,
         } => {
             tracing::warn!(
                 src = %src_peer_id,
                 dst = %dst_peer_id,
+                ?status,
                 "Relay circuit denied"
             );
         }

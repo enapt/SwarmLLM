@@ -38,9 +38,9 @@ use crate::error::{ApiError, SwarmError};
 /// translation. Mirrors the 16 MiB cap used elsewhere.
 const MAX_UPSTREAM_BYTES: usize = 16 * 1024 * 1024;
 
-/// Anthropic's `max_tokens` is a required field. Mirror the Responses
-/// default if the caller didn't set `max_output_tokens`.
-const DEFAULT_MAX_TOKENS: u32 = 2048;
+/// Anthropic's `max_tokens` is a required field. Mirror the shared
+/// Responses default if the caller didn't set `max_output_tokens`.
+const DEFAULT_MAX_TOKENS: u32 = super::DEFAULT_MAX_OUTPUT_TOKENS;
 
 // ============================================================================
 // Request: Responses → Messages
@@ -795,7 +795,9 @@ async fn proxy_anthropic_responses_stream(
 
     Ok(axum::response::sse::Sse::new(sse_stream)
         .keep_alive(
-            axum::response::sse::KeepAlive::new().interval(std::time::Duration::from_secs(15)),
+            axum::response::sse::KeepAlive::new().interval(std::time::Duration::from_secs(
+                super::stream::SSE_KEEPALIVE_INTERVAL_SECS,
+            )),
         )
         .into_response())
 }

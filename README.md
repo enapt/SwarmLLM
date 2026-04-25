@@ -10,7 +10,7 @@ Decentralized peer-to-peer LLM inference network. A single Rust binary that shar
 
 **Join the swarm. Run AI together — for free.**
 
-> **Status:** Alpha — actively developed, moving into broader testing. Distributed inference stable and tested on multi-node deployments. Most recent headline: cross-node prefix-KV sharing delivers a **12.9× iter-1 TTFT speedup** on 7B prompts when a peer has the same prefix cached (Round 6 bench, 2026-04-20); Windows release binaries validated at Linux parity (Round 8, 2026-04-23). 788 tests, continuous security sweeps. [Report issues](https://github.com/enapt/SwarmLLM/issues).
+> **Status:** Alpha — actively developed, moving into broader testing. Distributed inference stable and tested on multi-node deployments. Most recent headline: cross-node prefix-KV sharing delivers a **12.9× iter-1 TTFT speedup** on 7B prompts when a peer has the same prefix cached (Round 6 bench, 2026-04-20); Windows release binaries validated at Linux parity (Round 8, 2026-04-23). 816 tests, continuous security sweeps. [Report issues](https://github.com/enapt/SwarmLLM/issues).
 
 ---
 
@@ -511,7 +511,7 @@ See the full [mdBook documentation](docs/book/) for detailed guides on networkin
 
 SwarmLLM was developed collaboratively between a human developer and Claude (Anthropic's AI). The entire codebase — Rust backend, JavaScript frontend, P2P networking, distributed inference pipeline, credit system, security hardening, and documentation — was written by Claude Code. The human developer provided architecture direction, testing, and review, but zero lines of code were manually written.
 
-This is an honest disclosure. The project has been through rigorous QA: 771 passing tests, continuous multi-agent code sweeps, security auditing, and multi-node distributed inference tested on real networks. Every commit passes `cargo fmt`, `cargo clippy -- -D warnings`, and the full test suite before push.
+This is an honest disclosure. The project has been through rigorous QA: 816 passing tests, continuous multi-agent code sweeps, security auditing, and multi-node distributed inference tested on real networks. Every commit passes `cargo fmt`, `cargo clippy -- -D warnings`, and the full test suite before push.
 
 We believe AI-assisted development should be transparent. Judge the code on its technical merit — contributions, scrutiny, and feedback are all welcome.
 

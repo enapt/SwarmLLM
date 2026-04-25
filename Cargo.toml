@@ -7,6 +7,9 @@ exclude = [
     "vendor/candle",
     "vendor/float8",
 ]
+# Note: vendor/libp2p-gossipsub was removed in libp2p 0.55→0.56 upgrade —
+# upstream libp2p-gossipsub 0.49.4 ships the CVE-2026-33040 + CVE-2026-34219
+# fixes our backport carried, so the vendor is no longer needed.
 
 [package]
 name = "swarmllm"
@@ -36,7 +39,7 @@ path = "src/bin/launcher.rs"
 tokio = { version = "1", features = ["full"] }
 
 # P2P Networking
-libp2p = { version = "0.55", features = [
+libp2p = { version = "0.56", features = [
     "tokio",
     "quic",
     "kad",
@@ -54,7 +57,7 @@ libp2p = { version = "0.55", features = [
     "serde",
     "mdns",
 ] }
-libp2p-stream = "0.3.0-alpha"
+libp2p-stream = "0.4.0-alpha"
 
 # HTTP server
 axum = { version = "0.8", features = ["ws"] }
@@ -223,14 +226,12 @@ path = "tests/integration/test_yamux_substream.rs"
 
 [patch.crates-io]
 libp2p-request-response = { path = "vendor/libp2p-request-response" }
-# Vendor of libp2p-gossipsub 0.48.0 with CVE-2026-33040 + CVE-2026-34219
-# backported (clamp peer-supplied PRUNE.backoff Duration + checked_add in
-# heartbeat expiry). Both are remote panic/DoS vulnerabilities reachable by
-# any mesh peer with no auth. Upstream fixed them in 0.49.3 / 0.49.4, but
-# that release track requires libp2p 0.56; until the umbrella upgrade, this
-# vendor keeps the 0.48 API while closing the DoS. See
-# vendor/libp2p-gossipsub/src/backoff.rs for the annotated diffs.
-libp2p-gossipsub = { path = "vendor/libp2p-gossipsub" }
+# vendor/libp2p-gossipsub was removed in the libp2p 0.55→0.56 upgrade.
+# Upstream libp2p-gossipsub 0.49.4 (commits ae3acad / 4e57d34) ships the
+# CVE-2026-33040 (PRUNE.backoff Duration overflow, GHSA-gc42-3jg7-rxr2)
+# and CVE-2026-34219 (heartbeat Instant overflow, GHSA-xqmp-fxgv-xvq5)
+# fixes our backport carried, so the `[patch.crates-io]` entry is no
+# longer needed.
 # Upstream candle 0.10.1 hardcodes `cudarc/dynamic-linking` in its
 # Cargo.toml, preventing downstream consumers from choosing a different
 # linking mode (e.g. `dynamic-loading` so the binary can ship the NVIDIA

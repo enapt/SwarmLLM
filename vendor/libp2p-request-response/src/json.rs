@@ -21,6 +21,15 @@
 /// A request-response behaviour using [`serde_json`] for serializing and deserializing the
 /// messages.
 ///
+/// # Default Size Limits
+///
+/// The codec uses the following default size limits:
+/// - Maximum request size: 1,048,576 bytes (1 MiB)
+/// - Maximum response size: 10,485,760 bytes (10 MiB)
+///
+/// These limits can be customized with [`codec::Codec::set_request_size_maximum`]
+/// and [`codec::Codec::set_response_size_maximum`].
+///
 /// # Example
 ///
 /// ```
@@ -46,7 +55,7 @@
 /// ```
 pub type Behaviour<Req, Resp> = crate::Behaviour<codec::Codec<Req, Resp>>;
 
-mod codec {
+pub mod codec {
     use std::{io, marker::PhantomData};
 
     use async_trait::async_trait;
@@ -175,7 +184,7 @@ mod tests {
 
     use crate::Codec;
 
-    #[async_std::test]
+    #[tokio::test]
     async fn test_codec() {
         let expected_request = TestRequest {
             payload: "test_payload".to_string(),

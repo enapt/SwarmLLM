@@ -93,13 +93,17 @@ impl BackgroundState {
     /// The buffer is capped at EVENT_BUFFER_CAP; when full, the oldest
     /// events are dropped first.
     async fn push(&self, event: BufferedEvent) {
-        let mut events = self.events.lock().await;
-        if events.len() >= EVENT_BUFFER_CAP {
-            // Drop the oldest event. `remove(0)` is O(n) but n is small
-            // (2000) and writes are infrequent.
-            events.remove(0);
+        {
+            let mut events = self.events.lock().await;
+            if events.len() >= EVENT_BUFFER_CAP {
+                // Drop the oldest event. `remove(0)` is O(n) but n is small
+                // (2000) and writes are infrequent.
+                events.remove(0);
+            }
+            events.push(event);
+            // Drop the guard before notifying so woken resumers don't
+            // immediately contend on the same lock.
         }
-        events.push(event);
         self.notify.notify_waiters();
     }
 
@@ -411,6 +415,18 @@ fn serve_resume_stream(state: Arc<BackgroundState>, after: i64) -> Response {
         let mut last_seen = after;
 
         loop {
+            // Register the notification future *before* checking the
+            // event buffer. Tokio's Notify only wakes already-registered
+            // waiters, so a producer call to notify_waiters() between
+            // our events_after() check and our notified().await would
+            // otherwise be a lost-wakeup, stalling this resumer for up
+            // to RESUME_STREAM_MAX_IDLE_SECS. The standard idiom is:
+            //   register → check → drain → await
+            // — by the time we await, any push that happened after we
+            // registered will fire the future immediately.
+            let notified = state.notify.notified();
+            tokio::pin!(notified);
+
             let pending = state.events_after(last_seen).await;
             for ev in pending {
                 last_seen = ev.sequence_number as i64;
@@ -431,7 +447,7 @@ fn serve_resume_stream(state: Arc<BackgroundState>, after: i64) -> Response {
             // entry can't keep this connection open forever.
             let wait = tokio::time::timeout(
                 std::time::Duration::from_secs(RESUME_STREAM_MAX_IDLE_SECS),
-                state.notify.notified(),
+                notified.as_mut(),
             )
             .await;
             if wait.is_err() {

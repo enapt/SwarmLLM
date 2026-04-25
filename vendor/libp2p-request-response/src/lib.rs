@@ -88,9 +88,9 @@ pub use handler::ProtocolSupport;
 use libp2p_core::{transport::PortUse, ConnectedPoint, Endpoint, Multiaddr};
 use libp2p_identity::PeerId;
 use libp2p_swarm::{
-    behaviour::{AddressChange, ConnectionClosed, ConnectionEstablished, DialFailure, FromSwarm},
+    behaviour::{AddressChange, ConnectionClosed, DialFailure, FromSwarm},
     dial_opts::DialOpts,
-    ConnectionDenied, ConnectionHandler, ConnectionId, NetworkBehaviour, NotifyHandler,
+    ConnectionDenied, ConnectionHandler, ConnectionId, DialError, NetworkBehaviour, NotifyHandler,
     PeerAddresses, THandler, THandlerInEvent, THandlerOutEvent, ToSwarm,
 };
 use smallvec::SmallVec;
@@ -427,12 +427,26 @@ where
     /// connection is established.
     ///
     /// > **Note**: In order for such a dialing attempt to succeed,
-    /// > the `RequestResonse` protocol must either be embedded
+    /// > the `RequestResponse` protocol must either be embedded
     /// > in another `NetworkBehaviour` that provides peer and
     /// > address discovery, or known addresses of peers must be
-    /// > managed via [`Behaviour::add_address`] and
-    /// > [`Behaviour::remove_address`].
+    /// > managed via [`libp2p_swarm::Swarm::add_peer_address`].
+    /// > Addresses are automatically removed when dial attempts
+    /// > to them fail.
+    /// > Alternatively, [`Behaviour::send_request_with_addresses`]
+    /// > can be used.
     pub fn send_request(&mut self, peer: &PeerId, request: TCodec::Request) -> OutboundRequestId {
+        self.send_request_with_addresses(peer, request, Vec::new())
+    }
+
+    /// Like [`Behaviour::send_request`], but additionally using the provided addresses
+    /// if a connection needs to be established.
+    pub fn send_request_with_addresses(
+        &mut self,
+        peer: &PeerId,
+        request: TCodec::Request,
+        addresses: Vec<Multiaddr>,
+    ) -> OutboundRequestId {
         let request_id = self.next_outbound_request_id();
         let request = OutboundMessage {
             request_id,
@@ -442,7 +456,10 @@ where
 
         if let Some(request) = self.try_send_request(peer, request) {
             self.pending_events.push_back(ToSwarm::Dial {
-                opts: DialOpts::peer_id(*peer).build(),
+                opts: DialOpts::peer_id(*peer)
+                    .addresses(addresses)
+                    .extend_addresses_through_behaviour()
+                    .build(),
             });
             self.pending_outbound_requests
                 .entry(*peer)
@@ -491,10 +508,10 @@ where
         self.addresses.remove(peer, address);
     }
 
-    /// Checks whether a peer is currently connected (has at least one confirmed connection).
+    /// Checks whether a peer is currently connected.
     pub fn is_connected(&self, peer: &PeerId) -> bool {
         if let Some(connections) = self.connected.get(peer) {
-            connections.iter().any(|c| c.confirmed)
+            !connections.is_empty()
         } else {
             false
         }
@@ -552,46 +569,11 @@ where
         request: OutboundMessage<TCodec>,
     ) -> Option<OutboundMessage<TCodec>> {
         if let Some(connections) = self.connected.get_mut(peer) {
-            // Only route to confirmed connections. Unconfirmed entries were
-            // added by preload_new_handler() for connections that may have been
-            // denied by connection_limits (stale ConnectionIds whose
-            // NotifyHandler events are silently dropped by the swarm).
-            let confirmed: Vec<usize> = connections
-                .iter()
-                .enumerate()
-                .filter(|(_, c)| c.confirmed)
-                .map(|(i, _)| i)
-                .collect();
-            if confirmed.is_empty() {
-                tracing::trace!(
-                    %peer,
-                    request_id = %request.request_id,
-                    total = connections.len(),
-                    "RR-BEHAVIOUR: try_send_request — no confirmed connections"
-                );
+            if connections.is_empty() {
                 return Some(request);
             }
-            let ix = (request.request_id.0 as usize) % confirmed.len();
-            let conn_idx = confirmed[ix];
-            let conn_id = connections[conn_idx].id;
-            let pending_out = connections[conn_idx].pending_outbound_responses.len();
-            let pending_in = connections[conn_idx].pending_inbound_responses.len();
-            let all_conn_ids: Vec<_> = connections.iter().map(|c| {
-                format!("{:?}({})", c.id, if c.confirmed { "ok" } else { "stale" })
-            }).collect();
-            tracing::trace!(
-                %peer,
-                request_id = %request.request_id,
-                ?conn_id,
-                num_confirmed = confirmed.len(),
-                total_connections = connections.len(),
-                selected_index = ix,
-                pending_outbound = pending_out,
-                pending_inbound = pending_in,
-                ?all_conn_ids,
-                "RR-BEHAVIOUR: try_send_request — routing to confirmed handler"
-            );
-            let conn = &mut connections[conn_idx];
+            let ix = (request.request_id.0 as usize) % connections.len();
+            let conn = &mut connections[ix];
             conn.pending_outbound_responses.insert(request.request_id);
             self.pending_events.push_back(ToSwarm::NotifyHandler {
                 peer_id: *peer,
@@ -600,11 +582,6 @@ where
             });
             None
         } else {
-            tracing::trace!(
-                %peer,
-                request_id = %request.request_id,
-                "RR-BEHAVIOUR: try_send_request — peer NOT in connected map"
-            );
             Some(request)
         }
     }
@@ -687,17 +664,6 @@ where
             ..
         }: ConnectionClosed,
     ) {
-        let all_ids: Vec<_> = self.connected.get(&peer_id)
-            .map(|v| v.iter().map(|c| format!("{:?}", c.id)).collect())
-            .unwrap_or_default();
-        tracing::trace!(
-            %peer_id,
-            ?connection_id,
-            remaining_established,
-            ?all_ids,
-            "RR-BEHAVIOUR: on_connection_closed"
-        );
-
         let connections = self
             .connected
             .get_mut(&peer_id)
@@ -740,9 +706,13 @@ where
         DialFailure {
             peer_id,
             connection_id,
-            ..
+            error,
         }: DialFailure,
     ) {
+        if let DialError::DialPeerConditionFalse(_) = error {
+            // Dial-condition fails because there is already another ongoing dial.
+            return;
+        }
         if let Some(peer) = peer_id {
             // If there are pending outgoing requests when a dial failure occurs,
             // it is implied that we are not connected to the peer, since pending
@@ -773,19 +743,6 @@ where
         connection_id: ConnectionId,
         remote_address: Option<Multiaddr>,
     ) {
-        let existing_count = self.connected.get(&peer).map(|v| v.len()).unwrap_or(0);
-        let existing_ids: Vec<_> = self.connected.get(&peer)
-            .map(|v| v.iter().map(|c| format!("{:?}", c.id)).collect())
-            .unwrap_or_default();
-        tracing::trace!(
-            %peer,
-            ?connection_id,
-            ?remote_address,
-            existing_connections = existing_count,
-            ?existing_ids,
-            "RR-BEHAVIOUR: preload_new_handler — registering connection"
-        );
-
         let mut connection = Connection::new(connection_id, remote_address);
 
         if let Some(pending_requests) = self.pending_outbound_requests.remove(&peer) {
@@ -835,9 +792,8 @@ where
         _addresses: &[Multiaddr],
         _effective_role: Endpoint,
     ) -> Result<Vec<Multiaddr>, ConnectionDenied> {
-        let peer = match maybe_peer {
-            None => return Ok(vec![]),
-            Some(peer) => peer,
+        let Some(peer) = maybe_peer else {
+            return Ok(vec![]);
         };
 
         let mut addresses = Vec::new();
@@ -880,40 +836,7 @@ where
     fn on_swarm_event(&mut self, event: FromSwarm) {
         self.addresses.on_swarm_event(&event);
         match event {
-            FromSwarm::ConnectionEstablished(ConnectionEstablished {
-                peer_id,
-                connection_id,
-                ..
-            }) => {
-                // Mark the connection as confirmed. preload_new_handler() adds
-                // entries to `connected` before connection_limits can deny the
-                // connection. Only confirmed connections should be used for
-                // routing in try_send_request().
-                if let Some(connections) = self.connected.get_mut(&peer_id) {
-                    if let Some(conn) = connections.iter_mut().find(|c| c.id == connection_id) {
-                        conn.confirmed = true;
-                        tracing::debug!(
-                            %peer_id,
-                            ?connection_id,
-                            total = connections.len(),
-                            "RR-BEHAVIOUR: connection confirmed"
-                        );
-                    }
-                    // Prune unconfirmed connections for this peer — they were
-                    // added by preload_new_handler() for connections that were
-                    // subsequently denied by connection_limits.
-                    let before = connections.len();
-                    connections.retain(|c| c.confirmed);
-                    if connections.len() < before {
-                        tracing::info!(
-                            %peer_id,
-                            pruned = before - connections.len(),
-                            remaining = connections.len(),
-                            "RR-BEHAVIOUR: pruned stale unconfirmed connections"
-                        );
-                    }
-                }
-            }
+            FromSwarm::ConnectionEstablished(_) => {}
             FromSwarm::ConnectionClosed(connection_closed) => {
                 self.on_connection_closed(connection_closed)
             }
@@ -1122,11 +1045,6 @@ struct Connection {
     /// Pending inbound responses for previously sent requests on this
     /// connection.
     pending_inbound_responses: HashSet<InboundRequestId>,
-    /// Whether this connection has been confirmed by a `ConnectionEstablished`
-    /// swarm event. Connections added in `preload_new_handler()` start as
-    /// unconfirmed because connection_limits may deny them after the handler
-    /// is created, leaving a stale entry in the `connected` map.
-    confirmed: bool,
 }
 
 impl Connection {
@@ -1136,7 +1054,6 @@ impl Connection {
             remote_address,
             pending_outbound_responses: Default::default(),
             pending_inbound_responses: Default::default(),
-            confirmed: false,
         }
     }
 }
