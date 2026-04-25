@@ -1,8 +1,23 @@
 # Overnight session — 2026-04-25 → 2026-04-26
 
-> Self-paced loop run while user slept. ~7 cycles, ~3 hours of compute.
-> 95 files changed, +1271/-423. Every commit cargo fmt + clippy clean,
-> 821 lib tests passing throughout (was 816 at session start).
+> Self-paced loop run while user slept. ~7+ cycles, ~3.5 hours of compute.
+> ~100 files changed across 9 commits. Every commit cargo fmt + clippy
+> clean, 821 lib tests passing throughout (was 816 at session start).
+>
+> **5 critical bugs caught + fixed**:
+> 1. `responses.js` 4 broken `.toast()` calls (silently no-op'd
+>    cancel/delete buttons in dashboard).
+> 2. `previous_response_id` validation only ran on local-inference
+>    path, not cloud-proxy or Anthropic-bridge — 1MB junk id could
+>    reach upstream.
+> 3. `escrow.rs cleanup_expired` overcounted by every rolled-back
+>    refund attempt.
+> 4. `ledger.rs pending_credit_earn` had a swap+restore race that
+>    double-counted credits under contention.
+> 5. `split/executor.rs forward_batch` used the FIRST slot's KV
+>    offset for a shared mask without checking homogeneity — could
+>    silently corrupt attention under mismatched prefix-cache
+>    hydration.
 
 ## Headline
 
@@ -39,6 +54,18 @@ incrementing `count` BEFORE the persist+refund flow could rollback,
 so the "Cleaned up N expired escrows" log overcounted by every
 rolled-back attempt. **Commit `d1d8185`.**
 
+And one critical correctness bug: `forward_batch` in
+`split/executor.rs` built one shared causal mask using the FIRST
+slot's layer-0 KV offset, but the homogeneity check earlier only
+validated `(seq_len, index_pos)` — not the actual `kv_offset`. A
+partial or mismatched prefix-cache hydration could leave a slot
+with the same `index_pos` but a different layer-0 KV length, which
+silently masks the wrong key positions and corrupts attention.
+Added a per-slot kv_offset homogeneity check after KV extraction;
+on mismatch, restore the moved KV/SSM back to the per-request
+entries and fall through to the sequential `forward()` path.
+**Commit `8998517`.**
+
 ## Per-cycle summary
 
 | # | Commit | Scope | Headline |
@@ -49,7 +76,7 @@ rolled-back attempt. **Commit `d1d8185`.**
 | C4 | `ccfbf14` | Sweep R56 (10 fixes) + macOS CI | Hot-path syscall savings, `hkdf_sha256_derive_32` helper, missing i18n key, **macOS test+clippy in CI** |
 | C5 | `d4b00c9` + `6dcecf3` | CHANGELOG + Sweep R57 + Book deep review (16 fixes) | New `api/responses.md` page filling a major doc gap; libp2p deferred → landed marker; many stale refs in book/ |
 | C6 | `b729a92` + `d1d8185` | Items 14/17/18 research + Sweep R58 (4 fixes) | New `items_14_17_18_research.md` with concrete Mooncake > HELIOS > Mirror ranking; **critical escrow `count++` bug** |
-| C7 | (in flight) | Sweep R59 inference primitives | Pending |
+| C7 | `8998517` | Sweep R59 inference primitives (5 fixes) | **CRITICAL: forward_batch attention mask used FIRST slot's KV offset without verifying homogeneity across slots — silently corrupted attention when prefix-cache hydration produced same `index_pos` but different layer-0 KV length.** Plus orphan rustdoc fix, hot-path info→debug log demote, defensive `debug_assert`, NaN/Inf error type Internal→Inference. |
 
 ## What's now done that wasn't before
 
