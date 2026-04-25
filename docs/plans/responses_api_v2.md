@@ -9,11 +9,34 @@ concrete caller has asked for it yet.
 
 **Final test count**: 814 lib tests passing (up from 769 at v1 close —
 45 new tests across V1–V6/V7/V5+V8). Clippy clean both with and without
-`claude-subscription`. End-to-end curl matrix from v1 still green; the
-new V8 background-streaming flow + V5 resume cursor were validated by
-unit tests covering buffer cap, cursor filter, terminal-event derivation,
-and registration round-trip — full curl-matrix verification of the
-202+Location handshake is a follow-up bench task.
+`claude-subscription`.
+
+**End-to-end curl matrix**: 38/38 M1–M9 (`docs/bench_results/responses_api_v2_matrix.sh`
+covers the new V1–V8 surfaces; the original `/tmp/resp_final/matrix.sh` for
+M1–M9 was updated for the V3 routing change so M5 no longer expects 400
+on `claude-*`). 27/27 V1–V8 cases pass — multimodal rejection paths,
+input_items pagination + cursor + order=desc, V8 202+Location return,
+V8 SSE replay with cursor, V5 completed-record replay, V6 admin list
+endpoint with status filter, V1 first-byte gap.
+
+**Bench rerun** (`docs/bench_results/responses_api_v2_bench.sh`,
+TinyLlama CPU on WSL2):
+
+| | median | mean | p95 |
+|---|---|---|---|
+| chat_completions stream TTFB | 1.1 ms | 1.1 ms | 1.2 ms |
+| **responses stream TTFB** | **1.2 ms** | **1.2 ms** | **1.4 ms** |
+| POST background=true (queued) | 2.5 ms | 3.0 ms | — |
+| POST background+stream 202 | 2.4 ms | 3.0 ms | — |
+| GET /v1/responses/:id (hit) | 0.9 ms | 0.9 ms | — |
+| GET /v1/responses/:id/input_items | 0.8 ms | 0.9 ms | — |
+| GET /api/admin/responses (list 100) | 3.5 ms | 3.5 ms | — |
+
+V1 streaming TTFB gap: **0.1 ms median** (well inside the 20 ms target;
+v1's bench script measured `(curl | grep) time` which included pipeline
+tear-down latency and produced misleading ~600 ms readings — the v2
+bench uses curl's `time_starttransfer` which is what V1 actually
+targets).
 
 ## Why v2
 

@@ -1,0 +1,28 @@
+warmup...
+
+=== Streaming first-byte (TTFB — what V1 targets) ===
+chat_completions stream                        median=    1.1ms  mean=    1.1ms  p95=    1.2ms  (n=10)
+responses stream                               median=    1.2ms  mean=    1.2ms  p95=    1.4ms  (n=10)
+
+=== Non-streaming end-to-end ===
+chat_completions baseline                      median= 7849.0ms  mean= 7770.5ms  p95= 9737.7ms  (n=10)
+responses store=false                          median= 7572.2ms  mean= 7785.4ms  p95= 9955.2ms  (n=10)
+responses store=true (default)                 median= 7462.4ms  mean= 7475.2ms  p95= 9393.7ms  (n=10)
+responses + instructions                       median= 8607.2ms  mean= 8602.9ms  p95= 8739.7ms  (n=10)
+responses + array input                        median= 7697.0ms  mean= 7676.3ms  p95= 9651.3ms  (n=10)
+
+=== M9 background return latency (should be near-zero) ===
+POST background=true (queued return)           median=    2.5ms  mean=    3.0ms  (n=10)
+
+=== V8 background+stream 202 return latency ===
+POST background+stream (202 + Location)        median=    2.4ms  mean=    3.0ms  (n=10)
+
+=== Storage overhead ===
+GET /v1/responses/:id (cache hit)              median=    0.9ms  mean=    0.9ms  (n=20)
+DELETE /v1/responses/:id                       median=    2.2ms  mean=    2.3ms  (n=20)
+
+=== V4 input_items endpoint ===
+GET /v1/responses/:id/input_items              median=    0.8ms  mean=    0.9ms  (n=20)
+
+=== V6 admin /api/admin/responses ===
+GET /api/admin/responses?limit=100             median=    3.5ms  mean=    3.5ms  (n=20)

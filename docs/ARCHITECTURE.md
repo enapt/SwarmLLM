@@ -1144,9 +1144,10 @@ allowing candle to parse the full tensor index while only loading assigned layer
 ### OpenAI-Compatible (Bearer auth required)
 - `POST   /v1/chat/completions` — Chat completions (streaming + non-streaming, tool_calls + logprobs support)
 - `POST   /v1/responses` — OpenAI Responses API (gpt-5 / o-series default)
-- `GET    /v1/responses/:id` — Retrieve a stored response (30-day TTL)
+- `GET    /v1/responses/:id` — Retrieve a stored response (30-day TTL); pass `?stream=true&starting_after={seq}` to resume a background SSE stream
 - `DELETE /v1/responses/:id` — Delete a stored response
 - `POST   /v1/responses/:id/cancel` — Cancel a background response
+- `GET    /v1/responses/:id/input_items` — Paginated list of the original input items (synthetic ids `item_N`)
 - `POST   /v1/messages` — Anthropic Messages API (full Claude Code compatibility — tools, tool_choice, thinking, cache_control, metadata)
 - `POST   /v1/embeddings` — Text embeddings
 - `GET    /v1/models` — List available models
@@ -1158,12 +1159,16 @@ allowing candle to parse the full tensor index while only loading assigned layer
 OpenAI-compatible Responses endpoint — the 2026 default API for o-series / gpt-5 / reasoning-era callers:
 - **Request fields:** `input` (string or array of items), `instructions`, `previous_response_id`, `max_output_tokens`, `tools` (`function`), `tool_choice`, `reasoning`, `text.format`, `text.verbosity`, `service_tier`, `include[]`, `store`, `background`, `parallel_tool_calls`, `stream`, plus arbitrary forward-compat fields via `#[serde(flatten)] extras`.
 - **Input items:** `message`, `function_call`, `function_call_output`, `reasoning` (cloud-proxy path), with content parts `input_text`, `input_image`, `input_file`, `input_audio`. Unknown item types round-trip via a `Raw(Value)` fallback.
-- **Routing:** OpenAI-compatible cloud model (gpt-5, o-series, nvidia/*, etc.) → proxy verbatim to upstream `/responses`; Claude / subprocess provider → 400 pointing at `/v1/messages`; otherwise local inference via Chat Completions translation.
+- **Multimodal input (V2 of v2 plan):** `input_image{image_url}` (base64 data URIs pass through), `input_file{file_data}` (UTF-8 payloads inlined as text with a `[File: name]` header). `input_image{file_id}`, `input_file{file_id}`, `input_audio`, and non-UTF-8 file payloads are rejected with explicit errors pointing at the supported alternatives. 20 MiB cap per file.
+- **Routing:** OpenAI-compatible cloud model (gpt-5, o-series, nvidia/*, etc.) → proxy verbatim to upstream `/responses`; Anthropic / claude-subscription provider → translate to Anthropic Messages, forward, translate back (V3 of v2 plan; `src/api/openai/responses/anthropic_bridge.rs`); otherwise local inference via Chat Completions translation.
 - **Built-in tools** (`web_search`, `file_search`, `computer_use_preview`, `code_interpreter`, `image_generation`, `mcp`, `custom`): rejected on local path (400); forwarded verbatim on cloud path (OpenAI hosts them).
-- **Streaming:** SSE with monotonic `sequence_number`. Events: `response.created`, `response.in_progress`, `response.output_item.added`, `response.content_part.added`, `response.output_text.delta`, `response.output_text.done`, `response.content_part.done`, `response.output_item.done`, `response.function_call_arguments.delta/done`, terminal `response.completed` | `response.incomplete` | `response.failed`.
+- **Streaming:** SSE with monotonic `sequence_number`. V1 of v2 plan emits `response.created` + `response.in_progress` *before* the chat handler is awaited so first-byte latency matches Chat Completions (measured: ~1 ms on TinyLlama CPU vs. ~3 s pre-fix). Events: `response.created`, `response.in_progress`, `response.output_item.added`, `response.content_part.added`, `response.output_text.delta`, `response.output_text.done`, `response.content_part.done`, `response.output_item.done`, `response.function_call_arguments.delta/done`, terminal `response.completed` | `response.incomplete` | `response.failed` | `response.cancelled`.
 - **Persistence:** redb tree `responses`, 30-day TTL, hourly background sweep. `store=false` opts out.
-- **Chaining:** `previous_response_id` loads the stored record and flattens prior request.input + response.output into chat messages.
+- **Chaining:** `previous_response_id` loads the stored record and flattens prior request.input + response.output into chat messages. Reasoning items round-trip in the stored record (so `encrypted_content` survives byte-for-byte for o-series chains) but are *not* re-injected as chat messages — local inference can't consume them and an empty assistant stub would confuse the prompt.
 - **Background:** `background=true` spawns a tokio task, returns `status="queued"` immediately; `GET /v1/responses/:id` polls; `POST /v1/responses/:id/cancel` flips the cancel flag (cancel-wins: worker's final result is discarded if cancelled).
+- **Background streaming (V8 of v2 plan):** `background=true && stream=true` returns **202 Accepted** + a `Location` header pointing at `/v1/responses/:id?stream=true&starting_after=-1`. The server runs the inference internally via a spawned task that writes every SSE event into a per-response buffer (cap 2000 events, oldest-first eviction). State lives in `BACKGROUND_STATE: DashMap<id, Arc<BackgroundState>>` (cancel flag + buffer + completion flag + `tokio::sync::Notify`).
+- **Resumable SSE (V5 of v2 plan):** `GET /v1/responses/:id?stream=true&starting_after={seq}` replays buffered events whose `sequence_number > seq`, then live-tails new events until the response is marked completed. If the response already finished and there's no live `BackgroundState`, a synthetic minimal lifecycle (`response.created` + `response.in_progress` + terminal) is built from the stored record so reconnecting clients still close cleanly.
+- **input_items pagination (V4 of v2 plan):** `GET /v1/responses/:id/input_items?after={cursor}&limit={n}&order={asc|desc}`. Synthetic ids `item_N` map to the zero-based position in the original request. Returns the OpenAI list shape `{object: "list", data: [...], first_id, last_id, has_more}`. Default limit 20, max 100. `Text` input produces a single synthetic message item.
 
 ### Anthropic Messages API (`/v1/messages`)
 Full Anthropic Messages API compatibility for use as a Claude Code backend:
@@ -1208,6 +1213,7 @@ Routes Claude model requests through a locally-authenticated `claude` CLI subpro
 ### Admin API (CORS-protected, no Bearer auth)
 - `GET/PUT /api/admin/config` — Configuration read/update
 - `GET     /api/admin/stats` — Node statistics + hardware info
+- `GET     /api/admin/responses` — List stored `/v1/responses` records for the dashboard (filter by `?status=…&limit=…`)
 - `GET     /api/admin/models` — Model list with shard status, VRAM estimates, acquisition state
 - `POST    /api/admin/models/:id/add` — Trigger model acquisition
 - `GET     /api/admin/models/:id/status` — Model acquisition progress
@@ -1310,6 +1316,7 @@ Routes Claude model requests through a locally-authenticated `claude` CLI subpro
   - `frontend/js/components/identity.js` — network invite code, nickname, leaderboard
   - `frontend/js/components/network-map.js` — regional network map visualization
   - `frontend/js/components/compare.js` — multi-model comparison tool
+  - `frontend/js/components/responses.js` — `/v1/responses` dashboard panel: retrieve-by-id, status-filtered list, cancel/delete/view per row, 5-second polling refresh while visible
   - `frontend/js/components/pool.js` — device pool management (create, join, members, contribution)
   - `frontend/js/init.js` — event binding, initialization, public API export (`window.SwarmLLM`)
 - **HTML templates**: 12 `<template id="tmpl-*">` elements for repeating UI structures (session items, chat messages, toasts, provider badges, compare cards, leaderboard rows, HF result cards, download queue items, peer rows, prune rows, storage rows, compare chips, pool member rows). Components clone templates via `template.content.cloneNode(true)` instead of innerHTML string building.
@@ -1431,8 +1438,18 @@ Single-node inference performance, measured with `swarmllm bench` (100 output to
 
 ## Deferred Items
 
+### Subsystem-level
 - **Speculative decoding in subprocess**: IPC scaffolding removed; speculative decoding works via the direct executor path only, not through worker subprocesses. Low priority — speculative decoding is experimental.
 - **Local executor streaming serialization**: `executor.lock().await` in openai.rs/anthropic/mod.rs holds the Mutex for the entire streaming inference duration, serializing concurrent local streaming requests. Fix: route local streaming through `ModelProcessPool` (consistent with non-streaming path). Only affects the legacy single-GGUF executor path; split-model and distributed paths are unaffected. Low priority — legacy path rarely used.
+
+### Responses API v2 plan (`docs/plans/responses_api_v2.md`)
+- **V9: `POST /v1/responses/compact`** — was tagged as deferred indefinitely in the v2 plan; no concrete caller has asked for it yet. Implement when one shows up.
+- **Token-level cancel for background inference** — current `POST /v1/responses/:id/cancel` flips a flag that's only checked at completion time. Per-token interruption needs hooks in `chat_completions` that are out of v2 plan scope.
+- **Server-side `conversation` resource CRUD** — OpenAI's `conversation` parameter forwards through cloud proxy verbatim today; a local conversation type with its own endpoints is a separate design.
+- **Built-in tools on the local path** (`web_search`, `file_search`, `computer_use_preview`, `code_interpreter`, `image_generation`, `mcp`, `custom`): rejected with 400 on local; forwarded verbatim on cloud. Implementing them locally requires backing infrastructure (web crawler, code sandbox, image gen model) that SwarmLLM doesn't run.
+- **`custom` tools with Lark / regex grammars** — rejected on local, forwarded on cloud. Local grammar-constrained generation is a candle-side project.
+- **Audio input on `/v1/responses`** — `input_audio` returns 400 today; needs a Whisper-class transcription model that SwarmLLM doesn't currently expose.
+- **Binary file inputs** — `input_file{file_data}` accepts UTF-8 only; PDF / docx / image-bytes payloads are rejected with a clear hint pointing at `input_image` (for images) or server-side text extraction (for documents). Adding a PDF parser is a deferred call-site question.
 
 All sweep-deferred items from rounds 1-8 have been resolved (see `.claude/sweep-log.jsonl`).
 
