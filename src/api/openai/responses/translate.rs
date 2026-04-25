@@ -3,19 +3,26 @@
 //!
 //! Milestone scope:
 //! - **M3**: plain-text input ↔ plain-text output.
-//! - **M4 (current)**: function tools and tool_choice in both directions
-//!   plus function_call / function_call_output input items and assistant
+//! - **M4**: function tools and tool_choice in both directions plus
+//!   function_call / function_call_output input items and assistant
 //!   tool_calls → function_call output items in the response.
 //! - **M5**: cloud-proxy verbatim — no translation runs at all.
 //! - **M6**: streaming token map.
+//! - **V2 (v2 plan)**: multimodal input parts. `input_image{image_url}`
+//!   maps to chat's `image_url` ContentPart (base64 data URIs pass
+//!   through); `input_file{file_data}` inlines UTF-8 payloads as text;
+//!   `input_image{file_id}`, `input_file{file_id}`, `input_audio`, and
+//!   non-UTF-8 files are rejected with explicit errors pointing at the
+//!   supported alternatives.
 
 use std::collections::HashMap;
 
 use crate::api::openai::responses::store::ResponsesRecord;
 use crate::api::openai::responses::types::*;
 use crate::api::openai::types::{
-    ApiChatMessage, ChatCompletionRequest, FunctionCall as ChatFunctionCall, FunctionDefinition,
-    MessageContent, StopSequence, ToolCall as ChatToolCall, ToolDefinition,
+    ApiChatMessage, ChatCompletionRequest, ContentPart, FunctionCall as ChatFunctionCall,
+    FunctionDefinition, ImageUrlRef, MessageContent, StopSequence, ToolCall as ChatToolCall,
+    ToolDefinition,
 };
 use crate::error::SwarmError;
 use crate::types::Role;
@@ -278,10 +285,7 @@ fn push_input_item(item: &InputItem, messages: &mut Vec<ApiChatMessage>) -> Resu
             let role = parse_role(&m.role)?;
             let content = match &m.content {
                 InputMessageContent::Text(s) => MessageContent::Text(s.clone()),
-                InputMessageContent::Parts(parts) => {
-                    let text = collect_text_from_parts(parts);
-                    MessageContent::Text(text)
-                }
+                InputMessageContent::Parts(parts) => collect_content_parts(parts)?,
             };
             messages.push(ApiChatMessage {
                 role,
@@ -357,21 +361,151 @@ fn parse_role(role: &str) -> Result<Role, SwarmError> {
     }
 }
 
-fn collect_text_from_parts(parts: &[InputContentPart]) -> String {
-    let mut buf = String::new();
+/// Cap on a single decoded `input_file.file_data` payload. Matches the
+/// 20 MB image cap in `crate::api::openai::types`; the Responses plan
+/// (V2) explicitly preserves the same cap for files.
+const MAX_INPUT_FILE_BYTES: usize = 20 * 1024 * 1024;
+
+/// V2: multimodal translation for message.content parts. Maps Responses
+/// `input_text` → chat `text`, `input_image{image_url}` → chat
+/// `image_url`, and `input_file{file_data}` → inlined-as-text (UTF-8
+/// decodes only; binary formats are rejected with a clear 400).
+///
+/// Returns `MessageContent::Text` when every part collapsed to text, and
+/// `MessageContent::Parts` when any non-text part survived. The chat
+/// handler's `to_chat_message` already handles base64 image decode + size
+/// cap + format validation on the chat-side ContentPart, so this
+/// translator just forwards the data URI string as-is.
+///
+/// Rejections:
+/// - `input_image { file_id }` (no uploads API on this server)
+/// - `input_file { file_id }` (same)
+/// - `input_file` with non-UTF-8 payload (PDF / docx / binary formats)
+/// - `input_audio` (no Whisper plumbing yet)
+/// - `InputContentPart::Raw` with an unknown type tag
+fn collect_content_parts(parts: &[InputContentPart]) -> Result<MessageContent, SwarmError> {
+    use base64::Engine;
+
+    let mut chat_parts: Vec<ContentPart> = Vec::new();
+
     for part in parts {
-        if let InputContentPart::Typed(TypedInputContentPart::Text { text, .. }) = part {
-            if !buf.is_empty() {
-                buf.push('\n');
+        let typed = match part {
+            InputContentPart::Typed(t) => t,
+            InputContentPart::Raw(v) => {
+                let kind = v
+                    .get("type")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("<unknown>");
+                return Err(SwarmError::Validation(format!(
+                    "Input content part type `{kind}` is not supported on /v1/responses. \
+                     Supported types: input_text, input_image (image_url), input_file (file_data)."
+                )));
             }
-            buf.push_str(text);
+        };
+
+        match typed {
+            TypedInputContentPart::Text { text, .. } => {
+                if !text.is_empty() {
+                    chat_parts.push(ContentPart::Text { text: text.clone() });
+                }
+            }
+            TypedInputContentPart::Image {
+                image_url, file_id, ..
+            } => {
+                if file_id.is_some() {
+                    return Err(SwarmError::Validation(
+                        "input_image file_id references are not supported on this server \
+                         (no uploads API). Inline the image via image_url as a base64 \
+                         data URI instead, e.g. `data:image/png;base64,<...>`."
+                            .into(),
+                    ));
+                }
+                let url = image_url.as_ref().ok_or_else(|| {
+                    SwarmError::Validation(
+                        "input_image requires either image_url (base64 data URI) or file_id".into(),
+                    )
+                })?;
+                chat_parts.push(ContentPart::ImageUrl {
+                    image_url: ImageUrlRef { url: url.clone() },
+                });
+            }
+            TypedInputContentPart::File {
+                file_id,
+                file_data,
+                filename,
+                ..
+            } => {
+                if file_id.is_some() {
+                    return Err(SwarmError::Validation(
+                        "input_file file_id references are not supported on this server \
+                         (no uploads API). Inline the file contents via file_data (base64) \
+                         instead."
+                            .into(),
+                    ));
+                }
+                let data_b64 = file_data.as_ref().ok_or_else(|| {
+                    SwarmError::Validation("input_file requires either file_id or file_data".into())
+                })?;
+                let bytes = base64::engine::general_purpose::STANDARD
+                    .decode(data_b64)
+                    .map_err(|e| {
+                        SwarmError::Validation(format!(
+                            "input_file.file_data base64 decode failed: {e}"
+                        ))
+                    })?;
+                if bytes.len() > MAX_INPUT_FILE_BYTES {
+                    return Err(SwarmError::Validation(format!(
+                        "input_file.file_data decoded size {} exceeds the {}-byte cap",
+                        bytes.len(),
+                        MAX_INPUT_FILE_BYTES
+                    )));
+                }
+                let text = std::str::from_utf8(&bytes).map_err(|_| {
+                    SwarmError::Validation(format!(
+                        "input_file `{}` is not UTF-8 text. Binary file formats (PDF, \
+                         docx, images, etc.) are not yet supported on /v1/responses — \
+                         either decode server-side and pass the extracted text as \
+                         input_text, or send images via input_image with a base64 data URI.",
+                        filename.as_deref().unwrap_or("<no filename>"),
+                    ))
+                })?;
+                let with_header = match filename {
+                    Some(name) if !name.is_empty() => format!("[File: {name}]\n{text}"),
+                    _ => text.to_string(),
+                };
+                chat_parts.push(ContentPart::Text { text: with_header });
+            }
+            TypedInputContentPart::Audio { .. } => {
+                return Err(SwarmError::Validation(
+                    "input_audio is not supported on /v1/responses yet. Audio input \
+                     requires a Whisper-class transcription model that SwarmLLM does \
+                     not currently expose."
+                        .into(),
+                ));
+            }
         }
-        // Image / file / audio parts: not yet translated for local
-        // inference. Vision support exists in chat_completions; routing
-        // multimodal Responses requests through it lands in a later
-        // milestone.
     }
-    buf
+
+    // If every surviving part is text, collapse to MessageContent::Text so
+    // the chat handler doesn't pay the array-form overhead for text-only
+    // turns (and keeps the wire shape identical to what it would produce
+    // before V2 for backwards compatibility).
+    let all_text = chat_parts
+        .iter()
+        .all(|p| matches!(p, ContentPart::Text { .. }));
+    if all_text {
+        let joined = chat_parts
+            .iter()
+            .filter_map(|p| match p {
+                ContentPart::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        Ok(MessageContent::Text(joined))
+    } else {
+        Ok(MessageContent::Parts(chat_parts))
+    }
 }
 
 // ============================================================================
@@ -633,6 +767,183 @@ mod tests {
         match &chat.messages[0].content {
             MessageContent::Text(s) => assert_eq!(s, "first\nsecond"),
             _ => panic!(),
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // V2: multimodal input parts
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn input_image_with_base64_data_uri_becomes_chat_image_part() {
+        let mut req = req_text("");
+        req.input = serde_json::from_value(json!([
+            {"type": "message", "role": "user", "content": [
+                {"type": "input_text", "text": "describe"},
+                {"type": "input_image", "image_url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="},
+            ]},
+        ])).unwrap();
+        let chat = request_to_chat(&req, None).unwrap();
+        assert_eq!(chat.messages.len(), 1);
+        let parts = match &chat.messages[0].content {
+            MessageContent::Parts(p) => p.clone(),
+            _ => panic!("expected Parts form for mixed text+image input"),
+        };
+        assert_eq!(parts.len(), 2);
+        assert!(matches!(&parts[0], ContentPart::Text { text } if text == "describe"));
+        let url = match &parts[1] {
+            ContentPart::ImageUrl { image_url } => image_url.url.clone(),
+            _ => panic!("expected image_url part"),
+        };
+        assert!(url.starts_with("data:image/png;base64,"));
+    }
+
+    #[test]
+    fn input_image_file_id_is_rejected_with_clear_message() {
+        let mut req = req_text("");
+        req.input = serde_json::from_value(json!([
+            {"type": "message", "role": "user", "content": [
+                {"type": "input_image", "file_id": "file-123"},
+            ]},
+        ]))
+        .unwrap();
+        let err = request_to_chat(&req, None).unwrap_err().to_string();
+        assert!(err.contains("file_id"), "error should name file_id: {err}");
+        assert!(
+            err.contains("image_url") || err.contains("base64"),
+            "error should point to the alternative: {err}"
+        );
+    }
+
+    #[test]
+    fn input_audio_is_rejected() {
+        let mut req = req_text("");
+        req.input = serde_json::from_value(json!([
+            {"type": "message", "role": "user", "content": [
+                {"type": "input_audio", "input_audio": {"data": "AQID", "format": "wav"}},
+            ]},
+        ]))
+        .unwrap();
+        let err = request_to_chat(&req, None).unwrap_err().to_string();
+        assert!(
+            err.contains("audio"),
+            "expected audio-specific rejection: {err}"
+        );
+    }
+
+    #[test]
+    fn input_file_file_id_is_rejected() {
+        let mut req = req_text("");
+        req.input = serde_json::from_value(json!([
+            {"type": "message", "role": "user", "content": [
+                {"type": "input_file", "file_id": "file-123"},
+            ]},
+        ]))
+        .unwrap();
+        let err = request_to_chat(&req, None).unwrap_err().to_string();
+        assert!(
+            err.contains("file_id") && err.contains("file_data"),
+            "error should name both file_id and file_data: {err}"
+        );
+    }
+
+    #[test]
+    fn input_file_with_utf8_file_data_inlines_as_text_with_filename_header() {
+        use base64::Engine;
+        let payload = "line one\nline two";
+        let b64 = base64::engine::general_purpose::STANDARD.encode(payload);
+        let mut req = req_text("");
+        req.input = serde_json::from_value(json!([
+            {"type": "message", "role": "user", "content": [
+                {"type": "input_text", "text": "summarize"},
+                {"type": "input_file", "file_data": b64, "filename": "notes.txt"},
+            ]},
+        ]))
+        .unwrap();
+        let chat = request_to_chat(&req, None).unwrap();
+        assert_eq!(chat.messages.len(), 1);
+        match &chat.messages[0].content {
+            MessageContent::Text(s) => {
+                assert!(
+                    s.contains("summarize"),
+                    "chat text should include prompt: {s}"
+                );
+                assert!(
+                    s.contains("[File: notes.txt]"),
+                    "chat text should include filename header: {s}"
+                );
+                assert!(
+                    s.contains("line one") && s.contains("line two"),
+                    "chat text should include file body: {s}"
+                );
+            }
+            _ => panic!("all-text parts should collapse to MessageContent::Text"),
+        }
+    }
+
+    #[test]
+    fn input_file_binary_is_rejected() {
+        use base64::Engine;
+        // Invalid UTF-8 bytes (0x80 0xff are lone continuation/invalid).
+        let bytes: &[u8] = &[0xff, 0xfe, 0x00, 0x01, 0x02];
+        let b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
+        let mut req = req_text("");
+        req.input = serde_json::from_value(json!([
+            {"type": "message", "role": "user", "content": [
+                {"type": "input_file", "file_data": b64, "filename": "scan.pdf"},
+            ]},
+        ]))
+        .unwrap();
+        let err = request_to_chat(&req, None).unwrap_err().to_string();
+        assert!(
+            err.contains("scan.pdf"),
+            "error should include filename: {err}"
+        );
+        assert!(
+            err.contains("UTF-8") || err.contains("binary") || err.contains("Binary"),
+            "error should flag the binary/UTF-8 issue: {err}"
+        );
+    }
+
+    #[test]
+    fn mixed_text_and_image_stays_as_parts_form() {
+        let mut req = req_text("");
+        req.input = serde_json::from_value(json!([
+            {"type": "message", "role": "user", "content": [
+                {"type": "input_text", "text": "what's in this?"},
+                {"type": "input_image", "image_url": "data:image/jpeg;base64,/9j/4A=="},
+                {"type": "input_text", "text": "be terse"},
+            ]},
+        ]))
+        .unwrap();
+        let chat = request_to_chat(&req, None).unwrap();
+        let parts = match &chat.messages[0].content {
+            MessageContent::Parts(p) => p,
+            _ => panic!("expected Parts"),
+        };
+        // Text parts preserved in order around the image.
+        assert_eq!(parts.len(), 3);
+        assert!(matches!(&parts[0], ContentPart::Text { text } if text == "what's in this?"));
+        assert!(matches!(&parts[1], ContentPart::ImageUrl { .. }));
+        assert!(matches!(&parts[2], ContentPart::Text { text } if text == "be terse"));
+    }
+
+    #[test]
+    fn text_only_parts_collapse_to_messagecontent_text() {
+        // Regression: when every part is text, we should still collapse to
+        // the string shape (matches v1 behavior and is cheaper on chat).
+        let mut req = req_text("");
+        req.input = serde_json::from_value(json!([
+            {"type": "message", "role": "user", "content": [
+                {"type": "input_text", "text": "a"},
+                {"type": "input_text", "text": "b"},
+            ]},
+        ]))
+        .unwrap();
+        let chat = request_to_chat(&req, None).unwrap();
+        match &chat.messages[0].content {
+            MessageContent::Text(s) => assert_eq!(s, "a\nb"),
+            _ => panic!("expected MessageContent::Text, got Parts"),
         }
     }
 
