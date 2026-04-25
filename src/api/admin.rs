@@ -901,3 +901,127 @@ pub async fn update_schedule(
 
     Ok(Json(result))
 }
+
+// ============================================================================
+// V6 (responses_api_v2): Responses dashboard endpoint
+// ============================================================================
+
+/// Query parameters for `GET /api/admin/responses`.
+#[derive(Debug, Deserialize)]
+pub struct AdminResponsesQuery {
+    /// Filter by status (queued | in_progress | completed | failed |
+    /// cancelled | incomplete). Repeatable via comma list. Empty / unset
+    /// returns every status.
+    #[serde(default)]
+    pub status: Option<String>,
+    /// Cap the number of records returned. Default 100, max 500.
+    #[serde(default)]
+    pub limit: Option<u32>,
+}
+
+/// `GET /api/admin/responses?status=...&limit=...` — list stored
+/// `/v1/responses` records for the dashboard. Sorted newest first.
+pub async fn list_responses(
+    State(state): State<crate::api::server::AppState>,
+    axum::extract::Query(params): axum::extract::Query<AdminResponsesQuery>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let all = state
+        .db
+        .get_all_json::<crate::api::openai::responses::store::ResponsesRecord>(
+            crate::api::openai::responses::store::TREE,
+        )
+        .map_err(ApiError)?;
+
+    let status_filter: Option<Vec<String>> = params.status.map(|s| {
+        s.split(',')
+            .map(|t| t.trim().to_lowercase())
+            .filter(|t| !t.is_empty())
+            .collect()
+    });
+    let limit = params.limit.unwrap_or(100).clamp(1, 500) as usize;
+
+    // Whether a live background-streaming task is in flight for this id.
+    let live_ids: std::collections::HashSet<String> =
+        crate::api::openai::responses::background::BACKGROUND_STATE
+            .iter()
+            .map(|e| e.key().clone())
+            .collect();
+
+    let mut entries: Vec<(i64, serde_json::Value)> = all
+        .into_iter()
+        .map(|(_, rec)| rec)
+        .filter(|rec| match &status_filter {
+            Some(filter) => {
+                let s = serde_json::to_string(&rec.response.status)
+                    .unwrap_or_default()
+                    .trim_matches('"')
+                    .to_string();
+                filter.iter().any(|f| f == &s)
+            }
+            None => true,
+        })
+        .map(|rec| {
+            let live = live_ids.contains(&rec.id);
+            let preview = match &rec.request.input {
+                crate::api::openai::responses::types::ResponsesInput::Text(s) => {
+                    truncate_preview(s)
+                }
+                crate::api::openai::responses::types::ResponsesInput::Items(items) => items
+                    .first()
+                    .and_then(|item| match item {
+                        crate::api::openai::responses::types::InputItem::Typed(
+                            crate::api::openai::responses::types::TypedInputItem::Message(m),
+                        ) => match &m.content {
+                            crate::api::openai::responses::types::InputMessageContent::Text(t) => {
+                                Some(truncate_preview(t))
+                            }
+                            _ => None,
+                        },
+                        _ => None,
+                    })
+                    .unwrap_or_default(),
+            };
+            let value = serde_json::json!({
+                "id": rec.id,
+                "created_at": rec.created_at,
+                "expires_at": rec.expires_at,
+                "model": rec.response.model,
+                "status": rec.response.status,
+                "background": rec.response.background.unwrap_or(false),
+                "live": live,
+                "input_preview": preview,
+                "output_text_preview": rec.response.output_text.as_deref().map(truncate_preview),
+                "usage": {
+                    "input_tokens": rec.response.usage.input_tokens,
+                    "output_tokens": rec.response.usage.output_tokens,
+                },
+            });
+            (rec.created_at, value)
+        })
+        .collect();
+
+    entries.sort_by(|a, b| b.0.cmp(&a.0));
+    let data: Vec<serde_json::Value> = entries.into_iter().take(limit).map(|(_, v)| v).collect();
+
+    Ok(Json(serde_json::json!({
+        "object": "list",
+        "data": data,
+        "total": data.len(),
+    })))
+}
+
+fn truncate_preview(s: &str) -> String {
+    const MAX: usize = 120;
+    if s.chars().count() <= MAX {
+        return s.to_string();
+    }
+    let mut out = String::with_capacity(MAX);
+    for (i, ch) in s.chars().enumerate() {
+        if i >= MAX {
+            break;
+        }
+        out.push(ch);
+    }
+    out.push('…');
+    out
+}

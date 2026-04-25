@@ -119,6 +119,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/v1/status", get(openai::status))
         // Admin API
         .route("/api/admin/stats", get(admin::stats))
+        .route("/api/admin/responses", get(admin::list_responses))
         .route(
             "/api/admin/config",
             get(admin::get_config).put(admin::update_config),

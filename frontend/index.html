@@ -619,6 +619,7 @@
       <button class="tab-btn" data-tab="leaderboard" data-i18n="nav.leaderboard">Leaderboard</button>
       <button class="tab-btn" data-tab="network-map" data-i18n="nav.network_map">Network Map</button>
       <button class="tab-btn" data-tab="compare" data-i18n="nav.compare">Compare</button>
+      <button class="tab-btn" data-tab="responses" data-i18n="nav.responses">Responses</button>
       <button class="tab-btn" data-tab="devices" data-i18n="pool.title">My Devices</button>
     </div>
     <div class="header-right">
@@ -1144,6 +1145,47 @@
         </div>
       </div>
 
+      <!-- Responses view (V6) -->
+      <div class="view" id="view-responses" style="display:none">
+        <div class="container">
+          <div class="panel">
+            <div class="panel-header flex-wrap" style="gap:4px 12px">
+              <h2 data-i18n="responses.title">Responses</h2>
+              <span class="text-muted text-sm" data-i18n="responses.subtitle">Stored responses from the OpenAI /v1/responses endpoint. Retrieve by id, browse recent runs, cancel a background job.</span>
+            </div>
+            <div class="flex gap-1 mb-1" style="align-items:center">
+              <input type="text" id="responses-retrieve-id" placeholder="resp_…" data-i18n-placeholder="responses.retrieve_placeholder" style="flex:1;font-size:0.85rem">
+              <button class="btn btn-sm" id="btn-responses-retrieve" data-i18n="responses.retrieve_btn">Retrieve</button>
+              <button class="btn btn-sm" id="btn-responses-refresh" data-i18n="responses.refresh_btn">Refresh</button>
+            </div>
+            <div class="flex gap-0 text-xs mb-1" id="responses-filter">
+              <button class="btn btn-xs active" data-resp-filter="all" data-i18n="responses.filter_all">All</button>
+              <button class="btn btn-xs" data-resp-filter="in_progress" data-i18n="responses.filter_in_progress">In Progress</button>
+              <button class="btn btn-xs" data-resp-filter="queued" data-i18n="responses.filter_queued">Queued</button>
+              <button class="btn btn-xs" data-resp-filter="completed" data-i18n="responses.filter_completed">Completed</button>
+              <button class="btn btn-xs" data-resp-filter="failed" data-i18n="responses.filter_failed">Failed</button>
+              <button class="btn btn-xs" data-resp-filter="cancelled" data-i18n="responses.filter_cancelled">Cancelled</button>
+            </div>
+            <table class="data-table" id="responses-table">
+              <thead>
+                <tr>
+                  <th scope="col" data-i18n="responses.col_id">ID</th>
+                  <th scope="col" data-i18n="responses.col_model">Model</th>
+                  <th scope="col" data-i18n="responses.col_status">Status</th>
+                  <th scope="col" data-i18n="responses.col_created">Created</th>
+                  <th scope="col" data-i18n="responses.col_input">Input</th>
+                  <th scope="col" data-i18n="responses.col_actions">Actions</th>
+                </tr>
+              </thead>
+              <tbody id="responses-body">
+                <tr><td colspan="6" class="text-center text-muted" data-i18n="responses.loading">Loading…</td></tr>
+              </tbody>
+            </table>
+            <div id="responses-detail" style="display:none;margin-top:12px"></div>
+          </div>
+        </div>
+      </div>
+
       <!-- Leaderboard view -->
       <div class="view" id="view-leaderboard" style="display:none">
         <div class="container">
@@ -1513,6 +1555,7 @@
   <script src="/static/js/components/identity.js"></script>
   <script src="/static/js/components/network-map.js"></script>
   <script src="/static/js/components/compare.js"></script>
+  <script src="/static/js/components/responses.js"></script>
   <script src="/static/js/components/pool.js"></script>
   <script src="/static/js/components/auto-manage-status.js"></script>
   <!-- Init (must be last — wires everything together) -->
