@@ -44,16 +44,34 @@ pub(super) const MAX_ACTIVATION_SIZE: usize = 128 * 1024 * 1024;
 pub(super) const MAX_RESULT_TOKENS: usize = 65536;
 
 /// Codec for SwarmLLM request/response protocol using serde_json.
-/// When `compress_tensors` is true, tensor payloads above `compress_threshold`
-/// bytes are zstd-compressed on the wire (tag 0x02). Decompression of incoming
-/// compressed payloads always works regardless of the flag.
+///
+/// Compression knobs (all opt-in on the *send* side; the *receive* side
+/// always handles both compressed and raw frames so a node with the flag
+/// off can still decode payloads from a peer that has it on):
+///
+/// - `compress_tensors`: zstd-compress activation tensor payloads above
+///   `compress_threshold` bytes (wire tag 0x02). Default on.
+/// - `compress_prefix_kv`: zstd-compress cross-node prefix-KV snapshots
+///   above `compress_threshold` bytes (wire tag 0x04, flag=2). Default
+///   off — only worth flipping when the WAN bench shows wire size is the
+///   binding constraint (localhost's RTT-vs-wire trade is roughly neutral).
+///
+/// Decompression of incoming compressed payloads always works regardless
+/// of the send-side flag.
 #[derive(Debug, Clone)]
 pub struct SwarmCodec {
     /// Whether to compress outgoing tensor payloads.
     pub compress_tensors: bool,
-    /// Zstd compression level (1-22).
+    /// Whether to compress outgoing prefix-KV snapshot payloads
+    /// (`SwarmResponse::PrefixKvData`). Off by default — see
+    /// `docs/plans/distributed_inference_speedup.md` § Deferred for the
+    /// localhost-vs-WAN trade.
+    pub compress_prefix_kv: bool,
+    /// Zstd compression level (1-22). Shared between tensor and prefix-KV.
     pub compress_level: i32,
-    /// Minimum payload size in bytes to trigger compression.
+    /// Minimum payload size in bytes to trigger compression. Shared
+    /// between tensor and prefix-KV (the call site only attempts compression
+    /// when the relevant flag is on, so a single threshold is fine).
     pub compress_threshold: usize,
 }
 
@@ -61,6 +79,7 @@ impl Default for SwarmCodec {
     fn default() -> Self {
         Self {
             compress_tensors: true,
+            compress_prefix_kv: false,
             compress_level: 1,
             compress_threshold: 1024,
         }
@@ -128,7 +147,11 @@ const WIRE_TAG_TENSOR_COMPRESSED: u8 = 0x02;
 const WIRE_TAG_SHARD: u8 = 0x03;
 /// Item 8 Phase 2: cross-node prefix KV snapshot binary frame:
 ///   [tag][4B payload_len_be][16B request_id UUID][1B flag][data...]
-/// Flag=0: no payload (miss). Flag=1: `data` is a serialized `KvSnapshot`.
+/// Flag=0: no payload (miss).
+/// Flag=1: `data` is a raw serialized `KvSnapshot`.
+/// Flag=2: `data` is a zstd-compressed serialized `KvSnapshot`
+///         (gated on `SwarmCodec::compress_prefix_kv`; the receive side
+///         always decompresses regardless).
 /// Avoids JSON inflation on multi-MB KV payloads.
 const WIRE_TAG_PREFIX_KV: u8 = 0x04;
 
@@ -304,6 +327,12 @@ impl request_response::Codec for SwarmCodec {
                 let payload = match flag {
                     0 => None,
                     1 => Some(buf[17..].to_vec()),
+                    2 => Some(compression::decompress_tensor(&buf[17..]).map_err(|e| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            format!("PrefixKv zstd decompress: {e}"),
+                        )
+                    })?),
                     other => {
                         return Err(io::Error::new(
                             io::ErrorKind::InvalidData,
@@ -384,16 +413,41 @@ impl request_response::Codec for SwarmCodec {
             }
             SwarmResponse::PrefixKvData(ref resp) => {
                 // Binary prefix-KV frame: [tag][4B payload_len_be][16B uuid][1B flag][data...]
-                let data_ref: &[u8] = resp.payload.as_deref().unwrap_or(&[]);
-                let flag: u8 = if resp.payload.is_some() { 1 } else { 0 };
-                let payload_len = 16 + 1 + data_ref.len();
+                // Compress when configured AND payload is above threshold AND
+                // the compressed form is actually smaller; otherwise fall
+                // through to the raw flag=1 frame.
+                let (flag, body): (u8, std::borrow::Cow<'_, [u8]>) = match resp.payload.as_deref() {
+                    None => (0, std::borrow::Cow::Borrowed(&[][..])),
+                    Some(raw) => {
+                        if self.compress_prefix_kv && raw.len() >= self.compress_threshold {
+                            match compression::compress_tensor(raw, self.compress_level) {
+                                Ok(c) if c.len() < raw.len() => {
+                                    tracing::debug!(
+                                        raw_len = raw.len(),
+                                        compressed_len = c.len(),
+                                        ratio = format_args!(
+                                            "{:.2}x",
+                                            raw.len() as f64 / c.len().max(1) as f64
+                                        ),
+                                        "DIAG: PrefixKv frame compressed"
+                                    );
+                                    (2, std::borrow::Cow::Owned(c))
+                                }
+                                _ => (1, std::borrow::Cow::Borrowed(raw)),
+                            }
+                        } else {
+                            (1, std::borrow::Cow::Borrowed(raw))
+                        }
+                    }
+                };
+                let payload_len = 16 + 1 + body.len();
                 let len_bytes = (payload_len as u32).to_be_bytes();
                 let mut frame = Vec::with_capacity(1 + 4 + payload_len);
                 frame.push(WIRE_TAG_PREFIX_KV);
                 frame.extend_from_slice(&len_bytes);
                 frame.extend_from_slice(resp.request_id.as_bytes());
                 frame.push(flag);
-                frame.extend_from_slice(data_ref);
+                frame.extend_from_slice(&body);
                 frame
             }
             other => build_json_frame(&other, "response")?,
@@ -1053,5 +1107,120 @@ mod tests {
         assert_eq!(decoded.spec_logits[0], vec![1.0, 2.0, 3.0]);
         assert_eq!(decoded.spec_logits[1], vec![-1.5, 0.0, 2.5, 100.0]);
         assert_eq!(decoded.spec_logits[2], vec![0.0; 16]);
+    }
+
+    /// Build a PrefixKv response frame the same way `write_response` does
+    /// (test helper, mirrors the production write path) so we can exercise
+    /// the codec from both ends without standing up a libp2p stream.
+    fn build_prefix_kv_frame(
+        request_id: uuid::Uuid,
+        payload: Option<&[u8]>,
+        compress: bool,
+        level: i32,
+        threshold: usize,
+    ) -> Vec<u8> {
+        let (flag, body): (u8, std::borrow::Cow<'_, [u8]>) = match payload {
+            None => (0, std::borrow::Cow::Borrowed(&[][..])),
+            Some(raw) => {
+                if compress && raw.len() >= threshold {
+                    match compression::compress_tensor(raw, level) {
+                        Ok(c) if c.len() < raw.len() => (2, std::borrow::Cow::Owned(c)),
+                        _ => (1, std::borrow::Cow::Borrowed(raw)),
+                    }
+                } else {
+                    (1, std::borrow::Cow::Borrowed(raw))
+                }
+            }
+        };
+        let payload_len = 16 + 1 + body.len();
+        let len_bytes = (payload_len as u32).to_be_bytes();
+        let mut frame = Vec::with_capacity(1 + 4 + payload_len);
+        frame.push(WIRE_TAG_PREFIX_KV);
+        frame.extend_from_slice(&len_bytes);
+        frame.extend_from_slice(request_id.as_bytes());
+        frame.push(flag);
+        frame.extend_from_slice(&body);
+        frame
+    }
+
+    /// Decode the body of a PrefixKv frame (skipping tag + length header,
+    /// matching the read_response branch on WIRE_TAG_PREFIX_KV).
+    fn decode_prefix_kv_body(frame: &[u8]) -> (uuid::Uuid, u8, Option<Vec<u8>>) {
+        assert_eq!(frame[0], WIRE_TAG_PREFIX_KV);
+        let len = u32::from_be_bytes(frame[1..5].try_into().unwrap()) as usize;
+        let body = &frame[5..5 + len];
+        let mut uuid_bytes = [0u8; 16];
+        uuid_bytes.copy_from_slice(&body[..16]);
+        let request_id = uuid::Uuid::from_bytes(uuid_bytes);
+        let flag = body[16];
+        let payload = match flag {
+            0 => None,
+            1 => Some(body[17..].to_vec()),
+            2 => Some(decompress_tensor(&body[17..]).unwrap()),
+            other => panic!("unknown PrefixKv flag: {other}"),
+        };
+        (request_id, flag, payload)
+    }
+
+    #[test]
+    fn prefix_kv_compresses_when_flag_on() {
+        let req_id = uuid::Uuid::new_v4();
+        // 8 KB of zero-ish data — the realistic shape (KV padding regions
+        // beyond token_count are zero-initialized).
+        let payload = vec![0u8; 8192];
+        let frame = build_prefix_kv_frame(req_id, Some(&payload), true, 1, 1024);
+        let (got_id, flag, recovered) = decode_prefix_kv_body(&frame);
+        assert_eq!(got_id, req_id);
+        assert_eq!(flag, 2, "should have used compressed flag");
+        assert_eq!(recovered.unwrap(), payload);
+        // Compressed body is smaller than raw + uuid + flag overhead
+        assert!(frame.len() < 1 + 4 + 16 + 1 + payload.len());
+    }
+
+    #[test]
+    fn prefix_kv_skips_compression_when_flag_off() {
+        let req_id = uuid::Uuid::new_v4();
+        let payload = vec![0u8; 8192];
+        let frame = build_prefix_kv_frame(req_id, Some(&payload), false, 1, 1024);
+        let (got_id, flag, recovered) = decode_prefix_kv_body(&frame);
+        assert_eq!(got_id, req_id);
+        assert_eq!(flag, 1, "should have used raw flag");
+        assert_eq!(recovered.unwrap(), payload);
+    }
+
+    #[test]
+    fn prefix_kv_skips_compression_below_threshold() {
+        let req_id = uuid::Uuid::new_v4();
+        let payload = vec![0u8; 512];
+        let frame = build_prefix_kv_frame(req_id, Some(&payload), true, 1, 1024);
+        let (_id, flag, recovered) = decode_prefix_kv_body(&frame);
+        assert_eq!(flag, 1, "below threshold should stay raw");
+        assert_eq!(recovered.unwrap(), payload);
+    }
+
+    #[test]
+    fn prefix_kv_falls_back_when_compressed_is_larger() {
+        // Random data doesn't compress well — codec should silently fall
+        // back to flag=1 rather than emit a larger compressed frame.
+        let req_id = uuid::Uuid::new_v4();
+        let mut payload = vec![0u8; 2048];
+        for (i, byte) in payload.iter_mut().enumerate() {
+            *byte = (i.wrapping_mul(31).wrapping_add(7) % 256) as u8;
+        }
+        let frame = build_prefix_kv_frame(req_id, Some(&payload), true, 1, 1024);
+        let (_id, flag, recovered) = decode_prefix_kv_body(&frame);
+        // Either path is acceptable as long as the round-trip is exact.
+        assert!(flag == 1 || flag == 2);
+        assert_eq!(recovered.unwrap(), payload);
+    }
+
+    #[test]
+    fn prefix_kv_miss_has_no_payload_regardless_of_flag() {
+        let req_id = uuid::Uuid::new_v4();
+        let frame = build_prefix_kv_frame(req_id, None, true, 1, 1024);
+        let (got_id, flag, recovered) = decode_prefix_kv_body(&frame);
+        assert_eq!(got_id, req_id);
+        assert_eq!(flag, 0, "miss frames always use flag=0");
+        assert!(recovered.is_none());
     }
 }

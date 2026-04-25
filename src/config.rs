@@ -171,10 +171,20 @@ pub struct NetworkConfig {
     /// Only payloads larger than `tensor_compress_threshold` bytes are compressed.
     #[serde(default = "default_true")]
     pub tensor_compression: bool,
-    /// Zstd compression level (1-22, default 1 for speed).
+    /// Enable zstd compression for cross-node prefix-KV snapshot payloads
+    /// (Item 8 wire frames, tag 0x04). Off by default — only worth flipping
+    /// when WAN measurements show wire size is the binding constraint
+    /// (localhost's RTT-vs-wire trade is roughly neutral). Receivers always
+    /// decompress regardless of this flag, so flipping it on a single peer
+    /// doesn't require a coordinated upgrade.
+    #[serde(default)]
+    pub prefix_kv_compression: bool,
+    /// Zstd compression level (1-22, default 1 for speed). Shared between
+    /// tensor and prefix-KV compression.
     #[serde(default = "default_tensor_compress_level")]
     pub tensor_compress_level: i32,
     /// Minimum payload size in bytes before compression is applied (default 1024).
+    /// Shared between tensor and prefix-KV.
     #[serde(default = "default_tensor_compress_threshold")]
     pub tensor_compress_threshold: usize,
     /// IP address to bind P2P listeners on (default: "0.0.0.0" = all interfaces).
@@ -1374,6 +1384,7 @@ impl Default for NetworkConfig {
             enable_encryption: true,
             gossip_network_id: None,
             tensor_compression: true,
+            prefix_kv_compression: false,
             tensor_compress_level: default_tensor_compress_level(),
             tensor_compress_threshold: default_tensor_compress_threshold(),
             listen_address: default_listen_address(),

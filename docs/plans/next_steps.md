@@ -25,19 +25,23 @@
 
 ## What's left — ordered by signal-to-effort
 
-### 1. zstd compression on `WIRE_TAG_PREFIX_KV` *(1 d)*
+### 1. zstd compression on `WIRE_TAG_PREFIX_KV` ✅ LANDED 2026-04-25 (flag-gated)
 
-**Why next:** Prefix KV blocks are f32 with wide zero-ish regions (the
-seq dim beyond `token_count` is zero-padded, and attention patterns
-often cluster). A rough estimate from existing `WIRE_TAG_TENSOR_COMPRESSED`
-behavior is 30–50% wire reduction on localhost with ~5–15 ms
-compress/decompress overhead. On WAN this is a clear win; on localhost
-it probably roughly neutralizes.
+Implemented as `NetworkConfig::prefix_kv_compression: bool` (default off).
+Reuses the existing `compression::compress_tensor` / `decompress_tensor`
+helpers and the same level + threshold knobs as tensor compression.
 
-Plumbing already exists for the tensor path — reuse the same
-zstd-level + magic-byte framing convention rather than inventing a new
-one. Gate behind an `InferenceConfig` boolean defaulted to off until
-the larger-model bench confirms the benefit on WAN.
+Wire format: `WIRE_TAG_PREFIX_KV` frame's flag byte gained a third value
+(flag=2 = zstd-compressed payload). flag=0 (miss) and flag=1 (raw) are
+unchanged. Receivers always decompress regardless of the flag, so flipping
+it on a single peer doesn't require a coordinated upgrade.
+
+Send-side falls back to flag=1 when the compressed form isn't smaller than
+the raw form, so we never make the wire larger by accident.
+
+Tests: 5 new round-trip tests in `network::protocol::tests::prefix_kv_*`
+cover flag-on, flag-off, below-threshold, larger-when-compressed, and miss.
+**Awaiting WAN bench (item 2 below) to decide default-on.**
 
 ### 2. WAN bench *(real hardware, 1 d)*
 

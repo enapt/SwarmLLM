@@ -99,10 +99,12 @@ Full pipeline validated on both: announce → index → probe → trust-gate
 - **WAN bench** — two daemons on different machines / regions. The
   Qwen-7B loopback cross-over is established; WAN sharpens the
   RTT-vs-prefill trade.
-- **Zstd compression on `WIRE_TAG_PREFIX_KV`** — prefix KV blocks are
-  f32 with zero-ish regions. Rough estimate is 30–50% wire reduction.
-  Only worth pulling in once WAN numbers decide whether wire-size or
-  latency is the binding constraint.
+- **Zstd compression on `WIRE_TAG_PREFIX_KV`** — ✅ landed 2026-04-25 as
+  `NetworkConfig::prefix_kv_compression: bool` (default off). Wire format
+  reuses the existing flag byte: flag=0 (miss), flag=1 (raw), flag=2
+  (zstd). Receivers always decompress regardless of the send-side flag.
+  Falls back to raw when the compressed form isn't smaller. Awaiting WAN
+  bench to decide default-on. See `next_steps.md` § 1.
 - **Items 14 / 17 / 18** research candidates (Mirror Spec Decoding,
   disaggregated prefill/decode, per-token early-exit) — research first,
   decide if worth building.

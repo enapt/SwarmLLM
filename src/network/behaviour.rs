@@ -170,6 +170,7 @@ pub fn build_behaviour(
     let codec = if let Some(net_cfg) = network_config {
         SwarmCodec {
             compress_tensors: net_cfg.tensor_compression,
+            compress_prefix_kv: net_cfg.prefix_kv_compression,
             compress_level: net_cfg.tensor_compress_level,
             compress_threshold: net_cfg.tensor_compress_threshold,
         }
