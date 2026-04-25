@@ -55,6 +55,17 @@ impl SplitModel {
     /// `query_len`: number of new (suffix) tokens being processed.
     /// `kv_len`: total KV length (prefix_len + query_len).
     fn mask_with_offset(&self, query_len: usize, kv_len: usize) -> CandleResult<Tensor> {
+        // Caller contract: kv_len = prefix_len + query_len, so kv_len >= query_len.
+        // Both call sites are guarded by kv_offset > 0 plus the construction
+        // kv_offset + seq_len, but assert defensively in case a future edit
+        // changes the math — bare usize subtraction would silently wrap in
+        // release mode.
+        debug_assert!(
+            kv_len >= query_len,
+            "mask_with_offset contract: kv_len ({}) must be >= query_len ({})",
+            kv_len,
+            query_len
+        );
         let offset = kv_len - query_len;
         let mask: Vec<_> = (0..query_len)
             .flat_map(|i| (0..kv_len).map(move |j| u8::from(j > offset + i)))
@@ -597,14 +608,6 @@ impl SplitModel {
         result.map(|t| (t, captured))
     }
 
-    /// Tensor-parallel forward pass for a single layer.
-    ///
-    /// Each TP node computes only its fraction of the computation:
-    /// - Attention: processes `n_head / tp_size` heads (head-parallel)
-    /// - MLP: processes `intermediate_dim / tp_size` columns (column-parallel gate/up,
-    ///   row-parallel down)
-    ///
-    /// Returns a **partial** hidden state that must be summed (AllReduced) across all
     /// Forward pass for multimodal (vision + text) inference.
     ///
     /// If this is the first segment and `vision_embeddings` is provided, the input
@@ -888,25 +891,60 @@ impl SplitModel {
         let max_seq_len = self.max_seq_len;
 
         // Build one causal mask for the whole batch when seq_len > 1. Every
-        // slot shares (seq_len, index_pos) at this point, so they also share
-        // `kv_offset` (== first slot's layer-0 KV length), hence share a mask.
-        let mask = if seq_len == 1 {
-            None
-        } else {
-            let kv_offset = all_kv_caches
-                .first()
-                .and_then(|per_layer| per_layer.first())
+        // slot shares (seq_len, index_pos) at this point — but a partial /
+        // mismatched prefix-cache hydration could leave a slot with the same
+        // `index_pos` but a layer-0 KV length that differs from its peers,
+        // which would silently mask the wrong key positions. Verify per-slot
+        // `kv_offset` actually matches before sharing one mask, and fall back
+        // to sequential when it doesn't.
+        let kv_offset_for = |slot: &Vec<Option<KvCache>>| -> usize {
+            slot.first()
                 .and_then(|l| l.as_ref())
                 .map(|c| c.current_seq_len())
-                .unwrap_or(0);
-            if kv_offset > 0 {
-                Some(
-                    self.mask_with_offset(seq_len, kv_offset + seq_len)
-                        .map_err(SwarmError::internal)?,
-                )
-            } else {
-                Some(self.mask(seq_len).map_err(SwarmError::internal)?)
+                .unwrap_or(0)
+        };
+        let first_kv_offset = all_kv_caches.first().map(kv_offset_for).unwrap_or(0);
+        let kv_offset_homogeneous = all_kv_caches
+            .iter()
+            .all(|s| kv_offset_for(s) == first_kv_offset);
+        if !kv_offset_homogeneous {
+            // Restore the moved-out KV caches before the sequential fallback
+            // so each item's per-request entry is intact when forward() loads it.
+            for (item, kv) in items.iter().zip(all_kv_caches.into_iter()) {
+                let key = KvCacheStore::cache_key(&model_key, item.request_id);
+                let mut entry = kv_cache_store.get_or_create_keyed(&key, num_layers);
+                entry.layers = kv;
             }
+            for (item, ssm) in items.iter().zip(all_ssm_states.into_iter()) {
+                let key = KvCacheStore::cache_key(&model_key, item.request_id);
+                let mut entry = kv_cache_store.get_or_create_keyed(&key, num_layers);
+                entry.ssm_states = ssm;
+            }
+            tracing::debug!(
+                first_kv_offset,
+                batch_size,
+                "DIAG: forward_batch kv_offset mismatch — falling back to sequential"
+            );
+            let mut results = Vec::with_capacity(items.len());
+            for item in items {
+                results.push(self.forward(
+                    item.input,
+                    item.index_pos,
+                    kv_cache_store,
+                    item.request_id,
+                )?);
+            }
+            return Ok(results);
+        }
+        let mask = if seq_len == 1 {
+            None
+        } else if first_kv_offset > 0 {
+            Some(
+                self.mask_with_offset(seq_len, first_kv_offset + seq_len)
+                    .map_err(SwarmError::internal)?,
+            )
+        } else {
+            Some(self.mask(seq_len).map_err(SwarmError::internal)?)
         };
 
         // Stack all hidden states into a single batch tensor:

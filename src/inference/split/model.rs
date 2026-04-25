@@ -160,8 +160,11 @@ impl SplitModel {
             prompt.bytes().map(|b| b as i64).collect()
         };
         let num_tokens = token_ids.len();
-        // DIAG: dump token IDs for debugging tokenizer issues
-        tracing::info!(
+        // DIAG: dump token IDs for debugging tokenizer issues. Debug-level
+        // (not info) — fires on every prompt and would flood default-level
+        // logs while leaking prompt content. Other DIAG instrumentation in
+        // this module already uses debug! / trace!.
+        tracing::debug!(
             num_tokens,
             tokens = ?&token_ids[..token_ids.len().min(30)],
             "DIAG: tokenize result"

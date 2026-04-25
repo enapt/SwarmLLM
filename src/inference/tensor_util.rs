@@ -177,7 +177,12 @@ pub fn bytes_to_tensor(bytes: &[u8]) -> Result<Tensor, SwarmError> {
                 }
                 let val = f32::from_le_bytes(bytes[pos..pos + 4].try_into().unwrap());
                 if !val.is_finite() {
-                    return Err(SwarmError::Internal(
+                    // NaN/Inf in an inference activation isn't a code bug
+                    // (could be an fp16-overflow on a CUDA layer that
+                    // promoted to Inf before serialization). Inference is
+                    // the right error class — Internal would map this to
+                    // HTTP 500 even though it's a model/runtime fault.
+                    return Err(SwarmError::Inference(
                         "Tensor contains non-finite values (NaN/Inf)".into(),
                     ));
                 }
