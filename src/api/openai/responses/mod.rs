@@ -515,6 +515,134 @@ pub async fn cancel_response(
     }
 }
 
+/// Query parameters for `GET /v1/responses/:id/input_items`.
+#[derive(Debug, serde::Deserialize)]
+pub struct ListInputItemsParams {
+    /// Cursor: return items after the one with this id.
+    #[serde(default)]
+    pub after: Option<String>,
+    /// Page size. Defaults to 20 (matches OpenAI's default). Capped at 100.
+    #[serde(default)]
+    pub limit: Option<u32>,
+    /// `"asc"` (default) returns items in the order they appeared in the
+    /// original request; `"desc"` reverses.
+    #[serde(default)]
+    pub order: Option<String>,
+    /// Forward-compat: OpenAI SDKs pass `before` for reverse-cursor
+    /// pagination. We accept and ignore it for now (single-direction
+    /// cursor is sufficient for the shapes our callers use).
+    #[serde(default)]
+    pub before: Option<String>,
+    /// Forward-compat for `include[reasoning.encrypted_content]` etc.
+    /// Currently unused on the local path (we don't generate reasoning
+    /// input items; cloud-proxied responses are served from the verbatim
+    /// stored body).
+    #[serde(default)]
+    pub include: Option<String>,
+}
+
+/// `GET /v1/responses/:id/input_items` — paginated list of the input
+/// items that were sent as the request body. V4 (responses_api_v2):
+/// small bookkeeping endpoint hit by OpenAI SDKs in retried-tool-call
+/// flows.
+///
+/// Synthetic ids: input items don't carry stable ids on the wire, so we
+/// emit `item_{n}` where `n` is the zero-based position in the original
+/// request. A `Text` input produces a single synthetic `message` item.
+/// Cursor (`after`) matches by the synthetic id.
+pub async fn list_input_items(
+    State(state): State<AppState>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    axum::extract::Query(params): axum::extract::Query<ListInputItemsParams>,
+) -> Result<Response, ApiError> {
+    let record = store::load(&state.db, &id)
+        .map_err(ApiError)?
+        .ok_or_else(|| {
+            ApiError(SwarmError::Validation(format!(
+                "Response `{id}` not found or expired. Retention is 30 days; \
+                 pass store=false to opt out of persistence."
+            )))
+        })?;
+
+    let body = build_input_items_page(&record.request.input, &params);
+    Ok((StatusCode::OK, Json(body)).into_response())
+}
+
+/// Pure pagination helper: turn the stored `ResponsesInput` into the
+/// OpenAI list-object JSON shape. Separated from the handler so cursor
+/// + limit + order logic can be unit-tested without the full AppState.
+pub(crate) fn build_input_items_page(
+    input: &ResponsesInput,
+    params: &ListInputItemsParams,
+) -> serde_json::Value {
+    let mut items_with_ids: Vec<(String, serde_json::Value)> = match input {
+        ResponsesInput::Text(s) => {
+            let item_id = "item_0".to_string();
+            let v = serde_json::json!({
+                "id": item_id,
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": s}],
+            });
+            vec![(item_id, v)]
+        }
+        ResponsesInput::Items(items) => items
+            .iter()
+            .enumerate()
+            .map(|(i, item)| {
+                let item_id = format!("item_{i}");
+                let mut v = serde_json::to_value(item).unwrap_or(serde_json::Value::Null);
+                if let Some(obj) = v.as_object_mut() {
+                    obj.insert("id".into(), serde_json::Value::String(item_id.clone()));
+                }
+                (item_id, v)
+            })
+            .collect(),
+    };
+
+    // `order=desc` reverses the stable list before cursoring so `after`
+    // semantics still mean "the next page of results" regardless of
+    // direction.
+    if matches!(params.order.as_deref(), Some("desc")) {
+        items_with_ids.reverse();
+    }
+
+    let start = match params.after.as_deref() {
+        Some(cursor) => items_with_ids
+            .iter()
+            .position(|(i, _)| i == cursor)
+            .map(|i| i + 1)
+            .unwrap_or(items_with_ids.len()),
+        None => 0,
+    };
+
+    let limit = params.limit.unwrap_or(20).clamp(1, 100) as usize;
+    let total = items_with_ids.len();
+    let end = start.saturating_add(limit).min(total);
+    let page: Vec<serde_json::Value> = items_with_ids[start..end]
+        .iter()
+        .map(|(_, v)| v.clone())
+        .collect();
+
+    let first_id = page
+        .first()
+        .and_then(|v| v.get("id").and_then(|x| x.as_str()))
+        .map(String::from);
+    let last_id = page
+        .last()
+        .and_then(|v| v.get("id").and_then(|x| x.as_str()))
+        .map(String::from);
+    let has_more = end < total;
+
+    serde_json::json!({
+        "object": "list",
+        "data": page,
+        "first_id": first_id,
+        "last_id": last_id,
+        "has_more": has_more,
+    })
+}
+
 /// `DELETE /v1/responses/:id` — remove a stored response.
 pub async fn delete_response(
     State(state): State<AppState>,
@@ -568,6 +696,142 @@ mod tests {
             {"type": "function", "name": "g", "parameters": {"type": "object"}},
         ]));
         assert_eq!(first_builtin_tool(&tools), Some("web_search"));
+    }
+
+    // ------------------------------------------------------------------
+    // V4: input_items pagination
+    // ------------------------------------------------------------------
+
+    fn empty_params() -> ListInputItemsParams {
+        ListInputItemsParams {
+            after: None,
+            limit: None,
+            order: None,
+            before: None,
+            include: None,
+        }
+    }
+
+    #[test]
+    fn input_items_text_input_produces_single_synthetic_message() {
+        let input = ResponsesInput::Text("hi there".into());
+        let page = build_input_items_page(&input, &empty_params());
+        assert_eq!(page["object"], "list");
+        assert_eq!(page["has_more"], false);
+        let data = page["data"].as_array().unwrap();
+        assert_eq!(data.len(), 1);
+        assert_eq!(data[0]["id"], "item_0");
+        assert_eq!(data[0]["type"], "message");
+        assert_eq!(data[0]["role"], "user");
+        assert_eq!(data[0]["content"][0]["type"], "input_text");
+        assert_eq!(data[0]["content"][0]["text"], "hi there");
+        assert_eq!(page["first_id"], "item_0");
+        assert_eq!(page["last_id"], "item_0");
+    }
+
+    #[test]
+    fn input_items_array_input_paginates_by_limit() {
+        let input: ResponsesInput = serde_json::from_value(json!([
+            {"type": "message", "role": "user", "content": "one"},
+            {"type": "message", "role": "user", "content": "two"},
+            {"type": "message", "role": "user", "content": "three"},
+            {"type": "message", "role": "user", "content": "four"},
+        ]))
+        .unwrap();
+
+        let mut params = empty_params();
+        params.limit = Some(2);
+        let page = build_input_items_page(&input, &params);
+        assert_eq!(page["data"].as_array().unwrap().len(), 2);
+        assert_eq!(page["first_id"], "item_0");
+        assert_eq!(page["last_id"], "item_1");
+        assert_eq!(page["has_more"], true);
+    }
+
+    #[test]
+    fn input_items_after_cursor_returns_next_page() {
+        let input: ResponsesInput = serde_json::from_value(json!([
+            {"type": "message", "role": "user", "content": "one"},
+            {"type": "message", "role": "user", "content": "two"},
+            {"type": "message", "role": "user", "content": "three"},
+            {"type": "message", "role": "user", "content": "four"},
+        ]))
+        .unwrap();
+
+        let mut params = empty_params();
+        params.limit = Some(2);
+        params.after = Some("item_1".into());
+        let page = build_input_items_page(&input, &params);
+        let data = page["data"].as_array().unwrap();
+        assert_eq!(data.len(), 2);
+        assert_eq!(data[0]["id"], "item_2");
+        assert_eq!(data[1]["id"], "item_3");
+        assert_eq!(page["has_more"], false);
+    }
+
+    #[test]
+    fn input_items_after_cursor_at_end_returns_empty_page() {
+        let input: ResponsesInput = serde_json::from_value(json!([
+            {"type": "message", "role": "user", "content": "only"},
+        ]))
+        .unwrap();
+        let mut params = empty_params();
+        params.after = Some("item_0".into());
+        let page = build_input_items_page(&input, &params);
+        assert!(page["data"].as_array().unwrap().is_empty());
+        assert_eq!(page["has_more"], false);
+        assert_eq!(page["first_id"], serde_json::Value::Null);
+        assert_eq!(page["last_id"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn input_items_order_desc_reverses_iteration() {
+        let input: ResponsesInput = serde_json::from_value(json!([
+            {"type": "message", "role": "user", "content": "a"},
+            {"type": "message", "role": "user", "content": "b"},
+            {"type": "message", "role": "user", "content": "c"},
+        ]))
+        .unwrap();
+        let mut params = empty_params();
+        params.order = Some("desc".into());
+        let page = build_input_items_page(&input, &params);
+        let data = page["data"].as_array().unwrap();
+        // All three present because default limit=20 > 3.
+        assert_eq!(data.len(), 3);
+        // Items returned in reverse order (last first).
+        assert_eq!(data[0]["id"], "item_2");
+        assert_eq!(data[1]["id"], "item_1");
+        assert_eq!(data[2]["id"], "item_0");
+    }
+
+    #[test]
+    fn input_items_limit_capped_at_100() {
+        let input = ResponsesInput::Text("hi".into());
+        let mut params = empty_params();
+        params.limit = Some(10_000);
+        let page = build_input_items_page(&input, &params);
+        // 1 item so only 1 returned, but the clamp path shouldn't panic.
+        assert_eq!(page["data"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn input_items_function_call_items_preserve_fields_and_add_id() {
+        let input: ResponsesInput = serde_json::from_value(json!([
+            {"type": "message", "role": "user", "content": "call X"},
+            {"type": "function_call", "call_id": "c1", "name": "lookup", "arguments": "{\"q\":\"x\"}"},
+            {"type": "function_call_output", "call_id": "c1", "output": "{\"result\":42}"},
+        ]))
+        .unwrap();
+        let page = build_input_items_page(&input, &empty_params());
+        let data = page["data"].as_array().unwrap();
+        assert_eq!(data.len(), 3);
+        assert_eq!(data[0]["id"], "item_0");
+        assert_eq!(data[1]["id"], "item_1");
+        assert_eq!(data[1]["type"], "function_call");
+        assert_eq!(data[1]["name"], "lookup");
+        assert_eq!(data[2]["id"], "item_2");
+        assert_eq!(data[2]["type"], "function_call_output");
+        assert_eq!(data[2]["call_id"], "c1");
     }
 
     #[test]
