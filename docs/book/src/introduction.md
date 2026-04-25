@@ -86,4 +86,4 @@ See the [Getting Started](./getting-started.md) chapter for full instructions.
 | macOS x86_64 (Intel) | Best-effort | CPU only |
 | Linux aarch64 | Best-effort | CPU only |
 
-> **Note:** macOS binaries are compile-validated but not yet exercised in CI; treat them as best-effort until the macOS CI matrix lands. All platform binaries are on the [Releases page](https://github.com/enapt/SwarmLLM/releases).
+> **Note:** macOS aarch64 binaries are now exercised in the CI matrix (test + clippy on `macos-15`); integration tests stay Linux-only for now. All platform binaries are on the [Releases page](https://github.com/enapt/SwarmLLM/releases).

@@ -170,7 +170,7 @@ impl PipelineExecutor {
                 self.shared_state
                     .pending_vision_results
                     .remove(&self.request.id);
-                Err(SwarmError::InferenceTimeout(120))
+                Err(SwarmError::InferenceTimeout(VISION_ENCODE_TIMEOUT_SECS))
             }
         }
     }

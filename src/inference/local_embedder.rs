@@ -37,9 +37,9 @@ impl LocalEmbedder {
     /// compared to loading a full SplitModel (~64MB for a 7B Q4 model).
     pub fn load(shard0_path: &Path) -> Result<Self, SwarmError> {
         let mut file = std::fs::File::open(shard0_path)
-            .map_err(|e| SwarmError::Internal(format!("Failed to open shard_000: {e}")))?;
+            .map_err(|e| SwarmError::Inference(format!("Failed to open shard_000: {e}")))?;
         let ct = candle_core::quantized::gguf_file::Content::read(&mut file)
-            .map_err(|e| SwarmError::Internal(format!("Failed to read GGUF content: {e}")))?;
+            .map_err(|e| SwarmError::Inference(format!("Failed to read GGUF content: {e}")))?;
 
         let device = Device::Cpu;
 
@@ -57,10 +57,10 @@ impl LocalEmbedder {
         // Load and dequantize the embedding table
         let tok_embd = ct
             .tensor(&mut file, "token_embd.weight", &device)
-            .map_err(|e| SwarmError::Internal(format!("Failed to load token_embd.weight: {e}")))?;
+            .map_err(|e| SwarmError::Inference(format!("Failed to load token_embd.weight: {e}")))?;
         let tok_embd = tok_embd
             .dequantize(&device)
-            .map_err(|e| SwarmError::Internal(format!("Dequantize embedding: {e}")))?;
+            .map_err(|e| SwarmError::Inference(format!("Dequantize embedding: {e}")))?;
 
         let embeddings = Embedding::new(tok_embd, hidden_dim);
 

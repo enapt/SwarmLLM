@@ -19,7 +19,7 @@ Manager  Router  Ledger  Monitor  Server ancer    tion Mgr   Dispatch   Manager 
 | Subsystem | File | Role |
 |---|---|---|
 | **NetworkManager** | `src/network/manager/` | libp2p swarm: Kademlia DHT + GossipSub + request/response |
-| **InferenceRouter** | `src/inference/router.rs` | Request queuing, pipeline assembly, execution coordination |
+| **InferenceRouter** | `src/inference/router/` | Request queuing, pipeline assembly, execution coordination |
 | **MessageDispatcher** | `src/daemon/dispatch/mod.rs` | Routes inbound network messages to appropriate subsystems |
 | **CreditLedger** | `src/credit/ledger.rs` | Credit balance tracking, transaction signing, gossip |
 | **HealthMonitor** | `src/health/monitor.rs` | Periodic health pings, rebalancing triggers |

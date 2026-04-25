@@ -802,7 +802,6 @@ impl PipelineScheduler {
     ) -> Vec<TensorParallelGroup> {
         let local_id = self.shared_state.identity.node_id().clone();
         const MAX_TP_GROUP_SIZE: usize = 4;
-        let max_tp_size = MAX_TP_GROUP_SIZE;
 
         let mut groups = Vec::new();
 
@@ -819,7 +818,7 @@ impl PipelineScheduler {
                 if candidate.node_id == local_id {
                     continue;
                 }
-                if tp_nodes.len() >= max_tp_size {
+                if tp_nodes.len() >= MAX_TP_GROUP_SIZE {
                     break;
                 }
 

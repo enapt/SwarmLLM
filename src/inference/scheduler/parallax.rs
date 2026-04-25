@@ -46,10 +46,22 @@ impl VertexCost {
 /// we use a fixed ms penalty so it's tunable independently of a baseline estimate.
 const LOAD_COMPENSATOR_MS: f32 = 25.0;
 
-/// Fallback tokens/sec when a candidate hasn't gossiped an estimate.
-/// Below this threshold (e.g. est_tokens_per_sec == 0) compute_ms contribution is 0,
-/// making the DP fall back to pure latency + load as the cost.
-const DEFAULT_TOKENS_PER_SEC: f32 = 0.0;
+/// Compute-cost contribution when a candidate has neither an observed
+/// per-layer latency nor a gossiped throughput estimate. Set to 0 so the DP
+/// falls back to pure latency + load — the alternative (a positive default)
+/// would silently penalise newly-discovered peers we have no data on.
+///
+/// Despite the unit, this is *milliseconds*, not tokens/sec — see the
+/// fallback branch in `vertex_cost`.
+pub(super) const UNKNOWN_COMPUTE_MS: f32 = 0.0;
+
+/// Baseline transformer layer count used to scale a whole-model throughput
+/// estimate down to a per-segment contribution. 32 matches Llama-7B and most
+/// 7B Q4 models we benchmark against; arch-aware scaling would replace this
+/// with the actual layer count from the GGUF metadata. Shared with
+/// `parallax_allocator.rs` so the cost model stays consistent across the
+/// scheduler and the offline allocator.
+pub(super) const BASELINE_LAYER_COUNT: f32 = 32.0;
 
 /// Compute per-vertex cost for a (candidate, range) pair.
 ///
@@ -84,9 +96,9 @@ fn vertex_cost(c: &NodeCandidate, range: (u32, u32), local: &NodeId) -> VertexCo
             // then scale by the fraction of layers this segment owns. Assumes 32 layers
             // as the baseline; adjust here if we want arch-aware scaling later.
             let whole_model_ms = 1000.0 / c.est_tokens_per_sec;
-            whole_model_ms * (layers / 32.0)
+            whole_model_ms * (layers / BASELINE_LAYER_COUNT)
         } else {
-            DEFAULT_TOKENS_PER_SEC
+            UNKNOWN_COMPUTE_MS
         };
         (network, compute)
     };

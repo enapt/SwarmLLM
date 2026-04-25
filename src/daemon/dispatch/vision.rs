@@ -71,13 +71,9 @@ pub(super) async fn handle_vision_encode_request(
         }
     };
 
-    // Size check already done above (before module loading).
-    // This is a defense-in-depth second check.
-    if req.image_data.len() > MAX_IMAGE_BYTES {
-        return;
-    }
-
-    // Decode JPEG image into ImageData
+    // Decode JPEG image into ImageData. (The image_data byte cap was checked
+    // at the top of this function — req.image_data is immutable, so a
+    // re-check here would be unreachable.)
     let img = match image::load_from_memory(&req.image_data) {
         Ok(dyn_img) => {
             let rgb = dyn_img.to_rgb8();

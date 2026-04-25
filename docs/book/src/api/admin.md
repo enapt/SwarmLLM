@@ -47,25 +47,25 @@ List models with shard status, VRAM estimates, and acquisition state. Each model
 - `mmproj` field with `available` (bool), `local` (bool), and `holders` (count) for VLM vision encoder status
 - `trust_level` field: one of `"Discovered"`, `"Pinned"`, `"DemandVerified"`, or `"NetworkPopular"` indicating the model's trust status (auto-manage only downloads shards for DemandVerified+ or Pinned models)
 
-### POST /api/admin/models/:id/add
+### POST /api/admin/models/{id}/add
 Trigger model acquisition from the network.
 
-### GET /api/admin/models/:id/status
+### GET /api/admin/models/{id}/status
 Check model acquisition progress.
 
-### DELETE /api/admin/models/:id
+### DELETE /api/admin/models/{id}
 Remove model (shards + manifest + state).
 
-### DELETE /api/admin/models/:id/shards/:index
+### DELETE /api/admin/models/{id}/shards/{index}
 Delete a single shard.
 
-### GET/PUT /api/admin/models/:id/auto-manage
+### GET/PUT /api/admin/models/{id}/auto-manage
 Per-model auto-manage policy (including prune toggle).
 
-### GET/PUT /api/admin/models/:id/encrypted-pipeline
+### GET/PUT /api/admin/models/{id}/encrypted-pipeline
 Per-model encrypted pipeline toggle. GET returns current status, readiness (whether local node holds first + last shard), and overhead note. PUT enables/disables with body `{"enabled": true}`. Requires the local node to hold shard 0 and the final shard. Returns a warning for 2-shard models (fully local, no distribution benefit). Setting is persisted to the database and survives restarts. Falls back to global `encrypted_pipeline` config if no per-model override is set.
 
-### PUT /api/admin/models/:id/shards/:index/lock
+### PUT /api/admin/models/{id}/shards/{index}/lock
 Lock/unlock a shard to prevent auto-pruning.
 
 ## Storage & Shards
@@ -78,7 +78,7 @@ Response:
 { "status": "ok", "models_updated": ["model-id-1"], "count": 1 }
 ```
 
-### GET /api/admin/models/:id/metadata
+### GET /api/admin/models/{id}/metadata
 Read parsed GGUF metadata from a locally-stored model header (`gguf_header.bin`). Returns architecture parameters, tokenizer settings, quantization type, and all raw metadata key/value pairs (tokenizer vocabulary arrays are excluded). Returns 400 if no header file exists for the model.
 
 Response shape:
@@ -93,7 +93,7 @@ Response shape:
 }
 ```
 
-### POST /api/admin/models/:id/shards/:index/download
+### POST /api/admin/models/{id}/shards/{index}/download
 Trigger a P2P download of a specific shard that is not yet held locally. The daemon first checks for P2P peers that hold the shard (picking the best peer by LAN-proximity, latency, and trust), then falls back to returning HuggingFace source info if no peers are available. Bearer auth required.
 
 Responses:
@@ -102,7 +102,7 @@ Responses:
 - `{ "status": "use_hf", "source": "huggingface", "repo_id": "...", "filename": "...", ... }` — no P2P peers, use `hf/download-shards` instead
 - 400 if no peers and no HuggingFace source known
 
-### POST /api/admin/models/:id/shards/:index/unload
+### POST /api/admin/models/{id}/shards/{index}/unload
 Unload a single shard from memory (VRAM/RAM) without deleting the file from disk. Narrows the model's shard window to exclude this shard and restarts the worker subprocess. If this is the last loaded shard, the model is fully unloaded. Bearer auth required.
 
 Response:
@@ -110,7 +110,7 @@ Response:
 { "status": "unloaded", "model_id": "...", "shard_index": 0, "remaining_loaded": [1, 2] }
 ```
 
-### POST /api/admin/models/:id/shards/:index/load
+### POST /api/admin/models/{id}/shards/{index}/load
 Load a shard that is on disk into memory. The shard must already be present locally (use `/download` first if not). Expands the model's shard window to include the shard and restarts the worker subprocess. Bearer auth required.
 
 Response:
@@ -118,7 +118,7 @@ Response:
 { "status": "loaded", "model_id": "...", "shard_index": 0, "loaded_shards": [0, 1, 2] }
 ```
 
-### POST /api/admin/models/:id/unload
+### POST /api/admin/models/{id}/unload
 Unload an entire model from memory (VRAM/RAM) without deleting any files from disk. Evicts all split-model entries, kills the worker subprocess, clears GGUF metadata cache, and clears the loaded-model record. Bearer auth required.
 
 Response:
@@ -170,7 +170,7 @@ curl -X POST http://localhost:8800/api/admin/hf/download-shards \
   -d '{"repo_id": "Qwen/Qwen2.5-Coder-7B-Instruct-GGUF", "filename": "qwen2.5-coder-7b-instruct.Q4_K_M.gguf", "peer_fair_share": true}'
 ```
 
-### GET /api/admin/hf/source/:model_id
+### GET /api/admin/hf/source/{model_id}
 Look up the HuggingFace source (repo + filename) for a locally-known model. First checks the in-memory source cache and the probe cache, then auto-discovers by searching HuggingFace if neither has an entry. If found via auto-discovery the result is cached to the database and `hf_source.json` in the model directory.
 
 Response:
@@ -181,7 +181,7 @@ Response:
 ### GET /api/admin/downloads
 List the download queue with per-shard progress, speed, and source.
 
-### POST /api/admin/downloads/:model_id/cancel
+### POST /api/admin/downloads/{model_id}/cancel
 Cancel an in-progress download.
 
 ## LoRA Adapters
@@ -203,7 +203,7 @@ Request body:
 
 Response: `{ "status": "ok", "adapter": { ... } }`
 
-### DELETE /api/admin/adapters/:id
+### DELETE /api/admin/adapters/{id}
 Unregister a LoRA adapter. Does not delete the file from disk. Bearer auth required. Returns 400 if the id is not found.
 
 Response: `{ "status": "ok", "message": "Adapter 'my-adapter' removed" }`
@@ -290,6 +290,15 @@ Get an encrypted shareable invite code and network phase. The code embeds the no
 
 ### POST /api/admin/join-network
 Join the network via encrypted invite code (`swarm://...`) or raw multiaddr. Immediately dials the peer and saves the address to the peer cache.
+
+## Responses API listing
+
+### GET /api/admin/responses
+List stored Responses-API records (backs the dashboard's Responses tab).
+Optional query params: `?limit=N` (cap on returned records, default 100,
+max 500) and `?status=...` (filter by `completed` / `in_progress` /
+`cancelled` / `failed` / `queued`). See [Responses API](./responses.md)
+for the user-facing surface.
 
 ## Authentication
 

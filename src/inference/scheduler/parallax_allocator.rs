@@ -162,9 +162,9 @@ fn pack_k_pipelines(peers: &[PeerCapacity], num_layers: u32, k: u32) -> Option<A
             // Cost: 2 * rtt + compute_ms. Local node (latency 0) has no RTT term.
             let net_ms = 2.0 * p.latency_ms as f32;
             let compute_ms = if p.tokens_per_sec > 0.0 {
-                (1000.0 / p.tokens_per_sec) * (take as f32 / 32.0)
+                (1000.0 / p.tokens_per_sec) * (take as f32 / super::parallax::BASELINE_LAYER_COUNT)
             } else {
-                0.0
+                super::parallax::UNKNOWN_COMPUTE_MS
             };
             est_latency += net_ms + compute_ms;
             assigned.push(AllocationSegment {

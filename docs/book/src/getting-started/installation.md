@@ -7,8 +7,8 @@ Download the right file for your system from the [GitHub Releases page](https://
 | Your Computer | File Name |
 |---|---|
 | **Windows** (most PCs) | `swarmllm-windows-x86_64.zip` |
-| **Mac** (M1/M2/M3/M4) | Coming soon |
-| **Mac** (older Intel) | Coming soon |
+| **Mac** (M1/M2/M3/M4) | `swarmllm-macos-aarch64.tar.gz` (compile-validated) |
+| **Mac** (older Intel) | Best-effort — build from source |
 | **Linux** (most distros) | `swarmllm-linux-x86_64.tar.gz` |
 | **Linux** (NVIDIA GPU) | `swarmllm-linux-x86_64-cuda.tar.gz` |
 
@@ -30,9 +30,15 @@ cd Downloads\swarmllm-windows-x86_64
 
 ### macOS
 
-> **Note:** Pre-built macOS binaries are not yet available. Build from source instead (see below).
+```bash
+cd ~/Downloads
+tar xzf swarmllm-macos-aarch64.tar.gz
+cd swarmllm-macos-aarch64
+chmod +x swarmllm
+./swarmllm run
+```
 
-If macOS blocks a locally-built binary: System Settings > Privacy & Security > click **Open Anyway** next to SwarmLLM.
+> **Note:** macOS aarch64 binaries are compile-validated and exercised in CI (test + clippy on `macos-15`); integration tests stay Linux-only for now. Intel Mac users should build from source. If macOS blocks the binary on first launch: System Settings > Privacy & Security > click **Open Anyway** next to SwarmLLM.
 
 ### Linux
 

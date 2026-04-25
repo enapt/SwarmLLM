@@ -26,7 +26,7 @@ The unified protocol uses a type-tag byte on every frame
 | `0x01` | `WIRE_TAG_TENSOR` | Binary tensor payload (`LayerForward`, `LayerResult`), f16 |
 | `0x02` | `WIRE_TAG_TENSOR_COMPRESSED` | Q8_0 activation frame (Item 13, flag-gated `activation_compression`) — ~3.76× smaller than `0x01` |
 | `0x03` | `WIRE_TAG_SHARD` | Raw shard bytes (ShardResponse payload, 32 MB max — bypasses the 4 MB JSON cap) |
-| `0x04` | `WIRE_TAG_PREFIX_KV` | Cross-node prefix-KV snapshot (Item 8), f32 |
+| `0x04` | `WIRE_TAG_PREFIX_KV` | Cross-node prefix-KV snapshot (Item 8). Frame body's flag byte: `0` = miss, `1` = raw f32, `2` = zstd-compressed f32 (gated on `NetworkConfig::prefix_kv_compression`, default off). Receivers always decompress regardless of the send-side flag. |
 
 Receivers auto-dispatch on the leading byte; senders choose based on
 config + request kind. Only the `0x00` frame carries a JSON body; the

@@ -33,6 +33,7 @@
 # API Reference
 
 - [OpenAI-Compatible API](./api/openai.md)
+- [Responses API](./api/responses.md)
 - [Anthropic Messages API](./api/anthropic.md)
 - [MCP Server](./api/mcp.md)
 - [Admin API](./api/admin.md)

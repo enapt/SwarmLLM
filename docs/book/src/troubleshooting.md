@@ -57,7 +57,7 @@ If the first inference request to a model takes noticeably longer than subsequen
 # Back up first
 cp -r ~/.local/share/swarmllm ~/.local/share/swarmllm-backup
 # Delete database (models and config are preserved)
-rm -rf ~/.local/share/swarmllm/db
+rm ~/.local/share/swarmllm/db.redb
 # Restart
 ./swarmllm run
 ```
@@ -136,7 +136,7 @@ probe never fires because no peer passes the trust gate.
 
 ## Running the Test Suite
 
-SwarmLLM ships 771 tests (unit + integration + VLM E2E).
+SwarmLLM ships 821 lib tests + integration + VLM E2E.
 
 ```bash
 # Run all tests (release, used in CI)
