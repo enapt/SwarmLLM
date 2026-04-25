@@ -1,8 +1,19 @@
 # OpenAI `/v1/responses` — v2 Plan
 
-**Status**: scoping. v1 (M1-M9) shipped 2026-04-24 across commits `dfa4af6..6dd4e4b`.
+**Status**: V1–V8 shipped 2026-04-25 across commits `8c1e3c2..c85e3b4`.
+V9 (`POST /v1/responses/compact`) remains deferred indefinitely — no
+concrete caller has asked for it yet.
+
 **Inputs**: v1 commit log, `docs/plans/responses_api.md` § Watch-list, end-to-end matrix
 (38/38 pass) and benchmarks captured in `/tmp/resp_final/`.
+
+**Final test count**: 814 lib tests passing (up from 769 at v1 close —
+45 new tests across V1–V6/V7/V5+V8). Clippy clean both with and without
+`claude-subscription`. End-to-end curl matrix from v1 still green; the
+new V8 background-streaming flow + V5 resume cursor were validated by
+unit tests covering buffer cap, cursor filter, terminal-event derivation,
+and registration round-trip — full curl-matrix verification of the
+202+Location handshake is a follow-up bench task.
 
 ## Why v2
 
