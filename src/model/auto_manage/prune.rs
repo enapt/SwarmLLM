@@ -379,13 +379,29 @@ impl AutoShardManager {
                 let h = registry.shard_holders(&shard_id_check);
                 crate::pool::scope::count_allowed_holders(&h, &allowed_set)
             };
-            if current_holders <= candidate.target_replicas as usize {
+            // Re-compute pressure-adjusted target with current pressure as well.
+            // As we prune candidates earlier in this cycle, local disk usage
+            // drops and pressure-adjusted_target may have grown (i.e., we no
+            // longer need to shed). Re-using the snapshot taken at scan time
+            // could cause over-pruning. We re-use the cached VRAM read
+            // (live_vram_used) — VRAM is not affected by file deletes, only
+            // by reload/unload, which doesn't happen mid-cycle.
+            let fresh_pressure = self.compute_resource_pressure(live_vram_used);
+            let target_now = self.pressure_adjusted_target(
+                self.geo_target_replicas(&candidate.model_id, config.min_replicas, pool_size),
+                fresh_pressure,
+                config.min_replicas,
+            );
+            let effective_target = target_now.max(candidate.target_replicas);
+            if current_holders <= effective_target as usize {
                 tracing::debug!(
                     model = %candidate.model_id,
                     shard = candidate.shard_index,
                     current_holders,
-                    target = candidate.target_replicas,
-                    "Skipping prune — holder count changed since evaluation"
+                    target_at_scan = candidate.target_replicas,
+                    target_now,
+                    fresh_pressure = %format_args!("{:.2}", fresh_pressure),
+                    "Skipping prune — holder count or fresh pressure says we no longer need to shed"
                 );
                 continue;
             }

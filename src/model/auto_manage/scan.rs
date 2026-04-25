@@ -72,7 +72,14 @@ pub async fn rescan_local_shards(
             }
             // Skip size check when manifest has no size info (size_bytes == 0) —
             // an empty file must not pass as a valid shard.
-            if !super::shard_size_ok(&path, shard_info.size_bytes) {
+            // For zero-hash placeholder manifests we require exact size match
+            // (no ±10% tolerance) since size is the only signal we have.
+            let size_ok = if shard_info.hash == [0u8; 32] {
+                super::shard_size_exact(&path, shard_info.size_bytes)
+            } else {
+                super::shard_size_ok(&path, shard_info.size_bytes)
+            };
+            if !size_ok {
                 continue;
             }
 

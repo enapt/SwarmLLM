@@ -96,9 +96,12 @@ impl AutoShardManager {
                 return;
             }
 
-            // Verify shard integrity: try BLAKE3 hash if available, fall back to size check
+            // Verify shard integrity: try BLAKE3 hash if available, fall back to size check.
+            // Zero-hash placeholders use the exact-size variant — without a
+            // hash to corroborate, ±10% tolerance is too permissive.
             let shard_store = self.shared_state.shard_store();
-            let size_ok = || super::shard_size_ok(&shard_path, candidate.shard_size_bytes);
+            let size_ok_lenient = || super::shard_size_ok(&shard_path, candidate.shard_size_bytes);
+            let size_ok_exact = || super::shard_size_exact(&shard_path, candidate.shard_size_bytes);
             let file_ok = if let Some(manifest) = self
                 .shared_state
                 .model_registry
@@ -115,14 +118,14 @@ impl AutoShardManager {
                             .verify_shard(&candidate.model_id, shard_info)
                             .is_ok()
                     } else {
-                        // Zero-hash placeholder -- fall back to size check
-                        size_ok()
+                        // Zero-hash placeholder -- exact size match required.
+                        size_ok_exact()
                     }
                 } else {
-                    size_ok()
+                    size_ok_lenient()
                 }
             } else {
-                size_ok()
+                size_ok_lenient()
             };
 
             if file_ok {

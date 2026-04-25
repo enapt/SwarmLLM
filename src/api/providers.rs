@@ -288,11 +288,64 @@ const PROVIDER_PROXY_TIMEOUT_SECS: u64 = 300;
 /// TCP connect timeout for proxied provider requests.
 const PROVIDER_PROXY_CONNECT_SECS: u64 = 30;
 
+/// DNS resolver that filters out private/internal IP addresses *at request
+/// time*. Closes the TOCTOU gap in `validate_provider_url`: that helper
+/// only runs once at config-update or pre-request, but the actual TCP
+/// connection happens later and re-resolves the hostname. A malicious
+/// authoritative DNS server can return a public IP for the validation
+/// query and a private IP (e.g. cloud metadata `169.254.169.254`) for
+/// the request query. Injecting this resolver into the shared client
+/// makes the filter run on the same lookup that drives the connection,
+/// so the request and the check can't disagree.
+struct PrivateIpBlockingResolver;
+
+impl reqwest::dns::Resolve for PrivateIpBlockingResolver {
+    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        let host = name.as_str().to_string();
+        Box::pin(async move {
+            // GaiResolver (reqwest's default) uses `(host, 0).to_socket_addrs()`
+            // and lets the consumer fill in the port. We do the same.
+            let resolved: Result<Vec<std::net::SocketAddr>, std::io::Error> =
+                tokio::task::spawn_blocking(move || {
+                    std::net::ToSocketAddrs::to_socket_addrs(&(host.as_str(), 0u16))
+                        .map(|iter| iter.collect())
+                })
+                .await
+                .unwrap_or_else(|join_err| {
+                    Err(std::io::Error::other(format!(
+                        "DNS resolver task panicked: {join_err}"
+                    )))
+                });
+
+            let addrs =
+                resolved.map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
+
+            let safe: Vec<std::net::SocketAddr> = addrs
+                .into_iter()
+                .filter(|sa| !is_private_ip(sa.ip()))
+                .collect();
+
+            if safe.is_empty() {
+                return Err(Box::new(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "all resolved addresses are private/internal",
+                ))
+                    as Box<dyn std::error::Error + Send + Sync>);
+            }
+
+            let iter: Box<dyn Iterator<Item = std::net::SocketAddr> + Send> =
+                Box::new(safe.into_iter());
+            Ok(iter as reqwest::dns::Addrs)
+        })
+    }
+}
+
 /// Lazily-initialized shared reqwest client for provider proxying.
 static PROVIDER_CLIENT: std::sync::LazyLock<reqwest::Client> = std::sync::LazyLock::new(|| {
     crate::http::build_client(|b| {
         b.timeout(std::time::Duration::from_secs(PROVIDER_PROXY_TIMEOUT_SECS))
             .connect_timeout(std::time::Duration::from_secs(PROVIDER_PROXY_CONNECT_SECS))
+            .dns_resolver(std::sync::Arc::new(PrivateIpBlockingResolver))
     })
 });
 
@@ -728,6 +781,48 @@ pub async fn list_providers(State(state): State<AppState>) -> Json<serde_json::V
 mod tests {
     use super::*;
     use crate::config::{CustomProvider, ProviderEntry, ProvidersConfig};
+
+    #[tokio::test]
+    async fn private_ip_blocking_resolver_filters_loopback() {
+        use reqwest::dns::Resolve;
+        let resolver = PrivateIpBlockingResolver;
+        // `localhost` resolves to 127.0.0.1 (and possibly ::1) — both private.
+        let name: reqwest::dns::Name = "localhost".parse().unwrap();
+        let result = resolver.resolve(name).await;
+        assert!(
+            result.is_err(),
+            "resolver should reject hostnames whose every resolved IP is private/loopback"
+        );
+    }
+
+    #[tokio::test]
+    async fn private_ip_blocking_resolver_passes_public_dns() {
+        // example.com is a stable public hostname. Its resolution always
+        // returns at least one public IP (93.184.215.14 / 2606:2800:21f:cb07:6820:80da:af6b:8b2c
+        // at time of writing). If DNS is unreachable in CI we tolerate the
+        // failure mode (returns Err) but the resolver itself must not be
+        // the thing rejecting public IPs.
+        use reqwest::dns::Resolve;
+        let resolver = PrivateIpBlockingResolver;
+        let name: reqwest::dns::Name = "example.com".parse().unwrap();
+        let result = resolver.resolve(name).await;
+        if let Ok(addrs) = result {
+            let v: Vec<_> = addrs.collect();
+            assert!(
+                !v.is_empty(),
+                "public DNS should yield at least one address"
+            );
+            for sa in &v {
+                assert!(
+                    !is_private_ip(sa.ip()),
+                    "resolver leaked private IP {} for example.com",
+                    sa.ip()
+                );
+            }
+        }
+        // If the lookup itself fails (offline CI), we don't fail the test —
+        // that's a network condition, not a resolver bug.
+    }
 
     #[test]
     fn resolve_claude_to_anthropic() {
