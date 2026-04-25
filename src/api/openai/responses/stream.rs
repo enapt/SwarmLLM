@@ -28,7 +28,7 @@
 use std::collections::HashMap;
 use std::convert::Infallible;
 
-use axum::body::Body;
+use axum::body::to_bytes;
 use axum::extract::State;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
@@ -44,26 +44,36 @@ use crate::storage::db::Database;
 
 const SSE_KEEPALIVE_INTERVAL_SECS: u64 = 15;
 
+/// Cap on a non-success chat response body when surfacing it as the
+/// message of a `response.failed` SSE event. Mirrors `MAX_CHAT_RESPONSE_BYTES`
+/// in the non-streaming path.
+const MAX_CHAT_ERROR_BODY_BYTES: usize = 16 * 1024 * 1024;
+
 /// Entry point for streaming `/v1/responses` on the local-inference path.
+///
+/// V1 (responses_api_v2): the chat-completions handler is *not* awaited
+/// before the SSE stream opens. We yield `response.created` and
+/// `response.in_progress` immediately, then await the inference future
+/// inside the generator. This shaves the chat handler's preflight latency
+/// (model resolution, worker probe, template build, etc.) off the
+/// first-token timing — `response.created` arrives within a few ms of the
+/// HTTP handler entering the route.
+///
+/// Errors from chat_completions (whether sync `ApiError` or non-success
+/// `Response`) surface as `response.failed` events in the open SSE stream
+/// rather than HTTP error responses, since by the time the future resolves
+/// the SSE response has already been sent.
 pub async fn run_streaming(
     state: AppState,
     headers: axum::http::HeaderMap,
     req: ResponsesRequest,
     prior: Option<store::ResponsesRecord>,
 ) -> Result<Response, ApiError> {
+    // Translate is sync and validation-only — keep it before the SSE opens
+    // so a malformed request still returns a normal 4xx instead of an SSE
+    // 200 with response.failed inside.
     let mut chat_req = translate::request_to_chat(&req, prior.as_ref())?;
     chat_req.stream = true;
-
-    let chat_response = crate::api::openai::chat_completions(
-        State(state.clone()),
-        headers.clone(),
-        JsonBody(chat_req),
-    )
-    .await?;
-
-    if !chat_response.status().is_success() {
-        return Ok(chat_response);
-    }
 
     let response_id = format!("resp_{}", uuid::Uuid::new_v4().simple());
     let item_id = format!("msg_{}", uuid::Uuid::new_v4().simple());
@@ -71,16 +81,26 @@ pub async fn run_streaming(
 
     let initial_response = build_initial_response(&req, &response_id, created_at);
 
-    let chat_body: Body = chat_response.into_body();
-    let chat_stream = chat_body.into_data_stream();
-
     // M7: streaming responses are persisted at stream-end when store=true
     // (OpenAI default). Pass both into the generator so it can write after
     // the final_response is built but before the terminal event yields.
     let store_db = req.store.unwrap_or(true).then(|| state.db.clone());
 
+    // The chat_future is awaited *inside* the SSE generator so the early
+    // lifecycle events flush before any inference setup blocks.
+    let state_for_chat = state.clone();
+    let headers_for_chat = headers.clone();
+    let chat_future = async move {
+        crate::api::openai::chat_completions(
+            State(state_for_chat),
+            headers_for_chat,
+            JsonBody(chat_req),
+        )
+        .await
+    };
+
     let sse_stream = build_response_event_stream(
-        chat_stream,
+        chat_future,
         req,
         initial_response,
         response_id,
@@ -142,8 +162,8 @@ struct StreamingToolCall {
     arguments_so_far: String,
 }
 
-fn build_response_event_stream<S>(
-    chat_stream: S,
+fn build_response_event_stream<F>(
+    chat_future: F,
     original: ResponsesRequest,
     initial_response: ResponsesResponse,
     response_id: String,
@@ -152,7 +172,7 @@ fn build_response_event_stream<S>(
     store_db: Option<Database>,
 ) -> impl Stream<Item = Result<Event, Infallible>>
 where
-    S: Stream<Item = Result<bytes::Bytes, axum::Error>> + Send + 'static,
+    F: std::future::Future<Output = Result<Response, ApiError>> + Send + 'static,
 {
     async_stream::stream! {
         let mut seq: u64 = 0;
@@ -167,7 +187,7 @@ where
         let mut tool_call_order: Vec<u64> = Vec::new();
         let mut model_from_chunk: Option<String> = None;
 
-        // ---- response.created ----
+        // ---- response.created (V1: emitted before chat_future is awaited) ----
         yield Ok::<_, Infallible>(sse_event(
             "response.created",
             serde_json::json!({
@@ -189,6 +209,114 @@ where
         ));
         seq += 1;
 
+        // ---- Now await the inference setup. Errors and non-success
+        // responses become response.failed events because the SSE response
+        // is already in flight.
+        let chat_response = match chat_future.await {
+            Ok(r) => r,
+            Err(e) => {
+                let error = ResponseError {
+                    code: classify_error_code(&e),
+                    message: e.0.to_string(),
+                    extras: HashMap::new(),
+                };
+                let failed = build_failed_response(
+                    &original,
+                    &response_id,
+                    created_at,
+                    error.clone(),
+                );
+                if let Some(db) = store_db.as_ref() {
+                    let record = store::ResponsesRecord::new(
+                        original.clone(),
+                        failed.clone(),
+                        created_at,
+                        store::DEFAULT_TTL_SECS,
+                    );
+                    if let Err(e) = store::store(db, &record) {
+                        tracing::warn!(error = %e, id = %response_id, "responses stream store failed (early error)");
+                    }
+                }
+                yield Ok(sse_event(
+                    "response.failed",
+                    serde_json::json!({
+                        "type": "response.failed",
+                        "sequence_number": seq,
+                        "response": failed,
+                    }),
+                ));
+                return;
+            }
+        };
+
+        if !chat_response.status().is_success() {
+            let status_code = chat_response.status();
+            let bytes = match to_bytes(chat_response.into_body(), MAX_CHAT_ERROR_BODY_BYTES).await {
+                Ok(b) => b,
+                Err(e) => {
+                    let error = ResponseError {
+                        code: "internal_error".into(),
+                        message: format!("buffer chat error body: {e}"),
+                        extras: HashMap::new(),
+                    };
+                    let failed = build_failed_response(
+                        &original,
+                        &response_id,
+                        created_at,
+                        error,
+                    );
+                    yield Ok(sse_event(
+                        "response.failed",
+                        serde_json::json!({
+                            "type": "response.failed",
+                            "sequence_number": seq,
+                            "response": failed,
+                        }),
+                    ));
+                    return;
+                }
+            };
+            let message = parse_error_message(&bytes);
+            let code = if status_code.is_client_error() {
+                "invalid_request_error"
+            } else {
+                "upstream_error"
+            };
+            let error = ResponseError {
+                code: code.into(),
+                message,
+                extras: HashMap::new(),
+            };
+            let failed = build_failed_response(
+                &original,
+                &response_id,
+                created_at,
+                error,
+            );
+            if let Some(db) = store_db.as_ref() {
+                let record = store::ResponsesRecord::new(
+                    original.clone(),
+                    failed.clone(),
+                    created_at,
+                    store::DEFAULT_TTL_SECS,
+                );
+                if let Err(e) = store::store(db, &record) {
+                    tracing::warn!(error = %e, id = %response_id, "responses stream store failed (chat error)");
+                }
+            }
+            yield Ok(sse_event(
+                "response.failed",
+                serde_json::json!({
+                    "type": "response.failed",
+                    "sequence_number": seq,
+                    "response": failed,
+                }),
+            ));
+            return;
+        }
+
+        let chat_body = chat_response.into_body();
+        let chat_stream = chat_body.into_data_stream();
         let mut chat_stream = Box::pin(chat_stream);
         'outer: while let Some(chunk_result) = chat_stream.next().await {
             let chunk_bytes = match chunk_result {
@@ -592,6 +720,52 @@ where
     }
 }
 
+/// Build a `response.failed` final response carrying the given error.
+/// Used when chat_completions errors after the SSE stream has already
+/// opened, so the caller still receives a structurally-valid Responses
+/// object instead of a closed stream.
+fn build_failed_response(
+    req: &ResponsesRequest,
+    response_id: &str,
+    created_at: i64,
+    error: ResponseError,
+) -> ResponsesResponse {
+    let mut resp = build_initial_response(req, response_id, created_at);
+    resp.status = ResponseStatus::Failed;
+    resp.error = Some(error);
+    resp
+}
+
+/// Pick a coarse error code for an `ApiError` raised during chat-completions
+/// setup. The chat handler emits SwarmError variants that fan out to
+/// roughly two buckets (request validation vs. internal/upstream); this
+/// matches them onto the OpenAI error-code naming used in non-streaming
+/// failures.
+fn classify_error_code(err: &ApiError) -> String {
+    use crate::error::SwarmError;
+    match &err.0 {
+        SwarmError::Validation(_) => "invalid_request_error".into(),
+        SwarmError::ModelNotAvailable(_) | SwarmError::ShardNotFound(_) => "not_found".into(),
+        SwarmError::ProviderError { .. } => "upstream_error".into(),
+        _ => "internal_error".into(),
+    }
+}
+
+/// Extract the OpenAI-style `error.message` from a non-success chat
+/// response body, falling back to the raw body text.
+fn parse_error_message(bytes: &[u8]) -> String {
+    if let Ok(v) = serde_json::from_slice::<serde_json::Value>(bytes) {
+        if let Some(msg) = v
+            .get("error")
+            .and_then(|e| e.get("message"))
+            .and_then(|m| m.as_str())
+        {
+            return msg.to_string();
+        }
+    }
+    String::from_utf8_lossy(bytes).to_string()
+}
+
 /// Build the minimal response object emitted with the `response.created` /
 /// `response.in_progress` events. It carries request metadata only — the
 /// output array fills in during streaming, and `response.completed` carries
@@ -636,6 +810,39 @@ fn build_initial_response(
 mod tests {
     use super::*;
 
+    fn test_request() -> ResponsesRequest {
+        ResponsesRequest {
+            model: "test-model".into(),
+            input: ResponsesInput::Text("hi".into()),
+            instructions: None,
+            previous_response_id: None,
+            max_output_tokens: None,
+            temperature: None,
+            top_p: None,
+            frequency_penalty: None,
+            presence_penalty: None,
+            stop: None,
+            seed: None,
+            user: None,
+            metadata: None,
+            stream: None,
+            store: None,
+            background: None,
+            parallel_tool_calls: None,
+            truncation: None,
+            service_tier: None,
+            modalities: None,
+            include: None,
+            tools: None,
+            tool_choice: None,
+            reasoning: None,
+            text: None,
+            conversation: None,
+            context_management: None,
+            extras: HashMap::new(),
+        }
+    }
+
     #[test]
     fn drain_extracts_two_events() {
         let mut buf = BytesMut::from(&b"data: {\"a\":1}\n\ndata: {\"b\":2}\n\n"[..]);
@@ -676,6 +883,105 @@ mod tests {
         let mut buf = BytesMut::from(&b"data:{\"a\":1}\n\n"[..]);
         let events = drain_sse_data_payloads(&mut buf);
         assert_eq!(events, vec!["{\"a\":1}".to_string()]);
+    }
+
+    #[test]
+    fn classify_error_code_buckets_swarmerror_variants() {
+        use crate::error::SwarmError;
+        use crate::types::{ModelId, ShardId};
+        assert_eq!(
+            classify_error_code(&ApiError(SwarmError::Validation("bad".into()))),
+            "invalid_request_error"
+        );
+        assert_eq!(
+            classify_error_code(&ApiError(SwarmError::ModelNotAvailable(ModelId(
+                "x".into()
+            )))),
+            "not_found"
+        );
+        assert_eq!(
+            classify_error_code(&ApiError(SwarmError::ShardNotFound(ShardId {
+                model_id: ModelId("x".into()),
+                index: 0,
+            }))),
+            "not_found"
+        );
+        assert_eq!(
+            classify_error_code(&ApiError(SwarmError::ProviderError {
+                status: 502,
+                body: "upstream".into(),
+            })),
+            "upstream_error"
+        );
+        assert_eq!(
+            classify_error_code(&ApiError(SwarmError::Internal("boom".into()))),
+            "internal_error"
+        );
+    }
+
+    #[test]
+    fn parse_error_message_pulls_openai_shape() {
+        let body = br#"{"error":{"message":"model not found","type":"invalid_request_error"}}"#;
+        assert_eq!(parse_error_message(body), "model not found");
+    }
+
+    #[test]
+    fn parse_error_message_falls_back_to_raw_body() {
+        let body = b"plain text 503";
+        assert_eq!(parse_error_message(body), "plain text 503");
+    }
+
+    #[test]
+    fn parse_error_message_no_error_key_returns_raw() {
+        let body = br#"{"foo":"bar"}"#;
+        assert_eq!(parse_error_message(body), r#"{"foo":"bar"}"#);
+    }
+
+    #[test]
+    fn build_failed_response_carries_error_and_status() {
+        let req = test_request();
+        let err = ResponseError {
+            code: "invalid_request_error".into(),
+            message: "bad model".into(),
+            extras: HashMap::new(),
+        };
+        let resp = build_failed_response(&req, "resp_test123", 99, err);
+        assert_eq!(resp.id, "resp_test123");
+        assert_eq!(resp.status, ResponseStatus::Failed);
+        assert_eq!(resp.created_at, 99);
+        let e = resp.error.expect("error populated");
+        assert_eq!(e.code, "invalid_request_error");
+        assert_eq!(e.message, "bad model");
+    }
+
+    /// V1 contract: feeding the generator a chat_future that errors
+    /// immediately still yields response.created + response.in_progress
+    /// before response.failed. The point of the fix is that those two
+    /// events do not depend on the future resolving.
+    #[tokio::test]
+    async fn early_error_still_emits_lifecycle_then_failed() {
+        use crate::error::SwarmError;
+        use futures::StreamExt;
+
+        let req = test_request();
+        let initial = build_initial_response(&req, "resp_x", 0);
+        let chat_future =
+            async { Err::<Response, ApiError>(ApiError(SwarmError::Validation("bad".into()))) };
+        let stream = build_response_event_stream(
+            chat_future,
+            req,
+            initial,
+            "resp_x".into(),
+            "msg_x".into(),
+            0,
+            None,
+        );
+        let events: Vec<_> = stream.collect().await;
+        // Three events expected: created, in_progress, failed.
+        assert_eq!(events.len(), 3, "expected 3 events, got {}", events.len());
+        // We don't introspect axum::Event payloads here, but we can
+        // confirm the stream finalizes (no extra events after failed)
+        // and produces exactly the right count.
     }
 
     #[test]
