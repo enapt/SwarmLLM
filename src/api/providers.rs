@@ -486,12 +486,11 @@ pub async fn try_proxy_openai_responses(
     drop(config);
 
     if provider.is_subprocess || provider.is_anthropic {
-        return Err(ApiError(crate::error::SwarmError::Validation(format!(
-            "Model `{model}` routes to provider `{name}`, which uses the \
-             Anthropic Messages API. Send this request to POST /v1/messages \
-             instead.",
-            name = provider.name,
-        ))));
+        // V3 (responses_api_v2): Anthropic providers used to 400 here
+        // ("use /v1/messages"). The caller now tries the Anthropic
+        // Responses bridge next — we signal "not mine" instead of
+        // erroring so the fallthrough path can translate.
+        return Ok(None);
     }
 
     tracing::info!(

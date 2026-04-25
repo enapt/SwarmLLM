@@ -10,8 +10,13 @@
 //! - **M6**: SSE streaming.
 //! - **M7**: redb persistence (store=true + retrieve + delete).
 //! - **M8**: previous_response_id chaining.
-//! - **M9 (current)**: background=true + POST .../cancel.
+//! - **M9**: background=true + POST .../cancel.
+//! - **V1 (v2 plan)**: streaming first-token latency fix.
+//! - **V2 (v2 plan)**: multimodal input parts.
+//! - **V3 (v2 plan)**: Claude → Anthropic Messages translation.
+//! - **V4 (v2 plan)**: input_items pagination endpoint.
 
+pub mod anthropic_bridge;
 pub mod store;
 pub mod stream;
 pub mod translate;
@@ -94,7 +99,7 @@ pub async fn create_response(
     headers: axum::http::HeaderMap,
     JsonBody(req): JsonBody<ResponsesRequest>,
 ) -> Result<Response, ApiError> {
-    // ---- 1. Cloud proxy passthrough (M5). ----
+    // ---- 1a. Cloud proxy passthrough (M5 / V3). ----
     // Serialize the request struct back to JSON so flatten-extras and any
     // unmodeled OpenAI knobs reach the upstream verbatim.
     let body_value = serde_json::to_value(&req).map_err(|e| {
@@ -105,6 +110,18 @@ pub async fn create_response(
     let stream = req.stream.unwrap_or(false);
     if let Some(response) =
         crate::api::providers::try_proxy_openai_responses(&state, &body_value, stream).await?
+    {
+        return Ok(response);
+    }
+
+    // ---- 1b. Anthropic-translated passthrough (V3). ----
+    // When the model resolves to an Anthropic provider (or the
+    // claude-subscription subprocess), translate the Responses request
+    // to an Anthropic Messages request, forward, and translate back.
+    // `try_proxy_anthropic_responses` returns Ok(None) when the model
+    // isn't Anthropic, letting us fall through to local inference.
+    if let Some(response) =
+        anthropic_bridge::try_proxy_anthropic_responses(&state, &headers, &req).await?
     {
         return Ok(response);
     }
