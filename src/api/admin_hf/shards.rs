@@ -45,6 +45,20 @@ pub async fn hf_download_shards(
         )));
     }
 
+    // peer_fair_share is mutually exclusive with an explicit shards list —
+    // the fair-share assignment computation only runs when shards is empty
+    // (see `fair_share_peer_count` below). Mixing the two would silently
+    // ignore peer_fair_share and the dashboard would show a misleading
+    // "fair share mode" label on the resulting download.
+    if peer_fair_share && !shard_indices.is_empty() {
+        return Err(ApiError(crate::error::SwarmError::Validation(
+            "peer_fair_share is only meaningful when shards is empty — \
+             pass either an explicit shards array OR peer_fair_share=true, \
+             not both"
+                .into(),
+        )));
+    }
+
     if shard_indices.len() > 256 {
         return Err(ApiError(crate::error::SwarmError::Validation(
             "Too many shards requested (max 256)".into(),

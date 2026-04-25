@@ -6,7 +6,7 @@ use crate::api::server::AppState;
 use crate::error::ApiError;
 
 use super::helpers::*;
-use super::{validate_model_id, validate_shard_params};
+use super::validate_shard_params;
 
 pub async fn unload_shard(
     State(state): State<AppState>,
@@ -477,7 +477,10 @@ pub async fn lock_shard(
     Path((model_id, index)): Path<(String, u32)>,
     Json(body): Json<ShardLockUpdate>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    validate_model_id(&model_id)?;
+    // validate_shard_params (not validate_model_id) so the mmproj sentinel
+    // index (u32::MAX) is rejected — locked_shards iterators downstream
+    // assume regular indices and would mishandle the sentinel.
+    validate_shard_params(&model_id, index)?;
     let shard_id = crate::types::ShardId {
         model_id: crate::types::ModelId(model_id.clone()),
         index,

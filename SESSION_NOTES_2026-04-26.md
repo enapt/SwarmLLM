@@ -4,7 +4,7 @@
 > ~100 files changed across 9 commits. Every commit cargo fmt + clippy
 > clean, 821 lib tests passing throughout (was 816 at session start).
 >
-> **5 critical bugs caught + fixed**:
+> **6 critical bugs caught + fixed**:
 > 1. `responses.js` 4 broken `.toast()` calls (silently no-op'd
 >    cancel/delete buttons in dashboard).
 > 2. `previous_response_id` validation only ran on local-inference
@@ -18,6 +18,9 @@
 >    offset for a shared mask without checking homogeneity — could
 >    silently corrupt attention under mismatched prefix-cache
 >    hydration.
+> 6. `/api/admin/hf/source/*` missed the loopback rate-limit
+>    carveout that was added for `probe`/`search` — same
+>    HF-quota-burn vector, just on a different endpoint.
 
 ## Headline
 
@@ -77,6 +80,7 @@ entries and fall through to the sequential `forward()` path.
 | C5 | `d4b00c9` + `6dcecf3` | CHANGELOG + Sweep R57 + Book deep review (16 fixes) | New `api/responses.md` page filling a major doc gap; libp2p deferred → landed marker; many stale refs in book/ |
 | C6 | `b729a92` + `d1d8185` | Items 14/17/18 research + Sweep R58 (4 fixes) | New `items_14_17_18_research.md` with concrete Mooncake > HELIOS > Mirror ranking; **critical escrow `count++` bug** |
 | C7 | `8998517` | Sweep R59 inference primitives (5 fixes) | **CRITICAL: forward_batch attention mask used FIRST slot's KV offset without verifying homogeneity across slots — silently corrupted attention when prefix-cache hydration produced same `index_pos` but different layer-0 KV length.** Plus orphan rustdoc fix, hot-path info→debug log demote, defensive `debug_assert`, NaN/Inf error type Internal→Inference. |
+| C8 | `<final>` | Sweep R60 admin/glue (4 fixes) | **CRITICAL [SECURITY]: `/api/admin/hf/source/*` was missing from the loopback rate-limit carveout — could be loop-called locally to burn HF API quota.** Plus `lock_shard` now rejects mmproj sentinel index, `peer_fair_share` + explicit shards mutex check, doc verb fix. |
 
 ## What's now done that wasn't before
 

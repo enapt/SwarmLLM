@@ -213,7 +213,13 @@ pub async fn rate_limit_middleware(
     // API quota or get our IP banned.
     let is_loopback = addr.ip().is_loopback();
     let is_admin_get = path.starts_with("/api/admin/") && !is_mutating;
-    let is_outbound_admin = path == "/api/admin/hf/probe" || path == "/api/admin/hf/search";
+    // Outbound-call endpoints stay rate-limited even from loopback so a
+    // local script can't burn HuggingFace API quota. Use prefix matching
+    // for /api/admin/hf/source/* — the model_id path param means the
+    // canonical path varies per request and exact-match misses everything.
+    let is_outbound_admin = path == "/api/admin/hf/probe"
+        || path == "/api/admin/hf/search"
+        || path.starts_with("/api/admin/hf/source/");
     if is_loopback && is_admin_get && !is_outbound_admin {
         return next.run(req).await;
     }

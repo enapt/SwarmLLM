@@ -662,9 +662,8 @@ fn dir_size(path: &std::path::Path) -> std::io::Result<u64> {
     }
     Ok(total)
 }
-/// DELETE /api/admin/models/:model_id — Remove a model and all its shard files.
-///
-/// Removes shard files from disk, clears manifest from DB, removes from SharedState
+/// GET /api/admin/models/{model_id}/metadata — Return parsed GGUF metadata
+/// for a locally downloaded model. Reads the header file, no shard scan.
 pub async fn model_metadata(
     State(state): State<AppState>,
     Path(model_id): Path<String>,
