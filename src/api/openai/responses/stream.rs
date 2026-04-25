@@ -35,6 +35,7 @@ use axum::response::{IntoResponse, Response};
 use bytes::{Buf, BytesMut};
 use futures::{Stream, StreamExt};
 
+use super::background::BufferedEvent;
 use super::store;
 use super::translate;
 use super::types::*;
@@ -99,7 +100,7 @@ pub async fn run_streaming(
         .await
     };
 
-    let sse_stream = build_response_event_stream(
+    let buffered_stream = build_response_event_stream(
         chat_future,
         req,
         initial_response,
@@ -109,11 +110,49 @@ pub async fn run_streaming(
         store_db,
     );
 
+    // Live SSE: wrap the BufferedEvent stream as axum Events.
+    let sse_stream = buffered_stream.map(|ev| Ok::<_, Infallible>(buffered_to_event(&ev)));
+
     Ok(Sse::new(sse_stream)
         .keep_alive(
             KeepAlive::new().interval(std::time::Duration::from_secs(SSE_KEEPALIVE_INTERVAL_SECS)),
         )
         .into_response())
+}
+
+/// V8 (responses_api_v2): public entry point the background-streaming
+/// driver uses to obtain the raw `BufferedEvent` stream (no SSE wrap).
+/// Invokes the same generator that `run_streaming` uses, so the
+/// streaming behavior stays bit-for-bit identical between direct-SSE
+/// and background-buffered callers.
+pub fn run_streaming_buffered<F>(
+    chat_future: F,
+    req: ResponsesRequest,
+    response_id: String,
+    item_id: String,
+    created_at: i64,
+    store_db: Option<Database>,
+) -> impl Stream<Item = BufferedEvent>
+where
+    F: std::future::Future<Output = Result<Response, ApiError>> + Send + 'static,
+{
+    let initial_response = build_initial_response(&req, &response_id, created_at);
+    build_response_event_stream(
+        chat_future,
+        req,
+        initial_response,
+        response_id,
+        item_id,
+        created_at,
+        store_db,
+    )
+}
+
+/// Convert a buffered event back into the axum SSE Event representation.
+fn buffered_to_event(ev: &BufferedEvent) -> Event {
+    Event::default()
+        .event(&ev.event_name)
+        .data(serde_json::to_string(&ev.data).unwrap_or_default())
 }
 
 // ============================================================================
@@ -146,13 +185,6 @@ fn find_subslice(hay: &[u8], needle: &[u8]) -> Option<usize> {
     hay.windows(needle.len()).position(|w| w == needle)
 }
 
-/// Map a helper SSE event name + JSON body into an axum `Event`.
-fn sse_event(name: &str, body: serde_json::Value) -> Event {
-    Event::default()
-        .event(name)
-        .data(serde_json::to_string(&body).unwrap_or_default())
-}
-
 /// Accumulated state for streaming tool calls (chat streams arguments as
 /// fragments; we need to track the current fragment per `index`).
 #[derive(Default, Clone)]
@@ -170,7 +202,7 @@ fn build_response_event_stream<F>(
     item_id: String,
     created_at: i64,
     store_db: Option<Database>,
-) -> impl Stream<Item = Result<Event, Infallible>>
+) -> impl Stream<Item = BufferedEvent>
 where
     F: std::future::Future<Output = Result<Response, ApiError>> + Send + 'static,
 {
@@ -188,25 +220,29 @@ where
         let mut model_from_chunk: Option<String> = None;
 
         // ---- response.created (V1: emitted before chat_future is awaited) ----
-        yield Ok::<_, Infallible>(sse_event(
-            "response.created",
+        yield BufferedEvent {
+            sequence_number: seq,
+            event_name: "response.created".into(),
+            data:
             serde_json::json!({
                 "type": "response.created",
                 "sequence_number": seq,
                 "response": initial_response,
             }),
-        ));
+        };
         seq += 1;
 
         // ---- response.in_progress ----
-        yield Ok(sse_event(
-            "response.in_progress",
+        yield BufferedEvent {
+            sequence_number: seq,
+            event_name: "response.in_progress".into(),
+            data:
             serde_json::json!({
                 "type": "response.in_progress",
                 "sequence_number": seq,
                 "response": initial_response,
             }),
-        ));
+        };
         seq += 1;
 
         // ---- Now await the inference setup. Errors and non-success
@@ -237,14 +273,16 @@ where
                         tracing::warn!(error = %e, id = %response_id, "responses stream store failed (early error)");
                     }
                 }
-                yield Ok(sse_event(
-                    "response.failed",
+                yield BufferedEvent {
+            sequence_number: seq,
+            event_name: "response.failed".into(),
+            data:
                     serde_json::json!({
                         "type": "response.failed",
                         "sequence_number": seq,
                         "response": failed,
                     }),
-                ));
+        };
                 return;
             }
         };
@@ -265,14 +303,16 @@ where
                         created_at,
                         error,
                     );
-                    yield Ok(sse_event(
-                        "response.failed",
+                    yield BufferedEvent {
+            sequence_number: seq,
+            event_name: "response.failed".into(),
+            data:
                         serde_json::json!({
                             "type": "response.failed",
                             "sequence_number": seq,
                             "response": failed,
                         }),
-                    ));
+        };
                     return;
                 }
             };
@@ -304,14 +344,16 @@ where
                     tracing::warn!(error = %e, id = %response_id, "responses stream store failed (chat error)");
                 }
             }
-            yield Ok(sse_event(
-                "response.failed",
+            yield BufferedEvent {
+            sequence_number: seq,
+            event_name: "response.failed".into(),
+            data:
                 serde_json::json!({
                     "type": "response.failed",
                     "sequence_number": seq,
                     "response": failed,
                 }),
-            ));
+        };
             return;
         }
 
@@ -370,15 +412,17 @@ where
                             "status": "in_progress",
                             "content": [],
                         });
-                        yield Ok(sse_event(
-                            "response.output_item.added",
+                        yield BufferedEvent {
+            sequence_number: seq,
+            event_name: "response.output_item.added".into(),
+            data:
                             serde_json::json!({
                                 "type": "response.output_item.added",
                                 "sequence_number": seq,
                                 "output_index": 0,
                                 "item": opening_item,
                             }),
-                        ));
+        };
                         seq += 1;
                         item_added = true;
                     }
@@ -393,8 +437,10 @@ where
                                 "text": "",
                                 "annotations": [],
                             });
-                            yield Ok(sse_event(
-                                "response.content_part.added",
+                            yield BufferedEvent {
+            sequence_number: seq,
+            event_name: "response.content_part.added".into(),
+            data:
                                 serde_json::json!({
                                     "type": "response.content_part.added",
                                     "sequence_number": seq,
@@ -403,14 +449,16 @@ where
                                     "item_id": item_id,
                                     "part": part_shell,
                                 }),
-                            ));
+        };
                             seq += 1;
                             content_part_added = true;
                         }
 
                         accumulated_text.push_str(text);
-                        yield Ok(sse_event(
-                            "response.output_text.delta",
+                        yield BufferedEvent {
+            sequence_number: seq,
+            event_name: "response.output_text.delta".into(),
+            data:
                             serde_json::json!({
                                 "type": "response.output_text.delta",
                                 "sequence_number": seq,
@@ -419,7 +467,7 @@ where
                                 "item_id": item_id,
                                 "delta": text,
                             }),
-                        ));
+        };
                         seq += 1;
                     }
                 }
@@ -466,8 +514,10 @@ where
 
         // ---- Finalize text path ----
         if content_part_added {
-            yield Ok(sse_event(
-                "response.output_text.done",
+            yield BufferedEvent {
+            sequence_number: seq,
+            event_name: "response.output_text.done".into(),
+            data:
                 serde_json::json!({
                     "type": "response.output_text.done",
                     "sequence_number": seq,
@@ -476,10 +526,12 @@ where
                     "item_id": item_id,
                     "text": accumulated_text,
                 }),
-            ));
+        };
             seq += 1;
-            yield Ok(sse_event(
-                "response.content_part.done",
+            yield BufferedEvent {
+            sequence_number: seq,
+            event_name: "response.content_part.done".into(),
+            data:
                 serde_json::json!({
                     "type": "response.content_part.done",
                     "sequence_number": seq,
@@ -492,7 +544,7 @@ where
                         "annotations": [],
                     },
                 }),
-            ));
+        };
             seq += 1;
         }
 
@@ -522,15 +574,17 @@ where
             // An empty assistant message alongside function_call items would
             // break the "pure function_call output" shape.
             if !accumulated_text.is_empty() {
-                yield Ok(sse_event(
-                    "response.output_item.done",
+                yield BufferedEvent {
+            sequence_number: seq,
+            event_name: "response.output_item.done".into(),
+            data:
                     serde_json::json!({
                         "type": "response.output_item.done",
                         "sequence_number": seq,
                         "output_index": 0,
                         "item": message_item.clone(),
                     }),
-                ));
+        };
                 seq += 1;
 
                 output.push(OutputItem::Typed(TypedOutputItem::Message(
@@ -566,15 +620,17 @@ where
                 "arguments": "",
                 "status": "in_progress",
             });
-            yield Ok(sse_event(
-                "response.output_item.added",
+            yield BufferedEvent {
+            sequence_number: seq,
+            event_name: "response.output_item.added".into(),
+            data:
                 serde_json::json!({
                     "type": "response.output_item.added",
                     "sequence_number": seq,
                     "output_index": current_output_index,
                     "item": opening,
                 }),
-            ));
+        };
             seq += 1;
 
             // Emit the full accumulated arguments as a single delta. Chat's
@@ -582,8 +638,10 @@ where
             // event semantics want arguments-as-a-string-stream, which we
             // could forward fragment-by-fragment in a future refinement.
             if !tc.arguments_so_far.is_empty() {
-                yield Ok(sse_event(
-                    "response.function_call_arguments.delta",
+                yield BufferedEvent {
+            sequence_number: seq,
+            event_name: "response.function_call_arguments.delta".into(),
+            data:
                     serde_json::json!({
                         "type": "response.function_call_arguments.delta",
                         "sequence_number": seq,
@@ -591,12 +649,14 @@ where
                         "item_id": fc_item_id,
                         "delta": tc.arguments_so_far,
                     }),
-                ));
+        };
                 seq += 1;
             }
 
-            yield Ok(sse_event(
-                "response.function_call_arguments.done",
+            yield BufferedEvent {
+            sequence_number: seq,
+            event_name: "response.function_call_arguments.done".into(),
+            data:
                 serde_json::json!({
                     "type": "response.function_call_arguments.done",
                     "sequence_number": seq,
@@ -604,7 +664,7 @@ where
                     "item_id": fc_item_id,
                     "arguments": tc.arguments_so_far,
                 }),
-            ));
+        };
             seq += 1;
 
             let completed = serde_json::json!({
@@ -615,15 +675,17 @@ where
                 "arguments": tc.arguments_so_far,
                 "status": "completed",
             });
-            yield Ok(sse_event(
-                "response.output_item.done",
+            yield BufferedEvent {
+            sequence_number: seq,
+            event_name: "response.output_item.done".into(),
+            data:
                 serde_json::json!({
                     "type": "response.output_item.done",
                     "sequence_number": seq,
                     "output_index": current_output_index,
                     "item": completed,
                 }),
-            ));
+        };
             seq += 1;
 
             output.push(OutputItem::Typed(TypedOutputItem::FunctionCall(
@@ -709,14 +771,16 @@ where
         } else {
             "response.completed"
         };
-        yield Ok(sse_event(
-            terminal_event,
+        yield BufferedEvent {
+            sequence_number: seq,
+            event_name: terminal_event.into(),
+            data:
             serde_json::json!({
                 "type": terminal_event,
                 "sequence_number": seq,
                 "response": final_response,
             }),
-        ));
+        };
     }
 }
 

@@ -15,8 +15,12 @@
 //! - **V2 (v2 plan)**: multimodal input parts.
 //! - **V3 (v2 plan)**: Claude → Anthropic Messages translation.
 //! - **V4 (v2 plan)**: input_items pagination endpoint.
+//! - **V5 (v2 plan)**: resumable SSE via GET ?stream=true&starting_after=N.
+//! - **V7 (v2 plan)**: explicit reasoning round-trip guarantees (tests).
+//! - **V8 (v2 plan)**: background=true && stream=true (202 + Location).
 
 pub mod anthropic_bridge;
+pub mod background;
 pub mod store;
 pub mod stream;
 pub mod translate;
@@ -160,15 +164,21 @@ pub async fn create_response(
         None => None,
     };
 
+    // V8 (responses_api_v2): background=true && stream=true returns 202
+    // Accepted + Location header pointing at the GET resume endpoint.
+    // The server runs the inference internally and buffers SSE events
+    // for subsequent GET calls with `?stream=true&starting_after={seq}`.
+    if req.background.unwrap_or(false) && stream {
+        return background::start_background_stream(state, headers, req, prior).await;
+    }
+
     // Streaming (M6) — local-inference SSE. Cloud proxy already streamed
     // above if it matched.
     if stream {
         return stream::run_streaming(state, headers, req, prior).await;
     }
 
-    // Background mode (M9). stream=true + background=true requires
-    // resumable-SSE plumbing (scope-out in the plan); the non-stream
-    // background path is what M9 ships.
+    // Background mode (M9, non-stream).
     if req.background.unwrap_or(false) {
         return start_background(state, headers, req, prior).await;
     }
@@ -517,6 +527,12 @@ pub async fn cancel_response(
     // Signal the in-flight task (if any) to drop its result.
     if let Some(entry) = BACKGROUND_CANCEL.get(&id) {
         entry.store(true, Ordering::SeqCst);
+    }
+    // V8: also wake any resume-stream listeners so the cancelled state
+    // becomes visible to a connected GET caller without waiting for the
+    // next event push.
+    if let Some(bg) = background::lookup_background_state(&id) {
+        bg.notify.notify_waiters();
     }
 
     match store::load(&state.db, &id).map_err(ApiError)? {

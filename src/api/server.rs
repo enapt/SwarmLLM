@@ -100,7 +100,8 @@ pub fn build_router(state: AppState) -> Router {
         .route("/v1/responses", post(openai::responses::create_response))
         .route(
             "/v1/responses/:id",
-            get(openai::responses::get_response).delete(openai::responses::delete_response),
+            get(openai::responses::background::get_response_maybe_stream)
+                .delete(openai::responses::delete_response),
         )
         .route(
             "/v1/responses/:id/cancel",
