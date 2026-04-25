@@ -106,8 +106,10 @@ Full pipeline validated on both: announce → index → probe → trust-gate
   Falls back to raw when the compressed form isn't smaller. Awaiting WAN
   bench to decide default-on. See `next_steps.md` § 1.
 - **Items 14 / 17 / 18** research candidates (Mirror Spec Decoding,
-  disaggregated prefill/decode, per-token early-exit) — research first,
-  decide if worth building.
+  disaggregated prefill/decode, per-token early-exit) — per-item
+  assessment, fit-for-SwarmLLM analysis, and sequencing recommendation
+  in [`items_14_17_18_research.md`](./items_14_17_18_research.md).
+  Headline: 17 > 18 > 14 by signal-to-effort, all gated on WAN bench.
 - **End-to-end benches** for Item 13 (activation compression) measured in
   `round7.md`; Item 12 (DSD) + Item 2 (distributed spec decoding with
   matched-backend draft) still deferred — both need 3+ daemons + WAN-class

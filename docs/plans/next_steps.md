@@ -58,13 +58,19 @@ win hold when RTT becomes a meaningful fraction of the fetch total?
 
 ### 3. Item 14 / 17 / 18 research candidates
 
-Items 14 (sequence-level speculative decoding), 17 (overlapped comm +
-compute), and 18 (gradient-free adaptive batch sizing) are still in the
-"research, then decide if worth building" bucket per
-`docs/plans/distributed_inference_speedup.md`. Don't pull these in
-until (a) Qwen + WAN numbers are in, and (b) we've asked whether the
-next bottleneck is compute or wire. Do the bench first, pick the
-lever second.
+Item 14 (Mirror Speculative Decoding, Apple), Item 17 (disaggregated
+prefill/decode, Mooncake-style), and Item 18 (per-token early-exit
+with adaptive depth, HELIOS / TIDE / DREX) are still in the
+"research, then decide if worth building" bucket. Don't pull any in
+until (a) Qwen + WAN numbers are in (§ 2 above) and (b) we've asked
+whether the next bottleneck is compute, wire, or multi-segment tail
+latency — the answer flips which item is highest-leverage.
+
+Per-item assessment + sequencing recommendation written 2026-04-26 in
+[`items_14_17_18_research.md`](./items_14_17_18_research.md).
+Headline ranking by signal-to-effort for SwarmLLM today: **17 > 18 > 14**.
+Item 14 inherits Item 6 (SWIFT) blocker — defer until SWIFT lands
+measurable wins.
 
 ### 4. Release hygiene *(2–4 h mechanical)*
 
