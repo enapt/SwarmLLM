@@ -26,7 +26,6 @@
 //!   monotonic, so no duplicates — just a gap if they fell too far
 //!   behind).
 
-use std::collections::HashMap;
 use std::convert::Infallible;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -40,7 +39,7 @@ use dashmap::DashMap;
 use serde::Deserialize;
 use tokio::sync::{Mutex, Notify};
 
-use super::stream as responses_stream;
+use super::stream::{self as responses_stream, SSE_KEEPALIVE_INTERVAL_SECS};
 use super::types::*;
 use super::{store, BACKGROUND_CANCEL};
 use crate::api::server::AppState;
@@ -193,10 +192,19 @@ pub async fn start_background_stream(
     let headers_for_task = headers.clone();
     let req_for_task = req.clone();
     let id_for_task = response_id.clone();
+    let id_for_cleanup = response_id.clone();
     let bg_state_for_task = bg_state.clone();
+    let bg_state_for_cleanup = bg_state.clone();
     let chat_req_for_task = chat_req;
     tokio::spawn(async move {
-        drive_background_stream(
+        // Wrap in catch_unwind so a panic inside drive_background_stream
+        // (e.g., during run_streaming_buffered, or any inference panic)
+        // doesn't leak the BACKGROUND_STATE / BACKGROUND_CANCEL entries
+        // forever. Without this guard, a panicked task would leave the
+        // entry with completed=false, and any waiting GET resume client
+        // would receive 15s SSE keepalives indefinitely until disconnect.
+        use futures::FutureExt;
+        let outcome = std::panic::AssertUnwindSafe(drive_background_stream(
             state_for_task,
             headers_for_task,
             req_for_task,
@@ -204,8 +212,37 @@ pub async fn start_background_stream(
             created_at,
             chat_req_for_task,
             bg_state_for_task,
-        )
+        ))
+        .catch_unwind()
         .await;
+        if outcome.is_err() {
+            tracing::error!(
+                response_id = %id_for_cleanup,
+                "background streaming task panicked — marking completed and cleaning up"
+            );
+            // Push a cancelled-shaped terminal event so resumers see a
+            // close, then mark + deregister.
+            let seq_marker = u64::MAX; // will sort last; resumers see it after any cached events
+            bg_state_for_cleanup
+                .push(BufferedEvent {
+                    sequence_number: seq_marker,
+                    event_name: "response.failed".into(),
+                    data: serde_json::json!({
+                        "type": "response.failed",
+                        "sequence_number": seq_marker,
+                        "response": {
+                            "id": id_for_cleanup,
+                            "status": "failed",
+                            "error": {
+                                "code": "internal_error",
+                                "message": "background task panicked"
+                            }
+                        }
+                    }),
+                })
+                .await;
+            deregister_background_stream(&id_for_cleanup).await;
+        }
     });
 
     // Build a 202 Accepted response with a Location header so the
@@ -360,6 +397,13 @@ pub async fn get_response_maybe_stream(
     }
 }
 
+/// Maximum time a resumer will wait between events before giving up.
+/// Caps the worst-case "stuck on a stale state entry" hang in case the
+/// background task panics before its catch_unwind cleanup runs (or any
+/// future bug skips cleanup). 1 hour is generous for the longest plausible
+/// inference but still guarantees the connection won't be held forever.
+const RESUME_STREAM_MAX_IDLE_SECS: u64 = 3600;
+
 /// Live-tail resume: replay cached events after `after`, then wait for
 /// new events until completion.
 fn serve_resume_stream(state: Arc<BackgroundState>, after: i64) -> Response {
@@ -383,13 +427,27 @@ fn serve_resume_stream(state: Arc<BackgroundState>, after: i64) -> Response {
                 break;
             }
 
-            // Wait for new events.
-            state.notify.notified().await;
+            // Wait for new events with a hard idle cap so a stale state
+            // entry can't keep this connection open forever.
+            let wait = tokio::time::timeout(
+                std::time::Duration::from_secs(RESUME_STREAM_MAX_IDLE_SECS),
+                state.notify.notified(),
+            )
+            .await;
+            if wait.is_err() {
+                tracing::warn!(
+                    idle_secs = RESUME_STREAM_MAX_IDLE_SECS,
+                    "resume stream idle timeout — closing connection"
+                );
+                break;
+            }
         }
     };
 
     Sse::new(stream)
-        .keep_alive(KeepAlive::new().interval(std::time::Duration::from_secs(15)))
+        .keep_alive(
+            KeepAlive::new().interval(std::time::Duration::from_secs(SSE_KEEPALIVE_INTERVAL_SECS)),
+        )
         .into_response()
 }
 
@@ -405,7 +463,9 @@ fn serve_completed_replay(record: store::ResponsesRecord, after: i64) -> Respons
     );
 
     Sse::new(stream)
-        .keep_alive(KeepAlive::new().interval(std::time::Duration::from_secs(15)))
+        .keep_alive(
+            KeepAlive::new().interval(std::time::Duration::from_secs(SSE_KEEPALIVE_INTERVAL_SECS)),
+        )
         .into_response()
 }
 
@@ -472,40 +532,16 @@ fn build_queued_response(
     response_id: &str,
     created_at: i64,
 ) -> ResponsesResponse {
-    ResponsesResponse {
-        id: response_id.into(),
-        object: "response".into(),
-        created_at,
-        status: ResponseStatus::Queued,
-        model: req.model.clone(),
-        output: Vec::new(),
-        output_text: None,
-        usage: ResponsesUsage::default(),
-        error: None,
-        incomplete_details: None,
-        previous_response_id: req.previous_response_id.clone(),
-        instructions: req.instructions.clone(),
-        tools: req.tools.clone(),
-        tool_choice: req.tool_choice.clone(),
-        parallel_tool_calls: req.parallel_tool_calls,
-        temperature: Some(req.temperature.unwrap_or(0.7)),
-        top_p: Some(req.top_p.unwrap_or(0.9)),
-        max_output_tokens: Some(req.max_output_tokens.unwrap_or(2048)),
-        truncation: req.truncation.clone(),
-        metadata: req.metadata.clone(),
-        user: req.user.clone(),
-        reasoning: req.reasoning.clone(),
-        text: req.text.clone(),
-        modalities: req.modalities.clone(),
-        service_tier: req.service_tier.clone(),
-        background: Some(true),
-        extras: HashMap::new(),
-    }
+    let mut q =
+        super::build_response_skeleton(req, response_id, created_at, ResponseStatus::Queued);
+    q.background = Some(true);
+    q
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
 
     #[tokio::test]
     async fn buffer_caps_at_limit_and_drops_oldest() {

@@ -76,7 +76,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash /home/user/SwarmLLM/.claude/scripts/pre-edit-check.sh",
+            "command": "bash ${CLAUDE_PROJECT_DIR}/.claude/scripts/pre-edit-check.sh",
             "timeout": 5
           }
         ]
@@ -89,7 +89,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash /home/user/SwarmLLM/.claude/scripts/post-edit-lint.sh",
+            "command": "bash ${CLAUDE_PROJECT_DIR}/.claude/scripts/post-edit-lint.sh",
             "timeout": 120
           }
         ]
@@ -100,7 +100,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash /home/user/SwarmLLM/.claude/scripts/pre-compact-save.sh",
+            "command": "bash ${CLAUDE_PROJECT_DIR}/.claude/scripts/pre-compact-save.sh",
             "timeout": 30
           }
         ]
@@ -111,7 +111,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash /home/user/SwarmLLM/.claude/scripts/on-stop-verify.sh",
+            "command": "bash ${CLAUDE_PROJECT_DIR}/.claude/scripts/on-stop-verify.sh",
             "timeout": 30
           }
         ]

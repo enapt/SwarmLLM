@@ -2,7 +2,7 @@
 # Stop hook: verify no stale work left behind when Claude stops
 # Must always exit 0 — stop hooks should never block
 
-PROJECT_DIR="/home/user/SwarmLLM"
+PROJECT_DIR="${CLAUDE_PROJECT_DIR:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
 cd "$PROJECT_DIR" 2>/dev/null || exit 0
 
 LOG_DIR="$PROJECT_DIR/.claude/logs"

@@ -43,7 +43,10 @@ use crate::api::server::{AppState, JsonBody};
 use crate::error::ApiError;
 use crate::storage::db::Database;
 
-const SSE_KEEPALIVE_INTERVAL_SECS: u64 = 15;
+/// Keep-alive interval for SSE responses on `/v1/responses`. Shared with
+/// `background.rs` so the resume-stream and completed-replay paths use
+/// the same heartbeat cadence as the live local-inference stream.
+pub(super) const SSE_KEEPALIVE_INTERVAL_SECS: u64 = 15;
 
 /// Cap on a non-success chat response body when surfacing it as the
 /// message of a `response.failed` SSE event. Mirrors `MAX_CHAT_RESPONSE_BYTES`
@@ -833,41 +836,15 @@ fn parse_error_message(bytes: &[u8]) -> String {
 /// Build the minimal response object emitted with the `response.created` /
 /// `response.in_progress` events. It carries request metadata only — the
 /// output array fills in during streaming, and `response.completed` carries
-/// the full populated form.
+/// the full populated form. Thin wrapper around the shared
+/// `super::build_response_skeleton` so all four "build a response object
+/// from a request" sites stay in lockstep.
 fn build_initial_response(
     req: &ResponsesRequest,
     response_id: &str,
     created_at: i64,
 ) -> ResponsesResponse {
-    ResponsesResponse {
-        id: response_id.into(),
-        object: "response".into(),
-        created_at,
-        status: ResponseStatus::InProgress,
-        model: req.model.clone(),
-        output: Vec::new(),
-        output_text: None,
-        usage: ResponsesUsage::default(),
-        error: None,
-        incomplete_details: None,
-        previous_response_id: req.previous_response_id.clone(),
-        instructions: req.instructions.clone(),
-        tools: req.tools.clone(),
-        tool_choice: req.tool_choice.clone(),
-        parallel_tool_calls: req.parallel_tool_calls,
-        temperature: Some(req.temperature.unwrap_or(0.7)),
-        top_p: Some(req.top_p.unwrap_or(0.9)),
-        max_output_tokens: Some(req.max_output_tokens.unwrap_or(2048)),
-        truncation: req.truncation.clone(),
-        metadata: req.metadata.clone(),
-        user: req.user.clone(),
-        reasoning: req.reasoning.clone(),
-        text: req.text.clone(),
-        modalities: req.modalities.clone(),
-        service_tier: req.service_tier.clone(),
-        background: req.background,
-        extras: HashMap::new(),
-    }
+    super::build_response_skeleton(req, response_id, created_at, ResponseStatus::InProgress)
 }
 
 #[cfg(test)]

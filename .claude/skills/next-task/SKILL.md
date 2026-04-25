@@ -13,8 +13,8 @@ Determine what should be built next in the SwarmLLM project and begin working on
 ## Instructions
 
 1. **Assess state** (use haiku-model subagents in parallel for speed):
-   - Spawn Explore agent: scan `/home/user/SwarmLLM/src/` tree to inventory existing files
-   - Read `/home/user/SwarmLLM/docs/plans/NEXT_STEPS.md` for the prioritized roadmap
+   - Spawn Explore agent: scan `src/` tree to inventory existing files
+   - Read `docs/plans/NEXT_STEPS.md` for the prioritized roadmap
    - Run `cargo check` to verify current compilation state
 
 2. Identify the highest-priority incomplete item from NEXT_STEPS.md

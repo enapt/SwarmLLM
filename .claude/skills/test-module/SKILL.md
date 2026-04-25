@@ -12,7 +12,7 @@ context: fork
 
 Run tests for a specific SwarmLLM module. The user specified: `$ARGUMENTS`
 
-Working directory: `/home/user/SwarmLLM`
+Working directory: `.`
 
 ## Instructions
 

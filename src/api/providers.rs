@@ -557,61 +557,14 @@ pub async fn try_proxy_openai_responses(
     Ok(Some(response))
 }
 
-/// Low-level proxy: POST `body` verbatim to `{base_url}/responses`.
-/// `body` should already include the original caller's `extras` so unknown
-/// fields (`reasoning.effort`, `service_tier`, `text.verbosity`, `include`,
-/// `previous_response_id`, ...) round-trip without translation.
-pub async fn proxy_openai_responses(
+/// Low-level POST against an OpenAI-compatible provider endpoint. Handles
+/// URL validation, Bearer auth, content-type, three-branch reqwest error
+/// classification, non-2xx body extraction, and SSE/JSON passthrough.
+/// `endpoint` is the trailing path segment appended to `base_url` (e.g.
+/// `"/chat/completions"`, `"/responses"`).
+async fn post_openai_compat(
     base_url: &str,
-    api_key: &str,
-    body: &serde_json::Value,
-    stream: bool,
-) -> Result<axum::response::Response, ApiError> {
-    validate_provider_url(base_url).await.map_err(ApiError)?;
-
-    let client = get_provider_client();
-    let url = format!("{}/responses", base_url);
-
-    let resp = client
-        .post(&url)
-        .header("Authorization", format!("Bearer {}", api_key))
-        .header("Content-Type", "application/json")
-        .json(body)
-        .send()
-        .await
-        .map_err(|e| {
-            tracing::warn!(error = %e, url = %url, "Provider /responses proxy request failed");
-            let msg = if e.is_timeout() {
-                "Provider request timed out. The model may be slow to respond — try again or use a different model.".to_string()
-            } else if e.is_connect() {
-                "Could not connect to provider API. Check your internet connection.".to_string()
-            } else {
-                format!("Provider request failed: {e}")
-            };
-            ApiError(crate::error::SwarmError::ProviderError {
-                status: 504,
-                body: msg,
-            })
-        })?;
-
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let raw_body = resp.text().await.unwrap_or_default();
-        return Err(extract_provider_error(
-            &raw_body,
-            status,
-            "Provider",
-            OPENAI_ERROR_KEYS,
-        ));
-    }
-
-    let response = build_passthrough_response(resp, stream).await?;
-    Ok(response.into_response())
-}
-
-/// Generic OpenAI-compatible proxy: rewrite base URL + auth header, forward as-is.
-pub async fn proxy_openai_compatible(
-    base_url: &str,
+    endpoint: &str,
     api_key: &str,
     body: &serde_json::Value,
     stream: bool,
@@ -620,7 +573,7 @@ pub async fn proxy_openai_compatible(
     validate_provider_url(base_url).await.map_err(ApiError)?;
 
     let client = get_provider_client();
-    let url = format!("{}/chat/completions", base_url);
+    let url = format!("{}{}", base_url, endpoint);
 
     let resp = client
         .post(&url)
@@ -655,10 +608,31 @@ pub async fn proxy_openai_compatible(
         ));
     }
 
-    {
-        let response = build_passthrough_response(resp, stream).await?;
-        Ok(response.into_response())
-    }
+    let response = build_passthrough_response(resp, stream).await?;
+    Ok(response.into_response())
+}
+
+/// Low-level proxy: POST `body` verbatim to `{base_url}/responses`.
+/// `body` should already include the original caller's `extras` so unknown
+/// fields (`reasoning.effort`, `service_tier`, `text.verbosity`, `include`,
+/// `previous_response_id`, ...) round-trip without translation.
+pub async fn proxy_openai_responses(
+    base_url: &str,
+    api_key: &str,
+    body: &serde_json::Value,
+    stream: bool,
+) -> Result<axum::response::Response, ApiError> {
+    post_openai_compat(base_url, "/responses", api_key, body, stream).await
+}
+
+/// Generic OpenAI-compatible proxy: rewrite base URL + auth header, forward as-is.
+pub async fn proxy_openai_compatible(
+    base_url: &str,
+    api_key: &str,
+    body: &serde_json::Value,
+    stream: bool,
+) -> Result<axum::response::Response, ApiError> {
+    post_openai_compat(base_url, "/chat/completions", api_key, body, stream).await
 }
 
 /// Proxy a request to the Anthropic Messages API.

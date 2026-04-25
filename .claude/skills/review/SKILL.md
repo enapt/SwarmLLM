@@ -19,10 +19,10 @@ If `$ARGUMENTS` is provided, review only that module/file. Otherwise, review all
 ## Instructions
 
 1. Get the scope of changes:
-   - If argument provided: read the specified files under `/home/user/SwarmLLM/`
-   - Otherwise: run `git diff` and `git diff --cached` in `/home/user/SwarmLLM` to find changed files
+   - If argument provided: read the specified files under ``
+   - Otherwise: run `git diff` and `git diff --cached` in `.` to find changed files
 
-2. For each changed file, read `/home/user/SwarmLLM/docs/ARCHITECTURE.md` for the relevant subsystem
+2. For each changed file, read `docs/ARCHITECTURE.md` for the relevant subsystem
 
 3. Check for:
    - **Type correctness**: Do data types match existing patterns? (field names, types, derives)

@@ -698,15 +698,20 @@ pub async fn try_proxy_anthropic_responses(
     }
 
     let (parts, body) = upstream.into_parts();
+    // Failures here are caused by the upstream provider's response, not by
+    // local logic — surface as ProviderError (502) so the caller sees a
+    // gateway-class status, not a generic 500.
     let bytes = to_bytes(body, MAX_UPSTREAM_BYTES).await.map_err(|e| {
-        ApiError(SwarmError::Internal(format!(
-            "Failed to buffer Anthropic upstream body: {e}"
-        )))
+        ApiError(SwarmError::ProviderError {
+            status: 502,
+            body: format!("Failed to buffer Anthropic upstream body: {e}"),
+        })
     })?;
     let msg_value: Value = serde_json::from_slice(&bytes).map_err(|e| {
-        ApiError(SwarmError::Internal(format!(
-            "Failed to parse Anthropic upstream JSON: {e}"
-        )))
+        ApiError(SwarmError::ProviderError {
+            status: 502,
+            body: format!("Failed to parse Anthropic upstream JSON: {e}"),
+        })
     })?;
 
     let response_id = format!("resp_{}", uuid::Uuid::new_v4().simple());
@@ -1273,43 +1278,15 @@ fn stream_anthropic_to_responses(
 }
 
 /// Build the minimal Responses object for response.created /
-/// response.in_progress events in the streaming path. Mirrors
-/// `stream::build_initial_response` — kept module-local to avoid
-/// cross-module visibility churn.
+/// response.in_progress events in the streaming path. Thin wrapper around
+/// the shared `super::build_response_skeleton` to keep all four
+/// response-skeleton sites in lockstep.
 fn build_initial_response(
     req: &ResponsesRequest,
     response_id: &str,
     created_at: i64,
 ) -> ResponsesResponse {
-    ResponsesResponse {
-        id: response_id.into(),
-        object: "response".into(),
-        created_at,
-        status: ResponseStatus::InProgress,
-        model: req.model.clone(),
-        output: Vec::new(),
-        output_text: None,
-        usage: ResponsesUsage::default(),
-        error: None,
-        incomplete_details: None,
-        previous_response_id: req.previous_response_id.clone(),
-        instructions: req.instructions.clone(),
-        tools: req.tools.clone(),
-        tool_choice: req.tool_choice.clone(),
-        parallel_tool_calls: req.parallel_tool_calls,
-        temperature: Some(req.temperature.unwrap_or(0.7)),
-        top_p: Some(req.top_p.unwrap_or(0.9)),
-        max_output_tokens: Some(req.max_output_tokens.unwrap_or(DEFAULT_MAX_TOKENS)),
-        truncation: req.truncation.clone(),
-        metadata: req.metadata.clone(),
-        user: req.user.clone(),
-        reasoning: req.reasoning.clone(),
-        text: req.text.clone(),
-        modalities: req.modalities.clone(),
-        service_tier: req.service_tier.clone(),
-        background: req.background,
-        extras: HashMap::new(),
-    }
+    super::build_response_skeleton(req, response_id, created_at, ResponseStatus::InProgress)
 }
 
 fn sse_event(name: &str, body: Value) -> axum::response::sse::Event {

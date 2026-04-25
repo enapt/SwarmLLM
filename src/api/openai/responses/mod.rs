@@ -73,6 +73,53 @@ const MAX_CHAT_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 static BACKGROUND_CANCEL: std::sync::LazyLock<DashMap<String, Arc<AtomicBool>>> =
     std::sync::LazyLock::new(DashMap::new);
 
+/// Build a `ResponsesResponse` skeleton from a request — used by every
+/// path that needs to emit a response object before inference produces
+/// any content. Status is parameterized: `InProgress` for the lifecycle
+/// events at stream open, `Queued` for the M9/V8 placeholder seeded into
+/// redb, etc. Callers mutate the result post-construction when they need
+/// status-specific overrides (e.g. `background = Some(true)` for V8).
+///
+/// All `Option` fields are cloned from `req` so the response carries the
+/// caller's exact configuration knobs back to them, which is what the
+/// OpenAI Responses API contract requires.
+pub(super) fn build_response_skeleton(
+    req: &ResponsesRequest,
+    response_id: &str,
+    created_at: i64,
+    status: ResponseStatus,
+) -> ResponsesResponse {
+    ResponsesResponse {
+        id: response_id.into(),
+        object: "response".into(),
+        created_at,
+        status,
+        model: req.model.clone(),
+        output: Vec::new(),
+        output_text: None,
+        usage: ResponsesUsage::default(),
+        error: None,
+        incomplete_details: None,
+        previous_response_id: req.previous_response_id.clone(),
+        instructions: req.instructions.clone(),
+        tools: req.tools.clone(),
+        tool_choice: req.tool_choice.clone(),
+        parallel_tool_calls: req.parallel_tool_calls,
+        temperature: Some(req.temperature.unwrap_or(0.7)),
+        top_p: Some(req.top_p.unwrap_or(0.9)),
+        max_output_tokens: Some(req.max_output_tokens.unwrap_or(2048)),
+        truncation: req.truncation.clone(),
+        metadata: req.metadata.clone(),
+        user: req.user.clone(),
+        reasoning: req.reasoning.clone(),
+        text: req.text.clone(),
+        modalities: req.modalities.clone(),
+        service_tier: req.service_tier.clone(),
+        background: req.background,
+        extras: HashMap::new(),
+    }
+}
+
 /// Walk a tools array and return the first built-in tool type encountered.
 pub(crate) fn first_builtin_tool(tools: &[ToolDef]) -> Option<&'static str> {
     for t in tools {
@@ -264,35 +311,9 @@ async fn start_background(
 
     // Seed redb with a queued placeholder so a GET before inference runs
     // returns meaningful state (id, model, queued).
-    let queued = ResponsesResponse {
-        id: response_id.clone(),
-        object: "response".into(),
-        created_at,
-        status: ResponseStatus::Queued,
-        model: req.model.clone(),
-        output: Vec::new(),
-        output_text: None,
-        usage: ResponsesUsage::default(),
-        error: None,
-        incomplete_details: None,
-        previous_response_id: req.previous_response_id.clone(),
-        instructions: req.instructions.clone(),
-        tools: req.tools.clone(),
-        tool_choice: req.tool_choice.clone(),
-        parallel_tool_calls: req.parallel_tool_calls,
-        temperature: Some(req.temperature.unwrap_or(0.7)),
-        top_p: Some(req.top_p.unwrap_or(0.9)),
-        max_output_tokens: Some(req.max_output_tokens.unwrap_or(2048)),
-        truncation: req.truncation.clone(),
-        metadata: req.metadata.clone(),
-        user: req.user.clone(),
-        reasoning: req.reasoning.clone(),
-        text: req.text.clone(),
-        modalities: req.modalities.clone(),
-        service_tier: req.service_tier.clone(),
-        background: Some(true),
-        extras: HashMap::new(),
-    };
+    let mut queued =
+        build_response_skeleton(&req, &response_id, created_at, ResponseStatus::Queued);
+    queued.background = Some(true);
     let record = store::ResponsesRecord::new(
         req.clone(),
         queued.clone(),

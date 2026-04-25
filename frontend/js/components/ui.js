@@ -17,6 +17,7 @@
           : tab === 'leaderboard' ? '/admin/leaderboard'
           : tab === 'network-map' ? '/admin/network'
           : tab === 'compare' ? '/admin/compare'
+          : tab === 'responses' ? '/admin/responses'
           : tab === 'devices' ? '/admin/devices'
           : '/admin';
         if (window.location.pathname !== path) {

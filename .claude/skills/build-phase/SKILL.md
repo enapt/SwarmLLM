@@ -13,8 +13,8 @@ You are executing build phase `$ARGUMENTS` for the SwarmLLM project.
 
 ## Setup
 
-1. Read `/home/user/SwarmLLM/docs/ARCHITECTURE.md` for current architecture
-2. Read `/home/user/SwarmLLM/CLAUDE.md` for conventions and build phase descriptions
+1. Read `docs/ARCHITECTURE.md` for current architecture
+2. Read `CLAUDE.md` for conventions and build phase descriptions
 
 ## Execution Strategy
 

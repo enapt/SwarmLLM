@@ -11,7 +11,7 @@ context: fork
 
 Run the full SwarmLLM quality check pipeline in order. Report results for each step.
 
-Working directory: `/home/user/SwarmLLM`
+Working directory: `.`
 
 ## Steps
 
