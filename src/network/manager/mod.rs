@@ -81,7 +81,9 @@ const REDIAL_JITTER_MIN_MS: u64 = 2000;
 /// Random window added on top of `REDIAL_JITTER_MIN_MS` (effective delay 2-5s).
 const REDIAL_JITTER_RANGE_MS: u64 = 3000;
 
-use super::helpers::{extract_ipv4_bytes, is_non_public_addr, swarm_event_name};
+use super::helpers::{
+    extract_ipv4_bytes, is_non_public_addr, is_non_public_ipv4_bytes, swarm_event_name,
+};
 
 /// NetworkManager owns the libp2p Swarm and is the sole interface to the P2P network.
 pub struct NetworkManager {
@@ -1804,16 +1806,15 @@ impl NetworkManager {
                 .insert(node_id.clone(), peer_id.to_bytes());
         }
 
-        // Layer 6: Track subnet for anti-gaming — extract IPv4 from listen addrs
+        // Layer 6: Track subnet for anti-gaming — extract IPv4 from listen addrs.
+        // Skip non-public IPs (loopback, RFC 1918, link-local, CGN/Tailscale,
+        // unspecified) so subnet clustering can't false-positive on internal
+        // addresses. Uses the shared helper rather than re-implementing the
+        // RFC checks inline (the inline version was missing 169.254.x.x and
+        // the CGN range, leaking those into the anti-gaming tracker).
         for addr in &info.listen_addrs {
             if let Some(ip_bytes) = extract_ipv4_bytes(addr) {
-                // Skip private (RFC 1918) and loopback addresses
-                if ip_bytes[0] == 127
-                    || ip_bytes[0] == 0
-                    || ip_bytes[0] == 10
-                    || (ip_bytes[0] == 172 && (16..=31).contains(&ip_bytes[1]))
-                    || (ip_bytes[0] == 192 && ip_bytes[1] == 168)
-                {
+                if is_non_public_ipv4_bytes(&ip_bytes) {
                     continue;
                 }
                 // Use try_lock() to avoid blocking the event loop.

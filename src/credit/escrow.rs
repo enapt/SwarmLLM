@@ -289,7 +289,10 @@ impl EscrowManager {
                 if entry.status != EscrowStatus::Pending {
                     continue; // Already released/refunded by another path
                 }
-                count += 1;
+                // Don't increment count yet — only count successfully completed
+                // expiries. The persist+refund flow below has multiple revert
+                // paths; counting up-front would log "Cleaned up N expired
+                // escrows" when N includes rollbacks.
                 entry.status = EscrowStatus::Expired;
                 let amount = entry.amount;
 
@@ -345,6 +348,7 @@ impl EscrowManager {
                 if balance_persisted {
                     // Refund completed successfully — safe to remove from in-memory map
                     self.entries.remove(&id);
+                    count += 1;
                 }
 
                 tracing::info!(

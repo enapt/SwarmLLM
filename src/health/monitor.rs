@@ -76,8 +76,10 @@ impl HealthMonitor {
         } else {
             // floor(log2(peer_count / 5)), clamped to [1, 10]
             let ratio = peer_count / 5;
-            // bit_length - 1 = floor(log2(n)) for n >= 1
-            let log2 = (usize::BITS - 1 - ratio.leading_zeros()) as u64;
+            // checked_ilog2 returns None for 0 — protects against an
+            // upstream guard-change accidentally letting ratio=0 reach
+            // here, where the bit_length-1 expression would underflow.
+            let log2 = ratio.checked_ilog2().unwrap_or(0) as u64;
             log2.clamp(1, 10)
         }
     }

@@ -67,6 +67,23 @@ pub(crate) fn swarm_event_name(event: &SwarmEvent<SwarmBehaviourEvent>) -> &'sta
     }
 }
 
+/// Check whether a 4-byte IPv4 address is non-public (loopback, RFC 1918,
+/// link-local, CGN/Tailscale, unspecified). Single source of truth for the
+/// "this peer's IP shouldn't count toward subnet anti-gaming or PEX leakage"
+/// rule. Mirrors the parse-from-string `is_non_public_addr` for callers that
+/// already have raw bytes (Identify handler, anti-gaming subnet tracker).
+pub(crate) fn is_non_public_ipv4_bytes(b: &[u8; 4]) -> bool {
+    let ip = std::net::Ipv4Addr::new(b[0], b[1], b[2], b[3]);
+    ip.is_private()
+        || ip.is_loopback()
+        || ip.is_link_local()
+        || ip.is_unspecified()
+        // RFC 6598 CGN / Tailscale 100.64.0.0/10
+        || (b[0] == 100 && (64..128).contains(&b[1]))
+        // link-local metadata
+        || ip == std::net::Ipv4Addr::new(169, 254, 169, 254)
+}
+
 /// Extract IPv4 bytes from a multiaddr, if present.
 pub(crate) fn extract_ipv4_bytes(addr: &Multiaddr) -> Option<[u8; 4]> {
     for proto in addr.iter() {

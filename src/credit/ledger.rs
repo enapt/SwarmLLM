@@ -402,9 +402,40 @@ impl CreditLedger {
                                 pending,
                                 pending > 0,
                             ).await {
-                                tracing::warn!(error = %e, pending, "Failed to flush pending credit earn");
-                                // Put it back so it's not lost
-                                ss.credits.pending_credit_earn.fetch_add(pending, std::sync::atomic::Ordering::AcqRel);
+                                // Restore the credits so they aren't lost. Use
+                                // compare_exchange so we don't double-count: if
+                                // a concurrent earn_inference call landed
+                                // increments while we were flushing, the field
+                                // is no longer 0 and a naive fetch_add would
+                                // add `pending` on top of those increments.
+                                // On the contended path we fall back to
+                                // fetch_add anyway — losing the credits is
+                                // worse than the rare overcount, and the next
+                                // flush tick will reconcile against the DB.
+                                match ss.credits.pending_credit_earn.compare_exchange(
+                                    0,
+                                    pending,
+                                    std::sync::atomic::Ordering::AcqRel,
+                                    std::sync::atomic::Ordering::Acquire,
+                                ) {
+                                    Ok(_) => tracing::warn!(
+                                        error = %e,
+                                        pending,
+                                        "Failed to flush pending credit earn — restored cleanly"
+                                    ),
+                                    Err(observed) => {
+                                        ss.credits.pending_credit_earn.fetch_add(
+                                            pending,
+                                            std::sync::atomic::Ordering::AcqRel,
+                                        );
+                                        tracing::warn!(
+                                            error = %e,
+                                            pending,
+                                            observed,
+                                            "Failed to flush pending credit earn — concurrent earn detected, restored with potential overcount"
+                                        );
+                                    }
+                                }
                             } else {
                                 tracing::debug!(pending, "Flushed pending forward participation credits");
                             }
