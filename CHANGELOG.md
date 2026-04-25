@@ -2,6 +2,96 @@
 
 All notable changes to SwarmLLM are documented here.
 
+## v0.1.0 — 2026-04-25
+
+First non-alpha tag. Cuts off the v0.1.0-alpha.2 line and rolls every
+post-alpha commit (`v0.1.0-alpha.2..main`, ~56 commits) into a single
+release.
+
+### What's new since alpha.2
+
+- **OpenAI Responses API (`/v1/responses`)** — full v1 (M1–M9) + v2
+  (V1–V8) surface. Cloud-proxy passthrough, local inference via Chat
+  translation, Claude/Anthropic-Messages translation bridge,
+  multimodal input, redb persistence with 30-day TTL, chained
+  `previous_response_id`, background mode, resumable SSE +
+  background streaming (202 + Location handshake), `input_items`
+  pagination, dashboard panel under the new Responses tab. See
+  `docs/plans/responses_api.md` and `docs/plans/responses_api_v2.md`
+  for design + full bench numbers in `docs/bench_results/`.
+- **Audit fixes (`audit_2026-04-24.md`)** — 2 CVE backports for
+  vendored libp2p-gossipsub (CVE-2026-33040 + CVE-2026-34219), 5
+  cargo-update CVE patches (quinn-proto + rustls-webpki), spec_logits
+  IPC wire-format fix (no more 5–7× JSON bloat for f32 row-major
+  payloads), Anthropic / OpenAI proxy unknown-field preservation +
+  beta-header forwarding, cache-token usage roundtrip, escrow refund
+  loss + false-toast + total_bytes + spawn_region + no_peers_interval
+  fixes, hot-path mem::take in forward_through_segments. See
+  `audit_2026-04-24.md` in memory for full chronology.
+- **Audit fixes (this session)** — DNS TOCTOU closed via custom
+  reqwest resolver that filters private IPs at request time; shard
+  size check tightened to exact-match for zero-hash placeholder
+  manifests; prune cycle re-checks resource pressure between scan and
+  execution so over-pruning can't happen; Grafana docker-compose
+  refuses to start without explicit env vars (no more silent
+  admin/admin).
+- **Dep upgrades** — axum 0.7 → 0.8 (route patterns rewritten,
+  WebSocket Message types adapted, async_trait removed, tower-http
+  TimeoutLayer signature change), redb 3 → 4 (1.5× write throughput,
+  on-disk format compatible via existing UpgradeRequired migration
+  path), tower-http 0.5 → 0.6, candle 0.9 → 0.10 (vendor was already
+  at 0.10.1 — refreshed dep declaration to match).
+- **Distributed inference** — Items 1–7 + Item 8 (full architecture
+  + cross-over demo: TinyLlama 1.1B GPU loopback ~100 ms slower vs
+  control on small prompts; Qwen2.5-7B CPU loopback **12.9× iter-1
+  TTFT** on 640-token prompt), Item 12 DSD multi-segment spec
+  decoding (flag), Item 13 Q8_0 activation compression (~3.76× wire
+  saving, flag), Item 16 Parallax scheduler phases A+B+B.2+C+C.2 on
+  by default. Headlines: prefix-cache hit gives 29.4× wall-clock on
+  repeat prompts; remote-generate fastpath gives 1.93× decode; Phase
+  4 batched chunked prefill gives 1.57× tok/s @ c=4. See
+  `docs/plans/distributed_inference_speedup.md`.
+- **Cross-platform IPC** — Daemon ↔ model-worker IPC ported from
+  Unix-socket-only to the `interprocess` crate (AF_UNIX with 0o600
+  perms on Linux/macOS, named pipes with default-DACL on Windows).
+  Runtime-validated on Windows (CPU + GPU, single-node + multi-node
+  + split shards) on 2026-04-23. See note below.
+
+### Test + lint baseline at v0.1.0
+
+- 816 lib tests passing (782 → 816 since alpha.2), clippy clean both
+  with default features and `--no-default-features --features
+  dev,claude-subscription`.
+- Integration tests green.
+- 38/38 M1–M9 + 27/27 V1–V8 curl matrix pass against a live daemon.
+
+### Known deferred items (post-v0.1.0)
+
+- **libp2p 0.55 → 0.56** — needs vendor re-port (libp2p-request-
+  response 0.28 → 0.29, libp2p-gossipsub 0.48 → 0.49, libp2p-stream
+  alpha → 0.4). Tried in this session, hit incompatibility with the
+  vendored crates; needs its own session.
+- **`POST /v1/responses/compact`** — V9 of the v2 plan, deferred
+  indefinitely until a concrete caller asks for it.
+- See `docs/ARCHITECTURE.md` § "Deferred Items" for the full list.
+
+### Notes for upgraders from v0.1.0-alpha.2
+
+- Provider proxy now uses a custom DNS resolver. Hostnames that
+  resolve to private/internal IPs (RFC 1918, link-local, loopback)
+  are rejected at request time. The pre-flight `validate_provider_url`
+  helper still runs for friendlier error messages but is no longer
+  the only defense.
+- `monitoring/docker-compose.yml` no longer supplies `admin/admin`
+  defaults for Grafana. Run `cp .env.example .env && $EDITOR .env`
+  before `docker compose up -d`.
+- Anyone with a v3 redb file: the existing `Database::open` path
+  already backs up the file (`db.redb.bak`) and recreates fresh, so
+  in-place upgrade Just Works but loses prior state. New deployments
+  start clean on v4.
+
+---
+
 ## [Unreleased] - alpha
 
 > Prior tag: `v0.1.0-alpha.1` (2026-03-18, 674 tests). This section
