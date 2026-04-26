@@ -14,7 +14,7 @@ default-theme = "coal"
 preferred-dark-theme = "coal"
 git-repository-url = "https://github.com/enapt/SwarmLLM"
 edit-url-template = "https://github.com/enapt/SwarmLLM/edit/main/docs/book/src/{path}"
-site-url = "/swarmllm/"
+site-url = "/SwarmLLM/"
 no-section-label = false
 
 [output.html.search]

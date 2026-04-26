@@ -6,7 +6,9 @@ Download the right file for your system from the [GitHub Releases page](https://
 
 | Your Computer | File Name |
 |---|---|
-| **Windows** (most PCs) | `swarmllm-windows-x86_64.zip` |
+| **Windows** (most PCs) | `SwarmLLM-Setup.exe` (installer — auto-detects GPU) |
+| **Windows** (raw binary, GPU) | `swarmllm-windows-x86_64-gpu.zip` |
+| **Windows** (raw binary, CPU) | `swarmllm-windows-x86_64-cpu.zip` |
 | **Mac** (M1/M2/M3/M4) | `swarmllm-macos-aarch64.tar.gz` (compile-validated) |
 | **Mac** (older Intel) | Best-effort — build from source |
 | **Linux** (most distros) | `swarmllm-linux-x86_64.tar.gz` |
@@ -18,13 +20,13 @@ Download the right file for your system from the [GitHub Releases page](https://
 
 ### Windows
 
-1. Right-click `swarmllm-windows-x86_64.zip` and choose **Extract All...**
-2. Double-click `swarmllm.exe` in the extracted folder.
-3. If SmartScreen warns you, click **More info** > **Run anyway**.
+**Recommended — installer:** double-click `SwarmLLM-Setup.exe`. It detects your GPU (NVIDIA / AMD / Intel) and installs the matching binary. If SmartScreen warns you, click **More info** > **Run anyway**.
 
-Or from PowerShell:
+**Raw binary alternative:** download `swarmllm-windows-x86_64-gpu.zip` (Vulkan + CUDA static) or `swarmllm-windows-x86_64-cpu.zip` (CPU-only fallback), extract, and run `swarmllm.exe`.
+
+From PowerShell on a raw binary:
 ```powershell
-cd Downloads\swarmllm-windows-x86_64
+cd Downloads\swarmllm-windows-x86_64-gpu
 .\swarmllm.exe run
 ```
 
@@ -109,10 +111,9 @@ For CUDA GPU support:
 cargo build --release --features candle-cuda
 ```
 
-For Apple Silicon (Metal):
-```bash
-cargo build --release --features metal
-```
+For Apple Silicon: the default build runs on CPU. A Metal-accelerated
+build is on the roadmap but not yet implemented (no `metal` Cargo
+feature exists yet); until then, use the default `cargo build --release`.
 
 ## Open the Dashboard
 
