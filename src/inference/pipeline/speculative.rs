@@ -65,8 +65,12 @@ pub(super) fn eligible(exec: &PipelineExecutor) -> bool {
     if !exec.assignment.supports_speculative {
         return false;
     }
-    // Single segment, non-TP only.
-    if exec.assignment.segments.len() != 1 || !exec.assignment.tp_groups.is_empty() {
+    // Shared request-level disqualifiers (TP, LoRA, vision images).
+    if super::fastpath_request_disqualified(exec) {
+        return false;
+    }
+    // Single segment only.
+    if exec.assignment.segments.len() != 1 {
         return false;
     }
     // The single segment must be remote. Local-only inference is handled by
@@ -83,13 +87,8 @@ pub(super) fn eligible(exec: &PipelineExecutor) -> bool {
     if cfg.draft_model_path.is_none() {
         return false;
     }
-    // No vision, no LoRA, no encryption.
-    if exec.request.lora_adapter.is_some() {
-        return false;
-    }
-    if !crate::inference::vision::collect_images(&exec.request.messages).is_empty() {
-        return false;
-    }
+    // The standard wire codec is used directly here; the speculative path
+    // doesn't yet wrap activations in ChaCha session encryption.
     if exec.shared_state.config.network.enable_encryption {
         return false;
     }

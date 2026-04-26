@@ -455,7 +455,7 @@ impl PipelineExecutor {
                     &self.shared_state.credits.credit_balance,
                     &self.shared_state.db,
                     total_earned,
-                    true,
+                    crate::credit::ledger::CreditDelta::Earning,
                 )
                 .await
                 {

@@ -569,7 +569,7 @@ pub(crate) async fn dispatch_network_messages(
                                                 &shared_state.credits.credit_balance,
                                                 &shared_state.db,
                                                 tx.amount,
-                                                true,
+                                                crate::credit::ledger::CreditDelta::Earning,
                                             ).await {
                                                 tracing::warn!(error = %e, "Failed to apply credit transaction");
                                             }

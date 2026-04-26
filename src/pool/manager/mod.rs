@@ -736,7 +736,7 @@ impl PoolManager {
             &self.shared_state.credits.credit_balance,
             &self.shared_state.db,
             forward.amount,
-            true,
+            crate::credit::ledger::CreditDelta::Earning,
         )
         .await
         {

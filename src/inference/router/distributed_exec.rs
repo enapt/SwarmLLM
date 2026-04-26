@@ -135,7 +135,7 @@ pub(super) async fn finalize_request(
                     &shared_state.credits.credit_balance,
                     &shared_state.db,
                     -spent,
-                    false,
+                    crate::credit::ledger::CreditDelta::Spending,
                 )
                 .await
                 {
@@ -523,7 +523,7 @@ pub(super) async fn execute_request(
                 &shared_state.credits.credit_balance,
                 &shared_state.db,
                 -penalty,
-                false,
+                crate::credit::ledger::CreditDelta::Spending,
             )
             .await
             {

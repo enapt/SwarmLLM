@@ -4,6 +4,7 @@ use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
+use crate::credit::ledger::{apply_credit_direct, CreditDelta};
 use crate::error::SwarmError;
 use crate::storage::db::Database;
 use crate::types::{CreditBalance, NodeId};
@@ -110,21 +111,12 @@ impl EscrowManager {
         // exists — the user loses credits. This is better than the reverse: if we
         // crash after persisting escrow but before deducting balance, cleanup_expired
         // would refund into a balance that was never deducted, creating free credits.
+        if let Err(e) = apply_credit_direct(balance, &self.db, -amount, CreditDelta::Spending).await
         {
-            let mut bal = balance.write().await;
-            bal.balance = bal.balance.saturating_sub(amount);
-            bal.lifetime_spent = bal.lifetime_spent.saturating_add(amount as u64);
-            bal.last_updated = chrono::Utc::now();
-            if let Err(e) = self.db.put_json(
-                crate::credit::ledger::TREE_CREDITS,
-                crate::credit::ledger::KEY_BALANCE,
-                &*bal,
-            ) {
-                tracing::warn!(error = %e, "Failed to persist balance for escrow deduction");
-                return Err(SwarmError::CreditError(format!(
-                    "Failed to persist balance: {e}"
-                )));
-            }
+            tracing::warn!(error = %e, "Failed to persist balance for escrow deduction");
+            return Err(SwarmError::CreditError(format!(
+                "Failed to persist balance: {e}"
+            )));
         }
 
         // Now persist the escrow entry. If we crash here, the balance was already
@@ -233,19 +225,10 @@ impl EscrowManager {
         // Remove from in-memory map — entry is persisted to DB
         self.entries.remove(&escrow_id);
 
-        // Return credits to requester (lifetime_spent is monotonic — not decremented).
-        // Persist immediately to prevent credit loss on crash after refund.
-        {
-            let mut bal = balance.write().await;
-            bal.balance = bal.balance.saturating_add(amount);
-            bal.last_updated = chrono::Utc::now();
-            if let Err(e) = self.db.put_json(
-                crate::credit::ledger::TREE_CREDITS,
-                crate::credit::ledger::KEY_BALANCE,
-                &*bal,
-            ) {
-                tracing::warn!(error = %e, "Failed to persist refunded balance");
-            }
+        // Return credits to requester. CreditDelta::Refund leaves
+        // `lifetime_spent` alone (monotonic) and only adjusts `balance`.
+        if let Err(e) = apply_credit_direct(balance, &self.db, amount, CreditDelta::Refund).await {
+            tracing::warn!(error = %e, "Failed to persist refunded balance");
         }
 
         tracing::info!(
@@ -308,9 +291,16 @@ impl EscrowManager {
                 // may fail, in which case we need the entry present to revert it
                 // back to Pending for retry. Remove only after the refund succeeds.
 
-                // Refund the expired amount (lifetime_spent is monotonic — not decremented).
-                // Persist balance inside the write lock to ensure crash-safety:
-                // if persist fails, revert in-memory to prevent credits existing only in RAM.
+                // Refund the expired amount. We deliberately DO NOT use
+                // `apply_credit_direct(..., CreditDelta::Refund)` here even
+                // though the accounting semantics match — `cleanup_expired`
+                // requires strict crash-safety to support its retry loop:
+                // on persist failure, the in-memory balance MUST be reverted
+                // and the escrow status MUST go back to Pending so the next
+                // tick retries. `apply_credit_direct` deliberately doesn't
+                // revert in-memory on persist failure (small crash window
+                // is acceptable for hot-path callers), so reusing it here
+                // would let the retry tick double-credit when it succeeds.
                 let balance_persisted = {
                     let mut bal = balance.write().await;
                     let old_balance = bal.balance;

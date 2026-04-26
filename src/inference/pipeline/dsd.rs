@@ -72,20 +72,18 @@ pub(super) fn eligible(exec: &PipelineExecutor) -> bool {
     if !exec.assignment.supports_speculative {
         return false;
     }
+    // Shared request-level disqualifiers (TP, LoRA, vision images).
+    if super::fastpath_request_disqualified(exec) {
+        return false;
+    }
     // Multi-segment pipeline only — single-segment falls through to Item 2.
-    if exec.assignment.segments.len() < 2 || !exec.assignment.tp_groups.is_empty() {
+    if exec.assignment.segments.len() < 2 {
         return false;
     }
     if exec.request.sampling_params.temperature != 0.0 {
         return false;
     }
     if cfg.draft_model_path.is_none() {
-        return false;
-    }
-    if exec.request.lora_adapter.is_some() {
-        return false;
-    }
-    if !crate::inference::vision::collect_images(&exec.request.messages).is_empty() {
         return false;
     }
     if exec.shared_state.config.network.enable_encryption {

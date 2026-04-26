@@ -22,17 +22,7 @@ use super::PipelineExecutor;
 
 /// Preconditions for the fast path. All checks are local and cheap.
 pub(super) fn eligible(exec: &PipelineExecutor) -> bool {
-    // Single segment, non-TP.
-    if exec.assignment.segments.len() != 1 || !exec.assignment.tp_groups.is_empty() {
-        return false;
-    }
-    // The sole segment must be remote. Local inference is handled by
-    // `execute_local` which has its own faster path.
-    if exec.assignment.segments[0].node_id == *exec.shared_state.identity.node_id() {
-        return false;
-    }
-    // Skip when vision / LoRA / pipeline-seal are in play — those need
-    // coordinator involvement on a per-token basis.
+    // Shared disqualifiers: TP, LoRA adapter, vision images.
     //
     // NOTE on encryption: `config.network.enable_encryption` gates the
     // ChaCha session layer that's applied ON TOP of libp2p Noise for
@@ -42,10 +32,16 @@ pub(super) fn eligible(exec: &PipelineExecutor) -> bool {
     // messages travel today, protected only by Noise transport encryption.
     // No additional ChaCha layer is needed for the fast path to match the
     // existing security baseline for user prompts.
-    if exec.request.lora_adapter.is_some() {
+    if super::fastpath_request_disqualified(exec) {
         return false;
     }
-    if !crate::inference::vision::collect_images(&exec.request.messages).is_empty() {
+    // Single segment.
+    if exec.assignment.segments.len() != 1 {
+        return false;
+    }
+    // The sole segment must be remote. Local inference is handled by
+    // `execute_local` which has its own faster path.
+    if exec.assignment.segments[0].node_id == *exec.shared_state.identity.node_id() {
         return false;
     }
     let model_id = &exec.request.model_id;

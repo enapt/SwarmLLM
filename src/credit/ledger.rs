@@ -400,7 +400,7 @@ impl CreditLedger {
                                 &self.balance,
                                 &self.db,
                                 pending,
-                                pending > 0,
+                                if pending > 0 { CreditDelta::Earning } else { CreditDelta::Spending },
                             ).await {
                                 // Restore the credits so they aren't lost. Use
                                 // compare_exchange so we don't double-count: if
@@ -567,14 +567,29 @@ pub(crate) fn resolve_credit_rates(
     state.config.pool.credit_rates.clone()
 }
 
+/// Kind of credit movement applied by `apply_credit_direct`. Determines
+/// which monotonic lifetime counter is updated.
+///
+/// - `Earning`  → `lifetime_earned += |delta|`
+/// - `Spending` → `lifetime_spent  += |delta|`
+/// - `Refund`   → neither counter is touched (used when reverting a
+///   prior `Spending`, e.g. an escrow refund — `lifetime_spent` must stay
+///   monotonic)
+#[derive(Debug, Clone, Copy)]
+pub enum CreditDelta {
+    Earning,
+    Spending,
+    Refund,
+}
+
 /// This replicates what `CreditLedger::apply_credit` + `persist_balance` do, so that
-/// callers like `InferenceRouter` and `PipelineExecutor` don't bypass persistence and
-/// proper accounting.
+/// callers like `InferenceRouter`, `PipelineExecutor`, and `EscrowManager`
+/// don't bypass persistence and proper accounting.
 pub async fn apply_credit_direct(
     balance: &Arc<RwLock<CreditBalance>>,
     db: &crate::storage::db::Database,
     delta: i64,
-    is_earning: bool,
+    kind: CreditDelta,
 ) -> Result<(), SwarmError> {
     // Update in-memory balance under write lock, then release before DB write.
     // The small crash window (memory updated, process dies before persist) is
@@ -585,15 +600,22 @@ pub async fn apply_credit_direct(
         bal.balance = bal.balance.saturating_add(delta);
         bal.last_updated = chrono::Utc::now();
 
-        if is_earning {
-            bal.lifetime_earned = bal.lifetime_earned.saturating_add(delta.unsigned_abs());
-        } else {
-            bal.lifetime_spent = bal.lifetime_spent.saturating_add(delta.unsigned_abs());
+        match kind {
+            CreditDelta::Earning => {
+                bal.lifetime_earned = bal.lifetime_earned.saturating_add(delta.unsigned_abs());
+            }
+            CreditDelta::Spending => {
+                bal.lifetime_spent = bal.lifetime_spent.saturating_add(delta.unsigned_abs());
+            }
+            CreditDelta::Refund => {
+                // Reverting a prior spend — leave the monotonic counters alone.
+            }
         }
 
         tracing::debug!(
             balance = bal.balance,
             delta,
+            kind = ?kind,
             lifetime_earned = bal.lifetime_earned,
             lifetime_spent = bal.lifetime_spent,
             "Credit balance updated (direct)"

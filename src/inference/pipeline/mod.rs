@@ -41,6 +41,29 @@ const MAX_PENDING_LAYER_RESULTS: usize = 1024;
 pub(crate) const LLAMA_FALLBACK_EOS_TOKEN: u32 = 2;
 pub(crate) const PREFILL_ACTIVATION_THRESHOLD_BYTES: usize = 100_000;
 
+/// Request-level disqualifiers shared by every "fast path" coordinator:
+/// remote-generate (`remote_generate.rs`), distributed-speculative
+/// (`speculative.rs`), and DSD multi-segment (`dsd.rs`). Returns
+/// `true` when ANY disqualifier applies — callers short-circuit their
+/// own `eligible()` check on a true return.
+///
+/// Each path additionally has its own segment-shape, encryption, and
+/// flag-config preconditions; those stay in the per-path `eligible()`
+/// because the shapes are subtly divergent (1-segment / 2+-segment /
+/// all-remote / per-model encryption gate).
+pub(super) fn fastpath_request_disqualified(exec: &PipelineExecutor) -> bool {
+    if !exec.assignment.tp_groups.is_empty() {
+        return true;
+    }
+    if exec.request.lora_adapter.is_some() {
+        return true;
+    }
+    if !crate::inference::vision::collect_images(&exec.request.messages).is_empty() {
+        return true;
+    }
+    false
+}
+
 /// Executes a distributed inference pipeline across multiple nodes.
 ///
 /// The pipeline is a sequence of segments, each assigned to a node.
