@@ -682,12 +682,23 @@ pub async fn network_code(State(state): State<AppState>) -> Json<serde_json::Val
     };
 
     // Pick a real IP by scanning peer addresses that other nodes see for us,
-    // or fall back to detecting the local machine's non-loopback IP.
+    // or fall back to detecting the local machine's non-loopback IP. Cap the
+    // peer scan at NETWORK_CODE_PEER_SCAN_CAP — a public-facing IP is almost
+    // always advertised by the first few peers, and at 10k-peer scale the
+    // unbounded inner loop becomes a notable per-request hot path on the
+    // dashboard's invite-code refresh.
+    const NETWORK_CODE_PEER_SCAN_CAP: usize = 64;
+    const NETWORK_CODE_ADDR_PER_PEER_CAP: usize = 16;
     let best_ip = {
         // Try to find a non-loopback IP from peers' addresses for our node
         let mut found_ip = None;
-        for peer in state.shared_state.peer_registry.iter() {
-            for addr in &peer.addresses {
+        for peer in state
+            .shared_state
+            .peer_registry
+            .iter()
+            .take(NETWORK_CODE_PEER_SCAN_CAP)
+        {
+            for addr in peer.addresses.iter().take(NETWORK_CODE_ADDR_PER_PEER_CAP) {
                 if addr.starts_with("/ip4/") {
                     let parts: Vec<&str> = addr.split('/').collect();
                     if parts.len() >= 3 {

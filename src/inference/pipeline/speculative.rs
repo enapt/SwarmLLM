@@ -306,30 +306,10 @@ impl PipelineExecutor {
             // After this forward, remote KV was grown by verify_tokens.len().
             let kv_after_forward = expected_kv_len + verify_tokens.len() as u32;
 
-            // Greedy accept-reject:
-            //   spec_logits[i] = target's distribution AT input position i, which
-            //   predicts the NEXT token (at logical position current_pos+i+1).
-            //   - spec_logits[0] predicts what should come after last_token → verifies q_1
-            //   - spec_logits[i] predicts what should come after verify_tokens[i]
-            //     → verifies q_{i+1} for i in 1..γ
-            let mut accepted: Vec<u32> = Vec::with_capacity(drafts.len());
-            let mut bonus: u32 = 0;
-            for (i, &q) in drafts.iter().enumerate() {
-                let logits = &spec_logits[i];
-                let target_pick = argmax(logits);
-                if target_pick == q {
-                    accepted.push(q);
-                } else {
-                    bonus = target_pick;
-                    break;
-                }
-            }
-            let all_accepted = accepted.len() == drafts.len();
-            if all_accepted {
-                // Bonus sampled from spec_logits[γ] (target's prediction AFTER q_γ).
-                // Use the LAST available spec_logit as the bonus source.
-                bonus = argmax(&spec_logits[drafts.len()]);
-            }
+            // Greedy accept-reject — see `greedy_accept_reject` doc.
+            //   spec_logits[i] verifies drafts[i]; bonus comes from the
+            //   first mismatch or from spec_logits[γ] when all accepted.
+            let (accepted, bonus, _all_accepted) = greedy_accept_reject(&drafts, &spec_logits);
 
             acceptance_proposed += drafts.len() as u32;
             acceptance_accepted += accepted.len() as u32;
@@ -556,6 +536,42 @@ pub(super) fn argmax(logits: &[f32]) -> u32 {
         }
     }
     best_idx as u32
+}
+
+/// Greedy accept-reject for distributed speculative decoding.
+///
+/// `spec_logits[i]` is the target's predicted distribution AFTER seeing
+/// input position `i`, so it verifies `drafts[i]`. Walks the draft tokens:
+/// accept while the target's argmax matches; on first mismatch, take the
+/// target's argmax as the bonus and stop. If all drafts are accepted,
+/// take `spec_logits[drafts.len()]` (the target's prediction beyond the
+/// last accepted token) as the bonus.
+///
+/// Returns `(accepted, bonus, all_accepted)`. Shared by Item 2's
+/// `try_speculative_distributed` (single-segment) and Item 12's
+/// `try_dsd_distributed` (multi-segment) — both paths run bit-identical
+/// arithmetic; what differs around the call is round bookkeeping
+/// (gamma controller updates, partial-accept fixup) and token emission.
+pub(super) fn greedy_accept_reject(
+    drafts: &[u32],
+    spec_logits: &[Vec<f32>],
+) -> (Vec<u32>, u32, bool) {
+    let mut accepted: Vec<u32> = Vec::with_capacity(drafts.len());
+    let mut bonus: u32 = 0;
+    for (i, &q) in drafts.iter().enumerate() {
+        let target_pick = argmax(&spec_logits[i]);
+        if target_pick == q {
+            accepted.push(q);
+        } else {
+            bonus = target_pick;
+            break;
+        }
+    }
+    let all_accepted = accepted.len() == drafts.len();
+    if all_accepted {
+        bonus = argmax(&spec_logits[drafts.len()]);
+    }
+    (accepted, bonus, all_accepted)
 }
 
 // ─── Draft-model driver (llama-cpp) ────────────────────────────────────────

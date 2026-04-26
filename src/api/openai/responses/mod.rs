@@ -186,6 +186,28 @@ pub(crate) const BUILTIN_TOOL_TYPES: &[&str] = &[
 /// prevent an unbounded internal allocation if something goes sideways.
 const MAX_CHAT_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 
+/// Buffer a Chat Completions response body, parse it as JSON, and run
+/// the Responses-shaped translation. Used by both `create_response`
+/// (sync) and `run_background_inference` (background) which previously
+/// hand-rolled three separate `match`/error sites each. Returns a
+/// human-readable error string so each caller can wrap it into the
+/// error type their control flow uses (`ApiError`, `ResponseError`,
+/// etc.).
+async fn buffer_and_translate_chat_response(
+    body: axum::body::Body,
+    req: &ResponsesRequest,
+    response_id: &str,
+    created_at: i64,
+) -> Result<ResponsesResponse, String> {
+    let bytes = to_bytes(body, MAX_CHAT_RESPONSE_BYTES)
+        .await
+        .map_err(|e| format!("buffer error: {e}"))?;
+    let chat_value: serde_json::Value =
+        serde_json::from_slice(&bytes).map_err(|e| format!("parse chat JSON: {e}"))?;
+    translate::chat_response_to_responses(&chat_value, req, response_id, created_at)
+        .map_err(|e| e.to_string())
+}
+
 /// In-flight map of background response ids to their cancel flags.
 ///
 /// The cancel handler flips the flag; the background worker checks it at
@@ -195,9 +217,60 @@ const MAX_CHAT_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 /// cancellation surface (per-request, not per-response).
 ///
 /// Keys are removed when the background worker finishes (whether it wrote
-/// a completed result or was cancelled).
+/// a completed result or was cancelled). A parallel `BACKGROUND_CANCEL_AGES`
+/// map is used by `prune_stale_background_state` to evict entries whose
+/// owning task was cancelled externally (e.g. process shutdown mid-flight)
+/// before its cleanup path could run.
 static BACKGROUND_CANCEL: std::sync::LazyLock<DashMap<String, Arc<AtomicBool>>> =
     std::sync::LazyLock::new(DashMap::new);
+
+/// Insert times for `BACKGROUND_CANCEL` entries. Maintained by
+/// `register_background_cancel` / `unregister_background_cancel`. The
+/// hourly responses sweep evicts entries older than
+/// `BACKGROUND_CANCEL_MAX_AGE_SECS` from both maps so a runaway leak
+/// stays bounded under task-cancel-without-cleanup conditions.
+pub(crate) static BACKGROUND_CANCEL_AGES: std::sync::LazyLock<DashMap<String, std::time::Instant>> =
+    std::sync::LazyLock::new(DashMap::new);
+
+/// Generous upper bound on background-inference duration. Anything older
+/// is almost certainly a leak (the longest legitimate background run is
+/// a few minutes; this leaves an order of magnitude headroom).
+pub(crate) const BACKGROUND_CANCEL_MAX_AGE_SECS: u64 = 7200;
+
+/// Insert into `BACKGROUND_CANCEL` and record the timestamp atomically so
+/// the sweep has a consistent view. Replaces the bare
+/// `BACKGROUND_CANCEL.insert` calls everywhere.
+pub(crate) fn register_background_cancel(response_id: &str, flag: Arc<AtomicBool>) {
+    BACKGROUND_CANCEL.insert(response_id.to_string(), flag);
+    BACKGROUND_CANCEL_AGES.insert(response_id.to_string(), std::time::Instant::now());
+}
+
+/// Remove from both `BACKGROUND_CANCEL` and `BACKGROUND_CANCEL_AGES`.
+/// Replaces the bare `BACKGROUND_CANCEL.remove` calls everywhere.
+pub(crate) fn unregister_background_cancel(response_id: &str) {
+    BACKGROUND_CANCEL.remove(response_id);
+    BACKGROUND_CANCEL_AGES.remove(response_id);
+}
+
+/// Drop `BACKGROUND_CANCEL` + `BACKGROUND_CANCEL_AGES` +
+/// `background::BACKGROUND_STATE` entries older than
+/// `BACKGROUND_CANCEL_MAX_AGE_SECS`. Returns the count pruned. Intended
+/// to be called by the hourly responses sweep.
+pub(crate) fn prune_stale_background_state() -> usize {
+    let now = std::time::Instant::now();
+    let stale: Vec<String> = BACKGROUND_CANCEL_AGES
+        .iter()
+        .filter(|e| now.duration_since(*e.value()).as_secs() > BACKGROUND_CANCEL_MAX_AGE_SECS)
+        .map(|e| e.key().clone())
+        .collect();
+    let count = stale.len();
+    for id in stale {
+        BACKGROUND_CANCEL.remove(&id);
+        BACKGROUND_CANCEL_AGES.remove(&id);
+        background::BACKGROUND_STATE.remove(&id);
+    }
+    count
+}
 
 /// Default `max_output_tokens` when the caller didn't specify one.
 /// Single source of truth for the four response-skeleton sites — keep
@@ -407,22 +480,16 @@ pub async fn create_response(
 
     // 8. Parse the chat response body and translate to a Responses shape.
     let (parts, body) = chat_response.into_parts();
-    let bytes = to_bytes(body, MAX_CHAT_RESPONSE_BYTES).await.map_err(|e| {
-        ApiError(SwarmError::Internal(format!(
-            "Failed to buffer chat response body (model={}): {e}",
-            req.model
-        )))
-    })?;
-    let chat_value: serde_json::Value = serde_json::from_slice(&bytes).map_err(|e| {
-        ApiError(SwarmError::Internal(format!(
-            "Failed to parse chat response JSON (model={}): {e}",
-            req.model
-        )))
-    })?;
-
     let response_id = new_response_id();
     let created_at = chrono::Utc::now().timestamp();
-    let resp = translate::chat_response_to_responses(&chat_value, &req, &response_id, created_at)?;
+    let resp = buffer_and_translate_chat_response(body, &req, &response_id, created_at)
+        .await
+        .map_err(|msg| {
+            ApiError(SwarmError::Internal(format!(
+                "Chat→Responses translation failed (model={}): {msg}",
+                req.model
+            )))
+        })?;
 
     // M7: persist the completed response when store=true (the OpenAI default).
     if req.store.unwrap_or(true) {
@@ -467,7 +534,7 @@ async fn start_background(
     let created_at = chrono::Utc::now().timestamp();
 
     let cancel_flag = Arc::new(AtomicBool::new(false));
-    BACKGROUND_CANCEL.insert(response_id.clone(), cancel_flag.clone());
+    register_background_cancel(&response_id, cancel_flag.clone());
 
     // Seed redb with a queued placeholder so a GET before inference runs
     // returns meaningful state (id, model, queued).
@@ -481,7 +548,7 @@ async fn start_background(
         store::DEFAULT_TTL_SECS,
     );
     if let Err(e) = store::store(&state.db, &record) {
-        BACKGROUND_CANCEL.remove(&response_id);
+        unregister_background_cancel(&response_id);
         return Err(ApiError(e));
     }
 
@@ -546,7 +613,7 @@ async fn run_background_inference(
         // the cancelled record that POST .../cancel wrote; drop our
         // finalized result on the floor.
         if cancel_flag.load(Ordering::SeqCst) {
-            BACKGROUND_CANCEL.remove(&response_id);
+            unregister_background_cancel(&response_id);
             return;
         }
         if let Ok(Some(mut rec)) = store::load(&state.db, &response_id) {
@@ -559,7 +626,7 @@ async fn run_background_inference(
                 tracing::warn!(error = %e, id = %response_id, "background finalize store failed");
             }
         }
-        BACKGROUND_CANCEL.remove(&response_id);
+        unregister_background_cancel(&response_id);
     };
 
     let chat_req = match translate::request_to_chat(&req, prior.as_ref()) {
@@ -624,53 +691,26 @@ async fn run_background_inference(
         return;
     }
 
-    let bytes = match to_bytes(chat_response.into_body(), MAX_CHAT_RESPONSE_BYTES).await {
-        Ok(b) => b,
-        Err(e) => {
+    let resp = match buffer_and_translate_chat_response(
+        chat_response.into_body(),
+        &req,
+        &response_id,
+        created_at,
+    )
+    .await
+    {
+        Ok(r) => r,
+        Err(msg) => {
             finalize(
                 ResponseStatus::Failed,
                 Vec::new(),
                 None,
                 ResponsesUsage::default(),
-                Some(ResponseError::new(
-                    "internal_error",
-                    format!("buffer error: {e}"),
-                )),
+                Some(ResponseError::new("internal_error", msg)),
             );
             return;
         }
     };
-    let chat_value: serde_json::Value = match serde_json::from_slice(&bytes) {
-        Ok(v) => v,
-        Err(e) => {
-            finalize(
-                ResponseStatus::Failed,
-                Vec::new(),
-                None,
-                ResponsesUsage::default(),
-                Some(ResponseError::new(
-                    "internal_error",
-                    format!("parse chat JSON: {e}"),
-                )),
-            );
-            return;
-        }
-    };
-
-    let resp =
-        match translate::chat_response_to_responses(&chat_value, &req, &response_id, created_at) {
-            Ok(r) => r,
-            Err(e) => {
-                finalize(
-                    ResponseStatus::Failed,
-                    Vec::new(),
-                    None,
-                    ResponsesUsage::default(),
-                    Some(ResponseError::new("internal_error", e.to_string())),
-                );
-                return;
-            }
-        };
 
     finalize(resp.status, resp.output, resp.output_text, resp.usage, None);
 }

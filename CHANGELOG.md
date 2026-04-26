@@ -136,6 +136,28 @@ next tagged release.
   write lock for mutation. All 4 pool handlers audited for ordering
   consistency.
 
+### Reliability
+
+- **`BACKGROUND_CANCEL` TTL sweep** — the response-id → cancel-flag
+  registry could leak entries when a Tokio task was cancelled
+  externally (e.g. process shutdown mid-flight) before its cleanup
+  path ran. Added a parallel `BACKGROUND_CANCEL_AGES` map keyed by
+  response id with insert-time `Instant`; new
+  `register_background_cancel` / `unregister_background_cancel`
+  helpers wrap every insert / remove site so the two maps stay
+  consistent. New `prune_stale_background_state` drops entries
+  older than `BACKGROUND_CANCEL_MAX_AGE_SECS = 7200` (2 h —
+  generously above any real background-inference run) plus the
+  matching `BACKGROUND_STATE` entry. Wired into the existing
+  hourly responses sweep.
+- **`/api/admin/network_code` peer-iter caps** — the dashboard's
+  invite-code refresh handler walked every peer and every
+  advertised address with no bound. Added
+  `NETWORK_CODE_PEER_SCAN_CAP = 64` and
+  `NETWORK_CODE_ADDR_PER_PEER_CAP = 16`. A public-facing IP is
+  almost always advertised by the first few peers, so capping the
+  inner loops preserves the happy path and bounds the worst case.
+
 ### Observability
 
 - **`forward_batch` fallback log gained `model_id`** — the
@@ -144,6 +166,26 @@ next tagged release.
   model triggered the fallback in a multi-model deployment.
 
 ### Refactor / dedup
+
+- **`buffer_and_translate_chat_response` helper** collapses the
+  three-step buffer/parse/translate boilerplate that
+  `create_response` and `run_background_inference` each hand-rolled
+  with its own error-handling shape. Returns
+  `Result<ResponsesResponse, String>`; each caller wraps the
+  human-readable error string into its native error type. Site 1
+  went from 13 lines + 2 match arms to 8 lines + 1 `.map_err`;
+  site 2 went from 32 lines + 3 match arms to 14 lines + 1 match.
+- **`speculative::greedy_accept_reject`** extracts the bit-identical
+  14-line accept-reject arithmetic shared between
+  `try_speculative_distributed` (Item 2) and `try_dsd_distributed`
+  (Item 12). Token emission and gamma-controller bookkeeping that
+  surrounds the call stay per-path because the divergence there is
+  real.
+- **`build_chat_completion_response` helper** in
+  `api/openai/streaming.rs` collapses the response-shape
+  construction shared between `router_inference` (with logprobs +
+  session id) and `split_non_stream_response` (without). The
+  empty-vec → `None` logprob conversion lives in one place.
 
 - **`ResponseError::new(code, message)` constructor** replaces 11
   identical `ResponseError { code, message, extras: HashMap::new() }`

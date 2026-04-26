@@ -39,9 +39,9 @@ use dashmap::DashMap;
 use serde::Deserialize;
 use tokio::sync::{Mutex, Notify};
 
+use super::store;
 use super::stream::{self as responses_stream, SSE_KEEPALIVE_INTERVAL_SECS};
 use super::types::*;
-use super::{store, BACKGROUND_CANCEL};
 use crate::api::server::AppState;
 use crate::error::{ApiError, SwarmError};
 
@@ -136,9 +136,10 @@ pub(crate) fn register_background_stream(
 ) -> Arc<BackgroundState> {
     let state = Arc::new(BackgroundState::new(cancel.clone()));
     BACKGROUND_STATE.insert(response_id.to_string(), state.clone());
-    // Mirror the cancel flag into the legacy map so the existing
+    // Mirror the cancel flag into the legacy map (with insert-time
+    // tracking for the stale-state sweep) so the existing
     // cancel_response handler doesn't need a second lookup path.
-    BACKGROUND_CANCEL.insert(response_id.to_string(), cancel);
+    super::register_background_cancel(response_id, cancel);
     state
 }
 
@@ -150,7 +151,7 @@ pub(crate) async fn deregister_background_stream(response_id: &str) {
     if let Some((_, state)) = BACKGROUND_STATE.remove(response_id) {
         state.mark_completed().await;
     }
-    BACKGROUND_CANCEL.remove(response_id);
+    super::unregister_background_cancel(response_id);
 }
 
 /// Lookup helper used by the resume GET.

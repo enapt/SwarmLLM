@@ -816,6 +816,19 @@ pub(super) fn spawn_responses_sweep(
                         Ok(n) => tracing::info!(count = n, "responses sweep: pruned expired records"),
                         Err(e) => tracing::warn!(error = %e, "responses sweep failed"),
                     }
+                    // Defense in depth: prune BACKGROUND_CANCEL /
+                    // BACKGROUND_STATE entries whose owning task was
+                    // cancelled externally (e.g. shutdown mid-flight)
+                    // before its cleanup path could run. Sized at 2 h —
+                    // generously above any real background-inference run.
+                    let stale = crate::api::openai::responses::prune_stale_background_state();
+                    if stale > 0 {
+                        tracing::warn!(
+                            count = stale,
+                            "responses sweep: pruned stale background state \
+                             (likely cancelled-without-cleanup)"
+                        );
+                    }
                 }
             }
         }

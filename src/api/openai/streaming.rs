@@ -19,6 +19,70 @@ use super::types::{
     ChatMessageResponse, ChoiceLogProbs, ChunkChoice, Delta, TokenLogProb, TopLogProb, Usage,
 };
 
+/// Build a non-streaming `ChatCompletionResponse` from inference output.
+/// Shared by `router_inference` (router/distributed path with optional
+/// token logprobs + multi-turn session id) and
+/// `split_non_stream_response` (direct split-model fast path with neither).
+/// Either field can be empty/`None` and the helper folds it into the
+/// right shape.
+//
+// Args are all primitives that map 1:1 to fields on the response shape;
+// grouping them into a struct would just rename them at every call site.
+#[allow(clippy::too_many_arguments)]
+fn build_chat_completion_response(
+    request_id: String,
+    created: i64,
+    model: String,
+    content: String,
+    finish_reason: String,
+    prompt_tokens: u32,
+    completion_tokens: u32,
+    session_id: Option<String>,
+    token_logprobs: &[crate::inference::router::TokenLogProbEntry],
+) -> ChatCompletionResponse {
+    let logprobs = if token_logprobs.is_empty() {
+        None
+    } else {
+        Some(ChoiceLogProbs {
+            content: token_logprobs
+                .iter()
+                .map(|entry| TokenLogProb {
+                    token: entry.token.clone(),
+                    logprob: entry.logprob,
+                    bytes: None,
+                    top_logprobs: entry
+                        .top_logprobs
+                        .iter()
+                        .map(|(t, lp)| TopLogProb {
+                            token: t.clone(),
+                            logprob: *lp,
+                            bytes: None,
+                        })
+                        .collect(),
+                })
+                .collect(),
+        })
+    };
+    ChatCompletionResponse {
+        id: request_id,
+        object: "chat.completion",
+        created,
+        model,
+        choices: vec![ChatChoice {
+            index: 0,
+            message: ChatMessageResponse {
+                role: "assistant".into(),
+                content: Some(content),
+                tool_calls: None,
+            },
+            finish_reason,
+            logprobs,
+        }],
+        usage: Usage::from_counts(prompt_tokens, completion_tokens),
+        session_id,
+    }
+}
+
 /// Spawn a split-model generation task and return the token receiver.
 ///
 /// Resolves model metadata, builds the prompt, and spawns the worker subprocess.
@@ -178,47 +242,17 @@ pub(super) async fn router_inference(
 
     let output = crate::api::submit_to_router(&router_tx, inference_req).await?;
 
-    let response = ChatCompletionResponse {
-        id: request_id,
-        object: "chat.completion",
+    let response = build_chat_completion_response(
+        request_id,
         created,
-        model: req.model.clone(),
-        choices: vec![ChatChoice {
-            index: 0,
-            message: ChatMessageResponse {
-                role: "assistant".into(),
-                content: Some(output.content),
-                tool_calls: None,
-            },
-            finish_reason: output.finish_reason,
-            logprobs: if output.token_logprobs.is_empty() {
-                None
-            } else {
-                Some(ChoiceLogProbs {
-                    content: output
-                        .token_logprobs
-                        .iter()
-                        .map(|entry| TokenLogProb {
-                            token: entry.token.clone(),
-                            logprob: entry.logprob,
-                            bytes: None,
-                            top_logprobs: entry
-                                .top_logprobs
-                                .iter()
-                                .map(|(t, lp)| TopLogProb {
-                                    token: t.clone(),
-                                    logprob: *lp,
-                                    bytes: None,
-                                })
-                                .collect(),
-                        })
-                        .collect(),
-                })
-            },
-        }],
-        usage: Usage::from_counts(output.prompt_tokens, output.completion_tokens),
-        session_id: output.session_id,
-    };
+        req.model.clone(),
+        output.content,
+        output.finish_reason,
+        output.prompt_tokens,
+        output.completion_tokens,
+        output.session_id,
+        &output.token_logprobs,
+    );
 
     Ok(Json(response).into_response())
 }
@@ -432,24 +466,17 @@ pub(super) async fn split_non_stream_response(
     let output =
         run_split_generate(&state, &model_id, &messages, params.clone(), &request_id).await?;
 
-    let response = ChatCompletionResponse {
-        id: request_id,
-        object: "chat.completion",
+    let response = build_chat_completion_response(
+        request_id,
         created,
-        model: model_name,
-        choices: vec![ChatChoice {
-            index: 0,
-            message: ChatMessageResponse {
-                role: "assistant".into(),
-                content: Some(output.content),
-                tool_calls: None,
-            },
-            finish_reason: output.finish_reason.clone(),
-            logprobs: None,
-        }],
-        usage: Usage::from_counts(output.prompt_tokens, output.completion_tokens),
-        session_id: None,
-    };
+        model_name,
+        output.content,
+        output.finish_reason.clone(),
+        output.prompt_tokens,
+        output.completion_tokens,
+        None,
+        &[],
+    );
 
     Ok(Json(response).into_response())
 }

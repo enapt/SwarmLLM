@@ -55,7 +55,7 @@ use crate::types::{LayerForward, NetworkCommand, NetworkFinishReason, TensorForm
 use tokio::sync::mpsc;
 
 #[cfg(feature = "llama")]
-use super::speculative::{argmax, draft_next_gamma, draft_prefill, draft_sync_after_round};
+use super::speculative::{draft_next_gamma, draft_prefill, draft_sync_after_round};
 use super::PipelineExecutor;
 #[cfg(feature = "llama")]
 use super::MAX_PENDING_LAYER_RESULTS;
@@ -271,24 +271,9 @@ impl PipelineExecutor {
 
             let kv_after_forward = expected_kv_len + verify_tokens.len() as u32;
 
-            // Greedy accept-reject:
-            //   spec_logits[i] = target's distribution AFTER seeing input
-            //   position i, so verifies q_{i+1}.
-            let mut accepted: Vec<u32> = Vec::with_capacity(drafts.len());
-            let mut bonus: u32 = 0;
-            for (i, &q) in drafts.iter().enumerate() {
-                let pick = argmax(&spec_logits[i]);
-                if pick == q {
-                    accepted.push(q);
-                } else {
-                    bonus = pick;
-                    break;
-                }
-            }
-            let all_accepted = accepted.len() == drafts.len();
-            if all_accepted {
-                bonus = argmax(&spec_logits[drafts.len()]);
-            }
+            // Greedy accept-reject — shared with Item 2 via `greedy_accept_reject`.
+            let (accepted, bonus, _all_accepted) =
+                super::speculative::greedy_accept_reject(&drafts, &spec_logits);
 
             acceptance_proposed += drafts.len() as u32;
             acceptance_accepted += accepted.len() as u32;
