@@ -173,51 +173,22 @@ pub async fn chat_completions(
         let display = mname.as_deref().unwrap_or(&req.model);
         let max_tok = req.max_tokens;
         let msg_count = req.messages.len();
-        let prompt_preview: String = req
-            .messages
-            .last()
-            .map(|m| {
-                let content = match &m.content {
-                    MessageContent::Text(s) => s.clone(),
-                    MessageContent::Parts(parts) => parts
-                        .iter()
-                        .filter_map(|p| match p {
-                            ContentPart::Text { text } => Some(text.as_str()),
-                            _ => None,
-                        })
-                        .collect::<Vec<_>>()
-                        .join(" "),
-                };
-                if content.len() > 60 {
-                    format!(
-                        "{}...",
-                        &content[..content
-                            .char_indices()
-                            .take_while(|(i, _)| *i < 57)
-                            .last()
-                            .map(|(i, c)| i + c.len_utf8())
-                            .unwrap_or(57)]
-                    )
-                } else {
-                    content
-                }
-            })
-            .unwrap_or_default();
+        // PRIVACY: do NOT include prompt content. The activity event bus
+        // broadcasts every emit to all authenticated dashboard subscribers
+        // and replays activity_history to new connections — leaking even
+        // the first ~60 characters of a prompt across tenants on a
+        // multi-user node would be a privacy regression. Operational
+        // visibility (model + msg count + max_tokens) is sufficient.
         state.shared_state.emit_activity(
             crate::daemon::state::ActivityEvent::new(
                 "inference",
                 "inference_request",
                 format!(
-                    "Inference request on {} — {} message{}, max {} tokens{}",
+                    "Inference request on {} — {} message{}, max {} tokens",
                     display,
                     msg_count,
                     if msg_count != 1 { "s" } else { "" },
                     max_tok,
-                    if !prompt_preview.is_empty() {
-                        format!(": \"{}\"", prompt_preview)
-                    } else {
-                        String::new()
-                    }
                 ),
             )
             .with_model(req.model.clone())
@@ -271,7 +242,6 @@ pub async fn chat_completions(
             if let Some(router_tx) = &state.router_tx {
                 return dispatch_inference(
                     router_tx.clone(),
-                    &state,
                     &req,
                     internal_messages.clone(),
                     request_id,
@@ -342,7 +312,6 @@ pub async fn chat_completions(
                 if let Some(router_tx) = &state.router_tx {
                     return dispatch_inference(
                         router_tx.clone(),
-                        &state,
                         &req,
                         internal_messages.clone(),
                         request_id,
@@ -431,7 +400,6 @@ pub async fn chat_completions(
         if let Some(router_tx) = &state.router_tx {
             return dispatch_inference(
                 router_tx.clone(),
-                &state,
                 &req,
                 internal_messages.clone(),
                 request_id,

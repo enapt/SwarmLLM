@@ -459,24 +459,36 @@ pub async fn lock_shard(
         index,
     };
 
+    // Persist BEFORE updating the in-memory map — if the DB write fails,
+    // we want to surface the error to the operator with the in-memory
+    // state still matching disk. A silent discard (`let _ = ...`) here
+    // would cause a divergence on restart: the auto-manage pruner could
+    // remove a shard the operator believed was pinned. The same pattern
+    // was already corrected for pool pins, auto-manage policy, encrypted
+    // pipeline, and HF trust pin in earlier sweeps.
+    let key_str = serde_json::to_string(&shard_id).map_err(|e| {
+        crate::error::ApiError(crate::error::SwarmError::Internal(format!(
+            "Failed to serialize shard id: {e}"
+        )))
+    })?;
     if body.locked {
+        state
+            .shared_state
+            .db
+            .insert_raw("locked_shards", &key_str, b"1")
+            .map_err(crate::error::ApiError)?;
         state
             .shared_state
             .models
             .locked_shards
             .insert(shard_id.clone(), true);
-        // Persist to database
-        if let Ok(key_str) = serde_json::to_string(&shard_id) {
-            let _ = state
-                .shared_state
-                .db
-                .insert_raw("locked_shards", &key_str, b"1");
-        }
     } else {
+        state
+            .shared_state
+            .db
+            .remove("locked_shards", &key_str)
+            .map_err(crate::error::ApiError)?;
         state.shared_state.models.locked_shards.remove(&shard_id);
-        if let Ok(key_str) = serde_json::to_string(&shard_id) {
-            let _ = state.shared_state.db.remove("locked_shards", &key_str);
-        }
     }
 
     tracing::info!(

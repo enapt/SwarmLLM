@@ -558,8 +558,19 @@ async fn start_background(
     let prior_bg = prior;
     let response_id_bg = response_id.clone();
     let flag_bg = cancel_flag.clone();
+    // Pre-clone for the panic-cleanup branch so the inference future can
+    // consume the originals without lifetime tangling.
+    let state_panic = state.clone();
+    let id_panic = response_id.clone();
     tokio::spawn(async move {
-        run_background_inference(
+        // Wrap the inference in catch_unwind so a panic inside any of
+        // the chained calls (translate, chat_completions, buffer/parse,
+        // chat→responses translate) doesn't leak the BACKGROUND_CANCEL
+        // entry AND doesn't strand the redb record at status=in_progress
+        // forever. Without this guard, a polling client would never see
+        // a terminal state — the V8 streaming path has the same guard.
+        use futures::FutureExt;
+        let outcome = std::panic::AssertUnwindSafe(run_background_inference(
             state_bg,
             headers_bg,
             req_bg,
@@ -567,11 +578,37 @@ async fn start_background(
             response_id_bg,
             created_at,
             flag_bg,
-        )
+        ))
+        .catch_unwind()
         .await;
+        if outcome.is_err() {
+            tracing::error!(
+                response_id = %id_panic,
+                "M9 background task panicked — writing failed terminal state"
+            );
+            // Best-effort: stamp a terminal `failed` record so polling
+            // clients see closure instead of permanent in_progress.
+            if let Ok(Some(mut rec)) = store::load(&state_panic.db, &id_panic) {
+                rec.response.status = ResponseStatus::Failed;
+                rec.response.error = Some(ResponseError::new(
+                    "internal_error",
+                    "background task panicked",
+                ));
+                if let Err(e) = store::store(&state_panic.db, &rec) {
+                    tracing::error!(
+                        response_id = %id_panic,
+                        error = %e,
+                        "Failed to persist panic-terminal record"
+                    );
+                }
+            }
+            unregister_background_cancel(&id_panic);
+        }
     });
 
-    Ok((StatusCode::OK, Json(queued)).into_response())
+    // 202 Accepted — matches the V8 streaming path and the OpenAI
+    // Responses spec for queued background work.
+    Ok((StatusCode::ACCEPTED, Json(queued)).into_response())
 }
 
 /// The tokio task body for a background response. Runs translate →

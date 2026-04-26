@@ -121,7 +121,14 @@
       var span = document.createElement('span');
       var status = r.status || 'unknown';
       span.className = 'status-badge status-' + status;
-      span.textContent = I18n.t('responses.status_' + status, status);
+      // I18n.t(key, params) takes params as an interpolation OBJECT, not
+      // a fallback string. On a missing key it returns the key itself,
+      // so the second arg here was a no-op. For unknown future status
+      // values we want the raw status word, not the full key string —
+      // mirror the pattern used in notifications.js _formatEventText.
+      var key = 'responses.status_' + status;
+      var translated = I18n.t(key);
+      span.textContent = translated !== key ? translated : status;
       td.appendChild(span);
       if (r.live) {
         var live = document.createElement('span');

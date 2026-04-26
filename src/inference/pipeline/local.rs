@@ -178,7 +178,7 @@ impl PipelineExecutor {
             timeout_secs = timeout.as_secs(),
             num_layers,
             activation_bytes,
-            is_prefill = activation_bytes > 100_000,
+            is_prefill = activation_bytes > super::PREFILL_ACTIVATION_THRESHOLD_BYTES,
             "DIAG: waiting for remote segment result"
         );
         match tokio::time::timeout(timeout, rx).await {

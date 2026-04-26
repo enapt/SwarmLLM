@@ -49,6 +49,26 @@ next tagged release.
 
 ### Security & validation
 
+- **PRIVACY: `chat_completions` no longer leaks prompt content into
+  the activity event bus** — the event message included up to 60
+  characters of the last user message via `prompt_preview`, and
+  `emit_activity` broadcasts to every authenticated dashboard
+  subscriber AND replays via `activity_history` to new connections.
+  On a multi-tenant or shared-host node this leaked one user's
+  prompt to others without their knowledge. The Anthropic handler
+  did NOT reproduce this pattern. Removed the preview entirely;
+  the event now carries only model, message count, and max tokens.
+- **`lock_shard` / `unlock` now propagate DB write errors** — the
+  handler used `let _ = db.insert_raw / .remove(...)` for the
+  `locked_shards` persist, silently discarding write failures while
+  still mutating the in-memory DashMap. On a DB error the handler
+  returned `status: "ok"` despite a state divergence from disk;
+  after restart the auto-manage pruner could remove a shard the
+  operator believed was pinned. Same pattern was already corrected
+  for pool pins, auto-manage policy, encrypted pipeline, and HF
+  trust pin in earlier sweeps. Now persists first and surfaces any
+  error as 500.
+
 - **CRITICAL: `ResponsesRequest.extras` was an unbounded ingress vector**
   — the `#[serde(flatten)]` catch-all for unknown top-level JSON keys had
   no cap on count or per-value size. A request with thousands of unknown
@@ -138,6 +158,23 @@ next tagged release.
 
 ### Reliability
 
+- **CRITICAL: M9 background spawn now `catch_unwind`s a panic** —
+  the non-stream `/v1/responses` background path was a bare
+  `tokio::spawn` with no panic guard, while the V8 streaming path
+  has had `AssertUnwindSafe(...).catch_unwind()` around it since
+  V8 landed. On a panic anywhere in `run_background_inference`
+  (translate / chat_completions / buffer / parse / chat→responses
+  translate) the redb record was stranded at `status:in_progress`
+  forever — no terminal state ever written — and a polling client
+  would see `in_progress` indefinitely. Wrapped the spawn body in
+  `catch_unwind`; on panic we stamp a terminal `failed` record into
+  redb and call `unregister_background_cancel`.
+- **`POST /v1/responses` (M9 background) now returns 202 Accepted**
+  — was returning HTTP 200 even though the response was queued for
+  async completion. V8 streaming was already correct. Clients that
+  branch on status code to detect sync vs deferred completion would
+  have misclassified M9 background as a synchronous result.
+
 - **`BACKGROUND_CANCEL` TTL sweep** — the response-id → cancel-flag
   registry could leak entries when a Tokio task was cancelled
   externally (e.g. process shutdown mid-flight) before its cleanup
@@ -157,6 +194,28 @@ next tagged release.
   `NETWORK_CODE_ADDR_PER_PEER_CAP = 16`. A public-facing IP is
   almost always advertised by the first few peers, so capping the
   inner loops preserves the happy path and bounds the worst case.
+
+### Polish
+
+- **`dispatch_inference` / `router_inference_stream` no longer
+  thread an unused `&AppState`** — the parameter was passed
+  through both functions and read by neither. Dropped from both
+  signatures + 3 call sites in `openai/mod.rs`.
+- **`is_prefill` DIAG field uses `PREFILL_ACTIVATION_THRESHOLD_BYTES`
+  instead of a hardcoded `100_000`** — the constant is `pub(crate)`
+  and documented as a tuning knob; the bare literal would silently
+  diverge the diagnostic from the real classifier.
+- **`responses.js` `_statusCell` fallback fixed** — `I18n.t(key,
+  string)` passes the second arg as an interpolation **object**,
+  not a fallback string. Switched to the
+  `translated !== key ? translated : raw_status` pattern used
+  elsewhere so unknown future status values render as the raw word
+  rather than the literal i18n key.
+- **`notifications.js` removed a leftover `console.warn`** — the
+  ws-ticket fetch catch block logged on every transient reconnect
+  failure (visible in DevTools console). The user-visible
+  connection-lost banner via the `onclose` path is the right
+  surface; logging adds nothing.
 
 ### Observability
 

@@ -210,14 +210,13 @@ pub async fn run_split_generate(
 /// Dispatch to `router_inference` or `router_inference_stream` based on `req.stream`.
 pub(super) async fn dispatch_inference(
     router_tx: tokio::sync::mpsc::Sender<RouterCommand>,
-    state: &AppState,
     req: &ChatCompletionRequest,
     messages: Vec<ChatMessage>,
     request_id: String,
     created: i64,
 ) -> Result<axum::response::Response, ApiError> {
     if req.stream {
-        router_inference_stream(router_tx, state, req, messages, request_id, created).await
+        router_inference_stream(router_tx, req, messages, request_id, created).await
     } else {
         router_inference(router_tx, req, messages, request_id, created).await
     }
@@ -264,7 +263,6 @@ pub(super) async fn router_inference(
 /// token-by-token streaming for distributed inference.
 async fn router_inference_stream(
     router_tx: tokio::sync::mpsc::Sender<RouterCommand>,
-    _state: &AppState,
     req: &ChatCompletionRequest,
     messages: Vec<ChatMessage>,
     request_id: String,

@@ -351,10 +351,11 @@
         var tj = await tr.json();
         ticket = tj && tj.ticket ? tj.ticket : '';
       }
-    } catch (e) {
+    } catch (_e) {
       // Fall through — WS will be rejected 401 and the reconnect loop
-      // will retry. Still surface so the onclose banner path runs.
-      console.warn('ws-ticket fetch failed', e);
+      // will retry, which surfaces the connection-lost banner via the
+      // onclose path. Don't log: this fires on every transient network
+      // blip and the user-visible banner is the right surface.
     }
     if (!ticket) {
       // Reconnect path will try again after backoff. Don't hard-error the
