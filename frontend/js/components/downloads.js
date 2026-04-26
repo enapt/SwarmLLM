@@ -13,6 +13,15 @@
   // Download Queue
   // ========================================================================
 
+  // Predicate: is this acquisition in an active-progress state?
+  // Centralizes the four-site (downloading || awaiting_manifest) check
+  // and the type-guard against non-string state values (the backend
+  // serializes state either as a string or as an object like {failed: ...}).
+  function _isActiveDlState(state) {
+    var st = typeof state === 'string' ? state : '';
+    return st === 'downloading' || st === 'awaiting_manifest';
+  }
+
   // Shared helper: update progress display on a download item element.
   function _updateDlProgress(item, data) {
     var totalBytes = data.total_bytes || 0;
@@ -122,10 +131,7 @@
       var count = document.getElementById('download-queue-count');
       if (!panel || !list) return;
 
-      var active = downloads.filter(function(d) {
-        var st = typeof d.state === 'string' ? d.state : '';
-        return st === 'downloading' || st === 'awaiting_manifest';
-      });
+      var active = downloads.filter(function(d) { return _isActiveDlState(d.state); });
 
       if (active.length === 0) {
         list.innerHTML = '';
@@ -150,10 +156,7 @@
       var list = document.getElementById('download-queue-list');
       if (!panel || !list) return;
 
-      var hasActive = acquisitions.some(function(a) {
-        var st = typeof a.state === 'string' ? a.state : '';
-        return st === 'downloading' || st === 'awaiting_manifest';
-      });
+      var hasActive = acquisitions.some(function(a) { return _isActiveDlState(a.state); });
 
       if (hasActive && panel.classList.contains('hidden')) {
         App.downloads.render(acquisitions);
@@ -165,7 +168,7 @@
         var existing = list.querySelector('[data-dl-model="' + U.cssSafeAttr(acq.model_id) + '"]');
 
         if (!existing) {
-          if (acq.state === 'downloading' || acq.state === 'awaiting_manifest') {
+          if (_isActiveDlState(acq.state)) {
             panel.classList.remove('hidden');
             var empty = document.getElementById('download-queue-empty');
             if (empty) empty.classList.add('hidden');
@@ -178,9 +181,7 @@
           return;
         }
 
-        var st = typeof acq.state === 'string' ? acq.state : '';
-        var active = st === 'downloading' || st === 'awaiting_manifest';
-        if (!active) {
+        if (!_isActiveDlState(acq.state)) {
           existing.remove();
           var remaining = list.querySelectorAll('.dl-queue-item').length;
           if (remaining === 0) {

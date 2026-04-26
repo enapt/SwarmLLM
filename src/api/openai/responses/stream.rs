@@ -79,8 +79,8 @@ pub async fn run_streaming(
     let mut chat_req = translate::request_to_chat(&req, prior.as_ref())?;
     chat_req.stream = true;
 
-    let response_id = format!("resp_{}", uuid::Uuid::new_v4().simple());
-    let item_id = format!("msg_{}", uuid::Uuid::new_v4().simple());
+    let response_id = crate::api::openai::responses::new_response_id();
+    let item_id = crate::api::openai::responses::new_message_id();
     let created_at = chrono::Utc::now().timestamp();
 
     let initial_response = build_initial_response(&req, &response_id, created_at);
@@ -258,11 +258,7 @@ where
         let chat_response = match chat_future.await {
             Ok(r) => r,
             Err(e) => {
-                let error = ResponseError {
-                    code: classify_error_code(&e),
-                    message: e.0.to_string(),
-                    extras: HashMap::new(),
-                };
+                let error = ResponseError::new(classify_error_code(&e), e.0.to_string());
                 let failed = build_failed_response(
                     &original,
                     &response_id,
@@ -299,11 +295,10 @@ where
             let bytes = match to_bytes(chat_response.into_body(), MAX_CHAT_ERROR_BODY_BYTES).await {
                 Ok(b) => b,
                 Err(e) => {
-                    let error = ResponseError {
-                        code: "internal_error".into(),
-                        message: format!("buffer chat error body: {e}"),
-                        extras: HashMap::new(),
-                    };
+                    let error = ResponseError::new(
+                        "internal_error",
+                        format!("buffer chat error body: {e}"),
+                    );
                     let failed = build_failed_response(
                         &original,
                         &response_id,
@@ -329,11 +324,7 @@ where
             } else {
                 "upstream_error"
             };
-            let error = ResponseError {
-                code: code.into(),
-                message,
-                extras: HashMap::new(),
-            };
+            let error = ResponseError::new(code, message);
             let failed = build_failed_response(
                 &original,
                 &response_id,
@@ -989,11 +980,7 @@ mod tests {
     #[test]
     fn build_failed_response_carries_error_and_status() {
         let req = test_request();
-        let err = ResponseError {
-            code: "invalid_request_error".into(),
-            message: "bad model".into(),
-            extras: HashMap::new(),
-        };
+        let err = ResponseError::new("invalid_request_error", "bad model");
         let resp = build_failed_response(&req, "resp_test123", 99, err);
         assert_eq!(resp.id, "resp_test123");
         assert_eq!(resp.status, ResponseStatus::Failed);

@@ -56,6 +56,13 @@ const MAX_RESPONSES_USER_BYTES: usize = 256;
 const MAX_RESPONSES_MODEL_LEN: usize = 256;
 const MAX_RESPONSES_SHORT_FIELD_LEN: usize = 64;
 const MAX_RESPONSES_METADATA_BYTES: usize = 64 * 1024;
+/// Cap on `#[serde(flatten)] extras` — the catch-all for unknown top-level
+/// fields. Without this, a request with thousands of unknown keys (or one
+/// huge value) is materialised into a `HashMap<String, Value>` *before* any
+/// named-field validation runs and is then forwarded verbatim on the
+/// cloud-proxy path. Keep both the count and per-value size bounded.
+const MAX_RESPONSES_EXTRAS_COUNT: usize = 32;
+const MAX_RESPONSES_EXTRA_VALUE_BYTES: usize = 4 * 1024;
 
 /// Validate a `id` path parameter on a `/v1/responses/{id}` route. Mirrors
 /// the `previous_response_id` cap so caller-supplied identifiers never
@@ -82,6 +89,26 @@ pub(crate) fn validate_response_id(id: &str) -> Result<(), ApiError> {
 /// otherwise has its own validation surface (or none) — running this once at
 /// the top closes the gap.
 fn validate_responses_ingress(req: &ResponsesRequest) -> Result<(), ApiError> {
+    // Bound the `#[serde(flatten)] extras` catch-all FIRST — any other
+    // named-field validation comes after the request has already been
+    // deserialised, but extras are also memory pressure inside that
+    // deserialisation. The Axum DefaultBodyLimit caps the wire bytes; this
+    // caps the post-deserialisation cardinality and per-value size that
+    // gets forwarded on the cloud-proxy path.
+    if req.extras.len() > MAX_RESPONSES_EXTRAS_COUNT {
+        return Err(ApiError(SwarmError::Validation(format!(
+            "too many unknown request fields ({} present, max {MAX_RESPONSES_EXTRAS_COUNT})",
+            req.extras.len()
+        ))));
+    }
+    for (k, v) in &req.extras {
+        let value_len = v.to_string().len();
+        if value_len > MAX_RESPONSES_EXTRA_VALUE_BYTES {
+            return Err(ApiError(SwarmError::Validation(format!(
+                "unknown field `{k}` value too large ({value_len} bytes, max {MAX_RESPONSES_EXTRA_VALUE_BYTES})"
+            ))));
+        }
+    }
     if req.model.is_empty() || req.model.len() > MAX_RESPONSES_MODEL_LEN {
         return Err(ApiError(SwarmError::Validation(format!(
             "model must be 1..={MAX_RESPONSES_MODEL_LEN} characters"
@@ -176,6 +203,25 @@ static BACKGROUND_CANCEL: std::sync::LazyLock<DashMap<String, Arc<AtomicBool>>> 
 /// Single source of truth for the four response-skeleton sites — keep
 /// in sync if upstream OpenAI changes their default.
 pub(super) const DEFAULT_MAX_OUTPUT_TOKENS: u32 = 2048;
+/// Default sampling temperature when the caller didn't specify one. Mirrors
+/// `DEFAULT_MAX_OUTPUT_TOKENS` shape — single source of truth so the
+/// response skeleton (which records what was used) and the translation
+/// layer (which actually applies the value) can't drift.
+pub(super) const DEFAULT_TEMPERATURE: f32 = 0.7;
+/// Default top-p when the caller didn't specify one.
+pub(super) const DEFAULT_TOP_P: f32 = 0.9;
+
+/// Generate a fresh `resp_<32-hex>` response id. Single source of truth
+/// for the prefix convention so a future change (e.g. namespace bump)
+/// can't leave one path emitting the old prefix.
+pub(super) fn new_response_id() -> String {
+    format!("resp_{}", uuid::Uuid::new_v4().simple())
+}
+
+/// Generate a fresh `msg_<32-hex>` message id (used as `OutputItem.id`).
+pub(super) fn new_message_id() -> String {
+    format!("msg_{}", uuid::Uuid::new_v4().simple())
+}
 
 /// Build a `ResponsesResponse` skeleton from a request — used by every
 /// path that needs to emit a response object before inference produces
@@ -209,8 +255,8 @@ pub(super) fn build_response_skeleton(
         tools: req.tools.clone(),
         tool_choice: req.tool_choice.clone(),
         parallel_tool_calls: req.parallel_tool_calls,
-        temperature: Some(req.temperature.unwrap_or(0.7)),
-        top_p: Some(req.top_p.unwrap_or(0.9)),
+        temperature: Some(req.temperature.unwrap_or(DEFAULT_TEMPERATURE)),
+        top_p: Some(req.top_p.unwrap_or(DEFAULT_TOP_P)),
         max_output_tokens: Some(req.max_output_tokens.unwrap_or(DEFAULT_MAX_OUTPUT_TOKENS)),
         truncation: req.truncation.clone(),
         metadata: req.metadata.clone(),
@@ -374,7 +420,7 @@ pub async fn create_response(
         )))
     })?;
 
-    let response_id = format!("resp_{}", uuid::Uuid::new_v4().simple());
+    let response_id = new_response_id();
     let created_at = chrono::Utc::now().timestamp();
     let resp = translate::chat_response_to_responses(&chat_value, &req, &response_id, created_at)?;
 
@@ -417,7 +463,7 @@ async fn start_background(
     req: ResponsesRequest,
     prior: Option<store::ResponsesRecord>,
 ) -> Result<Response, ApiError> {
-    let response_id = format!("resp_{}", uuid::Uuid::new_v4().simple());
+    let response_id = new_response_id();
     let created_at = chrono::Utc::now().timestamp();
 
     let cancel_flag = Arc::new(AtomicBool::new(false));
@@ -524,11 +570,7 @@ async fn run_background_inference(
                 Vec::new(),
                 None,
                 ResponsesUsage::default(),
-                Some(ResponseError {
-                    code: "invalid_request_error".into(),
-                    message: e.to_string(),
-                    extras: HashMap::new(),
-                }),
+                Some(ResponseError::new("invalid_request_error", e.to_string())),
             );
             return;
         }
@@ -548,11 +590,7 @@ async fn run_background_inference(
                 Vec::new(),
                 None,
                 ResponsesUsage::default(),
-                Some(ResponseError {
-                    code: "internal_error".into(),
-                    message: e.0.to_string(),
-                    extras: HashMap::new(),
-                }),
+                Some(ResponseError::new("internal_error", e.0.to_string())),
             );
             return;
         }
@@ -567,11 +605,10 @@ async fn run_background_inference(
                     Vec::new(),
                     None,
                     ResponsesUsage::default(),
-                    Some(ResponseError {
-                        code: "internal_error".into(),
-                        message: format!("buffer error: {e}"),
-                        extras: HashMap::new(),
-                    }),
+                    Some(ResponseError::new(
+                        "internal_error",
+                        format!("buffer error: {e}"),
+                    )),
                 );
                 return;
             }
@@ -582,11 +619,7 @@ async fn run_background_inference(
             Vec::new(),
             None,
             ResponsesUsage::default(),
-            Some(ResponseError {
-                code: "upstream_error".into(),
-                message: msg,
-                extras: HashMap::new(),
-            }),
+            Some(ResponseError::new("upstream_error", msg)),
         );
         return;
     }
@@ -599,11 +632,10 @@ async fn run_background_inference(
                 Vec::new(),
                 None,
                 ResponsesUsage::default(),
-                Some(ResponseError {
-                    code: "internal_error".into(),
-                    message: format!("buffer error: {e}"),
-                    extras: HashMap::new(),
-                }),
+                Some(ResponseError::new(
+                    "internal_error",
+                    format!("buffer error: {e}"),
+                )),
             );
             return;
         }
@@ -616,11 +648,10 @@ async fn run_background_inference(
                 Vec::new(),
                 None,
                 ResponsesUsage::default(),
-                Some(ResponseError {
-                    code: "internal_error".into(),
-                    message: format!("parse chat JSON: {e}"),
-                    extras: HashMap::new(),
-                }),
+                Some(ResponseError::new(
+                    "internal_error",
+                    format!("parse chat JSON: {e}"),
+                )),
             );
             return;
         }
@@ -635,11 +666,7 @@ async fn run_background_inference(
                     Vec::new(),
                     None,
                     ResponsesUsage::default(),
-                    Some(ResponseError {
-                        code: "internal_error".into(),
-                        message: e.to_string(),
-                        extras: HashMap::new(),
-                    }),
+                    Some(ResponseError::new("internal_error", e.to_string())),
                 );
                 return;
             }
@@ -736,6 +763,25 @@ pub async fn list_input_items(
     axum::extract::Query(params): axum::extract::Query<ListInputItemsParams>,
 ) -> Result<Response, ApiError> {
     validate_response_id(&id)?;
+    // Cap caller-supplied query strings — they don't drive any DB lookup
+    // (synthetic `item_N` cursors are short by construction) so any
+    // megabyte-class value is hostile rather than a real cursor.
+    const MAX_INPUT_ITEMS_QUERY_LEN: usize = 64;
+    for (name, value) in [
+        ("after", params.after.as_deref()),
+        ("before", params.before.as_deref()),
+        ("order", params.order.as_deref()),
+        ("include", params.include.as_deref()),
+    ] {
+        if let Some(s) = value {
+            if s.len() > MAX_INPUT_ITEMS_QUERY_LEN {
+                return Err(ApiError(SwarmError::Validation(format!(
+                    "{name} parameter too long ({} bytes, max {MAX_INPUT_ITEMS_QUERY_LEN})",
+                    s.len()
+                ))));
+            }
+        }
+    }
     let record = store::load(&state.db, &id)
         .map_err(ApiError)?
         .ok_or_else(|| {

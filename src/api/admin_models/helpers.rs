@@ -1,5 +1,32 @@
 use crate::error::ApiError;
 
+/// Apply a recomputed shard-window to the model process pool and refresh the
+/// surrounding state (split-model cache, model-load history, dashboard
+/// signal). Shared between `unload_shard` and `load_shard` — the window
+/// arithmetic is path-specific (subtract vs add) but the after-effects are
+/// identical.
+///
+/// If `new_window` is empty the model is fully unloaded; otherwise the worker
+/// is restarted with the narrowed/expanded window.
+pub(super) async fn apply_shard_window_change(
+    shared: &crate::daemon::SharedState,
+    model_id: &str,
+    mid: &crate::types::ModelId,
+    new_window: &[u32],
+) {
+    if new_window.is_empty() {
+        shared.evict_and_unload(mid).await;
+    } else {
+        shared
+            .model_process_pool
+            .restart_with_window(mid, new_window.to_vec())
+            .await;
+        shared.evict_split_models(mid);
+    }
+    shared.events.clear_model_load_history(model_id);
+    shared.signal_dashboard(crate::daemon::state::DashboardSignal::ModelsChanged);
+}
+
 pub(super) fn resolve_local_shard(
     shared: &crate::daemon::SharedState,
     model_id: &str,

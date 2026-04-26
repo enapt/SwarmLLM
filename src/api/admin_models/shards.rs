@@ -25,24 +25,7 @@ pub async fn unload_shard(
     });
     let new_window: Vec<u32> = window.into_iter().filter(|&i| i != shard_index).collect();
 
-    if new_window.is_empty() {
-        // Unloading the last shard = unload the model entirely
-        shared.evict_and_unload(&mid).await;
-    } else {
-        // Narrow window and restart worker — next inference request
-        // respawns loading only the remaining shards
-        shared
-            .model_process_pool
-            .restart_with_window(&mid, new_window.clone())
-            .await;
-        // Remove split model entries so they reload with new window
-        shared.evict_split_models(&mid);
-    }
-
-    // Clear stale model_loaded history so updated layer range emits fresh
-    shared.events.clear_model_load_history(&model_id);
-
-    shared.signal_dashboard(crate::daemon::state::DashboardSignal::ModelsChanged);
+    apply_shard_window_change(shared, &model_id, &mid, &new_window).await;
 
     {
         let display = shared.model_registry.display_name(&mid);
@@ -109,17 +92,7 @@ pub async fn load_shard(
         new_window.sort();
     }
 
-    // Restart worker with expanded window
-    shared
-        .model_process_pool
-        .restart_with_window(&mid, new_window.clone())
-        .await;
-    // Clear split models so they reload with new window
-    shared.evict_split_models(&mid);
-    // Clear stale model_loaded history so the new layer range emits a fresh event
-    shared.events.clear_model_load_history(&model_id);
-
-    shared.signal_dashboard(crate::daemon::state::DashboardSignal::ModelsChanged);
+    apply_shard_window_change(shared, &model_id, &mid, &new_window).await;
 
     {
         let display = shared.model_registry.display_name(&mid);

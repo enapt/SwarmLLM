@@ -31,8 +31,8 @@ use crate::types::Role;
 /// Re-export of the shared constant from `super` so the chat-translation
 /// path uses the same default as the local + Anthropic skeleton sites.
 const DEFAULT_MAX_TOKENS: u32 = super::DEFAULT_MAX_OUTPUT_TOKENS;
-const DEFAULT_TEMPERATURE: f32 = 0.7;
-const DEFAULT_TOP_P: f32 = 0.9;
+const DEFAULT_TEMPERATURE: f32 = super::DEFAULT_TEMPERATURE;
+const DEFAULT_TOP_P: f32 = super::DEFAULT_TOP_P;
 
 // ============================================================================
 // Request: Responses → Chat
@@ -591,7 +591,7 @@ pub fn chat_response_to_responses(
     // pure (function_calls only) in that case.
     if !text.is_empty() {
         let output_message = OutputMessageItem {
-            id: format!("msg_{}", uuid::Uuid::new_v4().simple()),
+            id: crate::api::openai::responses::new_message_id(),
             role: "assistant".into(),
             status: Some("completed".into()),
             content: vec![OutputContentPart::Typed(TypedOutputContentPart::Text {
@@ -643,7 +643,7 @@ pub fn chat_response_to_responses(
     if output.is_empty() {
         output.push(OutputItem::Typed(TypedOutputItem::Message(
             OutputMessageItem {
-                id: format!("msg_{}", uuid::Uuid::new_v4().simple()),
+                id: crate::api::openai::responses::new_message_id(),
                 role: "assistant".into(),
                 status: Some("completed".into()),
                 content: vec![OutputContentPart::Typed(TypedOutputContentPart::Text {

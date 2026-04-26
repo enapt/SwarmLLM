@@ -606,6 +606,19 @@ pub struct ResponseError {
     pub extras: HashMap<String, serde_json::Value>,
 }
 
+impl ResponseError {
+    /// Build a `ResponseError` with no extras. Replaces a 10+ site
+    /// `ResponseError { code, message, extras: HashMap::new() }` literal
+    /// across `responses/{mod,stream,anthropic_bridge}.rs`.
+    pub fn new(code: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            code: code.into(),
+            message: message.into(),
+            extras: HashMap::new(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IncompleteDetails {
     pub reason: String,

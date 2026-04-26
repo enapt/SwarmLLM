@@ -3,7 +3,8 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self' ws: wss:; img-src 'self' data:; font-src 'self';">
+  <!-- Keep in sync with server-side CSP in src/api/middleware.rs:77. The server header takes precedence in browsers when both are present, but this meta covers the file-open / static-server / cached-page paths where the daemon's header isn't applied. -->
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self' ws: wss:; img-src 'self' data: blob:; font-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self';">
   <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
   <title>SwarmLLM — Join the Swarm</title>
   <link rel="stylesheet" href="/static/css/utilities.css">

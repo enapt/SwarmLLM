@@ -176,7 +176,7 @@ pub async fn start_background_stream(
     let mut chat_req = super::translate::request_to_chat(&req, prior.as_ref())?;
     chat_req.stream = true;
 
-    let response_id = format!("resp_{}", uuid::Uuid::new_v4().simple());
+    let response_id = crate::api::openai::responses::new_response_id();
     let created_at = chrono::Utc::now().timestamp();
 
     // Seed redb with a queued placeholder so a GET without stream=true
@@ -303,7 +303,7 @@ async fn drive_background_stream(
     // bucket each event into the buffer instead of yielding to a
     // client.
     let store_db = req.store.unwrap_or(true).then(|| app_state.db.clone());
-    let item_id = format!("msg_{}", uuid::Uuid::new_v4().simple());
+    let item_id = crate::api::openai::responses::new_message_id();
 
     // Drive via a helper that exposes a (name, data, seq) triple per
     // event. We don't have that on the generator directly — it only

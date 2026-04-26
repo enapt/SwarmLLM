@@ -528,7 +528,7 @@ pub fn messages_to_responses(
     // turns remain a single-item output (matches OpenAI's shape).
     let message_item = if !message_text_parts.is_empty() {
         Some(OutputMessageItem {
-            id: format!("msg_{}", uuid::Uuid::new_v4().simple()),
+            id: crate::api::openai::responses::new_message_id(),
             role: "assistant".into(),
             status: Some("completed".into()),
             content: message_text_parts,
@@ -714,7 +714,7 @@ pub async fn try_proxy_anthropic_responses(
         })
     })?;
 
-    let response_id = format!("resp_{}", uuid::Uuid::new_v4().simple());
+    let response_id = crate::api::openai::responses::new_response_id();
     let created_at = chrono::Utc::now().timestamp();
     let responses_resp =
         messages_to_responses(&msg_value, req, &response_id, created_at).map_err(ApiError)?;
@@ -787,7 +787,7 @@ async fn proxy_anthropic_responses_stream(
         return Ok(upstream);
     }
 
-    let response_id = format!("resp_{}", uuid::Uuid::new_v4().simple());
+    let response_id = crate::api::openai::responses::new_response_id();
     let created_at = chrono::Utc::now().timestamp();
     let req_cloned = req.clone();
 
@@ -926,7 +926,7 @@ fn stream_anthropic_to_responses(
 
                         match block_type.as_str() {
                             "text" => {
-                                state.item_id = format!("msg_{}", uuid::Uuid::new_v4().simple());
+                                state.item_id = crate::api::openai::responses::new_message_id();
                                 // Emit output_item.added (message, empty content)
                                 yield Ok(sse_event("response.output_item.added", json!({
                                     "type": "response.output_item.added",

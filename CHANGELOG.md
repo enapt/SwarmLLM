@@ -49,6 +49,27 @@ next tagged release.
 
 ### Security & validation
 
+- **CRITICAL: `ResponsesRequest.extras` was an unbounded ingress vector**
+  — the `#[serde(flatten)]` catch-all for unknown top-level JSON keys had
+  no cap on count or per-value size. A request with thousands of unknown
+  keys (or one very large value) was materialised into the in-process
+  `HashMap<String, Value>` before any validation could reject it AND
+  forwarded verbatim to upstream cloud providers on the proxy path.
+  Added `MAX_RESPONSES_EXTRAS_COUNT = 32` and
+  `MAX_RESPONSES_EXTRA_VALUE_BYTES = 4096`, checked first in
+  `validate_responses_ingress`.
+- **`/v1/responses/{id}/input_items` query parameters length-capped** —
+  `after`, `before`, `order`, `include` were unbounded. Synthetic
+  `item_N` cursors are short by construction so any large value is
+  hostile. Capped at 64 bytes each at handler entry.
+- **CSP meta tag in `frontend/index.html` synced to server header** —
+  the meta lacked `blob:` in `img-src`, `frame-ancestors 'none'`,
+  `base-uri 'self'`, and `form-action 'self'`. The server header in
+  `middleware.rs::security_headers` already had these and takes
+  precedence at runtime, but the meta covers the
+  static-server / file-open / cached paths where the daemon's header
+  isn't applied. Added an inline comment marking middleware.rs as
+  authoritative.
 - **CRITICAL: `responses.js` was calling a non-existent function** —
   `App.data.authFetch` doesn't exist; the symbol is `App.authFetch`.
   Every Responses dashboard interaction (load, retrieve, cancel,
@@ -123,6 +144,36 @@ next tagged release.
   model triggered the fallback in a multi-model deployment.
 
 ### Refactor / dedup
+
+- **`ResponseError::new(code, message)` constructor** replaces 11
+  identical `ResponseError { code, message, extras: HashMap::new() }`
+  struct literals across `responses/{mod, stream}.rs`.
+- **`new_response_id()` / `new_message_id()` helpers** in
+  `responses::mod` replace the
+  `format!("resp_{}", uuid::Uuid::new_v4().simple())` /
+  `format!("msg_{}", ...)` idiom that appeared at 7+ sites across
+  the responses module. The `rs_` (reasoning item) and `resp_test_`
+  (test fixture) prefixes intentionally stay inline — different
+  conventions.
+- **`apply_shard_window_change` helper** in
+  `admin_models::helpers` extracts the post-window-compute /
+  pre-event-emit block shared between `unload_shard` and
+  `load_shard`: empty-window→`evict_and_unload` else
+  `restart_with_window` + `evict_split_models`, then
+  `clear_model_load_history` and `signal_dashboard(ModelsChanged)`.
+  The activity-event + tracing tails stay per-handler (different
+  messaging is the right answer there).
+- **`DEFAULT_TEMPERATURE` / `DEFAULT_TOP_P` promoted to `pub(super)`**
+  in `responses::mod`, mirroring the existing `DEFAULT_MAX_OUTPUT_TOKENS`
+  shape. `translate.rs` now imports via `super::` instead of holding
+  its own private literal — closes a drift hazard.
+- **`_isActiveDlState(state)` helper** in `downloads.js` replaces 4
+  duplicated `(state === 'downloading' || state === 'awaiting_manifest')`
+  predicates and normalises a missing `typeof === 'string'` type guard
+  in one of the four sites.
+- **`detect_tp_groups` dropped its unused `_manifest: &ModelManifest`
+  parameter** — the function operates on `candidates` and `segments`
+  only.
 
 - **SSE parser dedup across `responses/{stream,anthropic_bridge}.rs`** —
   promoted `drain_sse_data_payloads` and `find_subslice` from private
