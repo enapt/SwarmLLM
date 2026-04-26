@@ -27,6 +27,7 @@
 //!   this in mind.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Instant;
 
@@ -130,7 +131,11 @@ pub struct KvSnapshot {
 struct Entry {
     tokens: Vec<u32>,
     snapshot: Arc<KvSnapshot>,
-    last_hit: Instant,
+    /// Logical clock tick of the most recent hit/insert. Used for LRU
+    /// eviction (`bucket.sort_by_key`). Atomic so cache hits stay on the
+    /// read-lock path — bumping the timestamp no longer needs a write
+    /// lock upgrade.
+    last_hit: AtomicU64,
 }
 
 impl Entry {
@@ -151,6 +156,11 @@ struct Inner {
 /// Flat, longest-prefix prefix KV-cache shared across requests on a worker.
 pub struct PrefixCache {
     inner: RwLock<Inner>,
+    /// Monotonic logical clock for LRU ordering. Bumped on every hit and
+    /// insert; the value is stored on the touched entry's `last_hit`
+    /// atomic. Lookups can therefore record a hit without upgrading from
+    /// read to write lock.
+    clock: AtomicU64,
     /// Maximum entries retained per model. Older entries (by `last_hit`)
     /// are evicted when the cap is exceeded.
     max_entries: usize,
@@ -180,12 +190,22 @@ impl PrefixCache {
             inner: RwLock::new(Inner {
                 per_model: HashMap::new(),
             }),
+            clock: AtomicU64::new(0),
             max_entries,
             min_tokens,
             max_prompt_tokens,
             block_tokens,
             enabled,
         }
+    }
+
+    /// Bump the logical clock and return the new tick. Used as the
+    /// timestamp written to an entry's `last_hit`.
+    fn next_tick(&self) -> u64 {
+        // Relaxed is fine: we only need monotonicity; total ordering across
+        // entries doesn't matter as long as each entry's last_hit reflects a
+        // tick from after the operation that touched it.
+        self.clock.fetch_add(1, Ordering::Relaxed) + 1
     }
 
     pub fn enabled(&self) -> bool {
@@ -210,37 +230,30 @@ impl PrefixCache {
         // nothing to compute logits for. Clamp the usable prefix length.
         let usable_max = input_tokens.len().saturating_sub(1);
 
-        // Fast path: read lock only. Clone the winning snapshot arc, then
-        // upgrade to write lock to bump last_hit.
-        let (best_idx, snapshot) = {
-            let inner = self.inner.read().ok()?;
-            let entries = inner.per_model.get(model_key)?;
-            let mut best: Option<(usize, &Entry)> = None;
-            for (i, e) in entries.iter().enumerate() {
-                if e.tokens.len() < self.min_tokens || e.tokens.len() > usable_max {
-                    continue;
-                }
-                if input_tokens.starts_with(&e.tokens) {
-                    match best {
-                        None => best = Some((i, e)),
-                        Some((_, cur)) if e.tokens.len() > cur.tokens.len() => {
-                            best = Some((i, e));
-                        }
-                        _ => {}
-                    }
-                }
+        // Fast path: read lock only. Walk to find the longest prefix, clone
+        // the winning snapshot Arc, and bump the entry's atomic last_hit
+        // without ever upgrading to a write lock.
+        let inner = self.inner.read().ok()?;
+        let entries = inner.per_model.get(model_key)?;
+        let mut best: Option<&Entry> = None;
+        for e in entries.iter() {
+            if e.tokens.len() < self.min_tokens || e.tokens.len() > usable_max {
+                continue;
             }
-            let (i, e) = best?;
-            (i, e.snapshot.clone())
-        };
-
-        if let Ok(mut inner) = self.inner.write() {
-            if let Some(entries) = inner.per_model.get_mut(model_key) {
-                if let Some(e) = entries.get_mut(best_idx) {
-                    e.last_hit = Instant::now();
+            if input_tokens.starts_with(&e.tokens) {
+                match best {
+                    None => best = Some(e),
+                    Some(cur) if e.tokens.len() > cur.tokens.len() => {
+                        best = Some(e);
+                    }
+                    _ => {}
                 }
             }
         }
+        let winner = best?;
+        winner.last_hit.store(self.next_tick(), Ordering::Relaxed);
+        let snapshot = winner.snapshot.clone();
+        drop(inner);
         tracing::info!(
             model_key,
             matched_tokens = snapshot.token_count,
@@ -332,25 +345,25 @@ impl PrefixCache {
             return Vec::new();
         };
         let bucket = inner.per_model.entry(model_key.to_string()).or_default();
-        let now = Instant::now();
         for (pos, snap) in snapshots {
             let tokens = prompt_tokens[..pos].to_vec();
+            let tick = self.next_tick();
             // Skip if an entry for this exact prefix already exists; bump LRU.
             if let Some(existing) = bucket.iter_mut().find(|e| e.tokens == tokens) {
-                existing.last_hit = now;
+                existing.last_hit.store(tick, Ordering::Relaxed);
                 existing.snapshot = snap;
                 continue;
             }
             bucket.push(Entry {
                 tokens,
                 snapshot: snap,
-                last_hit: now,
+                last_hit: AtomicU64::new(tick),
             });
         }
 
         // Evict LRU until within cap.
         if bucket.len() > self.max_entries {
-            bucket.sort_by_key(|e| e.last_hit);
+            bucket.sort_by_key(|e| e.last_hit.load(Ordering::Relaxed));
             let drop_count = bucket.len() - self.max_entries;
             bucket.drain(..drop_count);
         }
@@ -1337,8 +1350,6 @@ mod tests {
             make_fake_kv(&kv_store, "m", req, 2, 10);
             let tokens: Vec<u32> = (i as u32 * 10..i as u32 * 10 + 10).collect();
             pc.insert_from_kv("m", req, &kv_store, &tokens);
-            // Ensure last_hit timestamps differ so LRU order is deterministic.
-            std::thread::sleep(std::time::Duration::from_millis(2));
         }
 
         assert_eq!(pc.entry_count("m"), 2);

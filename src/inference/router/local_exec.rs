@@ -60,9 +60,12 @@ pub(super) async fn execute_local_batch(
         let token_tx = queued.token_tx;
 
         let output = if executor.is_loaded() {
-            let prompt = {
+            // Hold the loaded_model_info read lock once and derive both the
+            // chat-templated prompt and the stop-string list from a single
+            // guard. Avoids re-acquiring the lock per batch item.
+            let (prompt, local_stop_strings) = {
                 let info = shared_state.loaded_model_info.read().await;
-                match info.as_ref() {
+                let prompt = match info.as_ref() {
                     Some(i) => chat_template::build_prompt(
                         &request.messages,
                         i.chat_template.as_deref(),
@@ -70,7 +73,11 @@ pub(super) async fn execute_local_batch(
                         &i.eos_token,
                     ),
                     None => chat_template::chatml_fallback(&request.messages),
-                }
+                };
+                let stops = chat_template::extract_stop_strings(
+                    info.as_ref().and_then(|i| i.chat_template.as_deref()),
+                );
+                (prompt, stops)
             };
 
             tracing::info!(
@@ -78,13 +85,6 @@ pub(super) async fn execute_local_batch(
                 model = %request.model_id,
                 "Executing inference locally (batched)"
             );
-
-            // Extract chat-template stop strings (e.g. "<|user|>", "<|im_end|>")
-            let local_stop_strings = {
-                let info = shared_state.loaded_model_info.read().await;
-                let tmpl = info.as_ref().and_then(|i| i.chat_template.as_deref());
-                chat_template::extract_stop_strings(tmpl)
-            };
 
             // Use streaming generation if the request has a token channel
             if let Some(ref tx) = token_tx {

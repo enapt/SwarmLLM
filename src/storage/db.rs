@@ -287,6 +287,51 @@ impl Database {
         Ok(results)
     }
 
+    /// Stream every JSON-encoded record in a tree through `f` without
+    /// materialising a full `Vec`. Lets the caller maintain a bounded
+    /// data structure (heap, top-k cache, running aggregate) so listings
+    /// over large trees stay O(N) in time but O(k) in memory.
+    /// Skipping is mid-flight: deserialization failures emit a warning
+    /// and continue, matching `iter_json` / `get_all_json` semantics.
+    pub fn for_each_json<T, F>(&self, tree_name: &str, mut f: F) -> Result<(), SwarmError>
+    where
+        T: serde::de::DeserializeOwned,
+        F: FnMut(&str, T),
+    {
+        let start = tree_range_start(tree_name);
+        let end = tree_range_end(tree_name);
+        let read_txn = self
+            .inner
+            .begin_read()
+            .map_err(|e| SwarmError::Database(e.to_string()))?;
+        let table = match read_txn.open_table(DATA_TABLE) {
+            Ok(t) => t,
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(()),
+            Err(e) => return Err(SwarmError::Database(e.to_string())),
+        };
+        let range = table
+            .range(start.as_slice()..end.as_slice())
+            .map_err(|e| SwarmError::Database(e.to_string()))?;
+        for entry in range {
+            let (key_guard, val_guard) = entry.map_err(|e| SwarmError::Database(e.to_string()))?;
+            let subkey = extract_subkey(key_guard.value())
+                .and_then(|b| std::str::from_utf8(b).ok())
+                .unwrap_or("");
+            match serde_json::from_slice::<T>(val_guard.value()) {
+                Ok(val) => f(subkey, val),
+                Err(e) => {
+                    tracing::warn!(
+                        tree = tree_name,
+                        key = %subkey,
+                        error = %e,
+                        "Failed to deserialize entry in for_each_json, skipping"
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Iterate all raw key-value pairs in a named tree.
     /// Returns (sub_key_bytes, value_bytes) pairs.
     #[allow(clippy::type_complexity)]

@@ -577,8 +577,9 @@ impl InferenceRouter {
 
         // Check for multi-turn KV-cache reuse
         let cache_start_pos = if let Some(ref session_id) = queued.request.session_id {
-            // Collect active peer IDs for pipeline validation
-            let active_peers: Vec<crate::types::NodeId> = self
+            // Collect active peer IDs into a HashSet for O(1) holder lookup
+            // inside check_multi_turn_reuse — peer_registry can be large.
+            let active_peers: std::collections::HashSet<crate::types::NodeId> = self
                 .shared_state
                 .peer_registry
                 .iter()

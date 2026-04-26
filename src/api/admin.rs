@@ -921,16 +921,42 @@ pub struct AdminResponsesQuery {
 
 /// `GET /api/admin/responses?status=...&limit=...` — list stored
 /// `/v1/responses` records for the dashboard. Sorted newest first.
+///
+/// Streams the underlying redb tree so memory stays O(limit) rather
+/// than O(total_records). The full preview JSON is only built for the
+/// records that survive the bounded top-k pass.
 pub async fn list_responses(
     State(state): State<crate::api::server::AppState>,
     axum::extract::Query(params): axum::extract::Query<AdminResponsesQuery>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let all = state
-        .db
-        .get_all_json::<crate::api::openai::responses::store::ResponsesRecord>(
-            crate::api::openai::responses::store::TREE,
-        )
-        .map_err(ApiError)?;
+    use std::cmp::Ordering;
+    use std::collections::BinaryHeap;
+
+    /// Heap entry that orders by `created_at` only — the record itself
+    /// doesn't implement Ord. Sort order is REVERSED (`older` compares
+    /// as greater) so a default max-heap behaves as a min-heap of
+    /// newest survivors: `peek()` returns the oldest kept candidate,
+    /// `pop()` evicts it.
+    struct HeapEntry {
+        created_at: i64,
+        rec: crate::api::openai::responses::store::ResponsesRecord,
+    }
+    impl PartialEq for HeapEntry {
+        fn eq(&self, other: &Self) -> bool {
+            self.created_at == other.created_at
+        }
+    }
+    impl Eq for HeapEntry {}
+    impl PartialOrd for HeapEntry {
+        fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+            Some(self.cmp(other))
+        }
+    }
+    impl Ord for HeapEntry {
+        fn cmp(&self, other: &Self) -> Ordering {
+            other.created_at.cmp(&self.created_at)
+        }
+    }
 
     let status_filter: Option<Vec<String>> = params.status.map(|s| {
         s.split(',')
@@ -947,20 +973,48 @@ pub async fn list_responses(
             .map(|e| e.key().clone())
             .collect();
 
-    let mut entries: Vec<(i64, serde_json::Value)> = all
+    let mut heap: BinaryHeap<HeapEntry> = BinaryHeap::with_capacity(limit + 1);
+
+    state
+        .db
+        .for_each_json::<crate::api::openai::responses::store::ResponsesRecord, _>(
+            crate::api::openai::responses::store::TREE,
+            |_subkey, rec| {
+                if let Some(filter) = &status_filter {
+                    let s = serde_json::to_string(&rec.response.status)
+                        .unwrap_or_default()
+                        .trim_matches('"')
+                        .to_string();
+                    if !filter.iter().any(|f| f == &s) {
+                        return;
+                    }
+                }
+                if heap.len() < limit {
+                    heap.push(HeapEntry {
+                        created_at: rec.created_at,
+                        rec,
+                    });
+                } else if let Some(top) = heap.peek() {
+                    if rec.created_at > top.created_at {
+                        heap.pop();
+                        heap.push(HeapEntry {
+                            created_at: rec.created_at,
+                            rec,
+                        });
+                    }
+                }
+            },
+        )
+        .map_err(ApiError)?;
+
+    // into_sorted_vec yields ascending by `Ord` — which we reversed —
+    // so the result is oldest → newest. Reverse for newest-first.
+    let mut kept: Vec<HeapEntry> = heap.into_sorted_vec();
+    kept.reverse();
+
+    let data: Vec<serde_json::Value> = kept
         .into_iter()
-        .map(|(_, rec)| rec)
-        .filter(|rec| match &status_filter {
-            Some(filter) => {
-                let s = serde_json::to_string(&rec.response.status)
-                    .unwrap_or_default()
-                    .trim_matches('"')
-                    .to_string();
-                filter.iter().any(|f| f == &s)
-            }
-            None => true,
-        })
-        .map(|rec| {
+        .map(|HeapEntry { rec, .. }| {
             let live = live_ids.contains(&rec.id);
             let preview = match &rec.request.input {
                 crate::api::openai::responses::types::ResponsesInput::Text(s) => {
@@ -981,7 +1035,7 @@ pub async fn list_responses(
                     })
                     .unwrap_or_default(),
             };
-            let value = serde_json::json!({
+            serde_json::json!({
                 "id": rec.id,
                 "created_at": rec.created_at,
                 "expires_at": rec.expires_at,
@@ -995,13 +1049,9 @@ pub async fn list_responses(
                     "input_tokens": rec.response.usage.input_tokens,
                     "output_tokens": rec.response.usage.output_tokens,
                 },
-            });
-            (rec.created_at, value)
+            })
         })
         .collect();
-
-    entries.sort_by(|a, b| b.0.cmp(&a.0));
-    let data: Vec<serde_json::Value> = entries.into_iter().take(limit).map(|(_, v)| v).collect();
 
     Ok(Json(serde_json::json!({
         "object": "list",

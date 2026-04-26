@@ -592,18 +592,24 @@ impl PoolManager {
     }
 
     async fn handle_leave_pool(&mut self) -> Result<(), SwarmError> {
+        // Extract pool_id under a read guard, then drop the guard before
+        // the rate-limit check. Holding the read lock across
+        // check_and_record() blocks concurrent writers for no reason
+        // (the actual mutation happens later under a write lock, where
+        // any state change between then and now is naturally observed).
+        // Mirrors the lock-then-extract-then-rate-limit pattern in
+        // handle_create_invitation / handle_accept_invitation.
         let pool_id = {
             let guard = self.shared_state.credits.pool_state.read().await;
             let ps = guard
                 .as_ref()
                 .ok_or_else(|| SwarmError::Validation("Not in a pool".into()))?;
-
-            if !self.rate_limiter.check_and_record() {
-                return Err(SwarmError::Validation("Rate limit exceeded".into()));
-            }
-
             ps.pool_id.clone()
         };
+
+        if !self.rate_limiter.check_and_record() {
+            return Err(SwarmError::Validation("Rate limit exceeded".into()));
+        }
 
         // Clear pool state — DB first, then memory, to prevent inconsistency on DB failure.
         // If DB write fails, we return error with in-memory state still intact (correct for retry).

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant, SystemTime};
 
 use serde::{Deserialize, Serialize};
@@ -184,7 +184,7 @@ impl KvCacheManager {
         &mut self,
         user_session_id: &str,
         new_prompt: &str,
-        active_peers: &[NodeId],
+        active_peers: &HashSet<NodeId>,
     ) -> CacheReuse {
         let internal_id = match self.multi_turn_sessions.get(user_session_id) {
             Some(id) => *id,
@@ -225,7 +225,9 @@ impl KvCacheManager {
             return CacheReuse::Miss;
         }
 
-        // Check pipeline validity (all nodes still reachable)
+        // Check pipeline validity (all nodes still reachable). active_peers
+        // is a HashSet so each contains() is O(1) — the holders Vec is small
+        // (== pipeline segments) but peer_registry can be large.
         let missing: Vec<&NodeId> = session
             .cache_holders
             .iter()
@@ -337,7 +339,7 @@ impl KvCacheManager {
     pub fn validate_pipeline(
         &self,
         session_id: &SessionId,
-        active_peers: &[NodeId],
+        active_peers: &HashSet<NodeId>,
     ) -> PipelineValidity {
         match self.sessions.get(session_id) {
             None => PipelineValidity::NotFound,
@@ -638,7 +640,7 @@ mod tests {
 
         mgr.register_session(session_id, pipeline, 128);
 
-        let active = vec![NodeId([1u8; 32]), NodeId([2u8; 32])];
+        let active: HashSet<NodeId> = [NodeId([1u8; 32]), NodeId([2u8; 32])].into();
         match mgr.validate_pipeline(&session_id, &active) {
             PipelineValidity::Valid => {}
             other => panic!("Expected Valid, got {:?}", other),
@@ -654,7 +656,7 @@ mod tests {
         mgr.register_session(session_id, pipeline, 128);
 
         // Only node 1 is active
-        let active = vec![NodeId([1u8; 32])];
+        let active: HashSet<NodeId> = [NodeId([1u8; 32])].into();
         match mgr.validate_pipeline(&session_id, &active) {
             PipelineValidity::Degraded { missing_nodes } => {
                 assert_eq!(missing_nodes.len(), 1);
@@ -693,7 +695,7 @@ mod tests {
         let mut mgr = KvCacheManager::new(Duration::from_secs(600));
         let internal_id = uuid::Uuid::new_v4();
         let pipeline = make_pipeline(internal_id);
-        let active = vec![NodeId([1u8; 32]), NodeId([2u8; 32])];
+        let active: HashSet<NodeId> = [NodeId([1u8; 32]), NodeId([2u8; 32])].into();
 
         // Register initial turn
         let prompt_turn1 = "Hello, how are you?";
@@ -720,7 +722,7 @@ mod tests {
         let mut mgr = KvCacheManager::new(Duration::from_secs(600));
         let internal_id = uuid::Uuid::new_v4();
         let pipeline = make_pipeline(internal_id);
-        let active = vec![NodeId([1u8; 32]), NodeId([2u8; 32])];
+        let active: HashSet<NodeId> = [NodeId([1u8; 32]), NodeId([2u8; 32])].into();
 
         mgr.register_multi_turn(
             "session-abc",
@@ -754,7 +756,7 @@ mod tests {
 
         std::thread::sleep(Duration::from_millis(10));
 
-        let active = vec![NodeId([1u8; 32]), NodeId([2u8; 32])];
+        let active: HashSet<NodeId> = [NodeId([1u8; 32]), NodeId([2u8; 32])].into();
         match mgr.check_multi_turn_reuse("session-abc", "Hello, more text", &active) {
             CacheReuse::Miss => {}
             CacheReuse::Hit { .. } => panic!("Expected miss due to expiry"),
@@ -776,7 +778,7 @@ mod tests {
         );
 
         // Only node 1 is active (node 2 dropped)
-        let active = vec![NodeId([1u8; 32])];
+        let active: HashSet<NodeId> = [NodeId([1u8; 32])].into();
         match mgr.check_multi_turn_reuse("session-abc", "Hello, more text", &active) {
             CacheReuse::Miss => {}
             CacheReuse::Hit { .. } => panic!("Expected miss due to degraded pipeline"),
@@ -806,7 +808,7 @@ mod tests {
     #[test]
     fn multi_turn_unknown_session() {
         let mut mgr = KvCacheManager::new(Duration::from_secs(600));
-        let active = vec![NodeId([1u8; 32])];
+        let active: HashSet<NodeId> = [NodeId([1u8; 32])].into();
 
         match mgr.check_multi_turn_reuse("nonexistent", "Hello", &active) {
             CacheReuse::Miss => {}
@@ -847,7 +849,7 @@ mod tests {
         assert_eq!(restored, 2);
         assert_eq!(mgr2.active_sessions(), 2);
 
-        let active = vec![NodeId([1u8; 32]), NodeId([2u8; 32])];
+        let active: HashSet<NodeId> = [NodeId([1u8; 32]), NodeId([2u8; 32])].into();
         match mgr2.check_multi_turn_reuse("user-sess-1", "Hello world, more text", &active) {
             CacheReuse::Hit { start_pos } => assert_eq!(start_pos, 100),
             CacheReuse::Miss => panic!("Expected cache hit after restore"),
@@ -940,7 +942,7 @@ mod tests {
 
         // Session metadata was restored but prefix matching won't work
         // because cached_prompt was stripped
-        let active = vec![NodeId([1u8; 32]), NodeId([2u8; 32])];
+        let active: HashSet<NodeId> = [NodeId([1u8; 32]), NodeId([2u8; 32])].into();
         match mgr2.check_multi_turn_reuse("private-sess", "Secret user prompt more", &active) {
             CacheReuse::Miss => {} // Expected: empty cached_prompt => miss
             CacheReuse::Hit { .. } => panic!("Expected miss when privacy_mode stripped prompt"),
