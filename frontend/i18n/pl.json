@@ -1013,5 +1013,6 @@
   "responses.status_completed": "zakończona",
   "responses.status_failed": "nieudana",
   "responses.status_cancelled": "anulowana",
-  "responses.status_incomplete": "niekompletna"
+  "responses.status_incomplete": "niekompletna",
+  "responses.status_unknown": "nieznane"
 }

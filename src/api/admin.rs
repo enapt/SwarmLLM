@@ -958,12 +958,26 @@ pub async fn list_responses(
         }
     }
 
-    let status_filter: Option<Vec<String>> = params.status.map(|s| {
-        s.split(',')
-            .map(|t| t.trim().to_lowercase())
-            .filter(|t| !t.is_empty())
-            .collect()
-    });
+    // Cap the raw query string before splitting so a caller can't pass a
+    // megabyte-long `?status=` and force `.split(',')` to materialise an
+    // arbitrarily large Vec — the only valid values are a handful of
+    // short ASCII enum strings, 256 bytes is generous.
+    const MAX_STATUS_FILTER_BYTES: usize = 256;
+    let status_filter: Option<Vec<String>> = match params.status {
+        Some(s) if s.len() > MAX_STATUS_FILTER_BYTES => {
+            return Err(ApiError(crate::error::SwarmError::Validation(format!(
+                "status filter too long ({} bytes, max {MAX_STATUS_FILTER_BYTES})",
+                s.len()
+            ))));
+        }
+        Some(s) => Some(
+            s.split(',')
+                .map(|t| t.trim().to_lowercase())
+                .filter(|t| !t.is_empty())
+                .collect(),
+        ),
+        None => None,
+    };
     let limit = params.limit.unwrap_or(100).clamp(1, 500) as usize;
 
     // Whether a live background-streaming task is in flight for this id.

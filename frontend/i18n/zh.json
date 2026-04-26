@@ -1013,5 +1013,6 @@
   "responses.status_completed": "已完成",
   "responses.status_failed": "已失败",
   "responses.status_cancelled": "已取消",
-  "responses.status_incomplete": "未完成"
+  "responses.status_incomplete": "未完成",
+  "responses.status_unknown": "未知"
 }

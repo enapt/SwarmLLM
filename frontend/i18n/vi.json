@@ -1013,5 +1013,6 @@
   "responses.status_completed": "hoàn thành",
   "responses.status_failed": "thất bại",
   "responses.status_cancelled": "đã hủy",
-  "responses.status_incomplete": "chưa hoàn tất"
+  "responses.status_incomplete": "chưa hoàn tất",
+  "responses.status_unknown": "không rõ"
 }

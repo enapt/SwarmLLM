@@ -1013,5 +1013,6 @@
   "responses.status_completed": "tamamlandı",
   "responses.status_failed": "başarısız",
   "responses.status_cancelled": "iptal edildi",
-  "responses.status_incomplete": "tamamlanmamış"
+  "responses.status_incomplete": "tamamlanmamış",
+  "responses.status_unknown": "bilinmiyor"
 }

@@ -1013,5 +1013,6 @@
   "responses.status_completed": "selesai",
   "responses.status_failed": "gagal",
   "responses.status_cancelled": "dibatalkan",
-  "responses.status_incomplete": "tidak lengkap"
+  "responses.status_incomplete": "tidak lengkap",
+  "responses.status_unknown": "tidak diketahui"
 }

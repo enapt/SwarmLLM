@@ -1013,5 +1013,6 @@
   "responses.status_completed": "dokončená",
   "responses.status_failed": "neúspěšná",
   "responses.status_cancelled": "zrušená",
-  "responses.status_incomplete": "neúplná"
+  "responses.status_incomplete": "neúplná",
+  "responses.status_unknown": "neznámé"
 }

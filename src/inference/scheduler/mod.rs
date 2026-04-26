@@ -199,8 +199,7 @@ impl PipelineScheduler {
             };
             // Still detect TP groups — LAN peers covering the same range
             // can participate in tensor parallelism even in single-segment mode.
-            let tp_groups =
-                self.detect_tp_groups(std::slice::from_ref(&segment), &candidates, &manifest);
+            let tp_groups = self.detect_tp_groups(std::slice::from_ref(&segment), &candidates);
             return Ok(PipelineAssignment {
                 request_id,
                 segments: vec![segment],
@@ -250,7 +249,7 @@ impl PipelineScheduler {
         let tp_groups = if encrypted {
             vec![]
         } else {
-            self.detect_tp_groups(&segments, &candidates, &manifest)
+            self.detect_tp_groups(&segments, &candidates)
         };
 
         tracing::info!(
@@ -798,7 +797,6 @@ impl PipelineScheduler {
         &self,
         segments: &[PipelineSegment],
         candidates: &[NodeCandidate],
-        _manifest: &ModelManifest,
     ) -> Vec<TensorParallelGroup> {
         let local_id = self.shared_state.identity.node_id().clone();
         const MAX_TP_GROUP_SIZE: usize = 4;

@@ -57,6 +57,26 @@ const MAX_RESPONSES_MODEL_LEN: usize = 256;
 const MAX_RESPONSES_SHORT_FIELD_LEN: usize = 64;
 const MAX_RESPONSES_METADATA_BYTES: usize = 64 * 1024;
 
+/// Validate a `id` path parameter on a `/v1/responses/{id}` route. Mirrors
+/// the `previous_response_id` cap so caller-supplied identifiers never
+/// exceed the size we're willing to look up, log, or reflect into 404
+/// bodies and DashMap keys (`BACKGROUND_CANCEL`, `BACKGROUND_STATE`).
+pub(crate) fn validate_response_id(id: &str) -> Result<(), ApiError> {
+    if id.is_empty()
+        || id.len() > MAX_PREVIOUS_RESPONSE_ID_LEN
+        || !id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        return Err(ApiError(SwarmError::Validation(
+            "response id must be 1..=64 ASCII alphanumeric characters \
+             (with `_` / `-`)"
+                .into(),
+        )));
+    }
+    Ok(())
+}
+
 /// Validate caller-supplied identifiers and bounded strings BEFORE the
 /// cloud-proxy / Anthropic-bridge / local-inference branches. Each branch
 /// otherwise has its own validation surface (or none) — running this once at
@@ -446,6 +466,16 @@ async fn start_background(
 /// (unless the cancel flag was flipped in the meantime). Errors are
 /// captured into `status="failed"` with an `error` object so a polling
 /// caller gets a stable shape.
+/// Run inference for an M9 (non-stream) background `/v1/responses` request.
+///
+/// **Invariant — `BACKGROUND_STATE` is intentionally NOT populated here.**
+/// Only the V8 streaming path (`background::register_background_stream`)
+/// inserts into `BACKGROUND_STATE`; the M9 path uses `BACKGROUND_CANCEL`
+/// alone for cancel signalling and persists progress through redb. If you
+/// add `BACKGROUND_STATE` registration to this M9 path, you MUST also
+/// call `background::deregister_background_stream` on every exit (success,
+/// failure, cancel) — otherwise `list_responses` will accumulate stale
+/// `live=true` entries forever.
 async fn run_background_inference(
     state: AppState,
     headers: axum::http::HeaderMap,
@@ -623,6 +653,7 @@ pub async fn get_response(
     State(state): State<AppState>,
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> Result<Response, ApiError> {
+    validate_response_id(&id)?;
     match store::load(&state.db, &id).map_err(ApiError)? {
         Some(record) => Ok((StatusCode::OK, Json(record.response)).into_response()),
         None => Err(ApiError(SwarmError::Validation(format!(
@@ -639,6 +670,7 @@ pub async fn cancel_response(
     State(state): State<AppState>,
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> Result<Response, ApiError> {
+    validate_response_id(&id)?;
     // Signal the in-flight task (if any) to drop its result.
     if let Some(entry) = BACKGROUND_CANCEL.get(&id) {
         entry.store(true, Ordering::SeqCst);
@@ -703,6 +735,7 @@ pub async fn list_input_items(
     axum::extract::Path(id): axum::extract::Path<String>,
     axum::extract::Query(params): axum::extract::Query<ListInputItemsParams>,
 ) -> Result<Response, ApiError> {
+    validate_response_id(&id)?;
     let record = store::load(&state.db, &id)
         .map_err(ApiError)?
         .ok_or_else(|| {
@@ -796,6 +829,7 @@ pub async fn delete_response(
     State(state): State<AppState>,
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> Result<Response, ApiError> {
+    validate_response_id(&id)?;
     // Check existence so we can return a meaningful success body.
     let existed = store::load(&state.db, &id).map_err(ApiError)?.is_some();
     store::delete(&state.db, &id).map_err(ApiError)?;

@@ -1013,5 +1013,6 @@
   "responses.status_completed": "مكتمل",
   "responses.status_failed": "فاشل",
   "responses.status_cancelled": "ملغى",
-  "responses.status_incomplete": "غير مكتمل"
+  "responses.status_incomplete": "غير مكتمل",
+  "responses.status_unknown": "غير معروف"
 }

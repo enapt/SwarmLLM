@@ -64,6 +64,38 @@ pub(super) fn fastpath_request_disqualified(exec: &PipelineExecutor) -> bool {
     false
 }
 
+/// Common preconditions for any speculative-decoding fast path
+/// (`speculative.rs`'s single-segment Item 2 and `dsd.rs`'s
+/// multi-segment Item 12). Returns `true` when the request is
+/// eligible *so far* — callers add their own segment-shape check on
+/// top. Greedy temperature, draft model availability, and the
+/// non-encryption / non-LoRA / non-vision baseline are required by
+/// both paths; the bool flag config is per-path so it stays inline.
+pub(super) fn speculative_common_eligible(exec: &PipelineExecutor) -> bool {
+    let cfg = &exec.shared_state.config.inference;
+    if !cfg.speculative_decoding {
+        return false;
+    }
+    if !exec.assignment.supports_speculative {
+        return false;
+    }
+    if fastpath_request_disqualified(exec) {
+        return false;
+    }
+    if exec.request.sampling_params.temperature != 0.0 {
+        return false;
+    }
+    if cfg.draft_model_path.is_none() {
+        return false;
+    }
+    // The standard wire codec is used directly here; the speculative paths
+    // don't yet wrap activations in ChaCha session encryption.
+    if exec.shared_state.config.network.enable_encryption {
+        return false;
+    }
+    true
+}
+
 /// Executes a distributed inference pipeline across multiple nodes.
 ///
 /// The pipeline is a sequence of segments, each assigned to a node.

@@ -921,6 +921,7 @@ impl SplitModel {
                 entry.ssm_states = ssm;
             }
             tracing::debug!(
+                model_key = %model_key,
                 first_kv_offset,
                 batch_size,
                 "DIAG: forward_batch kv_offset mismatch — falling back to sequential"

@@ -9,6 +9,26 @@ next tagged release.
 
 ### Performance
 
+- **`PrefixCache` lookup hit no longer needs a write lock** —
+  `Entry::last_hit` is now an `AtomicU64` driven by a per-cache logical
+  clock; the read-lock walk records the hit via a `Relaxed` store
+  instead of upgrading to write. Removes the entire write-acquire from
+  every cache hit and its sleep-based test fixture. Touches
+  `src/inference/split/prefix_cache.rs` only.
+- **`local_exec` holds `loaded_model_info` once per batch item** — was
+  acquired twice per request (chat-template prompt + stop-string list).
+  Now extracted from a single guard.
+- **`KvCacheManager::check_multi_turn_reuse` takes `&HashSet<NodeId>`
+  instead of `&[NodeId]`** — the per-holder `contains()` was O(peers).
+  Caller in `inference/router/mod.rs` collects the DashMap directly
+  into a HashSet so the conversion is paid once.
+- **`GET /api/admin/responses` streams + bounded heap** — new
+  `Database::for_each_json` helper streams JSON-encoded records without
+  materialising a full Vec; the listing endpoint maintains a min-heap
+  of size `≤ limit` ordered by `created_at`. Memory now O(limit)
+  instead of O(total_records); only survivors get the full preview JSON
+  built.
+
 - **zstd compression on `WIRE_TAG_PREFIX_KV`** — flag-gated via
   `NetworkConfig::prefix_kv_compression` (default off). Send-side reuses
   the existing tensor-compression helpers and falls back to raw when the
@@ -28,6 +48,32 @@ next tagged release.
   fast-path short-circuit.
 
 ### Security & validation
+
+- **CRITICAL: `responses.js` was calling a non-existent function** —
+  `App.data.authFetch` doesn't exist; the symbol is `App.authFetch`.
+  Every Responses dashboard interaction (load, retrieve, cancel,
+  delete) was silently failing with `TypeError`. Same pattern that
+  was caught in `auto-manage-status.js` previously — the responses.js
+  refactor that introduced the `_action` helper reintroduced it.
+  Fixed via 3-site replace.
+- **`/v1/responses/{id}` path-param validation** — added
+  `validate_response_id` helper mirroring the
+  `previous_response_id` cap (≤64 ASCII alphanumeric `+_-`). Called
+  at the top of `get_response`, `cancel_response`, `delete_response`,
+  `list_input_items`, and `get_response_maybe_stream`. Closes a path
+  where a megabyte-long `{id}` could inflate logs / DashMap key
+  materialization for `BACKGROUND_CANCEL` / `BACKGROUND_STATE`.
+- **`GET /api/admin/responses ?status=` length cap** — raw status
+  string was split with no length cap, allowing an unbounded
+  `Vec<String>` allocation. Added a 256-byte cap before splitting.
+- **`Q8_0` tensor non-finite guard** — F32 path already rejected
+  NaN/Inf in deserialized activations; Q8_0 path dequantized blindly.
+  Added a matching `is_finite()` check after `dequantize_q8_0` so a
+  malicious or broken peer can't poison subsequent attention via
+  NaN/Inf-dequantizing Q8_0 blocks. Also flipped the F32+Q8_0
+  truncation error type from `Internal` (HTTP 500) to `Inference`
+  (a truncated wire payload from a peer is a network fault, not a
+  local code bug).
 
 - **`/v1/responses` ingress validation** — `validate_responses_ingress`
   runs BEFORE the cloud-proxy / Anthropic-bridge / local-inference
@@ -59,8 +105,68 @@ next tagged release.
   Build job already had macOS — this closes the test-coverage gap from
   `docs/plans/next_steps.md` § 4.
 
+### Correctness
+
+- **`pool::handle_leave_pool` lock ordering** — was the only pool
+  handler holding the `pool_state` read lock across
+  `rate_limiter.check_and_record()`. Now matches
+  `handle_create_invitation` / `handle_accept_invitation`: extract
+  `pool_id` under the guard, drop, rate-limit, then later acquire the
+  write lock for mutation. All 4 pool handlers audited for ordering
+  consistency.
+
+### Observability
+
+- **`forward_batch` fallback log gained `model_id`** — the
+  `kv_offset mismatch — falling back to sequential` debug log was
+  missing the model key, making it impossible to correlate which
+  model triggered the fallback in a multi-model deployment.
+
 ### Refactor / dedup
 
+- **SSE parser dedup across `responses/{stream,anthropic_bridge}.rs`** —
+  promoted `drain_sse_data_payloads` and `find_subslice` from private
+  to `pub(super)`, extracted a new `parse_sse_block_data_lines` helper
+  for the per-block parsing both call sites need, and dropped
+  `anthropic_bridge::find_event_boundary` (was the same logic under a
+  different name).
+- **`speculative_common_eligible` helper** — `speculative.rs` and
+  `dsd.rs` shared a 6-line `eligible()` prefix (decoding flag, draft
+  model loaded, greedy temperature, no encryption, etc.). Extracted
+  to `pipeline/mod.rs`; each path now calls it after its own
+  path-specific flag check.
+- **`network-map.js` map-stats helper** — `render()` and
+  `updateFromWs()` built the same I18n-formatted node/region count
+  text inline; extracted `_updateMapStats(totalNodes, totalRegions, maxCount)`.
+- **`responses.status_unknown` i18n key** — added across all 21 locale
+  files; was missing, so any non-English user seeing a response with
+  an unrecognized status value got the raw English `unknown`.
+- **`auto-manage-status.js` plural fallback** — the active-download
+  fallback string used `shard(s)` parenthetical pluralization;
+  replaced with a proper singular/plural branch.
+- **`detect_tp_groups` cleanup** — dropped an unused `_manifest:
+  &ModelManifest` parameter that did nothing at the call sites; the
+  function operates on `candidates` and `segments` only. Also renamed
+  `_is_last` → `is_last` in `tensor_parallel.rs::execute_tp_segment`
+  (the underscore convention falsely implied unused; the param is
+  read at lines 316 and 357).
+
+- **`CreditDelta` enum replaces `is_earning: bool`** on
+  `apply_credit_direct`. Variants `Earning` / `Spending` / `Refund`;
+  the new `Refund` leaves both monotonic counters
+  (`lifetime_earned`/`lifetime_spent`) untouched, which is the
+  semantics escrow refunds need but couldn't get from the old bool.
+  `EscrowManager::create_escrow` and `refund_escrow` now route through
+  the helper instead of hand-rolling the balance write + persist.
+  `cleanup_expired` keeps its manual block (its retry-on-failure
+  semantics need an in-memory revert that `apply_credit_direct`
+  deliberately doesn't do); the reason is documented inline.
+- **`pipeline::fastpath_request_disqualified`** helper extracts the
+  shared TP-empty + LoRA + vision-images guard from
+  `remote_generate.rs`, `speculative.rs`, and `dsd.rs`. Per-path
+  shape / encryption / flag preconditions stay separate because they
+  ARE subtly divergent (1-segment vs 2+-segment vs all-remote, and
+  remote_generate has a per-model encryption gate the others don't).
 - `SharedState::resolve_peer_id_bytes` helper replaces a 5-site
   `peer_id_map.or_else(peer_registry)` lookup duplication across
   `inference/pipeline/{distributed,remote_generate,speculative,dsd,
@@ -77,7 +183,8 @@ next tagged release.
   in `update.rs` (previously bare `"enapt/SwarmLLM"` string in two
   places).
 - Various small stale-doc + dead-code cleanups; see commits `36af419`,
-  `c9acbfc`, `c10956e`, `ccfbf14` for the per-sweep summaries.
+  `c9acbfc`, `c10956e`, `ccfbf14`, `712a4da`, `d8a840c` for the
+  per-sweep summaries.
 
 ### Tests
 

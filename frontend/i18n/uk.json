@@ -1013,5 +1013,6 @@
   "responses.status_completed": "завершено",
   "responses.status_failed": "невдалий",
   "responses.status_cancelled": "скасовано",
-  "responses.status_incomplete": "неповний"
+  "responses.status_incomplete": "неповний",
+  "responses.status_unknown": "невідомо"
 }

@@ -58,38 +58,21 @@ use super::{PipelineExecutor, MAX_PENDING_LAYER_RESULTS};
 
 /// Fast-path preconditions for the greedy distributed speculative loop.
 pub(super) fn eligible(exec: &PipelineExecutor) -> bool {
-    let cfg = &exec.shared_state.config.inference;
-    if !cfg.speculative_distributed || !cfg.speculative_decoding {
+    // Path-specific flag.
+    if !exec.shared_state.config.inference.speculative_distributed {
         return false;
     }
-    if !exec.assignment.supports_speculative {
+    // Common speculative-path baseline (greedy temp, draft model, etc.).
+    if !super::speculative_common_eligible(exec) {
         return false;
     }
-    // Shared request-level disqualifiers (TP, LoRA, vision images).
-    if super::fastpath_request_disqualified(exec) {
-        return false;
-    }
-    // Single segment only.
+    // Single segment only — multi-segment is DSD's path (Item 12).
     if exec.assignment.segments.len() != 1 {
         return false;
     }
     // The single segment must be remote. Local-only inference is handled by
     // `execute_local`'s own speculative path.
     if exec.assignment.segments[0].node_id == *exec.shared_state.identity.node_id() {
-        return false;
-    }
-    // Greedy only for MVP.
-    if exec.request.sampling_params.temperature != 0.0 {
-        return false;
-    }
-    // Requires draft model. Check without acquiring the lock (best-effort
-    // — the real check happens inside the method after the lock is held).
-    if cfg.draft_model_path.is_none() {
-        return false;
-    }
-    // The standard wire codec is used directly here; the speculative path
-    // doesn't yet wrap activations in ChaCha session encryption.
-    if exec.shared_state.config.network.enable_encryption {
         return false;
     }
     true

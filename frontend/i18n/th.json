@@ -1013,5 +1013,6 @@
   "responses.status_completed": "เสร็จสิ้น",
   "responses.status_failed": "ล้มเหลว",
   "responses.status_cancelled": "ยกเลิก",
-  "responses.status_incomplete": "ไม่สมบูรณ์"
+  "responses.status_incomplete": "ไม่สมบูรณ์",
+  "responses.status_unknown": "ไม่ทราบ"
 }

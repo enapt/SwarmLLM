@@ -371,6 +371,7 @@ pub async fn get_response_maybe_stream(
     axum::extract::Path(id): axum::extract::Path<String>,
     Query(params): Query<GetResponseParams>,
 ) -> Result<Response, ApiError> {
+    crate::api::openai::responses::validate_response_id(&id)?;
     let wants_stream = params.stream.unwrap_or(false);
     if !wants_stream {
         // Original get_response behavior.

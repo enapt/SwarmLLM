@@ -263,10 +263,8 @@
         }
       }
 
+      App.networkMap._updateMapStats(totalNodes, totalRegions, maxCount);
       var statsEl = document.getElementById('map-stats-text');
-      var statsText = I18n.t(totalNodes === 1 ? 'map.stats_nodes' : 'map.stats_nodes_plural', { count: totalNodes }) + ' ' + I18n.t('map.stats_across') + ' ' + I18n.t(totalRegions === 1 ? 'map.stats_region' : 'map.stats_regions', { count: totalRegions });
-      if (statsEl) statsEl.textContent = statsText;
-      document.getElementById('map-legend-max').textContent = maxCount;
 
       var healthEl = document.getElementById('map-regional-health');
       if (!healthEl) {
@@ -412,9 +410,22 @@
         }
       }
       App.networkMap._applyRegionColors(regionSummary, maxCount);
+      App.networkMap._updateMapStats(totalNodes, totalRegions, maxCount);
+    },
+
+    /// Set the map header stats line + legend max — called from both
+    /// `render()` (full topology rebuild) and `updateFromWs()` (live
+    /// regionSummary refresh) so the formatting stays in one place.
+    _updateMapStats: function(totalNodes, totalRegions, maxCount) {
       var statsEl = document.getElementById('map-stats-text');
-      if (statsEl) statsEl.textContent = I18n.t(totalNodes === 1 ? 'map.stats_nodes' : 'map.stats_nodes_plural', { count: totalNodes }) + ' ' + I18n.t('map.stats_across') + ' ' + I18n.t(totalRegions === 1 ? 'map.stats_region' : 'map.stats_regions', { count: totalRegions });
-      document.getElementById('map-legend-max').textContent = maxCount;
+      if (statsEl) {
+        statsEl.textContent =
+          I18n.t(totalNodes === 1 ? 'map.stats_nodes' : 'map.stats_nodes_plural', { count: totalNodes })
+          + ' ' + I18n.t('map.stats_across') + ' '
+          + I18n.t(totalRegions === 1 ? 'map.stats_region' : 'map.stats_regions', { count: totalRegions });
+      }
+      var legendEl = document.getElementById('map-legend-max');
+      if (legendEl) legendEl.textContent = maxCount;
     },
 
     countryNames: {US:'United States',CA:'Canada',MX:'Mexico',BR:'Brazil',AR:'Argentina',CL:'Chile',CO:'Colombia',GB:'United Kingdom',FR:'France',DE:'Germany',ES:'Spain',IT:'Italy',NL:'Netherlands',SE:'Sweden',NO:'Norway',FI:'Finland',PL:'Poland',UA:'Ukraine',RU:'Russia',TR:'Turkey',IN:'India',CN:'China',JP:'Japan',KR:'South Korea',AU:'Australia',NZ:'New Zealand',ZA:'South Africa',NG:'Nigeria',EG:'Egypt',KE:'Kenya',SG:'Singapore',ID:'Indonesia',TH:'Thailand',VN:'Vietnam',PH:'Philippines',TW:'Taiwan',IL:'Israel',AE:'UAE',SA:'Saudi Arabia',CH:'Switzerland',AT:'Austria',CZ:'Czech Republic',RO:'Romania',IE:'Ireland',PT:'Portugal',DK:'Denmark',BE:'Belgium'},

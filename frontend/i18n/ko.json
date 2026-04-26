@@ -1013,5 +1013,6 @@
   "responses.status_completed": "완료",
   "responses.status_failed": "실패",
   "responses.status_cancelled": "취소됨",
-  "responses.status_incomplete": "미완료"
+  "responses.status_incomplete": "미완료",
+  "responses.status_unknown": "알 수 없음"
 }

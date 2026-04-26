@@ -1013,5 +1013,6 @@
   "responses.status_completed": "पूर्ण",
   "responses.status_failed": "विफल",
   "responses.status_cancelled": "रद्द",
-  "responses.status_incomplete": "अधूरी"
+  "responses.status_incomplete": "अधूरी",
+  "responses.status_unknown": "अज्ञात"
 }

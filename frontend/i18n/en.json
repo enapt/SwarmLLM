@@ -43,6 +43,7 @@
   "responses.status_failed": "failed",
   "responses.status_cancelled": "cancelled",
   "responses.status_incomplete": "incomplete",
+  "responses.status_unknown": "unknown",
   "pool.title": "My Devices",
   "pool.description": "Link your personal computers, laptops, and servers together. Inference across your own devices is free — no credits used. Credits earned by any of your machines are combined into one balance on your main device.",
   "pool.not_network": "This is different from the SwarmLLM network — linking devices groups your own hardware, while the network connects you with other people.",

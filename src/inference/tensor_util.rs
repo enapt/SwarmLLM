@@ -173,7 +173,11 @@ pub fn bytes_to_tensor(bytes: &[u8]) -> Result<Tensor, SwarmError> {
             let mut data = Vec::with_capacity(num_elements);
             for _ in 0..num_elements {
                 if pos + 4 > bytes.len() {
-                    return Err(SwarmError::Internal("Tensor data truncated".into()));
+                    // Truncated wire payload from a peer is a network/remote
+                    // fault, not a local code bug — `Inference` (rather than
+                    // `Internal`) so the upstream caller doesn't surface it
+                    // as a 500.
+                    return Err(SwarmError::Inference("Tensor data truncated".into()));
                 }
                 let val = f32::from_le_bytes(bytes[pos..pos + 4].try_into().unwrap());
                 if !val.is_finite() {
@@ -194,10 +198,21 @@ pub fn bytes_to_tensor(bytes: &[u8]) -> Result<Tensor, SwarmError> {
         DTYPE_TAG_Q8_0 => {
             let payload_len = quant::q8_0_byte_len(num_elements);
             if pos + payload_len > bytes.len() {
-                return Err(SwarmError::Internal("Tensor Q8_0 payload truncated".into()));
+                return Err(SwarmError::Inference(
+                    "Tensor Q8_0 payload truncated".into(),
+                ));
             }
-            quant::dequantize_q8_0(&bytes[pos..pos + payload_len], num_elements)
-                .map_err(SwarmError::Internal)?
+            let data = quant::dequantize_q8_0(&bytes[pos..pos + payload_len], num_elements)
+                .map_err(SwarmError::Inference)?;
+            // Mirror the F32 path's non-finite guard — a malicious or
+            // broken peer could ship a Q8_0 block whose dequantized values
+            // include NaN/Inf and corrupt subsequent attention.
+            if data.iter().any(|v: &f32| !v.is_finite()) {
+                return Err(SwarmError::Inference(
+                    "Tensor Q8_0 dequantized to non-finite values (NaN/Inf)".into(),
+                ));
+            }
+            data
         }
         unknown => {
             return Err(SwarmError::Internal(format!(

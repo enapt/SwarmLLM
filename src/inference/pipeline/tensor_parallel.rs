@@ -25,7 +25,7 @@ impl PipelineExecutor {
         activation_bytes: &[u8],
         segment: &PipelineSegment,
         tp_group: &crate::types::TensorParallelGroup,
-        _is_last: bool,
+        is_last: bool,
     ) -> Result<Vec<u8>, SwarmError> {
         let model_id = &segment.shard_id.model_id;
         let (layer_start, layer_end) = (
@@ -313,7 +313,7 @@ impl PipelineExecutor {
                         .map_err(|e| SwarmError::Internal(format!("FFN residual add: {e}")))?;
             }
 
-            if _is_last {
+            if is_last {
                 // Last segment: the final activations need token sampling
                 let final_tensor = split::bytes_to_tensor(&current_activations_bytes)
                     .map_err(|e| SwarmError::Internal(format!("Deserialize TP output: {e}")))?;
@@ -354,7 +354,7 @@ impl PipelineExecutor {
                 .forward(layer_forward)
                 .await?;
 
-            if _is_last {
+            if is_last {
                 let final_tensor = split::bytes_to_tensor(&layer_result.activations)
                     .map_err(|e| SwarmError::Internal(format!("Deserialize output: {e}")))?;
                 let token_id =

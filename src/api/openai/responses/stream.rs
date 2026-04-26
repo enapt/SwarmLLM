@@ -158,26 +158,37 @@ where
 /// Extract complete SSE `data:` payloads from the accumulator. Consumes
 /// bytes up to and including each `\n\n` boundary. Lines that aren't
 /// `data:` (e.g. `event:`, `:keepalive`) are ignored.
-fn drain_sse_data_payloads(buf: &mut BytesMut) -> Vec<String> {
+pub(super) fn drain_sse_data_payloads(buf: &mut BytesMut) -> Vec<String> {
     let mut out = Vec::new();
     while let Some(pos) = find_subslice(buf, b"\n\n") {
         let block = buf[..pos].to_vec();
-        for line in block.split(|&b| b == b'\n') {
-            let line = line.strip_prefix(b"data:").unwrap_or(&[]);
-            let line = line.strip_prefix(b" ").unwrap_or(line);
-            if line.is_empty() {
-                continue;
-            }
-            if let Ok(s) = std::str::from_utf8(line) {
-                out.push(s.to_string());
-            }
-        }
+        out.extend(parse_sse_block_data_lines(&block));
         buf.advance(pos + 2);
     }
     out
 }
 
-fn find_subslice(hay: &[u8], needle: &[u8]) -> Option<usize> {
+/// Parse a single SSE event block (the bytes BEFORE the `\n\n` separator)
+/// and return the `data:` payload lines. `event:` / `id:` / `:comment`
+/// lines are dropped. Used by both `drain_sse_data_payloads` (collects
+/// all events at once) and `anthropic_bridge.rs` (advances one event at
+/// a time so each can be parsed individually).
+pub(super) fn parse_sse_block_data_lines(block: &[u8]) -> Vec<String> {
+    let mut out = Vec::new();
+    for line in block.split(|&b| b == b'\n') {
+        let line = line.strip_prefix(b"data:").unwrap_or(&[]);
+        let line = line.strip_prefix(b" ").unwrap_or(line);
+        if line.is_empty() {
+            continue;
+        }
+        if let Ok(s) = std::str::from_utf8(line) {
+            out.push(s.to_string());
+        }
+    }
+    out
+}
+
+pub(super) fn find_subslice(hay: &[u8], needle: &[u8]) -> Option<usize> {
     hay.windows(needle.len()).position(|w| w == needle)
 }
 

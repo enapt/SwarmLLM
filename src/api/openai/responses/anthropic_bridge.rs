@@ -877,25 +877,14 @@ fn stream_anthropic_to_responses(
             buf.extend_from_slice(&chunk);
 
             // Drain complete SSE events separated by blank lines.
-            while let Some(pos) = find_event_boundary(&buf) {
+            while let Some(pos) = super::stream::find_subslice(&buf, b"\n\n") {
                 let block = buf[..pos].to_vec();
                 buf.advance(pos + 2);
 
-                // Extract `data:` payload(s) from the block. Anthropic
-                // emits one JSON body per event.
-                let mut data_lines: Vec<String> = Vec::new();
-                for line in block.split(|&b| b == b'\n') {
-                    let stripped = line
-                        .strip_prefix(b"data:")
-                        .unwrap_or(&[]);
-                    let stripped = stripped.strip_prefix(b" ").unwrap_or(stripped);
-                    if stripped.is_empty() {
-                        continue;
-                    }
-                    if let Ok(s) = std::str::from_utf8(stripped) {
-                        data_lines.push(s.to_string());
-                    }
-                }
+                // Extract `data:` payload(s) from the block via the shared
+                // SSE parser. Anthropic emits one JSON body per event so we
+                // only consume the first line.
+                let data_lines = super::stream::parse_sse_block_data_lines(&block);
                 let data = match data_lines.first() {
                     Some(d) => d.clone(),
                     None => continue,
@@ -1295,10 +1284,6 @@ fn sse_event(name: &str, body: Value) -> axum::response::sse::Event {
     axum::response::sse::Event::default()
         .event(name)
         .data(serde_json::to_string(&body).unwrap_or_default())
-}
-
-fn find_event_boundary(hay: &[u8]) -> Option<usize> {
-    hay.windows(2).position(|w| w == b"\n\n")
 }
 
 #[cfg(test)]

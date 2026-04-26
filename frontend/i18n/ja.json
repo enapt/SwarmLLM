@@ -1013,5 +1013,6 @@
   "responses.status_completed": "完了",
   "responses.status_failed": "失敗",
   "responses.status_cancelled": "キャンセル済み",
-  "responses.status_incomplete": "不完全"
+  "responses.status_incomplete": "不完全",
+  "responses.status_unknown": "不明"
 }

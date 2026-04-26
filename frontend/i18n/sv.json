@@ -1013,5 +1013,6 @@
   "responses.status_completed": "klar",
   "responses.status_failed": "misslyckad",
   "responses.status_cancelled": "avbruten",
-  "responses.status_incomplete": "ofullständig"
+  "responses.status_incomplete": "ofullständig",
+  "responses.status_unknown": "okänt"
 }

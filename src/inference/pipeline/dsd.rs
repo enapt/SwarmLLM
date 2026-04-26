@@ -65,28 +65,21 @@ use crate::inference::dsd_controller::GammaController;
 /// Fast-path preconditions for the DSD coordinator loop.
 #[cfg(feature = "llama")]
 pub(super) fn eligible(exec: &PipelineExecutor) -> bool {
-    let cfg = &exec.shared_state.config.inference;
-    if !cfg.decentralized_spec_decoding || !cfg.speculative_decoding {
+    // Path-specific flag.
+    if !exec
+        .shared_state
+        .config
+        .inference
+        .decentralized_spec_decoding
+    {
         return false;
     }
-    if !exec.assignment.supports_speculative {
-        return false;
-    }
-    // Shared request-level disqualifiers (TP, LoRA, vision images).
-    if super::fastpath_request_disqualified(exec) {
+    // Common speculative-path baseline (greedy temp, draft model, etc.).
+    if !super::speculative_common_eligible(exec) {
         return false;
     }
     // Multi-segment pipeline only — single-segment falls through to Item 2.
     if exec.assignment.segments.len() < 2 {
-        return false;
-    }
-    if exec.request.sampling_params.temperature != 0.0 {
-        return false;
-    }
-    if cfg.draft_model_path.is_none() {
-        return false;
-    }
-    if exec.shared_state.config.network.enable_encryption {
         return false;
     }
     // All segments must be remote — a local segment in the pipeline would

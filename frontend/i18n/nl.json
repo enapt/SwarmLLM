@@ -1013,5 +1013,6 @@
   "responses.status_completed": "voltooid",
   "responses.status_failed": "mislukt",
   "responses.status_cancelled": "geannuleerd",
-  "responses.status_incomplete": "onvolledig"
+  "responses.status_incomplete": "onvolledig",
+  "responses.status_unknown": "onbekend"
 }

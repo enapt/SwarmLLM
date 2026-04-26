@@ -75,7 +75,7 @@
         if (this._statusFilter && this._statusFilter !== 'all') {
           url += '&status=' + encodeURIComponent(this._statusFilter);
         }
-        var resp = await App.data.authFetch(url);
+        var resp = await App.authFetch(url);
         if (!resp.ok) throw new Error('HTTP ' + resp.status);
         var data = await resp.json();
         this._records = data.data || [];
@@ -177,7 +177,7 @@
       detail.style.display = 'block';
       detail.textContent = I18n.t('responses.loading');
       try {
-        var resp = await App.data.authFetch('/v1/responses/' + encodeURIComponent(id));
+        var resp = await App.authFetch('/v1/responses/' + encodeURIComponent(id));
         if (!resp.ok) throw new Error('HTTP ' + resp.status);
         var json = await resp.json();
         detail.innerHTML = '<pre class="responses-detail-pre">' + U.escapeHtml(JSON.stringify(json, null, 2)) + '</pre>';
@@ -188,7 +188,7 @@
 
     _action: async function(url, method, successKey, errorKey, id) {
       try {
-        var resp = await App.data.authFetch(url, { method: method });
+        var resp = await App.authFetch(url, { method: method });
         if (!resp.ok) throw new Error('HTTP ' + resp.status);
         App.notifications.showToast(I18n.t(successKey, { id: id }), 'info', 3000);
         this.load();
