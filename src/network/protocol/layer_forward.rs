@@ -304,3 +304,225 @@ pub fn decode_layer_forward(data: &[u8]) -> Result<LayerForward, SwarmError> {
 //   [T]          finish_reason tag: 0=None, 1=Stop, 2=MaxTokens, 3=Error
 //   [T+1..]      if tag=3: error message (UTF-8 bytes) followed by [4B activations_len][activations]
 //                if tag!=3: [4B activations_len][activations data]
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{TensorParallelMeta, TpPhase};
+
+    fn base_forward() -> LayerForward {
+        LayerForward {
+            request_id: uuid::Uuid::from_u128(0x1122_3344_5566_7788_99AA_BBCC_DDEE_FF00),
+            sequence_num: 7,
+            index_pos: 13,
+            activations: vec![0xDE, 0xAD, 0xBE, 0xEF, 0x01, 0x02, 0x03, 0x04],
+            format: TensorFormat::FP16,
+            model_id: ModelId("qwen2.5-7b".into()),
+            layer_range: (0, 28),
+            tp_meta: None,
+            vision_embeddings: None,
+            sender_peer_bytes: None,
+            requester_node_id: None,
+            pre_embedded: false,
+            adapter_id: None,
+            draft_tokens: Vec::new(),
+            spec_logits_requested: false,
+            truncate_kv_to: None,
+        }
+    }
+
+    fn assert_roundtrip_eq(orig: &LayerForward, decoded: &LayerForward) {
+        assert_eq!(decoded.request_id, orig.request_id);
+        assert_eq!(decoded.sequence_num, orig.sequence_num);
+        assert_eq!(decoded.index_pos, orig.index_pos);
+        assert_eq!(decoded.activations, orig.activations);
+        assert!(matches!(
+            (&decoded.format, &orig.format),
+            (TensorFormat::FP16, TensorFormat::FP16)
+                | (TensorFormat::FP32, TensorFormat::FP32)
+                | (TensorFormat::INT8, TensorFormat::INT8)
+        ));
+        assert_eq!(decoded.model_id, orig.model_id);
+        assert_eq!(decoded.layer_range, orig.layer_range);
+        assert_eq!(decoded.pre_embedded, orig.pre_embedded);
+        assert_eq!(decoded.draft_tokens, orig.draft_tokens);
+        assert_eq!(decoded.spec_logits_requested, orig.spec_logits_requested);
+        assert_eq!(decoded.truncate_kv_to, orig.truncate_kv_to);
+        match (&decoded.tp_meta, &orig.tp_meta) {
+            (Some(a), Some(b)) => {
+                assert_eq!(a.tp_rank, b.tp_rank);
+                assert_eq!(a.tp_size, b.tp_size);
+                assert_eq!(a.single_layer, b.single_layer);
+                assert_eq!(a.phase, b.phase);
+            }
+            (None, None) => {}
+            _ => panic!("tp_meta presence mismatch"),
+        }
+    }
+
+    #[test]
+    fn roundtrip_minimal_forward() {
+        let orig = base_forward();
+        let bytes = encode_layer_forward(&orig).unwrap();
+        let decoded = decode_layer_forward(&bytes).unwrap();
+        assert_roundtrip_eq(&orig, &decoded);
+    }
+
+    #[test]
+    fn roundtrip_with_tp_meta_attn_only() {
+        let mut orig = base_forward();
+        orig.tp_meta = Some(TensorParallelMeta {
+            tp_rank: 2,
+            tp_size: 4,
+            single_layer: 17,
+            phase: TpPhase::AttnOnly,
+        });
+        let bytes = encode_layer_forward(&orig).unwrap();
+        let decoded = decode_layer_forward(&bytes).unwrap();
+        assert_roundtrip_eq(&orig, &decoded);
+    }
+
+    #[test]
+    fn roundtrip_with_tp_meta_ffn_only() {
+        let mut orig = base_forward();
+        orig.tp_meta = Some(TensorParallelMeta {
+            tp_rank: 0,
+            tp_size: 2,
+            single_layer: 0,
+            phase: TpPhase::FfnOnly,
+        });
+        let bytes = encode_layer_forward(&orig).unwrap();
+        let decoded = decode_layer_forward(&bytes).unwrap();
+        assert_roundtrip_eq(&orig, &decoded);
+    }
+
+    #[test]
+    fn roundtrip_all_tp_phases() {
+        for phase in [
+            TpPhase::Full,
+            TpPhase::AttnOnly,
+            TpPhase::FfnOnly,
+            TpPhase::EmbedOnly,
+        ] {
+            let mut orig = base_forward();
+            orig.tp_meta = Some(TensorParallelMeta {
+                tp_rank: 1,
+                tp_size: 4,
+                single_layer: 5,
+                phase: phase.clone(),
+            });
+            let bytes = encode_layer_forward(&orig).unwrap();
+            let decoded = decode_layer_forward(&bytes).unwrap();
+            assert_eq!(decoded.tp_meta.as_ref().unwrap().phase, phase);
+        }
+    }
+
+    #[test]
+    fn roundtrip_with_tp_meta_and_pre_embedded() {
+        let mut orig = base_forward();
+        orig.pre_embedded = true;
+        orig.tp_meta = Some(TensorParallelMeta {
+            tp_rank: 3,
+            tp_size: 4,
+            single_layer: 25,
+            phase: TpPhase::EmbedOnly,
+        });
+        let bytes = encode_layer_forward(&orig).unwrap();
+        let decoded = decode_layer_forward(&bytes).unwrap();
+        // pre_embedded is encoded inside the tp_meta trailer (one byte
+        // after phase). Without tp_meta, pre_embedded is not on the wire
+        // and decode returns false — that's a known limitation.
+        assert!(decoded.pre_embedded);
+        assert_eq!(decoded.tp_meta.unwrap().phase, TpPhase::EmbedOnly);
+    }
+
+    #[test]
+    fn roundtrip_with_speculative_drafts() {
+        let mut orig = base_forward();
+        orig.draft_tokens = vec![100, 101, 102, 103];
+        orig.spec_logits_requested = true;
+        let bytes = encode_layer_forward(&orig).unwrap();
+        let decoded = decode_layer_forward(&bytes).unwrap();
+        assert_eq!(decoded.draft_tokens, orig.draft_tokens);
+        assert!(decoded.spec_logits_requested);
+    }
+
+    #[test]
+    fn roundtrip_with_truncate_kv_to() {
+        let mut orig = base_forward();
+        orig.truncate_kv_to = Some(42);
+        let bytes = encode_layer_forward(&orig).unwrap();
+        let decoded = decode_layer_forward(&bytes).unwrap();
+        assert_eq!(decoded.truncate_kv_to, Some(42));
+    }
+
+    #[test]
+    fn roundtrip_with_all_optional_trailers() {
+        // tp_meta + speculative drafts + kv truncation all set. The
+        // decoder must scan trailers in marker order and not get
+        // confused by adjacency.
+        let mut orig = base_forward();
+        orig.tp_meta = Some(TensorParallelMeta {
+            tp_rank: 1,
+            tp_size: 2,
+            single_layer: 12,
+            phase: TpPhase::AttnOnly,
+        });
+        orig.pre_embedded = true;
+        orig.draft_tokens = vec![1, 2, 3, 4, 5];
+        orig.spec_logits_requested = true;
+        orig.truncate_kv_to = Some(99);
+
+        let bytes = encode_layer_forward(&orig).unwrap();
+        let decoded = decode_layer_forward(&bytes).unwrap();
+        assert_roundtrip_eq(&orig, &decoded);
+    }
+
+    #[test]
+    fn decoder_rejects_truncated_envelope() {
+        let orig = base_forward();
+        let bytes = encode_layer_forward(&orig).unwrap();
+        // Truncate to mid-header — decode should error, not panic.
+        let result = decode_layer_forward(&bytes[..15]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn decoder_rejects_truncated_activations() {
+        let orig = base_forward();
+        let mut bytes = encode_layer_forward(&orig).unwrap();
+        // Lop off the trailer — decoder should fail on missing
+        // layer_range/model_id trailer.
+        bytes.truncate(1 + 29 + orig.activations.len() + 3);
+        let result = decode_layer_forward(&bytes);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn decoder_skips_optional_tp_trailer_when_absent() {
+        let orig = base_forward();
+        let bytes = encode_layer_forward(&orig).unwrap();
+        let decoded = decode_layer_forward(&bytes).unwrap();
+        assert!(decoded.tp_meta.is_none());
+        assert!(decoded.draft_tokens.is_empty());
+        assert!(decoded.truncate_kv_to.is_none());
+    }
+
+    #[test]
+    fn formats_roundtrip_correctly() {
+        for fmt in [TensorFormat::FP16, TensorFormat::FP32, TensorFormat::INT8] {
+            let mut orig = base_forward();
+            orig.format = fmt.clone();
+            let bytes = encode_layer_forward(&orig).unwrap();
+            let decoded = decode_layer_forward(&bytes).unwrap();
+            // Compare via match since TensorFormat doesn't impl PartialEq.
+            let same = matches!(
+                (&decoded.format, &fmt),
+                (TensorFormat::FP16, TensorFormat::FP16)
+                    | (TensorFormat::FP32, TensorFormat::FP32)
+                    | (TensorFormat::INT8, TensorFormat::INT8)
+            );
+            assert!(same, "format roundtrip failed");
+        }
+    }
+}

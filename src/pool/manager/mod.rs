@@ -1389,3 +1389,345 @@ impl PoolManager {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Config;
+    use crate::identity::Identity;
+    use crate::storage::db::Database;
+    use tokio::sync::Mutex;
+
+    /// Build a fully-wired PoolManager backed by a temp database. Returns
+    /// (manager, shared_state, identity) so the caller can introspect /
+    /// mutate pool state directly to set up scenarios.
+    async fn build_test_pool_manager() -> (PoolManager, Arc<SharedState>, Identity) {
+        let config = Config::default();
+        let identity = Identity::generate();
+        let db = Database::open_temp().expect("temp db");
+        let executor = Arc::new(Mutex::new(crate::inference::executor::ModelExecutor::new()));
+
+        let (shared_state, _shutdown_rx, _dht_rx) =
+            SharedState::new(config, identity.clone(), db, executor, None);
+
+        let (_cmd_tx, cmd_rx) = mpsc::channel(16);
+        let (network_tx, _network_rx) = mpsc::channel(16);
+        let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+
+        let pm = PoolManager::new(shared_state.clone(), cmd_rx, network_tx, shutdown_rx);
+        (pm, shared_state, identity)
+    }
+
+    /// Synthesize a pool membership record for the given node — only
+    /// `node_id` matters for the handler under test.
+    fn membership_for(node_id: NodeId) -> PoolMembership {
+        let now = chrono::Utc::now();
+        PoolMembership {
+            node_id,
+            credits_contributed: 0,
+            joined_at: now,
+            acceptance_signature: Vec::new(),
+            invitation_id: uuid::Uuid::nil(),
+            device_name: None,
+            last_seen: Some(now),
+            online: true,
+            device_stats: None,
+            contribution_level: 100,
+        }
+    }
+
+    #[tokio::test]
+    async fn member_left_replay_protection_blocks_second_remove() {
+        let (mut pm, state, owner) = build_test_pool_manager().await;
+        pm.handle_create_pool("test-pool".into()).await.unwrap();
+
+        // Add a member and produce a signed leave notice.
+        let member = Identity::generate();
+        {
+            let mut ps = state.credits.pool_state.write().await;
+            if let Some(ref mut p) = *ps {
+                p.members.push(membership_for(member.node_id().clone()));
+            }
+        }
+
+        let pool_id = owner.node_id().clone();
+        let left_at = chrono::Utc::now().timestamp();
+        let nonce = uuid::Uuid::new_v4();
+        let payload =
+            crate::pool::crypto::member_left_payload(&pool_id, member.node_id(), left_at, &nonce);
+        let signature = member.sign(&payload);
+
+        // First call: removes the member.
+        pm.handle_inbound_member_left(
+            pool_id.clone(),
+            member.node_id().clone(),
+            left_at,
+            nonce,
+            signature.clone(),
+        )
+        .await;
+        assert_eq!(
+            state
+                .credits
+                .pool_state
+                .read()
+                .await
+                .as_ref()
+                .unwrap()
+                .members
+                .len(),
+            1,
+            "first leave notice must remove the member (only owner remains)"
+        );
+
+        // Re-add the member to set up the replay test.
+        {
+            let mut ps = state.credits.pool_state.write().await;
+            if let Some(ref mut p) = *ps {
+                p.members.push(membership_for(member.node_id().clone()));
+            }
+        }
+
+        // Replay: same nonce, same signature. Must NOT remove again — the
+        // replay key is already persisted from the first call.
+        pm.handle_inbound_member_left(pool_id, member.node_id().clone(), left_at, nonce, signature)
+            .await;
+        assert_eq!(
+            state
+                .credits
+                .pool_state
+                .read()
+                .await
+                .as_ref()
+                .unwrap()
+                .members
+                .len(),
+            2,
+            "replay (same nonce) must be rejected — member stays in the pool"
+        );
+    }
+
+    #[tokio::test]
+    async fn member_left_with_invalid_signature_rejected() {
+        let (mut pm, state, owner) = build_test_pool_manager().await;
+        pm.handle_create_pool("test-pool".into()).await.unwrap();
+
+        let member = Identity::generate();
+        let imposter = Identity::generate();
+        {
+            let mut ps = state.credits.pool_state.write().await;
+            if let Some(ref mut p) = *ps {
+                p.members.push(membership_for(member.node_id().clone()));
+            }
+        }
+
+        let left_at = chrono::Utc::now().timestamp();
+        let nonce = uuid::Uuid::new_v4();
+        // Imposter signs the payload with their own key but claims to be `member`.
+        let payload = crate::pool::crypto::member_left_payload(
+            owner.node_id(),
+            member.node_id(),
+            left_at,
+            &nonce,
+        );
+        let bad_signature = imposter.sign(&payload);
+
+        pm.handle_inbound_member_left(
+            owner.node_id().clone(),
+            member.node_id().clone(),
+            left_at,
+            nonce,
+            bad_signature,
+        )
+        .await;
+        assert_eq!(
+            state
+                .credits
+                .pool_state
+                .read()
+                .await
+                .as_ref()
+                .unwrap()
+                .members
+                .len(),
+            2,
+            "invalid signature must NOT remove the member"
+        );
+    }
+
+    #[tokio::test]
+    async fn member_left_with_stale_timestamp_rejected() {
+        let (mut pm, state, owner) = build_test_pool_manager().await;
+        pm.handle_create_pool("test-pool".into()).await.unwrap();
+
+        let member = Identity::generate();
+        {
+            let mut ps = state.credits.pool_state.write().await;
+            if let Some(ref mut p) = *ps {
+                p.members.push(membership_for(member.node_id().clone()));
+            }
+        }
+
+        // Timestamp 10 minutes ago — beyond the ±5min freshness window.
+        let stale = chrono::Utc::now().timestamp() - 600;
+        let nonce = uuid::Uuid::new_v4();
+        let payload = crate::pool::crypto::member_left_payload(
+            owner.node_id(),
+            member.node_id(),
+            stale,
+            &nonce,
+        );
+        let signature = member.sign(&payload);
+
+        pm.handle_inbound_member_left(
+            owner.node_id().clone(),
+            member.node_id().clone(),
+            stale,
+            nonce,
+            signature,
+        )
+        .await;
+        assert_eq!(
+            state
+                .credits
+                .pool_state
+                .read()
+                .await
+                .as_ref()
+                .unwrap()
+                .members
+                .len(),
+            2,
+            "stale timestamp must NOT remove the member"
+        );
+    }
+
+    #[tokio::test]
+    async fn member_left_for_other_pool_id_ignored() {
+        // Notices for a different pool_id (not us) must short-circuit.
+        let (mut pm, state, _owner) = build_test_pool_manager().await;
+        pm.handle_create_pool("test-pool".into()).await.unwrap();
+
+        let other_owner = Identity::generate();
+        let member = Identity::generate();
+        {
+            let mut ps = state.credits.pool_state.write().await;
+            if let Some(ref mut p) = *ps {
+                p.members.push(membership_for(member.node_id().clone()));
+            }
+        }
+
+        let left_at = chrono::Utc::now().timestamp();
+        let nonce = uuid::Uuid::new_v4();
+        let payload = crate::pool::crypto::member_left_payload(
+            other_owner.node_id(),
+            member.node_id(),
+            left_at,
+            &nonce,
+        );
+        let signature = member.sign(&payload);
+
+        pm.handle_inbound_member_left(
+            other_owner.node_id().clone(),
+            member.node_id().clone(),
+            left_at,
+            nonce,
+            signature,
+        )
+        .await;
+        assert_eq!(
+            state
+                .credits
+                .pool_state
+                .read()
+                .await
+                .as_ref()
+                .unwrap()
+                .members
+                .len(),
+            2,
+            "leave notice for someone else's pool must NOT touch our state"
+        );
+    }
+
+    #[tokio::test]
+    async fn join_request_ignored_when_not_pool_owner() {
+        // No pool created — this node is not an owner. Inbound join
+        // requests must short-circuit without panicking.
+        let (mut pm, _state, _owner) = build_test_pool_manager().await;
+        let requester = Identity::generate();
+        let code_hash = [0u8; 32];
+
+        pm.handle_inbound_join_request(code_hash, requester.node_id().clone())
+            .await;
+        // No panic, no auto-invitation created.
+        assert_eq!(pm.pending_invitations.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn join_request_with_unknown_code_ignored() {
+        let (mut pm, _state, _owner) = build_test_pool_manager().await;
+        pm.handle_create_pool("test-pool".into()).await.unwrap();
+
+        let requester = Identity::generate();
+        // Code hash that's not in our invite_codes map.
+        let unknown_hash = [0u8; 32];
+
+        pm.handle_inbound_join_request(unknown_hash, requester.node_id().clone())
+            .await;
+        assert_eq!(
+            pm.pending_invitations.len(),
+            0,
+            "unknown code hash must not auto-invite"
+        );
+    }
+
+    #[tokio::test]
+    async fn join_request_with_consumed_code_ignored() {
+        let (mut pm, _state, _owner) = build_test_pool_manager().await;
+        pm.handle_create_pool("test-pool".into()).await.unwrap();
+
+        // Insert a code marked as already consumed.
+        let pool_id = pm.shared_state.identity.node_id().clone();
+        let mut code = PoolInviteCode::generate(&pool_id, 24);
+        code.consumed = true;
+        let hash = code.code_hash;
+        pm.invite_codes.insert(hash, code);
+
+        let requester = Identity::generate();
+        pm.handle_inbound_join_request(hash, requester.node_id().clone())
+            .await;
+        assert_eq!(
+            pm.pending_invitations.len(),
+            0,
+            "consumed code must not auto-invite"
+        );
+    }
+
+    #[tokio::test]
+    async fn join_request_with_valid_code_consumes_and_invites() {
+        let (mut pm, _state, _owner) = build_test_pool_manager().await;
+        pm.handle_create_pool("test-pool".into()).await.unwrap();
+
+        let pool_id = pm.shared_state.identity.node_id().clone();
+        let code = PoolInviteCode::generate(&pool_id, 24);
+        let hash = code.code_hash;
+        pm.invite_codes.insert(hash, code);
+
+        let requester = Identity::generate();
+        pm.handle_inbound_join_request(hash, requester.node_id().clone())
+            .await;
+
+        // Code was consumed (one-time use).
+        assert!(
+            pm.invite_codes.get(&hash).unwrap().consumed,
+            "valid join request must consume the code"
+        );
+        // Auto-invitation was created.
+        assert_eq!(
+            pm.pending_invitations.len(),
+            1,
+            "valid join request must create an auto-invitation"
+        );
+    }
+}
