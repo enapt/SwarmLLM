@@ -138,7 +138,7 @@ libp2p 0.56, axum 0.8, candle-core/candle-transformers 0.10 (CUDA), redb 4, ed25
 
 ## Testing
 
-- 837 lib tests, clippy clean
+- 869 lib tests, clippy clean
 - Unit tests: in-module `#[cfg(test)]` blocks
 - Integration tests: `tests/integration/` — multi-node simulations with `--test-threads=1`
 - Test model: `tests/fixtures/tiny_model/` — 2-layer, 128 hidden dim, ~1MB, 2 shards
@@ -174,7 +174,7 @@ When spawning subagents in this repo, use these model picks (overrides defaults 
 
 ## Status
 
-All 20 build phases complete. All subsystems wired — no stubs. 837 lib tests passing. Deferred items in `docs/ARCHITECTURE.md` § "Deferred Items". See `memory/refactor_plan.md` for remaining large-file splits.
+All 20 build phases complete. All subsystems wired — no stubs. 869 lib tests passing. Deferred items in `docs/ARCHITECTURE.md` § "Deferred Items". See `memory/refactor_plan.md` for remaining large-file splits.
 
 ## Common Commands
 
