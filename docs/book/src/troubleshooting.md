@@ -136,7 +136,7 @@ probe never fires because no peer passes the trust gate.
 
 ## Running the Test Suite
 
-SwarmLLM ships 821 lib tests + integration + VLM E2E.
+SwarmLLM ships 823 lib tests + integration + VLM E2E.
 
 ```bash
 # Run all tests (release, used in CI)
