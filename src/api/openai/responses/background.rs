@@ -584,6 +584,65 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn notified_registered_before_push_is_not_lost() {
+        // Regression: serve_resume_stream uses the
+        // "register notified() → check buffer → await" idiom because
+        // tokio::Notify::notify_waiters() only wakes already-registered
+        // waiters. If we accidentally swap the order (check then
+        // register), a push between the two steps is a lost wakeup
+        // and the resumer sleeps for RESUME_STREAM_MAX_IDLE_SECS=3600s.
+        //
+        // This test exercises the documented contract: a push that
+        // happens AFTER notified() is registered MUST wake the
+        // pending future.
+        let state = Arc::new(BackgroundState::new(Arc::new(AtomicBool::new(false))));
+
+        let notified = state.notify.notified();
+        tokio::pin!(notified);
+
+        // Push the event. notify_waiters() inside push() must wake
+        // the registered future.
+        state
+            .push(BufferedEvent {
+                sequence_number: 1,
+                event_name: "x".into(),
+                data: serde_json::json!({}),
+            })
+            .await;
+
+        // Should resolve nearly immediately; cap at 100ms generously.
+        let woke = tokio::time::timeout(std::time::Duration::from_millis(100), notified)
+            .await
+            .is_ok();
+        assert!(
+            woke,
+            "notify_waiters() after register-then-pin notified() must wake the future"
+        );
+    }
+
+    #[tokio::test]
+    async fn mark_completed_wakes_existing_waiters() {
+        // Same contract for the completion path: mark_completed()
+        // calls notify_waiters() so resumers blocking on notified
+        // discover the terminal state without polling.
+        let state = Arc::new(BackgroundState::new(Arc::new(AtomicBool::new(false))));
+
+        let notified = state.notify.notified();
+        tokio::pin!(notified);
+
+        state.mark_completed().await;
+
+        let woke = tokio::time::timeout(std::time::Duration::from_millis(100), notified)
+            .await
+            .is_ok();
+        assert!(
+            woke,
+            "mark_completed() must wake registered notified() futures"
+        );
+        assert!(state.completed.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
     async fn events_after_filters_by_cursor() {
         let state = BackgroundState::new(Arc::new(AtomicBool::new(false)));
         for i in 0..5u64 {

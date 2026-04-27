@@ -884,3 +884,55 @@ pub(crate) fn pressure_adjusted_target(target: u32, pressure: f64, min_replicas:
         target.saturating_sub(2).max(min_replicas)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn relaxed_pressure_adds_one_extra_replica() {
+        // < 0.5 pressure: keep more replicas around (network is not
+        // hot, so over-replicate slightly for redundancy).
+        assert_eq!(pressure_adjusted_target(3, 0.0, 1), 4);
+        assert_eq!(pressure_adjusted_target(3, 0.49, 1), 4);
+    }
+
+    #[test]
+    fn normal_pressure_keeps_target() {
+        // 0.5..0.8: replica target stays as-is.
+        assert_eq!(pressure_adjusted_target(3, 0.5, 1), 3);
+        assert_eq!(pressure_adjusted_target(3, 0.79, 1), 3);
+    }
+
+    #[test]
+    fn eager_pressure_reduces_by_one() {
+        // 0.8..0.95: shed one replica to free disk/VRAM.
+        assert_eq!(pressure_adjusted_target(3, 0.80, 1), 2);
+        assert_eq!(pressure_adjusted_target(3, 0.94, 1), 2);
+    }
+
+    #[test]
+    fn urgent_pressure_reduces_by_two() {
+        // ≥0.95: shed two replicas — the swarm is at capacity.
+        assert_eq!(pressure_adjusted_target(5, 0.95, 1), 3);
+        assert_eq!(pressure_adjusted_target(5, 1.0, 1), 3);
+    }
+
+    #[test]
+    fn pressure_adjustment_floors_at_min_replicas() {
+        // Even under urgent pressure, must not drop below min_replicas.
+        assert_eq!(pressure_adjusted_target(3, 1.0, 3), 3);
+        assert_eq!(pressure_adjusted_target(2, 0.95, 1), 1);
+        // mmproj uses min=3 — at urgent pressure with only 2-3 replicas
+        // should clamp at 3 not 1.
+        assert_eq!(pressure_adjusted_target(3, 1.0, 3), 3);
+    }
+
+    #[test]
+    fn pressure_adjustment_handles_saturating_sub() {
+        // target=1, urgent pressure → saturating_sub(2) = 0 → max(0, min=1) = 1.
+        assert_eq!(pressure_adjusted_target(1, 1.0, 1), 1);
+        // target=0, any pressure → saturating_sub never goes negative.
+        assert_eq!(pressure_adjusted_target(0, 1.0, 0), 0);
+    }
+}

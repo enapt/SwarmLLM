@@ -185,6 +185,23 @@ impl RateLimiter {
     }
 }
 
+/// Whether `path` is an admin GET that proxies to an external service
+/// (HuggingFace, configured cloud providers). These paths stay
+/// rate-limited even from loopback so a runaway local script — or a
+/// malicious browser extension running on localhost:8800 — can't loop-
+/// call them and burn HuggingFace / cloud-provider API quota or get our
+/// IP banned.
+///
+/// Use prefix matching for `/api/admin/hf/source/*` — the model_id path
+/// param means the canonical path varies per request and exact-match
+/// would miss everything.
+fn is_outbound_admin_path(path: &str) -> bool {
+    path == "/api/admin/hf/probe"
+        || path == "/api/admin/hf/search"
+        || path == "/api/admin/provider-health"
+        || path.starts_with("/api/admin/hf/source/")
+}
+
 /// Rate-limiting middleware.
 ///
 /// Returns HTTP 429 Too Many Requests when a client exceeds their per-minute
@@ -213,17 +230,7 @@ pub async fn rate_limit_middleware(
     // API quota or get our IP banned.
     let is_loopback = addr.ip().is_loopback();
     let is_admin_get = path.starts_with("/api/admin/") && !is_mutating;
-    // Outbound-call endpoints stay rate-limited even from loopback so a
-    // local script can't burn HuggingFace / cloud-provider API quota or
-    // get our IP banned. Use prefix matching for /api/admin/hf/source/* —
-    // the model_id path param means the canonical path varies per request
-    // and exact-match misses everything. /api/admin/provider-health is GET
-    // but probes configured cloud providers, so it belongs here too.
-    let is_outbound_admin = path == "/api/admin/hf/probe"
-        || path == "/api/admin/hf/search"
-        || path == "/api/admin/provider-health"
-        || path.starts_with("/api/admin/hf/source/");
-    if is_loopback && is_admin_get && !is_outbound_admin {
+    if is_loopback && is_admin_get && !is_outbound_admin_path(&path) {
         return next.run(req).await;
     }
 
@@ -500,6 +507,38 @@ pub async fn auth_middleware(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn outbound_admin_carve_out_catches_hf_probe_and_search() {
+        // Loopback admin GET fast-path must NOT exempt these.
+        assert!(is_outbound_admin_path("/api/admin/hf/probe"));
+        assert!(is_outbound_admin_path("/api/admin/hf/search"));
+        assert!(is_outbound_admin_path("/api/admin/provider-health"));
+    }
+
+    #[test]
+    fn outbound_admin_carve_out_uses_prefix_for_hf_source() {
+        // The canonical path varies per model_id (e.g.
+        // /api/admin/hf/source/microsoft%2FPhi-3.5-mini). Prefix
+        // matching catches every variant.
+        assert!(is_outbound_admin_path("/api/admin/hf/source/abc"));
+        assert!(is_outbound_admin_path(
+            "/api/admin/hf/source/TinyLlama%2FTinyLlama-1.1B-Chat"
+        ));
+    }
+
+    #[test]
+    fn outbound_admin_carve_out_does_not_match_unrelated_admin() {
+        // Read-only dashboard endpoints stay loopback-exempt.
+        assert!(!is_outbound_admin_path("/api/admin/stats"));
+        assert!(!is_outbound_admin_path("/api/admin/peers"));
+        assert!(!is_outbound_admin_path("/api/admin/models"));
+        assert!(!is_outbound_admin_path("/api/admin/network-map"));
+        // Non-admin paths short-circuit elsewhere; sanity-check anyway.
+        assert!(!is_outbound_admin_path("/v1/chat/completions"));
+        assert!(!is_outbound_admin_path("/api/admin/hf"));
+        assert!(!is_outbound_admin_path("/api/admin/hf/source"));
+    }
 
     #[test]
     fn same_origin_gate_accepts_matching_origin_header() {
