@@ -1195,6 +1195,19 @@ pub fn resolve_data_dir(cli_data_dir: Option<&std::path::Path>) -> PathBuf {
     default_data_dir()
 }
 
+/// Parse the `SWARMLLM_NETWORK_BOOTSTRAP_PEERS` env var value into a
+/// list of multiaddrs. Splits on commas and any whitespace (newline,
+/// tab, space) so users can paste either a comma list or a multi-line
+/// `.env` value; empty entries are dropped.
+pub(crate) fn parse_bootstrap_peers_env(value: &str) -> Vec<String> {
+    value
+        .split(|c: char| c == ',' || c.is_whitespace())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+        .collect()
+}
+
 /// Read the HuggingFace API token from standard env vars (`HF_TOKEN` preferred,
 /// `HUGGING_FACE_HUB_TOKEN` fallback). Returns `None` if unset or empty.
 /// Lives here so all external-service credentials flow through `config`.
@@ -1540,6 +1553,25 @@ impl Config {
                 ),
             }
         }
+        // Bearer token for the HTTP API. Advertised in `.env.example` for
+        // Docker deployments where users need a deterministic key (vs. the
+        // auto-generated 32-byte one) without baking it into config.toml.
+        // Empty string is treated as "unset" so commenting `SWARMLLM_API_KEY=`
+        // doesn't blank the persisted key.
+        if let Ok(val) = std::env::var("SWARMLLM_API_KEY") {
+            if !val.is_empty() {
+                config.api.api_key = Some(val);
+            }
+        }
+        // Bootstrap peers as a comma-, space-, or newline-separated list of
+        // multiaddrs. Mirrors `--bootstrap` on the CLI for headless
+        // deployments. Empty entries are filtered.
+        if let Ok(val) = std::env::var("SWARMLLM_NETWORK_BOOTSTRAP_PEERS") {
+            let peers = parse_bootstrap_peers_env(&val);
+            if !peers.is_empty() {
+                config.network.bootstrap_peers = peers;
+            }
+        }
 
         // 4. Apply CLI overrides (highest priority)
         if let Some(port) = cli_port {
@@ -1747,6 +1779,35 @@ max_concurrent_requests = 5
         )
         .unwrap();
         assert_eq!(config.node.listen_port, 9999);
+    }
+
+    #[test]
+    fn bootstrap_peers_env_parses_commas_and_whitespace() {
+        // Comma-separated.
+        let parsed = parse_bootstrap_peers_env(
+            "/ip4/1.1.1.1/udp/8800/quic-v1,/ip4/2.2.2.2/udp/8800/quic-v1",
+        );
+        assert_eq!(
+            parsed,
+            vec![
+                "/ip4/1.1.1.1/udp/8800/quic-v1".to_string(),
+                "/ip4/2.2.2.2/udp/8800/quic-v1".to_string(),
+            ]
+        );
+
+        // Whitespace and newlines (multi-line .env value).
+        let parsed = parse_bootstrap_peers_env(
+            "/ip4/1.1.1.1/udp/8800/quic-v1\n/ip4/2.2.2.2/udp/8800/quic-v1",
+        );
+        assert_eq!(parsed.len(), 2);
+
+        // Mixed separators with empty entries.
+        let parsed = parse_bootstrap_peers_env(", ,/ip4/1.1.1.1/udp/8800/quic-v1, , ,");
+        assert_eq!(parsed, vec!["/ip4/1.1.1.1/udp/8800/quic-v1".to_string()]);
+
+        // Empty string yields no peers.
+        assert!(parse_bootstrap_peers_env("").is_empty());
+        assert!(parse_bootstrap_peers_env("   \n  ").is_empty());
     }
 
     #[test]
