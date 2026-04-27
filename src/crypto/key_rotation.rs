@@ -2,6 +2,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::{mpsc, watch};
+use tokio::time::Instant;
 
 use super::session::SessionManager;
 use crate::types::{EphemeralKeyExchange, NetworkCommand, NodeId, SwarmMessage};
@@ -16,12 +17,23 @@ const MAX_SESSION_AGE: Duration = Duration::from_secs(600);
 /// forward secrecy. Static DH sessions are replaced with ephemeral ones.
 const KEY_ROTATION_INTERVAL: Duration = Duration::from_secs(600);
 
+/// Half-period offset between rotation and eviction. Rotation always
+/// runs when peers are mid-life (~300s old), so a `tokio::select!`
+/// race between the two timers can never strand a peer between
+/// "evicted by age" and "scheduled to be re-keyed". Without this
+/// offset, both timers would fire at the same wall-clock instant
+/// every 600 s and the select! would non-deterministically pick one.
+const ROTATION_PHASE_OFFSET: Duration = Duration::from_secs(300);
+
 /// Run the background key rotation and session cleanup task.
 ///
 /// - Evicts stale encryption sessions every 10 minutes.
 /// - Initiates ephemeral ECDH re-keying with active peers every 10 minutes
 ///   for forward secrecy. Old static-key sessions are replaced with
 ///   ephemeral ones derived from fresh keypairs.
+/// - The two timers are staggered by half a period so they never tick on
+///   the same select-loop iteration (avoiding a race where eviction
+///   removes the peers rotation was just about to refresh).
 /// - Runs until shutdown signal.
 pub async fn run_key_rotation(
     session_manager: Arc<SessionManager>,
@@ -30,13 +42,19 @@ pub async fn run_key_rotation(
     shared_state: Arc<crate::daemon::SharedState>,
     mut shutdown_rx: watch::Receiver<bool>,
 ) {
-    let mut eviction_interval = tokio::time::interval(SESSION_EVICTION_INTERVAL);
+    let now = Instant::now();
+    // Eviction first tick at +600s, then every 600s.
+    let mut eviction_interval =
+        tokio::time::interval_at(now + SESSION_EVICTION_INTERVAL, SESSION_EVICTION_INTERVAL);
     eviction_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
-    let mut rotation_interval = tokio::time::interval(KEY_ROTATION_INTERVAL);
+    // Rotation first tick at +900s (offset 300s past first eviction), then every 600s.
+    // Net cadence: eviction at t=600, 1200, 1800; rotation at t=900, 1500, 2100. Never collide.
+    let mut rotation_interval = tokio::time::interval_at(
+        now + KEY_ROTATION_INTERVAL + ROTATION_PHASE_OFFSET,
+        KEY_ROTATION_INTERVAL,
+    );
     rotation_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    // Skip the first tick (don't rotate immediately on startup)
-    rotation_interval.tick().await;
 
     tracing::info!("Key rotation task started (eviction + ephemeral re-keying)");
 
