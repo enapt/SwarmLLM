@@ -477,21 +477,145 @@ mod tests {
         }
     }
 
-    #[test]
-    fn top_p_with_ctx_matches_allocating_version() {
-        let logits_orig = vec![1.0, 5.0, 3.0, 0.5, 4.0];
-
-        let mut logits_a = logits_orig.clone();
-        let mut ctx_a = SamplingContext::new(logits_a.len());
-        apply_top_p_with_ctx(&mut logits_a, 0.8, &mut ctx_a);
-
-        let mut logits_b = logits_orig.clone();
-        let mut ctx_b = SamplingContext::new(logits_b.len());
-        apply_top_p_with_ctx(&mut logits_b, 0.8, &mut ctx_b);
-
-        for (a, b) in logits_a.iter().zip(logits_b.iter()) {
-            assert!((a - b).abs() < f32::EPSILON || (a.is_infinite() && b.is_infinite()));
+    /// Naive O(n log n) reference implementation of top-p (nucleus)
+    /// filtering. Used by tests as ground truth for the optimized
+    /// partial-sort version. Mirrors the spec: softmax → full descending
+    /// sort → walk accumulating mass until ≥ p → mask the rest.
+    fn naive_top_p(logits: &mut [f32], p: f32) {
+        if p >= 1.0 {
+            return;
         }
+        let len = logits.len();
+        let max_logit = logits.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+        let mut probs: Vec<f32> = logits.iter().map(|l| (l - max_logit).exp()).collect();
+        let sum: f32 = probs.iter().sum();
+        if sum <= 0.0 || !sum.is_finite() {
+            return;
+        }
+        for prob in probs.iter_mut() {
+            *prob /= sum;
+        }
+
+        let mut indices: Vec<usize> = (0..len).collect();
+        indices.sort_unstable_by(|&a, &b| {
+            probs[b]
+                .partial_cmp(&probs[a])
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        let mut keep = vec![false; len];
+        let mut cumulative = 0.0;
+        for &idx in &indices {
+            cumulative += probs[idx];
+            keep[idx] = true;
+            if cumulative >= p {
+                break;
+            }
+        }
+
+        for (i, logit) in logits.iter_mut().enumerate() {
+            if !keep[i] {
+                *logit = f32::NEG_INFINITY;
+            }
+        }
+    }
+
+    fn assert_logits_match(actual: &[f32], expected: &[f32], label: &str) {
+        for (i, (a, b)) in actual.iter().zip(expected.iter()).enumerate() {
+            let both_inf = a.is_infinite() && b.is_infinite();
+            assert!(
+                both_inf || (a - b).abs() < 1e-5,
+                "{label}: index {i} mismatch (actual={a}, expected={b})"
+            );
+        }
+    }
+
+    #[test]
+    fn top_p_with_ctx_matches_naive_small() {
+        let logits_orig = vec![1.0, 5.0, 3.0, 0.5, 4.0];
+        let mut actual = logits_orig.clone();
+        let mut ctx = SamplingContext::new(actual.len());
+        apply_top_p_with_ctx(&mut actual, 0.8, &mut ctx);
+
+        let mut expected = logits_orig.clone();
+        naive_top_p(&mut expected, 0.8);
+
+        assert_logits_match(&actual, &expected, "small p=0.8");
+    }
+
+    #[test]
+    fn top_p_with_ctx_matches_naive_across_p_values() {
+        let logits_orig = vec![0.1, 0.2, 0.3, 5.0, 4.5, 0.05, 3.0, 2.0, 1.0, 0.8];
+        for p in [0.1_f32, 0.5, 0.7, 0.9, 0.95, 0.999] {
+            let mut actual = logits_orig.clone();
+            let mut ctx = SamplingContext::new(actual.len());
+            apply_top_p_with_ctx(&mut actual, p, &mut ctx);
+
+            let mut expected = logits_orig.clone();
+            naive_top_p(&mut expected, p);
+
+            assert_logits_match(&actual, &expected, &format!("p={p}"));
+        }
+    }
+
+    #[test]
+    fn top_p_with_ctx_matches_naive_large_vocab_fast_path() {
+        // 5000 elements > TOP_P_PARTIAL_K (4096) so the partial-sort
+        // fast path exercises its prefix walk; very sharp distribution
+        // (top-3 carry essentially all probability mass) so the
+        // nucleus is small enough to clear p=0.9 inside the top-K
+        // and the fallback path doesn't fire. Use distinct logits
+        // (all 5000 tokens have unique values) to avoid ordering
+        // ambiguity on tied probabilities — both impls would be
+        // spec-correct picking different tied tokens, but the test
+        // wants bitwise equivalence.
+        let len = 5000;
+        let mut logits_orig: Vec<f32> = (0..len).map(|i| -(i as f32) * 1e-3).collect();
+        logits_orig[2500] = 10.0;
+        logits_orig[100] = 8.0;
+        logits_orig[3700] = 5.0;
+
+        let mut actual = logits_orig.clone();
+        let mut ctx = SamplingContext::new(actual.len());
+        apply_top_p_with_ctx(&mut actual, 0.9, &mut ctx);
+
+        let mut expected = logits_orig.clone();
+        naive_top_p(&mut expected, 0.9);
+
+        assert_logits_match(&actual, &expected, "large vocab fast path");
+    }
+
+    #[test]
+    fn top_p_with_ctx_matches_naive_large_vocab_fallback() {
+        // 5000 elements, near-uniform distribution, p=0.999 → the
+        // nucleus is wider than TOP_P_PARTIAL_K, forcing the
+        // tail-sort fallback. Use a deterministic spread so the test
+        // is reproducible.
+        let len = 5000;
+        let logits_orig: Vec<f32> = (0..len).map(|i| (i as f32) / 1e5).collect();
+
+        let mut actual = logits_orig.clone();
+        let mut ctx = SamplingContext::new(actual.len());
+        apply_top_p_with_ctx(&mut actual, 0.999, &mut ctx);
+
+        let mut expected = logits_orig.clone();
+        naive_top_p(&mut expected, 0.999);
+
+        assert_logits_match(&actual, &expected, "large vocab fallback");
+        // Sanity: with p very close to 1, the optimized version should
+        // keep ~all tokens — masked count should match naive exactly.
+        let actual_kept = actual.iter().filter(|x| x.is_finite()).count();
+        let expected_kept = expected.iter().filter(|x| x.is_finite()).count();
+        assert_eq!(actual_kept, expected_kept);
+    }
+
+    #[test]
+    fn top_p_p_one_or_above_is_identity() {
+        let logits_orig = vec![1.0, 5.0, 3.0, 0.5, 4.0];
+        let mut actual = logits_orig.clone();
+        let mut ctx = SamplingContext::new(actual.len());
+        apply_top_p_with_ctx(&mut actual, 1.0, &mut ctx);
+        assert_eq!(actual, logits_orig);
     }
 
     #[test]
