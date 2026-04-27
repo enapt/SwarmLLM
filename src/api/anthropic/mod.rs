@@ -344,13 +344,7 @@ pub async fn messages(
                 provider = %provider_name,
                 "DIAG: anthropic→openai translation proxy to cloud provider"
             );
-            return handlers::anthropic_to_openai_proxy(
-                &req,
-                &internal_messages,
-                &provider_url,
-                &provider_key,
-            )
-            .await;
+            return handlers::anthropic_to_openai_proxy(&req, &provider_url, &provider_key).await;
         }
     }
 

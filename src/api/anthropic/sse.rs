@@ -16,9 +16,23 @@ pub(super) enum AnthropicSseEvent {
     ContentBlockStart {
         index: u32,
     },
+    /// Open a `tool_use` content block. Used by the OpenAI→Anthropic
+    /// streaming translator to surface upstream `tool_calls` chunks.
+    ContentBlockStartToolUse {
+        index: u32,
+        id: String,
+        name: String,
+    },
     ContentBlockDelta {
         index: u32,
         text: String,
+    },
+    /// `input_json_delta` for an open `tool_use` block. Anthropic streams
+    /// the tool-call arguments as a sequence of partial JSON fragments
+    /// the client concatenates and parses at content_block_stop.
+    ContentBlockInputJsonDelta {
+        index: u32,
+        partial_json: String,
     },
     ContentBlockStop {
         index: u32,
@@ -59,12 +73,38 @@ pub(super) fn serialize_anthropic_event(event: &AnthropicSseEvent) -> (&'static 
             })
             .to_string(),
         ),
+        AnthropicSseEvent::ContentBlockStartToolUse { index, id, name } => (
+            "content_block_start",
+            serde_json::json!({
+                "type": "content_block_start",
+                "index": index,
+                "content_block": {
+                    "type": "tool_use",
+                    "id": id,
+                    "name": name,
+                    "input": {}
+                }
+            })
+            .to_string(),
+        ),
         AnthropicSseEvent::ContentBlockDelta { index, text } => (
             "content_block_delta",
             serde_json::json!({
                 "type": "content_block_delta",
                 "index": index,
                 "delta": { "type": "text_delta", "text": text }
+            })
+            .to_string(),
+        ),
+        AnthropicSseEvent::ContentBlockInputJsonDelta {
+            index,
+            partial_json,
+        } => (
+            "content_block_delta",
+            serde_json::json!({
+                "type": "content_block_delta",
+                "index": index,
+                "delta": { "type": "input_json_delta", "partial_json": partial_json }
             })
             .to_string(),
         ),
