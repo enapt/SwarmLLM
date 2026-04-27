@@ -73,6 +73,12 @@ pub enum SwarmError {
     #[error("Validation error: {0}")]
     Validation(String),
 
+    // Resource lookup miss (generic 404 — distinct from Validation 400). Use
+    // for endpoints where the request shape is fine but the named resource
+    // (response id, session id, etc.) doesn't exist in the store.
+    #[error("Not found: {0}")]
+    NotFound(String),
+
     // Config
     #[error("Configuration error: {0}")]
     Config(String),
@@ -205,6 +211,9 @@ impl IntoResponse for ApiError {
                 "invalid_request_error",
             ),
             SwarmError::ShardNotFound(_) => {
+                (StatusCode::NOT_FOUND, self.0.to_string(), "not_found_error")
+            }
+            SwarmError::NotFound(_) => {
                 (StatusCode::NOT_FOUND, self.0.to_string(), "not_found_error")
             }
             _ => {

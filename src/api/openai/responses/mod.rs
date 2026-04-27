@@ -762,7 +762,9 @@ pub async fn get_response(
     validate_response_id(&id)?;
     match store::load(&state.db, &id).map_err(ApiError)? {
         Some(record) => Ok((StatusCode::OK, Json(record.response)).into_response()),
-        None => Err(ApiError(SwarmError::Validation(format!(
+        // Unknown id is a resource lookup miss, not a request-shape problem,
+        // so emit 404 (matches OpenAI's behavior on the same endpoint).
+        None => Err(ApiError(SwarmError::NotFound(format!(
             "Response `{id}` not found or expired. Retention is 30 days; \
              pass store=false to opt out of persistence."
         )))),
@@ -771,7 +773,7 @@ pub async fn get_response(
 
 /// `POST /v1/responses/:id/cancel` — flip the cancel flag and mark the
 /// stored record as `cancelled`. Idempotent: a second call is a no-op.
-/// Returns the updated response. 400 if the id is unknown.
+/// Returns the updated response. 404 if the id is unknown.
 pub async fn cancel_response(
     State(state): State<AppState>,
     axum::extract::Path(id): axum::extract::Path<String>,
@@ -794,7 +796,7 @@ pub async fn cancel_response(
             store::store(&state.db, &record).map_err(ApiError)?;
             Ok((StatusCode::OK, Json(record.response)).into_response())
         }
-        None => Err(ApiError(SwarmError::Validation(format!(
+        None => Err(ApiError(SwarmError::NotFound(format!(
             "Response `{id}` not found or expired. Cancel only applies to \
              background responses with store=true (the default)."
         )))),
@@ -864,7 +866,8 @@ pub async fn list_input_items(
     let record = store::load(&state.db, &id)
         .map_err(ApiError)?
         .ok_or_else(|| {
-            ApiError(SwarmError::Validation(format!(
+            // Unknown id → 404; the request shape is fine.
+            ApiError(SwarmError::NotFound(format!(
                 "Response `{id}` not found or expired. Retention is 30 days; \
                  pass store=false to opt out of persistence."
             )))

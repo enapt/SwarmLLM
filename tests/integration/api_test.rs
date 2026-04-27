@@ -522,6 +522,163 @@ async fn response_format_json_schema_accepted() {
 }
 
 /// V7: tool role messages parse correctly.
+// ============================================================================
+// /v1/responses (OpenAI Responses API) integration tests
+//
+// The test scaffold has no router/inference, so well-formed requests for
+// inference paths return 503 (no model). These tests verify the
+// auth/validation/translation surface of the Responses endpoint —
+// malformed bodies → 400/422, unauthenticated → 401, well-formed →
+// 503 (proves the request body parsed and reached the inference layer).
+// ============================================================================
+
+#[tokio::test]
+async fn responses_endpoint_requires_authentication() {
+    let (base, _key) = spawn_test_server().await;
+    let resp = reqwest::Client::new()
+        .post(format!("{base}/v1/responses"))
+        .json(&serde_json::json!({"model": "test", "input": "hi"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 401, "responses POST without bearer must 401");
+}
+
+#[tokio::test]
+async fn responses_endpoint_text_input_parses() {
+    let (base, key) = spawn_test_server().await;
+    let client = auth_client(&key);
+    // Plain text input form (string-shaped `input`).
+    let resp = client
+        .post(format!("{base}/v1/responses"))
+        .json(&serde_json::json!({
+            "model": "test",
+            "input": "hello world"
+        }))
+        .send()
+        .await
+        .unwrap();
+    // 503 = no model (request body parsed and routed); NOT 400/422.
+    assert_eq!(
+        resp.status(),
+        503,
+        "well-formed text input must reach inference path (no model → 503)"
+    );
+}
+
+#[tokio::test]
+async fn responses_endpoint_array_input_with_function_call_parses() {
+    let (base, key) = spawn_test_server().await;
+    let client = auth_client(&key);
+    // Multi-turn input array: user message + prior function_call +
+    // function_call_output. Exercises the translate.rs roundtrip
+    // for tool-calling conversations.
+    let resp = client
+        .post(format!("{base}/v1/responses"))
+        .json(&serde_json::json!({
+            "model": "test",
+            "input": [
+                {"type": "message", "role": "user", "content": "What's the weather?"},
+                {"type": "function_call", "call_id": "c1", "name": "get_weather", "arguments": "{\"loc\":\"NYC\"}"},
+                {"type": "function_call_output", "call_id": "c1", "output": "72F sunny"},
+            ]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        503,
+        "multi-turn tool input must parse + route"
+    );
+}
+
+#[tokio::test]
+async fn responses_endpoint_with_tools_definition_parses() {
+    let (base, key) = spawn_test_server().await;
+    let client = auth_client(&key);
+    let resp = client
+        .post(format!("{base}/v1/responses"))
+        .json(&serde_json::json!({
+            "model": "test",
+            "input": "use the tool",
+            "tools": [{
+                "type": "function",
+                "name": "lookup",
+                "description": "find a thing",
+                "parameters": {"type": "object", "properties": {"q": {"type": "string"}}}
+            }],
+            "tool_choice": "auto"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 503, "tools definition must parse");
+}
+
+#[tokio::test]
+async fn responses_endpoint_get_unknown_id_404() {
+    let (base, key) = spawn_test_server().await;
+    let client = auth_client(&key);
+    let resp = client
+        .get(format!("{base}/v1/responses/resp_does_not_exist_12345"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 404);
+}
+
+#[tokio::test]
+async fn responses_endpoint_cancel_unknown_id_404() {
+    let (base, key) = spawn_test_server().await;
+    let client = auth_client(&key);
+    let resp = client
+        .post(format!(
+            "{base}/v1/responses/resp_does_not_exist_12345/cancel"
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 404);
+}
+
+#[tokio::test]
+async fn responses_endpoint_rejects_missing_input() {
+    let (base, key) = spawn_test_server().await;
+    let client = auth_client(&key);
+    // No `input` and no `model` is invalid per spec.
+    let resp = client
+        .post(format!("{base}/v1/responses"))
+        .json(&serde_json::json!({"model": "test"}))
+        .send()
+        .await
+        .unwrap();
+    // Missing-field rejection: 400 (validation) or 422 (json parse).
+    let status = resp.status().as_u16();
+    assert!(
+        status == 400 || status == 422,
+        "missing `input` must 400/422, got {status}"
+    );
+}
+
+#[tokio::test]
+async fn responses_endpoint_reasoning_effort_passes_through() {
+    let (base, key) = spawn_test_server().await;
+    let client = auth_client(&key);
+    // reasoning.effort is a known field; must parse and route.
+    let resp = client
+        .post(format!("{base}/v1/responses"))
+        .json(&serde_json::json!({
+            "model": "test",
+            "input": "think hard",
+            "reasoning": {"effort": "high"}
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 503);
+}
+
 #[tokio::test]
 async fn tool_role_multi_turn_request() {
     let (base, key) = spawn_test_server().await;
