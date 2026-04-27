@@ -830,9 +830,9 @@ async fn tool_node_info(state: &AppState, id: Option<Value>) -> JsonRpcResponse 
     // Node stats
     let stats = state.shared_state.metrics.node_stats.read().await;
     let node_stats = json!({
-        "requests_served": stats.requests_served,
+        "requests_served": state.shared_state.metrics.requests_served_atomic.load(std::sync::atomic::Ordering::Relaxed),
         "requests_made": stats.requests_made,
-        "forwards_served": stats.forwards_served,
+        "forwards_served": state.shared_state.metrics.forwards_served_atomic.load(std::sync::atomic::Ordering::Relaxed),
         "bytes_uploaded": stats.bytes_uploaded,
         "bytes_downloaded": stats.bytes_downloaded,
         "uptime_seconds": chrono::Utc::now().signed_duration_since(stats.uptime_start).num_seconds(),

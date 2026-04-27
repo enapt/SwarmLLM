@@ -123,9 +123,11 @@ pub fn estimate_vram_from_shard_dir(
 }
 
 pub(super) fn track_forward_participation(shared_state: &SharedState, estimated_tokens: u32) {
-    if let Ok(mut stats) = shared_state.metrics.node_stats.try_write() {
-        stats.forwards_served += 1;
-    }
+    // AtomicU64 increment — try_write() silently dropped under contention.
+    shared_state
+        .metrics
+        .forwards_served_atomic
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     // Credits earned per forward step for remote peers serving segments.
     // Local segments don't go through dispatch — they use process_local_segment
     // which only earns via apply_credit_direct at pipeline completion.

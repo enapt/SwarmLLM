@@ -465,7 +465,9 @@ For production testing, use native Linux (dual boot or bare metal). WSL2 is suit
 
 | Level | What | Fields |
 |-------|------|--------|
-| DEBUG | `DIAG: websocket connected` | `addr` |
+| DEBUG | `DIAG: client connected` | `subsystem = "websocket"` |
+| DEBUG | `DIAG: client disconnected` | `subsystem = "websocket"` |
+| DEBUG | `DIAG: push_task exited first` / `DIAG: receiver loop exited first` | `subsystem = "websocket"` |
 
 ### Middleware (middleware.rs)
 

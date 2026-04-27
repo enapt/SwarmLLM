@@ -835,11 +835,45 @@ pub(super) fn spawn_responses_sweep(
                              (likely cancelled-without-cleanup)"
                         );
                     }
+                    // Prune pool_forwards dedup audit log. Entries serve only
+                    // as a replay block for a per-member rate-limit-window
+                    // (60s); 30 days is generous protection while bounding
+                    // disk growth. Without this, a busy pool owner accrues
+                    // ~hundreds of MB/day of append-only entries forever.
+                    let cutoff = chrono::Utc::now() - chrono::Duration::days(30);
+                    match prune_pool_forwards_older_than(&db, cutoff) {
+                        Ok(0) => {}
+                        Ok(n) => tracing::info!(
+                            count = n,
+                            cutoff = %cutoff.to_rfc3339(),
+                            "pool_forwards sweep: pruned old entries"
+                        ),
+                        Err(e) => tracing::warn!(error = %e, "pool_forwards sweep failed"),
+                    }
                 }
             }
         }
         "responses_sweep"
     });
+}
+
+/// TREE_POOL_FORWARDS audit/dedup log pruner. Returns count of removed
+/// entries. Anything older than `cutoff` is deleted.
+fn prune_pool_forwards_older_than(
+    db: &crate::storage::db::Database,
+    cutoff: chrono::DateTime<chrono::Utc>,
+) -> Result<usize, crate::error::SwarmError> {
+    let entries = db.iter_json::<crate::types::PoolCreditForward>("pool_forwards")?;
+    let mut removed = 0usize;
+    for entry in entries {
+        if entry.timestamp < cutoff {
+            // Use the UUID-string key (same format the writer used at the
+            // put_json call site in pool/manager/mod.rs).
+            db.remove("pool_forwards", &entry.id.to_string())?;
+            removed += 1;
+        }
+    }
+    Ok(removed)
 }
 
 #[cfg(test)]

@@ -142,10 +142,12 @@ impl PipelineExecutor {
             .forward(layer_forward)
             .await?;
 
-        // Track stats
-        if let Ok(mut stats) = self.shared_state.metrics.node_stats.try_write() {
-            stats.forwards_served += 1;
-        }
+        // Track stats — AtomicU64 increment, try_write() previously dropped
+        // silently under contention.
+        self.shared_state
+            .metrics
+            .forwards_served_atomic
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
         Ok(layer_result)
     }

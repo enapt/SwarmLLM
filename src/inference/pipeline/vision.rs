@@ -99,11 +99,27 @@ impl PipelineExecutor {
         let first_image = &images[0];
         let jpeg_bytes = self.compress_image_jpeg(first_image)?;
 
-        // Register response channel with expected responder for auth verification
+        // Register response channel with expected responder for auth verification.
+        // Use entry().or_insert() to detect collision rather than silently
+        // overwriting a live waiter — request_id reuse from a crashed/restarted
+        // session that didn't unregister would otherwise leak the original
+        // sender and the replaced entry's task would hang forever.
         let (tx, rx) = tokio::sync::oneshot::channel();
-        self.shared_state
+        match self
+            .shared_state
             .pending_vision_results
-            .insert(self.request.id, (remote_node.clone(), tx));
+            .entry(self.request.id)
+        {
+            dashmap::mapref::entry::Entry::Vacant(slot) => {
+                slot.insert((remote_node.clone(), tx));
+            }
+            dashmap::mapref::entry::Entry::Occupied(_) => {
+                return Err(SwarmError::Internal(format!(
+                    "duplicate vision request_id {} — refusing to overwrite live waiter",
+                    self.request.id
+                )));
+            }
+        }
 
         // Send VisionEncodeRequest directly to the selected remote node (not broadcast)
         let req = crate::types::VisionEncodeRequest {

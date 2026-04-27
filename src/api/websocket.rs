@@ -453,9 +453,9 @@ async fn build_stats_message(state: &SharedState) -> String {
         "lan_peers": lan_peers,
         "credits": crate::api::credit_summary_json(&credit),
         "active_requests": state.active_pipelines.len(),
-        "requests_served": stats.requests_served,
+        "requests_served": state.metrics.requests_served_atomic.load(std::sync::atomic::Ordering::Relaxed),
         "requests_made": stats.requests_made,
-        "forwards_served": stats.forwards_served,
+        "forwards_served": state.metrics.forwards_served_atomic.load(std::sync::atomic::Ordering::Relaxed),
         "uptime_seconds": (chrono::Utc::now() - stats.uptime_start).num_seconds(),
         "acquisitions": acquisitions,
     });

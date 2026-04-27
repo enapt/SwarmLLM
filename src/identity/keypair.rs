@@ -68,6 +68,13 @@ impl Identity {
                     .map_err(SwarmError::Io)?;
                 file.write_all(&identity.signing_key.to_bytes())
                     .map_err(SwarmError::Io)?;
+                // fsync to disk before declaring the identity persisted. A
+                // kernel panic / power loss between write_all returning and
+                // the page cache flushing can leave a 0-byte file on disk;
+                // load_or_generate then errors with "Invalid key file size:
+                // 0 bytes" and the node permanently can't start under its
+                // existing identity. Cheap insurance for a 32-byte write.
+                file.sync_all().map_err(SwarmError::Io)?;
             }
             #[cfg(not(unix))]
             {

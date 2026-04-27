@@ -189,7 +189,11 @@ impl PipelineExecutor {
         let mut current_pos = prompt_token_count;
         let mut last_token = first_token;
         // KV length expected on every remote segment BEFORE the next forward.
-        let mut expected_kv_len: u32 = prompt_token_count as u32 + 1;
+        // After prefill + 0 generated forwards, remote KV = prompt_token_count
+        // (the sampled first_token came out of the prefill's last logit and
+        // is NOT yet written to KV — that happens on the next forward when
+        // it's used as input). Mirror Item 2's baseline at speculative.rs:205.
+        let mut expected_kv_len: u32 = prompt_token_count as u32;
         let mut pending_truncate: Option<u32> = None;
 
         if let Some(ref tx) = token_tx {
@@ -258,11 +262,16 @@ impl PipelineExecutor {
                 }
             };
 
-            if spec_logits.len() < drafts.len() {
+            // Need γ+1 logit vectors: γ for verifying drafts[i] vs target's
+            // pick at position i, plus the bonus at position γ for the
+            // ALL-ACCEPTED branch. greedy_accept_reject indexes
+            // `spec_logits[drafts.len()]` when all drafts accepted, so a
+            // strict `< drafts.len() + 1` guard is required to avoid OOB.
+            if spec_logits.len() < drafts.len() + 1 {
                 tracing::warn!(
                     %request_id,
                     got = spec_logits.len(),
-                    want_min = drafts.len(),
+                    want_min = drafts.len() + 1,
                     "DSD: insufficient spec_logits — returning partial"
                 );
                 finish_reason = "stop".to_string();

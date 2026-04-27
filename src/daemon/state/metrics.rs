@@ -9,6 +9,15 @@ use crate::types::NodeStats;
 /// Metrics, stats, and provider configuration.
 pub struct MetricsProviders {
     pub inference_requests_total: AtomicU64,
+    /// Mirror of node_stats.requests_served as an AtomicU64 — written from
+    /// multiple async contexts. The RwLock-guarded field on NodeStats was
+    /// updated via `try_write()` which silently drops on contention,
+    /// undercounting served requests on busy dashboards. Serialization sites
+    /// snapshot this counter into the displayed NodeStats. Same pattern as
+    /// inference_requests_total.
+    pub requests_served_atomic: AtomicU64,
+    /// Mirror of node_stats.forwards_served — same try_write→atomic story.
+    pub forwards_served_atomic: AtomicU64,
     pub inference_latency_samples: std::sync::RwLock<std::collections::VecDeque<f64>>,
     pub channel_metrics: ChannelMetricsSet,
     pub ws_connection_count: std::sync::atomic::AtomicUsize,

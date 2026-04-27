@@ -284,13 +284,15 @@ impl PipelineExecutor {
                     )));
                 }
             };
-            // Remote forwarded verify_tokens.len() positions → expected
-            // spec_logits.len() == verify_tokens.len().
-            if spec_logits.len() < drafts.len() {
+            // Remote forwarded verify_tokens.len() = γ+1 positions →
+            // expected spec_logits.len() == γ+1. greedy_accept_reject indexes
+            // `spec_logits[drafts.len()]` (= γ) on ALL-ACCEPTED, so we need
+            // strict `< drafts.len() + 1` to avoid OOB on a corrupt response.
+            if spec_logits.len() < drafts.len() + 1 {
                 tracing::warn!(
                     %request_id,
                     got = spec_logits.len(),
-                    want_min = drafts.len(),
+                    want_min = drafts.len() + 1,
                     "speculative: insufficient spec_logits — returning partial"
                 );
                 return Ok(Some(self.finish_speculative(

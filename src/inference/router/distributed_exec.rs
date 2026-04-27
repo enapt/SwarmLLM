@@ -53,9 +53,11 @@ pub(super) async fn finalize_request(
     let is_local_api_request = request.requester == crate::types::NodeId([0u8; 32]);
 
     if let Ok(ref result) = output {
-        if let Ok(mut stats) = shared_state.metrics.node_stats.try_write() {
-            stats.requests_served += 1;
-        }
+        // AtomicU64 increment — try_write() silently dropped under contention.
+        shared_state
+            .metrics
+            .requests_served_atomic
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         // Update Prometheus metrics
         shared_state
             .metrics
@@ -514,7 +516,8 @@ pub(super) async fn execute_request(
                 request_id = %request.id,
                 schedule_ms,
                 execute_ms,
-                "DIAG: execute_request failed: {e}"
+                error = %e,
+                "DIAG: execute_request failed"
             );
 
             // Apply credit penalty for distributed inference failure

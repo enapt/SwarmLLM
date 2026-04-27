@@ -264,8 +264,16 @@ impl PoolManager {
         }
 
         crate::types::PoolDeviceStats {
-            forwards_served: node_stats.forwards_served,
-            requests_served: node_stats.requests_served,
+            forwards_served: self
+                .shared_state
+                .metrics
+                .forwards_served_atomic
+                .load(std::sync::atomic::Ordering::Relaxed),
+            requests_served: self
+                .shared_state
+                .metrics
+                .requests_served_atomic
+                .load(std::sync::atomic::Ordering::Relaxed),
             shards_hosted,
             vram_mb,
             ram_mb,

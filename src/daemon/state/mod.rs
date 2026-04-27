@@ -236,6 +236,8 @@ impl SharedState {
             metrics: MetricsProviders {
                 node_stats: RwLock::new(NodeStats::default()),
                 inference_requests_total: AtomicU64::new(0),
+                requests_served_atomic: AtomicU64::new(0),
+                forwards_served_atomic: AtomicU64::new(0),
                 inference_latency_samples: std::sync::RwLock::new(std::collections::VecDeque::new()),
                 channel_metrics: ChannelMetricsSet::new(),
                 ws_connection_count: std::sync::atomic::AtomicUsize::new(0),
