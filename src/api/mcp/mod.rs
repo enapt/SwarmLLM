@@ -81,6 +81,19 @@ pub async fn handle_mcp(
         "resources/list" => handle_resources_list(req.id),
         "resources/read" => handle_resources_read(&state, req.id, req.params).await,
         "ping" => JsonRpcResponse::success(req.id, json!({})),
+        // Explicit error arm for `sampling/createMessage`: clients
+        // (Claude Code, Cursor) sometimes try this method to ask the
+        // server to perform completions. SwarmLLM is a tools-only MCP
+        // server — inference is exposed via tools/call, not sampling.
+        // A bare METHOD_NOT_FOUND with the literal method name is hard
+        // to debug client-side; spell it out instead.
+        "sampling/createMessage" => JsonRpcResponse::error(
+            req.id,
+            METHOD_NOT_FOUND,
+            "sampling/createMessage is not implemented. SwarmLLM is a \
+             tools-only MCP server — invoke inference via the `tools/call` \
+             method (use `tools/list` to discover available tools).",
+        ),
         _ if is_notification => {
             // Unknown notification — silently accept per spec
             return (StatusCode::ACCEPTED, Json(None));
