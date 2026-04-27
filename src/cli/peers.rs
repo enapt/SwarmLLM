@@ -82,7 +82,11 @@ pub async fn query_peers(
             }
         }
         Err(_) => {
-            eprintln!("Error: SwarmLLM daemon is not running on port {port}");
+            eprintln!("Error: SwarmLLM daemon is not running on port {port}.");
+            eprintln!("  Start it: swarmllm run");
+            eprintln!(
+                "  Or if it's on a different port: --port <N> or set SWARMLLM_NODE_LISTEN_PORT"
+            );
             std::process::exit(1);
         }
     }

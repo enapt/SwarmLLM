@@ -101,6 +101,15 @@ pub fn request_to_chat(
     };
     let tool_choice = req.tool_choice.as_ref().map(translate_tool_choice);
 
+    // Forward `seed` through the extras catch-all so cloud providers that
+    // honor it (OpenAI returns deterministic outputs for a given seed) see
+    // it. Without this, a user passing seed=42 on /v1/responses gets
+    // non-deterministic output with no warning.
+    let mut extras = HashMap::new();
+    if let Some(s) = req.seed {
+        extras.insert("seed".into(), serde_json::json!(s));
+    }
+
     Ok(ChatCompletionRequest {
         model: req.model.clone(),
         messages,
@@ -122,7 +131,7 @@ pub fn request_to_chat(
         session_id: None,
         lora_adapter: None,
         cache_control: None,
-        extras: HashMap::new(),
+        extras,
     })
 }
 
@@ -540,11 +549,17 @@ pub fn chat_response_to_responses(
         .get("choices")
         .and_then(|c| c.as_array())
         .and_then(|c| c.first())
-        .ok_or_else(|| SwarmError::Internal("Chat response has no choices".into()))?;
+        .ok_or_else(|| SwarmError::ProviderError {
+            status: 502,
+            body: "Upstream chat response missing `choices` array".into(),
+        })?;
 
     let message = choice
         .get("message")
-        .ok_or_else(|| SwarmError::Internal("Chat response choice missing `message`".into()))?;
+        .ok_or_else(|| SwarmError::ProviderError {
+            status: 502,
+            body: "Upstream chat response choice missing `message`".into(),
+        })?;
 
     let text = message
         .get("content")

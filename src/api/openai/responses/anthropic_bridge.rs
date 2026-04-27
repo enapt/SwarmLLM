@@ -562,14 +562,26 @@ pub fn messages_to_responses(
         .and_then(|u| u.get("cache_read_input_tokens"))
         .and_then(|v| v.as_u64())
         .unwrap_or(0) as u32;
+    // cache_creation_input_tokens is billed at ~25× standard rate by
+    // Anthropic — must surface in total_tokens for accurate cost tracking.
+    // Stash in input_tokens_details.extras so callers who want the
+    // breakdown can read it.
+    let cache_creation = usage_val
+        .and_then(|u| u.get("cache_creation_input_tokens"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0) as u32;
+    let mut details_extras = HashMap::new();
+    if cache_creation > 0 {
+        details_extras.insert("cache_creation_input_tokens".into(), json!(cache_creation));
+    }
     let usage = ResponsesUsage {
-        input_tokens,
+        input_tokens: input_tokens + cache_creation,
         output_tokens,
-        total_tokens: input_tokens + output_tokens,
-        input_tokens_details: if cache_read > 0 {
+        total_tokens: input_tokens + cache_creation + output_tokens,
+        input_tokens_details: if cache_read > 0 || cache_creation > 0 {
             Some(InputTokensDetails {
                 cached_tokens: Some(cache_read),
-                extras: HashMap::new(),
+                extras: details_extras,
             })
         } else {
             None
@@ -593,8 +605,8 @@ pub fn messages_to_responses(
         tools: req.tools.clone(),
         tool_choice: req.tool_choice.clone(),
         parallel_tool_calls: req.parallel_tool_calls,
-        temperature: Some(req.temperature.unwrap_or(0.7)),
-        top_p: Some(req.top_p.unwrap_or(0.9)),
+        temperature: Some(req.temperature.unwrap_or(super::DEFAULT_TEMPERATURE)),
+        top_p: Some(req.top_p.unwrap_or(super::DEFAULT_TOP_P)),
         max_output_tokens: Some(req.max_output_tokens.unwrap_or(DEFAULT_MAX_TOKENS)),
         truncation: req.truncation.clone(),
         metadata: req.metadata.clone(),
@@ -1239,8 +1251,8 @@ fn stream_anthropic_to_responses(
             tools: req.tools.clone(),
             tool_choice: req.tool_choice.clone(),
             parallel_tool_calls: req.parallel_tool_calls,
-            temperature: Some(req.temperature.unwrap_or(0.7)),
-            top_p: Some(req.top_p.unwrap_or(0.9)),
+            temperature: Some(req.temperature.unwrap_or(super::DEFAULT_TEMPERATURE)),
+            top_p: Some(req.top_p.unwrap_or(super::DEFAULT_TOP_P)),
             max_output_tokens: Some(req.max_output_tokens.unwrap_or(DEFAULT_MAX_TOKENS)),
             truncation: req.truncation.clone(),
             metadata: req.metadata.clone(),

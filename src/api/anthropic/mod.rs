@@ -24,8 +24,6 @@ use convert::{
 };
 #[cfg(test)]
 use sse::{serialize_anthropic_event, AnthropicSseEvent};
-#[cfg(feature = "claude-subscription")]
-use types::SystemContent;
 use types::{AnthropicContent, ContentBlock, MessagesRequest};
 
 /// Hard cap on `max_tokens`. Matches the local sampling-params clamp ceiling
@@ -261,33 +259,34 @@ pub async fn messages(
         crate::api::claude_sub::try_get_claude_subscription(&state, &req.model).await
     {
         tracing::info!(model = %req.model, "DIAG: anthropic proxying via claude subscription subprocess");
-        // Build a minimal JSON for the subprocess handler (MessagesRequest isn't Serialize)
-        let body = serde_json::json!({
-            "model": req.model,
-            "max_tokens": req.max_tokens,
-            "messages": req.messages.iter().map(|m| {
-                serde_json::json!({
-                    "role": m.role,
-                    "content": match &m.content {
-                        AnthropicContent::Text(s) => serde_json::Value::String(s.clone()),
-                        AnthropicContent::Blocks(blocks) => serde_json::Value::Array(
-                            blocks.iter().map(|b| match b {
-                                ContentBlock::Text { text } => serde_json::json!({"type": "text", "text": text}),
-                                _ => serde_json::json!({"type": "text", "text": "[non-text content]"}),
-                            }).collect()
-                        ),
-                    }
-                })
-            }).collect::<Vec<_>>(),
-            "stream": req.stream,
-            "system": match &req.system {
-                Some(SystemContent::Text(s)) => serde_json::Value::String(s.clone()),
-                Some(SystemContent::Blocks(blocks)) => serde_json::Value::Array(
-                    blocks.iter().map(|b| serde_json::json!({"type": b.block_type, "text": b.text})).collect()
-                ),
-                None => serde_json::Value::Null,
-            },
-        });
+        // Use the same ProxyMessagesRequest serializer as the cloud path so
+        // tool_use / tool_result / thinking blocks survive the subprocess
+        // hop. The previous hand-serialization replaced every non-text
+        // ContentBlock with a "[non-text content]" placeholder, which broke
+        // multi-turn function-calling conversations because the assistant's
+        // tool_use blocks (and the user's tool_result blocks) were stripped
+        // before the subprocess ever saw them.
+        let body = serde_json::to_value(&proxy::ProxyMessagesRequest {
+            model: &req.model,
+            max_tokens: req.max_tokens,
+            messages: &req.messages,
+            system: &req.system,
+            stream: req.stream,
+            temperature: req.temperature,
+            top_p: req.top_p,
+            top_k: req.top_k,
+            stop_sequences: &req.stop_sequences,
+            tools: &req.tools,
+            tool_choice: &req.tool_choice,
+            metadata: &req.metadata,
+            thinking: &req.thinking,
+            extras: &req.extras,
+        })
+        .map_err(|e| {
+            ApiError(crate::error::SwarmError::Validation(format!(
+                "Failed to serialize request: {e}"
+            )))
+        })?;
         return crate::api::claude_sub::proxy_via_subprocess_anthropic(&sub_config, &body).await;
     }
 

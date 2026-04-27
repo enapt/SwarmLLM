@@ -430,7 +430,11 @@ pub async fn run_server_with_state(
 
     tracing::debug!(%addr, "DIAG: server startup");
 
-    let listener = tokio::net::TcpListener::bind(addr).await?;
+    let listener = tokio::net::TcpListener::bind(addr).await.map_err(|e| {
+        anyhow::anyhow!(
+            "Failed to bind API server to port {port}: {e}\n  Is another SwarmLLM instance already running? Try: swarmllm status\n  Or start on a different port: swarmllm run --port <N>"
+        )
+    })?;
     axum::serve(
         listener,
         app.into_make_service_with_connect_info::<std::net::SocketAddr>(),

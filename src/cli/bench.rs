@@ -43,7 +43,7 @@ pub async fn run_bench(
     let api_key = read_api_key(data_dir).unwrap_or_default();
     if api_key.is_empty() {
         anyhow::bail!(
-            "No API key at {} — is the daemon running?",
+            "SwarmLLM is not running (no API key at {}).\n  Start the daemon first: swarmllm run",
             data_dir.join("api_key").display()
         );
     }

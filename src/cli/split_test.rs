@@ -9,8 +9,11 @@ pub async fn test_split_inference(
 ) -> anyhow::Result<()> {
     use swarmllm::inference::split::{sample_token, SplitModel};
 
-    let model_path =
-        model_path.ok_or_else(|| anyhow::anyhow!("--model required for test-split"))?;
+    let model_path = model_path.ok_or_else(|| {
+        anyhow::anyhow!(
+            "--model is required for test-split.\n  Pass a local GGUF file path, e.g.:\n    swarmllm test-split --model ~/models/tinyllama-q4.gguf"
+        )
+    })?;
     println!("Loading full model from: {}", model_path.display());
 
     // Load as a single split covering ALL layers (0..N, is_first=true, is_last=true)

@@ -156,7 +156,16 @@ fn resolve_provider_inner(model: &str, config: &ProvidersConfig) -> Option<Provi
     if lower.starts_with("claude-") || lower.starts_with("claude3") {
         return resolve_by_name("anthropic", config);
     }
-    if lower.starts_with("gpt-") || lower.starts_with("o1-") || lower.starts_with("o3-") {
+    if lower.starts_with("gpt-")
+        || lower.starts_with("o1-")
+        || lower.starts_with("o3-")
+        || lower.starts_with("o4-")
+        || lower == "o1"
+        || lower == "o3"
+        || lower == "o4"
+        || lower == "o3-mini"
+        || lower == "o4-mini"
+    {
         return resolve_by_name("openai", config);
     }
     if lower.starts_with("deepseek") {

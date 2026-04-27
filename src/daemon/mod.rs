@@ -446,6 +446,21 @@ impl Daemon {
             "SwarmLLM daemon running"
         );
 
+        // Plain stderr banner — fires regardless of tracing log level or
+        // log redirection. New users running `swarmllm run` need to see the
+        // dashboard URL and API key path unmissably; tracing format is too
+        // noisy for "what URL do I open" first-run guidance.
+        let port = self.config.node.listen_port;
+        let api_key_path = self.config.node.data_dir.join("api_key");
+        eprintln!();
+        eprintln!("============================================================");
+        eprintln!("  SwarmLLM is running");
+        eprintln!("  Dashboard:  http://localhost:{port}");
+        eprintln!("  API key:    {}", api_key_path.display());
+        eprintln!("  OpenAI API: http://localhost:{port}/v1/chat/completions");
+        eprintln!("============================================================");
+        eprintln!();
+
         shared_state.emit_activity(
             crate::daemon::state::ActivityEvent::new(
                 "system",

@@ -14,7 +14,7 @@ pub async fn run_chat(
     let api_key = read_api_key(data_dir).unwrap_or_default();
     if api_key.is_empty() {
         anyhow::bail!(
-            "No API key at {} — is the daemon running?",
+            "SwarmLLM is not running (no API key at {}).\n  Start the daemon first: swarmllm run",
             data_dir.join("api_key").display()
         );
     }
@@ -65,7 +65,18 @@ pub async fn run_chat(
             .await?;
 
         if let Some(err) = resp.get("error") {
-            eprintln!("Error: {}", err);
+            // Extract just the message field rather than dumping the full
+            // JSON envelope. Falls back to the raw object if the shape is
+            // unfamiliar (non-OpenAI provider error).
+            let msg = err
+                .get("message")
+                .and_then(|v| v.as_str())
+                .map(String::from)
+                .unwrap_or_else(|| err.to_string());
+            eprintln!("Error: {msg}");
+            if let Some(hint) = err.get("hint").and_then(|v| v.as_str()) {
+                eprintln!("Hint: {hint}");
+            }
             messages.pop();
             continue;
         }

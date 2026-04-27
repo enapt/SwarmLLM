@@ -60,8 +60,17 @@ pub(super) fn resolve_api_key(config: &Config, db: &Database) -> String {
     // Write to file so CLI `status` can read it without opening the database
     write_api_key_file(&config.node.data_dir, &key);
 
-    // Print API key to stderr only (not to tracing logs which may be persisted/shipped)
-    eprintln!("Generated new API key (save this for API access): {key}");
+    // Print API key to stderr — visually distinct so first-run users don't
+    // miss it. Stderr only (NOT tracing) so it never lands in shipped logs.
+    let key_path = config.node.data_dir.join("api_key");
+    eprintln!();
+    eprintln!("============================================================");
+    eprintln!("  Generated new API key");
+    eprintln!("  KEY:        {key}");
+    eprintln!("  Saved to:   {}", key_path.display());
+    eprintln!("  Recover anytime: cat {}", key_path.display());
+    eprintln!("============================================================");
+    eprintln!();
 
     key
 }

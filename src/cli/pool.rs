@@ -142,10 +142,14 @@ pub async fn run_pool_command(
                             .and_then(|v| v.as_str())
                             .map(|s| &s[..10])
                             .unwrap_or("?");
-                        let online = if m.get("online").and_then(|v| v.as_bool()).unwrap_or(false) {
-                            "\x1b[32m●\x1b[0m"
-                        } else {
-                            "\x1b[90m○\x1b[0m"
+                        let use_ansi = std::env::var("NO_COLOR").is_err()
+                            && std::io::IsTerminal::is_terminal(&std::io::stdout());
+                        let is_online = m.get("online").and_then(|v| v.as_bool()).unwrap_or(false);
+                        let online = match (is_online, use_ansi) {
+                            (true, true) => "\x1b[32m●\x1b[0m",
+                            (false, true) => "\x1b[90m○\x1b[0m",
+                            (true, false) => "[on] ",
+                            (false, false) => "[off]",
                         };
                         println!("{online} {display:<18} {level:>5}% {credits:>12} {joined}");
                     }
