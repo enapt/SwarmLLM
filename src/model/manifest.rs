@@ -310,6 +310,41 @@ mod tests {
     }
 
     #[test]
+    fn verify_hash_strict_rejects_zero_hash() {
+        // A network-received manifest with an unsigned zero hash must
+        // be rejected by the strict path; the lenient `verify_hash`
+        // accepts zero (for local pre-signing flows).
+        let manifest = test_manifest();
+        assert_eq!(manifest.manifest_hash, [0u8; 32]);
+        assert!(manifest.verify_hash().is_ok());
+        assert!(
+            manifest.verify_hash_strict().is_err(),
+            "strict path must reject unsigned (zero) hash"
+        );
+    }
+
+    #[test]
+    fn verify_hash_strict_rejects_wrong_nonzero_hash() {
+        let mut manifest = test_manifest();
+        manifest.manifest_hash = [1u8; 32];
+        let err = manifest
+            .verify_hash_strict()
+            .expect_err("wrong hash must be rejected");
+        // Verify the error type is ShardIntegrity (mapped to 404 for the API).
+        assert!(matches!(
+            err,
+            crate::error::SwarmError::ShardIntegrity { .. }
+        ));
+    }
+
+    #[test]
+    fn verify_hash_strict_accepts_correct_hash() {
+        let mut manifest = test_manifest();
+        manifest.manifest_hash = manifest.compute_hash();
+        assert!(manifest.verify_hash_strict().is_ok());
+    }
+
+    #[test]
     fn shard_path_format() {
         let store = crate::model::shard::ShardStore::new(std::path::Path::new("/data"));
         let path = store.shard_path(&crate::types::ModelId("llama3-70b".into()), 5);

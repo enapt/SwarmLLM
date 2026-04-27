@@ -267,6 +267,37 @@ fn extract_ip_from_multiaddr(multiaddr: &str) -> Option<String> {
     }
 }
 
+/// Whether the request looks like a same-origin browser fetch — used to
+/// gate the loopback exemption on `GET /api/admin/api-key` so a
+/// non-browser local process (curl, python) can't grab the API key.
+///
+/// Two acceptable signals:
+///   * `Origin` matches this daemon's own origin (browsers send this on
+///     CORS-relevant requests — POST, DELETE, cross-origin GET).
+///   * `Sec-Fetch-Site: same-origin` (modern browsers auto-send this
+///     for every same-origin request; curl/python don't send it).
+///
+/// `Origin` alone is NOT sufficient: browsers omit `Origin` on same-origin
+/// simple GETs, so the dashboard's bootstrap fetch wouldn't match without
+/// the Sec-Fetch-Site fallback. See gotcha #26 in MEMORY.md.
+fn is_same_origin_browser_request(headers: &axum::http::HeaderMap, listen_port: u16) -> bool {
+    let allowed_origins = [
+        format!("http://localhost:{listen_port}"),
+        format!("http://127.0.0.1:{listen_port}"),
+    ];
+    let origin_ok = headers
+        .get(axum::http::header::ORIGIN)
+        .and_then(|v| v.to_str().ok())
+        .map(|o| allowed_origins.iter().any(|a| a == o))
+        .unwrap_or(false);
+    let same_site_ok = headers
+        .get("sec-fetch-site")
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.eq_ignore_ascii_case("same-origin"))
+        .unwrap_or(false);
+    origin_ok || same_site_ok
+}
+
 /// Check whether a request is exempt from Bearer token authentication.
 ///
 /// Frontend routes, health checks, and static assets are always exempt.
@@ -350,29 +381,14 @@ pub async fn auth_middleware(
     // determined local attacker can set either header manually; but a
     // malicious extension that can inject script into the dashboard
     // origin already has DOM / localStorage access anyway.
-    if path == "/api/admin/api-key" && method == Method::GET && addr.ip().is_loopback() {
-        let port = state.shared_state.config.node.listen_port;
-        let allowed_origins = [
-            format!("http://localhost:{port}"),
-            format!("http://127.0.0.1:{port}"),
-        ];
-        let origin_ok = req
-            .headers()
-            .get(axum::http::header::ORIGIN)
-            .and_then(|v| v.to_str().ok())
-            .map(|o| allowed_origins.iter().any(|a| a == o))
-            .unwrap_or(false);
-        let same_site_ok = req
-            .headers()
-            .get("sec-fetch-site")
-            .and_then(|v| v.to_str().ok())
-            .map(|v| v.eq_ignore_ascii_case("same-origin"))
-            .unwrap_or(false);
-        if origin_ok || same_site_ok {
-            return next.run(req).await;
-        }
-        // Fall through — the handler will fail auth normally with 401.
+    if path == "/api/admin/api-key"
+        && method == Method::GET
+        && addr.ip().is_loopback()
+        && is_same_origin_browser_request(req.headers(), state.shared_state.config.node.listen_port)
+    {
+        return next.run(req).await;
     }
+    // Otherwise fall through — the handler will fail auth normally with 401.
 
     // WebSocket upgrades at /api/admin/ws: no Bearer exemption.
     // Browsers can't set an Authorization header on WebSocket upgrades, so
@@ -484,6 +500,72 @@ pub async fn auth_middleware(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn same_origin_gate_accepts_matching_origin_header() {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(
+            axum::http::header::ORIGIN,
+            "http://localhost:8800".parse().unwrap(),
+        );
+        assert!(is_same_origin_browser_request(&headers, 8800));
+    }
+
+    #[test]
+    fn same_origin_gate_accepts_127_origin_header() {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(
+            axum::http::header::ORIGIN,
+            "http://127.0.0.1:8800".parse().unwrap(),
+        );
+        assert!(is_same_origin_browser_request(&headers, 8800));
+    }
+
+    #[test]
+    fn same_origin_gate_accepts_sec_fetch_site_header() {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert("sec-fetch-site", "same-origin".parse().unwrap());
+        assert!(is_same_origin_browser_request(&headers, 8800));
+    }
+
+    #[test]
+    fn same_origin_gate_rejects_no_signals() {
+        // Bare curl/python request with neither header set — must not
+        // bypass auth on the API-key bootstrap endpoint.
+        let headers = axum::http::HeaderMap::new();
+        assert!(!is_same_origin_browser_request(&headers, 8800));
+    }
+
+    #[test]
+    fn same_origin_gate_rejects_wrong_origin() {
+        // Cross-origin browser request — Origin would point elsewhere.
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(
+            axum::http::header::ORIGIN,
+            "http://evil.example.com".parse().unwrap(),
+        );
+        assert!(!is_same_origin_browser_request(&headers, 8800));
+    }
+
+    #[test]
+    fn same_origin_gate_rejects_cross_site_sec_fetch() {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert("sec-fetch-site", "cross-site".parse().unwrap());
+        assert!(!is_same_origin_browser_request(&headers, 8800));
+    }
+
+    #[test]
+    fn same_origin_gate_origin_match_is_port_sensitive() {
+        // Origin matching a different port must be rejected. Without
+        // this, a daemon on port 8810 forwarding requests internally
+        // could be confused for the dashboard.
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(
+            axum::http::header::ORIGIN,
+            "http://localhost:9999".parse().unwrap(),
+        );
+        assert!(!is_same_origin_browser_request(&headers, 8800));
+    }
 
     #[test]
     fn extract_ip_from_multiaddr_ipv4() {

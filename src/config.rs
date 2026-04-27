@@ -1782,6 +1782,57 @@ max_concurrent_requests = 5
     }
 
     #[test]
+    fn config_parses_with_missing_sections() {
+        // A minimal config (only [node]) must deserialize and rely on
+        // serde defaults for every other section. This is the back-
+        // compat invariant: old config.toml files written before new
+        // sections existed must still load.
+        let toml_str = r#"
+[node]
+listen_port = 8800
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.node.listen_port, 8800);
+        // Sections that didn't exist in the file should fall back to
+        // their Default impls, not panic.
+        assert_eq!(config.resources.max_disk_mb, 50_000);
+        assert_eq!(config.inference.max_concurrent_requests, 10);
+    }
+
+    #[test]
+    fn config_ignores_unknown_top_level_field() {
+        // `serde(default)` + non-`deny_unknown_fields` means a future
+        // version of swarmllm that adds new sections is forward-compat
+        // when read by an older binary. Verify behavior.
+        let toml_str = r#"
+[node]
+listen_port = 8800
+
+[future_section_we_dont_know_about]
+some_setting = "value"
+"#;
+        // toml::from_str must not error on the unknown section. If a
+        // future change adds #[serde(deny_unknown_fields)] to Config,
+        // this test will fire and the author must update the contract
+        // (or document the breakage).
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.node.listen_port, 8800);
+    }
+
+    #[test]
+    fn config_old_field_names_still_parse() {
+        // Sanity: a minimal file with only [api] api_key set parses
+        // and the old field name is preserved through round-trip.
+        // Catches accidental rename/removal of public config fields.
+        let toml_str = r#"
+[api]
+api_key = "test-key-abc"
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.api.api_key.as_deref(), Some("test-key-abc"));
+    }
+
+    #[test]
     fn bootstrap_peers_env_parses_commas_and_whitespace() {
         // Comma-separated.
         let parsed = parse_bootstrap_peers_env(

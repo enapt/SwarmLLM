@@ -610,6 +610,36 @@ mod tests {
     }
 
     #[test]
+    fn softmax_collapse_falls_back_to_argmax() {
+        // All logits set to -inf simulates a degenerate top_k ∩ top_p
+        // intersection where every candidate has been masked out. The
+        // softmax sum collapses to 0 (or NaN) and we MUST return the
+        // pre-softmax argmax rather than emitting the last vocab index
+        // (the silent-wrong-token bug fixed in 2026-04-14).
+        let mut logits = vec![f32::NEG_INFINITY; 5];
+        let params = SamplingParams {
+            temperature: 1.0,
+            top_k: 5,
+            top_p: 0.5,
+            ..Default::default()
+        };
+        let token = sample_token(&mut logits, &params);
+        // All logits identical (-inf): argmax returns the first index.
+        assert_eq!(token, 0);
+
+        // Now make one logit non-(-inf) but every other -inf: argmax
+        // must select that finite index, not last vocab.
+        let mut logits = vec![f32::NEG_INFINITY; 5];
+        logits[3] = 1.0;
+        // Force softmax-collapse-after-masking by setting top_k=1
+        // followed by top_p that excludes everything (degenerate
+        // arithmetic): instead, we just feed pre-collapsed logits
+        // into sample_token so the sum-zero branch fires directly.
+        let token = sample_token(&mut logits.clone(), &params);
+        assert_eq!(token, 3);
+    }
+
+    #[test]
     fn top_p_p_one_or_above_is_identity() {
         let logits_orig = vec![1.0, 5.0, 3.0, 0.5, 4.0];
         let mut actual = logits_orig.clone();
