@@ -1297,10 +1297,19 @@ impl SplitModel {
 
         let num_layers = self.layers.len();
         let cache_key = KvCacheStore::cache_key(&self.kv_model_key, request_id);
-        let mut layer_kv_caches = {
-            let mut entry = kv_cache_store.get_or_create_keyed(&cache_key, num_layers);
-            std::mem::take(&mut entry.layers)
-        };
+
+        // Hold the DashMap RefMut for the duration of the single-layer forward
+        // and access only `entry.layers[local_layer_idx]`. Avoids `mem::take`
+        // of the full layers Vec (28 entries on a 7B segment) on every
+        // AttnOnly + FfnOnly call — that's 56 full-Vec moves per token in TP
+        // decode, all to touch one slot. RefMut still serializes per-request
+        // KV access (correct: the cache key is `{model_key}\0{request_id}`).
+        let mut entry = kv_cache_store.get_or_create_keyed(&cache_key, num_layers);
+        let layer_slot = entry.layers.get_mut(local_layer_idx).ok_or_else(|| {
+            SwarmError::Internal(format!(
+                "TP layer slot {local_layer_idx} out of range (num_layers={num_layers})"
+            ))
+        })?;
 
         let result = match &self.layers[local_layer_idx] {
             LayerVariant::Dense(lw) => match phase {
@@ -1313,7 +1322,7 @@ impl SplitModel {
                         &x,
                         mask.as_ref(),
                         index_pos,
-                        &mut layer_kv_caches[local_layer_idx],
+                        layer_slot,
                         self.max_seq_len,
                         None,
                     )
@@ -1343,12 +1352,6 @@ impl SplitModel {
                 "TP not supported for non-Dense layers".into(),
             )),
         }?;
-
-        // Write back KV caches
-        {
-            let mut entry = kv_cache_store.get_or_create_keyed(&cache_key, num_layers);
-            entry.layers = layer_kv_caches;
-        }
 
         Ok(result)
     }

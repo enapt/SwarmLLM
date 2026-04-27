@@ -79,12 +79,18 @@ impl PipelineExecutor {
     ///
     /// Loads the split model (layer range) from the local GGUF if not already cached,
     /// then runs the forward pass on the activation tensor.
+    /// Run one local segment of a distributed pipeline.
+    ///
+    /// `activation_bytes` is taken by value (not `&[u8]`) so the caller can
+    /// `std::mem::take` the previous segment's buffer instead of forcing a
+    /// `to_vec()` copy on every iteration of the segment loop. The buffer
+    /// flows directly into `LayerForward.activations`.
     pub(super) async fn process_local_segment(
         &self,
         segment: &PipelineSegment,
         sequence_num: u32,
         index_pos: usize,
-        activation_bytes: &[u8],
+        activation_bytes: Vec<u8>,
         precomputed_vision_bytes: Option<&[u8]>,
         pre_embedded: bool,
     ) -> Result<LayerResult, SwarmError> {
@@ -116,7 +122,7 @@ impl PipelineExecutor {
             request_id: self.request.id,
             sequence_num,
             index_pos: index_pos as u32,
-            activations: activation_bytes.to_vec(),
+            activations: activation_bytes,
             format: crate::types::TensorFormat::FP16,
             model_id: model_id.clone(),
             layer_range: (layer_start as u32, layer_end as u32),

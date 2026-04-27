@@ -247,6 +247,43 @@ jobs:
           set -euxo pipefail
           gh release upload "${GITHUB_REF_NAME}" "${{ matrix.archive }}" --clobber
 
+      # Bare-binary asset + SHA256 sidecar for in-app auto-update (src/update.rs).
+      # update.rs looks for an asset named exactly:
+      #   linux/macos: swarmllm-{os}-{arch}
+      #   windows:     swarmllm-{os}-{arch}.exe
+      # plus an `<asset>.sha256` sidecar (mandatory — download is rejected
+      # without it). Only the CPU-only variants are published as bare binaries
+      # because update.rs picks one asset per (os, arch) pair and has no
+      # GPU-vs-CPU selection logic. CUDA/GPU users update via archive download.
+      - name: Publish bare binary + sha256 (Linux/macOS CPU)
+        if: matrix.name == 'Linux x86_64' || matrix.name == 'macOS aarch64'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euxo pipefail
+          OS=$([ "${{ runner.os }}" = "macOS" ] && echo "macos" || echo "linux")
+          ARCH=$([ "${{ matrix.target }}" = "aarch64-apple-darwin" ] && echo "aarch64" || echo "x86_64")
+          BARE="swarmllm-${OS}-${ARCH}"
+          cp "target/release/${{ matrix.binary }}" "$BARE"
+          shasum -a 256 "$BARE" > "${BARE}.sha256"
+          gh release upload "${GITHUB_REF_NAME}" "$BARE" "${BARE}.sha256" --clobber
+
+      - name: Publish bare binary + sha256 (Windows CPU)
+        if: matrix.name == 'Windows x86_64 CPU'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $bare = "swarmllm-windows-x86_64.exe"
+          Copy-Item "target\release\swarmllm.exe" $bare
+          # PowerShell Get-FileHash → "<hash>  <filename>" two-space delimiter
+          # matches the `shasum -a 256` format on Linux/macOS, which update.rs's
+          # checksum parser already handles via `split_whitespace().next()`.
+          $hash = (Get-FileHash $bare -Algorithm SHA256).Hash.ToLower()
+          "$hash  $bare" | Out-File -Encoding ascii -NoNewline "${bare}.sha256"
+          gh release upload "${env:GITHUB_REF_NAME}" $bare "${bare}.sha256" --clobber
+
       # .deb package (Linux CPU only)
       - name: Build and upload .deb
         if: matrix.name == 'Linux x86_64'

@@ -207,7 +207,33 @@ impl UpdateChecker {
             )));
         }
 
-        let tmp_path = self.binary_path.with_extension("update.tmp");
+        // Pick a writable location for the staging file. The natural choice is
+        // alongside the binary so apply_update's atomic rename stays on the same
+        // filesystem. But systemd-installed deb/rpm packages run as user
+        // `swarmllm` with no write access to /usr/bin/, so File::create EPERMs.
+        // Probe once, then fall back to the OS temp dir on PermissionDenied so
+        // the download still completes (apply_update will fail loudly with the
+        // real permission error or EXDEV across filesystems — that's the user's
+        // signal to update via their package manager instead).
+        let preferred_tmp = self.binary_path.with_extension("update.tmp");
+        let tmp_path = match tokio::fs::File::create(&preferred_tmp).await {
+            Ok(f) => {
+                drop(f);
+                preferred_tmp
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+                let pid = std::process::id();
+                let fallback = std::env::temp_dir().join(format!("swarmllm-{pid}.update.tmp"));
+                tracing::warn!(
+                    install_dir = %self.binary_path.parent().map(|p| p.display().to_string()).unwrap_or_default(),
+                    fallback = %fallback.display(),
+                    "Install dir not writable for daemon user — staging update in temp dir. \
+                     `apply_update` will likely fail; consider updating via your package manager (deb/rpm) instead."
+                );
+                fallback
+            }
+            Err(e) => return Err(SwarmError::Io(e)),
+        };
 
         let client = &*UPDATE_DOWNLOAD_CLIENT;
 

@@ -124,3 +124,33 @@ jobs:
         with:
           key: ${{ matrix.os }}
       - run: cargo build --release
+
+  # Compile-check feature paths that aren't covered by the main test/build
+  # matrix. Uses `cargo check` (not test or build) because CUDA codegen
+  # requires nvcc + CUDA libs which aren't on stock GitHub runners — but
+  # cudarc with `dynamic-loading` only dlopens at runtime, so `check`
+  # succeeds without CUDA installed and will catch any compile error in
+  # `cfg(feature = "candle-cuda")` code paths before a release tag.
+  feature-check:
+    name: Feature compile-check (${{ matrix.features }})
+    needs: fmt
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - features: "candle-cuda"
+            flags: "--no-default-features --features candle-cuda"
+          - features: "windows-gpu"
+            flags: "--no-default-features --features windows-gpu"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libssl-dev pkg-config
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: feature-check-${{ matrix.features }}
+      - run: cargo check ${{ matrix.flags }} --all-targets

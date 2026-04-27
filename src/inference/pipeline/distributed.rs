@@ -585,14 +585,18 @@ impl PipelineExecutor {
 
             // Standard pipeline execution (no TP)
             let segment_start = std::time::Instant::now();
-            // If this is the local node, process locally (no clone needed)
+            // If this is the local node, process locally — move the activation
+            // buffer in instead of cloning. We replace `activations` with
+            // `result.activations` immediately after, so the previous buffer
+            // is dead by then anyway.
             if segment.node_id == *self.shared_state.identity.node_id() {
+                let prev_activations = std::mem::take(&mut activations);
                 let result = self
                     .process_local_segment(
                         segment,
                         sequence_num,
                         index_pos,
-                        &activations,
+                        prev_activations,
                         if idx == 0 {
                             precomputed_vision.as_deref()
                         } else {

@@ -14,8 +14,6 @@ use uuid::Uuid;
 
 use crate::inference::process_pool::IpcWriter;
 
-use candle_core::IndexOp;
-
 use crate::daemon::shard_loader::{try_load_from_shards, ShardLoadParams};
 
 /// Item 8 Phase 2b: per-probe waiter. `handle_generate` /
@@ -1067,25 +1065,29 @@ async fn handle_forward(
                         )
                         .map_err(|e| format!("Forward speculative verify (pre-embedded): {e}"))?
                 };
-                // output_t shape is [1, seq_len, vocab_size]
+                // output_t shape is [1, seq_len, vocab_size]. Flatten + dtype-cast +
+                // to_vec1 in one shot (rather than per-position tensor slicing) so a
+                // 151K-vocab model at γ=4 doesn't pay seq_len intermediate tensor
+                // views + casts. Then split into per-position rows by vocab_size.
                 let dims = output_t.dims();
                 if dims.len() != 3 {
                     return Err(format!("spec verify unexpected shape: {dims:?}"));
                 }
                 let seq_len = dims[1];
-                let mut spec_logits: Vec<Vec<f32>> = Vec::with_capacity(seq_len);
-                for pos in 0..seq_len {
-                    let row = output_t
-                        .i((0, pos, ..))
-                        .map_err(|e| format!("spec verify slice: {e}"))?;
-                    let row = row
-                        .to_dtype(candle_core::DType::F32)
-                        .map_err(|e| format!("spec verify dtype: {e}"))?;
-                    let v: Vec<f32> = row
-                        .to_vec1::<f32>()
-                        .map_err(|e| format!("spec verify to_vec1: {e}"))?;
-                    spec_logits.push(v);
+                let vocab_size = dims[2];
+                let flat: Vec<f32> = output_t
+                    .flatten_all()
+                    .and_then(|t| t.to_dtype(candle_core::DType::F32))
+                    .and_then(|t| t.to_vec1::<f32>())
+                    .map_err(|e| format!("spec verify flatten/to_vec1: {e}"))?;
+                if flat.len() != seq_len * vocab_size {
+                    return Err(format!(
+                        "spec verify flat len {} ≠ seq_len({seq_len}) * vocab({vocab_size})",
+                        flat.len()
+                    ));
                 }
+                let spec_logits: Vec<Vec<f32>> =
+                    flat.chunks_exact(vocab_size).map(<[f32]>::to_vec).collect();
                 return Ok(crate::types::LayerResult {
                     request_id,
                     token_ids: vec![],
