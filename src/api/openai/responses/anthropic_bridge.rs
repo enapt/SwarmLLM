@@ -34,9 +34,7 @@ use crate::api::providers::{proxy_to_anthropic, resolve_provider};
 use crate::api::server::AppState;
 use crate::error::{ApiError, SwarmError};
 
-/// Cap when buffering the upstream Anthropic response for non-streaming
-/// translation. Mirrors the 16 MiB cap used elsewhere.
-const MAX_UPSTREAM_BYTES: usize = 16 * 1024 * 1024;
+use super::MAX_UPSTREAM_BODY_BYTES;
 
 /// Anthropic's `max_tokens` is a required field. Mirror the shared
 /// Responses default if the caller didn't set `max_output_tokens`.
@@ -701,7 +699,7 @@ pub async fn try_proxy_anthropic_responses(
     // Failures here are caused by the upstream provider's response, not by
     // local logic — surface as ProviderError (502) so the caller sees a
     // gateway-class status, not a generic 500.
-    let bytes = to_bytes(body, MAX_UPSTREAM_BYTES).await.map_err(|e| {
+    let bytes = to_bytes(body, MAX_UPSTREAM_BODY_BYTES).await.map_err(|e| {
         ApiError(SwarmError::ProviderError {
             status: 502,
             body: format!("Failed to buffer Anthropic upstream body: {e}"),

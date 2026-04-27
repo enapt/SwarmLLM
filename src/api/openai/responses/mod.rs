@@ -180,11 +180,13 @@ pub(crate) const BUILTIN_TOOL_TYPES: &[&str] = &[
     "custom",
 ];
 
-/// Cap on the body size we'll buffer when forwarding a Chat Completions
-/// response into the translation layer. 16 MiB is a generous bound — local
+/// Cap on the body size we'll buffer when forwarding an upstream HTTP
+/// response (Chat Completions translation, Anthropic bridge, error envelope
+/// stringification) into memory. 16 MiB is a generous bound — local
 /// inference responses are normally well under 1 MiB; the cap exists to
 /// prevent an unbounded internal allocation if something goes sideways.
-const MAX_CHAT_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
+/// Shared across the responses module so a future tuning is single-sourced.
+pub(super) const MAX_UPSTREAM_BODY_BYTES: usize = 16 * 1024 * 1024;
 
 /// Buffer a Chat Completions response body, parse it as JSON, and run
 /// the Responses-shaped translation. Used by both `create_response`
@@ -199,7 +201,7 @@ async fn buffer_and_translate_chat_response(
     response_id: &str,
     created_at: i64,
 ) -> Result<ResponsesResponse, String> {
-    let bytes = to_bytes(body, MAX_CHAT_RESPONSE_BYTES)
+    let bytes = to_bytes(body, MAX_UPSTREAM_BODY_BYTES)
         .await
         .map_err(|e| format!("buffer error: {e}"))?;
     let chat_value: serde_json::Value =
@@ -701,7 +703,7 @@ async fn run_background_inference(
     };
 
     if !chat_response.status().is_success() {
-        let bytes = match to_bytes(chat_response.into_body(), MAX_CHAT_RESPONSE_BYTES).await {
+        let bytes = match to_bytes(chat_response.into_body(), MAX_UPSTREAM_BODY_BYTES).await {
             Ok(b) => b,
             Err(e) => {
                 finalize(

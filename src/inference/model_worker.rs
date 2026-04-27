@@ -681,7 +681,6 @@ async fn run_fused_batch_forward(
 
     let is_first = model.is_first();
     let is_last = model.is_last();
-    let total_layers = model.total_layers;
 
     // Slice payload per request and build tensor inputs.
     let mut input_tensors: Vec<candle_core::Tensor> = Vec::with_capacity(requests.len());
@@ -717,11 +716,6 @@ async fn run_fused_batch_forward(
         input_tensors.push(tensor);
         request_id_strings.push(r.request_id.to_string());
     }
-
-    // Clear prefill KV if sequence_num == 0 (shouldn't happen for eligible
-    // batches, but defensively). Eligibility guarantees sequence_num > 0.
-    let model_key = format!("{layer_start}-{layer_end}-{total_layers}");
-    let _ = model_key;
 
     // Build BatchItems (references to our owned tensors + strings).
     let items: Vec<split::BatchItem<'_>> = requests

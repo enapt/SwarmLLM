@@ -20,6 +20,8 @@ const MAX_DISK_MB: u64 = 10_000_000;
 const MAX_AUTO_MANAGE_STORAGE_MB: u64 = 10_000_000;
 /// Upper bound for `batch_timeout_ms` accepted via the config API.
 const MAX_BATCH_TIMEOUT_MS: u64 = 60_000;
+/// Maximum bytes accepted for the `status` filter on `list_responses`.
+const MAX_STATUS_FILTER_BYTES: usize = 256;
 
 /// Serialize a peer registry entry to JSON. Used by both REST and WebSocket.
 ///
@@ -973,7 +975,6 @@ pub async fn list_responses(
     // megabyte-long `?status=` and force `.split(',')` to materialise an
     // arbitrarily large Vec — the only valid values are a handful of
     // short ASCII enum strings, 256 bytes is generous.
-    const MAX_STATUS_FILTER_BYTES: usize = 256;
     let status_filter: Option<Vec<String>> = match params.status {
         Some(s) if s.len() > MAX_STATUS_FILTER_BYTES => {
             return Err(ApiError(crate::error::SwarmError::Validation(format!(

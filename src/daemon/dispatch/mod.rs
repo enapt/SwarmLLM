@@ -536,29 +536,41 @@ pub(crate) async fn dispatch_network_messages(
                                                 continue;
                                             }
                                         }
-                                        // Anti-gaming validation for network transactions
-                                        {
-                                            let mut ag = shared_state.credits.anti_gaming.lock().await;
-                                            match ag.check_and_record_transaction(&tx.from, &tx.to, tx.amount) {
-                                                Ok(decision) => {
-                                                    if decision == crate::credit::anti_gaming::SpotCheckDecision::RequiresVerification {
-                                                        tracing::info!(
+                                        // Anti-gaming validation for network transactions.
+                                        // Use try_lock to avoid blocking the dispatch loop on contention —
+                                        // the periodic AG sweep in health/monitor.rs holds the same mutex for
+                                        // cleanup. Skipping a check on contention is acceptable: the dispatcher
+                                        // has already verified signatures + replay; AG just adds rate-window
+                                        // and subnet heuristics. Same pattern as health/monitor.rs:128.
+                                        match shared_state.credits.anti_gaming.try_lock() {
+                                            Ok(mut ag) => {
+                                                match ag.check_and_record_transaction(&tx.from, &tx.to, tx.amount) {
+                                                    Ok(decision) => {
+                                                        if decision == crate::credit::anti_gaming::SpotCheckDecision::RequiresVerification {
+                                                            tracing::info!(
+                                                                tx_id = %tx.id,
+                                                                from = %tx.from,
+                                                                to = %tx.to,
+                                                                amount = tx.amount,
+                                                                "Anti-gaming: spot check recommended for transaction"
+                                                            );
+                                                        }
+                                                    }
+                                                    Err(violation) => {
+                                                        tracing::warn!(
                                                             tx_id = %tx.id,
-                                                            from = %tx.from,
-                                                            to = %tx.to,
-                                                            amount = tx.amount,
-                                                            "Anti-gaming: spot check recommended for transaction"
+                                                            violation = %violation,
+                                                            "Anti-gaming rejected credit transaction"
                                                         );
+                                                        continue;
                                                     }
                                                 }
-                                                Err(violation) => {
-                                                    tracing::warn!(
-                                                        tx_id = %tx.id,
-                                                        violation = %violation,
-                                                        "Anti-gaming rejected credit transaction"
-                                                    );
-                                                    continue;
-                                                }
+                                            }
+                                            Err(_) => {
+                                                tracing::debug!(
+                                                    tx_id = %tx.id,
+                                                    "anti_gaming contended, skipping rate-window check"
+                                                );
                                             }
                                         }
                                         // Record the transaction and apply balance change

@@ -299,8 +299,16 @@ jobs:
           # `--repo` lets gh CLI skip `git remote get-url origin` lookup,
           # so we don't need `actions/checkout@v4` on this job.
           ASSET_COUNT=$(gh release view "$TAG" --repo "$REPO" --json assets --jq '.assets | length')
-          if [ "$ASSET_COUNT" -lt 1 ]; then
-            echo "Refusing to publish: no build jobs uploaded assets to $TAG"
+          # Expected minimum: one archive per matrix entry (5: linux-cpu,
+          # linux-cuda, macos, windows-cpu, windows-gpu). Linux-x86_64 also
+          # produces .deb + .rpm so a fully successful run uploads 7. We
+          # require >= 5 archives so a single-platform failure still ships
+          # the rest, but a multi-platform regression won't silently publish
+          # a release that's missing binaries for half the user base.
+          MIN_EXPECTED=5
+          if [ "$ASSET_COUNT" -lt "$MIN_EXPECTED" ]; then
+            echo "Refusing to publish: only $ASSET_COUNT asset(s) uploaded to $TAG (expected at least $MIN_EXPECTED — one per matrix entry)"
+            echo "This usually means multiple build jobs failed. Check the build matrix logs."
             exit 1
           fi
           gh release edit "$TAG" --repo "$REPO" --draft=false

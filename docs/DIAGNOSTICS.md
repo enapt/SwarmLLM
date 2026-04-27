@@ -35,10 +35,10 @@ cargo run -- run -vv 2>&1 | grep "request_id=<UUID>"
 
 ### Request Lifecycle (log points)
 
-1. **API entry** → `Queued inference request` (router.rs)
-2. **Dispatch** → `DIAG: dispatch_single starting inference` (router.rs)
-3. **Pipeline assembly** → `DIAG: pipeline assembled` with `segments`, `standbys`, `schedule_ms` (router.rs)
-4. **Forward start** → `DIAG: starting forward_through_segments` with `seq_num`, `index_pos`, `activation_bytes` (pipeline/mod.rs)
+1. **API entry** → `Queued inference request` (router/mod.rs)
+2. **Dispatch** → `DIAG: dispatch_single starting inference` (router/mod.rs)
+3. **Pipeline assembly** → `DIAG: pipeline assembled` with `segments`, `standbys`, `schedule_ms` (router/distributed_exec.rs)
+4. **Forward start** → `DIAG: starting forward_through_segments` with `seq_num`, `index_pos`, `activation_bytes` (pipeline/distributed.rs)
 5. **Tensor forward send** → `Sent tensor forward` with `is_connected`, `total_connections`, `pending_tensor_count`, `outbound_id` (manager.rs)
 6. **Codec write** → `DIAG: codec write_request start/done` with `frame_len` (protocol.rs)
 7. **Encryption (if enabled)** → `DIAG: encrypting tensor forward` with `aad_len`, `has_session` (manager.rs)
@@ -54,13 +54,13 @@ cargo run -- run -vv 2>&1 | grep "request_id=<UUID>"
 17. **Response received** → `DIAG: received response` with `kind`, `was_tensor_forward`, `pending_tensor_out` (manager.rs)
 18. **Response dispatch** → `DIAG: received TensorPayload response` (manager.rs)
 19. **Result delivery** → `DIAG: dispatcher received LayerResult` → `DIAG: LayerResult delivered to pipeline` (daemon/dispatch/mod.rs)
-20. **Forward complete** → `DIAG: forward_through_segments returned OK` with `fwd_ms`, `tokens`, `activations_bytes` (pipeline/mod.rs)
-21. **Local segment** → `DIAG: local segment complete` with `segment_ms`, `activation_bytes` (pipeline/mod.rs)
-22. **Remote segment** → `DIAG: remote segment complete` with `segment_ms`, `activation_bytes` (pipeline/mod.rs)
-23. **Segment result** → `DIAG: segment result received` with `elapsed_ms` (pipeline/mod.rs)
-24. **Pipeline complete** → `DIAG: forward_through_segments completed` with `pipeline_ms` (pipeline/mod.rs)
-25. **Execute complete** → `DIAG: execute_request completed successfully` with `schedule_ms`, `execute_ms`, `total_ms` (router.rs)
-26. **Completion** → `DIAG: inference completed` with `elapsed_ms`, `prompt_tokens`, `completion_tokens` (router.rs)
+20. **Forward complete** → `DIAG: forward_through_segments returned OK` with `fwd_ms`, `tokens`, `activations_bytes` (pipeline/distributed.rs)
+21. **Local segment** → `DIAG: local segment complete` with `segment_ms`, `activation_bytes` (pipeline/distributed.rs)
+22. **Remote segment** → `DIAG: remote segment complete` with `segment_ms`, `activation_bytes` (pipeline/distributed.rs)
+23. **Segment result** → `DIAG: segment result received` with `elapsed_ms` (pipeline/local.rs)
+24. **Pipeline complete** → `DIAG: forward_through_segments completed` with `pipeline_ms` (pipeline/distributed.rs)
+25. **Execute complete** → `DIAG: execute_request completed successfully` with `schedule_ms`, `execute_ms`, `total_ms` (router/distributed_exec.rs)
+26. **Completion** → `DIAG: inference completed` with `elapsed_ms`, `prompt_tokens`, `completion_tokens` (router/mod.rs)
 
 ### Network Event Diagnostics
 
@@ -74,15 +74,15 @@ cargo run -- run -vv 2>&1 | grep "request_id=<UUID>"
 
 ### Failure Paths
 
-- **Timeout** → `DIAG: segment TIMED OUT after 30s` (pipeline/mod.rs)
+- **Timeout** → `DIAG: segment TIMED OUT — no result received` (pipeline/local.rs)
 - **Outbound failure** → `DIAG: OutboundFailure` → `Tensor forward OutboundFailure — notifying pipeline` (manager.rs)
 - **Inbound failure** → `DIAG: InboundFailure — response send may have failed` (manager.rs)
 - **Decryption fail** → `DIAG: decrypt FAILED — possible AAD mismatch` (manager.rs)
-- **No standby** → `DIAG: NO standby available for failed segment` (pipeline/mod.rs)
-- **Client disconnect** → `DIAG: result_tx receiver dropped` (router.rs)
+- **No standby** → `DIAG: NO standby available for failed segment` (pipeline/distributed.rs)
+- **Client disconnect** → `DIAG: result_tx receiver dropped` (router/mod.rs)
 - **Channel drop** → `DIAG: LayerResult delivered but pipeline receiver DROPPED` (daemon/dispatch/mod.rs)
 - **No pending channel** → `DIAG: No pending channel for LayerResult — already timed out or duplicate` (daemon/dispatch/mod.rs)
-- **Streaming done event** → `DIAG: streaming done_event send failed` (router.rs)
+- **Streaming done event** → `DIAG: streaming done_event send failed` (router/mod.rs or router/distributed_exec.rs)
 
 ## SSE Streaming Diagnostics
 
@@ -92,32 +92,32 @@ All three streaming paths are instrumented with timing and error reporting:
 
 | Level | What | Where |
 |-------|------|-------|
-| WARN  | `DIAG: SSE role delta send failed` — client disconnected before stream started | openai.rs |
-| WARN  | `DIAG: SSE final text delta send failed` — client disconnected on last token | openai.rs |
-| WARN  | `DIAG: SSE finish delta send failed` — client disconnected at finish | openai.rs |
-| WARN  | `DIAG: SSE token delta send failed` — client disconnected mid-stream | openai.rs |
-| DEBUG | `DIAG: SSE stream no finish event from pipeline` — falling back to result_rx | openai.rs |
-| WARN  | `DIAG: SSE fallback content/finish/error send failed` — various fallback failures | openai.rs |
-| WARN  | `DIAG: SSE result_rx channel dropped` — pipeline task died | openai.rs |
-| INFO  | `DIAG: SSE distributed stream completed` — `elapsed_ms`, `token_count` | openai.rs |
+| WARN  | `DIAG: SSE role delta send failed` — client disconnected before stream started | api/openai/streaming.rs |
+| WARN  | `DIAG: SSE final text delta send failed` — client disconnected on last token | api/openai/streaming.rs |
+| WARN  | `DIAG: SSE finish delta send failed` — client disconnected at finish | api/openai/streaming.rs |
+| WARN  | `DIAG: SSE token delta send failed` — client disconnected mid-stream | api/openai/streaming.rs |
+| DEBUG | `DIAG: SSE stream no finish event from pipeline` — falling back to result_rx | api/openai/streaming.rs |
+| WARN  | `DIAG: SSE fallback content/finish/error send failed` — various fallback failures | api/openai/streaming.rs |
+| WARN  | `DIAG: SSE result_rx channel dropped` — pipeline task died | api/openai/streaming.rs |
+| INFO  | `DIAG: SSE distributed stream completed` — `elapsed_ms`, `token_count` | api/openai/streaming.rs |
 
 ### Split Model Streaming (split_stream_response)
 
 | Level | What | Where |
 |-------|------|-------|
-| DEBUG | `DIAG: split stream model not found` — model evicted during request | openai.rs |
-| DEBUG | `DIAG: split stream decode loop complete (subprocess)` — `decode_ms`, `tok_per_sec` | openai.rs |
-| WARN  | `DIAG: split stream client disconnected mid-decode` — `token_count`, `elapsed_ms` | openai.rs |
-| INFO  | `DIAG: split stream completed` — `elapsed_ms`, `token_count` | openai.rs |
+| DEBUG | `DIAG: split stream model not found` — model evicted during request | api/openai/streaming.rs |
+| DEBUG | `DIAG: split stream decode loop complete (subprocess)` — `decode_ms`, `tok_per_sec` | api/openai/streaming.rs |
+| WARN  | `DIAG: split stream client disconnected mid-decode` — `token_count`, `elapsed_ms` | api/openai/streaming.rs |
+| INFO  | `DIAG: split stream completed` — `elapsed_ms`, `token_count` | api/openai/streaming.rs |
 
 ### Local Executor Streaming (stream_response)
 
 | Level | What | Where |
 |-------|------|-------|
-| WARN  | `DIAG: local stream role delta send failed` — client disconnected early | openai.rs |
-| WARN  | `DIAG: local stream token send failed` — channel full or client disconnected | openai.rs |
-| ERROR | `DIAG: local stream generate_stream error` — executor error | openai.rs |
-| INFO  | `DIAG: local stream completed` — `elapsed_ms`, `token_count` | openai.rs |
+| WARN  | `DIAG: local stream role delta send failed` — client disconnected early | api/openai/streaming.rs |
+| WARN  | `DIAG: local stream token send failed` — channel full or client disconnected | api/openai/streaming.rs |
+| ERROR | `DIAG: local stream generate_stream error` — executor error | api/openai/streaming.rs |
+| INFO  | `DIAG: local stream completed` — `elapsed_ms`, `token_count` | api/openai/streaming.rs |
 
 ## Encryption Diagnostics
 
@@ -606,8 +606,8 @@ For production testing, use native Linux (dual boot or bare metal). WSL2 is suit
 | `src/network/relay.rs` | Relay reservation logging |
 | `src/network/peer_cache.rs` | Peer cache save count |
 | `src/inference/pipeline/` | Segment timing (local + remote), pipeline total timing, failover details, wait_for_result context |
-| `src/inference/router.rs` | Pipeline schedule vs execute timing breakdown, result channel delivery, streaming done event |
-| `src/inference/split/` | Per-forward-pass timing (model.rs), KV-cache cleanup (kv_cache.rs) |
+| `src/inference/router/` | Pipeline schedule vs execute timing breakdown (distributed_exec.rs), result channel delivery, streaming done event (mod.rs) |
+| `src/inference/split/` | Per-forward-pass timing (executor.rs), KV-cache cleanup (kv_cache.rs) |
 | `src/inference/kv_cache.rs` | KV-cache hit/miss with detailed miss reasons (expired, degraded, prefix mismatch, evicted) |
 | `src/inference/scheduler/mod.rs` | Pipeline assembly timing, candidate counts, standby counts |
 | `src/inference/executor.rs` | Model load timing with backend type, generate_stream params |

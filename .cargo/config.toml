@@ -1,2 +1,17 @@
+# WARNING — PORTABILITY FOOTGUN
+# `target-cpu=native` produces binaries that may use AVX2/AVX-512/NEON
+# instructions specific to the build host. They will SIGILL on older or
+# different CPUs and can trip `ring`/`rustc` assertion failures on aarch64.
+#
+# REQUIREMENT: every CI workflow and every release build MUST set
+#   RUSTFLAGS=""
+# in its `env:` block to override this. Both `.github/workflows/ci.yml`
+# and `.github/workflows/release.yml` already do so. If you add a new
+# workflow file (docs job, lint job, anything that runs cargo) you MUST
+# include `RUSTFLAGS: ""` or you will silently ship non-portable binaries.
+#
+# This flag stays here so local `cargo build` benchmarks reflect host
+# capabilities for the user running them; do NOT remove it without
+# coordinating across all release/install paths.
 [build]
 rustflags = ["-C", "target-cpu=native"]

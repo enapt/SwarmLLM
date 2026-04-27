@@ -63,6 +63,8 @@ const MAX_PENDING_PROVIDER_QUERIES: usize = 500;
 const MAX_PENDING_REDIAL: usize = 50;
 /// Maximum buffered gossip messages when no peers are connected at startup.
 const MAX_BUFFERED_GOSSIP: usize = 64;
+/// Maximum concurrent inbound prefix-KV fetch requests before replying miss.
+const MAX_INBOUND_PREFIX_FETCHES: usize = 256;
 /// Maximum entries in connection_addrs before half-eviction of oldest ConnectionIds.
 const MAX_CONNECTION_ADDRS: usize = 1024;
 /// Maximum entries in ping_sent_times before pruning stale entries.
@@ -2303,7 +2305,6 @@ impl NetworkManager {
                         .send_response(channel, resp);
                     return;
                 }
-                const MAX_INBOUND_PREFIX_FETCHES: usize = 256;
                 if self.pending_prefix_kv_inbound.len() >= MAX_INBOUND_PREFIX_FETCHES {
                     tracing::warn!(%peer, "PrefixKvFetch: inbound queue full, replying miss");
                     let resp = SwarmResponse::PrefixKvData(PrefixKvDataResp {

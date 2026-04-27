@@ -48,10 +48,7 @@ use crate::storage::db::Database;
 /// the same heartbeat cadence as the live local-inference stream.
 pub(super) const SSE_KEEPALIVE_INTERVAL_SECS: u64 = 15;
 
-/// Cap on a non-success chat response body when surfacing it as the
-/// message of a `response.failed` SSE event. Mirrors `MAX_CHAT_RESPONSE_BYTES`
-/// in the non-streaming path.
-const MAX_CHAT_ERROR_BODY_BYTES: usize = 16 * 1024 * 1024;
+use super::MAX_UPSTREAM_BODY_BYTES;
 
 /// Entry point for streaming `/v1/responses` on the local-inference path.
 ///
@@ -292,7 +289,7 @@ where
 
         if !chat_response.status().is_success() {
             let status_code = chat_response.status();
-            let bytes = match to_bytes(chat_response.into_body(), MAX_CHAT_ERROR_BODY_BYTES).await {
+            let bytes = match to_bytes(chat_response.into_body(), MAX_UPSTREAM_BODY_BYTES).await {
                 Ok(b) => b,
                 Err(e) => {
                     let error = ResponseError::new(
