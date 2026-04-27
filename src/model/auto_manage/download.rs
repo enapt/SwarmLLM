@@ -515,7 +515,23 @@ display
                                             "AutoShardManager: failed to persist manifest after shard hash update — hash in memory only"
                                         );
                                     }
-                                    shared.model_registry.register_manifest(manifest);
+                                    shared.model_registry.register_manifest(manifest.clone());
+                                    // Persist the updated hash to redb so it survives restart.
+                                    // Without this, load_from_db restores the pre-download
+                                    // manifest hash and any peer that gossips the corrected
+                                    // manifest_hash will see a mismatch until a full rescan.
+                                    // The acquisition.rs path already does this; HF downloads
+                                    // had drifted.
+                                    if let Err(e) = shared
+                                        .model_registry
+                                        .persist_manifest(&shared.db, &manifest)
+                                    {
+                                        tracing::warn!(
+                                            model = %model_id,
+                                            error = %e,
+                                            "AutoShardManager: failed to persist manifest hash to DB after HF download"
+                                        );
+                                    }
                                 }
                             }
 

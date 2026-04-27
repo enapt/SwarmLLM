@@ -176,10 +176,20 @@ fn load_adapter(
         }
     }
 
-    // Pair up A and B matrices
+    // Pair up A and B matrices, validating each A's leading dim matches the
+    // declared rank. If `adapter_config.json` advertises r=16 but the tensor
+    // shape says r=8, every layer using it will silently produce wrong output
+    // because `apply_lora` computes `scale = alpha / rank` (16) instead of
+    // `alpha / 8`. Reject the adapter rather than load a misconfigured one.
     let mut weights = HashMap::new();
     for (key, a) in &a_tensors {
         if let Some(b) = b_tensors.get(key) {
+            let actual_rank = a.dims().first().copied().unwrap_or(0);
+            if actual_rank != rank {
+                return Err(SwarmError::Validation(format!(
+                    "LoRA A matrix rank mismatch for {key}: adapter_config.json declares r={rank} but tensor leading dim is {actual_rank}. Adapter would compute scale = alpha / {rank} instead of alpha / {actual_rank}, producing numerically incorrect output."
+                )));
+            }
             weights.insert(
                 key.clone(),
                 LoraLayerWeights {

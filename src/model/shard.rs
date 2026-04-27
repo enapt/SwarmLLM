@@ -264,11 +264,16 @@ impl ShardStore {
                             continue;
                         }
 
-                        // Quick size check: reject obviously truncated files
+                        // Quick size check: reject obviously truncated OR
+                        // oversized files (the latter could be a partial
+                        // overwrite or injected bytes). BLAKE3 still verifies
+                        // contents in the background — this is the cheap
+                        // startup gate that mirrors auto_manage::shard_size_ok.
                         let size_ok = std::fs::metadata(&shard_path)
                             .map(|m| {
                                 shard_info.size_bytes == 0
-                                    || m.len() >= shard_info.size_bytes * 9 / 10
+                                    || (m.len() >= shard_info.size_bytes * 9 / 10
+                                        && m.len() <= shard_info.size_bytes * 11 / 10)
                             })
                             .unwrap_or(false);
                         if size_ok {

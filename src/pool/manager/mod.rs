@@ -722,16 +722,19 @@ impl PoolManager {
             return;
         }
 
-        // Store in audit log
-        if let Err(e) =
-            self.shared_state
-                .db
-                .put_json(TREE_POOL_FORWARDS, &forward.id.to_string(), &forward)
-        {
-            tracing::warn!(error = %e, "Failed to persist credit forward");
-        }
-
-        // SEC-C2: Apply credit to the pool owner's balance
+        // SEC-C2: Apply credit to the pool owner's balance FIRST, then persist
+        // the audit-log dedup entry. If balance apply fails (transient redb
+        // error, lock contention) we return early — the dedup table stays
+        // empty so the same forward UUID can be retried by the member next
+        // tick. The reverse ordering would permanently lose the credit:
+        // dedup entry written → balance apply fails → retry hits dedup,
+        // silently drops, owner never credited. Same pattern as escrow.rs:
+        // 114 (apply_credit_direct) → 124 (put_json audit log).
+        //
+        // The remaining race is a process crash between balance apply and
+        // audit-log write: balance applied, dedup empty, next retry double-
+        // credits. That window is microseconds and crashes are user-driven,
+        // so manual reconciliation is acceptable.
         if let Err(e) = crate::credit::ledger::apply_credit_direct(
             &self.shared_state.credits.credit_balance,
             &self.shared_state.db,
@@ -740,7 +743,31 @@ impl PoolManager {
         )
         .await
         {
-            tracing::warn!(error = %e, "Failed to apply forwarded credits to owner balance");
+            tracing::warn!(
+                error = %e,
+                from = %forward.from_node_id,
+                id = %forward.id,
+                "Failed to apply forwarded credits to owner balance — leaving dedup empty so member can retry"
+            );
+            return;
+        }
+
+        // Store in audit log (dedup table). Errors here mean the balance
+        // already moved but we couldn't persist the dedup entry — log a
+        // clear error so the operator can manually reconcile.
+        if let Err(e) =
+            self.shared_state
+                .db
+                .put_json(TREE_POOL_FORWARDS, &forward.id.to_string(), &forward)
+        {
+            tracing::error!(
+                error = %e,
+                from = %forward.from_node_id,
+                id = %forward.id,
+                amount = forward.amount,
+                "Credit forward applied to balance but FAILED to persist dedup entry — \
+                 a retry of this forward will double-credit. Manual reconciliation required."
+            );
         }
 
         // Update the member's contribution in pool state.

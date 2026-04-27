@@ -632,6 +632,12 @@ pub async fn apply_credit_direct(
 /// Maximum staleness for a signed balance report (5 minutes).
 const BALANCE_REPORT_MAX_AGE_SECS: i64 = 300;
 
+/// Allowable clock skew tolerance for a balance report timestamped in the
+/// future. Honest cross-node clocks drift by single-digit seconds; anything
+/// larger is rejected so an attacker can't pre-sign with a future timestamp
+/// to extend the effective replay window.
+const CLOCK_SKEW_TOLERANCE_SECS: i64 = 30;
+
 /// Build the deterministic signing payload for a balance report.
 /// Format: "swarmllm-balance-v1" || node_id(32) || balance_bucket(8) || timestamp_secs(8)
 fn build_balance_report_payload(
@@ -672,9 +678,18 @@ pub fn verify_balance_report(gossip: &CreditGossip) -> Result<(), SwarmError> {
         return Err(SwarmError::InvalidSignature);
     }
 
-    // Timestamp freshness check
+    // Timestamp freshness check. Use a one-sided staleness bound (NOT .abs())
+    // so an attacker can't pre-sign a report with a timestamp 5 minutes in
+    // the future and replay it for a full 10-minute window. A small negative
+    // tolerance is allowed for honest cross-node clock skew.
     let now = chrono::Utc::now();
-    let age_secs = (now - gossip.timestamp).num_seconds().abs();
+    let age_secs = (now - gossip.timestamp).num_seconds();
+    if age_secs < -CLOCK_SKEW_TOLERANCE_SECS {
+        return Err(SwarmError::CreditError(format!(
+            "Future-dated balance report from {}: {}s ahead (skew tolerance {}s)",
+            gossip.node_id, -age_secs, CLOCK_SKEW_TOLERANCE_SECS,
+        )));
+    }
     if age_secs > BALANCE_REPORT_MAX_AGE_SECS {
         return Err(SwarmError::CreditError(format!(
             "Stale balance report from {}: {}s old (max {}s)",

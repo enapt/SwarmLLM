@@ -88,26 +88,37 @@ fn get_peer_client() -> &'static reqwest::Client {
 }
 
 /// Forward a chat completion request to a peer's HTTP API.
+///
+/// The receiving daemon's auth middleware requires Bearer auth for non-loopback
+/// peer-forwarded requests — the `internal_auth_token` is per-process random
+/// and not shareable across nodes. So we forward the originating request's
+/// Authorization header verbatim. In the standard SwarmLLM cluster
+/// deployment all daemons share the same API key (set via env or data dir),
+/// so the receiver's Bearer check passes. If the originator didn't send an
+/// Authorization header (e.g. unauthed local probe) we still fail loudly at
+/// the receiver — that's correct behavior, not a regression.
 pub(super) async fn forward_to_peer(
     peer_url: &str,
     req: &ChatCompletionRequest,
     stream: bool,
+    auth_header: Option<&str>,
 ) -> Result<axum::response::Response, ApiError> {
     let client = get_peer_client();
     let url = format!("{}/v1/chat/completions", peer_url);
 
-    let peer_resp = client
+    let mut builder = client
         .post(&url)
         .header("x-swarm-forwarded", "true")
-        .json(req)
-        .send()
-        .await
-        .map_err(|e| {
-            tracing::warn!(error = %e, url = %url, "Failed to forward to peer");
-            ApiError(crate::error::SwarmError::Network(format!(
-                "Peer forwarding failed: {e}"
-            )))
-        })?;
+        .json(req);
+    if let Some(auth) = auth_header {
+        builder = builder.header(reqwest::header::AUTHORIZATION, auth);
+    }
+    let peer_resp = builder.send().await.map_err(|e| {
+        tracing::warn!(error = %e, url = %url, "Failed to forward to peer");
+        ApiError(crate::error::SwarmError::Network(format!(
+            "Peer forwarding failed: {e}"
+        )))
+    })?;
 
     if !peer_resp.status().is_success() {
         let status = peer_resp.status();

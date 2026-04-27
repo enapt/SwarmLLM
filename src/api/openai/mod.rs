@@ -262,7 +262,10 @@ pub async fn chat_completions(
                     peer_url = %peer_url,
                     "Forwarding request to peer"
                 );
-                return forward_to_peer(&peer_url, &req, req.stream).await;
+                let auth = headers
+                    .get(axum::http::header::AUTHORIZATION)
+                    .and_then(|v| v.to_str().ok());
+                return forward_to_peer(&peer_url, &req, req.stream, auth).await;
             }
         }
 
@@ -330,7 +333,10 @@ pub async fn chat_completions(
                         wait_ms = attempt * 500,
                         "Found peer after cold-start wait"
                     );
-                    return forward_to_peer(&peer_url, &req, req.stream).await;
+                    let auth = headers
+                        .get(axum::http::header::AUTHORIZATION)
+                        .and_then(|v| v.to_str().ok());
+                    return forward_to_peer(&peer_url, &req, req.stream, auth).await;
                 }
             }
         }
