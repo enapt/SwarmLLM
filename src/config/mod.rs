@@ -414,81 +414,6 @@ fn default_swift_skip_ratio() -> f32 {
     0.45
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct LoggingConfig {
-    #[serde(default = "default_log_level")]
-    pub level: String,
-    #[serde(default = "default_log_format")]
-    pub format: String,
-    #[serde(default)]
-    pub file: Option<String>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct UiConfig {
-    #[serde(default = "default_true")]
-    pub open_browser_on_start: bool,
-    #[serde(default = "default_theme")]
-    pub theme: String,
-}
-
-impl Default for UiConfig {
-    fn default() -> Self {
-        Self {
-            open_browser_on_start: true,
-            theme: default_theme(),
-        }
-    }
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct UpdateConfig {
-    #[serde(default = "default_auto_update")]
-    pub auto_update: AutoUpdateMode,
-    #[serde(default = "default_check_interval_hours")]
-    pub check_interval_hours: u32,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum AutoUpdateMode {
-    Disabled,
-    Stable,
-    All,
-}
-
-impl Default for UpdateConfig {
-    fn default() -> Self {
-        Self {
-            auto_update: AutoUpdateMode::Stable,
-            check_interval_hours: default_check_interval_hours(),
-        }
-    }
-}
-
-fn default_auto_update() -> AutoUpdateMode {
-    AutoUpdateMode::Stable
-}
-
-fn default_check_interval_hours() -> u32 {
-    6
-}
-
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
-pub struct ApiConfig {
-    /// Bearer token for API authentication. If empty, one is auto-generated on first run.
-    #[serde(default)]
-    pub api_key: Option<String>,
-    /// Rate limit (requests per minute) for `/v1/` and `/api/chat` endpoints.
-    /// Default: 60.
-    #[serde(default)]
-    pub rate_limit_rpm: Option<u64>,
-    /// Rate limit (requests per minute) for `/api/admin/` endpoints.
-    /// Default: 200.
-    #[serde(default)]
-    pub rate_limit_admin_rpm: Option<u64>,
-}
-
 /// Configuration for automatic shard management.
 ///
 /// When enabled, the node periodically evaluates network shard coverage
@@ -669,6 +594,11 @@ pub use credit::*;
 mod network;
 pub use network::*;
 
+/// Operational config: LoggingConfig, UiConfig, UpdateConfig +
+/// AutoUpdateMode, ApiConfig.
+mod ops;
+pub use ops::*;
+
 /// Identity configuration (voluntary self-reported metadata).
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct IdentityConfig {
@@ -676,10 +606,6 @@ pub struct IdentityConfig {
     /// Voluntarily self-reported; used for the network map visualization.
     #[serde(default)]
     pub region: Option<String>,
-}
-
-fn default_theme() -> String {
-    "dark".into()
 }
 
 // ---- Defaults ----
@@ -808,14 +734,6 @@ fn default_prune_aggressiveness() -> String {
     "normal".into()
 }
 
-fn default_log_level() -> String {
-    "info".into()
-}
-
-fn default_log_format() -> String {
-    "pretty".into()
-}
-
 // ---- Impl defaults ----
 
 impl Default for Config {
@@ -906,16 +824,6 @@ impl Default for InferenceConfig {
             decentralized_spec_decoding: false,
             activation_compression: false,
             parallax_routing: default_parallax_routing(),
-        }
-    }
-}
-
-impl Default for LoggingConfig {
-    fn default() -> Self {
-        Self {
-            level: default_log_level(),
-            format: default_log_format(),
-            file: None,
         }
     }
 }
