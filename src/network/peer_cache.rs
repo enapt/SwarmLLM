@@ -9,24 +9,23 @@ const MAX_CACHED_PEERS: usize = 200;
 /// Save known peer multiaddrs to the database for reconnection on restart.
 ///
 /// Stores up to `MAX_CACHED_PEERS` addresses keyed by sequential index.
+/// Uses `replace_tree` so the clear + N inserts land atomically — a
+/// crash mid-save never leaves the cache empty or partially populated.
 pub fn save_peer_cache(db: &Database, addrs: &[String]) {
-    // Clear old entries and write the current set
-    if let Err(e) = db.clear_tree(TREE_PEER_CACHE) {
-        tracing::warn!(error = %e, "Failed to clear peer cache");
+    let entries: Vec<(String, Vec<u8>)> = addrs
+        .iter()
+        .take(MAX_CACHED_PEERS)
+        .enumerate()
+        .map(|(i, addr)| (format!("peer_{i:04}"), addr.as_bytes().to_vec()))
+        .collect();
+
+    let count = entries.len();
+    if let Err(e) = db.replace_tree(TREE_PEER_CACHE, &entries) {
+        tracing::warn!(error = %e, "Failed to persist peer cache");
         return;
     }
 
-    for (i, addr) in addrs.iter().take(MAX_CACHED_PEERS).enumerate() {
-        let key = format!("peer_{i:04}");
-        if let Err(e) = db.insert_raw(TREE_PEER_CACHE, &key, addr.as_bytes()) {
-            tracing::warn!(error = %e, addr, "Failed to cache peer address");
-        }
-    }
-
-    tracing::debug!(
-        count = addrs.len().min(MAX_CACHED_PEERS),
-        "DIAG: peer cache saved"
-    );
+    tracing::debug!(count, "DIAG: peer cache saved");
 }
 
 /// Load cached peer multiaddrs from the database.

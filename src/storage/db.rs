@@ -441,6 +441,63 @@ impl Database {
         Ok(())
     }
 
+    /// Atomically replace every entry under `tree_name` with the given
+    /// key/value pairs in a single redb write transaction. Either the
+    /// whole new set lands or none of it does — readers never observe a
+    /// partially-cleared tree.
+    ///
+    /// `peer_cache` and any other "snapshot list" persistence path
+    /// should use this in preference to `clear_tree` + N `insert_raw`
+    /// calls (which span N+1 transactions and can leave the tree empty
+    /// or partially populated if the process is killed mid-write).
+    pub fn replace_tree(
+        &self,
+        tree_name: &str,
+        entries: &[(String, Vec<u8>)],
+    ) -> Result<(), SwarmError> {
+        let start = tree_range_start(tree_name);
+        let end = tree_range_end(tree_name);
+        let write_txn = self
+            .inner
+            .begin_write()
+            .map_err(|e| SwarmError::Database(e.to_string()))?;
+        {
+            let mut table = write_txn
+                .open_table(DATA_TABLE)
+                .map_err(|e| SwarmError::Database(e.to_string()))?;
+
+            // Collect existing keys then remove them — same pattern as
+            // clear_tree, but inside the same txn as the inserts.
+            let stale_keys: Vec<Vec<u8>> = {
+                let range = table
+                    .range(start.as_slice()..end.as_slice())
+                    .map_err(|e| SwarmError::Database(e.to_string()))?;
+                let mut ks = Vec::new();
+                for entry in range {
+                    let (key_guard, _) = entry.map_err(|e| SwarmError::Database(e.to_string()))?;
+                    ks.push(key_guard.value().to_vec());
+                }
+                ks
+            };
+            for key in &stale_keys {
+                table
+                    .remove(key.as_slice())
+                    .map_err(|e| SwarmError::Database(e.to_string()))?;
+            }
+
+            for (subkey, value) in entries {
+                let k = make_key(tree_name, subkey);
+                table
+                    .insert(k.as_slice(), value.as_slice())
+                    .map_err(|e| SwarmError::Database(e.to_string()))?;
+            }
+        }
+        write_txn
+            .commit()
+            .map_err(|e| SwarmError::Database(e.to_string()))?;
+        Ok(())
+    }
+
     /// Persist the user's --shards range so it's restored on next startup.
     pub fn save_shard_range(&self, start: u32, end: u32) -> Result<(), SwarmError> {
         self.put_json("config", "shard_range", &(start, end))
@@ -617,6 +674,46 @@ mod tests {
         db.save_shard_range(5, 8).unwrap();
         let loaded = db.load_shard_range().unwrap();
         assert_eq!(loaded, Some((5, 8)));
+    }
+
+    #[test]
+    fn replace_tree_swaps_contents_atomically() {
+        let db = Database::open_temp().unwrap();
+        let tree = "snapshot";
+
+        // Seed initial set.
+        let initial = vec![
+            ("a".to_string(), b"v1".to_vec()),
+            ("b".to_string(), b"v2".to_vec()),
+        ];
+        db.replace_tree(tree, &initial).unwrap();
+        assert_eq!(db.iter_raw(tree).unwrap().len(), 2);
+
+        // Replace with a fresh set; old keys should not survive.
+        let next = vec![("c".to_string(), b"v3".to_vec())];
+        db.replace_tree(tree, &next).unwrap();
+        let entries = db.iter_raw(tree).unwrap();
+        assert_eq!(entries.len(), 1);
+        let (_, v) = &entries[0];
+        assert_eq!(v.as_slice(), b"v3");
+    }
+
+    #[test]
+    fn replace_tree_with_empty_clears() {
+        let db = Database::open_temp().unwrap();
+        let tree = "snapshot";
+        db.replace_tree(
+            tree,
+            &[
+                ("a".to_string(), b"v1".to_vec()),
+                ("b".to_string(), b"v2".to_vec()),
+            ],
+        )
+        .unwrap();
+        assert_eq!(db.iter_raw(tree).unwrap().len(), 2);
+
+        db.replace_tree(tree, &[]).unwrap();
+        assert!(db.iter_raw(tree).unwrap().is_empty());
     }
 
     #[test]
