@@ -389,6 +389,21 @@ impl AutoShardManager {
                 config.min_replicas,
             );
             let effective_target = target_now.max(candidate.target_replicas);
+            // mmproj is added to candidates only when scan-time pressure was
+            // urgent. Earlier prune executions in this same loop may have
+            // dropped fresh_pressure below PRESSURE_URGENT — in that case
+            // the strict mmproj guard no longer holds, so skip rather than
+            // prune a 5x-bonus shard under merely soft pressure.
+            if candidate.shard_index == crate::types::MMPROJ_SHARD_INDEX
+                && fresh_pressure <= PRESSURE_URGENT
+            {
+                tracing::debug!(
+                    model = %candidate.model_id,
+                    fresh_pressure = %format_args!("{:.2}", fresh_pressure),
+                    "Skipping mmproj prune — fresh pressure no longer urgent (earlier prunes freed disk)"
+                );
+                continue;
+            }
             if current_holders <= effective_target as usize {
                 tracing::debug!(
                     model = %candidate.model_id,

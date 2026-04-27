@@ -672,9 +672,21 @@ mod tests {
         }
     }
 
+    /// RAII guard that cleans up `BACKGROUND_STATE` + the legacy cancel map
+    /// on drop, even if the test panics. Without this, a panicking run leaks
+    /// the entry into the process-global static and can affect later tests.
+    struct BgStateTestGuard(String);
+    impl Drop for BgStateTestGuard {
+        fn drop(&mut self) {
+            BACKGROUND_STATE.remove(&self.0);
+            super::super::unregister_background_cancel(&self.0);
+        }
+    }
+
     #[tokio::test]
     async fn register_and_lookup_background_state() {
         let id = format!("resp_test_{}", uuid::Uuid::new_v4().simple());
+        let _cleanup = BgStateTestGuard(id.clone());
         let cancel = Arc::new(AtomicBool::new(false));
         let state = register_background_stream(&id, cancel.clone());
         let fetched = lookup_background_state(&id).expect("registered");
@@ -687,6 +699,7 @@ mod tests {
 
         deregister_background_stream(&id).await;
         assert!(lookup_background_state(&id).is_none());
+        // _cleanup is now a no-op (entry already removed) — that's fine.
     }
 
     #[tokio::test]

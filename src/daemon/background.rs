@@ -799,6 +799,12 @@ pub(super) fn spawn_responses_sweep(
     tasks.spawn(async move {
         let mut tick =
             tokio::time::interval(std::time::Duration::from_secs(SWEEP_INTERVAL_SECS));
+        // If a tick gets missed (executor starvation, blocking spawn_blocking
+        // contention), skip the catch-up burst — at 1h granularity a back-to-
+        // back double-fire is harmless but inconsistent with every other
+        // periodic loop in the codebase. Match dispatch::DRAIN_TICK_INTERVAL
+        // and health::monitor::HEALTH_TICK_SECS which both set Skip.
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         // Skip the first tick (runs immediately) — the daemon just started
         // and there's nothing to clean up yet.
         tick.tick().await;

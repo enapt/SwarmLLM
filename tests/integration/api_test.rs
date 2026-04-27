@@ -55,8 +55,17 @@ async fn spawn_test_server() -> (String, String) {
         .unwrap();
     });
 
-    // Small delay to let server bind
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    // Probe TCP accept readiness instead of a fixed 50ms sleep. On slow CI
+    // runners 50ms wasn't always enough; on fast machines it's wasted time
+    // multiplied across every test. Bound: 2s with 1ms backoff.
+    let probe_addr = format!("127.0.0.1:{port}");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while std::time::Instant::now() < deadline {
+        match tokio::net::TcpStream::connect(&probe_addr).await {
+            Ok(_) => break,
+            Err(_) => tokio::time::sleep(std::time::Duration::from_millis(1)).await,
+        }
+    }
 
     (format!("http://127.0.0.1:{port}"), api_key)
 }

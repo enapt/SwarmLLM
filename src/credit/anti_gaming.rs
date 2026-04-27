@@ -311,7 +311,10 @@ mod tests {
     #[test]
     fn cleanup_removes_old_entries() {
         let mut ag = AntiGaming::new();
-        ag.window_duration = Duration::from_millis(1);
+        // window=10ms, sleep=100ms — 10x margin so CI scheduler jitter
+        // doesn't flake the test. Previous values (1ms+5ms) had only 4ms
+        // headroom which was insufficient under shared-runner load.
+        ag.window_duration = Duration::from_millis(10);
         ag.max_tx_per_window = 1;
 
         let from = node(1);
@@ -320,7 +323,7 @@ mod tests {
         ag.record_transaction(&from);
 
         // Wait for window to expire
-        std::thread::sleep(Duration::from_millis(5));
+        std::thread::sleep(Duration::from_millis(100));
         ag.cleanup();
 
         // Should be allowed again

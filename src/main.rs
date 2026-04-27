@@ -234,6 +234,25 @@ async fn main() -> anyhow::Result<()> {
         swarmllm::config::resolve_data_dir(cli_data_dir.as_deref())
     };
 
+    // CLI client port: CLI flag > SWARMLLM_NODE_LISTEN_PORT > 8800.
+    // Without env-var support every client subcommand (status/chat/peers/
+    // bench/pool) silently connected to 8800 even when the daemon was
+    // started on a different port via env var — surprising the user who
+    // followed the documented "env > default" precedence.
+    let resolve_client_port = |cli_port: Option<u16>| -> u16 {
+        if let Some(p) = cli_port {
+            return p;
+        }
+        if let Ok(s) = std::env::var("SWARMLLM_NODE_LISTEN_PORT") {
+            if let Ok(p) = s.parse::<u16>() {
+                if p > 0 {
+                    return p;
+                }
+            }
+        }
+        8800
+    };
+
     match command {
         Commands::Run { .. } => {
             let args = cli::run::DaemonArgs {
@@ -253,7 +272,7 @@ async fn main() -> anyhow::Result<()> {
             Ok(())
         }
         Commands::Status => {
-            let port = cli.port.unwrap_or(8800);
+            let port = resolve_client_port(cli.port);
             let data_dir = resolve_data_dir(&cli.data_dir);
             cli::status::query_status(port, &data_dir).await
         }
@@ -262,12 +281,12 @@ async fn main() -> anyhow::Result<()> {
             max_tokens,
             temperature,
         } => {
-            let port = cli.port.unwrap_or(8800);
+            let port = resolve_client_port(cli.port);
             let data_dir = resolve_data_dir(&cli.data_dir);
             cli::chat::run_chat(port, &data_dir, model, max_tokens, temperature).await
         }
         Commands::Peers { json } => {
-            let port = cli.port.unwrap_or(8800);
+            let port = resolve_client_port(cli.port);
             let data_dir = resolve_data_dir(&cli.data_dir);
             cli::peers::query_peers(port, &data_dir, json).await
         }
@@ -335,7 +354,7 @@ async fn main() -> anyhow::Result<()> {
             Ok(())
         }
         Commands::Pool { action } => {
-            let port = cli.port.unwrap_or(8800);
+            let port = resolve_client_port(cli.port);
             let data_dir = resolve_data_dir(&cli.data_dir);
             cli::pool::run_pool_command(port, &data_dir, action).await
         }
@@ -352,7 +371,7 @@ async fn main() -> anyhow::Result<()> {
             stream,
             model_id,
         } => {
-            let port = cli.port.unwrap_or(8800);
+            let port = resolve_client_port(cli.port);
             let data_dir = resolve_data_dir(&cli.data_dir);
             cli::bench::run_bench(
                 port,
@@ -379,16 +398,23 @@ fn init_tracing(verbose: u8) {
             _ => "trace".to_string(),
         }
     } else {
-        // Try to read logging.level from default config location
-        let config_level = dirs::data_dir()
-            .map(|d| d.join("swarmllm").join("config.toml"))
-            .and_then(|p| std::fs::read_to_string(p).ok())
-            .and_then(|contents| toml::from_str::<toml::Value>(&contents).ok())
-            .and_then(|v| {
-                v.get("logging")
-                    .and_then(|l| l.get("level"))
-                    .and_then(|l| l.as_str().map(String::from))
-            });
+        // Read logging.level from the resolved data dir, NOT a hardcoded
+        // default. resolve_data_dir() picks up SWARMLLM_NODE_DATA_DIR so a
+        // multi-node setup gets each node's own log level. Without this,
+        // node2 silently inherited node1's config (or fell through to "info").
+        // Note: this runs before CLI parsing, so a `--data-dir` flag isn't
+        // available yet — we accept that limitation for the bootstrap log
+        // filter; the env-var case (which is the common multi-node testing
+        // pattern) is what matters here.
+        let config_level =
+            std::fs::read_to_string(swarmllm::config::resolve_data_dir(None).join("config.toml"))
+                .ok()
+                .and_then(|contents| toml::from_str::<toml::Value>(&contents).ok())
+                .and_then(|v| {
+                    v.get("logging")
+                        .and_then(|l| l.get("level"))
+                        .and_then(|l| l.as_str().map(String::from))
+                });
         match config_level.as_deref() {
             Some("debug") => "swarmllm=debug".to_string(),
             Some("trace") => "trace".to_string(),

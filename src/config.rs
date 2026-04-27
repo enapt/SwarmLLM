@@ -1648,6 +1648,18 @@ impl Config {
                 "speculative_gamma must be > 0".to_string(),
             ));
         }
+        if !(0.0..1.0).contains(&self.inference.swift_skip_ratio) {
+            return Err(SwarmError::Config(format!(
+                "swift_skip_ratio must be in [0.0, 1.0) (got {}); a value >= 1.0 would cause empty layer ranges in the SWIFT draft pass",
+                self.inference.swift_skip_ratio
+            )));
+        }
+        if !(0.0..=1.0).contains(&self.inference.cross_node_prefix_trust_min) {
+            return Err(SwarmError::Config(format!(
+                "cross_node_prefix_trust_min must be in [0.0, 1.0] (got {}); values outside this range either trust everyone or no one",
+                self.inference.cross_node_prefix_trust_min
+            )));
+        }
         if self.network.relay_max_circuits == 0 {
             return Err(SwarmError::Config(
                 "relay_max_circuits must be > 0".to_string(),

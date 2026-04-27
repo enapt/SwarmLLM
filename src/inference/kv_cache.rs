@@ -591,12 +591,15 @@ mod tests {
 
     #[test]
     fn session_expires() {
-        let mut mgr = KvCacheManager::new(Duration::from_millis(1));
+        // TTL=10ms, sleep=100ms — 10x margin so the test stays robust under
+        // CI scheduler jitter. The previous TTL=1ms+sleep=10ms had a 9ms
+        // headroom which was flaky under load on shared CI runners.
+        let mut mgr = KvCacheManager::new(Duration::from_millis(10));
         let session_id = uuid::Uuid::new_v4();
         let pipeline = make_pipeline(session_id);
 
         mgr.register_session(session_id, pipeline, 128);
-        std::thread::sleep(Duration::from_millis(10));
+        std::thread::sleep(Duration::from_millis(100));
 
         let session = mgr.get_session(&session_id);
         assert!(session.is_none());
@@ -604,12 +607,12 @@ mod tests {
 
     #[test]
     fn cleanup_removes_expired() {
-        let mut mgr = KvCacheManager::new(Duration::from_millis(1));
+        let mut mgr = KvCacheManager::new(Duration::from_millis(10));
         let session_id = uuid::Uuid::new_v4();
         let pipeline = make_pipeline(session_id);
 
         mgr.register_session(session_id, pipeline, 128);
-        std::thread::sleep(Duration::from_millis(10));
+        std::thread::sleep(Duration::from_millis(100));
 
         let cleaned = mgr.cleanup_expired();
         assert_eq!(cleaned, 1);
@@ -618,14 +621,19 @@ mod tests {
 
     #[test]
     fn touch_refreshes_ttl() {
-        let mut mgr = KvCacheManager::new(Duration::from_millis(50));
+        // TTL=200ms, sleeps=120ms — touch at 120ms (TTL/200ms not yet
+        // expired), then sleep another 120ms → total 240ms but touch reset
+        // the clock at 120ms so the cumulative since-touch is 120ms <
+        // 200ms TTL. Previous values (TTL=50ms, sleep=30ms+30ms) gave only
+        // 10ms safety margin around scheduling jitter.
+        let mut mgr = KvCacheManager::new(Duration::from_millis(200));
         let session_id = uuid::Uuid::new_v4();
         let pipeline = make_pipeline(session_id);
 
         mgr.register_session(session_id, pipeline, 128);
-        std::thread::sleep(Duration::from_millis(30));
+        std::thread::sleep(Duration::from_millis(120));
         mgr.touch_session(&session_id);
-        std::thread::sleep(Duration::from_millis(30));
+        std::thread::sleep(Duration::from_millis(120));
 
         // Should still be valid because we touched it
         let session = mgr.get_session(&session_id);

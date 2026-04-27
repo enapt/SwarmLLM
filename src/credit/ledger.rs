@@ -1062,6 +1062,48 @@ mod tests {
         assert!(verify_balance_report(&gossip).is_ok());
     }
 
+    #[test]
+    fn future_dated_report_rejected() {
+        // Pre-signed reports with a timestamp in the future would extend the
+        // effective replay window if `.abs()` was used on the staleness
+        // check. R65 fixed this with a one-sided bound + 30s clock-skew
+        // tolerance — verify a report 60s in the future (well beyond
+        // tolerance) is rejected.
+        let identity = crate::identity::Identity::generate();
+        let node_id = identity.node_id().clone();
+        let future = chrono::Utc::now() + chrono::Duration::seconds(60);
+        let signature = sign_balance_report(&node_id, 500, future, &identity);
+        let gossip = CreditGossip {
+            node_id,
+            balance_bucket: 500,
+            timestamp: future,
+            signature,
+        };
+        assert!(
+            verify_balance_report(&gossip).is_err(),
+            "Future-dated balance report should be rejected"
+        );
+    }
+
+    #[test]
+    fn slightly_future_report_accepted_within_skew_tolerance() {
+        // Honest cross-node clock skew of 5s should still accept the report.
+        let identity = crate::identity::Identity::generate();
+        let node_id = identity.node_id().clone();
+        let slight_future = chrono::Utc::now() + chrono::Duration::seconds(5);
+        let signature = sign_balance_report(&node_id, 500, slight_future, &identity);
+        let gossip = CreditGossip {
+            node_id,
+            balance_bucket: 500,
+            timestamp: slight_future,
+            signature,
+        };
+        assert!(
+            verify_balance_report(&gossip).is_ok(),
+            "Report 5s in future (within 30s skew tolerance) should be accepted"
+        );
+    }
+
     #[tokio::test]
     async fn process_signed_gossip_adds_balance() {
         let identity = crate::identity::Identity::generate();

@@ -318,17 +318,25 @@ impl AutoShardManager {
             .saturating_sub(active_downloads);
         let delta = hosted_after as i64 - hosted_before as i64;
 
-        self.shared_state.emit_activity(
-            crate::daemon::state::ActivityEvent::new(
-                "auto_manage",
-                "cycle_complete",
-                format!(
-                    "Auto-manage cycle: {} models, {} shards hosted ({:+}), {} download(s) started",
-                    models_hosted, hosted_after, delta, new_downloads
-                ),
-            )
-            .with_detail_num(hosted_after as i64),
-        );
+        // Emit only when something actually changed. The notify path bypasses
+        // the 60s cooldown when has_p2p_failures is true, so a 50-shard burst
+        // of HF download completions can fire 50 cycle_complete events in a
+        // few seconds. activity_tx has cap 256 — combined with 150+ per-shard
+        // events that's enough to saturate the channel during cold start and
+        // drop unrelated subsystem events.
+        if delta != 0 || new_downloads > 0 {
+            self.shared_state.emit_activity(
+                crate::daemon::state::ActivityEvent::new(
+                    "auto_manage",
+                    "cycle_complete",
+                    format!(
+                        "Auto-manage cycle: {} models, {} shards hosted ({:+}), {} download(s) started",
+                        models_hosted, hosted_after, delta, new_downloads
+                    ),
+                )
+                .with_detail_num(hosted_after as i64),
+            );
+        }
     }
 
     /// Download under-replicated shards based on geo-aware scoring.
