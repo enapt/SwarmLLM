@@ -351,6 +351,15 @@ async fn async_main(mut cli: Cli) -> anyhow::Result<()> {
             } else {
                 Some(max_seq_len_override as usize)
             };
+            let options = swarmllm::inference::model_worker::WorkerOptions {
+                force_standard_attn,
+                max_seq_len_override: max_seq_override,
+                activation_compression,
+                batch_generate,
+                batch_generate_max_slots,
+                prefill_chunk_tokens,
+                batched_prefill_forward,
+            };
             swarmllm::inference::model_worker::run_worker(
                 socket,
                 data_dir,
@@ -358,13 +367,7 @@ async fn async_main(mut cli: Cli) -> anyhow::Result<()> {
                 kv_cache_ttl,
                 prefix_cfg,
                 swift_cfg,
-                force_standard_attn,
-                max_seq_override,
-                activation_compression,
-                batch_generate,
-                batch_generate_max_slots,
-                prefill_chunk_tokens,
-                batched_prefill_forward,
+                options,
             )
             .await;
             Ok(())

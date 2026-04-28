@@ -23,6 +23,21 @@ use super::{
     Mlp, ModelArch, MoeFfn, QMatMul, Qwen35AttnWeights, DEFAULT_MAX_SEQ_LEN,
 };
 
+/// Per-call options for [`SplitModel::load_model_from_content`]. Bundles the
+/// layer range + first/last role flags + the optional `parallel_data` mmap
+/// slice so the loader signature doesn't need `#[allow(too_many_arguments)]`.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct SplitLoadOptions<'a> {
+    pub layer_start: usize,
+    pub layer_end: usize,
+    pub is_first: bool,
+    pub is_last: bool,
+    /// When `Some`, enables parallel dense-layer loading via per-thread cursors
+    /// (mmap path). When `None`, loads sequentially (ShardReader path —
+    /// `ShardReader` can't be shared across threads).
+    pub parallel_data: Option<&'a [u8]>,
+}
+
 /// Bundle returned by [`load_qkv_weights`]: either fused `wqkv` is Some, or
 /// all three of `wq/wk/wv` are Some.
 type QkvWeights = (
@@ -89,8 +104,24 @@ impl SplitModel {
         is_last: bool,
     ) -> Result<Self, SwarmError> {
         let file = std::fs::File::open(gguf_path).map_err(SwarmError::Io)?;
-        // SAFETY: Standard mmap usage — file is kept open for the duration of loading.
-        // The mmap is dropped before the function returns; loaded tensors own their data.
+        // SAFETY: `memmap2::Mmap::map` is unsafe because the OS guarantees the
+        // mapping is valid only as long as the underlying file content does
+        // not change concurrently. We hold the `File` for the whole call, the
+        // GGUF file is read-only and atomically published by HF/our shard
+        // download path (no in-place truncation/rewriting), and we drop both
+        // the file handle and the mmap before this function returns.
+        //
+        // The non-obvious safety question is whether returned tensors alias
+        // the mmap memory after we drop it. They do not: `gguf_file::Content::
+        // tensor` reads each block via `ct.tensor(file, name, device)`, which
+        // calls `read_to_end` on the cursor and constructs `QTensor` /
+        // `Tensor` from a heap-allocated `Vec<u8>` owned by the candle layer
+        // (see candle's `quantized::ggml_file::qtensor_from_ggml`). The
+        // `parallel_data: Some(mmap.as_ref())` slice path used inside
+        // `load_model_from_content` makes per-thread `Cursor`s over the mmap
+        // for *parallel reads* of the same blocks, but the read still
+        // copies into a `Vec` before constructing the tensor. No tensor
+        // returned from this loader retains a reference to the mmap region.
         let mmap = unsafe { memmap2::Mmap::map(&file) }
             .map_err(|e| SwarmError::Internal(format!("Failed to mmap GGUF: {e}")))?;
         let mut file = std::io::Cursor::new(mmap.as_ref());
@@ -108,11 +139,13 @@ impl SplitModel {
             ct,
             &mut file,
             device,
-            layer_start,
-            layer_end,
-            is_first,
-            is_last,
-            Some(mmap.as_ref()),
+            SplitLoadOptions {
+                layer_start,
+                layer_end,
+                is_first,
+                is_last,
+                parallel_data: Some(mmap.as_ref()),
+            },
         )
     }
 
@@ -120,20 +153,19 @@ impl SplitModel {
     ///
     /// Parses GGUF metadata, loads tensors by architecture, extracts tokenizer/
     /// vocabulary/chat template, and constructs the SplitModel.
-    ///
-    /// `parallel_data`: when Some, enables parallel dense layer loading via
-    /// per-thread Cursors (mmap path). When None, loads sequentially (ShardReader).
-    #[allow(clippy::too_many_arguments)]
     fn load_model_from_content<R: std::io::Read + std::io::Seek>(
         ct: gguf_file::Content,
         mut file: &mut R,
         device: Device,
-        layer_start: usize,
-        layer_end: usize,
-        is_first: bool,
-        is_last: bool,
-        parallel_data: Option<&[u8]>,
+        opts: SplitLoadOptions<'_>,
     ) -> Result<Self, SwarmError> {
+        let SplitLoadOptions {
+            layer_start,
+            layer_end,
+            is_first,
+            is_last,
+            parallel_data,
+        } = opts;
         // Detect architecture prefix from GGUF metadata
         let arch_str = super::gguf_arch_str(&ct);
         let model_arch = ModelArch::from_gguf_arch(&arch_str);

@@ -123,11 +123,13 @@ impl SplitModel {
                 ct,
                 &mut cursor,
                 device,
-                layer_start,
-                layer_end,
-                is_first,
-                is_last,
-                Some(mmap.as_ref()),
+                super::SplitLoadOptions {
+                    layer_start,
+                    layer_end,
+                    is_first,
+                    is_last,
+                    parallel_data: Some(mmap.as_ref()),
+                },
             );
         }
 
@@ -227,11 +229,14 @@ impl SplitModel {
             ct,
             &mut reader,
             device,
-            layer_start,
-            layer_end,
-            is_first,
-            is_last,
-            None, // ShardReader can't be shared across threads for parallel loading
+            super::SplitLoadOptions {
+                layer_start,
+                layer_end,
+                is_first,
+                is_last,
+                // ShardReader can't be shared across threads for parallel loading
+                parallel_data: None,
+            },
         )
     }
 }

@@ -50,6 +50,48 @@ impl Default for PrefixCacheConfig {
     }
 }
 
+/// Runtime knobs passed from the daemon's CLI/config down through the worker.
+/// Bundles the seven scalars that previously rode the entry-point signature
+/// individually and forced `#[allow(clippy::too_many_arguments)]` on every
+/// caller in the chain.
+#[derive(Debug, Clone, Copy)]
+pub struct WorkerOptions {
+    /// Force every attention call through `standard_attention` (matmul) instead
+    /// of the fused `run_flash_attn_cpu` path. Diagnostic flag.
+    pub force_standard_attn: bool,
+    /// Cap GGUF `context_length` when allocating KV cache. None = use the GGUF
+    /// metadata value.
+    pub max_seq_len_override: Option<usize>,
+    /// Quantize intermediate-segment hidden state activations to Q8_0 before
+    /// returning them to the daemon. Off by default; receivers always
+    /// auto-dispatch on the dtype tag.
+    pub activation_compression: bool,
+    /// Item 7 BatchGenerate: multiple concurrent `Generate` requests interleave
+    /// through one `forward_batch` per decode tick.
+    pub batch_generate: bool,
+    /// Maximum number of concurrent decode slots when `batch_generate` is on.
+    pub batch_generate_max_slots: u32,
+    /// Item 7 Phase 2 chunked prefill chunk size (in prompt tokens).
+    pub prefill_chunk_tokens: u32,
+    /// Item 7 Phase 4: fuse concurrent same-shape Prefilling slots into one
+    /// `forward_batch` call inside `step_decode_pool`'s Phase A.
+    pub batched_prefill_forward: bool,
+}
+
+impl Default for WorkerOptions {
+    fn default() -> Self {
+        Self {
+            force_standard_attn: false,
+            max_seq_len_override: None,
+            activation_compression: false,
+            batch_generate: false,
+            batch_generate_max_slots: 8,
+            prefill_chunk_tokens: 128,
+            batched_prefill_forward: true,
+        }
+    }
+}
+
 /// Run the model worker subprocess.
 /// Called from main.rs when the binary is invoked with `model-worker` subcommand.
 /// `shard_window`: if Some, only load these shard indices (VRAM-saving mode).
@@ -62,7 +104,6 @@ impl Default for PrefixCacheConfig {
 ///   it by this many prompt tokens before the batched decode runs, so a long
 ///   admission can no longer block decode for more than one chunk's worth of
 ///   compute.
-#[allow(clippy::too_many_arguments)]
 pub async fn run_worker(
     socket_name: String,
     data_dir: PathBuf,
@@ -70,14 +111,17 @@ pub async fn run_worker(
     kv_cache_ttl_secs: u64,
     prefix_cfg: PrefixCacheConfig,
     swift_cfg: SwiftConfig,
-    force_standard_attn: bool,
-    max_seq_len_override: Option<usize>,
-    activation_compression: bool,
-    batch_generate: bool,
-    batch_generate_max_slots: u32,
-    prefill_chunk_tokens: u32,
-    batched_prefill_forward: bool,
+    options: WorkerOptions,
 ) {
+    let WorkerOptions {
+        force_standard_attn,
+        max_seq_len_override,
+        activation_compression,
+        batch_generate,
+        batch_generate_max_slots,
+        prefill_chunk_tokens,
+        batched_prefill_forward,
+    } = options;
     // Connect to the daemon's IPC socket. The name matches what the daemon
     // bound: a filesystem path on Unix, a namespace name on Windows.
     use interprocess::local_socket::tokio::{prelude::*, Stream};
@@ -260,10 +304,7 @@ pub async fn run_worker(
                 &data_dir,
                 &shard_window,
                 &swift_cfg,
-                force_standard_attn,
-                max_seq_len_override,
-                activation_compression,
-                batch_generate,
+                &options,
                 &mut slot_table,
                 &pending_fetches,
             )
@@ -289,10 +330,7 @@ pub async fn run_worker(
                             &data_dir,
                             &shard_window,
                             &swift_cfg,
-                            force_standard_attn,
-                            max_seq_len_override,
-                            activation_compression,
-                            batch_generate,
+                            &options,
                             &mut slot_table,
                             &pending_fetches,
                         )
@@ -2558,7 +2596,7 @@ async fn finalize_slot(
 /// messages already queued on the mpsc before running the next decode tick).
 ///
 /// Returns `true` iff the message was `Shutdown` (caller should break).
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)] // distinct concerns: writer, model state, ctx, options, mailbox
 async fn handle_daemon_msg(
     msg: DaemonMsg,
     payload: Vec<u8>,
@@ -2569,13 +2607,14 @@ async fn handle_daemon_msg(
     data_dir: &std::path::Path,
     shard_window: &Option<Vec<u32>>,
     swift_cfg: &SwiftConfig,
-    force_standard_attn: bool,
-    max_seq_len_override: Option<usize>,
-    activation_compression: bool,
-    batch_generate: bool,
+    options: &WorkerOptions,
     slot_table: &mut SlotTable,
     pending_fetches: &PrefixFetchWaiterMap,
 ) -> bool {
+    let activation_compression = options.activation_compression;
+    let force_standard_attn = options.force_standard_attn;
+    let max_seq_len_override = options.max_seq_len_override;
+    let batch_generate = options.batch_generate;
     match msg {
         DaemonMsg::Forward(fwd) => {
             let request_id = fwd.request_id;
