@@ -511,6 +511,16 @@ pub(crate) async fn ring_allreduce_network(
             .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
             .collect();
 
+        // SEC: Reject NaN/Inf from peers — a single non-finite value in the ring
+        // poisons the reduced tensor, propagates through every subsequent layer,
+        // and corrupts every token of the request output (and any sessions sharing
+        // the KV cache).
+        if !recv_floats.iter().all(|f| f.is_finite()) {
+            return Err(SwarmError::Internal(format!(
+                "Ring AllReduce step {step_num}: received non-finite values from peer"
+            )));
+        }
+
         // Apply the received chunk
         let recv_idx = ring_step.recv_chunk_idx;
         match ring_step.phase {

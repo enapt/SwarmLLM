@@ -572,6 +572,18 @@ pub(super) fn greedy_accept_reject(
     drafts: &[u32],
     spec_logits: &[Vec<f32>],
 ) -> (Vec<u32>, u32, bool) {
+    // SEC: Reject NaN/Inf from a peer-supplied target segment. NaN comparisons
+    // in IEEE 754 are non-deterministic in argmax (`partial_cmp` returns
+    // `Equal` for any NaN), letting a malicious peer steer accepted tokens.
+    // We treat any non-finite row as an all-rejected decision with bonus = 0,
+    // forcing the caller to fall back / finish the request safely.
+    let nonfinite = spec_logits
+        .iter()
+        .take(drafts.len() + 1)
+        .any(|row| row.iter().any(|v| !v.is_finite()));
+    if nonfinite {
+        return (Vec::new(), 0, false);
+    }
     let mut accepted: Vec<u32> = Vec::with_capacity(drafts.len());
     let mut bonus: u32 = 0;
     for (i, &q) in drafts.iter().enumerate() {

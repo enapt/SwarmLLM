@@ -523,9 +523,14 @@ async fn forward_verify_through_segments(
         }
 
         // Intermediate: feed the segment's hidden state output to the next.
-        if result.activations.is_empty() {
+        // SEC: Validate that the returned activation byte length matches what we
+        // sent in. Transformer layers preserve [seq, hidden] shape; a malicious
+        // peer returning a different length would crash the next worker (gotcha #20).
+        if result.activations.len() != activation_bytes.len() {
             return Err(SwarmError::Inference(format!(
-                "DSD segment {idx} returned empty activations"
+                "DSD segment {idx} returned wrong activation shape: got {} bytes, expected {}",
+                result.activations.len(),
+                activation_bytes.len()
             )));
         }
         activation_bytes = result.activations;

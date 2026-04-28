@@ -209,6 +209,19 @@ impl PipelineExecutor {
                 // Decompress raw f32 AllReduce result, reconstruct tensor, add residual
                 let post_attn_raw = zstd::decode_all(std::io::Cursor::new(&attn_resp.reduced_data))
                     .map_err(|e| SwarmError::Internal(format!("Decompress attn AR: {e}")))?;
+                // SEC: Reject NaN/Inf from the coordinator's reduced output. A
+                // malicious coordinator (or any peer that contributed a poisoned
+                // partial that slipped through) would otherwise corrupt every
+                // layer downstream.
+                if post_attn_raw.len() % 4 == 0
+                    && post_attn_raw
+                        .chunks_exact(4)
+                        .any(|c| !f32::from_le_bytes([c[0], c[1], c[2], c[3]]).is_finite())
+                {
+                    return Err(SwarmError::Internal(
+                        "Attn AllReduce result contains NaN/Inf — possible tensor poisoning".into(),
+                    ));
+                }
                 let attn_reduced_bytes =
                     split::raw_f32_to_tensor_bytes(&post_attn_raw, &attn_resp.shape);
                 // Residual add: post_attn = AllReduce(attn_partials) + layer_input
@@ -306,6 +319,16 @@ impl PipelineExecutor {
                 // Decompress raw f32 AllReduce result, reconstruct tensor, add residual
                 let ffn_raw = zstd::decode_all(std::io::Cursor::new(&ffn_resp.reduced_data))
                     .map_err(|e| SwarmError::Internal(format!("Decompress ffn AR: {e}")))?;
+                // SEC: see attn AR check above — reject NaN/Inf from coordinator.
+                if ffn_raw.len() % 4 == 0
+                    && ffn_raw
+                        .chunks_exact(4)
+                        .any(|c| !f32::from_le_bytes([c[0], c[1], c[2], c[3]]).is_finite())
+                {
+                    return Err(SwarmError::Internal(
+                        "Ffn AllReduce result contains NaN/Inf — possible tensor poisoning".into(),
+                    ));
+                }
                 let ffn_reduced_bytes = split::raw_f32_to_tensor_bytes(&ffn_raw, &ffn_resp.shape);
                 // Residual add: next_layer_input = AllReduce(ffn_partials) + post_attn
                 current_activations_bytes =

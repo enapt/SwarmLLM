@@ -827,7 +827,39 @@ impl PipelineExecutor {
                                 let result = self.unseal_result(result);
                                 return Ok(result);
                             }
-                            activations = result.activations;
+                            // SEC: Validate intermediate-segment activation shape.
+                            // Transformer layers preserve [seq, hidden] shape, so the
+                            // byte length must match the input we forwarded. A malicious
+                            // peer returning a wrong-shaped tensor would crash the next
+                            // segment's worker (gotcha #20) — fail fast and let
+                            // failover handle the segment instead.
+                            if result.activations.len() != activations.len() {
+                                tracing::warn!(
+                                    request_id = %request_id,
+                                    segment = idx,
+                                    node = %segment.node_id,
+                                    expected = activations.len(),
+                                    got = result.activations.len(),
+                                    "Remote segment returned wrong activation shape — failing over"
+                                );
+                                self.shared_state.pending_layer_results.remove(&request_id);
+                                let failover_result = self
+                                    .failover_segment(
+                                        idx,
+                                        request_id,
+                                        sequence_num,
+                                        index_pos,
+                                        &activations,
+                                        is_last,
+                                    )
+                                    .await?;
+                                if is_last {
+                                    return Ok(failover_result);
+                                }
+                                activations = failover_result.activations;
+                            } else {
+                                activations = result.activations;
+                            }
                         }
                     }
                     Err(e) => {
