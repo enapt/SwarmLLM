@@ -194,6 +194,13 @@ impl UpdateChecker {
     }
 
     /// Download the update binary to a temp file alongside the current binary.
+    /// Path that `download_update` will stage to when the install dir is
+    /// writable — same filesystem as the running binary, so the atomic
+    /// rename in `apply_update` succeeds.
+    pub fn preferred_tmp_path(&self) -> PathBuf {
+        self.binary_path.with_extension("update.tmp")
+    }
+
     pub async fn download_update(&self, info: &UpdateInfo) -> Result<PathBuf, SwarmError> {
         // SECURITY: Only allow downloads from GitHub to prevent SSRF via poisoned API response
         if !info.download_url.starts_with("https://github.com/")
@@ -488,9 +495,26 @@ impl UpdateChecker {
                     };
                     if should_download {
                         match self.download_update(&info).await {
-                            Ok(_path) => {
-                                info.downloaded = true;
-                                tracing::info!("Update downloaded and ready to apply");
+                            Ok(path) => {
+                                // Only mark `downloaded = true` if the staging
+                                // file is alongside the running binary — that
+                                // path is on the same filesystem so the atomic
+                                // rename in apply_update will succeed. The
+                                // EPERM-fallback to temp_dir typically lives
+                                // on a different filesystem; apply will fail
+                                // with EXDEV. The dashboard "ready to apply"
+                                // banner would otherwise mislead the operator.
+                                let preferred = self.binary_path.with_extension("update.tmp");
+                                let appliable = path == preferred;
+                                info.downloaded = appliable;
+                                if appliable {
+                                    tracing::info!("Update downloaded and ready to apply");
+                                } else {
+                                    tracing::warn!(
+                                        path = %path.display(),
+                                        "Update staged in temp dir — apply via package manager required"
+                                    );
+                                }
                             }
                             Err(e) => {
                                 tracing::warn!(error = %e, "Failed to auto-download update");

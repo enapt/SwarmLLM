@@ -937,8 +937,11 @@ pub async fn check_update(
             // Auto-download
             let mut info = info;
             if let Ok(tmp_path) = checker.download_update(&info).await {
-                info.downloaded = true;
-                let _ = tmp_path; // path is known from binary location
+                // Only flag downloaded=true when the staging path is the
+                // preferred (same-filesystem) location. The temp_dir fallback
+                // path will EXDEV at apply_update time; flagging it would let
+                // the dashboard show a misleading "ready to apply" banner.
+                info.downloaded = tmp_path == checker.preferred_tmp_path();
             }
             let mut us = update_state.write().await;
             us.update_available = Some(info.clone());

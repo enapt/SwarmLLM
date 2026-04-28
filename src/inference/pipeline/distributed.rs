@@ -388,11 +388,17 @@ impl PipelineExecutor {
                     }
                 }
                 Err(e) => {
+                    // Note: failover for remote-segment timeouts/errors is
+                    // attempted INSIDE forward_through_segments
+                    // (see failover_segment). Reaching this arm means either
+                    // a local-segment failure (which has no automatic
+                    // failover; that's a deferred enhancement) or that
+                    // failover itself returned an error.
                     tracing::warn!(
                         request_id = %request_id,
                         error = %e,
                         seq_num,
-                        "Pipeline segment failed, attempting failover"
+                        "Pipeline failed and failover (if eligible) was unsuccessful"
                     );
                     return Err(e);
                 }

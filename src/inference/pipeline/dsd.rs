@@ -484,6 +484,10 @@ async fn forward_verify_through_segments(
             activation_bytes.len(),
         )
         .await?;
+        // Result delivered (the dispatcher already removed the entry); disarm
+        // the guard so we don't double-remove on drop. Mirrors the
+        // speculative.rs pattern documented in gotcha #45.
+        pending_guard.disarm();
 
         if let Some(NetworkFinishReason::Error(msg)) = &result.finish_reason {
             return Err(SwarmError::Inference(format!("DSD segment {idx}: {msg}")));

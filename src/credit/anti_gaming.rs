@@ -150,8 +150,24 @@ impl AntiGaming {
 
     /// Register a node's observed IPv4 address for subnet clustering detection.
     /// Extracts the /24 prefix and tracks which NodeIds share it.
+    ///
+    /// A node may move between subnets (NAT change, mobile/cellular handoff,
+    /// VPN reconnect). Without removing the stale `(NodeId, _)` entry from
+    /// the previous /24's bucket, the same NodeId would accumulate in
+    /// multiple buckets and `is_subnet_clustered` would return true if ANY
+    /// of those happens to be crowded — penalising a peer for a subnet they
+    /// no longer belong to. Drop the stale entry first.
     pub fn register_subnet(&mut self, node_id: &NodeId, ip_bytes: [u8; 4]) {
         let prefix = [ip_bytes[0], ip_bytes[1], ip_bytes[2]];
+        // Remove the NodeId from any other prefix bucket it currently lives in.
+        for (other_prefix, nodes) in self.subnet_counts.iter_mut() {
+            if other_prefix != &prefix {
+                nodes.retain(|(n, _)| n != node_id);
+            }
+        }
+        // Drop empty buckets so they don't pile up over the eviction window.
+        self.subnet_counts.retain(|_, nodes| !nodes.is_empty());
+
         let nodes = self.subnet_counts.entry(prefix).or_default();
         if let Some(entry) = nodes.iter_mut().find(|(n, _)| n == node_id) {
             entry.1 = Instant::now(); // refresh timestamp
