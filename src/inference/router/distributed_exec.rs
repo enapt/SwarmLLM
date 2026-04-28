@@ -94,11 +94,16 @@ pub(super) async fn finalize_request(
         // - Skip if escrow was used — escrow already deducted the estimated cost
         // - Pool members (slaves): charge goes to the MASTER's balance via credit forward.
         //   The slave's dashboard is fully usable; usage is billed to the pool owner.
-        let is_pool_member = {
+        // Snapshot both fields from a single pool_state read so the later
+        // pool_tx-held branch doesn't need a nested pool_state.read(). Tokio's
+        // RwLock is write-preferring; nesting two reads on different locks lets
+        // a queued write on pool_state stall the inference completion path.
+        let (is_pool_member, pool_id_opt) = {
             let ps = shared_state.credits.pool_state.read().await;
-            ps.as_ref()
-                .map(|s| s.pool_id != *shared_state.identity.node_id())
-                .unwrap_or(false)
+            let me = shared_state.identity.node_id();
+            let pid = ps.as_ref().map(|s| s.pool_id.clone());
+            let member = pid.as_ref().map(|p| p != me).unwrap_or(false);
+            (member, pid)
         };
         if is_local_api_request && escrow_id.is_none() {
             let total_tokens = result.prompt_tokens + result.completion_tokens;
@@ -109,11 +114,7 @@ pub(super) async fn finalize_request(
                 // Use the same credit forward mechanism as earning, but negative.
                 if let Some(ref tx) = *shared_state.credits.pool_tx.read().await {
                     let my_id = shared_state.identity.node_id();
-                    let pool_id = {
-                        let ps = shared_state.credits.pool_state.read().await;
-                        ps.as_ref().map(|s| s.pool_id.clone())
-                    };
-                    if let Some(pid) = pool_id {
+                    if let Some(pid) = pool_id_opt.clone() {
                         let forward = crate::pool::crypto::create_credit_forward(
                             &shared_state.identity,
                             &pid,

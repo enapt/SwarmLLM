@@ -149,31 +149,36 @@ impl EscrowManager {
         escrow_id: uuid::Uuid,
         to_node: &NodeId,
     ) -> Result<i64, SwarmError> {
-        let mut entry = self
-            .entries
-            .get_mut(&escrow_id)
-            .ok_or_else(|| SwarmError::CreditError("Escrow not found".into()))?;
+        // Snapshot the entry while holding the DashMap shard lock briefly,
+        // then drop the lock before the synchronous redb write. Holding the
+        // RefMut across put_json otherwise blocked every other access on the
+        // same shard for the disk-write duration.
+        let snapshot = {
+            let mut entry = self
+                .entries
+                .get_mut(&escrow_id)
+                .ok_or_else(|| SwarmError::CreditError("Escrow not found".into()))?;
 
-        if entry.status != EscrowStatus::Pending {
-            return Err(SwarmError::CreditError(format!(
-                "Escrow {} is {:?}, not Pending",
-                escrow_id, entry.status
-            )));
-        }
+            if entry.status != EscrowStatus::Pending {
+                return Err(SwarmError::CreditError(format!(
+                    "Escrow {} is {:?}, not Pending",
+                    escrow_id, entry.status
+                )));
+            }
 
-        entry.status = EscrowStatus::Released;
-        entry.to_node = Some(to_node.clone());
-        let amount = entry.amount;
+            entry.status = EscrowStatus::Released;
+            entry.to_node = Some(to_node.clone());
+            entry.clone()
+        };
+        let amount = snapshot.amount;
 
-        // Persist updated status
         if let Err(e) = self
             .db
-            .put_json(TREE_ESCROW, &escrow_id.to_string(), &*entry)
+            .put_json(TREE_ESCROW, &escrow_id.to_string(), &snapshot)
         {
             tracing::warn!(error = %e, "Failed to persist escrow release");
         }
 
-        drop(entry);
         // Remove from in-memory map — entry is persisted to DB
         self.entries.remove(&escrow_id);
 

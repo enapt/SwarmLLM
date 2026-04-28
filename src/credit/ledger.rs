@@ -313,9 +313,12 @@ impl CreditLedger {
     }
 
     /// Persist the current balance to the database.
+    /// Snapshots out of the lock before the synchronous redb write so a
+    /// queued writer (apply_credit on the inference hot path) doesn't park
+    /// on the read lock for the disk write duration.
     async fn persist_balance(&self) -> Result<(), SwarmError> {
-        let bal = self.balance.read().await;
-        self.db.put_json(TREE_CREDITS, KEY_BALANCE, &*bal)?;
+        let snapshot = self.balance.read().await.clone();
+        self.db.put_json(TREE_CREDITS, KEY_BALANCE, &snapshot)?;
         Ok(())
     }
 

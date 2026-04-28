@@ -1314,21 +1314,29 @@ impl PoolManager {
 
     /// Generate a short invite code (owner only). One-time use, expires after TTL.
     async fn handle_generate_invite_code(&mut self) -> Result<String, SwarmError> {
-        let pool_state = self.shared_state.credits.pool_state.read().await;
-        let ps = pool_state
-            .as_ref()
-            .ok_or_else(|| SwarmError::Validation("Not in a pool".into()))?;
+        // Snapshot the two values we need from pool_state and drop the read
+        // lock before the rate-limit / code-generation work below. Holding
+        // the lock across rate_limiter.check_and_record() and key generation
+        // would block a concurrent pool_state writer (handle_remove_member,
+        // handle_accept_invitation) for no reason.
+        let max_size = self.shared_state.config.pool.max_pool_size;
+        let (is_owner, member_count) = {
+            let pool_state = self.shared_state.credits.pool_state.read().await;
+            let ps = pool_state
+                .as_ref()
+                .ok_or_else(|| SwarmError::Validation("Not in a pool".into()))?;
+            (
+                ps.pool_id == *self.shared_state.identity.node_id(),
+                ps.members.len() as u32,
+            )
+        };
 
-        // Only the owner can generate invite codes
-        if ps.pool_id != *self.shared_state.identity.node_id() {
+        if !is_owner {
             return Err(SwarmError::Validation(
                 "Only the pool owner can generate invite codes".into(),
             ));
         }
-
-        // Check pool isn't full
-        let max_size = self.shared_state.config.pool.max_pool_size;
-        if ps.members.len() as u32 >= max_size {
+        if member_count >= max_size {
             return Err(SwarmError::Validation(format!(
                 "Pool is full ({max_size} members)"
             )));
