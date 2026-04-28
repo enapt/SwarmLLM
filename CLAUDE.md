@@ -55,7 +55,7 @@ swarmllm/
 │   ├── cli/       (mod, run, status, chat, bench, peers, pool, split_test, update)
 │   ├── config/    (mod, providers, credit, network, ops, node, inference)
 │   ├── daemon/    (mod, state, manifest, shard_loader, dispatch/)
-│   ├── network/   (manager/, behaviour, discovery, protocol, transport, relay, peer_cache, helpers)
+│   ├── network/   (manager/{mod,events,requests,tensors,identify,commands,connections,dht,shard_transfer}, behaviour, discovery, protocol, transport, relay, peer_cache, helpers)
 │   ├── model/     (manifest, shard, distribution, registry, acquisition, huggingface, auto_manage/, lora)
 │   │   └── auto_manage/  (mod, manager, scoring, download, prune, scan, vram, parallax)
 │   ├── inference/ (executor, sampling, kv_cache, speculative, swift, dsd_controller, quant, tokenizer, tensor_util, shard_layout, model_arch, vision, allreduce, attn_kernel, local_embedder, model_worker, process_pool, slot_table, worker_ipc)
