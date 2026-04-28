@@ -23,15 +23,7 @@ use super::PipelineExecutor;
 /// Preconditions for the fast path. All checks are local and cheap.
 pub(super) fn eligible(exec: &PipelineExecutor) -> bool {
     // Shared disqualifiers: TP, LoRA adapter, vision images.
-    //
-    // NOTE on encryption: `config.network.enable_encryption` gates the
-    // ChaCha session layer that's applied ON TOP of libp2p Noise for
-    // `LayerForward` tensor payloads (because intermediate activations can
-    // leak model internals). The fast path sends a user prompt — which is
-    // already how `SwarmMessage::InferenceRequest` and similar user-data
-    // messages travel today, protected only by Noise transport encryption.
-    // No additional ChaCha layer is needed for the fast path to match the
-    // existing security baseline for user prompts.
+    // Encryption layer rationale: see ARCHITECTURE.md § Deferred Items.
     if super::fastpath_request_disqualified(exec) {
         return false;
     }

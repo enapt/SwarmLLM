@@ -82,9 +82,7 @@ pub(super) fn eligible(exec: &PipelineExecutor) -> bool {
     if exec.assignment.segments.len() < 2 {
         return false;
     }
-    // All segments must be remote — a local segment in the pipeline would
-    // need a different propagation path (the worker IPC vs network send
-    // distinction). MVP only handles the all-remote case.
+    // All segments must be remote — see ARCHITECTURE.md § Deferred Items.
     let local_node_id = exec.shared_state.identity.node_id();
     if exec
         .assignment

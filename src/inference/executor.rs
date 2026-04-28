@@ -206,7 +206,7 @@ impl ModelExecutor {
         &mut self,
         prompt: &str,
         params: &SamplingParams,
-        #[allow(unused_mut)] mut callback: F,
+        callback: F,
     ) -> Result<GenerationResult, SwarmError>
     where
         F: FnMut(&str) -> bool,
@@ -229,7 +229,7 @@ impl ModelExecutor {
 
         #[cfg(not(feature = "llama"))]
         {
-            self.generate_stream_stub(prompt, params, &mut callback)
+            self.generate_stream_stub(prompt, params, callback)
         }
     }
 
@@ -325,8 +325,6 @@ impl ModelExecutor {
         // Auto-regressive generation loop
         let mut completion_tokens = 0u32;
         let mut cur_pos = tokens.len();
-        // SYNC: token loop logic must match model_worker.rs handle_generate.
-        // Changes to EOS/stop handling must be applied to both.
         let eos = model.token_eos();
         let stop_sequences = &params.stop;
         let mut accumulated_text = String::new();
@@ -391,7 +389,7 @@ impl ModelExecutor {
         &self,
         prompt: &str,
         params: &SamplingParams,
-        callback: &mut F,
+        mut callback: F,
     ) -> Result<GenerationResult, SwarmError>
     where
         F: FnMut(&str) -> bool,
@@ -528,6 +526,7 @@ impl ModelExecutor {
     where
         F: FnMut(&str) -> bool,
     {
+        use crate::inference::sampling::softmax_vec;
         use crate::inference::speculative::{self, SpeculativeDraftState};
         use llama_cpp_2::context::params::LlamaContextParams;
         use llama_cpp_2::llama_batch::LlamaBatch;
@@ -608,7 +607,7 @@ impl ModelExecutor {
 
         // get_logits() returns the logits for the last token in the batch (no index check)
         let initial_target_logits: Vec<f32> = target_ctx.get_logits()[..target_n_vocab].to_vec();
-        let mut next_target_probs = speculative::softmax(&initial_target_logits);
+        let mut next_target_probs = softmax_vec(&initial_target_logits);
 
         // --- Prefill draft model ---
         let mut draft_batch = LlamaBatch::new(d_n_ctx as usize, 1);
@@ -642,7 +641,7 @@ impl ModelExecutor {
             for _ in 0..effective_gamma {
                 // get_logits() returns logits for the last decoded token
                 let draft_logits: Vec<f32> = draft_ctx.get_logits()[..draft_n_vocab].to_vec();
-                let probs = speculative::softmax(&draft_logits);
+                let probs = softmax_vec(&draft_logits);
 
                 // Greedy sample from draft (maximizes acceptance rate)
                 let draft_token = probs
@@ -692,7 +691,7 @@ impl ModelExecutor {
                 })?;
 
                 let logits: Vec<f32> = target_ctx.get_logits()[..target_n_vocab].to_vec();
-                verify_probs.push(speculative::softmax(&logits));
+                verify_probs.push(softmax_vec(&logits));
                 verify_pos += 1;
             }
 
@@ -854,7 +853,7 @@ impl ModelExecutor {
                         SwarmError::Inference(format!("Target re-eval decode failed: {e}"))
                     })?;
                     let logits: Vec<f32> = target_ctx.get_logits()[..target_n_vocab].to_vec();
-                    next_target_probs = speculative::softmax(&logits);
+                    next_target_probs = softmax_vec(&logits);
                 }
             }
         }

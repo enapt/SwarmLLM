@@ -32,8 +32,7 @@
 //!   probabilities; the existing `speculative::accept_reject` wants per-position
 //!   draft distributions which we don't pay to transmit in greedy mode.
 //! - Encryption disabled (`enable_encryption = false`) for the speculative
-//!   path. The standard wire codec is used directly. Adding encrypted support
-//!   is mechanical once the baseline works.
+//!   path — see ARCHITECTURE.md § Deferred Items.
 //! - Non-pre-embedded, non-vision, non-LoRA requests.
 //! - Requires draft model loaded (`config.inference.draft_model_path` set and
 //!   `SharedState.draft_executor` holds a loaded model).

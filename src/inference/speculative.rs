@@ -69,15 +69,6 @@ pub struct SpeculativeResult {
     pub bonus_token: Option<u32>,
 }
 
-/// Convert raw logits to a probability distribution via softmax.
-///
-/// Thin wrapper over `crate::inference::sampling::softmax_vec` — kept for
-/// the speculative-decoding call sites and integration tests that import
-/// `speculative::softmax` directly.
-pub fn softmax(logits: &[f32]) -> Vec<f32> {
-    crate::inference::sampling::softmax_vec(logits)
-}
-
 /// Sample a token from a probability distribution.
 ///
 /// Returns the index of the sampled token.
@@ -251,7 +242,7 @@ mod tests {
     #[test]
     fn softmax_basic() {
         let logits = vec![1.0, 2.0, 3.0];
-        let probs = softmax(&logits);
+        let probs = crate::inference::sampling::softmax_vec(&logits);
         assert_eq!(probs.len(), 3);
         // Sum should be ~1.0
         let sum: f32 = probs.iter().sum();
@@ -263,14 +254,14 @@ mod tests {
 
     #[test]
     fn softmax_empty() {
-        let probs = softmax(&[]);
+        let probs = crate::inference::sampling::softmax_vec(&[]);
         assert!(probs.is_empty());
     }
 
     #[test]
     fn softmax_uniform() {
         let logits = vec![0.0, 0.0, 0.0];
-        let probs = softmax(&logits);
+        let probs = crate::inference::sampling::softmax_vec(&logits);
         for &p in &probs {
             assert!((p - 1.0 / 3.0).abs() < 1e-5);
         }

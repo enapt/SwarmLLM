@@ -8,26 +8,20 @@ use crate::error::{ApiError, SwarmError};
 use crate::pool::types::PoolCommand;
 use crate::types::NodeId;
 
-/// Await a oneshot reply from the pool manager, converting channel errors to ServiceUnavailable.
-async fn await_pool_reply<T>(
-    rx: tokio::sync::oneshot::Receiver<Result<T, SwarmError>>,
-) -> Result<T, ApiError> {
-    rx.await
-        .map_err(|_| {
-            ApiError(SwarmError::ServiceUnavailable(
-                "Pool manager unavailable".into(),
-            ))
-        })?
-        .map_err(ApiError)
-}
-
-/// Await a raw (non-Result) oneshot from the pool manager.
+/// Await a raw oneshot from the pool manager. Channel drop = ServiceUnavailable.
 async fn await_pool_recv<T>(rx: tokio::sync::oneshot::Receiver<T>) -> Result<T, ApiError> {
     rx.await.map_err(|_| {
         ApiError(SwarmError::ServiceUnavailable(
             "Pool manager unavailable".into(),
         ))
     })
+}
+
+/// Await a Result-bearing oneshot reply from the pool manager.
+async fn await_pool_reply<T>(
+    rx: tokio::sync::oneshot::Receiver<Result<T, SwarmError>>,
+) -> Result<T, ApiError> {
+    await_pool_recv(rx).await?.map_err(ApiError)
 }
 
 /// GET /api/pool/state — Get current pool state.

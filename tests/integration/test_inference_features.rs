@@ -3,7 +3,8 @@
 //! Tests speculative decoding correctness (accept/reject algorithm preserves
 //! target distribution) and batch inference tracking.
 
-use swarmllm::inference::speculative::{accept_reject, softmax, SpeculativeDraftState};
+use swarmllm::inference::sampling::softmax_vec as softmax;
+use swarmllm::inference::speculative::{accept_reject, SpeculativeDraftState};
 use swarmllm::types::ModelId;
 
 /// Test speculative decoding correctness: when draft and target have identical
