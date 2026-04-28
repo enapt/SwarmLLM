@@ -159,6 +159,11 @@ zstd = "0.13"
 # Image processing (for VLM vision encoder)
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 
+# libc for umask (Unix-only — used to atomically chmod IPC sockets at bind time
+# to close the TOCTOU window between bind and explicit set_permissions).
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [features]
 default = ["swarmllm-frontend/embedded"]
 dev = ["swarmllm-frontend/dev"]

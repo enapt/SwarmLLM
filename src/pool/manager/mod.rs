@@ -134,15 +134,13 @@ impl PoolManager {
         // on first restart — they're stale by definition since their age is unknown.
         let cutoff = chrono::Utc::now().timestamp() - 300;
         let mut to_remove: Vec<String> = Vec::new();
-        let _ = db.for_each_json::<serde_json::Value, _>(
-            TREE_POOL_REMOVAL_REPLAYS,
-            |subkey, val| {
+        let _ =
+            db.for_each_json::<serde_json::Value, _>(TREE_POOL_REMOVAL_REPLAYS, |subkey, val| {
                 let keep = val.as_i64().is_some_and(|ts| ts >= cutoff);
                 if !keep {
                     to_remove.push(subkey.to_string());
                 }
-            },
-        );
+            });
         for key in to_remove {
             let _ = db.remove(TREE_POOL_REMOVAL_REPLAYS, &key);
         }

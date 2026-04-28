@@ -50,8 +50,9 @@ impl Daemon {
 
     /// Run the daemon — spawns all subsystems and waits for shutdown.
     pub async fn run(self) -> anyhow::Result<()> {
-        // Load .env file from data dir (or cwd) into process environment
-        crate::config::load_dotenv(&self.config.node.data_dir);
+        // .env loading happens in main() before the Tokio runtime spawns
+        // worker threads — `std::env::set_var` is unsound in a multi-threaded
+        // process. By the time we reach here, env vars are already populated.
 
         // Log detected provider API keys from environment
         let env_keys = crate::config::ProvidersConfig::detect_env_keys();

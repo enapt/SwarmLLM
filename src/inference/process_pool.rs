@@ -899,13 +899,38 @@ impl ModelProcessPool {
             .to_ns_name::<interprocess::local_socket::GenericNamespaced>()
             .map_err(|e| SwarmError::Internal(format!("ipc name: {e}")))?;
 
+        // SEC: On Unix, set umask(0o177) BEFORE bind so the socket file is
+        // created with mode 0o600 atomically. The previous approach
+        // (post-bind set_permissions) leaves a window where a local attacker
+        // racing inotify on /tmp could connect first and impersonate the
+        // worker, receiving plaintext prompts.
+        //
+        // umask is process-global; we save and restore it. Other threads
+        // creating files during this brief window would see 0o600 perms
+        // applied — that's strictly more restrictive, not less, so safe.
+        // libc::umask is async-signal-safe and not blocking.
+        #[cfg(unix)]
+        let prev_umask = unsafe { libc::umask(0o177) };
+
         // Start listening before spawning so the worker can connect immediately.
         let listener = ListenerOptions::new()
             .name(ipc_name)
             .create_tokio()
-            .map_err(|e| SwarmError::Internal(format!("socket bind: {e}")))?;
+            .map_err(|e| {
+                #[cfg(unix)]
+                unsafe {
+                    libc::umask(prev_umask);
+                }
+                SwarmError::Internal(format!("socket bind: {e}"))
+            })?;
 
-        // SEC: Restrict Unix filesystem socket to the current user only.
+        #[cfg(unix)]
+        unsafe {
+            libc::umask(prev_umask);
+        }
+
+        // Defense-in-depth chmod — covers any platform/filesystem where the
+        // umask path didn't kick in (some FUSE mounts, weird umasks).
         // On Windows the default named-pipe DACL already scopes to the
         // current logon session — equivalent isolation, no extra call.
         #[cfg(unix)]

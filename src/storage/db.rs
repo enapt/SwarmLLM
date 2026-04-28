@@ -121,6 +121,19 @@ impl Database {
                 )));
             }
         };
+        // SEC: enforce 0o600 on Unix. The redb file holds plaintext credit
+        // balances, peer trust scores, and manifest metadata (provider keys
+        // are encrypted, but the rest is sensitive). Process umask defaults
+        // to 0o022 on most distros, leaving the file world-readable.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if let Err(e) =
+                std::fs::set_permissions(&db_path, std::fs::Permissions::from_mode(0o600))
+            {
+                tracing::warn!(path = %db_path.display(), error = %e, "Failed to chmod db.redb to 0600");
+            }
+        }
         tracing::debug!(path = %db_path.display(), "DIAG: db_open");
 
         let db = Self {

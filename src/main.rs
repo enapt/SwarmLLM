@@ -214,10 +214,26 @@ enum Commands {
     },
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    let mut cli = Cli::parse();
+fn main() -> anyhow::Result<()> {
+    let cli = Cli::parse();
 
+    // SEC: Load .env into process environment BEFORE the Tokio runtime spawns
+    // worker threads. `std::env::set_var` is unsound in a multi-threaded
+    // process (deprecated in Rust 1.81+) — racing a libc env reader from a
+    // worker thread can crash glibc. Doing it here, on the main thread before
+    // runtime construction, eliminates the race.
+    {
+        let data_dir = swarmllm::config::resolve_data_dir(cli.data_dir.as_deref());
+        swarmllm::config::load_dotenv(&data_dir);
+    }
+
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    runtime.block_on(async_main(cli))
+}
+
+async fn async_main(mut cli: Cli) -> anyhow::Result<()> {
     init_tracing(cli.verbose);
 
     let no_update_check = matches!(

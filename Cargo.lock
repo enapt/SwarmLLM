@@ -4719,6 +4719,7 @@ dependencies = [
  "hkdf",
  "image",
  "interprocess",
+ "libc",
  "libp2p",
  "libp2p-stream",
  "llama-cpp-2",
