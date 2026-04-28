@@ -1,0 +1,11 @@
+version: 2
+updates:
+  # GitHub Actions are pinned by commit SHA in workflow files. Dependabot
+  # opens PRs that bump those SHAs while keeping the trailing tag comment
+  # in sync. Without this config a compromised third-party action that
+  # mutates its tag could ship malicious code into release builds.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5

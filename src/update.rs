@@ -371,12 +371,46 @@ impl UpdateChecker {
 
     /// Apply the downloaded update: atomic rename of binaries.
     /// Does NOT restart the daemon — the user must restart manually.
+    ///
+    /// `latest_version`, when supplied, must be strictly newer than the running
+    /// version. This guards against downgrade-by-replay: a stored UpdateInfo
+    /// pointing at an older release must not be silently re-applied even if the
+    /// SHA256 still matches.
     pub fn apply_update(&self, tmp_path: &std::path::Path) -> Result<(), SwarmError> {
+        self.apply_update_with_version(tmp_path, None)
+    }
+
+    pub fn apply_update_checked(
+        &self,
+        tmp_path: &std::path::Path,
+        latest_version: &str,
+    ) -> Result<(), SwarmError> {
+        self.apply_update_with_version(tmp_path, Some(latest_version))
+    }
+
+    fn apply_update_with_version(
+        &self,
+        tmp_path: &std::path::Path,
+        latest_version: Option<&str>,
+    ) -> Result<(), SwarmError> {
         tracing::debug!(path = %tmp_path.display(), "DIAG: apply_update starting");
         if !tmp_path.exists() {
             return Err(SwarmError::Internal(
                 "Update file not found — download first".to_string(),
             ));
+        }
+
+        // SEC: re-verify the version is strictly newer than the running build at
+        // apply time. The version was checked in `check_for_update`, but the
+        // UpdateInfo can sit in shared state for arbitrary time and a downgrade
+        // would otherwise bypass the version gate.
+        if let Some(target) = latest_version {
+            let current = env!("CARGO_PKG_VERSION");
+            if !is_newer_version(current, target) {
+                return Err(SwarmError::Validation(format!(
+                    "Refusing to apply update: target version {target} is not newer than running {current}"
+                )));
+            }
         }
 
         // Windows locks the running .exe — rename fails with ACCESS_DENIED.
