@@ -32,11 +32,26 @@
     'rebalance_peer_left': true,
   };
 
+  // Debounce sessionStorage writes — _pushEntry can fire many times per
+  // second during inference. Synchronous setItem + JSON.stringify of up to
+  // 100 entries on every event was measurable main-thread cost. The data
+  // is only used for page-reload recovery, so a 1-second flush delay is
+  // not user-visible.
+  var _persistActivityTimer = null;
+  var _persistNetworkTimer = null;
   function _persistActivity() {
-    try { sessionStorage.setItem(ACTIVITY_STORAGE_KEY, JSON.stringify(_activityEntries.slice(0, 100))); } catch (e) {}
+    if (_persistActivityTimer) return;
+    _persistActivityTimer = setTimeout(function() {
+      _persistActivityTimer = null;
+      try { sessionStorage.setItem(ACTIVITY_STORAGE_KEY, JSON.stringify(_activityEntries.slice(0, 100))); } catch (e) {}
+    }, 1000);
   }
   function _persistNetwork() {
-    try { sessionStorage.setItem(NETWORK_STORAGE_KEY, JSON.stringify(_networkEntries.slice(0, 100))); } catch (e) {}
+    if (_persistNetworkTimer) return;
+    _persistNetworkTimer = setTimeout(function() {
+      _persistNetworkTimer = null;
+      try { sessionStorage.setItem(NETWORK_STORAGE_KEY, JSON.stringify(_networkEntries.slice(0, 100))); } catch (e) {}
+    }, 1000);
   }
 
   // Category → icon mapping for backend activity events
@@ -183,11 +198,20 @@
     }
   }
 
+  // Per-log signature of last render — top-entry ts + length. If neither
+  // changed since the last render of this log, skip the full innerHTML
+  // rebuild entirely (the visible state is already correct).
+  var _renderSig = {};
   function _renderEventLog(entries, logId, countId, emptyText) {
     var log = document.getElementById(logId);
     if (!log) return;
     var countEl = document.getElementById(countId);
     if (countEl) countEl.textContent = I18n.t('activity.count', { count: entries.length });
+
+    var topTs = entries.length > 0 ? entries[0].ts : 0;
+    var sig = topTs + ':' + entries.length;
+    if (_renderSig[logId] === sig) return;
+    _renderSig[logId] = sig;
 
     var html = '';
     var show = entries.slice(0, MAX_DISPLAY);
@@ -651,8 +675,11 @@
   if (_activityEntries.length > 0) setTimeout(_renderActivityLog, 0);
   if (_networkEntries.length > 0) setTimeout(_renderNetworkLog, 0);
 
-  // Refresh "ago" timestamps every 30 seconds
+  // Refresh "ago" timestamps every 30 seconds. Force a full rerender of
+  // activity / network logs (the per-event signature skip would otherwise
+  // leave the in-row "ago" text stale until the next activity event).
   setInterval(function() {
+    _renderSig = {};
     _renderActivityLog();
     _renderNetworkLog();
     // Also refresh per-model tickers

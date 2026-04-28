@@ -492,6 +492,7 @@
             }
           });
     },
+    _tickerSig: {},
     _renderModelTicker: function(modelId) {
       var actEvents = _modelEvents[modelId] || [];
       var netEvents = _modelNetEvents[modelId] || [];
@@ -500,6 +501,16 @@
       var safeId = U.safeId(modelId);
       var ticker = document.querySelector('[data-model-ticker="' + safeId + '"]');
       if (!ticker) return;
+
+      // Skip the innerHTML rebuild when nothing has changed. Each ticker is
+      // re-rendered on every activity event for that model; during download
+      // bursts that's many events per second per model. The signature
+      // collapses to top event ts + length on each side.
+      var actTop = actEvents.length ? actEvents[0].ts : 0;
+      var netTop = netEvents.length ? netEvents[0].ts : 0;
+      var sig = actTop + ':' + actEvents.length + '|' + netTop + ':' + netEvents.length;
+      if (App.dashboard._tickerSig[modelId] === sig) return;
+      App.dashboard._tickerSig[modelId] = sig;
 
       function _tickerTime(ts) {
         var d = new Date(ts);
@@ -1603,6 +1614,20 @@
       if (!acquisitions && !shardRegistry && !peerDownloads) return;
       var self = this;
 
+      // Build a single rowId -> element map up front. The previous code
+      // ran a fresh document.querySelector('[data-shard-row="..."]') per
+      // shard per tick; with N models × M shards that's N×M tree scans
+      // every 2 seconds. One querySelectorAll + map lookup is N×1 + O(N×M)
+      // hash hits.
+      var rowMap = {};
+      var rows = document.querySelectorAll('[data-shard-row]');
+      for (var ri = 0; ri < rows.length; ri++) {
+        rowMap[rows[ri].getAttribute('data-shard-row')] = rows[ri];
+      }
+      function _findRow(rowId) {
+        return rowMap[U.cssSafeAttr(rowId)] || null;
+      }
+
       // Index peerDownloads by modelId/shardIndex for quick lookup during patches
       var pdIndex = {};
       if (peerDownloads && peerDownloads.length > 0) {
@@ -1622,7 +1647,7 @@
           var shardDetails = acq.shard_details || [];
           shardDetails.forEach(function(sd) {
             var rowId = safeId + '-' + sd.index;
-            var row = document.querySelector('[data-shard-row="' + U.cssSafeAttr(rowId) + '"]');
+            var row = _findRow(rowId);
             if (!row) return;
 
             var dlPct = sd.progress_pct || 0;
@@ -1733,7 +1758,7 @@
           var shards = shardRegistry[modelId] || [];
           shards.forEach(function(s) {
             var rowId = safeId + '-' + s.index;
-            var row = document.querySelector('[data-shard-row="' + U.cssSafeAttr(rowId) + '"]');
+            var row = _findRow(rowId);
             if (!row) return;
             var current = row.getAttribute('data-state') || 'missing';
             if (current === 'downloading') return;
@@ -1832,6 +1857,20 @@
       if (pLoading) pLoading.remove();
       if (!list) return;
       if (overflow) overflow.style.display = 'none';
+
+      // Skip the full <table> rebuild when none of the rendered fields
+      // changed. peer_list bursts on swarm churn (multiple per second) —
+      // each rebuild destroys ~20 rows and recreates them from a string.
+      // The signature covers every field the row template uses; sort
+      // direction is included so toggle clicks still trigger a rerender.
+      var renderSig = (peers || []).map(function(p) {
+        return (p.node_id || '') + '|' + (p.healthy ? 1 : 0) + '|' +
+          (p.latency_ms || 0) + '|' + (p.hosted_shards || 0) + '|' +
+          (p.trust_score || 0) + '|' + (p.is_lan_peer ? 1 : 0) + '|' +
+          (p.nickname || '') + '|' + (p.gpu || '');
+      }).sort().join('||') + '#' + App.dashboard._peerSort + ':' + App.dashboard._peerSortDir;
+      if (App.dashboard._lastPeerRenderSig === renderSig) return;
+      App.dashboard._lastPeerRenderSig = renderSig;
 
       // If the set of hosted shards changed since the last snapshot, refresh
       // pipeline plans on visible matrix cards. The initial card render often
