@@ -125,9 +125,27 @@ impl PoolManager {
                 .insert(pool_id, state);
         }
 
-        // Clear stale removal replay entries — the timestamp freshness check (±5min)
-        // already prevents replays, so persisted entries serve no purpose after restart.
-        let _ = db.clear_tree(TREE_POOL_REMOVAL_REPLAYS);
+        // SEC: Do NOT clear TREE_POOL_REMOVAL_REPLAYS on restart. The 5-minute
+        // freshness window IS exactly the replay window — a saved PoolRemoval
+        // packet replayed within that window after a restart would re-evict the
+        // member. Evict only entries older than the freshness window. Entries
+        // are stored as the i64 unix timestamp at which the message was processed.
+        // Legacy `true` (bool) entries from older builds are evicted unconditionally
+        // on first restart — they're stale by definition since their age is unknown.
+        let cutoff = chrono::Utc::now().timestamp() - 300;
+        let mut to_remove: Vec<String> = Vec::new();
+        let _ = db.for_each_json::<serde_json::Value, _>(
+            TREE_POOL_REMOVAL_REPLAYS,
+            |subkey, val| {
+                let keep = val.as_i64().is_some_and(|ts| ts >= cutoff);
+                if !keep {
+                    to_remove.push(subkey.to_string());
+                }
+            },
+        );
+        for key in to_remove {
+            let _ = db.remove(TREE_POOL_REMOVAL_REPLAYS, &key);
+        }
 
         // Restore pending invitations
         if let Ok(invitations) = db.iter_json::<PoolInvitation>(TREE_POOL_INVITATIONS) {
@@ -952,12 +970,25 @@ impl PoolManager {
             return;
         }
 
-        // Check invitation replay
-        if !self
-            .pending_invitations
-            .contains_key(&acceptance.invitation_id)
-        {
-            tracing::warn!(invitation_id = %acceptance.invitation_id, invitee = %acceptance.invitee_node_id, "Acceptance for unknown invitation");
+        // SEC: Verify the acceptance comes from the invitee we actually invited.
+        // Without this, anyone who learns the invitation_id (e.g. via leaked
+        // PoolMembership broadcast or log scrape) could craft an acceptance with
+        // their own NodeId + own valid signature, consume the slot, and lock out
+        // the real invitee.
+        let pending = match self.pending_invitations.get(&acceptance.invitation_id) {
+            Some(inv) => inv,
+            None => {
+                tracing::warn!(invitation_id = %acceptance.invitation_id, invitee = %acceptance.invitee_node_id, "Acceptance for unknown invitation");
+                return;
+            }
+        };
+        if pending.invitee_node_id != acceptance.invitee_node_id {
+            tracing::warn!(
+                invitation_id = %acceptance.invitation_id,
+                expected = %pending.invitee_node_id,
+                got = %acceptance.invitee_node_id,
+                "Acceptance invitee does not match original invitation — rejecting"
+            );
             return;
         }
 
@@ -1047,12 +1078,14 @@ impl PoolManager {
                 return;
             }
 
-            // SEC: Replay protection — check if we've already processed this removal_id
+            // SEC: Replay protection — check if we've already processed this removal_id.
+            // Type-agnostic check (bool from old builds OR i64 timestamp going forward)
+            // so legacy entries still block replays during the upgrade.
             let removal_key = removal.removal_id.to_string();
             if self
                 .shared_state
                 .db
-                .get_json::<bool>(TREE_POOL_REMOVAL_REPLAYS, &removal_key)
+                .get_json::<serde_json::Value>(TREE_POOL_REMOVAL_REPLAYS, &removal_key)
                 .ok()
                 .flatten()
                 .is_some()
@@ -1071,11 +1104,14 @@ impl PoolManager {
                 return;
             }
 
-            // Record the removal_id to prevent replay
-            let _ = self
-                .shared_state
-                .db
-                .put_json(TREE_POOL_REMOVAL_REPLAYS, &removal_key, &true);
+            // Record the removal_id (with timestamp) to prevent replay; the
+            // timestamp lets startup sweep keep only entries within the 5-min
+            // freshness window so a planned restart can't re-open the replay door.
+            let _ = self.shared_state.db.put_json(
+                TREE_POOL_REMOVAL_REPLAYS,
+                &removal_key,
+                &chrono::Utc::now().timestamp(),
+            );
 
             *self.shared_state.credits.pool_state.write().await = None;
             let _ = self.shared_state.db.remove(TREE_POOL_STATE, KEY_MY_POOL);
@@ -1119,11 +1155,12 @@ impl PoolManager {
         }
 
         // Replay protection: same tree as pool removals, keyed by nonce.
+        // Type-agnostic check (bool from old builds OR i64 timestamp).
         let replay_key = format!("ml-{}", nonce);
         if self
             .shared_state
             .db
-            .get_json::<bool>(TREE_POOL_REMOVAL_REPLAYS, &replay_key)
+            .get_json::<serde_json::Value>(TREE_POOL_REMOVAL_REPLAYS, &replay_key)
             .ok()
             .flatten()
             .is_some()
@@ -1154,12 +1191,12 @@ impl PoolManager {
             return;
         }
 
-        // Record nonce to prevent replay.
-        if let Err(e) = self
-            .shared_state
-            .db
-            .put_json(TREE_POOL_REMOVAL_REPLAYS, &replay_key, &true)
-        {
+        // Record nonce (with timestamp) to prevent replay.
+        if let Err(e) = self.shared_state.db.put_json(
+            TREE_POOL_REMOVAL_REPLAYS,
+            &replay_key,
+            &chrono::Utc::now().timestamp(),
+        ) {
             tracing::warn!(error = %e, "Failed to persist member-left replay key");
         }
 

@@ -132,7 +132,13 @@ pub(super) fn track_forward_participation(shared_state: &SharedState, estimated_
     // Local segments don't go through dispatch — they use process_local_segment
     // which only earns via apply_credit_direct at pipeline completion.
     // Multiply by estimated token count to account for prefill (many tokens in one forward).
-    let tokens = estimated_tokens.max(1) as i64;
+    // SEC: cap peer-controlled token count. The requester sets `token_count` in
+    // the LayerForward message; without a cap, `token_count = u32::MAX` would mint
+    // ~43B credits per serving node on the next pending_credit_earn flush.
+    // 8192 covers any realistic single-forward batch (model context lengths cap
+    // out at ~32K-128K but those are split across multiple forwards).
+    const MAX_CREDITABLE_TOKENS: u32 = 8192;
+    let tokens = estimated_tokens.clamp(1, MAX_CREDITABLE_TOKENS) as i64;
     let earned = crate::credit::ledger::RATE_INFERENCE_SERVE.saturating_mul(tokens);
     shared_state
         .credits
