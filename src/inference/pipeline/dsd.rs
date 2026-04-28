@@ -1,6 +1,6 @@
 //! Decentralized Speculative Decoding coordinator loop (Item 12 / DSD).
 //!
-//! See `docs/plans/distributed_inference_speedup.md` § Item 12 for the
+//! See `docs/plans/archive/distributed_inference_speedup.md` § Item 12 for the
 //! design and arxiv 2511.11733 / 2511.21669 for the source papers.
 //!
 //! # What this fixes that Item 2 doesn't

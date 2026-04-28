@@ -64,7 +64,7 @@ pub struct SwarmCodec {
     pub compress_tensors: bool,
     /// Whether to compress outgoing prefix-KV snapshot payloads
     /// (`SwarmResponse::PrefixKvData`). Off by default — see
-    /// `docs/plans/distributed_inference_speedup.md` § Deferred for the
+    /// `docs/plans/archive/distributed_inference_speedup.md` § Deferred for the
     /// localhost-vs-WAN trade.
     pub compress_prefix_kv: bool,
     /// Zstd compression level (1-22). Shared between tensor and prefix-KV.

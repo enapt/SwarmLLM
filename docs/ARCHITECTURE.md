@@ -1443,7 +1443,10 @@ Single-node inference performance, measured with `swarmllm bench` (100 output to
 - **Speculative decoding in subprocess**: IPC scaffolding removed; speculative decoding works via the direct executor path only, not through worker subprocesses. Low priority — speculative decoding is experimental.
 - **Local executor streaming serialization**: `executor.lock().await` in openai.rs/anthropic/mod.rs holds the Mutex for the entire streaming inference duration, serializing concurrent local streaming requests. Fix: route local streaming through `ModelProcessPool` (consistent with non-streaming path). Only affects the legacy single-GGUF executor path; split-model and distributed paths are unaffected. Low priority — legacy path rarely used.
 
-### Responses API v2 plan (`docs/plans/responses_api_v2.md`)
+### Security
+- **Binary signature on auto-update** — `src/update.rs` verifies the SHA256 sidecar fetched from the same GitHub release as the binary; a compromised maintainer account/CI token can publish a matching pair. Real fix: generate an offline signing keypair, embed the public key via `env!()` at compile time, publish a detached `cosign` (or `minisign`) signature as a third release asset, and verify it before applying the rename. Blocked on a key-custody decision (storage location, who can sign). Tracked as audit_2026-04-29 finding C1. Until landed, the loopback-only `update/check` + `update/apply` (commit `2e1c5b1`) and the version-recheck at apply time (commit `cb2c688`) keep the blast radius local — but a published-tag tampering still bypasses SHA256 verification.
+
+### Responses API v2 plan (`docs/plans/archive/responses_api_v2.md`)
 - **V9: `POST /v1/responses/compact`** — was tagged as deferred indefinitely in the v2 plan; no concrete caller has asked for it yet. Implement when one shows up.
 - **Token-level cancel for background inference** — current `POST /v1/responses/:id/cancel` flips a flag that's only checked at completion time. Per-token interruption needs hooks in `chat_completions` that are out of v2 plan scope.
 - **Server-side `conversation` resource CRUD** — OpenAI's `conversation` parameter forwards through cloud proxy verbatim today; a local conversation type with its own endpoints is a separate design.

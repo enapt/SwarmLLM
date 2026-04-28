@@ -2,7 +2,7 @@
 
 > Follow-up to `round6.md` (Item 8 cross-over demo). This round fills the
 > "End-to-end multi-segment benchmark pending" line on Items 12 + 13 from
-> `docs/plans/distributed_inference_speedup.md`.
+> `docs/plans/archive/distributed_inference_speedup.md`.
 >
 > **TL;DR.** Item 13 (Q8_0 activation compression) shipped a **3.15×
 > wire-size reduction** on real multi-segment forwards between two

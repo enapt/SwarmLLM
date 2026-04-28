@@ -1,7 +1,7 @@
 //! OpenAI `/v1/responses` endpoint — request/response types, translation
 //! to/from Chat Completions, and HTTP handler.
 //!
-//! Capabilities (all shipped, see `docs/plans/responses_api{,_v2}.md` for
+//! Capabilities (all shipped, see `docs/plans/archive/responses_api{,_v2}.md` for
 //! the per-milestone history):
 //! - Local inference via translation to `/v1/chat/completions`, including
 //!   function tools and `tool_choice`.

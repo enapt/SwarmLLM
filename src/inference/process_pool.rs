@@ -475,7 +475,7 @@ pub struct ModelProcessPool {
     /// Quantize intermediate-segment hidden state activations to Q8_0 before
     /// returning them to the daemon (which forwards to the next pipeline peer).
     /// Receivers auto-dispatch on the dtype tag. See Item 13 in
-    /// `docs/plans/distributed_inference_speedup.md`.
+    /// `docs/plans/archive/distributed_inference_speedup.md`.
     activation_compression: std::sync::atomic::AtomicBool,
     /// Continuous batching: when on, `forward()` routes through an
     /// auto-coalescing scheduler that collects concurrent arrivals into a
@@ -720,7 +720,7 @@ impl ModelProcessPool {
     /// calls for the same model are collected into one `BatchForward` IPC
     /// message. CPU workers fall through to sequential automatically; GPU
     /// workers run the fused `SplitModel::forward_batch` path. See Item 3
-    /// Phase 2b in `docs/plans/distributed_inference_speedup.md`.
+    /// Phase 2b in `docs/plans/archive/distributed_inference_speedup.md`.
     pub fn set_continuous_batching(&self, enabled: bool) {
         self.continuous_batching
             .store(enabled, std::sync::atomic::Ordering::Relaxed);

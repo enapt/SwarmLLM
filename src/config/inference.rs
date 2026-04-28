@@ -39,7 +39,7 @@ pub struct InferenceConfig {
     pub speculative_decoding: bool,
     /// Use a persistent libp2p bidirectional stream per pipeline session for
     /// distributed inference instead of the per-token request_response path.
-    /// Off by default until validated. See `docs/plans/distributed_inference_speedup.md`.
+    /// Off by default until validated. See `docs/plans/archive/distributed_inference_speedup.md`.
     #[serde(default)]
     pub persistent_pipeline_stream: bool,
     /// Enable speculative decoding for the distributed inference path. Requires
@@ -223,7 +223,7 @@ pub struct InferenceConfig {
     /// cost of N·γ× the per-link payload (still small after Item 13's Q8_0).
     /// Single-segment workloads continue to use the Item 4 fast path. Off by
     /// default until the coordinator loop and adaptive γ controller land
-    /// (DSD Phases 2–4 — see `docs/plans/distributed_inference_speedup.md`
+    /// (DSD Phases 2–4 — see `docs/plans/archive/distributed_inference_speedup.md`
     /// Item 12). Worker (Phase 1) accepts the γ-token wire format already.
     #[serde(default)]
     pub decentralized_spec_decoding: bool,
@@ -231,7 +231,7 @@ pub struct InferenceConfig {
     /// (group-32 symmetric) before sending them to the next pipeline peer.
     /// Compresses ~3.76× vs raw f32 with negligible quality loss (PPL drift
     /// well under 1% on standard benchmarks — see
-    /// `docs/plans/distributed_inference_speedup.md` Item 13). Receivers
+    /// `docs/plans/archive/distributed_inference_speedup.md` Item 13). Receivers
     /// auto-dispatch on the dtype tag, so enabling this on one peer does not
     /// require all peers to upgrade — uncompressed peers still send raw f32
     /// and receive correctly-dequantized inputs. Off by default until
@@ -242,7 +242,7 @@ pub struct InferenceConfig {
     /// Replace the greedy pipeline assembler with a Parallax-inspired
     /// shortest-path DP over (node, layer_range) vertices. Picks the chain
     /// minimising total `2*rtt + compute + load_penalty` rather than greedy
-    /// next-hop coverage — see `docs/plans/distributed_inference_speedup.md`
+    /// next-hop coverage — see `docs/plans/archive/distributed_inference_speedup.md`
     /// Item 16. **Default on as of 2026-04-18.** Falls back to greedy when
     /// the DP has no valid source→sink path or candidate list is empty, so
     /// routing never regresses below the greedy baseline. Uses the same

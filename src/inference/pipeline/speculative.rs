@@ -1,6 +1,6 @@
 //! Distributed speculative decoding coordinator loop.
 //!
-//! See `docs/plans/distributed_inference_speedup.md` § Item 2.
+//! See `docs/plans/archive/distributed_inference_speedup.md` § Item 2.
 //!
 //! # Flow
 //!

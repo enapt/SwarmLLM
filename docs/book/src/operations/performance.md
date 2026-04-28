@@ -10,7 +10,7 @@ is still being hardened; those are documented at the bottom so you can turn
 them on intentionally.
 
 The full internal design of each item lives in
-[`docs/plans/distributed_inference_speedup.md`](https://github.com/enapt/SwarmLLM/blob/main/docs/plans/distributed_inference_speedup.md)
+[`docs/plans/archive/distributed_inference_speedup.md`](https://github.com/enapt/SwarmLLM/blob/main/docs/plans/archive/distributed_inference_speedup.md)
 with benchmark recipes in
 [`docs/plans/benchmarks/`](https://github.com/enapt/SwarmLLM/tree/main/docs/plans/benchmarks).
 

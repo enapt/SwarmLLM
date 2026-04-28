@@ -49,6 +49,67 @@ next tagged release.
 
 ### Security & validation
 
+- **Black-hat sweep 2026-04-29** — six parallel adversarial reviewers
+  (network, crypto/auth, pool/credit, HTTP API, inference path, supply
+  chain). 7 commits landed (`f4ff02b..fff42b4`); see
+  `memory/audit_2026-04-29.md` for the full rollup. Highlights:
+  - **Network**: gossip timestamp staleness in `events.rs` was
+    symmetric `saturating_sub` — doubled the replay window to ~10 min;
+    now one-sided per gotcha #44. PEX response no longer calls
+    `kademlia.add_address` on unauthenticated peer/multiaddr pairs
+    (Kademlia eclipse vector). `spec_logits` decoder hard-caps
+    `num_positions ≤ 32` and `vocab_len ≤ 512_000`.
+  - **Pool & credit**: `TREE_POOL_REMOVAL_REPLAYS` is no longer cleared
+    on restart — the 5-min freshness window IS the replay window, and
+    a saved `PoolRemoval` could re-evict after a planned restart. Now
+    timestamps each entry. `handle_inbound_acceptance` verifies the
+    acceptance's `invitee_node_id` matches the pending invitation
+    (anyone learning the `invitation_id` could otherwise steal the
+    slot). `track_forward_participation` caps peer-controlled
+    token count at 8192 — `LayerForward.token_count = u32::MAX`
+    would otherwise mint ~43B credits per serving node per flush.
+  - **Inference**: intermediate-segment activations are now
+    shape-validated against the input we forwarded; a malicious peer
+    returning a wrong-shaped tensor would otherwise crash the next
+    worker (gotcha #20). NaN/Inf rejected from peer-supplied f32
+    tensors at three sites (ring AllReduce, TP attn/ffn AllReduce
+    result, `spec_logits` rows before argmax in
+    `greedy_accept_reject` — IEEE 754 NaN argmax is non-deterministic
+    and lets a malicious peer steer accepted tokens).
+  - **Shard & adapter integrity**: shard startup size check tightened
+    to exact match (was ±10%); LoRA safetensors now BLAKE3-pinned via
+    a `<filename>.blake3` sidecar so a swapped adapter can't silently
+    produce wrong inference output.
+  - **HTTP API**: `POST /api/admin/update/{check,apply}` now
+    loopback-only (auto-downloads + binary swap should not be remote).
+    `provider-model-status` rejects path-injection in `model_id` via
+    allowlist (`[A-Za-z0-9._:@-]`, max 256, no `..`). `join-network`
+    rejects private/loopback/link-local multiaddrs (P2P-layer SSRF).
+    `GET /api/admin/responses` only returns `input_preview` /
+    `output_text_preview` to loopback callers (single shared API key
+    leaked prompt prefixes across users). Removed unreachable dead
+    code: the non-loopback `x-swarm-internal-token` block in
+    middleware.rs (per gotcha #30, `internal_auth_token` is
+    per-process random and never crosses node boundaries).
+  - **Update + supply chain**: `apply_update` re-verifies version is
+    strictly newer than `env!("CARGO_PKG_VERSION")` at apply time
+    (downgrade-by-replay protection). All GitHub Actions in `ci.yml`
+    and `release.yml` pinned to commit SHAs with the tag in a trailing
+    comment; `.github/dependabot.yml` opens weekly bumps. `libc::umask(0o177)`
+    around the AF_UNIX socket bind in `process_pool.rs` so the IPC
+    socket is created at 0o600 atomically (closes a TOCTOU between
+    bind and post-bind `set_permissions` where a local attacker
+    racing inotify on `/tmp` could connect first and impersonate
+    the worker). `db.redb` chmod'd to 0o600 on Unix after create.
+    `.env` loaded BEFORE the Tokio runtime spawns worker threads
+    (`std::env::set_var` is unsound in a multi-threaded process).
+  - **Deferred (still open)**: C1 — auto-update binary signing.
+    SHA256 sidecar comes from the same release as the binary, so a
+    compromised account/CI token publishes both together. Real fix
+    needs an offline keypair embedded as `env!()` pubkey + cosign
+    or minisign signature as a third release asset. Tracked in
+    `docs/ARCHITECTURE.md` § Deferred Items.
+
 - **PRIVACY: `chat_completions` no longer leaks prompt content into
   the activity event bus** — the event message included up to 60
   characters of the last user message via `prompt_preview`, and
