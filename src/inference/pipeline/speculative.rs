@@ -118,6 +118,7 @@ impl PipelineExecutor {
         // plus nothing for the generated token (we sample it, don't feed it
         // back yet). The first_token will ride as the "bootstrap" on round 1.
         let prompt_bytes = prompt.as_bytes().to_vec();
+        let prompt_byte_len = prompt_bytes.len();
         let (first_token, prompt_token_count, eos_tokens, decoder) = {
             // Register response channel.
             if self.shared_state.pending_layer_results.len() >= MAX_PENDING_LAYER_RESULTS {
@@ -163,8 +164,21 @@ impl PipelineExecutor {
                 ));
             }
             let num_layers = segment.layer_range.1 - segment.layer_range.0;
-            let prefill_result =
-                Self::wait_for_result(rx, request_id, 0, &segment.node_id, num_layers, 0).await?;
+            // Pass the real prompt byte length for adaptive timeout. Passing 0
+            // would classify this as a decode pass (DECODE_SECS_PER_LAYER=2)
+            // and yield the 30s SEGMENT_TIMEOUT_MIN_SECS floor regardless of
+            // model size — too tight for long prompts on slow hardware.
+            // forward_through_segments already does this for the standard
+            // path; mirror here.
+            let prefill_result = Self::wait_for_result(
+                rx,
+                request_id,
+                0,
+                &segment.node_id,
+                num_layers,
+                prompt_byte_len,
+            )
+            .await?;
 
             if prefill_result.token_ids.is_empty() {
                 return Err(SwarmError::Inference(

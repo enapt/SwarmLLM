@@ -92,6 +92,17 @@ impl PoolManager {
             return false;
         }
         entry.push_back(now);
+
+        // Bound the outer HashMap by sweeping NodeIds whose VecDeque emptied
+        // out (member left the pool, restart, etc.). Without this sweep the
+        // map accumulates one stale entry per ever-seen sender forever.
+        // Cheap guard — only sweeps when the map exceeds a soft cap.
+        const CREDIT_FORWARD_RL_SOFT_CAP: usize = 256;
+        if self.credit_forward_rl.len() > CREDIT_FORWARD_RL_SOFT_CAP {
+            self.credit_forward_rl.retain(|_, deque| {
+                !deque.is_empty() && now.duration_since(*deque.back().unwrap()) <= window
+            });
+        }
         true
     }
 

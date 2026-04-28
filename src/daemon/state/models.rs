@@ -159,13 +159,31 @@ impl ModelMgmt {
     /// other peers in the per-block holder set. A peer announcing an empty
     /// set is treated as "I no longer hold any blocks for this model".
     ///
+    /// SEC: drops any input list larger than `MAX_BLOCKS_PER_PEER_MODEL`.
+    /// Without this cap a single misbehaving peer can announce millions of
+    /// distinct block hashes per model and exhaust memory in the per-block
+    /// holder sets. The cap matches the worst-case prefix-cache snapshot
+    /// count for typical 8K-context workloads (256-token blocks → ~32 blocks
+    /// per request × a few hundred concurrent sessions).
+    ///
     /// Returns `(added, removed)` counts for logging — strictly diagnostic.
     pub fn replace_peer_prefix_blocks(
         &self,
         peer: NodeId,
         model_id: crate::types::ModelId,
-        new_blocks: Vec<[u8; 32]>,
+        mut new_blocks: Vec<[u8; 32]>,
     ) -> (usize, usize) {
+        const MAX_BLOCKS_PER_PEER_MODEL: usize = 16_384;
+        if new_blocks.len() > MAX_BLOCKS_PER_PEER_MODEL {
+            tracing::warn!(
+                %peer,
+                model = %model_id,
+                announced = new_blocks.len(),
+                cap = MAX_BLOCKS_PER_PEER_MODEL,
+                "Truncating prefix-block announce: exceeds per-peer-per-model cap"
+            );
+            new_blocks.truncate(MAX_BLOCKS_PER_PEER_MODEL);
+        }
         // Snapshot the previous block set for this (peer, model) pair, then
         // compute the diff so we only touch the per-block holder sets that
         // actually changed.

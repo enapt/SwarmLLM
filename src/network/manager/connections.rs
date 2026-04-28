@@ -12,8 +12,8 @@ use crate::network::protocol::SwarmRequest;
 use crate::types::SwarmMessage;
 
 use super::{
-    NetworkManager, MAX_CONNECTION_ADDRS, MAX_PENDING_REDIAL, MAX_PING_ENTRIES,
-    PING_SENT_TIMES_CUTOFF_SECS, REDIAL_JITTER_MIN_MS, REDIAL_JITTER_RANGE_MS,
+    NetworkManager, MAX_CONNECTION_ADDRS, MAX_PEER_REMOTE_ADDRS, MAX_PENDING_REDIAL,
+    MAX_PING_ENTRIES, PING_SENT_TIMES_CUTOFF_SECS, REDIAL_JITTER_MIN_MS, REDIAL_JITTER_RANGE_MS,
 };
 
 impl NetworkManager {
@@ -53,6 +53,21 @@ impl NetworkManager {
         }
         self.connection_addrs
             .insert(connection_id, remote_addr.clone());
+        // Cap peer_remote_addrs at MAX_PEER_REMOTE_ADDRS — disconnected peers'
+        // entries are removed in handle_connection_closed, but a cap defends
+        // against missed close events leaking entries indefinitely. Drop a
+        // random half via take() since peer_id has no natural ordering.
+        if self.peer_remote_addrs.len() >= MAX_PEER_REMOTE_ADDRS {
+            let to_drop: Vec<_> = self
+                .peer_remote_addrs
+                .keys()
+                .take(MAX_PEER_REMOTE_ADDRS / 2)
+                .copied()
+                .collect();
+            for k in to_drop {
+                self.peer_remote_addrs.remove(&k);
+            }
+        }
         self.peer_remote_addrs.insert(peer_id, remote_addr.clone());
         self.update_peer_count();
 

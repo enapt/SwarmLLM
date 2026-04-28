@@ -71,6 +71,10 @@ const MAX_BUFFERED_GOSSIP: usize = 64;
 const MAX_INBOUND_PREFIX_FETCHES: usize = 256;
 /// Maximum entries in connection_addrs before half-eviction of oldest ConnectionIds.
 const MAX_CONNECTION_ADDRS: usize = 1024;
+/// Maximum entries in peer_remote_addrs before half-eviction of stale peers.
+/// Disconnected peers' entries are removed in `handle_connection_closed`, but
+/// the cap defends against missed close events leaking entries into the map.
+const MAX_PEER_REMOTE_ADDRS: usize = 1024;
 /// Maximum entries in ping_sent_times before pruning stale entries.
 const MAX_PING_ENTRIES: usize = 2048;
 /// How often the run loop wakes to process the pending_redial queue.

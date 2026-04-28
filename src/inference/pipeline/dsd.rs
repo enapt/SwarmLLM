@@ -430,6 +430,38 @@ async fn forward_verify_through_segments(
         let (tx, rx) = tokio::sync::oneshot::channel();
         shared_state.pending_layer_results.insert(request_id, tx);
 
+        // RAII: ensure the pending_layer_results entry is removed on every
+        // exit path from this iteration, including `?` propagation from
+        // wait_for_result. Without this, a non-final-segment timeout/network
+        // error leaves a permanent stale entry that consumes capacity (the
+        // MAX_PENDING_LAYER_RESULTS check at the loop head would fail under
+        // load) and silently swallows any late-arriving response.
+        struct PendingGuard<'a> {
+            map: &'a dashmap::DashMap<
+                uuid::Uuid,
+                tokio::sync::oneshot::Sender<crate::types::LayerResult>,
+            >,
+            id: uuid::Uuid,
+            armed: bool,
+        }
+        impl<'a> PendingGuard<'a> {
+            fn disarm(&mut self) {
+                self.armed = false;
+            }
+        }
+        impl<'a> Drop for PendingGuard<'a> {
+            fn drop(&mut self) {
+                if self.armed {
+                    self.map.remove(&self.id);
+                }
+            }
+        }
+        let mut pending_guard = PendingGuard {
+            map: &shared_state.pending_layer_results,
+            id: request_id,
+            armed: true,
+        };
+
         let forward = LayerForward {
             request_id,
             sequence_num: 1, // not prefill

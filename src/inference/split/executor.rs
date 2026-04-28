@@ -910,14 +910,20 @@ impl SplitModel {
         if !kv_offset_homogeneous {
             // Restore the moved-out KV caches before the sequential fallback
             // so each item's per-request entry is intact when forward() loads it.
-            for (item, kv) in items.iter().zip(all_kv_caches.into_iter()) {
+            //
+            // SAFETY: write `layers` and `ssm_states` in a single
+            // get_or_create_keyed per item. The previous two-pass version
+            // could lose `layers` if a TTL eviction fired between the two
+            // loops — the second pass would create a fresh empty entry and
+            // overwrite the just-restored layers with `Vec::new()`.
+            for ((item, kv), ssm) in items
+                .iter()
+                .zip(all_kv_caches.into_iter())
+                .zip(all_ssm_states.into_iter())
+            {
                 let key = KvCacheStore::cache_key(&model_key, item.request_id);
                 let mut entry = kv_cache_store.get_or_create_keyed(&key, num_layers);
                 entry.layers = kv;
-            }
-            for (item, ssm) in items.iter().zip(all_ssm_states.into_iter()) {
-                let key = KvCacheStore::cache_key(&model_key, item.request_id);
-                let mut entry = kv_cache_store.get_or_create_keyed(&key, num_layers);
                 entry.ssm_states = ssm;
             }
             tracing::debug!(
