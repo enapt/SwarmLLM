@@ -364,6 +364,17 @@ impl EscrowManager {
             .filter(|e| e.status == EscrowStatus::Pending)
             .count()
     }
+
+    /// Total amount currently held in pending escrows. Useful for
+    /// distinguishing "credits actually spent" from "credits temporarily
+    /// locked awaiting release/refund" in admin surfaces.
+    pub fn pending_total(&self) -> i64 {
+        self.entries
+            .iter()
+            .filter(|e| e.status == EscrowStatus::Pending)
+            .map(|e| e.amount)
+            .sum()
+    }
 }
 
 #[cfg(test)]

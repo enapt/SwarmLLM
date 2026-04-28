@@ -16,15 +16,31 @@ use tokio::sync::mpsc;
 
 /// Format a value as an SSE `data:` frame (for byte streams).
 /// Accepts any `serde::Serialize` — typed response structs or raw JSON values.
+/// On serialization failure (e.g. NaN in a logprob) emits a structured error
+/// event rather than an empty `data:` line — empty data is a valid SSE
+/// no-op event and would silently hang clients waiting for a specific
+/// payload (e.g. `[DONE]` or `message_stop`).
 pub fn data_frame<S: serde::Serialize>(value: &S) -> bytes::Bytes {
-    let json = serde_json::to_string(value).unwrap_or_default();
-    bytes::Bytes::from(format!("data: {json}\n\n"))
+    match serde_json::to_string(value) {
+        Ok(json) => bytes::Bytes::from(format!("data: {json}\n\n")),
+        Err(e) => {
+            tracing::error!(error = %e, "SSE data_frame: serialization failed");
+            bytes::Bytes::from_static(b"data: {\"error\":\"serialization_failed\"}\n\n")
+        }
+    }
 }
 
 /// Format a named SSE event frame (`event: ...\ndata: ...`) for byte streams.
 pub fn event_frame<S: serde::Serialize>(event_type: &str, value: &S) -> bytes::Bytes {
-    let json = serde_json::to_string(value).unwrap_or_default();
-    bytes::Bytes::from(format!("event: {event_type}\ndata: {json}\n\n"))
+    match serde_json::to_string(value) {
+        Ok(json) => bytes::Bytes::from(format!("event: {event_type}\ndata: {json}\n\n")),
+        Err(e) => {
+            tracing::error!(error = %e, event_type, "SSE event_frame: serialization failed");
+            bytes::Bytes::from(format!(
+                "event: {event_type}\ndata: {{\"error\":\"serialization_failed\"}}\n\n"
+            ))
+        }
+    }
 }
 
 /// Terminal `data: [DONE]` frame used by OpenAI-compatible streams.

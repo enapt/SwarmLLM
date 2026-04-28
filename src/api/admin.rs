@@ -397,15 +397,29 @@ pub async fn list_peers(State(state): State<AppState>) -> Json<Vec<serde_json::V
 
 /// GET /api/admin/credits — Credit details.
 pub async fn credit_info(State(state): State<AppState>) -> Json<serde_json::Value> {
-    let credit = state.shared_state.credits.credit_balance.read().await;
-    let tier = crate::credit::priority::PriorityCalculator::tier_name(credit.balance);
+    // Snapshot the balance and drop the read lock before computing escrow
+    // so the credit hot-path doesn't park behind us.
+    let (balance, lifetime_earned, lifetime_spent, last_updated, tier) = {
+        let credit = state.shared_state.credits.credit_balance.read().await;
+        (
+            credit.balance,
+            credit.lifetime_earned,
+            credit.lifetime_spent,
+            credit.last_updated.to_rfc3339(),
+            crate::credit::priority::PriorityCalculator::tier_name(credit.balance),
+        )
+    };
+    let escrow_held = state.shared_state.credits.escrow_manager.pending_total();
+    let escrow_pending = state.shared_state.credits.escrow_manager.pending_count();
 
     Json(serde_json::json!({
-        "balance": credit.balance,
-        "lifetime_earned": credit.lifetime_earned,
-        "lifetime_spent": credit.lifetime_spent,
+        "balance": balance,
+        "lifetime_earned": lifetime_earned,
+        "lifetime_spent": lifetime_spent,
         "tier": tier,
-        "last_updated": credit.last_updated.to_rfc3339(),
+        "last_updated": last_updated,
+        "escrow_held": escrow_held,
+        "escrow_pending_count": escrow_pending,
     }))
 }
 

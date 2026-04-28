@@ -143,7 +143,7 @@ impl IntoResponse for ApiError {
             SwarmError::InsufficientCredits { .. } => (
                 StatusCode::PAYMENT_REQUIRED,
                 self.0.to_string(),
-                "rate_limit_error",
+                "insufficient_credits",
             ),
             SwarmError::InsufficientCapacity(_) | SwarmError::ServiceUnavailable(_) => (
                 StatusCode::SERVICE_UNAVAILABLE,
@@ -215,6 +215,11 @@ impl IntoResponse for ApiError {
             }
             SwarmError::NotFound(_) => {
                 (StatusCode::NOT_FOUND, self.0.to_string(), "not_found_error")
+            }
+            // Network upstream-unreachable: 502 + a distinct error_type so
+            // SDK retry logic can distinguish 'try later' from a 500 bug.
+            SwarmError::Network(_) => {
+                (StatusCode::BAD_GATEWAY, self.0.to_string(), "network_error")
             }
             _ => {
                 // Log the full error internally but return a generic message

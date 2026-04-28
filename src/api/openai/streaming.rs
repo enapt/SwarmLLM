@@ -517,8 +517,11 @@ pub(super) async fn split_stream_response(
                 }
             };
 
-        // Forward streaming tokens from the worker to SSE events
-        let mut finish = "length".to_string();
+        // Forward streaming tokens from the worker to SSE events.
+        // Default to "stop"; the worker will override with "length" if the
+        // generation hit max_tokens. "length" as a default would tell clients
+        // the response was truncated even on a clean exit.
+        let mut finish = "stop".to_string();
         while let Some(event) = token_rx.recv().await {
             if let Some(fr) = &event.finish_reason {
                 finish = fr.clone();
@@ -614,12 +617,16 @@ pub(super) async fn stream_response(
             send_result.is_ok()
         });
 
-        // Send finish reason
+        // Send finish reason. OpenAI spec restricts finish_reason to
+        // stop|length|tool_calls|content_filter|function_call. Map an
+        // execution error to "stop" — the error is already logged here and
+        // the caller has separate paths to surface it (HTTP 500 before the
+        // SSE opens, or an `error` SSE event for in-stream failures).
         let finish = match result {
             Ok(r) => r.finish_reason.as_str().to_string(),
             Err(ref e) => {
                 tracing::error!(error = %e, "DIAG: local stream generate_stream error");
-                "error".to_string()
+                "stop".to_string()
             }
         };
         if tx

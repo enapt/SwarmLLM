@@ -380,11 +380,11 @@ pub struct LayerResult {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sealed_token_ids: Option<Vec<u8>>,
     /// Speculative decoding: per-position logit vectors returned by the target
-    /// model when `LayerForward.spec_logits_requested` was set. One vector per
-    /// γ draft positions (the bonus logit for the "all accepted" case is the
-    /// last entry, so length == γ+1 when populated on a `seq_num >= 1` step
-    /// with a known `previous_bonus_logits` context, or just == γ when the
-    /// coordinator keeps its own rolling next-token logits).
+    /// model when `LayerForward.spec_logits_requested` was set. Length is
+    /// always γ+1 — `greedy_accept_reject` indexes `spec_logits[drafts.len()]`
+    /// (= γ) on the ALL-ACCEPTED branch as the bonus logit. A length-γ payload
+    /// would OOB-panic that index. See gotcha #29 in `memory/MEMORY.md` for
+    /// the R67 fix that nailed this contract.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub spec_logits: Vec<Vec<f32>>,
 }

@@ -471,10 +471,21 @@ pub async fn list_models(State(state): State<AppState>) -> Json<ModelListRespons
             slug
         };
 
+        // Try to use the manifest's publish date; fall back to the registry's
+        // local-load timestamp if available; only fall back to 0 if neither.
+        // Returning Utc::now() per call (the prior behaviour) made `created`
+        // change every /v1/models response, breaking client-side caches that
+        // key on (id, created).
+        let created = state
+            .shared_state
+            .model_registry
+            .get_manifest(&crate::types::ModelId(model_id.clone()))
+            .map(|m| m.publish_date.timestamp())
+            .unwrap_or(0);
         data.push(ModelInfo {
             id: model_id,
             object: "model",
-            created: chrono::Utc::now().timestamp(),
+            created,
             owned_by: "local".into(),
         });
     }

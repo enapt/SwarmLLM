@@ -125,10 +125,10 @@ pub(super) async fn finalize_request(
                         let _ = tx
                             .send(crate::pool::types::PoolCommand::ProcessCreditForward { forward })
                             .await;
-                        tracing::debug!(
+                        tracing::info!(
                             spent,
                             request_id = %request.id,
-                            "Forwarded inference spend to pool owner"
+                            "DIAG: forwarded inference spend to pool owner"
                         );
                     }
                 }
@@ -144,11 +144,11 @@ pub(super) async fn finalize_request(
                 {
                     tracing::warn!(error = %e, "Failed to persist credit spend");
                 }
-                tracing::debug!(
+                tracing::info!(
                     spent,
                     total_tokens,
                     request_id = %request.id,
-                    "Spent credits for consuming inference"
+                    "DIAG: spent credits for consuming inference"
                 );
             }
         }
