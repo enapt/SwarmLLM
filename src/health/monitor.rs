@@ -198,11 +198,14 @@ impl HealthMonitor {
                 .max(0) as u64
         };
 
-        // Populate real system metrics.
-        // sysinfo does blocking filesystem reads (/proc/*) — use block_in_place.
+        // Populate real system metrics. sysinfo does blocking filesystem
+        // reads (/proc/*); route them to the dedicated blocking pool via
+        // spawn_blocking instead of block_in_place — block_in_place parks
+        // a Tokio worker thread for the duration of the syscalls, which
+        // forces the runtime to spin up a replacement on every 30s tick.
         let data_dir = self.shared_state.config.node.data_dir.clone();
         let (ram_total_mb, ram_available_mb, disk_available_mb) =
-            tokio::task::block_in_place(|| {
+            tokio::task::spawn_blocking(move || {
                 let mut sys = sysinfo::System::new();
                 sys.refresh_memory();
                 let ram_total = sys.total_memory() / (1024 * 1024);
@@ -223,7 +226,9 @@ impl HealthMonitor {
                             .sum()
                     });
                 (ram_total, ram_avail, disk_avail)
-            });
+            })
+            .await
+            .unwrap_or((0, 0, 0));
 
         let est_tokens_per_sec_7b = gpu_info
             .as_ref()

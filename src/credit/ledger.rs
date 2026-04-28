@@ -362,8 +362,21 @@ impl CreditLedger {
                     }
                 }
                 _ = gossip_interval.tick() => {
-                    let bucket = self.balance_bucket().await;
-                    let tier = self.calculate_tier().await;
+                    // Read once, derive both. Two sequential read-locks let a
+                    // concurrent apply_credit slip a write between them, so the
+                    // gossiped (bucket, tier) pair could reflect different
+                    // balance values.
+                    let (bucket, tier) = {
+                        let balance_now = {
+                            let bal = self.balance.read().await;
+                            bal.balance
+                        };
+                        let percentile = self.estimate_percentile(balance_now);
+                        (
+                            bucket_balance(balance_now),
+                            super::priority::calculate_tier(balance_now, percentile),
+                        )
+                    };
 
                     tracing::info!(
                         balance_bucket = bucket,

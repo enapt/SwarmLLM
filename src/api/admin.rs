@@ -93,14 +93,24 @@ use crate::error::ApiError;
 /// GET /api/admin/stats — Full dashboard stats snapshot.
 pub async fn stats(State(state): State<AppState>) -> Json<serde_json::Value> {
     let node_id = hex::encode(state.shared_state.identity.node_id().0);
-    let stats = state.shared_state.metrics.node_stats.read().await;
-    let credit = state.shared_state.credits.credit_balance.read().await;
 
-    let uptime_seconds = (chrono::Utc::now() - stats.uptime_start)
-        .num_seconds()
-        .max(0) as u64;
-
-    let tier = crate::credit::priority::PriorityCalculator::tier_name(credit.balance);
+    // Snapshot the locked values into stack copies and drop the guards BEFORE
+    // the sysinfo spawn_blocking await. Holding RwLock guards across the
+    // blocking-call .await would otherwise park concurrent writers
+    // (apply_credit on the inference hot path, the health monitor) for the
+    // duration of the /proc/* scan.
+    let (uptime_start, requests_made) = {
+        let stats = state.shared_state.metrics.node_stats.read().await;
+        (stats.uptime_start, stats.requests_made)
+    };
+    let (tier, credit_json) = {
+        let credit = state.shared_state.credits.credit_balance.read().await;
+        (
+            crate::credit::priority::PriorityCalculator::tier_name(credit.balance),
+            super::credit_summary_json(&credit),
+        )
+    };
+    let uptime_seconds = (chrono::Utc::now() - uptime_start).num_seconds().max(0) as u64;
 
     // Count only shards held locally (not all tracked shards network-wide)
     let hosted_shards = crate::api::metrics::count_local_shards(&state.shared_state);
@@ -139,10 +149,10 @@ pub async fn stats(State(state): State<AppState>) -> Json<serde_json::Value> {
         "peers": state.shared_state.peer_registry.len(),
         "requests_served": state.shared_state.metrics.requests_served_atomic.load(std::sync::atomic::Ordering::Relaxed),
         "forwards_served": state.shared_state.metrics.forwards_served_atomic.load(std::sync::atomic::Ordering::Relaxed),
-        "requests_made": stats.requests_made,
+        "requests_made": requests_made,
         "active_requests": state.shared_state.active_pipelines.len(),
         "hosted_shards": hosted_shards,
-        "credits": super::credit_summary_json(&credit),
+        "credits": credit_json,
         "hardware": hardware,
         "inference": inference_perf,
     }))

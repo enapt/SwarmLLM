@@ -505,7 +505,11 @@ async fn send_verify_batch(
         requester_node_id: Some(shared_state.identity.node_id().0),
         pre_embedded: false,
         adapter_id: None,
-        draft_tokens: verify_tokens.to_vec(),
+        // The receiver gates spec-logits emission on
+        // `spec_logits_requested && is_last`, not on `draft_tokens`. The
+        // draft IDs are also already encoded in `activations`, so leaving
+        // this empty saves an allocation per spec round at no cost.
+        draft_tokens: Vec::new(),
         spec_logits_requested: true,
         truncate_kv_to,
     };

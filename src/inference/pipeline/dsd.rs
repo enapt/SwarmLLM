@@ -474,10 +474,11 @@ async fn forward_verify_through_segments(
             requester_node_id: Some(shared_state.identity.node_id().0),
             pre_embedded: false,
             adapter_id: None,
-            // Carry draft_tokens informationally so the receiver can log/trace
-            // the verify request, even though the input shape is sourced from
-            // `activations` after Phase 1.
-            draft_tokens: verify_tokens.to_vec(),
+            // The receiver gates spec-logits emission on
+            // `spec_logits_requested && is_last`, not on `draft_tokens`. The
+            // draft IDs are also already encoded in `activations`, so leaving
+            // this empty saves an allocation per spec round at no cost.
+            draft_tokens: Vec::new(),
             // Only the last segment will actually populate spec_logits — but
             // setting the flag uniformly makes the protocol symmetric.
             spec_logits_requested: true,

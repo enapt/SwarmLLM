@@ -210,7 +210,15 @@ impl AutoShardManager {
                 _ = self.notify.notified() => {
                     // Woken by a new HfSourceGossip or ModelManifest -- wait for gossip
                     // to settle and peers to announce their downloads before evaluating.
-                    tokio::time::sleep(Duration::from_secs(AUTO_MANAGE_NOTIFY_SETTLE_SECS)).await;
+                    // Race the settle window against shutdown so a daemon stop fired
+                    // mid-sleep doesn't add 15s to the supervisor's exit window.
+                    let mut shutdown_rx = self.shutdown_rx.clone();
+                    tokio::select! {
+                        _ = tokio::time::sleep(Duration::from_secs(AUTO_MANAGE_NOTIFY_SETTLE_SECS)) => {}
+                        _ = shutdown_rx.changed() => {
+                            if *shutdown_rx.borrow() { break; }
+                        }
+                    }
                     // Cooldown: skip if we evaluated recently (prevents cascading
                     // re-evaluations from shard progress gossip between peers).
                     // Exception: bypass when P2P has exhausted for one or more

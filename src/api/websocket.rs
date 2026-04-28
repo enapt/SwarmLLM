@@ -385,8 +385,19 @@ async fn get_or_build_stats_message(state: &SharedState) -> std::sync::Arc<Strin
 }
 
 async fn build_stats_message(state: &SharedState) -> String {
-    let stats = state.metrics.node_stats.read().await;
-    let credit = state.credits.credit_balance.read().await;
+    // Snapshot the locked values into stack copies and drop the guards BEFORE
+    // the DashMap full scans + serde_json construction below. Holding RwLock
+    // guards across hundreds of microseconds of synchronous work parks the
+    // inference hot path's apply_credit writers and the health monitor's
+    // node_stats writer, every 2 seconds, per connected WS client.
+    let (uptime_start, requests_made) = {
+        let stats = state.metrics.node_stats.read().await;
+        (stats.uptime_start, stats.requests_made)
+    };
+    let credit_json = {
+        let credit = state.credits.credit_balance.read().await;
+        crate::api::credit_summary_json(&credit)
+    };
     let local_node_id = state.identity.node_id().clone();
 
     // Collect active acquisition progress with per-shard detail
@@ -451,12 +462,12 @@ async fn build_stats_message(state: &SharedState) -> String {
     let mut data = serde_json::json!({
         "peers": peers_connected,
         "lan_peers": lan_peers,
-        "credits": crate::api::credit_summary_json(&credit),
+        "credits": credit_json,
         "active_requests": state.active_pipelines.len(),
         "requests_served": state.metrics.requests_served_atomic.load(std::sync::atomic::Ordering::Relaxed),
-        "requests_made": stats.requests_made,
+        "requests_made": requests_made,
         "forwards_served": state.metrics.forwards_served_atomic.load(std::sync::atomic::Ordering::Relaxed),
-        "uptime_seconds": (chrono::Utc::now() - stats.uptime_start).num_seconds(),
+        "uptime_seconds": (chrono::Utc::now() - uptime_start).num_seconds(),
         "acquisitions": acquisitions,
     });
 

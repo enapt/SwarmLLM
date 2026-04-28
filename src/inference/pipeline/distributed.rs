@@ -152,6 +152,13 @@ impl PipelineExecutor {
             None
         };
 
+        // Hoist the EOS fallback set out of the decode loop. The fallback is
+        // only consulted on the very first forward (seq_num==0) before
+        // `cached_eos` is populated; afterward `cached_eos` is always Some,
+        // so allocating a fresh HashSet per token was pure waste.
+        let default_eos: std::collections::HashSet<u32> =
+            [LLAMA_FALLBACK_EOS_TOKEN].into_iter().collect();
+
         // Token generation loop
         let mut prompt_bytes_opt = Some(prompt_bytes);
         for seq_num in 0..max_tokens {
@@ -270,8 +277,6 @@ impl PipelineExecutor {
                     generated_tokens.extend(&result.token_ids);
 
                     // Decode and stream each non-EOS token, checking for stop strings.
-                    let default_eos: std::collections::HashSet<u32> =
-                        [LLAMA_FALLBACK_EOS_TOKEN].into_iter().collect();
                     let eos = cached_eos.as_ref().unwrap_or(&default_eos);
                     let decoder = cached_decoder.as_ref();
                     let mut hit_stop_string = false;
