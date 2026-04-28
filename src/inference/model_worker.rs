@@ -2413,9 +2413,6 @@ async fn step_decode_pool(
 
     let mut input_tensors: Vec<candle_core::Tensor> =
         Vec::with_capacity(still_active_indices.len());
-    let mut req_id_strs: Vec<String> = Vec::with_capacity(still_active_indices.len());
-    let mut sampling_clones: Vec<crate::types::SamplingParams> =
-        Vec::with_capacity(still_active_indices.len());
     let mut index_positions: Vec<usize> = Vec::with_capacity(still_active_indices.len());
     // Per-slot tensor build with error containment. If one slot's
     // token_tensor fails (e.g. impossibly large token id), mark it errored
@@ -2434,8 +2431,6 @@ async fn step_decode_pool(
         match model.token_tensor(last_token) {
             Ok(t) => {
                 input_tensors.push(t);
-                req_id_strs.push(slot.req_id_str.clone());
-                sampling_clones.push(slot.sampling.clone());
                 index_positions.push(index_pos);
                 keep_indices.push(i);
             }
@@ -2452,13 +2447,16 @@ async fn step_decode_pool(
         return Ok(());
     }
 
+    // BatchItem borrows req_id_str directly from `active` — no per-slot
+    // clone needed. items goes out of scope before any mutable borrow of
+    // active resumes (line 2479's `&mut active[i]`).
     let items: Vec<BatchItem<'_>> = still_active_indices
         .iter()
         .enumerate()
-        .map(|(j, _)| BatchItem {
+        .map(|(j, &i)| BatchItem {
             input: &input_tensors[j],
             index_pos: index_positions[j],
-            request_id: req_id_strs[j].as_str(),
+            request_id: active[i].req_id_str.as_str(),
         })
         .collect();
 
@@ -2480,7 +2478,7 @@ async fn step_decode_pool(
         let (next_tok, next_logprob) =
             match crate::inference::tensor_util::sample_token_with_logprob(
                 &outputs[j],
-                &sampling_clones[j],
+                &slot.sampling,
             ) {
                 Ok(v) => v,
                 Err(e) => {
