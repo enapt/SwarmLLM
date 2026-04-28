@@ -47,14 +47,11 @@ impl NetworkManager {
                     }
                 }
 
-                // Add to Kademlia
-                if let Some(pid) = &maybe_peer_id {
-                    self.swarm
-                        .behaviour_mut()
-                        .kademlia
-                        .add_address(pid, addr.clone());
-                }
-
+                // SEC: Do NOT call kademlia.add_address here — PEX-supplied
+                // (PeerId, Multiaddr) pairs are unauthenticated and would let an
+                // attacker poison the routing table for eclipse attacks. The dial
+                // below triggers Noise + identify, and the identify handler adds
+                // the verified address to Kademlia post-handshake.
                 if let Err(e) = self.swarm.dial(addr) {
                     tracing::debug!(error = %e, "PEX: failed to dial peer");
                 } else {

@@ -55,22 +55,25 @@ impl NetworkManager {
                 match decoded {
                     Ok((sender_node_id, msg)) => {
                         // NET-M10: Reject gossip messages with timestamps older than 5 minutes
+                        // or more than 30s in the future. One-sided check per gotcha #44 —
+                        // symmetric .abs()-style windows double the effective replay window.
                         let now_epoch = chrono::Utc::now().timestamp() as u64;
+                        const SKEW_TOLERANCE_SECS: u64 = 30;
+                        const MAX_AGE_SECS: u64 = 300;
+                        let stale_or_future = |ts: u64| -> bool {
+                            ts > now_epoch + SKEW_TOLERANCE_SECS
+                                || now_epoch.saturating_sub(ts) > MAX_AGE_SECS
+                        };
                         let too_old = match &msg {
                             SwarmMessage::HealthPing { timestamp, .. }
                             | SwarmMessage::HealthPong { timestamp, .. } => {
-                                now_epoch.saturating_sub(*timestamp) > 300
-                                    || timestamp.saturating_sub(now_epoch) > 300
+                                stale_or_future(*timestamp)
                             }
                             SwarmMessage::ShardAnnounce(ann) => {
-                                let ts = ann.timestamp.timestamp() as u64;
-                                now_epoch.saturating_sub(ts) > 300
-                                    || ts.saturating_sub(now_epoch) > 300
+                                stale_or_future(ann.timestamp.timestamp() as u64)
                             }
                             SwarmMessage::CreditGossip(gossip) => {
-                                let ts = gossip.timestamp.timestamp() as u64;
-                                now_epoch.saturating_sub(ts) > 300
-                                    || ts.saturating_sub(now_epoch) > 300
+                                stale_or_future(gossip.timestamp.timestamp() as u64)
                             }
                             _ => false,
                         };

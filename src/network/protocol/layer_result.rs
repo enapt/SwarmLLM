@@ -199,6 +199,14 @@ pub fn decode_layer_result(data: &[u8]) -> Result<LayerResult, SwarmError> {
                 .map_err(|_| SwarmError::Network("Invalid spec_logits count".into()))?,
         ) as usize;
         pos += 2;
+        // SEC: hard cap on attacker-controlled position count. γ in speculative
+        // decoding is ≤ 8 in practice; 32 is a generous ceiling.
+        const MAX_SPEC_LOGITS_POSITIONS: usize = 32;
+        if num_positions > MAX_SPEC_LOGITS_POSITIONS {
+            return Err(SwarmError::Network(format!(
+                "spec_logits num_positions {num_positions} > {MAX_SPEC_LOGITS_POSITIONS}"
+            )));
+        }
         spec_logits.reserve(num_positions);
         for _ in 0..num_positions {
             if pos + 4 > data.len() {
@@ -212,6 +220,14 @@ pub fn decode_layer_result(data: &[u8]) -> Result<LayerResult, SwarmError> {
                     .map_err(|_| SwarmError::Network("Invalid spec_logits vocab".into()))?,
             ) as usize;
             pos += 4;
+            // SEC: hard cap on attacker-controlled vocab length. Real model
+            // vocabularies are ≤ ~256K (e.g. Llama 3 has 128K). 512K is generous.
+            const MAX_SPEC_LOGITS_VOCAB: usize = 512_000;
+            if vocab_len > MAX_SPEC_LOGITS_VOCAB {
+                return Err(SwarmError::Network(format!(
+                    "spec_logits vocab_len {vocab_len} > {MAX_SPEC_LOGITS_VOCAB}"
+                )));
+            }
             if pos + vocab_len * 4 > data.len() {
                 return Err(SwarmError::Network("spec_logits payload truncated".into()));
             }
