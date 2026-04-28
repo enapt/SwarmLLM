@@ -521,9 +521,49 @@ pub(super) async fn execute_request(
                 "DIAG: execute_request failed"
             );
 
-            // Apply credit penalty for distributed inference failure
+            // Apply credit penalty for distributed inference failure.
+            // Pool slaves: forward the negative delta to the master so the
+            // pool owner sees the penalty, not the slave's local balance.
+            // Without this branch the slave's local balance went negative on
+            // failures even though it doesn't own the credits, which then
+            // gated the slave's own future inference via MIN_BALANCE_FOR_INFERENCE.
             let penalty = shared_state.config.pool.credit_rates.penalty_serve_failure;
-            if let Err(pe) = crate::credit::ledger::apply_credit_direct(
+            let pool_id_opt: Option<crate::types::NodeId> = {
+                let ps = shared_state.credits.pool_state.read().await;
+                let me = shared_state.identity.node_id();
+                ps.as_ref().and_then(|s| {
+                    if s.pool_id != *me {
+                        Some(s.pool_id.clone())
+                    } else {
+                        None
+                    }
+                })
+            };
+            if let Some(pid) = pool_id_opt {
+                if let Some(ref tx) = *shared_state.credits.pool_tx.read().await {
+                    let my_id = shared_state.identity.node_id();
+                    let forward = crate::pool::crypto::create_credit_forward(
+                        &shared_state.identity,
+                        &pid,
+                        my_id,
+                        &pid,
+                        -penalty,
+                    );
+                    if let Err(e) = tx
+                        .send(crate::pool::types::PoolCommand::ProcessCreditForward { forward })
+                        .await
+                    {
+                        tracing::warn!(error = %e, "Failed to forward failure penalty to pool master — falling back to local apply");
+                        let _ = crate::credit::ledger::apply_credit_direct(
+                            &shared_state.credits.credit_balance,
+                            &shared_state.db,
+                            -penalty,
+                            crate::credit::ledger::CreditDelta::Spending,
+                        )
+                        .await;
+                    }
+                }
+            } else if let Err(pe) = crate::credit::ledger::apply_credit_direct(
                 &shared_state.credits.credit_balance,
                 &shared_state.db,
                 -penalty,

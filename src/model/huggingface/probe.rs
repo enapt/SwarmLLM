@@ -5,6 +5,40 @@ use super::{
     HF_META_CLIENT,
 };
 
+/// Run a fallible HTTP probe with the standard 3-attempt exponential backoff
+/// (`NETWORK_RETRY_DELAYS = [5, 30, 120] s`). Permanent 4xx errors do not
+/// retry; transient connection / 5xx / 429 errors do.
+async fn retry_hf<T, F, Fut>(label: &str, mut op: F) -> Result<T, String>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T, (String, bool /* transient */)>>,
+{
+    let delays = crate::config::NETWORK_RETRY_DELAYS;
+    let mut last_err: Option<String> = None;
+    for attempt in 0..=delays.len() {
+        match op().await {
+            Ok(v) => return Ok(v),
+            Err((e, transient)) => {
+                if !transient {
+                    return Err(e);
+                }
+                last_err = Some(e);
+                if attempt < delays.len() {
+                    let delay = delays[attempt];
+                    tracing::debug!(
+                        label,
+                        attempt = attempt + 1,
+                        delay_secs = delay,
+                        "HF probe transient error — retrying"
+                    );
+                    tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
+                }
+            }
+        }
+    }
+    Err(last_err.unwrap_or_else(|| "exhausted retries".into()))
+}
+
 pub async fn probe_gguf_file(
     repo_id: &str,
     filename: &str,
@@ -14,22 +48,27 @@ pub async fn probe_gguf_file(
 
     let url = download_url(repo_id, filename);
 
-    // HEAD request to get total file size
-    let head_resp = hf_headers(client.head(&url))
-        .send()
-        .await
-        .map_err(|e| format!("HEAD request failed: {e}"))?;
-
-    if !head_resp.status().is_success() {
-        return Err(format!("HEAD returned {}", head_resp.status()));
-    }
-
-    let total_size = head_resp
-        .headers()
-        .get("content-length")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.parse::<u64>().ok())
-        .ok_or("Server did not return Content-Length")?;
+    // HEAD request to get total file size — retry on transient errors.
+    let total_size = retry_hf("HEAD", || async {
+        let head_resp = hf_headers(client.head(&url))
+            .send()
+            .await
+            .map_err(|e| (format!("HEAD request failed: {e}"), true))?;
+        let status = head_resp.status();
+        if !status.is_success() {
+            // 5xx / 429 are transient; 4xx (other than 429) are permanent.
+            let transient = status.is_server_error() || status.as_u16() == 429;
+            return Err((format!("HEAD returned {status}"), transient));
+        }
+        let total_size = head_resp
+            .headers()
+            .get("content-length")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.parse::<u64>().ok())
+            .ok_or_else(|| ("Server did not return Content-Length".to_string(), false))?;
+        Ok(total_size)
+    })
+    .await?;
 
     if total_size == 0 {
         return Err("Server returned Content-Length: 0 (empty file)".to_string());
@@ -37,24 +76,27 @@ pub async fn probe_gguf_file(
     let probe_size: u64 = GGUF_HEADER_PROBE_SIZE;
     let range_end = (probe_size - 1).min(total_size - 1);
 
-    let probe_resp = hf_headers(client.get(&url))
-        .header("Range", format!("bytes=0-{range_end}"))
-        .send()
-        .await
-        .map_err(|e| format!("Range probe request failed: {e}"))?;
-
-    // 206 Partial Content means Range requests are supported
-    if probe_resp.status().as_u16() != 206 && !probe_resp.status().is_success() {
-        return Err(format!(
-            "Range probe returned {} (server may not support Range requests)",
-            probe_resp.status()
-        ));
-    }
-
-    let probe_bytes = probe_resp
-        .bytes()
-        .await
-        .map_err(|e| format!("Failed to read probe bytes: {e}"))?;
+    let probe_bytes = retry_hf("Range-probe", || async {
+        let probe_resp = hf_headers(client.get(&url))
+            .header("Range", format!("bytes=0-{range_end}"))
+            .send()
+            .await
+            .map_err(|e| (format!("Range probe request failed: {e}"), true))?;
+        // 206 Partial Content means Range requests are supported
+        let status = probe_resp.status();
+        if status.as_u16() != 206 && !status.is_success() {
+            let transient = status.is_server_error() || status.as_u16() == 429;
+            return Err((
+                format!("Range probe returned {status} (server may not support Range requests)"),
+                transient,
+            ));
+        }
+        probe_resp
+            .bytes()
+            .await
+            .map_err(|e| (format!("Failed to read probe bytes: {e}"), true))
+    })
+    .await?;
 
     // Parse the GGUF header to get tensor_data_offset and tensor metadata
     let mut cursor = Cursor::new(&probe_bytes[..]);
