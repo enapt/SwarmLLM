@@ -1020,10 +1020,10 @@ pub async fn apply_update(
         )));
     }
 
-    // SEC: re-check version at apply time so a stored stale UpdateInfo can't
-    // be replayed for a downgrade.
+    // SEC: apply_update re-checks version at apply time so a stored stale
+    // UpdateInfo can't be replayed for a downgrade.
     checker
-        .apply_update_checked(&tmp_path, &info.latest_version)
+        .apply_update(&tmp_path, &info.latest_version)
         .map_err(ApiError)?;
 
     Ok(Json(serde_json::json!({

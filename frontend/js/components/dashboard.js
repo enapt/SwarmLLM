@@ -506,15 +506,15 @@
         return ('0' + d.getHours()).slice(-2) + ':' + ('0' + d.getMinutes()).slice(-2) + ':' + ('0' + d.getSeconds()).slice(-2);
       }
       function _renderColumn(events, emptyText) {
-        if (events.length === 0) return '<div class="text-muted text-2xs py-1">' + emptyText + '</div>';
+        if (events.length === 0) return '<div class="text-muted text-2xs py-1">' + U.escapeHtml(emptyText) + '</div>';
         var latest = events[0];
-        var html = '<div class="model-ticker-latest"><span class="model-ticker-icon">' + latest.icon + '</span>' +
+        var html = '<div class="model-ticker-latest"><span class="model-ticker-icon">' + U.escapeHtml(latest.icon) + '</span>' +
           '<span class="model-ticker-text">' + U.escapeHtml(latest.text) + '</span>' +
           '<span class="model-ticker-time" data-ts="' + latest.ts + '">' + U.timeAgo(latest.ts) + '</span></div>';
         if (events.length > 1) {
           html += '<div class="model-ticker-history">';
           events.slice(1, 6).forEach(function(e) {
-            html += '<div class="model-ticker-row"><span>' + e.icon + ' ' + U.escapeHtml(e.text) + '</span><span class="model-ticker-time" data-ts="' + e.ts + '">' + _tickerTime(e.ts) + ' ' + U.timeAgo(e.ts) + '</span></div>';
+            html += '<div class="model-ticker-row"><span>' + U.escapeHtml(e.icon) + ' ' + U.escapeHtml(e.text) + '</span><span class="model-ticker-time" data-ts="' + e.ts + '">' + _tickerTime(e.ts) + ' ' + U.timeAgo(e.ts) + '</span></div>';
           });
           html += '</div>';
         }
@@ -523,8 +523,8 @@
 
       ticker.innerHTML =
         '<div class="model-ticker-split">' +
-          '<div class="model-ticker-col"><div class="model-ticker-col-label">' + I18n.t('activity.label_activity') + '</div>' + _renderColumn(actEvents, I18n.t('activity.none')) + '</div>' +
-          '<div class="model-ticker-col"><div class="model-ticker-col-label">' + I18n.t('activity.label_network') + '</div>' + _renderColumn(netEvents, I18n.t('activity.none_network')) + '</div>' +
+          '<div class="model-ticker-col"><div class="model-ticker-col-label">' + U.escapeHtml(I18n.t('activity.label_activity')) + '</div>' + _renderColumn(actEvents, I18n.t('activity.none')) + '</div>' +
+          '<div class="model-ticker-col"><div class="model-ticker-col-label">' + U.escapeHtml(I18n.t('activity.label_network')) + '</div>' + _renderColumn(netEvents, I18n.t('activity.none_network')) + '</div>' +
         '</div>';
       ticker.style.display = '';
     },

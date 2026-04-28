@@ -423,6 +423,15 @@ pub(crate) async fn ring_allreduce_network(
     for (i, chunk) in partial_bytes.chunks_exact(4).enumerate() {
         local_data[i] = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
     }
+    // SEC: Symmetric with the recv-side check below — IPC corruption or a
+    // worker hardware fault can deliver a non-finite local partial; if we
+    // accumulate it into the ring it poisons every peer's reduced tensor.
+    if !local_data.iter().all(|f| f.is_finite()) {
+        return Err(SwarmError::Internal(
+            "Ring AllReduce: local partial contains NaN/Inf — IPC corruption or hardware fault"
+                .into(),
+        ));
+    }
 
     // Split into N chunks
     let chunk_size = num_elements.div_ceil(n);

@@ -200,15 +200,15 @@
       var timeHtml = i === 0
         ? '<span class="activity-time" title="' + clock + '">' + ago + '</span>'
         : '<span class="activity-time">' + clock + ' <span class="activity-ago">' + ago + '</span></span>';
-      html += '<div class="activity-entry ' + catClass + '"><span class="activity-icon">' + e.icon + '</span>' +
+      html += '<div class="activity-entry ' + catClass + '"><span class="activity-icon">' + U.escapeHtml(e.icon) + '</span>' +
         '<span class="activity-text">' + U.escapeHtml(e.text) + '</span>' +
         timeHtml + '</div>';
     }
     if (entries.length > MAX_DISPLAY) {
       html += '<div class="activity-overflow text-muted" style="font-size:0.7rem;padding:4px 0;text-align:center">' +
-        I18n.t('activity.overflow', { count: entries.length - MAX_DISPLAY }) + '</div>';
+        U.escapeHtml(I18n.t('activity.overflow', { count: entries.length - MAX_DISPLAY })) + '</div>';
     }
-    log.innerHTML = html || '<div class="text-muted text-sm" style="padding:8px 0">' + emptyText + '</div>';
+    log.innerHTML = html || '<div class="text-muted text-sm" style="padding:8px 0">' + U.escapeHtml(emptyText) + '</div>';
   }
 
   function _renderActivityLog() { _renderEventLog(_activityEntries, 'activity-log', 'activity-count', I18n.t('activity.none')); }

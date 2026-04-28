@@ -372,15 +372,11 @@ impl UpdateChecker {
     /// Apply the downloaded update: atomic rename of binaries.
     /// Does NOT restart the daemon — the user must restart manually.
     ///
-    /// `latest_version`, when supplied, must be strictly newer than the running
-    /// version. This guards against downgrade-by-replay: a stored UpdateInfo
-    /// pointing at an older release must not be silently re-applied even if the
-    /// SHA256 still matches.
-    pub fn apply_update(&self, tmp_path: &std::path::Path) -> Result<(), SwarmError> {
-        self.apply_update_with_version(tmp_path, None)
-    }
-
-    pub fn apply_update_checked(
+    /// `latest_version` must be strictly newer than the running version.
+    /// This guards against downgrade-by-replay: a stored `UpdateInfo`
+    /// pointing at an older release must not be silently re-applied even
+    /// if the SHA256 still matches.
+    pub fn apply_update(
         &self,
         tmp_path: &std::path::Path,
         latest_version: &str,

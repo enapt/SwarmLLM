@@ -1026,12 +1026,31 @@ pub async fn list_responses(
                 s.len()
             ))));
         }
-        Some(s) => Some(
-            s.split(',')
+        Some(s) => {
+            let tokens: Vec<String> = s
+                .split(',')
                 .map(|t| t.trim().to_lowercase())
                 .filter(|t| !t.is_empty())
-                .collect(),
-        ),
+                .collect();
+            // Reject typos: a `?status=complete` filter would silently match
+            // zero records and look like an empty result instead of an error.
+            const VALID: &[&str] = &[
+                "queued",
+                "in_progress",
+                "completed",
+                "failed",
+                "cancelled",
+                "incomplete",
+            ];
+            for tok in &tokens {
+                if !VALID.contains(&tok.as_str()) {
+                    return Err(ApiError(crate::error::SwarmError::Validation(format!(
+                        "unknown status filter '{tok}': must be one of queued, in_progress, completed, failed, cancelled, incomplete"
+                    ))));
+                }
+            }
+            Some(tokens)
+        }
         None => None,
     };
     let limit = params.limit.unwrap_or(100).clamp(1, 500) as usize;
