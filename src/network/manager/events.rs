@@ -200,7 +200,11 @@ impl NetworkManager {
                 if let Some((result_uuid, _)) =
                     self.pending_tensor_result_outbound.remove(&request_id)
                 {
-                    tracing::error!(
+                    // Mirrors the rr-message branch below: this is the best-effort
+                    // result-fallback path, and the upstream pipeline's own
+                    // pending_tensor_outbound watchdog handles the user-visible
+                    // failure. warn! is enough; error! would page on every retry.
+                    tracing::warn!(
                         %peer,
                         inference_request_id = %result_uuid,
                         %error,
@@ -230,7 +234,12 @@ impl NetworkManager {
                         .get(&shard_id)
                         .copied()
                         .unwrap_or(0);
-                    tracing::error!(
+                    // Self-healing path — retry_shard_or_fallback tries up to
+                    // MAX_P2P_RETRIES other peers and only then falls back to HF.
+                    // The exhausted-all-peers case surfaces its own error-level
+                    // event in shard_transfer.rs, so warn! here keeps normal
+                    // single-peer hiccups out of the operator triage queue.
+                    tracing::warn!(
                         %peer,
                         model = %shard_id.model_id,
                         shard_index = shard_id.index,
@@ -238,7 +247,6 @@ impl NetworkManager {
                         bytes_downloaded = progress,
                         "DIAG: shard download OutboundFailure — attempting peer failover"
                     );
-                    // Try another peer; fall back to HF only after retries exhausted.
                     self.retry_shard_or_fallback(shard_id, peer, &format!("{error}"));
                 }
             }

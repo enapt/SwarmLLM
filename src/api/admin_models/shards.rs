@@ -466,11 +466,10 @@ pub async fn lock_shard(
     // remove a shard the operator believed was pinned. The same pattern
     // was already corrected for pool pins, auto-manage policy, encrypted
     // pipeline, and HF trust pin in earlier sweeps.
-    let key_str = serde_json::to_string(&shard_id).map_err(|e| {
-        crate::error::ApiError(crate::error::SwarmError::Internal(format!(
-            "Failed to serialize shard id: {e}"
-        )))
-    })?;
+    // ShardId = { model_id: String, index: u32 } — both are infallibly
+    // serializable, so .expect() avoids a dead error path that would
+    // otherwise sit in the SwarmError::Internal bucket.
+    let key_str = serde_json::to_string(&shard_id).expect("ShardId is always JSON-serializable");
     if body.locked {
         state
             .shared_state
