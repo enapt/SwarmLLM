@@ -65,7 +65,7 @@
     if (data.kind === 'shard_pruned') {
       state.lastPruneTs = Date.now();
     }
-    if (data.kind === 'download_cycle' || data.kind === 'interval_changed'
+    if (data.kind === 'cycle_complete' || data.kind === 'interval_changed'
         || data.kind === 'hf_source_discovered' || data.kind === 'model_promoted'
         || data.kind === 'model_unloaded' || data.kind === 'vram_soft_unload') {
       state.lastCycleMsg = data.message || data.kind;
