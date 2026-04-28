@@ -187,7 +187,8 @@ impl PoolManager {
                 let _ = reply.send(result);
             }
             PoolCommand::CreateInvitation { invitee, reply } => {
-                let result = self.handle_create_invitation(invitee).await;
+                // Direct owner-initiated invite — not bound to an invite code.
+                let result = self.handle_create_invitation(invitee, None).await;
                 let _ = reply.send(result);
             }
             PoolCommand::AcceptInvitation { invitation, reply } => {
@@ -361,6 +362,7 @@ impl PoolManager {
     async fn handle_create_invitation(
         &mut self,
         invitee: NodeId,
+        code_hash: Option<[u8; 32]>,
     ) -> Result<PoolInvitation, SwarmError> {
         // Extract pool_id from state, validating constraints, then release the lock.
         let pool_id = {
@@ -421,7 +423,10 @@ impl PoolManager {
         // SEC-M18 FIX: Broadcast a blinded invitation that hides the invitee's identity.
         // Only the intended invitee can recognize the invitation by recomputing the BLAKE3
         // commitment H("pool_invitee_commit_v1" || their_node_id || invitation_id).
-        let blinded = BlindedPoolInvitation::from_invitation(&invitation);
+        // SEC: code_hash binds this invitation to the specific JoinRequest that triggered it
+        // — prevents an attacker who observes a gossiped JoinRequest from issuing their own
+        // pool's invitation that the requester would auto-accept.
+        let blinded = BlindedPoolInvitation::from_invitation(&invitation, code_hash);
         let msg = SwarmMessage::PoolMessage(crate::types::PoolMessage::BlindedInvitation(blinded));
         let _ = self.network_tx.send(NetworkCommand::Broadcast(msg)).await;
 
@@ -875,23 +880,45 @@ impl PoolManager {
         );
 
         // Auto-accept only if we have a pending code-based join that hasn't expired
-        if let Some((_, created_at)) = self.auto_accept_code_hash {
-            if created_at.elapsed().as_secs() < AUTO_ACCEPT_TIMEOUT_SECS {
-                self.auto_accept_code_hash = None;
-                tracing::info!(
-                    invitation_id = %invitation.id,
-                    pool_id = %invitation.pool_id,
-                    "Auto-accepting blinded invitation (from invite code join)"
-                );
-                if let Err(e) = self.handle_accept_invitation(invitation).await {
-                    tracing::warn!(error = %e, "Auto-accept failed");
-                }
-            } else {
+        // AND the invitation is bound to the same code_hash we redeemed. Without
+        // this code_hash binding, a network-adjacent attacker who observes a
+        // gossiped JoinRequest could issue an invitation under a pool they
+        // control and the auto-accept window would route the requester there.
+        if let Some((stored_hash, created_at)) = self.auto_accept_code_hash {
+            if created_at.elapsed().as_secs() >= AUTO_ACCEPT_TIMEOUT_SECS {
                 // Expired — clear the stale auto-accept intent
                 self.auto_accept_code_hash = None;
                 tracing::info!(
                     "Auto-accept expired (>5min) — invitation stored but not auto-accepted"
                 );
+                return;
+            }
+            match blinded.code_hash {
+                Some(hash) if hash == stored_hash => {
+                    self.auto_accept_code_hash = None;
+                    tracing::info!(
+                        invitation_id = %invitation.id,
+                        pool_id = %invitation.pool_id,
+                        "Auto-accepting blinded invitation (from invite code join)"
+                    );
+                    if let Err(e) = self.handle_accept_invitation(invitation).await {
+                        tracing::warn!(error = %e, "Auto-accept failed");
+                    }
+                }
+                Some(_) => {
+                    tracing::warn!(
+                        invitation_id = %invitation.id,
+                        pool_id = %invitation.pool_id,
+                        "Refusing to auto-accept: invitation code_hash does not match the one we redeemed (possible hijack attempt)"
+                    );
+                }
+                None => {
+                    tracing::debug!(
+                        invitation_id = %invitation.id,
+                        pool_id = %invitation.pool_id,
+                        "Stored invitation but not auto-accepting: invitation has no code_hash binding"
+                    );
+                }
             }
         }
     }
@@ -1064,9 +1091,18 @@ impl PoolManager {
             return;
         }
 
-        // Freshness check: reject notices more than 5 minutes out of range.
+        // Freshness check: reject notices that are too old or pre-signed in the
+        // future. Use a one-sided staleness bound (NOT .abs()) so an attacker
+        // can't pre-sign a notice timestamped 5 minutes in the future and replay
+        // it for a full 10-minute window. Mirrors `verify_balance_report` in
+        // `credit/ledger.rs`. 30s future tolerance for honest cross-node clock
+        // skew, 300s past tolerance for staleness.
         let now = chrono::Utc::now().timestamp();
-        if (now - left_at).abs() > 300 {
+        if left_at > now + 30 {
+            tracing::warn!(node = %node_id, left_at, now, "Future-dated member-left notice — rejecting");
+            return;
+        }
+        if left_at < now - 300 {
             tracing::warn!(node = %node_id, left_at, now, "Stale member-left notice — rejecting");
             return;
         }
@@ -1366,8 +1402,13 @@ impl PoolManager {
             "Invite code claimed — auto-creating invitation"
         );
 
-        // Auto-create invitation for the requester
-        match self.handle_create_invitation(requester.clone()).await {
+        // Auto-create invitation for the requester. Bind the resulting blinded
+        // invitation to this code_hash so the requester's auto-accept gate can
+        // verify the invitation came from the pool whose code they redeemed.
+        match self
+            .handle_create_invitation(requester.clone(), Some(code_hash))
+            .await
+        {
             Ok(inv) => {
                 tracing::info!(
                     invitation_id = %inv.id,
@@ -1603,6 +1644,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn member_left_with_future_timestamp_rejected() {
+        // Pre-signed future-dated notices must be rejected even within the .abs()
+        // window that previously doubled the effective replay window. This is the
+        // companion test to verify_balance_report's one-sided staleness check.
+        let (mut pm, state, owner) = build_test_pool_manager().await;
+        pm.handle_create_pool("test-pool".into()).await.unwrap();
+
+        let member = Identity::generate();
+        {
+            let mut ps = state.credits.pool_state.write().await;
+            if let Some(ref mut p) = *ps {
+                p.members.push(membership_for(member.node_id().clone()));
+            }
+        }
+
+        // 250s in the future — within the (now ±5min .abs()) window but well
+        // beyond the 30s honest-skew tolerance. Must be rejected.
+        let future = chrono::Utc::now().timestamp() + 250;
+        let nonce = uuid::Uuid::new_v4();
+        let payload = crate::pool::crypto::member_left_payload(
+            owner.node_id(),
+            member.node_id(),
+            future,
+            &nonce,
+        );
+        let signature = member.sign(&payload);
+
+        pm.handle_inbound_member_left(
+            owner.node_id().clone(),
+            member.node_id().clone(),
+            future,
+            nonce,
+            signature,
+        )
+        .await;
+        assert_eq!(
+            state
+                .credits
+                .pool_state
+                .read()
+                .await
+                .as_ref()
+                .unwrap()
+                .members
+                .len(),
+            2,
+            "future-dated timestamp must NOT remove the member"
+        );
+    }
+
+    #[tokio::test]
     async fn member_left_for_other_pool_id_ignored() {
         // Notices for a different pool_id (not us) must short-circuit.
         let (mut pm, state, _owner) = build_test_pool_manager().await;
@@ -1728,6 +1820,68 @@ mod tests {
             pm.pending_invitations.len(),
             1,
             "valid join request must create an auto-invitation"
+        );
+    }
+
+    #[tokio::test]
+    async fn auto_accept_rejects_invitation_with_mismatched_code_hash() {
+        // SEC: A network-adjacent attacker who observes a JoinRequest could
+        // issue an invitation under a pool they control. Without the code_hash
+        // binding, the requester's auto-accept window would silently route them
+        // to the attacker's pool. Verify the gate refuses to auto-accept when
+        // blinded.code_hash doesn't match the requested code's hash.
+        let (mut pm, state, _owner) = build_test_pool_manager().await;
+
+        // Pretend we just sent a JoinWithCode that hashes to `our_hash`.
+        let our_hash = *blake3::hash(b"OUR-CODE").as_bytes();
+        pm.auto_accept_code_hash = Some((our_hash, std::time::Instant::now()));
+
+        // Attacker's pool (different identity). PoolId is a type alias for NodeId.
+        let attacker = Identity::generate();
+        let me = state.identity.node_id().clone();
+
+        // Build a valid PoolInvitation signed by the attacker (we delegate to
+        // the production signing helper so the verify path inside the manager
+        // accepts it).
+        let attacker_inv = crate::pool::crypto::create_invitation(
+            &attacker,
+            attacker.node_id(),
+            &me,
+            1, // 1-hour TTL
+        );
+
+        // Attacker's invitation has no code_hash → auto-accept must refuse.
+        let blinded_no_hash = BlindedPoolInvitation::from_invitation(&attacker_inv, None);
+        pm.handle_inbound_blinded_invitation(blinded_no_hash).await;
+
+        assert!(
+            pm.auto_accept_code_hash.is_some(),
+            "auto_accept_code_hash must NOT be cleared by an unbound invitation"
+        );
+        assert_eq!(
+            pm.pending_invitations.len(),
+            1,
+            "invitation should still be stored as a pending invitation"
+        );
+        assert!(
+            state.credits.pool_state.read().await.is_none(),
+            "must not have joined attacker's pool"
+        );
+
+        // Now try with a wrong code_hash bound — still refuses.
+        let wrong_hash = *blake3::hash(b"WRONG-CODE").as_bytes();
+        let attacker_inv2 =
+            crate::pool::crypto::create_invitation(&attacker, attacker.node_id(), &me, 1);
+        let blinded_wrong =
+            BlindedPoolInvitation::from_invitation(&attacker_inv2, Some(wrong_hash));
+        pm.handle_inbound_blinded_invitation(blinded_wrong).await;
+        assert!(
+            pm.auto_accept_code_hash.is_some(),
+            "auto_accept_code_hash must NOT be cleared by a wrong-hash invitation"
+        );
+        assert!(
+            state.credits.pool_state.read().await.is_none(),
+            "must not have joined attacker's pool with wrong code_hash"
         );
     }
 }

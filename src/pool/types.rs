@@ -210,11 +210,11 @@ pub fn compute_invitee_commitment(
 
 /// Extension methods for BlindedPoolInvitation.
 pub trait BlindedPoolInvitationExt {
-    fn from_invitation(inv: &PoolInvitation) -> BlindedPoolInvitation;
+    fn from_invitation(inv: &PoolInvitation, code_hash: Option<[u8; 32]>) -> BlindedPoolInvitation;
 }
 
 impl BlindedPoolInvitationExt for BlindedPoolInvitation {
-    fn from_invitation(inv: &PoolInvitation) -> BlindedPoolInvitation {
+    fn from_invitation(inv: &PoolInvitation, code_hash: Option<[u8; 32]>) -> BlindedPoolInvitation {
         BlindedPoolInvitation {
             id: inv.id,
             pool_id: inv.pool_id.clone(),
@@ -222,6 +222,7 @@ impl BlindedPoolInvitationExt for BlindedPoolInvitation {
             expires_at: inv.expires_at,
             owner_signature: inv.owner_signature.clone(),
             created_at: inv.created_at,
+            code_hash,
         }
     }
 }
@@ -312,13 +313,18 @@ mod tests {
             created_at: chrono::Utc::now(),
         };
 
-        let blinded = BlindedPoolInvitation::from_invitation(&inv);
+        let blinded = BlindedPoolInvitation::from_invitation(&inv, None);
         assert_eq!(blinded.id, inv.id);
         assert_eq!(blinded.pool_id, pool_id);
         assert_eq!(
             blinded.invitee_commitment,
             compute_invitee_commitment(&invitee, &inv.id)
         );
+        assert!(blinded.code_hash.is_none());
+
+        let bound_hash = [7u8; 32];
+        let bound = BlindedPoolInvitation::from_invitation(&inv, Some(bound_hash));
+        assert_eq!(bound.code_hash, Some(bound_hash));
     }
 
     #[test]

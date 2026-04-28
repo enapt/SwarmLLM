@@ -135,6 +135,16 @@ pub struct BlindedPoolInvitation {
     pub expires_at: chrono::DateTime<chrono::Utc>,
     pub owner_signature: Vec<u8>,
     pub created_at: chrono::DateTime<chrono::Utc>,
+    /// SEC: BLAKE3 hash of the invite code that triggered this invitation, if any.
+    /// `Some(hash)` for code-based JoinRequest auto-invites; `None` for direct
+    /// owner-initiated invites. The receiver's auto-accept gate verifies that
+    /// `code_hash == auto_accept_code_hash` to prevent an attacker from
+    /// hijacking a `JoinRequest` (broadcast in cleartext) by issuing their own
+    /// invitation under a pool they control. Without this binding, the
+    /// invitee would auto-accept ANY pool's invitation that arrives within
+    /// the 5-minute auto-accept window after a code-based join request.
+    #[serde(default)]
+    pub code_hash: Option<[u8; 32]>,
 }
 
 /// Acceptance of a pool invitation.
