@@ -230,31 +230,51 @@ async fn handle_socket(socket: WebSocket, shared_state: Arc<SharedState>) {
                     }
                 }
                 signal = dashboard_rx.recv() => {
-                    if let Ok(sig) = signal {
-                        let msg_str = match sig {
-                            crate::daemon::state::DashboardSignal::ModelsChanged => {
-                                serde_json::to_string(&serde_json::json!({"type": "models_changed"})).unwrap_or_default()
+                    let sig = match signal {
+                        Ok(s) => s,
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                            tracing::warn!(
+                                dropped = n,
+                                "WebSocket client lagged on dashboard channel — re-syncing"
+                            );
+                            // Force the client to re-fetch authoritative state.
+                            // Without this, missed PeersChanged / ModelsChanged
+                            // signals leave the dashboard stale until the next
+                            // 2s stats tick or page reload.
+                            let resync = serde_json::to_string(&serde_json::json!({
+                                "type": "models_changed"
+                            }))
+                            .unwrap_or_default();
+                            if sender.send(Message::Text(resync.into())).await.is_err() {
+                                break;
                             }
-                            crate::daemon::state::DashboardSignal::PeersChanged => {
-                                let peers = build_peer_list_message(&push_state);
-                                serde_json::to_string(&peers).unwrap_or_default()
-                            }
-                            crate::daemon::state::DashboardSignal::UpdateAvailable(info) => {
-                                serde_json::to_string(&serde_json::json!({
-                                    "type": "update_available",
-                                    "data": {
-                                        "current_version": info.current_version,
-                                        "latest_version": info.latest_version,
-                                        "changelog": info.changelog,
-                                        "published_at": info.published_at,
-                                        "downloaded": info.downloaded,
-                                    }
-                                })).unwrap_or_default()
-                            }
-                        };
-                        if sender.send(Message::Text(msg_str.into())).await.is_err() {
-                            break;
+                            continue;
                         }
+                        Err(_) => break, // channel closed (daemon shutdown)
+                    };
+                    let msg_str = match sig {
+                        crate::daemon::state::DashboardSignal::ModelsChanged => {
+                            serde_json::to_string(&serde_json::json!({"type": "models_changed"})).unwrap_or_default()
+                        }
+                        crate::daemon::state::DashboardSignal::PeersChanged => {
+                            let peers = build_peer_list_message(&push_state);
+                            serde_json::to_string(&peers).unwrap_or_default()
+                        }
+                        crate::daemon::state::DashboardSignal::UpdateAvailable(info) => {
+                            serde_json::to_string(&serde_json::json!({
+                                "type": "update_available",
+                                "data": {
+                                    "current_version": info.current_version,
+                                    "latest_version": info.latest_version,
+                                    "changelog": info.changelog,
+                                    "published_at": info.published_at,
+                                    "downloaded": info.downloaded,
+                                }
+                            })).unwrap_or_default()
+                        }
+                    };
+                    if sender.send(Message::Text(msg_str.into())).await.is_err() {
+                        break;
                     }
                 }
                 activity = activity_rx.recv() => {

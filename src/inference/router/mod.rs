@@ -655,6 +655,38 @@ impl InferenceRouter {
         let token_tx = queued.token_tx;
 
         tokio::spawn(async move {
+            // RAII guard so a panic anywhere inside the spawned closure
+            // doesn't leak the active_pipelines entry or the active_count
+            // tier-cap counter — those would otherwise stay until process
+            // exit and silently throttle the daemon to ServiceUnavailable
+            // after enough panicking requests.
+            struct ActivePipelineGuard {
+                shared_state: Arc<crate::daemon::SharedState>,
+                count: Arc<std::sync::atomic::AtomicUsize>,
+                request_id: uuid::Uuid,
+                armed: bool,
+            }
+            impl ActivePipelineGuard {
+                fn disarm(&mut self) {
+                    self.armed = false;
+                }
+            }
+            impl Drop for ActivePipelineGuard {
+                fn drop(&mut self) {
+                    if self.armed {
+                        self.shared_state.active_pipelines.remove(&self.request_id);
+                        self.count
+                            .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+                    }
+                }
+            }
+            let mut active_guard = ActivePipelineGuard {
+                shared_state: shared_state.clone(),
+                count: active_count.clone(),
+                request_id: request.id,
+                armed: true,
+            };
+
             let request_start = std::time::Instant::now();
             tracing::info!(
                 request_id = %request.id,
@@ -790,6 +822,8 @@ impl InferenceRouter {
                     .await;
             }
 
+            // Disarm the guard — normal completion does the same work below.
+            active_guard.disarm();
             // Remove from active pipelines
             shared_state.active_pipelines.remove(&request.id);
 

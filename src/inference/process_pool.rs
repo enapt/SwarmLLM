@@ -155,10 +155,14 @@ async fn reader_actor(
                     if let Some(tx) = prefix_manifest_tx.as_ref() {
                         // try_send: never block the IPC reader. Daemon being
                         // slow or absent must not stall worker responses.
-                        let _ = tx.try_send(PrefixManifestEvent {
-                            model_id: announce_model,
-                            blocks,
-                        });
+                        if let Err(tokio::sync::mpsc::error::TrySendError::Full(_)) =
+                            tx.try_send(PrefixManifestEvent {
+                                model_id: announce_model,
+                                blocks,
+                            })
+                        {
+                            tracing::debug!("prefix manifest channel full — dropping announce");
+                        }
                     }
                     continue;
                 }
@@ -170,11 +174,24 @@ async fn reader_actor(
                 } = msg
                 {
                     if let Some(tx) = prefix_probe_tx.as_ref() {
-                        let _ = tx.try_send(PrefixProbeEvent {
-                            model_id: probe_model,
-                            request_id,
-                            blocks,
-                        });
+                        let probe_model_for_log = probe_model.clone();
+                        if let Err(tokio::sync::mpsc::error::TrySendError::Full(_)) =
+                            tx.try_send(PrefixProbeEvent {
+                                model_id: probe_model,
+                                request_id,
+                                blocks,
+                            })
+                        {
+                            // Dropped probes look indistinguishable from cross-node
+                            // misses on the worker side — log so operators can
+                            // distinguish channel-saturation from actual misses
+                            // when chasing prefix-cache hit-rate regressions.
+                            tracing::debug!(
+                                model = %probe_model_for_log,
+                                %request_id,
+                                "prefix probe channel full — dropping probe"
+                            );
+                        }
                     }
                     continue;
                 }
