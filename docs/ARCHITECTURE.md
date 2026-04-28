@@ -1154,7 +1154,6 @@ allowing candle to parse the full tensor index while only loading assigned layer
 - `GET    /v1/models` — List available models
 - `GET    /v1/providers` — List configured cloud providers and their available models
 - `GET    /v1/status` — SwarmLLM node status
-- ~~`POST /v1/internal/hidden-states`~~ — **Removed** (was always returning "not supported with subprocess inference"; endpoint and module deleted)
 
 ### OpenAI Responses API (`/v1/responses`)
 OpenAI-compatible Responses endpoint — the 2026 default API for o-series / gpt-5 / reasoning-era callers:
@@ -1222,7 +1221,8 @@ Routes Claude model requests through a locally-authenticated `claude` CLI subpro
 - `GET     /api/admin/credits` — Credit balance and tier info
 - `GET     /api/admin/shard-storage` — Per-model storage breakdown, disk/VRAM usage
 - `GET     /api/admin/api-key` — Retrieve API key (Bearer auth required)
-- `GET     /api/admin/ws` — WebSocket for live updates
+- `POST    /api/admin/ws-ticket` — Issue a single-use 30s ticket (Bearer auth) — required pre-step for the WS upgrade
+- `GET     /api/admin/ws` — WebSocket for live updates (consumes a ws-ticket)
 - `GET     /api/admin/downloads` — Download queue with priorities and progress
 
 ### HuggingFace Integration
