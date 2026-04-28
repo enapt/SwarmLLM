@@ -508,7 +508,7 @@ For production testing, use native Linux (dual boot or bare metal). WSL2 is suit
 
 ## Config Diagnostics
 
-### Config (config.rs)
+### Config (config/mod.rs)
 
 | Level | What | Fields |
 |-------|------|--------|
@@ -641,7 +641,7 @@ For production testing, use native Linux (dual boot or bare metal). WSL2 is suit
 | `src/api/internal.rs` | Hidden states request entry, gate denial |
 | `src/api/metrics.rs` | Metrics scrape, health readiness probe |
 | `src/api/pool.rs` | Pool create, invite, rate set operations |
-| `src/config.rs` | Config load source, data_dir resolution, validation complete |
+| `src/config/mod.rs` | Config load source, data_dir resolution, validation complete |
 | `src/update.rs` | Update check start, version compare, apply start |
 | `src/main.rs` | Daemon startup |
 
@@ -668,7 +668,7 @@ All 61 files containing runtime decision/timing/error logic are instrumented. Th
 | Credit (ledger, transaction, priority, anti_gaming, trust, escrow) | 6 | ~15 | Transaction verification, tier calculation, trust updates, escrow |
 | Crypto (session, key_rotation, gossip_seal, pipeline_seal) | 4 | ~10 | Key exchange, session management, encryption seal/open |
 | Daemon + Main (daemon/, main.rs) | 5 | ~11 | Daemon startup, LayerForward processing, result delivery |
-| Config (config.rs) | 1 | ~2 | Config load source, WSL2 detection, validation |
+| Config (config/) | 1 | ~2 | Config load source, WSL2 detection, validation |
 | Update (update.rs) | 1 | ~3 | Update check, version compare, apply |
 | Pool (manager, crypto, forward) | 3 | ~5 | Pool commands, invitations, credit forwarding |
 | Identity (keypair, keystore, nickname) | 3 | ~3 | Key generation, keystore save/load, nickname records |

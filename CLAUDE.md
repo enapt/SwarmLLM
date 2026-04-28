@@ -50,9 +50,10 @@ swarmllm/
 │   ├── swarmllm-frontend/  (embedded + dev-mode frontend asset serving)
 │   └── swarmllm-types/     (shared types crate: NodeId, ModelManifest, SwarmMessage, etc.)
 ├── src/
-│   ├── main.rs, lib.rs, config.rs, error.rs, http.rs, types.rs, update.rs
+│   ├── main.rs, lib.rs, error.rs, http.rs, types.rs, update.rs
 │   ├── bin/       (launcher.rs — Windows GPU/CPU auto-selecting launcher)
 │   ├── cli/       (mod, run, status, chat, bench, peers, pool, split_test, update)
+│   ├── config/    (mod, providers, credit, network, ops, node, inference)
 │   ├── daemon/    (mod, state, manifest, shard_loader, dispatch/)
 │   ├── network/   (manager/, behaviour, discovery, protocol, transport, relay, peer_cache, helpers)
 │   ├── model/     (manifest, shard, distribution, registry, acquisition, huggingface, auto_manage/, lora)
@@ -61,7 +62,8 @@ swarmllm/
 │   │   ├── router/       (mod, types, batch, local_exec, distributed_exec, spot_check, tests)
 │   │   ├── scheduler/    (mod, parallax, parallax_allocator, tests)
 │   │   ├── pipeline/     (mod, distributed, dsd, local, prompt, remote_generate, speculative, tensor_parallel, vision)
-│   │   ├── split/        (mod, model, loader, executor, kv_cache, entry, gguf_meta, shard_reader, rope, prefix_cache, tests)
+│   │   ├── split/        (mod, model, loader, executor, kv_cache, entry, gguf_meta, shard_reader, rope, prefix_cache, tests/)
+│   │   │   └── tests/    (mod, common, core, gqa, gemma2, moe_mla, llama4_glm4)
 │   │   ├── chat_template/ (mod, parser, eval, fallbacks, tests)
 │   │   └── layers/       (mod, qwen35)
 │   ├── credit/    (ledger, transaction, priority, anti_gaming, trust, escrow)
