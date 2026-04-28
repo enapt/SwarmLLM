@@ -72,18 +72,30 @@ Headline ranking by signal-to-effort for SwarmLLM today: **17 > 18 > 14**.
 Item 14 inherits Item 6 (SWIFT) blocker — defer until SWIFT lands
 measurable wins.
 
-### 4. Release hygiene *(2–4 h mechanical)*
+### 4. Release hygiene
 
-- Tag `v0.1.0`. All 20 phases complete + 771 tests passing + Item 8
-  validated (including cross-over demo) is a reasonable version cut.
-- macOS CI matrix: currently Linux-only. macOS build is believed to
-  work (uses Metal via candle's default) but untested in CI.
-- Benchmarks for already-shipped Items still under flags that we
-  haven't measured: multi-segment DSD (Item 12) still pending (needs
-  3+ daemons + draft model + WAN RTT — see `round7.md` § Item 12 for
-  recipe). Q8_0 activation compression (Item 13) measured 2026-04-20
-  in `round7.md`: 3.15× wire reduction, localhost decode neutral-to-
-  slightly-negative as predicted; WAN bench will decide default-on.
+- ✅ `v0.1.0` tag cut 2026-04-25 (816 tests). Subsequent commits are
+  in CHANGELOG `[Unreleased] — post-v0.1.0`. Two black-hat audits
+  (2026-04-28 + 2026-04-29) and continuous sweeps have landed since;
+  current head sits at 890 lib tests, clippy clean, both feature sets.
+- ✅ macOS CI matrix is live (clippy + test + build on `macos-15` in
+  `.github/workflows/ci.yml` — clippy default features only, integration
+  tests Linux-only by design until macOS multi-process IPC is exercised).
+- ✅ Cargo metadata + workspace alignment (license, repository,
+  homepage, MSRV) verified across all three workspace crates 2026-04-29.
+- ✅ `cargo audit` known/accepted advisories documented in
+  `SECURITY.md` (core2 yanked, paste unmaintained, rand custom-logger
+  unsoundness — none of which we trip).
+- ⏳ Item 12 multi-segment DSD bench still pending (needs 3+ daemons
+  + draft model + WAN RTT — `docs/plans/benchmarks/round7.md` § Item
+  12 for recipe). Q8_0 activation compression (Item 13) measured
+  2026-04-20 in `round7.md`: 3.15× wire reduction, localhost decode
+  neutral-to-slightly-negative as predicted; WAN bench will decide
+  default-on.
+- 🔓 **C1 binary signing** still open — auto-update SHA256 sidecar
+  from the same release as the binary; needs an offline keypair
+  decision before the next-tag cut. Tracked in `docs/ARCHITECTURE.md`
+  § Deferred Items.
 
 ## Anti-goals
 

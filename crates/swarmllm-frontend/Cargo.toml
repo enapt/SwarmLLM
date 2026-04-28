@@ -4,6 +4,8 @@ version = "0.1.0"
 edition = "2021"
 description = "Embedded frontend assets for SwarmLLM"
 license = "MIT OR Apache-2.0"
+repository = "https://github.com/enapt/SwarmLLM"
+homepage = "https://github.com/enapt/SwarmLLM"
 rust-version = "1.80"
 
 [dependencies]

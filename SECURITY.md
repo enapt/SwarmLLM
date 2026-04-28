@@ -36,3 +36,19 @@ Issues in any of these areas, as well as path traversal, injection, authenticati
 ## Recognition
 
 We credit security researchers in release notes (unless you prefer to remain anonymous).
+
+## Known accepted advisories
+
+These advisories show up in `cargo audit` and are accepted for the
+following reasons. Re-evaluate when the upstream ecosystem moves.
+
+| ID | Crate | Reason accepted |
+|---|---|---|
+| RUSTSEC-2026-0105 | `core2` (yanked / unmaintained) | Transitive via `libp2p → multiaddr → multihash`. No alternative until libp2p moves off `multihash 0.19`. No exploitable code path; advisory is hygiene. |
+| RUSTSEC-2024-0436 | `paste` (unmaintained) | Transitive via `tokenizers → candle`. Compile-time macro only, not in the runtime trust boundary. |
+| RUSTSEC-2026-0097 | `rand 0.8.x / 0.9.x` (unsound with custom logger) | Triggered only when a consumer installs a custom `rand` logger. We do not. Cryptographic randomness uses `OsRng`, not `thread_rng()`. |
+
+The auto-update integrity-binding finding **C1** (audit_2026-04-29) —
+SHA256 sidecar fetched from the same GitHub release as the binary —
+is tracked in `docs/ARCHITECTURE.md` § Deferred Items and remains open
+until an offline signing keypair is in place.

@@ -497,13 +497,14 @@ release.
 
 ---
 
-## [Unreleased] - alpha
+### Detailed change log: alpha.2 → v0.1.0
 
-> Prior tag: `v0.1.0-alpha.1` (2026-03-18, 674 tests). This section
-> accumulates work landed after that alpha, distributed to alpha testers
-> as point builds. Test count as of HEAD: 771.
+> Prior tag: `v0.1.0-alpha.1` (2026-03-18, 674 tests) → `v0.1.0-alpha.2` →
+> `v0.1.0` (2026-04-25, 816 tests). The summary above is the user-facing
+> rollup; this section preserves the per-feature detail captured during
+> the alpha → 1.0 grind so reviewers don't have to read 56 commits.
 
-### Cross-Platform IPC
+#### Cross-Platform IPC
 
 Daemon ↔ model-worker IPC was Unix-socket-only between 2026-04-18 and
 now, silently breaking Windows builds. Ported to the `interprocess`
@@ -548,10 +549,10 @@ request-response before auto-manage was disabled for the split test.
 
 macOS aarch64 binary remains compile-validated only.
 
-### Distributed Inference Speedup Arc
+#### Distributed Inference Speedup Arc
 
 A multi-session effort to speed up distributed inference, tracked in
-`docs/plans/distributed_inference_speedup.md`. Items 1–16 numbered in
+`docs/plans/archive/distributed_inference_speedup.md`. Items 1–16 numbered in
 plan order; default-on items landed as they shipped, flag-gated items
 are off until benchmarked on real workloads.
 
@@ -616,7 +617,7 @@ are off until benchmarked on real workloads.
   Wire-verified; no measured latency win because the bottleneck was
   elsewhere (Items 4 + 7 solved it).
 
-### Round 6 Bench Findings (2026-04-20)
+#### Round 6 Bench Findings (2026-04-20)
 
 The Item 8 two-daemon loopback bench caught three wire bugs before the
 measured numbers above landed:
@@ -638,32 +639,32 @@ measured numbers above landed:
    to 3000 / 2500 / 2000 ms respectively, keeping the worker timeout as
    the outer bound.
 
-### Code Sweep (105 issues found, 58 fixed)
+#### Code Sweep (105 issues found, 58 fixed)
 - **Round 1**: 10 parallel review agents across all 109 .rs files — 68 issues (9 CRITICAL, 32 HIGH, 22 MEDIUM), 41 fixed
 - **Round 2**: Second pass — 37 new issues (5 CRITICAL, 22 HIGH, 10 MEDIUM), 17 fixed
 - Key fixes: max_seq_len 2048 cap, ShardReader cross-tensor bleed, TensorPayload auth, escrow double-charge, IPC framing overflow, API key leak, Gemma embedding scale in forward_batch, hardcoded sampling in distributed forward
 
-### Credit System Overhaul
+#### Credit System Overhaul
 - Balanced rates: `rate × tokens` on both earn and spend (no layer multiplier)
 - Minimum balance enforcement: `MIN_BALANCE_FOR_INFERENCE = -1000`
 - Atomic credit accumulation via `pending_credit_earn` AtomicI64
 - Anti-Sybil peer balance deduplication by NodeId
 - Priority tiers require positive balance for Gold/Platinum
 
-### Device Pool Invite Codes
+#### Device Pool Invite Codes
 - 8-char one-time codes (e.g., `A3F7K2M9`), 24h expiry, Ed25519 signed
 - CLI: `swarmllm pool create/invite-code/join/status/leave`
 - API: `/api/pool/generate-code`, `/api/pool/join`, `/api/pool/device-name`, `/api/pool/credit-split`
 
-### Pool UX Overhaul
+#### Pool UX Overhaul
 - Device nicknames, online/offline status, per-device stats, combined VRAM display
 - QR code for invite codes, credit split configuration (0-50%)
 - "My Devices" tab with full management UI
 
-### Terminology Clarification
+#### Terminology Clarification
 - "My Devices" vs "Swarm Peers" — clear separation in setup wizard, share popover, dashboard
 
-## [0.1.0] - 2026-03-18
+## [0.1.0-alpha.2] - 2026-03-18
 
 ### Release & Scale Readiness (Phase 19)
 - **Docker release packaging**: Production `docker-compose.yml` (CPU default, GPU via `--profile gpu`), `.env.example` with all configurable env vars, GitHub Actions CI/CD pushing CPU + CUDA images to GHCR on git tag
