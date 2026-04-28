@@ -24,17 +24,6 @@ use crate::types::SwarmMessage;
 use super::NetworkManager;
 
 impl NetworkManager {
-    /// Decode peer ID bytes; logs and returns None on failure.
-    pub(super) fn resolve_peer_id(bytes: &[u8], label: &str) -> Option<libp2p::PeerId> {
-        match libp2p::PeerId::from_bytes(bytes) {
-            Ok(id) => Some(id),
-            Err(e) => {
-                tracing::warn!(error = %e, label, "Invalid peer ID bytes");
-                None
-            }
-        }
-    }
-
     /// Send a tensor forward to a specific peer via the unified binary tensor protocol.
     /// Uses WIRE_TAG_TENSOR (0x01) framing. Encrypts activations when an encryption
     /// session exists, falls back to plaintext.

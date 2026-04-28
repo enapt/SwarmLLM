@@ -7,9 +7,10 @@
 //! suspending here. All cross-task state access uses try_lock / DashMap /
 //! atomics for that reason.
 
+use crate::network::helpers::{extract_ipv4_bytes, is_non_public_ipv4_bytes};
 use crate::types::PeerInfo;
 
-use super::{extract_ipv4_bytes, is_non_public_ipv4_bytes, NetworkManager};
+use super::NetworkManager;
 
 impl NetworkManager {
     /// Handle Identify protocol — peer identified, establish encryption, register in peer_registry.

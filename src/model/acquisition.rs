@@ -618,7 +618,7 @@ impl AcquisitionManager {
                     )
                     .with_model(model_id.0.clone())
                     .with_detail_num(shard_id.index as i64)
-                    .with_toast("warn", 5000),
+                    .with_toast("warning", 5000),
                 );
                 self.shared_state.models.auto_manage_notify.notify_one();
             }

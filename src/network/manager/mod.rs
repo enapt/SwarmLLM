@@ -91,8 +91,6 @@ const REDIAL_JITTER_MIN_MS: u64 = 2000;
 /// Random window added on top of `REDIAL_JITTER_MIN_MS` (effective delay 2-5s).
 const REDIAL_JITTER_RANGE_MS: u64 = 3000;
 
-use super::helpers::{extract_ipv4_bytes, is_non_public_ipv4_bytes, swarm_event_name};
-
 /// NetworkManager owns the libp2p Swarm and is the sole interface to the P2P network.
 pub struct NetworkManager {
     shared_state: Arc<SharedState>,
@@ -361,7 +359,20 @@ impl NetworkManager {
             })
     }
 
-    /// Start the network manager event loop.
+    /// Decode peer ID bytes; logs and returns None on failure.
+    /// Used by `tensors.rs`, `commands.rs`, and `shard_transfer.rs` —
+    /// keeping it on the parent so the call sites read uniformly as
+    /// `Self::resolve_peer_id(...)` regardless of which sibling file they're in.
+    fn resolve_peer_id(bytes: &[u8], label: &str) -> Option<libp2p::PeerId> {
+        match libp2p::PeerId::from_bytes(bytes) {
+            Ok(id) => Some(id),
+            Err(e) => {
+                tracing::warn!(error = %e, label, "Invalid peer ID bytes");
+                None
+            }
+        }
+    }
+
     /// Send an error LayerResult to the pipeline for a failed tensor forward.
     fn fail_tensor_forward(
         &mut self,
@@ -384,6 +395,13 @@ impl NetworkManager {
         }
     }
 
+    /// Start the network manager event loop. Listens for inbound libp2p
+    /// `SwarmEvent`s, daemon `NetworkCommand`s, internal commands, and
+    /// `dht_query_rx` model IDs, dispatching each to the appropriate
+    /// per-protocol handler in the sibling modules (events.rs, requests.rs,
+    /// identify.rs, connections.rs, commands.rs, dht.rs, tensors.rs,
+    /// shard_transfer.rs). Returns when the shutdown signal fires or the
+    /// inbound channel closes.
     pub async fn run(mut self) -> Result<(), SwarmError> {
         let config = self.shared_state.config.clone();
         let port = config.node.listen_port;
@@ -982,5 +1000,32 @@ impl NetworkManager {
         if !addrs.is_empty() {
             crate::network::peer_cache::save_peer_cache(&self.shared_state.db, &addrs);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolve_peer_id_round_trips_valid_bytes() {
+        // Generate a random PeerId and verify the bytes form round-trips through the helper.
+        let kp = libp2p::identity::Keypair::generate_ed25519();
+        let pid = kp.public().to_peer_id();
+        let bytes = pid.to_bytes();
+        let resolved = NetworkManager::resolve_peer_id(&bytes, "test")
+            .expect("valid PeerId bytes should resolve");
+        assert_eq!(resolved, pid);
+    }
+
+    #[test]
+    fn resolve_peer_id_returns_none_for_garbage() {
+        // Random bytes can decode but not always — explicitly bad bytes (too short)
+        // must return None without panicking.
+        let bad: [u8; 3] = [0xff, 0x01, 0x02];
+        assert!(NetworkManager::resolve_peer_id(&bad, "test").is_none());
+
+        let empty: [u8; 0] = [];
+        assert!(NetworkManager::resolve_peer_id(&empty, "test").is_none());
     }
 }

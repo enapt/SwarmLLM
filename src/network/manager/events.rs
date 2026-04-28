@@ -18,10 +18,11 @@ use libp2p::swarm::SwarmEvent;
 use libp2p::Multiaddr;
 
 use crate::network::behaviour::SwarmBehaviourEvent;
+use crate::network::helpers::swarm_event_name;
 use crate::network::protocol::{self, SwarmRequest, SwarmResponse};
 use crate::types::SwarmMessage;
 
-use super::{swarm_event_name, NetworkManager};
+use super::NetworkManager;
 
 impl NetworkManager {
     pub(super) async fn handle_swarm_event(&mut self, event: SwarmEvent<SwarmBehaviourEvent>) {

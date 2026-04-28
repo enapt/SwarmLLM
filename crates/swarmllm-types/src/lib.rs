@@ -167,27 +167,6 @@ mod tests {
         assert_eq!(a, b);
     }
 
-    #[allow(dead_code)]
-    fn test_manifest() -> ModelManifest {
-        ModelManifest {
-            id: ModelId("test".into()),
-            name: "Test".into(),
-            architecture: ModelArchitecture::Llama,
-            num_layers: 2,
-            num_params_billions: 0.001,
-            quantization: Quantization::Q4KM,
-            total_size_bytes: 1024,
-            shard_count: 1,
-            shards: vec![],
-            tokenizer_hash: [0u8; 32],
-            manifest_hash: [0u8; 32],
-            publisher: NodeId([0u8; 32]),
-            publish_date: chrono::Utc::now(),
-            license: "MIT".into(),
-            mmproj: None,
-        }
-    }
-
     #[test]
     fn trust_level_ordering() {
         assert!(ModelTrustLevel::Discovered < ModelTrustLevel::Pinned);

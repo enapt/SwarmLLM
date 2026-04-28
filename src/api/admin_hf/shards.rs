@@ -362,7 +362,7 @@ pub async fn hf_download_shards(
                     ),
                 )
                 .with_model(download_mid.0.clone())
-                .with_toast("warn", 6000),
+                .with_toast("warning", 6000),
             );
             // Continue with downloads anyway — manifest can be regenerated later
         }

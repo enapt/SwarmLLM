@@ -228,8 +228,8 @@ If `pending_tensor_forwards > 0` when a connection closes, those requests will g
 
 | Level | What | Where |
 |-------|------|-------|
-| TRACE | `DIAG: layer forward complete` — `layer`, `layer_ms` (per-layer timing) | split/model.rs |
-| DEBUG | `DIAG: SplitModel forward pass complete` — `forward_ms`, `seq_len`, `num_layers`, `is_first`, `is_last`, `kv_offset` | split/model.rs |
+| TRACE | `DIAG: layer forward complete` — `layer`, `layer_ms` (per-layer timing) | split/executor.rs |
+| DEBUG | `DIAG: SplitModel forward pass complete` — `forward_ms`, `seq_len`, `num_layers`, `is_first`, `is_last`, `kv_offset` | split/executor.rs |
 
 For per-token decode analysis, combine the forward pass timing with the decode loop timing from `DIAG: split stream decode loop complete` which reports `tok_per_sec`. Use `-vvv` (trace) to see per-layer timing.
 
