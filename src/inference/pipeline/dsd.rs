@@ -434,31 +434,8 @@ async fn forward_verify_through_segments(
         // error leaves a permanent stale entry that consumes capacity (the
         // MAX_PENDING_LAYER_RESULTS check at the loop head would fail under
         // load) and silently swallows any late-arriving response.
-        struct PendingGuard<'a> {
-            map: &'a dashmap::DashMap<
-                uuid::Uuid,
-                tokio::sync::oneshot::Sender<crate::types::LayerResult>,
-            >,
-            id: uuid::Uuid,
-            armed: bool,
-        }
-        impl<'a> PendingGuard<'a> {
-            fn disarm(&mut self) {
-                self.armed = false;
-            }
-        }
-        impl<'a> Drop for PendingGuard<'a> {
-            fn drop(&mut self) {
-                if self.armed {
-                    self.map.remove(&self.id);
-                }
-            }
-        }
-        let mut pending_guard = PendingGuard {
-            map: &shared_state.pending_layer_results,
-            id: request_id,
-            armed: true,
-        };
+        let mut pending_guard =
+            super::PendingLayerResultGuard::new(&shared_state.pending_layer_results, request_id);
 
         let forward = LayerForward {
             request_id,

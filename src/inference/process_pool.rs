@@ -318,10 +318,22 @@ impl Drop for ResponseGuard {
 async fn batch_scheduler_loop(
     pool: Arc<ModelProcessPool>,
     mut rx: mpsc::Receiver<BatchSchedulerMsg>,
+    mut shutdown_rx: tokio::sync::watch::Receiver<bool>,
 ) {
     use std::collections::HashMap;
     use std::time::{Duration, Instant};
-    while let Some(first) = rx.recv().await {
+    loop {
+        let first = tokio::select! {
+            biased;
+            _ = shutdown_rx.changed() => {
+                tracing::debug!("batch_scheduler_loop: shutdown observed");
+                return;
+            }
+            msg = rx.recv() => match msg {
+                Some(m) => m,
+                None => return, // sender side dropped
+            },
+        };
         let collection_ms = pool
             .batch_collection_ms
             .load(std::sync::atomic::Ordering::Relaxed);
@@ -701,7 +713,10 @@ impl ModelProcessPool {
     /// from within a Tokio runtime; no-op if no runtime is available (sync
     /// tests constructing `SharedState` directly). Safe to call more than
     /// once (second call is a no-op via `OnceLock::set`).
-    pub fn start_batch_scheduler(self: &Arc<Self>) {
+    pub fn start_batch_scheduler(
+        self: &Arc<Self>,
+        shutdown_rx: tokio::sync::watch::Receiver<bool>,
+    ) {
         if tokio::runtime::Handle::try_current().is_err() {
             tracing::debug!("start_batch_scheduler called outside a tokio runtime — skipping");
             return;
@@ -712,7 +727,7 @@ impl ModelProcessPool {
             return;
         }
         tokio::spawn(async move {
-            batch_scheduler_loop(pool, rx).await;
+            batch_scheduler_loop(pool, rx, shutdown_rx).await;
         });
     }
 

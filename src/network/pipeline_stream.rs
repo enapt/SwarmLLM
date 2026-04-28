@@ -245,24 +245,37 @@ where
 
 /// Spawn the remote-side accept loop. Each inbound stream gets its own
 /// handler task. Returns immediately; the accept task runs in the background
-/// until the `IncomingStreams` handle is dropped (i.e. until the process exits
-/// or the control is torn down).
+/// until the `IncomingStreams` handle is dropped or shutdown is signaled.
 pub fn spawn_accept_loop(
     mut incoming: IncomingStreams,
     shared_state: Arc<SharedState>,
     outbound_tx: mpsc::Sender<crate::types::AuthenticatedMessage>,
+    mut shutdown_rx: tokio::sync::watch::Receiver<bool>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         tracing::info!(
             protocol = PROTOCOL_PIPELINE,
             "pipeline stream accept loop started"
         );
-        while let Some((peer_id, stream)) = incoming.next().await {
-            let state = shared_state.clone();
-            let out_tx = outbound_tx.clone();
-            tokio::spawn(async move {
-                handle_inbound_stream(peer_id, stream, state, out_tx).await;
-            });
+        loop {
+            tokio::select! {
+                biased;
+                _ = shutdown_rx.changed() => {
+                    tracing::debug!("pipeline accept loop: shutdown observed");
+                    break;
+                }
+                next = incoming.next() => match next {
+                    Some((peer_id, stream)) => {
+                        let state = shared_state.clone();
+                        let out_tx = outbound_tx.clone();
+                        let stream_shutdown = shutdown_rx.clone();
+                        tokio::spawn(async move {
+                            handle_inbound_stream(peer_id, stream, state, out_tx, stream_shutdown).await;
+                        });
+                    }
+                    None => break,
+                },
+            }
         }
         tracing::info!("pipeline stream accept loop terminated");
     })
@@ -277,18 +290,27 @@ async fn handle_inbound_stream(
     stream: libp2p::Stream,
     shared_state: Arc<SharedState>,
     outbound_tx: mpsc::Sender<crate::types::AuthenticatedMessage>,
+    mut shutdown_rx: tokio::sync::watch::Receiver<bool>,
 ) {
     let (mut read, mut write) = stream.split();
     tracing::info!(%peer_id, "pipeline stream handler started");
 
     loop {
-        let frame = match read_frame(&mut read).await {
-            Ok(f) => f,
-            Err(e) => {
-                tracing::debug!(%peer_id, error = %e, "pipeline stream handler terminated");
+        let frame = tokio::select! {
+            biased;
+            _ = shutdown_rx.changed() => {
+                tracing::debug!(%peer_id, "pipeline stream handler: shutdown observed");
                 let _ = write.close().await;
                 return;
             }
+            res = read_frame(&mut read) => match res {
+                Ok(f) => f,
+                Err(e) => {
+                    tracing::debug!(%peer_id, error = %e, "pipeline stream handler terminated");
+                    let _ = write.close().await;
+                    return;
+                }
+            },
         };
 
         // Decode + decrypt (mirrors the handle_tensor_payload logic for

@@ -458,7 +458,9 @@ impl SharedState {
         state
             .model_process_pool
             .set_batched_prefill_forward(state.config.inference.batched_prefill_forward);
-        state.model_process_pool.start_batch_scheduler();
+        state
+            .model_process_pool
+            .start_batch_scheduler(shutdown_rx.clone());
 
         (state, shutdown_rx, dht_query_rx)
     }

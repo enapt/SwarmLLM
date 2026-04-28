@@ -466,6 +466,7 @@ impl NetworkManager {
                 incoming,
                 self.shared_state.clone(),
                 self.outbound_tx.clone(),
+                self.shutdown_rx.clone(),
             );
             tracing::info!(
                 protocol = crate::network::pipeline_stream::PROTOCOL_PIPELINE,

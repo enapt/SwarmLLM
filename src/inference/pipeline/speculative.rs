@@ -129,6 +129,13 @@ impl PipelineExecutor {
             self.shared_state
                 .pending_layer_results
                 .insert(request_id, tx);
+            // RAII guard so an early Err propagation from wait_for_result or
+            // the empty-tokens check below doesn't leak the pending entry —
+            // see PendingLayerResultGuard / gotcha #45.
+            let mut prefill_guard = super::PendingLayerResultGuard::new(
+                &self.shared_state.pending_layer_results,
+                request_id,
+            );
 
             let forward = LayerForward {
                 request_id,
@@ -157,7 +164,7 @@ impl PipelineExecutor {
                 .await
                 .is_err()
             {
-                self.shared_state.pending_layer_results.remove(&request_id);
+                // Drop guard removes the pending entry on return.
                 return Err(SwarmError::Network(
                     "Failed to send prefill LayerForward".into(),
                 ));
@@ -178,6 +185,10 @@ impl PipelineExecutor {
                 prompt_byte_len,
             )
             .await?;
+            // Result delivered (the dispatcher already removed the entry when
+            // it consumed the oneshot); disarm the guard so it doesn't double-
+            // remove on drop.
+            prefill_guard.disarm();
 
             if prefill_result.token_ids.is_empty() {
                 return Err(SwarmError::Inference(
@@ -482,6 +493,10 @@ async fn send_verify_batch(
     }
     let (tx, rx) = tokio::sync::oneshot::channel();
     shared_state.pending_layer_results.insert(request_id, tx);
+    // RAII guard so a wait_for_result Err propagation doesn't leak the
+    // pending entry — see PendingLayerResultGuard / gotcha #45.
+    let mut verify_guard =
+        super::PendingLayerResultGuard::new(&shared_state.pending_layer_results, request_id);
 
     // Build the LayerForward. As of DSD Phase 4 (Item 12) the worker
     // unifies speculative and standard input paths through the first-segment
@@ -521,7 +536,7 @@ async fn send_verify_batch(
         .await
         .is_err()
     {
-        shared_state.pending_layer_results.remove(&request_id);
+        // Drop guard removes the pending entry on return.
         return Err(SwarmError::Network("verify send dropped".into()));
     }
     let num_layers = segment.layer_range.1 - segment.layer_range.0;
@@ -534,6 +549,9 @@ async fn send_verify_batch(
         verify_tokens.len() * 4,
     )
     .await?;
+    // Result delivered (the dispatcher already removed the entry); disarm
+    // the guard so we don't double-remove on drop.
+    verify_guard.disarm();
     if let Some(NetworkFinishReason::Error(msg)) = &result.finish_reason {
         return Err(SwarmError::Inference(msg.clone()));
     }

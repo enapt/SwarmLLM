@@ -35,6 +35,44 @@ const SEGMENT_TIMEOUT_MIN_SECS: u64 = 30;
 const SEGMENT_TIMEOUT_MAX_SECS: u64 = 600;
 /// Cap pending layer results to prevent OOM under sustained load.
 const MAX_PENDING_LAYER_RESULTS: usize = 1024;
+
+/// RAII guard that removes a `pending_layer_results` entry on drop unless
+/// `disarm()` has been called first. Shared by every coordinator that
+/// inserts a oneshot before awaiting a remote tensor result — without it
+/// a bare `?` propagation from the wait site leaves a stale entry per
+/// failed inference, eventually exhausting `MAX_PENDING_LAYER_RESULTS`.
+/// Per gotcha #45 in `memory/MEMORY.md`.
+pub(super) struct PendingLayerResultGuard<'a> {
+    pub(super) map:
+        &'a dashmap::DashMap<uuid::Uuid, tokio::sync::oneshot::Sender<crate::types::LayerResult>>,
+    pub(super) id: uuid::Uuid,
+    pub(super) armed: bool,
+}
+impl<'a> PendingLayerResultGuard<'a> {
+    pub(super) fn new(
+        map: &'a dashmap::DashMap<
+            uuid::Uuid,
+            tokio::sync::oneshot::Sender<crate::types::LayerResult>,
+        >,
+        id: uuid::Uuid,
+    ) -> Self {
+        Self {
+            map,
+            id,
+            armed: true,
+        }
+    }
+    pub(super) fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+impl<'a> Drop for PendingLayerResultGuard<'a> {
+    fn drop(&mut self) {
+        if self.armed {
+            self.map.remove(&self.id);
+        }
+    }
+}
 /// Fallback EOS token ID when GGUF metadata is unavailable. Matches LLaMA family;
 /// other architectures (Qwen2, Phi-3, Gemma) have different EOS tokens.
 /// A warning is emitted when this fallback is used.
