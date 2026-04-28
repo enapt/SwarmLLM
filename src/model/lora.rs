@@ -47,6 +47,10 @@ pub struct AdapterMetadata {
     pub num_layers: usize,
     /// File size in bytes.
     pub size_bytes: u64,
+    /// BLAKE3 hash (hex) of the safetensors file at registration time.
+    /// Verified on subsequent loads to detect tampering / file swap.
+    #[serde(default)]
+    pub blake3: String,
 }
 
 /// LoRA weight pair for a single base weight (e.g., one attention projection).
@@ -152,6 +156,34 @@ fn load_adapter(
 
     let file_data = std::fs::read(path)
         .map_err(|e| SwarmError::Internal(format!("Failed to read adapter file: {e}")))?;
+
+    // SEC: verify file integrity. If a `<filename>.blake3` sidecar exists, the
+    // adapter was registered through the admin API and the hash there is the
+    // trusted one — any mismatch means the file was swapped or corrupted.
+    // Without the sidecar (first load), compute and store the hash so subsequent
+    // loads are anchored to the bytes we just consumed.
+    let computed = blake3::hash(&file_data);
+    let computed_hex = computed.to_hex().to_string();
+    let sidecar = path.with_extension(
+        path.extension()
+            .map(|e| format!("{}.blake3", e.to_string_lossy()))
+            .unwrap_or_else(|| "blake3".to_string()),
+    );
+    match std::fs::read_to_string(&sidecar) {
+        Ok(expected) => {
+            let expected = expected.trim();
+            if !expected.eq_ignore_ascii_case(&computed_hex) {
+                return Err(SwarmError::Validation(format!(
+                    "LoRA adapter integrity check failed: file BLAKE3 ({computed_hex}) does not match sidecar ({expected}). File may have been tampered with."
+                )));
+            }
+        }
+        Err(_) => {
+            // First load — pin the hash so subsequent loads can verify.
+            let _ = std::fs::write(&sidecar, &computed_hex);
+        }
+    }
+
     let tensors = safetensors::SafeTensors::deserialize(&file_data)
         .map_err(|e| SwarmError::Internal(format!("Failed to parse safetensors: {e}")))?;
 
@@ -225,6 +257,7 @@ fn load_adapter(
             path: path.to_path_buf(),
             num_layers,
             size_bytes: file_size,
+            blake3: computed_hex,
         },
         weights,
     })

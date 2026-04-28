@@ -264,17 +264,17 @@ impl ShardStore {
                             continue;
                         }
 
-                        // Quick size check: reject obviously truncated OR
-                        // oversized files (the latter could be a partial
-                        // overwrite or injected bytes). BLAKE3 still verifies
-                        // contents in the background — this is the cheap
-                        // startup gate that mirrors auto_manage::shard_size_ok.
+                        // Strict size check: shard files written by acquisition
+                        // are the exact `size_bytes` from the manifest. Any
+                        // deviation indicates either a partial download, a
+                        // truncated file, or tampering. The previous ±10%
+                        // window let an adversary deliver shards up to 9%
+                        // truncated/padded that would still pass the startup
+                        // gate before the background BLAKE3 verification ran.
+                        // We keep `size_bytes == 0` as the "size unknown" escape
+                        // hatch for legacy/incomplete manifests.
                         let size_ok = std::fs::metadata(&shard_path)
-                            .map(|m| {
-                                shard_info.size_bytes == 0
-                                    || (m.len() >= shard_info.size_bytes * 9 / 10
-                                        && m.len() <= shard_info.size_bytes * 11 / 10)
-                            })
+                            .map(|m| shard_info.size_bytes == 0 || m.len() == shard_info.size_bytes)
                             .unwrap_or(false);
                         if size_ok {
                             shards.push((model_id.clone(), shard_info.clone()));
