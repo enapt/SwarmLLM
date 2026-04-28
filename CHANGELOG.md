@@ -7,6 +7,77 @@ All notable changes to SwarmLLM are documented here.
 Working changelog for commits after the v0.1.0 tag. Will roll into the
 next tagged release.
 
+### Sweep arc R69 → R75 (2026-04-29 / 2026-04-30)
+
+Long-running self-managed sweep covering: post-audit follow-ups (R69),
+hot-path performance (R70), concurrency + lifecycle (R71), error
+recovery + resilience (R72), observability + operability (R73), API +
+wire-format correctness (R74), and pre-release readiness (R75). Each
+round spawned 4–5 parallel review agents, applied auto-fixable
+findings in batched commits, and surfaced architectural items for
+follow-up. ~20 commits, broad coverage:
+
+- **Performance** — `PendingLayerResultGuard` shared between dsd /
+  speculative; `req_id_str` and `SamplingParams` no longer cloned per
+  decode tick in `step_decode_pool`; per-token `default_eos` HashSet
+  hoisted out of the decode loop; `verify_tokens.to_vec()` dropped
+  from spec-round LayerForward; admin/stats and websocket
+  build_stats_message no longer hold RwLock guards across blocking
+  work; `health/monitor.rs` switched from `block_in_place` to
+  `spawn_blocking` for the 30s sysinfo refresh; frontend
+  notifications + dashboard render skips on equal state +
+  sessionStorage debounced.
+- **Concurrency** — `batch_scheduler_loop` and
+  `pipeline_stream::spawn_accept_loop` + `handle_inbound_stream` now
+  observe the watch-channel shutdown signal; PendingLayerResultGuard
+  applied to speculative.rs's two leak sites; `apply_pipeline_guard`
+  RAII catches panic-induced leaks of `active_pipelines` /
+  `active_count`; `dashboard_rx` Lagged path now sends a re-sync
+  message instead of silently dropping.
+- **Resilience** — `apply_update` collapsed into a single signature
+  that always re-checks version; HF probe wrapped with the
+  NETWORK_RETRY_DELAYS exponential backoff (was a bare `.await?`);
+  pool slaves now forward the `penalty_serve_failure` to the master
+  via the same path as success-case spends (was hitting the slave's
+  local balance and gating its own future requests); update.rs
+  `info.downloaded = true` only set when staging path is the
+  preferred (same-filesystem) location, not the temp_dir EPERM
+  fallback.
+- **Observability** — credit spend logs promoted from debug to info
+  with `DIAG:` prefix (the earn side already had it; the spend side
+  was dark); `escrow_held` + `escrow_pending_count` exposed on
+  `/api/admin/credits`; `subnet_counts` retain on register so a NAT
+  flip doesn't pile a peer into multiple buckets.
+- **API correctness** — `SwarmError::InsufficientCredits` returns a
+  distinct `insufficient_credits` error_type instead of the
+  `rate_limit_error` mismatch (SDK retry logic was treating credit
+  stops as rate-limits); `SwarmError::Network` maps to 502 +
+  `network_error`; streaming finish_reason='error' replaced with
+  'stop' (not a valid OpenAI value); `/v1/models` `created` is the
+  manifest publish_date timestamp not Utc::now() (was unstable per
+  call); `sse.rs::data_frame` emits a structured error on
+  serialization failure instead of silently emitting an empty
+  `data:` line; spec_logits doc-comment in swarmllm-types matches
+  gotcha #29's γ+1 contract.
+- **Hygiene** — `WorkerOptions` struct bundles run_worker's 7 runtime
+  knobs (was 13 args under `#[allow(too_many_arguments)]`);
+  `SplitLoadOptions` for split/loader; `speculative::softmax`
+  wrapper deleted; `// SYNC:` comment dropped (gotcha #18 is the
+  canonical 3-path warning); inline "deferred ChaCha encryption"
+  paragraphs collapsed to one ARCHITECTURE.md pointer; mmap SAFETY
+  comment expanded with candle's qtensor_from_ggml copy-semantics
+  proof.
+- **Release prep** — i18n files now sorted alphabetically by key for
+  reliable parity audits (1015 keys + 2 metadata = 1017 entries per
+  locale, all 21 languages confirmed in parity); `default.toml`
+  documents the speculative-fast-path ChaCha bypass next to
+  `enable_encryption = true`; `yamux_substream` CI tests now run on
+  macOS (the Linux-only guard was a copy-paste from the
+  multi-process integration tests).
+
+890 lib tests pass throughout; clippy clean both feature sets;
+pre-push hooks passing on every commit.
+
 ### Performance
 
 - **`PrefixCache` lookup hit no longer needs a write lock** —

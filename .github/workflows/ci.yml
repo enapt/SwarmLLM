@@ -100,8 +100,10 @@ jobs:
       - name: Run phase 10/11 integration tests (Linux only)
         if: runner.os == 'Linux'
         run: cargo test --test integration_phase10_11 -- --test-threads=1
-      - name: Run yamux substream tests (Linux only)
-        if: runner.os == 'Linux'
+      # yamux_substream tests use TCP/QUIC transport only (no named-pipe IPC),
+      # so they're safe to run on macOS — the Linux-only guard was copy-pasted
+      # from the multi-process integration tests above.
+      - name: Run yamux substream tests
         run: cargo test --test yamux_substream
 
   build:
