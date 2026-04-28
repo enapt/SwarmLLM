@@ -803,6 +803,17 @@ pub async fn join_network(
         )))
     })?;
 
+    // SEC: Reject private / loopback / link-local / cloud-metadata addresses.
+    // Without this check, an attacker with the API key could supply a multiaddr
+    // pointing at internal services (e.g. 169.254.169.254 IMDS, 127.0.0.1
+    // services on the host) and the daemon would attempt P2P-layer dials —
+    // P2P-layer SSRF — and persist the address to peer cache for re-dialing.
+    if crate::network::helpers::is_non_public_addr(&addr_str) {
+        return Err(ApiError(crate::error::SwarmError::Validation(
+            "Address resolves to a private/loopback/link-local IP — refusing to dial".into(),
+        )));
+    }
+
     tracing::info!(addr = %addr_str, "Joining network via invite code");
 
     // Save to peer cache so it persists across restarts
@@ -966,9 +977,15 @@ pub struct AdminResponsesQuery {
 /// than O(total_records). The full preview JSON is only built for the
 /// records that survive the bounded top-k pass.
 pub async fn list_responses(
+    axum::extract::ConnectInfo(addr): axum::extract::ConnectInfo<std::net::SocketAddr>,
     State(state): State<crate::api::server::AppState>,
     axum::extract::Query(params): axum::extract::Query<AdminResponsesQuery>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    // SEC: input_preview shows a 100-char prefix of the user's prompt. With a
+    // shared cluster API key, exposing it to non-loopback callers would leak
+    // every other user's prompts. Loopback callers (local dashboard) get the
+    // full preview; remote API-key holders see metadata only.
+    let include_preview = addr.ip().is_loopback();
     use std::cmp::Ordering;
     use std::collections::BinaryHeap;
 
@@ -1069,24 +1086,33 @@ pub async fn list_responses(
         .into_iter()
         .map(|HeapEntry { rec, .. }| {
             let live = live_ids.contains(&rec.id);
-            let preview = match &rec.request.input {
-                crate::api::openai::responses::types::ResponsesInput::Text(s) => {
-                    truncate_preview(s)
-                }
-                crate::api::openai::responses::types::ResponsesInput::Items(items) => items
-                    .first()
-                    .and_then(|item| match item {
-                        crate::api::openai::responses::types::InputItem::Typed(
-                            crate::api::openai::responses::types::TypedInputItem::Message(m),
-                        ) => match &m.content {
-                            crate::api::openai::responses::types::InputMessageContent::Text(t) => {
-                                Some(truncate_preview(t))
-                            }
+            let preview = if include_preview {
+                match &rec.request.input {
+                    crate::api::openai::responses::types::ResponsesInput::Text(s) => {
+                        truncate_preview(s)
+                    }
+                    crate::api::openai::responses::types::ResponsesInput::Items(items) => items
+                        .first()
+                        .and_then(|item| match item {
+                            crate::api::openai::responses::types::InputItem::Typed(
+                                crate::api::openai::responses::types::TypedInputItem::Message(m),
+                            ) => match &m.content {
+                                crate::api::openai::responses::types::InputMessageContent::Text(
+                                    t,
+                                ) => Some(truncate_preview(t)),
+                                _ => None,
+                            },
                             _ => None,
-                        },
-                        _ => None,
-                    })
-                    .unwrap_or_default(),
+                        })
+                        .unwrap_or_default(),
+                }
+            } else {
+                String::new()
+            };
+            let output_preview = if include_preview {
+                rec.response.output_text.as_deref().map(truncate_preview)
+            } else {
+                None
             };
             serde_json::json!({
                 "id": rec.id,
@@ -1097,7 +1123,7 @@ pub async fn list_responses(
                 "background": rec.response.background.unwrap_or(false),
                 "live": live,
                 "input_preview": preview,
-                "output_text_preview": rec.response.output_text.as_deref().map(truncate_preview),
+                "output_text_preview": output_preview,
                 "usage": {
                     "input_tokens": rec.response.usage.input_tokens,
                     "output_tokens": rec.response.usage.output_tokens,

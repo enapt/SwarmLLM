@@ -798,6 +798,30 @@ pub async fn provider_model_status(
                     "error": format!("SSRF blocked: {e}"),
                 });
             }
+            // SEC: Reject path-injection attempts in the user-supplied model_id
+            // before interpolating it into the outbound URL. Real model IDs are
+            // alphanumeric + a few separators (e.g. `gpt-4`, `claude-sonnet-4-5`,
+            // `ft:gpt-3.5-turbo:org:suffix:id`). Anything outside that set is
+            // either a typo or an attempt to alter the request path on a custom
+            // provider — reject rather than smuggle.
+            let id_ok = !model_id.is_empty()
+                && model_id.len() <= 256
+                && !model_id.contains("..")
+                && model_id.chars().all(|c| {
+                    c.is_ascii_alphanumeric()
+                        || c == '-'
+                        || c == '_'
+                        || c == '.'
+                        || c == ':'
+                        || c == '@'
+                });
+            if !id_ok {
+                return serde_json::json!({
+                    "model": model_id,
+                    "status": "error",
+                    "error": "invalid model_id (rejected by character allowlist)",
+                });
+            }
             // Probe via GET /models/{id} — O(1) cost, no rate-limit hit, works for
             // all model types (DALL-E, Whisper, embeddings too). Measures real network
             // latency to the provider's API.
@@ -886,9 +910,17 @@ pub async fn version_info(State(state): State<AppState>) -> Json<serde_json::Val
 }
 
 /// POST /api/admin/update/check — Trigger an immediate update check.
+/// Loopback-only — auto-downloads the binary as a side effect, so a remote
+/// API-key holder shouldn't be able to drive disk writes / binary swaps.
 pub async fn check_update(
+    axum::extract::ConnectInfo(addr): axum::extract::ConnectInfo<std::net::SocketAddr>,
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    if !addr.ip().is_loopback() {
+        return Err(ApiError(crate::error::SwarmError::Unauthorized(
+            "Update check only allowed from localhost".into(),
+        )));
+    }
     let config = state.shared_state.config.updates.clone();
     let update_state = state.shared_state.events.update_state.clone();
     let dash_tx = state.shared_state.events.dashboard_tx.clone();
@@ -940,9 +972,16 @@ pub async fn check_update(
 }
 
 /// POST /api/admin/update/apply — Apply a downloaded update (restart required).
+/// Loopback-only — replaces the running binary, must not be remote-triggerable.
 pub async fn apply_update(
+    axum::extract::ConnectInfo(addr): axum::extract::ConnectInfo<std::net::SocketAddr>,
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    if !addr.ip().is_loopback() {
+        return Err(ApiError(crate::error::SwarmError::Unauthorized(
+            "Update apply only allowed from localhost".into(),
+        )));
+    }
     let update_state = state.shared_state.events.update_state.read().await;
     let info = match &update_state.update_available {
         Some(info) if info.downloaded => info.clone(),
@@ -981,7 +1020,11 @@ pub async fn apply_update(
         )));
     }
 
-    checker.apply_update(&tmp_path).map_err(ApiError)?;
+    // SEC: re-check version at apply time so a stored stale UpdateInfo can't
+    // be replayed for a downgrade.
+    checker
+        .apply_update_checked(&tmp_path, &info.latest_version)
+        .map_err(ApiError)?;
 
     Ok(Json(serde_json::json!({
         "status": "applied",
