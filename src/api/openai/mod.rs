@@ -130,8 +130,8 @@ async fn try_cloud_proxy(
     {
         tracing::info!(model = %req.model, "DIAG: openai proxying via claude subscription subprocess");
         let body = serde_json::to_value(req).map_err(|e| {
-            ApiError(crate::error::SwarmError::Validation(format!(
-                "serialize request: {e}"
+            ApiError(crate::error::SwarmError::Internal(format!(
+                "serialize request for proxy: {e}"
             )))
         })?;
         return crate::api::claude_sub::proxy_via_subprocess_openai(&sub_config, &body)
@@ -140,8 +140,8 @@ async fn try_cloud_proxy(
     }
 
     let body = serde_json::to_value(req).map_err(|e| {
-        ApiError(crate::error::SwarmError::Validation(format!(
-            "serialize request: {e}"
+        ApiError(crate::error::SwarmError::Internal(format!(
+            "serialize request for proxy: {e}"
         )))
     })?;
     crate::api::providers::try_proxy_openai(state, &body, req.stream).await

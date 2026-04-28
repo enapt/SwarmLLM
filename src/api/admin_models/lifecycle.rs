@@ -45,7 +45,14 @@ pub async fn delete_model(
         count
     })
     .await
-    .unwrap_or(0);
+    .map_err(|e| {
+        // Surface a panic in the file-removal task instead of silently
+        // returning files_removed=0, which would tell the caller the delete
+        // succeeded when blocking I/O actually crashed.
+        ApiError(crate::error::SwarmError::Internal(format!(
+            "Model file removal task panicked: {e}"
+        )))
+    })?;
 
     // Remove manifest from DB
     let _ = shared.db.remove("model_meta", &model_id);

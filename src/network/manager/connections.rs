@@ -104,17 +104,37 @@ impl NetworkManager {
             Some(libp2p::swarm::ConnectionError::KeepAliveTimeout) => "idle_timeout",
             Some(libp2p::swarm::ConnectionError::IO(_)) => "io_error",
         };
-        tracing::warn!(
-            %peer_id, %connection_id,
-            reason,
-            ?cause,
-            ?closed_addr,
-            remaining = num_established,
-            pending_tensor_forwards = self.pending_tensor_outbound.len(),
-            affected_request_ids = ?affected_tensors.iter().take(5).collect::<Vec<_>>(),
-            total_peers = self.swarm.connected_peers().count(),
-            "DIAG: connection closed"
-        );
+        // Emit at info! for clean and idle-timeout closes — those are normal
+        // network churn and would otherwise drown warn-level alerting (in a
+        // 20-peer node, ~20 idle-timeout closes fire per IDLE_CONNECTION_TIMEOUT
+        // cycle). Reserve warn! for io_error which signals a real transport
+        // problem worth a triage glance.
+        let warn_level = matches!(reason, "io_error");
+        if warn_level {
+            tracing::warn!(
+                %peer_id, %connection_id,
+                reason,
+                ?cause,
+                ?closed_addr,
+                remaining = num_established,
+                pending_tensor_forwards = self.pending_tensor_outbound.len(),
+                affected_request_ids = ?affected_tensors.iter().take(5).collect::<Vec<_>>(),
+                total_peers = self.swarm.connected_peers().count(),
+                "DIAG: connection closed"
+            );
+        } else {
+            tracing::info!(
+                %peer_id, %connection_id,
+                reason,
+                ?cause,
+                ?closed_addr,
+                remaining = num_established,
+                pending_tensor_forwards = self.pending_tensor_outbound.len(),
+                affected_request_ids = ?affected_tensors.iter().take(5).collect::<Vec<_>>(),
+                total_peers = self.swarm.connected_peers().count(),
+                "DIAG: connection closed"
+            );
+        }
 
         // Skip cleanup if other connections to this peer remain
         if num_established > 0 {

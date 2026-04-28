@@ -50,9 +50,9 @@ pub(super) fn resolve_local_shard(
         .shard_holders(&shard_id)
         .contains(&local_node_id)
     {
-        return Err(ApiError(crate::error::SwarmError::Validation(
-            "Shard is not held locally".into(),
-        )));
+        // Structurally valid request for an absent resource → 404.
+        // Matches the pattern used by delete_shard in the same module.
+        return Err(ApiError(crate::error::SwarmError::ShardNotFound(shard_id)));
     }
     Ok((mid, shard_id, local_node_id))
 }

@@ -18,7 +18,17 @@ pub async fn build_passthrough_response(
         let body = axum::body::Body::from_stream(byte_stream);
         build_sse_response(body)
     } else {
-        let body = resp.text().await.unwrap_or_default();
+        // Surface a body-read failure as a 502 ProviderError instead of
+        // unwrap_or_default()'ing into an empty 200. The caller (chat
+        // completions, anthropic proxy) hands the response straight to the
+        // user; an empty 200 looks like the provider returned an empty
+        // object, hiding the real failure (transport drop mid-body).
+        let body = resp.text().await.map_err(|e| {
+            ApiError(crate::error::SwarmError::ProviderError {
+                status: 502,
+                body: format!("Failed to read provider response body: {e}"),
+            })
+        })?;
         axum::response::Response::builder()
             .header("content-type", "application/json")
             .body(axum::body::Body::from(body))

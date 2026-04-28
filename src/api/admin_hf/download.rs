@@ -132,7 +132,15 @@ pub async fn hf_download(
                             .update_acquisition(&download_mid, |s| {
                                 s.log_push(format!("Model load failed: {}", e));
                             });
-                        tracing::error!(error = %e, "Failed to load HF model");
+                        // Recoverable user-space failure (bad arch, truncated
+                        // GGUF, format error) — the user can re-download or
+                        // pick a different model from the dashboard. Reserve
+                        // error! for actual production-incident severity.
+                        tracing::warn!(
+                            error = %e,
+                            model = %download_mid,
+                            "HF model load failed after download — re-download or check format"
+                        );
                     }
                 }
             }

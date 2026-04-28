@@ -283,8 +283,8 @@ pub async fn messages(
             extras: &req.extras,
         })
         .map_err(|e| {
-            ApiError(crate::error::SwarmError::Validation(format!(
-                "Failed to serialize request: {e}"
+            ApiError(crate::error::SwarmError::Internal(format!(
+                "serialize request for proxy: {e}"
             )))
         })?;
         return crate::api::claude_sub::proxy_via_subprocess_anthropic(&sub_config, &body).await;
@@ -315,8 +315,8 @@ pub async fn messages(
                 extras: &req.extras,
             })
             .map_err(|e| {
-                ApiError(crate::error::SwarmError::Validation(format!(
-                    "Failed to serialize request: {e}"
+                ApiError(crate::error::SwarmError::Internal(format!(
+                    "serialize request for proxy: {e}"
                 )))
             })?;
 

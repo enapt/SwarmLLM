@@ -279,6 +279,7 @@ pub async fn update_config(
         .map_err(|e| ApiError(crate::error::SwarmError::Validation(e.to_string())))?;
 
     let cp = config_path.clone();
+    let cp_for_err = config_path.clone();
     tokio::task::spawn_blocking(move || {
         if let Some(parent) = cp.parent() {
             std::fs::create_dir_all(parent).ok();
@@ -292,7 +293,18 @@ pub async fn update_config(
             "Failed to save configuration".into(),
         ))
     })?
-    .map_err(|e| ApiError(crate::error::SwarmError::Io(e)))?;
+    .map_err(|e| {
+        // SwarmError::Io has no IntoResponse arm of its own and falls through
+        // to the catch-all 500 with a generic "internal error occurred"
+        // message — the operator never sees which path failed or why
+        // (permission denied, disk full, ENOTDIR, etc). Wrap in Internal
+        // with the path so the structured error log + response body carry
+        // the context needed to triage.
+        ApiError(crate::error::SwarmError::Internal(format!(
+            "Failed to write config to {}: {e}",
+            cp_for_err.display()
+        )))
+    })?;
 
     tracing::info!(path = %config_path.display(), "Configuration saved");
 
@@ -318,9 +330,24 @@ pub async fn reload_config(
         "Config reload requested via API"
     );
 
-    // Pass SwarmError::Config through unchanged so the admin gets a 400
-    // with the actual parse/IO message instead of a generic 500.
-    let params = crate::config::reload_operational_params(&config_path).map_err(ApiError::from)?;
+    // Map config-file errors to HTTP-appropriate variants:
+    //   missing file → 404 NotFound (the dashboard hasn't saved yet)
+    //   parse / IO error → 400 Validation (broken file content)
+    // SwarmError::Config is reserved for startup-only errors per the rule in
+    // .claude/rules/completeness.md and would otherwise leak the unhelpful
+    // "invalid_request_error" type for what is really a config-file issue.
+    let params = crate::config::reload_operational_params(&config_path).map_err(|e| match e {
+        crate::error::SwarmError::Config(msg) if msg.starts_with("Config file not found") => {
+            ApiError(crate::error::SwarmError::NotFound(msg))
+        }
+        crate::error::SwarmError::Config(msg) => {
+            ApiError(crate::error::SwarmError::Validation(msg))
+        }
+        crate::error::SwarmError::Io(io_err) => ApiError(crate::error::SwarmError::Validation(
+            format!("Config file IO error: {io_err}"),
+        )),
+        other => ApiError(other),
+    })?;
 
     let old = crate::config::OperationalParams::from_config(&state.config);
     let changed = params != old;
