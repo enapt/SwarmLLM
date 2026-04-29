@@ -1458,6 +1458,9 @@ Single-node inference performance, measured with `swarmllm bench` (100 output to
 - **Audio input on `/v1/responses`** — `input_audio` returns 400 today; needs a Whisper-class transcription model that SwarmLLM doesn't currently expose.
 - **Binary file inputs** — `input_file{file_data}` accepts UTF-8 only; PDF / docx / image-bytes payloads are rejected with a clear hint pointing at `input_image` (for images) or server-side text extraction (for documents). Adding a PDF parser is a deferred call-site question.
 
+### Test infrastructure
+- **Synthetic tiny-model fixture (`tests/fixtures/tiny_model/`)** — empty placeholder. Originally specced as a 2-layer / 128-hidden / 2-shard llama-arch GGUF (~1MB) committed to the repo so a multi-process spawn-and-infer integration test could run in CI without network. Two reasons it stays deferred: (1) generating a valid GGUF + matching `manifest.json` + `gguf_header.bin` + tokenizer requires a Python `gguf`-library generator script that we don't yet maintain, and would version-drift against candle-transformers / our split loader; (2) random-weight outputs are gibberish, so the test would only catch GGUF-parse and worker-IPC plumbing bugs — both already covered by `tests/integration/end_to_end.rs` (in-process HTTP + shutdown) and `inference::split` unit tests. The pragmatic substitute is the env-var-gated `local_embedder_load_from_real_model` test (`SWARMLLM_TEST_MODEL_DIR`) and manual smoke tests against the existing TinyLlama-1.1B / Phi-3.5 / Qwen2.5-7B installs at `~/.local/share/swarmllm/models/`. Revisit if a CI worker subprocess regression slips past the unit + in-process layers.
+
 Per-sweep-round findings (status, resolution, deferral) are tracked in `.claude/sweep-log.jsonl`.
 
 ## Scalability (Phase 19)

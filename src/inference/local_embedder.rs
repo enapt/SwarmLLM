@@ -154,26 +154,36 @@ impl LocalEmbedder {
 mod tests {
     use super::*;
 
+    /// Loads `shard_000.bin` from a real on-disk model directory and exercises
+    /// `embed_prompt` + `embed_token`. Gated on `SWARMLLM_TEST_MODEL_DIR`; no
+    /// synthetic fixture is committed (see `docs/ARCHITECTURE.md` § Deferred Items).
+    ///
+    /// Run with:
+    /// ```sh
+    /// SWARMLLM_TEST_MODEL_DIR=~/.local/share/swarmllm/models/tinyllama-1.1b-... \
+    ///     cargo test -- --ignored local_embedder_load_from_real_model
+    /// ```
     #[test]
-    fn local_embedder_load_from_test_model() {
-        // Use the test model's shard_000.bin if available
-        let shard0 = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures/tiny_model/shard_000.bin");
-        if !shard0.exists() {
-            return; // Skip if test fixture not available
-        }
+    #[ignore]
+    fn local_embedder_load_from_real_model() {
+        let model_dir = match std::env::var("SWARMLLM_TEST_MODEL_DIR") {
+            Ok(d) => std::path::PathBuf::from(d),
+            Err(_) => {
+                panic!("set SWARMLLM_TEST_MODEL_DIR to a model directory containing shard_000.bin")
+            }
+        };
+        let shard0 = model_dir.join("shard_000.bin");
+        assert!(shard0.exists(), "shard_000.bin missing in {model_dir:?}");
 
         let embedder = LocalEmbedder::load(&shard0).expect("Failed to load local embedder");
         assert!(embedder.hidden_dim > 0);
 
-        // Test prompt embedding
         let (bytes, num_tokens) = embedder
             .embed_prompt("Hello world")
             .expect("embed_prompt failed");
         assert!(num_tokens > 0);
         assert!(!bytes.is_empty());
 
-        // Test single token embedding
         let token_bytes = embedder.embed_token(1).expect("embed_token failed");
         assert!(!token_bytes.is_empty());
     }

@@ -140,10 +140,10 @@ libp2p 0.56, axum 0.8, candle-core/candle-transformers 0.10 (CUDA), redb 4, ed25
 
 ## Testing
 
-- 890 lib tests + 1 ignored end-to-end (`cargo test --test integration_phase10_11 -- --ignored`), clippy clean
+- 879 lib tests passing + 8 ignored (env-var-gated real-model + manual smoke), 75 integration tests in `tests/integration/`, 1 ignored end-to-end (`cargo test --test integration_phase10_11 -- --ignored`), clippy clean
 - Unit tests: in-module `#[cfg(test)]` blocks
 - Integration tests: `tests/integration/` — multi-node simulations with `--test-threads=1`
-- Test model: `tests/fixtures/tiny_model/` — 2-layer, 128 hidden dim, ~1MB, 2 shards
+- Real-model spawn-and-infer test: set `SWARMLLM_TEST_MODEL_DIR` to a fully-populated model directory (e.g. `~/.local/share/swarmllm/models/tinyllama-1.1b-...`) and run `cargo test --test integration_phase10_11 -- --ignored end_to_end`. No synthetic GGUF fixture is committed; see `docs/ARCHITECTURE.md` § Deferred Items.
 - CI pipeline: `cargo fmt` → `cargo clippy --all-targets -- -D warnings` → `cargo test` → `cargo build --release`
 
 ## Key Design Decisions
@@ -176,7 +176,7 @@ When spawning subagents in this repo, use these model picks (overrides defaults 
 
 ## Status
 
-All 20 build phases complete. All subsystems wired — no stubs. 890 lib tests + 1 ignored end-to-end passing (was 893; the 2026-04-29 black-hat sweep removed 3 tests for the deleted dead non-loopback peer-forwarded auth gate). Deferred items in `docs/ARCHITECTURE.md` § "Deferred Items". See `memory/refactor_plan.md` for remaining large-file splits.
+All 20 build phases complete. All subsystems wired — no stubs. 879 lib tests + 75 integration tests passing; 8 lib + 1 e2e ignored (env-var or manual). Deferred items in `docs/ARCHITECTURE.md` § "Deferred Items". See `memory/refactor_plan.md` for remaining large-file splits.
 
 ## Common Commands
 

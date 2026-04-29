@@ -7,9 +7,13 @@
 //! the existing api_test.rs (which only mounts the router) doesn't see.
 //!
 //! Marked `#[ignore]` so CI runs it explicitly via `cargo test --test
-//! integration_phase10_11 -- --ignored end_to_end`. The full multi-process
-//! `swarmllm run` spawn-and-stop test is left as a manual smoke step until
-//! the tiny_model fixture is regenerated.
+//! integration_phase10_11 -- --ignored end_to_end`.
+//!
+//! The full multi-process `swarmllm run` spawn-and-infer smoke is gated
+//! on `SWARMLLM_TEST_MODEL_DIR` pointing at a real on-disk model dir
+//! (run via `daemon_lifecycle_with_real_model`). No synthetic GGUF
+//! fixture is committed; see `docs/ARCHITECTURE.md` § Deferred Items
+//! for the rationale.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
