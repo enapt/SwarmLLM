@@ -79,6 +79,11 @@ impl PipelineExecutor {
 
         let mut generated_tokens: Vec<u32> = Vec::new();
         let mut finish_reason = String::new();
+        // Outer-scope flag tracking whether a stop-string fired during the
+        // decode loop. Drives the post-loop KV-truncate to remote segments
+        // for session-keyed requests (gotcha #4 — stop tokens otherwise
+        // contaminate the next session turn's KV).
+        let mut hit_stop_string_outer = false;
 
         // Cumulative position for RoPE / KV-cache
         let mut index_pos: usize = 0;
@@ -353,6 +358,7 @@ impl PipelineExecutor {
                     }
 
                     if hit_stop_string {
+                        hit_stop_string_outer = true;
                         finish_reason = "stop".to_string();
                         if let Some(ref tx) = token_tx {
                             let _ = tx
@@ -427,6 +433,24 @@ impl PipelineExecutor {
                         text: String::new(),
                         finish_reason: Some("length".to_string()),
                     })
+                    .await;
+            }
+        }
+
+        // Stop-sequence KV cleanup for session-keyed requests. When a stop
+        // string fires mid-decode, the remote KV cache holds tokens up to
+        // (and including) the stop tokens — feeding that state into the next
+        // session turn would prepend the stop string to the new context.
+        // Truncate every remote segment's KV back to `prompt_token_count` so
+        // the next turn re-prefills (fast via prefix-cache) without the
+        // contaminated suffix. Only matters when session_id is set;
+        // request-scoped KV is cleaned up by the per-request TTL anyway.
+        let needs_kv_reset = hit_stop_string_outer
+            && self.request.session_id.is_some()
+            && !self.assignment.segments.is_empty();
+        if needs_kv_reset {
+            if let Some(ptc) = prompt_token_count {
+                self.send_kv_truncate_to_segments(request_id, ptc as u32)
                     .await;
             }
         }
@@ -506,6 +530,69 @@ impl PipelineExecutor {
                 .drain(..)
                 .collect(),
         })
+    }
+
+    /// Send a truncation-only `LayerForward` to every remote segment in the
+    /// pipeline so each peer can shrink its KV cache back to `truncate_to`
+    /// positions. Used after a stop-string fires on a session-keyed request,
+    /// so the next turn doesn't see the contaminating stop tokens. Errors
+    /// are logged but not propagated — the request itself has already
+    /// completed; failed-truncate just means the next session turn re-
+    /// prefills from scratch (which is correct behaviour, just slower).
+    async fn send_kv_truncate_to_segments(&self, request_id: uuid::Uuid, truncate_to: u32) {
+        for segment in &self.assignment.segments {
+            // Skip the local segment — its KV is owned by the worker process,
+            // and the per-request TTL plus session-scoped lookup keys handle
+            // it correctly. Only remote segments need an explicit signal.
+            if segment.node_id == *self.shared_state.identity.node_id() {
+                continue;
+            }
+            let target_peer_bytes = match self.shared_state.resolve_peer_id_bytes(&segment.node_id)
+            {
+                Some(p) => p,
+                None => continue,
+            };
+            let forward = crate::types::LayerForward {
+                request_id,
+                sequence_num: 1, // not prefill
+                index_pos: truncate_to,
+                activations: Vec::new(), // truncate-only, no compute
+                format: crate::types::TensorFormat::FP32,
+                model_id: segment.shard_id.model_id.clone(),
+                layer_range: segment.layer_range,
+                vision_embeddings: None,
+                sender_peer_bytes: None,
+                tp_meta: None,
+                requester_node_id: Some(self.shared_state.identity.node_id().0),
+                pre_embedded: false,
+                adapter_id: None,
+                draft_tokens: Vec::new(),
+                spec_logits_requested: false,
+                truncate_kv_to: Some(truncate_to),
+            };
+            if let Err(e) = self
+                .network_tx
+                .send(crate::types::NetworkCommand::SendTensor {
+                    target_peer_bytes,
+                    forward,
+                })
+                .await
+            {
+                tracing::debug!(
+                    request_id = %request_id,
+                    node = %segment.node_id,
+                    error = %e,
+                    "DIAG: stop-sequence KV-truncate send failed; next session turn re-prefills"
+                );
+            } else {
+                tracing::debug!(
+                    request_id = %request_id,
+                    node = %segment.node_id,
+                    truncate_to,
+                    "DIAG: sent stop-sequence KV-truncate to segment"
+                );
+            }
+        }
     }
 
     /// Forward activation data through all pipeline segments in order.

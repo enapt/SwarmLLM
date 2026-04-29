@@ -47,6 +47,39 @@ pub(super) async fn finalize_request(
             .with_detail_str(format!("{}", e))
             .with_toast("warning", 5000),
         );
+
+        // Refund the escrow if one was created. Without this, a failed
+        // request leaves credits locked until the 5-minute cleanup tick
+        // (which only fires on `expires_at` expiry — itself defaulted to
+        // a generous window). Credit enforcement isn't gating real users
+        // yet, but the bookkeeping has to be correct for when it is.
+        if let Some(eid) = escrow_id {
+            match shared_state
+                .credits
+                .escrow_manager
+                .refund_escrow(eid, &shared_state.credits.credit_balance)
+                .await
+            {
+                Ok(amount) => {
+                    tracing::info!(
+                        request_id = %request.id,
+                        escrow_id = %eid,
+                        amount,
+                        "DIAG: refunded escrow on inference failure"
+                    );
+                }
+                Err(re) => {
+                    // Don't propagate — the user already got their failure.
+                    // Log so the cleanup sweep can still mop up.
+                    tracing::warn!(
+                        request_id = %request.id,
+                        escrow_id = %eid,
+                        error = %re,
+                        "Escrow refund failed; cleanup tick will retry"
+                    );
+                }
+            }
+        }
     }
 
     // Local API requests use NodeId([0; 32]) as requester sentinel
