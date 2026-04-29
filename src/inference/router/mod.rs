@@ -585,8 +585,19 @@ impl InferenceRouter {
             None
         };
 
-        // Check for multi-turn KV-cache reuse
-        let cache_start_pos = if let Some(ref session_id) = queued.request.session_id {
+        // Check for multi-turn KV-cache reuse. Hoist the chatml_fallback
+        // allocation outside the if-let so the same prompt String is reused
+        // by both check_multi_turn_reuse (above) and register_multi_turn
+        // (below) on the cache-miss branch — was being allocated twice on
+        // every cold-start session-keyed request.
+        let session_prompt =
+            queued.request.session_id.as_ref().map(|_| {
+                crate::inference::chat_template::chatml_fallback(&queued.request.messages)
+            });
+
+        let cache_start_pos = if let (Some(session_id), Some(prompt)) =
+            (queued.request.session_id.as_ref(), session_prompt.as_ref())
+        {
             // Collect active peer IDs into a HashSet for O(1) holder lookup
             // inside check_multi_turn_reuse — peer_registry can be large.
             let active_peers: std::collections::HashSet<crate::types::NodeId> = self
@@ -596,16 +607,9 @@ impl InferenceRouter {
                 .map(|e| e.key().clone())
                 .collect();
 
-            // Build the prompt to check prefix matching
-            let prompt = {
-                // Use a quick ChatML fallback for prefix comparison — the
-                // actual template doesn't matter as long as we're consistent.
-                crate::inference::chat_template::chatml_fallback(&queued.request.messages)
-            };
-
             match self
                 .kv_cache
-                .check_multi_turn_reuse(session_id, &prompt, &active_peers)
+                .check_multi_turn_reuse(session_id, prompt, &active_peers)
             {
                 crate::inference::kv_cache::CacheReuse::Hit { start_pos } => {
                     tracing::info!(
@@ -635,9 +639,9 @@ impl InferenceRouter {
         // Skip if session already exists (cache_start_pos.is_some()) — don't overwrite
         // existing session's pipeline/cache_holders with empty data.
         if cache_start_pos.is_none() {
-            if let Some(ref session_id) = queued.request.session_id {
-                let prompt =
-                    crate::inference::chat_template::chatml_fallback(&queued.request.messages);
+            if let (Some(session_id), Some(prompt)) =
+                (queued.request.session_id.as_ref(), session_prompt)
+            {
                 self.kv_cache.register_multi_turn(
                     session_id,
                     queued.request.id,

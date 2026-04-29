@@ -275,7 +275,10 @@ impl SplitModel {
         all_positions: bool,
         skip_mask: Option<&[bool]>,
     ) -> Result<(Tensor, HashMap<usize, Tensor>), SwarmError> {
-        let forward_start = std::time::Instant::now();
+        // Skip the clock_gettime syscall when DEBUG tracing is off — fires per
+        // token per layer-forward, and the elapsed time is consumed only by
+        // the debug! at the end of this fn.
+        let forward_start = tracing::enabled!(tracing::Level::DEBUG).then(std::time::Instant::now);
         // Use component presence rather than layer indices for shard-aware is_first/is_last
         let is_first = self.tok_embeddings.is_some();
         let is_last = self.output.is_some();
@@ -592,18 +595,20 @@ impl SplitModel {
             Ok(layer_in)
         };
 
-        let forward_ms = forward_start.elapsed().as_millis() as u64;
-        tracing::debug!(
-            request_id,
-            index_pos,
-            seq_len,
-            num_layers,
-            is_first,
-            is_last,
-            kv_offset,
-            forward_ms,
-            "DIAG: SplitModel forward pass complete"
-        );
+        if let Some(start) = forward_start {
+            let forward_ms = start.elapsed().as_millis() as u64;
+            tracing::debug!(
+                request_id,
+                index_pos,
+                seq_len,
+                num_layers,
+                is_first,
+                is_last,
+                kv_offset,
+                forward_ms,
+                "DIAG: SplitModel forward pass complete"
+            );
+        }
 
         result.map(|t| (t, captured))
     }

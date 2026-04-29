@@ -784,7 +784,12 @@ impl PipelineExecutor {
                     .pending_layer_results
                     .insert(request_id, tx);
 
-                tracing::info!(
+                // Per-token call in the decode loop. tracing::info! eagerly
+                // formats `%request_id` (UUID Display) and `%segment.node_id`
+                // (hex) on every call regardless of subscriber level. Drop
+                // to debug! to match the surrounding DIAG: gating; ~4 String
+                // allocations per token per remote segment saved.
+                tracing::debug!(
                     request_id = %request_id,
                     seq = sequence_num,
                     segment = idx,
