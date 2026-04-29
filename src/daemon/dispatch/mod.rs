@@ -256,22 +256,25 @@ pub(crate) async fn dispatch_network_messages(
                                             has_sender = forward.sender_peer_bytes.is_some(),
                                             "DIAG: dispatcher received LayerForward, spawning handler"
                                         );
-                                        // SEC: Per-peer concurrent forward limit to prevent single-peer exhaustion
+                                        // SEC: Per-peer concurrent forward limit to prevent single-peer exhaustion.
+                                        // Use optimistic fetch_add, then revert on overshoot — load-then-check-then-add
+                                        // would let two concurrent dispatcher iterations both pass the check at
+                                        // MAX-1 and admit MAX+1 forwards from one peer.
                                         let peer_sender = authenticated_sender.clone().expect("guarded by Some check above");
                                         let peer_count = peer_forward_counts
                                             .entry(peer_sender.clone())
                                             .or_insert_with(|| std::sync::atomic::AtomicUsize::new(0));
-                                        let current = peer_count.load(std::sync::atomic::Ordering::Relaxed);
-                                        if current >= MAX_FORWARDS_PER_PEER {
+                                        let prev = peer_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                        if prev >= MAX_FORWARDS_PER_PEER {
+                                            peer_count.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
                                             tracing::warn!(
                                                 sender = %peer_sender,
-                                                current,
+                                                current = prev,
                                                 max = MAX_FORWARDS_PER_PEER,
                                                 "LayerForward rejected — per-peer limit reached"
                                             );
                                             continue;
                                         }
-                                        peer_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                                         let permit = match forward_semaphore.clone().try_acquire_owned() {
                                             Ok(p) => p,
                                             Err(_) => {
@@ -397,43 +400,43 @@ pub(crate) async fn dispatch_network_messages(
                                     }
                                     // T13: VisionEncodeResponse — fire pending oneshot
                                     SwarmMessage::VisionEncodeResponse(resp) => {
-                                        // Verify the authenticated sender matches the expected responder
-                                        // stored when the VisionEncodeRequest was sent.
-                                        // SEC: Peek at entry first — only remove after sender is validated
-                                        // to avoid dropping the oneshot sender on mismatch (which would hang the pipeline).
-                                        let sender_ok = if let Some(entry) = shared_state
+                                        // Atomically remove the entry, then validate the sender against
+                                        // the stored expected_node. A peek+remove dance had a TOCTOU with
+                                        // the health-monitor stale-entry sweep (health/monitor.rs:622)
+                                        // that could remove the entry between the peek and the remove,
+                                        // silently dropping a valid response.
+                                        // On sender mismatch we re-insert so a later valid response can
+                                        // still land — entries are bounded by request timeouts upstream.
+                                        if let Some((_, (expected_node, tx))) = shared_state
                                             .pending_vision_results
-                                            .get(&resp.request_id)
+                                            .remove(&resp.request_id)
                                         {
-                                            let expected_node = &entry.0;
-                                            if let Some(ref sender) = authenticated_sender {
-                                                if sender != expected_node {
+                                            match &authenticated_sender {
+                                                Some(sender) if sender == &expected_node => {
+                                                    let _ = tx.send(resp);
+                                                }
+                                                Some(sender) => {
                                                     tracing::warn!(
                                                         request_id = %resp.request_id,
                                                         expected = %expected_node,
                                                         actual = %sender,
                                                         "VisionEncodeResponse sender mismatch — dropping"
                                                     );
-                                                    false
-                                                } else {
-                                                    true
+                                                    shared_state.pending_vision_results.insert(
+                                                        resp.request_id,
+                                                        (expected_node, tx),
+                                                    );
                                                 }
-                                            } else {
-                                                tracing::warn!(
-                                                    request_id = %resp.request_id,
-                                                    "VisionEncodeResponse without authenticated sender — dropping"
-                                                );
-                                                false
-                                            }
-                                        } else {
-                                            false
-                                        };
-                                        if sender_ok {
-                                            if let Some((_, (_expected_node, tx))) = shared_state
-                                                .pending_vision_results
-                                                .remove(&resp.request_id)
-                                            {
-                                                let _ = tx.send(resp);
+                                                None => {
+                                                    tracing::warn!(
+                                                        request_id = %resp.request_id,
+                                                        "VisionEncodeResponse without authenticated sender — dropping"
+                                                    );
+                                                    shared_state.pending_vision_results.insert(
+                                                        resp.request_id,
+                                                        (expected_node, tx),
+                                                    );
+                                                }
                                             }
                                         }
                                     }
@@ -450,13 +453,16 @@ pub(crate) async fn dispatch_network_messages(
                                             tracing::warn!(msg_type = "Inference", "message without authenticated sender — dropping");
                                             continue;
                                         }
+                                        // try_send to avoid blocking the dispatch loop on a backlogged
+                                        // router channel. A full router queue is the expected backpressure
+                                        // signal — drop the inbound inference message and log; the peer
+                                        // will retry. Same policy as the StreamingToken path above.
                                         if let Err(e) = router_tx
-                                            .send(RouterCommand::NetworkMessage(msg))
-                                            .await
+                                            .try_send(RouterCommand::NetworkMessage(msg))
                                         {
                                             tracing::warn!(
                                                 error = %e,
-                                                "Failed to route inference message to router"
+                                                "Failed to route inference message to router (channel full or closed)"
                                             );
                                         }
                                     }
@@ -877,7 +883,19 @@ pub(crate) async fn dispatch_network_messages(
                                             );
                                             continue;
                                         }
-                                        if let Some(ref tx) = *shared_state.credits.pool_tx.read().await {
+                                        // Clone the sender out of the RwLock to drop the read guard
+                                        // BEFORE awaiting send(). Holding the guard across send().await
+                                        // would block the dispatch loop AND block any writer trying to
+                                        // install/replace pool_tx (gotcha: tokio RwLock starves writers
+                                        // while readers are parked).
+                                        let pool_tx_clone = shared_state
+                                            .credits
+                                            .pool_tx
+                                            .read()
+                                            .await
+                                            .as_ref()
+                                            .cloned();
+                                        if let Some(tx) = pool_tx_clone {
                                             let cmd = match pool_msg {
                                                 crate::types::PoolMessage::BlindedInvitation(blinded) => {
                                                     Some(crate::pool::types::PoolCommand::InboundBlindedInvitation {

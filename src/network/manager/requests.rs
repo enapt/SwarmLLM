@@ -395,9 +395,13 @@ impl NetworkManager {
                     // Measure RTT from rr_ping send time
                     if let Some((_sent_peer, sent_at)) = self.ping_sent_times.remove(&request_id) {
                         let rtt_ms = sent_at.elapsed().as_millis() as u32;
-                        if let Some(node_id) = self.peer_to_node.get(&peer) {
+                        // Clone NodeId out of peer_to_node Ref before touching peer_registry —
+                        // holding a Ref across another DashMap mutating call is the gotcha #10
+                        // pattern that has bitten us before.
+                        let node_id = self.peer_to_node.get(&peer).map(|r| r.clone());
+                        if let Some(node_id) = node_id {
                             if let Some(mut peer_info) =
-                                self.shared_state.peer_registry.get_mut(&*node_id)
+                                self.shared_state.peer_registry.get_mut(&node_id)
                             {
                                 peer_info.latency_ms = Some(rtt_ms);
                                 // Auto-detect LAN peer from low latency (< 5ms)

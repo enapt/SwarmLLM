@@ -897,31 +897,29 @@ impl ModelProcessPool {
             return Ok(handle.clone());
         }
 
-        // Crash-loop backoff: refuse to re-spawn while a recent failure is
-        // still inside its cooldown window. Without this a permanently-broken
-        // model (corrupt shards, GPU OOM on load) burns one
-        // WORKER_CONNECT_TIMEOUT_SECS = 30s spawn attempt per arriving
-        // request and saturates the whole inference path.
-        if let Some(entry) = self.spawn_failures.get(model_id) {
-            let (at, count) = *entry;
-            let cooldown = spawn_failure_cooldown(count);
-            if at.elapsed() < cooldown {
-                let remaining = cooldown.saturating_sub(at.elapsed());
-                return Err(SwarmError::ModelNotAvailable(model_id.clone()))
-                    .map_err(|_| {
-                        SwarmError::ServiceUnavailable(format!(
-                            "Worker spawn for {} failing repeatedly — backing off for {:?} (attempt #{})",
-                            model_id.0, remaining, count
-                        ))
-                    });
-            }
-        }
-
         // Slow path: serialize spawns to prevent duplicate workers
         let _guard = self.spawn_lock.lock().await;
         // Re-check after acquiring lock (another task may have spawned it)
         if let Some(handle) = self.workers.get(model_id) {
             return Ok(handle.clone());
+        }
+        // Crash-loop backoff: refuse to re-spawn while a recent failure is
+        // still inside its cooldown window. Without this a permanently-broken
+        // model (corrupt shards, GPU OOM on load) burns one
+        // WORKER_CONNECT_TIMEOUT_SECS = 30s spawn attempt per arriving
+        // request and saturates the whole inference path.
+        // Check INSIDE the spawn_lock so a concurrent failure that records
+        // itself between our entry and our spawn cannot be bypassed.
+        if let Some(entry) = self.spawn_failures.get(model_id) {
+            let (at, count) = *entry;
+            let cooldown = spawn_failure_cooldown(count);
+            if at.elapsed() < cooldown {
+                let remaining = cooldown.saturating_sub(at.elapsed());
+                return Err(SwarmError::ServiceUnavailable(format!(
+                    "Worker spawn for {} failing repeatedly — backing off for {:?} (attempt #{})",
+                    model_id.0, remaining, count
+                )));
+            }
         }
         match self.spawn_worker(model_id).await {
             Ok(handle) => {
