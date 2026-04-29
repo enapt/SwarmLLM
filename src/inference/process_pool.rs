@@ -46,6 +46,23 @@ pub struct PrefixProbeEvent {
 }
 
 const WORKER_CONNECT_TIMEOUT_SECS: u64 = 30;
+
+/// Exponential backoff for repeat worker-spawn failures: 1s, 2s, 4s, 8s,
+/// 16s, 32s, capped at 60s. The arriving request gets `ModelNotAvailable`
+/// during the cooldown window, so a permanently-broken model can't drown
+/// the inference path in 30-second connect timeouts.
+fn spawn_failure_cooldown(consecutive_failures: u32) -> std::time::Duration {
+    let secs = match consecutive_failures {
+        0 | 1 => 1,
+        2 => 2,
+        3 => 4,
+        4 => 8,
+        5 => 16,
+        6 => 32,
+        _ => 60,
+    };
+    std::time::Duration::from_secs(secs)
+}
 /// Default KV-cache TTL in seconds (10 minutes). Overridden by config at startup.
 pub const DEFAULT_KV_CACHE_TTL_SECS: u64 = 600;
 
@@ -471,6 +488,13 @@ pub struct ModelProcessPool {
     /// Serializes worker spawning to prevent TOCTOU races where two concurrent
     /// callers both miss the DashMap lookup and each spawn a subprocess.
     spawn_lock: Mutex<()>,
+    /// Crash-loop backoff: per-model `(last_failure_at, consecutive_failures)`.
+    /// A spawn that fails (or crashes immediately) bumps the counter; further
+    /// `get_or_spawn` calls within the cooldown window short-circuit with
+    /// `ModelNotAvailable` instead of repeatedly burning the 30 s
+    /// `WORKER_CONNECT_TIMEOUT_SECS` on every arriving request. First
+    /// successful spawn clears the entry.
+    spawn_failures: DashMap<ModelId, (std::time::Instant, u32)>,
     data_dir: PathBuf,
     /// Active shard windows: which shards each model worker should load.
     /// If absent, the worker loads all on-disk shards (default behavior).
@@ -589,6 +613,7 @@ impl ModelProcessPool {
         Self {
             workers: DashMap::new(),
             spawn_lock: Mutex::new(()),
+            spawn_failures: DashMap::new(),
             data_dir,
             active_shard_windows: DashMap::new(),
             activity_tx: std::sync::OnceLock::new(),
@@ -871,16 +896,75 @@ impl ModelProcessPool {
         if let Some(handle) = self.workers.get(model_id) {
             return Ok(handle.clone());
         }
+
+        // Crash-loop backoff: refuse to re-spawn while a recent failure is
+        // still inside its cooldown window. Without this a permanently-broken
+        // model (corrupt shards, GPU OOM on load) burns one
+        // WORKER_CONNECT_TIMEOUT_SECS = 30s spawn attempt per arriving
+        // request and saturates the whole inference path.
+        if let Some(entry) = self.spawn_failures.get(model_id) {
+            let (at, count) = *entry;
+            let cooldown = spawn_failure_cooldown(count);
+            if at.elapsed() < cooldown {
+                let remaining = cooldown.saturating_sub(at.elapsed());
+                return Err(SwarmError::ModelNotAvailable(model_id.clone()))
+                    .map_err(|_| {
+                        SwarmError::ServiceUnavailable(format!(
+                            "Worker spawn for {} failing repeatedly — backing off for {:?} (attempt #{})",
+                            model_id.0, remaining, count
+                        ))
+                    });
+            }
+        }
+
         // Slow path: serialize spawns to prevent duplicate workers
         let _guard = self.spawn_lock.lock().await;
         // Re-check after acquiring lock (another task may have spawned it)
         if let Some(handle) = self.workers.get(model_id) {
             return Ok(handle.clone());
         }
-        let handle = self.spawn_worker(model_id).await?;
-        let handle = Arc::new(handle);
-        self.workers.insert(model_id.clone(), handle.clone());
-        Ok(handle)
+        match self.spawn_worker(model_id).await {
+            Ok(handle) => {
+                // Reset the failure counter on first success.
+                self.spawn_failures.remove(model_id);
+                let handle = Arc::new(handle);
+                self.workers.insert(model_id.clone(), handle.clone());
+                Ok(handle)
+            }
+            Err(e) => {
+                let count = self
+                    .spawn_failures
+                    .entry(model_id.clone())
+                    .and_modify(|v| *v = (std::time::Instant::now(), v.1.saturating_add(1)))
+                    .or_insert((std::time::Instant::now(), 1))
+                    .1;
+                let cooldown = spawn_failure_cooldown(count);
+                tracing::error!(
+                    model = %model_id,
+                    consecutive_failures = count,
+                    cooldown_secs = cooldown.as_secs(),
+                    error = %e,
+                    "Worker spawn failed — backing off"
+                );
+                if let Some(tx) = self.activity_tx.get() {
+                    let _ = tx.send(
+                        crate::daemon::state::ActivityEvent::new(
+                            "model",
+                            "worker_spawn_failed",
+                            format!(
+                                "Worker spawn failed for {} (attempt #{}, cooldown {}s)",
+                                model_id.0,
+                                count,
+                                cooldown.as_secs()
+                            ),
+                        )
+                        .with_model(model_id.0.clone())
+                        .with_toast("error", 6000),
+                    );
+                }
+                Err(e)
+            }
+        }
     }
 
     async fn spawn_worker(&self, model_id: &ModelId) -> Result<WorkerHandle, SwarmError> {

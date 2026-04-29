@@ -134,6 +134,7 @@ pub async fn submit_stream_to_router(
     sampling_params: SamplingParams,
     session_id: Option<String>,
     lora_adapter: Option<String>,
+    cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 ) -> Result<
     (
         tokio::sync::oneshot::Receiver<
@@ -146,7 +147,7 @@ pub async fn submit_stream_to_router(
     let (result_tx, result_rx) = tokio::sync::oneshot::channel();
     let (token_tx, token_rx) = tokio::sync::mpsc::channel::<StreamingTokenEvent>(64);
 
-    let inference_req = InferenceRequest::local(
+    let mut inference_req = InferenceRequest::local(
         model_id,
         messages,
         sampling_params,
@@ -154,6 +155,7 @@ pub async fn submit_stream_to_router(
         session_id,
         lora_adapter,
     );
+    inference_req.cancel = cancel;
 
     router_tx
         .send(RouterCommand::StreamSubmit {
@@ -214,11 +216,12 @@ pub(super) async fn dispatch_inference(
     messages: Vec<ChatMessage>,
     request_id: String,
     created: i64,
+    cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 ) -> Result<axum::response::Response, ApiError> {
     if req.stream {
-        router_inference_stream(router_tx, req, messages, request_id, created).await
+        router_inference_stream(router_tx, req, messages, request_id, created, cancel).await
     } else {
-        router_inference(router_tx, req, messages, request_id, created).await
+        router_inference(router_tx, req, messages, request_id, created, cancel).await
     }
 }
 
@@ -229,8 +232,9 @@ pub(super) async fn router_inference(
     messages: Vec<ChatMessage>,
     request_id: String,
     created: i64,
+    cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 ) -> Result<axum::response::Response, ApiError> {
-    let inference_req = InferenceRequest::local(
+    let mut inference_req = InferenceRequest::local(
         ModelId(req.model.clone()),
         messages,
         req.to_sampling_params(),
@@ -238,6 +242,7 @@ pub(super) async fn router_inference(
         req.session_id.clone(),
         req.lora_adapter.clone(),
     );
+    inference_req.cancel = cancel;
 
     let output = crate::api::submit_to_router(&router_tx, inference_req).await?;
 
@@ -267,6 +272,7 @@ async fn router_inference_stream(
     messages: Vec<ChatMessage>,
     request_id: String,
     created: i64,
+    cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 ) -> Result<axum::response::Response, ApiError> {
     let (result_rx, mut token_rx) = submit_stream_to_router(
         &router_tx,
@@ -275,6 +281,7 @@ async fn router_inference_stream(
         req.to_sampling_params(),
         req.session_id.clone(),
         req.lora_adapter.clone(),
+        cancel,
     )
     .await?;
 

@@ -83,6 +83,7 @@ pub(super) async fn anthropic_stream(
         params,
         None,
         None,
+        None, // anthropic /v1/messages doesn't have a cancel-by-token wire yet
     )
     .await?;
 

@@ -160,6 +160,22 @@ pub async fn chat_completions(
     let request_id = format!("swarm-{}", uuid::Uuid::new_v4().simple());
     let created = chrono::Utc::now().timestamp();
 
+    // Cancellation: callers (e.g. /v1/responses background runner) set a
+    // pre-registered cancel token via the `x-swarmllm-cancel-token` header.
+    // The pipeline executor checks `request.is_cancelled()` per token in the
+    // decode loop, so flipping the AtomicBool from the cancel API stops the
+    // generation on the next iteration.
+    let cancel_token: Option<std::sync::Arc<std::sync::atomic::AtomicBool>> = headers
+        .get("x-swarmllm-cancel-token")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|tok| {
+            state
+                .shared_state
+                .cancel_signals
+                .get(tok)
+                .map(|r| r.value().clone())
+        });
+
     // Track requests made by this node
     super::increment_requests_made(&state.shared_state);
 
@@ -246,6 +262,7 @@ pub async fn chat_completions(
                     internal_messages.clone(),
                     request_id,
                     created,
+                    cancel_token.clone(),
                 )
                 .await;
             } else {
@@ -319,6 +336,7 @@ pub async fn chat_completions(
                         internal_messages.clone(),
                         request_id,
                         created,
+                        cancel_token.clone(),
                     )
                     .await;
                 }
@@ -410,6 +428,7 @@ pub async fn chat_completions(
                 internal_messages.clone(),
                 request_id,
                 created,
+                cancel_token.clone(),
             )
             .await;
         }
@@ -430,6 +449,7 @@ pub async fn chat_completions(
             internal_messages,
             request_id,
             created,
+            cancel_token,
         )
         .await
     } else {

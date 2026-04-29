@@ -162,6 +162,19 @@ impl PipelineExecutor {
         // Token generation loop
         let mut prompt_bytes_opt = Some(prompt_bytes);
         for seq_num in 0..max_tokens {
+            // Cancellation observation. Tripped externally by /v1/responses/{id}/cancel
+            // (and any other cancel handler that flips the request's cancel flag).
+            // We check at the top of the per-token loop so the longest a cancel
+            // can sit unobserved is one forward_through_segments.
+            if self.request.is_cancelled() {
+                tracing::info!(
+                    request_id = %request_id,
+                    seq_num,
+                    "DIAG: inference cancelled externally"
+                );
+                finish_reason = "stop".to_string();
+                break;
+            }
             let (activations, pre_embedded) = if let Some(ref embedder) = local_embedder {
                 // Local embedding privacy: embed locally, never send raw tokens
                 if seq_num == 0 {

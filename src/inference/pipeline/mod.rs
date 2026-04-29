@@ -320,6 +320,7 @@ mod tests {
             created_at: chrono::Utc::now(),
             session_id: None,
             lora_adapter: None,
+            cancel: None,
         }
     }
 

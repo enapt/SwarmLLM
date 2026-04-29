@@ -61,6 +61,14 @@ pub struct SharedState {
     pub gpu_info: Option<crate::inference::executor::GpuInfo>,
     pub model_loaded: std::sync::atomic::AtomicBool,
     pub active_pipelines: DashMap<uuid::Uuid, PipelineAssignment>,
+    /// Per-cancel-token cancel signals. The HTTP entry for `chat_completions`
+    /// looks up an `Arc<AtomicBool>` by token (passed via the
+    /// `x-swarmllm-cancel-token` header) and attaches it to the
+    /// `InferenceRequest`. The pipeline executor reads `request.is_cancelled()`
+    /// per token and stops the decode loop when tripped. Background paths
+    /// (e.g. `/v1/responses/{id}/cancel`) flip the bool to interrupt
+    /// in-flight inference. Cleared on request completion.
+    pub cancel_signals: DashMap<String, Arc<std::sync::atomic::AtomicBool>>,
     pub split_models:
         DashMap<crate::inference::split::SplitModelKey, crate::inference::split::SplitModelEntry>,
     /// Secondary index: model_id → loaded segment ranges for O(1) lookup by model.
@@ -233,6 +241,7 @@ impl SharedState {
             peer_registry: DashMap::new(),
             model_registry,
             active_pipelines: DashMap::new(),
+            cancel_signals: DashMap::new(),
             metrics: MetricsProviders {
                 node_stats: RwLock::new(NodeStats::default()),
                 inference_requests_total: AtomicU64::new(0),

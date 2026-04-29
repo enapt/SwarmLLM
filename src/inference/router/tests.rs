@@ -58,6 +58,7 @@ fn make_request(priority: PriorityTier) -> InferenceRequest {
         created_at: chrono::Utc::now(),
         session_id: None,
         lora_adapter: None,
+        cancel: None,
     }
 }
 
@@ -77,6 +78,7 @@ fn make_request_with_model(priority: PriorityTier, model: &str) -> InferenceRequ
         created_at: chrono::Utc::now(),
         session_id: None,
         lora_adapter: None,
+        cancel: None,
     }
 }
 

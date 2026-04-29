@@ -246,6 +246,8 @@ pub async fn start_background_stream(
                     }),
                 })
                 .await;
+            // Clean up the cancel signal too on the panic path.
+            state.shared_state.cancel_signals.remove(&id_for_cleanup);
             deregister_background_stream(&id_for_cleanup).await;
         }
     });
@@ -289,8 +291,21 @@ async fn drive_background_stream(
 ) {
     use futures::StreamExt;
 
+    // Register the cancel signal so chat_completions's
+    // `x-swarmllm-cancel-token` header lookup finds the same Arc<AtomicBool>
+    // that bg_state holds. /v1/responses/{id}/cancel flips bg_state.cancel,
+    // which the inference loop now observes per-token. Keyed by response_id
+    // and cleaned up at function exit.
+    app_state
+        .shared_state
+        .cancel_signals
+        .insert(response_id.clone(), bg_state.cancel.clone());
+
     let state_for_chat = app_state.clone();
-    let headers_for_chat = headers.clone();
+    let mut headers_for_chat = headers.clone();
+    if let Ok(val) = axum::http::HeaderValue::from_str(&response_id) {
+        headers_for_chat.insert("x-swarmllm-cancel-token", val);
+    }
     let chat_future = async move {
         crate::api::openai::chat_completions(
             State(state_for_chat),
@@ -346,6 +361,9 @@ async fn drive_background_stream(
         }
         bg_state.push(buffered).await;
     }
+
+    // Cleanup: remove the cancel signal we registered before chat_completions.
+    app_state.shared_state.cancel_signals.remove(&response_id);
 
     deregister_background_stream(&response_id).await;
 }
