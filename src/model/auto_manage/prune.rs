@@ -416,6 +416,25 @@ impl AutoShardManager {
                 );
                 continue;
             }
+            // Re-check is_shard_in_progress BEFORE deletion. The scan-time
+            // skip at line 142 catches the static case, but a P2P download
+            // for this shard could have started between scan and execute —
+            // deleting now would race the in-progress write and could leave
+            // a half-loaded file under the canonical path. The candidate
+            // collection already drops actively-downloading shards; this
+            // is the second-pass guard for the scan→execute window.
+            if self
+                .shared_state
+                .models
+                .is_shard_in_progress(&candidate.model_id, candidate.shard_index)
+            {
+                tracing::debug!(
+                    model = %candidate.model_id,
+                    shard = candidate.shard_index,
+                    "Skipping prune — shard download started after scan"
+                );
+                continue;
+            }
 
             // Actually delete the shard file (or mmproj.gguf for sentinel)
             let shard_path = if candidate.shard_index == crate::types::MMPROJ_SHARD_INDEX {
@@ -490,8 +509,13 @@ impl AutoShardManager {
                 ),
                 freed_bytes: candidate.shard_size_bytes,
                 remaining_local_shards: remaining_local,
-                holder_count_before: candidate.holder_count,
-                holder_count_after: candidate.holder_count.saturating_sub(1),
+                // Use the freshly-recomputed holder count (`current_holders`)
+                // not `candidate.holder_count` (scan-time snapshot) — concurrent
+                // prunes elsewhere on the network can shift the count between
+                // scan and execute, and this event drives the dashboard's
+                // "remaining replicas" display + persisted prune history.
+                holder_count_before: current_holders,
+                holder_count_after: current_holders.saturating_sub(1),
                 timestamp: chrono::Utc::now(),
             };
 

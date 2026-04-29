@@ -202,31 +202,48 @@ impl EscrowManager {
         escrow_id: uuid::Uuid,
         balance: &Arc<RwLock<CreditBalance>>,
     ) -> Result<i64, SwarmError> {
-        let mut entry = self
-            .entries
-            .get_mut(&escrow_id)
-            .ok_or_else(|| SwarmError::CreditError("Escrow not found".into()))?;
+        // Snapshot under the DashMap shard lock, drop the lock, then write
+        // to redb. Holding the RefMut across the synchronous put_json blocks
+        // every other DashMap access on the same shard for the disk-write
+        // duration — same pattern as release_escrow above.
+        let snapshot = {
+            let mut entry = self
+                .entries
+                .get_mut(&escrow_id)
+                .ok_or_else(|| SwarmError::CreditError("Escrow not found".into()))?;
 
-        if entry.status != EscrowStatus::Pending {
-            return Err(SwarmError::CreditError(format!(
-                "Escrow {} is {:?}, not Pending",
-                escrow_id, entry.status
+            if entry.status != EscrowStatus::Pending {
+                return Err(SwarmError::CreditError(format!(
+                    "Escrow {} is {:?}, not Pending",
+                    escrow_id, entry.status
+                )));
+            }
+
+            entry.status = EscrowStatus::Refunded;
+            entry.clone()
+        };
+        let amount = snapshot.amount;
+
+        // Persist updated status BEFORE modifying balance to prevent
+        // double-refund on crash. On DB failure we leave the in-memory
+        // entry as Refunded — the next restart will see it as Refunded too
+        // (we already updated under the lock above) so the balance won't
+        // be double-refunded; the cost is one stuck "Refunded with no
+        // balance update" state, surfaced via the warn! below if the
+        // subsequent apply_credit_direct also fails.
+        if let Err(e) = self
+            .db
+            .put_json(TREE_ESCROW, &escrow_id.to_string(), &snapshot)
+        {
+            // Revert in-memory status since DB failed.
+            if let Some(mut entry) = self.entries.get_mut(&escrow_id) {
+                entry.status = EscrowStatus::Pending;
+            }
+            return Err(SwarmError::Database(format!(
+                "Failed to persist escrow refund: {e}"
             )));
         }
 
-        entry.status = EscrowStatus::Refunded;
-        let amount = entry.amount;
-
-        // Persist updated status BEFORE modifying balance to prevent double-refund on crash
-        self.db
-            .put_json(TREE_ESCROW, &escrow_id.to_string(), &*entry)
-            .map_err(|e| {
-                // Revert in-memory status since DB failed
-                entry.status = EscrowStatus::Pending;
-                SwarmError::Database(format!("Failed to persist escrow refund: {e}"))
-            })?;
-
-        drop(entry);
         // Remove from in-memory map — entry is persisted to DB
         self.entries.remove(&escrow_id);
 

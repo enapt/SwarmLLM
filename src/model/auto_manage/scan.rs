@@ -399,7 +399,7 @@ pub async fn check_and_load_model(
                                 "model_load_skipped",
                                 format!(
 "Not loading {} — {estimated}MB needed but only {}MB free of {budget}MB budget",
-manifest.name, budget - total_after
+manifest.name, budget.saturating_sub(total_after)
 ),
                             )
                             .with_model(model_id.0.clone())
