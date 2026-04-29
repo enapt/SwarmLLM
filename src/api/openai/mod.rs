@@ -121,6 +121,28 @@ fn validate_chat_request(
         None => {}
     }
 
+    // SEC: cap response_format.json_schema sizes. The schema is serialized to a
+    // string and injected into the system prompt; without a cap, an attacker
+    // can submit a 10 MB schema that bypasses validate_content_size (which
+    // only inspects messages, not response_format).
+    if let Some(crate::api::openai::types::ResponseFormat::JsonSchema { ref json_schema }) =
+        req.response_format
+    {
+        const MAX_SCHEMA_NAME_BYTES: usize = 256;
+        const MAX_SCHEMA_BYTES: usize = 64 * 1024;
+        if json_schema.name.len() > MAX_SCHEMA_NAME_BYTES {
+            return Err(ApiError(crate::error::SwarmError::Validation(format!(
+                "response_format.json_schema.name exceeds {MAX_SCHEMA_NAME_BYTES} chars"
+            ))));
+        }
+        let schema_str = json_schema.schema.to_string();
+        if schema_str.len() > MAX_SCHEMA_BYTES {
+            return Err(ApiError(crate::error::SwarmError::Validation(format!(
+                "response_format.json_schema.schema exceeds {MAX_SCHEMA_BYTES} bytes"
+            ))));
+        }
+    }
+
     Ok(())
 }
 
