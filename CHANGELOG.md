@@ -7,6 +7,118 @@ All notable changes to SwarmLLM are documented here.
 Working changelog for commits after the v0.1.0 tag. Will roll into the
 next tagged release.
 
+### Sweep arc R76 → R81 (2026-04-29 / 2026-04-30, autonomous)
+
+Self-managed overnight sweep covering: doc drift + dead code (R76),
+concurrency + lifecycle (R77), error paths + resilience (R78), security
++ wire format (R79), frontend (R80), hot-path performance (R81). Each
+round spawned 3–4 parallel review agents, applied auto-fixable
+findings in batched commits. ~7 commits.
+
+- **R76 (doc drift + dead code)** — Removed unused `SplitModel::n_kv_head()`
+  accessor (no call sites). Fixed `request_response` timeout doc claim
+  300s→600s. Clarified `GossipSub mesh_outbound_min` scales with peer
+  count (1→4 across 6 buckets) instead of fixed=1. Corrected several
+  ARCHITECTURE.md path references (`pipeline/distributed.rs`, not
+  `pipeline/mod.rs`; `state/activity.rs` for ActivityEvent struct).
+  i18n key count 1014→1015 (verified). CLAUDE.md Bronze tier:
+  "negative balance" → "zero/negative" to match `priority.rs`.
+  Replaced bare `#[allow(clippy::excessive_precision)]` on CLIP
+  constants with rationale comment.
+- **R77 (concurrency + lifecycle)** — Five concurrency bugs:
+  - `dispatch/mod.rs:880` pool_tx RwLock guard held across send().await
+    (could deadlock dispatcher AND any installer of pool_tx). Clone
+    Sender out of guard before send.
+  - `dispatch/mod.rs:261` per-peer LayerForward count load-then-add
+    race (admits MAX+1 forwards from one peer). Switch to optimistic
+    fetch_add → check prev → fetch_sub on overshoot.
+  - `dispatch/mod.rs:456` router_tx send().await blocking the dispatch
+    loop on a backlogged InferenceRouter. Switch to try_send.
+  - `dispatch/mod.rs:402` pending_vision_results get-then-remove
+    TOCTOU vs health-monitor's stale-entry sweep. Atomic remove +
+    re-insert on sender mismatch.
+  - `process_pool.rs:905` spawn_failures cooldown bypass when fresh
+    failure recorded between (clear) check and spawn_lock acquisition.
+    Move cooldown check inside the lock.
+  - `network/manager/requests.rs:398` peer_to_node Ref held across
+    peer_registry.get_mut (gotcha #10 pattern). Clone NodeId out of
+    Ref before second DashMap access.
+- **R78 (error paths + resilience)** — Wrong error variants and
+  silent failures:
+  - `inference/router/mod.rs:285` emit `InsufficientCredits {balance,
+    required}` (→402) instead of `CreditError(string)` (catch-all
+    →500). Same fix on queue-full ServiceUnavailable.
+  - `error.rs:203` `SwarmError::Config` maps to 500/server_error,
+    not 400/invalid_request_error (rule: Config is startup-only).
+  - `chat_template/eval.rs:284` guard `% 0` modulo. Peer-supplied
+    GGUF chat templates can crash the worker subprocess every request.
+  - `chat_template/eval.rs` depth-limit recursion (Cell<u32> + RAII
+    DepthGuard, MAX_TEMPLATE_DEPTH=256). Prevents stack overflow
+    from `((((...))))` or nested for-in-for templates.
+  - `network/manager/tensors.rs:212` gate per-tensor-forward
+    connection_addrs Vec<String> dump on tracing::enabled!(DEBUG).
+    At default info level the eager allocation burned ~50–100 KB
+    throwaway heap per LayerForward.
+  - `model/acquisition.rs:344` set `AcquisitionState::Failed` when
+    manifest save fails (was leaving the dashboard stuck on
+    Downloading forever).
+  - `api/admin_models/lifecycle.rs:58` log DB::remove errors instead
+    of `_ = ...`. Asymmetry vs file-removal path caused divergence
+    after partial deletes.
+  - `update.rs:97` log warn when `current_exe()` falls back to
+    "swarmllm" relative path (sandboxed envs).
+- **R79 (security + wire format)** — Replay protection, input
+  validation, IPv6 CORS:
+  - `dispatch/mod.rs:808` (NicknameGossip): one-sided staleness per
+    gotcha #44. Future-dated records were squatting peer nicknames
+    for up to 24 hours.
+  - `dispatch/mod.rs:518` (CreditTransaction): freshness window
+    (30s skew, 5min max age). Was admissible indefinitely.
+  - `inference/split/gguf_meta.rs`: cap block_count, embedding_length,
+    head_count, head_count_kv at sane upper bounds (256 / 65 536 /
+    256). Crafted GGUF was driving worker into oversized KV/mask
+    allocations.
+  - `pool/manager/gossip.rs:286`: cap inbound device_name to 64 bytes.
+    Local handler caps at 32 chars but inbound gossip path was
+    persisting multi-MB strings to all pool members' redb.
+  - `api/mod.rs`: add `validate_optional_sampling` for top_p,
+    top_logprobs, presence_penalty, frequency_penalty (was silently
+    clamped inside build_sampling_params, violating OpenAI-compat
+    spec contract).
+  - `api/openai/mod.rs`: cap response_format.json_schema.name (256B)
+    and .schema (64KB). Bypassed validate_content_size.
+  - `middleware.rs` cors_layer + `websocket.rs` origin allowlist:
+    add `http://[::1]:{port}` for IPv6-only browsers.
+- **R80 (frontend)** — Two real bugs:
+  - `dashboard.js`: ResizeObserver/IntersectionObserver attached to
+    .shard-matrix per model card stayed live after `list.innerHTML=''`
+    wiped the DOM, accumulating across each `models_changed`
+    re-render. Add `_disconnectMatrixObservers()` called before each
+    of the 3 wipe sites.
+  - `chat.js`: `saveSessions()` now surfaces QuotaExceededError as a
+    warning toast instead of silently dropping chat history. New
+    i18n key `chat.storage_quota_exceeded` across all 21 language
+    files (1015→1016 keys, 1017→1018 entries per locale).
+- **R81 (hot-path performance)** — Three measurable wins:
+  - `pipeline/distributed.rs:787` per-token info!→debug! for the
+    `Sending LayerForward to remote segment` log. ~4 String allocs/
+    token/segment saved at default level.
+  - `split/executor.rs:278` gate the unconditional `Instant::now()`
+    on `tracing::enabled!(DEBUG)`. clock_gettime syscall per forward
+    eliminated when info-only.
+  - `router/mod.rs` hoist `chatml_fallback()` out of the if-let so
+    the same prompt String is reused by both
+    `check_multi_turn_reuse` and `register_multi_turn` on the
+    cache-miss branch.
+
+Out-of-band fix: formalized the `tests/fixtures/tiny_model/` fixture
+deferral (Option B) — false aspirational claim removed from CLAUDE.md
+and `local_embedder.rs` test gated on `SWARMLLM_TEST_MODEL_DIR` env
+var pointing at a real on-disk model dir. New entry under § Deferred
+Items in `docs/ARCHITECTURE.md` explains why a synthetic random-weight
+GGUF would only catch parser/IPC plumbing bugs already covered by
+unit + in-process tests.
+
 ### Deferred-item follow-ups (R72/R75 leftovers, 2026-04-29)
 
 Three commits cleaning up the structurally-deferred items the sweep
