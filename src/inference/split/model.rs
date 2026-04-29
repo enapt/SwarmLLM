@@ -70,19 +70,6 @@ impl SplitModel {
         &self.device
     }
 
-    /// Return the number of KV heads from the first layer.
-    pub fn n_kv_head(&self) -> usize {
-        self.layers
-            .first()
-            .map(|l| match l {
-                LayerVariant::Dense(w) => w.n_kv_head,
-                LayerVariant::DeepSeek { .. } => 1, // MLA uses MQA
-                LayerVariant::Qwen35Attn { weights, .. } => weights.n_kv_head,
-                LayerVariant::Qwen35Ssm { .. } => 0,
-            })
-            .unwrap_or(1)
-    }
-
     /// Return the KV cache model key (used for cache cleanup).
     pub fn kv_model_key(&self) -> &str {
         &self.kv_model_key

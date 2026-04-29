@@ -166,7 +166,8 @@ pub fn build_behaviour(
     // - JSON control messages (shard transfers, PEX, health)
     // - Binary tensor payloads (activation forwarding)
     // Uses a unified codec with type-tag byte to distinguish formats.
-    // NET-C3: 300s timeout for shard transfers (large files need more time)
+    // NET-C3: 600s timeout (RR_REQUEST_TIMEOUT_SECS) for slow CPU inference
+    // and large shard transfers; vendored handler has its own watchdog.
     let codec = if let Some(net_cfg) = network_config {
         SwarmCodec {
             compress_tensors: net_cfg.tensor_compression,

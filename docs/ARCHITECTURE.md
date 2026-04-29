@@ -204,7 +204,7 @@ libp2p Swarm
 │   └── /swarm/model/{model_id}               → ModelManifest
 │   └── Records expire after 1 hour, re-published periodically
 │
-├── GossipSub (pub/sub, mesh_outbound_min=1)
+├── GossipSub (pub/sub, mesh_n/mesh_n_low/mesh_n_high/mesh_outbound_min auto-scale with known_peers: 2/1/4/1 at <10 peers up to 8/6/16/4 at 10k+)
 │   ├── swarm/models/{model_id}       → ShardAnnounce, capacity
 │   ├── swarm/credits                 → CreditGossip
 │   ├── swarm/health                  → trust summaries
@@ -213,7 +213,7 @@ libp2p Swarm
 │   └── Messages >5 min old are rejected (replay protection)
 │   └── Failed publishes buffered and replayed on mesh formation
 │
-├── request_response (unified protocol, /swarmllm/1.0.0, 300s timeout)
+├── request_response (unified protocol, /swarmllm/1.0.0, 600s timeout — slow CPU inference)
 │   ├── JSON control messages — SwarmMessage, ShardRequest/ShardResponse
 │   ├── Binary tensor payloads — LayerForward, LayerResult (type-tag byte: 0x00=JSON, 0x01=tensor, zstd compression optional)
 │   └── Binary shard data — ShardResponse payload (type-tag byte: 0x03=shard, 32MB chunks as raw bytes, bypasses 4MB JSON limit)
@@ -434,7 +434,7 @@ For a 7B model (hidden_dim=3584):
 ### Inference Correctness
 
 **Stop sequence handling**: User-provided stop sequences (`stop` in OpenAI, `stop_sequences` in Anthropic) are enforced in all three inference execution paths:
-1. `pipeline/mod.rs` `execute_distributed` — accumulated text scanned after each token decode
+1. `pipeline/distributed.rs` `execute_distributed` — accumulated text scanned after each token decode
 2. `model_worker.rs` `handle_generate` — accumulated text checked after each token in the subprocess decode loop
 3. `executor.rs` `generate_stream_llama` — accumulated text checked after each token in the llama.cpp loop
 
@@ -1039,7 +1039,7 @@ Kademlia provider records (S5) track shard holders at scale:
 - Key: `/swarm/provide/<model_id>/<shard_index>` per shard
 - Functions: `start_providing_shards()` / `stop_providing_shards()` / `query_shard_providers()`
 - Provider TTL: 1 hour, republication: 20 minutes
-- PeerId↔NodeId conversion via `node_id_to_peer_id()` / `peer_id_to_node_id()` in `transport.rs`
+- PeerId→NodeId via `peer_id_to_node_id()` in `transport.rs` (production); the reverse direction is test-only since libp2p derives PeerIds from keypairs directly
 
 **DHT shard keys are per-node** to prevent last-writer-wins collisions: records are keyed
 as `/swarm/shards/{model_id}/{node_id_hex}` (one record per node per model), not a single
@@ -1324,7 +1324,7 @@ Routes Claude model requests through a locally-authenticated `claude` CLI subpro
 - Cross-component calls: `App.componentName.method()`. Shared state: `App.state.*`. Utilities: `App.utils.*`.
 
 ### Frontend Features
-- **i18n**: 1014 translation keys across 21 languages (en, es, fr, de, pt, it, nl, ru, zh, ja, ko, ar, tr, pl, sv, th, hi, vi, id, uk, cs). Auto-detects browser language. `I18n.t()` + `data-i18n` DOM attributes. Interpolation via `{variable}` placeholders. Fallback chain: current language → English → raw key. "Continue in English" UX for non-English users who prefer English.
+- **i18n**: 1015 translation keys (1017 entries per locale incl. `_lang` + `_dir`) across 21 languages (en, es, fr, de, pt, it, nl, ru, zh, ja, ko, ar, tr, pl, sv, th, hi, vi, id, uk, cs). Auto-detects browser language. `I18n.t()` + `data-i18n` DOM attributes. Interpolation via `{variable}` placeholders. Fallback chain: current language → English → raw key. "Continue in English" UX for non-English users who prefer English.
 - **Theme**: Light / Dark / System toggle. `[data-theme="light"]` CSS overrides. Persisted in localStorage.
 - **Neural network background**: Animated canvas particle network behind dashboard tiles (`frontend/js/neural-bg.js`). ~60 nodes with connecting edges, gentle drift, mouse repulsion/glow. State-reactive coloring: blue (idle) → cyan (active inference) → red-orange (unhealthy/disconnected). Peer count boosts vibrancy, active requests trigger node firing pulses. Pauses when tab hidden; reduced opacity in light theme.
 
@@ -1332,7 +1332,7 @@ Routes Claude model requests through a locally-authenticated `claude` CLI subpro
 
 A lightweight cross-subsystem event bus for real-time dashboard observability.
 
-**Backend** (`src/daemon/state/mod.rs`):
+**Backend** (`ActivityEvent` defined in `src/daemon/state/activity.rs`, re-exported from `state/mod.rs`):
 - `ActivityEvent` struct with fields: `category` (`&'static str`), `kind` (`&'static str`, e.g. `"shard_pruned"`), `message` (English), plus optional `model_id`, `model_name`, `node_id`, `detail_num`, `detail_str`, `toast_level`, `toast_duration_ms`, `shard_index`, `freed_bytes`, `holder_count_before`, `holder_count_after`, `remaining_local_shards`, `timestamp` (ISO 8601)
 - `activity_tx: broadcast::Sender<ActivityEvent>` in `state.events` sub-struct (capacity 256, oldest events dropped on overflow)
 - All 11 subsystems emit events via the `state.emit_activity(ActivityEvent::new(...))` builder — fire-and-forget (send errors ignored)

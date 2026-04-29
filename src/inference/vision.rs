@@ -18,7 +18,10 @@ use crate::types::{ImageData, VisionConfig};
 
 // ── Image Preprocessing ──
 
-/// Default CLIP normalization constants (ImageNet).
+// Default CLIP normalization constants (ImageNet). These are the canonical
+// published values from OpenAI's CLIP repo; the extra precision (>7 sig figs)
+// exceeds f32's range and clippy flags it, but truncating would silently drift
+// from upstream — the allow is the documented exception.
 #[allow(clippy::excessive_precision)]
 const CLIP_MEAN: [f32; 3] = [0.48145466, 0.4578275, 0.40821073];
 #[allow(clippy::excessive_precision)]

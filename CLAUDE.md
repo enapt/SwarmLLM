@@ -1,6 +1,6 @@
 # SwarmLLM — Claude Code Instructions
 
-> **Quick start**: Read `memory/code-map.md` for the component dependency map, data flows, and SharedState sub-struct layout before exploring code.
+> **Quick start**: Read `docs/ARCHITECTURE.md` for the canonical architecture (subsystems, channels, SharedState sub-struct layout, protocols, security model) before exploring code. Per-developer dependency notes may live in `~/.claude/projects/-home-user-SwarmLLM/memory/` outside the repo.
 
 ## Project Overview
 
@@ -152,7 +152,7 @@ libp2p 0.56, axum 0.8, candle-core/candle-transformers 0.10 (CUDA), redb 4, ed25
 - Data dir: `~/.local/share/swarmllm/` (Linux), `~/Library/Application Support/swarmllm/` (macOS), `%APPDATA%\swarmllm\` (Windows)
 - Port layout: HTTP API on TCP:port, P2P TCP on port+10 (Noise+Yamux), P2P QUIC on UDP:port
 - Credit transactions require dual Ed25519 signatures (serving node + requesting node)
-- Priority tiers: Bronze (negative balance) < Silver (positive) < Gold (70th percentile) < Platinum (90th)
+- Priority tiers: Bronze (zero/negative) < Silver (positive) < Gold (70th percentile) < Platinum (90th)
 - KV-cache sessions expire after 10 minutes of inactivity (configurable)
 - Shard verification: BLAKE3 content hash checked on every load
 - Pipeline failover: hot-standby nodes pre-identified per segment
@@ -176,7 +176,7 @@ When spawning subagents in this repo, use these model picks (overrides defaults 
 
 ## Status
 
-All 20 build phases complete. All subsystems wired — no stubs. 879 lib tests + 75 integration tests passing; 8 lib + 1 e2e ignored (env-var or manual). Deferred items in `docs/ARCHITECTURE.md` § "Deferred Items". See `memory/refactor_plan.md` for remaining large-file splits.
+All 20 build phases complete. All subsystems wired — no stubs. 879 lib tests + 75 integration tests passing; 8 lib + 1 e2e ignored (env-var or manual). Deferred items in `docs/ARCHITECTURE.md` § "Deferred Items".
 
 ## Common Commands
 
