@@ -2,6 +2,7 @@
 //!
 //! Run with: cargo test --test integration_phase10_11 -- --test-threads=1
 
+mod end_to_end;
 mod test_config_reload;
 mod test_credit_escrow;
 mod test_inference_features;
