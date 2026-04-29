@@ -92,10 +92,17 @@ measurable wins.
   2026-04-20 in `round7.md`: 3.15× wire reduction, localhost decode
   neutral-to-slightly-negative as predicted; WAN bench will decide
   default-on.
-- 🔓 **C1 binary signing** still open — auto-update SHA256 sidecar
-  from the same release as the binary; needs an offline keypair
-  decision before the next-tag cut. Tracked in `docs/ARCHITECTURE.md`
-  § Deferred Items.
+- ✅ Worker crash-loop backoff, per-token cancellation observation
+  (`/v1/responses/{id}/cancel` end-to-end), stop-sequence KV truncate
+  to remote peers on session requests, escrow refund on inference
+  failure, and the end-to-end daemon-lifecycle integration test
+  (`tests/integration/end_to_end.rs`, `#[ignore]`'d) all landed
+  2026-04-29.
+- 🔓 **C1 binary signing** still open — three-option write-up in
+  `memory/signing_options.md` (recommendation: **minisign**). Needs
+  a key-custody decision (hardware token / encrypted file / GitHub
+  Actions secret) from the maintainer before the next-tag cut.
+  Tracked in `docs/ARCHITECTURE.md` § Deferred Items.
 
 ## Anti-goals
 

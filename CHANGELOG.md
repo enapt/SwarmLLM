@@ -7,6 +7,45 @@ All notable changes to SwarmLLM are documented here.
 Working changelog for commits after the v0.1.0 tag. Will roll into the
 next tagged release.
 
+### Deferred-item follow-ups (R72/R75 leftovers, 2026-04-29)
+
+Three commits cleaning up the structurally-deferred items the sweep
+arc surfaced:
+
+- **Worker crash-loop backoff** (`bab361c`) — `ModelProcessPool` now
+  tracks per-model spawn failures; arriving requests during the
+  cooldown window get `ServiceUnavailable` instead of waiting for
+  `WORKER_CONNECT_TIMEOUT_SECS=30s` per attempt. Backoff steps
+  1→2→4→8→16→32→60 s, reset on first successful spawn.
+- **Cancellation token in inference loop** (`bab361c`) —
+  `InferenceRequest.cancel: Option<Arc<AtomicBool>>` (`#[serde(skip)]`),
+  `SharedState.cancel_signals` map keyed by an opaque token via
+  the `x-swarmllm-cancel-token` HTTP header. Pipeline checks
+  `request.is_cancelled()` per-token. Wired end-to-end through
+  `responses/background.rs` so `/v1/responses/{id}/cancel`
+  actually interrupts in-flight inference within one forward.
+- **Stop-sequence KV truncate** (`9f9f22e`) —
+  `pipeline/distributed.rs` sends a finalising
+  `LayerForward(truncate_kv_to=ptc, activations=[])` to every remote
+  segment after a stop string fires on a session-keyed request.
+  Without this the next session turn would see the stop tokens
+  still in the remote KV and produce contaminated output.
+- **Escrow refund on inference failure** (`9f9f22e`) —
+  `finalize_request` now calls `refund_escrow` on the `Err` arm.
+  Previously `refund_escrow` had no production caller; failed
+  requests left credits locked until the cleanup tick. Credit
+  enforcement isn't gating users yet, but the bookkeeping is solid
+  for when it is.
+- **Pre-release surface trim** (`1d7eb39`) — every internal module
+  in `src/lib.rs` now `#[doc(hidden)]`; `api`, `config`, `error`,
+  `types`, `update` are the documented stable API. New
+  `tests/integration/end_to_end.rs` exercises the full HTTP +
+  shutdown lifecycle (`#[ignore]`'d, ~10 s).
+
+C1 (binary signing) stays open with a fully-researched options write-
+up at `memory/signing_options.md` — recommendation is **minisign**;
+landing it requires a key-custody decision from the maintainer.
+
 ### Sweep arc R69 → R75 (2026-04-29 / 2026-04-30)
 
 Long-running self-managed sweep covering: post-audit follow-ups (R69),
