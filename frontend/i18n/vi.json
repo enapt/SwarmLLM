@@ -123,6 +123,7 @@
   "chat.source_cloud": "Đám mây",
   "chat.source_local": "Máy của bạn",
   "chat.source_network": "Mạng",
+  "chat.storage_quota_exceeded": "Bộ nhớ cuộc trò chuyện cục bộ đã đầy — không thể lưu các phiên cũ.",
   "chat.thinking": "Đang suy nghĩ...",
   "chat.title_with_model": "Trò chuyện với {model}",
   "chat.type_to_send": "Nhập tin nhắn bên dưới và nhấn Enter để gửi",

@@ -123,6 +123,7 @@
   "chat.source_cloud": "คลาวด์",
   "chat.source_local": "เครื่องของคุณ",
   "chat.source_network": "เครือข่าย",
+  "chat.storage_quota_exceeded": "พื้นที่จัดเก็บแชทในเครื่องเต็ม — ไม่สามารถบันทึกเซสชันเก่าได้",
   "chat.thinking": "กำลังคิด...",
   "chat.title_with_model": "แชทกับ {model}",
   "chat.type_to_send": "พิมพ์ข้อความด้านล่างแล้วกด Enter เพื่อส่ง",

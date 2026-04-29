@@ -123,6 +123,7 @@
   "chat.source_cloud": "Bulut",
   "chat.source_local": "Bilgisayarın",
   "chat.source_network": "Ağ",
+  "chat.storage_quota_exceeded": "Yerel sohbet depolaması dolu — eski oturumlar kaydedilemez.",
   "chat.thinking": "Düşünüyor...",
   "chat.title_with_model": "{model} ile Sohbet",
   "chat.type_to_send": "Göndermek için aşağıya mesaj yazın ve Enter'a basın",

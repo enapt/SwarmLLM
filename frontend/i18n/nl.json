@@ -123,6 +123,7 @@
   "chat.source_cloud": "Cloud",
   "chat.source_local": "Jouw PC",
   "chat.source_network": "Netwerk",
+  "chat.storage_quota_exceeded": "De lokale chatopslag is vol — oudere sessies kunnen niet worden opgeslagen.",
   "chat.thinking": "Nadenken...",
   "chat.title_with_model": "Chat met {model}",
   "chat.type_to_send": "Typ een bericht hieronder en druk op Enter om te verzenden",

@@ -123,6 +123,7 @@
   "chat.source_cloud": "Awan",
   "chat.source_local": "PC Anda",
   "chat.source_network": "Jaringan",
+  "chat.storage_quota_exceeded": "Penyimpanan obrolan lokal penuh — sesi lama tidak dapat disimpan.",
   "chat.thinking": "Berpikir...",
   "chat.title_with_model": "Chat dengan {model}",
   "chat.type_to_send": "Ketik pesan di bawah dan tekan Enter untuk mengirim",

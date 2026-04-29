@@ -123,6 +123,7 @@
   "chat.source_cloud": "Chmura",
   "chat.source_local": "Twój PC",
   "chat.source_network": "Sieć",
+  "chat.storage_quota_exceeded": "Lokalna pamięć czatu jest pełna — starsze sesje nie mogą zostać zapisane.",
   "chat.thinking": "Myślenie...",
   "chat.title_with_model": "Czat z {model}",
   "chat.type_to_send": "Wpisz wiadomość poniżej i naciśnij Enter, aby wysłać",

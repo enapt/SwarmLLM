@@ -123,6 +123,7 @@
   "chat.source_cloud": "Moln",
   "chat.source_local": "Din dator",
   "chat.source_network": "Nätverk",
+  "chat.storage_quota_exceeded": "Det lokala chattlagret är fullt — äldre sessioner kan inte sparas.",
   "chat.thinking": "Tänker...",
   "chat.title_with_model": "Chatta med {model}",
   "chat.type_to_send": "Skriv ett meddelande nedan och tryck Enter för att skicka",

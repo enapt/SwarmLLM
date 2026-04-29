@@ -843,7 +843,22 @@
       var hasCloud = apiModels.length > 0;
       var hasSubscription = subscriptionModels.length > 0;
 
+      // Disconnect any per-card observers (Resize/Intersection) before
+      // wiping the DOM. Otherwise the observers keep firing on detached
+      // nodes and accumulate across each models_changed re-render —
+      // observable as a slow leak on a long-running dashboard tab.
+      function _disconnectMatrixObservers(root) {
+        if (!root) return;
+        var matrices = root.querySelectorAll('[data-shard-matrix]');
+        for (var i = 0; i < matrices.length; i++) {
+          var m = matrices[i];
+          if (m._pipelineRO) { try { m._pipelineRO.disconnect(); } catch (e) {} m._pipelineRO = null; }
+          if (m._pipelineIO) { try { m._pipelineIO.disconnect(); } catch (e) {} m._pipelineIO = null; }
+        }
+      }
+
       if ((!models || models.length === 0) && !hasCloud && !hasSubscription) {
+        _disconnectMatrixObservers(list);
         list.innerHTML = '';
         empty.style.display = '';
         var _sb = document.getElementById('models-stats-bar');
@@ -861,6 +876,7 @@
       });
 
       if (models.length === 0 && !hasCloud && !hasSubscription) {
+        _disconnectMatrixObservers(list);
         list.innerHTML = '';
         empty.style.display = '';
         var _sb2 = document.getElementById('models-stats-bar');
@@ -869,6 +885,7 @@
       }
 
       empty.style.display = 'none';
+      _disconnectMatrixObservers(list);
       list.innerHTML = '';
 
       // Quick stats

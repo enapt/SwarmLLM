@@ -123,6 +123,7 @@
   "chat.source_cloud": "クラウド",
   "chat.source_local": "ローカル",
   "chat.source_network": "ネットワーク",
+  "chat.storage_quota_exceeded": "ローカルチャットストレージが満杯です — 古いセッションは保存できません。",
   "chat.thinking": "考え中...",
   "chat.title_with_model": "{model}とチャット",
   "chat.type_to_send": "下にメッセージを入力してEnterで送信",

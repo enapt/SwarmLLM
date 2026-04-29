@@ -123,6 +123,7 @@
   "chat.source_cloud": "Хмара",
   "chat.source_local": "Ваш ПК",
   "chat.source_network": "Мережа",
+  "chat.storage_quota_exceeded": "Локальне сховище чату заповнене — старіші сеанси не можна зберегти.",
   "chat.thinking": "Роздуми...",
   "chat.title_with_model": "Чат з {model}",
   "chat.type_to_send": "Введіть повідомлення нижче та натисніть Enter для відправки",

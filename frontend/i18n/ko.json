@@ -123,6 +123,7 @@
   "chat.source_cloud": "클라우드",
   "chat.source_local": "내 PC",
   "chat.source_network": "네트워크",
+  "chat.storage_quota_exceeded": "로컬 채팅 저장소가 가득 찼습니다 — 이전 세션을 저장할 수 없습니다.",
   "chat.thinking": "생각 중...",
   "chat.title_with_model": "{model}과(와) 채팅",
   "chat.type_to_send": "아래에 메시지를 입력하고 Enter를 눌러 전송하세요",

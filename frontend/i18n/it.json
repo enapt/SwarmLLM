@@ -123,6 +123,7 @@
   "chat.source_cloud": "Cloud",
   "chat.source_local": "Il tuo PC",
   "chat.source_network": "Rete",
+  "chat.storage_quota_exceeded": "Lo spazio di archiviazione locale della chat è pieno — le sessioni precedenti non possono essere salvate.",
   "chat.thinking": "Elaborazione...",
   "chat.title_with_model": "Chat con {model}",
   "chat.type_to_send": "Scrivi un messaggio qui sotto e premi Invio per inviare",

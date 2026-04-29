@@ -123,6 +123,7 @@
   "chat.source_cloud": "Nube",
   "chat.source_local": "Tu PC",
   "chat.source_network": "Red",
+  "chat.storage_quota_exceeded": "El almacenamiento local de chat está lleno — no se pueden guardar sesiones más antiguas.",
   "chat.thinking": "Pensando...",
   "chat.title_with_model": "Chat con {model}",
   "chat.type_to_send": "Escribe un mensaje y presiona Enter para enviar",

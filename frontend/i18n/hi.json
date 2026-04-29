@@ -123,6 +123,7 @@
   "chat.source_cloud": "क्लाउड",
   "chat.source_local": "आपका PC",
   "chat.source_network": "नेटवर्क",
+  "chat.storage_quota_exceeded": "स्थानीय चैट संग्रहण भर गया है — पुराने सत्र सहेजे नहीं जा सकते।",
   "chat.thinking": "सोच रहे हैं...",
   "chat.title_with_model": "{model} के साथ चैट",
   "chat.type_to_send": "नीचे संदेश लिखें और भेजने के लिए Enter दबाएँ",

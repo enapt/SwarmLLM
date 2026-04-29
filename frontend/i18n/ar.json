@@ -123,6 +123,7 @@
   "chat.source_cloud": "السحابة",
   "chat.source_local": "جهازك",
   "chat.source_network": "الشبكة",
+  "chat.storage_quota_exceeded": "مساحة تخزين المحادثة المحلية ممتلئة — لا يمكن حفظ الجلسات القديمة.",
   "chat.thinking": "جارٍ التفكير...",
   "chat.title_with_model": "محادثة مع {model}",
   "chat.type_to_send": "اكتب رسالة أدناه واضغط Enter للإرسال",

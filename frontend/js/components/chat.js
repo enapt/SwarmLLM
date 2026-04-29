@@ -727,9 +727,28 @@
             })
           });
         });
-        localStorage.setItem(App.SESSIONS_KEY, JSON.stringify(stripped));
-        if (S.currentSessionId) localStorage.setItem(App.ACTIVE_SESSION_KEY, S.currentSessionId);
-      } catch (e) {}
+        try {
+          localStorage.setItem(App.SESSIONS_KEY, JSON.stringify(stripped));
+          if (S.currentSessionId) localStorage.setItem(App.ACTIVE_SESSION_KEY, S.currentSessionId);
+        } catch (quotaErr) {
+          // QuotaExceededError is the typical cause. Surface it instead of
+          // silently dropping the user's chat history. Best-effort only —
+          // older sessions are already chronologically last in the JSON, so
+          // a follow-up save after the user prunes will succeed.
+          if (typeof App !== 'undefined' && App.notifications && App.notifications.toast) {
+            App.notifications.toast(
+              (typeof I18n !== 'undefined' && I18n.t)
+                ? I18n.t('chat.storage_quota_exceeded')
+                : 'Local chat storage is full — older sessions cannot be saved.',
+              'warning',
+              6000
+            );
+          }
+        }
+      } catch (_e) {
+        // Outer catch: defensive against malformed Object.keys / Object.assign
+        // failure on degraded browsers. No user impact worth logging.
+      }
     },
 
     loadSessions: function() {

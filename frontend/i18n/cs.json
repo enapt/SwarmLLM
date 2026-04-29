@@ -123,6 +123,7 @@
   "chat.source_cloud": "Cloud",
   "chat.source_local": "Tvůj PC",
   "chat.source_network": "Síť",
+  "chat.storage_quota_exceeded": "Místní úložiště chatu je plné — starší relace nelze uložit.",
   "chat.thinking": "Přemýšlí...",
   "chat.title_with_model": "Chat s {model}",
   "chat.type_to_send": "Napište zprávu níže a stiskněte Enter pro odeslání",

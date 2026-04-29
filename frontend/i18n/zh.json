@@ -123,6 +123,7 @@
   "chat.source_cloud": "云端",
   "chat.source_local": "本机",
   "chat.source_network": "网络",
+  "chat.storage_quota_exceeded": "本地聊天存储已满 — 无法保存较旧的会话。",
   "chat.thinking": "思考中...",
   "chat.title_with_model": "与 {model} 对话",
   "chat.type_to_send": "输入消息并按 Enter 发送",

@@ -123,6 +123,7 @@
   "chat.source_cloud": "Nuvem",
   "chat.source_local": "Seu PC",
   "chat.source_network": "Rede",
+  "chat.storage_quota_exceeded": "O armazenamento local de bate-papo está cheio — sessões antigas não podem ser salvas.",
   "chat.thinking": "Pensando...",
   "chat.title_with_model": "Chat com {model}",
   "chat.type_to_send": "Digite uma mensagem abaixo e pressione Enter para enviar",
