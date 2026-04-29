@@ -783,6 +783,14 @@ impl PipelineExecutor {
                 self.shared_state
                     .pending_layer_results
                     .insert(request_id, tx);
+                // NOTE: the dsd.rs / speculative.rs PendingLayerResultGuard
+                // pattern (gotcha #45) is NOT applied here because
+                // `failover_segment(&mut self, ...)` mid-loop needs `&mut self`
+                // while a guard would hold a `&` borrow on
+                // `self.shared_state.pending_layer_results` for the full
+                // iteration. Every error/failover branch in the loop body has
+                // an explicit `pending_layer_results.remove(&request_id)`
+                // immediately above the `return Err`/failover call.
 
                 // Per-token call in the decode loop. tracing::info! eagerly
                 // formats `%request_id` (UUID Display) and `%segment.node_id`
