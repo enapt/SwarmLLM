@@ -68,6 +68,12 @@ fn validate_chat_request(
     }
 
     super::validate_common_params(req.model.len(), req.messages.len(), req.temperature.into())?;
+    super::validate_optional_sampling(
+        Some(req.top_p as f64),
+        req.top_logprobs,
+        Some(req.presence_penalty as f64),
+        Some(req.frequency_penalty as f64),
+    )?;
 
     // SEC: Cap individual message content size and total prompt size
     super::validate_content_size(req.messages.iter().map(|msg| {

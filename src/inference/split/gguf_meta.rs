@@ -92,9 +92,39 @@ impl GgufTensorMeta {
                 "GGUF metadata error: attention.head_count is zero".into(),
             ));
         }
+        // Sanity caps on peer-supplied GGUF dimensions. Without these a crafted
+        // GGUF file (downloaded from network or from HF) can drive the worker
+        // into oversized KV cache / mask allocations and OOM the subprocess.
+        // Limits chosen well above any current real architecture:
+        // - block_count (= layer count): 256 is 2× DeepSeek's 128
+        // - embedding_length: 65 536 is 4× any current 70B model's hidden dim
+        // - head_count: 256 (Llama-3 70B has 64)
+        const MAX_BLOCK_COUNT: usize = 256;
+        const MAX_EMBEDDING_LENGTH: usize = 65_536;
+        const MAX_HEAD_COUNT: usize = 256;
+        if head_count > MAX_HEAD_COUNT {
+            return Err(SwarmError::Inference(format!(
+                "GGUF metadata error: attention.head_count={head_count} exceeds cap {MAX_HEAD_COUNT}"
+            )));
+        }
         let head_count_kv = md_u32("attention.head_count_kv")?;
+        if head_count_kv > MAX_HEAD_COUNT {
+            return Err(SwarmError::Inference(format!(
+                "GGUF metadata error: attention.head_count_kv={head_count_kv} exceeds cap {MAX_HEAD_COUNT}"
+            )));
+        }
         let block_count = md_u32("block_count")?;
+        if block_count > MAX_BLOCK_COUNT {
+            return Err(SwarmError::Inference(format!(
+                "GGUF metadata error: block_count={block_count} exceeds cap {MAX_BLOCK_COUNT}"
+            )));
+        }
         let embedding_length = md_u32("embedding_length")?;
+        if embedding_length == 0 || embedding_length > MAX_EMBEDDING_LENGTH {
+            return Err(SwarmError::Inference(format!(
+                "GGUF metadata error: embedding_length={embedding_length} out of range (1..={MAX_EMBEDDING_LENGTH})"
+            )));
+        }
         // head_dim: prefer attention.key_length (Qwen3 uses 128 vs embed/heads=64)
         let head_dim = ct
             .metadata

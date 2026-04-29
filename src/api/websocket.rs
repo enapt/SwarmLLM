@@ -92,6 +92,7 @@ pub async fn handler(
         let allowed = [
             format!("http://localhost:{port}"),
             format!("http://127.0.0.1:{port}"),
+            format!("http://[::1]:{port}"),
         ];
         if !allowed.iter().any(|a| a == origin_str) {
             tracing::warn!(

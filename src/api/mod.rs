@@ -193,7 +193,7 @@ pub(crate) fn increment_requests_made(state: &crate::daemon::state::SharedState)
 }
 
 /// Validate common request parameters shared between OpenAI and Anthropic handlers.
-/// Checks model name length, message count, and temperature range.
+/// Checks model name length, message count, temperature/top_p/top_logprobs ranges.
 pub(crate) fn validate_common_params(
     model_len: usize,
     message_count: usize,
@@ -220,6 +220,56 @@ pub(crate) fn validate_common_params(
                 "temperature must be between 0 and 2, got {temperature}"
             )),
         ));
+    }
+    Ok(())
+}
+
+/// Validate optional sampling parameters that need not be present (top_p,
+/// top_logprobs, presence_penalty, frequency_penalty, seed). Reject silly
+/// values rather than silently clamping inside `build_sampling_params` —
+/// matches the OpenAI spec contract for clients (a 400 makes the client fix
+/// its bug; a clamp hides it).
+pub(crate) fn validate_optional_sampling(
+    top_p: Option<f64>,
+    top_logprobs: Option<u32>,
+    presence_penalty: Option<f64>,
+    frequency_penalty: Option<f64>,
+) -> Result<(), crate::error::ApiError> {
+    if let Some(tp) = top_p {
+        if !(0.0..=1.0).contains(&tp) {
+            return Err(crate::error::ApiError(
+                crate::error::SwarmError::Validation(format!(
+                    "top_p must be between 0 and 1, got {tp}"
+                )),
+            ));
+        }
+    }
+    if let Some(tl) = top_logprobs {
+        if tl > 20 {
+            return Err(crate::error::ApiError(
+                crate::error::SwarmError::Validation(format!(
+                    "top_logprobs must be <= 20, got {tl}"
+                )),
+            ));
+        }
+    }
+    if let Some(p) = presence_penalty {
+        if !(-2.0..=2.0).contains(&p) {
+            return Err(crate::error::ApiError(
+                crate::error::SwarmError::Validation(format!(
+                    "presence_penalty must be between -2 and 2, got {p}"
+                )),
+            ));
+        }
+    }
+    if let Some(f) = frequency_penalty {
+        if !(-2.0..=2.0).contains(&f) {
+            return Err(crate::error::ApiError(
+                crate::error::SwarmError::Validation(format!(
+                    "frequency_penalty must be between -2 and 2, got {f}"
+                )),
+            ));
+        }
     }
     Ok(())
 }

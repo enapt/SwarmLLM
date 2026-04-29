@@ -522,6 +522,30 @@ pub(crate) async fn dispatch_network_messages(
                                             tracing::warn!(tx_id = %tx.id, "Rejecting replayed credit transaction");
                                             continue;
                                         }
+                                        // SEC: Freshness window — every other signed gossip type binds a
+                                        // narrow time window (gotcha #32 / #44 one-sided staleness). Without
+                                        // it a captured-but-never-stored partial transaction signed long ago
+                                        // could be admitted indefinitely. Skew tolerance matches the credit
+                                        // balance report (30s skew, 5min max age).
+                                        const TX_SKEW_SECS: i64 = 30;
+                                        const TX_MAX_AGE_SECS: i64 = 300;
+                                        let tx_age = (chrono::Utc::now() - tx.timestamp).num_seconds();
+                                        if tx_age < -TX_SKEW_SECS {
+                                            tracing::warn!(
+                                                tx_id = %tx.id,
+                                                age_secs = tx_age,
+                                                "Rejecting credit tx: timestamp in the future"
+                                            );
+                                            continue;
+                                        }
+                                        if tx_age > TX_MAX_AGE_SECS {
+                                            tracing::warn!(
+                                                tx_id = %tx.id,
+                                                age_secs = tx_age,
+                                                "Rejecting credit tx: timestamp too old"
+                                            );
+                                            continue;
+                                        }
                                         // SEC: Verify dual Ed25519 signatures before accepting.
                                         // Without this check, any peer can forge arbitrary credit transactions.
                                         {
@@ -804,11 +828,23 @@ pub(crate) async fn dispatch_network_messages(
                                             tracing::debug!("Dropping unauthenticated NicknameGossip");
                                             continue;
                                         }
-                                        // Age check: reject messages older than 24 hours
-                                        let age = chrono::Utc::now() - record.timestamp;
-                                        if age > chrono::Duration::hours(24) {
+                                        // Age check: one-sided per gotcha #44. Without the future-dated
+                                        // rejection, an attacker can pre-sign with `timestamp = now+23.9h`
+                                        // and the record will win the timestamp-tiebreaker for the next day,
+                                        // squatting any peer's nickname.
+                                        let age_secs = (chrono::Utc::now() - record.timestamp).num_seconds();
+                                        const NICK_GOSSIP_MAX_AGE_SECS: i64 = 24 * 60 * 60;
+                                        const NICK_GOSSIP_SKEW_SECS: i64 = 30;
+                                        if age_secs < -NICK_GOSSIP_SKEW_SECS {
                                             tracing::debug!(
                                                 node_id = %record.node_id,
+                                                age_secs,
+                                                "Rejecting future-dated nickname gossip"
+                                            );
+                                        } else if age_secs > NICK_GOSSIP_MAX_AGE_SECS {
+                                            tracing::debug!(
+                                                node_id = %record.node_id,
+                                                age_secs,
                                                 "Rejecting stale nickname gossip (>24h old)"
                                             );
                                         } else if record.verify().is_err() {

@@ -30,11 +30,16 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 /// Dynamically builds the origin whitelist from the actual listen port so users
 /// running on non-default ports (e.g. `-p 9000`) don't get blocked by CORS.
 pub fn cors_layer(port: u16) -> CorsLayer {
-    let mut origins: Vec<HeaderValue> = Vec::with_capacity(2);
+    let mut origins: Vec<HeaderValue> = Vec::with_capacity(3);
     if let Ok(v) = format!("http://localhost:{port}").parse::<HeaderValue>() {
         origins.push(v);
     }
     if let Ok(v) = format!("http://127.0.0.1:{port}").parse::<HeaderValue>() {
+        origins.push(v);
+    }
+    // IPv6 loopback — browsers on IPv6-only stacks resolve `localhost` to
+    // `[::1]` and send `Origin: http://[::1]:port`, which the v4 entries miss.
+    if let Ok(v) = format!("http://[::1]:{port}").parse::<HeaderValue>() {
         origins.push(v);
     }
     CorsLayer::new()

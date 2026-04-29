@@ -296,6 +296,25 @@ impl PoolManager {
             return;
         }
 
+        // SEC: cap inbound device_name length. handle_set_device_name applies
+        // a 32-char cap on local writes, but the inbound gossip path is what
+        // ends up persisted to redb and broadcast to all pool members — a
+        // malicious member can otherwise smuggle multi-MB strings into every
+        // peer's pool state.
+        const MAX_DEVICE_NAME_BYTES: usize = 64;
+        let device_name = device_name.map(|n| {
+            if n.len() > MAX_DEVICE_NAME_BYTES {
+                tracing::warn!(
+                    %node_id,
+                    len = n.len(),
+                    "Truncating oversized inbound device_name"
+                );
+                n.chars().take(MAX_DEVICE_NAME_BYTES).collect()
+            } else {
+                n
+            }
+        });
+
         let mut ps_guard = self.shared_state.credits.pool_state.write().await;
         if let Some(ref mut ps) = *ps_guard {
             match ps.members.iter_mut().find(|m| m.node_id == node_id) {
