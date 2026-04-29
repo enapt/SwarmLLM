@@ -1,6 +1,15 @@
+use std::cell::Cell;
+
 use crate::types::{ChatMessage, Role};
 
 use super::parser::Token;
+
+/// Maximum depth for recursive template evaluation. Chat templates come from
+/// peer-supplied GGUF metadata; without a depth cap, a crafted template with
+/// deeply-nested parens / for-in-for / if-in-if blocks can overflow the worker
+/// thread's stack. 256 is generous for any reasonable chat template (real-world
+/// templates rarely exceed depth 5).
+pub(super) const MAX_TEMPLATE_DEPTH: u32 = 256;
 
 pub(super) struct EvalCtx<'a> {
     pub(super) tokens: &'a [Token],
@@ -8,6 +17,32 @@ pub(super) struct EvalCtx<'a> {
     pub(super) bos_token: &'a str,
     pub(super) eos_token: &'a str,
     pub(super) add_generation_prompt: bool,
+    /// Current recursion depth — `Cell` so we can borrow `&EvalCtx`
+    /// throughout while still mutating the counter.
+    pub(super) depth: Cell<u32>,
+}
+
+impl EvalCtx<'_> {
+    /// RAII helper: increments depth, returns a guard that decrements on drop.
+    /// Returns `None` if `MAX_TEMPLATE_DEPTH` would be exceeded.
+    pub(super) fn enter(&self) -> Option<DepthGuard<'_>> {
+        let cur = self.depth.get();
+        if cur >= MAX_TEMPLATE_DEPTH {
+            return None;
+        }
+        self.depth.set(cur + 1);
+        Some(DepthGuard { cell: &self.depth })
+    }
+}
+
+pub(super) struct DepthGuard<'a> {
+    cell: &'a Cell<u32>,
+}
+
+impl Drop for DepthGuard<'_> {
+    fn drop(&mut self) {
+        self.cell.set(self.cell.get().saturating_sub(1));
+    }
 }
 
 /// Mutable evaluation state (changes per loop iteration, accumulates variables).
@@ -55,6 +90,7 @@ pub(super) fn eval_block(
     output: &mut String,
     state: &mut EvalState,
 ) -> Option<usize> {
+    let _depth_guard = ctx.enter()?;
     let mut i = start;
     while i < ctx.tokens.len() {
         match &ctx.tokens[i] {
@@ -277,10 +313,15 @@ fn eval_expr(expr: &str, state: &EvalState, ctx: &EvalCtx) -> Option<String> {
         return state.loop_index.map(|i| i.to_string());
     }
 
-    // Modulo: X % N
+    // Modulo: X % N. The chat template is peer-supplied (GGUF tokenizer.chat_template
+    // field), so guard against `% 0` which would panic in debug and is undefined in
+    // release for i64.
     if let Some((left, right)) = split_outside_strings(expr, '%') {
         let lv = eval_expr(left, state, ctx)?.parse::<i64>().ok()?;
         let rv = right.parse::<i64>().ok()?;
+        if rv == 0 {
+            return None;
+        }
         return Some((lv % rv).to_string());
     }
 
@@ -394,6 +435,10 @@ fn split_outside_strings(expr: &str, sep: char) -> Option<(&str, &str)> {
 
 /// Evaluate a condition expression (for {% if %} / {% elif %}).
 fn eval_condition(condition: &str, state: &EvalState, ctx: &EvalCtx) -> bool {
+    let _depth_guard = match ctx.enter() {
+        Some(g) => g,
+        None => return false,
+    };
     let condition = condition.trim();
 
     if condition.is_empty() {

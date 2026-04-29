@@ -94,7 +94,17 @@ impl UpdateChecker {
         state: Arc<RwLock<UpdateState>>,
         dashboard_tx: tokio::sync::broadcast::Sender<crate::daemon::state::DashboardSignal>,
     ) -> Self {
-        let binary_path = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("swarmllm"));
+        // current_exe() can fail in sandboxed environments (seccomp, certain
+        // container runtimes, missing /proc/self/exe). The "swarmllm" fallback
+        // resolves against CWD at apply-time, which is almost never the install
+        // dir — log loudly so operators know auto-update will fail.
+        let binary_path = std::env::current_exe().unwrap_or_else(|e| {
+            tracing::warn!(
+                error = %e,
+                "current_exe() failed — auto-update disabled (binary path unknown)"
+            );
+            PathBuf::from("swarmllm")
+        });
         Self {
             config,
             repo,

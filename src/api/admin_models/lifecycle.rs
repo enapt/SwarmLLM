@@ -54,11 +54,15 @@ pub async fn delete_model(
         )))
     })?;
 
-    // Remove manifest from DB
-    let _ = shared.db.remove("model_meta", &model_id);
-
-    // Remove HF source from DB
-    let _ = shared.db.remove("hf_sources", &model_id);
+    // Remove manifest from DB. Log on failure — silently dropping the error
+    // would leave the row on disk while the in-memory registry is updated
+    // below, causing the model to reappear after restart.
+    if let Err(e) = shared.db.remove("model_meta", &model_id) {
+        tracing::warn!(model = %model_id, error = %e, "Failed to remove model_meta from DB");
+    }
+    if let Err(e) = shared.db.remove("hf_sources", &model_id) {
+        tracing::warn!(model = %model_id, error = %e, "Failed to remove hf_sources from DB");
+    }
 
     // S5: Collect local shards before removal for DHT stop_providing
     let local_shards: Vec<_> = shared

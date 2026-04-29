@@ -35,6 +35,7 @@ pub fn apply_chat_template(
         bos_token,
         eos_token,
         add_generation_prompt,
+        depth: std::cell::Cell::new(0),
     };
     let mut state = EvalState::new(messages);
     eval_block(&ctx, 0, &mut output, &mut state)?;

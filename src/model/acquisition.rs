@@ -342,7 +342,22 @@ impl AcquisitionManager {
         // Save the verified manifest to disk
         let model_dir = self.shard_store.model_dir(&model_id);
         if let Err(e) = manifest.save_to_dir(&model_dir) {
+            let reason = format!("Failed to save manifest: {e}");
             tracing::error!(model = %model_id, error = %e, "Failed to save manifest");
+            // Mark the job Failed so the dashboard doesn't show it stuck in
+            // Downloading forever (we already inserted progress as Downloading
+            // when the job was registered).
+            if let Some(job) = self.jobs.get_mut(&model_id) {
+                job.status.state = AcquisitionState::Failed {
+                    reason: reason.clone(),
+                };
+                self.shared_state
+                    .models
+                    .acquisition_progress
+                    .insert(model_id.clone(), job.status.clone());
+            }
+            self.shared_state
+                .schedule_acquisition_cleanup(model_id.clone());
             return;
         }
 

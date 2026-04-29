@@ -282,12 +282,16 @@ impl InferenceRouter {
                 requester = %request.requester,
                 "Inference request rejected — balance below minimum"
             );
-            let _ = result_tx.send(Err(SwarmError::CreditError(format!(
-                "Insufficient credits: balance {} is below minimum {} required for inference. \
-                 Contribute by hosting model shards or serving inference to earn credits.",
+            let send_res = result_tx.send(Err(SwarmError::InsufficientCredits {
                 balance,
-                crate::credit::ledger::MIN_BALANCE_FOR_INFERENCE
-            ))));
+                required: crate::credit::ledger::MIN_BALANCE_FOR_INFERENCE,
+            }));
+            if send_res.is_err() {
+                tracing::debug!(
+                    requester = %request.requester,
+                    "Credit-rejection error not delivered (oneshot receiver dropped)"
+                );
+            }
             return;
         }
 
@@ -355,9 +359,15 @@ impl InferenceRouter {
                 queue_len = self.queue.len(),
                 "Inference queue full — rejecting request"
             );
-            let _ = result_tx.send(Err(crate::error::SwarmError::ServiceUnavailable(
+            let send_res = result_tx.send(Err(crate::error::SwarmError::ServiceUnavailable(
                 "Inference queue is full. Please try again later.".to_string(),
             )));
+            if send_res.is_err() {
+                tracing::debug!(
+                    request_id = %adjusted_request.id,
+                    "Queue-full error not delivered (oneshot receiver dropped)"
+                );
+            }
             return;
         }
 

@@ -200,10 +200,14 @@ impl IntoResponse for ApiError {
                 self.0.to_string(),
                 "authentication_error",
             ),
+            // SwarmError::Config is for daemon startup / config-file errors per
+            // .claude/rules/completeness.md. If it surfaces in an HTTP response
+            // path, the daemon has shipped misconfigured — that's a 500, not a
+            // 400 (the user did not send invalid input).
             SwarmError::Config(_) => (
-                StatusCode::BAD_REQUEST,
+                StatusCode::INTERNAL_SERVER_ERROR,
                 self.0.to_string(),
-                "invalid_request_error",
+                "server_error",
             ),
             SwarmError::InvalidNickname(_) | SwarmError::Validation(_) => (
                 StatusCode::BAD_REQUEST,

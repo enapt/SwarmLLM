@@ -203,32 +203,53 @@ impl NetworkManager {
             .behaviour()
             .request_response
             .is_pending_outbound(&peer_id, &outbound_id);
-        // DIAG: enumerate connection IDs for this peer to detect stale conn_id issues
+        // DIAG: enumerate connection IDs for this peer to detect stale conn_id issues.
+        // Allocated and stringified eagerly by the tracing! macro regardless of subscriber
+        // level, so gate the expensive `connection_addrs` enumeration on whether DEBUG is
+        // actually enabled. At the default `info` filter the per-token call rate would
+        // otherwise burn ~50–100 KB of throwaway heap per LayerForward.
         let peer_established_count = self
             .swarm
             .connected_peers()
             .filter(|p| **p == peer_id)
             .count();
-        let all_conn_ids: Vec<_> = self
-            .connection_addrs
-            .iter()
-            .map(|(cid, addr)| format!("{cid:?}→{addr}"))
-            .collect();
-        tracing::info!(
-            %peer_id,
-            request_id = %forward.request_id,
-            seq = forward.sequence_num,
-            encrypted = use_encryption,
-            payload_len,
-            is_connected,
-            total_connections = total_conn_count,
-            peer_established_count,
-            is_rr_pending,
-            pending_tensor_count = self.pending_tensor_outbound.len(),
-            ?outbound_id,
-            tracked_connections = ?all_conn_ids,
-            "DIAG: sent tensor forward via send_request"
-        );
+        if tracing::enabled!(tracing::Level::DEBUG) {
+            let all_conn_ids: Vec<_> = self
+                .connection_addrs
+                .iter()
+                .map(|(cid, addr)| format!("{cid:?}→{addr}"))
+                .collect();
+            tracing::debug!(
+                %peer_id,
+                request_id = %forward.request_id,
+                seq = forward.sequence_num,
+                encrypted = use_encryption,
+                payload_len,
+                is_connected,
+                total_connections = total_conn_count,
+                peer_established_count,
+                is_rr_pending,
+                pending_tensor_count = self.pending_tensor_outbound.len(),
+                ?outbound_id,
+                tracked_connections = ?all_conn_ids,
+                "DIAG: sent tensor forward via send_request (verbose)"
+            );
+        } else {
+            tracing::info!(
+                %peer_id,
+                request_id = %forward.request_id,
+                seq = forward.sequence_num,
+                encrypted = use_encryption,
+                payload_len,
+                is_connected,
+                total_connections = total_conn_count,
+                peer_established_count,
+                is_rr_pending,
+                pending_tensor_count = self.pending_tensor_outbound.len(),
+                ?outbound_id,
+                "DIAG: sent tensor forward via send_request"
+            );
+        }
     }
 
     /// Send a tensor result back to the requesting peer.
