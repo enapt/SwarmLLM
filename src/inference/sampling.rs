@@ -14,6 +14,10 @@ pub struct SamplingContext {
     indices: Vec<usize>,
     /// Saved raw logits (pre-temperature/top-k/top-p) for computing logprobs.
     raw_logits: Vec<f32>,
+    /// Per-token occurrence counts over the generated history. Reused
+    /// across decode iterations: zeroed at start of each penalty
+    /// application. Size = vocab_size, indexed by token id.
+    penalty_counts: Vec<u32>,
 }
 
 impl SamplingContext {
@@ -25,6 +29,7 @@ impl SamplingContext {
             probs: Vec::with_capacity(vocab_size),
             indices: Vec::with_capacity(vocab_size),
             raw_logits: Vec::with_capacity(vocab_size),
+            penalty_counts: Vec::with_capacity(vocab_size),
         }
     }
 
@@ -39,6 +44,58 @@ impl SamplingContext {
             .reserve(vocab_size.saturating_sub(self.probs.capacity()));
         self.indices
             .reserve(vocab_size.saturating_sub(self.indices.capacity()));
+    }
+}
+
+/// Apply OpenAI-style frequency + presence penalties in-place.
+///
+/// Formula (per OpenAI API spec): for each vocab token j,
+///   logits[j] -= count_j * frequency_penalty + I[count_j > 0] * presence_penalty
+/// where count_j is the number of occurrences of token j in `generated_ids`
+/// (the completion-so-far, NOT including prompt tokens). Both penalties
+/// expected in the documented [-2.0, 2.0] range; we don't clamp here so
+/// callers that pass out-of-range values get the documented behavior.
+///
+/// Penalty application MUST happen BEFORE temperature scaling so the
+/// post-temperature distribution is meaningful (penalties scaled by
+/// temperature otherwise become inverse-proportional to creativity, which
+/// inverts the intent of frequency_penalty=1.0 + temperature=2.0).
+///
+/// `ctx.penalty_counts` is reused as a vocab-sized histogram; this avoids
+/// allocating per-token in the decode hot path. Cost: O(vocab + history)
+/// per call.
+pub(crate) fn apply_repetition_penalties(
+    logits: &mut [f32],
+    generated_ids: &[u32],
+    frequency_penalty: f32,
+    presence_penalty: f32,
+    ctx: &mut SamplingContext,
+) {
+    if generated_ids.is_empty()
+        || (frequency_penalty == 0.0 && presence_penalty == 0.0)
+        || logits.is_empty()
+    {
+        return;
+    }
+    let vocab = logits.len();
+    if ctx.penalty_counts.len() < vocab {
+        ctx.penalty_counts.resize(vocab, 0);
+    } else {
+        for c in &mut ctx.penalty_counts[..vocab] {
+            *c = 0;
+        }
+    }
+    for &tok in generated_ids {
+        let i = tok as usize;
+        if i < vocab {
+            ctx.penalty_counts[i] = ctx.penalty_counts[i].saturating_add(1);
+        }
+    }
+    for (i, &c) in ctx.penalty_counts[..vocab].iter().enumerate() {
+        if c == 0 {
+            continue;
+        }
+        logits[i] -= (c as f32) * frequency_penalty + presence_penalty;
     }
 }
 
@@ -223,9 +280,28 @@ fn apply_top_p_with_ctx(logits: &mut [f32], p: f32, ctx: &mut SamplingContext) {
 /// Applies temperature, top-k, top-p in order, then samples from the
 /// resulting distribution. Allocates temporary buffers each call.
 /// For hot-path usage in decode loops, prefer `sample_token_with_ctx`.
+///
+/// Repetition penalties (frequency_penalty / presence_penalty) are NOT
+/// applied here — pass `generated_ids` via `sample_token_with_history`
+/// in decode loops that need them. This signature stays history-free
+/// for tests and one-shot validation paths.
 pub fn sample_token(logits: &mut [f32], params: &SamplingParams) -> u32 {
     let mut ctx = SamplingContext::new(logits.len());
-    sample_token_with_ctx(logits, params, &mut ctx)
+    sample_token_with_ctx(logits, params, &[], &mut ctx)
+}
+
+/// Sample a token index applying frequency/presence penalties from the
+/// generated-token history. Use this in decode loops; pass the
+/// completion-so-far as `generated_ids` (NOT including prompt tokens,
+/// matching the OpenAI spec). Empty `generated_ids` is equivalent to
+/// `sample_token`.
+pub fn sample_token_with_history(
+    logits: &mut [f32],
+    params: &SamplingParams,
+    generated_ids: &[u32],
+    ctx: &mut SamplingContext,
+) -> u32 {
+    sample_token_with_ctx(logits, params, generated_ids, ctx)
 }
 
 /// Sample a token index from logits using pre-allocated scratch buffers.
@@ -235,8 +311,22 @@ pub fn sample_token(logits: &mut [f32], params: &SamplingParams) -> u32 {
 fn sample_token_with_ctx(
     logits: &mut [f32],
     params: &SamplingParams,
+    generated_ids: &[u32],
     ctx: &mut SamplingContext,
 ) -> u32 {
+    // Repetition penalties (frequency + presence) MUST run before
+    // temperature scaling per OpenAI spec — applying after temperature
+    // would scale the penalty inversely with creativity and silently
+    // invert the user's intent. No-op when penalties are 0 or history
+    // is empty.
+    apply_repetition_penalties(
+        logits,
+        generated_ids,
+        params.frequency_penalty,
+        params.presence_penalty,
+        ctx,
+    );
+
     // Greedy decoding when temperature is 0
     if params.temperature <= 0.0 {
         let token = argmax(logits);
@@ -338,10 +428,27 @@ pub fn sample_token_with_logprobs(
     params: &SamplingParams,
     ctx: &mut SamplingContext,
 ) -> (u32, Option<SampledTokenLogProb>) {
+    sample_token_with_logprobs_history(logits, params, &[], ctx)
+}
+
+/// Same as `sample_token_with_logprobs` but applies repetition penalties
+/// from `generated_ids`. Use this in decode loops with non-zero
+/// frequency/presence penalty AND logprobs enabled.
+///
+/// Note: `raw_logits` is saved BEFORE penalty application so the returned
+/// logprobs reflect the model's raw distribution (matches OpenAI spec —
+/// logprobs are not penalty-adjusted, only the sampling distribution is).
+pub fn sample_token_with_logprobs_history(
+    logits: &mut [f32],
+    params: &SamplingParams,
+    generated_ids: &[u32],
+    ctx: &mut SamplingContext,
+) -> (u32, Option<SampledTokenLogProb>) {
     let need_logprobs = params.logprobs && params.top_logprobs > 0;
 
-    // Save raw logits BEFORE sampling mutates them (temperature/top-k/top-p).
-    // OpenAI spec: logprobs are computed from the pre-sampling distribution.
+    // Save raw logits BEFORE sampling mutates them (temperature/top-k/top-p
+    // or penalties). OpenAI spec: logprobs are computed from the
+    // pre-sampling distribution — NOT the penalty-adjusted one.
     if need_logprobs {
         ctx.raw_logits.clear();
         ctx.raw_logits.extend_from_slice(logits);
@@ -351,7 +458,7 @@ pub fn sample_token_with_logprobs(
     // (especially important for greedy/temperature=0 which skips softmax)
     ctx.probs.clear();
 
-    let token_id = sample_token_with_ctx(logits, params, ctx);
+    let token_id = sample_token_with_ctx(logits, params, generated_ids, ctx);
 
     let logprob_info = if need_logprobs {
         // Compute log-softmax from raw (pre-sampling) logits per OpenAI spec.
@@ -685,7 +792,7 @@ mod tests {
             ..Default::default()
         };
         let mut ctx = SamplingContext::new(logits.len());
-        let token = sample_token_with_ctx(&mut logits, &params, &mut ctx);
+        let token = sample_token_with_ctx(&mut logits, &params, &[], &mut ctx);
         assert_eq!(token, 1);
     }
 
@@ -771,5 +878,95 @@ mod tests {
         let mut ctx = SamplingContext::new(logits.len());
         let (_token, lp) = sample_token_with_logprobs(&mut logits, &params, &mut ctx);
         assert!(lp.is_none());
+    }
+
+    #[test]
+    fn repetition_penalties_no_op_when_zero() {
+        let mut logits = vec![1.0, 5.0, 3.0, 2.0, 4.0];
+        let original = logits.clone();
+        let mut ctx = SamplingContext::new(logits.len());
+        apply_repetition_penalties(&mut logits, &[1, 1, 2], 0.0, 0.0, &mut ctx);
+        assert_eq!(logits, original);
+    }
+
+    #[test]
+    fn repetition_penalties_no_op_when_history_empty() {
+        let mut logits = vec![1.0, 5.0, 3.0];
+        let original = logits.clone();
+        let mut ctx = SamplingContext::new(logits.len());
+        apply_repetition_penalties(&mut logits, &[], 1.5, 0.5, &mut ctx);
+        assert_eq!(logits, original);
+    }
+
+    #[test]
+    fn frequency_penalty_scales_with_count() {
+        // OpenAI formula: logits[j] -= count[j] * frequency_penalty
+        let mut logits = vec![10.0, 10.0, 10.0];
+        let mut ctx = SamplingContext::new(logits.len());
+        // Token 1 appears 3 times; token 2 appears once; token 0 unused.
+        apply_repetition_penalties(&mut logits, &[1, 1, 1, 2], 1.0, 0.0, &mut ctx);
+        assert!((logits[0] - 10.0).abs() < 1e-6);
+        assert!((logits[1] - 7.0).abs() < 1e-6); // 10 - 3*1
+        assert!((logits[2] - 9.0).abs() < 1e-6); // 10 - 1*1
+    }
+
+    #[test]
+    fn presence_penalty_is_boolean_not_count() {
+        // OpenAI formula: logits[j] -= 1[count[j] > 0] * presence_penalty.
+        // Token 1 appears 5 times — same penalty as appearing once.
+        let mut logits = vec![10.0, 10.0, 10.0];
+        let mut ctx = SamplingContext::new(logits.len());
+        apply_repetition_penalties(&mut logits, &[1, 1, 1, 1, 1, 2], 0.0, 0.7, &mut ctx);
+        assert!((logits[0] - 10.0).abs() < 1e-6);
+        assert!((logits[1] - 9.3).abs() < 1e-6);
+        assert!((logits[2] - 9.3).abs() < 1e-6);
+    }
+
+    #[test]
+    fn frequency_and_presence_combine() {
+        let mut logits = vec![10.0, 10.0];
+        let mut ctx = SamplingContext::new(logits.len());
+        apply_repetition_penalties(&mut logits, &[1, 1, 1], 0.5, 0.3, &mut ctx);
+        // Token 1: count=3, present → 10 - (3 * 0.5 + 0.3) = 8.2
+        assert!((logits[0] - 10.0).abs() < 1e-6);
+        assert!((logits[1] - 8.2).abs() < 1e-6);
+    }
+
+    #[test]
+    fn negative_penalty_encourages_repetition() {
+        // Per OpenAI docs, negative values "encourage repetition".
+        let mut logits = vec![10.0, 10.0];
+        let mut ctx = SamplingContext::new(logits.len());
+        apply_repetition_penalties(&mut logits, &[1, 1], -1.0, -0.5, &mut ctx);
+        assert!((logits[0] - 10.0).abs() < 1e-6);
+        // Token 1: 10 - (2 * -1.0 + -0.5) = 12.5
+        assert!((logits[1] - 12.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn out_of_range_token_id_ignored() {
+        let mut logits = vec![1.0, 2.0, 3.0];
+        let original = logits.clone();
+        let mut ctx = SamplingContext::new(logits.len());
+        // Token id 99 is past vocab — must NOT panic, must NOT corrupt logits.
+        apply_repetition_penalties(&mut logits, &[99, 100], 1.0, 1.0, &mut ctx);
+        assert_eq!(logits, original);
+    }
+
+    #[test]
+    fn sample_token_with_history_applies_freq_penalty() {
+        // With strong freq penalty + greedy temperature, the previously
+        // sampled token should be suppressed below the next-best.
+        let mut logits = vec![10.0, 9.0, 8.0]; // greedy would pick 0
+        let params = SamplingParams {
+            temperature: 0.0,
+            frequency_penalty: 2.0,
+            ..Default::default()
+        };
+        let mut ctx = SamplingContext::new(logits.len());
+        // Token 0 appears once; penalty drops it to 10 - 1*2 = 8.0
+        // but logits[1] = 9.0 > 8.0, so token 1 wins.
+        let token = sample_token_with_history(&mut logits, &params, &[0], &mut ctx);
+        assert_eq!(token, 1);
     }
 }

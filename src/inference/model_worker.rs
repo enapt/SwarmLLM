@@ -785,9 +785,14 @@ async fn run_fused_batch_forward(
 
     for (r, output_t) in requests.iter().zip(results.iter()) {
         if is_last {
-            // Logits [1, vocab] → sample + EOS check.
-            let token_id = split::sample_token_with_params(output_t, &r.sampling)
-                .map_err(|e| SwarmError::Internal(format!("Sample: {e}")))?;
+            // Logits [1, vocab] → sample + EOS check. Pass generated_ids
+            // (populated by the daemon coordinator on the final segment
+            // when penalties are non-zero) so frequency_penalty /
+            // presence_penalty are honored on the distributed batched
+            // path.
+            let token_id =
+                split::sample_token_with_params_history(output_t, &r.sampling, &r.generated_ids)
+                    .map_err(|e| SwarmError::Internal(format!("Sample: {e}")))?;
             let finish = if model.eos_tokens().contains(&token_id) {
                 Some(crate::types::NetworkFinishReason::Stop)
             } else {
@@ -1194,8 +1199,12 @@ async fn handle_forward(
             };
 
             if is_last && tp_meta.is_none() {
-                let token_id = split::sample_token_with_params(&output, &fwd.sampling)
-                    .map_err(|e| format!("Sample: {e}"))?;
+                let token_id = split::sample_token_with_params_history(
+                    &output,
+                    &fwd.sampling,
+                    &fwd.generated_ids,
+                )
+                .map_err(|e| format!("Sample: {e}"))?;
                 let eos_tokens = model.eos_tokens();
                 let finish = if eos_tokens.contains(&token_id) {
                     Some(NetworkFinishReason::Stop)
@@ -1599,8 +1608,13 @@ async fn handle_generate(
                 let _g = crate::inference::attn_kernel::ForceStandardAttnGuard::new(force_attn);
                 model.forward(&input, index_pos, kv_store, &req_id_str)
             })?;
-            let (tok, lp) =
-                crate::inference::tensor_util::sample_token_with_logprob(&logits, &gen.sampling)?;
+            // Pass `generated` so frequency_penalty / presence_penalty
+            // are honored against the completion-so-far per OpenAI spec.
+            let (tok, lp) = crate::inference::tensor_util::sample_token_with_logprob_history(
+                &logits,
+                &gen.sampling,
+                &generated,
+            )?;
             next_token = tok;
             token_logprob = lp;
             index_pos += 1;
@@ -2090,6 +2104,7 @@ async fn try_register_generate_slot(
         sampling,
         prompt_tokens,
         prompt_ids,
+        generated_ids: Vec::new(),
         finish_reason: None,
         error_message: None,
     };
@@ -2489,10 +2504,14 @@ async fn step_decode_pool(
 
     for (j, &i) in still_active_indices.iter().enumerate() {
         let slot = &mut active[i];
+        // Pass slot.generated_ids so frequency_penalty / presence_penalty
+        // see the completion-so-far for THIS slot (each batch slot has
+        // its own decoded history).
         let (next_tok, next_logprob) =
-            match crate::inference::tensor_util::sample_token_with_logprob(
+            match crate::inference::tensor_util::sample_token_with_logprob_history(
                 &outputs[j],
                 &slot.sampling,
+                &slot.generated_ids,
             ) {
                 Ok(v) => v,
                 Err(e) => {
@@ -2501,6 +2520,7 @@ async fn step_decode_pool(
                     continue;
                 }
             };
+        slot.generated_ids.push(next_tok);
         let new_generated_count = match &mut slot.state {
             crate::inference::slot_table::SlotState::Decoding {
                 last_token,

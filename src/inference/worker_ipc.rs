@@ -173,6 +173,14 @@ pub struct IpcForward {
     /// a multi-position forward and returns per-position logits.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub draft_tokens: Vec<u32>,
+    /// OpenAI-style frequency_penalty / presence_penalty history: the
+    /// completion-so-far token IDs. Populated by the daemon coordinator on
+    /// the final-segment forward when `sampling.frequency_penalty != 0` or
+    /// `sampling.presence_penalty != 0`; empty otherwise (default no-op,
+    /// no wire bloat). Worker passes this to
+    /// `apply_repetition_penalties` before sampling.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub generated_ids: Vec<u32>,
     /// Coordinator wants per-position logit vectors populated on the result.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub spec_logits_requested: bool,
@@ -429,6 +437,7 @@ mod tests {
             sampling: Default::default(),
             adapter_id: None,
             draft_tokens: vec![],
+            generated_ids: vec![],
             spec_logits_requested: false,
             truncate_kv_to: None,
         };
@@ -460,6 +469,7 @@ mod tests {
             sampling: Default::default(),
             adapter_id: None,
             draft_tokens: vec![],
+            generated_ids: vec![],
             spec_logits_requested: false,
             truncate_kv_to: None,
         };

@@ -244,6 +244,7 @@ impl PipelineExecutor {
                     activations,
                     vision_for_forward,
                     pre_embedded,
+                    &generated_tokens,
                 )
                 .await
             {
@@ -565,6 +566,7 @@ impl PipelineExecutor {
                 tp_meta: None,
                 requester_node_id: Some(self.shared_state.identity.node_id().0),
                 pre_embedded: false,
+                generated_ids: Vec::new(),
                 adapter_id: None,
                 draft_tokens: Vec::new(),
                 spec_logits_requested: false,
@@ -600,6 +602,7 @@ impl PipelineExecutor {
     /// If tensor-parallel groups are available for a segment's layer range,
     /// the executor uses layer-by-layer AllReduce across the TP group instead
     /// of sending the full layer range to a single node.
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn forward_through_segments(
         &mut self,
         request_id: uuid::Uuid,
@@ -608,6 +611,7 @@ impl PipelineExecutor {
         initial_activations: Vec<u8>,
         precomputed_vision: Option<Vec<u8>>,
         pre_embedded: bool,
+        generated_ids: &[u32],
     ) -> Result<LayerResult, SwarmError> {
         let mut activations = initial_activations;
         let num_segments = self.assignment.segments.len();
@@ -714,6 +718,7 @@ impl PipelineExecutor {
                             None
                         },
                         pre_embedded && idx == 0,
+                        generated_ids,
                     )
                     .await?;
                 tracing::debug!(
@@ -759,6 +764,16 @@ impl PipelineExecutor {
                     // Local embedding privacy: only the first segment of the first
                     // forward needs this flag (subsequent segments receive hidden states anyway).
                     pre_embedded: pre_embedded && idx == 0,
+                    // Only the LAST segment samples — others just propagate
+                    // hidden state. Sending generated_ids to intermediate
+                    // segments is wasted bytes. Send empty for non-last
+                    // segments and when the caller passed an empty slice
+                    // (penalties == 0 fast path; no wire bloat).
+                    generated_ids: if is_last && !generated_ids.is_empty() {
+                        generated_ids.to_vec()
+                    } else {
+                        Vec::new()
+                    },
                     adapter_id: None,
                     draft_tokens: Vec::new(),
                     spec_logits_requested: false,
@@ -1089,6 +1104,7 @@ impl PipelineExecutor {
                     sender_peer_bytes: None,
                     requester_node_id: Some(self.shared_state.identity.node_id().0),
                     pre_embedded: false,
+                    generated_ids: Vec::new(),
                     adapter_id: None,
                     draft_tokens: Vec::new(),
                     spec_logits_requested: false,

@@ -259,6 +259,14 @@ pub struct LayerForward {
     /// IDs or prompt text. The receiving node skips its embedding lookup.
     #[serde(default)]
     pub pre_embedded: bool,
+    /// Decoded-so-far token IDs for OpenAI-style frequency_penalty /
+    /// presence_penalty. Populated by the daemon coordinator on the
+    /// final-segment forward when penalties are non-zero, so the worker
+    /// applies penalties against the completion-so-far.
+    /// Serialized only when non-empty to keep zero-penalty requests on
+    /// the existing wire size.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub generated_ids: Vec<u32>,
     /// LoRA adapter ID to apply during inference. When set, the worker loads the
     /// adapter from the data_dir and applies its low-rank deltas per-layer.
     #[serde(default, skip_serializing_if = "Option::is_none")]

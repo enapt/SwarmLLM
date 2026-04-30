@@ -1330,6 +1330,7 @@ impl ModelProcessPool {
             sender_peer_bytes: _,
             requester_node_id,
             pre_embedded,
+            generated_ids,
             adapter_id,
             draft_tokens,
             spec_logits_requested,
@@ -1365,6 +1366,7 @@ impl ModelProcessPool {
             sampling: Default::default(),
             adapter_id,
             draft_tokens,
+            generated_ids,
             spec_logits_requested,
             truncate_kv_to,
         };
@@ -1507,6 +1509,7 @@ impl ModelProcessPool {
                 sender_peer_bytes: _,
                 requester_node_id,
                 pre_embedded,
+                generated_ids,
                 adapter_id,
                 draft_tokens,
                 spec_logits_requested,
@@ -1528,6 +1531,7 @@ impl ModelProcessPool {
                 sampling: Default::default(),
                 adapter_id,
                 draft_tokens,
+                generated_ids,
                 spec_logits_requested,
                 truncate_kv_to,
             });

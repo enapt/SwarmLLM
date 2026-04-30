@@ -263,6 +263,7 @@ pub fn decode_layer_forward_encrypted(
         sender_peer_bytes: None,
         requester_node_id: None,
         pre_embedded: tp_pre_embedded,
+        generated_ids: Vec::new(),
         adapter_id: None,
         draft_tokens,
         spec_logits_requested,

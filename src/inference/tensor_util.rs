@@ -238,13 +238,27 @@ pub fn sample_token(logits: &Tensor, temperature: f32, top_p: f32) -> Result<u32
     )
 }
 
-/// Sample the next token from logits using full SamplingParams (top_k, frequency/presence penalty).
+/// Sample the next token from logits using full SamplingParams (top_k,
+/// temperature, top_p). Does NOT apply frequency/presence penalties —
+/// pass an empty history. For decode loops with non-zero penalties,
+/// use `sample_token_with_params_history`.
 ///
-/// Converts the tensor to a flat `Vec<f32>` and delegates to `sampling::sample_token`
-/// which handles the full temperature → top-k → top-p → softmax → sample pipeline.
+/// Converts the tensor to a flat `Vec<f32>` and delegates to
+/// `sampling::sample_token`.
 pub fn sample_token_with_params(
     logits: &Tensor,
     params: &crate::types::SamplingParams,
+) -> Result<u32, SwarmError> {
+    sample_token_with_params_history(logits, params, &[])
+}
+
+/// Same as `sample_token_with_params` but applies frequency/presence
+/// penalties from `generated_ids` (the completion-so-far). Empty history
+/// is equivalent to `sample_token_with_params` (no penalty).
+pub fn sample_token_with_params_history(
+    logits: &Tensor,
+    params: &crate::types::SamplingParams,
+    generated_ids: &[u32],
 ) -> Result<u32, SwarmError> {
     let logits = logits.squeeze(0).map_err(SwarmError::internal)?;
     let logits = logits.to_dtype(DType::F32).map_err(SwarmError::internal)?;
@@ -254,21 +268,36 @@ pub fn sample_token_with_params(
         return Err(SwarmError::Internal("Empty logits".into()));
     }
 
-    Ok(crate::inference::sampling::sample_token(
+    let mut ctx = crate::inference::sampling::SamplingContext::new(logits_vec.len());
+    Ok(crate::inference::sampling::sample_token_with_history(
         &mut logits_vec,
         params,
+        generated_ids,
+        &mut ctx,
     ))
 }
 
 /// Sample a token from logits with optional logprob collection.
 /// When `params.logprobs` is true, returns `(token_id, Some(logprob))`.
+///
+/// History-free: pass `generated_ids = &[]`. For decode loops with
+/// frequency_penalty / presence_penalty, use
+/// `sample_token_with_logprob_history` instead.
 pub fn sample_token_with_logprob(
     logits: &Tensor,
     params: &crate::types::SamplingParams,
 ) -> Result<(u32, Option<f32>), SwarmError> {
-    if !params.logprobs {
-        return sample_token_with_params(logits, params).map(|t| (t, None));
-    }
+    sample_token_with_logprob_history(logits, params, &[])
+}
+
+/// Same as `sample_token_with_logprob` but applies frequency/presence
+/// penalties from `generated_ids` (the completion-so-far token list).
+/// Use this in decode loops; pass an empty slice to skip penalties.
+pub fn sample_token_with_logprob_history(
+    logits: &Tensor,
+    params: &crate::types::SamplingParams,
+    generated_ids: &[u32],
+) -> Result<(u32, Option<f32>), SwarmError> {
     let logits_squeezed = logits.squeeze(0).map_err(SwarmError::internal)?;
     let logits_f32 = logits_squeezed
         .to_dtype(DType::F32)
@@ -278,8 +307,21 @@ pub fn sample_token_with_logprob(
         return Err(SwarmError::Internal("Empty logits".into()));
     }
     let mut ctx = crate::inference::sampling::SamplingContext::new(logits_vec.len());
-    let (token_id, info) =
-        crate::inference::sampling::sample_token_with_logprobs(&mut logits_vec, params, &mut ctx);
+    if !params.logprobs {
+        let token_id = crate::inference::sampling::sample_token_with_history(
+            &mut logits_vec,
+            params,
+            generated_ids,
+            &mut ctx,
+        );
+        return Ok((token_id, None));
+    }
+    let (token_id, info) = crate::inference::sampling::sample_token_with_logprobs_history(
+        &mut logits_vec,
+        params,
+        generated_ids,
+        &mut ctx,
+    );
     let logprob = info.map(|i| i.logprob);
     Ok((token_id, logprob))
 }

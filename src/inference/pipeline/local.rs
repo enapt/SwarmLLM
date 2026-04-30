@@ -85,6 +85,7 @@ impl PipelineExecutor {
     /// `std::mem::take` the previous segment's buffer instead of forcing a
     /// `to_vec()` copy on every iteration of the segment loop. The buffer
     /// flows directly into `LayerForward.activations`.
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn process_local_segment(
         &self,
         segment: &PipelineSegment,
@@ -93,6 +94,7 @@ impl PipelineExecutor {
         activation_bytes: Vec<u8>,
         precomputed_vision_bytes: Option<&[u8]>,
         pre_embedded: bool,
+        generated_ids: &[u32],
     ) -> Result<LayerResult, SwarmError> {
         let model_id = &segment.shard_id.model_id;
         let (layer_start, layer_end) = (
@@ -131,6 +133,7 @@ impl PipelineExecutor {
             sender_peer_bytes: None,
             requester_node_id: None,
             pre_embedded,
+            generated_ids: generated_ids.to_vec(),
             adapter_id: None,
             draft_tokens: Vec::new(),
             spec_logits_requested: false,

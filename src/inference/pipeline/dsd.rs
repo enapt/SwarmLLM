@@ -159,8 +159,9 @@ impl PipelineExecutor {
         // existing forward_through_segments path. The first token bootstraps
         // the spec round loop.
         let prompt_bytes = prompt.as_bytes().to_vec();
+        // Empty `generated_ids` for prefill — no tokens generated yet.
         let prefill_result = self
-            .forward_through_segments(request_id, 0, 0, prompt_bytes.clone(), None, false)
+            .forward_through_segments(request_id, 0, 0, prompt_bytes.clone(), None, false, &[])
             .await?;
         if prefill_result.token_ids.is_empty() {
             return Err(SwarmError::Inference(
@@ -460,6 +461,7 @@ async fn forward_verify_through_segments(
             tp_meta: None,
             requester_node_id: Some(shared_state.identity.node_id().0),
             pre_embedded: false,
+            generated_ids: Vec::new(),
             adapter_id: None,
             // The receiver gates spec-logits emission on
             // `spec_logits_requested && is_last`, not on `draft_tokens`. The

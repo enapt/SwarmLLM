@@ -150,6 +150,7 @@ impl PipelineExecutor {
                 tp_meta: None,
                 requester_node_id: Some(self.shared_state.identity.node_id().0),
                 pre_embedded: false,
+                generated_ids: Vec::new(),
                 adapter_id: None,
                 draft_tokens: Vec::new(),
                 spec_logits_requested: false,
@@ -530,6 +531,7 @@ async fn send_verify_batch(
         tp_meta: None,
         requester_node_id: Some(shared_state.identity.node_id().0),
         pre_embedded: false,
+        generated_ids: Vec::new(),
         adapter_id: None,
         // The receiver gates spec-logits emission on
         // `spec_logits_requested && is_last`, not on `draft_tokens`. The

@@ -78,6 +78,11 @@ pub struct Slot {
     /// completed prefill back into the radix tree for future hits. Cleared
     /// once the snapshot is inserted.
     pub prompt_ids: Vec<u32>,
+    /// Decoded token history for OpenAI-style frequency_penalty /
+    /// presence_penalty. Appended after each sample. Empty during
+    /// Prefilling. Populated with `[first_token]` in `promote_to_decoding`
+    /// so the next decode sample sees the first generated token.
+    pub generated_ids: Vec<u32>,
     /// Set when the slot decides to stop. The slot driver reads this on
     /// the next pass and removes the slot. Possible values:
     /// - `"stop"`  — EOS or stop-sequence match
@@ -184,6 +189,10 @@ impl Slot {
             generated_count: 0,
             index_pos: new_index_pos,
         };
+        // First sampled token is part of the completion-so-far for
+        // frequency_penalty / presence_penalty purposes.
+        self.generated_ids.clear();
+        self.generated_ids.push(first_token);
     }
 }
 
@@ -317,6 +326,7 @@ mod tests {
             },
             prompt_tokens: 8,
             prompt_ids: vec![1, 2, 3, 4, 5, 6, 7, 8],
+            generated_ids: vec![],
             finish_reason: None,
             error_message: None,
         }
@@ -357,6 +367,7 @@ mod tests {
             },
             prompt_tokens: prompt_len,
             prompt_ids: (1..=prompt_len as u32).collect(),
+            generated_ids: vec![],
             finish_reason: None,
             error_message: None,
         }
