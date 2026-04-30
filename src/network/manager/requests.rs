@@ -582,15 +582,23 @@ impl NetworkManager {
                         // More chunks needed — re-register and request next chunk
                         // SEC: enforce cap even for continuation requests to prevent unbounded growth
                         if self.pending_shard_requests.len() >= MAX_PENDING_SHARD_REQUESTS {
+                            // Don't just drop the local maps: that leaves
+                            // `acquisition_progress` / `p2p_download_permits`
+                            // orphaned (UI shows perpetual download, semaphore
+                            // permit blocks future fetches). Route through the
+                            // standard retry/fallback path so HF takeover and
+                            // permit release happen.
                             tracing::warn!(
                                 %peer,
                                 model = %shard_id.model_id,
                                 index = shard_id.index,
-                                "Shard download continuation dropped — pending_shard_requests at cap"
+                                "Shard download continuation dropped — pending_shard_requests at cap; routing to retry/fallback"
                             );
-                            self.shard_download_progress.remove(&shard_id);
-                            self.shard_p2p_retries.remove(&shard_id);
-                            self.shard_last_progress_at.remove(&shard_id);
+                            self.retry_shard_or_fallback(
+                                shard_id,
+                                peer,
+                                "pending_shard_requests at cap on continuation",
+                            );
                         } else {
                             self.shard_download_progress
                                 .insert(shard_id.clone(), new_offset);

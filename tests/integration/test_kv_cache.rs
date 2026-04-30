@@ -138,7 +138,10 @@ fn test_kv_cache_invalidated_on_pipeline_degradation() {
 /// Test that expired sessions return cache miss.
 #[test]
 fn test_kv_cache_expired_session_miss() {
-    let mut mgr = KvCacheManager::new(Duration::from_millis(1)); // 1ms TTL
+    // 50ms TTL with 250ms wait — 5x margin so OS scheduler jitter on a
+    // loaded CI runner doesn't flip Hit↔Miss randomly. The previous 1ms
+    // TTL / 10ms sleep was a 10x margin, which still flaked under load.
+    let mut mgr = KvCacheManager::new(Duration::from_millis(50));
     let internal_id = uuid::Uuid::new_v4();
     let pipeline = make_pipeline(internal_id);
 
@@ -151,7 +154,7 @@ fn test_kv_cache_expired_session_miss() {
     );
 
     // Wait for TTL to expire
-    std::thread::sleep(Duration::from_millis(10));
+    std::thread::sleep(Duration::from_millis(250));
 
     let active_peers: HashSet<NodeId> = [NodeId([1u8; 32]), NodeId([2u8; 32])].into();
     match mgr.check_multi_turn_reuse("conv-expired", "Hello, more", &active_peers) {

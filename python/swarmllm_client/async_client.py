@@ -38,6 +38,10 @@ class AsyncAdminClient:
             credits_balance=data.get("credits", {}).get("balance", 0),
             credit_tier=data.get("tier", ""),
             hosted_shards=data.get("hosted_shards", 0),
+            requests_served=data.get("requests_served", 0),
+            forwards_served=data.get("forwards_served", 0),
+            requests_made=data.get("requests_made", 0),
+            active_requests=data.get("active_requests", 0),
             raw=data,
         )
 

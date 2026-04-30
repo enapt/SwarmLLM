@@ -77,6 +77,10 @@ class NodeStats:
     credits_balance: float = 0
     credit_tier: str = ""
     hosted_shards: int = 0
+    requests_served: int = 0
+    forwards_served: int = 0
+    requests_made: int = 0
+    active_requests: int = 0
     raw: dict[str, Any] = field(default_factory=dict)
 
 

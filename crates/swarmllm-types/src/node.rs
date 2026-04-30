@@ -73,12 +73,7 @@ impl From<ContributionMode> for ContributionLevel {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct NodeStats {
     pub peers_connected: u32,
-    pub requests_served: u64,
     pub requests_made: u64,
-    /// Layer forwards processed for other nodes in distributed inference.
-    pub forwards_served: u64,
-    pub bytes_uploaded: u64,
-    pub bytes_downloaded: u64,
     pub uptime_start: chrono::DateTime<chrono::Utc>,
     /// NAT status detected by AutoNAT ("Public", "Private", "Unknown").
     #[serde(default)]
@@ -89,11 +84,7 @@ impl Default for NodeStats {
     fn default() -> Self {
         Self {
             peers_connected: 0,
-            requests_served: 0,
             requests_made: 0,
-            forwards_served: 0,
-            bytes_uploaded: 0,
-            bytes_downloaded: 0,
             uptime_start: chrono::Utc::now(),
             nat_status: None,
         }
