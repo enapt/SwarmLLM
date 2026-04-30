@@ -944,11 +944,59 @@ e
             match crate::model::huggingface::download_model(&repo_id, &filename, &model_dir, None)
                 .await
             {
-                Ok(_path) => {
+                Ok(path) => {
                     tracing::info!(
                         model = %model_id,
                         "AutoShardManager: mmproj downloaded from HF"
                     );
+                    // Compute BLAKE3 of the downloaded mmproj and pin it in
+                    // the manifest. Without this the mmproj hash stays as
+                    // the originating peer's claim (or zero on local
+                    // download), and there's no integrity check against
+                    // wire / disk corruption on subsequent loads.
+                    let hash_path = path.clone();
+                    let hash_result: Option<[u8; 32]> = tokio::task::spawn_blocking(move || {
+                        crate::model::shard::hash_file_blake3(&hash_path).ok()
+                    })
+                    .await
+                    .ok()
+                    .flatten();
+                    if let Some(hash) = hash_result {
+                        if let Some(mut manifest) = shared.model_registry.get_manifest(&model_id) {
+                            let mut updated = false;
+                            if let Some(ref mut info) = manifest.mmproj {
+                                if info.hash != hash {
+                                    info.hash = hash;
+                                    updated = true;
+                                }
+                            }
+                            if updated {
+                                manifest.manifest_hash = manifest.compute_hash();
+                                let model_dir_p = crate::model::shard::model_dir(
+                                    &shared.config.node.data_dir,
+                                    &model_id.0,
+                                );
+                                use crate::model::manifest::ModelManifestExt;
+                                if let Err(e) = manifest.save_to_dir(&model_dir_p) {
+                                    tracing::warn!(
+                                        model = %model_id,
+                                        error = %e,
+                                        "AutoShardManager: failed to persist manifest after mmproj hash compute"
+                                    );
+                                } else {
+                                    shared.model_registry.register_manifest(manifest.clone());
+                                    let _ = shared
+                                        .model_registry
+                                        .persist_manifest(&shared.db, &manifest);
+                                }
+                            }
+                        }
+                    } else {
+                        tracing::warn!(
+                            model = %model_id,
+                            "AutoShardManager: BLAKE3 compute failed for mmproj — hash stays as manifest claim"
+                        );
+                    }
                     shared.emit_activity(
                         crate::daemon::state::ActivityEvent::new(
                             "auto_manage",

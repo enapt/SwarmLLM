@@ -3,6 +3,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 
 use crate::daemon::SharedState;
+use crate::model::manifest::ModelManifestExt;
 use crate::types::{ModelId, NetworkCommand, ShardId};
 
 use super::vram::{compute_vram_budget, estimate_segment_vram_mb};
@@ -83,31 +84,91 @@ pub async fn rescan_local_shards(
                 continue;
             }
 
-            // Verify shard hash (skip zero-hash placeholders)
-            if shard_info.hash != [0u8; 32] {
-                if let Err(e) = shard_store.verify_shard(&model_id, shard_info) {
+            // Verify shard hash. For zero-hash placeholders (manually
+            // placed shards or pre-hash manifests), compute and persist
+            // the BLAKE3 hash NOW so subsequent rescans verify properly
+            // and we never gossip a holder-claim for an unverified shard.
+            // Without this, a node that hosts a manually-placed shard
+            // announces holder presence to the network using only a size
+            // check — peers would download corrupted content from us.
+            if shard_info.hash == [0u8; 32] {
+                let hash_path = path.clone();
+                let hash_result: Option<[u8; 32]> = tokio::task::spawn_blocking(move || {
+                    crate::model::shard::hash_file_blake3(&hash_path).ok()
+                })
+                .await
+                .ok()
+                .flatten();
+                let new_hash = match hash_result {
+                    Some(h) => h,
+                    None => {
+                        tracing::warn!(
+                            model = %model_id_str,
+                            shard = shard_info.index,
+                            "Rescan: BLAKE3 compute failed for zero-hash shard — skipping registration"
+                        );
+                        continue;
+                    }
+                };
+                let saved = if let Some(mut manifest) =
+                    shared.model_registry.get_manifest(&model_id)
+                {
+                    if let Some(si) = manifest
+                        .shards
+                        .iter_mut()
+                        .find(|s| s.index == shard_info.index)
+                    {
+                        si.hash = new_hash;
+                    }
+                    manifest.manifest_hash = manifest.compute_hash();
+                    let model_dir =
+                        crate::model::shard::model_dir(&shared.config.node.data_dir, &model_id.0);
+                    let on_disk_ok = manifest.save_to_dir(&model_dir).is_ok();
+                    shared.model_registry.register_manifest(manifest.clone());
+                    let in_db_ok = shared
+                        .model_registry
+                        .persist_manifest(&shared.db, &manifest)
+                        .is_ok();
+                    on_disk_ok && in_db_ok
+                } else {
+                    false
+                };
+                if !saved {
                     tracing::warn!(
                         model = %model_id_str,
                         shard = shard_info.index,
-                        error = %e,
-                        "Rescan: shard verification failed, skipping"
-                    );
-                    shared.emit_activity(
-                        crate::daemon::state::ActivityEvent::new(
-                            "auto_manage",
-                            "shard_verification_failed",
-                            format!(
-                                "Shard {} of {} failed hash verification",
-                                shard_info.index, model_id_str
-                            ),
-                        )
-                        .with_model(&model_id_str)
-                        .with_shard_index(shard_info.index)
-                        .with_detail_str(e.to_string())
-                        .with_toast("error", 6000),
+                        "Rescan: persisted hash failed — skipping holder registration to avoid announcing unverified shards"
                     );
                     continue;
                 }
+                tracing::info!(
+                    model = %model_id_str,
+                    shard = shard_info.index,
+                    hash = %hex::encode(&new_hash[..8]),
+                    "Rescan: auto-computed BLAKE3 hash for zero-hash shard"
+                );
+            } else if let Err(e) = shard_store.verify_shard(&model_id, shard_info) {
+                tracing::warn!(
+                    model = %model_id_str,
+                    shard = shard_info.index,
+                    error = %e,
+                    "Rescan: shard verification failed, skipping"
+                );
+                shared.emit_activity(
+                    crate::daemon::state::ActivityEvent::new(
+                        "auto_manage",
+                        "shard_verification_failed",
+                        format!(
+                            "Shard {} of {} failed hash verification",
+                            shard_info.index, model_id_str
+                        ),
+                    )
+                    .with_model(&model_id_str)
+                    .with_shard_index(shard_info.index)
+                    .with_detail_str(e.to_string())
+                    .with_toast("error", 6000),
+                );
+                continue;
             }
 
             // Register as holder. The early-continue above already ensured we're
