@@ -55,14 +55,19 @@ pub enum AutoUpdateMode {
 impl Default for UpdateConfig {
     fn default() -> Self {
         Self {
-            auto_update: AutoUpdateMode::Stable,
+            auto_update: AutoUpdateMode::Disabled,
             check_interval_hours: default_check_interval_hours(),
         }
     }
 }
 
+// Auto-update default is `Disabled` per docs/ARCHITECTURE.md "Key Design
+// Decisions" and the C1 deferred-item note: until binary signing is wired,
+// every node opting in to auto-update is downloading SHA256-only-verified
+// binaries from GitHub. Default-disabled is the documented safe posture;
+// users opt-in via `[update] auto_update = "stable"` in config.toml.
 fn default_auto_update() -> AutoUpdateMode {
-    AutoUpdateMode::Stable
+    AutoUpdateMode::Disabled
 }
 
 fn default_check_interval_hours() -> u32 {

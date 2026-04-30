@@ -141,6 +141,11 @@ impl RateLimiter {
         let (kind, limit) = if path == "/api/admin/provider-model-status"
             || path == "/api/admin/provider-health"
             || ((path == "/api/admin/providers" || path == "/api/admin/api-key") && is_mutating)
+            // Auto-update endpoints: download + SHA256 verify + atomic
+            // rename. Strict cap so a runaway caller can't trigger
+            // repeated update downloads (each is a heavy GitHub fetch).
+            || path == "/api/admin/update/check"
+            || path == "/api/admin/update/apply"
         {
             (BucketKind::SensitiveAdmin, SENSITIVE_ADMIN_RPM)
         } else if path.starts_with("/api/admin/") || path.starts_with("/api/claude-code/") {
@@ -283,6 +288,11 @@ fn is_same_origin_browser_request(headers: &axum::http::HeaderMap, listen_port: 
     let allowed_origins = [
         format!("http://localhost:{listen_port}"),
         format!("http://127.0.0.1:{listen_port}"),
+        // Browsers on dual-stack systems may resolve `localhost` to ::1
+        // and emit `Origin: http://[::1]:PORT`. The CORS layer accepts
+        // this; the same-origin gate must too, otherwise dashboard
+        // bootstrap fetches break on IPv6.
+        format!("http://[::1]:{listen_port}"),
     ];
     let origin_ok = headers
         .get(axum::http::header::ORIGIN)

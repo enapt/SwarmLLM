@@ -639,8 +639,32 @@ pub async fn apply_credit_direct(
 
         bal.clone()
     };
-    // Persist outside write lock to avoid blocking inference hot path
-    db.put_json(TREE_CREDITS, KEY_BALANCE, &snapshot)?;
+    // Persist outside write lock to avoid blocking inference hot path.
+    // On DB failure, REVERT the in-memory mutation so the caller can retry
+    // (e.g. via pending_credit_earn restore in ledger persist_interval)
+    // without double-counting in memory. Without this, a failed flush plus
+    // restored-pending plus successful next flush applies the same delta
+    // to in-memory balance twice — the second flush then writes the
+    // doubled value to DB, persisting the divergence.
+    if let Err(e) = db.put_json(TREE_CREDITS, KEY_BALANCE, &snapshot) {
+        let mut bal = balance.write().await;
+        bal.balance = bal.balance.saturating_sub(delta);
+        match kind {
+            CreditDelta::Earning => {
+                bal.lifetime_earned = bal.lifetime_earned.saturating_sub(delta.unsigned_abs());
+            }
+            CreditDelta::Spending => {
+                bal.lifetime_spent = bal.lifetime_spent.saturating_sub(delta.unsigned_abs());
+            }
+            CreditDelta::Refund => {}
+        }
+        tracing::warn!(
+            error = %e,
+            delta,
+            "apply_credit_direct: DB persist failed — reverted in-memory mutation"
+        );
+        return Err(e);
+    }
 
     Ok(())
 }

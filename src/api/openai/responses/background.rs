@@ -413,7 +413,7 @@ pub async fn get_response_maybe_stream(
             // still see a clean SSE close.
             match store::load(&app_state.db, &id).map_err(ApiError)? {
                 Some(record) => Ok(serve_completed_replay(record, after)),
-                None => Err(ApiError(SwarmError::Validation(format!(
+                None => Err(ApiError(SwarmError::NotFound(format!(
                     "Response `{id}` not found or expired."
                 )))),
             }

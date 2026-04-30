@@ -134,19 +134,14 @@ impl ShardRebalancer {
         for departed_peer in &departed {
             let underreplicated = self.find_underreplicated_shards(departed_peer);
             for (shard_id, holders) in &underreplicated {
-                // Per-model cooldown check
-                if let Some(last) = self.last_rebalance_per_model.get(&shard_id.model_id) {
-                    if last.elapsed().as_secs() < REBALANCE_COOLDOWN_SECS {
-                        tracing::debug!(
-                            model = %shard_id.model_id,
-                            "Rebalance cooldown active for model, skipping"
-                        );
-                        continue;
-                    }
-                }
-
                 if holders.contains(&local_node_id) {
-                    // We hold this shard — re-announce it so peers know it's still available
+                    // We hold this shard — re-announce it so peers know
+                    // it's still available. Re-announces are cheap
+                    // (single GossipSub message, no DB or network fetch),
+                    // so they don't need the per-model cooldown — under
+                    // a thundering-herd departure, suppressing them
+                    // leaves locally-held shards undiscoverable for up
+                    // to REBALANCE_COOLDOWN_SECS while peers retry HF.
                     let announce = crate::types::ShardAnnounce {
                         node_id: local_node_id.clone(),
                         shards: vec![shard_id.clone()],
@@ -157,7 +152,20 @@ impl ShardRebalancer {
                         tracing::warn!(error = %e, "Failed to broadcast shard rebalance announce");
                     }
                 } else {
-                    // We don't hold this shard — request acquisition to download it
+                    // We don't hold this shard — request acquisition.
+                    // Acquisition is expensive (HF download or P2P
+                    // fetch); the per-model cooldown gates ONLY this
+                    // path so a multi-peer departure doesn't trigger
+                    // duplicate downloads.
+                    if let Some(last) = self.last_rebalance_per_model.get(&shard_id.model_id) {
+                        if last.elapsed().as_secs() < REBALANCE_COOLDOWN_SECS {
+                            tracing::debug!(
+                                model = %shard_id.model_id,
+                                "Rebalance acquisition cooldown active, skipping"
+                            );
+                            continue;
+                        }
+                    }
                     if self
                         .acquisition_tx
                         .try_send(AcquisitionCommand::Acquire {
@@ -182,10 +190,9 @@ impl ShardRebalancer {
                         shard = shard_id.index,
                         "Requesting acquisition of under-replicated shard"
                     );
+                    self.last_rebalance_per_model
+                        .insert(shard_id.model_id.clone(), now);
                 }
-
-                self.last_rebalance_per_model
-                    .insert(shard_id.model_id.clone(), now);
             }
         }
     }

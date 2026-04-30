@@ -361,13 +361,16 @@ impl EscrowManager {
                     // Refund completed successfully — safe to remove from in-memory map
                     self.entries.remove(&id);
                     count += 1;
+                    // Log ONLY on successful refund. Logging unconditionally
+                    // makes the failure path log "refunded" while leaving the
+                    // escrow Pending — operator audits via grep see false
+                    // positives.
+                    tracing::info!(
+                        escrow_id = %id,
+                        amount,
+                        "Expired escrow — refunded"
+                    );
                 }
-
-                tracing::info!(
-                    escrow_id = %id,
-                    amount,
-                    "Expired escrow — refunded"
-                );
             }
         }
 

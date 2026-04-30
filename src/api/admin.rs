@@ -447,8 +447,6 @@ pub struct ConfigUpdate {
     pub shard_size_mb: Option<u64>,
     pub max_batch_size: Option<u32>,
     pub batch_timeout_ms: Option<u64>,
-    #[serde(default)]
-    pub models: Vec<String>,
 }
 
 /// POST /api/admin/shutdown — Gracefully shut down the node.

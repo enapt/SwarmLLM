@@ -670,7 +670,7 @@ mod tests {
     #[test]
     fn update_config_defaults() {
         let config = UpdateConfig::default();
-        assert_eq!(config.auto_update, crate::config::AutoUpdateMode::Stable);
+        assert_eq!(config.auto_update, crate::config::AutoUpdateMode::Disabled);
         assert_eq!(config.check_interval_hours, 6);
     }
 
