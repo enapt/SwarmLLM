@@ -17,38 +17,25 @@
 
   <!-- Setup wizard modal (first-run only) -->
   <div class="modal-overlay hidden" id="setup-modal" role="dialog" aria-modal="true" aria-labelledby="setup-title">
-    <div class="modal">
-      <div class="modal-header">
-        <div id="setup-lang-bar" class="flex-center gap-1" style="justify-content:flex-end;margin-bottom:4px">
-          <button class="btn btn-sm text-xs hidden" id="setup-lang-english" data-i18n="setup.lang_english">Continue in English</button>
-          <img id="setup-lang-flag" src="/static/flags/gb.svg" alt="" class="lang-flag-img" style="width:20px;height:15px">
-          <select id="setup-language" class="text-sm" style="width:auto;padding:3px 8px;cursor:pointer" data-i18n-title="settings.language_label" title="Language">
-            <option value="en">English</option>
-            <option value="es">Español</option>
-            <option value="fr">Français</option>
-            <option value="de">Deutsch</option>
-            <option value="pt">Português</option>
-            <option value="it">Italiano</option>
-            <option value="nl">Nederlands</option>
-            <option value="ru">Русский</option>
-            <option value="zh">中文</option>
-            <option value="ja">日本語</option>
-            <option value="ko">한국어</option>
-            <option value="ar">العربية</option>
-            <option value="tr">Türkçe</option>
-            <option value="pl">Polski</option>
-            <option value="sv">Svenska</option>
-            <option value="th">ไทย</option>
-            <option value="hi">हिन्दी</option>
-            <option value="vi">Tiếng Việt</option>
-            <option value="id">Bahasa Indonesia</option>
-            <option value="uk">Українська</option>
-            <option value="cs">Čeština</option>
-          </select>
-        </div>
-        <h2 id="setup-title" data-i18n="setup.welcome">Welcome to SwarmLLM</h2>
-        <span class="text-muted" data-i18n="setup.subtitle">Chat with AI using your own computer, or team up with others to run bigger models</span>
+    <div class="modal setup-modal">
+      <!-- Language picker, top-right corner of the modal -->
+      <div class="setup-lang-corner">
+        <button type="button" class="btn btn-ghost btn-sm setup-lang-btn" id="setup-lang-btn" data-i18n-title="settings.language_label" title="Language" data-i18n-aria-label="settings.language_label" aria-label="Language" aria-haspopup="listbox" aria-expanded="false">
+          <img id="setup-lang-flag" src="/static/flags/gb.svg" alt="" class="lang-flag-img">
+          <span id="setup-lang-name" class="setup-lang-name">English</span>
+          <span class="setup-lang-caret" aria-hidden="true">▾</span>
+        </button>
+        <div class="lang-dropdown setup-lang-dropdown" id="setup-lang-dropdown" style="display:none" role="listbox"></div>
+        <button class="btn btn-sm setup-lang-english-pill hidden" id="setup-lang-english" data-i18n="setup.lang_english">Continue in English</button>
       </div>
+
+      <!-- Header (title + subtitle stacked) -->
+      <div class="setup-header">
+        <h2 id="setup-title" data-i18n="setup.welcome">Welcome to SwarmLLM</h2>
+        <p class="setup-subtitle" data-i18n="setup.subtitle">Chat with AI using your own computer, or team up with others to run bigger models</p>
+      </div>
+
+      <!-- Step indicators -->
       <div class="wizard-steps" id="step-indicators" role="tablist" data-i18n-aria-label="setup.steps_aria" aria-label="Setup steps">
         <button class="wizard-step active" data-step="1" role="tab" aria-selected="true" data-i18n-aria-label="setup.step1_aria" aria-label="Step 1: About You">1</button>
         <div class="wizard-connector"></div>
@@ -56,118 +43,177 @@
         <div class="wizard-connector"></div>
         <button class="wizard-step" data-step="3" role="tab" aria-selected="false" data-i18n-aria-label="setup.step3_aria" aria-label="Step 3: Ready">3</button>
       </div>
-      <!-- Step 1: About You (hardware + preferences merged) -->
+
+      <!-- Step 1: Your Hardware (autodetect + contribution + auto-download + nickname) -->
       <div class="wizard-body" id="step-1">
-        <h3 data-i18n="setup.about_you">About You</h3>
+        <h3 data-i18n="setup.about_you">Your Hardware</h3>
+
+        <!-- Hardware autodetect — capability cards -->
         <div id="hw-loading" class="flex-center gap-1 mb-1">
           <div class="spinner"></div>
           <span class="text-muted" data-i18n="setup.detecting_hw">Detecting hardware...</span>
         </div>
-        <div id="hw-results" class="hidden setup-hw-box">
-          <div class="setup-hw-row">
-            <span><strong id="hw-gpu">---</strong></span>
-            <span class="text-muted" id="hw-vram">---</span>
-            <span class="text-muted" id="hw-ram">---</span>
-            <span class="text-muted" id="hw-disk">---</span>
+        <div id="hw-results" class="hidden setup-hw-cards">
+          <div class="setup-hw-card" id="hw-card-gpu">
+            <div class="setup-hw-card-label" data-i18n="setup.hw_card_compute">Compute</div>
+            <div class="setup-hw-card-name" id="hw-gpu">---</div>
+            <div class="setup-hw-card-spec" id="hw-vram"></div>
+            <div class="setup-hw-card-badge" id="hw-recommendation"></div>
           </div>
-          <div id="hw-recommendation" class="text-muted text-sm mt-0"></div>
-        </div>
-        <div class="form-group">
-          <label class="field-label"><span data-i18n="settings.nickname_label">Nickname</span> <span class="text-muted font-normal" data-i18n="setup.nickname_optional">(optional)</span></label>
-          <input type="text" id="setup-nickname" data-i18n-placeholder="setup.nickname_placeholder" placeholder="e.g. HomePC, GamerRig, ServerBox" maxlength="32" class="mt-0">
-        </div>
-        <div class="form-group mt-2 divider">
-          <label class="field-label" data-i18n="setup.resource_label">Resource Contribution</label>
-          <p class="text-muted text-sm" style="margin:4px 0 8px" data-i18n="setup.resource_desc">Let others use your compute to help run AI. You earn credits in return.</p>
-          <div class="flex-between mb-1">
-            <span><span data-i18n="setup.contrib_minimal">Minimal</span><span class="contribution-hint">&lt;5% CPU</span></span>
-            <span class="mono" id="contribution-label" data-i18n="setup.contrib_minimal">Minimal</span>
-            <span><span data-i18n="setup.contrib_maximum">Maximum</span><span class="contribution-hint">75%+ CPU</span></span>
+          <div class="setup-hw-card" id="hw-card-system">
+            <div class="setup-hw-card-label" data-i18n="setup.hw_card_system">System</div>
+            <div class="setup-hw-card-name" id="hw-ram">---</div>
+            <div class="setup-hw-card-spec" id="hw-disk">---</div>
           </div>
-          <input type="range" id="contribution-slider" min="0" max="2" step="1" value="0" data-i18n-aria-label="setup.contribution_aria" aria-label="Resource contribution level">
         </div>
-        <div class="text-muted text-sm" id="contribution-desc" data-i18n="setup.contrib_minimal_desc">Low impact: uses minimal resources. Best for shared or low-spec machines.</div>
-        <div class="form-group mt-2 divider">
-          <label class="flex-center gap-1" style="cursor:pointer">
-            <input type="checkbox" id="setup-auto-manage" checked style="width:18px;height:18px">
-            <span data-i18n="setup.auto_download_label">Auto-download AI models</span>
+
+        <!-- Contribution — segmented control (replaces 3-stop slider) -->
+        <div class="form-group mt-2">
+          <label class="field-label" data-i18n="setup.resource_label">How much do you want to contribute?</label>
+          <p class="text-muted text-sm setup-resource-desc" data-i18n="setup.resource_desc">Let others use your compute to help run AI. You earn credits in return.</p>
+          <div class="segmented setup-contribution-segmented" data-bound-select="setup-contribution" role="radiogroup" data-i18n-aria-label="setup.contribution_aria" aria-label="Resource contribution level">
+            <button type="button" class="segmented-btn" data-value="minimal" role="radio" aria-checked="false">
+              <span class="segmented-title" data-i18n="setup.contrib_minimal">Minimal</span>
+              <span class="segmented-sub" data-i18n="setup.contrib_minimal_short">≤ 25%</span>
+            </button>
+            <button type="button" class="segmented-btn active" data-value="moderate" role="radio" aria-checked="true">
+              <span class="segmented-title" data-i18n="setup.contrib_moderate">Moderate</span>
+              <span class="segmented-sub" data-i18n="setup.contrib_moderate_short">≤ 50%</span>
+            </button>
+            <button type="button" class="segmented-btn" data-value="maximum" role="radio" aria-checked="false">
+              <span class="segmented-title" data-i18n="setup.contrib_maximum">Maximum</span>
+              <span class="segmented-sub" data-i18n="setup.contrib_maximum_short">≤ 75%+</span>
+            </button>
+          </div>
+          <select id="setup-contribution" class="visually-hidden">
+            <option value="minimal" data-i18n="setup.contrib_minimal">Minimal</option>
+            <option value="moderate" selected data-i18n="setup.contrib_moderate">Moderate</option>
+            <option value="maximum" data-i18n="setup.contrib_maximum">Maximum</option>
+          </select>
+          <div class="setup-contribution-callout" id="contribution-desc" data-i18n="setup.contrib_moderate_desc">Balanced: ~25% CPU, moderate storage. Good for most users.</div>
+        </div>
+
+        <!-- Auto-download toggle (modernized as toggle row) -->
+        <div class="form-group mt-2 setup-toggle-row">
+          <label class="setup-toggle-label">
+            <input type="checkbox" id="setup-auto-manage" checked>
+            <span class="setup-toggle-content">
+              <span class="setup-toggle-title" data-i18n="setup.auto_download_label">Auto-download AI models</span>
+              <span class="setup-toggle-desc" data-i18n="setup.auto_download_desc">Automatically download popular AI models that fit your hardware. Uses disk space and bandwidth. You can set limits in Settings.</span>
+            </span>
           </label>
-          <span class="text-muted field-hint" data-i18n="setup.auto_download_desc">Automatically download popular AI models that fit your hardware. Uses disk space and bandwidth. You can set limits in Settings.</span>
+        </div>
+
+        <!-- Nickname (last because it's optional and identity-related) -->
+        <div class="form-group mt-2">
+          <label class="field-label" for="setup-nickname"><span data-i18n="settings.nickname_label">Nickname</span> <span class="text-muted font-normal" data-i18n="setup.nickname_optional">(optional)</span></label>
+          <input type="text" id="setup-nickname" data-i18n-placeholder="setup.nickname_placeholder" placeholder="e.g. HomePC, GamerRig, ServerBox" maxlength="32">
         </div>
       </div>
-      <!-- Step 2: Connect (invite code + cloud provider) -->
-      <div class="wizard-body hidden" id="step-2">
-        <h3 data-i18n="setup.connect_btn">Connect</h3>
-        <p class="text-muted mb-2" data-i18n="setup.connect_subtitle">Choose one or both. You can also skip this and configure later.</p>
-        <!-- Peer address section (NOT device pool — this connects to the P2P swarm) -->
-        <div class="mb-2">
-          <label class="field-label" data-i18n="setup.connect_peer">Connect to a swarm peer</label>
-          <p class="text-muted text-sm" style="margin:4px 0 8px" data-i18n="setup.connect_peer_desc">Paste a peer address from someone already running SwarmLLM. This connects you to the network — it's not the same as linking your own devices.</p>
-          <div class="flex gap-1">
-            <input type="text" id="setup-invite-code" placeholder="swarm://..." class="flex-1 mono">
-            <button class="btn btn-sm" id="setup-invite-join" data-i18n="setup.connect_btn">Connect</button>
-          </div>
-          <div id="setup-invite-status" class="text-sm mt-0"></div>
-          <p class="text-muted field-hint mt-1" data-i18n="setup.auto_discover">No address? No problem — devices on the same local network find each other automatically.</p>
-        </div>
-        <!-- Device group section (collapsed by default — most first-time users have one device) -->
-        <details class="divider mb-2">
-          <summary class="field-label" style="cursor:pointer" data-i18n="setup.link_device">Already have SwarmLLM on another device? <span class="text-muted font-normal">(optional)</span></summary>
-          <p class="text-muted text-sm mb-1" data-i18n="setup.link_device_desc">Enter the invite code from your main device to link this machine. Credits earned here will be combined with your main device.</p>
-          <div class="flex gap-1">
-            <input type="text" id="setup-pool-code" placeholder="A3F7K2M9" maxlength="8" class="flex-1 pool-code-input">
-            <button class="btn btn-sm" id="setup-pool-join" data-i18n="pool.join">Link</button>
-          </div>
-          <div id="setup-pool-status" class="text-sm mt-0"></div>
-        </details>
 
-        <!-- Cloud provider section -->
-        <div class="divider">
+      <!-- Step 2: Get Online — auto-discovery first, advanced peer behind details, cloud provider -->
+      <div class="wizard-body hidden" id="step-2">
+        <h3 data-i18n="setup.step2_title">Get Online</h3>
+
+        <!-- Auto-discovery — primary lead message -->
+        <div class="setup-auto-discover-callout" id="setup-auto-discover">
+          <div class="setup-auto-discover-icon" aria-hidden="true">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.55a11 11 0 0 1 14.08 0"/><path d="M1.42 9a16 16 0 0 1 21.16 0"/><path d="M8.53 16.11a6 6 0 0 1 6.95 0"/><circle cx="12" cy="20" r="1"/></svg>
+          </div>
+          <div class="setup-auto-discover-body">
+            <strong data-i18n="setup.auto_discover_title">You're already on the swarm</strong>
+            <p class="text-muted text-sm mt-0" data-i18n="setup.auto_discover_lead">Your node will find other SwarmLLM nodes on your local network automatically — no setup needed.</p>
+          </div>
+        </div>
+
+        <!-- Cloud provider — provider tile grid (replaces select dropdown) -->
+        <div class="setup-section">
           <label class="field-label"><span data-i18n="setup.cloud_label">Cloud AI Service</span> <span class="text-muted font-normal" data-i18n="setup.cloud_optional">(optional — chat instantly)</span></label>
-          <p class="text-muted text-sm" style="margin:4px 0 8px" data-i18n="setup.cloud_desc">Add an API key to start chatting right away while local models download.</p>
-          <select id="setup-provider-select" class="mb-0">
-            <option value="" data-i18n="setup.select_provider">Select a provider...</option>
-            <option value="openai">OpenAI</option>
-            <option value="deepseek">DeepSeek</option>
-            <option value="groq">Groq</option>
-            <option value="nvidia_nim">NVIDIA NIM</option>
-            <option value="cerebras">Cerebras</option>
-            <option value="sambanova">SambaNova</option>
-            <option value="anthropic">Anthropic</option>
-            <option value="mistral">Mistral</option>
-            <option value="fireworks">Fireworks AI</option>
-            <option value="together">Together AI</option>
-            <option value="deepinfra">DeepInfra</option>
-          </select>
-          <div id="setup-provider-input" class="hidden mt-1">
-            <input type="password" id="setup-provider-key" data-i18n-placeholder="setup.paste_key" placeholder="Paste your API key here..." class="mb-0">
-            <div class="flex-center gap-1 mt-0">
-              <button class="btn btn-sm" id="setup-provider-save" data-i18n="setup.save_key">Save Key</button>
+          <p class="text-muted text-sm setup-section-desc" data-i18n="setup.cloud_desc">Add an API key to start chatting right away while local models download.</p>
+          <div class="setup-provider-tiles" id="setup-provider-tiles" role="radiogroup" data-i18n-aria-label="setup.choose_provider" aria-label="Choose a cloud provider"></div>
+          <div id="setup-provider-input" class="hidden setup-provider-key-row">
+            <div class="setup-provider-key-row-top">
+              <span class="setup-provider-selected" id="setup-provider-selected-name"></span>
               <a id="setup-provider-signup" href="#" target="_blank" rel="noopener" class="provider-signup-link" data-i18n="setup.get_free_key">Get a free key &rarr;</a>
-              <span id="setup-provider-status" class="text-sm"></span>
+            </div>
+            <div class="setup-provider-key-input-row">
+              <input type="password" id="setup-provider-key" data-i18n-placeholder="setup.paste_key" placeholder="Paste your API key here..." autocomplete="off" spellcheck="false">
+              <button class="btn btn-sm setup-provider-paste" id="setup-provider-paste" type="button" data-i18n="setup.paste_btn" data-i18n-title="setup.paste_btn_title" title="Paste from clipboard">Paste</button>
+              <button class="btn btn-primary btn-sm" id="setup-provider-save" type="button" data-i18n="setup.save_and_test">Save &amp; Test</button>
+            </div>
+            <div id="setup-provider-status" class="setup-provider-status" aria-live="polite"></div>
+          </div>
+        </div>
+
+        <!-- Advanced — peer address + device link -->
+        <details class="setup-advanced">
+          <summary class="setup-advanced-summary">
+            <span data-i18n="setup.advanced_title">Advanced connection options</span>
+            <span class="setup-advanced-caret" aria-hidden="true">▸</span>
+          </summary>
+          <div class="setup-advanced-body">
+            <div class="mb-2">
+              <label class="field-label" for="setup-invite-code" data-i18n="setup.connect_peer">Connect to a specific peer</label>
+              <p class="text-muted text-sm setup-section-desc" data-i18n="setup.connect_peer_desc">Paste a peer address from someone already running SwarmLLM. This connects you to a specific node — usually only needed if auto-discovery is blocked.</p>
+              <div class="flex gap-1">
+                <input type="text" id="setup-invite-code" placeholder="swarm://..." class="flex-1 mono">
+                <button class="btn btn-sm" id="setup-invite-join" data-i18n="setup.connect_btn">Connect</button>
+              </div>
+              <div id="setup-invite-status" class="text-sm mt-0" aria-live="polite"></div>
+            </div>
+            <div class="setup-advanced-divider">
+              <label class="field-label" for="setup-pool-code" data-i18n="setup.link_device">Link your other devices</label>
+              <p class="text-muted text-sm setup-section-desc" data-i18n="setup.link_device_desc">Enter the invite code from your main device to link this machine. Credits earned here will be combined with your main device.</p>
+              <div class="flex gap-1">
+                <input type="text" id="setup-pool-code" placeholder="A3F7K2M9" maxlength="8" class="flex-1 pool-code-input">
+                <button class="btn btn-sm" id="setup-pool-join" data-i18n="pool.join">Link</button>
+              </div>
+              <div id="setup-pool-status" class="text-sm mt-0" aria-live="polite"></div>
             </div>
           </div>
-        </div>
+        </details>
       </div>
-      <!-- Step 3: Ready (dynamic summary) -->
+
+      <!-- Step 3: Ready — clickable summary + next steps -->
       <div class="wizard-body hidden" id="step-3">
         <h3 data-i18n="setup.ready_title">Ready to Go</h3>
-        <div class="mt-1">
-          <div class="flex-between mb-1"><span class="text-muted" data-i18n="setup.summary_hw">Hardware</span><span class="mono" id="summary-gpu">---</span></div>
-          <div class="flex-between mb-1"><span class="text-muted" data-i18n="settings.nickname_label">Nickname</span><span class="mono" id="summary-nickname">---</span></div>
-          <div class="flex-between mb-1"><span class="text-muted" data-i18n="setup.summary_contribution">Contribution</span><span class="mono" id="summary-contribution">---</span></div>
-          <div class="flex-between mb-1"><span class="text-muted" data-i18n="setup.summary_auto_download">Auto-Download</span><span class="mono" id="summary-auto-manage">---</span></div>
-          <div id="summary-invite-row" class="flex-between mb-1 hidden"><span class="text-muted" data-i18n="setup.summary_peer">Swarm Peer</span><span class="mono" id="summary-invite">---</span></div>
-          <div id="summary-provider-row" class="flex-between mb-1 hidden"><span class="text-muted" data-i18n="setup.summary_provider">Cloud Provider</span><span class="mono" id="summary-provider">---</span></div>
+        <p class="text-muted text-sm setup-section-desc" data-i18n="setup.ready_desc">Review your setup. Click any row to change it.</p>
+        <div class="setup-summary">
+          <button type="button" class="setup-summary-row" data-jump-step="1" data-i18n-title="setup.summary_edit_step1" title="Click to edit hardware settings">
+            <span class="setup-summary-label" data-i18n="setup.summary_hw">Hardware</span>
+            <span class="setup-summary-value" id="summary-gpu">---</span>
+          </button>
+          <button type="button" class="setup-summary-row" data-jump-step="1" data-i18n-title="setup.summary_edit_step1" title="Click to edit nickname">
+            <span class="setup-summary-label" data-i18n="settings.nickname_label">Nickname</span>
+            <span class="setup-summary-value" id="summary-nickname">---</span>
+          </button>
+          <button type="button" class="setup-summary-row" data-jump-step="1" data-i18n-title="setup.summary_edit_step1" title="Click to edit contribution">
+            <span class="setup-summary-label" data-i18n="setup.summary_contribution">Contribution</span>
+            <span class="setup-summary-value" id="summary-contribution">---</span>
+          </button>
+          <button type="button" class="setup-summary-row" data-jump-step="1" data-i18n-title="setup.summary_edit_step1" title="Click to edit auto-download">
+            <span class="setup-summary-label" data-i18n="setup.summary_auto_download">Auto-Download</span>
+            <span class="setup-summary-value" id="summary-auto-manage">---</span>
+          </button>
+          <button type="button" id="summary-invite-row" class="setup-summary-row hidden" data-jump-step="2" data-i18n-title="setup.summary_edit_step2" title="Click to change peer">
+            <span class="setup-summary-label" data-i18n="setup.summary_peer">Swarm Peer</span>
+            <span class="setup-summary-value" id="summary-invite">---</span>
+          </button>
+          <button type="button" id="summary-provider-row" class="setup-summary-row hidden" data-jump-step="2" data-i18n-title="setup.summary_edit_step2" title="Click to change provider">
+            <span class="setup-summary-label" data-i18n="setup.summary_provider">Cloud Provider</span>
+            <span class="setup-summary-value" id="summary-provider">---</span>
+          </button>
         </div>
-        <div id="summary-next-steps" class="next-steps-box">
-          <p class="text-base font-semibold mb-0" data-i18n="setup.next_steps_title">What happens next:</p>
-          <div id="summary-next-list" class="text-muted text-sm"></div>
+        <div class="next-steps-box">
+          <div class="next-steps-title" data-i18n="setup.next_steps_title">What happens next:</div>
+          <ul id="summary-next-list" class="next-steps-list"></ul>
         </div>
       </div>
+
+      <!-- Footer -->
       <div class="wizard-footer">
         <button class="btn hidden" id="btn-prev" data-i18n="setup.btn_back">Back</button>
-        <a href="#" id="btn-skip-setup" class="text-sm text-dim" style="text-decoration:none;align-self:center" data-i18n="setup.btn_skip" data-i18n-title="setup.btn_skip_title" title="Skip setup and go straight to the dashboard">Skip setup</a>
+        <a href="#" id="btn-skip-setup" class="setup-skip-link" data-i18n="setup.btn_skip_long" data-i18n-title="setup.btn_skip_title" title="Skip setup and go straight to the dashboard">Skip for now — I'll configure later</a>
         <button class="btn btn-primary btn-lg" id="btn-next" data-i18n="setup.continue">Continue</button>
       </div>
     </div>
@@ -667,6 +713,10 @@
         <span id="private-mode-badge" class="hidden" style="position:absolute;top:0;right:0;width:8px;height:8px;background:var(--green);border-radius:50%;border:2px solid var(--bg)"></span>
       </button>
       <button class="btn btn-ghost btn-sm" id="btn-open-settings" data-i18n-title="settings.title" title="Settings" data-i18n-aria-label="settings.title" aria-label="Settings">&#9881;</button>
+      <div class="setup-finish-chip hidden" id="setup-finish-chip" role="status" aria-live="polite">
+        <button type="button" class="setup-finish-chip-main" id="setup-finish-chip-main" data-i18n="setup.complete_chip" data-i18n-title="setup.complete_chip_title" title="Finish your setup">Finish setup</button>
+        <button type="button" class="setup-finish-chip-dismiss" id="setup-finish-chip-dismiss" data-i18n-aria-label="setup.complete_chip_dismiss" aria-label="Dismiss">&times;</button>
+      </div>
       <div class="header-lang-picker" style="position:relative">
         <button class="btn btn-ghost btn-sm" id="btn-lang-picker" data-i18n-title="settings.language_label" title="Language" data-i18n-aria-label="settings.language_label" aria-label="Language"><img src="/static/flags/gb.svg" alt="EN" class="lang-flag-img"></button>
         <div class="lang-dropdown" id="lang-dropdown" style="display:none"></div>

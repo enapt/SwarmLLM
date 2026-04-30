@@ -2,44 +2,146 @@
 
 // ============================================================================
 // SwarmLLM — Setup Wizard Component
-// First-run configuration wizard (extracted from settings.js)
+// First-run configuration wizard
 // ============================================================================
 
 (function() {
   var U = App.utils;
 
-  // ========================================================================
-  // Setup Wizard
-  // ========================================================================
+  // Test models keyed by provider — copied from settings.testProvider so the
+  // wizard can validate keys end-to-end before marking the provider configured.
+  var PROVIDER_TEST_MODELS = {
+    openai: 'gpt-4o-mini',
+    deepseek: 'deepseek-chat',
+    mistral: 'mistral-small-latest',
+    groq: 'llama-3.1-8b-instant',
+    nvidia_nim: 'meta/llama-3.1-8b-instruct',
+    cerebras: 'cerebras:llama-3.1-8b',
+    sambanova: 'sambanova:Meta-Llama-3.3-70B-Instruct',
+    fireworks: 'accounts/fireworks/models/llama-v3p3-70b-instruct',
+    together: 'together:meta-llama/Llama-3.3-70B-Instruct-Turbo',
+    deepinfra: 'deepinfra:meta-llama/Llama-3.3-70B-Instruct',
+    moonshot: 'moonshot-v1-8k',
+  };
+
+  // Order matters — first 6 are visible above the fold on most screens.
+  var PROVIDER_ORDER = [
+    'openai', 'anthropic', 'deepseek', 'groq', 'mistral', 'together',
+    'nvidia_nim', 'cerebras', 'sambanova', 'fireworks', 'deepinfra',
+  ];
+
   App.setup = {
     currentStep: 1,
     totalSteps: 3,
     hwData: null,
     _savedProvider: null,
+    _selectedProvider: null,
     _joinedPeer: false,
 
     init: function() {
-      if (localStorage.getItem(App.SETUP_DONE_KEY) === 'true') return;
+      // First-run gate: only auto-show if neither completed nor skipped.
+      var done = localStorage.getItem(App.SETUP_DONE_KEY) === 'true';
+      App.setup._renderFinishChip();
+      if (done) return;
+      // If skipped, don't auto-show — the chip handles re-entry.
+      if (localStorage.getItem(App.SETUP_SKIPPED_KEY) === 'true') return;
       document.getElementById('setup-modal').classList.remove('hidden');
       App.setup.detectHardware();
 
-      document.getElementById('contribution-slider').addEventListener('input', function() {
-        var levels = [I18n.t('setup.contrib_minimal'), I18n.t('setup.contrib_moderate'), I18n.t('setup.contrib_maximum')];
-        var descs = [
-          I18n.t('setup.contrib_minimal_desc'),
-          I18n.t('setup.contrib_moderate_desc'),
-          I18n.t('setup.contrib_maximum_desc'),
-        ];
-        var val = parseInt(this.value, 10);
-        document.getElementById('contribution-label').textContent = levels[val];
-        document.getElementById('contribution-desc').textContent = descs[val];
-      });
+      App.setup._wireSegmented();
+      App.setup._wireProviderTiles();
 
-      // Invite code join button
+      // Auto-open advanced if user pasted into invite-code via URL or has it focused
       var joinBtn = document.getElementById('setup-invite-join');
-      if (joinBtn) {
-        joinBtn.addEventListener('click', function() { App.setup.joinInvite(); });
+      if (joinBtn) joinBtn.addEventListener('click', function() { App.setup.joinInvite(); });
+
+      // Step indicator clicks: jump to earlier step (existing behavior in init.js, idempotent here)
+      // Summary row click-to-jump
+      document.querySelectorAll('.setup-summary-row[data-jump-step]').forEach(function(row) {
+        row.addEventListener('click', function() {
+          var target = parseInt(row.getAttribute('data-jump-step'), 10);
+          if (target && target < App.setup.currentStep) {
+            App.setup.currentStep = target;
+            App.setup.updateUI();
+          }
+        });
+      });
+    },
+
+    // Wire the contribution segmented control to the hidden <select>.
+    _wireSegmented: function() {
+      var seg = document.querySelector('.segmented[data-bound-select="setup-contribution"]');
+      var sel = document.getElementById('setup-contribution');
+      if (!seg || !sel) return;
+      var descEl = document.getElementById('contribution-desc');
+      var sync = function() {
+        var v = sel.value;
+        seg.querySelectorAll('.segmented-btn').forEach(function(b) {
+          var on = b.getAttribute('data-value') === v;
+          b.classList.toggle('active', on);
+          b.setAttribute('aria-checked', on ? 'true' : 'false');
+        });
+        if (descEl) {
+          var keys = { minimal: 'setup.contrib_minimal_desc', moderate: 'setup.contrib_moderate_desc', maximum: 'setup.contrib_maximum_desc' };
+          var key = keys[v] || keys.moderate;
+          descEl.textContent = I18n.t(key);
+          descEl.setAttribute('data-i18n', key);
+        }
+      };
+      seg.querySelectorAll('.segmented-btn').forEach(function(btn) {
+        btn.addEventListener('click', function() {
+          sel.value = btn.getAttribute('data-value');
+          sel.dispatchEvent(new Event('change'));
+          sync();
+        });
+      });
+      sel.addEventListener('change', sync);
+      sync();
+    },
+
+    // Build the cloud-provider tile grid.
+    _wireProviderTiles: function() {
+      var grid = document.getElementById('setup-provider-tiles');
+      if (!grid) return;
+      grid.innerHTML = '';
+      PROVIDER_ORDER.forEach(function(key) {
+        if (!PROVIDER_NAMES[key]) return;
+        var tile = document.createElement('button');
+        tile.type = 'button';
+        tile.className = 'setup-provider-tile';
+        tile.setAttribute('role', 'radio');
+        tile.setAttribute('aria-checked', 'false');
+        tile.dataset.provider = key;
+        var iconUrl = providerIconUrl(key);
+        var iconHtml = iconUrl
+          ? '<img src="' + iconUrl + '" alt="" aria-hidden="true">'
+          : '<span style="width:28px;height:28px;display:inline-block"></span>';
+        tile.innerHTML = iconHtml + '<span class="setup-provider-tile-label">' + U.escapeHtml(PROVIDER_NAMES[key]) + '</span>';
+        tile.addEventListener('click', function() { App.setup._selectProvider(key); });
+        grid.appendChild(tile);
+      });
+    },
+
+    _selectProvider: function(key) {
+      App.setup._selectedProvider = key;
+      var grid = document.getElementById('setup-provider-tiles');
+      if (grid) {
+        grid.querySelectorAll('.setup-provider-tile').forEach(function(t) {
+          var on = t.dataset.provider === key;
+          t.classList.toggle('selected', on);
+          t.setAttribute('aria-checked', on ? 'true' : 'false');
+        });
       }
+      var input = document.getElementById('setup-provider-input');
+      if (input) input.classList.remove('hidden');
+      var nameEl = document.getElementById('setup-provider-selected-name');
+      if (nameEl) nameEl.textContent = PROVIDER_NAMES[key] || key;
+      var signup = document.getElementById('setup-provider-signup');
+      if (signup) signup.href = (typeof PROVIDER_SIGNUP_URLS !== 'undefined' && PROVIDER_SIGNUP_URLS[key]) || '#';
+      var status = document.getElementById('setup-provider-status');
+      if (status) { status.textContent = ''; status.className = 'setup-provider-status'; }
+      var keyInput = document.getElementById('setup-provider-key');
+      if (keyInput) { keyInput.value = ''; keyInput.focus(); }
     },
 
     detectHardware: async function() {
@@ -47,23 +149,39 @@
         var result = await App.data.loadStats();
         var data = (result && result.stats) ? result.stats : {};
         App.setup.hwData = data.hardware || {};
-        var gpuName = App.setup.hwData.gpu_name || I18n.t('hw.mode_cpu_only');
+        var gpuName = App.setup.hwData.gpu_name;
         var vramMb = App.setup.hwData.gpu_vram_mb || 0;
-        document.getElementById('hw-gpu').textContent = gpuName;
-        document.getElementById('hw-vram').textContent = vramMb ? U.formatMB(vramMb) + ' ' + I18n.t('hw.vram') : '';
-        document.getElementById('hw-ram').textContent = U.formatMB(App.setup.hwData.total_ram_mb || 0) + ' ' + I18n.t('hw.ram');
-        document.getElementById('hw-disk').textContent = U.formatMB(App.setup.hwData.available_disk_mb || 0) + ' ' + I18n.t('dashboard.disk_label');
-        // Hardware-aware model recommendation
+        var ramMb = App.setup.hwData.total_ram_mb || 0;
+        var diskMb = App.setup.hwData.available_disk_mb || 0;
+
+        var gpuEl = document.getElementById('hw-gpu');
+        var vramEl = document.getElementById('hw-vram');
+        var ramEl = document.getElementById('hw-ram');
+        var diskEl = document.getElementById('hw-disk');
         var rec = document.getElementById('hw-recommendation');
+
+        if (gpuName && vramMb > 0) {
+          gpuEl.textContent = gpuName;
+          vramEl.textContent = U.formatMB(vramMb) + ' ' + I18n.t('hw.vram');
+        } else {
+          gpuEl.textContent = I18n.t('hw.mode_cpu_only');
+          vramEl.textContent = I18n.t('setup.hw_no_gpu_short');
+        }
+        ramEl.textContent = U.formatMB(ramMb) + ' ' + I18n.t('hw.ram');
+        diskEl.textContent = U.formatMB(diskMb) + ' ' + I18n.t('dashboard.disk_label');
+
         if (rec) {
+          rec.className = 'setup-hw-card-badge';
           if (vramMb >= 8000) {
             rec.textContent = I18n.t('setup.hw_gpu_7b');
           } else if (vramMb >= 4000) {
             rec.textContent = I18n.t('setup.hw_gpu_small');
           } else if (vramMb > 0) {
             rec.textContent = I18n.t('setup.hw_limited_vram');
+            rec.classList.add('warn');
           } else {
-            rec.textContent = I18n.t('setup.hw_no_gpu');
+            rec.textContent = I18n.t('setup.hw_capability_cpu');
+            rec.classList.add('cpu');
           }
         }
       } catch (e) {
@@ -86,6 +204,91 @@
           document.getElementById('setup-invite-code').value = '';
         }
       });
+    },
+
+    // Save + test API key — adapted from settings.testProvider so the wizard
+    // gives the user real validation feedback instead of just a "saved" status.
+    saveAndTestProvider: async function() {
+      var provider = App.setup._selectedProvider;
+      var keyInput = document.getElementById('setup-provider-key');
+      var status = document.getElementById('setup-provider-status');
+      var saveBtn = document.getElementById('setup-provider-save');
+      if (!provider) { status.textContent = I18n.t('init.select_provider'); status.className = 'setup-provider-status error'; return; }
+      var key = (keyInput.value || '').trim();
+      if (!key) { status.textContent = I18n.t('setup.paste_key_first'); status.className = 'setup-provider-status error'; return; }
+
+      status.textContent = I18n.t('setup.testing_key');
+      status.className = 'setup-provider-status testing';
+      if (saveBtn) saveBtn.disabled = true;
+
+      try {
+        var saveBody = {}; saveBody[provider + '_key'] = key;
+        var saveResp = await App.authFetch('/api/admin/providers', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(saveBody),
+        });
+        if (!saveResp.ok) {
+          status.textContent = I18n.t('setup.failed_save');
+          status.className = 'setup-provider-status error';
+          return;
+        }
+
+        // Test with a 1-token request — same shape settings.testProvider uses.
+        var testResp;
+        if (provider === 'anthropic') {
+          testResp = await App.authFetch('/v1/messages', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ model: 'claude-haiku-4-5-20251001', max_tokens: 1, messages: [{ role: 'user', content: 'hi' }] }),
+          });
+        } else {
+          var model = PROVIDER_TEST_MODELS[provider] || provider + '-test';
+          testResp = await App.authFetch('/v1/chat/completions', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ model: model, max_tokens: 1, messages: [{ role: 'user', content: 'hi' }] }),
+          });
+        }
+        if (testResp.ok) {
+          status.innerHTML = '<span>✓ ' + U.escapeHtml(I18n.t('setup.key_verified', { name: PROVIDER_NAMES[provider] || provider })) + '</span>';
+          status.className = 'setup-provider-status success';
+          App.setup._savedProvider = provider;
+          var tile = document.querySelector('.setup-provider-tile[data-provider="' + provider + '"]');
+          if (tile) tile.classList.add('configured');
+          if (keyInput) keyInput.value = '';
+        } else {
+          var errText = await testResp.text();
+          var friendlyErr = errText;
+          try { var ej = JSON.parse(errText); friendlyErr = (ej.error && ej.error.message) || errText; } catch(pe) {}
+          if (friendlyErr.length > 200) friendlyErr = friendlyErr.substring(0, 200) + '…';
+          status.textContent = I18n.t('setup.key_test_failed', { error: friendlyErr });
+          status.className = 'setup-provider-status error';
+        }
+      } catch (e) {
+        status.textContent = I18n.t('setup.connection_error', { error: e.message || I18n.t('common.request_failed') });
+        status.className = 'setup-provider-status error';
+      } finally {
+        if (saveBtn) saveBtn.disabled = false;
+      }
+    },
+
+    // Read a key from the clipboard (single click — no Ctrl+V hunt).
+    pasteFromClipboard: async function() {
+      var status = document.getElementById('setup-provider-status');
+      try {
+        if (!navigator.clipboard || !navigator.clipboard.readText) {
+          status.textContent = I18n.t('setup.paste_unsupported');
+          status.className = 'setup-provider-status error';
+          return;
+        }
+        var text = await navigator.clipboard.readText();
+        var input = document.getElementById('setup-provider-key');
+        if (input && text) input.value = text.trim();
+      } catch (e) {
+        status.textContent = I18n.t('setup.paste_denied');
+        status.className = 'setup-provider-status error';
+      }
     },
 
     nextStep: function() {
@@ -134,36 +337,44 @@
     populateSummary: function() {
       var nick = (document.getElementById('setup-nickname').value || '').trim();
       document.getElementById('summary-nickname').textContent = nick || I18n.t('setup.summary_anonymous');
-      var levels = [I18n.t('setup.contrib_minimal'), I18n.t('setup.contrib_moderate'), I18n.t('setup.contrib_maximum')];
-      var val = parseInt(document.getElementById('contribution-slider').value, 10);
-      document.getElementById('summary-contribution').textContent = levels[val];
+      var contribSel = document.getElementById('setup-contribution');
+      var contribKey = (contribSel && contribSel.value) || 'moderate';
+      var contribLabels = { minimal: I18n.t('setup.contrib_minimal'), moderate: I18n.t('setup.contrib_moderate'), maximum: I18n.t('setup.contrib_maximum') };
+      document.getElementById('summary-contribution').textContent = contribLabels[contribKey] || contribKey;
       var gpuName = App.setup.hwData && App.setup.hwData.gpu_name ? App.setup.hwData.gpu_name : I18n.t('hw.mode_cpu_only');
       document.getElementById('summary-gpu').textContent = gpuName;
       var autoManage = document.getElementById('setup-auto-manage').checked;
-      document.getElementById('summary-auto-manage').textContent = autoManage ? I18n.t('setup.summary_enabled') : I18n.t('settings.claude_subscription_disabled');
+      document.getElementById('summary-auto-manage').textContent = autoManage ? I18n.t('setup.summary_enabled') : I18n.t('setup.summary_disabled');
 
-      // Only show invite/provider rows if configured
       var inviteRow = document.getElementById('summary-invite-row');
       if (App.setup._joinedPeer) { inviteRow.classList.remove('hidden'); document.getElementById('summary-invite').textContent = I18n.t('connection.connected'); }
+      else { inviteRow.classList.add('hidden'); }
       var provRow = document.getElementById('summary-provider-row');
       if (App.setup._savedProvider) {
         provRow.classList.remove('hidden');
         document.getElementById('summary-provider').textContent = PROVIDER_NAMES[App.setup._savedProvider] || App.setup._savedProvider;
+      } else {
+        provRow.classList.add('hidden');
       }
 
-      // Dynamic next steps
       var steps = [];
       if (autoManage) steps.push(I18n.t('setup.next_auto_manage'));
       if (App.setup._joinedPeer) steps.push(I18n.t('setup.next_joined_peer'));
       if (App.setup._savedProvider) steps.push(I18n.t('setup.next_provider'));
       if (!App.setup._savedProvider && !autoManage) steps.push(I18n.t('setup.next_manual'));
       steps.push(I18n.t('setup.next_lan'));
-      document.getElementById('summary-next-list').innerHTML = steps.map(function(s) { return '<p style="margin:4px 0">\u2022 ' + s + '</p>'; }).join('');
+      var listEl = document.getElementById('summary-next-list');
+      listEl.innerHTML = '';
+      steps.forEach(function(s) {
+        var li = document.createElement('li');
+        li.textContent = s;
+        listEl.appendChild(li);
+      });
     },
 
     submit: async function() {
-      var levels = ['minimal', 'moderate', 'maximum'];
-      var level = levels[parseInt(document.getElementById('contribution-slider').value, 10)];
+      var contribSel = document.getElementById('setup-contribution');
+      var level = (contribSel && contribSel.value) || 'moderate';
       var autoManage = document.getElementById('setup-auto-manage').checked;
       try {
         var resp = await App.authFetch('/api/admin/config', {
@@ -193,14 +404,47 @@
         } catch (e) {}
       }
       localStorage.setItem(App.SETUP_DONE_KEY, 'true');
+      // Clear the skipped flag so the chip disappears for sure.
+      localStorage.removeItem(App.SETUP_SKIPPED_KEY);
+      localStorage.removeItem(App.SETUP_CHIP_DISMISSED_KEY);
       document.getElementById('setup-modal').classList.add('hidden');
+      App.setup._renderFinishChip();
       App.ui.showBanner('success', I18n.t('setup.complete'));
     },
 
+    // Skip without marking setup complete — surfaces the "Finish setup" chip in the dashboard.
     finish: function() {
-      localStorage.setItem(App.SETUP_DONE_KEY, 'true');
+      localStorage.setItem(App.SETUP_SKIPPED_KEY, 'true');
       document.getElementById('setup-modal').classList.add('hidden');
+      App.setup._renderFinishChip();
       App.ui.showBanner('info', I18n.t('setup.skipped'));
-    }
+    },
+
+    // Show / hide the dashboard "Finish setup" chip based on storage state.
+    _renderFinishChip: function() {
+      var chip = document.getElementById('setup-finish-chip');
+      if (!chip) return;
+      var done = localStorage.getItem(App.SETUP_DONE_KEY) === 'true';
+      var skipped = localStorage.getItem(App.SETUP_SKIPPED_KEY) === 'true';
+      var dismissed = localStorage.getItem(App.SETUP_CHIP_DISMISSED_KEY) === 'true';
+      var show = !done && skipped && !dismissed;
+      chip.classList.toggle('hidden', !show);
+    },
+
+    // Re-open the wizard from the chip.
+    reopen: function() {
+      localStorage.removeItem(App.SETUP_DONE_KEY);
+      localStorage.removeItem(App.SETUP_SKIPPED_KEY);
+      App.setup.currentStep = 1;
+      App.setup.updateUI();
+      document.getElementById('setup-modal').classList.remove('hidden');
+      App.setup.detectHardware();
+      App.setup._renderFinishChip();
+    },
+
+    dismissChip: function() {
+      localStorage.setItem(App.SETUP_CHIP_DISMISSED_KEY, 'true');
+      App.setup._renderFinishChip();
+    },
   };
 })();

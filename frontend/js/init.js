@@ -45,37 +45,17 @@
       e.preventDefault();
       App.setup.finish();
     });
-    // Setup provider select
-    on('setup-provider-select', 'change', function() {
-      var sel = document.getElementById('setup-provider-select');
-      var inputDiv = document.getElementById('setup-provider-input');
-      var signupLink = document.getElementById('setup-provider-signup');
-      if (sel.value) {
-        inputDiv.classList.remove('hidden');
-        signupLink.href = (PROVIDER_SIGNUP_URLS && PROVIDER_SIGNUP_URLS[sel.value]) || '#';
-      } else {
-        inputDiv.classList.add('hidden');
-      }
-      document.getElementById('setup-provider-status').textContent = '';
+    on('setup-provider-save', 'click', function() { App.setup.saveAndTestProvider(); });
+    on('setup-provider-paste', 'click', function() { App.setup.pasteFromClipboard(); });
+    // Submit on Enter inside the key input
+    on('setup-provider-key', 'keydown', function(e) {
+      if (e.key === 'Enter') { e.preventDefault(); App.setup.saveAndTestProvider(); }
     });
-    on('setup-provider-save', 'click', async function() {
-      var provider = document.getElementById('setup-provider-select').value;
-      var key = document.getElementById('setup-provider-key').value.trim();
-      var status = document.getElementById('setup-provider-status');
-      if (!provider || !key) { status.textContent = I18n.t('init.select_provider'); status.style.color = 'var(--red)'; return; }
-      status.textContent = I18n.t('actions.saving'); status.style.color = 'var(--text-muted)';
-      try {
-        var body = {}; body[provider + '_key'] = key;
-        var resp = await App.authFetch('/api/admin/providers', {method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
-        var data = await resp.json();
-        if (data[provider]) {
-          status.innerHTML = '<span style="color:var(--green)">\u2713 ' + U.escapeHtml(I18n.t('connection.connected')) + '</span>';
-          App.setup._savedProvider = provider;
-        } else {
-          status.innerHTML = '<span style="color:var(--red)">' + U.escapeHtml(I18n.t('init.key_saved_no_response')) + '</span>';
-          App.setup._savedProvider = provider;
-        }
-      } catch (e) { status.textContent = I18n.t('common.request_failed') + ': ' + e.message; status.style.color = 'var(--red)'; }
+    // "Finish setup" chip in the dashboard header
+    on('setup-finish-chip-main', 'click', function() { App.setup.reopen(); });
+    on('setup-finish-chip-dismiss', 'click', function(e) {
+      e.stopPropagation();
+      App.setup.dismissChip();
     });
     // Wizard step indicators
     document.querySelectorAll('.wizard-step[data-step]').forEach(function(stepBtn) {
@@ -125,8 +105,6 @@
           if (typeof I18n !== 'undefined') I18n.setLang(pair[0]);
           var settingsLang = document.getElementById('settings-language');
           if (settingsLang) settingsLang.value = pair[0];
-          var setupLang = document.getElementById('setup-language');
-          if (setupLang) setupLang.value = pair[0];
           dropdown.style.display = 'none';
           updateLangDropdownActive();
         });
@@ -153,28 +131,81 @@
       updateLangDropdownActive();
     })();
 
-    // Setup wizard language picker
-    on('setup-language', 'change', function() {
-      var lang = document.getElementById('setup-language').value;
-      if (typeof I18n !== 'undefined') I18n.setLang(lang);
-      var settingsLang = document.getElementById('settings-language');
-      if (settingsLang) settingsLang.value = lang;
-      var engBtn = document.getElementById('setup-lang-english');
-      if (engBtn) engBtn.style.display = (lang !== 'en') ? '' : 'none';
-      var setupFlag = document.getElementById('setup-lang-flag');
-      var flagCode = langFlagCode(lang);
-      if (setupFlag && flagCode) {
-        setupFlag.src = '/static/flags/' + flagCode + '.svg';
+    // Setup wizard language picker (button-style dropdown — matches the header lang picker UX)
+    (function() {
+      var btn = document.getElementById('setup-lang-btn');
+      var dropdown = document.getElementById('setup-lang-dropdown');
+      if (!btn || !dropdown) return;
+
+      function countryFlag(cc) {
+        return '<img src="/static/flags/' + cc.toLowerCase() + '.svg" alt="' + cc + '" class="lang-flag-img">';
       }
-    });
+      function refreshButton() {
+        var cur = (typeof I18n !== 'undefined') ? I18n.getLang() : 'en';
+        var entry = LANGS.find(function(l) { return l[0] === cur; }) || LANGS[0];
+        var flag = document.getElementById('setup-lang-flag');
+        var name = document.getElementById('setup-lang-name');
+        if (flag) flag.src = '/static/flags/' + entry[2].toLowerCase() + '.svg';
+        if (name) name.textContent = entry[1];
+        var engBtn = document.getElementById('setup-lang-english');
+        if (engBtn) engBtn.classList.toggle('hidden', cur === 'en');
+      }
+      LANGS.forEach(function(pair) {
+        var b = document.createElement('button');
+        b.type = 'button';
+        b.setAttribute('role', 'option');
+        b.innerHTML = countryFlag(pair[2]) + ' ' + App.utils.escapeHtml(pair[1]);
+        b.dataset.lang = pair[0];
+        b.addEventListener('click', function() {
+          if (typeof I18n !== 'undefined') I18n.setLang(pair[0]);
+          var settingsLang = document.getElementById('settings-language');
+          if (settingsLang) settingsLang.value = pair[0];
+          dropdown.style.display = 'none';
+          btn.setAttribute('aria-expanded', 'false');
+          refreshButton();
+          syncDropdownActive();
+          // Re-populate the summary if we're on Step 3 — the previous translation is stale.
+          if (App.setup && App.setup.currentStep === 3) App.setup.populateSummary();
+        });
+        dropdown.appendChild(b);
+      });
+      function syncDropdownActive() {
+        var cur = (typeof I18n !== 'undefined') ? I18n.getLang() : 'en';
+        dropdown.querySelectorAll('button').forEach(function(b) {
+          b.classList.toggle('active', b.dataset.lang === cur);
+        });
+      }
+      btn.addEventListener('click', function(e) {
+        e.stopPropagation();
+        var open = dropdown.style.display !== 'none';
+        dropdown.style.display = open ? 'none' : '';
+        btn.setAttribute('aria-expanded', open ? 'false' : 'true');
+        if (!open) syncDropdownActive();
+      });
+      document.addEventListener('click', function() {
+        dropdown.style.display = 'none';
+        btn.setAttribute('aria-expanded', 'false');
+      });
+      dropdown.addEventListener('click', function(e) { e.stopPropagation(); });
+      // "Continue in English" pill (only visible when current language ≠ en).
+      var engBtn = document.getElementById('setup-lang-english');
+      if (engBtn) {
+        engBtn.addEventListener('click', function() {
+          if (typeof I18n !== 'undefined') I18n.setLang('en');
+          var settingsLang = document.getElementById('settings-language');
+          if (settingsLang) settingsLang.value = 'en';
+          refreshButton();
+          syncDropdownActive();
+          if (App.setup && App.setup.currentStep === 3) App.setup.populateSummary();
+        });
+      }
+      refreshButton();
+      syncDropdownActive();
+    })();
 
     on('btn-rerun-setup', 'click', function() {
-      localStorage.removeItem(App.SETUP_DONE_KEY);
       App.ui.closeSettings();
-      App.setup.currentStep = 1;
-      App.setup.updateUI();
-      document.getElementById('setup-modal').classList.remove('hidden');
-      App.setup.detectHardware();
+      App.setup.reopen();
     });
 
     on('btn-show-all-peers', 'click', function() {
@@ -756,24 +787,6 @@
     App.chat.renderMessages();
 
     App.applyTheme(localStorage.getItem(App.THEME_KEY) || 'dark');
-
-    // Sync setup language
-    if (typeof I18n !== 'undefined') {
-      var detectedLang = I18n.getLang() || 'en';
-      var setupLang = document.getElementById('setup-language');
-      if (setupLang) setupLang.value = detectedLang;
-      var engBtn = document.getElementById('setup-lang-english');
-      if (engBtn && detectedLang !== 'en') {
-        engBtn.style.display = '';
-        engBtn.addEventListener('click', function() {
-          I18n.setLang('en');
-          if (setupLang) setupLang.value = 'en';
-          var settingsLang = document.getElementById('settings-language');
-          if (settingsLang) settingsLang.value = 'en';
-          engBtn.style.display = 'none';
-        });
-      }
-    }
 
     if (typeof NeuralBg !== 'undefined') NeuralBg.init();
 
