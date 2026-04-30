@@ -93,7 +93,7 @@ impl PipelineExecutor {
                 eos,
                 Some(&model_id.0),
             );
-            tracing::info!(
+            tracing::debug!(
                 model = %model_id,
                 prompt_len = prompt.len(),
                 "DIAG: build_prompt from header"

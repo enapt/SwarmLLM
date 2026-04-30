@@ -507,7 +507,9 @@ mod encrypted;
 mod layer_forward;
 mod layer_result;
 
-pub use encrypted::{decode_layer_forward_encrypted, encode_layer_forward_encrypted};
+pub use encrypted::{
+    build_layer_forward_aad, decode_layer_forward_encrypted, encode_layer_forward_encrypted,
+};
 pub use layer_forward::{decode_layer_forward, encode_layer_forward};
 pub use layer_result::{decode_layer_result, encode_layer_result};
 

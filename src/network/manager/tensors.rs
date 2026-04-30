@@ -49,24 +49,7 @@ impl NetworkManager {
                     return;
                 }
             };
-            // Build the AAD from the cleartext header fields — must match
-            // decode_layer_forward_encrypted's AAD (uuid + seq + idx_pos + fmt + layer_range + model_id)
-            let model_id_bytes = forward.model_id.0.as_bytes();
-            let mut aad = Vec::with_capacity(35 + model_id_bytes.len());
-            aad.extend_from_slice(forward.request_id.as_bytes());
-            aad.extend_from_slice(&forward.sequence_num.to_le_bytes());
-            aad.extend_from_slice(&forward.index_pos.to_le_bytes());
-            let fmt_tag: u8 = match forward.format {
-                crate::types::TensorFormat::FP16 => 0,
-                crate::types::TensorFormat::FP32 => 1,
-                crate::types::TensorFormat::INT8 => 2,
-            };
-            aad.push(fmt_tag);
-            let (layer_start, layer_end) = forward.layer_range;
-            aad.extend_from_slice(&layer_start.to_le_bytes());
-            aad.extend_from_slice(&layer_end.to_le_bytes());
-            aad.extend_from_slice(&(model_id_bytes.len() as u16).to_le_bytes());
-            aad.extend_from_slice(model_id_bytes);
+            let aad = protocol::build_layer_forward_aad(&forward);
 
             tracing::debug!(
                 request_id = %forward.request_id,

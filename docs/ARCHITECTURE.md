@@ -1228,8 +1228,8 @@ Routes Claude model requests through a locally-authenticated `claude` CLI subpro
 ### HuggingFace Integration
 - `GET  /api/admin/hf/search?query=...` — Search HuggingFace for GGUF models (grouped by repo with quant variants)
 - `GET  /api/admin/hf/probe?repo_id=...&filename=...` — Probe remote GGUF (size, shard layout)
-- `POST /api/admin/hf/download` — Download full GGUF model
-- `POST /api/admin/hf/download-shards` — Download specific shard indices (supports `peer_fair_share` for smart distribution)
+- `POST /api/admin/hf/download` — Download full GGUF model. **⚠ Deprecated** for normal use — the frontend and all new code MUST use `/api/admin/hf/download-shards`. Full-GGUF download exists only for offline-inference / seeding workflows; never call it implicitly. See CLAUDE.md § "No implicit full model downloads".
+- `POST /api/admin/hf/download-shards` — Download specific shard indices (supports `peer_fair_share` for smart distribution). **Preferred entry point.**
 - `GET  /api/admin/hf/source/{model_id}` — Lookup HuggingFace source info for a model
 
 ### Identity API
@@ -1324,7 +1324,7 @@ Routes Claude model requests through a locally-authenticated `claude` CLI subpro
 - Cross-component calls: `App.componentName.method()`. Shared state: `App.state.*`. Utilities: `App.utils.*`.
 
 ### Frontend Features
-- **i18n**: 1030 translation keys (1032 entries per locale incl. `_lang` + `_dir`) across 21 languages (en, es, fr, de, pt, it, nl, ru, zh, ja, ko, ar, tr, pl, sv, th, hi, vi, id, uk, cs). Auto-detects browser language. `I18n.t()` + `data-i18n` DOM attributes. Interpolation via `{variable}` placeholders. Fallback chain: current language → English → raw key. "Continue in English" UX for non-English users who prefer English.
+- **i18n**: 1025 translation keys (1027 entries per locale incl. `_lang` + `_dir`) across 21 languages (en, es, fr, de, pt, it, nl, ru, zh, ja, ko, ar, tr, pl, sv, th, hi, vi, id, uk, cs). Auto-detects browser language. `I18n.t()` + `data-i18n` DOM attributes. Interpolation via `{variable}` placeholders. Fallback chain: current language → English → raw key. "Continue in English" UX for non-English users who prefer English.
 - **Theme**: Light / Dark / System toggle. `[data-theme="light"]` CSS overrides. Persisted in localStorage.
 - **Neural network background**: Animated canvas particle network behind dashboard tiles (`frontend/js/neural-bg.js`). ~60 nodes with connecting edges, gentle drift, mouse repulsion/glow. State-reactive coloring: blue (idle) → cyan (active inference) → red-orange (unhealthy/disconnected). Peer count boosts vibrancy, active requests trigger node firing pulses. Pauses when tab hidden; reduced opacity in light theme.
 

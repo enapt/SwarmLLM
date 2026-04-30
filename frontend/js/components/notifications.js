@@ -303,7 +303,7 @@
       dlBtn.style.cssText = 'background:var(--bg-primary, #0a0e14);color:var(--yellow, #eab308);border:none;border-radius:4px;padding:0.3rem 0.8rem;cursor:pointer;font-size:0.8rem;font-weight:600';
       dlBtn.onclick = async function() {
         dlBtn.disabled = true;
-        dlBtn.textContent = I18n.t('settings.detecting');
+        dlBtn.textContent = I18n.t('update.checking');
         try {
           var resp = await App.authFetch('/api/admin/update/check', { method: 'POST' });
           if (resp.ok) {

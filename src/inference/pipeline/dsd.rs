@@ -380,21 +380,14 @@ impl PipelineExecutor {
             "DSD: request complete"
         );
 
-        let clean: Vec<u32> = generated
-            .into_iter()
-            .filter(|t| !eos_set.contains(t))
-            .collect();
-        let completion_tokens = clean.len() as u32;
-        let content = decoder.decode_tokens(&clean);
-        Ok(Some(InferenceOutput {
+        Ok(Some(self.finish_speculative(
             request_id,
-            content,
-            prompt_tokens: prompt_token_count as u32,
-            completion_tokens,
+            generated,
+            &decoder,
+            &eos_set,
+            prompt_token_count as u32,
             finish_reason,
-            session_id: self.request.session_id.clone(),
-            token_logprobs: vec![],
-        }))
+        )))
     }
 }
 

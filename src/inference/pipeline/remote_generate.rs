@@ -20,6 +20,11 @@ use crate::types::{NetworkCommand, NetworkFinishReason, RemoteGenerateRequest};
 
 use super::PipelineExecutor;
 
+/// Burst budget for one full generation before backpressure applies to the
+/// remote-generate token stream. Sized to comfortably hold a long completion's
+/// worth of tokens without blocking the inbound dispatch task.
+const REMOTE_GENERATE_TOKEN_CHANNEL_CAP: usize = 256;
+
 /// Preconditions for the fast path. All checks are local and cheap.
 pub(super) fn eligible(exec: &PipelineExecutor) -> bool {
     // Shared disqualifiers: TP, LoRA adapter, vision images.
@@ -84,8 +89,9 @@ impl PipelineExecutor {
 
         // Register an inbound StreamingToken channel before sending the
         // request so we never miss an early token.
-        let (stream_tx, mut stream_rx) =
-            tokio::sync::mpsc::channel::<crate::types::StreamingToken>(256);
+        let (stream_tx, mut stream_rx) = tokio::sync::mpsc::channel::<crate::types::StreamingToken>(
+            REMOTE_GENERATE_TOKEN_CHANNEL_CAP,
+        );
         self.shared_state
             .streaming_token_txs
             .insert(request_id, stream_tx);

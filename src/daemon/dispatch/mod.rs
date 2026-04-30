@@ -36,6 +36,24 @@ const MAX_REGION_SUMMARIES: usize = 10_000;
 /// Maximum demand rate entries across all (model, region) pairs.
 const MAX_DEMAND_ENTRIES: usize = 10_000;
 
+/// One-sided staleness check for regional gossip messages (gotcha #44).
+/// Returns `true` if `ts_ms` is within the accepted window; `false` (with a
+/// trace log tagged by `kind`) if the message is future-dated past the skew
+/// tolerance or older than `GOSSIP_STALENESS_MS`. Centralised here so every
+/// gossip handler enforces the invariant identically.
+fn gossip_timestamp_fresh(ts_ms: u64, now_ms: u64, kind: &'static str) -> bool {
+    if ts_ms > now_ms.saturating_add(GOSSIP_SKEW_MS) {
+        tracing::warn!(kind, ts_ms, now_ms, "Dropping future-dated gossip");
+        return false;
+    }
+    let age = now_ms.saturating_sub(ts_ms);
+    if age > GOSSIP_STALENESS_MS {
+        tracing::debug!(kind, age_ms = age, "Dropping stale gossip");
+        return false;
+    }
+    true
+}
+
 /// Pipeline sealing: encrypt the token IDs in a LayerResult for the requester's X25519 key.
 /// If `requester_node_id` is present, seals `token_ids` into `sealed_token_ids` and clears
 /// the plaintext `token_ids`. Falls back silently on crypto errors (result sent unsealed).
@@ -1469,23 +1487,8 @@ pub(crate) async fn dispatch_network_messages(
                                         {
                                             continue;
                                         }
-                                        // Reject stale OR future-dated summaries (gotcha #44).
                                         let now_ms = crate::types::unix_now_ms();
-                                        if summary.timestamp_ms > now_ms.saturating_add(GOSSIP_SKEW_MS) {
-                                            tracing::warn!(
-                                                region = %summary.region,
-                                                model = %summary.model_id,
-                                                "Dropping future-dated RegionShardSummary"
-                                            );
-                                            continue;
-                                        }
-                                        if now_ms.saturating_sub(summary.timestamp_ms) > GOSSIP_STALENESS_MS {
-                                            tracing::debug!(
-                                                region = %summary.region,
-                                                model = %summary.model_id,
-                                                age_ms = now_ms.saturating_sub(summary.timestamp_ms),
-                                                "Dropping stale RegionShardSummary"
-                                            );
+                                        if !gossip_timestamp_fresh(summary.timestamp_ms, now_ms, "RegionShardSummary") {
                                             continue;
                                         }
                                         let key = (summary.region.clone(), summary.model_id.clone());
@@ -1530,22 +1533,8 @@ pub(crate) async fn dispatch_network_messages(
                                         if demand.region.len() > 8 || demand.model_id.0.len() > 256 {
                                             continue;
                                         }
-                                        // Reject stale OR future-dated demand (gotcha #44).
                                         let now_ms = crate::types::unix_now_ms();
-                                        if demand.timestamp_ms > now_ms.saturating_add(GOSSIP_SKEW_MS) {
-                                            tracing::warn!(
-                                                model = %demand.model_id,
-                                                region = %demand.region,
-                                                "Dropping future-dated ModelDemandGossip"
-                                            );
-                                            continue;
-                                        }
-                                        if now_ms.saturating_sub(demand.timestamp_ms) > GOSSIP_STALENESS_MS {
-                                            tracing::debug!(
-                                                model = %demand.model_id,
-                                                region = %demand.region,
-                                                "Dropping stale ModelDemandGossip"
-                                            );
+                                        if !gossip_timestamp_fresh(demand.timestamp_ms, now_ms, "ModelDemandGossip") {
                                             continue;
                                         }
                                         let key = (demand.model_id.clone(), demand.region.clone());

@@ -3,6 +3,33 @@ use crate::types::{LayerForward, ModelId, TensorFormat};
 
 use super::TENSOR_TAG_ENCRYPTED;
 
+/// Build the AAD bytes for sealing/opening a `LayerForward` activation payload.
+///
+/// Layout: `request_id(16) | sequence_num(4 LE) | index_pos(4 LE) | fmt(1)
+/// | layer_start(4 LE) | layer_end(4 LE) | model_id_len(2 LE) | model_id`.
+/// Both the encrypt path (`network/manager/tensors.rs`) and the decrypt path
+/// (`decode_layer_forward_encrypted`) MUST produce the exact same bytes; any
+/// drift breaks every encrypted forward. Centralising here pins the contract.
+pub fn build_layer_forward_aad(forward: &LayerForward) -> Vec<u8> {
+    let model_id_bytes = forward.model_id.0.as_bytes();
+    let mut aad = Vec::with_capacity(35 + model_id_bytes.len());
+    aad.extend_from_slice(forward.request_id.as_bytes());
+    aad.extend_from_slice(&forward.sequence_num.to_le_bytes());
+    aad.extend_from_slice(&forward.index_pos.to_le_bytes());
+    let fmt_tag: u8 = match forward.format {
+        TensorFormat::FP16 => 0,
+        TensorFormat::FP32 => 1,
+        TensorFormat::INT8 => 2,
+    };
+    aad.push(fmt_tag);
+    let (layer_start, layer_end) = forward.layer_range;
+    aad.extend_from_slice(&layer_start.to_le_bytes());
+    aad.extend_from_slice(&layer_end.to_le_bytes());
+    aad.extend_from_slice(&(model_id_bytes.len() as u16).to_le_bytes());
+    aad.extend_from_slice(model_id_bytes);
+    aad
+}
+
 pub fn encode_layer_forward_encrypted(
     forward: &LayerForward,
     sealed_activations: Vec<u8>,

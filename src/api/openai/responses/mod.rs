@@ -63,6 +63,12 @@ const MAX_RESPONSES_METADATA_BYTES: usize = 64 * 1024;
 /// cloud-proxy path. Keep both the count and per-value size bounded.
 const MAX_RESPONSES_EXTRAS_COUNT: usize = 32;
 const MAX_RESPONSES_EXTRA_VALUE_BYTES: usize = 4 * 1024;
+/// Cap on the count of items in `ResponsesRequest.input`. Each item is a
+/// fully-deserialised structure with its own `extras` map; without this,
+/// `validate_responses_ingress` would have to walk an unbounded list to
+/// enforce per-item caps, and a malicious client could ship millions of
+/// near-empty items past the wire-byte limit.
+const MAX_RESPONSES_INPUT_ITEMS: usize = 1024;
 
 /// Validate a `id` path parameter on a `/v1/responses/{id}` route. Mirrors
 /// the `previous_response_id` cap so caller-supplied identifiers never
@@ -153,6 +159,38 @@ fn validate_responses_ingress(req: &ResponsesRequest) -> Result<(), ApiError> {
             return Err(ApiError(SwarmError::Validation(format!(
                 "metadata too large ({total} bytes, max {MAX_RESPONSES_METADATA_BYTES})"
             ))));
+        }
+    }
+    // Bound `input` item count and per-message extras so a request with
+    // thousands of message items (each carrying its own `#[serde(flatten)]`
+    // extras map) can't bypass the top-level extras cap.
+    if let crate::api::openai::responses::types::ResponsesInput::Items(items) = &req.input {
+        if items.len() > MAX_RESPONSES_INPUT_ITEMS {
+            return Err(ApiError(SwarmError::Validation(format!(
+                "input has too many items ({} present, max {MAX_RESPONSES_INPUT_ITEMS})",
+                items.len()
+            ))));
+        }
+        for item in items {
+            if let crate::api::openai::responses::types::InputItem::Typed(
+                crate::api::openai::responses::types::TypedInputItem::Message(msg),
+            ) = item
+            {
+                if msg.extras.len() > MAX_RESPONSES_EXTRAS_COUNT {
+                    return Err(ApiError(SwarmError::Validation(format!(
+                        "input message has too many unknown fields ({} present, max {MAX_RESPONSES_EXTRAS_COUNT})",
+                        msg.extras.len()
+                    ))));
+                }
+                for (k, v) in &msg.extras {
+                    let value_len = v.to_string().len();
+                    if value_len > MAX_RESPONSES_EXTRA_VALUE_BYTES {
+                        return Err(ApiError(SwarmError::Validation(format!(
+                            "input message field `{k}` value too large ({value_len} bytes, max {MAX_RESPONSES_EXTRA_VALUE_BYTES})"
+                        ))));
+                    }
+                }
+            }
         }
     }
     Ok(())

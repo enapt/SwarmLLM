@@ -1739,18 +1739,6 @@
             }
           }
 
-          // Update shard summary
-          var summaryEl = document.querySelector('[data-model-summary="' + safeId + '"]');
-          if (summaryEl && shardDetails.length > 0) {
-            var summParts = [];
-            if (localCount > 0) summParts.push('<span class="shard-sum-item shard-sum-local"><span class="shard-sum-dot"></span>' + I18n.t('dashboard.summary_local', { count: localCount }) + '</span>');
-            if (peerCount > 0) summParts.push('<span class="shard-sum-item shard-sum-peer"><span class="shard-sum-dot"></span>' + I18n.t('dashboard.peer_count', { count: peerCount }) + '</span>');
-            if (dlCount > 0) summParts.push('<span class="shard-sum-item shard-sum-dl"><span class="shard-sum-dot"></span>' + I18n.t('dashboard.summary_downloading', { count: dlCount }) + '</span>');
-            if (peerDlCount > 0) summParts.push('<span class="shard-sum-item shard-sum-peer-dl"><span class="shard-sum-dot"></span>' + I18n.t('dashboard.summary_peer_dl', { count: peerDlCount }) + '</span>');
-            if (queuedCount > 0) summParts.push('<span class="shard-sum-item shard-sum-queued"><span class="shard-sum-dot"></span>' + I18n.t('dashboard.summary_queued', { count: queuedCount }) + '</span>');
-            if (missingCount > 0) summParts.push('<span class="shard-sum-item shard-sum-missing"><span class="shard-sum-dot"></span>' + I18n.t('dashboard.summary_missing', { count: missingCount }) + '</span>');
-            summaryEl.innerHTML = summParts.join('');
-          }
         });
       }
 
