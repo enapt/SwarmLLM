@@ -130,6 +130,18 @@ impl PipelineExecutor {
         let mut first = true;
 
         loop {
+            // Honor external cancel — same pattern as execute_distributed
+            // line 174. Without this, a cancelled request keeps draining
+            // tokens until INTER_TOKEN_TIMEOUT (60s) per gap.
+            if self.request.is_cancelled() {
+                tracing::info!(
+                    %request_id,
+                    "DIAG: remote-generate cancelled externally"
+                );
+                self.shared_state.streaming_token_txs.remove(&request_id);
+                finish_reason = "stop".to_string();
+                break;
+            }
             let timeout_dur = if first {
                 FIRST_TOKEN_TIMEOUT
             } else {

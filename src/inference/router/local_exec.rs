@@ -59,7 +59,35 @@ pub(super) async fn execute_local_batch(
         let result_tx = queued.result_tx;
         let token_tx = queued.token_tx;
 
-        let output = if executor.is_loaded() {
+        // Honor external cancel between batch items. Without this, a
+        // cancelled request still runs full generation under the executor
+        // mutex — blocking every later request in the batch (and any new
+        // request, since the mutex is held end-to-end). Same cancel
+        // contract as execute_distributed line 174. Falls through to the
+        // standard finalize path with an empty-content "stop" output.
+        let output = if request.is_cancelled() {
+            tracing::info!(
+                request_id = %request.id,
+                "DIAG: local batch item cancelled externally before generation"
+            );
+            // If the request is streaming, emit a final stop event so the
+            // SSE client closes cleanly.
+            if let Some(ref tx) = token_tx {
+                let _ = tx.try_send(StreamingTokenEvent {
+                    text: String::new(),
+                    finish_reason: Some("stop".to_string()),
+                });
+            }
+            Ok(InferenceOutput {
+                request_id: request.id,
+                content: String::new(),
+                prompt_tokens: 0,
+                completion_tokens: 0,
+                finish_reason: "stop".to_string(),
+                session_id: request.session_id.clone(),
+                token_logprobs: vec![],
+            })
+        } else if executor.is_loaded() {
             // Hold the loaded_model_info read lock once and derive both the
             // chat-templated prompt and the stop-string list from a single
             // guard. Avoids re-acquiring the lock per batch item.

@@ -22,6 +22,13 @@ const FORWARD_COUNTS_CLEANUP_SECS: u64 = 60;
 pub(super) const ZSTD_COMPRESS_LEVEL: i32 = 3;
 /// Maximum age (ms) for regional gossip messages before they're considered stale.
 const GOSSIP_STALENESS_MS: u64 = 15 * 60 * 1000;
+/// Clock-skew tolerance for gossip timestamp checks. Per gotcha #44, the
+/// future-side check MUST be one-sided — `now_ms.saturating_sub(ts) > MAX`
+/// silently accepts future-dated messages because saturating_sub returns 0
+/// when ts > now. Future-dated messages then ride the entire 15-minute
+/// staleness window AND beat any honest contemporaneous update on the
+/// "most recent wins" comparison.
+const GOSSIP_SKEW_MS: u64 = 30_000;
 /// Maximum AllReduce partials in flight before dropping new TpAllReduceRequests (DoS guard).
 const MAX_PENDING_TP_PARTIALS: usize = 512;
 /// Maximum cached regional shard summaries (per region+model pair).
@@ -777,6 +784,29 @@ pub(crate) async fn dispatch_network_messages(
                                             tracing::debug!("Dropping unauthenticated NodeCapabilityUpdate");
                                             continue;
                                         }
+                                        // SEC: cap inbound vec sizes before iterating. Each
+                                        // observed_latencies entry inserts into a shared
+                                        // DashMap via merge_peer_segment_latency — without
+                                        // a length cap a malicious peer can drive memory
+                                        // growth via a single capability update. Mirrors the
+                                        // ShardAnnounce/PrefixCacheAnnounce/RegionShardSummary
+                                        // pattern (already capped at 512/1024/512). Same
+                                        // concern for hosted_shards (bounded already by the
+                                        // single peer.capability slot, but a 100k-entry vec
+                                        // would still OOM the deserialiser).
+                                        const MAX_OBSERVED_LATENCIES: usize = 256;
+                                        const MAX_HOSTED_SHARDS_IN_CAP: usize = 1024;
+                                        if cap.observed_latencies.len() > MAX_OBSERVED_LATENCIES
+                                            || cap.hosted_shards.len() > MAX_HOSTED_SHARDS_IN_CAP
+                                        {
+                                            tracing::warn!(
+                                                node_id = %cap.node_id,
+                                                obs = cap.observed_latencies.len(),
+                                                hosted = cap.hosted_shards.len(),
+                                                "NodeCapabilityUpdate: payload exceeds caps — dropping"
+                                            );
+                                            continue;
+                                        }
                                         tracing::debug!(
                                             node_id = %cap.node_id,
                                             hosted_shards = cap.hosted_shards.len(),
@@ -986,8 +1016,25 @@ pub(crate) async fn dispatch_network_messages(
                                                 }
                                             };
                                             if let Some(cmd) = cmd {
-                                                if let Err(e) = tx.send(cmd).await {
-                                                    tracing::warn!(error = %e, "Failed to route pool message");
+                                                // Use try_send so a slow PoolManager (large
+                                                // StateGossip merge, slow DB write) doesn't
+                                                // block the dispatch loop and starve every
+                                                // other inbound message (LayerResult,
+                                                // CreditTransaction, …). Consistent with the
+                                                // InferenceRequest / StreamingToken paths.
+                                                if let Err(e) = tx.try_send(cmd) {
+                                                    shared_state
+                                                        .metrics
+                                                        .channel_metrics
+                                                        .network_out
+                                                        .record_dropped();
+                                                    tracing::warn!(error = %e, "Failed to route pool message (channel full or closed)");
+                                                } else {
+                                                    shared_state
+                                                        .metrics
+                                                        .channel_metrics
+                                                        .network_out
+                                                        .record_sent();
                                                 }
                                             }
                                         }
@@ -1422,8 +1469,16 @@ pub(crate) async fn dispatch_network_messages(
                                         {
                                             continue;
                                         }
-                                        // Reject stale summaries
+                                        // Reject stale OR future-dated summaries (gotcha #44).
                                         let now_ms = crate::types::unix_now_ms();
+                                        if summary.timestamp_ms > now_ms.saturating_add(GOSSIP_SKEW_MS) {
+                                            tracing::warn!(
+                                                region = %summary.region,
+                                                model = %summary.model_id,
+                                                "Dropping future-dated RegionShardSummary"
+                                            );
+                                            continue;
+                                        }
                                         if now_ms.saturating_sub(summary.timestamp_ms) > GOSSIP_STALENESS_MS {
                                             tracing::debug!(
                                                 region = %summary.region,
@@ -1475,8 +1530,16 @@ pub(crate) async fn dispatch_network_messages(
                                         if demand.region.len() > 8 || demand.model_id.0.len() > 256 {
                                             continue;
                                         }
-                                        // Reject stale demand
+                                        // Reject stale OR future-dated demand (gotcha #44).
                                         let now_ms = crate::types::unix_now_ms();
+                                        if demand.timestamp_ms > now_ms.saturating_add(GOSSIP_SKEW_MS) {
+                                            tracing::warn!(
+                                                model = %demand.model_id,
+                                                region = %demand.region,
+                                                "Dropping future-dated ModelDemandGossip"
+                                            );
+                                            continue;
+                                        }
                                         if now_ms.saturating_sub(demand.timestamp_ms) > GOSSIP_STALENESS_MS {
                                             tracing::debug!(
                                                 model = %demand.model_id,

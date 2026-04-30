@@ -250,6 +250,17 @@ impl PipelineExecutor {
 
         // Speculative round loop.
         while finish_reason.is_empty() && (generated.len() as u32) < max_tokens {
+            // Honor external cancel between rounds — same pattern as
+            // execute_distributed line 174. Each spec round emits γ+1
+            // tokens, so worst-case observation latency is one round.
+            if self.request.is_cancelled() {
+                tracing::info!(
+                    request_id = %request_id,
+                    "DIAG: speculative inference cancelled externally"
+                );
+                finish_reason = "stop".to_string();
+                break;
+            }
             let remaining = max_tokens - generated.len() as u32;
             let this_gamma = gamma.min(remaining).max(1);
 
