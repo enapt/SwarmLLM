@@ -85,10 +85,10 @@
     }
     if (state.activeDownloads > 0) {
       var n = state.activeDownloads;
-      var noun = n === 1 ? 'shard' : 'shards';
       return { cls: 'active-download', label: String(n),
                titleKey: 'nav.auto_manage_active_download',
-               fallback: 'Auto-manage: downloading ' + n + ' ' + noun };
+               titleParams: { count: n },
+               fallback: 'Auto-manage: downloading ' + n + ' ' + (n === 1 ? 'shard' : 'shards') };
     }
     if (state.lastPruneTs && (now - state.lastPruneTs) < PRUNE_LINGER_MS) {
       return { cls: 'active-prune', label: '', titleKey: 'nav.auto_manage_active_prune',
@@ -117,7 +117,7 @@
       label.classList.add('hidden');
     }
 
-    var title = (typeof I18n !== 'undefined') ? I18n.t(s.titleKey) : s.fallback;
+    var title = (typeof I18n !== 'undefined') ? I18n.t(s.titleKey, s.titleParams || undefined) : s.fallback;
     if (!title || title === s.titleKey) title = s.fallback;
     if (s.detail && s.cls === 'problem') title += ' — ' + s.detail;
     btn.title = title;

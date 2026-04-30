@@ -149,7 +149,7 @@ pub async fn pool_accept(
         .into_iter()
         .find(|i| i.id == invitation_id)
         .ok_or_else(|| {
-            ApiError(crate::error::SwarmError::Validation(
+            ApiError(crate::error::SwarmError::NotFound(
                 "Invitation not found or expired".into(),
             ))
         })?;
@@ -257,25 +257,19 @@ pub async fn pool_set_device_name(
     State(state): State<AppState>,
     Json(body): Json<PoolDeviceNameRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    if body.name.trim().is_empty() {
+    let name = body.name.trim().to_string();
+    if name.is_empty() {
         return Err(ApiError(crate::error::SwarmError::Validation(
             "Device name must not be empty".into(),
         )));
     }
-    if body.name.trim().len() > 32 {
+    if name.len() > 32 {
         return Err(ApiError(crate::error::SwarmError::Validation(
             "Device name must be 32 characters or fewer".into(),
         )));
     }
     let (tx, rx) = tokio::sync::oneshot::channel();
-    send_pool_command(
-        &state,
-        PoolCommand::SetDeviceName {
-            name: body.name,
-            reply: tx,
-        },
-    )
-    .await?;
+    send_pool_command(&state, PoolCommand::SetDeviceName { name, reply: tx }).await?;
     await_pool_reply(rx).await?;
     Ok(Json(serde_json::json!({"status": "ok"})))
 }

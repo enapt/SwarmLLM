@@ -597,7 +597,7 @@
   "models.unloaded_freed": "{name} 已从内存卸载（释放约 {freed}）",
   "models.well_replicated": "副本充足",
   "nav.active_model": "活跃模型",
-  "nav.auto_manage_active_download": "自动管理：正在下载分片",
+  "nav.auto_manage_active_download": "自动管理：正在下载 {count} 个分片",
   "nav.auto_manage_active_prune": "自动管理：正在清理分片",
   "nav.auto_manage_idle_disabled": "自动管理：已禁用",
   "nav.auto_manage_idle_ok": "自动管理：空闲，正常",

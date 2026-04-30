@@ -37,21 +37,22 @@
   // 100 entries on every event was measurable main-thread cost. The data
   // is only used for page-reload recovery, so a 1-second flush delay is
   // not user-visible.
-  var _persistActivityTimer = null;
-  var _persistNetworkTimer = null;
-  function _persistActivity() {
-    if (_persistActivityTimer) return;
-    _persistActivityTimer = setTimeout(function() {
-      _persistActivityTimer = null;
-      try { sessionStorage.setItem(ACTIVITY_STORAGE_KEY, JSON.stringify(_activityEntries.slice(0, 100))); } catch (e) {}
+  var _persistActivityRef = { t: null };
+  var _persistNetworkRef = { t: null };
+  // Debounce sessionStorage writes — coalesce bursts of activity/network
+  // events into one write per second per stream.
+  function _debouncedPersist(ref, key, getEntries) {
+    if (ref.t) return;
+    ref.t = setTimeout(function() {
+      ref.t = null;
+      try { sessionStorage.setItem(key, JSON.stringify(getEntries().slice(0, 100))); } catch (e) {}
     }, 1000);
   }
+  function _persistActivity() {
+    _debouncedPersist(_persistActivityRef, ACTIVITY_STORAGE_KEY, function() { return _activityEntries; });
+  }
   function _persistNetwork() {
-    if (_persistNetworkTimer) return;
-    _persistNetworkTimer = setTimeout(function() {
-      _persistNetworkTimer = null;
-      try { sessionStorage.setItem(NETWORK_STORAGE_KEY, JSON.stringify(_networkEntries.slice(0, 100))); } catch (e) {}
-    }, 1000);
+    _debouncedPersist(_persistNetworkRef, NETWORK_STORAGE_KEY, function() { return _networkEntries; });
   }
 
   // Category → icon mapping for backend activity events

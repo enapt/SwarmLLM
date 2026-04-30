@@ -115,17 +115,7 @@ fn validate_responses_ingress(req: &ResponsesRequest) -> Result<(), ApiError> {
         ))));
     }
     if let Some(prev_id) = req.previous_response_id.as_deref() {
-        if prev_id.len() > MAX_PREVIOUS_RESPONSE_ID_LEN
-            || !prev_id
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
-        {
-            return Err(ApiError(SwarmError::Validation(
-                "previous_response_id must be ≤64 ASCII alphanumeric characters \
-                 (with `_` / `-`); generation format is `resp_<32-hex>`."
-                    .into(),
-            )));
-        }
+        validate_response_id(prev_id)?;
     }
     if let Some(instructions) = req.instructions.as_deref() {
         if instructions.len() > MAX_RESPONSES_INSTRUCTIONS_BYTES {

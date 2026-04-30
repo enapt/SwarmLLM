@@ -285,8 +285,11 @@ pub async fn update_config(
     }
 
     // Write updated config to disk
-    let toml_str = toml::to_string_pretty(&config)
-        .map_err(|e| ApiError(crate::error::SwarmError::Validation(e.to_string())))?;
+    let toml_str = toml::to_string_pretty(&config).map_err(|e| {
+        ApiError(crate::error::SwarmError::Internal(format!(
+            "Failed to serialize config to TOML: {e}"
+        )))
+    })?;
 
     let cp = config_path.clone();
     let cp_for_err = config_path.clone();

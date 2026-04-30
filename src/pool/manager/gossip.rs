@@ -296,12 +296,14 @@ impl PoolManager {
             return;
         }
 
-        // SEC: cap inbound device_name length. handle_set_device_name applies
-        // a 32-char cap on local writes, but the inbound gossip path is what
-        // ends up persisted to redb and broadcast to all pool members — a
-        // malicious member can otherwise smuggle multi-MB strings into every
-        // peer's pool state.
+        // SEC: cap inbound payload sizes. The local-write path enforces a
+        // 32-char device_name cap, but inbound gossip is what gets persisted
+        // to redb AND broadcast to all pool members — a malicious member can
+        // otherwise smuggle multi-MB strings/Vecs into every peer's pool
+        // state.
         const MAX_DEVICE_NAME_BYTES: usize = 64;
+        const MAX_MODELS_HOSTED: usize = 64;
+        const MAX_MODEL_NAME_LEN: usize = 256;
         let device_name = device_name.map(|n| {
             if n.len() > MAX_DEVICE_NAME_BYTES {
                 tracing::warn!(
@@ -314,6 +316,26 @@ impl PoolManager {
                 n
             }
         });
+
+        let mut stats = stats;
+        if stats.models_hosted.len() > MAX_MODELS_HOSTED
+            || stats
+                .models_hosted
+                .iter()
+                .any(|m| m.len() > MAX_MODEL_NAME_LEN)
+        {
+            tracing::warn!(
+                %node_id,
+                count = stats.models_hosted.len(),
+                "Truncating oversized inbound models_hosted in DeviceStatsReport"
+            );
+            stats.models_hosted.truncate(MAX_MODELS_HOSTED);
+            for m in stats.models_hosted.iter_mut() {
+                if m.len() > MAX_MODEL_NAME_LEN {
+                    *m = m.chars().take(MAX_MODEL_NAME_LEN).collect();
+                }
+            }
+        }
 
         let mut ps_guard = self.shared_state.credits.pool_state.write().await;
         if let Some(ref mut ps) = *ps_guard {

@@ -597,7 +597,7 @@
   "models.unloaded_freed": "{name} выгружена из памяти (~{freed} освобождено)",
   "models.well_replicated": "Хорошо реплицировано",
   "nav.active_model": "Активная модель",
-  "nav.auto_manage_active_download": "Автоуправление: загрузка шардов",
+  "nav.auto_manage_active_download": "Автоуправление: загрузка {count} шардов",
   "nav.auto_manage_active_prune": "Автоуправление: очистка шардов",
   "nav.auto_manage_idle_disabled": "Автоуправление: отключено",
   "nav.auto_manage_idle_ok": "Автоуправление: простой, исправно",

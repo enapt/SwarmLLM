@@ -597,7 +597,7 @@
   "models.unloaded_freed": "{name}をメモリからアンロードしました（約{freed}解放）",
   "models.well_replicated": "十分に複製済み",
   "nav.active_model": "アクティブモデル",
-  "nav.auto_manage_active_download": "自動管理：シャードをダウンロード中",
+  "nav.auto_manage_active_download": "自動管理：{count} 個のシャードをダウンロード中",
   "nav.auto_manage_active_prune": "自動管理：シャードを削除中",
   "nav.auto_manage_idle_disabled": "自動管理：無効",
   "nav.auto_manage_idle_ok": "自動管理：アイドル、正常",

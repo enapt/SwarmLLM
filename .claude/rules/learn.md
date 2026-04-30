@@ -11,7 +11,7 @@ Update knowledge artifacts the same commit as the change — not at session end.
 | Changed file structure (new/renamed/deleted) | `CLAUDE.md` Repository Structure |
 | Changed API endpoint | `docs/ARCHITECTURE.md` HTTP API |
 | Changed SharedState fields/sub-structs | `CLAUDE.md` Architecture + `architecture.md` |
-| Changed broadcast channels or WS message types | `CLAUDE.md` Frontend + `docs/book/daemon.md` |
+| Changed broadcast channels or WS message types | `CLAUDE.md` Frontend + `docs/book/src/architecture/daemon.md` |
 | Changed frontend JS file structure | `CLAUDE.md` Frontend + `docs/ARCHITECTURE.md` Frontend |
 | New debugging technique | `docs/DIAGNOSTICS.md` |
 | Test count changed | `CLAUDE.md` Testing (after `cargo test` confirms) |
