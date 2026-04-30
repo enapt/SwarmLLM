@@ -30,6 +30,7 @@ impl NetworkManager {
             NetworkCommand::StopProviding(_) => "StopProviding",
             NetworkCommand::SendPrefixKvFetch { .. } => "SendPrefixKvFetch",
             NetworkCommand::DeliverPrefixKvResponse { .. } => "DeliverPrefixKvResponse",
+            NetworkCommand::DeliverShardResponse { .. } => "DeliverShardResponse",
         };
         tracing::debug!(cmd = cmd_name, "DIAG: handling outbound command");
         match cmd {
@@ -177,6 +178,48 @@ impl NetworkManager {
                     age_ms,
                     hit = payload.is_some(),
                     "DIAG: served PrefixKvFetch"
+                );
+            }
+            NetworkCommand::DeliverShardResponse {
+                ticket,
+                data,
+                total_size,
+            } => {
+                let Some((stored_at, channel)) = self.pending_shard_responses.remove(&ticket)
+                else {
+                    tracing::debug!(
+                        %ticket,
+                        "DeliverShardResponse: no pending inbound shard fetch"
+                    );
+                    return;
+                };
+                let bytes_served = data.len() as u64;
+                let age_ms = stored_at.elapsed().as_millis();
+                let resp =
+                    SwarmResponse::ShardData(crate::types::ShardResponse { data, total_size });
+                if self
+                    .swarm
+                    .behaviour_mut()
+                    .request_response
+                    .send_response(channel, resp)
+                    .is_ok()
+                {
+                    if bytes_served > 0 {
+                        self.shared_state
+                            .shard_bytes_served
+                            .fetch_add(bytes_served, std::sync::atomic::Ordering::Relaxed);
+                    }
+                } else {
+                    tracing::debug!(
+                        %ticket,
+                        "DeliverShardResponse: channel closed before reply"
+                    );
+                }
+                tracing::debug!(
+                    %ticket,
+                    bytes_served,
+                    age_ms,
+                    "DIAG: served ShardTransfer"
                 );
             }
             NetworkCommand::SendPrefixKvFetch {

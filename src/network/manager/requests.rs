@@ -18,8 +18,8 @@ use crate::network::protocol::{self, PrefixKvDataResp, SwarmRequest, SwarmRespon
 use crate::types::{NetworkCommand, SwarmMessage};
 
 use super::{
-    NetworkManager, MAX_INBOUND_PREFIX_FETCHES, MAX_PENDING_SHARD_REQUESTS,
-    MAX_PENDING_TENSOR_CHANNELS, PEX_MAX_PER_WINDOW, PEX_WINDOW,
+    NetworkManager, MAX_INBOUND_PREFIX_FETCHES, MAX_INBOUND_SHARD_FETCHES,
+    MAX_PENDING_SHARD_REQUESTS, MAX_PENDING_TENSOR_CHANNELS, PEX_MAX_PER_WINDOW, PEX_WINDOW,
 };
 
 impl NetworkManager {
@@ -172,68 +172,85 @@ impl NetworkManager {
                     "Shard transfer request"
                 );
 
-                // Extract path info from self (sync), then do blocking I/O
-                // via spawn_blocking without holding &self across the await.
+                // SEC: do the disk read + bandwidth-throttle sleep OFF the
+                // swarm event loop (gotcha #11). Awaiting them inline
+                // suspends ALL network activity for the duration — at a
+                // 1 Mbps cap, a 4 MB chunk would freeze the loop ~32s.
+                // Stash the channel and spawn a task that posts the
+                // response back via internal_cmd_tx; same pattern as the
+                // PrefixKvFetch path immediately below.
+                if self.pending_shard_responses.len() >= MAX_INBOUND_SHARD_FETCHES {
+                    tracing::warn!(
+                        %peer,
+                        "ShardTransfer: inbound queue full, replying empty"
+                    );
+                    let resp = SwarmResponse::ShardData(crate::types::ShardResponse {
+                        data: vec![],
+                        total_size: 0,
+                    });
+                    let _ = self
+                        .swarm
+                        .behaviour_mut()
+                        .request_response
+                        .send_response(channel, resp);
+                    return;
+                }
                 let prepared = self.prepare_shard_read(&shard_req);
                 let bw_limit = self.shared_state.config.resources.max_bandwidth_mbps;
-                let response = match prepared {
-                    Some((path, offset, chunk_size, model_id, shard_index)) => {
-                        let resp = super::shard_transfer::read_shard_chunk_async(
-                            path,
-                            offset,
-                            chunk_size,
-                            model_id,
-                            shard_index,
-                        )
-                        .await;
-                        // Enforce upload bandwidth cap: delay proportional to chunk size.
-                        // 0 = unlimited (default). Only throttles shard serving, not tensor forwards.
-                        if bw_limit > 0 {
-                            if let SwarmResponse::ShardData(ref sr) = resp {
-                                if !sr.data.is_empty() {
-                                    let bytes = sr.data.len() as u64;
-                                    let limit_bytes_per_sec = bw_limit * 125_000; // Mbps → bytes/s
-                                    let delay_ms = (bytes * 1000) / limit_bytes_per_sec;
-                                    if delay_ms > 0 {
-                                        tokio::time::sleep(std::time::Duration::from_millis(
-                                            delay_ms,
-                                        ))
-                                        .await;
+                let ticket = uuid::Uuid::new_v4();
+                self.pending_shard_responses
+                    .insert(ticket, (std::time::Instant::now(), channel));
+                let net_tx = self.internal_cmd_tx.clone();
+                tokio::spawn(async move {
+                    let (data, total_size) = match prepared {
+                        Some((path, offset, chunk_size, model_id, shard_index)) => {
+                            let resp = super::shard_transfer::read_shard_chunk_async(
+                                path,
+                                offset,
+                                chunk_size,
+                                model_id,
+                                shard_index,
+                            )
+                            .await;
+                            // Enforce upload bandwidth cap. 0 = unlimited
+                            // (default). Only throttles shard serving, not
+                            // tensor forwards.
+                            if bw_limit > 0 {
+                                if let SwarmResponse::ShardData(ref sr) = resp {
+                                    if !sr.data.is_empty() {
+                                        let bytes = sr.data.len() as u64;
+                                        let limit_bytes_per_sec = bw_limit * 125_000; // Mbps → bytes/s
+                                        let delay_ms = (bytes * 1000) / limit_bytes_per_sec;
+                                        if delay_ms > 0 {
+                                            tokio::time::sleep(std::time::Duration::from_millis(
+                                                delay_ms,
+                                            ))
+                                            .await;
+                                        }
                                     }
                                 }
                             }
+                            match resp {
+                                SwarmResponse::ShardData(sr) => (sr.data, sr.total_size),
+                                _ => (Vec::new(), 0),
+                            }
                         }
-                        resp
+                        None => (Vec::new(), 0),
+                    };
+                    let bytes_served = data.len() as u64;
+                    let cmd = NetworkCommand::DeliverShardResponse {
+                        ticket,
+                        data,
+                        total_size,
+                    };
+                    if net_tx.send(cmd).await.is_err() {
+                        tracing::debug!(
+                            %ticket,
+                            bytes_served,
+                            "ShardTransfer: internal_cmd_tx closed before delivery"
+                        );
                     }
-                    None => SwarmResponse::ShardData(crate::types::ShardResponse {
-                        data: vec![],
-                        total_size: 0,
-                    }),
-                };
-
-                // Track bytes served for seeding credits
-                let bytes_served = match &response {
-                    SwarmResponse::ShardData(ref sr) => sr.data.len() as u64,
-                    _ => 0,
-                };
-
-                // NET-M7: Log send_response errors
-                if self
-                    .swarm
-                    .behaviour_mut()
-                    .request_response
-                    .send_response(channel, response)
-                    .is_ok()
-                {
-                    // Only credit bytes if the response was actually sent
-                    if bytes_served > 0 {
-                        self.shared_state
-                            .shard_bytes_served
-                            .fetch_add(bytes_served, std::sync::atomic::Ordering::Relaxed);
-                    }
-                } else {
-                    tracing::debug!(%peer, "Failed to send shard data response (channel closed)");
-                }
+                });
             }
             SwarmRequest::PrefixKvFetch(req) => {
                 // Item 8 Phase 2b: inbound cross-node prefix KV fetch.

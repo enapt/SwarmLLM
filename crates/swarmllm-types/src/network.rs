@@ -299,6 +299,18 @@ pub enum NetworkCommand {
         request_id: uuid::Uuid,
         payload: Option<Vec<u8>>,
     },
+    /// Mirror of `DeliverPrefixKvResponse` for shard-transfer serving. The
+    /// serving task does the disk read + bandwidth-throttle sleep off the
+    /// swarm event loop and posts this command with the produced bytes.
+    /// NetworkManager looks up the stored ResponseChannel by `ticket`,
+    /// constructs `SwarmResponse::ShardData { data, total_size }`, emits
+    /// the reply, and bumps the `shard_bytes_served` atomic for credit
+    /// seeding.
+    DeliverShardResponse {
+        ticket: uuid::Uuid,
+        data: Vec<u8>,
+        total_size: u64,
+    },
 }
 
 /// Events that trigger shard rebalancing.

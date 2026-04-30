@@ -69,6 +69,19 @@ const MAX_PENDING_REDIAL: usize = 50;
 const MAX_BUFFERED_GOSSIP: usize = 64;
 /// Maximum concurrent inbound prefix-KV fetch requests before replying miss.
 const MAX_INBOUND_PREFIX_FETCHES: usize = 256;
+/// Maximum concurrent inbound shard-transfer requests being served off the
+/// swarm event loop. Beyond this cap, new requests reply with an empty
+/// chunk so the requester can retry / fall back rather than waiting on the
+/// serving task to drain. Bound is generous because each ticket only holds
+/// a `ResponseChannel` (cheap) — the actual disk + throttle work is in the
+/// spawned task.
+const MAX_INBOUND_SHARD_FETCHES: usize = 256;
+/// Maximum age of a stale `pending_shard_responses` ticket before the sweep
+/// drops it. Sized to the worst-case shard chunk read + bandwidth-throttle
+/// at the cluster's slowest cap (4 MB at 1 Mbps ≈ 32s, plus disk latency
+/// headroom). Beyond this, the serving task likely panicked or was
+/// orphaned; the channel will close on drop.
+const PENDING_SHARD_TICKET_TTL_SECS: u64 = 60;
 /// Maximum entries in connection_addrs before half-eviction of oldest ConnectionIds.
 const MAX_CONNECTION_ADDRS: usize = 1024;
 /// Maximum entries in peer_remote_addrs before half-eviction of stale peers.
@@ -190,6 +203,21 @@ pub struct NetworkManager {
         uuid::Uuid,
         (
             uuid::Uuid,
+            std::time::Instant,
+            request_response::ResponseChannel<SwarmResponse>,
+        ),
+    >,
+    /// Inbound shard-transfer reply channels. Manager stashes the
+    /// `ResponseChannel` here keyed by a fresh ticket Uuid, spawns a task
+    /// that does the disk read + bandwidth-throttle sleep OFF the swarm
+    /// event loop (per gotcha #11), and emits
+    /// `NetworkCommand::DeliverShardResponse { ticket, ... }` when the
+    /// task completes. Manager then pops the stored channel and sends the
+    /// response on its substream. Without this indirection a 4 MB chunk
+    /// at a 1 Mbps cap would suspend the swarm task for ~32s.
+    pending_shard_responses: HashMap<
+        uuid::Uuid,
+        (
             std::time::Instant,
             request_response::ResponseChannel<SwarmResponse>,
         ),
@@ -320,6 +348,7 @@ impl NetworkManager {
             pending_provider_queries: HashMap::new(),
             pending_prefix_kv_outbound: HashMap::new(),
             pending_prefix_kv_inbound: HashMap::new(),
+            pending_shard_responses: HashMap::new(),
             internal_cmd_tx,
             internal_cmd_rx,
             pex_inbound_timestamps: Vec::new(),
@@ -763,6 +792,24 @@ impl NetworkManager {
                             removed = removed_prefix,
                             remaining = self.pending_prefix_kv_inbound.len(),
                             "Swept stale pending_prefix_kv_inbound tickets"
+                        );
+                    }
+                    // Same defence for shard-serve tickets: if the spawned
+                    // task panicked or its DeliverShardResponse was dropped
+                    // because internal_cmd_tx was full, the channel here
+                    // would otherwise sit until the request_response timeout
+                    // (30s) closes the substream — but the entry counts
+                    // against MAX_INBOUND_SHARD_FETCHES until then.
+                    let before_shard = self.pending_shard_responses.len();
+                    self.pending_shard_responses.retain(|_ticket, (inserted, _chan)| {
+                        inserted.elapsed().as_secs() < PENDING_SHARD_TICKET_TTL_SECS
+                    });
+                    let removed_shard = before_shard - self.pending_shard_responses.len();
+                    if removed_shard > 0 {
+                        tracing::warn!(
+                            removed = removed_shard,
+                            remaining = self.pending_shard_responses.len(),
+                            "Swept stale pending_shard_responses tickets"
                         );
                     }
                     if !self.pending_tensor_outbound.is_empty() {
