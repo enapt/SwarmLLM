@@ -1026,20 +1026,34 @@ async fn handle_forward(
                             .chunks_exact(2)
                             .map(|b| half::f16::from_le_bytes([b[0], b[1]]).to_f32())
                             .collect();
-                        if f32_values.len() != num_tokens * hidden_dim {
-                            tracing::warn!(
-                                expected = num_tokens * hidden_dim,
-                                actual = f32_values.len(),
-                                "Vision embedding shape mismatch"
-                            );
-                            None
-                        } else {
-                            candle_core::Tensor::from_vec(
+                        // SEC: checked_mul guards against integer overflow
+                        // for adversarial shape headers. On 32-bit platforms
+                        // num_tokens * hidden_dim can wrap if both are near
+                        // u32::MAX, bypassing the length-equality check and
+                        // letting Tensor::from_vec receive a mismatched len.
+                        match num_tokens.checked_mul(hidden_dim) {
+                            None => {
+                                tracing::warn!(
+                                    num_tokens,
+                                    hidden_dim,
+                                    "Vision embedding shape multiply overflow — dropping tensor"
+                                );
+                                None
+                            }
+                            Some(expected_len) if f32_values.len() != expected_len => {
+                                tracing::warn!(
+                                    expected = expected_len,
+                                    actual = f32_values.len(),
+                                    "Vision embedding shape mismatch"
+                                );
+                                None
+                            }
+                            Some(_) => candle_core::Tensor::from_vec(
                                 f32_values,
                                 &[num_tokens, hidden_dim],
                                 &candle_core::Device::Cpu,
                             )
-                            .ok()
+                            .ok(),
                         }
                     }
                 }

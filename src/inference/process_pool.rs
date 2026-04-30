@@ -293,13 +293,34 @@ async fn dispatch_batch_result(
     let mut cursor = 0usize;
     for (r, len) in results.into_iter().zip(activation_lens.into_iter()) {
         let len = len as usize;
-        let end = cursor.saturating_add(len);
-        let slot_payload = if r.has_activations && end <= payload.len() {
-            payload[cursor..end].to_vec()
+        // SEC: only consume payload bytes for slots that actually carry an
+        // activation tensor. A malformed worker response with len > 0 on a
+        // has_activations=false slot would otherwise silently shift the
+        // cursor past valid bytes, corrupting EVERY subsequent slot's
+        // payload without any error returned.
+        let (slot_payload, advance) = if r.has_activations {
+            let end = cursor.saturating_add(len);
+            if end <= payload.len() {
+                (payload[cursor..end].to_vec(), len)
+            } else {
+                tracing::warn!(
+                    request_id = %r.request_id,
+                    cursor, len, payload_len = payload.len(),
+                    "BatchResult activation length exceeds payload"
+                );
+                (Vec::new(), 0)
+            }
         } else {
-            Vec::new()
+            if len != 0 {
+                tracing::warn!(
+                    request_id = %r.request_id,
+                    len,
+                    "BatchResult non-activation slot has len > 0 — ignoring (potential malformed worker response)"
+                );
+            }
+            (Vec::new(), 0)
         };
-        cursor = end;
+        cursor = cursor.saturating_add(advance);
         let rid = r.request_id;
         let tx_opt = responses.get(&rid).map(|e| e.value().clone());
         if let Some(tx) = tx_opt {

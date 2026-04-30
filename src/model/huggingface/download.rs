@@ -37,6 +37,23 @@ pub async fn download_model(
 
     let total_size = resp.content_length().unwrap_or(0);
 
+    // SEC: cap mmproj / model file size at 16 GiB. Without this, a
+    // misconfigured or hostile HF repo could advertise a multi-hundred-GB
+    // file and stream it until disk is exhausted (download_shard has the
+    // disk preflight; download_model previously did not). 16 GiB covers
+    // every real mmproj (largest seen: ~3 GB for vision encoders on 70B
+    // models) plus generous headroom; anything larger is a misconfigured
+    // sentinel and refused.
+    const MAX_MODEL_FILE_BYTES: u64 = 16 * 1024 * 1024 * 1024;
+    if total_size > MAX_MODEL_FILE_BYTES {
+        return Err(format!(
+            "HuggingFace file size {total_size} bytes exceeds cap {MAX_MODEL_FILE_BYTES}"
+        ));
+    }
+    if total_size > 0 {
+        crate::model::check_disk_space(dest_dir, total_size).map_err(|e| e.to_string())?;
+    }
+
     // Create destination directory
     std::fs::create_dir_all(dest_dir).map_err(|e| format!("Failed to create dir: {e}"))?;
 
