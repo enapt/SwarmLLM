@@ -20,12 +20,14 @@ const ENC_PREFIX: &str = "$SWARM_ENC$";
 const MAX_KEY_LENGTH: usize = 256;
 
 /// Derive a 32-byte symmetric key from the node's Ed25519 signing key for provider key encryption.
-fn derive_encryption_key(signing_key_bytes: &[u8; 32]) -> [u8; 32] {
-    super::hkdf_sha256_derive_32(
+/// Returned wrapped in `Zeroizing` so the symmetric key is overwritten when
+/// the local goes out of scope, rather than left as heap/stack residue.
+fn derive_encryption_key(signing_key_bytes: &[u8; 32]) -> zeroize::Zeroizing<[u8; 32]> {
+    zeroize::Zeroizing::new(super::hkdf_sha256_derive_32(
         signing_key_bytes,
         None,
         b"swarmllm-provider-key-encryption-v1",
-    )
+    ))
 }
 
 /// Encrypt a plaintext API key string. Returns a string with the `$SWARM_ENC$` prefix.
@@ -34,7 +36,7 @@ fn encrypt_key(plaintext: &str, signing_key_bytes: &[u8; 32]) -> Result<String, 
         return Ok(String::new());
     }
     let sym_key = derive_encryption_key(signing_key_bytes);
-    let cipher = ChaCha20Poly1305::new_from_slice(&sym_key)
+    let cipher = ChaCha20Poly1305::new_from_slice(&sym_key[..])
         .map_err(|e| SwarmError::Internal(format!("cipher init: {e}")))?;
 
     let mut nonce_bytes = [0u8; 12];
@@ -77,7 +79,7 @@ fn decrypt_key(stored: &str, signing_key_bytes: &[u8; 32]) -> Result<String, Swa
     }
 
     let sym_key = derive_encryption_key(signing_key_bytes);
-    let cipher = ChaCha20Poly1305::new_from_slice(&sym_key)
+    let cipher = ChaCha20Poly1305::new_from_slice(&sym_key[..])
         .map_err(|e| SwarmError::Internal(format!("cipher init: {e}")))?;
 
     let nonce = Nonce::from_slice(&blob[..12]);

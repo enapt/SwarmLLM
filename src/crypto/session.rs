@@ -5,6 +5,7 @@ use chacha20poly1305::aead::{Aead, KeyInit};
 use chacha20poly1305::{ChaCha20Poly1305, Nonce};
 use dashmap::DashMap;
 use x25519_dalek::{EphemeralSecret, PublicKey, StaticSecret};
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::error::SwarmError;
 use crate::types::NodeId;
@@ -124,7 +125,10 @@ impl ReplayWindow {
 
 /// A cached pairwise session derived from X25519 ECDH.
 pub struct CachedSession {
-    cipher_key: [u8; 32],
+    /// SEC: wrapped in `Zeroizing` so eviction / SessionManager drop overwrites
+    /// the AEAD key in heap memory rather than leaving it for the allocator
+    /// to recycle.
+    cipher_key: Zeroizing<[u8; 32]>,
     send_nonce: AtomicU64,
     /// RFC 6479 sliding window for anti-replay. Protected by a Mutex since
     /// it requires mutable access for both check and record operations.
@@ -133,7 +137,7 @@ pub struct CachedSession {
 }
 
 impl CachedSession {
-    fn new(cipher_key: [u8; 32]) -> Self {
+    fn new(cipher_key: Zeroizing<[u8; 32]>) -> Self {
         Self {
             cipher_key,
             send_nonce: AtomicU64::new(0),
@@ -333,7 +337,7 @@ impl SessionManager {
         let nonce_bytes = session.next_nonce()?;
         let nonce = Nonce::from_slice(&nonce_bytes);
 
-        let cipher = ChaCha20Poly1305::new_from_slice(&session.cipher_key)
+        let cipher = ChaCha20Poly1305::new_from_slice(&session.cipher_key[..])
             .map_err(|e| SwarmError::Encryption(format!("Cipher init failed: {e}")))?;
 
         let payload = chacha20poly1305::aead::Payload {
@@ -409,7 +413,7 @@ impl SessionManager {
         let nonce = Nonce::from_slice(&sealed[..12]);
         let ciphertext = &sealed[12..];
 
-        let cipher = ChaCha20Poly1305::new_from_slice(&session.cipher_key)
+        let cipher = ChaCha20Poly1305::new_from_slice(&session.cipher_key[..])
             .map_err(|e| SwarmError::Encryption(format!("Cipher init failed: {e}")))?;
 
         let payload = chacha20poly1305::aead::Payload {
@@ -499,7 +503,7 @@ pub fn ephemeral_seal(
     let shared_secret = ephemeral_secret.diffie_hellman(recipient_pub);
 
     let cipher_key = derive_cipher_key(shared_secret.as_bytes(), &ephemeral_public, recipient_pub);
-    let cipher = ChaCha20Poly1305::new_from_slice(&cipher_key)
+    let cipher = ChaCha20Poly1305::new_from_slice(&cipher_key[..])
         .map_err(|e| SwarmError::Encryption(format!("Cipher init failed: {e}")))?;
 
     let nonce_bytes = [0u8; 12]; // Single-use key, nonce=0 is safe
@@ -528,7 +532,7 @@ pub fn ephemeral_open(
     let shared_secret = local_secret.diffie_hellman(&ephemeral_public);
 
     let cipher_key = derive_cipher_key(shared_secret.as_bytes(), &ephemeral_public, &local_public);
-    let cipher = ChaCha20Poly1305::new_from_slice(&cipher_key)
+    let cipher = ChaCha20Poly1305::new_from_slice(&cipher_key[..])
         .map_err(|e| SwarmError::Encryption(format!("Cipher init failed: {e}")))?;
 
     let nonce = Nonce::from_slice(&[0u8; 12]);
@@ -552,7 +556,11 @@ pub fn ed25519_to_x25519_secret(signing_key_bytes: &[u8; 32]) -> StaticSecret {
     x25519_bytes[0] &= 248;
     x25519_bytes[31] &= 127;
     x25519_bytes[31] |= 64;
-    StaticSecret::from(x25519_bytes)
+    let secret = StaticSecret::from(x25519_bytes);
+    // SEC: StaticSecret::from copies the bytes into its own scalar (which
+    // is ZeroizeOnDrop), but the stack-allocated source is left dirty.
+    x25519_bytes.zeroize();
+    secret
 }
 
 /// Convert an Ed25519 public key (verifying key bytes) to an X25519 public key.
@@ -568,7 +576,11 @@ pub fn ed25519_pubkey_to_x25519(ed_pub_bytes: &[u8; 32]) -> Option<PublicKey> {
 /// Derive a symmetric cipher key from an ECDH shared secret using HKDF-SHA256.
 /// Public keys are sorted to ensure both sides derive the same key regardless of
 /// who initiates the session.
-fn derive_cipher_key(shared_secret: &[u8], pub_a: &PublicKey, pub_b: &PublicKey) -> [u8; 32] {
+fn derive_cipher_key(
+    shared_secret: &[u8],
+    pub_a: &PublicKey,
+    pub_b: &PublicKey,
+) -> Zeroizing<[u8; 32]> {
     // Sort public keys lexicographically for deterministic salt
     let (first, second) = if pub_a.as_bytes() < pub_b.as_bytes() {
         (pub_a.as_bytes(), pub_b.as_bytes())
@@ -579,7 +591,11 @@ fn derive_cipher_key(shared_secret: &[u8], pub_a: &PublicKey, pub_b: &PublicKey)
     salt.extend_from_slice(first);
     salt.extend_from_slice(second);
 
-    super::hkdf_sha256_derive_32(shared_secret, Some(&salt), b"swarmllm-session-v1")
+    Zeroizing::new(super::hkdf_sha256_derive_32(
+        shared_secret,
+        Some(&salt),
+        b"swarmllm-session-v1",
+    ))
 }
 
 #[cfg(test)]

@@ -1060,11 +1060,20 @@ impl PipelineExecutor {
                     "DIAG: failing over to standby node"
                 );
 
-                // Register a response channel BEFORE sending the request
+                // Register a response channel BEFORE sending the request.
+                // SEC: a RAII guard removes the entry on every error path
+                // (including a panic between insert and wait). Without it a
+                // failed `wait_for_result` would leak one slot per double
+                // timeout — at MAX_PENDING_LAYER_RESULTS the pipeline starts
+                // rejecting all new requests with ServiceUnavailable.
                 let (tx, rx) = tokio::sync::oneshot::channel();
                 self.shared_state
                     .pending_layer_results
                     .insert(request_id, tx);
+                let mut pending_guard = super::PendingLayerResultGuard::new(
+                    &self.shared_state.pending_layer_results,
+                    request_id,
+                );
 
                 // Send to backup node via directed tensor protocol
                 let forward = LayerForward {
@@ -1090,7 +1099,6 @@ impl PipelineExecutor {
                     match self.shared_state.resolve_peer_id_bytes(&backup.node_id) {
                         Some(b) => b,
                         None => {
-                            self.shared_state.pending_layer_results.remove(&request_id);
                             return Err(SwarmError::Network(format!(
                                 "No peer_id_bytes for backup node {}",
                                 backup.node_id
@@ -1106,7 +1114,6 @@ impl PipelineExecutor {
                     .await
                     .is_err()
                 {
-                    self.shared_state.pending_layer_results.remove(&request_id);
                     return Err(SwarmError::Network(
                         "Failed to send to standby node".to_string(),
                     ));
@@ -1124,6 +1131,8 @@ impl PipelineExecutor {
                     activations.len(),
                 )
                 .await?;
+                // dispatcher already removed the entry on deliver
+                pending_guard.disarm();
 
                 // Update the assignment so subsequent tokens use the standby
                 // directly, avoiding repeated failover + 30s timeout per token.
