@@ -983,6 +983,7 @@
   "shard.row.holders_title": "Pares mantendo este shard",
   "shard.row.missing_label": "FALTANDO",
   "shard.row.no_other_holders": "Nenhum outro par mantém este shard",
+  "shard.row.peer_label": "Remoto",
   "shard.row.replicas_count_one": "{n} par possui este shard",
   "shard.row.replicas_count_other": "{n} pares possuem este shard",
   "shard.row.replicas_local_only": "Mantido localmente — nenhum outro par possui este shard",

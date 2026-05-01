@@ -983,6 +983,7 @@
   "shard.row.holders_title": "Peers ที่ถือ shard นี้",
   "shard.row.missing_label": "MISSING",
   "shard.row.no_other_holders": "ไม่มี peers อื่นถือ shard นี้",
+  "shard.row.peer_label": "ระยะไกล",
   "shard.row.replicas_count_one": "{n} peer มี shard นี้",
   "shard.row.replicas_count_other": "{n} peers มี shard นี้",
   "shard.row.replicas_local_only": "ถือไว้ในเครื่องเท่านั้น — ไม่มี peers อื่นมี shard นี้",

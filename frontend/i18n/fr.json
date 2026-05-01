@@ -983,6 +983,7 @@
   "shard.row.holders_title": "Pairs tenant ce shard",
   "shard.row.missing_label": "MANQUANT",
   "shard.row.no_other_holders": "Aucun autre pair ne tient ce shard",
+  "shard.row.peer_label": "Distant",
   "shard.row.replicas_count_one": "{n} pair a ce shard",
   "shard.row.replicas_count_other": "{n} pairs ont ce shard",
   "shard.row.replicas_local_only": "Tenu localement — aucun autre pair n'a ce shard",

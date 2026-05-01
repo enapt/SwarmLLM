@@ -983,6 +983,7 @@
   "shard.row.holders_title": "Peers, die diesen Shard halten",
   "shard.row.missing_label": "FEHLEND",
   "shard.row.no_other_holders": "Kein anderer Peer hält diesen Shard",
+  "shard.row.peer_label": "Remote",
   "shard.row.replicas_count_one": "{n} Peer hat diesen Shard",
   "shard.row.replicas_count_other": "{n} Peers haben diesen Shard",
   "shard.row.replicas_local_only": "Lokal gehostet — kein anderer Peer hat diesen Shard",

@@ -983,6 +983,7 @@
   "shard.row.holders_title": "Peer yang memegang shard ini",
   "shard.row.missing_label": "HILANG",
   "shard.row.no_other_holders": "Tidak ada peer lain yang memegang shard ini",
+  "shard.row.peer_label": "Jarak Jauh",
   "shard.row.replicas_count_one": "{n} peer memiliki shard ini",
   "shard.row.replicas_count_other": "{n} peer memiliki shard ini",
   "shard.row.replicas_local_only": "Dipegang secara lokal — tidak ada peer lain yang memiliki shard ini",

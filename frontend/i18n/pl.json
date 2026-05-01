@@ -983,6 +983,7 @@
   "shard.row.holders_title": "Węzły przechowujące ten odłamek",
   "shard.row.missing_label": "BRAKUJĄCY",
   "shard.row.no_other_holders": "Żaden inny węzeł nie przechowuje tego odłamka",
+  "shard.row.peer_label": "Zdalny",
   "shard.row.replicas_count_one": "{n} węzeł ma ten odłamek",
   "shard.row.replicas_count_other": "{n} węzłów ma ten odłamek",
   "shard.row.replicas_local_only": "Przechowywany lokalnie — żaden inny węzeł nie ma tego odłamka",

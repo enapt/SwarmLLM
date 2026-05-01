@@ -983,6 +983,7 @@
   "shard.row.holders_title": "이 샤드를 보유한 피어",
   "shard.row.missing_label": "누락됨",
   "shard.row.no_other_holders": "다른 피어는 이 샤드를 보유하지 않음",
+  "shard.row.peer_label": "원격",
   "shard.row.replicas_count_one": "{n}개 피어가 이 샤드를 보유",
   "shard.row.replicas_count_other": "{n}개 피어가 이 샤드를 보유",
   "shard.row.replicas_local_only": "로컬에서 보유 — 다른 피어는 이 샤드를 보유하지 않음",

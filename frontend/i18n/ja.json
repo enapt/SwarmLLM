@@ -983,6 +983,7 @@
   "shard.row.holders_title": "このシャードを保有しているピア",
   "shard.row.missing_label": "欠落",
   "shard.row.no_other_holders": "他のピアはこのシャードを保有していません",
+  "shard.row.peer_label": "リモート",
   "shard.row.replicas_count_one": "{n}個のピアがこのシャードを持っています",
   "shard.row.replicas_count_other": "{n}個のピアがこのシャードを持っています",
   "shard.row.replicas_local_only": "ローカルで保持 — 他のピアはこのシャードを持っていません",

@@ -983,6 +983,7 @@
   "shard.row.holders_title": "Узлы, хранящие этот осколок",
   "shard.row.missing_label": "ОТСУТСТВУЕТ",
   "shard.row.no_other_holders": "Ни один другой узел не хранит этот осколок",
+  "shard.row.peer_label": "Удалённо",
   "shard.row.replicas_count_one": "{n} узел имеет этот осколок",
   "shard.row.replicas_count_other": "{n} узлов имеют этот осколок",
   "shard.row.replicas_local_only": "Хранится локально — ни один другой узел не имеет этот осколок",

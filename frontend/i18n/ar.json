@@ -983,6 +983,7 @@
   "shard.row.holders_title": "الأقران التي تحتفظ بهذا الجزء",
   "shard.row.missing_label": "مفقودة",
   "shard.row.no_other_holders": "لا أحد من الأقران الآخرين يحتفظ بهذا الجزء",
+  "shard.row.peer_label": "عن بُعد",
   "shard.row.replicas_count_one": "{n} نظير لديه هذا الجزء",
   "shard.row.replicas_count_other": "{n} أقران لديهم هذا الجزء",
   "shard.row.replicas_local_only": "محتفظ به محلياً — لا أحد من الأقران الآخرين لديه هذا الجزء",

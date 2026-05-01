@@ -983,6 +983,7 @@
   "shard.row.holders_title": "Однорангові вузли, які утримують цей фрагмент",
   "shard.row.missing_label": "ВІДСУТНІЙ",
   "shard.row.no_other_holders": "Жоден інший однорангові вузол не утримує цей фрагмент",
+  "shard.row.peer_label": "Віддалений",
   "shard.row.replicas_count_one": "{n} однорангові вузел має цей фрагмент",
   "shard.row.replicas_count_other": "{n} однорангові вузлів мають цей фрагмент",
   "shard.row.replicas_local_only": "Утримується локально — жоден інший однорангові вузел не має цього фрагменту",

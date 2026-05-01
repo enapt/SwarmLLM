@@ -983,6 +983,7 @@
   "shard.row.holders_title": "Nätverksnoder som innehåller denna shard",
   "shard.row.missing_label": "SAKNAS",
   "shard.row.no_other_holders": "Ingen annan nätverksnode innehåller denna shard",
+  "shard.row.peer_label": "Fjärr",
   "shard.row.replicas_count_one": "{n} nätverksnode har denna shard",
   "shard.row.replicas_count_other": "{n} nätverksnoder har denna shard",
   "shard.row.replicas_local_only": "Hålls lokalt — ingen annan nätverksnode har denna shard",

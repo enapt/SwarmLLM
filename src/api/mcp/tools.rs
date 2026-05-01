@@ -5,7 +5,7 @@ use super::dispatch::{
 };
 use super::resources::mcp_peer_json;
 use super::types::{JsonRpcResponse, INTERNAL_ERROR, INVALID_PARAMS, RESOURCE_UNAVAILABLE};
-use super::MCP_MAX_PROMPT_BYTES;
+use super::{MCP_MAX_MODEL_ID_BYTES, MCP_MAX_PROMPT_BYTES, MCP_MAX_TASK_ID_BYTES};
 use crate::api::server::AppState;
 use crate::api::{DEFAULT_MAX_TOKENS, DEFAULT_TOP_K};
 
@@ -42,7 +42,7 @@ async fn tool_chat(state: &AppState, id: Option<Value>, args: Value) -> JsonRpcR
             return JsonRpcResponse::error(id, INVALID_PARAMS, "Missing required field: model");
         }
     };
-    if model.len() > 256 {
+    if model.len() > MCP_MAX_MODEL_ID_BYTES {
         return JsonRpcResponse::error(id, INVALID_PARAMS, "Model name too long");
     }
 
@@ -470,13 +470,28 @@ async fn tool_batch_prompts(state: &AppState, id: Option<Value>, args: Value) ->
 
     let mut handles = Vec::new();
     for task in &tasks {
-        let task_id = task
-            .get("id")
-            .and_then(|v| v.as_str())
-            .unwrap_or("unknown")
-            .to_string();
+        let raw_task_id = task.get("id").and_then(|v| v.as_str()).unwrap_or("unknown");
+        let task_id = if raw_task_id.len() > MCP_MAX_TASK_ID_BYTES {
+            raw_task_id
+                .char_indices()
+                .take_while(|(i, _)| *i < MCP_MAX_TASK_ID_BYTES)
+                .map(|(_, c)| c)
+                .collect::<String>()
+        } else {
+            raw_task_id.to_string()
+        };
         let model_id = match task.get("model").and_then(|v| v.as_str()) {
-            Some(m) => m.to_string(),
+            Some(m) if m.len() <= MCP_MAX_MODEL_ID_BYTES => m.to_string(),
+            Some(_) => {
+                handles.push(tokio::spawn(async move {
+                    json!({
+                        "task_id": task_id,
+                        "error": "model name too long",
+                        "status": "error",
+                    })
+                }));
+                continue;
+            }
             None => {
                 handles.push(tokio::spawn(async move {
                     json!({

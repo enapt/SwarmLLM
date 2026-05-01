@@ -983,6 +983,7 @@
   "shard.row.holders_title": "Pares que tienen este fragmento",
   "shard.row.missing_label": "FALTANTE",
   "shard.row.no_other_holders": "Ningún otro par tiene este fragmento",
+  "shard.row.peer_label": "Remoto",
   "shard.row.replicas_count_one": "{n} par tiene este fragmento",
   "shard.row.replicas_count_other": "{n} pares tienen este fragmento",
   "shard.row.replicas_local_only": "Alojado localmente — ningún otro par tiene este fragmento",

@@ -45,6 +45,14 @@ translate with another, review code with a third).";
 
 /// Maximum prompt/question length for MCP tool inputs (4 MB, matches HTTP validation).
 pub(crate) const MCP_MAX_PROMPT_BYTES: usize = 4 * 1024 * 1024;
+/// Maximum length (bytes) of a model id supplied to an MCP tool (matches the
+/// `tool_chat` guard at `tools.rs:45`). Without this cap the same string in
+/// `batch_prompts` would be cloned per-task before being rejected downstream.
+pub(crate) const MCP_MAX_MODEL_ID_BYTES: usize = 256;
+/// Maximum length (bytes) of a caller-supplied task id in `batch_prompts`. The
+/// id is embedded in the response and cloned into per-task closures, so an
+/// uncapped string is a per-batch heap-amplification vector.
+pub(crate) const MCP_MAX_TASK_ID_BYTES: usize = 256;
 
 // ---- MCP handlers ----
 

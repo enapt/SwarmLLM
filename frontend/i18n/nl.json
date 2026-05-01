@@ -983,6 +983,7 @@
   "shard.row.holders_title": "Peers die deze shard hebben",
   "shard.row.missing_label": "ONTBREEKT",
   "shard.row.no_other_holders": "Geen andere peers hebben deze shard",
+  "shard.row.peer_label": "Op afstand",
   "shard.row.replicas_count_one": "{n} peer heeft deze shard",
   "shard.row.replicas_count_other": "{n} peers hebben deze shard",
   "shard.row.replicas_local_only": "Lokaal gehouden — geen andere peers hebben deze shard",

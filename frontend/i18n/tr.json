@@ -983,6 +983,7 @@
   "shard.row.holders_title": "Bu parçayı barındıran eşler",
   "shard.row.missing_label": "KAYIP",
   "shard.row.no_other_holders": "Başka hiçbir eş bu parçayı tutmaz",
+  "shard.row.peer_label": "Uzak",
   "shard.row.replicas_count_one": "{n} eş bu parçaya sahip",
   "shard.row.replicas_count_other": "{n} eş bu parçaya sahip",
   "shard.row.replicas_local_only": "Yerel tutulmuş — başka hiçbir eş bu parçaya sahip değil",

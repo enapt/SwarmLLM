@@ -142,7 +142,6 @@ pub async fn delete_shard(
     Path((model_id, shard_index)): Path<(String, u32)>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     validate_shard_params(&model_id, shard_index)?;
-    let safe_model_id = crate::model::shard::sanitize_path_component(&model_id);
     let mid = crate::types::ModelId(model_id.clone());
     let shared = &state.shared_state;
     let local_node_id = shared.identity.node_id().clone();
@@ -159,8 +158,7 @@ pub async fn delete_shard(
 
     // Delete shard file from disk
     let shard_store = state.shared_state.shard_store();
-    let shard_path =
-        shard_store.shard_path(&crate::types::ModelId(safe_model_id.clone()), shard_index);
+    let shard_path = shard_store.shard_path(&mid, shard_index);
 
     if shard_path.exists() {
         let sp = shard_path.clone();

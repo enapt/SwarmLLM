@@ -983,6 +983,7 @@
   "shard.row.holders_title": "इस shard को रखने वाले Peers",
   "shard.row.missing_label": "MISSING",
   "shard.row.no_other_holders": "कोई अन्य peer इस shard को नहीं रखता",
+  "shard.row.peer_label": "रिमोट",
   "shard.row.replicas_count_one": "{n} peer के पास यह shard है",
   "shard.row.replicas_count_other": "{n} peers के पास यह shard है",
   "shard.row.replicas_local_only": "स्थानीय रूप से आयोजित — कोई अन्य peer इस shard को नहीं रखता",

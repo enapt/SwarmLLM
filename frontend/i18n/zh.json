@@ -983,6 +983,7 @@
   "shard.row.holders_title": "持有此分片的对等节点",
   "shard.row.missing_label": "缺失",
   "shard.row.no_other_holders": "没有其他对等节点持有此分片",
+  "shard.row.peer_label": "远程",
   "shard.row.replicas_count_one": "{n}个对等节点拥有此分片",
   "shard.row.replicas_count_other": "{n}个对等节点拥有此分片",
   "shard.row.replicas_local_only": "本地持有 — 无其他对等节点拥有此分片",

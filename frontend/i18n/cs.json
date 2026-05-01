@@ -983,6 +983,7 @@
   "shard.row.holders_title": "Partneři držící tento fragment",
   "shard.row.missing_label": "CHYBÍ",
   "shard.row.no_other_holders": "Žádný jiný partner nedrží tento fragment",
+  "shard.row.peer_label": "Vzdálené",
   "shard.row.replicas_count_one": "{n} partner má tento fragment",
   "shard.row.replicas_count_other": "{n} partnerů má tento fragment",
   "shard.row.replicas_local_only": "Uloženo lokálně — žádný jiný partner nemá tento fragment",

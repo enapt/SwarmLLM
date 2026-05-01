@@ -983,6 +983,7 @@
   "shard.row.holders_title": "Các peer giữ shard này",
   "shard.row.missing_label": "THIẾU",
   "shard.row.no_other_holders": "Không có peer nào khác giữ shard này",
+  "shard.row.peer_label": "Từ xa",
   "shard.row.replicas_count_one": "{n} peer có shard này",
   "shard.row.replicas_count_other": "{n} peer có shard này",
   "shard.row.replicas_local_only": "Được lưu giữ cục bộ — không có peer nào khác có shard này",

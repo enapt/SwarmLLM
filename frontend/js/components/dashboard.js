@@ -655,7 +655,7 @@
               var vramPct = vramTotal > 0 ? (displayUsed / vramTotal * 100) : 0;
               App.dashboard._setGauge('vram-gauge', vramPct);
               document.getElementById('vram-bar').style.width = vramPct.toFixed(1) + '%';
-              document.getElementById('vram-bar').className = vramPct > 90 ? 'fill red' : (vramPct > 70 ? 'fill orange' : 'fill cyan');
+              document.getElementById('vram-bar').className = U.resourceBarClass(vramPct, 'cyan');
               App.dashboard._updateContribution(vramPct, 'vram');
             } else {
               if (vramLabel) vramLabel.textContent = I18n.t('hw.vram_idle');
@@ -667,7 +667,7 @@
               var ramPctForBar = hw.total_ram_mb > 0 ? (ramForModels / hw.total_ram_mb * 100) : 0;
               App.dashboard._setGauge('vram-gauge', vramTotal > 0 ? (vramUsed / vramTotal * 100) : 0);
               document.getElementById('vram-bar').style.width = ramPctForBar.toFixed(1) + '%';
-              document.getElementById('vram-bar').className = ramPctForBar > 90 ? 'fill red' : (ramPctForBar > 70 ? 'fill orange' : 'fill cyan');
+              document.getElementById('vram-bar').className = U.resourceBarClass(ramPctForBar, 'cyan');
               App.dashboard._updateContribution(ramPctForBar, 'ram');
             }
           }
@@ -697,7 +697,7 @@
           }
           var ramPct = hw.total_ram_mb > 0 ? (ramUsed / hw.total_ram_mb * 100) : 0;
           document.getElementById('ram-bar').style.width = ramPct.toFixed(1) + '%';
-          document.getElementById('ram-bar').className = ramPct > 90 ? 'fill red' : (ramPct > 70 ? 'fill orange' : 'fill green');
+          document.getElementById('ram-bar').className = U.resourceBarClass(ramPct, 'green');
           App.dashboard._setGauge('ram-gauge', ramPct);
         }
         if (hw.total_disk_mb) {
@@ -707,7 +707,7 @@
           var diskPct = hw.total_disk_mb > 0 ? (diskUsed / hw.total_disk_mb * 100) : 0;
           var diskBar = document.getElementById('disk-bar');
           diskBar.style.width = diskPct.toFixed(1) + '%';
-          diskBar.className = diskPct > 90 ? 'fill red' : (diskPct > 70 ? 'fill orange' : 'fill accent');
+          diskBar.className = U.resourceBarClass(diskPct, 'accent');
           App.dashboard._setGauge('disk-gauge', diskPct);
         }
       }
@@ -1785,7 +1785,7 @@
             var statusText;
             if (s.local && s.in_vram) { newState = 'vram'; statusText = I18n.t('shard.row.vram_label'); }
             else if (s.local) { newState = 'disk'; statusText = I18n.t('dashboard.disk_label'); }
-            else if (s.holders > 0) { newState = 'peer'; statusText = I18n.t('dashboard.peer_col_name'); }
+            else if (s.holders > 0) { newState = 'peer'; statusText = I18n.t('shard.row.peer_label'); }
             else { newState = 'missing'; statusText = I18n.t('shard.row.missing_label'); }
 
             self._patchShardRow(row, { state: newState, statusText: statusText });

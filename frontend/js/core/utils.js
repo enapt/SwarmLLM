@@ -63,6 +63,12 @@
     return formatBytes(dlBytes) + ' / ' + formatBytes(totalBytes) + ' (' + pct + '%)';
   }
 
+  function resourceBarClass(pct, healthyColor) {
+    if (pct > 90) return 'fill red';
+    if (pct > 70) return 'fill orange';
+    return 'fill ' + healthyColor;
+  }
+
   function formatSpeed(bytesPerSec) {
     if (bytesPerSec >= 1048576) return (bytesPerSec / 1048576).toFixed(1) + ' MB/s';
     if (bytesPerSec >= 1024) return Math.round(bytesPerSec / 1024) + ' KB/s';
@@ -603,6 +609,7 @@
     formatBytes: formatBytes,
     formatCompact: formatCompact,
     formatDlProgress: formatDlProgress,
+    resourceBarClass: resourceBarClass,
     formatSpeed: formatSpeed,
     formatEta: formatEta,
     timeAgo: timeAgo,

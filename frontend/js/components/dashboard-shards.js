@@ -73,7 +73,7 @@
         ? s.peer_downloads[0].progress_pct : 0;
       return (lead || 0) + '%\u2193';
     }
-    if (state === 'peer') return I18n.t('dashboard.peer_col_name');
+    if (state === 'peer') return I18n.t('shard.row.peer_label');
     return I18n.t('shard.row.missing_label');
   }
 
