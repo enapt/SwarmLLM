@@ -69,6 +69,14 @@ const MAX_RESPONSES_EXTRA_VALUE_BYTES: usize = 4 * 1024;
 /// enforce per-item caps, and a malicious client could ship millions of
 /// near-empty items past the wire-byte limit.
 const MAX_RESPONSES_INPUT_ITEMS: usize = 1024;
+/// Cap on caller-supplied query strings on `GET /v1/responses/:id/input_items`
+/// (`after`, `before`, `order`, `include`). Cursors are short by construction
+/// (`item_N`); any megabyte-class value is hostile rather than a real cursor.
+const MAX_INPUT_ITEMS_QUERY_LEN: usize = 64;
+/// Default page size for `GET /v1/responses/:id/input_items`. Matches OpenAI.
+const INPUT_ITEMS_DEFAULT_PAGE_SIZE: u32 = 20;
+/// Hard cap on the `limit` query param for input-items pagination.
+const INPUT_ITEMS_MAX_PAGE_SIZE: u32 = 100;
 
 /// Validate a `id` path parameter on a `/v1/responses/{id}` route. Mirrors
 /// the `previous_response_id` cap so caller-supplied identifiers never
@@ -872,10 +880,6 @@ pub async fn list_input_items(
     axum::extract::Query(params): axum::extract::Query<ListInputItemsParams>,
 ) -> Result<Response, ApiError> {
     validate_response_id(&id)?;
-    // Cap caller-supplied query strings — they don't drive any DB lookup
-    // (synthetic `item_N` cursors are short by construction) so any
-    // megabyte-class value is hostile rather than a real cursor.
-    const MAX_INPUT_ITEMS_QUERY_LEN: usize = 64;
     for (name, value) in [
         ("after", params.after.as_deref()),
         ("before", params.before.as_deref()),
@@ -953,7 +957,10 @@ pub(crate) fn build_input_items_page(
         None => 0,
     };
 
-    let limit = params.limit.unwrap_or(20).clamp(1, 100) as usize;
+    let limit = params
+        .limit
+        .unwrap_or(INPUT_ITEMS_DEFAULT_PAGE_SIZE)
+        .clamp(1, INPUT_ITEMS_MAX_PAGE_SIZE) as usize;
     let total = items_with_ids.len();
     let end = start.saturating_add(limit).min(total);
     let page: Vec<serde_json::Value> = items_with_ids[start..end]

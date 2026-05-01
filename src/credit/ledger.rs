@@ -669,14 +669,43 @@ pub async fn apply_credit_direct(
     Ok(())
 }
 
-/// Maximum staleness for a signed balance report (5 minutes).
-const BALANCE_REPORT_MAX_AGE_SECS: i64 = 300;
+/// Maximum staleness for a signed balance report (5 minutes). Shared with
+/// the credit-transaction freshness check in `daemon::dispatch` (every signed
+/// credit-typed gossip uses the same window per gotcha #32 / #44).
+pub(crate) const BALANCE_REPORT_MAX_AGE_SECS: i64 = 300;
 
 /// Allowable clock skew tolerance for a balance report timestamped in the
 /// future. Honest cross-node clocks drift by single-digit seconds; anything
 /// larger is rejected so an attacker can't pre-sign with a future timestamp
 /// to extend the effective replay window.
-const CLOCK_SKEW_TOLERANCE_SECS: i64 = 30;
+pub(crate) const CLOCK_SKEW_TOLERANCE_SECS: i64 = 30;
+
+/// One-sided staleness check shared across signed credit-typed messages
+/// (balance reports, credit transactions, future signed types). Returns
+/// `Ok(())` if `timestamp` is within `[now - max_age_secs, now + skew_secs]`,
+/// `Err(SwarmError::CreditError)` otherwise. Per gotcha #32 / #44 the future
+/// side MUST be one-sided — `(now - ts).abs() > MAX` doubles the effective
+/// replay window. Centralising here pins the invariant.
+pub(crate) fn check_signed_freshness(
+    timestamp: chrono::DateTime<chrono::Utc>,
+    skew_secs: i64,
+    max_age_secs: i64,
+    kind: &'static str,
+) -> Result<(), SwarmError> {
+    let age_secs = (chrono::Utc::now() - timestamp).num_seconds();
+    if age_secs < -skew_secs {
+        return Err(SwarmError::CreditError(format!(
+            "Future-dated {kind}: {}s ahead (skew tolerance {skew_secs}s)",
+            -age_secs,
+        )));
+    }
+    if age_secs > max_age_secs {
+        return Err(SwarmError::CreditError(format!(
+            "Stale {kind}: {age_secs}s old (max {max_age_secs}s)"
+        )));
+    }
+    Ok(())
+}
 
 /// Build the deterministic signing payload for a balance report.
 /// Format: "swarmllm-balance-v1" || node_id(32) || balance_bucket(8) || timestamp_secs(8)
@@ -718,24 +747,12 @@ pub fn verify_balance_report(gossip: &CreditGossip) -> Result<(), SwarmError> {
         return Err(SwarmError::InvalidSignature);
     }
 
-    // Timestamp freshness check. Use a one-sided staleness bound (NOT .abs())
-    // so an attacker can't pre-sign a report with a timestamp 5 minutes in
-    // the future and replay it for a full 10-minute window. A small negative
-    // tolerance is allowed for honest cross-node clock skew.
-    let now = chrono::Utc::now();
-    let age_secs = (now - gossip.timestamp).num_seconds();
-    if age_secs < -CLOCK_SKEW_TOLERANCE_SECS {
-        return Err(SwarmError::CreditError(format!(
-            "Future-dated balance report from {}: {}s ahead (skew tolerance {}s)",
-            gossip.node_id, -age_secs, CLOCK_SKEW_TOLERANCE_SECS,
-        )));
-    }
-    if age_secs > BALANCE_REPORT_MAX_AGE_SECS {
-        return Err(SwarmError::CreditError(format!(
-            "Stale balance report from {}: {}s old (max {}s)",
-            gossip.node_id, age_secs, BALANCE_REPORT_MAX_AGE_SECS,
-        )));
-    }
+    check_signed_freshness(
+        gossip.timestamp,
+        CLOCK_SKEW_TOLERANCE_SECS,
+        BALANCE_REPORT_MAX_AGE_SECS,
+        "balance report",
+    )?;
 
     // Verify Ed25519 signature
     let verifying_key =

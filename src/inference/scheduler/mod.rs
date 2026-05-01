@@ -45,6 +45,12 @@ struct NodeCandidate {
     is_pool_member: bool,
 }
 
+/// Maximum number of GPUs in a tensor-parallel group. AllReduce communication
+/// between layers requires low latency, so groups are bounded to LAN-class
+/// peers; 4 keeps the all-reduce ring small enough for sub-millisecond
+/// per-token sync on a single switch.
+const MAX_TP_GROUP_SIZE: usize = 4;
+
 /// Static adjacency table for adjacent regions (0.5 score).
 /// These pairs represent geographically close countries where cross-region
 /// latency is typically acceptable for inference.
@@ -799,7 +805,6 @@ impl PipelineScheduler {
         candidates: &[NodeCandidate],
     ) -> Vec<TensorParallelGroup> {
         let local_id = self.shared_state.identity.node_id().clone();
-        const MAX_TP_GROUP_SIZE: usize = 4;
 
         let mut groups = Vec::new();
 

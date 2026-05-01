@@ -547,28 +547,15 @@ pub(crate) async fn dispatch_network_messages(
                                             tracing::warn!(tx_id = %tx.id, "Rejecting replayed credit transaction");
                                             continue;
                                         }
-                                        // SEC: Freshness window — every other signed gossip type binds a
-                                        // narrow time window (gotcha #32 / #44 one-sided staleness). Without
-                                        // it a captured-but-never-stored partial transaction signed long ago
-                                        // could be admitted indefinitely. Skew tolerance matches the credit
-                                        // balance report (30s skew, 5min max age).
-                                        const TX_SKEW_SECS: i64 = 30;
-                                        const TX_MAX_AGE_SECS: i64 = 300;
-                                        let tx_age = (chrono::Utc::now() - tx.timestamp).num_seconds();
-                                        if tx_age < -TX_SKEW_SECS {
-                                            tracing::warn!(
-                                                tx_id = %tx.id,
-                                                age_secs = tx_age,
-                                                "Rejecting credit tx: timestamp in the future"
-                                            );
-                                            continue;
-                                        }
-                                        if tx_age > TX_MAX_AGE_SECS {
-                                            tracing::warn!(
-                                                tx_id = %tx.id,
-                                                age_secs = tx_age,
-                                                "Rejecting credit tx: timestamp too old"
-                                            );
+                                        // SEC: Freshness window — gotcha #32 / #44 one-sided staleness.
+                                        // Shared invariant with the balance report (same skew + max age).
+                                        if let Err(e) = crate::credit::ledger::check_signed_freshness(
+                                            tx.timestamp,
+                                            crate::credit::ledger::CLOCK_SKEW_TOLERANCE_SECS,
+                                            crate::credit::ledger::BALANCE_REPORT_MAX_AGE_SECS,
+                                            "credit tx",
+                                        ) {
+                                            tracing::warn!(tx_id = %tx.id, error = %e, "Rejecting credit tx");
                                             continue;
                                         }
                                         // SEC: Verify dual Ed25519 signatures before accepting.

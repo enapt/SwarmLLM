@@ -277,7 +277,7 @@
       var el = document.getElementById('contribution-pct');
       if (!el) return;
       var tier = pct < 5 ? 'idle' : pct < 25 ? 'minimal' : pct < 60 ? 'moderate' : 'maximum';
-      var tierLabel = I18n.t('dashboard.contribution_tier_' + tier) || tier;
+      var tierLabel = I18n.t('dashboard.contribution_tier_' + tier);
       var memLabel = memKind === 'vram' ? I18n.t('hw.vram') : I18n.t('hw.ram');
       el.textContent = pct.toFixed(0) + '% ' + memLabel + ' · ' + tierLabel;
     },
@@ -1838,7 +1838,7 @@
         label.appendChild(sub);
       } else {
         label.className = 'peer-label mono';
-        label.textContent = (p.node_id || 'unknown').substring(0, 16);
+        label.textContent = (p.node_id || I18n.t('utils.unknown_model')).substring(0, 16);
       }
 
       var gpu = node.querySelector('.peer-gpu');

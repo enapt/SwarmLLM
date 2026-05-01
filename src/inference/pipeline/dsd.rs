@@ -64,7 +64,7 @@ use crate::inference::dsd_controller::GammaController;
 
 /// Fast-path preconditions for the DSD coordinator loop.
 #[cfg(feature = "llama")]
-pub(super) fn eligible(exec: &PipelineExecutor) -> bool {
+fn eligible(exec: &PipelineExecutor) -> bool {
     // Path-specific flag.
     if !exec
         .shared_state

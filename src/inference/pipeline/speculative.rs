@@ -56,7 +56,7 @@ use super::prompt::CachedDecoder;
 use super::{PipelineExecutor, MAX_PENDING_LAYER_RESULTS};
 
 /// Fast-path preconditions for the greedy distributed speculative loop.
-pub(super) fn eligible(exec: &PipelineExecutor) -> bool {
+fn eligible(exec: &PipelineExecutor) -> bool {
     // Path-specific flag.
     if !exec.shared_state.config.inference.speculative_distributed {
         return false;
@@ -457,7 +457,7 @@ impl PipelineExecutor {
         )))
     }
 
-    fn finish_speculative(
+    pub(super) fn finish_speculative(
         &self,
         request_id: uuid::Uuid,
         generated: Vec<u32>,
@@ -576,7 +576,7 @@ async fn send_verify_batch(
     Ok(result.spec_logits)
 }
 
-pub(super) fn argmax(logits: &[f32]) -> u32 {
+fn argmax(logits: &[f32]) -> u32 {
     let mut best_idx: usize = 0;
     let mut best_val = f32::NEG_INFINITY;
     for (i, &v) in logits.iter().enumerate() {
@@ -647,10 +647,7 @@ pub(crate) struct DraftState {
 }
 
 #[cfg(not(feature = "llama"))]
-pub(crate) struct DraftState {
-    #[allow(dead_code)]
-    pub pos: usize,
-}
+pub(crate) struct DraftState;
 
 // SAFETY: We carefully avoid letting this state escape the mutex-locked
 // ModelExecutor. The 'static lifetime is a workaround for storing the context

@@ -11,6 +11,14 @@ use crate::types::{NetworkCommand, SwarmMessage};
 
 use super::PoolManager;
 
+/// SEC: cap inbound DeviceStatsReport payload sizes. The local-write path
+/// enforces a 32-char `device_name` cap, but inbound gossip is what gets
+/// persisted to redb AND broadcast to all pool members — a malicious member
+/// can otherwise smuggle multi-MB strings/Vecs into every peer's pool state.
+const MAX_DEVICE_NAME_BYTES: usize = 64;
+const MAX_MODELS_HOSTED: usize = 64;
+const MAX_MODEL_NAME_LEN: usize = 256;
+
 impl PoolManager {
     pub(super) async fn handle_pool_state_gossip(&mut self, state: PoolState) {
         // Verify owner signature before inserting into registry
@@ -296,14 +304,6 @@ impl PoolManager {
             return;
         }
 
-        // SEC: cap inbound payload sizes. The local-write path enforces a
-        // 32-char device_name cap, but inbound gossip is what gets persisted
-        // to redb AND broadcast to all pool members — a malicious member can
-        // otherwise smuggle multi-MB strings/Vecs into every peer's pool
-        // state.
-        const MAX_DEVICE_NAME_BYTES: usize = 64;
-        const MAX_MODELS_HOSTED: usize = 64;
-        const MAX_MODEL_NAME_LEN: usize = 256;
         let device_name = device_name.map(|n| {
             if n.len() > MAX_DEVICE_NAME_BYTES {
                 tracing::warn!(

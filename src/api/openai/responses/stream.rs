@@ -730,8 +730,8 @@ where
             tools: original.tools.clone(),
             tool_choice: original.tool_choice.clone(),
             parallel_tool_calls: original.parallel_tool_calls,
-            temperature: Some(original.temperature.unwrap_or(0.7)),
-            top_p: Some(original.top_p.unwrap_or(0.9)),
+            temperature: Some(original.temperature.unwrap_or(super::DEFAULT_TEMPERATURE)),
+            top_p: Some(original.top_p.unwrap_or(super::DEFAULT_TOP_P)),
             max_output_tokens: Some(
                 original
                     .max_output_tokens

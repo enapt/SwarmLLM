@@ -271,9 +271,10 @@
         content = result.error;
         isError = true;
       } else if (!result.ok) {
-        content = result.data.error && result.data.error.message
-          ? result.data.error.message
-          : JSON.stringify(result.data.error || result.data, null, 2);
+        content = U.extractErrorMessage(
+          result.data,
+          JSON.stringify(result.data.error || result.data, null, 2)
+        );
         isError = true;
       } else {
         var blocks = result.data.content || [];
