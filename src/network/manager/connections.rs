@@ -241,6 +241,15 @@ impl NetworkManager {
                     // dispatch from resolving NodeId for a peer that's being removed
                     self.peer_to_node.remove(&peer_id);
                     self.shared_state.peer_registry.remove(&node_id);
+                    // Also evict from shard holder registry. Without this, the
+                    // pipeline scheduler keeps offering the dead peer as a
+                    // candidate for ~90s (until the health-monitor stale-peer
+                    // sweep runs), causing remote-generate to time out at the
+                    // first-token timeout (120s) instead of routing to a live
+                    // holder immediately.
+                    self.shared_state
+                        .model_registry
+                        .remove_peer_from_all_shards(&node_id);
                     self.shared_state
                         .signal_dashboard(crate::daemon::state::DashboardSignal::PeersChanged);
 

@@ -321,6 +321,18 @@ impl PipelineScheduler {
                         continue;
                     }
                 }
+                // Skip peers we can't currently reach. The DHT periodically
+                // re-injects stale providers (peers that recently disconnected
+                // but whose Kademlia provider records haven't expired yet) into
+                // shard_holders. Without this filter, the scheduler picks the
+                // dead peer as a candidate, remote-generate sends to it, and
+                // the request hangs until the 120s first-token timeout.
+                // peer_registry reflects application-level connection state — it's
+                // pruned in handle_connection_closed alongside model_registry holders.
+                let is_local = node_id == *local_node_id;
+                if !is_local && !self.shared_state.peer_registry.contains_key(&node_id) {
+                    continue;
+                }
                 node_shards.entry(node_id).or_default().push(shard.index);
             }
         }

@@ -69,11 +69,20 @@ pub fn trigger_bootstrap(swarm: &mut Swarm<SwarmBehaviour>) -> Result<(), SwarmE
             Ok(())
         }
         Err(e) => {
-            tracing::warn!(
-                error = %e,
-                connected_peers = swarm.connected_peers().count(),
-                "DIAG: Kademlia bootstrap failed — no known peers in routing table"
-            );
+            // Empty routing table at startup is expected — only warn once peers are connected.
+            let connected = swarm.connected_peers().count();
+            if connected > 0 {
+                tracing::warn!(
+                    error = %e,
+                    connected_peers = connected,
+                    "DIAG: Kademlia bootstrap failed despite connected peers"
+                );
+            } else {
+                tracing::debug!(
+                    error = %e,
+                    "Kademlia bootstrap skipped — routing table empty (expected at startup)"
+                );
+            }
             Ok(())
         }
     }

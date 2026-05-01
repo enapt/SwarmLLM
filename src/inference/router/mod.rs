@@ -794,31 +794,17 @@ impl InferenceRouter {
 
             finalize_request(&shared_state, &request, &output, escrow_id).await;
 
-            // Release or refund escrow
-            if let Some(eid) = escrow_id {
-                match &output {
-                    Ok(_) => {
-                        // Release escrow — credits stay deducted (already charged)
-                        if let Err(e) = shared_state
-                            .credits
-                            .escrow_manager
-                            .release_escrow(eid, shared_state.identity.node_id())
-                            .await
-                        {
-                            tracing::warn!(escrow_id = %eid, error = %e, "Failed to release escrow");
-                        }
-                    }
-                    Err(_) => {
-                        // Refund escrow — return credits on failure
-                        if let Err(e) = shared_state
-                            .credits
-                            .escrow_manager
-                            .refund_escrow(eid, &shared_state.credits.credit_balance)
-                            .await
-                        {
-                            tracing::warn!(escrow_id = %eid, error = %e, "Failed to refund escrow");
-                        }
-                    }
+            // Release escrow on success. Refund on failure is handled by
+            // finalize_request — calling refund_escrow again here races and
+            // logs a spurious "Escrow not found" warning.
+            if let (Some(eid), Ok(_)) = (escrow_id, &output) {
+                if let Err(e) = shared_state
+                    .credits
+                    .escrow_manager
+                    .release_escrow(eid, shared_state.identity.node_id())
+                    .await
+                {
+                    tracing::warn!(escrow_id = %eid, error = %e, "Failed to release escrow");
                 }
             }
 

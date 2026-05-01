@@ -401,8 +401,10 @@ impl Daemon {
             )
         });
 
-        // Spawn UpdateChecker (11th subsystem task — optional, runs only if not disabled)
-        {
+        // Spawn UpdateChecker (11th subsystem task — optional, runs only if not disabled).
+        // When disabled, skip the spawn entirely — otherwise the supervisor logs a
+        // misleading "Subsystem exited unexpectedly with Ok" warning at startup.
+        if self.config.updates.auto_update != crate::config::AutoUpdateMode::Disabled {
             let update_config = self.config.updates.clone();
             let update_state = shared_state.events.update_state.clone();
             let dash_tx = shared_state.events.dashboard_tx.clone();
