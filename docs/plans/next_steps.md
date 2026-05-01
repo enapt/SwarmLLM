@@ -76,9 +76,10 @@ measurable wins.
 
 - ✅ `v0.1.0` tag cut 2026-04-25 (816 tests). Subsequent commits are
   in CHANGELOG `[Unreleased] — post-v0.1.0`. Two black-hat audits
-  (2026-04-28 + 2026-04-29) plus the autonomous R76→R83 sweep arc
-  (2026-04-30, 11 commits) have landed since; current head sits at
-  879 lib + 75 integration tests, clippy clean, both feature sets.
+  (2026-04-28 + 2026-04-29) plus the autonomous R76→R91 sweep arc
+  (2026-04-30 → 2026-05-01, 16 rounds) have landed since; current
+  head sits at 887 lib + 75 integration tests, clippy clean, both
+  default and `--features llama` feature sets compile.
 - ✅ macOS CI matrix is live (clippy + test + build on `macos-15` in
   `.github/workflows/ci.yml` — clippy default features only, integration
   tests Linux-only by design until macOS multi-process IPC is exercised).

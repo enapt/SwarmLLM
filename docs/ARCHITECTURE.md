@@ -927,6 +927,19 @@ Models are loaded into VRAM only when needed, not eagerly at startup.
 └─────────────────────────────────────────────────────────────┘
 ```
 
+### Tier 1 AAD construction (single source of truth)
+
+The `LayerForward` AAD bytes — `request_id(16) | sequence_num(4 LE) |
+index_pos(4 LE) | fmt(1) | layer_start(4 LE) | layer_end(4 LE) |
+model_id_len(2 LE) | model_id` — are produced by
+`network::protocol::build_layer_forward_aad`. Both encrypt-side
+(`network::manager::tensors::handle_send_tensor`) and decrypt-side
+(`network::protocol::decode_layer_forward_encrypted`) call it. Any
+field added to `LayerForward` that needs authentication MUST extend
+this helper, not be re-appended on the encrypt side. Drift between
+the two sides silently breaks every encrypted forward (AAD mismatch
+fails AEAD verify; only a `seal/open mismatch` warn surfaces).
+
 ## Pipeline Privacy Model
 
 What each node sees in a distributed pipeline (Requester → A → B → C):
@@ -1101,6 +1114,16 @@ shared key that any node can overwrite. Each node publishes only its own shard h
 - Priority tier calculation consistent between scheduler and display
 - AntiGaming wired into credit flow: atomic check+record prevents TOCTOU
 - Peer balance gossip rejects implausible values (abs > 100M)
+- Signed-message freshness centralised in `credit::ledger::check_signed_freshness`
+  (one-sided staleness, NEVER `.abs()`). Shared `pub(crate)` constants
+  `CLOCK_SKEW_TOLERANCE_SECS = 30` and `BALANCE_REPORT_MAX_AGE_SECS = 300`
+  apply to balance reports AND credit transactions, so a single tuning
+  changes the replay window for every signed credit-typed message at once
+- Regional gossip (`RegionShardSummary`, `ModelDemandGossip`) freshness
+  goes through `daemon::dispatch::gossip_timestamp_fresh` — same one-sided
+  invariant on `u64` millisecond timestamps. `saturating_sub` returns 0
+  when `ts > now`, so the future-rejection branch is required separately
+  from the staleness-rejection branch
 
 ## API Authentication
 
@@ -1168,7 +1191,8 @@ OpenAI-compatible Responses endpoint — the 2026 default API for o-series / gpt
 - **Background:** `background=true` spawns a tokio task, returns `status="queued"` immediately; `GET /v1/responses/{id}` polls; `POST /v1/responses/{id}/cancel` flips the cancel flag (cancel-wins: worker's final result is discarded if cancelled).
 - **Background streaming (V8 of v2 plan):** `background=true && stream=true` returns **202 Accepted** + a `Location` header pointing at `/v1/responses/{id}?stream=true&starting_after=-1`. The server runs the inference internally via a spawned task that writes every SSE event into a per-response buffer (cap 2000 events, oldest-first eviction). State lives in `BACKGROUND_STATE: DashMap<id, Arc<BackgroundState>>` (cancel flag + buffer + completion flag + `tokio::sync::Notify`).
 - **Resumable SSE (V5 of v2 plan):** `GET /v1/responses/{id}?stream=true&starting_after={seq}` replays buffered events whose `sequence_number > seq`, then live-tails new events until the response is marked completed. If the response already finished and there's no live `BackgroundState`, a synthetic minimal lifecycle (`response.created` + `response.in_progress` + terminal) is built from the stored record so reconnecting clients still close cleanly.
-- **input_items pagination (V4 of v2 plan):** `GET /v1/responses/{id}/input_items?after={cursor}&limit={n}&order={asc|desc}`. Synthetic ids `item_N` map to the zero-based position in the original request. Returns the OpenAI list shape `{object: "list", data: [...], first_id, last_id, has_more}`. Default limit 20, max 100. `Text` input produces a single synthetic message item.
+- **input_items pagination (V4 of v2 plan):** `GET /v1/responses/{id}/input_items?after={cursor}&limit={n}&order={asc|desc}`. Synthetic ids `item_N` map to the zero-based position in the original request. Returns the OpenAI list shape `{object: "list", data: [...], first_id, last_id, has_more}`. Default limit `INPUT_ITEMS_DEFAULT_PAGE_SIZE = 20`, max `INPUT_ITEMS_MAX_PAGE_SIZE = 100`, `MAX_INPUT_ITEMS_QUERY_LEN = 64` on each query string (`after`/`before`/`order`/`include`). `Text` input produces a single synthetic message item.
+- **Ingress validation:** `validate_responses_ingress` caps `MAX_RESPONSES_INPUT_ITEMS = 1024` items, `MAX_RESPONSES_EXTRAS_COUNT = 32` per `extras` map (top-level AND per-`InputMessageItem`), `MAX_RESPONSES_EXTRA_VALUE_BYTES = 4 KiB` per extras value. Closes a DoS surface where thousands of message items each carrying their own `#[serde(flatten)]` extras could bypass the top-level cap (R90).
 
 ### Anthropic Messages API (`/v1/messages`)
 Full Anthropic Messages API compatibility for use as a Claude Code backend:

@@ -47,3 +47,36 @@ All storage keys are registered as constants on `App` in state.js (e.g., `App.MO
 ## Frontend Data Fetching
 
 Use `App.data.loadModels()` and `App.data.loadStats()` for model/stats data. Do NOT make independent `authFetch('/api/admin/models')` calls from components — this bypasses the dedup cache.
+
+## Centralised Wire-Format Helpers
+
+These helpers exist as the single source of truth for invariants that
+silently break at the wire if duplicated:
+
+- **`network::protocol::build_layer_forward_aad`** — encryption AAD
+  bytes for `LayerForward` envelopes. Both encrypt
+  (`network/manager/tensors.rs`) and decrypt
+  (`decode_layer_forward_encrypted`) MUST go through it. Adding a
+  new authenticated field to `LayerForward` means extending this
+  helper, not appending bytes on the encrypt side.
+- **`daemon::dispatch::gossip_timestamp_fresh`** — one-sided
+  staleness check for `u64`-millisecond regional gossip
+  (`RegionShardSummary`, `ModelDemandGossip`). New gossip types use
+  this; do NOT re-implement `if ts > now + skew { drop } else if
+  now - ts > max_age { drop }` per gotcha #44.
+- **`credit::ledger::check_signed_freshness`** — one-sided
+  staleness check for `chrono::DateTime<Utc>`-typed signed messages
+  (balance reports, credit transactions). Constants
+  `CLOCK_SKEW_TOLERANCE_SECS` / `BALANCE_REPORT_MAX_AGE_SECS` are
+  `pub(crate)` so all credit-typed callers share the same window
+  (gotcha #32).
+
+## Cross-feature compile checks
+
+`cargo check` with default features does NOT compile the `llama` cfg
+path. Visibility-tightening or cross-file refactors that touch
+`pipeline/dsd.rs` or any spec/llama-gated code in
+`pipeline/speculative.rs` MUST verify with
+`cargo check --features llama` before push. Pre-push hook only runs
+default-features `cargo check`. R91 caught a regression introduced
+in R90 that default-features had silently let through.

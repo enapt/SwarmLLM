@@ -119,6 +119,194 @@ Items in `docs/ARCHITECTURE.md` explains why a synthetic random-weight
 GGUF would only catch parser/IPC plumbing bugs already covered by
 unit + in-process tests.
 
+### Sweep arc R82 → R89 (2026-04-30, autonomous)
+
+Continuation of the overnight sweep arc, six new rounds plus a follow-up
+deferred-item batch. ~17 commits. Each round spawned 3–4 parallel
+review agents and applied auto-fix findings as they landed.
+
+- **R82 (RAII guard scope)** — Document why
+  `pending_layer_results` RAII guard cannot be applied in
+  `forward_through_segments`: borrow conflicts with later `&mut self`
+  segment calls would force an unwieldy lifetime gymnastics. Note in
+  source comment + sweep log; the sibling `failover_segment` IS
+  patched in R85.
+- **R83 (correctness)** — Prune race window in `auto_manage/prune.rs`
+  (compute redundancy, decide to prune, but didn't re-check between
+  the decision and the file rm; R83 atomic-marks as pruning before
+  fs::remove). Escrow lock pattern aligned with credit-tx pattern
+  (apply balance change first, then audit log). Smaller fixes:
+  `unwrap()` paths reachable on bad input, redundant `clone()` in
+  hot scoring loop.
+- **R84 (pool gossip + error types + i18n)** — Pool gossip caps for
+  `DeviceStatsReport.device_name`/`models_hosted`/`model_name_len`
+  (multi-MB strings could otherwise be smuggled into every peer's
+  pool state via inbound gossip). Two error-type fixes:
+  `SwarmError::Internal` → `Validation` for API input rejections,
+  `SwarmError::Config` → `Internal` on a runtime-only path. i18n
+  count-interpolation pattern (`{count}` placeholder) replacing
+  ad-hoc `' ' + n + ' '` string concat.
+- **R85 (security hygiene)** — Zeroize on drop for
+  `crypto/session.rs::CachedSession` and provider API keys
+  (`crypto/provider_keys.rs`) so process memory dumps don't leak
+  recently-rotated session keys / tokens. Also: failover path
+  `pending_layer_results` leak (gotcha #70). Pattern lifts the RAII
+  guard from gotcha #45 — clean up the slot on `wait_for_result`
+  Err path so a double-timeout (primary + standby both unreliable)
+  doesn't permanently deplete `MAX_PENDING_LAYER_RESULTS=1024`.
+- **R86 (dispatch + cleanup)** — Shard continuation orphan
+  (`pending_shard_continuations` map grew without cleanup if the
+  client disconnected mid-stream; TTL sweep added). Dead `NodeStats`
+  fields removed (`bytes_uploaded`/`bytes_downloaded` superseded by
+  `shared_state.shard_bytes_served` atomic). Two flaky tests
+  stabilised. Python `swarmllm-client` stats endpoint mirrored the
+  R67 atomic split. **Follow-up**: shard-serve disk I/O + bandwidth
+  throttle moved off the swarm event loop (gotcha #11 / #71). The
+  inbound `SwarmRequest::ShardTransfer` handler had been doing
+  `read_shard_chunk_async()` + `tokio::time::sleep()` (bandwidth
+  cap) inline; at a 1 Mbps cap with 4 MB default chunk, the loop
+  froze ~32 s. Now stashes the `ResponseChannel` in
+  `pending_shard_responses` keyed by ticket and `tokio::spawn`s the
+  I/O+throttle, mirroring the `PrefixKvFetch` pattern.
+- **R87 (cancel observation + dispatch hardening)** — Cancel signal
+  added to four fast paths that had forked from `execute_distributed`
+  but omitted the cancel observation (gotcha #72: `local_exec`,
+  `try_speculative_distributed`, `try_dsd_distributed`,
+  `try_remote_generate_fastpath`). Dispatch hardening:
+  - one-sided u64-millisecond gossip timestamp checks for
+    `RegionShardSummary` and `ModelDemandGossip` (gotcha #73,
+    extends gotcha #44 — `saturating_sub` returns 0 when `ts > now`,
+    so future-dated messages bypassed the staleness gate);
+  - dispatch loop sub-system sends switched from `.send().await` to
+    `try_send` for `pool_cmd_tx` (gotcha #74 — the dispatch loop is
+    the network event loop's only consumer, blocking it on a slow
+    PoolManager starves every other inbound message);
+  - cap raises for inbound caps that had been at TinyLlama-era
+    sizes.
+- **R88 (auto-update default + credit invariants)** — `AutoUpdateMode`
+  default flipped `Stable` → `Disabled` (gotcha #75). Until binary
+  signing (C1) lands, `src/update.rs` only verifies a SHA256 sidecar
+  fetched from the same release as the binary; a compromised
+  maintainer/CI token can publish a matching pair. Defaulting to
+  Stable was silently downloading unsigned binaries on every node's
+  startup. `apply_credit_direct` now reverts in-memory mutation on
+  DB persist failure (gotcha #76 — the silent double-credit was
+  undetectable from logs). Rebalancer cooldown scope tightened
+  (was per-process when it should have been per-(model, target-region)).
+  HTTP error-mapping fixes for two paths.
+- **R89 (deferred-item follow-ups)** — Three deferred items closed:
+  - HF download size cap + vision overflow guard + IPC header cursor
+    fix (`147f474`).
+  - **OpenAI `frequency_penalty`/`presence_penalty`** implemented per
+    OpenAI spec (gotcha #77): penalty applied *before* temperature
+    scaling, threading `generated_ids` through standard worker decode
+    + batched decode + distributed-path `LayerForward.generated_ids`
+    / `IpcForward.generated_ids` (`#[serde(default,
+    skip_if=is_empty)]` so zero-penalty requests stay on existing
+    wire shape). Only the LAST segment of `forward_through_segments`
+    samples; intermediate segments don't.
+  - **Auto-compute BLAKE3 for zero-hash shards + mmproj**
+    (gotcha #78). `auto_manage/scan.rs::rescan_local_shards`, when
+    seeing a manifest shard with `hash == [0u8; 32]` whose file
+    passes the size check, computes BLAKE3 in `spawn_blocking`,
+    persists, THEN registers as holder. Without this, manually-
+    placed shards with zero-hash placeholder manifests would be
+    announced to the network using only a size check. mmproj path
+    in `auto_manage/download.rs::trigger_mmproj_download` does the
+    same.
+
+### Sweep arc R90 → R91 (2026-04-30 / 2026-05-01, autonomous)
+
+Two more rounds, 25 fixes pushed. Continued the same pattern of 4
+parallel review agents per round with worktree isolation.
+
+- **R90** (`50af1b8`, 12 fixes) — Hot-path safety, dedup helpers,
+  doc drift:
+  - **Dead `updateShardsLive` summary block** in `dashboard.js`
+    referenced 6 undefined counters and a `data-model-summary`
+    element that no longer exists (replaced by torrent-style health
+    bar in commit `8ac662c`). Removed the block + 6 orphan i18n keys
+    across all 21 locales.
+  - **`finish_speculative` inline copy** in `dsd.rs` replaced with
+    method call (already on `PipelineExecutor`).
+  - **`build_layer_forward_aad`** extracted to
+    `network/protocol/encrypted.rs` so encrypt-side
+    (`network/manager/tensors.rs::handle_send_tensor`) and decrypt-
+    side (`decode_layer_forward_encrypted`) compute the AAD bytes
+    from a single function. Drift between the two would silently
+    break every encrypted forward — gotcha #80 pins the contract.
+  - **`gossip_timestamp_fresh`** extracted in
+    `daemon/dispatch/mod.rs` — the gotcha #44 one-sided staleness
+    check was duplicated for `RegionShardSummary` and
+    `ModelDemandGossip`. Now centralised; gotcha #81 records the
+    helper as the canonical entry point for new gossip types.
+  - **`MAX_RESPONSES_INPUT_ITEMS = 1024`** + per-`InputMessageItem`
+    extras enforcement added to `validate_responses_ingress`. Closes
+    a DoS surface where a request with thousands of message items
+    each carrying 32 × 4 KB extras could bypass the top-level
+    `extras` cap.
+  - **DIAG demoted** `info!` → `debug!` for `build_prompt from
+    header` (was firing on every prefill at default log level).
+  - **`REMOTE_GENERATE_TOKEN_CHANNEL_CAP = 256`** named constant
+    replacing magic literal.
+  - **`/api/admin/hf/download` deprecation note** in
+    `docs/ARCHITECTURE.md` — frontend MUST use `/download-shards`
+    per CLAUDE.md "no implicit full model downloads" rule.
+  - **`update.checking` i18n key** added across all 21 locales (the
+    update download button was reusing `settings.detecting`, which
+    is semantically hardware detection — confusing in the update
+    context for users reading the translation literally).
+  - **Doc count corrections** — lib tests 897 → 887 in CLAUDE.md
+    Testing + Status sections; i18n keys 1030/1032 → 1025/1027 in
+    CLAUDE.md + ARCHITECTURE.md.
+- **R91** (`9993960`, 13 fixes) — Visibility, magic-number hoists,
+  freshness dedup:
+  - **Visibility narrowed** `pub(super)` → `fn` on four
+    internal-only helpers: `eligible()` in `speculative.rs`,
+    `dsd.rs`, `remote_generate.rs`, and `argmax()` in
+    `speculative.rs`. None had cross-file callers.
+  - **R90 regression caught** —
+    `speculative.rs::finish_speculative` needed `pub(super)` for the
+    cross-file call from `dsd.rs` introduced in R90's inline-copy
+    removal. Default-feature `cargo check` skipped the llama path
+    that triggered the breakage. Gotcha #79 records this footgun:
+    visibility-tightening or cross-file refactors that touch the
+    spec/dsd modules MUST verify with `cargo check --features
+    llama`.
+  - **Non-llama `DraftState` stub** had an unused `pos: usize` field
+    guarded by `#[allow(dead_code)]`. Per
+    `.claude/rules/completeness.md` `#[allow(dead_code)]` is a
+    smell, not a fix. Converted to a unit struct (the stub is never
+    constructed in non-llama builds).
+  - **Hoisted 8 block-scoped consts** to module level:
+    `MAX_TP_GROUP_SIZE` (`scheduler/mod.rs`),
+    `MAX_MODEL_FILE_BYTES` (`huggingface/download.rs`),
+    `MAX_DEVICE_NAME_BYTES` / `MAX_MODELS_HOSTED` /
+    `MAX_MODEL_NAME_LEN` (`pool/manager/gossip.rs`),
+    `MAX_INPUT_ITEMS_QUERY_LEN` / `INPUT_ITEMS_DEFAULT_PAGE_SIZE` /
+    `INPUT_ITEMS_MAX_PAGE_SIZE` (`responses/mod.rs`).
+  - **`check_signed_freshness`** added to `credit/ledger.rs`,
+    `pub(crate) const CLOCK_SKEW_TOLERANCE_SECS` /
+    `BALANCE_REPORT_MAX_AGE_SECS` exported. The
+    dispatch-mod credit-transaction freshness check now uses the
+    helper instead of duplicating both the constants and the
+    one-sided staleness logic. Gotcha #82 records the helper as the
+    canonical entry point for any new signed credit-typed message.
+  - **Hardcoded `0.7` / `0.9`** in `responses/stream.rs` →
+    `super::DEFAULT_TEMPERATURE` / `DEFAULT_TOP_P`. Streaming-path
+    fallback now matches the non-streaming path which already
+    referenced the named constants.
+  - **`compare.js` inline error extraction** → `U.extractErrorMessage`
+    helper (with JSON-stringify fallback to preserve debug info).
+  - **`dashboard.js`** — peer-label fallback `'unknown'` →
+    `I18n.t('utils.unknown_model')`; removed dead `|| tier`
+    fallback (`I18n.t` returns the key on miss, never falsy).
+
+After R91 the tree has **887 lib tests + 75 integration tests**
+passing, clippy clean on both feature sets, both default and
+`--features llama` compile. Sweep log
+(`.claude/sweep-log.jsonl`) totals **825 entries** across 91 rounds.
+
 ### Deferred-item follow-ups (R72/R75 leftovers, 2026-04-29)
 
 Three commits cleaning up the structurally-deferred items the sweep
