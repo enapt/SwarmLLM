@@ -191,6 +191,8 @@ Two-tier shard holder discovery for 50K+ node scaling:
 
 - **Lifecycle wiring**: `NetworkCommand::StartProviding` on shard acquisition (startup scan, rescan, download complete). `NetworkCommand::StopProviding` on shard deletion (prune, admin API).
 
+- **Disconnect eviction**: `handle_connection_closed` calls `model_registry.remove_peer_from_all_shards(node_id)` synchronously alongside `peer_registry.remove`. Prevents the scheduler from picking a just-disconnected peer (was a 90s window before the health-monitor stale-peer sweep ran). DHT can still re-inject the peer asynchronously, so the scheduler's `connected_node_ids` filter is the load-bearing guard.
+
 Memory: O(shards × 50) bounded regardless of network size (was O(shards × nodes) unbounded).
 
 ## Networking Stack
@@ -216,7 +218,8 @@ libp2p Swarm
 ├── request_response (unified protocol, /swarmllm/1.0.0, 600s timeout — slow CPU inference)
 │   ├── JSON control messages — SwarmMessage, ShardRequest/ShardResponse
 │   ├── Binary tensor payloads — LayerForward, LayerResult (type-tag byte: 0x00=JSON, 0x01=tensor, zstd compression optional)
-│   └── Binary shard data — ShardResponse payload (type-tag byte: 0x03=shard, 32MB chunks as raw bytes, bypasses 4MB JSON limit)
+│   ├── Binary shard data — ShardResponse payload (type-tag byte: 0x03=shard, 32MB chunks as raw bytes, bypasses 4MB JSON limit)
+│   └── ACK-timeout fast-fail: streaming-tracked sends (`SendDirectMessage` with `delivery_request_id = Some(uuid)`) are mapped to a Uuid via `pending_rr_observability`. The 10s `RR_ACK_TIMEOUT_SECS` sweep closes `streaming_token_txs[uuid]` if no Response/OutboundFailure event fires (libp2p rr can silently drop sends under load); caller sees Err in ~10–20s instead of 120s
 │
 ├── TCP transport (Noise + Yamux, nodelay=true, port+10)
 ├── QUIC transport (port, fallback for NAT traversal)
@@ -424,12 +427,16 @@ For a 7B model (hidden_dim=3584):
 
 1. Fetch model manifest → determine layer ranges
 2. Query model_registry.shard_holders for hosting nodes
-3. Fetch node load/latency from peer_registry
-4. Sort candidates by (latency ASC, load ASC, trust DESC)
-5. Greedy assignment: widest contiguous layer range per node
-6. Merge contiguous segments assigned to the same node
-7. Identify standby nodes per segment
-8. Send PipelineAssignment → all nodes ACK → begin forwarding
+3. Filter holders against `connected_node_ids` — drops peers whose libp2p
+   connection is gone (DHT can re-inject stale providers; `peer_registry`
+   is preserved across mid-pipeline disconnects for reconnect attempts so
+   it's not the right liveness oracle)
+4. Fetch node load/latency from peer_registry
+5. Sort candidates by (latency ASC, load ASC, trust DESC)
+6. Greedy assignment: widest contiguous layer range per node
+7. Merge contiguous segments assigned to the same node
+8. Identify standby nodes per segment
+9. Send PipelineAssignment → all nodes ACK → begin forwarding
 
 ### Inference Correctness
 
@@ -599,6 +606,19 @@ from `peer_credit_balances` (populated via credit gossip, **deduplicated by Node
 Sybil percentile stuffing), calls `calculate_tier()`, and sets the request priority. Balance must
 be positive for Gold/Platinum tiers. In `drain_queue()`, `max_concurrent_for_tier()` limits
 concurrent execution slots per tier.
+
+**Queue draining**: `drain_queue` only fires on Submit/StreamSubmit commands or `queue_notify`.
+Every path that calls `active_count.fetch_sub(1)` on completion MUST also call
+`queue_notify.notify_one()` — otherwise queued requests beyond the per-tier cap sit indefinitely
+until a new Submit arrives. Four call sites enforce this: `ActivePipelineGuard::drop` (panic
+path), normal-completion in `dispatch_single`, `execute_distributed_batch` (spawn body + join-loop
+panic arm), and `BatchCleanup` (`complete_one` + `Drop`) in `local_exec`.
+
+**Transient-failure retry**: `dispatch_single` wraps `execute_request` with a single retry on
+`is_transient_remote_failure` errors (silent rr drop, OutboundFailure, remote-generate timeout).
+Retry passes `preferred_pipeline = None` so the scheduler re-runs and the dead/dropped peer is
+filtered out via `connected_node_ids`. Bounded to one retry per request — failure of the second
+attempt propagates to the user with a "try again" hint.
 
 **Minimum balance enforcement**: Remote peers with balance below `MIN_BALANCE_FOR_INFERENCE`
 (-1000) have their inference requests rejected with a descriptive error message telling them to

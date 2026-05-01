@@ -92,6 +92,28 @@ CPU inference is 5-20x slower but works for any model size. To avoid OOM:
 - The scheduler needs enough shard coverage to build a complete pipeline
 - Check `DIAG: assemble_pipeline_for` for candidate counts
 
+**Inference fails with "peer never acknowledged" or "silent drop":**
+- A `SendDirectMessage` was issued but neither a Response nor an
+  `OutboundFailure` event arrived from libp2p within 10s
+  (`RR_ACK_TIMEOUT_SECS`). Treated as a transient failure: the router
+  automatically retries once with a fresh pipeline assembly that
+  filters out the unreachable peer. If retry also fails, the user
+  sees the error within ~20s (vs the 120s `FIRST_TOKEN_TIMEOUT`).
+- Most common cause: the target peer was killed or partitioned and
+  the local libp2p connection state hasn't yet caught up.
+- Look for `DIAG: rr ACK timeout — closing streaming caller` in
+  the logs to confirm the fast-fail path engaged.
+
+**Concurrent requests stall when only some get dispatched:**
+- Per-tier concurrency caps come from `inference.max_concurrent_requests`
+  (default 10): Bronze=2, Silver=5, Gold=10, Platinum=20. Excess
+  requests queue until prior ones complete. To raise: bump the config
+  knob or earn credits to climb tiers.
+- If queued requests don't dispatch even after others complete,
+  check for a missed `queue_notify.notify_one()` after
+  `active_count.fetch_sub(1)` (should never happen on `main`; was a
+  real regression fixed in `da6f485`).
+
 ## Cross-Node Prefix KV Sharing (Item 8)
 
 The cross-node prefix fetch is default-on. Expected logs on a successful

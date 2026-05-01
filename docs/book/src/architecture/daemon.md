@@ -28,7 +28,7 @@ Manager  Router  Ledger  Monitor  Server ancer    tion Mgr   Dispatch   Manager 
 | **ApiServer** | `src/api/server.rs` | Axum HTTP: OpenAI + Anthropic APIs + MCP server + admin dashboard + WebSocket |
 | **PoolManager** | `src/pool/manager/` | Device pool management, credit forwarding |
 | **AutoShardManager** | `src/model/auto_manage/` | VRAM-aware shard acquisition + smart pruning (manager, scoring, download, prune, scan, vram) |
-| **UpdateChecker** | `src/update.rs` | Periodic GitHub release polling, SHA256-verified binary download, atomic apply |
+| **UpdateChecker** | `src/update.rs` | Periodic GitHub release polling, SHA256-verified binary download, atomic apply. **Skipped entirely** when `auto_update = "disabled"` (default until binary signing C1 lands), so the supervisor doesn't log a misleading "exited unexpectedly" warning. |
 
 ## Channel Layout
 

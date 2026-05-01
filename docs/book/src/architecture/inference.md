@@ -56,12 +56,41 @@ Client → API Server → InferenceRouter → Pipeline Assembly
 1. Fetch model manifest to determine layer ranges
 2. **Pipeline affinity check**: if multi-turn session has a previous pipeline and all nodes are still connected, reuse it (KV cache locality)
 3. Query model_registry.shard_holders for hosting nodes
-4. Fetch node load/latency from peer_registry
-5. **Parallax scheduler** (Item 16): shortest-path dynamic programming over observed per-layer latencies (EMA over recent forwards), rather than a greedy latency-only sort. Cross-gossips top-32 observed latencies via `NodeCapability.observed_latencies` so every node has a current view of the network's compute profile
-6. **Encrypted pipeline check**: if enabled for this model, force first and last segments to the local node (boomerang topology)
-7. Assignment: widest contiguous layer range per node, merging on same-node
-8. Identify standby nodes per segment (failover)
-9. Send PipelineAssignment, wait for ACKs, begin forwarding
+4. **Liveness filter**: drop holders that aren't in `connected_node_ids` (the libp2p truth — DHT can re-inject providers for peers that just disconnected, and `peer_registry` is intentionally preserved across mid-pipeline disconnects for reconnect attempts)
+5. Fetch node load/latency from peer_registry
+6. **Parallax scheduler** (Item 16): shortest-path dynamic programming over observed per-layer latencies (EMA over recent forwards), rather than a greedy latency-only sort. Cross-gossips top-32 observed latencies via `NodeCapability.observed_latencies` so every node has a current view of the network's compute profile
+7. **Encrypted pipeline check**: if enabled for this model, force first and last segments to the local node (boomerang topology)
+8. Assignment: widest contiguous layer range per node, merging on same-node
+9. Identify standby nodes per segment (failover)
+10. Send PipelineAssignment, wait for ACKs, begin forwarding
+
+## Failure Handling
+
+The router applies a **single retry** on transient remote failures
+(silent rr drops, OutboundFailure, remote-generate timeouts). The
+retry passes `preferred_pipeline = None` so the scheduler re-runs
+and the dead/dropped peer is filtered out via the liveness oracle
+above. Failure of the second attempt propagates to the user with a
+"try again" hint.
+
+Independently, streaming-tracked `SendDirectMessage` sends carry a
+`delivery_request_id`; if the receiver doesn't ACK within
+`RR_ACK_TIMEOUT_SECS` (10s), the daemon closes the caller's
+streaming channel — converting a 120s `FIRST_TOKEN_TIMEOUT` hang
+into a fast-fail in ~10–20s. This handles the rare case where
+libp2p `request_response` accepts a `send_request` call but never
+delivers it (no `OutboundFailure` event fires).
+
+## Concurrent Request Throttling
+
+Per-tier concurrency caps come from `max_concurrent_requests`
+(default 10): Bronze=¼, Silver=½, Gold=1×, Platinum=2×. Requests
+beyond the cap queue in the router. **The queue is event-driven**:
+every `active_count.fetch_sub(1)` on completion is paired with
+`queue_notify.notify_one()` so `drain_queue` wakes immediately.
+Without that pairing, queued requests would sit indefinitely until
+the next Submit arrived (a real bug found in stress testing — fix
+in commit `da6f485`).
 
 Pipeline affinity means that multi-turn conversations (with `session_id`) prefer to route through the same nodes, preserving KV-cache state and avoiding cold restarts on every turn.
 
