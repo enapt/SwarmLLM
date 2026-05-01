@@ -266,9 +266,16 @@ pub enum NetworkCommand {
         chunk: TpRingChunk,
     },
     /// Send a SwarmMessage directly to a specific peer via request_response.
+    ///
+    /// `delivery_request_id`, when set, opts into ACK-timeout tracking: if
+    /// the receiver doesn't ACK within a few seconds, the daemon closes
+    /// `streaming_token_txs[delivery_request_id]` so the caller fails fast
+    /// instead of waiting the full FIRST_TOKEN_TIMEOUT (120s). Used by the
+    /// remote-generate fast path to detect rare libp2p rr silent-drops.
     SendDirectMessage {
         target_peer_bytes: Vec<u8>,
         message: SwarmMessage,
+        delivery_request_id: Option<uuid::Uuid>,
     },
     /// Dial a multiaddr to connect to a new peer.
     DialAddress(String),

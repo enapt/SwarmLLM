@@ -33,6 +33,25 @@ pub use types::{
     TokenLogProbEntry,
 };
 
+/// Classify a router error as a transient remote failure that warrants a
+/// single retry with a fresh pipeline assembly.
+///
+/// Targets:
+/// - "peer never acknowledged" — RR_ACK_TIMEOUT_SECS sweep fired
+///   (libp2p rr silent-drop or peer died without TCP RST).
+/// - "remote-generate timed out" — first-token wait exceeded.
+/// - "OutboundFailure" — explicit libp2p delivery failure.
+///
+/// On retry the scheduler re-runs and picks a different holder via the
+/// `connected_node_ids` filter, so a dead peer is not selected again.
+fn is_transient_remote_failure(err: &SwarmError) -> bool {
+    let msg = err.to_string();
+    msg.contains("never acknowledged")
+        || msg.contains("silent drop")
+        || msg.contains("remote-generate timed out")
+        || msg.contains("OutboundFailure")
+}
+
 const KV_CACHE_CLEANUP_INTERVAL_SECS: u64 = 30;
 /// Maximum depth of the inference request queue. Requests are rejected with 503 when full.
 const MAX_QUEUE_DEPTH: usize = 512;
@@ -523,12 +542,21 @@ impl InferenceRouter {
             self.active_count.fetch_add(batch_size, Ordering::Relaxed);
 
             let active_count = self.active_count.clone();
+            let queue_notify = self.queue_notify.clone();
             let shared_state = self.shared_state.clone();
             let network_tx = self.network_tx.clone();
             let scheduler = self.scheduler.clone();
 
             tokio::spawn(async move {
-                execute_batch(shared_state, network_tx, scheduler, batch, active_count).await;
+                execute_batch(
+                    shared_state,
+                    network_tx,
+                    scheduler,
+                    batch,
+                    active_count,
+                    queue_notify,
+                )
+                .await;
             });
         }
     }
@@ -660,6 +688,7 @@ impl InferenceRouter {
 
         self.active_count.fetch_add(1, Ordering::Relaxed);
         let active_count = self.active_count.clone();
+        let queue_notify = self.queue_notify.clone();
         let shared_state = self.shared_state.clone();
         let network_tx = self.network_tx.clone();
         let scheduler = self.scheduler.clone();
@@ -677,6 +706,7 @@ impl InferenceRouter {
             struct ActivePipelineGuard {
                 shared_state: Arc<crate::daemon::SharedState>,
                 count: Arc<std::sync::atomic::AtomicUsize>,
+                queue_notify: Arc<tokio::sync::Notify>,
                 request_id: uuid::Uuid,
                 armed: bool,
             }
@@ -691,12 +721,15 @@ impl InferenceRouter {
                         self.shared_state.active_pipelines.remove(&self.request_id);
                         self.count
                             .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+                        // Wake drain_queue so the next queued request can dispatch.
+                        self.queue_notify.notify_one();
                     }
                 }
             }
             let mut active_guard = ActivePipelineGuard {
                 shared_state: shared_state.clone(),
                 count: active_count.clone(),
+                queue_notify: queue_notify.clone(),
                 request_id: request.id,
                 armed: true,
             };
@@ -750,15 +783,36 @@ impl InferenceRouter {
                 None
             };
 
-            let output = execute_request(
+            // Retry once on transient remote failures (silent rr drops or
+            // mid-flight peer disconnects). We reset `preferred_pipeline`
+            // to None so the second attempt re-runs the scheduler — which
+            // filters out the dead/dropped peer via `connected_node_ids`
+            // and picks a different holder.
+            let mut output = execute_request(
                 shared_state.clone(),
-                network_tx,
-                scheduler,
+                network_tx.clone(),
+                scheduler.clone(),
                 request.clone(),
-                token_tx,
+                token_tx.clone(),
                 preferred_pipeline,
             )
             .await;
+            if matches!(&output, Err(e) if is_transient_remote_failure(e)) {
+                tracing::warn!(
+                    request_id = %request.id,
+                    error = %output.as_ref().err().unwrap(),
+                    "DIAG: inference transient failure — retrying with fresh pipeline"
+                );
+                output = execute_request(
+                    shared_state.clone(),
+                    network_tx,
+                    scheduler,
+                    request.clone(),
+                    token_tx,
+                    None,
+                )
+                .await;
+            }
 
             let elapsed = request_start.elapsed();
             // Record latency for Prometheus histogram
@@ -827,8 +881,12 @@ impl InferenceRouter {
             // Remove from active pipelines
             shared_state.active_pipelines.remove(&request.id);
 
-            // Decrement active count so new requests can be dispatched
+            // Decrement active count so new requests can be dispatched, then
+            // wake drain_queue so the next queued request actually starts.
+            // Without the notify, queued requests sat indefinitely until the
+            // next Submit arrived (the only other drain trigger).
             active_count.fetch_sub(1, Ordering::Relaxed);
+            queue_notify.notify_one();
 
             if result_tx.send(output).is_err() {
                 tracing::warn!(

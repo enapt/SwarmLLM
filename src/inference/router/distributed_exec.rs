@@ -212,6 +212,7 @@ pub(super) async fn execute_distributed_batch(
     scheduler: PipelineScheduler,
     batch: Vec<QueuedRequest>,
     active_count: Arc<AtomicUsize>,
+    queue_notify: Arc<tokio::sync::Notify>,
 ) {
     let mut handles = Vec::with_capacity(batch.len());
 
@@ -220,6 +221,7 @@ pub(super) async fn execute_distributed_batch(
         let network_tx = network_tx.clone();
         let scheduler = scheduler.clone();
         let active_count = active_count.clone();
+        let queue_notify = queue_notify.clone();
 
         handles.push(tokio::spawn(async move {
             let request = queued.request;
@@ -238,8 +240,11 @@ pub(super) async fn execute_distributed_batch(
 
             finalize_request(&shared_state, &request, &output, None).await;
             shared_state.active_pipelines.remove(&request.id);
-            // Return true to signal the join loop that we already decremented
+            // Decrement active_count and wake drain_queue so the next queued
+            // request can dispatch (without notify, the queue stalls until a
+            // new Submit arrives).
             active_count.fetch_sub(1, Ordering::Relaxed);
+            queue_notify.notify_one();
             if result_tx.send(output).is_err() {
                 tracing::warn!(
                     request_id = %request.id,
@@ -257,6 +262,7 @@ pub(super) async fn execute_distributed_batch(
             Ok(_) => {} // task already decremented
             Err(_) => {
                 active_count.fetch_sub(1, Ordering::Relaxed);
+                queue_notify.notify_one();
             }
         }
     }

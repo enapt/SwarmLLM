@@ -108,6 +108,7 @@ pub async fn run_key_rotation(
                         if let Err(e) = network_tx.try_send(NetworkCommand::SendDirectMessage {
                             target_peer_bytes: target,
                             message: msg,
+                            delivery_request_id: None,
                         }) {
                             tracing::debug!(
                                 peer = %peer,

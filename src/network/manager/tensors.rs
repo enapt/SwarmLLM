@@ -610,19 +610,36 @@ impl NetworkManager {
             .send_request(&peer_id, req);
         self.pending_rr_observability.insert(
             req_id,
-            ("streaming_token".to_string(), std::time::Instant::now()),
+            (
+                "streaming_token".to_string(),
+                std::time::Instant::now(),
+                None,
+            ),
         );
     }
 
     /// Send an arbitrary SwarmMessage to a specific peer via request_response.
     /// Used for AllReduce and other point-to-point messages.
+    ///
+    /// `delivery_request_id` is the optional Uuid identifying a streaming
+    /// request whose `streaming_token_txs` channel should be closed if no ACK
+    /// arrives within `RR_ACK_TIMEOUT`. Used by the remote-generate fast path
+    /// to fail fast on rare libp2p rr silent-drops; pass `None` for fire-and-
+    /// forget messages.
     pub(super) fn handle_send_rr_message(
         &mut self,
         target_peer_bytes: Vec<u8>,
         msg: SwarmMessage,
         label: &str,
+        delivery_request_id: Option<uuid::Uuid>,
     ) {
         let Some(peer_id) = Self::resolve_peer_id(&target_peer_bytes, label) else {
+            // Notify the streaming caller immediately — otherwise it sits at
+            // FIRST_TOKEN_TIMEOUT (120s) waiting for a peer we can't even
+            // reach.
+            if let Some(uuid) = delivery_request_id {
+                self.shared_state.streaming_token_txs.remove(&uuid);
+            }
             return;
         };
 
@@ -632,6 +649,9 @@ impl NetworkManager {
                 label,
                 "Dropping rr message — peer not connected"
             );
+            if let Some(uuid) = delivery_request_id {
+                self.shared_state.streaming_token_txs.remove(&uuid);
+            }
             return;
         }
         let req = SwarmRequest::Message(Box::new(msg));
@@ -640,7 +660,13 @@ impl NetworkManager {
             .behaviour_mut()
             .request_response
             .send_request(&peer_id, req);
-        self.pending_rr_observability
-            .insert(req_id, (label.to_string(), std::time::Instant::now()));
+        self.pending_rr_observability.insert(
+            req_id,
+            (
+                label.to_string(),
+                std::time::Instant::now(),
+                delivery_request_id,
+            ),
+        );
     }
 }

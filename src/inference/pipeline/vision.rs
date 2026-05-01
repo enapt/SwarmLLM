@@ -148,6 +148,7 @@ impl PipelineExecutor {
         let msg = NetworkCommand::SendDirectMessage {
             target_peer_bytes,
             message: SwarmMessage::VisionEncodeRequest(req),
+            delivery_request_id: None,
         };
         if let Err(e) = self.network_tx.send(msg).await {
             self.shared_state

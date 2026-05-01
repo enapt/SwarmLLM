@@ -37,6 +37,13 @@ const MAX_PENDING_SHARD_REQUESTS: usize = 1024;
 /// libp2p's own failure notification — not before (spurious double-failures)
 /// and not after (stuck entries outliving the transport).
 const MAX_TENSOR_FORWARD_SECS: u64 = behaviour::RR_REQUEST_TIMEOUT_SECS;
+/// Per-message ACK deadline for streaming-tracked rr sends (`SendDirectMessage`
+/// with `delivery_request_id = Some(_)`). When elapsed without a Response or
+/// OutboundFailure event, treat as silent-drop and close the streaming
+/// caller's channel so it fails fast instead of waiting FIRST_TOKEN_TIMEOUT.
+/// 10s is generous on LAN (sub-millisecond ACKs in practice) but short enough
+/// to convert a 2-minute hang into a 10-second retry window.
+const RR_ACK_TIMEOUT_SECS: u64 = 10;
 /// libp2p swarm idle connection timeout. Connections with no traffic for this long are closed.
 const IDLE_CONNECTION_TIMEOUT_SECS: u64 = 120;
 /// Interval for periodic PEX ping health checks. Keeps the outbound queue shallow so
@@ -147,10 +154,17 @@ pub struct NetworkManager {
     /// pipeline from here (it lives on the other peer) — it handles its own
     /// timeout via its own `pending_tensor_outbound` watchdog.
     pending_tensor_result_outbound: HashMap<OutboundRequestId, (uuid::Uuid, std::time::Instant)>,
-    /// Observability: track streaming-token + rr-message sends so OutboundFailure
-    /// events can be attributed to a label. Purely for logging — the upstream
-    /// protocol handles its own timeouts.
-    pending_rr_observability: HashMap<OutboundRequestId, (String, std::time::Instant)>,
+    /// Track outbound rr-message sends. Three uses:
+    /// 1. Attribute OutboundFailure events to a label for logging.
+    /// 2. Stale-sweep: any entry older than `RR_ACK_TIMEOUT_SECS` indicates
+    ///    libp2p never delivered the message (silent-drop case observed
+    ///    under load — neither Response nor OutboundFailure fires).
+    /// 3. When the third value is `Some(uuid)`, the entry corresponds to a
+    ///    streaming caller (typically remote-generate fast path) whose
+    ///    `streaming_token_txs[uuid]` should be closed on stale/failure so
+    ///    the caller fails fast instead of waiting 120s for first-token.
+    pending_rr_observability:
+        HashMap<OutboundRequestId, (String, std::time::Instant, Option<uuid::Uuid>)>,
     /// Holds ResponseChannels for pending tensor forwards, keyed by inference UUID.
     /// When a LayerForward arrives, we store the channel here instead of ACK-ing immediately.
     /// When the computed LayerResult comes back via NetworkCommand::SendTensorResult,
@@ -775,9 +789,38 @@ impl NetworkManager {
                     self.pending_tensor_result_outbound.retain(|_id, (_, inserted)| {
                         inserted.elapsed().as_secs() < MAX_TENSOR_FORWARD_SECS
                     });
-                    self.pending_rr_observability.retain(|_id, (_, inserted)| {
-                        inserted.elapsed().as_secs() < MAX_TENSOR_FORWARD_SECS
-                    });
+                    // Streaming-tracked entries (`delivery_request_id = Some`)
+                    // get the much shorter `RR_ACK_TIMEOUT_SECS` window so the
+                    // remote-generate fast path fails fast on libp2p rr
+                    // silent-drops. On expiry we close the caller's channel
+                    // so it sees Err immediately. Untracked entries (label-
+                    // only) keep the existing long sweep window.
+                    let now = std::time::Instant::now();
+                    let mut closed_streaming: Vec<uuid::Uuid> = Vec::new();
+                    self.pending_rr_observability
+                        .retain(|_id, (_label, inserted, delivery_uuid)| {
+                            let age = now.duration_since(*inserted).as_secs();
+                            match delivery_uuid {
+                                Some(uuid) => {
+                                    if age >= RR_ACK_TIMEOUT_SECS {
+                                        closed_streaming.push(*uuid);
+                                        false
+                                    } else {
+                                        true
+                                    }
+                                }
+                                None => age < MAX_TENSOR_FORWARD_SECS,
+                            }
+                        });
+                    for uuid in closed_streaming {
+                        if self.shared_state.streaming_token_txs.remove(&uuid).is_some() {
+                            tracing::warn!(
+                                request_id = %uuid,
+                                ack_timeout_secs = RR_ACK_TIMEOUT_SECS,
+                                "DIAG: rr ACK timeout — closing streaming caller (silent-drop suspected)"
+                            );
+                        }
+                    }
                     // Sweep pending_prefix_kv_inbound tickets whose serving task
                     // panicked or whose DeliverPrefixKvResponse command was dropped
                     // (internal_cmd_tx full). Without this, under load the 256-entry

@@ -69,6 +69,7 @@ impl NetworkManager {
                     target_peer_bytes,
                     SwarmMessage::TpAllReduceRequest(request),
                     "AllReduceRequest",
+                    None,
                 );
             }
             NetworkCommand::SendAllReduceResponse {
@@ -79,6 +80,7 @@ impl NetworkManager {
                     target_peer_bytes,
                     SwarmMessage::TpAllReduceResponse(response),
                     "AllReduceResponse",
+                    None,
                 );
             }
             NetworkCommand::SendRingChunk {
@@ -89,13 +91,20 @@ impl NetworkManager {
                     target_peer_bytes,
                     SwarmMessage::TpRingChunk(chunk),
                     "RingChunk",
+                    None,
                 );
             }
             NetworkCommand::SendDirectMessage {
                 target_peer_bytes,
                 message,
+                delivery_request_id,
             } => {
-                self.handle_send_rr_message(target_peer_bytes, message, "DirectMessage");
+                self.handle_send_rr_message(
+                    target_peer_bytes,
+                    message,
+                    "DirectMessage",
+                    delivery_request_id,
+                );
             }
             NetworkCommand::DialAddress(addr_str) => {
                 match addr_str.parse::<libp2p::Multiaddr>() {

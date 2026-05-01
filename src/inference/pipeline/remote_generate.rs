@@ -111,6 +111,11 @@ impl PipelineExecutor {
             .send(NetworkCommand::SendDirectMessage {
                 target_peer_bytes,
                 message: msg,
+                // Opt into ACK-timeout tracking. If libp2p rr silently drops
+                // the request (observed under load), the daemon closes
+                // streaming_token_txs[request_id] within RR_ACK_TIMEOUT_SECS
+                // (10s) so we fail fast instead of waiting 120s.
+                delivery_request_id: Some(request_id),
             })
             .await
             .is_err()
@@ -157,7 +162,18 @@ impl PipelineExecutor {
             let tok = match maybe {
                 Ok(Some(t)) => t,
                 Ok(None) => {
-                    tracing::warn!(%request_id, "remote-generate: token channel closed unexpectedly");
+                    // Channel closed by the daemon's ACK-timeout sweep
+                    // (libp2p rr silent-drop) or by an OutboundFailure event.
+                    // If no tokens arrived yet, surface as an explicit error
+                    // so the caller can retry; otherwise treat as graceful
+                    // end-of-stream and return what we have.
+                    if first {
+                        tracing::warn!(%request_id, "remote-generate: token channel closed before any token (likely send failure)");
+                        return Err(SwarmError::PipelineError(format!(
+                            "remote-generate: peer never acknowledged request_id={request_id} (silent drop or disconnect)"
+                        )));
+                    }
+                    tracing::warn!(%request_id, "remote-generate: token channel closed mid-stream");
                     break;
                 }
                 Err(_) => {

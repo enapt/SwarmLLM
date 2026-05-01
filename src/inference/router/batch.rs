@@ -28,6 +28,7 @@ pub(super) async fn execute_batch(
     scheduler: PipelineScheduler,
     batch: Vec<QueuedRequest>,
     active_count: Arc<AtomicUsize>,
+    queue_notify: Arc<tokio::sync::Notify>,
 ) {
     let batch_size = batch.len();
     let is_split_mode = shared_state.config.inference.shard_range.is_some();
@@ -37,11 +38,19 @@ pub(super) async fn execute_batch(
 
     if model_loaded && !is_split_mode {
         // Local inference batch: hold the executor lock once, process all requests
-        execute_local_batch(shared_state, batch, active_count).await;
+        execute_local_batch(shared_state, batch, active_count, queue_notify).await;
     } else {
         // Distributed inference batch: spawn each request independently
         // They'll assemble their own pipelines and run concurrently.
-        execute_distributed_batch(shared_state, network_tx, scheduler, batch, active_count).await;
+        execute_distributed_batch(
+            shared_state,
+            network_tx,
+            scheduler,
+            batch,
+            active_count,
+            queue_notify,
+        )
+        .await;
     }
 
     tracing::debug!(batch_size, "Batch execution complete");

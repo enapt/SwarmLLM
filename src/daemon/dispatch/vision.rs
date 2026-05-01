@@ -136,6 +136,7 @@ pub(super) async fn handle_vision_encode_request(
                 NetworkCommand::SendDirectMessage {
                     target_peer_bytes: target_bytes.clone(),
                     message: SwarmMessage::VisionEncodeResponse(response),
+                    delivery_request_id: None,
                 }
             } else {
                 tracing::warn!(request_id = %req.request_id, "VisionEncodeResponse has no sender — dropping");

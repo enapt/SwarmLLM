@@ -130,6 +130,7 @@ fn assemble_multi_node_pipeline() {
             is_lan_peer: false,
         },
     );
+    state.connected_node_ids.insert(node_b.clone());
     state.peer_registry.insert(
         node_c.clone(),
         PeerInfo {
@@ -146,6 +147,7 @@ fn assemble_multi_node_pipeline() {
             is_lan_peer: false,
         },
     );
+    state.connected_node_ids.insert(node_c.clone());
 
     let scheduler = PipelineScheduler::new(state);
     let assignment = scheduler
@@ -324,6 +326,7 @@ fn prefers_lower_load_node() {
             is_lan_peer: false,
         },
     );
+    state.connected_node_ids.insert(node_a.clone());
     state.peer_registry.insert(
         node_b.clone(),
         PeerInfo {
@@ -340,6 +343,7 @@ fn prefers_lower_load_node() {
             is_lan_peer: false,
         },
     );
+    state.connected_node_ids.insert(node_b.clone());
 
     let scheduler = PipelineScheduler::new(state);
     let assignment = scheduler
@@ -396,6 +400,7 @@ fn detects_tp_group_for_lan_peers() {
             is_lan_peer: true,
         },
     );
+    state.connected_node_ids.insert(node_b.clone());
 
     let scheduler = PipelineScheduler::new(state);
     let assignment = scheduler
@@ -442,7 +447,7 @@ fn no_tp_group_for_wan_peers() {
     state.peer_registry.insert(
         node_b.clone(),
         PeerInfo {
-            node_id: node_b,
+            node_id: node_b.clone(),
             addresses: vec![],
             capability: None,
             last_seen: chrono::Utc::now(),
@@ -455,6 +460,7 @@ fn no_tp_group_for_wan_peers() {
             is_lan_peer: false,
         },
     );
+    state.connected_node_ids.insert(node_b.clone());
 
     let scheduler = PipelineScheduler::new(state);
     let assignment = scheduler
@@ -512,6 +518,7 @@ fn tp_group_from_low_latency_only() {
             is_lan_peer: false,
         },
     );
+    state.connected_node_ids.insert(node_b.clone());
 
     let scheduler = PipelineScheduler::new(state);
     let assignment = scheduler
@@ -612,6 +619,7 @@ fn encrypted_pipeline_forces_local_first_and_last() {
             is_lan_peer: false,
         },
     );
+    state.connected_node_ids.insert(node_b.clone());
 
     // Enable encrypted pipeline for this model
     state
@@ -678,7 +686,7 @@ fn encrypted_pipeline_fails_without_first_shard() {
     state.peer_registry.insert(
         node_b.clone(),
         PeerInfo {
-            node_id: node_b,
+            node_id: node_b.clone(),
             addresses: vec![],
             capability: None,
             last_seen: chrono::Utc::now(),
@@ -691,6 +699,7 @@ fn encrypted_pipeline_fails_without_first_shard() {
             is_lan_peer: false,
         },
     );
+    state.connected_node_ids.insert(node_b.clone());
 
     state
         .encrypted_pipeline_models
@@ -763,6 +772,7 @@ fn parallax_flag_picks_low_latency_peer_end_to_end() {
             is_lan_peer: false,
         },
     );
+    state.connected_node_ids.insert(slow.clone());
     state.peer_registry.insert(
         fast.clone(),
         PeerInfo {
@@ -779,6 +789,7 @@ fn parallax_flag_picks_low_latency_peer_end_to_end() {
             is_lan_peer: false,
         },
     );
+    state.connected_node_ids.insert(fast.clone());
 
     let scheduler = PipelineScheduler::new(state);
     let assignment = scheduler

@@ -1246,6 +1246,7 @@ pub(crate) async fn dispatch_network_messages(
                                                 .send(NetworkCommand::SendDirectMessage {
                                                     target_peer_bytes: peer_bytes,
                                                     message: pong,
+                                                    delivery_request_id: None,
                                                 })
                                                 .await;
                                         } else {
@@ -1314,6 +1315,7 @@ pub(crate) async fn dispatch_network_messages(
                                                 let _ = network_tx.send(NetworkCommand::SendDirectMessage {
                                                     target_peer_bytes: target_bytes,
                                                     message: reply,
+                                                    delivery_request_id: None,
                                                 }).await;
                                             } else {
                                                 tracing::warn!(

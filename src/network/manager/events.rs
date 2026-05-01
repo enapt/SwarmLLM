@@ -211,13 +211,20 @@ impl NetworkManager {
                         "Tensor result fallback OutboundFailure — upstream will timeout"
                     );
                 }
-                if let Some((label, _)) = self.pending_rr_observability.remove(&request_id) {
+                if let Some((label, _, delivery_uuid)) =
+                    self.pending_rr_observability.remove(&request_id)
+                {
                     tracing::warn!(
                         %peer,
                         label,
                         %error,
                         "rr-message OutboundFailure — upstream will handle via its own timeout"
                     );
+                    // Close the streaming caller's channel immediately so it
+                    // sees the failure now, not after FIRST_TOKEN_TIMEOUT.
+                    if let Some(uuid) = delivery_uuid {
+                        self.shared_state.streaming_token_txs.remove(&uuid);
+                    }
                 }
                 // Item 8 Phase 2: unblock a pending prefix-KV fetch on failure.
                 if let Some(uuid) = self.pending_prefix_kv_outbound.remove(&request_id) {

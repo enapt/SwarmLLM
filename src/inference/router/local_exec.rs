@@ -15,6 +15,7 @@ use super::types::{InferenceOutput, QueuedRequest, StreamingTokenEvent};
 /// Ensures active_count is always decremented even if batch processing panics mid-loop.
 pub(super) struct BatchCleanup {
     pub(super) active_count: Arc<AtomicUsize>,
+    pub(super) queue_notify: Arc<tokio::sync::Notify>,
     pub(super) remaining: usize,
 }
 
@@ -23,6 +24,8 @@ impl BatchCleanup {
         if self.remaining > 0 {
             self.active_count.fetch_sub(1, Ordering::Relaxed);
             self.remaining -= 1;
+            // Wake drain_queue so the next queued request can dispatch.
+            self.queue_notify.notify_one();
         }
     }
 }
@@ -32,6 +35,7 @@ impl Drop for BatchCleanup {
         if self.remaining > 0 {
             self.active_count
                 .fetch_sub(self.remaining, Ordering::Relaxed);
+            self.queue_notify.notify_one();
         }
     }
 }
@@ -44,11 +48,13 @@ pub(super) async fn execute_local_batch(
     shared_state: Arc<SharedState>,
     batch: Vec<QueuedRequest>,
     active_count: Arc<AtomicUsize>,
+    queue_notify: Arc<tokio::sync::Notify>,
 ) {
     let mut executor = shared_state.executor.lock().await;
     let batch_size = batch.len();
     let mut cleanup = BatchCleanup {
         active_count: active_count.clone(),
+        queue_notify: queue_notify.clone(),
         remaining: batch_size,
     };
 
