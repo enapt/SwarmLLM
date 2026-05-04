@@ -55,25 +55,31 @@ impl NetworkManager {
                 match decoded {
                     Ok((sender_node_id, msg)) => {
                         // NET-M10: Reject gossip messages with timestamps older than 5 minutes
-                        // or more than 30s in the future. One-sided check per gotcha #44 —
-                        // symmetric .abs()-style windows double the effective replay window.
-                        let now_epoch = chrono::Utc::now().timestamp() as u64;
+                        // or more than 30s in the future. Routed through the centralised
+                        // one-sided helper (gotcha #44) so the .abs()-style replay-window
+                        // doubling can't sneak back in.
+                        let now_secs = chrono::Utc::now().timestamp() as u64;
                         const SKEW_TOLERANCE_SECS: u64 = 30;
                         const MAX_AGE_SECS: u64 = 300;
-                        let stale_or_future = |ts: u64| -> bool {
-                            ts > now_epoch + SKEW_TOLERANCE_SECS
-                                || now_epoch.saturating_sub(ts) > MAX_AGE_SECS
+                        let fresh = |ts: u64, kind: &'static str| -> bool {
+                            crate::daemon::dispatch::timestamp_fresh_one_sided(
+                                ts,
+                                now_secs,
+                                MAX_AGE_SECS,
+                                SKEW_TOLERANCE_SECS,
+                                kind,
+                            )
                         };
                         let too_old = match &msg {
                             SwarmMessage::HealthPing { timestamp, .. }
                             | SwarmMessage::HealthPong { timestamp, .. } => {
-                                stale_or_future(*timestamp)
+                                !fresh(*timestamp, "gossip_health")
                             }
                             SwarmMessage::ShardAnnounce(ann) => {
-                                stale_or_future(ann.timestamp.timestamp() as u64)
+                                !fresh(ann.timestamp.timestamp() as u64, "gossip_shard_announce")
                             }
                             SwarmMessage::CreditGossip(gossip) => {
-                                stale_or_future(gossip.timestamp.timestamp() as u64)
+                                !fresh(gossip.timestamp.timestamp() as u64, "gossip_credit")
                             }
                             _ => false,
                         };

@@ -29,7 +29,10 @@ pub async fn hf_search(
     if query.is_empty() {
         return Ok(Json(vec![]));
     }
-    if query.len() > 256 {
+    // chars().count() so non-ASCII queries don't get rejected by byte
+    // counting when the user-facing limit is character-count (R93/R94
+    // pool-name pattern).
+    if query.chars().count() > 256 {
         return Err(ApiError(crate::error::SwarmError::Validation(
             "Search query too long (max 256 chars)".into(),
         )));

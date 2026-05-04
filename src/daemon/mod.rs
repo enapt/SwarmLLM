@@ -15,7 +15,7 @@ use crate::storage::db::Database;
 use crate::types::{AuthenticatedMessage, NetworkCommand, RebalanceEvent};
 
 mod background;
-mod dispatch;
+pub(crate) mod dispatch;
 mod helpers;
 pub mod manifest;
 pub mod shard_loader;

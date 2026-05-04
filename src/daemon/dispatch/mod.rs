@@ -36,22 +36,38 @@ const MAX_REGION_SUMMARIES: usize = 10_000;
 /// Maximum demand rate entries across all (model, region) pairs.
 const MAX_DEMAND_ENTRIES: usize = 10_000;
 
-/// One-sided staleness check for regional gossip messages (gotcha #44).
-/// Returns `true` if `ts_ms` is within the accepted window; `false` (with a
-/// trace log tagged by `kind`) if the message is future-dated past the skew
-/// tolerance or older than `GOSSIP_STALENESS_MS`. Centralised here so every
-/// gossip handler enforces the invariant identically.
-fn gossip_timestamp_fresh(ts_ms: u64, now_ms: u64, kind: &'static str) -> bool {
-    if ts_ms > now_ms.saturating_add(GOSSIP_SKEW_MS) {
-        tracing::warn!(kind, ts_ms, now_ms, "Dropping future-dated gossip");
+/// Generic one-sided staleness check (gotcha #44). Returns `true` when
+/// the timestamp is within `[now - max_age, now + skew]`; `false` (with a
+/// log tagged by `kind`) when future-dated past `skew` or older than
+/// `max_age`. Time units must be consistent across `ts`/`now`/`max_age`
+/// /`skew` — typically all-ms or all-secs. Pre-existing call sites with
+/// `.abs()` symmetric windows silently double the effective replay
+/// window (see gotcha #44 / #32) — never re-introduce that pattern.
+pub(crate) fn timestamp_fresh_one_sided(
+    ts: u64,
+    now: u64,
+    max_age: u64,
+    skew: u64,
+    kind: &'static str,
+) -> bool {
+    if ts > now.saturating_add(skew) {
+        tracing::warn!(kind, ts, now, "Dropping future-dated gossip");
         return false;
     }
-    let age = now_ms.saturating_sub(ts_ms);
-    if age > GOSSIP_STALENESS_MS {
-        tracing::debug!(kind, age_ms = age, "Dropping stale gossip");
+    let age = now.saturating_sub(ts);
+    if age > max_age {
+        tracing::debug!(kind, age, "Dropping stale gossip");
         return false;
     }
     true
+}
+
+/// One-sided staleness check for regional gossip messages (gotcha #44),
+/// in milliseconds with the dispatch defaults (15 min staleness, 30s
+/// skew). Centralised here so every gossip handler enforces the
+/// invariant identically.
+fn gossip_timestamp_fresh(ts_ms: u64, now_ms: u64, kind: &'static str) -> bool {
+    timestamp_fresh_one_sided(ts_ms, now_ms, GOSSIP_STALENESS_MS, GOSSIP_SKEW_MS, kind)
 }
 
 /// Pipeline sealing: encrypt the token IDs in a LayerResult for the requester's X25519 key.

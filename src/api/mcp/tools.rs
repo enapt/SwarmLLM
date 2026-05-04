@@ -471,15 +471,26 @@ async fn tool_batch_prompts(state: &AppState, id: Option<Value>, args: Value) ->
     let mut handles = Vec::new();
     for task in &tasks {
         let raw_task_id = task.get("id").and_then(|v| v.as_str()).unwrap_or("unknown");
-        let task_id = if raw_task_id.len() > MCP_MAX_TASK_ID_BYTES {
-            raw_task_id
+        if raw_task_id.len() > MCP_MAX_TASK_ID_BYTES {
+            // Match every other oversize-input arm in this fn — return an
+            // explicit error rather than silently truncating, so the caller
+            // can correlate the error response back to a known task ID
+            // (R94: silent truncation broke that correlation).
+            let preview: String = raw_task_id
                 .char_indices()
                 .take_while(|(i, _)| *i < MCP_MAX_TASK_ID_BYTES)
                 .map(|(_, c)| c)
-                .collect::<String>()
-        } else {
-            raw_task_id.to_string()
-        };
+                .collect();
+            handles.push(tokio::spawn(async move {
+                json!({
+                    "task_id": preview,
+                    "error": "task_id too long",
+                    "status": "error",
+                })
+            }));
+            continue;
+        }
+        let task_id = raw_task_id.to_string();
         let model_id = match task.get("model").and_then(|v| v.as_str()) {
             Some(m) if m.len() <= MCP_MAX_MODEL_ID_BYTES => m.to_string(),
             Some(_) => {

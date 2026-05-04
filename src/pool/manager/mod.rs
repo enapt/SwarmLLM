@@ -1065,14 +1065,17 @@ impl PoolManager {
 
         // If we're the one being removed
         if removal.removed_node_id == *my_id {
-            // SEC: Freshness check — reject removals older than 5 minutes
-            let age = chrono::Utc::now().signed_duration_since(removal.removed_at);
-            let age_secs = age.num_seconds();
-            if !(-30..=300).contains(&age_secs) {
-                tracing::warn!(
-                    age_secs = age.num_seconds(),
-                    "Pool removal rejected: timestamp too old or too far in future"
-                );
+            // SEC: Freshness check — reject removals older than 5 minutes,
+            // routed through the centralised one-sided helper so we can't
+            // accidentally re-introduce the .abs() replay-window bug
+            // (gotcha #32 / #44).
+            if let Err(e) = crate::credit::ledger::check_signed_freshness(
+                removal.removed_at,
+                crate::credit::ledger::CLOCK_SKEW_TOLERANCE_SECS,
+                crate::credit::ledger::BALANCE_REPORT_MAX_AGE_SECS,
+                "pool_removal",
+            ) {
+                tracing::warn!(error = %e, "Pool removal rejected: stale or future-dated");
                 return;
             }
 

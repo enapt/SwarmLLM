@@ -228,7 +228,13 @@ impl HealthMonitor {
                 (ram_total, ram_avail, disk_avail)
             })
             .await
-            .unwrap_or((0, 0, 0));
+            .unwrap_or_else(|e| {
+                // sysinfo block can panic on malformed /proc on certain
+                // container environments. Log so a recurring zero-broadcast
+                // doesn't look like genuine resource exhaustion to peers.
+                tracing::warn!(error = %e, "Hardware-detection task failed; broadcasting zeros for this tick");
+                (0, 0, 0)
+            });
 
         let est_tokens_per_sec_7b = gpu_info
             .as_ref()
