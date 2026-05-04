@@ -50,7 +50,7 @@ use crate::error::SwarmError;
 use crate::inference::router::StreamingTokenEvent;
 use crate::inference::router::{InferenceOutput, StreamingTokenTx};
 #[cfg(feature = "llama")]
-use crate::types::{LayerForward, NetworkCommand, NetworkFinishReason, TensorFormat};
+use crate::types::{NetworkCommand, NetworkFinishReason};
 #[cfg(feature = "llama")]
 use tokio::sync::mpsc;
 
@@ -58,7 +58,6 @@ use tokio::sync::mpsc;
 use super::speculative::{draft_next_gamma, draft_prefill, draft_sync_after_round};
 use super::PipelineExecutor;
 #[cfg(feature = "llama")]
-use super::MAX_PENDING_LAYER_RESULTS;
 #[cfg(feature = "llama")]
 use crate::inference::dsd_controller::GammaController;
 
@@ -415,57 +414,32 @@ async fn forward_verify_through_segments(
     debug_assert_eq!(num_segments, peer_id_for_segment.len());
 
     // First-segment activations: γ+1 token IDs as i64 LE bytes.
-    let mut activation_bytes: Vec<u8> = Vec::with_capacity(verify_tokens.len() * 8);
-    for &t in verify_tokens {
-        activation_bytes.extend_from_slice(&(t as i64).to_le_bytes());
-    }
+    let mut activation_bytes: Vec<u8> = super::pack_verify_tokens_to_le_bytes(verify_tokens);
 
     for (idx, segment) in segments.iter().enumerate() {
         let is_last = idx == num_segments - 1;
         let target_peer_bytes = &peer_id_for_segment[idx];
 
-        if shared_state.pending_layer_results.len() >= MAX_PENDING_LAYER_RESULTS {
-            return Err(SwarmError::ServiceUnavailable(
-                "DSD: pipeline overloaded — too many pending layer results".into(),
-            ));
-        }
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        shared_state.pending_layer_results.insert(request_id, tx);
+        // Cap-check + register oneshot + RAII guard. The guard ensures
+        // the pending_layer_results entry is removed on every exit path
+        // from this iteration, including `?` propagation from
+        // wait_for_result. Without it, a non-final-segment timeout/network
+        // error leaves a permanent stale entry that consumes capacity
+        // (the cap check at the loop head would fail under load) and
+        // silently swallows any late-arriving response — gotcha #45.
+        let (rx, mut pending_guard) =
+            super::register_pending_layer_result(&shared_state.pending_layer_results, request_id)?;
 
-        // RAII: ensure the pending_layer_results entry is removed on every
-        // exit path from this iteration, including `?` propagation from
-        // wait_for_result. Without this, a non-final-segment timeout/network
-        // error leaves a permanent stale entry that consumes capacity (the
-        // MAX_PENDING_LAYER_RESULTS check at the loop head would fail under
-        // load) and silently swallows any late-arriving response.
-        let mut pending_guard =
-            super::PendingLayerResultGuard::new(&shared_state.pending_layer_results, request_id);
-
-        let forward = LayerForward {
+        // Only the last segment will actually populate spec_logits — but
+        // setting the flag uniformly makes the protocol symmetric.
+        let forward = super::build_spec_verify_forward(
             request_id,
-            sequence_num: 1, // not prefill
             index_pos,
-            activations: activation_bytes.clone(),
-            format: TensorFormat::FP32,
-            model_id: segment.shard_id.model_id.clone(),
-            layer_range: segment.layer_range,
-            vision_embeddings: None,
-            sender_peer_bytes: None,
-            tp_meta: None,
-            requester_node_id: Some(shared_state.identity.node_id().0),
-            pre_embedded: false,
-            generated_ids: Vec::new(),
-            adapter_id: None,
-            // The receiver gates spec-logits emission on
-            // `spec_logits_requested && is_last`, not on `draft_tokens`. The
-            // draft IDs are also already encoded in `activations`, so leaving
-            // this empty saves an allocation per spec round at no cost.
-            draft_tokens: Vec::new(),
-            // Only the last segment will actually populate spec_logits — but
-            // setting the flag uniformly makes the protocol symmetric.
-            spec_logits_requested: true,
+            activation_bytes.clone(),
+            segment,
+            shared_state.identity.node_id().0,
             truncate_kv_to,
-        };
+        );
 
         if network_tx
             .send(NetworkCommand::SendTensor {

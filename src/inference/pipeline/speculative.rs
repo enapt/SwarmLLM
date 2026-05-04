@@ -53,7 +53,7 @@ use crate::types::{LayerForward, LayerResult, NetworkCommand, NetworkFinishReaso
 use tokio::sync::mpsc;
 
 use super::prompt::CachedDecoder;
-use super::{PipelineExecutor, MAX_PENDING_LAYER_RESULTS};
+use super::PipelineExecutor;
 
 /// Fast-path preconditions for the greedy distributed speculative loop.
 fn eligible(exec: &PipelineExecutor) -> bool {
@@ -119,23 +119,14 @@ impl PipelineExecutor {
         let prompt_bytes = prompt.as_bytes().to_vec();
         let prompt_byte_len = prompt_bytes.len();
         let (first_token, prompt_token_count, eos_tokens, decoder) = {
-            // Register response channel.
-            if self.shared_state.pending_layer_results.len() >= MAX_PENDING_LAYER_RESULTS {
-                return Err(SwarmError::ServiceUnavailable(
-                    "Pipeline overloaded — too many pending layer results".into(),
-                ));
-            }
-            let (tx, rx) = tokio::sync::oneshot::channel();
-            self.shared_state
-                .pending_layer_results
-                .insert(request_id, tx);
-            // RAII guard so an early Err propagation from wait_for_result or
-            // the empty-tokens check below doesn't leak the pending entry —
-            // see PendingLayerResultGuard / gotcha #45.
-            let mut prefill_guard = super::PendingLayerResultGuard::new(
+            // Register response channel. Cap-checked + RAII-guarded so an
+            // early Err propagation from wait_for_result or the empty-tokens
+            // check below doesn't leak the pending entry — see
+            // PendingLayerResultGuard / gotcha #45.
+            let (rx, mut prefill_guard) = super::register_pending_layer_result(
                 &self.shared_state.pending_layer_results,
                 request_id,
-            );
+            )?;
 
             let forward = LayerForward {
                 request_id,
@@ -497,50 +488,25 @@ async fn send_verify_batch(
     verify_tokens: &[u32],
     truncate_kv_to: Option<u32>,
 ) -> Result<Vec<Vec<f32>>, SwarmError> {
-    // Register oneshot for the result.
-    if shared_state.pending_layer_results.len() >= MAX_PENDING_LAYER_RESULTS {
-        return Err(SwarmError::ServiceUnavailable(
-            "Pipeline overloaded — too many pending layer results".into(),
-        ));
-    }
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    shared_state.pending_layer_results.insert(request_id, tx);
-    // RAII guard so a wait_for_result Err propagation doesn't leak the
-    // pending entry — see PendingLayerResultGuard / gotcha #45.
-    let mut verify_guard =
-        super::PendingLayerResultGuard::new(&shared_state.pending_layer_results, request_id);
+    // Register oneshot for the result. Cap-checked + RAII-guarded so a
+    // wait_for_result Err propagation doesn't leak the pending entry —
+    // see PendingLayerResultGuard / gotcha #45.
+    let (rx, mut verify_guard) =
+        super::register_pending_layer_result(&shared_state.pending_layer_results, request_id)?;
 
     // Build the LayerForward. As of DSD Phase 4 (Item 12) the worker
     // unifies speculative and standard input paths through the first-segment
     // multi-token decode branch, which reads γ token IDs from `activations`
     // (γ × 8 bytes LE). Pack all verify_tokens, not just the first.
-    let mut activations = Vec::with_capacity(verify_tokens.len() * 8);
-    for &t in verify_tokens {
-        activations.extend_from_slice(&(t as i64).to_le_bytes());
-    }
-    let forward = LayerForward {
+    let activations = super::pack_verify_tokens_to_le_bytes(verify_tokens);
+    let forward = super::build_spec_verify_forward(
         request_id,
-        sequence_num: 1, // not prefill
         index_pos,
         activations,
-        format: TensorFormat::FP32,
-        model_id: segment.shard_id.model_id.clone(),
-        layer_range: segment.layer_range,
-        vision_embeddings: None,
-        sender_peer_bytes: None,
-        tp_meta: None,
-        requester_node_id: Some(shared_state.identity.node_id().0),
-        pre_embedded: false,
-        generated_ids: Vec::new(),
-        adapter_id: None,
-        // The receiver gates spec-logits emission on
-        // `spec_logits_requested && is_last`, not on `draft_tokens`. The
-        // draft IDs are also already encoded in `activations`, so leaving
-        // this empty saves an allocation per spec round at no cost.
-        draft_tokens: Vec::new(),
-        spec_logits_requested: true,
+        segment,
+        shared_state.identity.node_id().0,
         truncate_kv_to,
-    };
+    );
     if network_tx
         .send(NetworkCommand::SendTensor {
             target_peer_bytes: target_peer_bytes.to_vec(),

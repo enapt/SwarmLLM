@@ -66,6 +66,33 @@ impl<'a> PendingLayerResultGuard<'a> {
         self.armed = false;
     }
 }
+
+/// Cap-check + insert + RAII-guard for a pending layer-result oneshot.
+/// Shared by the canonical 3 sites (speculative prefill, speculative
+/// verify batch, DSD verify) — `distributed.rs` keeps its inline form
+/// because one branch needs `&mut self` access and another skips the
+/// cap check during failover. Returns `ServiceUnavailable` when the
+/// pending map is at `MAX_PENDING_LAYER_RESULTS`.
+pub(super) fn register_pending_layer_result(
+    map: &dashmap::DashMap<uuid::Uuid, tokio::sync::oneshot::Sender<crate::types::LayerResult>>,
+    request_id: uuid::Uuid,
+) -> Result<
+    (
+        tokio::sync::oneshot::Receiver<crate::types::LayerResult>,
+        PendingLayerResultGuard<'_>,
+    ),
+    crate::error::SwarmError,
+> {
+    if map.len() >= MAX_PENDING_LAYER_RESULTS {
+        return Err(crate::error::SwarmError::ServiceUnavailable(
+            "Pipeline overloaded — too many pending layer results".into(),
+        ));
+    }
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    map.insert(request_id, tx);
+    let guard = PendingLayerResultGuard::new(map, request_id);
+    Ok((rx, guard))
+}
 impl<'a> Drop for PendingLayerResultGuard<'a> {
     fn drop(&mut self) {
         if self.armed {
@@ -78,6 +105,59 @@ impl<'a> Drop for PendingLayerResultGuard<'a> {
 /// A warning is emitted when this fallback is used.
 pub(crate) const LLAMA_FALLBACK_EOS_TOKEN: u32 = 2;
 pub(crate) const PREFILL_ACTIVATION_THRESHOLD_BYTES: usize = 100_000;
+
+/// Pack a slice of u32 token IDs as i64 little-endian bytes — the
+/// activation byte format the worker expects for first-segment
+/// multi-token decode (DSD Phase 4 / Item 12). Shared by
+/// `speculative.rs::send_verify_batch` and
+/// `dsd.rs::forward_verify_through_segments` so a wire-format change
+/// has a single source of truth.
+pub(super) fn pack_verify_tokens_to_le_bytes(tokens: &[u32]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(tokens.len() * 8);
+    for &t in tokens {
+        out.extend_from_slice(&(t as i64).to_le_bytes());
+    }
+    out
+}
+
+/// Build the `LayerForward` envelope for a speculative-verify send.
+/// Shared by `speculative.rs::send_verify_batch` (single-segment) and
+/// `dsd.rs::forward_verify_through_segments` (multi-segment) so adding
+/// a `LayerForward` field can't drift between the two paths. The
+/// `spec_logits_requested` flag is set uniformly; the receiver gates
+/// emission on `is_last`.
+pub(super) fn build_spec_verify_forward(
+    request_id: uuid::Uuid,
+    index_pos: u32,
+    activations: Vec<u8>,
+    segment: &crate::types::PipelineSegment,
+    requester_node_id_bytes: [u8; 32],
+    truncate_kv_to: Option<u32>,
+) -> crate::types::LayerForward {
+    crate::types::LayerForward {
+        request_id,
+        sequence_num: 1, // not prefill
+        index_pos,
+        activations,
+        format: crate::types::TensorFormat::FP32,
+        model_id: segment.shard_id.model_id.clone(),
+        layer_range: segment.layer_range,
+        vision_embeddings: None,
+        sender_peer_bytes: None,
+        tp_meta: None,
+        requester_node_id: Some(requester_node_id_bytes),
+        pre_embedded: false,
+        generated_ids: Vec::new(),
+        adapter_id: None,
+        // The receiver gates spec-logits emission on
+        // `spec_logits_requested && is_last`, not on `draft_tokens`. The
+        // draft IDs are also already encoded in `activations`, so leaving
+        // this empty saves an allocation per spec round at no cost.
+        draft_tokens: Vec::new(),
+        spec_logits_requested: true,
+        truncate_kv_to,
+    }
+}
 
 /// Request-level disqualifiers shared by every "fast path" coordinator:
 /// remote-generate (`remote_generate.rs`), distributed-speculative

@@ -163,10 +163,7 @@ fn translate_tools(tools: &[ToolDef]) -> Result<Vec<ToolDefinition>, SwarmError>
                 });
             }
             ToolDef::Raw(value) => {
-                let kind = value
-                    .get("type")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("<unknown>");
+                let kind = super::types::raw_tool_kind_or_unknown(value);
                 return Err(SwarmError::Validation(format!(
                     "Tool type `{kind}` is not supported by /v1/responses on \
                      this server. Only `function` tools are translated for \

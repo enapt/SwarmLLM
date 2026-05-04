@@ -116,7 +116,7 @@ impl AntiGaming {
     }
 
     /// Cleanup expired rate limit entries.
-    /// SEC-M15: Should be called periodically (every 5 minutes) from a background task
+    /// SEC-M15: Should be called periodically (every health-monitor tick)
     /// to prevent unbounded memory growth in the rate_limits HashMap.
     pub fn cleanup(&mut self) {
         let cutoff = Instant::now() - self.window_duration;
@@ -131,6 +131,18 @@ impl AntiGaming {
             nodes.retain(|(_, ts)| *ts > subnet_cutoff);
             !nodes.is_empty()
         });
+        // Soft warning if the rate-limit map grows unusually large between
+        // ticks. Time-based eviction above bounds this in steady state, but
+        // a Sybil burst could push it temporarily high. Emitted at ~once per
+        // tick when the threshold is crossed.
+        const RATE_LIMITS_WARN_THRESHOLD: usize = 10_000;
+        if self.rate_limits.len() > RATE_LIMITS_WARN_THRESHOLD {
+            tracing::warn!(
+                size = self.rate_limits.len(),
+                threshold = RATE_LIMITS_WARN_THRESHOLD,
+                "anti_gaming.rate_limits map exceeded soft threshold — possible burst of unique nodes"
+            );
+        }
     }
 
     /// Report a spot-check failure — peer claimed work they didn't do.

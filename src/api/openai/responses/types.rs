@@ -300,6 +300,17 @@ pub enum ToolDef {
     Raw(serde_json::Value),
 }
 
+/// Best-effort kind discriminator for a `ToolDef::Raw` JSON value.
+/// Used in error messages from `translate_tools` to identify the
+/// unsupported tool type. Returns `<unknown>` if the value has no
+/// readable `type` string.
+pub(crate) fn raw_tool_kind_or_unknown(value: &serde_json::Value) -> &str {
+    value
+        .get("type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("<unknown>")
+}
+
 impl ToolDef {
     /// Discriminator string. Used by M2's built-in-tool rejection path.
     pub fn type_str(&self) -> Option<&str> {

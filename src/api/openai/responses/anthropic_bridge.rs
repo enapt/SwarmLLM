@@ -361,10 +361,7 @@ fn translate_tools(tools: &[ToolDef]) -> Result<Vec<Value>, SwarmError> {
                 out.push(Value::Object(obj));
             }
             ToolDef::Raw(value) => {
-                let kind = value
-                    .get("type")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("<unknown>");
+                let kind = super::types::raw_tool_kind_or_unknown(value);
                 return Err(SwarmError::Validation(format!(
                     "Tool type `{kind}` is not supported on /v1/responses for \
                      Anthropic models. Only `function` tools translate."
