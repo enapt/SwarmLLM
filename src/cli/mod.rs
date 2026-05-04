@@ -22,6 +22,27 @@ pub(crate) fn read_api_key(data_dir: &std::path::Path) -> Option<String> {
         .map(|s| s.trim().to_string())
 }
 
+/// Bail with the canonical "daemon not running (no API key)" message.
+/// Shared by CLI commands that need an API key to call the local HTTP API.
+pub(crate) fn bail_if_no_api_key(api_key: &str, data_dir: &std::path::Path) -> anyhow::Result<()> {
+    if api_key.is_empty() {
+        anyhow::bail!(
+            "SwarmLLM is not running (no API key at {}).\n  Start the daemon first: swarmllm run",
+            data_dir.join("api_key").display()
+        );
+    }
+    Ok(())
+}
+
+/// Print the canonical "daemon unreachable on port N" guidance and
+/// `exit(1)`. Shared by CLI commands that print errors instead of bailing.
+pub(crate) fn exit_daemon_unreachable(port: u16) -> ! {
+    eprintln!("Error: SwarmLLM daemon is not running on port {port}.");
+    eprintln!("  Start it: swarmllm run");
+    eprintln!("  Or if it's on a different port: --port <N> or set SWARMLLM_NODE_LISTEN_PORT");
+    std::process::exit(1);
+}
+
 /// Resolve a model id: explicit override wins, otherwise pick the first
 /// listing from the daemon's `/v1/models`.
 pub(crate) async fn discover_model(

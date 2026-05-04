@@ -67,15 +67,19 @@ impl NicknameRecordExt for NicknameRecord {
     /// Verify the Ed25519 signature on this record.
     /// SEC-I3: Also rejects records older than 24 hours to prevent stale replay.
     fn verify(&self) -> Result<(), SwarmError> {
-        // Timestamp freshness check: reject records older than 24 hours
-        // (matches the gossip dispatcher's age filter in dispatch.rs)
+        // Timestamp freshness — one-sided per gotcha #44: separate
+        // (now - ts) > MAX_AGE and (ts - now) > SKEW checks. Do NOT
+        // collapse to (now - ts).abs() > MAX_AGE: that doubles the
+        // effective replay window. Window is wider here than for credit
+        // messages (24h vs 5min) because nickname records are rotated
+        // less frequently — see credit::ledger::check_signed_freshness
+        // for the same idiom in the credit domain.
         let age = chrono::Utc::now() - self.timestamp;
         if age > chrono::Duration::hours(24) {
             return Err(SwarmError::InvalidNickname(
                 "Nickname record is stale (older than 24 hours)".into(),
             ));
         }
-        // Also reject records with timestamps in the future (clock skew tolerance: 5 min)
         if self.timestamp > chrono::Utc::now() + chrono::Duration::minutes(5) {
             return Err(SwarmError::InvalidNickname(
                 "Nickname record has future timestamp".into(),

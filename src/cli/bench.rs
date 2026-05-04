@@ -41,12 +41,7 @@ pub async fn run_bench(
     model_override: Option<String>,
 ) -> anyhow::Result<()> {
     let api_key = read_api_key(data_dir).unwrap_or_default();
-    if api_key.is_empty() {
-        anyhow::bail!(
-            "SwarmLLM is not running (no API key at {}).\n  Start the daemon first: swarmllm run",
-            data_dir.join("api_key").display()
-        );
-    }
+    super::bail_if_no_api_key(&api_key, data_dir)?;
 
     let base = format!("http://localhost:{port}");
     let client = reqwest::Client::new();

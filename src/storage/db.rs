@@ -160,6 +160,28 @@ impl Database {
         })
     }
 
+    /// Open a write transaction, run `f` on the data table, commit on
+    /// `Ok`, rollback (drop) on `Err`. Removes the open-write/open-table/
+    /// commit boilerplate from every mutating method (R96).
+    fn with_write_table<R>(
+        &self,
+        f: impl FnOnce(&mut redb::Table<'_, &'static [u8], &'static [u8]>) -> Result<R, SwarmError>,
+    ) -> Result<R, SwarmError> {
+        let txn = self
+            .inner
+            .begin_write()
+            .map_err(|e| SwarmError::Database(e.to_string()))?;
+        let result = {
+            let mut table = txn
+                .open_table(DATA_TABLE)
+                .map_err(|e| SwarmError::Database(e.to_string()))?;
+            f(&mut table)?
+        };
+        txn.commit()
+            .map_err(|e| SwarmError::Database(e.to_string()))?;
+        Ok(result)
+    }
+
     /// Store a JSON-serializable value.
     pub fn put_json<T: serde::Serialize>(
         &self,
@@ -169,22 +191,12 @@ impl Database {
     ) -> Result<(), SwarmError> {
         let k = make_key(tree_name, key);
         let bytes = serde_json::to_vec(value)?;
-        let write_txn = self
-            .inner
-            .begin_write()
-            .map_err(|e| SwarmError::Database(e.to_string()))?;
-        {
-            let mut table = write_txn
-                .open_table(DATA_TABLE)
-                .map_err(|e| SwarmError::Database(e.to_string()))?;
+        self.with_write_table(|table| {
             table
                 .insert(k.as_slice(), bytes.as_slice())
                 .map_err(|e| SwarmError::Database(e.to_string()))?;
-        }
-        write_txn
-            .commit()
-            .map_err(|e| SwarmError::Database(e.to_string()))?;
-        Ok(())
+            Ok(())
+        })
     }
 
     /// Load a JSON-deserializable value.
@@ -379,57 +391,30 @@ impl Database {
     /// Insert a raw byte value into a named tree.
     pub fn insert_raw(&self, tree_name: &str, key: &str, value: &[u8]) -> Result<(), SwarmError> {
         let k = make_key(tree_name, key);
-        let write_txn = self
-            .inner
-            .begin_write()
-            .map_err(|e| SwarmError::Database(e.to_string()))?;
-        {
-            let mut table = write_txn
-                .open_table(DATA_TABLE)
-                .map_err(|e| SwarmError::Database(e.to_string()))?;
+        self.with_write_table(|table| {
             table
                 .insert(k.as_slice(), value)
                 .map_err(|e| SwarmError::Database(e.to_string()))?;
-        }
-        write_txn
-            .commit()
-            .map_err(|e| SwarmError::Database(e.to_string()))?;
-        Ok(())
+            Ok(())
+        })
     }
 
     /// Remove a key from a named tree.
     pub fn remove(&self, tree_name: &str, key: &str) -> Result<(), SwarmError> {
         let k = make_key(tree_name, key);
-        let write_txn = self
-            .inner
-            .begin_write()
-            .map_err(|e| SwarmError::Database(e.to_string()))?;
-        {
-            let mut table = write_txn
-                .open_table(DATA_TABLE)
-                .map_err(|e| SwarmError::Database(e.to_string()))?;
+        self.with_write_table(|table| {
             table
                 .remove(k.as_slice())
                 .map_err(|e| SwarmError::Database(e.to_string()))?;
-        }
-        write_txn
-            .commit()
-            .map_err(|e| SwarmError::Database(e.to_string()))?;
-        Ok(())
+            Ok(())
+        })
     }
 
     /// Clear all entries from a named tree.
     pub fn clear_tree(&self, tree_name: &str) -> Result<(), SwarmError> {
         let start = tree_range_start(tree_name);
         let end = tree_range_end(tree_name);
-        let write_txn = self
-            .inner
-            .begin_write()
-            .map_err(|e| SwarmError::Database(e.to_string()))?;
-        {
-            let mut table = write_txn
-                .open_table(DATA_TABLE)
-                .map_err(|e| SwarmError::Database(e.to_string()))?;
+        self.with_write_table(|table| {
             // Collect keys to remove (can't mutate while iterating)
             let keys: Vec<Vec<u8>> = {
                 let range = table
@@ -447,11 +432,8 @@ impl Database {
                     .remove(key.as_slice())
                     .map_err(|e| SwarmError::Database(e.to_string()))?;
             }
-        }
-        write_txn
-            .commit()
-            .map_err(|e| SwarmError::Database(e.to_string()))?;
-        Ok(())
+            Ok(())
+        })
     }
 
     /// Atomically replace every entry under `tree_name` with the given
@@ -470,15 +452,7 @@ impl Database {
     ) -> Result<(), SwarmError> {
         let start = tree_range_start(tree_name);
         let end = tree_range_end(tree_name);
-        let write_txn = self
-            .inner
-            .begin_write()
-            .map_err(|e| SwarmError::Database(e.to_string()))?;
-        {
-            let mut table = write_txn
-                .open_table(DATA_TABLE)
-                .map_err(|e| SwarmError::Database(e.to_string()))?;
-
+        self.with_write_table(|table| {
             // Collect existing keys then remove them — same pattern as
             // clear_tree, but inside the same txn as the inserts.
             let stale_keys: Vec<Vec<u8>> = {
@@ -504,11 +478,8 @@ impl Database {
                     .insert(k.as_slice(), value.as_slice())
                     .map_err(|e| SwarmError::Database(e.to_string()))?;
             }
-        }
-        write_txn
-            .commit()
-            .map_err(|e| SwarmError::Database(e.to_string()))?;
-        Ok(())
+            Ok(())
+        })
     }
 
     /// Persist the user's --shards range so it's restored on next startup.

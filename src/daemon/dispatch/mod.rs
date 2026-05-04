@@ -1257,22 +1257,25 @@ pub(crate) async fn dispatch_network_messages(
                                             active_request_count: our_load,
                                         };
                                         // Unicast pong to the pinger instead of broadcasting O(N²)
+                                        // try_send so a saturated network_tx
+                                        // (large tensor transfer in flight) can't
+                                        // block the dispatch loop. A missed pong
+                                        // recovers next health-monitor tick.
                                         if let Some(peer_bytes) = shared_state
                                             .peer_id_map
                                             .get(&sender_id)
                                             .map(|r| r.clone())
                                         {
-                                            let _ = network_tx
-                                                .send(NetworkCommand::SendDirectMessage {
-                                                    target_peer_bytes: peer_bytes,
-                                                    message: pong,
-                                                    delivery_request_id: None,
-                                                })
-                                                .await;
-                                        } else {
+                                            if let Err(e) = network_tx.try_send(NetworkCommand::SendDirectMessage {
+                                                target_peer_bytes: peer_bytes,
+                                                message: pong,
+                                                delivery_request_id: None,
+                                            }) {
+                                                tracing::debug!(error = %e, "Dropping HealthPong: network_tx busy");
+                                            }
+                                        } else if let Err(e) = network_tx.try_send(NetworkCommand::Broadcast(pong)) {
                                             // Fallback to broadcast if peer_id unknown
-                                            let _ =
-                                                network_tx.send(NetworkCommand::Broadcast(pong)).await;
+                                            tracing::debug!(error = %e, "Dropping HealthPong broadcast: network_tx busy");
                                         }
                                     }
                                     // Health pongs: update the sender's load in peer_registry
@@ -1332,11 +1335,17 @@ pub(crate) async fn dispatch_network_messages(
                                                 .get(&exchange.node_id)
                                                 .map(|r| r.value().clone());
                                             if let Some(target_bytes) = target {
-                                                let _ = network_tx.send(NetworkCommand::SendDirectMessage {
+                                                // try_send to keep the dispatch
+                                                // loop from blocking on a saturated
+                                                // network_tx. A dropped key reply
+                                                // re-runs on the next exchange.
+                                                if let Err(e) = network_tx.try_send(NetworkCommand::SendDirectMessage {
                                                     target_peer_bytes: target_bytes,
                                                     message: reply,
                                                     delivery_request_id: None,
-                                                }).await;
+                                                }) {
+                                                    tracing::warn!(error = %e, "Dropping ephemeral key reply: network_tx busy");
+                                                }
                                             } else {
                                                 tracing::warn!(
                                                     node_id = %exchange.node_id,
@@ -1374,6 +1383,14 @@ pub(crate) async fn dispatch_network_messages(
                                         // (embedded by NetworkManager when receiving the rr request)
                                         let sender_peer = req.sender_peer_bytes.clone();
 
+                                        // Cap check: reject when key is new AND we're at the
+                                        // limit. The contains_key + len check + entry().or_insert
+                                        // sequence below is NOT atomic across multiple
+                                        // dispatch_network_messages tasks, but only this single
+                                        // task touches pending_tp_partials inserts on the
+                                        // dispatch side, so the visible window is one iteration.
+                                        // If this loop is ever parallelised, restructure with
+                                        // entry-first to keep the cap exact.
                                         if !ss.pending_tp_partials.contains_key(&key)
                                             && ss.pending_tp_partials.len() >= MAX_PENDING_TP_PARTIALS
                                         {

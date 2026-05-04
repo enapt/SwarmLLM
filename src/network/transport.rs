@@ -29,10 +29,10 @@ fn node_id_to_peer_id(node_id: &NodeId) -> Option<PeerId> {
 pub fn peer_id_to_node_id(peer_id: &PeerId) -> Option<NodeId> {
     // PeerId for Ed25519 keys uses identity multihash, so the public key
     // can be extracted directly from the PeerId bytes.
-    let pk = libp2p::identity::PublicKey::try_decode_protobuf(
-        &peer_id.to_bytes()[2..], // skip multihash prefix
-    )
-    .ok()?;
+    // .get(2..) — return None on a malformed/short PeerId rather than
+    // panicking on an unchecked slice (R96).
+    let bytes = peer_id.to_bytes();
+    let pk = libp2p::identity::PublicKey::try_decode_protobuf(bytes.get(2..)?).ok()?;
     let ed_pk = pk.try_into_ed25519().ok()?;
     let bytes = ed_pk.to_bytes();
     Some(NodeId(bytes))
