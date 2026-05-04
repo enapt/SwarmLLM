@@ -76,8 +76,11 @@ pub async fn pool_create(
     Json(body): Json<PoolCreateRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     tracing::debug!(name = %body.name, "DIAG: pool_create request");
-    // Validate pool name length
-    if body.name.trim().is_empty() || body.name.len() > 64 {
+    // Validate pool name length. Pool names are ASCII-only (enforced
+    // by the manager), so chars().count() == len(); but the user-facing
+    // limit is character-count, not byte-count.
+    let trimmed = body.name.trim();
+    if trimmed.is_empty() || trimmed.chars().count() > 64 {
         return Err(ApiError(crate::error::SwarmError::Validation(
             "Pool name must be 1-64 characters".into(),
         )));
@@ -263,7 +266,11 @@ pub async fn pool_set_device_name(
             "Device name must not be empty".into(),
         )));
     }
-    if name.len() > 32 {
+    // Limit by character count for the user-facing 32-char UI cap, but
+    // also enforce a byte cap so a 32-char CJK name (~96 bytes) doesn't
+    // exceed the 64-byte gossip cap (MAX_DEVICE_NAME_BYTES) and get
+    // truncated on peers.
+    if name.chars().count() > 32 || name.len() > 64 {
         return Err(ApiError(crate::error::SwarmError::Validation(
             "Device name must be 32 characters or fewer".into(),
         )));

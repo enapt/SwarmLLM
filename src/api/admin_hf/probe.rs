@@ -77,8 +77,9 @@ pub async fn hf_probe(
                 "network_replicas": network_replicas,
             })))
         }
-        Err(e) => Err(ApiError(crate::error::SwarmError::ServiceUnavailable(
-            crate::api::scrub_truncate_error(&e),
-        ))),
+        Err(e) => Err(ApiError(crate::error::SwarmError::ProviderError {
+            status: 502,
+            body: crate::api::scrub_truncate_error(&e),
+        })),
     }
 }

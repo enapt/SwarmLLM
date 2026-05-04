@@ -1230,7 +1230,7 @@ impl PoolManager {
     /// Set the device nickname for this node within the pool.
     async fn handle_set_device_name(&mut self, name: String) -> Result<(), SwarmError> {
         let name = name.trim().to_string();
-        if name.len() > 32 {
+        if name.chars().count() > 32 || name.len() > 64 {
             return Err(SwarmError::Validation(
                 "Device name must be 32 characters or less".into(),
             ));

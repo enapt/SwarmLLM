@@ -316,6 +316,8 @@
   "dashboard.peer_col_latency": "Gecikme",
   "dashboard.peer_col_name": "Eş",
   "dashboard.peer_col_trust": "Güven",
+  "dashboard.peer_count_one": "{count} eş barındırıyor",
+  "dashboard.peer_count_other": "{count} eş barındırıyor",
   "dashboard.peer_degraded": "Bozulmuş",
   "dashboard.peers_summary": "{count} eş · {lan} LAN · {healthy} sağlıklı",
   "dashboard.providers_count": "{count} sağlayıcı · {models} model",

@@ -316,6 +316,8 @@
   "dashboard.peer_col_latency": "Затримка",
   "dashboard.peer_col_name": "Однорангові вузол",
   "dashboard.peer_col_trust": "Довіра",
+  "dashboard.peer_count_one": "{count} пір розміщує",
+  "dashboard.peer_count_other": "{count} пірів розміщують",
   "dashboard.peer_degraded": "Знижена якість",
   "dashboard.peers_summary": "{count} пір/пірів · {lan} LAN · {healthy} здорових",
   "dashboard.providers_count": "{count} провайдер/провайдерів · {models} моделей",

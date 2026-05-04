@@ -316,6 +316,8 @@
   "dashboard.peer_col_latency": "Latence",
   "dashboard.peer_col_name": "Pair",
   "dashboard.peer_col_trust": "Confiance",
+  "dashboard.peer_count_one": "{count} pair hébergeant",
+  "dashboard.peer_count_other": "{count} pairs hébergeant",
   "dashboard.peer_degraded": "Dégradé",
   "dashboard.peers_summary": "{count} pair(s) · {lan} LAN · {healthy} sains",
   "dashboard.providers_count": "{count} fournisseur(s) · {models} modèles",

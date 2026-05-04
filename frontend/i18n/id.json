@@ -316,6 +316,8 @@
   "dashboard.peer_col_latency": "Latensi",
   "dashboard.peer_col_name": "Peer",
   "dashboard.peer_col_trust": "Kepercayaan",
+  "dashboard.peer_count_one": "{count} peer hosting",
+  "dashboard.peer_count_other": "{count} peer hosting",
   "dashboard.peer_degraded": "Terdegradasi",
   "dashboard.peers_summary": "{count} peer · {lan} LAN · {healthy} sehat",
   "dashboard.providers_count": "{count} penyedia · {models} model",

@@ -316,6 +316,8 @@
   "dashboard.peer_col_latency": "Latence",
   "dashboard.peer_col_name": "Partner",
   "dashboard.peer_col_trust": "Důvěra",
+  "dashboard.peer_count_one": "{count} peer hostuje",
+  "dashboard.peer_count_other": "{count} peerů hostuje",
   "dashboard.peer_degraded": "Degradovaný",
   "dashboard.peers_summary": "{count} uzel/uzlů · {lan} LAN · {healthy} zdravých",
   "dashboard.providers_count": "{count} poskytovatel(ů) · {models} modelů",

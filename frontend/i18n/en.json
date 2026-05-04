@@ -316,6 +316,8 @@
   "dashboard.peer_col_latency": "Latency",
   "dashboard.peer_col_name": "Peer",
   "dashboard.peer_col_trust": "Trust",
+  "dashboard.peer_count_one": "{count} peer hosting",
+  "dashboard.peer_count_other": "{count} peers hosting",
   "dashboard.peer_degraded": "Degraded",
   "dashboard.peers_summary": "{count} peer(s) · {lan} LAN · {healthy} healthy",
   "dashboard.providers_count": "{count} provider(s) · {models} models",

@@ -316,6 +316,8 @@
   "dashboard.peer_col_latency": "Latency",
   "dashboard.peer_col_name": "Peer",
   "dashboard.peer_col_trust": "Trust",
+  "dashboard.peer_count_one": "{count} เพียร์โฮสต์",
+  "dashboard.peer_count_other": "{count} เพียร์โฮสต์",
   "dashboard.peer_degraded": "Degraded",
   "dashboard.peers_summary": "{count} เพียร์ · {lan} LAN · {healthy} สมบูรณ์",
   "dashboard.providers_count": "{count} ผู้ให้บริการ · {models} โมเดล",

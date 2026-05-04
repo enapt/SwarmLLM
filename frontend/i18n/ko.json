@@ -316,6 +316,8 @@
   "dashboard.peer_col_latency": "지연",
   "dashboard.peer_col_name": "피어",
   "dashboard.peer_col_trust": "신뢰",
+  "dashboard.peer_count_one": "{count} 개의 피어가 호스팅 중",
+  "dashboard.peer_count_other": "{count} 개의 피어가 호스팅 중",
   "dashboard.peer_degraded": "성능 저하됨",
   "dashboard.peers_summary": "피어 {count}개 · LAN {lan}개 · 정상 {healthy}개",
   "dashboard.providers_count": "공급자 {count}개 · 모델 {models}개",

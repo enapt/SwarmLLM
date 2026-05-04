@@ -316,6 +316,8 @@
   "dashboard.peer_col_latency": "الكمون",
   "dashboard.peer_col_name": "النظير",
   "dashboard.peer_col_trust": "الثقة",
+  "dashboard.peer_count_one": "{count} نظير يستضيف",
+  "dashboard.peer_count_other": "{count} نظراء يستضيفون",
   "dashboard.peer_degraded": "متدهور",
   "dashboard.peers_summary": "{count} أقران · {lan} LAN · {healthy} سليم",
   "dashboard.providers_count": "{count} مزودين · {models} نماذج",

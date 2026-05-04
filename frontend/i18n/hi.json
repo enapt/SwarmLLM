@@ -316,6 +316,8 @@
   "dashboard.peer_col_latency": "Latency",
   "dashboard.peer_col_name": "Peer",
   "dashboard.peer_col_trust": "विश्वास",
+  "dashboard.peer_count_one": "{count} पीयर होस्ट कर रहा है",
+  "dashboard.peer_count_other": "{count} पीयर होस्ट कर रहे हैं",
   "dashboard.peer_degraded": "गिरावट",
   "dashboard.peers_summary": "{count} पीयर · {lan} LAN · {healthy} स्वस्थ",
   "dashboard.providers_count": "{count} प्रदाता · {models} मॉडल",

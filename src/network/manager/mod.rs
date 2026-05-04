@@ -365,7 +365,10 @@ impl NetworkManager {
             pending_shard_responses: HashMap::new(),
             internal_cmd_tx,
             internal_cmd_rx,
-            pex_inbound_timestamps: Vec::new(),
+            // Pre-allocate at the rate-limit cap so the Vec never grows past
+            // PEX_MAX_PER_WINDOW (R93 — capacity creep otherwise persists
+            // across bursts).
+            pex_inbound_timestamps: Vec::with_capacity(PEX_MAX_PER_WINDOW),
         })
     }
 

@@ -316,6 +316,8 @@
   "dashboard.peer_col_latency": "Độ trễ",
   "dashboard.peer_col_name": "Peer",
   "dashboard.peer_col_trust": "Tin cậy",
+  "dashboard.peer_count_one": "{count} peer đang lưu trữ",
+  "dashboard.peer_count_other": "{count} peer đang lưu trữ",
   "dashboard.peer_degraded": "Suy giảm",
   "dashboard.peers_summary": "{count} nút · {lan} LAN · {healthy} khỏe mạnh",
   "dashboard.providers_count": "{count} nhà cung cấp · {models} mô hình",

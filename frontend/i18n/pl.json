@@ -316,6 +316,8 @@
   "dashboard.peer_col_latency": "Opóźnienie",
   "dashboard.peer_col_name": "Węzeł",
   "dashboard.peer_col_trust": "Zaufanie",
+  "dashboard.peer_count_one": "{count} peer hostuje",
+  "dashboard.peer_count_other": "{count} peerów hostuje",
   "dashboard.peer_degraded": "Obniżony",
   "dashboard.peers_summary": "{count} węzeł/węzłów · {lan} LAN · {healthy} zdrowych",
   "dashboard.providers_count": "{count} dostawca/dostawców · {models} modeli",

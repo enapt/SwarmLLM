@@ -316,6 +316,8 @@
   "dashboard.peer_col_latency": "延迟",
   "dashboard.peer_col_name": "对等节点",
   "dashboard.peer_col_trust": "信任",
+  "dashboard.peer_count_one": "{count} 个对等节点托管",
+  "dashboard.peer_count_other": "{count} 个对等节点托管",
   "dashboard.peer_degraded": "降级",
   "dashboard.peers_summary": "{count} 个对等节点 · {lan} 局域网 · {healthy} 健康",
   "dashboard.providers_count": "{count} 个提供商 · {models} 个模型",

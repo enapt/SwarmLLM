@@ -316,6 +316,8 @@
   "dashboard.peer_col_latency": "Latens",
   "dashboard.peer_col_name": "Nätverksnode",
   "dashboard.peer_col_trust": "Förtroende",
+  "dashboard.peer_count_one": "{count} peer värdar",
+  "dashboard.peer_count_other": "{count} peers värdar",
   "dashboard.peer_degraded": "Försämrad",
   "dashboard.peers_summary": "{count} peer(s) · {lan} LAN · {healthy} friska",
   "dashboard.providers_count": "{count} leverantör(er) · {models} modeller",

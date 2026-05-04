@@ -316,6 +316,8 @@
   "dashboard.peer_col_latency": "Задержка",
   "dashboard.peer_col_name": "Узел",
   "dashboard.peer_col_trust": "Доверие",
+  "dashboard.peer_count_one": "{count} пир размещает",
+  "dashboard.peer_count_other": "{count} пиров размещают",
   "dashboard.peer_degraded": "Деградирован",
   "dashboard.peers_summary": "{count} пир(ов) · {lan} LAN · {healthy} здоровых",
   "dashboard.providers_count": "{count} провайдер(ов) · {models} моделей",

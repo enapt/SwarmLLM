@@ -316,6 +316,8 @@
   "dashboard.peer_col_latency": "レイテンシ",
   "dashboard.peer_col_name": "ピア",
   "dashboard.peer_col_trust": "信頼",
+  "dashboard.peer_count_one": "{count} 個のピアがホスト中",
+  "dashboard.peer_count_other": "{count} 個のピアがホスト中",
   "dashboard.peer_degraded": "低下",
   "dashboard.peers_summary": "{count}個のピア · {lan}件LAN · {healthy}件健全",
   "dashboard.providers_count": "{count}個のプロバイダー · {models}個のモデル",

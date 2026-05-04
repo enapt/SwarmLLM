@@ -316,6 +316,8 @@
   "dashboard.peer_col_latency": "Latenza",
   "dashboard.peer_col_name": "Peer",
   "dashboard.peer_col_trust": "Fiducia",
+  "dashboard.peer_count_one": "{count} peer ospitante",
+  "dashboard.peer_count_other": "{count} peer ospitanti",
   "dashboard.peer_degraded": "Degradato",
   "dashboard.peers_summary": "{count} peer · {lan} LAN · {healthy} sano/i",
   "dashboard.providers_count": "{count} provider · {models} modelli",
