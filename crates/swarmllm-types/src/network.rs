@@ -340,6 +340,19 @@ pub struct ShardResponse {
     pub total_size: u64,
 }
 
+impl ShardResponse {
+    /// Build the canonical empty/error response — used for refused
+    /// requests, queue-full rejections, and disk read/seek/open failures
+    /// (R97). Centralised so adding an error field can't drift across
+    /// the 8+ rejection sites in `network::manager::{requests,shard_transfer}`.
+    pub fn empty() -> Self {
+        Self {
+            data: Vec::new(),
+            total_size: 0,
+        }
+    }
+}
+
 /// One block in a `PrefixCacheAnnounce`. The hash is a chained BLAKE3
 /// rollup over the token IDs of the prompt prefix that produced this KV
 /// snapshot, with `token_count` total tokens covered.

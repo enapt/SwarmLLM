@@ -458,10 +458,13 @@ pub(super) async fn execute_request(
         "Assembling distributed pipeline"
     );
 
-    // Pipeline affinity: reuse previous pipeline if all nodes are still connected
+    // Pipeline affinity: reuse previous pipeline if all nodes are still connected.
+    // peer_registry is intentionally preserved across mid-pipeline disconnects
+    // (gotcha #86); use connected_node_ids as the actual liveness oracle, same
+    // gate as scheduler::gather_candidates.
     let assignment = if let Some(prev) = preferred_pipeline {
         let all_connected = prev.segments.iter().all(|seg| {
-            seg.node_id == local_node_id || shared_state.peer_registry.contains_key(&seg.node_id)
+            seg.node_id == local_node_id || shared_state.connected_node_ids.contains(&seg.node_id)
         });
         if all_connected && !prev.segments.is_empty() {
             tracing::info!(

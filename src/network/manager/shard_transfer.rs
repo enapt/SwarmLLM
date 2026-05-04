@@ -35,6 +35,24 @@ impl NetworkManager {
         self.shard_download_progress.remove(&shard_id);
         self.shard_last_progress_at.remove(&shard_id);
 
+        // Cap shard_p2p_retries map: every retry adds at most one entry per
+        // unique ShardId. On a seeder serving many distinct shards under
+        // hostile churn the map can grow without bound. Soft-evict the
+        // oldest-by-key entry when at cap to keep memory predictable
+        // (R97). Real eviction happens when retries exhaust or completion
+        // succeeds (lines 108, requests.rs:504/642).
+        const MAX_P2P_RETRY_ENTRIES: usize = 4096;
+        if !self.shard_p2p_retries.contains_key(&shard_id)
+            && self.shard_p2p_retries.len() >= MAX_P2P_RETRY_ENTRIES
+        {
+            if let Some(victim) = self.shard_p2p_retries.keys().next().cloned() {
+                self.shard_p2p_retries.remove(&victim);
+                tracing::warn!(
+                    cap = MAX_P2P_RETRY_ENTRIES,
+                    "shard_p2p_retries at cap; evicted one entry"
+                );
+            }
+        }
         let retries = self.shard_p2p_retries.entry(shard_id.clone()).or_insert(0);
         *retries += 1;
         let retry_num = *retries;
@@ -275,10 +293,7 @@ pub(super) async fn read_shard_chunk_async(
                 let chunk_size = chunk_size.min(crate::network::protocol::SHARD_CHUNK_SIZE);
                 if let Err(e) = file.seek(SeekFrom::Start(offset)) {
                     tracing::warn!(error = %e, "Failed to seek in shard file");
-                    return SwarmResponse::ShardData(crate::types::ShardResponse {
-                        data: vec![],
-                        total_size: 0,
-                    });
+                    return SwarmResponse::ShardData(crate::types::ShardResponse::empty());
                 }
                 let read_len = chunk_size.min(total_size.saturating_sub(offset)) as usize;
                 let mut buf = vec![0u8; read_len];
@@ -299,19 +314,13 @@ pub(super) async fn read_shard_chunk_async(
                     }
                     Err(e) => {
                         tracing::warn!(error = %e, "Failed to read shard file");
-                        SwarmResponse::ShardData(crate::types::ShardResponse {
-                            data: vec![],
-                            total_size: 0,
-                        })
+                        SwarmResponse::ShardData(crate::types::ShardResponse::empty())
                     }
                 }
             }
             Err(e) => {
                 tracing::warn!(error = %e, "Failed to open shard file");
-                SwarmResponse::ShardData(crate::types::ShardResponse {
-                    data: vec![],
-                    total_size: 0,
-                })
+                SwarmResponse::ShardData(crate::types::ShardResponse::empty())
             }
         }
     })
@@ -321,10 +330,7 @@ pub(super) async fn read_shard_chunk_async(
         Ok(response) => response,
         Err(e) => {
             tracing::warn!(error = %e, "spawn_blocking panicked during shard read");
-            SwarmResponse::ShardData(crate::types::ShardResponse {
-                data: vec![],
-                total_size: 0,
-            })
+            SwarmResponse::ShardData(crate::types::ShardResponse::empty())
         }
     }
 }

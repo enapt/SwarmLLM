@@ -144,10 +144,7 @@ impl NetworkManager {
                         tracing::warn!(%peer, "Shard transfer from unknown peer — rejecting");
                         let _ = self.swarm.behaviour_mut().request_response.send_response(
                             channel,
-                            SwarmResponse::ShardData(crate::types::ShardResponse {
-                                data: vec![],
-                                total_size: 0,
-                            }),
+                            SwarmResponse::ShardData(crate::types::ShardResponse::empty()),
                         );
                         return;
                     }
@@ -155,10 +152,7 @@ impl NetworkManager {
                     tracing::warn!(%peer, "Shard transfer from unmapped peer — rejecting");
                     let _ = self.swarm.behaviour_mut().request_response.send_response(
                         channel,
-                        SwarmResponse::ShardData(crate::types::ShardResponse {
-                            data: vec![],
-                            total_size: 0,
-                        }),
+                        SwarmResponse::ShardData(crate::types::ShardResponse::empty()),
                     );
                     return;
                 }
@@ -184,10 +178,7 @@ impl NetworkManager {
                         %peer,
                         "ShardTransfer: inbound queue full, replying empty"
                     );
-                    let resp = SwarmResponse::ShardData(crate::types::ShardResponse {
-                        data: vec![],
-                        total_size: 0,
-                    });
+                    let resp = SwarmResponse::ShardData(crate::types::ShardResponse::empty());
                     let _ = self
                         .swarm
                         .behaviour_mut()

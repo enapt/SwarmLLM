@@ -265,17 +265,8 @@ impl NetworkManager {
                 } else {
                     tracing::info!(%peer_id, "Keeping peer in registry (active pipeline) — scheduling reconnect");
                     // Active pipeline needs this peer — reconnect immediately.
-                    // Use peer_id_map to find the address, or fall back to closed_addr.
                     if let Some(addr) = closed_addr.clone() {
-                        let already_queued = self
-                            .pending_redial
-                            .iter()
-                            .any(|(pid, _, _)| *pid == peer_id);
-                        if !already_queued && self.pending_redial.len() < MAX_PENDING_REDIAL {
-                            let scheduled =
-                                std::time::Instant::now() + std::time::Duration::from_millis(500);
-                            self.pending_redial.push((peer_id, addr, scheduled));
-                        }
+                        self.try_enqueue_redial(peer_id, addr, 500);
                     }
                 }
             } else {
@@ -283,27 +274,38 @@ impl NetworkManager {
                 // This typically happens during mDNS simultaneous-dial race.
                 // Schedule a re-dial with random jitter to break symmetry.
                 if let Some(addr) = closed_addr {
-                    // Only re-dial if not already in the queue
-                    let already_queued = self
-                        .pending_redial
-                        .iter()
-                        .any(|(pid, _, _)| *pid == peer_id);
-                    if !already_queued && self.pending_redial.len() < MAX_PENDING_REDIAL {
-                        use std::hash::{Hash, Hasher};
-                        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-                        peer_id.hash(&mut hasher);
-                        let jitter_ms =
-                            REDIAL_JITTER_MIN_MS + (hasher.finish() % REDIAL_JITTER_RANGE_MS);
-                        let scheduled =
-                            std::time::Instant::now() + std::time::Duration::from_millis(jitter_ms);
-                        tracing::info!(
-                            %peer_id, %addr, jitter_ms,
-                            "Scheduling re-dial after connection race"
-                        );
-                        self.pending_redial.push((peer_id, addr, scheduled));
-                    }
+                    use std::hash::{Hash, Hasher};
+                    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                    peer_id.hash(&mut hasher);
+                    let jitter_ms =
+                        REDIAL_JITTER_MIN_MS + (hasher.finish() % REDIAL_JITTER_RANGE_MS);
+                    tracing::info!(
+                        %peer_id, %addr, jitter_ms,
+                        "Scheduling re-dial after connection race"
+                    );
+                    self.try_enqueue_redial(peer_id, addr, jitter_ms);
                 }
             }
         } // end else (num_established == 0)
+    }
+
+    /// Enqueue a re-dial unless this peer already has one queued or the
+    /// queue is at `MAX_PENDING_REDIAL`. Shared by both the active-pipeline
+    /// and the unregistered-peer reconnect paths so the dedup+cap
+    /// invariant lives in one place (R97).
+    fn try_enqueue_redial(
+        &mut self,
+        peer_id: libp2p::PeerId,
+        addr: libp2p::Multiaddr,
+        delay_ms: u64,
+    ) {
+        let already_queued = self
+            .pending_redial
+            .iter()
+            .any(|(pid, _, _)| *pid == peer_id);
+        if !already_queued && self.pending_redial.len() < MAX_PENDING_REDIAL {
+            let scheduled = std::time::Instant::now() + std::time::Duration::from_millis(delay_ms);
+            self.pending_redial.push((peer_id, addr, scheduled));
+        }
     }
 }

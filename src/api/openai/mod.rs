@@ -54,7 +54,7 @@ fn validate_chat_request(
     if let Some(ref sid) = req.session_id {
         if sid.len() > 256 {
             return Err(ApiError(crate::error::SwarmError::Validation(
-                "session_id too long (max 256 chars)".into(),
+                "session_id too long (max 256 bytes)".into(),
             )));
         }
     }
@@ -101,7 +101,7 @@ fn validate_chat_request(
     if let Some(ref adapter) = req.lora_adapter {
         if adapter.len() > 256 {
             return Err(ApiError(crate::error::SwarmError::Validation(
-                "lora_adapter name too long (max 256 chars)".into(),
+                "lora_adapter name too long (max 256 bytes)".into(),
             )));
         }
         if adapter.contains("..") || adapter.contains('/') || adapter.contains('\\') {
@@ -132,7 +132,7 @@ fn validate_chat_request(
         const MAX_SCHEMA_BYTES: usize = 64 * 1024;
         if json_schema.name.len() > MAX_SCHEMA_NAME_BYTES {
             return Err(ApiError(crate::error::SwarmError::Validation(format!(
-                "response_format.json_schema.name exceeds {MAX_SCHEMA_NAME_BYTES} chars"
+                "response_format.json_schema.name exceeds {MAX_SCHEMA_NAME_BYTES} bytes"
             ))));
         }
         let schema_str = json_schema.schema.to_string();
