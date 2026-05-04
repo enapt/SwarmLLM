@@ -90,6 +90,13 @@ libp2p 0.56, axum 0.8, candle-core/candle-transformers 0.10 (CUDA), redb 4, ed25
 - Use `thiserror` for defining error types in `src/error.rs` (SwarmError enum)
 - Use `anyhow` only in `main.rs` and integration tests
 - Map SwarmError variants to HTTP status codes via `ApiError` wrapper
+- Variant → status contract (see `.claude/rules/completeness.md`):
+  - `Validation` → 400 (API input)
+  - `ModelNotAvailable` / `ShardNotFound` / `NotFound` → 404
+  - `Config` → startup ONLY
+  - `Internal` → actual bugs (500)
+  - `ProviderError { status, body }` → upstream cloud errors (preserves status)
+  - `ServiceUnavailable` → THIS server can't serve (503), NOT upstream
 - Network errors: retry with exponential backoff (3 attempts)
 - Inference errors: return immediately, never retry silently
 - Shard integrity errors: quarantine shard, re-download, penalize peer trust
@@ -172,6 +179,8 @@ When spawning subagents in this repo, use these model picks (overrides defaults 
 - `docs/ARCHITECTURE.md` — **Primary reference** — current architecture, subsystems, protocols, security model
 - `docs/book/` — mdBook documentation site (getting started, API reference, architecture, troubleshooting)
 - `docs/DIAGNOSTICS.md` — DIAG: log instrumentation guide for debugging
+- `.claude/rules/architecture.md` — invariants (SharedState, broadcast channels, scheduler oracle, centralised wire-format helpers)
+- `.claude/sweep-log.jsonl` — per-finding history of every `/sweep` round (status: fixed / wontfix / deferred). Grep before re-reporting potential issues.
 - `SwarmLLM_Technical_Specification.docx` — High-level technical specification with architecture rationale
 
 ## Status

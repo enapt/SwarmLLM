@@ -102,17 +102,56 @@ silently break at the wire if duplicated:
   (`decode_layer_forward_encrypted`) MUST go through it. Adding a
   new authenticated field to `LayerForward` means extending this
   helper, not appending bytes on the encrypt side.
-- **`daemon::dispatch::gossip_timestamp_fresh`** — one-sided
-  staleness check for `u64`-millisecond regional gossip
-  (`RegionShardSummary`, `ModelDemandGossip`). New gossip types use
-  this; do NOT re-implement `if ts > now + skew { drop } else if
-  now - ts > max_age { drop }` per gotcha #44.
-- **`credit::ledger::check_signed_freshness`** — one-sided
-  staleness check for `chrono::DateTime<Utc>`-typed signed messages
-  (balance reports, credit transactions). Constants
+- **`daemon::dispatch::timestamp_fresh_one_sided`** — generic
+  one-sided staleness check (R94). Time units must be consistent
+  across `ts`/`now`/`max_age`/`skew`. Use directly for any new
+  timestamp gate; gossip and pre-signed-message helpers below are
+  thin wrappers around it.
+- **`daemon::dispatch::gossip_timestamp_fresh`** — `u64`-ms wrapper
+  used by regional gossip (`RegionShardSummary`, `ModelDemandGossip`)
+  and by the `network::manager::events.rs` GossipSub pre-filter (R94
+  routed it through here too, so the seconds-unit wire-level check
+  shares the one-sided invariant).
+- **`credit::ledger::check_signed_freshness`** — one-sided staleness
+  check for `chrono::DateTime<Utc>`-typed signed messages (balance
+  reports, credit transactions, pool removals). Constants
   `CLOCK_SKEW_TOLERANCE_SECS` / `BALANCE_REPORT_MAX_AGE_SECS` are
-  `pub(crate)` so all credit-typed callers share the same window
-  (gotcha #32).
+  `pub(crate)` so all callers share the same window (gotcha #32). R94
+  routed `pool/manager::handle_inbound_removal` through here.
+- **`pipeline::pack_verify_tokens_to_le_bytes`** (R93) — packs `&[u32]`
+  speculative-verify tokens as i64-LE bytes for the worker's
+  multi-token decode branch. Shared by `speculative.rs::send_verify_batch`
+  and `dsd.rs::forward_verify_through_segments`.
+- **`pipeline::build_spec_verify_forward`** (R93) — constructs the
+  17-field `LayerForward` envelope for spec verify. Adding a new field
+  to `LayerForward` extends this helper, not the call sites.
+- **`pipeline::build_kv_truncate_forward`** (R95) — sibling helper
+  for stop-sequence KV-truncate signals (empty activations,
+  `spec_logits_requested: false`).
+- **`pipeline::register_pending_layer_result`** (R93) — cap-check +
+  oneshot insert + `PendingLayerResultGuard` RAII (gotcha #45). Used
+  by speculative prefill, speculative verify, and DSD verify;
+  `distributed.rs` keeps two inline call sites that need `&mut self`
+  or skip the cap during failover.
+- **`storage::Database::with_write_table`** (R96) — opens a write
+  transaction, runs a closure on the data table, commits on `Ok` or
+  rolls back on `Err`. Used by `put_json`, `insert_raw`, `remove`,
+  `clear_tree`, `replace_tree`. Read-side dedup deferred (lifetime
+  constraints on `ReadOnlyTable`).
+- **`swarmllm_types::ShardResponse::empty()`** (R97) — canonical
+  empty/error response for refused requests, queue-full rejections,
+  and disk read/seek/open failures. 8+ rejection sites across
+  `network/manager/{requests,shard_transfer}` go through it.
+- **`network/manager/connections::try_enqueue_redial`** (R97) —
+  dedup + cap + push for `pending_redial`. Used by both the
+  active-pipeline and unregistered-peer reconnect paths.
+- **`responses::types::raw_tool_kind_or_unknown`** (R93) — extracts
+  the `type` field from a `ToolDef::Raw` JSON value with `<unknown>`
+  fallback. Used by both Chat and Anthropic `translate_tools` error
+  arms.
+- **`cli::bail_if_no_api_key` / `cli::exit_daemon_unreachable`** (R96)
+  — the canonical "daemon not running" / "daemon unreachable"
+  messages. Used by `cli::{bench, chat, peers, status}`.
 
 ## Cross-feature compile checks
 

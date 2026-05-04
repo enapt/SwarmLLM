@@ -1143,7 +1143,14 @@ shared key that any node can overwrite. Each node publishes only its own shard h
   goes through `daemon::dispatch::gossip_timestamp_fresh` — same one-sided
   invariant on `u64` millisecond timestamps. `saturating_sub` returns 0
   when `ts > now`, so the future-rejection branch is required separately
-  from the staleness-rejection branch
+  from the staleness-rejection branch. Both that helper AND the
+  GossipSub wire-level pre-filter in `network/manager/events.rs` route
+  through the generic `daemon::dispatch::timestamp_fresh_one_sided`
+  (R94), so the one-sided invariant has a single implementation
+- Pool removal freshness (`pool::manager::handle_inbound_removal`) routes
+  through `credit::ledger::check_signed_freshness` (R94) so the same
+  replay-window constants apply to every signed timestamp the daemon
+  accepts
 
 ## API Authentication
 
@@ -1368,7 +1375,7 @@ Routes Claude model requests through a locally-authenticated `claude` CLI subpro
 - Cross-component calls: `App.componentName.method()`. Shared state: `App.state.*`. Utilities: `App.utils.*`.
 
 ### Frontend Features
-- **i18n**: 1026 translation keys (1028 entries per locale incl. `_lang` + `_dir`) across 21 languages (en, es, fr, de, pt, it, nl, ru, zh, ja, ko, ar, tr, pl, sv, th, hi, vi, id, uk, cs). Auto-detects browser language. `I18n.t()` + `data-i18n` DOM attributes. Interpolation via `{variable}` placeholders. Fallback chain: current language → English → raw key. "Continue in English" UX for non-English users who prefer English.
+- **i18n**: 1028 translation keys (1030 entries per locale incl. `_lang` + `_dir`) across 21 languages (en, es, fr, de, pt, it, nl, ru, zh, ja, ko, ar, tr, pl, sv, th, hi, vi, id, uk, cs). Auto-detects browser language. `I18n.t()` + `data-i18n` DOM attributes. Interpolation via `{variable}` placeholders. Fallback chain: current language → English → raw key. "Continue in English" UX for non-English users who prefer English.
 - **Theme**: Light / Dark / System toggle. `[data-theme="light"]` CSS overrides. Persisted in localStorage.
 - **Neural network background**: Animated canvas particle network behind dashboard tiles (`frontend/js/neural-bg.js`). ~60 nodes with connecting edges, gentle drift, mouse repulsion/glow. State-reactive coloring: blue (idle) → cyan (active inference) → red-orange (unhealthy/disconnected). Peer count boosts vibrancy, active requests trigger node firing pulses. Pauses when tab hidden; reduced opacity in light theme.
 

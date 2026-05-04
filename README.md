@@ -10,7 +10,7 @@ Decentralized peer-to-peer LLM inference network. A single Rust binary that shar
 
 **Join the swarm. Run AI together — for free.**
 
-> **Status:** Alpha — actively developed, moving into broader testing. Distributed inference stable and tested on multi-node deployments. Most recent headline: cross-node prefix-KV sharing delivers a **12.9× iter-1 TTFT speedup** on 7B prompts when a peer has the same prefix cached (Round 6 bench, 2026-04-20); Windows release binaries validated at Linux parity (Round 8, 2026-04-23). 823 tests, continuous security sweeps. [Report issues](https://github.com/enapt/SwarmLLM/issues).
+> **Status:** Alpha — actively developed, moving into broader testing. Distributed inference stable and tested on multi-node deployments. Most recent headline: cross-node prefix-KV sharing delivers a **12.9× iter-1 TTFT speedup** on 7B prompts when a peer has the same prefix cached (Round 6 bench, 2026-04-20); Windows release binaries validated at Linux parity (Round 8, 2026-04-23). 887 lib tests + 75 integration tests, continuous security sweeps. [Report issues](https://github.com/enapt/SwarmLLM/issues).
 
 ---
 
