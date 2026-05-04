@@ -242,7 +242,9 @@ pub(super) async fn handle_layer_forward(
     }
 }
 
-/// Handle a VisionEncodeRequest: encode the image using local mmproj and respond.
+/// Send a sanitized error `LayerResult` back to the originating peer when
+/// `LayerForward` processing fails locally. The error message is scrubbed
+/// before transmission to avoid leaking internal layer topology or paths.
 pub(super) async fn send_error_result(
     network_tx: &mpsc::Sender<NetworkCommand>,
     target_peer_bytes: &[u8],

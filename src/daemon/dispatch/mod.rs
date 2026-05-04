@@ -132,10 +132,10 @@ pub(super) fn seal_layer_result(
     }
 }
 
-/// Track inference participation: increment forwards_served and earn credits (non-blocking).
-/// `max_layers` caps the credited range to the model's actual layer count,
-/// preventing credit inflation from forged layer_range values.
-/// Estimate VRAM usage from shard files on disk (no model loading).
+/// Estimate VRAM usage (in MiB) from shard files on disk (no model
+/// loading). Sums every `shard_*.bin` byte length in `model_dir` and
+/// scales by the requested layer-range fraction; if `total_layers == 0`
+/// the full sum is returned unscaled.
 pub fn estimate_vram_from_shard_dir(
     model_dir: &std::path::Path,
     layer_start: usize,
@@ -163,6 +163,10 @@ pub fn estimate_vram_from_shard_dir(
     ((total_bytes as f64 * layer_fraction) / (1024.0 * 1024.0)) as u64
 }
 
+/// Track inference participation: increment `forwards_served_atomic` and
+/// earn credits (non-blocking). The caller must pass `estimated_tokens`
+/// already capped against the model's real context length and the
+/// per-forward batch cap so a forged `token_count` can't inflate credits.
 pub(super) fn track_forward_participation(shared_state: &SharedState, estimated_tokens: u32) {
     // AtomicU64 increment — try_write() silently dropped under contention.
     shared_state

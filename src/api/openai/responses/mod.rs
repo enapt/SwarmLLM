@@ -125,7 +125,7 @@ fn validate_responses_ingress(req: &ResponsesRequest) -> Result<(), ApiError> {
     }
     if req.model.is_empty() || req.model.len() > MAX_RESPONSES_MODEL_LEN {
         return Err(ApiError(SwarmError::Validation(format!(
-            "model must be 1..={MAX_RESPONSES_MODEL_LEN} characters"
+            "model must be 1..={MAX_RESPONSES_MODEL_LEN} bytes"
         ))));
     }
     if let Some(prev_id) = req.previous_response_id.as_deref() {
@@ -142,7 +142,7 @@ fn validate_responses_ingress(req: &ResponsesRequest) -> Result<(), ApiError> {
     if let Some(user) = req.user.as_deref() {
         if user.len() > MAX_RESPONSES_USER_BYTES {
             return Err(ApiError(SwarmError::Validation(format!(
-                "user identifier too long (max {MAX_RESPONSES_USER_BYTES} chars)"
+                "user identifier too long (max {MAX_RESPONSES_USER_BYTES} bytes)"
             ))));
         }
     }

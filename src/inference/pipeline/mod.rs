@@ -159,6 +159,39 @@ pub(super) fn build_spec_verify_forward(
     }
 }
 
+/// Build the `LayerForward` envelope for a stop-sequence KV-truncate
+/// signal sent to a remote segment. Empty activations + no compute,
+/// `truncate_kv_to: Some(truncate_to)` is the only signal — the receiver
+/// trims its KV cache and acknowledges. Shares the same field order as
+/// `build_spec_verify_forward` so a `LayerForward` field addition has a
+/// single source of truth in this module.
+pub(super) fn build_kv_truncate_forward(
+    request_id: uuid::Uuid,
+    segment: &crate::types::PipelineSegment,
+    truncate_to: u32,
+    requester_node_id_bytes: [u8; 32],
+) -> crate::types::LayerForward {
+    crate::types::LayerForward {
+        request_id,
+        sequence_num: 1, // not prefill
+        index_pos: truncate_to,
+        activations: Vec::new(), // truncate-only, no compute
+        format: crate::types::TensorFormat::FP32,
+        model_id: segment.shard_id.model_id.clone(),
+        layer_range: segment.layer_range,
+        vision_embeddings: None,
+        sender_peer_bytes: None,
+        tp_meta: None,
+        requester_node_id: Some(requester_node_id_bytes),
+        pre_embedded: false,
+        generated_ids: Vec::new(),
+        adapter_id: None,
+        draft_tokens: Vec::new(),
+        spec_logits_requested: false,
+        truncate_kv_to: Some(truncate_to),
+    }
+}
+
 /// Request-level disqualifiers shared by every "fast path" coordinator:
 /// remote-generate (`remote_generate.rs`), distributed-speculative
 /// (`speculative.rs`), and DSD multi-segment (`dsd.rs`). Returns

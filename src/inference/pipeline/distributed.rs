@@ -553,25 +553,12 @@ impl PipelineExecutor {
                 Some(p) => p,
                 None => continue,
             };
-            let forward = crate::types::LayerForward {
+            let forward = super::build_kv_truncate_forward(
                 request_id,
-                sequence_num: 1, // not prefill
-                index_pos: truncate_to,
-                activations: Vec::new(), // truncate-only, no compute
-                format: crate::types::TensorFormat::FP32,
-                model_id: segment.shard_id.model_id.clone(),
-                layer_range: segment.layer_range,
-                vision_embeddings: None,
-                sender_peer_bytes: None,
-                tp_meta: None,
-                requester_node_id: Some(self.shared_state.identity.node_id().0),
-                pre_embedded: false,
-                generated_ids: Vec::new(),
-                adapter_id: None,
-                draft_tokens: Vec::new(),
-                spec_logits_requested: false,
-                truncate_kv_to: Some(truncate_to),
-            };
+                segment,
+                truncate_to,
+                self.shared_state.identity.node_id().0,
+            );
             if let Err(e) = self
                 .network_tx
                 .send(crate::types::NetworkCommand::SendTensor {
