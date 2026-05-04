@@ -41,9 +41,13 @@ pub async fn hf_search(
     let results = crate::model::huggingface::search_gguf_models(&query)
         .await
         .map_err(|e| {
-            ApiError(crate::error::SwarmError::ServiceUnavailable(
-                crate::api::scrub_truncate_error(&e),
-            ))
+            // Upstream HuggingFace failure → ProviderError, NOT
+            // ServiceUnavailable (which is for local-server outages).
+            // Matches R93's probe.rs fix; same error-contract rule.
+            ApiError(crate::error::SwarmError::ProviderError {
+                status: 502,
+                body: crate::api::scrub_truncate_error(&e),
+            })
         })?;
 
     // Available VRAM for fits_vram check (pool VRAM or local GPU)

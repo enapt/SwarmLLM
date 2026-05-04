@@ -116,7 +116,7 @@ pub async fn hf_source(
         }
     }
 
-    Err(ApiError(crate::error::SwarmError::Validation(format!(
+    Err(ApiError(crate::error::SwarmError::NotFound(format!(
         "No HuggingFace source found for model '{}'",
         model_id
     ))))

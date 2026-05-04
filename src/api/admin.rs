@@ -165,8 +165,13 @@ pub async fn stats(State(state): State<AppState>) -> Json<serde_json::Value> {
 /// in-memory startup config if the file cannot be read.
 pub async fn get_config(State(state): State<AppState>) -> Json<serde_json::Value> {
     let config_path = state.config.node.data_dir.join("config.toml");
-    let config = std::fs::read_to_string(&config_path)
+    // Hot-path: dashboard polls this. Read off the async runtime so the
+    // sync read doesn't block a Tokio worker (R98). update_config at line
+    // ~296 already wraps writes in spawn_blocking — match that pattern.
+    let config = tokio::task::spawn_blocking(move || std::fs::read_to_string(&config_path))
+        .await
         .ok()
+        .and_then(|r| r.ok())
         .and_then(|s| toml::from_str::<crate::config::Config>(&s).ok())
         .unwrap_or_else(|| state.config.clone());
     let config = &config;
