@@ -6,11 +6,13 @@
 [![Docker](https://img.shields.io/badge/docker-ghcr.io-blue.svg)](https://ghcr.io/enapt/swarmllm)
 [![Release](https://img.shields.io/github/v/release/enapt/SwarmLLM?include_prereleases&label=release)](https://github.com/enapt/SwarmLLM/releases)
 
-Decentralized peer-to-peer LLM inference network. A single Rust binary that shards large language models across a network of contributing nodes, enabling access to 70B+ parameter models without expensive hardware or paid API tokens.
+A peer-to-peer LLM inference network in a single Rust binary. Pool hardware with other nodes to run 70B+ parameter models on machines that couldn't host them alone — no API tokens, no cloud fees, end-to-end encryption between every peer.
 
 **Join the swarm. Run AI together — for free.**
 
-> **Status:** Alpha — actively developed, moving into broader testing. Distributed inference stable and tested on multi-node deployments. Most recent headline: cross-node prefix-KV sharing delivers a **12.9× iter-1 TTFT speedup** on 7B prompts when a peer has the same prefix cached (Round 6 bench, 2026-04-20); Windows release binaries validated at Linux parity (Round 8, 2026-04-23). 887 lib tests + 75 integration tests, continuous security sweeps. [Report issues](https://github.com/enapt/SwarmLLM/issues).
+> **Status — alpha**, actively developed. Distributed inference is stable across multi-node deployments. 887 lib tests + 75 integration tests run on every PR; continuous security sweeps. [Report issues](https://github.com/enapt/SwarmLLM/issues).
+>
+> **Recent headlines:** cross-node prefix-KV sharing delivers a **12.9× iter-1 TTFT speedup** on 7B prompts when a peer has the same prefix cached (Round 6, 2026-04-20). Windows release binaries reach Linux parity (Round 8, 2026-04-23).
 
 ---
 
