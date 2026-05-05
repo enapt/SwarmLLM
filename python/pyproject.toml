@@ -43,7 +43,7 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/swarmllm/swarmllm"
-Documentation = "https://github.com/swarmllm/swarmllm/tree/main/python"
-Repository = "https://github.com/swarmllm/swarmllm"
-Issues = "https://github.com/swarmllm/swarmllm/issues"
+Homepage = "https://github.com/enapt/SwarmLLM"
+Documentation = "https://github.com/enapt/SwarmLLM/tree/main/python"
+Repository = "https://github.com/enapt/SwarmLLM"
+Issues = "https://github.com/enapt/SwarmLLM/issues"

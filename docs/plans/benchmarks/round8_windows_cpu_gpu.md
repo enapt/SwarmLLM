@@ -141,6 +141,7 @@ to static-linked CUDA.
 
 ## Data artifacts
 
-Raw logs preserved at `C:\Users\User\swarmllm-smoketest\bench-*.log`
-on the Windows host (single-node + split variants for both binaries).
-Linux native run at `/tmp/bench-linux-qwen/daemon.log`.
+Raw logs from the bench run are not committed; runs were performed
+locally against a Windows + Linux pair (single-node + split variants
+for both binaries) and the per-run summaries above capture the
+relevant numbers.

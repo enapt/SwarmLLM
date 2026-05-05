@@ -1,6 +1,6 @@
 # swarmllm-client
 
-Python client SDK for [SwarmLLM](https://github.com/swarmllm/swarmllm) — decentralized P2P LLM inference.
+Python client SDK for [SwarmLLM](https://github.com/enapt/SwarmLLM) — decentralized P2P LLM inference.
 
 Provides both synchronous and asynchronous clients for the OpenAI-compatible API and SwarmLLM-specific admin/identity/pool endpoints.
 

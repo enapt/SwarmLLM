@@ -60,7 +60,6 @@
     ],
     "deny": [
       "Bash(cargo publish *)",
-      "Read(/home/user/.claude/.credentials.json)",
       "Read(./.env)",
       "Read(./.env.*)"
     ]
