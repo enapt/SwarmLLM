@@ -24,9 +24,9 @@ The unified protocol uses a type-tag byte on every frame
 |---|---|---|
 | `0x00` | `WIRE_TAG_JSON` | JSON control message (`SwarmMessage`, `ShardRequest`/`ShardResponse`) |
 | `0x01` | `WIRE_TAG_TENSOR` | Binary tensor payload (`LayerForward`, `LayerResult`), f16 |
-| `0x02` | `WIRE_TAG_TENSOR_COMPRESSED` | Q8_0 activation frame (Item 13, flag-gated `activation_compression`) — ~3.76× smaller than `0x01` |
+| `0x02` | `WIRE_TAG_TENSOR_COMPRESSED` | Q8_0 activation frame (flag-gated `activation_compression`) — ~3.76× smaller than `0x01` |
 | `0x03` | `WIRE_TAG_SHARD` | Raw shard bytes (ShardResponse payload, 32 MB max — bypasses the 4 MB JSON cap) |
-| `0x04` | `WIRE_TAG_PREFIX_KV` | Cross-node prefix-KV snapshot (Item 8). Frame body's flag byte: `0` = miss, `1` = raw f32, `2` = zstd-compressed f32 (gated on `NetworkConfig::prefix_kv_compression`, default off). Receivers always decompress regardless of the send-side flag. |
+| `0x04` | `WIRE_TAG_PREFIX_KV` | Cross-node prefix-KV snapshot. Frame body's flag byte: `0` = miss, `1` = raw f32, `2` = zstd-compressed f32 (gated on `NetworkConfig::prefix_kv_compression`, default off). Receivers always decompress regardless of the send-side flag. |
 
 Receivers auto-dispatch on the leading byte; senders choose based on
 config + request kind. Only the `0x00` frame carries a JSON body; the
@@ -48,7 +48,7 @@ Six topics, all subscribed at startup in `discovery::subscribe_topics`:
 
 | Topic | Constant | Content |
 |---|---|---|
-| `swarm/models` | `TOPIC_MODELS` | `ShardAnnounce`, `ModelManifest`, `PrefixCacheAnnounce` (Item 8 cross-node prefix-KV index) |
+| `swarm/models` | `TOPIC_MODELS` | `ShardAnnounce`, `ModelManifest`, `PrefixCacheAnnounce` (cross-node prefix-KV index) |
 | `swarm/health` | `TOPIC_HEALTH` | `HealthPing`, `NodeCapability` (includes observed per-layer latencies for the Parallax scheduler), `TpAllReduceResponse` |
 | `swarm/credits` | `TOPIC_CREDITS` | `CreditGossip`, `CreditTransaction` |
 | `swarm/identity` | `TOPIC_IDENTITY` | `NicknameGossip` (signed) |
@@ -58,19 +58,19 @@ Six topics, all subscribed at startup in `discovery::subscribe_topics`:
 The topic match in `NetworkManager::handle_broadcast` is
 contract-not-default: a `SwarmMessage` variant with no topic arm falls
 through `_ => return` and silently drops at the wire. Adding a new
-gossip variant requires updating the match — Round 6 bench caught
-`PrefixCacheAnnounce` missing from the `TOPIC_MODELS` arm, which had
-silently dropped every Item 8 announce at the network layer until a
-two-daemon run flushed it out.
+gossip variant requires updating the match — an early multi-node test
+caught `PrefixCacheAnnounce` missing from the `TOPIC_MODELS` arm, which
+had silently dropped every cross-node prefix-cache announce at the
+network layer until a two-daemon run flushed it out.
 
 Messages older than 5 minutes are rejected (replay protection).
 
 ## Cross-Node Prefix KV Sharing Dispatch
 
-Item 8's fetch path uses the `request_response` protocol, not gossip.
-The gossip layer only broadcasts which blocks each peer holds
-(`PrefixCacheAnnounce` on `swarm/models`); the actual snapshot transfer
-is a direct bilateral exchange:
+The cross-node prefix-cache fetch path uses the `request_response`
+protocol, not gossip. The gossip layer only broadcasts which blocks
+each peer holds (`PrefixCacheAnnounce` on `swarm/models`); the actual
+snapshot transfer is a direct bilateral exchange:
 
 1. Requesting daemon sends `SwarmRequest::PrefixKvFetch` to the peer
    chosen by the probe resolver (trust-gated by
@@ -80,7 +80,7 @@ is a direct bilateral exchange:
 3. Serving daemon returns `SwarmResponse::PrefixKvData { present, payload }`
    with the bytes wrapped in the `WIRE_TAG_PREFIX_KV` frame on the
    binary payload slot (not in the JSON header — `serde_json` inflates
-   `Vec<u8>` ~5× and blows past the 64 MiB IPC cap, see Round 6 bug #2)
+   `Vec<u8>` ~5× and blows past the 64 MiB IPC cap)
 4. Requesting daemon BLAKE3-reverifies + NaN/Inf-scans, hands bytes to
    its worker to hydrate a `KvCacheEntry`
 

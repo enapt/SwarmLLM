@@ -1096,7 +1096,7 @@ shared key that any node can overwrite. Each node publishes only its own shard h
 - Invitation expiry checked at API layer with clear error messages
 - Config: max_pool_size=10, invitation_ttl_hours=24, rate_limit_per_hour=10
 
-**Pool join security hardening** (6-agent sweep):
+**Pool join security hardening**:
 - Join request **signature verification is transport-authenticated**: the dispatch layer sets the requester `NodeId` from the verified Noise-authenticated sender, not from a self-reported field in the message body. Forgery of join origin is not possible.
 - **Capacity check before invitation consumption**: pool size is validated before the invite code is marked as used, preventing invitee lockout when the pool is already full.
 - **`auto_accept` bound to specific `code_hash`**: auto-acceptance only fires for the exact invitation that matches the code the joiner used, preventing cross-pool or stale auto-acceptance.
@@ -1145,10 +1145,10 @@ shared key that any node can overwrite. Each node publishes only its own shard h
   when `ts > now`, so the future-rejection branch is required separately
   from the staleness-rejection branch. Both that helper AND the
   GossipSub wire-level pre-filter in `network/manager/events.rs` route
-  through the generic `daemon::dispatch::timestamp_fresh_one_sided`
-  (R94), so the one-sided invariant has a single implementation
+  through the generic `daemon::dispatch::timestamp_fresh_one_sided`,
+  so the one-sided invariant has a single implementation
 - Pool removal freshness (`pool::manager::handle_inbound_removal`) routes
-  through `credit::ledger::check_signed_freshness` (R94) so the same
+  through `credit::ledger::check_signed_freshness` so the same
   replay-window constants apply to every signed timestamp the daemon
   accepts
 
@@ -1219,7 +1219,7 @@ OpenAI-compatible Responses endpoint — the 2026 default API for o-series / gpt
 - **Background streaming (V8 of v2 plan):** `background=true && stream=true` returns **202 Accepted** + a `Location` header pointing at `/v1/responses/{id}?stream=true&starting_after=-1`. The server runs the inference internally via a spawned task that writes every SSE event into a per-response buffer (cap 2000 events, oldest-first eviction). State lives in `BACKGROUND_STATE: DashMap<id, Arc<BackgroundState>>` (cancel flag + buffer + completion flag + `tokio::sync::Notify`).
 - **Resumable SSE (V5 of v2 plan):** `GET /v1/responses/{id}?stream=true&starting_after={seq}` replays buffered events whose `sequence_number > seq`, then live-tails new events until the response is marked completed. If the response already finished and there's no live `BackgroundState`, a synthetic minimal lifecycle (`response.created` + `response.in_progress` + terminal) is built from the stored record so reconnecting clients still close cleanly.
 - **input_items pagination (V4 of v2 plan):** `GET /v1/responses/{id}/input_items?after={cursor}&limit={n}&order={asc|desc}`. Synthetic ids `item_N` map to the zero-based position in the original request. Returns the OpenAI list shape `{object: "list", data: [...], first_id, last_id, has_more}`. Default limit `INPUT_ITEMS_DEFAULT_PAGE_SIZE = 20`, max `INPUT_ITEMS_MAX_PAGE_SIZE = 100`, `MAX_INPUT_ITEMS_QUERY_LEN = 64` on each query string (`after`/`before`/`order`/`include`). `Text` input produces a single synthetic message item.
-- **Ingress validation:** `validate_responses_ingress` caps `MAX_RESPONSES_INPUT_ITEMS = 1024` items, `MAX_RESPONSES_EXTRAS_COUNT = 32` per `extras` map (top-level AND per-`InputMessageItem`), `MAX_RESPONSES_EXTRA_VALUE_BYTES = 4 KiB` per extras value. Closes a DoS surface where thousands of message items each carrying their own `#[serde(flatten)]` extras could bypass the top-level cap (R90).
+- **Ingress validation:** `validate_responses_ingress` caps `MAX_RESPONSES_INPUT_ITEMS = 1024` items, `MAX_RESPONSES_EXTRAS_COUNT = 32` per `extras` map (top-level AND per-`InputMessageItem`), `MAX_RESPONSES_EXTRA_VALUE_BYTES = 4 KiB` per extras value. Closes a DoS surface where thousands of message items each carrying their own `#[serde(flatten)]` extras could bypass the top-level cap.
 
 ### Anthropic Messages API (`/v1/messages`)
 Full Anthropic Messages API compatibility for use as a Claude Code backend:
@@ -1498,7 +1498,7 @@ Single-node inference performance, measured with `swarmllm bench` (100 output to
 - **Binary signature on auto-update (audit_2026-04-29 C1)** — `src/update.rs` verifies the SHA256 sidecar fetched from the same GitHub release as the binary; a compromised maintainer account/CI token can publish a matching pair. Real fix: generate an offline signing keypair, embed the public key at compile time, publish a detached signature as a third release asset, and verify it before applying the rename. **Deferred** until a key-custody decision is made — see `memory/signing_options.md` for the three concrete options (raw Ed25519, minisign, or Sigstore/Cosign keyless), recommended approach (minisign), and step-by-step rollout plan. Until landed, defence-in-depth fixes keep the blast radius local: `update/check` + `update/apply` are loopback-only (`2e1c5b1`), `apply_update` re-checks `latest_version > running_version` at apply time (post-`cb2c688`), `info.downloaded` only flips true when the staging path is on the same filesystem as the binary, and auto-update is opt-in via `config.updates.auto_update` (default `Disabled`).
 
 ### Distributed inference fast paths
-- **ChaCha session encryption on speculative / DSD / remote-generate fast paths** — `config.network.enable_encryption` gates a ChaCha session layer applied on top of libp2p Noise for `LayerForward` tensor payloads (because intermediate activations can leak model internals). The three fast paths — `pipeline/speculative.rs` (Item 2), `pipeline/dsd.rs` (Item 12), and `pipeline/remote_generate.rs` (Item 4) — do not yet wrap their activation forwards in this extra layer, so they require `enable_encryption = false` to engage. Adding encrypted support is mechanical once a real-traffic measurement decides the threshold; until then the eligibility guards in `pipeline/mod.rs` enforce the off-state. The fast path itself sends a raw user prompt protected by Noise (same baseline as `SwarmMessage::InferenceRequest`), so the security floor is unchanged when these paths engage.
+- **ChaCha session encryption on speculative / DSD / remote-generate fast paths** — `config.network.enable_encryption` gates a ChaCha session layer applied on top of libp2p Noise for `LayerForward` tensor payloads (because intermediate activations can leak model internals). The three fast paths (`pipeline/speculative.rs` distributed speculative decoding, `pipeline/dsd.rs` decentralized speculative decoding, `pipeline/remote_generate.rs` single-segment fast path) do not yet wrap their activation forwards in this extra layer, so they require `enable_encryption = false` to engage. Adding encrypted support is mechanical once a real-traffic measurement decides the threshold; until then the eligibility guards in `pipeline/mod.rs` enforce the off-state. The fast path itself sends a raw user prompt protected by Noise (same baseline as `SwarmMessage::InferenceRequest`), so the security floor is unchanged when these paths engage.
 - **DSD multi-segment requires all-remote segments** — `pipeline/dsd.rs::eligible` rejects pipelines that include the requesting node as a segment, because a local segment needs a different propagation path (worker-IPC vs network send). MVP only handles the all-remote case; the local-mixed case is straightforward but unscheduled.
 
 ### Responses API v2 plan (`docs/plans/archive/responses_api_v2.md`)
@@ -1512,7 +1512,7 @@ Single-node inference performance, measured with `swarmllm bench` (100 output to
 ### Test infrastructure
 - **Synthetic tiny-model fixture (`tests/fixtures/tiny_model/`)** — empty placeholder. Originally specced as a 2-layer / 128-hidden / 2-shard llama-arch GGUF (~1MB) committed to the repo so a multi-process spawn-and-infer integration test could run in CI without network. Two reasons it stays deferred: (1) generating a valid GGUF + matching `manifest.json` + `gguf_header.bin` + tokenizer requires a Python `gguf`-library generator script that we don't yet maintain, and would version-drift against candle-transformers / our split loader; (2) random-weight outputs are gibberish, so the test would only catch GGUF-parse and worker-IPC plumbing bugs — both already covered by `tests/integration/end_to_end.rs` (in-process HTTP + shutdown) and `inference::split` unit tests. The pragmatic substitute is the env-var-gated `local_embedder_load_from_real_model` test (`SWARMLLM_TEST_MODEL_DIR`) and manual smoke tests against the existing TinyLlama-1.1B / Phi-3.5 / Qwen2.5-7B installs at `~/.local/share/swarmllm/models/`. Revisit if a CI worker subprocess regression slips past the unit + in-process layers.
 
-Per-sweep-round findings (status, resolution, deferral) are tracked in `.claude/sweep-log.jsonl`.
+Per-finding history (status, resolution, deferral) is tracked in `.claude/sweep-log.jsonl`.
 
 ## Scalability (Phase 19)
 

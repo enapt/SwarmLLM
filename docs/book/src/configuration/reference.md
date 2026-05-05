@@ -47,7 +47,7 @@ Every configuration option, organized by section.
 | `enable_autonat` | boolean | `true` | NAT detection. Disable on WSL2 to reduce noise |
 | `enable_dcutr` | boolean | `true` | Hole punching. Disable on WSL2 to reduce noise |
 | `tensor_compression` | boolean | `true` | Zstd compression for tensor payloads |
-| `prefix_kv_compression` | boolean | `false` | Zstd compression for cross-node prefix-KV snapshots (Item 8 wire frames). Default off — meaningful win on WAN where wire size is the bottleneck; roughly neutral on localhost. Receivers always decompress regardless of this flag. |
+| `prefix_kv_compression` | boolean | `false` | Zstd compression for cross-node prefix-KV snapshot wire frames. Default off — meaningful win on WAN where wire size is the bottleneck; roughly neutral on localhost. Receivers always decompress regardless of this flag. |
 | `tensor_compress_level` | integer | `1` | Zstd compression level (1-22, 1 = fastest). Shared between tensor and prefix-KV. |
 | `tensor_compress_threshold` | integer | `1024` | Min payload bytes before compression. Shared between tensor and prefix-KV. |
 

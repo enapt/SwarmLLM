@@ -114,7 +114,7 @@ CPU inference is 5-20x slower but works for any model size. To avoid OOM:
   `active_count.fetch_sub(1)` (should never happen on `main`; was a
   real regression fixed in `da6f485`).
 
-## Cross-Node Prefix KV Sharing (Item 8)
+## Cross-Node Prefix-KV Sharing
 
 The cross-node prefix fetch is default-on. Expected logs on a successful
 first hit of a peer's cached prefix:
@@ -140,9 +140,10 @@ A: DIAG: served PrefixKvFetch ... hit=true
 - The peer didn't return a snapshot inside the worker-probe window
   (3000 ms by default). On a large model (7B+) with cold CPU this can
   happen if the snapshot is >100 MB. The path degrades to local prefill
-  — no worse than not having the feature. Round 6 bench found the
-  original 500/400/500 ms chained timeouts were TinyLlama-sized; current
-  values (3000/2500/2000 ms) handle 7B snapshots.
+  — no worse than not having the feature. The current 3000/2500/2000 ms
+  chained timeouts are sized for 7B-class snapshots; the older
+  500/400/500 ms values were TinyLlama-sized and forced a fallback to
+  local prefill on larger models.
 
 **I see `rejected KV snapshot — penalizing peer trust`:**
 - The returned snapshot failed BLAKE3 reverification or contained
@@ -189,7 +190,7 @@ loopback — they're the slow ones, and CI runs them with
 `--test-threads=1` to avoid port contention.
 
 See [Benchmarking](./operations/benchmarking.md) for reproducing the
-speedup-arc benchmarks and [Performance](./operations/performance.md)
+performance benchmarks and [Performance](./operations/performance.md)
 for which knobs turn each speedup on/off.
 
 ## Model Trust

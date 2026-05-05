@@ -12,7 +12,7 @@ A peer-to-peer LLM inference network in a single Rust binary. Pool hardware with
 
 > **Status — alpha**, actively developed. Distributed inference is stable across multi-node deployments. 887 lib tests + 75 integration tests run on every PR; continuous security sweeps. [Report issues](https://github.com/enapt/SwarmLLM/issues).
 >
-> **Recent headlines:** cross-node prefix-KV sharing delivers a **12.9× iter-1 TTFT speedup** on 7B prompts when a peer has the same prefix cached (Round 6, 2026-04-20). Windows release binaries reach Linux parity (Round 8, 2026-04-23).
+> **Recent benchmarks:** cross-node prefix-KV sharing delivers a **12.9× iter-1 TTFT speedup** on 7B prompts when a peer has the same prefix cached (measured 2026-04-20). Windows release binaries reach Linux parity on single-node and split inference (validated 2026-04-23).
 
 For long-form documentation see the [SwarmLLM book](https://enapt.github.io/SwarmLLM/).
 
@@ -210,7 +210,7 @@ Single-node, `swarmllm bench`. Prompt: *"Explain the theory of relativity in sim
 | Phi-3.5 Mini | 3.8B | Q4_K_M | **46.4 tok/s** | 1.8 tok/s | 25.8× |
 | Qwen2.5-Coder 7B | 7.6B | Q4_K_M | **29.0 tok/s** | 2.4 tok/s | 12.1× |
 
-**Cross-node prefix-KV sharing** (Round 6, 2026-04-20): two daemons on loopback, Qwen2.5-Coder-7B Q4, 672-token prompt. When the second node fetches the first's prefix-KV snapshot instead of re-prefilling locally, **iter-1 TTFT drops from 151.7 s → 11.8 s (12.9×)**. See [Performance chapter](https://enapt.github.io/SwarmLLM/operations/performance.html#item-8--cross-node-prefix-kv-sharing).
+**Cross-node prefix-KV sharing** (measured 2026-04-20): two daemons on loopback, Qwen2.5-Coder-7B Q4, 672-token prompt. When the second node fetches the first's prefix-KV snapshot instead of re-prefilling locally, **iter-1 TTFT drops from 151.7 s → 11.8 s (12.9×)**. See [Performance chapter](https://enapt.github.io/SwarmLLM/operations/performance.html#cross-node-prefix-kv-sharing).
 
 ```bash
 swarmllm bench --max-tokens 100 --iterations 5 --concurrency 4 --json

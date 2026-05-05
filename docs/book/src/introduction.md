@@ -20,7 +20,7 @@ This site is the long-form reference. For source code, releases, and issues, hea
 | Phi-3.5 3.8B Q4      | 46.4 tok/s | 1.8 tok/s |
 | Qwen2.5-Coder 7B Q4  | 29.0 tok/s | 2.4 tok/s |
 
-**Distributed-inference speedups (all default-on):** prefix-caching, batched prefill, the Parallax scheduler, and cross-node KV sharing. Round 6 bench (2026-04-20) measured a **12.9× iter-1 TTFT speedup** on a 672-token Qwen-7B prompt when a peer had the same prefix already cached (151.7 s → 11.8 s, CPU-CPU, localhost). Each knob is documented in [Performance & Inference Speedups](./operations/performance.md).
+**Distributed-inference speedups (all default-on):** prefix-caching, batched prefill, the Parallax scheduler, and cross-node KV sharing. The cross-node prefix-KV benchmark (2026-04-20) measured a **12.9× iter-1 TTFT speedup** on a 672-token Qwen-7B prompt when a peer had the same prefix already cached (151.7 s → 11.8 s, CPU-CPU, localhost). Each knob is documented in [Performance & Inference Speedups](./operations/performance.md).
 
 ## How a node fits together
 

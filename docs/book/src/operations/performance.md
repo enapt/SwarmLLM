@@ -9,14 +9,14 @@ A few are **flag-gated** because the win is workload-dependent or the path
 is still being hardened; those are documented at the bottom so you can turn
 them on intentionally.
 
-The full internal design of each item lives in
+The full design notes live in
 [`docs/plans/archive/distributed_inference_speedup.md`](https://github.com/enapt/SwarmLLM/blob/main/docs/plans/archive/distributed_inference_speedup.md)
 with benchmark recipes in
 [`docs/plans/benchmarks/`](https://github.com/enapt/SwarmLLM/tree/main/docs/plans/benchmarks).
 
 ## The default-on stack
 
-### Item 3 — Continuous batching
+### Continuous batching
 
 Concurrent `/v1/chat/completions` requests for the same model share one
 forward pass per decode tick instead of running serially. GPU builds use a
@@ -27,7 +27,7 @@ no regression.
   TinyLlama Q4
 - **Config:** `inference.continuous_batching = true` (default)
 
-### Item 4 — Remote-generate fast path
+### Remote-generate fast path
 
 For single-segment distributed inference (the common case: one remote node
 owns the whole model, requester does embedding + sampling), skip the
@@ -38,7 +38,7 @@ the remote worker. Tokens stream back as they're sampled.
 - **Config:** default-on — no flag, triggered automatically on
   single-segment pipelines
 
-### Item 5 — Cross-request prefix cache
+### Cross-request prefix cache
 
 Each worker keeps an LRU cache of prefill KV snapshots keyed by the
 prompt's token prefix. A re-submission with the same system prompt
@@ -51,7 +51,7 @@ forwards the suffix.
   `inference.prefix_cache_block_tokens = 64` (default — block granularity),
   `inference.prefix_cache_max_entries = 16` (default — per model)
 
-### Item 7 — BatchGenerate + chunked prefill
+### Batched prefill + chunked prefill
 
 Sarathi-style chunked prefill: a long admission advances by
 `prefill_chunk_tokens` (default 128) per decode tick, so new requests
@@ -67,7 +67,7 @@ same-shape prefill chunks into one `forward_batch` call.
   `inference.prefill_chunk_tokens = 128`,
   `inference.batched_prefill_forward = true` (all default)
 
-### Item 8 — Cross-node prefix KV sharing
+### Cross-node prefix-KV sharing
 
 When node B receives a prompt whose prefix was already prefilled by peer A,
 B fetches A's KV snapshot over the wire instead of re-prefilling locally.
@@ -95,33 +95,32 @@ B verifies BLAKE3 + NaN/Inf → hydrates KV → prefill suffix only
 The fetch path uses three chained timeouts (worker probe 3000 ms, daemon
 network 2500 ms, serving IPC 2000 ms) sized for 7B-class f32 snapshots.
 Missing the window degrades to a clean miss — no worse than not having
-the feature. See
-[`docs/plans/benchmarks/round6.md`](https://github.com/enapt/SwarmLLM/blob/main/docs/plans/benchmarks/round6.md)
-for the two-daemon loopback bench recipe.
+the feature. See the
+[two-daemon loopback bench recipe](https://github.com/enapt/SwarmLLM/blob/main/docs/plans/benchmarks/round6.md)
+for reproduction details.
 
-### Item 16 — Parallax scheduler
+### Parallax scheduler
 
 Pipeline assignment uses shortest-path dynamic programming over observed
 per-layer latencies (EMA over recent forwards) rather than a greedy
-pick-the-closest-peer heuristic. Phase B.2 cross-gossips top-32 observed
-latencies via `NodeCapability.observed_latencies` so every node has a
-current view of the network's compute profile. Phase C.2 adds a soft
-acquire/prune bias in `AutoShardManager` driven by a per-shard stability
-counter (≥3 consistent ticks before it acts), so shards drift to where
-they'll actually be used without respecting existing hard constraints.
+pick-the-closest-peer heuristic. Cross-gossip of top-32 observed
+latencies via `NodeCapability.observed_latencies` lets every node keep
+a current view of the network's compute profile. A soft acquire/prune
+bias in `AutoShardManager` driven by a per-shard stability counter
+(≥3 consistent ticks before it acts) drifts shards toward where they're
+actually used without violating existing hard constraints.
 
 - **Measured:** 10 routing + 7 allocator + 2 scheduler integration tests
   passing; real-world improvements depend on network heterogeneity. The
   biggest impact is in asymmetric setups where a cheap peer's low
   observed latency should beat a high-VRAM peer's big shard slot.
-- **Config:** default-on. Phase D (multi-pipeline concurrency) is
-  deferred.
+- **Config:** default-on. Multi-pipeline concurrency is deferred.
 
 ## Flag-gated features
 
 Turn these on when you've measured that they match your workload.
 
-### Item 2 — Distributed speculative decoding (`speculative_distributed`)
+### Distributed speculative decoding (`speculative_distributed`)
 
 Draft model proposes γ tokens locally; target verifies all γ in one
 remote forward pass.
@@ -133,7 +132,7 @@ remote forward pass.
   `inference.draft_model_path = "path/to/draft.gguf"`,
   `inference.speculative_gamma = 4` (tokens per verify round)
 
-### Item 6 — SWIFT self-speculative decoding (`swift_self_speculative`)
+### SWIFT self-speculative decoding (`swift_self_speculative`)
 
 The target model acts as its own draft by skipping a contiguous range of
 layers on the proposal pass. No external draft model needed.
@@ -145,7 +144,7 @@ layers on the proposal pass. No external draft model needed.
   `inference.swift_skip_ratio = 0.45` (fraction of layers to skip on the
   draft pass)
 
-### Item 12 — DSD: decentralized speculative decoding (`decentralized_spec_decoding`)
+### DSD — decentralized speculative decoding (`decentralized_spec_decoding`)
 
 Multi-segment distributed inference with speculative decoding woven in.
 A γ-token decode on the last-segment worker plus KV truncation primitives
@@ -155,7 +154,7 @@ plus a coordinator loop in `pipeline/dsd.rs`.
   multi-segment WAN benchmark pending.
 - **Config:** `inference.decentralized_spec_decoding = true`
 
-### Item 13 — Activation compression Q8_0 (`activation_compression`)
+### Activation compression Q8_0 (`activation_compression`)
 
 Intermediate pipeline hidden-state activations are quantized from f16 to
 Q8_0 before going over the wire. Receivers auto-dispatch on the dtype
@@ -165,19 +164,20 @@ tag.
   End-to-end multi-segment benchmark pending.
 - **Config:** `inference.activation_compression = true`
 
-### Item 1 — Persistent pipeline stream (`persistent_pipeline_stream`)
+### Persistent pipeline stream (`persistent_pipeline_stream`)
 
 Replace per-token request/response with one long-lived libp2p bidirectional
 stream per pipeline session.
 
 - **Status:** Landed behind flag. Wire-level verified; no measured latency
-  win because the bottleneck was elsewhere (solved by Items 4 + 7).
+  win because the bottleneck was elsewhere (solved by remote-generate +
+  batched prefill).
 - **Config:** `inference.persistent_pipeline_stream = true`
 
 ## Debugging slow inference
 
 Default verbosity (`-v`) gives an `INFO`-level stream. Bump to `-vv` to
-see per-request `DIAG:` logs, which include all the speedup-arc
+see per-request `DIAG:` logs, which include the per-feature speedup
 signals:
 
 ```bash
@@ -186,32 +186,33 @@ signals:
 
 Key DIAG kinds:
 
-- `DIAG: prefix-cache HIT` — local Item 5 hit
-- `DIAG: cross-node prefix HIT` — Item 8 fetch succeeded
-- `DIAG: prefix-probe: fetch timed out` — Item 8 fetch missed the window
-  (see Round 6 notes on timeout sizing)
+- `DIAG: prefix-cache HIT` — local prefix cache hit
+- `DIAG: cross-node prefix HIT` — cross-node prefix-KV fetch succeeded
+- `DIAG: prefix-probe: fetch timed out` — cross-node fetch missed the
+  window (see [Troubleshooting](../troubleshooting.md) for timeout
+  sizing on 7B+ models)
 - `DIAG: served PrefixKvFetch ... hit=true` — this node served a
   cross-node fetch
-- `DIAG: BatchGenerate` — Item 7 slot table activity
-- `DIAG: chunk fused batch_size=N` — Item 7 Phase 4 fused prefill chunks
-- `DIAG: Parallax` — Item 16 scheduler decisions
+- `DIAG: BatchGenerate` — batched-prefill slot table activity
+- `DIAG: chunk fused batch_size=N` — fused prefill chunks (Phase 4)
+- `DIAG: Parallax` — Parallax scheduler decisions
 
 For the full DIAG taxonomy and what each line means, see
 [`docs/DIAGNOSTICS.md`](https://github.com/enapt/SwarmLLM/blob/main/docs/DIAGNOSTICS.md).
 
 ## When should I turn a speedup off?
 
-Almost never. The default-on items degrade cleanly under edge cases —
-Item 5's prefix cache falls through to full prefill on a miss, Item 8
-falls through to local prefill on a timeout, Item 7 falls back to
-sequential when concurrency is 1. If you suspect one is the cause of a
-regression:
+Almost never. The default-on features degrade cleanly under edge cases —
+the prefix cache falls through to full prefill on a miss, cross-node
+fetch falls through to local prefill on a timeout, batched prefill
+falls back to sequential when concurrency is 1. If you suspect one is
+the cause of a regression:
 
 - **Prefix cache off:** `inference.prefix_cache_enabled = false`
 - **Cross-node fetch off:** `inference.cross_node_prefix_trust_min = 2.0`
   (gates every peer out)
 - **Continuous batching off:** `inference.continuous_batching = false`
-  (also disables Item 7 Phase 4)
+  (also disables Phase 4 fusion)
 - **Phase 4 fusion off, keep continuous batching:**
   `inference.batched_prefill_forward = false`
 

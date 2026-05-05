@@ -2,10 +2,9 @@
 
 OpenAI's `/v1/responses` is the default API for o-series and gpt-5-series
 models in 2026 and the replacement for the sunsetting Assistants API
-(2026-08-26). SwarmLLM exposes the full v1 surface (`M1–M9`) plus the
-v2 follow-on work (`V1–V8`); see `docs/plans/archive/responses_api.md` and
-`docs/plans/archive/responses_api_v2.md` for design notes and the per-milestone
-history.
+(2026-08-26). SwarmLLM exposes the full v1 surface plus follow-on
+features such as resumable streams, async background runs, MCP tool
+integration, and conversation chaining via `previous_response_id`.
 
 ## Endpoints
 

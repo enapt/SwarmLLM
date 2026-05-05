@@ -25,8 +25,8 @@ Key flags:
 - `--concurrency` — concurrent requests for throughput tests (default 1)
 - `--stream` — use streaming chat completions and report **TTFT**
   (time-to-first-token) per request. TTFT is the signal that captures
-  Item 7 and Item 8 wins; non-streaming bench rolls prefill + decode into
-  one total time and hides the difference.
+  the batched-prefill and cross-node-fetch wins; non-streaming bench
+  rolls prefill + decode into one total time and hides the difference.
 - `--prompt` — custom prompt; default is a short prompt about
   relativity that won't stress prefix caching. Pass a longer prompt
   (≥500 tokens) to exercise prefix cache paths.
@@ -52,12 +52,13 @@ Reference numbers on an AMD Ryzen 7 5800H + RTX 3070 Laptop 8 GB VRAM
 Single-node numbers are largely about your hardware. The interesting
 benchmarks are distributed.
 
-## Reproducing the speedup-arc benchmarks
+## Reproducing the performance benchmarks
 
-Each entry in the speedup arc has a written recipe. Most require two
-local daemons on loopback; a couple need three.
+Each performance optimization has a written benchmark recipe in
+[`docs/plans/benchmarks/`](https://github.com/enapt/SwarmLLM/tree/main/docs/plans/benchmarks).
+Most require two local daemons on loopback; a couple need three.
 
-### Item 7: BatchGenerate TTFT fairness
+### Batched prefill — TTFT fairness
 
 [`docs/plans/benchmarks/round4.md`](https://github.com/enapt/SwarmLLM/blob/main/docs/plans/benchmarks/round4.md)
 
@@ -65,7 +66,7 @@ Measures TTFT at concurrency 2/4/8 with Phases 1+2 on vs off. The win is
 fairness, not aggregate throughput: Sarathi chunked prefill prevents new
 admits from waiting behind the full prior prefill.
 
-### Item 7 Phase 4: Batched chunked prefill
+### Batched chunked prefill (Phase 4)
 
 [`docs/plans/benchmarks/round5.md`](https://github.com/enapt/SwarmLLM/blob/main/docs/plans/benchmarks/round5.md)
 
@@ -74,7 +75,7 @@ Measures aggregate tok/s and per-request TTFT spread with
 same-shape prefill chunks so TTFT lands tightly clustered instead of
 spreading.
 
-### Item 8: Cross-node prefix KV sharing
+### Cross-node prefix-KV sharing
 
 [`docs/plans/benchmarks/round6.md`](https://github.com/enapt/SwarmLLM/blob/main/docs/plans/benchmarks/round6.md)
 
@@ -118,10 +119,11 @@ to confirm the fetch path fired.
 - **WSL2 localhost bandwidth** is much higher than any real network —
   localhost benches are the best case for compute-bound paths and the
   worst case for fetch paths. WAN numbers will be different.
-- **TinyLlama is too small to show some speedups** — Item 8 in particular
-  needs a larger model (Phi-3.5, Qwen-7B) to flip the sign between
-  fetch-cost and prefill-cost. See the Round 6 doc for the cross-over
-  math.
+- **TinyLlama is too small to show some speedups** — cross-node
+  prefix-KV sharing in particular needs a larger model (Phi-3.5,
+  Qwen-7B) to flip the sign between fetch-cost and prefill-cost. See
+  the [round6 benchmark notes](https://github.com/enapt/SwarmLLM/blob/main/docs/plans/benchmarks/round6.md)
+  for the cross-over math.
 - **VRAM fit matters** — Qwen-7B Q4 weights fit in 8 GB but batched
   attention kernel scratch does not. CPU-mode works but the baseline
   numbers above change.
