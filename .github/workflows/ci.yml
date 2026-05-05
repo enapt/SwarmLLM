@@ -172,10 +172,15 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # Keep default features (the embedded frontend) and stack the
+          # GPU-backend feature on top — the daemon binary always serves
+          # the frontend, so `--no-default-features` here would just
+          # surface unrelated missing-symbol errors from the dashboard
+          # routes instead of testing the GPU code path.
           - features: "candle-cuda"
-            flags: "--no-default-features --features candle-cuda"
+            flags: "--features candle-cuda"
           - features: "windows-gpu"
-            flags: "--no-default-features --features windows-gpu"
+            flags: "--features windows-gpu"
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
