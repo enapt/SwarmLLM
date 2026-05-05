@@ -1,0 +1,128 @@
+/* SwarmLLM mdBook polish.
+ *
+ * Layered on top of the default `coal` (dark) theme; light themes
+ * (light/rust/navy/ayu) are unchanged where possible — the rules
+ * below use color-mix or transparent overlays so they don't fight
+ * the per-theme palette. */
+
+:root {
+  --swarmllm-accent: #7aa2ff;
+  --swarmllm-accent-soft: rgba(122, 162, 255, 0.15);
+  --swarmllm-success: #5fc99e;
+  --swarmllm-warn: #f5b748;
+}
+
+/* Tighter content width on wide monitors — long lines hurt scan. */
+.content main {
+  max-width: 820px;
+  padding: 0 18px;
+}
+
+/* h1: lighter weight + accent underline. */
+.content h1 {
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  border-bottom: 2px solid var(--swarmllm-accent);
+  padding-bottom: 0.35em;
+  margin-bottom: 0.8em;
+}
+
+/* h2: softer separator. */
+.content h2 {
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  border-bottom: 1px solid var(--sidebar-bg, rgba(120, 120, 120, 0.25));
+  padding-bottom: 0.25em;
+  margin-top: 2em;
+}
+
+.content h3 {
+  font-weight: 600;
+}
+
+/* Inline code: subtle accent tint so it pops without screaming. */
+.content code {
+  background: var(--swarmllm-accent-soft);
+  border-radius: 4px;
+  padding: 0.12em 0.4em;
+  font-size: 0.92em;
+}
+
+/* Code blocks already have their own pre styling; don't re-tint. */
+.content pre code {
+  background: transparent;
+  padding: 0;
+}
+
+/* Tables: more compact, zebra-striped on the dark theme. */
+.content table {
+  border-collapse: collapse;
+  margin: 1em 0;
+  width: 100%;
+}
+.content table th,
+.content table td {
+  padding: 0.55em 0.85em;
+  border: 1px solid var(--sidebar-bg, rgba(120, 120, 120, 0.25));
+}
+.content table thead {
+  background: var(--swarmllm-accent-soft);
+}
+
+/* Blockquotes as gentle callouts. */
+.content blockquote {
+  border-left: 3px solid var(--swarmllm-accent);
+  background: var(--swarmllm-accent-soft);
+  padding: 0.6em 1em;
+  border-radius: 0 6px 6px 0;
+  margin: 1em 0;
+  color: inherit;
+}
+
+/* Links: cleaner accent on hover. */
+.content a:link,
+.content a:visited {
+  color: var(--swarmllm-accent);
+  text-decoration: none;
+  border-bottom: 1px solid transparent;
+  transition: border-color 0.12s ease;
+}
+.content a:hover {
+  border-bottom-color: var(--swarmllm-accent);
+}
+
+/* Sidebar chapter active state: clearer accent bar. */
+.sidebar .chapter li.chapter-item.active > a,
+.sidebar .chapter li.chapter-item > a:hover {
+  color: var(--swarmllm-accent);
+}
+
+/* "Next steps" cards (custom pattern used in introduction.md). */
+.next-steps {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 12px;
+  margin: 1.5em 0;
+}
+.next-steps a {
+  display: block;
+  padding: 14px 16px;
+  border: 1px solid var(--sidebar-bg, rgba(120, 120, 120, 0.25));
+  border-radius: 8px;
+  text-decoration: none;
+  border-bottom: 1px solid var(--sidebar-bg, rgba(120, 120, 120, 0.25)) !important;
+  transition: border-color 0.12s ease, transform 0.12s ease;
+}
+.next-steps a:hover {
+  border-color: var(--swarmllm-accent) !important;
+  transform: translateY(-1px);
+}
+.next-steps a strong {
+  display: block;
+  color: var(--swarmllm-accent);
+  margin-bottom: 4px;
+}
+.next-steps a span {
+  font-size: 0.92em;
+  opacity: 0.8;
+}

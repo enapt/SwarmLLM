@@ -1,89 +1,69 @@
 # SwarmLLM
 
-**Join the swarm. Run AI together — for free.**
+> **Run AI together — for free.** A single Rust binary that turns your computer into a node in a peer-to-peer LLM inference network. Pool hardware with others to run models too large for any single machine, with no API tokens, no cloud fees, and end-to-end encryption between every peer.
 
-SwarmLLM is a single Rust binary that turns your computer into a node in a distributed AI inference network. Multiple nodes combine their hardware to run large language models that no single machine could handle alone — for free, with no API tokens or cloud fees.
+This site is the long-form reference. For source code, releases, and issues, head to [`enapt/SwarmLLM`](https://github.com/enapt/SwarmLLM).
 
-## Key Features
+## What you can do with it
 
-- **Single Binary** — No Python, no Docker required. Download and run.
-- **Combine Resources** — Pool your GPU/CPU with others to run 70B+ models that no one could run alone.
-- **OpenAI-Compatible API** — Drop-in replacement for `POST /v1/chat/completions`. Works with any tool that supports the OpenAI format.
-- **Anthropic Messages API** — Full `POST /v1/messages` compatibility. Use SwarmLLM as a Claude Code backend to access all models through one endpoint.
-- **MCP Server** — Native Model Context Protocol server with 7 tools (`chat`, `models`, `compare`, `research`, `batch_prompts`, `delegate`, `node_info`) for Claude Code, VS Code Copilot, Cursor, and MCP-compatible agents. Offload research and batch tasks to cheap models in parallel.
-- **Shard-Only Operation** — Nodes only need small pieces (shards) of a model. A phone with 2GB can contribute to running a 70B model.
-- **Private by Default** — All peer-to-peer communication is end-to-end encrypted (X25519 + ChaCha20-Poly1305 with forward secrecy). Relay nodes never see your data — unlike other distributed inference tools where peers have no encryption layer.
-- **Credit Incentives** — Earn credits by serving inference, hosting shards, and relaying traffic. Higher credits = higher priority.
-- **VRAM-Aware** — Automatic shard management based on available GPU memory with on-demand model loading and LRU eviction.
-- **Model Trust System** — Automatic trust levels (Discovered, Pinned, DemandVerified, NetworkPopular) gate shard downloads and pruning decisions.
-- **Zero-Config Networking** — LAN discovery via mDNS, peer exchange, persistent peer cache, invite codes.
-- **Multi-SDK** — Python, JavaScript/TypeScript, LangChain, and LlamaIndex integrations.
-- **Web Dashboard** — Built-in swarm-first UI with chat, model browser, network map, and model compare. 21 languages (i18n), light/dark/system theme toggle, plain-English labels for beginners.
-- **Cloud Fallback** — Optionally route to 12 cloud providers (incl. Moonshot/Kimi) when no swarm peers have the model you need.
+- **Chat with AI locally** — open `localhost:8800` after running the binary; the dashboard auto-detects your hardware and walks you through downloading a model.
+- **Use it as a drop-in API** — OpenAI-compatible `/v1/chat/completions`, the Anthropic Messages API at `/v1/messages` (full Claude Code support), an MCP server with seven tools, plus 12 cloud providers reachable through one endpoint.
+- **Pool hardware** — your phone with 2 GB of RAM can host a few shards of a 70B model and contribute alongside someone else's GPU. Shards download individually via byte-range requests; no node ever needs the full file.
+- **Stay private** — every P2P hop uses X25519 + ChaCha20-Poly1305 with forward secrecy. The optional boomerang pipeline ensures no remote node ever sees plaintext.
 
-## Performance
+## Single-node performance (RTX 3070 Laptop, 8 GB VRAM)
 
-Single-node inference on an NVIDIA RTX 3070 Laptop (8GB VRAM):
+| Model                | GPU        | CPU       |
+|----------------------|------------|-----------|
+| TinyLlama 1.1B Q4    | 27.2 tok/s | 4.2 tok/s |
+| Gemma-2 2B Q4        | 20.6 tok/s | 3.5 tok/s |
+| Phi-3.5 3.8B Q4      | 46.4 tok/s | 1.8 tok/s |
+| Qwen2.5-Coder 7B Q4  | 29.0 tok/s | 2.4 tok/s |
 
-| Model | GPU | CPU |
-|-------|-----|-----|
-| TinyLlama 1.1B Q4 | 27.2 tok/s | 4.2 tok/s |
-| Gemma-2 2B Q4 | 20.6 tok/s | 3.5 tok/s |
-| Phi-3.5 3.8B Q4 | 46.4 tok/s | 1.8 tok/s |
-| Qwen2.5-Coder 7B Q4 | 29.0 tok/s | 2.4 tok/s |
+**Distributed-inference speedups (all default-on):** prefix-caching, batched prefill, the Parallax scheduler, and cross-node KV sharing. Round 6 bench (2026-04-20) measured a **12.9× iter-1 TTFT speedup** on a 672-token Qwen-7B prompt when a peer had the same prefix already cached (151.7 s → 11.8 s, CPU-CPU, localhost). Each knob is documented in [Performance & Inference Speedups](./operations/performance.md).
 
-**Distributed-inference speedups (all default-on):** a stack of
-prefix-caching + batched prefill + Parallax scheduling + cross-node KV
-sharing. Round 6 bench (2026-04-20) measured a **12.9× iter-1 TTFT
-speedup** when a peer has the same prompt prefix already prefilled
-(672-token Qwen-7B prompt on CPU-CPU localhost: 151.7 s → 11.8 s). Full
-stack and the knobs to turn each on/off are documented in
-[Performance & Inference Speedups](./operations/performance.md).
+## How a node fits together
 
-## How It Works
-
-```
-┌─────────────────────────────────────────────────────┐
-│                  Your Computer                       │
-│                                                     │
-│  ┌──────────┐  ┌──────────────┐  ┌──────────────┐  │
-│  │  P2P     │  │  HTTP API    │  │  Admin UI    │  │
-│  │  Node    │  │  Server      │  │  (embedded)  │  │
-│  │(TCP+QUIC)│  │  (Axum)      │  │              │  │
-│  └──────────┘  └──────────────┘  └──────────────┘  │
-│                                                     │
-│         All running on a single port (8800)          │
-└─────────────────────────────────────────────────────┘
+```text
+┌──────────────────────────────────────────────────────────────┐
+│                      Your computer (port 8800)                │
+│                                                              │
+│   P2P node          HTTP server          Web dashboard       │
+│   TCP+QUIC          OpenAI · Anthropic   (embedded)          │
+│   Noise+Yamux       MCP · Admin          21 languages        │
+│                                                              │
+│   ─────────────────────────────────────────────────────────  │
+│   11 Tokio subsystems · DashMap shared state · redb storage  │
+└──────────────────────────────────────────────────────────────┘
 ```
 
-Each SwarmLLM node:
-1. Connects to the P2P network over TCP (Noise+Yamux) and QUIC/UDP
-2. Downloads and hosts shard files for popular models
-3. Participates in distributed inference pipelines
-4. Serves OpenAI + Anthropic compatible HTTP APIs and an MCP server on the same port
-5. Provides a web dashboard for monitoring and chat
+Each node simultaneously: connects over TCP and QUIC, serves four HTTP API surfaces (OpenAI · Anthropic · MCP · admin) on the same port, hosts shard files for popular models, participates in distributed inference pipelines, and ships an embedded web dashboard.
 
-## Quick Start
+## Where to go next
 
-```bash
-# Download and run (Linux)
-tar xzf swarmllm-linux-x86_64.tar.gz
-cd swarmllm-linux-x86_64
-./swarmllm run
+<div class="next-steps">
+<a href="./getting-started.html"><strong>Getting Started →</strong><span>Install the binary, download your first model, send your first prompt.</span></a>
+<a href="./architecture/overview.html"><strong>Architecture →</strong><span>Subsystems, network protocols, encryption model, scheduler design.</span></a>
+<a href="./api/openai.html"><strong>API Reference →</strong><span>OpenAI · Anthropic · MCP · Responses · Admin endpoints with examples.</span></a>
+<a href="./operations/performance.html"><strong>Performance →</strong><span>The full speedup stack and how to tune it for your network.</span></a>
+<a href="./operations/tailscale-wan.html"><strong>WAN setup →</strong><span>Run a swarm across the internet with Tailscale.</span></a>
+<a href="./troubleshooting.html"><strong>Troubleshooting →</strong><span>Common pitfalls, diagnostics, and how to file useful bug reports.</span></a>
+</div>
 
-# Open http://localhost:8800 in your browser
-```
+## Status
 
-See the [Getting Started](./getting-started.md) chapter for full instructions.
+Alpha — actively developed and moving into broader testing. Distributed inference is stable across multi-node deployments. Windows release binaries reach Linux parity (Round 8, 2026-04-23). 887 lib tests + 75 integration tests run on every PR; continuous security sweeps. [Report issues](https://github.com/enapt/SwarmLLM/issues).
 
-## Platform Support
+## Platform support
 
-| Platform | Status | GPU Support |
-|---|---|---|
-| Linux x86_64 | Available | CUDA |
-| Windows x86_64 | Available | CUDA |
-| macOS aarch64 (Apple Silicon) | Binary available (compile-validated) | CPU only (Metal planned) |
-| macOS x86_64 (Intel) | Best-effort | CPU only |
-| Linux aarch64 | Best-effort | CPU only |
+| Platform                          | Status                                | GPU                  |
+|-----------------------------------|---------------------------------------|----------------------|
+| Linux x86_64                      | Available                             | CUDA                 |
+| Windows x86_64                    | Available                             | CUDA                 |
+| macOS aarch64 (Apple Silicon)     | Binary available; compile-validated   | CPU only (Metal planned) |
+| macOS x86_64 (Intel)              | Best-effort                           | CPU only             |
+| Linux aarch64                     | Best-effort                           | CPU only             |
 
-> **Note:** macOS aarch64 binaries are now exercised in the CI matrix (test + clippy on `macos-15`); integration tests stay Linux-only for now. All platform binaries are on the [Releases page](https://github.com/enapt/SwarmLLM/releases).
+> macOS aarch64 runs `cargo test --lib` + `cargo clippy` on `macos-15` in CI. Integration tests stay Linux-only for now.
+
+All binaries live on the [Releases page](https://github.com/enapt/SwarmLLM/releases).
