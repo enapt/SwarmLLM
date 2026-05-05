@@ -83,7 +83,7 @@ impl BpeTokenizer {
             .map(|(t, &id)| (t.clone(), id))
             .collect();
         // Sort by length descending for longest-match-first
-        special_tokens.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
+        special_tokens.sort_by_key(|(t, _)| std::cmp::Reverse(t.len()));
 
         Self {
             token_to_id,
@@ -348,7 +348,7 @@ impl SpmTokenizer {
             .map(|(i, t)| (t.clone(), i as u32))
             .collect();
         // Sort by length descending for greedy matching
-        special_tokens.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
+        special_tokens.sort_by_key(|(t, _)| std::cmp::Reverse(t.len()));
 
         tracing::info!(
             vocab_size = tokens.len(),

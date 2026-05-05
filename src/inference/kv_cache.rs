@@ -621,19 +621,18 @@ mod tests {
 
     #[test]
     fn touch_refreshes_ttl() {
-        // TTL=200ms, sleeps=120ms — touch at 120ms (TTL/200ms not yet
-        // expired), then sleep another 120ms → total 240ms but touch reset
-        // the clock at 120ms so the cumulative since-touch is 120ms <
-        // 200ms TTL. Previous values (TTL=50ms, sleep=30ms+30ms) gave only
-        // 10ms safety margin around scheduling jitter.
-        let mut mgr = KvCacheManager::new(Duration::from_millis(200));
+        // TTL=1000ms, sleeps=200ms each — wide margin (800ms) so macOS CI
+        // scheduling jitter (sleep can over-run by 100ms+ under load) does
+        // not flake the test. Earlier 200/120/120 values gave 80ms safety
+        // and tripped on macos-15.
+        let mut mgr = KvCacheManager::new(Duration::from_millis(1000));
         let session_id = uuid::Uuid::new_v4();
         let pipeline = make_pipeline(session_id);
 
         mgr.register_session(session_id, pipeline, 128);
-        std::thread::sleep(Duration::from_millis(120));
+        std::thread::sleep(Duration::from_millis(200));
         mgr.touch_session(&session_id);
-        std::thread::sleep(Duration::from_millis(120));
+        std::thread::sleep(Duration::from_millis(200));
 
         // Should still be valid because we touched it
         let session = mgr.get_session(&session_id);

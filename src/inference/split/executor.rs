@@ -921,11 +921,7 @@ impl SplitModel {
             // could lose `layers` if a TTL eviction fired between the two
             // loops — the second pass would create a fresh empty entry and
             // overwrite the just-restored layers with `Vec::new()`.
-            for ((item, kv), ssm) in items
-                .iter()
-                .zip(all_kv_caches.into_iter())
-                .zip(all_ssm_states.into_iter())
-            {
+            for ((item, kv), ssm) in items.iter().zip(all_kv_caches).zip(all_ssm_states) {
                 let key = KvCacheStore::cache_key(&model_key, item.request_id);
                 let mut entry = kv_cache_store.get_or_create_keyed(&key, num_layers);
                 entry.layers = kv;

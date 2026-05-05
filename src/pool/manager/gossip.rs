@@ -370,7 +370,7 @@ impl PoolManager {
                 .map(|m| (m.node_id.clone(), m.credits_contributed))
                 .collect();
 
-            members.sort_by(|a, b| b.1.cmp(&a.1));
+            members.sort_by_key(|(_, credits)| std::cmp::Reverse(*credits));
 
             for (rank, (node_id, credits)) in members.into_iter().enumerate() {
                 entries.push(LeaderboardEntry {

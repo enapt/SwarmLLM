@@ -953,11 +953,7 @@ impl PipelineScheduler {
                 })
                 .unwrap_or(0);
             let available_bytes = available_mb.saturating_mul(1_048_576);
-            let layer_capacity = if bytes_per_layer > 0 {
-                (available_bytes / bytes_per_layer) as u32
-            } else {
-                0
-            };
+            let layer_capacity = available_bytes.checked_div(bytes_per_layer).unwrap_or(0) as u32;
             let tps = peer
                 .capability
                 .as_ref()

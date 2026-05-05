@@ -155,11 +155,15 @@ jobs:
       - run: cargo build --release
 
   # Compile-check feature paths that aren't covered by the main test/build
-  # matrix. Uses `cargo check` (not test or build) because CUDA codegen
-  # requires nvcc + CUDA libs which aren't on stock GitHub runners — but
-  # cudarc with `dynamic-loading` only dlopens at runtime, so `check`
-  # succeeds without CUDA installed and will catch any compile error in
-  # `cfg(feature = "candle-cuda")` code paths before a release tag.
+  # matrix. Uses `cargo check` (not test or build). Installs cuda-nvcc only
+  # (no full toolkit) because cudarc 0.19.4's build script invokes
+  # `nvcc --version` even though dynamic-loading dlopens cuda runtime libs
+  # at runtime — without nvcc on PATH, `cargo check` fails with
+  # `failed to run custom build command for cudarc`. cuda-nvcc-12-4 is
+  # ~100 MB; the full toolkit (cuda-toolkit-12-4 used in release.yml) is
+  # ~3 GB, which we don't need for `check`. Catches compile errors in any
+  # `cfg(feature = "candle-cuda")` or `cfg(feature = "windows-gpu")` code
+  # path before a release tag.
   feature-check:
     name: Feature compile-check (${{ matrix.features }})
     needs: fmt
@@ -179,6 +183,13 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libssl-dev pkg-config
+      - name: Install cuda-nvcc (build-time only, dynamic-loading dlopens runtime)
+        run: |
+          wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb
+          sudo dpkg -i cuda-keyring_1.1-1_all.deb
+          sudo apt-get update
+          sudo apt-get install -y cuda-nvcc-12-4
+          echo "/usr/local/cuda-12.4/bin" >> "$GITHUB_PATH"
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: feature-check-${{ matrix.features }}

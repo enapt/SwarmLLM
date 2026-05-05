@@ -624,11 +624,11 @@ pub async fn proxy_via_subprocess_openai(
                                             yield Ok::<_, std::io::Error>(crate::api::sse::data_frame(&chunk));
                                         }
                                     }
-                                    "message_delta" => {
-                                        if parsed["event"]["delta"]["stop_reason"].as_str().is_some() {
-                                            let chunk = build_content_chunk(&rid, created, &model_owned, String::new(), Some("stop".into()));
-                                            yield Ok(crate::api::sse::data_frame(&chunk));
-                                        }
+                                    "message_delta"
+                                        if parsed["event"]["delta"]["stop_reason"].as_str().is_some() =>
+                                    {
+                                        let chunk = build_content_chunk(&rid, created, &model_owned, String::new(), Some("stop".into()));
+                                        yield Ok(crate::api::sse::data_frame(&chunk));
                                     }
                                     _ => {} // content_block_start, content_block_stop, message_start, message_stop — skip
                                 }

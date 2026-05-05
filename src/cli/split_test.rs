@@ -83,6 +83,7 @@ pub async fn test_split_inference(
 
     // Generate remaining tokens
     let mut index_pos = token_ids.len();
+    #[allow(clippy::explicit_counter_loop)]
     for _ in 1..max_tokens {
         let last_token = *generated
             .last()

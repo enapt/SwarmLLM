@@ -291,7 +291,7 @@ async fn dispatch_batch_result(
         return;
     }
     let mut cursor = 0usize;
-    for (r, len) in results.into_iter().zip(activation_lens.into_iter()) {
+    for (r, len) in results.into_iter().zip(activation_lens) {
         let len = len as usize;
         // SEC: only consume payload bytes for slots that actually carry an
         // activation tensor. A malformed worker response with len > 0 on a
@@ -470,7 +470,7 @@ async fn dispatch_scheduler_group(pool: &Arc<ModelProcessPool>, msgs: Vec<BatchS
                 return;
             }
             // Fan out in sender order (forward_batch preserves input order).
-            for (tx, result) in resp_txs.into_iter().zip(results.into_iter()) {
+            for (tx, result) in resp_txs.into_iter().zip(results) {
                 let _ = tx.send(Ok(result));
             }
         }

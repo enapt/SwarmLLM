@@ -31,6 +31,7 @@ CLAUDE.local.md
 .claude/settings.local.json
 .claude/logs/
 .claude/agent-memory-local/
+.claude/scheduled_tasks.lock
 CLAUDE.md
 
 # Peon notification sounds (dev environment)
