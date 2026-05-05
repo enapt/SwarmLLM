@@ -1,9 +1,14 @@
 name: CI
 
 on:
-  # Run on PRs (if any) but NOT on direct pushes to main — local pre-push hooks
-  # (cargo fmt + cargo clippy) already enforce quality before every commit.
-  # Trigger manually via GitHub Actions UI or gh CLI: gh workflow run ci.yml
+  # Run on every PR AND on every direct push to main, so the trunk is
+  # always continuously validated. Local pre-push hooks (cargo fmt +
+  # cargo clippy) catch obvious issues before the push, but tests,
+  # macOS jobs, the audit job, and the GPU feature-check only run
+  # here. Branch protection (configured via gh API, not in this file)
+  # makes the same status checks required before a PR can be merged.
+  push:
+    branches: [main]
   pull_request:
   workflow_dispatch:
 
