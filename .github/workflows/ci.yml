@@ -31,6 +31,33 @@ jobs:
           components: rustfmt
       - run: cargo fmt --check
 
+  # `cargo audit` against the RustSec advisory DB. The five `--ignore`
+  # advisories below are documented in SECURITY.md § "Known accepted
+  # advisories" with the rationale for each. Re-evaluate whenever the
+  # transitive dep tree moves (most are blocked on a libp2p bump that
+  # carries fresh hickory / multihash). New advisories on un-ignored
+  # crates fail the job.
+  audit:
+    name: Audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          key: cargo-audit
+          cache-targets: false
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+      - name: Run cargo audit
+        run: |
+          cargo audit \
+            --ignore RUSTSEC-2026-0118 \
+            --ignore RUSTSEC-2026-0119 \
+            --ignore RUSTSEC-2026-0105 \
+            --ignore RUSTSEC-2024-0436 \
+            --ignore RUSTSEC-2026-0097
+
   clippy:
     name: Clippy (${{ matrix.os }} / ${{ matrix.features }})
     needs: fmt
