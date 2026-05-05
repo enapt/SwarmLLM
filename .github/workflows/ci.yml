@@ -195,6 +195,17 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y cuda-nvcc-12-4
           echo "/usr/local/cuda-12.4/bin" >> "$GITHUB_PATH"
+      # windows-gpu = ["llama-vulkan", "candle-cuda"]; the llama-vulkan
+      # half builds llama-cpp-sys-2's CMake project with -DGGML_VULKAN=ON,
+      # which needs Vulkan_LIBRARY, Vulkan_INCLUDE_DIR, and glslc on the
+      # builder. Install only when the matrix is windows-gpu.
+      - name: Install Vulkan SDK (windows-gpu feature only)
+        if: matrix.features == 'windows-gpu'
+        uses: jakoch/install-vulkan-sdk-action@85a045da72257cc52d4b11e0d4125ab8a7b768e4 # v1
+        with:
+          install_runtime: true
+          cache: true
+          stripdown: true
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: feature-check-${{ matrix.features }}
