@@ -1070,7 +1070,13 @@ mod tests {
     }
 
     #[test]
-    fn layer_forward_no_speculative_trailer_when_empty() {
+    fn layer_forward_spec_logits_requested_round_trips_with_empty_drafts() {
+        // The DSD verify path (`build_spec_verify_forward`) packs the
+        // verify token IDs into `activations` and leaves `draft_tokens`
+        // empty — the worker only needs `spec_logits_requested` as the
+        // gate. The encoder MUST emit the 0x03 trailer in this case so
+        // the flag survives the round-trip; the previous "skip trailer
+        // when draft_tokens empty" gate silently broke DSD-with-remote.
         let forward = LayerForward {
             request_id: uuid::Uuid::new_v4(),
             sequence_num: 0,
@@ -1090,7 +1096,38 @@ mod tests {
             spec_logits_requested: true,
             truncate_kv_to: None,
         };
-        // When draft_tokens is empty, spec trailer must not be emitted.
+        let encoded = encode_layer_forward(&forward).unwrap();
+        let decoded = decode_layer_forward(&encoded).unwrap();
+        assert!(decoded.draft_tokens.is_empty());
+        assert!(
+            decoded.spec_logits_requested,
+            "spec_logits_requested must survive round-trip even when draft_tokens is empty"
+        );
+    }
+
+    #[test]
+    fn layer_forward_no_speculative_trailer_when_both_empty() {
+        // When BOTH draft_tokens is empty AND spec_logits_requested is
+        // false, no trailer should be emitted.
+        let forward = LayerForward {
+            request_id: uuid::Uuid::new_v4(),
+            sequence_num: 0,
+            index_pos: 0,
+            activations: vec![0; 8],
+            format: TensorFormat::FP32,
+            model_id: test_model_id(),
+            layer_range: (0, 4),
+            tp_meta: None,
+            vision_embeddings: None,
+            sender_peer_bytes: None,
+            requester_node_id: None,
+            pre_embedded: false,
+            generated_ids: Vec::new(),
+            adapter_id: None,
+            draft_tokens: vec![],
+            spec_logits_requested: false,
+            truncate_kv_to: None,
+        };
         let encoded = encode_layer_forward(&forward).unwrap();
         let decoded = decode_layer_forward(&encoded).unwrap();
         assert!(decoded.draft_tokens.is_empty());

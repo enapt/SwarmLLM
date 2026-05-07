@@ -17,6 +17,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     pkg-config \
     && rm -rf /var/lib/apt/lists/*
 
+# Override the workspace's `.cargo/config.toml` `target-cpu=native` so the
+# image is portable across CPUs other than the build runner. Without this
+# the binary SIGILLs on machines whose microarchitecture differs from the
+# CI runner that built the image. See gotcha #39 in memory/MEMORY.md and
+# the matching `RUSTFLAGS: ""` in `.github/workflows/{ci,release}.yml`.
+ENV RUSTFLAGS=""
+
 WORKDIR /build
 
 # Cache dependency compilation: copy manifests first, build a dummy to populate

@@ -393,18 +393,27 @@ impl UpdateChecker {
     /// This guards against downgrade-by-replay: a stored `UpdateInfo`
     /// pointing at an older release must not be silently re-applied even
     /// if the SHA256 still matches.
+    ///
+    /// `expected_checksum_sha256` re-verifies the staged file's hash before
+    /// the rename. Between download (where the hash was first verified)
+    /// and apply, the staging file sits on disk for an unbounded interval
+    /// (the dashboard "check / apply" buttons are separate calls). A
+    /// process running as the same user can swap the staging file during
+    /// that window. Re-hashing here closes that TOCTOU.
     pub fn apply_update(
         &self,
         tmp_path: &std::path::Path,
         latest_version: &str,
+        expected_checksum_sha256: Option<&str>,
     ) -> Result<(), SwarmError> {
-        self.apply_update_with_version(tmp_path, Some(latest_version))
+        self.apply_update_with_version(tmp_path, Some(latest_version), expected_checksum_sha256)
     }
 
     fn apply_update_with_version(
         &self,
         tmp_path: &std::path::Path,
         latest_version: Option<&str>,
+        expected_checksum_sha256: Option<&str>,
     ) -> Result<(), SwarmError> {
         tracing::debug!(path = %tmp_path.display(), "DIAG: apply_update starting");
         if !tmp_path.exists() {
@@ -422,6 +431,27 @@ impl UpdateChecker {
             if !is_newer_version(current, target) {
                 return Err(SwarmError::Validation(format!(
                     "Refusing to apply update: target version {target} is not newer than running {current}"
+                )));
+            }
+        }
+
+        // SEC: re-hash the staged file before rename. Closes the TOCTOU
+        // between download (which verifies hash) and apply (which until
+        // now only checked tmp_path.exists()). A local process can swap
+        // the staged file during the gap; without re-verifying we'd then
+        // rename adversary-supplied bytes onto the binary path.
+        if let Some(expected) = expected_checksum_sha256 {
+            use sha2::{Digest, Sha256};
+            let bytes = std::fs::read(tmp_path)
+                .map_err(|e| SwarmError::Internal(format!("read staged file: {e}")))?;
+            let actual = hex::encode(Sha256::digest(&bytes));
+            // Sidecar files often have the form "<hash>  <filename>"; take
+            // only the first whitespace-delimited token.
+            let expected_trimmed = expected.split_whitespace().next().unwrap_or(expected);
+            if !actual.eq_ignore_ascii_case(expected_trimmed) {
+                let _ = std::fs::remove_file(tmp_path);
+                return Err(SwarmError::Validation(format!(
+                    "Staged update file SHA256 mismatch (expected {expected_trimmed}, got {actual}) — staging file rejected"
                 )));
             }
         }

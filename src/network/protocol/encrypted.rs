@@ -87,7 +87,15 @@ pub fn encode_layer_forward_encrypted(
     // tokens travel in the cleartext trailer — they are not sensitive (they
     // are just candidate IDs). The sealed activations already carry the
     // coordinator's position; drafts ride alongside as plaintext metadata.
-    if !forward.draft_tokens.is_empty() {
+    //
+    // Emitted when EITHER `draft_tokens` is non-empty OR `spec_logits_requested`
+    // is set. Gating on `draft_tokens.is_empty()` alone silently dropped
+    // `spec_logits_requested = true` from the wire for the DSD verify path
+    // (`build_spec_verify_forward` deliberately leaves `draft_tokens` empty
+    // because the IDs are already encoded in `activations`). Decoders ignore
+    // unknown trailers, so emitting an empty-drafts trailer for older peers
+    // is a no-op extension.
+    if !forward.draft_tokens.is_empty() || forward.spec_logits_requested {
         if forward.draft_tokens.len() > u16::MAX as usize {
             return Err(SwarmError::Network(format!(
                 "draft_tokens too long: {} > {}",
@@ -298,6 +306,150 @@ pub fn decode_layer_forward_encrypted(
     };
 
     Ok((forward, sealed, aad))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{LayerForward, ModelId, TensorFormat, TensorParallelMeta, TpPhase};
+
+    fn base_forward() -> LayerForward {
+        LayerForward {
+            request_id: uuid::Uuid::from_u128(0xDEAD_BEEF_CAFE_F00D_1122_3344_5566_7788),
+            sequence_num: 5,
+            index_pos: 11,
+            activations: vec![],
+            format: TensorFormat::FP32,
+            model_id: ModelId("qwen2.5-7b".into()),
+            layer_range: (4, 12),
+            tp_meta: None,
+            vision_embeddings: None,
+            sender_peer_bytes: None,
+            requester_node_id: None,
+            pre_embedded: false,
+            generated_ids: Vec::new(),
+            adapter_id: None,
+            draft_tokens: Vec::new(),
+            spec_logits_requested: false,
+            truncate_kv_to: None,
+        }
+    }
+
+    #[test]
+    fn encrypted_envelope_preserves_spec_trailers() {
+        // Locks down the Task-1 claim: encode_layer_forward_encrypted /
+        // decode_layer_forward_encrypted preserve all spec trailers
+        // (draft_tokens marker 0x03, truncate_kv_to marker 0x04). Without
+        // this, lifting the speculative_common_eligible enable_encryption
+        // gate would silently corrupt verify rounds when encryption is on.
+        let mut orig = base_forward();
+        orig.draft_tokens = vec![100, 200, 300, 400, 500];
+        orig.spec_logits_requested = true;
+        orig.truncate_kv_to = Some(42);
+
+        let sealed = vec![0u8; 256];
+        let bytes = encode_layer_forward_encrypted(&orig, sealed.clone()).unwrap();
+        let (decoded, sealed_out, _aad) = decode_layer_forward_encrypted(&bytes).unwrap();
+
+        assert_eq!(decoded.request_id, orig.request_id);
+        assert_eq!(decoded.sequence_num, orig.sequence_num);
+        assert_eq!(decoded.index_pos, orig.index_pos);
+        assert_eq!(decoded.layer_range, orig.layer_range);
+        assert_eq!(decoded.model_id, orig.model_id);
+        assert_eq!(decoded.draft_tokens, orig.draft_tokens);
+        assert!(decoded.spec_logits_requested);
+        assert_eq!(decoded.truncate_kv_to, Some(42));
+        assert_eq!(sealed_out, sealed);
+    }
+
+    #[test]
+    fn encrypted_envelope_preserves_tp_meta_alongside_spec() {
+        // Belt-and-braces: tp_meta + spec trailers + kv_truncate all set.
+        // The decoder scans trailers in marker order; adjacency must not
+        // confuse the parser.
+        let mut orig = base_forward();
+        orig.tp_meta = Some(TensorParallelMeta {
+            tp_rank: 2,
+            tp_size: 4,
+            single_layer: 7,
+            phase: TpPhase::AttnOnly,
+        });
+        orig.pre_embedded = true;
+        orig.draft_tokens = vec![1, 2, 3];
+        orig.spec_logits_requested = true;
+        orig.truncate_kv_to = Some(99);
+
+        let sealed = vec![0xABu8; 64];
+        let bytes = encode_layer_forward_encrypted(&orig, sealed).unwrap();
+        let (decoded, _sealed, _aad) = decode_layer_forward_encrypted(&bytes).unwrap();
+
+        let tp = decoded.tp_meta.expect("tp_meta should round-trip");
+        assert_eq!(tp.tp_rank, 2);
+        assert_eq!(tp.tp_size, 4);
+        assert_eq!(tp.single_layer, 7);
+        assert!(matches!(tp.phase, TpPhase::AttnOnly));
+        assert!(decoded.pre_embedded);
+        assert_eq!(decoded.draft_tokens, vec![1, 2, 3]);
+        assert!(decoded.spec_logits_requested);
+        assert_eq!(decoded.truncate_kv_to, Some(99));
+    }
+
+    #[test]
+    fn aad_helper_matches_inline_layout() {
+        // build_layer_forward_aad is the documented single source of truth
+        // (see .claude/rules/architecture.md § Centralised Wire-Format
+        // Helpers). The encrypt path in network/manager/tensors.rs and the
+        // decode path in this file MUST produce byte-identical AAD; pin
+        // the layout here so a refactor that subtly drifts the order
+        // breaks at unit-test time, not at the wire.
+        let mut forward = base_forward();
+        forward.sequence_num = 0x1122_3344;
+        forward.index_pos = 0x5566_7788;
+        forward.format = TensorFormat::INT8;
+        forward.layer_range = (0xAABB_CCDD, 0xEEFF_0011);
+
+        let aad = build_layer_forward_aad(&forward);
+        // Layout: uuid(16) + seq(4 LE) + idx(4 LE) + fmt(1) + ls(4 LE) + le(4 LE) + mid_len(2 LE) + mid_bytes
+        let mid_bytes = forward.model_id.0.as_bytes();
+        assert_eq!(aad.len(), 35 + mid_bytes.len());
+        assert_eq!(&aad[0..16], forward.request_id.as_bytes());
+        assert_eq!(&aad[16..20], &0x1122_3344u32.to_le_bytes());
+        assert_eq!(&aad[20..24], &0x5566_7788u32.to_le_bytes());
+        assert_eq!(aad[24], 2); // INT8 fmt tag
+        assert_eq!(&aad[25..29], &0xAABB_CCDDu32.to_le_bytes());
+        assert_eq!(&aad[29..33], &0xEEFF_0011u32.to_le_bytes());
+        assert_eq!(&aad[33..35], &(mid_bytes.len() as u16).to_le_bytes());
+        assert_eq!(&aad[35..], mid_bytes);
+    }
+
+    #[test]
+    fn encrypted_envelope_preserves_spec_logits_requested_with_empty_drafts() {
+        // Regression test: build_spec_verify_forward intentionally sets
+        // draft_tokens=[] (the IDs ride in `activations` for the DSD verify
+        // path). The encoder MUST still emit the 0x03 trailer so
+        // spec_logits_requested=true survives the round-trip; otherwise
+        // the receiver computes want_spec_output=false and the last
+        // segment never returns spec_logits, breaking DSD entirely.
+        let mut orig = base_forward();
+        orig.draft_tokens = Vec::new();
+        orig.spec_logits_requested = true;
+
+        let bytes = encode_layer_forward_encrypted(&orig, vec![0u8; 32]).unwrap();
+        let (decoded, _sealed, _aad) = decode_layer_forward_encrypted(&bytes).unwrap();
+        assert!(decoded.draft_tokens.is_empty());
+        assert!(
+            decoded.spec_logits_requested,
+            "spec_logits_requested must survive encrypted round-trip when draft_tokens is empty"
+        );
+    }
+
+    #[test]
+    fn encrypted_envelope_rejects_truncated_input() {
+        let orig = base_forward();
+        let bytes = encode_layer_forward_encrypted(&orig, vec![0u8; 32]).unwrap();
+        // Lop off most of the payload — decoder must error, not panic.
+        assert!(decode_layer_forward_encrypted(&bytes[..10]).is_err());
+    }
 }
 
 // Serde impls for SwarmRequest/SwarmResponse

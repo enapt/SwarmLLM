@@ -934,14 +934,29 @@ pub async fn check_update(
 
     match checker.check_for_update().await {
         Ok(Some(info)) => {
-            // Auto-download
             let mut info = info;
-            if let Ok(tmp_path) = checker.download_update(&info).await {
-                // Only flag downloaded=true when the staging path is the
-                // preferred (same-filesystem) location. The temp_dir fallback
-                // path will EXDEV at apply_update time; flagging it would let
-                // the dashboard show a misleading "ready to apply" banner.
-                info.downloaded = tmp_path == checker.preferred_tmp_path();
+            // Mirror the background loop's gating: only auto-download when
+            // the operator has explicitly opted into updates. Without this
+            // gate, a user with `auto_update = "disabled"` (the documented
+            // safe default until C1 binary signing lands) would still get
+            // a binary written to disk every time the dashboard pings
+            // /update/check, contradicting their setting and producing a
+            // misleading "ready to apply" banner. Stable mode also skips
+            // pre-release tags so a release-candidate doesn't auto-stage.
+            let is_prerelease = info.latest_version.contains('-');
+            let should_download = match state.shared_state.config.updates.auto_update {
+                crate::config::AutoUpdateMode::Disabled => false,
+                crate::config::AutoUpdateMode::Stable => !is_prerelease,
+                crate::config::AutoUpdateMode::All => true,
+            };
+            if should_download {
+                if let Ok(tmp_path) = checker.download_update(&info).await {
+                    // Only flag downloaded=true when the staging path is the
+                    // preferred (same-filesystem) location. The temp_dir fallback
+                    // path will EXDEV at apply_update time; flagging it would let
+                    // the dashboard show a misleading "ready to apply" banner.
+                    info.downloaded = tmp_path == checker.preferred_tmp_path();
+                }
             }
             let mut us = update_state.write().await;
             us.update_available = Some(info.clone());
@@ -1024,9 +1039,16 @@ pub async fn apply_update(
     }
 
     // SEC: apply_update re-checks version at apply time so a stored stale
-    // UpdateInfo can't be replayed for a downgrade.
+    // UpdateInfo can't be replayed for a downgrade, AND re-hashes the
+    // staged file to close the TOCTOU between download and apply (the
+    // staging file sits on disk for an unbounded interval between
+    // dashboard "check" and "apply" clicks).
     checker
-        .apply_update(&tmp_path, &info.latest_version)
+        .apply_update(
+            &tmp_path,
+            &info.latest_version,
+            info.checksum_sha256.as_deref(),
+        )
         .map_err(ApiError)?;
 
     Ok(Json(serde_json::json!({

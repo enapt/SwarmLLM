@@ -438,24 +438,12 @@ pub fn encode_forward_for_wire(
         let node_id = peer_node_id.ok_or_else(|| {
             SwarmError::Network("encryption requested but no NodeId for peer".into())
         })?;
-        // AAD must match decode_layer_forward_encrypted — see handle_send_tensor
-        let model_id_bytes = forward.model_id.0.as_bytes();
-        let mut aad = Vec::with_capacity(35 + model_id_bytes.len());
-        aad.extend_from_slice(forward.request_id.as_bytes());
-        aad.extend_from_slice(&forward.sequence_num.to_le_bytes());
-        aad.extend_from_slice(&forward.index_pos.to_le_bytes());
-        let fmt_tag: u8 = match forward.format {
-            crate::types::TensorFormat::FP16 => 0,
-            crate::types::TensorFormat::FP32 => 1,
-            crate::types::TensorFormat::INT8 => 2,
-        };
-        aad.push(fmt_tag);
-        let (layer_start, layer_end) = forward.layer_range;
-        aad.extend_from_slice(&layer_start.to_le_bytes());
-        aad.extend_from_slice(&layer_end.to_le_bytes());
-        aad.extend_from_slice(&(model_id_bytes.len() as u16).to_le_bytes());
-        aad.extend_from_slice(model_id_bytes);
-
+        // Single source of truth — `protocol::build_layer_forward_aad` is
+        // shared with the RR encrypt path (`network/manager/tensors.rs`)
+        // and the decrypt path (`decode_layer_forward_encrypted`). Inline
+        // construction here would drift the moment a new authenticated
+        // field is added to LayerForward.
+        let aad = protocol::build_layer_forward_aad(forward);
         let sealed = shared_state
             .session_manager
             .seal(&node_id, &forward.activations, &aad)

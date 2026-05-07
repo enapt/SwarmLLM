@@ -234,9 +234,22 @@ pub fn decode_layer_result(data: &[u8]) -> Result<LayerResult, SwarmError> {
             let mut v = Vec::with_capacity(vocab_len);
             for i in 0..vocab_len {
                 let o = pos + i * 4;
-                v.push(f32::from_le_bytes(data[o..o + 4].try_into().map_err(
-                    |_| SwarmError::Network("Invalid spec_logit value".into()),
-                )?));
+                let val = f32::from_le_bytes(
+                    data[o..o + 4]
+                        .try_into()
+                        .map_err(|_| SwarmError::Network("Invalid spec_logit value".into()))?,
+                );
+                // SEC: reject non-finite values from peer-supplied buffers.
+                // NaN propagates silently through float comparisons in
+                // `greedy_accept_reject` (NaN > x is always false), so an
+                // adversarial peer could otherwise corrupt the accept/reject
+                // decision and inject arbitrary tokens into output.
+                if !val.is_finite() {
+                    return Err(SwarmError::Network(
+                        "spec_logits contains non-finite f32 (NaN/Inf rejected)".into(),
+                    ));
+                }
+                v.push(val);
             }
             pos += vocab_len * 4;
             spec_logits.push(v);

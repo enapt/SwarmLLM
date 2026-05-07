@@ -70,8 +70,15 @@ pub fn encode_layer_forward(forward: &LayerForward) -> Result<Vec<u8>, SwarmErro
     }
 
     // Optional: speculative trailer (marker 0x03 + flags(1) + num_drafts(2 LE) + drafts*4)
-    // Only emitted when draft_tokens is non-empty — older peers ignore unknown trailers.
-    if !forward.draft_tokens.is_empty() {
+    //
+    // Emitted when EITHER `draft_tokens` is non-empty OR `spec_logits_requested`
+    // is set. Gating on `draft_tokens.is_empty()` alone silently dropped
+    // `spec_logits_requested = true` from the wire for the DSD verify path
+    // (`build_spec_verify_forward` deliberately leaves `draft_tokens` empty
+    // because the IDs are already encoded in `activations`). Decoders ignore
+    // unknown trailers, so emitting an empty-drafts trailer for older peers
+    // is a no-op extension.
+    if !forward.draft_tokens.is_empty() || forward.spec_logits_requested {
         if forward.draft_tokens.len() > u16::MAX as usize {
             return Err(SwarmError::Network(format!(
                 "draft_tokens too long: {} > {}",
@@ -447,6 +454,25 @@ mod tests {
         let decoded = decode_layer_forward(&bytes).unwrap();
         assert_eq!(decoded.draft_tokens, orig.draft_tokens);
         assert!(decoded.spec_logits_requested);
+    }
+
+    #[test]
+    fn roundtrip_spec_logits_requested_with_empty_drafts() {
+        // Regression test: build_spec_verify_forward intentionally sets
+        // draft_tokens=[] (IDs ride in `activations`). The encoder MUST
+        // still emit the 0x03 trailer so spec_logits_requested=true
+        // survives the round-trip; otherwise the worker computes
+        // want_spec_output=false and never returns spec_logits.
+        let mut orig = base_forward();
+        orig.draft_tokens = Vec::new();
+        orig.spec_logits_requested = true;
+        let bytes = encode_layer_forward(&orig).unwrap();
+        let decoded = decode_layer_forward(&bytes).unwrap();
+        assert!(decoded.draft_tokens.is_empty());
+        assert!(
+            decoded.spec_logits_requested,
+            "spec_logits_requested must survive cleartext round-trip when draft_tokens is empty"
+        );
     }
 
     #[test]
