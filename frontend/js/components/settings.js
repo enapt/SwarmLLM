@@ -301,7 +301,20 @@
       var keyEl = document.getElementById('settings-api-key');
       if (!keyEl) return;
       try {
-        var resp = await App.authFetch('/api/admin/api-key');
+        // Bootstrap path: include the per-page nonce the daemon embedded
+        // in the served HTML so the loopback gate in src/api/middleware.rs
+        // accepts the request without a Bearer (we don't have one yet —
+        // this fetch is how we obtain it). Single-use, 60s TTL. The nonce
+        // is stripped from the meta tag after consumption to avoid replay
+        // from any code that re-reads it.
+        var nonceEl = document.querySelector('meta[name="bootstrap-nonce"]');
+        var nonce = nonceEl ? nonceEl.getAttribute('content') : '';
+        var headers = {};
+        if (nonce && nonce !== '__SWARMLLM_BOOTSTRAP_NONCE__') {
+          headers['X-Dashboard-Nonce'] = nonce;
+          if (nonceEl) nonceEl.setAttribute('content', '');
+        }
+        var resp = await App.authFetch('/api/admin/api-key', { headers: headers });
         if (resp.ok) {
           var data = await resp.json();
           var key = data.api_key || '';

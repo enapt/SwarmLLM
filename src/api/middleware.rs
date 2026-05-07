@@ -281,30 +281,33 @@ pub async fn rate_limit_middleware(
 ///   * `Sec-Fetch-Site: same-origin` (modern browsers auto-send this
 ///     for every same-origin request; curl/python don't send it).
 ///
-/// `Origin` alone is NOT sufficient: browsers omit `Origin` on same-origin
-/// simple GETs, so the dashboard's bootstrap fetch wouldn't match without
-/// the Sec-Fetch-Site fallback. See gotcha #26 in MEMORY.md.
-fn is_same_origin_browser_request(headers: &axum::http::HeaderMap, listen_port: u16) -> bool {
-    let allowed_origins = [
-        format!("http://localhost:{listen_port}"),
-        format!("http://127.0.0.1:{listen_port}"),
-        // Browsers on dual-stack systems may resolve `localhost` to ::1
-        // and emit `Origin: http://[::1]:PORT`. The CORS layer accepts
-        // this; the same-origin gate must too, otherwise dashboard
-        // bootstrap fetches break on IPv6.
-        format!("http://[::1]:{listen_port}"),
-    ];
-    let origin_ok = headers
-        .get(axum::http::header::ORIGIN)
+/// Validate the per-page bootstrap nonce on a `GET /api/admin/api-key`
+/// request. The dashboard handler in `api/server.rs::serve_dashboard_with_nonce`
+/// substitutes a freshly-issued single-use nonce into the served HTML;
+/// the dashboard JS (`frontend/js/components/settings.js::loadApiKey`)
+/// reads it from `<meta name="bootstrap-nonce">` and sends it as the
+/// `X-Dashboard-Nonce` header on its bootstrap fetch. The check is one-
+/// time-use AND TTL-bounded (60s).
+///
+/// This replaces the prior `Sec-Fetch-Site: same-origin` fallback (a
+/// curl-spoofable header). A loopback attacker who lacks ability to read
+/// the served HTML now needs to either guess a 32-byte random value
+/// (infeasible) or actively race the legitimate dashboard's bootstrap
+/// fetch (a much narrower window that requires precisely-timed local
+/// activity).
+fn is_valid_bootstrap_nonce(state: &AppState, headers: &axum::http::HeaderMap) -> bool {
+    let Some(nonce) = headers
+        .get("x-dashboard-nonce")
         .and_then(|v| v.to_str().ok())
-        .map(|o| allowed_origins.iter().any(|a| a == o))
-        .unwrap_or(false);
-    let same_site_ok = headers
-        .get("sec-fetch-site")
-        .and_then(|v| v.to_str().ok())
-        .map(|v| v.eq_ignore_ascii_case("same-origin"))
-        .unwrap_or(false);
-    origin_ok || same_site_ok
+    else {
+        return false;
+    };
+    // Length-bound the input before consulting the DashMap so a malicious
+    // caller can't grind cycles by sending megabyte-long strings.
+    if nonce.len() > 64 {
+        return false;
+    }
+    state.consume_bootstrap_nonce(nonce)
 }
 
 /// Check whether a request is exempt from Bearer token authentication.
@@ -369,31 +372,23 @@ pub async fn auth_middleware(
         return next.run(req).await;
     }
 
-    // Exempt API key retrieval — loopback only AND the request must carry
-    // a browser-only signal. The endpoint is the bootstrap path (the
-    // dashboard has no way to obtain the key otherwise on first load), so
-    // it stays loopback-exempt, but a header check raises the bar against
-    // other local processes doing direct curl/python.
+    // Exempt API key retrieval on first dashboard load. Loopback-only AND
+    // the request must carry a valid one-time-use bootstrap nonce that the
+    // dashboard handler embedded in the served HTML for this page load.
+    // See `is_valid_bootstrap_nonce` — the prior `Sec-Fetch-Site` fallback
+    // was curl-spoofable, so any local process could read the api-key by
+    // setting that header.
     //
-    // Two acceptable signals:
-    //   * `Origin` matches this daemon's own origin (sent by fetch() for
-    //     CORS-relevant requests — POST, DELETE, or GETs to a different
-    //     origin).
-    //   * `Sec-Fetch-Site: same-origin` (modern browsers auto-send this
-    //     for every same-origin request; curl/python don't send it).
-    //
-    // `Origin` alone is NOT sufficient: browsers typically omit `Origin`
-    // on same-origin simple GETs, so the dashboard's bootstrap fetch
-    // wouldn't match. `Sec-Fetch-Site` fills that gap.
-    //
-    // This is defense in depth, not a hard security boundary. A
-    // determined local attacker can set either header manually; but a
-    // malicious extension that can inject script into the dashboard
-    // origin already has DOM / localStorage access anyway.
+    // The dashboard JS reads the nonce out of `<meta name="bootstrap-nonce">`
+    // and sends it as `X-Dashboard-Nonce`. A determined local attacker can
+    // still scrape `/admin` to obtain a fresh nonce — this raises the bar
+    // (curl now needs two coordinated requests against a 60s window) but
+    // is not a hard boundary. The api_key file in data_dir is mode 0o600;
+    // any same-UID process with shell access already has the key.
     if path == "/api/admin/api-key"
         && method == Method::GET
         && addr.ip().is_loopback()
-        && is_same_origin_browser_request(req.headers(), state.shared_state.config.node.listen_port)
+        && is_valid_bootstrap_nonce(&state, req.headers())
     {
         return next.run(req).await;
     }
@@ -521,71 +516,13 @@ mod tests {
         assert!(!is_outbound_admin_path("/api/admin/hf/source"));
     }
 
-    #[test]
-    fn same_origin_gate_accepts_matching_origin_header() {
-        let mut headers = axum::http::HeaderMap::new();
-        headers.insert(
-            axum::http::header::ORIGIN,
-            "http://localhost:8800".parse().unwrap(),
-        );
-        assert!(is_same_origin_browser_request(&headers, 8800));
-    }
-
-    #[test]
-    fn same_origin_gate_accepts_127_origin_header() {
-        let mut headers = axum::http::HeaderMap::new();
-        headers.insert(
-            axum::http::header::ORIGIN,
-            "http://127.0.0.1:8800".parse().unwrap(),
-        );
-        assert!(is_same_origin_browser_request(&headers, 8800));
-    }
-
-    #[test]
-    fn same_origin_gate_accepts_sec_fetch_site_header() {
-        let mut headers = axum::http::HeaderMap::new();
-        headers.insert("sec-fetch-site", "same-origin".parse().unwrap());
-        assert!(is_same_origin_browser_request(&headers, 8800));
-    }
-
-    #[test]
-    fn same_origin_gate_rejects_no_signals() {
-        // Bare curl/python request with neither header set — must not
-        // bypass auth on the API-key bootstrap endpoint.
-        let headers = axum::http::HeaderMap::new();
-        assert!(!is_same_origin_browser_request(&headers, 8800));
-    }
-
-    #[test]
-    fn same_origin_gate_rejects_wrong_origin() {
-        // Cross-origin browser request — Origin would point elsewhere.
-        let mut headers = axum::http::HeaderMap::new();
-        headers.insert(
-            axum::http::header::ORIGIN,
-            "http://evil.example.com".parse().unwrap(),
-        );
-        assert!(!is_same_origin_browser_request(&headers, 8800));
-    }
-
-    #[test]
-    fn same_origin_gate_rejects_cross_site_sec_fetch() {
-        let mut headers = axum::http::HeaderMap::new();
-        headers.insert("sec-fetch-site", "cross-site".parse().unwrap());
-        assert!(!is_same_origin_browser_request(&headers, 8800));
-    }
-
-    #[test]
-    fn same_origin_gate_origin_match_is_port_sensitive() {
-        // Origin matching a different port must be rejected. Without
-        // this, a daemon on port 8810 forwarding requests internally
-        // could be confused for the dashboard.
-        let mut headers = axum::http::HeaderMap::new();
-        headers.insert(
-            axum::http::header::ORIGIN,
-            "http://localhost:9999".parse().unwrap(),
-        );
-        assert!(!is_same_origin_browser_request(&headers, 8800));
-    }
+    // The previous `same_origin_gate_*` tests covered the
+    // `is_same_origin_browser_request` helper that gated the api-key
+    // bootstrap on a curl-spoofable `Sec-Fetch-Site` header. The helper
+    // and its tests were removed when the bootstrap was reworked to use
+    // a per-page nonce (`api/server.rs::serve_dashboard_with_nonce` →
+    // `AppState::consume_bootstrap_nonce`). Round-trip behavior of the
+    // nonce is exercised in `api/server.rs::tests`.
 
     #[test]
     fn exempt_only_frontend_and_metrics() {

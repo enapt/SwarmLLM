@@ -55,6 +55,7 @@ async fn daemon_lifecycle_serves_health_then_shuts_down() {
         acquisition_tx: None,
         network_tx: None,
         shared_state,
+        bootstrap_nonces: std::sync::Arc::new(dashmap::DashMap::new()),
     };
 
     let app = swarmllm::api::server::build_router(state);

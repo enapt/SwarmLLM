@@ -14,7 +14,7 @@
 //! ```
 
 use axum::http::{header, StatusCode};
-use axum::response::{Html, IntoResponse, Response};
+use axum::response::{IntoResponse, Response};
 
 // ── Embedded mode (default): compile assets into binary ──
 
@@ -25,38 +25,33 @@ mod embedded_mode {
 }
 
 // ── Serve dashboard (index.html) ──
+//
+// All dashboard routes go through `api/server.rs::serve_dashboard_with_nonce`
+// in the main crate, which substitutes a per-page bootstrap nonce into the
+// served HTML. That handler reads the raw HTML via `dashboard_html_owned`
+// below; the previous `serve_dashboard` / `serve_dashboard_catchall`
+// handlers (which returned the HTML unchanged) are obsolete.
 
+/// Read the dashboard HTML as an owned `String`. Used by the main crate's
+/// nonce-injecting wrapper to template a per-page bootstrap value into
+/// the `<meta name="bootstrap-nonce">` tag before responding.
 #[cfg(feature = "embedded")]
-pub async fn serve_dashboard() -> Html<&'static str> {
-    Html(get_file_content_embedded("index.html").unwrap_or("<!-- missing index.html -->"))
+pub async fn dashboard_html_owned() -> String {
+    get_file_content_embedded("index.html")
+        .unwrap_or("<!-- missing index.html -->")
+        .to_string()
 }
 
 #[cfg(all(feature = "dev", not(feature = "embedded")))]
-pub async fn serve_dashboard() -> Html<String> {
+pub async fn dashboard_html_owned() -> String {
     let path = frontend_dir().join("index.html");
     match tokio::fs::read_to_string(&path).await {
-        Ok(content) => Html(content),
+        Ok(content) => content,
         Err(e) => {
             tracing::warn!(path = %path.display(), error = %e, "Failed to read index.html from disk");
-            Html("<!-- index.html not found — check SWARMLLM_FRONTEND_DIR -->".to_string())
+            "<!-- index.html not found — check SWARMLLM_FRONTEND_DIR -->".to_string()
         }
     }
-}
-
-// ── SPA catch-all ──
-
-#[cfg(feature = "embedded")]
-pub async fn serve_dashboard_catchall(
-    axum::extract::Path(_path): axum::extract::Path<String>,
-) -> Html<&'static str> {
-    Html(get_file_content_embedded("index.html").unwrap_or("<!-- missing index.html -->"))
-}
-
-#[cfg(all(feature = "dev", not(feature = "embedded")))]
-pub async fn serve_dashboard_catchall(
-    axum::extract::Path(_path): axum::extract::Path<String>,
-) -> Html<String> {
-    serve_dashboard().await
 }
 
 // ── Static files ──

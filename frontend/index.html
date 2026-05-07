@@ -5,6 +5,15 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <!-- Keep in sync with server-side CSP in src/api/middleware.rs:77. The server header takes precedence in browsers when both are present, but this meta covers the file-open / static-server / cached-page paths where the daemon's header isn't applied. -->
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self' ws: wss:; img-src 'self' data: blob:; font-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self';">
+  <!-- Per-page bootstrap nonce. The daemon substitutes the placeholder with a
+       fresh single-use 32-byte random value (60s TTL) on every dashboard load
+       (`api/server.rs::serve_dashboard_with_nonce`). The client sends this
+       value as `X-Dashboard-Nonce` on its initial GET /api/admin/api-key
+       fetch; the daemon validates and consumes it. Without a valid nonce
+       header the api-key endpoint requires the normal Bearer auth, so a
+       loopback attacker can no longer spoof browser-only signals to read
+       the api-key. -->
+  <meta name="bootstrap-nonce" content="__SWARMLLM_BOOTSTRAP_NONCE__">
   <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
   <title>SwarmLLM — Join the Swarm</title>
   <link rel="stylesheet" href="/static/css/utilities.css">

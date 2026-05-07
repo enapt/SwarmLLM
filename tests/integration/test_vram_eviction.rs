@@ -39,6 +39,7 @@ async fn spawn_test_server() -> (String, String) {
         acquisition_tx: None,
         network_tx: None,
         shared_state,
+        bootstrap_nonces: std::sync::Arc::new(dashmap::DashMap::new()),
     };
 
     let app = build_router(state);

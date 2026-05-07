@@ -28,6 +28,13 @@ const RATE_LIMIT_CLEANUP_INTERVAL_SECS: u64 = 300;
 /// Rate-limiter bucket TTL — entries older than this are evicted.
 const RATE_LIMIT_BUCKET_TTL_SECS: u64 = 600;
 
+/// TTL for bootstrap nonces. Long enough that a slow page load can still
+/// consume the nonce, short enough that an attacker who scrapes /admin in
+/// the background can't accumulate a large pool of valid nonces. The
+/// dashboard's bootstrap fetch happens within ~1s of HTML parse on every
+/// platform we've measured.
+pub(crate) const BOOTSTRAP_NONCE_TTL_SECS: u64 = 60;
+
 /// Shared application state passed to all Axum handlers.
 #[derive(Clone)]
 pub struct AppState {
@@ -44,6 +51,12 @@ pub struct AppState {
     pub shared_state: Arc<SharedState>,
     /// IP-based rate limiter.
     pub rate_limiter: middleware::RateLimiter,
+    /// Per-page bootstrap nonces, one-time-use. Issued when serving the
+    /// dashboard HTML, consumed by the loopback `GET /api/admin/api-key`
+    /// gate so a curl-style local attacker can no longer bypass auth by
+    /// setting `Sec-Fetch-Site: same-origin` themselves. Entries are
+    /// expired lazily on issue and on consume.
+    pub bootstrap_nonces: Arc<dashmap::DashMap<String, std::time::Instant>>,
 }
 
 impl AppState {
@@ -52,6 +65,56 @@ impl AppState {
     /// `state.config.node.data_dir` reach-through.
     pub fn model_dir(&self, model_id: &str) -> std::path::PathBuf {
         self.shared_state.model_dir(model_id)
+    }
+
+    /// Generate a fresh 32-byte bootstrap nonce, register it with TTL, and
+    /// return the base64url-encoded string for embedding in dashboard HTML.
+    /// Lazy-cleans expired entries on every issue so the map can't grow
+    /// unbounded if the dashboard is opened repeatedly.
+    pub(crate) fn issue_bootstrap_nonce(&self) -> String {
+        issue_bootstrap_nonce_into(
+            &self.bootstrap_nonces,
+            std::time::Duration::from_secs(BOOTSTRAP_NONCE_TTL_SECS),
+        )
+    }
+
+    /// Validate and consume a bootstrap nonce. Returns `true` iff the
+    /// nonce was registered AND not expired AT THE TIME OF CHECK. Removes
+    /// the entry on any outcome (one-time-use) so a leaked nonce can't be
+    /// replayed even within its TTL.
+    pub(crate) fn consume_bootstrap_nonce(&self, nonce: &str) -> bool {
+        consume_bootstrap_nonce_from(&self.bootstrap_nonces, nonce)
+    }
+}
+
+/// Standalone form of [`AppState::issue_bootstrap_nonce`] that takes the
+/// DashMap and TTL directly. Split out so tests can exercise the
+/// expiry / GC semantics without constructing a full `AppState`.
+fn issue_bootstrap_nonce_into(
+    nonces: &dashmap::DashMap<String, std::time::Instant>,
+    ttl: std::time::Duration,
+) -> String {
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+    use rand::RngCore;
+    let mut bytes = [0u8; 32];
+    rand::rngs::OsRng.fill_bytes(&mut bytes);
+    let nonce = URL_SAFE_NO_PAD.encode(bytes);
+    let now = std::time::Instant::now();
+    // Lazy GC — bounded work because issuance frequency is low (one per
+    // dashboard page load) and the map size is implicitly capped by TTL.
+    nonces.retain(|_, exp| *exp > now);
+    nonces.insert(nonce.clone(), now + ttl);
+    nonce
+}
+
+/// Standalone form of [`AppState::consume_bootstrap_nonce`].
+fn consume_bootstrap_nonce_from(
+    nonces: &dashmap::DashMap<String, std::time::Instant>,
+    nonce: &str,
+) -> bool {
+    match nonces.remove(nonce) {
+        Some((_, expires_at)) => expires_at > std::time::Instant::now(),
+        None => false,
     }
 }
 
@@ -86,6 +149,39 @@ where
             }
         }
     }
+}
+
+/// Token in `frontend/index.html` that the dashboard handler replaces with
+/// a freshly-issued bootstrap nonce. The dashboard JS reads the nonce from
+/// the `<meta name="bootstrap-nonce">` tag and sends it as `X-Dashboard-Nonce`
+/// on its `/api/admin/api-key` bootstrap fetch. Single-use, 60-second TTL.
+const BOOTSTRAP_NONCE_PLACEHOLDER: &str = "__SWARMLLM_BOOTSTRAP_NONCE__";
+
+/// Wrapper handler for the dashboard HTML. Issues a fresh per-page
+/// bootstrap nonce and substitutes it for the placeholder before
+/// returning. Replaces the bare `assets::serve_dashboard` so loopback
+/// admin-key bootstrap is gated by a value the legitimate dashboard JS
+/// must read out of the served HTML, raising the bar against curl-style
+/// local attackers that previously bypassed via `Sec-Fetch-Site`.
+async fn serve_dashboard_with_nonce(
+    axum::extract::State(state): axum::extract::State<AppState>,
+) -> axum::response::Html<String> {
+    let html = assets::dashboard_html_owned().await;
+    let nonce = state.issue_bootstrap_nonce();
+    axum::response::Html(html.replace(BOOTSTRAP_NONCE_PLACEHOLDER, &nonce))
+}
+
+/// SPA catch-all variant of [`serve_dashboard_with_nonce`]. Any path that
+/// the SPA owns (e.g. `/admin/models`, `/chat/abc`) returns the same
+/// dashboard HTML with a fresh nonce so client-side routing resolves to
+/// the same shell.
+async fn serve_dashboard_catchall_with_nonce(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    axum::extract::Path(_path): axum::extract::Path<String>,
+) -> axum::response::Html<String> {
+    let html = assets::dashboard_html_owned().await;
+    let nonce = state.issue_bootstrap_nonce();
+    axum::response::Html(html.replace(BOOTSTRAP_NONCE_PLACEHOLDER, &nonce))
 }
 
 /// Build the Axum router with all routes.
@@ -337,11 +433,11 @@ pub fn build_router(state: AppState) -> Router {
         // Static files (embedded frontend)
         // SPA catch-all: serve index.html for all frontend sub-routes
         // so direct URL access (bookmarks, refresh) works
-        .route("/admin", get(assets::serve_dashboard))
-        .route("/admin/{*path}", get(assets::serve_dashboard_catchall))
-        .route("/chat", get(assets::serve_dashboard))
-        .route("/chat/{*path}", get(assets::serve_dashboard_catchall))
-        .route("/setup", get(assets::serve_dashboard))
+        .route("/admin", get(serve_dashboard_with_nonce))
+        .route("/admin/{*path}", get(serve_dashboard_catchall_with_nonce))
+        .route("/chat", get(serve_dashboard_with_nonce))
+        .route("/chat/{*path}", get(serve_dashboard_catchall_with_nonce))
+        .route("/setup", get(serve_dashboard_with_nonce))
         .route("/static/{*path}", get(assets::serve_static))
         // Root redirect
         .route("/", get(|| async { Redirect::to("/admin") }))
@@ -405,6 +501,7 @@ pub async fn run_server_with_state(
         acquisition_tx: Some(acquisition_tx),
         network_tx: Some(network_tx),
         shared_state,
+        bootstrap_nonces: Arc::new(dashmap::DashMap::new()),
     };
 
     // Periodically clean up stale rate-limiter entries to prevent memory exhaustion
@@ -447,4 +544,52 @@ pub async fn run_server_with_state(
     .await?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn nonce_round_trip_succeeds_within_ttl() {
+        let map = dashmap::DashMap::new();
+        let nonce = issue_bootstrap_nonce_into(&map, std::time::Duration::from_secs(60));
+        // 32 random bytes encoded URL-SAFE-NO-PAD = 43 chars (32 * 4 / 3 rounded up,
+        // minus the 1 char of padding skipped).
+        assert_eq!(nonce.len(), 43);
+        assert!(consume_bootstrap_nonce_from(&map, &nonce));
+        // One-time use: the same nonce must not validate again.
+        assert!(!consume_bootstrap_nonce_from(&map, &nonce));
+    }
+
+    #[test]
+    fn nonce_with_zero_ttl_rejects_immediately() {
+        // TTL=0 → expires_at == now → strict `>` comparison rejects.
+        // Defends against the legitimate-but-expired race the GC sweep
+        // might otherwise let through.
+        let map = dashmap::DashMap::new();
+        let nonce = issue_bootstrap_nonce_into(&map, std::time::Duration::from_secs(0));
+        assert!(!consume_bootstrap_nonce_from(&map, &nonce));
+    }
+
+    #[test]
+    fn nonce_unknown_value_rejected() {
+        let map = dashmap::DashMap::new();
+        // An attacker who guesses or fabricates a nonce that was never
+        // issued must not bypass the gate.
+        assert!(!consume_bootstrap_nonce_from(&map, "fake-nonce-value"));
+    }
+
+    #[test]
+    fn nonce_issuance_gc_drops_expired_entries() {
+        let map = dashmap::DashMap::new();
+        // Stuff an already-expired entry directly into the map.
+        let stale = "stale-nonce-from-an-old-session".to_string();
+        map.insert(stale.clone(), std::time::Instant::now());
+        // Sleep briefly so the entry is strictly in the past, not "now".
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        // Issuing a new nonce sweeps expired entries.
+        let _fresh = issue_bootstrap_nonce_into(&map, std::time::Duration::from_secs(60));
+        assert!(!map.contains_key(&stale));
+    }
 }
