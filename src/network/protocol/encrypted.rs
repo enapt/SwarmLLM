@@ -5,11 +5,34 @@ use super::TENSOR_TAG_ENCRYPTED;
 
 /// Build the AAD bytes for sealing/opening a `LayerForward` activation payload.
 ///
-/// Layout: `request_id(16) | sequence_num(4 LE) | index_pos(4 LE) | fmt(1)
+/// Layout (header — always present):
+/// `request_id(16) | sequence_num(4 LE) | index_pos(4 LE) | fmt(1)
 /// | layer_start(4 LE) | layer_end(4 LE) | model_id_len(2 LE) | model_id`.
-/// Both the encrypt path (`network/manager/tensors.rs`) and the decrypt path
-/// (`decode_layer_forward_encrypted`) MUST produce the exact same bytes; any
-/// drift breaks every encrypted forward. Centralising here pins the contract.
+///
+/// Layout (spec trailer — present iff `!draft_tokens.is_empty() ||
+/// spec_logits_requested`):
+/// `0x03 marker(1) | spec_flags(1) | num_drafts(2 LE) | drafts(num_drafts × 4 LE)`.
+///
+/// Layout (kv-truncate trailer — present iff `truncate_kv_to.is_some()`):
+/// `0x04 marker(1) | target_len(4 LE)`.
+///
+/// Trailers are included in the AAD whenever they're emitted on the wire so
+/// an active MITM cannot flip `spec_logits_requested` or modify
+/// `truncate_kv_to` without invalidating Poly1305. The wire trailers stay
+/// cleartext (the worker reads them after decrypt to dispatch correctly),
+/// but their values are now authenticated.
+///
+/// Both the encrypt path (`network/manager/tensors.rs`,
+/// `network/pipeline_stream.rs::encode_forward_for_wire`) and the decrypt
+/// path (`decode_layer_forward_encrypted`) MUST produce identical bytes;
+/// any drift breaks every encrypted forward. Centralising here pins the
+/// contract.
+///
+/// **Wire compatibility:** extending the AAD layout is a protocol bump for
+/// encrypted mode. Old↔new mixed clusters running `enable_encryption=true`
+/// will fail decrypt with auth-error. Plaintext mode (`enable_encryption=false`)
+/// is unaffected. Encrypted mode is opt-in and alpha; this trade-off is
+/// documented in `docs/ARCHITECTURE.md`.
 pub fn build_layer_forward_aad(forward: &LayerForward) -> Vec<u8> {
     let model_id_bytes = forward.model_id.0.as_bytes();
     let mut aad = Vec::with_capacity(35 + model_id_bytes.len());
@@ -27,6 +50,29 @@ pub fn build_layer_forward_aad(forward: &LayerForward) -> Vec<u8> {
     aad.extend_from_slice(&layer_end.to_le_bytes());
     aad.extend_from_slice(&(model_id_bytes.len() as u16).to_le_bytes());
     aad.extend_from_slice(model_id_bytes);
+
+    // Spec trailer fields (mirror `encode_layer_forward[_encrypted]`'s 0x03
+    // emission gate exactly — see `protocol/layer_forward.rs`).
+    if !forward.draft_tokens.is_empty() || forward.spec_logits_requested {
+        aad.push(0x03);
+        let flags: u8 = if forward.spec_logits_requested { 1 } else { 0 };
+        aad.push(flags);
+        // draft_tokens length is u16-bounded by the encoder. The encode
+        // helpers reject overlong drafts before AAD is built; we trust
+        // that contract here and saturate as a defence-in-depth.
+        let n = forward.draft_tokens.len().min(u16::MAX as usize) as u16;
+        aad.extend_from_slice(&n.to_le_bytes());
+        for t in &forward.draft_tokens {
+            aad.extend_from_slice(&t.to_le_bytes());
+        }
+    }
+
+    // KV-truncate trailer (mirror 0x04 emission gate).
+    if let Some(target_len) = forward.truncate_kv_to {
+        aad.push(0x04);
+        aad.extend_from_slice(&target_len.to_le_bytes());
+    }
+
     aad
 }
 
@@ -193,11 +239,13 @@ pub fn decode_layer_forward_encrypted(
         .map_err(|_| SwarmError::Network("Invalid model_id UTF-8".into()))?;
     let model_id = ModelId(model_id_str.to_string());
 
-    // AAD is everything from uuid through model_id (before sealed_len)
-    let aad_end = mid_start + mid_len;
-    let aad = data[..aad_end].to_vec();
-
-    let sealed_len_start = aad_end;
+    // The AAD covers the cleartext header AND the post-payload trailers
+    // (spec / kv-truncate). We can't slice the bytes here because the
+    // trailers come AFTER the sealed payload — we parse them below first,
+    // then reconstruct the AAD via `build_layer_forward_aad` on the parsed
+    // forward struct so encrypt and decrypt agree byte-for-byte. See the
+    // helper's docstring for the layout contract.
+    let sealed_len_start = mid_start + mid_len;
     let sealed_len = u32::from_le_bytes(
         data[sealed_len_start..sealed_len_start + 4]
             .try_into()
@@ -304,6 +352,13 @@ pub fn decode_layer_forward_encrypted(
         spec_logits_requested,
         truncate_kv_to,
     };
+
+    // Reconstruct AAD from the parsed forward via the helper. This MUST
+    // match the bytes the encrypt path passed to `session_manager.seal`.
+    // The trailer fields (`spec_logits_requested`, `draft_tokens`,
+    // `truncate_kv_to`) are now authenticated — flipping them on the wire
+    // invalidates Poly1305 even though they ride as cleartext metadata.
+    let aad = build_layer_forward_aad(&forward);
 
     Ok((forward, sealed, aad))
 }
@@ -440,6 +495,100 @@ mod tests {
         assert!(
             decoded.spec_logits_requested,
             "spec_logits_requested must survive encrypted round-trip when draft_tokens is empty"
+        );
+    }
+
+    #[test]
+    fn aad_includes_spec_trailer_when_emitted() {
+        // Spec trailer fields MUST be in the AAD whenever they're emitted on
+        // the wire. The presence/length of the spec trailer in AAD is gated
+        // by the same condition the encoder uses for the 0x03 wire trailer:
+        // `!draft_tokens.is_empty() || spec_logits_requested`.
+        let mut forward = base_forward();
+        forward.draft_tokens = vec![100, 200, 300];
+        forward.spec_logits_requested = true;
+
+        let aad = build_layer_forward_aad(&forward);
+        let mid_bytes = forward.model_id.0.as_bytes();
+        let header_end = 35 + mid_bytes.len();
+        // Header byte length: 35 + mid_bytes.len()
+        // Spec trailer: 1 (marker) + 1 (flags) + 2 (num_drafts) + 3*4 (drafts) = 16
+        assert_eq!(aad.len(), header_end + 16);
+        assert_eq!(aad[header_end], 0x03);
+        assert_eq!(aad[header_end + 1], 1); // spec_logits_requested flag
+        assert_eq!(&aad[header_end + 2..header_end + 4], &3u16.to_le_bytes(),);
+        assert_eq!(&aad[header_end + 4..header_end + 8], &100u32.to_le_bytes(),);
+    }
+
+    #[test]
+    fn aad_includes_kv_truncate_when_set() {
+        let mut forward = base_forward();
+        forward.truncate_kv_to = Some(0xCAFE_BABE);
+
+        let aad = build_layer_forward_aad(&forward);
+        let mid_bytes = forward.model_id.0.as_bytes();
+        let header_end = 35 + mid_bytes.len();
+        // KV-truncate trailer: 1 (marker) + 4 (target_len) = 5
+        assert_eq!(aad.len(), header_end + 5);
+        assert_eq!(aad[header_end], 0x04);
+        assert_eq!(
+            &aad[header_end + 1..header_end + 5],
+            &0xCAFE_BABEu32.to_le_bytes(),
+        );
+    }
+
+    #[test]
+    fn aad_omits_trailers_when_absent() {
+        // When neither spec nor kv_truncate trailers are emitted, the AAD
+        // is just the header bytes (preserves backward-compat for the
+        // common no-trailer case).
+        let forward = base_forward();
+        let aad = build_layer_forward_aad(&forward);
+        let mid_bytes = forward.model_id.0.as_bytes();
+        assert_eq!(aad.len(), 35 + mid_bytes.len());
+    }
+
+    #[test]
+    fn aad_authenticates_spec_logits_requested_flip() {
+        // Lock down the security claim: an attacker who flips
+        // `spec_logits_requested` on the wire MUST produce a different AAD
+        // than the one the sender used to seal. The encoder's spec trailer
+        // is cleartext (so the worker can read it without decrypting), but
+        // the value is now in the AAD, so MITM tampering invalidates the
+        // Poly1305 tag.
+        //
+        // This test compares the helper's output for two LayerForwards
+        // that differ only in `spec_logits_requested` and asserts the AAD
+        // bytes diverge. Decrypt-side enforcement is exercised by
+        // `decode_layer_forward_encrypted` calling `build_layer_forward_aad`
+        // on the parsed forward — see the matching round-trip test.
+        let mut a = base_forward();
+        a.spec_logits_requested = true;
+        let aad_a = build_layer_forward_aad(&a);
+
+        let mut b = a.clone();
+        b.spec_logits_requested = false;
+        let aad_b = build_layer_forward_aad(&b);
+
+        assert_ne!(
+            aad_a, aad_b,
+            "flipping spec_logits_requested MUST change AAD bytes"
+        );
+    }
+
+    #[test]
+    fn aad_authenticates_truncate_kv_to_change() {
+        let mut a = base_forward();
+        a.truncate_kv_to = Some(42);
+        let aad_a = build_layer_forward_aad(&a);
+
+        let mut b = a.clone();
+        b.truncate_kv_to = Some(43);
+        let aad_b = build_layer_forward_aad(&b);
+
+        assert_ne!(
+            aad_a, aad_b,
+            "modifying truncate_kv_to MUST change AAD bytes"
         );
     }
 
