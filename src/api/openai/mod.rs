@@ -265,10 +265,17 @@ pub async fn chat_completions(
     // No local full-model executor — use distributed inference or forward.
     // Nodes are NOT required to have all shards. Any node can initiate inference
     // as long as the network collectively covers all layers.
-    // The `x-swarm-forwarded` header prevents infinite forwarding loops between nodes.
-    // Only trust this header from internal requests (authenticated with internal token).
-    // Middleware already validates that x-swarm-forwarded only passes from known peer IPs
-    // or loopback with valid internal token, so we just check presence here.
+    //
+    // The `x-swarm-forwarded` header prevents infinite forwarding loops between
+    // nodes. The legitimate setter is `forward_to_peer`, which adds it when a
+    // peer node forwards an inference request (auth carried via the verbatim
+    // Bearer — see gotcha #30). Any Bearer-authenticated caller can set this
+    // header on their own request, but the only effect is forcing this node
+    // to skip peer-forwarding and attempt the request locally; that's a
+    // routing-only side channel that provides no privilege gain (they already
+    // have full inference rights via Bearer) and only hurts the caller (they
+    // get a 503 if local shards aren't available). Not worth additional
+    // middleware enforcement.
     let is_forwarded = headers.get("x-swarm-forwarded").is_some();
 
     if model_name.is_none() {

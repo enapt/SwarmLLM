@@ -106,11 +106,27 @@ pub async fn handle_mcp(
             // Unknown notification — silently accept per spec
             return (StatusCode::ACCEPTED, Json(None));
         }
-        _ => JsonRpcResponse::error(
-            req.id,
-            METHOD_NOT_FOUND,
-            format!("Method not found: {}", req.method),
-        ),
+        _ => {
+            // SEC: cap the reflected method string. The body is bounded by
+            // the global 32 MB request cap, but echoing 32 MB of caller-
+            // controlled UTF-8 in error responses (and structured logs)
+            // is amplification we can avoid cheaply.
+            const REFLECT_CAP: usize = 64;
+            let mut shown = req.method.clone();
+            if shown.len() > REFLECT_CAP {
+                let mut end = REFLECT_CAP;
+                while end > 0 && !shown.is_char_boundary(end) {
+                    end -= 1;
+                }
+                shown.truncate(end);
+                shown.push_str("...");
+            }
+            JsonRpcResponse::error(
+                req.id,
+                METHOD_NOT_FOUND,
+                format!("Method not found: {shown}"),
+            )
+        }
     };
 
     (StatusCode::OK, Json(Some(response)))
