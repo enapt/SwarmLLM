@@ -198,10 +198,10 @@ pub(super) fn build_kv_truncate_forward(
 /// `true` when ANY disqualifier applies — callers short-circuit their
 /// own `eligible()` check on a true return.
 ///
-/// Each path additionally has its own segment-shape, encryption, and
-/// flag-config preconditions; those stay in the per-path `eligible()`
-/// because the shapes are subtly divergent (1-segment / 2+-segment /
-/// all-remote / per-model encryption gate).
+/// Each path additionally has its own segment-shape and flag-config
+/// preconditions; those stay in the per-path `eligible()` because the
+/// shapes are subtly divergent (1-segment / 2+-segment / per-model
+/// encrypted-pipeline gate).
 pub(super) fn fastpath_request_disqualified(exec: &PipelineExecutor) -> bool {
     if !exec.assignment.tp_groups.is_empty() {
         return true;
