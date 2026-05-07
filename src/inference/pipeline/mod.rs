@@ -239,11 +239,6 @@ pub(super) fn speculative_common_eligible(exec: &PipelineExecutor) -> bool {
     if cfg.draft_model_path.is_none() {
         return false;
     }
-    // Encryption layer not yet wired through speculative/DSD/remote-generate
-    // fast paths — see ARCHITECTURE.md § Deferred Items.
-    if exec.shared_state.config.network.enable_encryption {
-        return false;
-    }
     true
 }
 

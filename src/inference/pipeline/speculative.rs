@@ -31,8 +31,6 @@
 //! - Greedy only (`temperature == 0`). Non-greedy accept-reject needs draft
 //!   probabilities; the existing `speculative::accept_reject` wants per-position
 //!   draft distributions which we don't pay to transmit in greedy mode.
-//! - Encryption disabled (`enable_encryption = false`) for the speculative
-//!   path — see ARCHITECTURE.md § Deferred Items.
 //! - Non-pre-embedded, non-vision, non-LoRA requests.
 //! - Requires draft model loaded (`config.inference.draft_model_path` set and
 //!   `SharedState.draft_executor` holds a loaded model).

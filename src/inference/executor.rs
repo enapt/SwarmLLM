@@ -223,6 +223,7 @@ impl ModelExecutor {
         );
 
         #[cfg(feature = "llama")]
+        #[allow(clippy::needless_return)]
         {
             return self.generate_stream_llama(prompt, params, callback);
         }
@@ -329,6 +330,10 @@ impl ModelExecutor {
         let stop_sequences = &params.stop;
         let mut accumulated_text = String::new();
 
+        // cur_pos tracks the absolute KV position of the next token to decode,
+        // which starts at `tokens.len()` (after prefill) — not at 0. The loop
+        // index is just a max_tokens bound, not a position counter.
+        #[allow(clippy::explicit_counter_loop)]
         for _ in 0..max_gen {
             // Sample next token
             let new_token = sampler.sample(&ctx, -1);
@@ -347,7 +352,7 @@ impl ModelExecutor {
             accumulated_text.push_str(&piece);
 
             // Check user-provided stop sequences
-            if crate::inference::sampling::find_stop_sequence(&accumulated_text, &stop_sequences)
+            if crate::inference::sampling::find_stop_sequence(&accumulated_text, stop_sequences)
                 .is_some()
             {
                 break;
@@ -478,6 +483,7 @@ impl ModelExecutor {
         );
 
         #[cfg(feature = "llama")]
+        #[allow(clippy::needless_return)]
         {
             return self.generate_speculative_llama(draft, prompt, params, gamma, callback);
         }

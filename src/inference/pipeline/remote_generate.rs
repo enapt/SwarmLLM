@@ -28,7 +28,6 @@ const REMOTE_GENERATE_TOKEN_CHANNEL_CAP: usize = 256;
 /// Preconditions for the fast path. All checks are local and cheap.
 fn eligible(exec: &PipelineExecutor) -> bool {
     // Shared disqualifiers: TP, LoRA adapter, vision images.
-    // Encryption layer rationale: see ARCHITECTURE.md § Deferred Items.
     if super::fastpath_request_disqualified(exec) {
         return false;
     }

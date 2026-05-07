@@ -29,9 +29,7 @@
 //! - Pipeline has 2+ segments AND no TP groups (single-segment is Item 2's job)
 //! - Greedy temperature == 0
 //! - Draft model loaded
-//! - All segments remote (a local segment in the pipeline would need a
-//!   different code path — future work)
-//! - No vision, LoRA, or encryption
+//! - No vision or LoRA
 //!
 //! # Correctness
 //!
@@ -81,16 +79,6 @@ fn eligible(exec: &PipelineExecutor) -> bool {
     if exec.assignment.segments.len() < 2 {
         return false;
     }
-    // All segments must be remote — see ARCHITECTURE.md § Deferred Items.
-    let local_node_id = exec.shared_state.identity.node_id();
-    if exec
-        .assignment
-        .segments
-        .iter()
-        .any(|s| s.node_id == *local_node_id)
-    {
-        return false;
-    }
     true
 }
 
@@ -126,13 +114,20 @@ impl PipelineExecutor {
         let initial_gamma = self.shared_state.config.inference.speculative_gamma.max(2);
         let mut controller = GammaController::new(initial_gamma);
 
-        // Resolve all peer IDs upfront. If any segment's peer can't be
-        // located, fall through cleanly.
-        let mut peer_id_for_segment: Vec<Vec<u8>> =
+        // Resolve peer IDs upfront. Local segments push None and dispatch to
+        // the worker subprocess in `forward_verify_through_segments`; remote
+        // segments need a resolved peer_id_bytes so we can fall through
+        // cleanly if any are missing.
+        let local_node_id = self.shared_state.identity.node_id().clone();
+        let mut peer_id_for_segment: Vec<Option<Vec<u8>>> =
             Vec::with_capacity(self.assignment.segments.len());
         for segment in &self.assignment.segments {
+            if segment.node_id == local_node_id {
+                peer_id_for_segment.push(None);
+                continue;
+            }
             match self.shared_state.resolve_peer_id_bytes(&segment.node_id) {
-                Some(p) => peer_id_for_segment.push(p),
+                Some(p) => peer_id_for_segment.push(Some(p)),
                 None => {
                     tracing::debug!(%request_id, node = %segment.node_id, "DSD: missing peer_id_bytes — falling back");
                     return Ok(None);
@@ -398,6 +393,11 @@ impl PipelineExecutor {
 /// `LayerForward` carries `truncate_kv_to`, `draft_tokens` (informational),
 /// and `spec_logits_requested = true` — only the last segment actually emits
 /// `spec_logits` (the worker gates emission on `is_last`).
+///
+/// Local segments (`peer_id_for_segment[idx] == None`) dispatch directly to
+/// the local `model_process_pool` worker instead of going over the network.
+/// The worker handles the `spec_logits_requested && is_last` gating
+/// internally, so the result shape contract is unchanged.
 #[cfg(feature = "llama")]
 #[allow(clippy::too_many_arguments)]
 async fn forward_verify_through_segments(
@@ -406,7 +406,7 @@ async fn forward_verify_through_segments(
     request_id: uuid::Uuid,
     index_pos: u32,
     segments: &[crate::types::PipelineSegment],
-    peer_id_for_segment: &[Vec<u8>],
+    peer_id_for_segment: &[Option<Vec<u8>>],
     verify_tokens: &[u32],
     truncate_kv_to: Option<u32>,
 ) -> Result<Vec<Vec<f32>>, SwarmError> {
@@ -420,16 +420,6 @@ async fn forward_verify_through_segments(
         let is_last = idx == num_segments - 1;
         let target_peer_bytes = &peer_id_for_segment[idx];
 
-        // Cap-check + register oneshot + RAII guard. The guard ensures
-        // the pending_layer_results entry is removed on every exit path
-        // from this iteration, including `?` propagation from
-        // wait_for_result. Without it, a non-final-segment timeout/network
-        // error leaves a permanent stale entry that consumes capacity
-        // (the cap check at the loop head would fail under load) and
-        // silently swallows any late-arriving response — gotcha #45.
-        let (rx, mut pending_guard) =
-            super::register_pending_layer_result(&shared_state.pending_layer_results, request_id)?;
-
         // Only the last segment will actually populate spec_logits — but
         // setting the flag uniformly makes the protocol symmetric.
         let forward = super::build_spec_verify_forward(
@@ -441,32 +431,56 @@ async fn forward_verify_through_segments(
             truncate_kv_to,
         );
 
-        if network_tx
-            .send(NetworkCommand::SendTensor {
-                target_peer_bytes: target_peer_bytes.clone(),
-                forward,
-            })
-            .await
-            .is_err()
-        {
-            shared_state.pending_layer_results.remove(&request_id);
-            return Err(SwarmError::Network("DSD: verify send dropped".into()));
-        }
+        let result = if let Some(peer_bytes) = target_peer_bytes {
+            // Remote segment: register a pending result oneshot, ship the
+            // forward, wait for the LayerResult to come back over the network.
+            //
+            // Cap-check + register oneshot + RAII guard. The guard ensures
+            // the pending_layer_results entry is removed on every exit path
+            // from this iteration, including `?` propagation from
+            // wait_for_result. Without it, a non-final-segment timeout/network
+            // error leaves a permanent stale entry that consumes capacity
+            // (the cap check at the loop head would fail under load) and
+            // silently swallows any late-arriving response — gotcha #45.
+            let (rx, mut pending_guard) = super::register_pending_layer_result(
+                &shared_state.pending_layer_results,
+                request_id,
+            )?;
 
-        let num_layers = segment.layer_range.1 - segment.layer_range.0;
-        let result = PipelineExecutor::wait_for_result(
-            rx,
-            request_id,
-            idx,
-            &segment.node_id,
-            num_layers,
-            activation_bytes.len(),
-        )
-        .await?;
-        // Result delivered (the dispatcher already removed the entry); disarm
-        // the guard so we don't double-remove on drop. Mirrors the
-        // speculative.rs pattern documented in gotcha #45.
-        pending_guard.disarm();
+            if network_tx
+                .send(NetworkCommand::SendTensor {
+                    target_peer_bytes: peer_bytes.clone(),
+                    forward,
+                })
+                .await
+                .is_err()
+            {
+                shared_state.pending_layer_results.remove(&request_id);
+                return Err(SwarmError::Network("DSD: verify send dropped".into()));
+            }
+
+            let num_layers = segment.layer_range.1 - segment.layer_range.0;
+            let result = PipelineExecutor::wait_for_result(
+                rx,
+                request_id,
+                idx,
+                &segment.node_id,
+                num_layers,
+                activation_bytes.len(),
+            )
+            .await?;
+            // Result delivered (the dispatcher already removed the entry); disarm
+            // the guard so we don't double-remove on drop. Mirrors the
+            // speculative.rs pattern documented in gotcha #45.
+            pending_guard.disarm();
+            result
+        } else {
+            // Local segment: dispatch directly to the worker subprocess via
+            // the model process pool. The worker's `forward_verify_all_positions`
+            // path emits `spec_logits` only on `is_last`; intermediate locals
+            // produce hidden-state activations like a remote intermediate.
+            shared_state.model_process_pool.forward(forward).await?
+        };
 
         if let Some(NetworkFinishReason::Error(msg)) = &result.finish_reason {
             return Err(SwarmError::Inference(format!("DSD segment {idx}: {msg}")));
