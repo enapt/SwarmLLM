@@ -76,16 +76,33 @@ pub(super) fn resolve_api_key(config: &Config, db: &Database) -> String {
 }
 
 /// Write the API key to a plain file so the CLI can read it while the daemon holds the DB lock.
+///
+/// SEC: open with mode 0o600 atomically rather than `fs::write` + `set_permissions`.
+/// The two-step variant left a TOCTOU window where the file existed with the
+/// process-umask-derived permissions (typically 0o644 — world-readable) before
+/// the chmod tightened it. Mirrors the identity.key write at keypair.rs:62.
 fn write_api_key_file(data_dir: &std::path::Path, key: &str) {
     let path = data_dir.join("api_key");
-    if let Err(e) = std::fs::write(&path, key) {
-        tracing::warn!(error = %e, "Failed to write api_key file");
-    }
-    // Restrict permissions on Unix (owner read/write only)
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create(true).truncate(true).mode(0o600);
+        match opts.open(&path) {
+            Ok(mut f) => {
+                if let Err(e) = f.write_all(key.as_bytes()) {
+                    tracing::warn!(error = %e, "Failed to write api_key file");
+                }
+            }
+            Err(e) => tracing::warn!(error = %e, "Failed to open api_key file"),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        if let Err(e) = std::fs::write(&path, key) {
+            tracing::warn!(error = %e, "Failed to write api_key file");
+        }
     }
 }
 

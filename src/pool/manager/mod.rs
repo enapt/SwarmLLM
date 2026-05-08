@@ -709,6 +709,27 @@ impl PoolManager {
             return;
         }
 
+        // SEC: reject forwards with stale/future timestamps. Without this, a
+        // member can pre-sign a batch of forwards with fresh UUIDs and drip
+        // them in months later (UUID dedup only blocks exact-id replays). The
+        // signed `forward.timestamp` becomes the freshness anchor; reuses the
+        // same window/skew constants as `verify_balance_report` and
+        // `handle_inbound_removal` (gotcha #32, #44).
+        if let Err(e) = crate::credit::ledger::check_signed_freshness(
+            forward.timestamp,
+            crate::credit::ledger::CLOCK_SKEW_TOLERANCE_SECS,
+            crate::credit::ledger::BALANCE_REPORT_MAX_AGE_SECS,
+            "pool_credit_forward",
+        ) {
+            tracing::warn!(
+                error = %e,
+                from = %forward.from_node_id,
+                id = %forward.id,
+                "Rejecting credit forward with stale/future timestamp"
+            );
+            return;
+        }
+
         // Rate-limit per-member forwards. The UUID is member-generated, so the DB
         // dedup above only blocks exact-UUID replays — a fresh UUID with identical
         // amount/timestamp would bypass it. Rate-limiting bounds the exploitability.

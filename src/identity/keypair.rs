@@ -126,6 +126,14 @@ impl Identity {
     }
 
     /// Get the raw signing key bytes (for libp2p keypair conversion).
+    ///
+    /// SEC: callers that hold the returned array beyond a single immediate
+    /// consume MUST wrap in `zeroize::Zeroizing::new(...)` so the heap/stack
+    /// copy is scrubbed on drop. `SigningKey` zeroizes itself, but once
+    /// bytes leave via `to_bytes()` that guarantee doesn't propagate. The
+    /// public signature stays `[u8; 32]` because most consumers pass the
+    /// array straight into libp2p / candle APIs that take ownership; forcing
+    /// `Zeroizing` here just produces an unzeroized copy on the way in.
     pub(crate) fn signing_key_bytes(&self) -> [u8; 32] {
         self.signing_key.to_bytes()
     }

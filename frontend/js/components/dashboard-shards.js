@@ -28,13 +28,27 @@
    * @param {string} [opts.cancelBtn] - Optional cancel button HTML appended to right text
    */
   function buildProgressBar(opts) {
-    var bar = opts.barContent || '<div class="dl-fill" style="width:' + opts.pct + '%"></div>';
+    // SEC: escape every text-typed input that lands in innerHTML. Numeric
+    // (`pct`) is coerced via `+` and serialized as a number, so the HTML it
+    // produces is structurally safe; `barContent` and `cancelBtn` are
+    // pre-built HTML strings (callers' responsibility) and are passed
+    // through as-is. `safeId`, `label`, and `rightText` are text — escape
+    // them. The two current callers only pass server-controlled numerics
+    // through `label`/`rightText`, but the function contract should not
+    // rely on that — peer-controlled strings (e.g. model display names)
+    // shouldn't become an XSS vector simply because someone wires a new
+    // caller through.
+    var safePct = +opts.pct || 0;
+    var safeId = U.escapeHtml(String(opts.safeId || ''));
+    var safeLabel = U.escapeHtml(String(opts.label || ''));
+    var safeRight = U.escapeHtml(String(opts.rightText || ''));
+    var bar = opts.barContent || '<div class="dl-fill" style="width:' + safePct + '%"></div>';
     var right = opts.cancelBtn
-      ? '<span style="display:flex;align-items:center;gap:8px"><span class="mono dl-progress-text">' + opts.rightText + '</span>' + opts.cancelBtn + '</span>'
-      : '<span class="mono dl-progress-text">' + opts.rightText + '</span>';
-    return '<div class="dl-progress" data-model-progress="' + opts.safeId + '" data-last-pct="' + opts.pct + '">' +
+      ? '<span style="display:flex;align-items:center;gap:8px"><span class="mono dl-progress-text">' + safeRight + '</span>' + opts.cancelBtn + '</span>'
+      : '<span class="mono dl-progress-text">' + safeRight + '</span>';
+    return '<div class="dl-progress" data-model-progress="' + safeId + '" data-last-pct="' + safePct + '">' +
       '<div class="flex-between field-hint mb-0">' +
-      '<span class="text-muted">' + opts.label + '</span>' +
+      '<span class="text-muted">' + safeLabel + '</span>' +
       right +
       '</div>' +
       '<div class="dl-bar">' + bar + '</div>' +

@@ -293,6 +293,25 @@ async fn handle_inbound_stream(
     mut shutdown_rx: tokio::sync::watch::Receiver<bool>,
 ) {
     let (mut read, mut write) = stream.split();
+
+    // SEC: refuse streams from peers that haven't completed Identify yet.
+    // The libp2p connection is established as soon as Noise+Yamux handshake
+    // finishes — *before* `peer_registry` is populated by the Identify
+    // event. Accepting frames at that point lets an unauthenticated peer
+    // (a) leak `pending_stream_result_routes` entries (each frame inserts a
+    // new oneshot keyed by attacker-chosen UUID), and (b) hold a Tokio task
+    // forever per UUID waiting on `rx.await` because the dispatch path
+    // drops messages with `sender = None`. Wait for the registry entry
+    // before serving anything; if it never arrives, the stream times out
+    // on the connection-idle path naturally.
+    if shared_state
+        .peer_to_node_id_from_registry(&peer_id)
+        .is_none()
+    {
+        tracing::debug!(%peer_id, "pipeline stream from unregistered peer — closing");
+        let _ = write.close().await;
+        return;
+    }
     tracing::info!(%peer_id, "pipeline stream handler started");
 
     loop {

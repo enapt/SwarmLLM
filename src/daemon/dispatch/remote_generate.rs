@@ -25,7 +25,7 @@ use super::super::state::SharedState;
 pub(super) async fn handle_remote_generate_request(
     shared_state: Arc<SharedState>,
     network_tx: mpsc::Sender<NetworkCommand>,
-    req: RemoteGenerateRequest,
+    mut req: RemoteGenerateRequest,
 ) {
     let sender_bytes: Vec<u8> = match req.sender_peer_bytes.as_ref() {
         Some(b) => b.clone(),
@@ -41,6 +41,40 @@ pub(super) async fn handle_remote_generate_request(
     let request_id = req.request_id;
     let model_id = req.model_id.clone();
     let layer_range = req.layer_range;
+
+    // SEC: clamp peer-supplied sampling params before they reach the worker.
+    // The local API path runs `build_sampling_params` which clamps everything;
+    // RemoteGenerateRequest arrives over the wire from peers and bypasses
+    // that. Without this clamp a malicious peer can pin a worker for hours
+    // with `max_tokens = u32::MAX`, or NaN-poison `temperature/top_p`.
+    {
+        let s = &mut req.sampling;
+        s.temperature = if s.temperature.is_finite() {
+            s.temperature.clamp(0.0, 2.0)
+        } else {
+            1.0
+        };
+        s.top_p = if s.top_p.is_finite() {
+            s.top_p.clamp(f32::EPSILON, 1.0)
+        } else {
+            1.0
+        };
+        s.frequency_penalty = if s.frequency_penalty.is_finite() {
+            s.frequency_penalty.clamp(-2.0, 2.0)
+        } else {
+            0.0
+        };
+        s.presence_penalty = if s.presence_penalty.is_finite() {
+            s.presence_penalty.clamp(-2.0, 2.0)
+        } else {
+            0.0
+        };
+        s.max_tokens = s.max_tokens.clamp(1, crate::api::DEFAULT_MAX_TOKENS);
+        s.top_logprobs = s.top_logprobs.min(20);
+        if s.stop.len() > crate::api::MAX_STOP_SEQUENCES {
+            s.stop.truncate(crate::api::MAX_STOP_SEQUENCES);
+        }
+    }
 
     tracing::info!(
         %request_id,

@@ -1031,6 +1031,20 @@ async fn handle_forward(
                             .chunks_exact(2)
                             .map(|b| half::f16::from_le_bytes([b[0], b[1]]).to_f32())
                             .collect();
+                        // SEC: reject NaN/Inf from peer-supplied vision embeddings.
+                        // Without this, a poisoned tensor propagates through the KV
+                        // cache for the session, contaminating every subsequent
+                        // decode step. Same convention as `spec_logits` decode and
+                        // AllReduce sums.
+                        if f32_values.iter().any(|v| !v.is_finite()) {
+                            tracing::warn!(
+                                request_id = %fwd.request_id,
+                                "Vision embeddings contain NaN/Inf — dropping vision tensor"
+                            );
+                            return Err(SwarmError::Validation(
+                                "Vision embeddings contain non-finite values".into(),
+                            ));
+                        }
                         // SEC: checked_mul guards against integer overflow
                         // for adversarial shape headers. On 32-bit platforms
                         // num_tokens * hidden_dim can wrap if both are near
@@ -1070,8 +1084,30 @@ async fn handle_forward(
         }
     };
 
-    // Load LoRA adapter if requested
+    // Load LoRA adapter if requested.
+    //
+    // SEC: `adapter_id` rides peer-controlled `LayerForward.adapter_id`. A naive
+    // `data_dir.join("adapters").join(adapter_id)` lets a malicious peer escape
+    // the adapters/ directory via `..`, absolute paths, or NUL bytes. Reject
+    // anything that isn't a single, plain filename component before joining.
     let lora_adapter = if let Some(ref adapter_id) = fwd.adapter_id {
+        let is_safe_id = !adapter_id.is_empty()
+            && !adapter_id.contains('/')
+            && !adapter_id.contains('\\')
+            && !adapter_id.contains('\0')
+            && adapter_id != "."
+            && adapter_id != ".."
+            && !adapter_id.starts_with('.')
+            && std::path::Path::new(adapter_id).components().count() == 1;
+        if !is_safe_id {
+            tracing::warn!(
+                adapter_id,
+                "Rejecting LoRA adapter_id with unsafe path components"
+            );
+            return Err(SwarmError::Validation(
+                "adapter_id must be a single safe filename component".into(),
+            ));
+        }
         let adapter_dir = data_dir.join("adapters").join(adapter_id);
         if adapter_dir.exists() {
             match crate::model::lora::load_adapter_from_dir(&adapter_dir) {

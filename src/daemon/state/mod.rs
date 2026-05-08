@@ -232,8 +232,12 @@ impl SharedState {
             }
             map
         };
-        // Grab signing key bytes before identity is moved into the struct
-        let signing_key_bytes = identity.signing_key_bytes();
+        // Grab signing key bytes before identity is moved into the struct.
+        // SEC: wrap in `Zeroizing` so the local copy is scrubbed on drop —
+        // this lives across the whole `Arc::new(Self { ... })` block and
+        // through `decrypt_config` below.
+        let signing_key_bytes: zeroize::Zeroizing<[u8; 32]> =
+            zeroize::Zeroizing::new(identity.signing_key_bytes());
         let state = Arc::new(Self {
             config: config.clone(),
             identity,

@@ -1563,6 +1563,20 @@ pub(crate) async fn dispatch_network_messages(
                                         if !gossip_timestamp_fresh(demand.timestamp_ms, now_ms, "ModelDemandGossip") {
                                             continue;
                                         }
+                                        // SEC: reject NaN/Inf from peer-supplied f64. Without this,
+                                        // a single gossiped `decayed_rate: NaN` poisons the EMA
+                                        // blend permanently for that (model, region) pair —
+                                        // every subsequent `*existing * 0.8 + NaN * 0.2` stays NaN
+                                        // until restart, corrupting auto-manage replication scoring.
+                                        if !demand.decayed_rate.is_finite() {
+                                            tracing::warn!(
+                                                model = %demand.model_id,
+                                                region = %demand.region,
+                                                rate = demand.decayed_rate,
+                                                "ModelDemandGossip non-finite decayed_rate — dropping"
+                                            );
+                                            continue;
+                                        }
                                         let key = (demand.model_id.clone(), demand.region.clone());
                                         if shared_state.region_demand.len() >= MAX_DEMAND_ENTRIES
                                             && !shared_state.region_demand.contains_key(&key)

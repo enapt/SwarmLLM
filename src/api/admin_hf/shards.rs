@@ -147,10 +147,18 @@ pub async fn hf_download_shards(
             .await
             .map_err(|e| {
                 tracing::error!(error = %e, "HuggingFace probe failed");
-                ApiError(crate::error::SwarmError::ServiceUnavailable(format!(
-                    "HuggingFace probe failed: {}",
-                    crate::api::scrub_truncate_error(&e)
-                )))
+                // SEC / contract: HuggingFace is the upstream service, so a
+                // probe failure is an upstream error (502 Bad Gateway), not
+                // local "this server can't serve" (503). Matches the variant
+                // used in probe.rs and search.rs and prevents leaking local-
+                // vs-upstream topology via 503/502 differentiation.
+                ApiError(crate::error::SwarmError::ProviderError {
+                    status: 502,
+                    body: format!(
+                        "HuggingFace probe failed: {}",
+                        crate::api::scrub_truncate_error(&e)
+                    ),
+                })
             })?;
 
     let arch_str = &info.tensor_meta.architecture;

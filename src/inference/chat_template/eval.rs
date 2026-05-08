@@ -11,6 +11,14 @@ use super::parser::Token;
 /// templates rarely exceed depth 5).
 pub(super) const MAX_TEMPLATE_DEPTH: u32 = 256;
 
+/// Hard cap on the rendered template output length. The depth guard alone
+/// stops infinite recursion but doesn't stop heap amplification: e.g.
+/// a chain of `{% set x = x + x %}` (or any string-doubling expression)
+/// allocates 2^depth-sized strings before the depth cap fires. Real
+/// chat templates render to a few KB at most. Any output past this cap
+/// is a footgun (or an attack via a poisoned model's tokenizer.json).
+pub(super) const MAX_TEMPLATE_OUTPUT: usize = 4 * 1024 * 1024;
+
 pub(super) struct EvalCtx<'a> {
     pub(super) tokens: &'a [Token],
     pub(super) messages: &'a [ChatMessage],
@@ -93,6 +101,19 @@ pub(super) fn eval_block(
     let _depth_guard = ctx.enter()?;
     let mut i = start;
     while i < ctx.tokens.len() {
+        // SEC: bail out if output exceeds the hard cap. A chain of
+        // `{% set x = x + x %}` doublings allocates exponentially-sized
+        // strings before MAX_TEMPLATE_DEPTH fires — return early so the
+        // worker can't be coerced into multi-GB allocations by a poisoned
+        // model's tokenizer.json.
+        if output.len() > MAX_TEMPLATE_OUTPUT {
+            tracing::warn!(
+                output_len = output.len(),
+                cap = MAX_TEMPLATE_OUTPUT,
+                "Chat template output exceeded hard cap — truncating"
+            );
+            return Some(ctx.tokens.len());
+        }
         match &ctx.tokens[i] {
             Token::Text(t) => {
                 output.push_str(t);

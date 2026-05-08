@@ -208,7 +208,14 @@ pub fn cosign_credit_forward(
 #[cfg(test)]
 fn blind_invite(pool_id: &PoolId, ttl_hours: u32) -> (uuid::Uuid, BlindingFactor, BlindedToken) {
     let invitation_id = uuid::Uuid::new_v4();
-    let blinding_factor = BlindingFactor(rand::random::<[u8; 32]>());
+    // SEC: use OsRng directly. `rand::random` resolves to `thread_rng()` —
+    // a ChaCha12Rng seeded once from OsRng. Every other crypto-material
+    // generation in this codebase uses OsRng explicitly; keep this site
+    // consistent so a future promotion to non-test never accidentally
+    // weakens entropy.
+    let mut factor_bytes = [0u8; 32];
+    rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut factor_bytes);
+    let blinding_factor = BlindingFactor(factor_bytes);
     let commitment = compute_blind_commitment(&invitation_id, &blinding_factor);
     let expires_at = chrono::Utc::now() + chrono::Duration::hours(ttl_hours as i64);
 
