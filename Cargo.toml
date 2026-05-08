@@ -142,7 +142,7 @@ sysinfo = "0.38"
 half = "2"
 fancy-regex = "0.17"
 encoding_rs = { version = "0.8", optional = true }
-reqwest = { version = "0.12", features = ["json", "stream"] }
+reqwest = { version = "0.13", features = ["json", "stream"] }
 
 # Core types
 swarmllm-types = { path = "crates/swarmllm-types" }
