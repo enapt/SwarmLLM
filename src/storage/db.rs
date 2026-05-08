@@ -13,6 +13,11 @@ use crate::error::SwarmError;
 /// a standalone node — pool members would then see the owner as departed.
 /// `credit_txns` is included because dedup integrity is the only thing
 /// preventing CreditTransaction replay across restart.
+/// `pool_removal_replays` is included because a corrupt entry would let a
+/// previously-processed PoolRemoval replay successfully (R105) — re-evicting
+/// the member.
+/// `pool_invite_codes` is included because a corrupt consumed-flag entry
+/// could allow a one-time invite code to be reused.
 const CRITICAL_TREES: &[&str] = &[
     "manifests",
     "credits",
@@ -20,6 +25,8 @@ const CRITICAL_TREES: &[&str] = &[
     "nicknames",
     "pool_state",
     "credit_txns",
+    "pool_removal_replays",
+    "pool_invite_codes",
 ];
 
 /// Single redb table storing all logical trees via composite keys.

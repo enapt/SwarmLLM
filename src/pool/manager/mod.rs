@@ -1172,18 +1172,32 @@ impl PoolManager {
             // Record the removal_id (with timestamp) to prevent replay; the
             // timestamp lets startup sweep keep only entries within the 5-min
             // freshness window so a planned restart can't re-open the replay door.
-            let _ = self.shared_state.db.put_json(
-                TREE_POOL_REMOVAL_REPLAYS,
-                &removal_key,
-                &chrono::Utc::now().timestamp(),
-            );
-
+            // SEC (R105): order matters. Previously the replay-key write
+            // happened BEFORE the pool_state delete; a crash between them
+            // permanently blocked the same removal from re-processing
+            // (replay key persisted) while pool_state still claimed
+            // membership — node stuck in a pool the owner had ejected
+            // them from, with no way to recover except manual DB edit.
+            //
+            // Inverted order: remove pool_state first, then write the
+            // replay key. Crash between is now benign in both directions:
+            //   - crash after pool_state delete, before replay write:
+            //     same removal re-arrives → re-removes already-removed
+            //     pool_state (idempotent), then writes the replay key.
+            //   - crash before pool_state delete: the dedup key wasn't
+            //     written, so the next delivery processes from scratch.
             *self.shared_state.credits.pool_state.write().await = None;
             let _ = self.shared_state.db.remove(TREE_POOL_STATE, KEY_MY_POOL);
             self.shared_state
                 .credits
                 .pool_registry
                 .remove(&removal.pool_id);
+
+            let _ = self.shared_state.db.put_json(
+                TREE_POOL_REMOVAL_REPLAYS,
+                &removal_key,
+                &chrono::Utc::now().timestamp(),
+            );
             tracing::info!(pool_id = %removal.pool_id, "Removed from pool by owner");
         }
     }

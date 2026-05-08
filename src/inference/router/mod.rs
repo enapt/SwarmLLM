@@ -834,6 +834,20 @@ impl InferenceRouter {
                         }
                         samples.push_back(latency_secs);
                     }
+                    // CORRECTNESS (R105): keep a monotonic total alongside
+                    // the bounded ring. Prometheus histogram `_count` /
+                    // `_sum` MUST be monotonically non-decreasing for
+                    // `rate()` / `increase()` to work; the ring's count
+                    // capped at 1000 and could fall when it wrapped.
+                    shared_state
+                        .metrics
+                        .inference_latency_total_count
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let micros = (latency_secs * 1_000_000.0).round() as u64;
+                    shared_state
+                        .metrics
+                        .inference_latency_total_micros
+                        .fetch_add(micros, std::sync::atomic::Ordering::Relaxed);
                 }
                 Err(ref e) => {
                     tracing::error!(

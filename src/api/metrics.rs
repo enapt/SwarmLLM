@@ -16,12 +16,20 @@ pub async fn metrics(State(state): State<AppState>) -> Response {
     let shared = &state.shared_state;
     let mut buf = String::with_capacity(2048);
 
-    // swarmllm_peers_connected (gauge)
-    let peers = shared.peer_registry.len();
+    // swarmllm_peers_connected (gauge).
+    // CORRECTNESS (R105): use `connected_node_ids` — the transport-level
+    // ground truth (populated on Identify-Received, removed on
+    // ConnectionClosed). `peer_registry` is intentionally preserved
+    // across mid-pipeline disconnects for reconnect attempts (gotcha
+    // #86), so it OVER-counts: a node with 50 stale registry entries but
+    // 12 actually-connected peers reported 50. Grafana alerts on
+    // "swarmllm_peers_connected < 5" silently never fired during real
+    // isolation events.
+    let peers = shared.connected_node_ids.len();
     write_gauge(
         &mut buf,
         "swarmllm_peers_connected",
-        "Number of connected peers",
+        "Number of currently transport-connected peers",
         peers as f64,
     );
 
@@ -210,32 +218,51 @@ fn write_latency_histogram(buf: &mut String, shared: &crate::daemon::SharedState
             return;
         }
     };
-    let count = samples_guard.len() as f64;
-    let sum: f64 = samples_guard.iter().sum();
+    // CORRECTNESS (R105): emit MONOTONIC `_count` and `_sum` from the
+    // dedicated atomic counters; the ring is only used for the per-bucket
+    // distribution. Without this, `_count` capped at 1000 (the ring size)
+    // and could fall when the ring wrapped — breaking `rate()` /
+    // `increase()` queries that assume counters are non-decreasing.
+    let total_count = shared
+        .metrics
+        .inference_latency_total_count
+        .load(Ordering::Relaxed);
+    let total_micros = shared
+        .metrics
+        .inference_latency_total_micros
+        .load(Ordering::Relaxed);
+    let total_sum_secs = total_micros as f64 / 1_000_000.0;
 
     let _ = writeln!(buf, "# HELP {name} Inference request latency in seconds");
     let _ = writeln!(buf, "# TYPE {name} histogram");
 
+    // Bucket counts come from the bounded ring — they're best-effort
+    // distribution snapshots. They may not equal `_count` (the ring is
+    // capped). That's expected for a sliding-window histogram.
     for &bound in BUCKETS {
         let bucket_count = samples_guard.iter().filter(|&&s| s <= bound).count();
         let _ = writeln!(buf, "{name}_bucket{{le=\"{bound}\"}} {bucket_count}");
     }
     let _ = writeln!(buf, "{name}_bucket{{le=\"+Inf\"}} {}", samples_guard.len());
-    let _ = writeln!(buf, "{name}_sum {sum}");
-    let _ = writeln!(buf, "{name}_count {count}");
+    let _ = writeln!(buf, "{name}_sum {total_sum_secs}");
+    let _ = writeln!(buf, "{name}_count {total_count}");
 }
 
 /// Write per-channel backpressure metrics (capacity, sent_total, dropped_total).
 fn write_channel_metrics(buf: &mut String, shared: &crate::daemon::SharedState) {
     use std::sync::atomic::Ordering::Relaxed;
 
+    // CORRECTNESS (R105): only emit channels whose `record_sent` /
+    // `record_dropped` are actually instrumented in their send path. The
+    // others (network_cmd, router_cmd, rebalance, pool_cmd) had counter
+    // declarations but no call sites incrementing them, producing a
+    // perpetual zero in Prometheus that misled `swarmllm_channel_dropped_total > 0`
+    // alerts into never firing despite real backpressure. Drop them from
+    // the output until instrumented; operators who alerted on these will
+    // see a clean missing-series rather than fabricated zeros.
     let channels: &[(&str, &crate::daemon::ChannelCounters)] = &[
-        ("network_cmd", &shared.metrics.channel_metrics.network_cmd),
         ("network_out", &shared.metrics.channel_metrics.network_out),
-        ("router_cmd", &shared.metrics.channel_metrics.router_cmd),
-        ("rebalance", &shared.metrics.channel_metrics.rebalance),
         ("acquisition", &shared.metrics.channel_metrics.acquisition),
-        ("pool_cmd", &shared.metrics.channel_metrics.pool_cmd),
     ];
 
     let _ = writeln!(

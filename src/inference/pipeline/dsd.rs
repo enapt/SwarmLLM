@@ -290,11 +290,17 @@ impl PipelineExecutor {
             acceptance_proposed += drafts.len() as u32;
             acceptance_accepted += accepted.len() as u32;
 
-            let emitted: Vec<u32> = accepted
+            let mut emitted: Vec<u32> = accepted
                 .iter()
                 .copied()
                 .chain(std::iter::once(bonus))
                 .collect();
+
+            // BUG-FIX (R105): truncate at first EOS before any consumer sees
+            // post-EOS tokens. See speculative.rs for the same fix and rationale.
+            if let Some(eos_at) = emitted.iter().position(|t| eos_set.contains(t)) {
+                emitted.truncate(eos_at + 1);
+            }
 
             if let Some(ref tx) = token_tx {
                 for &t in &emitted {

@@ -342,11 +342,22 @@ impl PipelineExecutor {
             acceptance_accepted += accepted.len() as u32;
 
             // Emit accepted + bonus.
-            let emitted: Vec<u32> = accepted
+            let mut emitted: Vec<u32> = accepted
                 .iter()
                 .copied()
                 .chain(std::iter::once(bonus))
                 .collect();
+
+            // BUG-FIX (R105): truncate emitted at the FIRST EOS, before any
+            // downstream consumer (streaming, generated buffer, KV bookkeeping)
+            // sees post-EOS tokens. Previously the EOS check happened AFTER
+            // both streaming and `generated.extend`, so junk tokens following
+            // an EOS in a multi-token speculative round (e.g. [a, EOS, b, c])
+            // were streamed to the client and appended to `generated`. Same
+            // pattern applied in dsd.rs.
+            if let Some(eos_at) = emitted.iter().position(|t| eos_tokens.contains(t)) {
+                emitted.truncate(eos_at + 1);
+            }
 
             // Streaming per token.
             if let Some(ref tx) = token_tx {

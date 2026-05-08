@@ -959,7 +959,22 @@ impl PipelineExecutor {
                             // peer returning a wrong-shaped tensor would crash the next
                             // segment's worker (gotcha #20) — fail fast and let
                             // failover handle the segment instead.
-                            if result.activations.len() != activations.len() {
+                            //
+                            // BUG-FIX (R105): the shape-preservation invariant only holds
+                            // for INTERMEDIATE segments (idx > 0). The first segment
+                            // performs token-embedding (8 bytes/token i64 → hidden_dim*4
+                            // bytes/token f32 hidden state), so input ≠ output by design.
+                            // Without this guard, every decode token whose first
+                            // segment is remote tripped a spurious failover — wasting
+                            // latency, falsely penalising the first-segment peer's trust
+                            // score, and risking a hard fail when no standby is
+                            // available. Skip the check for idx == 0 unless the input
+                            // is already pre-embedded (in which case the shape DOES
+                            // preserve and the check is meaningful).
+                            let is_embedding_expansion = idx == 0 && !pre_embedded;
+                            if !is_embedding_expansion
+                                && result.activations.len() != activations.len()
+                            {
                                 tracing::warn!(
                                     request_id = %request_id,
                                     segment = idx,

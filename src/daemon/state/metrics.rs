@@ -19,6 +19,16 @@ pub struct MetricsProviders {
     /// Mirror of node_stats.forwards_served — same try_write→atomic story.
     pub forwards_served_atomic: AtomicU64,
     pub inference_latency_samples: std::sync::RwLock<std::collections::VecDeque<f64>>,
+    /// Monotonic total count of latency samples ever recorded. The
+    /// `inference_latency_samples` ring buffer caps at a fixed size and
+    /// would otherwise produce a non-monotonic Prometheus histogram
+    /// `_count` (it falls when the ring wraps), breaking `rate()` and
+    /// `increase()` queries. This counter is the canonical histogram
+    /// `_count`. Same idea for sum.
+    pub inference_latency_total_count: AtomicU64,
+    /// Monotonic total sum of latency samples (ms × 1000 to keep an
+    /// integer; divide by 1e6 when emitting as seconds).
+    pub inference_latency_total_micros: AtomicU64,
     pub channel_metrics: ChannelMetricsSet,
     pub ws_connection_count: std::sync::atomic::AtomicUsize,
     pub node_stats: RwLock<NodeStats>,

@@ -106,7 +106,7 @@ pub async fn download_shard(
 ) -> Result<std::path::PathBuf, String> {
     let client = &*HF_DOWNLOAD_CLIENT;
 
-    let url = download_url(repo_id, filename);
+    let url = download_url(repo_id, filename)?;
     let shard_index = layout.index;
 
     std::fs::create_dir_all(dest_dir).map_err(|e| format!("Failed to create dir: {e}"))?;

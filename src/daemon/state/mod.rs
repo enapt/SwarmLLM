@@ -252,6 +252,8 @@ impl SharedState {
                 requests_served_atomic: AtomicU64::new(0),
                 forwards_served_atomic: AtomicU64::new(0),
                 inference_latency_samples: std::sync::RwLock::new(std::collections::VecDeque::new()),
+                inference_latency_total_count: AtomicU64::new(0),
+                inference_latency_total_micros: AtomicU64::new(0),
                 channel_metrics: ChannelMetricsSet::new(),
                 ws_connection_count: std::sync::atomic::AtomicUsize::new(0),
                 providers_config: RwLock::new({

@@ -46,7 +46,7 @@ pub async fn probe_gguf_file(
 ) -> Result<GgufFileInfo, String> {
     let client = &*HF_META_CLIENT;
 
-    let url = download_url(repo_id, filename);
+    let url = download_url(repo_id, filename)?;
 
     // HEAD request to get total file size — retry on transient errors.
     let total_size = retry_hf("HEAD", || async {
@@ -173,7 +173,7 @@ pub async fn download_gguf_header(
 ) -> Result<std::path::PathBuf, String> {
     let client = &*HF_DOWNLOAD_CLIENT;
 
-    let url = download_url(repo_id, filename);
+    let url = download_url(repo_id, filename)?;
     if header_size == 0 {
         return Err("header_size is 0 — invalid GGUF metadata".to_string());
     }
@@ -244,7 +244,7 @@ pub async fn download_tied_output_weight(
 
     let client = &*HF_DOWNLOAD_CLIENT;
 
-    let url = download_url(repo_id, filename);
+    let url = download_url(repo_id, filename)?;
     if size == 0 {
         return Err("token_embd.weight has zero size — cannot download tied output weight".into());
     }

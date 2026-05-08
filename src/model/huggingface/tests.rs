@@ -4,11 +4,21 @@ use std::time::SystemTime;
 
 #[test]
 fn download_url_format() {
-    let url = download_url("TheBloke/Llama-2-7B-GGUF", "llama-2-7b.Q4_K_M.gguf");
+    let url = download_url("TheBloke/Llama-2-7B-GGUF", "llama-2-7b.Q4_K_M.gguf").unwrap();
     assert_eq!(
         url,
         "https://huggingface.co/TheBloke/Llama-2-7B-GGUF/resolve/main/llama-2-7b.Q4_K_M.gguf"
     );
+}
+
+#[test]
+fn download_url_rejects_path_traversal_filename() {
+    assert!(download_url("org/name", "../../etc/passwd").is_err());
+    assert!(download_url("org/name", "%2F%2Fevil.gguf").is_err());
+    assert!(download_url("org/name", "evil%5Cwindows.gguf").is_err());
+    assert!(download_url("org/name", "name\0null.gguf").is_err());
+    assert!(download_url("org/name", "/abs/path.gguf").is_err());
+    assert!(download_url("org/name", "").is_err());
 }
 
 #[test]

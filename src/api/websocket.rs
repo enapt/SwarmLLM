@@ -488,7 +488,10 @@ async fn build_stats_message(state: &SharedState) -> String {
         "requests_served": state.metrics.requests_served_atomic.load(std::sync::atomic::Ordering::Relaxed),
         "requests_made": requests_made,
         "forwards_served": state.metrics.forwards_served_atomic.load(std::sync::atomic::Ordering::Relaxed),
-        "uptime_seconds": (chrono::Utc::now() - uptime_start).num_seconds(),
+        // CORRECTNESS (R105): clamp to 0. NTP-step backwards on a freshly-
+        // booted node would otherwise produce a negative uptime in the WS
+        // payload (the REST handler at admin.rs:113 already clamps).
+        "uptime_seconds": (chrono::Utc::now() - uptime_start).num_seconds().max(0),
         "acquisitions": acquisitions,
     });
 

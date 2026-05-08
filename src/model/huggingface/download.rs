@@ -8,16 +8,55 @@ use super::{hf_headers, validate_hf_repo_id, DownloadProgress, HF_DOWNLOAD_CLIEN
 /// headroom; anything larger is a misconfigured sentinel and refused.
 const MAX_MODEL_FILE_BYTES: u64 = 16 * 1024 * 1024 * 1024;
 
-pub fn download_url(repo_id: &str, filename: &str) -> String {
-    // SEC: validate repo_id to prevent SSRF. If invalid, return a safe dummy URL
-    // that will fail on download. Callers should validate before reaching this point.
-    if validate_hf_repo_id(repo_id).is_err() {
-        return format!("https://huggingface.co/INVALID_REPO/resolve/main/{filename}");
+/// Validate an HF filename (the `rfilename` from the API). Allows only
+/// safe characters and rejects path traversal / NUL / control chars.
+/// Without this, an attacker who controls a typosquat HF repo could supply
+/// `rfilename: "../../evil.gguf"` (passes the `.ends_with(".gguf")` check
+/// in search) and the URL `https://huggingface.co/org/name/resolve/main/../../evil.gguf`
+/// gets handed to the CDN, which on redirect resolves the `..` segments
+/// and serves a different file. Also reject percent-encoded traversal
+/// (`%2F%2F`) which would survive a URL-percent-decoder on the CDN side.
+fn validate_hf_filename(filename: &str) -> Result<(), String> {
+    if filename.is_empty() || filename.len() > 512 {
+        return Err(format!("filename length {} out of range", filename.len()));
     }
-    format!(
+    if filename.contains('\0')
+        || filename.contains("..")
+        || filename.starts_with('/')
+        || filename.starts_with('\\')
+    {
+        return Err(format!("filename '{filename}' contains unsafe components"));
+    }
+    // Reject percent-encoded slashes — these survive raw insertion into a
+    // URL path and are decoded by the upstream server, enabling traversal.
+    let lower = filename.to_ascii_lowercase();
+    if lower.contains("%2f") || lower.contains("%5c") {
+        return Err(format!(
+            "filename '{filename}' contains percent-encoded path separator"
+        ));
+    }
+    if !filename
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '/'))
+    {
+        return Err(format!(
+            "filename '{filename}' contains characters outside [a-zA-Z0-9._\\-/]"
+        ));
+    }
+    Ok(())
+}
+
+pub fn download_url(repo_id: &str, filename: &str) -> Result<String, String> {
+    // SEC: validate both repo_id AND filename. Returning a "dummy" URL on
+    // failure (the previous behavior) issued a real HTTP request to
+    // huggingface.co/INVALID_REPO/... — wasting bandwidth and embedding
+    // attacker-controlled `filename` in the URL. Now: hard error to caller.
+    validate_hf_repo_id(repo_id).map_err(|e| format!("invalid repo_id: {e}"))?;
+    validate_hf_filename(filename)?;
+    Ok(format!(
         "https://huggingface.co/{}/resolve/main/{}",
         repo_id, filename
-    )
+    ))
 }
 
 /// Download a GGUF file from HuggingFace with progress reporting.
@@ -32,7 +71,7 @@ pub async fn download_model(
 ) -> Result<std::path::PathBuf, String> {
     let client = &*HF_DOWNLOAD_CLIENT;
 
-    let url = download_url(repo_id, filename);
+    let url = download_url(repo_id, filename)?;
 
     let resp = hf_headers(client.get(&url))
         .send()

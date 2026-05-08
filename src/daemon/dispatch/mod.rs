@@ -759,6 +759,38 @@ pub(crate) async fn dispatch_network_messages(
                                             publisher = %manifest.publisher,
                                             "Received model manifest from network"
                                         );
+                                        // SEC (R105): cap peer-gossiped manifest size BEFORE
+                                        // accepting. The manifest_hash check is self-
+                                        // referential — a peer can compute a valid hash over
+                                        // ANY payload they construct, including one with
+                                        // 100k tensor entries × 100 shards inflating registry
+                                        // memory by hundreds of MB per gossiped manifest.
+                                        // Real-world manifests have ≤ 256 shards × ≤ 16k
+                                        // tensor entries each (the 70B-class Llama upper
+                                        // bound). Anything beyond is hostile/malformed.
+                                        const MAX_SHARDS_PER_MANIFEST: usize = 256;
+                                        const MAX_TENSORS_PER_SHARD: usize = 16_384;
+                                        if manifest.shards.len() > MAX_SHARDS_PER_MANIFEST {
+                                            tracing::warn!(
+                                                model = %manifest.id,
+                                                shards = manifest.shards.len(),
+                                                cap = MAX_SHARDS_PER_MANIFEST,
+                                                "Rejecting peer manifest: too many shards"
+                                            );
+                                            continue;
+                                        }
+                                        if manifest
+                                            .shards
+                                            .iter()
+                                            .any(|s| s.tensors.len() > MAX_TENSORS_PER_SHARD)
+                                        {
+                                            tracing::warn!(
+                                                model = %manifest.id,
+                                                cap = MAX_TENSORS_PER_SHARD,
+                                                "Rejecting peer manifest: a shard has too many tensor entries"
+                                            );
+                                            continue;
+                                        }
                                         // Strict verification for network-received manifests:
                                         // reject zero-hash to prevent gossip poisoning.
                                         match manifest.verify_hash_strict() {
@@ -1688,6 +1720,19 @@ pub(crate) async fn dispatch_network_messages(
                                         );
                                     }
 
+                                    // SEC (R105): explicitly reject HealthPing/Pong with
+                                    // missing node_id rather than silently swallowing
+                                    // them via the generic catch-all. The Some(node_id)
+                                    // arms above carry the authenticated-sender check;
+                                    // a peer sending node_id: None bypasses both the
+                                    // pong path and any log signal. Surface so it's
+                                    // observable.
+                                    SwarmMessage::HealthPing { node_id: None, .. }
+                                    | SwarmMessage::HealthPong { node_id: None, .. } => {
+                                        tracing::debug!(
+                                            "Dropping HealthPing/Pong with missing node_id"
+                                        );
+                                    }
                                     // Other messages handled by NetworkManager
                                     _ => {}
                                 }
