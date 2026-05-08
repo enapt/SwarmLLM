@@ -78,7 +78,7 @@ sha2 = "0.10"
 hkdf = "0.12"
 blake3 = "1"
 zeroize = { version = "1", features = ["derive"] }
-rand = "0.8"
+rand = "0.9"
 
 # LLM inference
 llama-cpp-2 = { version = "0.1", optional = true }
