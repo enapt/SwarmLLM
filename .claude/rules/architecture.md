@@ -98,10 +98,14 @@ silently break at the wire if duplicated:
 
 - **`network::protocol::build_layer_forward_aad`** — encryption AAD
   bytes for `LayerForward` envelopes. Both encrypt
-  (`network/manager/tensors.rs`) and decrypt
-  (`decode_layer_forward_encrypted`) MUST go through it. Adding a
-  new authenticated field to `LayerForward` means extending this
-  helper, not appending bytes on the encrypt side.
+  (`network/manager/tensors.rs`, `network/pipeline_stream.rs`) and
+  decrypt (`decode_layer_forward_encrypted`) MUST go through it.
+  Adding a new authenticated field to `LayerForward` means extending
+  this helper, not appending bytes on the encrypt side. Post-R100,
+  the helper covers the cleartext header AND the spec/kv-truncate
+  trailer fields; the decoder reconstructs AAD via the helper after
+  parsing trailers (since trailer bytes don't appear contiguously
+  on the wire — sealed payload sits between header and trailers).
 - **`daemon::dispatch::timestamp_fresh_one_sided`** — generic
   one-sided staleness check (R94). Time units must be consistent
   across `ts`/`now`/`max_age`/`skew`. Use directly for any new
