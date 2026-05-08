@@ -232,7 +232,19 @@ impl CreditLedger {
         hours: f32,
     ) -> Result<i64, SwarmError> {
         let rates = self.credit_rates();
-        let amount = (rates.shard_hosting as f64 * size_gb * hours as f64) as i64;
+        let raw = rates.shard_hosting as f64 * size_gb * hours as f64;
+        // SEC: `size_gb` derives from `ModelManifest.size_bytes` (peer-
+        // controllable u64). With `size_bytes = u64::MAX`, `size_gb ≈ 1.7e10`
+        // and the f64 product saturates the `as i64` cast to `i64::MAX` —
+        // free instant Platinum tier. Reject non-finite, clamp to a sane
+        // per-tick maximum (1M credits/tick/shard is already implausibly
+        // generous for honest inputs).
+        const MAX_HOSTING_PER_TICK: f64 = 1_000_000.0;
+        let amount = if raw.is_finite() && raw >= 0.0 {
+            raw.min(MAX_HOSTING_PER_TICK) as i64
+        } else {
+            0
+        };
         if amount > 0 {
             self.apply_credit(amount, true).await?;
             self.persist_balance().await?;
@@ -248,7 +260,17 @@ impl CreditLedger {
     ) -> Result<i64, SwarmError> {
         let gb = bytes_transferred as f64 / (1024.0 * 1024.0 * 1024.0);
         let rates = self.credit_rates();
-        let amount = (rates.shard_seeding as f64 * gb) as i64;
+        let raw = rates.shard_seeding as f64 * gb;
+        // SEC: same f64 → i64 saturation pattern. `bytes_transferred` is a
+        // local AtomicU64 today (lower risk than `earn_shard_hosting`'s
+        // peer-supplied size), but apply the same defensive cap so that
+        // any future plumbing change can't turn this into a credit-mint.
+        const MAX_SEEDING_PER_CALL: f64 = 1_000_000.0;
+        let amount = if raw.is_finite() && raw >= 0.0 {
+            raw.min(MAX_SEEDING_PER_CALL) as i64
+        } else {
+            0
+        };
         if amount > 0 {
             self.apply_credit(amount, true).await?;
             self.persist_balance().await?;
@@ -260,7 +282,13 @@ impl CreditLedger {
     pub async fn earn_relay_service(&self, duration_seconds: u64) -> Result<i64, SwarmError> {
         let hours = duration_seconds as f64 / 3600.0;
         let rates = self.credit_rates();
-        let amount = (rates.relay_service as f64 * hours) as i64;
+        let raw = rates.relay_service as f64 * hours;
+        const MAX_RELAY_PER_CALL: f64 = 1_000_000.0;
+        let amount = if raw.is_finite() && raw >= 0.0 {
+            raw.min(MAX_RELAY_PER_CALL) as i64
+        } else {
+            0
+        };
         if amount > 0 {
             self.apply_credit(amount, true).await?;
             self.persist_balance().await?;
@@ -703,10 +731,15 @@ pub(crate) fn check_signed_freshness(
     kind: &'static str,
 ) -> Result<(), SwarmError> {
     let age_secs = (chrono::Utc::now() - timestamp).num_seconds();
+    // SEC: `chrono::Duration::num_seconds()` returns `i64::MIN` on overflow
+    // when `timestamp` is e.g. `DateTime::<Utc>::MAX_UTC` (year 262143 CE,
+    // which serde_json will happily round-trip from a wire field). `-i64::MIN`
+    // is signed-negation overflow — panic in debug, wrap to MIN in release.
+    // `saturating_neg` clamps to `i64::MAX` for the formatted message.
     if age_secs < -skew_secs {
         return Err(SwarmError::CreditError(format!(
             "Future-dated {kind}: {}s ahead (skew tolerance {skew_secs}s)",
-            -age_secs,
+            age_secs.saturating_neg(),
         )));
     }
     if age_secs > max_age_secs {
@@ -789,9 +822,13 @@ pub async fn process_balance_gossip(
     gossip: &CreditGossip,
     peer_balance_map: Option<&DashMap<NodeId, i64>>,
 ) {
-    // Reject implausible balance buckets
+    // Reject implausible balance buckets.
+    // SEC: `.abs()` panics in debug builds on `i64::MIN`. A peer can send
+    // `balance_bucket: -9_223_372_036_854_775_808` over GossipSub — and this
+    // check runs BEFORE signature verification, so it's pre-auth. Use
+    // `saturating_abs()` (clamps to `i64::MAX`) to never panic.
     const MAX_PLAUSIBLE_BALANCE: i64 = 100_000_000;
-    if gossip.balance_bucket.abs() > MAX_PLAUSIBLE_BALANCE {
+    if gossip.balance_bucket.saturating_abs() > MAX_PLAUSIBLE_BALANCE {
         tracing::debug!(
             balance_bucket = gossip.balance_bucket,
             "Ignoring implausible peer balance gossip"

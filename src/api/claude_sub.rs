@@ -62,13 +62,26 @@ impl ClaudeSubscriptionConfig {
 
 /// Check if a model should be routed through Claude subscription and return the config if so.
 ///
-/// Returns `Some(config)` when the model starts with "claude" and a subscription is
-/// enabled in provider config. Both openai.rs and anthropic.rs call this to avoid
-/// duplicating the check logic.
+/// Returns `Some(config)` when the model starts with "claude", a subscription
+/// is enabled in provider config, and the request originated locally
+/// (`is_forwarded == false`). Both openai.rs and anthropic.rs call this to
+/// avoid duplicating the check logic.
+///
+/// SEC: peer-forwarded inference requests must NEVER consume the local
+/// operator's personal Claude subscription. The subscription is bound to
+/// `~/.claude/.credentials.json` on this host — burning it for cluster
+/// peers exhausts the operator's Pro/Max quota and is an unintended
+/// resource transfer. Local-operator requests never carry
+/// `x-swarm-forwarded`; that header is set by `peer_forward.rs` on
+/// peer-to-peer hops only.
 pub async fn try_get_claude_subscription(
     state: &crate::api::server::AppState,
     model: &str,
+    is_forwarded: bool,
 ) -> Option<ClaudeSubscriptionConfig> {
+    if is_forwarded {
+        return None;
+    }
     let lower = model.to_lowercase();
     if !lower.starts_with("claude") {
         return None;

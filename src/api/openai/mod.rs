@@ -147,14 +147,19 @@ fn validate_chat_request(
 }
 
 /// Try proxying a chat completion request to a configured cloud provider.
+///
+/// `is_forwarded` is consulted only by the `claude-subscription` feature
+/// path; when that feature is disabled the parameter is unused.
+#[cfg_attr(not(feature = "claude-subscription"), allow(unused_variables))]
 async fn try_cloud_proxy(
     state: &AppState,
     req: &ChatCompletionRequest,
+    is_forwarded: bool,
 ) -> Result<Option<axum::response::Response>, ApiError> {
     // Claude subscription: proxy through local CLI subprocess (higher priority than API key)
     #[cfg(feature = "claude-subscription")]
     if let Some(sub_config) =
-        crate::api::claude_sub::try_get_claude_subscription(state, &req.model).await
+        crate::api::claude_sub::try_get_claude_subscription(state, &req.model, is_forwarded).await
     {
         tracing::info!(model = %req.model, "DIAG: openai proxying via claude subscription subprocess");
         let body = serde_json::to_value(req).map_err(|e| {
@@ -323,7 +328,7 @@ pub async fn chat_completions(
 
         // Cloud provider fast-path: if the model matches a configured cloud provider,
         // route immediately without cold-start waiting. Cloud models are never local.
-        if let Some(response) = try_cloud_proxy(&state, &req).await? {
+        if let Some(response) = try_cloud_proxy(&state, &req, is_forwarded).await? {
             return Ok(response);
         }
 
@@ -395,7 +400,7 @@ pub async fn chat_completions(
         }
 
         // Cloud provider fallback: proxy to configured cloud provider if model matches
-        if let Some(response) = try_cloud_proxy(&state, &req).await? {
+        if let Some(response) = try_cloud_proxy(&state, &req, is_forwarded).await? {
             return Ok(response);
         }
 

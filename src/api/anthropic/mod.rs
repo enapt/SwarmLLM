@@ -253,10 +253,14 @@ pub async fn messages(
     // No local model — try proxying to cloud providers
     let lower_model = req.model.to_lowercase();
 
-    // Claude subscription: proxy through local CLI subprocess (higher priority than API key)
+    // Claude subscription: proxy through local CLI subprocess (higher priority than API key).
+    // SEC: pass `is_forwarded` so peer-forwarded requests don't burn the
+    // local operator's personal Claude subscription quota (gotcha #115).
+    #[cfg(feature = "claude-subscription")]
+    let is_forwarded = headers.get("x-swarm-forwarded").is_some();
     #[cfg(feature = "claude-subscription")]
     if let Some(sub_config) =
-        crate::api::claude_sub::try_get_claude_subscription(&state, &req.model).await
+        crate::api::claude_sub::try_get_claude_subscription(&state, &req.model, is_forwarded).await
     {
         tracing::info!(model = %req.model, "DIAG: anthropic proxying via claude subscription subprocess");
         // Use the same ProxyMessagesRequest serializer as the cloud path so

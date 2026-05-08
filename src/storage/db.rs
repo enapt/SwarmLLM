@@ -162,6 +162,15 @@ impl Database {
     /// path is held alive by `_temp_dir` via a small RAII guard that removes
     /// the file when the last `Database` clone drops, so test runs don't
     /// leak redb files into `/tmp`.
+    ///
+    /// SEC: kept `pub` only because integration tests in `tests/` are
+    /// separate crates that can't see `pub(crate)` items. `#[cfg(test)]`
+    /// alone wouldn't cover them either. The `#[cfg(any(test, debug_assertions))]`
+    /// gate stops it from compiling into release builds — production
+    /// callers cannot accidentally create an unprotected, non-0o600
+    /// database in `/tmp`.
+    #[cfg(any(test, debug_assertions))]
+    #[doc(hidden)]
     pub fn open_temp() -> Result<Self, SwarmError> {
         let temp_path =
             std::env::temp_dir().join(format!("swarmllm_test_{}.redb", uuid::Uuid::new_v4()));

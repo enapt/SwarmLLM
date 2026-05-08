@@ -9,3 +9,13 @@ updates:
     schedule:
       interval: "weekly"
     open-pull-requests-limit: 5
+  # SEC: also surface cargo dep updates so we get yanked-version /
+  # unmaintained-crate alerts that `cargo audit` doesn't catch. Auto-merge
+  # is intentionally NOT enabled — a malicious semver-compatible bump
+  # (typosquat / takeover) is the precise supply-chain vector to defend
+  # against, so all PRs require human review before merge.
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5

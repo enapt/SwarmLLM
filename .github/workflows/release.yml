@@ -35,7 +35,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          set -euxo pipefail
+          set -euo pipefail
           TAG="${GITHUB_REF_NAME}"
           # Build jobs upload with --clobber, so an existing release is fine.
           if gh release view "$TAG" >/dev/null 2>&1; then
@@ -181,7 +181,7 @@ jobs:
           "LIB=$env:CUDA_PATH\lib\x64;$env:LIB" | Out-File -Append -FilePath $env:GITHUB_ENV -Encoding utf8
 
       - name: Build release binary
-        run: cargo build --release ${{ matrix.features }}
+        run: cargo build --locked --release ${{ matrix.features }}
         env:
           # Compute capability passed to candle-kernels / bindgen_cuda for
           # nvcc `-arch=compute_NN`. Generated PTX is JIT-compiled at runtime
@@ -194,7 +194,7 @@ jobs:
         if: runner.os != 'Windows'
         shell: bash
         run: |
-          set -euxo pipefail
+          set -euo pipefail
           ls -la "target/release/${{ matrix.binary }}"
           mkdir -p staging
           cp "target/release/${{ matrix.binary }}" staging/
@@ -244,7 +244,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          set -euxo pipefail
+          set -euo pipefail
           gh release upload "${GITHUB_REF_NAME}" "${{ matrix.archive }}" --clobber
 
       # Bare-binary asset + SHA256 sidecar for in-app auto-update (src/update.rs).
@@ -261,7 +261,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          set -euxo pipefail
+          set -euo pipefail
           OS=$([ "${{ runner.os }}" = "macOS" ] && echo "macos" || echo "linux")
           ARCH=$([ "${{ matrix.target }}" = "aarch64-apple-darwin" ] && echo "aarch64" || echo "x86_64")
           BARE="swarmllm-${OS}-${ARCH}"
@@ -290,7 +290,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          set -euxo pipefail
+          set -euo pipefail
           cargo install cargo-deb --locked 2>/dev/null || true
           cargo deb --no-build
           # GITHUB_REF_NAME is "v0.1.0" but cargo-deb names the file
@@ -308,7 +308,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          set -euxo pipefail
+          set -euo pipefail
           cargo install cargo-generate-rpm --locked 2>/dev/null || true
           cargo generate-rpm
           # Same naming rule as the .deb build — RPM tools strip the "v".
@@ -331,7 +331,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
         run: |
-          set -euxo pipefail
+          set -euo pipefail
           TAG="${GITHUB_REF_NAME}"
           # `--repo` lets gh CLI skip `git remote get-url origin` lookup,
           # so we don't need `actions/checkout@v4` on this job.

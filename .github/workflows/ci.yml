@@ -16,6 +16,15 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+# SEC: explicit least-privilege. Without this, every workflow job inherits
+# the default GITHUB_TOKEN scope which on push to a repo with permissive
+# defaults includes `contents: write` plus several others. None of CI's
+# jobs (fmt / audit / clippy / test / build / feature-check) write to the
+# repo or publish artifacts; `release.yml` and `book.yml` declare their
+# own scoped permissions.
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
   # Override `.cargo/config.toml`'s `target-cpu=native` — CI builds must be
@@ -96,7 +105,7 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: clippy-${{ matrix.os }}-${{ matrix.features }}
-      - run: cargo clippy ${{ matrix.flags }} --all-targets -- -D warnings
+      - run: cargo clippy --locked ${{ matrix.flags }} --all-targets -- -D warnings
 
   test:
     name: Test (${{ matrix.os }})
@@ -118,24 +127,24 @@ jobs:
         with:
           key: test-${{ matrix.os }}
       - name: Run unit tests
-        run: cargo test --lib --bins
+        run: cargo test --locked --lib --bins
       - name: Run unit tests (dev,claude-subscription features)
-        run: cargo test --no-default-features --features dev,claude-subscription --lib --bins
+        run: cargo test --locked --no-default-features --features dev,claude-subscription --lib --bins
       # Integration tests use multi-process spawning + named-pipe IPC that
       # has been validated on Linux + Windows but not exercised on macOS.
       # Run them only on Linux until we catch the first failure on macOS
       # and decide whether to fix or skip-list per test.
       - name: Run integration tests (Linux only)
         if: runner.os == 'Linux'
-        run: cargo test --test integration -- --test-threads=1
+        run: cargo test --locked --test integration -- --test-threads=1
       - name: Run phase 10/11 integration tests (Linux only)
         if: runner.os == 'Linux'
-        run: cargo test --test integration_phase10_11 -- --test-threads=1
+        run: cargo test --locked --test integration_phase10_11 -- --test-threads=1
       # yamux_substream tests use TCP/QUIC transport only (no named-pipe IPC),
       # so they're safe to run on macOS — the Linux-only guard was copy-pasted
       # from the multi-process integration tests above.
       - name: Run yamux substream tests
-        run: cargo test --test yamux_substream
+        run: cargo test --locked --test yamux_substream
 
   build:
     name: Build (${{ matrix.os }})
@@ -156,7 +165,7 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: ${{ matrix.os }}
-      - run: cargo build --release
+      - run: cargo build --locked --release
 
   # Compile-check feature paths that aren't covered by the main test/build
   # matrix. Uses `cargo check` (not test or build). Installs cuda-nvcc only
@@ -219,6 +228,6 @@ jobs:
       # target manually — sm_80 (Ampere) is a safe lower bound that any
       # cuda-12.4 nvcc accepts. The actual compute target only matters
       # at runtime; `cargo check` only verifies it compiles.
-      - run: cargo check ${{ matrix.flags }} --all-targets
+      - run: cargo check --locked ${{ matrix.flags }} --all-targets
         env:
           CUDA_COMPUTE_CAP: "80"

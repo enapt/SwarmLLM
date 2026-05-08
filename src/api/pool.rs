@@ -482,6 +482,18 @@ pub async fn pool_rates_set(
     Json(body): Json<PoolRatesRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let pool_id = parse_node_id(&pool_id_hex)?;
+    // SEC: any authenticated Bearer holder COULD address this endpoint with
+    // an arbitrary `pool_id`, but only the local node's owner should be
+    // able to write its own pool's rates. Match the gate used by the
+    // pool-manager handlers (`handle_set_credit_split`,
+    // `handle_set_contribution_level`): pool_id MUST equal the local
+    // identity. (Pool IDs are owner NodeIds by convention.)
+    let my_id = state.shared_state.identity.node_id();
+    if pool_id != *my_id {
+        return Err(ApiError(crate::error::SwarmError::Validation(
+            "Can only set rates for your own pool".into(),
+        )));
+    }
     let defaults = CreditRateConfig::default();
 
     // Merge: use provided values or fall back to current/defaults

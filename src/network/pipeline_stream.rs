@@ -343,10 +343,36 @@ async fn handle_inbound_stream(
 
         // Register the result route BEFORE dispatching so we never race the
         // dispatcher's SendTensorResult against our own insertion.
+        //
+        // SEC: an RAII guard removes the entry on ALL exit paths — including
+        // when the future is dropped mid-`outbound_tx.send().await` (task
+        // abort during shutdown, supervisor `abort_all`). Without this guard
+        // the explicit `remove` calls only ran on `is_err` / `Err(_)` arms;
+        // a cancellation between insert and send completion leaked the
+        // oneshot Sender into the map indefinitely.
         let (tx, rx) = oneshot::channel();
         shared_state
             .pending_stream_result_routes
             .insert(request_id, tx);
+        struct StreamRouteGuard<'a> {
+            state: &'a Arc<SharedState>,
+            request_id: uuid::Uuid,
+            armed: bool,
+        }
+        impl Drop for StreamRouteGuard<'_> {
+            fn drop(&mut self) {
+                if self.armed {
+                    self.state
+                        .pending_stream_result_routes
+                        .remove(&self.request_id);
+                }
+            }
+        }
+        let mut route_guard = StreamRouteGuard {
+            state: &shared_state,
+            request_id,
+            armed: true,
+        };
 
         // Stamp the authenticated sender and dispatch via the normal path.
         let auth = crate::types::AuthenticatedMessage {
@@ -354,9 +380,7 @@ async fn handle_inbound_stream(
             message: SwarmMessage::LayerForward(forward),
         };
         if outbound_tx.send(auth).await.is_err() {
-            shared_state
-                .pending_stream_result_routes
-                .remove(&request_id);
+            // Guard drop will remove the entry.
             tracing::warn!(%peer_id, %request_id, "dispatch channel closed");
             let _ = write.close().await;
             return;
@@ -365,12 +389,15 @@ async fn handle_inbound_stream(
         // Await the result produced by the dispatcher (delivered by
         // `try_deliver_stream_result` from the network manager).
         let result = match rx.await {
-            Ok(r) => r,
+            Ok(r) => {
+                // Successful delivery — disarm guard, dispatcher already
+                // consumed the entry.
+                route_guard.armed = false;
+                r
+            }
             Err(_) => {
-                shared_state
-                    .pending_stream_result_routes
-                    .remove(&request_id);
                 tracing::warn!(%peer_id, %request_id, "result oneshot dropped");
+                // Guard drop will clean up.
                 continue;
             }
         };

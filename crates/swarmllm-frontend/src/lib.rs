@@ -75,9 +75,43 @@ pub async fn serve_static(axum::extract::Path(path): axum::extract::Path<String>
 
 #[cfg(all(feature = "dev", not(feature = "embedded")))]
 pub async fn serve_static(axum::extract::Path(path): axum::extract::Path<String>) -> Response {
+    // SEC: this route is auth-exempt (see middleware.rs `is_exempt_request`
+    // for `/static/`). Without containment, joining the caller-controlled
+    // `path` onto `frontend_dir()` lets `..` segments escape the workspace
+    // and read arbitrary files (e.g. `/static/../../../etc/passwd`). axum's
+    // `Path` extractor does NOT canonicalize `..`. Reject paths whose
+    // components include `..`, absolute roots, or NUL — and double-check
+    // by canonicalizing the result and verifying it stays under
+    // `frontend_dir()`. Embedded mode (production) is immune because
+    // `include_dir!` resolves at compile time against a fixed tree.
     let path_str = path.trim_start_matches('/');
-    let full_path = frontend_dir().join(path_str);
-    match tokio::fs::read(&full_path).await {
+    if path_str.is_empty()
+        || path_str.contains("..")
+        || path_str.contains('\0')
+        || path_str.starts_with('/')
+        || std::path::Path::new(path_str).is_absolute()
+        || std::path::Path::new(path_str).components().any(|c| {
+            matches!(
+                c,
+                std::path::Component::ParentDir | std::path::Component::RootDir
+            )
+        })
+    {
+        return (StatusCode::NOT_FOUND, "Not found").into_response();
+    }
+    let base = match frontend_dir().canonicalize() {
+        Ok(b) => b,
+        Err(_) => return (StatusCode::NOT_FOUND, "Not found").into_response(),
+    };
+    let full_path = base.join(path_str);
+    let resolved = match full_path.canonicalize() {
+        Ok(p) => p,
+        Err(_) => return (StatusCode::NOT_FOUND, "Not found").into_response(),
+    };
+    if !resolved.starts_with(&base) {
+        return (StatusCode::NOT_FOUND, "Not found").into_response();
+    }
+    match tokio::fs::read(&resolved).await {
         Ok(bytes) => {
             let mime = mime_type_for(path_str);
             (StatusCode::OK, [(header::CONTENT_TYPE, mime)], bytes).into_response()
