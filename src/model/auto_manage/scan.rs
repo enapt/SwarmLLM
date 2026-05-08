@@ -71,6 +71,19 @@ pub async fn rescan_local_shards(
             if !path.exists() {
                 continue;
             }
+            // SEC: skip if a download is in flight for this shard. Without
+            // this, a near-complete download (95% of target size) passes
+            // `shard_size_ok` but BLAKE3 verify reads partially-written
+            // bytes, fails, and emits a `shard_verification_failed`
+            // activity event with an error toast — false-alarm on a shard
+            // that's about to land successfully. The `check_and_load_model`
+            // path already gates on this; mirror it here.
+            if shared
+                .models
+                .is_shard_in_progress(&model_id, shard_info.index)
+            {
+                continue;
+            }
             // Skip size check when manifest has no size info (size_bytes == 0) —
             // an empty file must not pass as a valid shard.
             // For zero-hash placeholder manifests we require exact size match

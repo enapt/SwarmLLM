@@ -1597,9 +1597,16 @@ pub(crate) async fn dispatch_network_messages(
                                         {
                                             continue;
                                         }
-                                        // EMA blend: 0.8 * old + 0.2 * incoming
+                                        // EMA blend: 0.8 * old + 0.2 * incoming.
+                                        // SEC: also guard the cached `*existing` against
+                                        // NaN — gotcha #98 closed the receive-side guard
+                                        // on `decayed_rate`, but a stale NaN from a
+                                        // pre-R102 DB rehydrate or local-decay race
+                                        // (manager.rs::decay_request_counts) still
+                                        // permanently poisons the EMA: `NaN * 0.8 + x * 0.2 = NaN`.
                                         let new_rate = if let Some(existing) = shared_state.region_demand.get(&key) {
-                                            *existing * 0.8 + demand.decayed_rate * 0.2
+                                            let prev = if existing.is_finite() { *existing } else { 0.0 };
+                                            prev * 0.8 + demand.decayed_rate * 0.2
                                         } else {
                                             demand.decayed_rate
                                         };

@@ -76,14 +76,24 @@ impl AutoShardManager {
 
         // Build consistent hash ring ONCE for the entire evaluation cycle.
         // Each node gets VIRTUAL_SLOTS positions. Ring is sorted for binary search.
+        //
+        // SEC: build the ring from `connected_node_ids` rather than
+        // `peer_registry`. Per gotcha #86 (scheduler liveness oracle),
+        // `peer_registry` is intentionally preserved across mid-pipeline
+        // disconnects for reconnect attempts; counting those entries here
+        // gives stale shard ownership, possibly causing this node to skip
+        // a shard it should claim while the "other holder" is offline.
         const VIRTUAL_SLOTS: u32 = 10;
         let hash_ring: Vec<(u32, NodeId)> = {
-            let mut ring = Vec::with_capacity((pool_size) * VIRTUAL_SLOTS as usize);
+            let mut ring = Vec::with_capacity(pool_size * VIRTUAL_SLOTS as usize);
             for vn in 0..VIRTUAL_SLOTS {
                 let pos = hash_ring_position(&local_node_id.0, vn);
                 ring.push((pos, local_node_id.clone()));
             }
-            for peer in self.shared_state.peer_registry.iter() {
+            for peer in self.shared_state.connected_node_ids.iter() {
+                if peer.key() == local_node_id {
+                    continue; // local already added above
+                }
                 for vn in 0..VIRTUAL_SLOTS {
                     let pos = hash_ring_position(&peer.key().0, vn);
                     ring.push((pos, peer.key().clone()));
@@ -312,7 +322,9 @@ impl AutoShardManager {
                 // On join/leave, only ~1/pool_size of assignments change.
                 // BYPASS: if we already host other shards of this model, always allow
                 // gap-filling so partial models get completed for local inference.
-                let peers = self.shared_state.peer_registry.len();
+                // SEC: use connected_node_ids (gotcha #86) — peer_registry
+                // includes recently-disconnected peers preserved for reconnect.
+                let peers = self.shared_state.connected_node_ids.len();
                 let already_hosting_model = local_shard_count > 0;
                 if holder_count < target_replicas
                     && peers > 0
@@ -666,6 +678,22 @@ impl AutoShardManager {
                 while model_indices[mi] < candidates_for_model.len() {
                     let candidate = &candidates_for_model[model_indices[mi]];
                     model_indices[mi] += 1;
+                    // SEC: skip candidates with zero `shard_size_bytes`. The
+                    // field comes from `ShardInfo.size_bytes` populated from
+                    // peer-gossiped manifests OR HF API responses where the
+                    // file size may be missing (`unwrap_or(0)`). A zero-size
+                    // candidate ALWAYS passes `<= budget_bytes` regardless
+                    // of remaining budget, then subtracts 0 — silently
+                    // letting unbounded zero-size shards through the budget
+                    // gate. Treat unknown size as a refusal signal instead.
+                    if candidate.shard_size_bytes == 0 {
+                        tracing::debug!(
+                            model = %candidate.model_id,
+                            shard = candidate.shard_index,
+                            "Auto-manage: skipping candidate with zero shard_size_bytes (unknown size)"
+                        );
+                        continue;
+                    }
                     if candidate.shard_size_bytes <= budget_bytes {
                         budget_bytes -= candidate.shard_size_bytes;
                         selected.push(candidate.clone());

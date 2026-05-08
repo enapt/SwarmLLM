@@ -28,8 +28,12 @@ const MIN_AUTO_MANAGE_INTERVAL_SECS: u64 = 10;
 
 /// Read pool shard pins via a non-blocking try_read on `pool_state`.
 /// Returns an empty Vec on lock contention or when the node isn't in a pool.
-/// Used by both scoring (full pin list for bonuses) and prune (per-shard
-/// pin checks) so the lock-acquisition shape stays consistent.
+/// Used by SCORING — a sync hot path that can't `.await` and accepts the
+/// "miss this cycle" failure mode for an under-replicated bonus signal.
+///
+/// SEC: do NOT use this from prune. A pinned shard slipping through to the
+/// pruneable set because pool_state was momentarily write-locked is a
+/// data-loss vector. Prune calls `read_shard_pins_blocking` instead.
 pub(super) fn read_shard_pins(state: &SharedState) -> Vec<crate::types::ShardPin> {
     state
         .credits
@@ -38,6 +42,60 @@ pub(super) fn read_shard_pins(state: &SharedState) -> Vec<crate::types::ShardPin
         .ok()
         .and_then(|ps| ps.as_ref().map(|s| s.shard_pins.clone()))
         .unwrap_or_default()
+}
+
+/// Async sibling of `read_shard_pins` that awaits the read lock instead of
+/// failing-empty on contention. Used by prune (and any other code path
+/// where treating "lock contended" as "no pins exist" is unsafe).
+pub(super) async fn read_shard_pins_blocking(state: &SharedState) -> Vec<crate::types::ShardPin> {
+    state
+        .credits
+        .pool_state
+        .read()
+        .await
+        .as_ref()
+        .map(|s| s.shard_pins.clone())
+        .unwrap_or_default()
+}
+
+/// Maximum time a P2P download permit may sit in `p2p_download_permits`
+/// before being considered stalled. Matches the rough order of the longest
+/// honest shard chunk fetch (32 MiB chunk × multi-segment retry) plus
+/// generous slack for slow peers. Anything older is almost certainly a
+/// silent drop in the libp2p path.
+const P2P_PERMIT_STALL_SECS: u64 = 600;
+
+/// Sweep `p2p_download_permits` for entries older than `P2P_PERMIT_STALL_SECS`.
+/// Releases the permit (drop semantics on the OwnedSemaphorePermit) and
+/// clears the matching `acquisition_progress` shard entry so the next
+/// auto-manage tick can retry. Marks the shard as P2P-failed so the HF
+/// fallback fires next cycle, mirroring the give-up path in
+/// `shard_transfer.rs::retry_shard_or_fallback`.
+pub(super) fn sweep_stalled_p2p_permits(state: &SharedState) {
+    let cutoff = std::time::Duration::from_secs(P2P_PERMIT_STALL_SECS);
+    let now = std::time::Instant::now();
+    let mut stalled: Vec<crate::types::ShardId> = Vec::new();
+    for entry in state.models.p2p_download_permits.iter() {
+        if now.duration_since(entry.value().1) > cutoff {
+            stalled.push(entry.key().clone());
+        }
+    }
+    for sid in stalled {
+        state.models.p2p_download_permits.remove(&sid);
+        state.models.shard_p2p_failed.insert(sid.clone());
+        if let Some(mut entry) = state.models.acquisition_progress.get_mut(&sid.model_id) {
+            entry.shard_progress.remove(&sid.index);
+        }
+        tracing::warn!(
+            model = %sid.model_id,
+            shard = sid.index,
+            stall_secs = P2P_PERMIT_STALL_SECS,
+            "Auto-manage: released stalled P2P download permit; HF fallback will fire next cycle"
+        );
+        // Wake the manager loop so the HF retry can fire promptly rather
+        // than waiting for the next periodic interval.
+        state.models.auto_manage_notify.notify_one();
+    }
 }
 
 /// Compute a position on a u32 consistent hash ring for a node's virtual slot.
@@ -159,8 +217,35 @@ impl AutoShardManager {
         let mut interval = tokio::time::interval(Duration::from_secs(interval_secs));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
-        // Skip the first tick (fires immediately) -- let the node discover peers first
+        // Skip the first tick (fires immediately) -- let the node discover peers first.
+        // Then add a deterministic per-node phase offset so a fleet of nodes
+        // that all booted in the same epoch window doesn't fire `evaluate()`
+        // at the same clock minute and trigger a thundering-herd of HF byte-
+        // range requests against the same CDN origin. Phase = first 2 bytes
+        // of BLAKE3(node_id) modulo the interval. Stable per-node, no clock
+        // synchronization assumptions, no randomness needed.
         interval.tick().await;
+        let phase_offset_secs = {
+            let nid = self.shared_state.identity.node_id();
+            let h = blake3::hash(&nid.0);
+            let bytes = h.as_bytes();
+            let raw = u16::from_le_bytes([bytes[0], bytes[1]]) as u64;
+            raw % interval_secs.max(1)
+        };
+        if phase_offset_secs > 0 {
+            tracing::debug!(
+                phase_offset_secs,
+                "Auto-manage applying per-node phase offset to break startup thundering-herd"
+            );
+            tokio::select! {
+                _ = self.shutdown_rx.changed() => {
+                    if *self.shutdown_rx.borrow() {
+                        return;
+                    }
+                }
+                _ = tokio::time::sleep(Duration::from_secs(phase_offset_secs)) => {}
+            }
+        }
 
         tracing::info!(
             interval_secs = interval_secs,
@@ -201,6 +286,15 @@ impl AutoShardManager {
                             "Rescan discovered new local shards"
                         );
                     }
+
+                    // SEC: sweep stalled P2P download permits. Without this,
+                    // a silent libp2p drop (request never reaches peer)
+                    // parks the OwnedSemaphorePermit forever — after enough
+                    // such drops, all `max_concurrent_downloads` slots are
+                    // permanently held and auto-manage downloads freeze
+                    // with no log signal. Sweep runs every loop tick so
+                    // worst-case stall window is ~one interval.
+                    sweep_stalled_p2p_permits(&self.shared_state);
 
                     // Re-check enabled -- admin API can toggle at runtime
                     if self.shared_state.models.auto_manage_enabled.load(std::sync::atomic::Ordering::Acquire) {
@@ -458,6 +552,15 @@ impl AutoShardManager {
                 .get(&key)
                 .map(|v| *v)
                 .unwrap_or(0.0);
+            // SEC: NaN guard on the cached value. Gotcha #98 (R102) added
+            // the guard at the gossip ingress, but a NaN from a pre-R102
+            // DB rehydrate or a brief race window still poisons the EMA
+            // here. `NaN * 0.85 + n * 0.15 = NaN` permanently — and
+            // `geo_target_replicas` reads the value with no NaN check,
+            // landing in the `else` arm with `demand_factor = 3.0` (max
+            // popularity) for a model nobody is requesting. Treat NaN/Inf
+            // as 0.0 so the bad entry self-heals on the next decay tick.
+            let old = if old.is_finite() { old } else { 0.0 };
             let new_rate = old * EMA_DECAY_WEIGHT + fresh as f64 * EMA_FRESH_WEIGHT;
             if new_rate > 0.001 {
                 self.shared_state.region_demand.insert(key, new_rate);

@@ -107,8 +107,8 @@
           <label class="setup-toggle-label">
             <input type="checkbox" id="setup-auto-manage" checked>
             <span class="setup-toggle-content">
-              <span class="setup-toggle-title" data-i18n="setup.auto_download_label">Auto-download AI models</span>
-              <span class="setup-toggle-desc" data-i18n="setup.auto_download_desc">Automatically download popular AI models that fit your hardware. Uses disk space and bandwidth. You can set limits in Settings.</span>
+              <span class="setup-toggle-title" data-i18n="setup.auto_download_label">Auto-host model shards</span>
+              <span class="setup-toggle-desc" data-i18n="setup.auto_download_desc">Automatically host shards of popular models the network needs — under-replicated ones first, scoped to your VRAM and disk budget. Uses disk space and bandwidth. You can set limits in Settings.</span>
             </span>
           </label>
         </div>
@@ -331,7 +331,7 @@
         <label for="settings-auto-shards" data-i18n="settings.auto_download">Auto-Download Models</label>
         <select id="settings-auto-shards">
           <option value="off" data-i18n="settings.auto_off">Off</option>
-          <option value="on" data-i18n="settings.auto_on">On — automatically download popular model data</option>
+          <option value="on" data-i18n="settings.auto_on">On — automatically host popular model shards</option>
         </select>
         <span class="text-muted field-hint" data-i18n="settings.auto_download_hint">Downloads pieces of AI models so the network can run them. Uses disk space.</span>
       </div>

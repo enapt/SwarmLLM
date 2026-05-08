@@ -68,6 +68,16 @@ impl AutoShardManager {
         // Collect prune candidates across all models
         let mut prune_candidates: Vec<PruneCandidate> = Vec::new();
 
+        // SEC: cache pool shard pins ONCE per prune cycle, AND use the
+        // blocking read variant. The previous per-shard re-read used
+        // `pool_state.try_read()` — on lock contention (e.g. during
+        // pool-membership gossip processing) it returned an empty Vec,
+        // silently unblocking the prune of pinned shards (data-loss). The
+        // blocking read awaits the lock; treating "contended" as "no pins"
+        // is unsafe here. Caching before the loop also gives a consistent
+        // snapshot — pin state can't flip mid-cycle.
+        let shard_pins_cached = super::manager::read_shard_pins_blocking(&self.shared_state).await;
+
         for manifest in registry.models() {
             // Check per-model prune policy
             if let Some(policy) = self
@@ -112,6 +122,21 @@ impl AutoShardManager {
                 }
                 // Private mode: filter holders to allowed set for replica counting
                 let holders = crate::pool::scope::filter_allowed_holders(holders, &allowed_set);
+                // SEC: count only LIVE holders (gotcha #86 / scheduler-liveness
+                // oracle pattern). `shard_holders` returns the gossip-cached
+                // list including peers that have been offline for hours
+                // (registry entries persist until LRU eviction or explicit
+                // remove). The previous logic counted offline peers toward
+                // `holder_count`, so a shard whose 3 cached holders were all
+                // disconnected passed the `holder_count <= adjusted_target`
+                // guard and got pruned — losing the only live copy. Filter
+                // against `connected_node_ids` (always include self).
+                let holders: Vec<crate::types::NodeId> = holders
+                    .into_iter()
+                    .filter(|h| {
+                        *h == local_node_id || self.shared_state.connected_node_ids.contains(h)
+                    })
+                    .collect();
 
                 // Skip locked/pinned shards
                 if self
@@ -123,11 +148,11 @@ impl AutoShardManager {
                     continue;
                 }
 
-                // Skip shards pinned to this node via pool shard pinning
+                // Skip shards pinned to this node via pool shard pinning.
+                // Uses the cached snapshot from above — see SEC note there.
                 {
                     let local_id = self.shared_state.identity.node_id();
-                    let shard_pins = super::manager::read_shard_pins(&self.shared_state);
-                    if shard_pins
+                    if shard_pins_cached
                         .iter()
                         .any(|p| p.matches(&manifest.id.0, local_id, shard.index))
                     {
@@ -373,7 +398,17 @@ impl AutoShardManager {
             };
             let current_holders = {
                 let h = registry.shard_holders(&shard_id_check);
-                crate::pool::scope::count_allowed_holders(&h, &allowed_set)
+                let h = crate::pool::scope::filter_allowed_holders(h, &allowed_set);
+                // SEC: same liveness filter as candidate-collection loop.
+                // Counting offline holders here would let the re-check pass
+                // even if every other holder went down between selection
+                // and execution.
+                h.into_iter()
+                    .filter(|peer| {
+                        *peer == local_node_id
+                            || self.shared_state.connected_node_ids.contains(peer)
+                    })
+                    .count()
             };
             // Re-compute pressure-adjusted target with current pressure as well.
             // As we prune candidates earlier in this cycle, local disk usage

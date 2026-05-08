@@ -350,7 +350,15 @@ impl AutoShardManager {
                                 entry.state = crate::model::acquisition::AcquisitionState::Failed {
                                     reason: format!("GGUF probe failed: {}", e),
                                 };
+                                // SEC: clear the per-shard progress entry so
+                                // is_shard_in_progress() doesn't keep returning
+                                // true forever — without this, the failed shard
+                                // is locked out of every subsequent eval cycle
+                                // and the dashboard shows a permanent
+                                // "downloading" spinner.
+                                entry.shard_progress.remove(&shard_idx);
                             }
+                            shared.schedule_acquisition_cleanup(model_id.clone());
                             return;
                         }
                     };
@@ -376,6 +384,18 @@ impl AutoShardManager {
                             .with_detail_str(arch_str)
                             .with_toast("warning", 5000),
                         );
+                        // SEC: same cleanup as GGUF probe failure — without it
+                        // the shard's progress entry sits in `Downloading`
+                        // forever, locking it out of future eval cycles.
+                        if let Some(mut entry) =
+                            shared.models.acquisition_progress.get_mut(&model_id)
+                        {
+                            entry.state = crate::model::acquisition::AcquisitionState::Failed {
+                                reason: format!("Unsupported architecture: {}", arch_str),
+                            };
+                            entry.shard_progress.remove(&shard_idx);
+                        }
+                        shared.schedule_acquisition_cleanup(model_id.clone());
                         return;
                     }
 
@@ -388,6 +408,19 @@ impl AutoShardManager {
                                 total_shards = info.shard_count(),
                                 "AutoShardManager: shard index out of range"
                             );
+                            // SEC: same cleanup pattern — see above.
+                            if let Some(mut entry) =
+                                shared.models.acquisition_progress.get_mut(&model_id)
+                            {
+                                entry.state = crate::model::acquisition::AcquisitionState::Failed {
+                                    reason: format!(
+                                        "Shard index {shard_idx} out of range (have {})",
+                                        info.shard_count()
+                                    ),
+                                };
+                                entry.shard_progress.remove(&shard_idx);
+                            }
+                            shared.schedule_acquisition_cleanup(model_id.clone());
                             return;
                         }
                     };
@@ -853,7 +886,7 @@ e
                     self.shared_state
                         .models
                         .p2p_download_permits
-                        .insert(sid.clone(), p2p_permit);
+                        .insert(sid.clone(), (p2p_permit, std::time::Instant::now()));
                     let cmd = NetworkCommand::SendShardRequest {
                         target_peer_bytes: bytes,
                         request,
