@@ -373,7 +373,16 @@ where
                 let chunk: serde_json::Value = match serde_json::from_str(&data) {
                     Ok(v) => v,
                     Err(e) => {
-                        tracing::warn!(error = %e, data = %data, "responses stream: malformed chat chunk");
+                        // PRIVACY: do NOT log `data` itself. It's an SSE payload
+                        // from the upstream provider that on the success path
+                        // contains generated assistant content; warn logs flow
+                        // into journald/syslog/Loki and would persist other
+                        // tenants' partial response text on a multi-user node.
+                        tracing::warn!(
+                            error = %e,
+                            data_len = data.len(),
+                            "responses stream: malformed chat chunk"
+                        );
                         continue;
                     }
                 };

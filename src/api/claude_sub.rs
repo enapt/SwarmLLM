@@ -148,6 +148,21 @@ fn get_session(key: &str) -> Option<String> {
 
 /// Store a session ID for multi-turn reuse.
 fn put_session(key: String, session_id: String) {
+    // SEC: cap the cached session_id length. The value is parsed from the
+    // `claude` subprocess's NDJSON stdout and used as the `--resume <sid>`
+    // CLI argument on the next invocation. A compromised/replaced binary
+    // could emit megabyte-scale session IDs to fill up to 200 cache
+    // entries with large strings — bounded targeted memory exhaustion.
+    // Real session IDs are short UUIDs.
+    const MAX_SESSION_ID_BYTES: usize = 512;
+    if session_id.len() > MAX_SESSION_ID_BYTES {
+        tracing::warn!(
+            len = session_id.len(),
+            cap = MAX_SESSION_ID_BYTES,
+            "claude_sub: session_id exceeds cap — not caching"
+        );
+        return;
+    }
     // Lazy cleanup on every insert to bound cache size
     cleanup_expired_sessions();
     if SESSION_CACHE.len() >= MAX_SESSION_CACHE_SIZE {
@@ -611,11 +626,17 @@ pub async fn proxy_via_subprocess_openai(
                                 match inner_type {
                                     "content_block_delta" => {
                                         let delta_type = parsed["event"]["delta"]["type"].as_str().unwrap_or("");
+                                        // PRIVACY: drop `thinking_delta` from the OpenAI-format
+                                        // proxy. Anthropic's extended thinking carries the model's
+                                        // chain-of-thought; the OpenAI streaming chunk schema has
+                                        // no `reasoning` field, so the previous code concatenated
+                                        // it into `choices[0].delta.content`. Clients see internal
+                                        // reasoning indistinguishable from the actual answer —
+                                        // a privacy regression vs. talking to Anthropic directly.
+                                        // The Anthropic-format proxy below preserves typed
+                                        // thinking blocks for clients that explicitly support them.
                                         let text_opt = if delta_type == "text_delta" {
                                             Some(parsed["event"]["delta"]["text"].as_str().unwrap_or("").to_string())
-                                        } else if delta_type == "thinking_delta" {
-                                            // Extended thinking — pass through as content
-                                            Some(parsed["event"]["delta"]["thinking"].as_str().unwrap_or("").to_string())
                                         } else {
                                             None
                                         };

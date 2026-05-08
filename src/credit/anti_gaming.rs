@@ -39,6 +39,12 @@ pub struct AntiGaming {
     /// Many nodes from the same /24 may indicate Sybil attack.
     /// Each entry stores (NodeId, registration time) for age-based eviction.
     subnet_counts: HashMap<[u8; 3], Vec<(NodeId, Instant)>>,
+    /// Reverse index: NodeId → its current /24 prefix. Lets `register_subnet`
+    /// remove a node from its old bucket in O(1) instead of scanning every
+    /// bucket. Without this, `register_subnet` was O(N × buckets) and ran
+    /// on every libp2p Identify event — Sybil attackers opening many
+    /// distinct connections forced quadratic work per push.
+    node_subnet: HashMap<NodeId, [u8; 3]>,
 }
 
 impl AntiGaming {
@@ -50,6 +56,7 @@ impl AntiGaming {
             max_transaction_amount: 100_000,
             spot_check_rate: 0.05, // 5% of transactions
             subnet_counts: HashMap::new(),
+            node_subnet: HashMap::new(),
         }
     }
 
@@ -127,10 +134,23 @@ impl AntiGaming {
         // Evict subnet registrations older than SUBNET_EVICTION_SECS to prevent
         // unbounded growth from nodes that connect but never transact.
         let subnet_cutoff = Instant::now() - Duration::from_secs(SUBNET_EVICTION_SECS);
+        let mut evicted: Vec<NodeId> = Vec::new();
         self.subnet_counts.retain(|_, nodes| {
-            nodes.retain(|(_, ts)| *ts > subnet_cutoff);
+            nodes.retain(|(n, ts)| {
+                let keep = *ts > subnet_cutoff;
+                if !keep {
+                    evicted.push(n.clone());
+                }
+                keep
+            });
             !nodes.is_empty()
         });
+        // Keep `node_subnet` reverse index in sync — drop entries that were
+        // just evicted from `subnet_counts` so a future register_subnet call
+        // doesn't try to remove them from a bucket that no longer exists.
+        for n in evicted {
+            self.node_subnet.remove(&n);
+        }
         // Soft warning if the rate-limit map grows unusually large between
         // ticks. Time-based eviction above bounds this in steady state, but
         // a Sybil burst could push it temporarily high. Emitted at ~once per
@@ -171,14 +191,21 @@ impl AntiGaming {
     /// no longer belong to. Drop the stale entry first.
     pub fn register_subnet(&mut self, node_id: &NodeId, ip_bytes: [u8; 4]) {
         let prefix = [ip_bytes[0], ip_bytes[1], ip_bytes[2]];
-        // Remove the NodeId from any other prefix bucket it currently lives in.
-        for (other_prefix, nodes) in self.subnet_counts.iter_mut() {
-            if other_prefix != &prefix {
-                nodes.retain(|(n, _)| n != node_id);
+        // O(1) reverse-index lookup of the previous bucket. If the node was
+        // last seen in a different /24, drop it from that bucket; otherwise
+        // we're refreshing in place. The previous full-scan implementation
+        // was O(N × buckets) and ran on every libp2p Identify event.
+        if let Some(&old_prefix) = self.node_subnet.get(node_id) {
+            if old_prefix != prefix {
+                if let Some(nodes) = self.subnet_counts.get_mut(&old_prefix) {
+                    nodes.retain(|(n, _)| n != node_id);
+                    if nodes.is_empty() {
+                        self.subnet_counts.remove(&old_prefix);
+                    }
+                }
             }
         }
-        // Drop empty buckets so they don't pile up over the eviction window.
-        self.subnet_counts.retain(|_, nodes| !nodes.is_empty());
+        self.node_subnet.insert(node_id.clone(), prefix);
 
         let nodes = self.subnet_counts.entry(prefix).or_default();
         if let Some(entry) = nodes.iter_mut().find(|(n, _)| n == node_id) {

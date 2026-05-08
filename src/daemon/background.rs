@@ -850,6 +850,38 @@ pub(super) fn spawn_responses_sweep(
                         ),
                         Err(e) => tracing::warn!(error = %e, "pool_forwards sweep failed"),
                     }
+                    // SEC: prune credit_txns dedup table. Entries serve only
+                    // as the UUID-replay block. Replay protection requires
+                    // keeping records within `BALANCE_REPORT_MAX_AGE_SECS`
+                    // (5 minutes — the staleness window that gates new tx
+                    // acceptance); 30 days is generous defense-in-depth
+                    // while bounding disk growth. Without this, every valid
+                    // gossiped CreditTransaction (~1/peer/window) writes a
+                    // permanent entry — at 200-peer cap the table grows
+                    // ~MB/day with no eviction.
+                    match prune_credit_txns_older_than(&db, cutoff) {
+                        Ok(0) => {}
+                        Ok(n) => tracing::info!(
+                            count = n,
+                            cutoff = %cutoff.to_rfc3339(),
+                            "credit_txns sweep: pruned old entries"
+                        ),
+                        Err(e) => tracing::warn!(error = %e, "credit_txns sweep failed"),
+                    }
+                    // SEC: prune expired pool_invitations from disk. The
+                    // in-memory map skips expired entries on rehydration,
+                    // but the DB grew unbounded. Same 30-day cutoff —
+                    // invitations have a max 24h TTL so any entry past 30
+                    // days is long-expired regardless of `expires_at`.
+                    match prune_pool_invitations_older_than(&db, cutoff) {
+                        Ok(0) => {}
+                        Ok(n) => tracing::info!(
+                            count = n,
+                            cutoff = %cutoff.to_rfc3339(),
+                            "pool_invitations sweep: pruned old entries"
+                        ),
+                        Err(e) => tracing::warn!(error = %e, "pool_invitations sweep failed"),
+                    }
                 }
             }
         }
@@ -870,6 +902,45 @@ fn prune_pool_forwards_older_than(
             // Use the UUID-string key (same format the writer used at the
             // put_json call site in pool/manager/mod.rs).
             db.remove("pool_forwards", &entry.id.to_string())?;
+            removed += 1;
+        }
+    }
+    Ok(removed)
+}
+
+/// TREE_TRANSACTIONS (credit_txns) dedup log pruner. Returns count of
+/// removed entries. Mirrors `prune_pool_forwards_older_than`.
+fn prune_credit_txns_older_than(
+    db: &crate::storage::db::Database,
+    cutoff: chrono::DateTime<chrono::Utc>,
+) -> Result<usize, crate::error::SwarmError> {
+    let entries =
+        db.iter_json::<crate::types::CreditTransaction>(crate::credit::ledger::TREE_TRANSACTIONS)?;
+    let mut removed = 0usize;
+    for entry in entries {
+        if entry.timestamp < cutoff {
+            db.remove(
+                crate::credit::ledger::TREE_TRANSACTIONS,
+                &entry.id.to_string(),
+            )?;
+            removed += 1;
+        }
+    }
+    Ok(removed)
+}
+
+/// TREE_POOL_INVITATIONS pruner. Removes entries whose `expires_at` is
+/// older than `cutoff`. The in-memory rehydrate path already skips
+/// expired entries, but the DB grew unbounded.
+fn prune_pool_invitations_older_than(
+    db: &crate::storage::db::Database,
+    cutoff: chrono::DateTime<chrono::Utc>,
+) -> Result<usize, crate::error::SwarmError> {
+    let entries = db.iter_json::<swarmllm_types::pool::PoolInvitation>("pool_invitations")?;
+    let mut removed = 0usize;
+    for entry in entries {
+        if entry.expires_at < cutoff {
+            db.remove("pool_invitations", &entry.id.to_string())?;
             removed += 1;
         }
     }

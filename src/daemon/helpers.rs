@@ -94,6 +94,15 @@ fn write_api_key_file(data_dir: &std::path::Path, key: &str) {
                 if let Err(e) = f.write_all(key.as_bytes()) {
                     tracing::warn!(error = %e, "Failed to write api_key file");
                 }
+                // SEC: fsync. On a power loss between write_all and the
+                // kernel page-cache flush, the file lands empty/partial.
+                // If the DB persist also failed (warn-only path in
+                // resolve_api_key), the next startup generates a NEW key
+                // and the operator's saved tokens stop working — silently.
+                // Mirrors identity.key write (keypair.rs:71).
+                if let Err(e) = f.sync_all() {
+                    tracing::warn!(error = %e, "Failed to fsync api_key file");
+                }
             }
             Err(e) => tracing::warn!(error = %e, "Failed to open api_key file"),
         }

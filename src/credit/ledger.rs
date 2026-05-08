@@ -164,32 +164,42 @@ impl CreditLedger {
             "Earned credits for inference serving"
         );
 
-        // Forward credits to pool owner if we're a member (not owner).
-        // Credits are only applied to the local balance if they are NOT forwarded.
-        // This prevents credit inflation if forwarding fails.
-        if let Some(ref ss) = self.shared_state {
+        // Forward (a portion of) earned credits to the pool owner per
+        // PoolState::member_credit_split_pct. The forwarder returns the
+        // member's local-credit share — full amount if not in pool / is
+        // owner / forward channel unavailable; member_keeps if a partial
+        // split is configured; zero if 100% forwarded. We then apply
+        // exactly that to the local balance — no inflation, no theft of
+        // the configured split.
+        let local_credit = if let Some(ref ss) = self.shared_state {
             match crate::pool::forward::forward_credits_to_owner(ss, amount).await {
-                Ok(true) => {
-                    // Credits forwarded to pool owner — member retains nothing
-                    tracing::info!(amount, "Forwarded earned credits to pool owner");
-                    return Ok(0);
-                }
-                Ok(false) => {} // Not in a pool or is the owner — credit locally below
+                Ok(local) => local,
                 Err(e) => {
                     tracing::warn!(
                         error = %e,
                         amount,
                         "Pool credit forwarding failed — crediting locally. Owner will not receive these credits."
                     );
+                    amount
                 }
             }
+        } else {
+            amount
+        };
+
+        if local_credit > 0 {
+            self.apply_credit(local_credit, true).await?;
+            self.persist_balance().await?;
+        }
+        if local_credit < amount {
+            tracing::info!(
+                forwarded = amount - local_credit,
+                kept = local_credit,
+                "Forwarded share of earned credits to pool owner"
+            );
         }
 
-        // Credit locally (not in pool, or forwarding failed/unavailable)
-        self.apply_credit(amount, true).await?;
-        self.persist_balance().await?;
-
-        Ok(amount)
+        Ok(local_credit)
     }
 
     /// Spend credits for consuming inference.

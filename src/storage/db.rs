@@ -7,7 +7,20 @@ use redb::{ReadableDatabase, ReadableTable, TableDefinition};
 use crate::error::SwarmError;
 
 /// Critical trees to check during integrity verification.
-const CRITICAL_TREES: &[&str] = &["manifests", "credits", "identity", "nicknames"];
+///
+/// `pool_state` is included because a corrupt entry causes the pool
+/// manager's restore_state to silently drop the membership and gossip as
+/// a standalone node — pool members would then see the owner as departed.
+/// `credit_txns` is included because dedup integrity is the only thing
+/// preventing CreditTransaction replay across restart.
+const CRITICAL_TREES: &[&str] = &[
+    "manifests",
+    "credits",
+    "identity",
+    "nicknames",
+    "pool_state",
+    "credit_txns",
+];
 
 /// Single redb table storing all logical trees via composite keys.
 /// Key format: "{tree_name}\0{key}" (NUL separator).

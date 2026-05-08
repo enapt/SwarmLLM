@@ -47,6 +47,11 @@ pub struct CreditGossip {
     pub timestamp: chrono::DateTime<chrono::Utc>,
     /// Ed25519 signature over (node_id || balance_bucket || timestamp_secs).
     /// Required — unsigned gossip is rejected.
-    #[serde(default)]
+    ///
+    /// SEC: NO `#[serde(default)]` here. A permissive default would let any
+    /// future handler that forgets to call `verify_balance_report` silently
+    /// accept unsigned credit gossip. Forcing the field to be present at
+    /// the deserializer means the failure mode is "discard malformed
+    /// message" rather than "accept an unsigned report".
     pub signature: Vec<u8>,
 }

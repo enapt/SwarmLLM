@@ -1123,6 +1123,20 @@ pub(crate) async fn dispatch_network_messages(
                                             continue;
                                         }
                                         let mid = gossip.model_id.clone();
+                                        // SEC: cap distinct hf_sources entries. Without this, a
+                                        // peer can gossip thousands of unique model_ids to inflate
+                                        // the in-memory map and the persisted "hf_sources" tree.
+                                        const MAX_HF_SOURCES: usize = 1024;
+                                        if !shared_state.models.hf_sources.contains_key(&mid)
+                                            && shared_state.models.hf_sources.len() >= MAX_HF_SOURCES
+                                        {
+                                            tracing::warn!(
+                                                model = %mid,
+                                                cap = MAX_HF_SOURCES,
+                                                "HfSourceGossip dropped — hf_sources at capacity"
+                                            );
+                                            continue;
+                                        }
                                         if !shared_state.models.hf_sources.contains_key(&mid) {
                                             tracing::info!(
                                                 model = %mid,

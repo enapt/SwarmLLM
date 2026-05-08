@@ -91,6 +91,16 @@ async fn tool_chat(state: &AppState, id: Option<Value>, args: Value) -> JsonRpcR
         return JsonRpcResponse::error(id, INVALID_PARAMS, "No valid messages provided");
     }
 
+    // SEC: cap per-message and total prompt size before submitting to the
+    // router. The OpenAI and Anthropic handlers run this check; the MCP
+    // handler had only a message-count cap, so a client could send 4096
+    // messages of 2 MB each (8 GiB total) and the router would OOM trying
+    // to assemble the prompt.
+    if let Err(e) = crate::api::validate_content_size(chat_messages.iter().map(|m| m.content.len()))
+    {
+        return JsonRpcResponse::error(id, INVALID_PARAMS, format!("{}", e.0));
+    }
+
     let request = crate::types::InferenceRequest::local(
         crate::types::ModelId(model),
         chat_messages,

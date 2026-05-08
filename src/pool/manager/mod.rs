@@ -18,6 +18,12 @@ pub(crate) const TREE_POOL_STATE: &str = "pool_state";
 const TREE_POOL_INVITATIONS: &str = "pool_invitations";
 const TREE_POOL_FORWARDS: &str = "pool_forwards";
 const TREE_POOL_REMOVAL_REPLAYS: &str = "pool_removal_replays";
+/// SEC: invite codes persistence. Without this, a pool owner restart between
+/// `JoinWithCode` arriving and the invitation being sent loses the code from
+/// memory; the joiner's `auto_accept_code_hash` expires silently and the
+/// join always requires manual intervention. Keyed on the hex-encoded
+/// `code_hash` (32 bytes → 64 chars).
+const TREE_POOL_INVITE_CODES: &str = "pool_invite_codes";
 pub(crate) const KEY_MY_POOL: &str = "my_pool";
 
 /// Max lifetime of a pending auto-accept intent created by a code-based join.
@@ -157,6 +163,28 @@ impl PoolManager {
                 tracing::info!(
                     count = self.pending_invitations.len(),
                     "Restored pending pool invitations"
+                );
+            }
+        }
+
+        // SEC: rehydrate invite codes (owner side). Without this, a pool
+        // owner restart between code generation and the joiner sending
+        // JoinRequest silently breaks the join flow.
+        if let Ok(codes) = db.iter_json::<PoolInviteCode>(TREE_POOL_INVITE_CODES) {
+            let now = chrono::Utc::now();
+            for code in codes {
+                if !code.consumed && code.expires_at > now {
+                    self.invite_codes.insert(code.code_hash, code);
+                } else {
+                    // Best-effort cleanup of expired/consumed codes from disk.
+                    let key = hex::encode(code.code_hash);
+                    let _ = db.remove(TREE_POOL_INVITE_CODES, &key);
+                }
+            }
+            if !self.invite_codes.is_empty() {
+                tracing::info!(
+                    count = self.invite_codes.len(),
+                    "Restored active pool invite codes"
                 );
             }
         }
@@ -1100,6 +1128,21 @@ impl PoolManager {
                 return;
             }
 
+            // SEC: reject nil removal_id explicitly. The wire field defaults
+            // to `Uuid::nil()` for backwards-compat with pre-id messages,
+            // but the dedup table is keyed on the UUID — a nil-keyed entry
+            // would block ALL future legacy nil-UUID removals from being
+            // processed (one-shot suppression DoS). Real pool removals
+            // emitted by current builds always carry a fresh UUID.
+            if removal.removal_id.is_nil() {
+                tracing::warn!(
+                    pool = %removal.pool_id,
+                    removed = %removal.removed_node_id,
+                    "Pool removal rejected: missing removal_id"
+                );
+                return;
+            }
+
             // SEC: Replay protection — check if we've already processed this removal_id.
             // Type-agnostic check (bool from old builds OR i64 timestamp going forward)
             // so legacy entries still block replays during the upgrade.
@@ -1386,6 +1429,19 @@ impl PoolManager {
         let ttl = self.shared_state.config.pool.invitation_ttl_hours;
         let invite = PoolInviteCode::generate(self.shared_state.identity.node_id(), ttl);
         let code = invite.code.clone();
+        // SEC: persist alongside the in-memory map so a restart between
+        // generate-code and the joiner sending JoinRequest doesn't lose the
+        // code (without this, every owner crash silently breaks join flows
+        // that were in flight). Keyed on hex(code_hash) — DB keys are
+        // strings.
+        let code_hash_hex = hex::encode(invite.code_hash);
+        if let Err(e) =
+            self.shared_state
+                .db
+                .put_json(TREE_POOL_INVITE_CODES, &code_hash_hex, &invite)
+        {
+            tracing::warn!(error = %e, "Failed to persist invite code");
+        }
         self.invite_codes.insert(invite.code_hash, invite);
 
         tracing::info!(code_preview = &code[..4], "Generated pool invite code");
@@ -1472,8 +1528,13 @@ impl PoolManager {
         // Signature verification over the payload is done at the network message level
         // by gossip_seal/transport auth — no additional check needed here.
 
-        // Mark code as consumed (one-time use)
+        // Mark code as consumed (one-time use). Also drop the persisted
+        // copy so a future restart doesn't see a "fresh" non-expired code.
         code_entry.consumed = true;
+        let key = hex::encode(code_hash);
+        if let Err(e) = self.shared_state.db.remove(TREE_POOL_INVITE_CODES, &key) {
+            tracing::debug!(error = %e, "Failed to remove consumed invite code from db");
+        }
 
         tracing::info!(
             requester = %requester,
