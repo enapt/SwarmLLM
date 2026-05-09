@@ -231,7 +231,15 @@ async fn reader_actor(
             }
             Err(e) => {
                 tracing::warn!(model = %model_id, error = %e, "Worker reader exiting — evicting");
-                dead.store(true, Ordering::Relaxed);
+                // R107: Release ordering pairs with Acquire loads at every
+                // dead-check call site. On weakly-ordered CPUs (ARM), a
+                // Relaxed load could legally observe `dead == false` after
+                // this store and the subsequent `responses.clear()`,
+                // letting a concurrent caller insert into `responses` after
+                // the clear — that channel would never receive anything,
+                // and the caller's `recv()` loop has no timeout, so it
+                // would hang forever. Release/Acquire prevents this race.
+                dead.store(true, Ordering::Release);
                 // Clear all pending response channels; dropping the Senders
                 // makes each caller's `recv()` return `None`, which we map
                 // to a "worker died" error.
@@ -692,7 +700,7 @@ impl ModelProcessPool {
                 "send_prefix_fetch_result: no worker for model {model_id}"
             ))
         })?;
-        if handle.dead.load(Ordering::Relaxed) {
+        if handle.dead.load(Ordering::Acquire) {
             return Err(SwarmError::Internal("worker dead".into()));
         }
         let mut writer = handle.writer.lock().await;
@@ -722,7 +730,7 @@ impl ModelProcessPool {
         block_hash: [u8; 32],
     ) -> Option<Vec<u8>> {
         let handle = self.get_existing(model_id)?;
-        if handle.dead.load(Ordering::Relaxed) {
+        if handle.dead.load(Ordering::Acquire) {
             return None;
         }
         let request_id = Uuid::new_v4();
@@ -1371,7 +1379,7 @@ impl ModelProcessPool {
             truncate_kv_to,
         };
 
-        if handle.dead.load(Ordering::Relaxed) {
+        if handle.dead.load(Ordering::Acquire) {
             self.workers.remove(&model_id);
             return Err(SwarmError::Internal("worker is dead".into()));
         }
@@ -1467,7 +1475,7 @@ impl ModelProcessPool {
             ));
         }
         let handle = self.get_or_spawn(&model_id).await?;
-        if handle.dead.load(Ordering::Relaxed) {
+        if handle.dead.load(Ordering::Acquire) {
             self.workers.remove(&model_id);
             return Err(SwarmError::Internal("worker is dead".into()));
         }
@@ -1625,7 +1633,7 @@ impl ModelProcessPool {
             session_id,
         };
 
-        if handle.dead.load(Ordering::Relaxed) {
+        if handle.dead.load(Ordering::Acquire) {
             self.workers.remove(model_id);
             return Err(SwarmError::Internal("worker is dead".into()));
         }

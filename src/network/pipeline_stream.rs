@@ -240,36 +240,55 @@ where
 /// Spawn the remote-side accept loop. Each inbound stream gets its own
 /// handler task. Returns immediately; the accept task runs in the background
 /// until the `IncomingStreams` handle is dropped or shutdown is signaled.
+///
+/// R107: the body is wrapped in `FutureExt::catch_unwind` so that a panic
+/// inside `incoming.next()` (e.g. a libp2p_stream invariant violation) is
+/// logged at `error!` instead of silently terminating the entire inbound
+/// pipeline path for the rest of the daemon's lifetime. The handle the
+/// caller drops cannot signal a panic upward; without this wrapper a
+/// healthy-looking daemon would silently refuse new inbound pipeline
+/// streams.
 pub fn spawn_accept_loop(
     mut incoming: IncomingStreams,
     shared_state: Arc<SharedState>,
     outbound_tx: mpsc::Sender<crate::types::AuthenticatedMessage>,
     mut shutdown_rx: tokio::sync::watch::Receiver<bool>,
 ) -> JoinHandle<()> {
+    use futures::FutureExt;
     tokio::spawn(async move {
         tracing::info!(
             protocol = PROTOCOL_PIPELINE,
             "pipeline stream accept loop started"
         );
-        loop {
-            tokio::select! {
-                biased;
-                _ = shutdown_rx.changed() => {
-                    tracing::debug!("pipeline accept loop: shutdown observed");
-                    break;
-                }
-                next = incoming.next() => match next {
-                    Some((peer_id, stream)) => {
-                        let state = shared_state.clone();
-                        let out_tx = outbound_tx.clone();
-                        let stream_shutdown = shutdown_rx.clone();
-                        tokio::spawn(async move {
-                            handle_inbound_stream(peer_id, stream, state, out_tx, stream_shutdown).await;
-                        });
+        let result = std::panic::AssertUnwindSafe(async {
+            loop {
+                tokio::select! {
+                    biased;
+                    _ = shutdown_rx.changed() => {
+                        tracing::debug!("pipeline accept loop: shutdown observed");
+                        break;
                     }
-                    None => break,
-                },
+                    next = incoming.next() => match next {
+                        Some((peer_id, stream)) => {
+                            let state = shared_state.clone();
+                            let out_tx = outbound_tx.clone();
+                            let stream_shutdown = shutdown_rx.clone();
+                            tokio::spawn(async move {
+                                handle_inbound_stream(peer_id, stream, state, out_tx, stream_shutdown).await;
+                            });
+                        }
+                        None => break,
+                    },
+                }
             }
+        })
+        .catch_unwind()
+        .await;
+        if result.is_err() {
+            tracing::error!(
+                protocol = PROTOCOL_PIPELINE,
+                "pipeline stream accept loop panicked — inbound pipeline acceptance has stopped"
+            );
         }
         tracing::info!("pipeline stream accept loop terminated");
     })

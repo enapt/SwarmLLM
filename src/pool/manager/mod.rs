@@ -199,6 +199,16 @@ impl PoolManager {
             tokio::time::interval(std::time::Duration::from_secs(gossip_secs));
         gossip_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
+        // R107: periodically prune stale TREE_POOL_REMOVAL_REPLAYS entries.
+        // The startup-only sweep at `restore_state` was insufficient under
+        // sustained pool churn — entries accumulated continuously between
+        // restarts (the table is unbounded), letting redb grow without
+        // bound. Sweep every 5 minutes (matches the freshness window).
+        let mut replay_sweep_interval = tokio::time::interval(std::time::Duration::from_secs(300));
+        replay_sweep_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        // First tick fires immediately; skip it since restore_state already swept.
+        replay_sweep_interval.tick().await;
+
         tracing::info!(target: "swarmllm::pool::manager", "PoolManager running");
 
         loop {
@@ -229,10 +239,37 @@ impl PoolManager {
                         }
                     }
                 }
+                _ = replay_sweep_interval.tick() => {
+                    self.sweep_replay_table();
+                }
             }
         }
 
         Ok(())
+    }
+
+    /// Prune `TREE_POOL_REMOVAL_REPLAYS` entries older than the freshness
+    /// window. Mirrors the startup logic in `restore_state` — keeps the
+    /// table bounded under sustained pool churn between restarts.
+    fn sweep_replay_table(&self) {
+        let cutoff = chrono::Utc::now().timestamp() - 300;
+        let mut to_remove: Vec<String> = Vec::new();
+        let _ = self.shared_state.db.for_each_json::<serde_json::Value, _>(
+            TREE_POOL_REMOVAL_REPLAYS,
+            |subkey, val| {
+                let keep = val.as_i64().is_some_and(|ts| ts >= cutoff);
+                if !keep {
+                    to_remove.push(subkey.to_string());
+                }
+            },
+        );
+        if !to_remove.is_empty() {
+            let count = to_remove.len();
+            for key in to_remove {
+                let _ = self.shared_state.db.remove(TREE_POOL_REMOVAL_REPLAYS, &key);
+            }
+            tracing::debug!(count, "Pruned stale pool replay entries");
+        }
     }
 
     async fn handle_command(&mut self, cmd: PoolCommand) {
@@ -1270,16 +1307,20 @@ impl PoolManager {
             return;
         }
 
-        // Record nonce (with timestamp) to prevent replay.
-        if let Err(e) = self.shared_state.db.put_json(
-            TREE_POOL_REMOVAL_REPLAYS,
-            &replay_key,
-            &chrono::Utc::now().timestamp(),
-        ) {
-            tracing::warn!(error = %e, "Failed to persist member-left replay key");
-        }
-
-        // Clone+drop before DB write to avoid holding write lock across I/O.
+        // R107: Order matters — mirror the R105 fix in
+        // `handle_inbound_removal`. Previously the replay-key write
+        // happened BEFORE the in-memory `members.retain` and the
+        // `persist_pool_state` write; a crash in that window left a
+        // permanent replay key blocking redelivery while the departed
+        // member still appeared in pool state on disk — the member was
+        // stuck-in-pool with no way to recover. New order: mutate
+        // pool_state and persist first, then write the replay key.
+        // Crash between is now benign in both directions:
+        //   - crash after persist, before replay write: same notice
+        //     re-arrives → idempotent retain (already removed), then
+        //     writes the replay key.
+        //   - crash before persist: replay key not written, so the
+        //     next delivery processes from scratch.
         let snapshot = {
             let mut state = self.shared_state.credits.pool_state.write().await;
             if let Some(ref mut ps) = *state {
@@ -1299,6 +1340,16 @@ impl PoolManager {
                 tracing::warn!(error = %e, "Failed to persist pool state after member left");
             }
             tracing::info!(member = %node_id, "Member left pool");
+        }
+
+        // Record nonce (with timestamp) to prevent replay — written AFTER
+        // pool_state mutation per the ordering invariant above.
+        if let Err(e) = self.shared_state.db.put_json(
+            TREE_POOL_REMOVAL_REPLAYS,
+            &replay_key,
+            &chrono::Utc::now().timestamp(),
+        ) {
+            tracing::warn!(error = %e, "Failed to persist member-left replay key");
         }
     }
 

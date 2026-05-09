@@ -311,7 +311,19 @@ impl PoolManager {
                     len = n.len(),
                     "Truncating oversized inbound device_name"
                 );
-                n.chars().take(MAX_DEVICE_NAME_BYTES).collect()
+                // R107: byte-based truncation to honor the byte cap. The
+                // earlier `chars().take(MAX_DEVICE_NAME_BYTES)` confused
+                // bytes with chars — 64 multi-byte CJK chars is 256 bytes,
+                // letting an attacker bypass the documented byte limit.
+                // Cut at the last valid char boundary <= the cap so we
+                // never split mid-codepoint.
+                let mut end = MAX_DEVICE_NAME_BYTES.min(n.len());
+                while end > 0 && !n.is_char_boundary(end) {
+                    end -= 1;
+                }
+                let mut s = n;
+                s.truncate(end);
+                s
             } else {
                 n
             }

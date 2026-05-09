@@ -505,14 +505,13 @@ impl InferenceRouter {
             // Enforce per-tier concurrent limits: the next request's tier
             // determines how many slots it can use (Bronze=1/4, Silver=1/2,
             // Gold=base, Platinum=2x).
-            let active = self.active_count.load(Ordering::Relaxed);
             let next_tier = self
                 .queue
                 .peek()
                 .map(|q| q.request.priority)
                 .unwrap_or(crate::types::PriorityTier::Bronze);
             let tier_max = priority::max_concurrent_for_tier(next_tier, self.max_concurrent);
-            if active >= tier_max {
+            if self.active_count.load(Ordering::Relaxed) >= tier_max {
                 break;
             }
 
@@ -532,7 +531,21 @@ impl InferenceRouter {
                 self.drain_pending_commands().await;
             }
 
-            let batch = self.collect_batch(self.max_batch_size);
+            // Re-read active_count after the await so a task that completed
+            // during the batch_timeout window contributes its freed slot.
+            // Cap the collection size against remaining tier headroom — the
+            // multi-batch dispatch below does `fetch_add(batch_size)` in one
+            // shot, so collecting more than `tier_max - active` items would
+            // bypass the per-tier concurrency cap (Bronze=¼, Silver=½),
+            // letting low-credit users co-batch up to `max_batch_size` and
+            // erase the credit-tier isolation guarantee. R107 fix.
+            let active = self.active_count.load(Ordering::Relaxed);
+            if active >= tier_max {
+                break;
+            }
+            let headroom = tier_max - active;
+            let collect_cap = self.max_batch_size.min(headroom);
+            let batch = self.collect_batch(collect_cap);
             if batch.is_empty() {
                 break;
             }

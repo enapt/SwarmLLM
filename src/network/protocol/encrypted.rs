@@ -303,6 +303,14 @@ pub fn decode_layer_forward_encrypted(
                 .map_err(|_| SwarmError::Network("Invalid num_drafts".into()))?,
         ) as usize;
         cursor += 4;
+        // R107: see layer_forward.rs for rationale — cap to keep
+        // `Vec::with_capacity` bounded against malicious peers.
+        const MAX_DRAFT_TOKENS: usize = 32;
+        if num_drafts > MAX_DRAFT_TOKENS {
+            return Err(SwarmError::Network(format!(
+                "num_drafts {num_drafts} > {MAX_DRAFT_TOKENS}"
+            )));
+        }
         if data.len() < cursor + num_drafts * 4 {
             return Err(SwarmError::Network("draft_tokens truncated".into()));
         }

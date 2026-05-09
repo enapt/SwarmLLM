@@ -75,6 +75,19 @@ fn validate_chat_request(
         Some(req.frequency_penalty as f64),
     )?;
 
+    // R107: reject max_tokens=0 and out-of-range values explicitly. The
+    // local sampling clamp at api/mod.rs::build_sampling_params would
+    // silently coerce 0→1 and >32768→32768, but OpenAI's spec requires
+    // max_tokens>0 and clients deserve explicit error feedback rather
+    // than getting a one-token response. The Anthropic /v1/messages
+    // handler enforces the same range — keep the two paths in sync.
+    if req.max_tokens == 0 || req.max_tokens > super::DEFAULT_MAX_TOKENS {
+        return Err(ApiError(crate::error::SwarmError::Validation(format!(
+            "max_tokens must be 1..={}",
+            super::DEFAULT_MAX_TOKENS
+        ))));
+    }
+
     // SEC: Cap individual message content size and total prompt size
     super::validate_content_size(req.messages.iter().map(|msg| {
         match &msg.content {
