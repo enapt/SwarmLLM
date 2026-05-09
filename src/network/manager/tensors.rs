@@ -121,25 +121,26 @@ impl NetworkManager {
 
         let payload_len = payload.len();
         let is_connected = self.swarm.is_connected(&peer_id);
-        // DIAG: Check if request_response behaviour thinks this peer is connected
-        let rr_is_connected = self
-            .swarm
-            .behaviour()
-            .request_response
-            .is_connected(&peer_id);
-        // Count total established connections (all peers) for diagnostics
-        let total_conn_count = self
-            .swarm
-            .network_info()
-            .connection_counters()
-            .num_established();
-        tracing::info!(
-            %peer_id,
-            request_id = %forward.request_id,
-            rr_is_connected,
-            swarm_is_connected = is_connected,
-            "DIAG: PRE-send_request state"
-        );
+        // R108: gate the diagnostic `rr_is_connected` / `network_info()`
+        // probes and the per-token info! log behind the DEBUG level. Each
+        // ran unconditionally on every LayerForward — at default `info`
+        // they were burning a UUID/PeerId Display allocation pair plus an
+        // O(n_connections) network_info snapshot per token with no subscriber
+        // listening. The is_connected fast-fail below stays unconditional.
+        if tracing::enabled!(tracing::Level::DEBUG) {
+            let rr_is_connected = self
+                .swarm
+                .behaviour()
+                .request_response
+                .is_connected(&peer_id);
+            tracing::debug!(
+                %peer_id,
+                request_id = %forward.request_id,
+                rr_is_connected,
+                swarm_is_connected = is_connected,
+                "DIAG: PRE-send_request state"
+            );
+        }
         // CRITICAL: If the swarm says the peer is not connected, fail immediately.
         // The rr behaviour may have a stale connection entry (rr_connected=true)
         // after a disconnect, causing send_request() to target a dead ConnectionId
@@ -148,7 +149,6 @@ impl NetworkManager {
             tracing::warn!(
                 %peer_id,
                 request_id = %forward.request_id,
-                rr_is_connected,
                 "Peer not connected — failing tensor forward immediately"
             );
             self.fail_tensor_forward(forward.request_id, &peer_id, "Peer not connected".into());
@@ -174,23 +174,28 @@ impl NetworkManager {
                 activation_bytes,
             ),
         );
-        // DIAG: check is_pending_outbound immediately — confirms the request was registered
-        let is_rr_pending = self
-            .swarm
-            .behaviour()
-            .request_response
-            .is_pending_outbound(&peer_id, &outbound_id);
-        // DIAG: enumerate connection IDs for this peer to detect stale conn_id issues.
-        // Allocated and stringified eagerly by the tracing! macro regardless of subscriber
-        // level, so gate the expensive `connection_addrs` enumeration on whether DEBUG is
-        // actually enabled. At the default `info` filter the per-token call rate would
-        // otherwise burn ~50–100 KB of throwaway heap per LayerForward.
-        let peer_established_count = self
-            .swarm
-            .connected_peers()
-            .filter(|p| **p == peer_id)
-            .count();
+        // R108: every diagnostic call (`is_pending_outbound`, `connected_peers().filter().count()`,
+        // `network_info()`, `connection_addrs` enumeration) is gated together
+        // so the default `info` log level no longer pays for any of them.
+        // Previously `peer_established_count` ran the O(n_peers) iterator
+        // outside the gate even though the value was only read inside the
+        // `tracing::debug!` macro arguments below.
         if tracing::enabled!(tracing::Level::DEBUG) {
+            let is_rr_pending = self
+                .swarm
+                .behaviour()
+                .request_response
+                .is_pending_outbound(&peer_id, &outbound_id);
+            let peer_established_count = self
+                .swarm
+                .connected_peers()
+                .filter(|p| **p == peer_id)
+                .count();
+            let total_conn_count = self
+                .swarm
+                .network_info()
+                .connection_counters()
+                .num_established();
             let all_conn_ids: Vec<_> = self
                 .connection_addrs
                 .iter()
@@ -210,21 +215,6 @@ impl NetworkManager {
                 ?outbound_id,
                 tracked_connections = ?all_conn_ids,
                 "DIAG: sent tensor forward via send_request (verbose)"
-            );
-        } else {
-            tracing::info!(
-                %peer_id,
-                request_id = %forward.request_id,
-                seq = forward.sequence_num,
-                encrypted = use_encryption,
-                payload_len,
-                is_connected,
-                total_connections = total_conn_count,
-                peer_established_count,
-                is_rr_pending,
-                pending_tensor_count = self.pending_tensor_outbound.len(),
-                ?outbound_id,
-                "DIAG: sent tensor forward via send_request"
             );
         }
     }
@@ -391,7 +381,9 @@ impl NetworkManager {
         tracing::debug!(%peer, tag, payload_len = payload.len(), "handle_tensor_payload");
         match tag {
             protocol::TENSOR_TAG_FORWARD => {
-                tracing::info!(%peer, payload_len = payload.len(), "Received tensor LayerForward");
+                // R108: per-token; downgrade from info to debug to match the
+                // `handle_tensor_payload` entry log at line 381.
+                tracing::debug!(%peer, payload_len = payload.len(), "Received tensor LayerForward");
                 match protocol::decode_layer_forward(payload) {
                     Ok(mut forward) => {
                         let request_id = forward.request_id;
@@ -428,7 +420,7 @@ impl NetworkManager {
                 }
             }
             protocol::TENSOR_TAG_RESULT => {
-                tracing::info!(%peer, payload_len = payload.len(), "Received tensor LayerResult");
+                tracing::debug!(%peer, payload_len = payload.len(), "Received tensor LayerResult");
                 match protocol::decode_layer_result(payload) {
                     Ok(result) => {
                         tracing::debug!(
@@ -462,7 +454,7 @@ impl NetworkManager {
                 None
             }
             protocol::TENSOR_TAG_ENCRYPTED => {
-                tracing::info!(
+                tracing::debug!(
                     %peer,
                     payload_len = payload.len(),
                     "DIAG: Received encrypted tensor"

@@ -700,7 +700,13 @@ fn stream_events_to_sse(
             };
             json_buf.clear();
             let json = if serde_json::to_writer(&mut json_buf, &chunk).is_ok() {
-                String::from_utf8(json_buf.clone()).unwrap_or_default()
+                // R108: per-token. Move the buffer into String without
+                // copying; serde_json::to_writer guarantees valid UTF-8 so
+                // `from_utf8` cannot fail. Re-prime json_buf for the next
+                // event with the same starting capacity.
+                let taken = std::mem::take(&mut json_buf);
+                json_buf = Vec::with_capacity(512);
+                String::from_utf8(taken).unwrap_or_default()
             } else {
                 String::new()
             };

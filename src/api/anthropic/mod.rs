@@ -71,6 +71,13 @@ pub async fn messages(
         ))));
     }
 
+    // R108: validate top_p range parity with the OpenAI handler (which calls
+    // `validate_optional_sampling`). Without this, top_p out of [0,1] was
+    // silently clamped by `build_sampling_params`, hiding client bugs.
+    // Anthropic doesn't expose presence/frequency penalties or top_logprobs,
+    // so only top_p applies here.
+    super::validate_optional_sampling(req.top_p.map(|t| t as f64), None, None, None)?;
+
     if let Some(ref stops) = req.stop_sequences {
         super::validate_stop_sequences(stops)?;
     }

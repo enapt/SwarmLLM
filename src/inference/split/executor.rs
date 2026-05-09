@@ -346,9 +346,17 @@ impl SplitModel {
         // Detect pre-populated prefix cache entries (KV already present from prefix
         // cache restoration). If so, build an offset causal mask that allows the
         // suffix query tokens to attend to all prefix KV positions.
+        //
+        // R108: scan for the first attention layer's cache rather than just
+        // `.first()`. Qwen3.5 hybrid models interleave SSM layers (no KV
+        // cache → `None`) with attention layers (every 4th); a segment
+        // beginning with SSM layers used to read `None` here and fall
+        // through to `kv_offset = 0`, leaving subsequent attention layers
+        // with a square `(seq_len × seq_len)` mask instead of the offset
+        // mask required for the populated KV.
         let kv_offset = layer_kv_caches
-            .first()
-            .and_then(|c| c.as_ref())
+            .iter()
+            .find_map(|c| c.as_ref())
             .map(|c| c.current_seq_len())
             .unwrap_or(0);
 

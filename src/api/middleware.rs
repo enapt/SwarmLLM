@@ -57,6 +57,13 @@ pub fn cors_layer(port: u16) -> CorsLayer {
             axum::http::header::ACCEPT,
             axum::http::HeaderName::from_static("x-api-key"),
             axum::http::HeaderName::from_static("anthropic-version"),
+            // R108: SDKs send `anthropic-beta` to opt into preview features
+            // (extended thinking, token-efficient tools, etc.). The header
+            // is captured at `anthropic/mod.rs::proxy_beta` and forwarded
+            // upstream — without listing it here, browser preflight strips
+            // it on cross-origin requests, silently degrading to vanilla
+            // Claude behavior.
+            axum::http::HeaderName::from_static("anthropic-beta"),
         ])
 }
 

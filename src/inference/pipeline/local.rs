@@ -119,6 +119,21 @@ impl PipelineExecutor {
             entry.value().eos_tokens.clone()
         };
 
+        // R108: only ship `generated_ids` to the worker when the sampler
+        // actually needs it — i.e. when frequency_penalty or
+        // presence_penalty is non-zero. Otherwise the worker silently
+        // ignores it but we still pay for the per-segment Vec<u32> copy
+        // and the JSON-array serialization (the field is annotated
+        // `skip_serializing_if = "Vec::is_empty"`). The distributed path
+        // already gates this; the local path was unconditional.
+        let needs_generated_ids = self.request.sampling_params.frequency_penalty != 0.0
+            || self.request.sampling_params.presence_penalty != 0.0;
+        let generated_ids_for_worker = if needs_generated_ids {
+            generated_ids.to_vec()
+        } else {
+            Vec::new()
+        };
+
         // Build a LayerForward and route to the worker subprocess
         let layer_forward = crate::types::LayerForward {
             request_id: self.request.id,
@@ -133,7 +148,7 @@ impl PipelineExecutor {
             sender_peer_bytes: None,
             requester_node_id: None,
             pre_embedded,
-            generated_ids: generated_ids.to_vec(),
+            generated_ids: generated_ids_for_worker,
             adapter_id: None,
             draft_tokens: Vec::new(),
             spec_logits_requested: false,

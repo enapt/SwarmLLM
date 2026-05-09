@@ -254,17 +254,14 @@ pub fn decode_layer_forward(data: &[u8]) -> Result<LayerForward, SwarmError> {
                 .map_err(|_| SwarmError::Network("Invalid num_drafts".into()))?,
         ) as usize;
         cursor += 4;
-        // R107: cap peer-controlled num_drafts to keep `Vec::with_capacity`
-        // and the subsequent loop bounded. Speculative γ is tied to the
-        // GammaController bounds (DEFAULT_GAMMA_MAX = 16); the spec_logits
-        // decoder in `layer_result.rs` enforces 32 (γ+1 with margin). Use
-        // the same constant here so the pre-allocation matches the
-        // post-decode contract — without this, a u16=65535 forces a 256KB
-        // pre-alloc per crafted message.
-        const MAX_DRAFT_TOKENS: usize = 32;
-        if num_drafts > MAX_DRAFT_TOKENS {
+        // R107/R108: cap peer-controlled num_drafts to keep
+        // `Vec::with_capacity` and the subsequent loop bounded. Shared
+        // with `encrypted.rs` via `super::MAX_DRAFT_TOKENS` so the
+        // plaintext and encrypted decoders cannot drift apart.
+        if num_drafts > super::MAX_DRAFT_TOKENS {
             return Err(SwarmError::Network(format!(
-                "num_drafts {num_drafts} > {MAX_DRAFT_TOKENS}"
+                "num_drafts {num_drafts} > {}",
+                super::MAX_DRAFT_TOKENS
             )));
         }
         if data.len() < cursor + num_drafts * 4 {

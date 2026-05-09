@@ -43,6 +43,15 @@ pub(super) const MAX_ACTIVATION_SIZE: usize = 128 * 1024 * 1024;
 /// Maximum token count in a single layer result (OOM guard).
 pub(super) const MAX_RESULT_TOKENS: usize = 65536;
 
+/// Maximum number of speculative draft tokens accepted in a `LayerForward`
+/// 0x03 trailer. Defended in both the plaintext (`layer_forward.rs`) and
+/// encrypted (`encrypted.rs`) decoders; mirrored on the receive side by
+/// `layer_result.rs::MAX_SPEC_LOGITS_POSITIONS = 32`. Speculative γ is
+/// bounded by `GammaController::DEFAULT_GAMMA_MAX = 12`; the cap leaves
+/// generous headroom while keeping `Vec::with_capacity(num_drafts)`
+/// bounded against malicious peers (R107).
+pub(super) const MAX_DRAFT_TOKENS: usize = 32;
+
 /// Codec for SwarmLLM request/response protocol using serde_json.
 ///
 /// Compression knobs (all opt-in on the *send* side; the *receive* side
