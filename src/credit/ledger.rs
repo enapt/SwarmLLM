@@ -303,12 +303,6 @@ impl CreditLedger {
         super::priority::calculate_tier(bal.balance, percentile)
     }
 
-    /// Bucket the current balance for gossip (round to nearest 100 for privacy).
-    pub async fn balance_bucket(&self) -> i64 {
-        let bal = self.balance.read().await;
-        bucket_balance(bal.balance)
-    }
-
     #[cfg(test)]
     pub fn peer_balances(&self) -> &Arc<ArcSwap<Vec<i64>>> {
         &self.peer_balances

@@ -300,8 +300,7 @@
       var filter = (document.getElementById('map-model-filter') || {}).value || '';
       if (!filter) return;
 
-      App.authFetch('/api/admin/models/' + encodeURIComponent(filter) + '/pipeline-plan')
-        .then(function(res) { return res.ok ? res.json() : null; })
+      App.data.loadPipelinePlan(filter)
         .then(function(plan) {
           if (!plan || !plan.segments || plan.segments.length === 0) return;
           function regionCenter(code) {

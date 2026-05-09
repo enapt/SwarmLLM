@@ -443,10 +443,21 @@ impl InferenceRouter {
         }
     }
 
-    /// Collect a batch of compatible requests (same model) from the priority queue.
+    /// Collect a batch of compatible requests (same model + same priority tier)
+    /// from the priority queue.
     ///
-    /// Returns up to `max_batch_size` requests that all target the same model_id.
-    /// Incompatible requests (different model) are pushed back into the queue.
+    /// Returns up to `max_batch_size` requests that all target the same
+    /// `model_id` AND share the same `PriorityTier` as the first request.
+    /// Incompatible requests (different model or lower tier) are pushed back
+    /// into the queue.
+    ///
+    /// CORRECTNESS: the per-tier concurrency cap in `drain_queue` is checked
+    /// against the head-of-queue's tier (via `peek()`). If we co-batched
+    /// lower-tier requests with a higher-tier head, those lower-tier
+    /// requests would bypass their stricter cap (e.g. a Platinum head would
+    /// pull Bronze followers through under the 2× Platinum cap, defeating
+    /// Bronze's 1/4× isolation). Same-tier batching keeps the cap invariant
+    /// regardless of which request in the batch is examined.
     fn collect_batch(&mut self, max_size: usize) -> Vec<QueuedRequest> {
         let first = match self.queue.pop() {
             Some(q) => q,
@@ -458,13 +469,14 @@ impl InferenceRouter {
         }
 
         let target_model = first.request.model_id.clone();
+        let target_priority = first.request.priority;
         let mut batch = vec![first];
         let mut deferred = Vec::new();
 
         while batch.len() < max_size {
             match self.queue.pop() {
                 Some(q) => {
-                    if q.request.model_id == target_model {
+                    if q.request.model_id == target_model && q.request.priority == target_priority {
                         batch.push(q);
                     } else {
                         deferred.push(q);
@@ -627,10 +639,14 @@ impl InferenceRouter {
             (queued.request.session_id.as_ref(), session_prompt.as_ref())
         {
             // Collect active peer IDs into a HashSet for O(1) holder lookup
-            // inside check_multi_turn_reuse — peer_registry can be large.
+            // inside check_multi_turn_reuse. Use connected_node_ids (the
+            // connectivity oracle, gotcha #86) — peer_registry is preserved
+            // across mid-pipeline disconnects, so a peer that hung up is
+            // still in peer_registry; using it here would let a stale
+            // session reuse KV against a node that no longer holds it.
             let active_peers: std::collections::HashSet<crate::types::NodeId> = self
                 .shared_state
-                .peer_registry
+                .connected_node_ids
                 .iter()
                 .map(|e| e.key().clone())
                 .collect();

@@ -146,6 +146,12 @@ silently break at the wire if duplicated:
   empty/error response for refused requests, queue-full rejections,
   and disk read/seek/open failures. 8+ rejection sites across
   `network/manager/{requests,shard_transfer}` go through it.
+- **`swarmllm_types::LayerResult::error(request_id, reason)`** (R106)
+  — canonical empty/error LayerResult for failed pipeline forwards.
+  Five rejection sites (`network/manager/{tensors,requests,mod}.rs`,
+  `network/pipeline_stream.rs`, `daemon/dispatch/layer_forward.rs`)
+  go through it. Adding a new field to `LayerResult` only requires
+  updating this constructor — mirrors `ShardResponse::empty()`.
 - **`network/manager/connections::try_enqueue_redial`** (R97) —
   dedup + cap + push for `pending_redial`. Used by both the
   active-pipeline and unregistered-peer reconnect paths.

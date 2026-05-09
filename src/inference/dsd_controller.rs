@@ -102,6 +102,7 @@ impl GammaController {
     }
 
     /// Override the smoothing constants — only used in benchmarks / tuning.
+    #[cfg(test)]
     pub fn with_tuning(mut self, alpha: f32, beta: f32) -> Self {
         self.alpha = alpha.clamp(0.0, 1.0);
         self.beta = beta.clamp(0.0, 1.0);

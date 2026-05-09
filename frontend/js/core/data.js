@@ -130,6 +130,21 @@
     });
   }
 
+  // Dedup pipeline-plan fetches across the dashboard pipeline overlay and
+  // network-map's region path renderer — both expand on initial load and
+  // would otherwise issue duplicate /pipeline-plan requests for the same
+  // model. No long-lived cache (the plan changes when peers join/leave).
+  function loadPipelinePlan(modelId) {
+    if (!modelId) return Promise.resolve(null);
+    return dedupe('pipelinePlan:' + modelId, async function() {
+      try {
+        var r = await authFetch('/api/admin/models/' + encodeURIComponent(modelId) + '/pipeline-plan');
+        if (r.ok) return await r.json();
+      } catch (e) {}
+      return null;
+    });
+  }
+
   // In-flight dedup only (no long-lived cache): three components can request
   // this concurrently on page load — the header strip, the dashboard panel,
   // and settings — but we want a single `claude --version` subprocess call.
@@ -150,6 +165,7 @@
     loadConfig: loadConfig,
     loadPeers: loadPeers,
     loadProviders: loadProviders,
+    loadPipelinePlan: loadPipelinePlan,
     loadClaudeSubStatus: loadClaudeSubStatus,
     invalidateDedup: invalidateDedup,
     cache: cache,

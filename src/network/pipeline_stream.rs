@@ -195,16 +195,10 @@ where
                 // Evict stale result channel so the pipeline fails fast instead
                 // of waiting for the adaptive stale-tensor cleanup.
                 if let Some((_, tx)) = shared_state.pending_layer_results.remove(&request_id) {
-                    let _ = tx.send(LayerResult {
+                    let _ = tx.send(LayerResult::error(
                         request_id,
-                        token_ids: vec![],
-                        finish_reason: Some(crate::types::NetworkFinishReason::Error(format!(
-                            "pipeline stream closed: {e}"
-                        ))),
-                        activations: vec![],
-                        sealed_token_ids: None,
-                        spec_logits: Vec::new(),
-                    });
+                        format!("pipeline stream closed: {e}"),
+                    ));
                 }
                 return;
             }

@@ -135,9 +135,13 @@ impl TrustManager {
         }
     }
 
-    /// Load persisted trust scores into the peer registry (test/bulk-restore helper).
-    /// In production, trust is restored per-peer at connection time via `get_trust()`
-    /// in the Identify handler in `network/manager.rs`.
+    /// Load persisted trust scores into the peer registry (test/bulk-restore
+    /// helper). In production, trust is restored per-peer at connection time
+    /// via `get_trust()` in the Identify handler
+    /// (`network/manager/identify.rs`), so this is exercised only by unit
+    /// tests and the integration suite. Kept `pub` because the integration
+    /// test in `tests/integration/test_trust.rs` lives in an external crate
+    /// and cannot reach `#[cfg(test)]` items.
     pub fn hydrate_from_db(&self, peer_registry: &DashMap<NodeId, crate::types::PeerInfo>) {
         if let Ok(entries) = self.db.iter_raw(TREE_TRUST_SCORES) {
             for (key_bytes, val_bytes) in entries {

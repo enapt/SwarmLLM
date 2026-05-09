@@ -414,6 +414,27 @@ pub struct LayerResult {
     pub spec_logits: Vec<Vec<f32>>,
 }
 
+impl LayerResult {
+    /// Canonical empty/error response: no tokens, no activations, no spec
+    /// logits, just a `finish_reason::Error(reason)`. Used by every site that
+    /// has to fail a pending pipeline forward (encryption-session loss,
+    /// pending-channel capacity exceeded, missing shards, stream-reader
+    /// termination, dispatch failure). Centralising this constructor keeps
+    /// the empty-error wire shape in one place — adding a new field to
+    /// `LayerResult` only needs an update here, mirroring
+    /// `ShardResponse::empty()` in `swarmllm-types`.
+    pub fn error(request_id: uuid::Uuid, reason: impl Into<String>) -> Self {
+        Self {
+            request_id,
+            token_ids: Vec::new(),
+            finish_reason: Some(NetworkFinishReason::Error(reason.into())),
+            activations: Vec::new(),
+            sealed_token_ids: None,
+            spec_logits: Vec::new(),
+        }
+    }
+}
+
 /// A single token streamed back from the final pipeline node to the originator.
 /// Used for SSE streaming in distributed inference.
 #[derive(Clone, Debug, Serialize, Deserialize)]

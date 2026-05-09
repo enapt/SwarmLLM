@@ -1654,6 +1654,7 @@ impl ModelProcessPool {
         let mut completion_tokens = 0u32;
         #[allow(unused_assignments)]
         let mut finish_reason = String::new();
+        let mut token_logprobs: Vec<crate::inference::router::TokenLogProbEntry> = Vec::new();
 
         loop {
             let (msg, _) = match resp_rx.recv().await {
@@ -1670,10 +1671,18 @@ impl ModelProcessPool {
                     request_id: rid,
                     text,
                     is_eos,
-                    ..
+                    logprob,
+                    token_id: _,
                 } if rid == request_id => {
                     if !is_eos {
                         content.push_str(&text);
+                        if let Some(lp) = logprob {
+                            token_logprobs.push(crate::inference::router::TokenLogProbEntry {
+                                token: text.clone(),
+                                logprob: lp,
+                                top_logprobs: Vec::new(),
+                            });
+                        }
                         if let Some(ref tx) = token_tx {
                             let _ = tx
                                 .send(StreamingTokenEvent {
@@ -1721,7 +1730,7 @@ impl ModelProcessPool {
             completion_tokens,
             finish_reason,
             session_id: None,
-            token_logprobs: vec![],
+            token_logprobs,
         })
     }
 

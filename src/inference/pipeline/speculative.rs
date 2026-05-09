@@ -377,6 +377,16 @@ impl PipelineExecutor {
                 }
             }
 
+            // Bail before the per-round bookkeeping (KV tracking,
+            // `draft_sync_after_round` which holds a `block_in_place`) when the
+            // client has disconnected. The inner `break` above only exits the
+            // streaming for-loop; without this gate the round still pays for
+            // the synchronous draft sync before the outer `while` re-checks
+            // `finish_reason.is_empty()`.
+            if !finish_reason.is_empty() {
+                break;
+            }
+
             generated.extend(&emitted);
 
             // Track KV state.
@@ -401,16 +411,12 @@ impl PipelineExecutor {
             current_pos += emitted.len();
             last_token = *emitted.last().unwrap();
 
-            // Stop conditions.
+            // Stop conditions. R105's truncation at the first EOS guarantees
+            // that if `emitted` contains an EOS token it must be the last
+            // element, so checking `last_token` is sufficient.
             if eos_tokens.contains(&last_token) {
                 finish_reason = "stop".to_string();
                 break;
-            }
-            for t in &emitted {
-                if eos_tokens.contains(t) {
-                    finish_reason = "stop".to_string();
-                    break;
-                }
             }
         }
 

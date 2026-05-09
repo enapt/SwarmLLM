@@ -475,10 +475,11 @@ async fn build_stats_message(state: &SharedState) -> String {
         .filter(|entry| entry.is_lan_peer)
         .count();
 
-    // Use peer_registry.len() as authoritative peer count — DashMap never
-    // has contention issues, unlike node_stats.peers_connected which uses
-    // try_write() and can silently skip updates during connection bursts.
-    let peers_connected = state.peer_registry.len() as u32;
+    // Use connected_node_ids as the connectivity oracle (gotcha #86).
+    // peer_registry is intentionally preserved across mid-pipeline disconnects
+    // for reconnect attempts, so it overcounts live peers. R105 fixed the
+    // Prometheus metric the same way; the WS payload was missed.
+    let peers_connected = state.connected_node_ids.len() as u32;
 
     let mut data = serde_json::json!({
         "peers": peers_connected,

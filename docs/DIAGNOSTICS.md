@@ -22,7 +22,7 @@ cargo run -- run -vv 2>&1 | grep "DIAG:.*SSE"          # SSE streaming path
 cargo run -- run -vv 2>&1 | grep "DIAG:.*KV-cache"     # KV-cache hit/miss
 cargo run -- run -vv 2>&1 | grep "DIAG:.*split stream"  # Split model decode loop
 cargo run -- run -vv 2>&1 | grep "DIAG:.*execute_request" # End-to-end request timing
-cargo run -- run -vv 2>&1 | grep "DIAG:.*decompress"    # Tensor compression
+cargo run -- run -vv 2>&1 | grep "DIAG:.*codec"           # Wire-protocol codec frames
 ```
 
 ## End-to-End Request Trace

@@ -262,14 +262,7 @@ pub(super) async fn send_error_result(
         let msg = error.chars().take(100).collect::<String>();
         msg.replace(['/', '\\'], "")
     };
-    let result = crate::types::LayerResult {
-        request_id,
-        token_ids: vec![],
-        finish_reason: Some(crate::types::NetworkFinishReason::Error(sanitized)),
-        activations: vec![],
-        sealed_token_ids: None,
-        spec_logits: Vec::new(),
-    };
+    let result = crate::types::LayerResult::error(request_id, sanitized);
     let _ = network_tx
         .send(NetworkCommand::SendTensorResult {
             target_peer_bytes: target_peer_bytes.to_vec(),

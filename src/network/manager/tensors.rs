@@ -97,16 +97,10 @@ impl NetworkManager {
                             .request_response
                             .send_response(channel, SwarmResponse::Ack);
                     }
-                    let error_result = crate::types::LayerResult {
+                    let error_result = crate::types::LayerResult::error(
                         request_id,
-                        token_ids: vec![],
-                        finish_reason: Some(crate::types::NetworkFinishReason::Error(
-                            "Encryption session lost — reconnecting".into(),
-                        )),
-                        activations: vec![],
-                        sealed_token_ids: None,
-                        spec_logits: Vec::new(),
-                    };
+                        "Encryption session lost — reconnecting",
+                    );
                     if let Some((_, tx)) =
                         self.shared_state.pending_layer_results.remove(&request_id)
                     {

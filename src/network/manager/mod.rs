@@ -426,14 +426,7 @@ impl NetworkManager {
         peer: &libp2p::PeerId,
         reason: String,
     ) {
-        let error_result = crate::types::LayerResult {
-            request_id,
-            token_ids: vec![],
-            finish_reason: Some(crate::types::NetworkFinishReason::Error(reason)),
-            activations: vec![],
-            sealed_token_ids: None,
-            spec_logits: Vec::new(),
-        };
+        let error_result = crate::types::LayerResult::error(request_id, reason);
         if let Err(e) =
             self.dispatch_authenticated(Some(peer), SwarmMessage::LayerResult(error_result))
         {

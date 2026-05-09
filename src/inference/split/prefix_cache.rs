@@ -437,11 +437,12 @@ impl PrefixCache {
         None
     }
 
-    /// Snapshot the current per-model BLAKE3 block-hash manifest. Used by the
-    /// daemon at startup or after configuration changes to re-announce a
-    /// worker's full prefix-cache state to peers without waiting for a new
-    /// insert. Returns an empty vec when the model has no entries or
-    /// `block_tokens == 0`.
+    /// Snapshot the current per-model BLAKE3 block-hash manifest. Used by
+    /// tests to validate the cache's announce-payload shape; production
+    /// re-announce flow uses `enumerate_manifest_locked` directly from
+    /// `insert_from_kv`. Returns an empty vec when the model has no entries
+    /// or `block_tokens == 0`.
+    #[cfg(test)]
     pub fn enumerate_manifest(&self, model_key: &str) -> Vec<PrefixBlockEntry> {
         if self.block_tokens == 0 {
             return Vec::new();

@@ -359,8 +359,7 @@
       matrix.querySelectorAll('.planned-row').forEach(function(el) { el.classList.remove('planned-row'); });
       svg.innerHTML = '';
 
-      App.authFetch('/api/admin/models/' + encodeURIComponent(modelId) + '/pipeline-plan')
-        .then(function(res) { return res.ok ? res.json() : null; })
+      App.data.loadPipelinePlan(modelId)
         .then(function(plan) {
           if (!plan || !plan.segments || plan.segments.length === 0) return;
           // Cache plan on the matrix so resize-driven redraws can reuse it

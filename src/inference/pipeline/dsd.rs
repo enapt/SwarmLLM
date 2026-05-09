@@ -319,6 +319,15 @@ impl PipelineExecutor {
                 }
             }
 
+            // Bail before the per-round bookkeeping when the client has
+            // disconnected. Mirrors speculative.rs — the inner `break` only
+            // exits the streaming for-loop, leaving `controller.record_round`
+            // and the synchronous `draft_sync_after_round` to run before the
+            // outer `while` notices the disconnect.
+            if !finish_reason.is_empty() {
+                break;
+            }
+
             generated.extend(&emitted);
 
             // After this round, every remote KV grew by verify_tokens.len()
@@ -345,11 +354,13 @@ impl PipelineExecutor {
             current_pos += emitted.len();
             last_token = *emitted.last().unwrap();
 
-            for t in &emitted {
-                if eos_set.contains(t) {
-                    finish_reason = "stop".to_string();
-                    break;
-                }
+            // R105's truncation at the first EOS guarantees that if `emitted`
+            // contains an EOS token it must be the last element; checking
+            // `last_token` is sufficient and lets us break out of the outer
+            // `while` directly instead of waiting for the next iteration.
+            if eos_set.contains(&last_token) {
+                finish_reason = "stop".to_string();
+                break;
             }
         }
 
