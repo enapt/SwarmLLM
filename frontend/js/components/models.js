@@ -71,7 +71,7 @@
         // R114: include the active task-filter chips in the request so
         // the backend filters server-side. Empty = no filter.
         var taskFilter = (App.hf._activeTasks || []).join(',');
-        var url = '/api/admin/hf/search?query=' + encodeURIComponent(query) +
+        var url = '/api/admin/hf/search?q=' + encodeURIComponent(query) +
           (taskFilter ? '&tasks=' + encodeURIComponent(taskFilter) : '');
         var resp = await App.authFetch(url);
         loading.classList.add('hidden');

@@ -198,7 +198,11 @@ pub fn compute_swarm_capacity(state: &SharedState) -> SwarmCapacity {
             replications: Vec::with_capacity(manifest.shards.len()),
             hosted_by_us: false,
             size_mb: manifest.total_size_bytes / (1024 * 1024),
-            display_name: manifest.id.0.clone(),
+            display_name: if manifest.name.is_empty() {
+                manifest.id.0.clone()
+            } else {
+                manifest.name.clone()
+            },
         };
         let mut all_covered = true;
         for shard_info in &manifest.shards {

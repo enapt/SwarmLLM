@@ -256,7 +256,7 @@ impl Daemon {
 
         // ── Subsystem Supervisor (JoinSet) ──
         //
-        // All 11 subsystem tasks are spawned into a JoinSet for unified monitoring.
+        // All 12 subsystem tasks are spawned into a JoinSet for unified monitoring.
         // Each task returns (name, criticality, result) so the supervisor loop
         // can decide whether to trigger shutdown or continue degraded.
         //

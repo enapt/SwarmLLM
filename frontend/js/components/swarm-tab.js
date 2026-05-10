@@ -13,6 +13,8 @@
 (function () {
   if (!window.App) return;
 
+  var U = App.utils;
+
   var STATUS_LABELS = {
     hosting: 'wishlist.status.hosting',
     serveable: 'wishlist.status.serveable',
