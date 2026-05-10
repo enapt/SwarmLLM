@@ -366,6 +366,9 @@ impl SharedState {
                 wishlist: arc_swap::ArcSwap::from_pointee(
                     crate::model::auto_manage::wishlist::Wishlist::default(),
                 ),
+                hf_trending_cache: arc_swap::ArcSwap::from_pointee(
+                    crate::model::huggingface::HfTrendingSnapshot::default(),
+                ),
             },
             events: EventBus {
                 dashboard_tx: broadcast::channel(32).0,

@@ -216,6 +216,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/admin/stats", get(admin::stats))
         .route("/api/admin/swarm/capacity", get(admin::swarm_capacity))
         .route("/api/admin/wishlist", get(admin::wishlist))
+        .route("/api/admin/hf/trending", get(admin::hf_trending))
         .route(
             "/api/admin/storage/breakdown",
             get(admin::storage_breakdown),

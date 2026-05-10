@@ -79,6 +79,11 @@ pub struct ModelMgmt {
     /// every WS stats build (cheap pass over the model registry) and on
     /// every auto-manage tick.
     pub wishlist: arc_swap::ArcSwap<crate::model::auto_manage::wishlist::Wishlist>,
+    /// R112: cache of the most recent HuggingFace trending-GGUF poll.
+    /// Populated by `HfWatcher` once an hour; consumed by the wishlist
+    /// scorer (boosts trending models) and by the future task-filter
+    /// view in the HF browser. Empty until the first successful fetch.
+    pub hf_trending_cache: arc_swap::ArcSwap<crate::model::huggingface::HfTrendingSnapshot>,
 }
 
 impl ModelMgmt {
@@ -327,6 +332,9 @@ mod tests {
             p2p_download_permits: DashMap::new(),
             wishlist: arc_swap::ArcSwap::from_pointee(
                 crate::model::auto_manage::wishlist::Wishlist::default(),
+            ),
+            hf_trending_cache: arc_swap::ArcSwap::from_pointee(
+                crate::model::huggingface::HfTrendingSnapshot::default(),
             ),
         }
     }

@@ -114,6 +114,15 @@ pub async fn wishlist(State(state): State<AppState>) -> Json<serde_json::Value> 
     Json(serde_json::to_value(&*snap).unwrap_or_else(|_| serde_json::json!({})))
 }
 
+/// GET /api/admin/hf/trending — latest HuggingFace trending-GGUF snapshot
+/// captured by the background HfWatcher (R112). Surfaces the same data the
+/// wishlist scorer consumes so the frontend can render a "trending now"
+/// view without re-querying HF.
+pub async fn hf_trending(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let snap = state.shared_state.models.hf_trending_cache.load_full();
+    Json(serde_json::to_value(&*snap).unwrap_or_else(|_| serde_json::json!({})))
+}
+
 /// GET /api/admin/storage/breakdown — disk allocation summary for the
 /// stacked-bar UI. Replaces the dual "Max Disk" / "Max Auto-Download Storage"
 /// settings with a single bar showing total / used / auto-manage-budget /

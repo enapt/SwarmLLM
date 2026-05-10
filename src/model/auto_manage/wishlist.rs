@@ -139,6 +139,22 @@ pub fn compute_wishlist(state: &SharedState) -> Wishlist {
         pinned_user.insert(entry.key().clone(), entry.value().pinned_by_user);
     }
 
+    // R112: HF trending join. The HfWatcher caches the latest trending
+    // GGUF download counts; we boost wishlist score when our local model
+    // matches one of those repos, and add a `wishlist.why.popular_on_hf`
+    // tag so users see *why* a model jumped up the list.
+    let trending_snapshot = state.models.hf_trending_cache.load_full();
+    let mut trending_by_repo: HashMap<String, u64> = HashMap::new();
+    for e in &trending_snapshot.entries {
+        trending_by_repo.insert(e.repo_id.clone(), e.downloads);
+    }
+    let mut trending_for_model: HashMap<ModelId, u64> = HashMap::new();
+    for src in state.models.hf_sources.iter() {
+        if let Some(downloads) = trending_by_repo.get(src.value().repo_id.as_str()) {
+            trending_for_model.insert(src.key().clone(), *downloads);
+        }
+    }
+
     let mut entries: Vec<WishlistEntry> = Vec::new();
 
     for manifest in state.model_registry.models() {
@@ -279,6 +295,18 @@ pub fn compute_wishlist(state: &SharedState) -> Wishlist {
         if holders.is_empty() {
             score += 10.0;
             why_tags.push("wishlist.why.be_first_host".to_string());
+        }
+
+        // R112: HF trending boost (0..15) — if the wider HuggingFace
+        // community is downloading this model, surface it on the swarm
+        // wishlist too. Log-scaled so a 1M-download model doesn't
+        // crowd out the long tail of niche-but-useful models.
+        if let Some(&hf_downloads) = trending_for_model.get(&mid) {
+            // log10(downloads).clamp(0, 7) maps 1 dl → 0, 10M → 7.
+            let log = ((hf_downloads.max(1)) as f64).log10();
+            let normalised = (log / 7.0).clamp(0.0, 1.0);
+            score += 15.0 * normalised;
+            why_tags.push("wishlist.why.popular_on_hf".to_string());
         }
 
         // Hosting / serveability tags — informational only.

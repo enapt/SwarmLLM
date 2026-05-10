@@ -356,6 +356,13 @@ pub struct AutoManageConfig {
     /// constraints (the bias is purely additive on score).
     #[serde(default = "default_true")]
     pub parallax_auto_rebalance: bool,
+    /// R112: enable the background HfWatcher that polls HuggingFace's
+    /// trending GGUF feed every hour and seeds the wishlist with
+    /// candidate models the swarm could host. Off-by-default for
+    /// air-gapped / privacy-sensitive deployments. Single hourly fetch
+    /// per node, well below HF's anonymous rate limits.
+    #[serde(default = "default_true")]
+    pub hf_watcher_enabled: bool,
 }
 
 /// Per-model auto-manage policy controlling whether a model participates
@@ -389,6 +396,7 @@ impl Default for AutoManageConfig {
             prune_cooldown_secs: default_prune_cooldown_secs(),
             max_holder_load_for_prune: default_max_holder_load_for_prune(),
             parallax_auto_rebalance: true,
+            hf_watcher_enabled: true,
         }
     }
 }

@@ -5,11 +5,13 @@ mod private_types;
 mod probe;
 mod search;
 mod shards;
+pub mod watcher;
 
 pub use download::{download_model, download_url};
 pub use probe::{download_gguf_header, download_tied_output_weight, probe_gguf_file};
 pub use search::{extract_quant_tag, search_gguf_models};
 pub use shards::{coalesce_byte_ranges, download_shard, download_shards, parse_retry_after};
+pub use watcher::{HfTrendingEntry, HfTrendingSnapshot, HfWatcher};
 
 /// Size of the GGUF header probe download (16 MB).
 /// Most GGUF headers are <10MB; 16MB gives margin for large vocab models.

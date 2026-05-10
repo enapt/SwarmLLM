@@ -802,6 +802,7 @@ mod tests {
             prune_cooldown_secs: 300,
             max_holder_load_for_prune: 3,
             parallax_auto_rebalance: true,
+            hf_watcher_enabled: false,
         };
         assert_eq!(config.max_shards, 0); // unlimited
     }
