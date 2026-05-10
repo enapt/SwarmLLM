@@ -815,9 +815,102 @@
       if (data.forwards_served !== undefined) _trackStat('forwards', data.forwards_served, 'stat-forwards');
       if (data.active_requests !== undefined) _trackStat('active', data.active_requests, 'stat-active');
 
+      // R110: render swarm-capacity headline. The whole point of the
+      // product is "everyday users contribute to running huge models",
+      // so the answer to "what does this swarm actually run?" is the
+      // first thing the user should see on the dashboard.
+      if (data.swarm_capacity) App.dashboard._renderCapacity(data.swarm_capacity);
+
       App.modeIndicator.update(data, S._cachedProviderData);
 
       if (typeof NeuralBg !== 'undefined') NeuralBg.updateState(data);
+    },
+
+    /**
+     * Render the swarm-capacity banner from the latest stats_update payload.
+     * Hides cleanly when the snapshot is empty (cold start, peer drought).
+     * Copy is plain-language for non-technical users — no jargon ("shards",
+     * "replication factor", "VRAM" → "memory").
+     * R110.
+     */
+    _renderCapacity: function(cap) {
+      var banner = document.getElementById('swarm-capacity-banner');
+      if (!banner) return;
+      // Cold start: hide until we have at least 1 node + some signal.
+      if (!cap || (cap.online_nodes || 0) < 1) { banner.style.display = 'none'; return; }
+      banner.style.display = '';
+
+      var nodesEl = document.getElementById('capacity-nodes');
+      if (nodesEl) nodesEl.textContent = (cap.online_nodes || 0).toLocaleString();
+
+      var vramEl = document.getElementById('capacity-vram');
+      if (vramEl) {
+        var vramMb = cap.total_vram_mb || 0;
+        // Human magnitudes: < 1 GB → "—" (CPU-only swarm); else GB or TB.
+        var vramText;
+        if (vramMb < 1024) vramText = I18n.t('capacity.cpu_only');
+        else if (vramMb < 1024 * 1024) vramText = (vramMb / 1024).toFixed(1) + ' GB';
+        else vramText = (vramMb / (1024 * 1024)).toFixed(2) + ' TB';
+        vramEl.textContent = vramText;
+      }
+
+      var modelsCountEl = document.getElementById('capacity-models-count');
+      var serveable = (cap.serveable_models || []);
+      if (modelsCountEl) modelsCountEl.textContent = serveable.length;
+
+      // Headline model — biggest serveable as the "your swarm runs up to" claim.
+      var headlineWrap = document.getElementById('capacity-headline-model');
+      var headlineNameEl = document.getElementById('capacity-headline-name');
+      if (cap.headline_model && cap.headline_model.display_name) {
+        if (headlineNameEl) headlineNameEl.textContent = cap.headline_model.display_name;
+        if (headlineWrap) headlineWrap.style.display = '';
+      } else if (headlineWrap) {
+        headlineWrap.style.display = 'none';
+      }
+
+      // Running-now list — top 4 by size (already sorted in backend).
+      var runningWrap = document.getElementById('capacity-running');
+      var runningList = document.getElementById('capacity-running-list');
+      if (runningList) {
+        runningList.innerHTML = '';
+        serveable.slice(0, 4).forEach(function(m, i) {
+          var span = document.createElement('span');
+          span.className = 'capacity-pill' + (m.hosted_by_us ? ' capacity-pill-mine' : '');
+          span.textContent = m.display_name || m.model_id;
+          if (m.hosted_by_us) span.title = I18n.t('capacity.you_host_this');
+          runningList.appendChild(span);
+          if (i < Math.min(serveable.length, 4) - 1) runningList.appendChild(document.createTextNode(' '));
+        });
+        if (serveable.length > 4) {
+          var more = document.createElement('span');
+          more.className = 'capacity-pill capacity-pill-more';
+          more.textContent = '+' + (serveable.length - 4) + ' ' + I18n.t('capacity.more_word');
+          runningList.appendChild(document.createTextNode(' '));
+          runningList.appendChild(more);
+        }
+        if (runningWrap) runningWrap.style.display = serveable.length > 0 ? '' : 'none';
+      }
+
+      // Aspirational — only show top 3 with how-close-they-are framing.
+      var aspirationalWrap = document.getElementById('capacity-aspirational');
+      var aspirationalList = document.getElementById('capacity-aspirational-list');
+      var aspirational = (cap.aspirational_models || []);
+      if (aspirationalList) {
+        aspirationalList.innerHTML = '';
+        aspirational.slice(0, 3).forEach(function(m, i) {
+          var span = document.createElement('span');
+          span.className = 'capacity-pill capacity-pill-aspirational';
+          var pct = m.total_shards > 0 ? Math.floor((m.shards_covered / m.total_shards) * 100) : 0;
+          span.textContent = (m.display_name || m.model_id) + ' · ' + pct + '%';
+          span.title = I18n.t('capacity.aspirational_tip', {
+            covered: m.shards_covered,
+            total: m.total_shards,
+          });
+          aspirationalList.appendChild(span);
+          if (i < Math.min(aspirational.length, 3) - 1) aspirationalList.appendChild(document.createTextNode(' '));
+        });
+        if (aspirationalWrap) aspirationalWrap.style.display = aspirational.length > 0 ? '' : 'none';
+      }
     },
 
     renderModels: function(models, cloudModels) {

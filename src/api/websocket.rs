@@ -481,6 +481,17 @@ async fn build_stats_message(state: &SharedState) -> String {
     // Prometheus metric the same way; the WS payload was missed.
     let peers_connected = state.connected_node_ids.len() as u32;
 
+    // R110: refresh + serialise the swarm capacity snapshot. Cheap (single
+    // pass over registries), runs once per stats build (every ~2s per WS
+    // client, but coalesced via the cache stampede guard so we only build
+    // one snapshot per cache TTL). Folded into stats_update so the
+    // dashboard header gets it without a new WS message type.
+    crate::daemon::state::refresh_swarm_capacity(state);
+    let capacity_json = {
+        let snap = state.metrics.swarm_capacity.load_full();
+        serde_json::to_value(&*snap).unwrap_or_else(|_| serde_json::json!({}))
+    };
+
     let mut data = serde_json::json!({
         "peers": peers_connected,
         "lan_peers": lan_peers,
@@ -494,6 +505,7 @@ async fn build_stats_message(state: &SharedState) -> String {
         // payload (the REST handler at admin.rs:113 already clamps).
         "uptime_seconds": (chrono::Utc::now() - uptime_start).num_seconds().max(0),
         "acquisitions": acquisitions,
+        "swarm_capacity": capacity_json,
     });
 
     data["shard_registry"] = shard_registry_val;

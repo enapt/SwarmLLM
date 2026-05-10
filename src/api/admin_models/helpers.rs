@@ -215,5 +215,10 @@ pub fn serialize_acquisition_to_json(
         "cancellable": cancellable,
         "log": status.log.iter().rev().take(10).collect::<Vec<_>>(),
         "shard_details": shard_details,
+        // R110: surface what kicked off this download so the UI can show
+        // a non-technical badge ("hosted by your swarm" / "added by you" /
+        // "swarm pipeline pull"). Empty string if older internal call
+        // sites didn't set it — frontend renders no badge in that case.
+        "trigger": status.trigger,
     })
 }

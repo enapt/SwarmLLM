@@ -90,6 +90,104 @@ use crate::api::server::AppState;
 use crate::config::ContributionMode;
 use crate::error::ApiError;
 
+/// GET /api/admin/swarm/capacity — collective hardware + serveable-models snapshot.
+///
+/// Designed for the "what can my swarm run?" dashboard header. Refreshes
+/// the snapshot inline so the response always reflects the current peer
+/// set (cheap — single pass over the registries). Non-technical-friendly
+/// fields: every value is human-renderable without further interpretation.
+pub async fn swarm_capacity(State(state): State<AppState>) -> Json<serde_json::Value> {
+    crate::daemon::state::refresh_swarm_capacity(&state.shared_state);
+    let snap = state.shared_state.metrics.swarm_capacity.load_full();
+    Json(serde_json::to_value(&*snap).unwrap_or_else(|_| serde_json::json!({})))
+}
+
+/// GET /api/admin/storage/breakdown — disk allocation summary for the
+/// stacked-bar UI. Replaces the dual "Max Disk" / "Max Auto-Download Storage"
+/// settings with a single bar showing total / used / auto-manage-budget /
+/// free. R110.
+///
+/// Numbers are pre-converted to MB so the frontend doesn't have to handle
+/// byte→MB rounding (avoids `49.99 GB` rendering when user typed `50 GB`).
+pub async fn storage_breakdown(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let config = state.config.clone();
+    let local_node_id = state.shared_state.identity.node_id().clone();
+    let mgr = &state.shared_state.models;
+
+    // Bytes currently held on disk by this node.
+    let mut used_bytes: u64 = 0;
+    let mut held_shards: u32 = 0;
+    for entry in state.shared_state.model_registry.models() {
+        for shard in &entry.shards {
+            let sid = crate::types::ShardId {
+                model_id: entry.id.clone(),
+                index: shard.index,
+            };
+            let holders = state.shared_state.model_registry.shard_holders(&sid);
+            if holders.contains(&local_node_id) {
+                used_bytes = used_bytes.saturating_add(shard.size_bytes);
+                held_shards += 1;
+            }
+        }
+    }
+
+    // What auto-manage will try to grow to. Mirrors the budget computation
+    // in `auto_manage::scoring::remaining_budget_bytes` — we don't call it
+    // directly because the helper is `pub(super)` and locking it down
+    // is the right architecture (no cross-module reach into auto-manage
+    // internals from the API layer).
+    let raw_auto_max_bytes = if config.auto_manage.max_storage_mb > 0 {
+        config
+            .auto_manage
+            .max_storage_mb
+            .saturating_mul(1024)
+            .saturating_mul(1024)
+    } else {
+        config
+            .resources
+            .max_disk_mb
+            .saturating_mul(1024)
+            .saturating_mul(1024)
+            / 2
+    };
+    let auto_target_bytes = match config.node.contribution {
+        ContributionMode::Minimal => raw_auto_max_bytes / 4,
+        ContributionMode::Moderate => raw_auto_max_bytes,
+        ContributionMode::Maximum => raw_auto_max_bytes.saturating_mul(3) / 2,
+    };
+    let total_bytes = config
+        .resources
+        .max_disk_mb
+        .saturating_mul(1024)
+        .saturating_mul(1024);
+    let auto_target_capped = auto_target_bytes.min(total_bytes);
+    // Free = max(0, total - used). When used > total (rare — happens if
+    // user shrinks Max Disk after already having more on disk), we report
+    // 0 free and let the UI show a "you're over your budget" hint.
+    let free_bytes = total_bytes.saturating_sub(used_bytes);
+
+    let auto_enabled = mgr
+        .auto_manage_enabled
+        .load(std::sync::atomic::Ordering::Relaxed);
+
+    Json(serde_json::json!({
+        // All values in MB to match the slider units; UI converts to GB
+        // for display. Single-source-of-truth: never present "max_disk_mb"
+        // and "auto_manage_max_storage_mb" as independent inputs again.
+        "total_mb": total_bytes / (1024 * 1024),
+        "used_mb": used_bytes / (1024 * 1024),
+        "free_mb": free_bytes / (1024 * 1024),
+        "auto_target_mb": auto_target_capped / (1024 * 1024),
+        "held_shards": held_shards,
+        "auto_manage_enabled": auto_enabled,
+        "contribution": match config.node.contribution {
+            ContributionMode::Minimal => "minimal",
+            ContributionMode::Moderate => "moderate",
+            ContributionMode::Maximum => "maximum",
+        },
+    }))
+}
+
 /// GET /api/admin/stats — Full dashboard stats snapshot.
 pub async fn stats(State(state): State<AppState>) -> Json<serde_json::Value> {
     let node_id = hex::encode(state.shared_state.identity.node_id().0);

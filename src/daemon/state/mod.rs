@@ -15,6 +15,7 @@ use crate::types::{NodeId, NodeStats, PeerInfo, PipelineAssignment};
 use super::helpers::resolve_api_key;
 
 mod activity;
+mod capacity;
 mod credits;
 mod events;
 mod hf;
@@ -23,6 +24,9 @@ mod models;
 mod tp_allreduce;
 
 pub use activity::{ActivityEvent, DashboardSignal, LoadedModelInfo};
+pub use capacity::{
+    compute_swarm_capacity, refresh_swarm_capacity, HeadlineModel, ModelEntry, SwarmCapacity,
+};
 pub use credits::CreditPool;
 pub use events::EventBus;
 pub use hf::{HfProbeInfo, HfSource};
@@ -280,6 +284,7 @@ impl SharedState {
                 stats_cache: parking_lot::Mutex::new(None),
                 stats_building: std::sync::atomic::AtomicBool::new(false),
                 peer_segment_latency_ms_per_layer: DashMap::new(),
+                swarm_capacity: arc_swap::ArcSwap::from_pointee(SwarmCapacity::default()),
             },
             credits: CreditPool {
                 credit_balance: Arc::new(RwLock::new(crate::types::CreditBalance {

@@ -347,6 +347,18 @@
         var maxMb = data.auto_manage_max_storage_mb || 0;
         document.getElementById('settings-storage-max').textContent = maxMb > 0 ? U.formatMB(maxMb) : I18n.t('settings.disk_50pct');
 
+        // R110: render the stacked-bar from the dedicated breakdown
+        // endpoint. Best-effort — we don't fail the whole storage panel
+        // if the new endpoint isn't reachable (e.g. older daemon during
+        // upgrade roll-out).
+        try {
+          var bResp = await App.authFetch('/api/admin/storage/breakdown');
+          if (bResp.ok) {
+            var b = await bResp.json();
+            App.settings._renderStorageBar(b);
+          }
+        } catch (e) { /* non-fatal */ }
+
         var networkVram = data.pool_vram_mb || 0;
         var localVram = data.local_vram_mb || 0;
         var peerCount = data.peer_count || 0;
@@ -394,6 +406,45 @@
       } catch (e) {
         App.ui.showBanner('error', I18n.t('settings.storage_load_failed'));
       }
+    },
+
+    /**
+     * R110: render the stacked-bar storage allocator. Replaces the old
+     * dual-slider that confused users about whether `Max Auto-Download
+     * Storage` was inside or in addition to `Max Disk`.
+     */
+    _renderStorageBar: function(b) {
+      var bar = document.getElementById('storage-stacked-bar');
+      if (!bar || !b) return;
+      bar.style.display = '';
+      var total = Math.max(1, b.total_mb || 0);
+      var used = Math.min(b.used_mb || 0, total);
+      var freeRaw = b.free_mb || 0;
+      // The auto-manage budget is "head-room reserved for downloads".
+      // Visually it sits between used and free — capped so we never
+      // exceed the total. Fall back to free if the budget overlaps.
+      var budgetSlice = Math.max(0, Math.min(b.auto_target_mb || 0, freeRaw));
+      var freeSlice = Math.max(0, freeRaw - budgetSlice);
+
+      var pct = function(mb) { return ((mb / total) * 100).toFixed(2) + '%'; };
+      var usedEl = document.getElementById('storage-bar-used');
+      var budgetEl = document.getElementById('storage-bar-budget');
+      var freeEl = document.getElementById('storage-bar-free');
+      if (usedEl) usedEl.style.width = pct(used);
+      if (budgetEl) budgetEl.style.width = pct(budgetSlice);
+      if (freeEl) freeEl.style.width = pct(freeSlice);
+
+      var fmtGb = function(mb) {
+        if (mb >= 1000) return (mb / 1000).toFixed(1) + ' GB';
+        return mb + ' MB';
+      };
+      var setText = function(id, mb) {
+        var el = document.getElementById(id);
+        if (el) el.textContent = fmtGb(mb);
+      };
+      setText('storage-legend-used-val', used);
+      setText('storage-legend-budget-val', budgetSlice);
+      setText('storage-legend-free-val', freeSlice);
     },
 
     loadProviders: async function() {

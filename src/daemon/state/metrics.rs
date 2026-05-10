@@ -1,10 +1,13 @@
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 
+use arc_swap::ArcSwap;
 use dashmap::DashMap;
 use tokio::sync::RwLock;
 
 use crate::types::NodeStats;
+
+use super::capacity::SwarmCapacity;
 
 /// Metrics, stats, and provider configuration.
 pub struct MetricsProviders {
@@ -54,6 +57,13 @@ pub struct MetricsProviders {
     /// segment widths (e.g. a 4-layer segment vs a 16-layer segment on the
     /// same peer).
     pub peer_segment_latency_ms_per_layer: DashMap<crate::types::NodeId, f32>,
+    /// Cached snapshot of swarm-wide capacity (online nodes, total VRAM,
+    /// serveable models, ...). Refreshed on gossip ticks via
+    /// `capacity::refresh_swarm_capacity`. ArcSwap so dashboard / WS / REST
+    /// readers all see a lock-free snapshot — capacity is read on every
+    /// dashboard render and we don't want to gate it behind the same lock
+    /// tree the writers contend for. R110.
+    pub swarm_capacity: ArcSwap<SwarmCapacity>,
 }
 
 /// Atomic counters for a single mpsc channel.

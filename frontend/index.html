@@ -349,14 +349,34 @@
           <span class="mono" id="settings-pool-vram">--</span>
         </div>
         <div id="settings-storage-models" class="text-sm mt-1"></div>
-      </div>
-      <div class="form-group" id="settings-auto-manage-storage-group" style="display:none">
-        <label for="settings-auto-manage-storage">
-          <span data-i18n="settings.max_auto_storage">Max Auto-Download Storage</span>
-          <output class="slider-output" id="settings-auto-manage-storage-out">Auto</output>
-        </label>
-        <input type="range" id="settings-auto-manage-storage" class="slider" value="0" min="0" max="500000" step="1000" data-slider-format="gb-auto">
-        <span class="text-muted field-hint" data-i18n="settings.max_auto_label_hint">0 = use 50% of max disk.</span>
+
+        <!-- R110: Stacked-bar showing how the configured Max Disk is split
+             between currently-used + auto-managed budget + free. Replaces
+             the standalone "Max Auto-Download Storage" slider — the budget
+             is now derived deterministically from Max Disk + contribution
+             mode, so the user has one knob instead of two confusing ones. -->
+        <div class="storage-stacked-bar mt-2" id="storage-stacked-bar" style="display:none">
+          <div class="storage-bar-track">
+            <div class="storage-bar-segment storage-bar-used" id="storage-bar-used"></div>
+            <div class="storage-bar-segment storage-bar-budget" id="storage-bar-budget"></div>
+            <div class="storage-bar-segment storage-bar-free" id="storage-bar-free"></div>
+          </div>
+          <div class="storage-bar-legend text-2xs mt-1">
+            <span class="storage-legend-item"><span class="legend-dot legend-dot-used"></span>
+              <span data-i18n="settings.storage_legend_used">Used now</span>
+              <strong id="storage-legend-used-val">0 GB</strong>
+            </span>
+            <span class="storage-legend-item"><span class="legend-dot legend-dot-budget"></span>
+              <span data-i18n="settings.storage_legend_budget">Auto-manage budget</span>
+              <strong id="storage-legend-budget-val">0 GB</strong>
+            </span>
+            <span class="storage-legend-item"><span class="legend-dot legend-dot-free"></span>
+              <span data-i18n="settings.storage_legend_free">Free</span>
+              <strong id="storage-legend-free-val">0 GB</strong>
+            </span>
+          </div>
+          <div class="text-muted field-hint mt-1" data-i18n="settings.storage_breakdown_hint">Auto-manage budget grows or shrinks with your contribution level. Use the slider below to change the total.</div>
+        </div>
       </div>
       </section>
 
@@ -847,6 +867,37 @@
         <div class="container">
           <!-- Status banner -->
           <div id="status-banner"></div>
+
+          <!-- R110: swarm-wide capacity banner. Headline answer to
+               "what can my swarm actually run right now?". Hidden until
+               the first WS stats_update arrives so we never show "0 nodes"
+               on the cold-start screen. -->
+          <div class="swarm-capacity-banner mb-2" id="swarm-capacity-banner" style="display:none">
+            <div class="capacity-line capacity-headline">
+              <span class="capacity-icon">&#127760;</span>
+              <span data-i18n="capacity.headline_prefix">Your swarm has</span>
+              <strong id="capacity-nodes">0</strong>
+              <span data-i18n="capacity.nodes_word">contributors</span>
+              <span class="capacity-sep">·</span>
+              <strong id="capacity-vram">0 GB</strong>
+              <span data-i18n="capacity.combined_memory_word">combined memory</span>
+              <span class="capacity-sep">·</span>
+              <strong id="capacity-models-count">0</strong>
+              <span data-i18n="capacity.models_running_word">models ready</span>
+            </div>
+            <div class="capacity-line capacity-headline-model" id="capacity-headline-model" style="display:none">
+              <span data-i18n="capacity.runs_up_to">Runs up to</span>
+              <strong id="capacity-headline-name">—</strong>
+            </div>
+            <div class="capacity-line capacity-running" id="capacity-running" style="display:none">
+              <span class="text-muted" data-i18n="capacity.running_now">Running now:</span>
+              <span id="capacity-running-list"></span>
+            </div>
+            <div class="capacity-line capacity-aspirational" id="capacity-aspirational" style="display:none">
+              <span class="text-muted" data-i18n="capacity.watching">Watching:</span>
+              <span id="capacity-aspirational-list"></span>
+            </div>
+          </div>
 
           <!-- Operation mode indicator -->
           <div class="mode-indicator mb-2" id="mode-indicator">

@@ -78,6 +78,29 @@ impl AutoShardManager {
         // snapshot — pin state can't flip mid-cycle.
         let shard_pins_cached = super::manager::read_shard_pins_blocking(&self.shared_state).await;
 
+        // R110: snapshot the set of shards currently in flight on at least
+        // one active pipeline. Pruning a shard mid-inference would cause
+        // the next forward to fail (a `ShardNotFound` mid-token-loop). We
+        // already register every assigned segment in `active_pipelines`
+        // when the router dispatches; cross-referencing here is cheap
+        // (single pass over a typically <10-entry DashMap). Keys are
+        // `ShardId` so per-shard membership is O(1) below.
+        let mut active_pipeline_shards: std::collections::HashSet<ShardId> =
+            std::collections::HashSet::new();
+        for entry in self.shared_state.active_pipelines.iter() {
+            for seg in &entry.value().segments {
+                if seg.node_id == local_node_id {
+                    active_pipeline_shards.insert(seg.shard_id.clone());
+                }
+            }
+        }
+        if !active_pipeline_shards.is_empty() {
+            tracing::debug!(
+                count = active_pipeline_shards.len(),
+                "DIAG: prune guarding active-pipeline shards"
+            );
+        }
+
         for manifest in registry.models() {
             // Check per-model prune policy
             if let Some(policy) = self
@@ -166,6 +189,18 @@ impl AutoShardManager {
                     .models
                     .is_shard_in_progress(&manifest.id, shard.index);
                 if is_downloading {
+                    continue;
+                }
+
+                // R110: skip shards currently in use on an active pipeline
+                // assigned to us. Pruning mid-inference produces a
+                // ShardNotFound error halfway through a user's response.
+                // The active_pipelines registry is cleaned up by the
+                // dispatch path on completion / failure / cancellation,
+                // so a "stuck" entry can't pin a shard forever — the
+                // router's pipeline TTL sweeper evicts orphans within
+                // its own window.
+                if active_pipeline_shards.contains(&shard_id) {
                     continue;
                 }
 
