@@ -659,6 +659,16 @@
           <option value="size_asc" data-i18n="model_browser.sort_size_asc">Smallest first</option>
           <option value="size_desc" data-i18n="model_browser.sort_size_desc">Largest first</option>
         </select>
+        <!-- R114: task filter chips. Multi-select; each click toggles a
+             tag in the search query string. The chip set is small + curated,
+             not a free-form picker — matches the wishlist task taxonomy. -->
+        <div class="hf-task-chips" id="hf-task-chips">
+          <button class="hf-task-chip" data-hf-task="chat" data-i18n="wishlist.task.chat">Chat</button>
+          <button class="hf-task-chip" data-hf-task="code" data-i18n="wishlist.task.code">Code</button>
+          <button class="hf-task-chip" data-hf-task="vision" data-i18n="wishlist.task.vision">Vision</button>
+          <button class="hf-task-chip" data-hf-task="reasoning" data-i18n="wishlist.task.reasoning">Reasoning</button>
+          <button class="hf-task-chip" data-hf-task="multilingual" data-i18n="wishlist.task.multilingual">Multilingual</button>
+        </div>
       </div>
       <div id="hf-results">
         <div class="hf-suggestions" id="hf-suggestions">
@@ -1636,6 +1646,9 @@
         <div class="hf-model-name"></div>
         <div class="hf-model-meta hf-meta-stats"></div>
         <div class="hf-model-meta hf-meta-network"></div>
+        <!-- R114: task-tag chips + swarm CTA pill rendered into these slots. -->
+        <div class="hf-meta-tasks"></div>
+        <div class="hf-meta-cta"></div>
       </div>
       <div class="hf-model-actions">
         <select class="hf-quant-select" hidden></select>

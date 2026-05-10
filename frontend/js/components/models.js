@@ -14,6 +14,27 @@
   // HuggingFace Module
   // ========================================================================
   App.hf = {
+    /** R114: active task filter chips. Set of stable tokens
+     *  (chat/code/vision/multilingual/reasoning). Empty = no filter. */
+    _activeTasks: [],
+
+    /** R114: toggle a task chip on/off and re-search. */
+    toggleTaskChip: function(task) {
+      task = (task || '').toLowerCase();
+      if (!task) return;
+      var idx = App.hf._activeTasks.indexOf(task);
+      if (idx >= 0) App.hf._activeTasks.splice(idx, 1);
+      else App.hf._activeTasks.push(task);
+      // Reflect state on the chip buttons.
+      document.querySelectorAll('.hf-task-chip').forEach(function(el) {
+        var t = (el.dataset.hfTask || '').toLowerCase();
+        el.classList.toggle('active', App.hf._activeTasks.indexOf(t) >= 0);
+      });
+      // Re-run the search if there's already a query.
+      var input = document.getElementById('hf-search-input');
+      if (input && input.value.trim()) App.hf.search();
+    },
+
     /**
      * Centralized HF shard download request.
      * @param {Object} body - Request body (repo_id, filename, shards?, model_id?, peer_fair_share?)
@@ -47,7 +68,12 @@
       loading.classList.remove('hidden');
 
       try {
-        var resp = await App.authFetch('/api/admin/hf/search?query=' + encodeURIComponent(query));
+        // R114: include the active task-filter chips in the request so
+        // the backend filters server-side. Empty = no filter.
+        var taskFilter = (App.hf._activeTasks || []).join(',');
+        var url = '/api/admin/hf/search?query=' + encodeURIComponent(query) +
+          (taskFilter ? '&tasks=' + encodeURIComponent(taskFilter) : '');
+        var resp = await App.authFetch(url);
         loading.classList.add('hidden');
 
         if (!resp.ok) {
@@ -128,6 +154,50 @@
           else if (replicas <= 2) networkHtml += '<span style="color:var(--yellow)">&#128176; ' + U.escapeHtml(I18n.t('models.demand_medium')) + '</span>';
           else networkHtml += '<span style="color:var(--text-muted)">&#128176; ' + U.escapeHtml(I18n.t('models.well_replicated')) + '</span>';
           card.querySelector('.hf-meta-network').innerHTML = networkHtml;
+
+          // R114: task-tag chips. Inert (visual only) — clicking the
+          // top-level task filter chips does the actual filtering.
+          var tasksEl = card.querySelector('.hf-meta-tasks');
+          var tasks = repo.task_tags || [];
+          if (tasksEl && tasks.length > 0) {
+            tasksEl.innerHTML = tasks.map(function(t) {
+              var label = I18n.t('wishlist.task.' + t);
+              if (label === 'wishlist.task.' + t) label = t;
+              return '<span class="hf-task-tag-pill">' + U.escapeHtml(label) + '</span>';
+            }).join(' ');
+          }
+
+          // R114: status-driven CTA pill. Replaces the implicit "you
+          // figure it out from the score" UX with a single sentence
+          // that says exactly why this model is interesting (or not).
+          var ctaEl = card.querySelector('.hf-meta-cta');
+          if (ctaEl) {
+            var status = repo.swarm_cta_status || 'downloadable';
+            var ctaKey, ctaClass;
+            switch (status) {
+              case 'be_first_host':
+                ctaKey = 'hf_browser.cta_be_first_host';
+                ctaClass = 'hf-cta-pill hf-cta-be-first';
+                break;
+              case 'needs_more_hosts':
+                ctaKey = 'hf_browser.cta_needs_more_hosts';
+                ctaClass = 'hf-cta-pill hf-cta-needs-more';
+                break;
+              case 'well_replicated':
+                ctaKey = 'hf_browser.cta_well_replicated';
+                ctaClass = 'hf-cta-pill hf-cta-replicated';
+                break;
+              case 'unreachable':
+                ctaKey = 'hf_browser.cta_unreachable';
+                ctaClass = 'hf-cta-pill hf-cta-unreachable';
+                break;
+              default:
+                ctaKey = 'hf_browser.cta_downloadable';
+                ctaClass = 'hf-cta-pill';
+            }
+            ctaEl.innerHTML = '<span class="' + ctaClass + '">' +
+              U.escapeHtml(I18n.t(ctaKey)) + '</span>';
+          }
 
           // Variant selector
           var selectEl = card.querySelector('.hf-quant-select');

@@ -1065,3 +1065,6 @@
 {"file":"src/daemon/state/capacity_plan.rs","line":1,"kind":"feature_r113","summary":"new compute_capacity_plan + 3 baked scenarios + headline_target; turns value prop into concrete next step for users","status":"fixed","date":"2026-05-10"}
 {"file":"src/api/admin.rs","line":135,"kind":"feature_r113","summary":"GET /api/admin/swarm/capacity-plan endpoint","status":"fixed","date":"2026-05-10"}
 {"file":"frontend/js/components/swarm-tab.js","line":260,"kind":"feature_r113","summary":"Capacity Plan view rendering with hero target + 3 scenario cards","status":"fixed","date":"2026-05-10"}
+{"file":"src/api/admin_hf/search.rs","line":18,"kind":"feature_r114","summary":"task filter param + status-driven CTA + task_tags from HfWatcher cache + name-based fallback","status":"fixed","date":"2026-05-10"}
+{"file":"frontend/index.html","line":1640,"kind":"feature_r114","summary":"hf-task-chips multi-select + tmpl-hf-result-card extended with hf-meta-tasks/hf-meta-cta slots","status":"fixed","date":"2026-05-10"}
+{"file":"frontend/js/components/models.js","line":18,"kind":"feature_r114","summary":"App.hf.toggleTaskChip + task_tags pill rendering + status-CTA pill rendering","status":"fixed","date":"2026-05-10"}

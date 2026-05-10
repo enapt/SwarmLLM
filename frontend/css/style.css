@@ -5322,3 +5322,51 @@ textarea:focus:not(:focus-visible) {
   text-anchor: middle;
   pointer-events: none;
 }
+
+/* R114: HF browse polish — task filter chips + status CTA pills */
+.hf-task-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-left: 12px;
+}
+.hf-task-chip {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  padding: 3px 10px;
+  border-radius: 14px;
+  cursor: pointer;
+  font-size: 0.78rem;
+  transition: background 0.15s, border-color 0.15s;
+}
+.hf-task-chip:hover { background: rgba(56, 139, 253, 0.06); }
+.hf-task-chip.active {
+  background: rgba(56, 139, 253, 0.15);
+  border-color: rgba(56, 139, 253, 0.5);
+  color: var(--text);
+  font-weight: 600;
+}
+.hf-task-tag-pill {
+  display: inline-block;
+  padding: 1px 7px;
+  border-radius: 10px;
+  background: rgba(125, 89, 229, 0.1);
+  border: 1px solid rgba(125, 89, 229, 0.2);
+  color: var(--text-muted);
+  font-size: 0.72rem;
+  margin-right: 3px;
+}
+.hf-cta-pill {
+  display: inline-block;
+  padding: 2px 9px;
+  border-radius: 10px;
+  font-size: 0.78rem;
+  font-weight: 500;
+  background: rgba(56, 139, 253, 0.12);
+  color: var(--text);
+}
+.hf-cta-be-first { background: rgba(46, 160, 67, 0.18); color: #2ea043; }
+.hf-cta-needs-more { background: rgba(56, 139, 253, 0.18); color: #388bfd; }
+.hf-cta-replicated { background: rgba(120, 120, 120, 0.18); color: var(--text-muted); }
+.hf-cta-unreachable { background: rgba(190, 50, 50, 0.15); color: #e25c5c; }

@@ -268,6 +268,12 @@
         App.hf.search();
       });
     });
+    // R114: HF task-filter chips. Multi-select; toggles re-trigger search.
+    document.querySelectorAll('[data-hf-task]').forEach(function(chip) {
+      chip.addEventListener('click', function() {
+        App.hf.toggleTaskChip(chip.getAttribute('data-hf-task'));
+      });
+    });
     on('btn-open-model-browser', 'click', function() { App.ui.openModelBrowser(); });
     on('btn-browse-hf', 'click', function() { App.ui.openModelBrowser(); });
 

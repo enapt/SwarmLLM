@@ -19,6 +19,12 @@ const MODEL_SIZE_SCORE_MAX_GB: f64 = 8.0;
 pub struct HfSearchParams {
     #[serde(rename = "q")]
     pub query: Option<String>,
+    /// R114: optional task filter — comma-separated tokens
+    /// (chat / code / vision / multilingual / reasoning). Results that
+    /// don't match any of the requested tokens are dropped. Empty/missing
+    /// = no filter (returns everything).
+    #[serde(default)]
+    pub tasks: Option<String>,
 }
 
 pub async fn hf_search(
@@ -50,6 +56,27 @@ pub async fn hf_search(
             })
         })?;
 
+    // R114: task-filter parsing. Tokens are case-insensitive; unknown
+    // tokens are silently ignored so a future filter chip the backend
+    // doesn't recognise yet doesn't break the response.
+    let task_filter: Option<std::collections::HashSet<String>> = params.tasks.as_ref().map(|s| {
+        s.split(',')
+            .map(|t| t.trim().to_lowercase())
+            .filter(|t| !t.is_empty())
+            .collect()
+    });
+
+    // Map repo_id → task tags from the HfWatcher's trending cache. For
+    // non-trending repos we infer tags from the repo name (best-effort
+    // — tags help filtering, not correctness, so a miss just falls
+    // back to "uncategorised").
+    let trending_snapshot = state.shared_state.models.hf_trending_cache.load_full();
+    let mut tags_by_repo: std::collections::HashMap<String, Vec<String>> =
+        std::collections::HashMap::new();
+    for e in &trending_snapshot.entries {
+        tags_by_repo.insert(e.repo_id.clone(), e.task_tags.clone());
+    }
+
     // Available VRAM for fits_vram check (pool VRAM or local GPU)
     let available_vram_bytes: u64 = state
         .shared_state
@@ -77,7 +104,21 @@ pub async fn hf_search(
             let files = repo_map.remove(&repo_id)?;
             Some((repo_id, files))
         })
-        .map(|(repo_id, files)| {
+        .filter_map(|(repo_id, files)| {
+            // R114: task tags + filter. Tags from the HfWatcher trending
+            // cache (authoritative); fall back to a tiny name-based heuristic
+            // for non-trending repos so the chips still do something useful.
+            let task_tags: Vec<String> = tags_by_repo
+                .get(&repo_id)
+                .cloned()
+                .unwrap_or_else(|| infer_task_tags_from_repo_name(&repo_id));
+            if let Some(ref filter) = task_filter {
+                if !filter.is_empty()
+                    && !task_tags.iter().any(|t| filter.contains(&t.to_lowercase()))
+                {
+                    return None;
+                }
+            }
             let downloads = files.first().map(|f| f.downloads).unwrap_or(0);
             let likes = files.first().map(|f| f.likes).unwrap_or(0);
 
@@ -164,7 +205,24 @@ pub async fn hf_search(
             let size_factor = (1.0 - shard_gb / MODEL_SIZE_SCORE_MAX_GB).clamp(0.1, 1.0);
             let composite_score = (quality * fit * demand * size_factor * 100.0) as u32;
 
-            serde_json::json!({
+            // R114: status-driven CTA. Drives a single button per result
+            // instead of forcing the user to interpret a 0..100 composite
+            // score. The mapping mirrors the wishlist's status taxonomy
+            // (Hosting / Serveable / Aspirational / Unreachable / Blocked)
+            // so non-technical users see consistent language across views.
+            let status = if !fits_full && !fits_boomerang && !fits_shard {
+                "unreachable"
+            } else if network_replicas == 0 && (fits_boomerang || fits_full) {
+                "be_first_host"
+            } else if network_replicas > 0 && network_replicas < 3 {
+                "needs_more_hosts"
+            } else if network_replicas >= 3 {
+                "well_replicated"
+            } else {
+                "downloadable"
+            };
+
+            Some(serde_json::json!({
                 "repo_id": repo_id,
                 "downloads": downloads,
                 "likes": likes,
@@ -183,7 +241,9 @@ pub async fn hf_search(
                     "demand": (demand * 100.0) as u32,
                     "size": (size_factor * 100.0) as u32,
                 },
-            })
+                "task_tags": task_tags,
+                "swarm_cta_status": status,
+            }))
         })
         .collect();
 
@@ -201,4 +261,47 @@ pub async fn hf_search(
     });
 
     Ok(Json(values))
+}
+
+/// R114: tiny name-based tag inference for non-trending repos. The
+/// HfWatcher trending cache is the authoritative source; this fallback
+/// just makes the chips do something useful for repos HfWatcher hasn't
+/// seen. Best-effort; users can always remove a filter to see everything.
+fn infer_task_tags_from_repo_name(repo_id: &str) -> Vec<String> {
+    let lower = repo_id.to_lowercase();
+    let mut tags: Vec<String> = Vec::new();
+    if lower.contains("code")
+        || lower.contains("coder")
+        || lower.contains("starcoder")
+        || lower.contains("granite-code")
+    {
+        tags.push("code".to_string());
+    }
+    if lower.contains("vision")
+        || lower.contains("vlm")
+        || lower.contains("llava")
+        || lower.contains("multimodal")
+    {
+        tags.push("vision".to_string());
+    }
+    if lower.contains("math")
+        || lower.contains("reasoning")
+        || lower.contains("o1")
+        || lower.contains("deepseek-r1")
+    {
+        tags.push("reasoning".to_string());
+    }
+    if lower.contains("multilingual")
+        || lower.contains("aya")
+        || lower.contains("nllb")
+        || lower.contains("madlad")
+    {
+        tags.push("multilingual".to_string());
+    }
+    // Default fallback so the chips always do something. Most GGUFs
+    // are chat / instruct fine-tunes anyway.
+    if tags.is_empty() || lower.contains("chat") || lower.contains("instruct") {
+        tags.push("chat".to_string());
+    }
+    tags
 }
