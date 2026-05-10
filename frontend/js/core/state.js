@@ -30,6 +30,7 @@ window.App = {
       if (p === '/admin/compare') return 'compare';
       if (p === '/admin/responses') return 'responses';
       if (p === '/admin/devices') return 'devices';
+      if (p === '/admin/swarm') return 'swarm';
       return 'dashboard';
     })(),
     providerHealth: {},

@@ -1053,3 +1053,8 @@
 {"file":"src/model/auto_manage/prune.rs","line":80,"kind":"feature_r110","summary":"active-pipeline shard guard prevents mid-inference shard eviction","status":"fixed","date":"2026-05-10"}
 {"file":"frontend/index.html","line":847,"kind":"feature_r110","summary":"swarm-capacity banner on dashboard + stacked-bar storage allocator in settings","status":"fixed","date":"2026-05-10"}
 {"file":"frontend/i18n","line":1,"kind":"feature_r110","summary":"15 new capacity.* + settings.storage_legend_* keys propagated to all 21 language files","status":"fixed","date":"2026-05-10"}
+{"file":"src/model/auto_manage/wishlist.rs","line":1,"kind":"feature_r111","summary":"new Wishlist + WishlistEntry + WishlistStatus; compute_wishlist + refresh_wishlist; ArcSwap on ModelMgmt","status":"fixed","date":"2026-05-10"}
+{"file":"src/api/admin.rs","line":110,"kind":"feature_r111","summary":"GET /api/admin/wishlist endpoint; folded into stats_update WS","status":"fixed","date":"2026-05-10"}
+{"file":"src/model/auto_manage/manager.rs","line":407,"kind":"feature_r111","summary":"refresh_wishlist hook into auto-manage tick","status":"fixed","date":"2026-05-10"}
+{"file":"frontend/js/components/swarm-tab.js","line":1,"kind":"feature_r111","summary":"new Swarm tab with Wishlist/Running/Search/Capacity sub-views","status":"fixed","date":"2026-05-10"}
+{"file":"frontend/i18n","line":1,"kind":"feature_r111","summary":"43 new wishlist.*/swarm.*/nav.swarm i18n keys propagated to all 21 languages","status":"fixed","date":"2026-05-10"}

@@ -102,6 +102,18 @@ pub async fn swarm_capacity(State(state): State<AppState>) -> Json<serde_json::V
     Json(serde_json::to_value(&*snap).unwrap_or_else(|_| serde_json::json!({})))
 }
 
+/// GET /api/admin/wishlist — ranked list of models the swarm wants.
+///
+/// R111. The wishlist is the user-visible face of auto-manage: instead of
+/// the daemon downloading models in mysterious silence, the user sees a
+/// ranked queue with status badges and human-readable "why" tags. Refreshed
+/// on demand so manual browsing always sees fresh data.
+pub async fn wishlist(State(state): State<AppState>) -> Json<serde_json::Value> {
+    crate::model::auto_manage::refresh_wishlist(&state.shared_state);
+    let snap = state.shared_state.models.wishlist.load_full();
+    Json(serde_json::to_value(&*snap).unwrap_or_else(|_| serde_json::json!({})))
+}
+
 /// GET /api/admin/storage/breakdown — disk allocation summary for the
 /// stacked-bar UI. Replaces the dual "Max Disk" / "Max Auto-Download Storage"
 /// settings with a single bar showing total / used / auto-manage-budget /

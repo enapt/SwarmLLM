@@ -692,6 +692,7 @@
     <div class="header-center">
       <button class="tab-btn tab-btn-chat" data-tab="chat" data-i18n="nav.chat">Chat</button>
       <button class="tab-btn active" data-tab="dashboard" data-i18n="nav.dashboard">Dashboard</button>
+      <button class="tab-btn" data-tab="swarm" data-i18n="nav.swarm">The Swarm</button>
       <button class="tab-btn" data-tab="leaderboard" data-i18n="nav.leaderboard">Leaderboard</button>
       <button class="tab-btn" data-tab="network-map" data-i18n="nav.network_map">Network Map</button>
       <button class="tab-btn" data-tab="compare" data-i18n="nav.compare">Compare</button>
@@ -1297,6 +1298,52 @@
         </div>
       </div>
 
+      <!-- R111: Swarm view — wishlist + browse + capacity-plan tabs.
+           Surfaces what the swarm wants to run next, with plain-language
+           "why" tags so non-technical users see the reasoning. -->
+      <div class="view" id="view-swarm" style="display:none">
+        <div class="container">
+          <div class="panel">
+            <div class="panel-header">
+              <h2 data-i18n="swarm.title">The Swarm</h2>
+              <div class="swarm-subtab-nav">
+                <button class="swarm-subtab active" data-swarm-subtab="wishlist" data-i18n="swarm.tab_wishlist">Wishlist</button>
+                <button class="swarm-subtab" data-swarm-subtab="running" data-i18n="swarm.tab_running">Running now</button>
+                <button class="swarm-subtab" data-swarm-subtab="search" data-i18n="swarm.tab_search">Search HuggingFace</button>
+                <button class="swarm-subtab" data-swarm-subtab="capacity" data-i18n="swarm.tab_capacity">Capacity plan</button>
+              </div>
+            </div>
+
+            <!-- Wishlist subtab -->
+            <div class="swarm-subview" id="swarm-subview-wishlist">
+              <div class="text-muted text-sm mb-2" data-i18n="swarm.wishlist_intro">A live, ranked list of models the swarm wants. Auto-manage works through this list within your contribution budget — no waiting required.</div>
+              <div class="wishlist-list" id="wishlist-list"></div>
+              <div class="text-muted text-2xs mt-2" id="wishlist-meta"></div>
+            </div>
+
+            <!-- Running-now subtab — reuses swarm_capacity.serveable_models -->
+            <div class="swarm-subview" id="swarm-subview-running" style="display:none">
+              <div class="text-muted text-sm mb-2" data-i18n="swarm.running_intro">Models the swarm can serve right now. The ones you help host are highlighted.</div>
+              <div class="capacity-running-grid" id="swarm-running-grid"></div>
+            </div>
+
+            <!-- Search HuggingFace subtab — placeholder hosting the existing model browser. -->
+            <div class="swarm-subview" id="swarm-subview-search" style="display:none">
+              <div class="text-muted text-sm mb-2" data-i18n="swarm.search_intro">Find a model on HuggingFace. Adding it to the swarm helps everyone — pick something popular, and your contribution unlocks it for the whole network.</div>
+              <button class="btn btn-primary" id="swarm-open-hf-browser" data-i18n="swarm.open_hf_browser">Open HuggingFace browser</button>
+            </div>
+
+            <!-- Capacity-plan subtab — what-if calculator (filled in R113) -->
+            <div class="swarm-subview" id="swarm-subview-capacity" style="display:none">
+              <div class="text-muted text-sm mb-2" data-i18n="swarm.capacity_intro">See what the swarm could run if more contributors joined.</div>
+              <div id="capacity-plan-content">
+                <div class="text-muted" data-i18n="swarm.capacity_pending">Capacity-plan view is being prepared in a follow-up update.</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
       <!-- Leaderboard view -->
       <div class="view" id="view-leaderboard" style="display:none">
         <div class="container">
@@ -1669,6 +1716,7 @@
   <script src="/static/js/components/responses.js"></script>
   <script src="/static/js/components/pool.js"></script>
   <script src="/static/js/components/auto-manage-status.js"></script>
+  <script src="/static/js/components/swarm-tab.js"></script>
   <!-- Init (must be last — wires everything together) -->
   <script src="/static/js/init.js"></script>
 </body>

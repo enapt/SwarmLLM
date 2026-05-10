@@ -405,6 +405,14 @@ impl AutoShardManager {
             self.evaluate_and_prune().await;
         }
 
+        // R111: refresh the user-visible wishlist at the end of every
+        // tick so the dashboard reflects the latest swarm state even
+        // when no client is currently rendering it. The WS stats build
+        // also refreshes — duplicating here is cheap (single registry
+        // pass) and means an idle dashboard sees fresh data the moment
+        // it connects.
+        crate::model::auto_manage::refresh_wishlist(&self.shared_state);
+
         let hosted_after = self
             .shared_state
             .model_registry

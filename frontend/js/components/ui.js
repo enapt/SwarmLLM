@@ -19,6 +19,7 @@
           : tab === 'compare' ? '/admin/compare'
           : tab === 'responses' ? '/admin/responses'
           : tab === 'devices' ? '/admin/devices'
+          : tab === 'swarm' ? '/admin/swarm'
           : '/admin';
         if (window.location.pathname !== path) {
           history.pushState({ tab: tab }, '', path);
@@ -39,6 +40,8 @@
       if (responsesView) responsesView.style.display = tab === 'responses' ? '' : 'none';
       var devicesView = document.getElementById('view-devices');
       if (devicesView) devicesView.style.display = tab === 'devices' ? '' : 'none';
+      var swarmView = document.getElementById('view-swarm');
+      if (swarmView) swarmView.style.display = tab === 'swarm' ? '' : 'none';
       var sidebar = document.getElementById('sidebar');
       var edgeTrigger = document.getElementById('sidebar-edge-trigger');
       if (sidebar) {
@@ -82,6 +85,9 @@
       }
       if (tab === 'devices' && App.pool) {
         App.pool.load();
+      }
+      if (tab === 'swarm' && App.swarmTab) {
+        App.swarmTab.onShow();
       }
     },
 

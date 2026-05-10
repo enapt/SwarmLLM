@@ -433,6 +433,10 @@
           if (msg.data.region_summary && S.activeTab === 'network-map') {
             App.networkMap.updateFromWs(msg.data.region_summary);
           }
+          // R111: feed wishlist + capacity into the Swarm tab.
+          if (App.swarmTab && typeof App.swarmTab.onStats === 'function') {
+            App.swarmTab.onStats(msg.data);
+          }
         } else if (msg.type === 'update_available') {
           showUpdateBanner(msg.data);
         } else if (msg.type === 'peer_list') {

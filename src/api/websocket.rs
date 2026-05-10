@@ -491,6 +491,14 @@ async fn build_stats_message(state: &SharedState) -> String {
         let snap = state.metrics.swarm_capacity.load_full();
         serde_json::to_value(&*snap).unwrap_or_else(|_| serde_json::json!({}))
     };
+    // R111: piggyback the wishlist on the same stats payload. Same
+    // coalescing benefits — every dashboard render gets a fresh ranked
+    // queue without spamming a new WS message type or polling REST.
+    crate::model::auto_manage::refresh_wishlist(state);
+    let wishlist_json = {
+        let snap = state.models.wishlist.load_full();
+        serde_json::to_value(&*snap).unwrap_or_else(|_| serde_json::json!({}))
+    };
 
     let mut data = serde_json::json!({
         "peers": peers_connected,
@@ -506,6 +514,7 @@ async fn build_stats_message(state: &SharedState) -> String {
         "uptime_seconds": (chrono::Utc::now() - uptime_start).num_seconds().max(0),
         "acquisitions": acquisitions,
         "swarm_capacity": capacity_json,
+        "wishlist": wishlist_json,
     });
 
     data["shard_registry"] = shard_registry_val;

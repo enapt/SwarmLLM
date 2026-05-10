@@ -74,6 +74,11 @@ pub struct ModelMgmt {
     /// silently freezes after enough silent drops.
     pub p2p_download_permits:
         DashMap<crate::types::ShardId, (tokio::sync::OwnedSemaphorePermit, std::time::Instant)>,
+    /// R111: latest computed Wishlist snapshot. ArcSwap so the dashboard +
+    /// REST + future HfWatcher all read a lock-free snapshot. Refreshed on
+    /// every WS stats build (cheap pass over the model registry) and on
+    /// every auto-manage tick.
+    pub wishlist: arc_swap::ArcSwap<crate::model::auto_manage::wishlist::Wishlist>,
 }
 
 impl ModelMgmt {
@@ -320,6 +325,9 @@ mod tests {
             cross_node_prefix_index: DashMap::new(),
             peer_prefix_blocks: DashMap::new(),
             p2p_download_permits: DashMap::new(),
+            wishlist: arc_swap::ArcSwap::from_pointee(
+                crate::model::auto_manage::wishlist::Wishlist::default(),
+            ),
         }
     }
 

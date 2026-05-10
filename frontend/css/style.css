@@ -974,6 +974,128 @@ a:hover { color: var(--accent-hover); }
 .legend-dot-free { background: transparent; border: 1px dashed var(--border); }
 .storage-legend-item strong { color: var(--text); margin-left: 2px; }
 
+/* ---- R111: Swarm tab — wishlist + sub-tabs ---- */
+.swarm-subtab-nav { display: flex; gap: 4px; }
+.swarm-subtab {
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--text-muted);
+  padding: 6px 12px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 0.88rem;
+}
+.swarm-subtab:hover { background: rgba(56, 139, 253, 0.06); color: var(--text); }
+.swarm-subtab.active {
+  background: rgba(56, 139, 253, 0.1);
+  border-color: rgba(56, 139, 253, 0.3);
+  color: var(--text);
+  font-weight: 600;
+}
+.swarm-subview { padding-top: 8px; }
+
+.wishlist-list { display: flex; flex-direction: column; gap: 8px; }
+.wishlist-card {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-left-width: 3px;
+  border-radius: 6px;
+  padding: 10px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.wishlist-card-hosting { border-left-color: rgba(46, 160, 67, 0.7); }
+.wishlist-card-serveable { border-left-color: rgba(56, 139, 253, 0.7); }
+.wishlist-card-aspirational { border-left-color: rgba(210, 153, 34, 0.7); }
+.wishlist-card-unreachable { border-left-color: rgba(120, 120, 120, 0.6); }
+.wishlist-card-blocked { border-left-color: rgba(190, 50, 50, 0.6); }
+.wishlist-card-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.wishlist-card-name {
+  font-weight: 600;
+  font-size: 0.95rem;
+  flex: 1;
+  min-width: 200px;
+}
+.wishlist-pill {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 12px;
+  font-size: 0.78rem;
+  font-weight: 500;
+}
+.wishlist-pill-hosting { background: rgba(46, 160, 67, 0.18); color: #2ea043; }
+.wishlist-pill-serveable { background: rgba(56, 139, 253, 0.18); color: #388bfd; }
+.wishlist-pill-aspirational { background: rgba(210, 153, 34, 0.18); color: #d29922; }
+.wishlist-pill-unreachable { background: rgba(120, 120, 120, 0.2); color: var(--text-muted); }
+.wishlist-pill-blocked { background: rgba(190, 50, 50, 0.18); color: #e25c5c; }
+.wishlist-heat {
+  display: inline-block;
+  width: 60px;
+  height: 6px;
+  background: var(--bg);
+  border-radius: 3px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+}
+.wishlist-heat-bar {
+  display: block;
+  height: 100%;
+  background: linear-gradient(90deg, #d29922, #2ea043);
+}
+.wishlist-card-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  font-size: 0.82rem;
+  color: var(--text-muted);
+}
+.wishlist-tags { display: flex; flex-wrap: wrap; gap: 6px; }
+.wishlist-tag {
+  display: inline-block;
+  padding: 1px 7px;
+  border-radius: 10px;
+  background: rgba(125, 89, 229, 0.12);
+  border: 1px solid rgba(125, 89, 229, 0.25);
+  font-size: 0.74rem;
+  color: var(--text);
+}
+.wishlist-cta { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.wishlist-cta-label { font-size: 0.82rem; }
+
+.capacity-running-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 8px;
+}
+.capacity-card {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  position: relative;
+}
+.capacity-card-mine { border-color: rgba(46, 160, 67, 0.4); }
+.capacity-card-name { font-weight: 600; }
+.capacity-card-badge {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  font-size: 0.68rem;
+  background: rgba(46, 160, 67, 0.18);
+  color: #2ea043;
+  padding: 1px 6px;
+  border-radius: 8px;
+}
+
 /* ---- Stat cards ---- */
 /* Compact stat strip — single row */
 .stat-strip {

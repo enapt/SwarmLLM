@@ -9,6 +9,7 @@ mod parallax;
 mod prune;
 mod scoring;
 pub mod vram;
+pub mod wishlist;
 
 pub mod manager;
 pub mod scan;
@@ -18,6 +19,7 @@ pub use manager::AutoShardManager;
 pub(crate) use prune::pressure_adjusted_target;
 pub use scan::{check_and_load_model, rescan_local_shards};
 pub use vram::{compute_vram_budget, estimate_model_vram_mb, global_pool_vram_mb, local_vram_mb};
+pub use wishlist::{compute_wishlist, refresh_wishlist, Wishlist, WishlistEntry, WishlistStatus};
 
 /// Returns true when a shard file on disk looks fully downloaded.
 ///

@@ -363,6 +363,9 @@ impl SharedState {
                 cross_node_prefix_index: DashMap::new(),
                 peer_prefix_blocks: DashMap::new(),
                 p2p_download_permits: DashMap::new(),
+                wishlist: arc_swap::ArcSwap::from_pointee(
+                    crate::model::auto_manage::wishlist::Wishlist::default(),
+                ),
             },
             events: EventBus {
                 dashboard_tx: broadcast::channel(32).0,

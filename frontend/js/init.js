@@ -769,6 +769,10 @@
     if (App.autoManageStatus) App.autoManageStatus.init();
     if (App.claudeCode) App.claudeCode.init();
     if (App.responses) App.responses.init();
+    // R111: bind subtab + button handlers for the Swarm tab. Safe to call
+    // even when the user lands on a different tab — no fetches happen
+    // until `onShow` or the first stats_update.
+    if (App.swarmTab) App.swarmTab.bind();
     App.settings._apiKeyPromise = App.settings.loadApiKey();
 
     App.ui.switchTab(S.activeTab, true);
