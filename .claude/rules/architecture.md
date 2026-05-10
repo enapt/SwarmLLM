@@ -14,7 +14,7 @@ SharedState is organized into 4 sub-structs. Always use the correct accessor:
 - `state.models.hf_trending_cache` — R112. ArcSwap<HfTrendingSnapshot>; written by `HfWatcher` only.
 - `state.metrics.node_stats` — NOT `state.node_stats`
 - `state.metrics.providers_config` — NOT `state.providers_config`
-- `state.metrics.swarm_capacity` — R110. ArcSwap<SwarmCapacity>; refresh via `crate::daemon::state::refresh_swarm_capacity(state)`.
+- `state.metrics.swarm_capacity` — R110. ArcSwap<SwarmCapacity>; refresh via `crate::daemon::state::refresh_swarm_capacity(state)`. Eagerly refreshed on peer connect (`network/manager/identify.rs`) and disconnect (`network/manager/connections.rs`) so the dashboard banner stays consistent with the peer-list panel under churn — the WS stats-cache 1.5s coalesce alone is too lazy.
 
 When adding new fields to SharedState, put them in the appropriate sub-struct unless they're accessed by 10+ files across 3+ subsystem boundaries.
 
@@ -50,6 +50,47 @@ All storage keys are registered as constants on `App` in state.js (e.g., `App.MO
 ## Frontend Data Fetching
 
 Use `App.data.loadModels()` and `App.data.loadStats()` for model/stats data. Do NOT make independent `authFetch('/api/admin/models')` calls from components — this bypasses the dedup cache.
+
+## Frontend Component IIFE Boilerplate
+
+Every `frontend/js/components/*.js` file opens with the same boilerplate
+inside its IIFE:
+
+```js
+(function () {
+  if (!window.App) return;
+  var U = App.utils;   // <-- mandatory if the component calls escapeHtml / formatBytes / etc.
+  // ...
+})();
+```
+
+`U.escapeHtml`, `U.formatBytes`, `U.formatMB`, etc. are pulled off
+`App.utils`, which is populated by `core/utils.js`. Components that
+reference `U.*` without declaring `var U = App.utils` first will throw
+`ReferenceError: U is not defined` at the call site — the R111
+swarm-tab regression hid behind this until the Capacity Plan view
+rendered for the first time. When adding a new component, copy the
+existing boilerplate from a sibling file (e.g. `chat.js`).
+
+## Active-Pipeline Guard on Manual Mutations
+
+Anything that removes a shard file or model from a node MUST first
+check whether `active_pipelines` references it, and refuse with
+`SwarmError::ServiceUnavailable(...)` (mapped to HTTP 503) if so —
+yanking a shard file out from under an in-flight token loop surfaces
+as `ShardNotFound` mid-stream, which is unrecoverable. The
+auto-manage prune path already does this via `active_pipeline_shards`
+in `model/auto_manage/prune.rs`. The same guard MUST live in:
+
+- `api/admin_models/shards.rs::delete_shard` — checks
+  `seg.shard_id.model_id == mid && seg.shard_id.index == shard_index`.
+- `api/admin_models/lifecycle.rs::delete_model` — checks
+  `seg.shard_id.model_id == mid`.
+
+New "delete" or "evict-from-disk" admin handlers MUST add the guard
+before the destructive operation. Note that `unload_model` /
+`unload_shard` (memory-only eviction) are NOT in scope — the worker
+will simply re-load on next request.
 
 ## Inference Router Queue
 

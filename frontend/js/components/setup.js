@@ -342,14 +342,17 @@
       var contribLabels = { minimal: I18n.t('setup.contrib_minimal'), moderate: I18n.t('setup.contrib_moderate'), maximum: I18n.t('setup.contrib_maximum') };
       document.getElementById('summary-contribution').textContent = contribLabels[contribKey] || contribKey;
 
-      // R115: concrete preview — "At Moderate × 50 GB disk, you'll host
+      // R115: concrete preview — "At Moderate × N GB disk, you'll host
       // ~5 model parts (~30 GB)". Replaces the abstract "≤ 50% CPU"
       // framing with numbers a non-technical user can act on.
-      // 50 GB is the default Max Disk; we don't bother fetching the
-      // user's actual setting yet because they're still in setup.
+      // Prefers the actual available disk (capped at 200 GB so a 2 TB
+      // drive doesn't claim all the space) over a hardcoded default.
       var contribFactor = { minimal: 0.25, moderate: 0.5, maximum: 0.75 }[contribKey] || 0.5;
-      var defaultDiskGb = 50;
-      var autoBudgetGb = Math.round(defaultDiskGb * contribFactor);
+      var availDiskMb = App.setup.hwData && App.setup.hwData.available_disk_mb;
+      var diskBudgetGb = availDiskMb && availDiskMb > 0
+        ? Math.min(200, Math.max(10, Math.round(availDiskMb / 1024)))
+        : 50;
+      var autoBudgetGb = Math.round(diskBudgetGb * contribFactor);
       // Average shard ≈ 4 GB (Q4 7B-class); cap at 12 to keep the
       // number realistic.
       var avgShardGb = 4;

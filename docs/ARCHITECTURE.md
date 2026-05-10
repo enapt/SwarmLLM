@@ -1284,7 +1284,7 @@ Routes Claude model requests through a locally-authenticated `claude` CLI subpro
 - `GET     /api/admin/downloads` — Download queue with priorities and progress
 
 ### HuggingFace Integration
-- `GET  /api/admin/hf/search?query=...` — Search HuggingFace for GGUF models (grouped by repo with quant variants)
+- `GET  /api/admin/hf/search?q=...` — Search HuggingFace for GGUF models (grouped by repo with quant variants). Note the parameter is `q`, NOT `query` (axum deserialises via `#[serde(rename = "q")]`).
 - `GET  /api/admin/hf/probe?repo_id=...&filename=...` — Probe remote GGUF (size, shard layout)
 - `POST /api/admin/hf/download` — Download full GGUF model. **⚠ Deprecated** for normal use — the frontend and all new code MUST use `/api/admin/hf/download-shards`. Full-GGUF download exists only for offline-inference / seeding workflows; never call it implicitly. See CLAUDE.md § "No implicit full model downloads".
 - `POST /api/admin/hf/download-shards` — Download specific shard indices (supports `peer_fair_share` for smart distribution). **Preferred entry point.**
