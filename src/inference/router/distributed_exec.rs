@@ -342,6 +342,7 @@ pub(super) async fn execute_request(
                     let event = super::types::StreamingTokenEvent {
                         text: token.to_string(),
                         finish_reason: None,
+                        matched_stop_sequence: None,
                     };
                     tx.try_send(event).is_ok()
                 },
@@ -350,6 +351,7 @@ pub(super) async fn execute_request(
             let done_event = super::types::StreamingTokenEvent {
                 text: String::new(),
                 finish_reason: Some(gen_result.finish_reason.as_str().to_string()),
+                matched_stop_sequence: gen_result.matched_stop_sequence.clone(),
             };
             if tx.try_send(done_event).is_err() {
                 tracing::warn!(
@@ -365,6 +367,7 @@ pub(super) async fn execute_request(
                 finish_reason: gen_result.finish_reason.as_str().to_string(),
                 session_id: request.session_id.clone(),
                 token_logprobs: vec![],
+                matched_stop_sequence: gen_result.matched_stop_sequence,
             });
         }
 
@@ -378,6 +381,7 @@ pub(super) async fn execute_request(
             finish_reason: gen_result.finish_reason.as_str().to_string(),
             session_id: request.session_id.clone(),
             token_logprobs: vec![],
+            matched_stop_sequence: gen_result.matched_stop_sequence,
         });
     }
 

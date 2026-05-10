@@ -59,6 +59,15 @@ pub enum StreamEvent {
     Error {
         message: String,
     },
+    /// OpenAI 2024+ spec: when the request includes
+    /// `stream_options: {"include_usage": true}`, an extra terminal chunk
+    /// is emitted right before `[DONE]` with `choices: []` and the usage
+    /// object populated. This event carries the token counts to the
+    /// encoder; emit it ONLY when the request opted in.
+    Usage {
+        prompt_tokens: u32,
+        completion_tokens: u32,
+    },
     Done,
 }
 

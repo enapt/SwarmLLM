@@ -202,6 +202,7 @@ impl PipelineExecutor {
                         .send(StreamingTokenEvent {
                             text: String::new(),
                             finish_reason: Some(finish_reason.clone()),
+                            matched_stop_sequence: None,
                         })
                         .await;
                 }
@@ -216,6 +217,7 @@ impl PipelineExecutor {
                         .send(StreamingTokenEvent {
                             text: tok.text,
                             finish_reason: None,
+                            matched_stop_sequence: None,
                         })
                         .await
                         .is_err()
@@ -248,6 +250,10 @@ impl PipelineExecutor {
             finish_reason,
             session_id: self.request.session_id.clone(),
             token_logprobs: vec![],
+            // remote-generate fast path: stop-sequence detection happens
+            // remotely; the matched string isn't carried over the wire
+            // today (see distributed.rs comment).
+            matched_stop_sequence: None,
         }))
     }
 }

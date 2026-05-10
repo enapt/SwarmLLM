@@ -82,6 +82,7 @@ pub(super) async fn execute_local_batch(
                 let _ = tx.try_send(StreamingTokenEvent {
                     text: String::new(),
                     finish_reason: Some("stop".to_string()),
+                    matched_stop_sequence: None,
                 });
             }
             Ok(InferenceOutput {
@@ -92,6 +93,7 @@ pub(super) async fn execute_local_batch(
                 finish_reason: "stop".to_string(),
                 session_id: request.session_id.clone(),
                 token_logprobs: vec![],
+                matched_stop_sequence: None,
             })
         } else if executor.is_loaded() {
             // Hold the loaded_model_info read lock once and derive both the
@@ -147,6 +149,7 @@ pub(super) async fn execute_local_batch(
                         let event = StreamingTokenEvent {
                             text: token.to_string(),
                             finish_reason: None,
+                            matched_stop_sequence: None,
                         };
                         tx.try_send(event).is_ok()
                     },
@@ -161,6 +164,7 @@ pub(super) async fn execute_local_batch(
                         let done_event = StreamingTokenEvent {
                             text: String::new(),
                             finish_reason: Some(finish.clone()),
+                            matched_stop_sequence: gen_result.matched_stop_sequence.clone(),
                         };
                         let _ = tx.try_send(done_event);
                         Ok(InferenceOutput {
@@ -171,6 +175,7 @@ pub(super) async fn execute_local_batch(
                             finish_reason: finish,
                             session_id,
                             token_logprobs: vec![],
+                            matched_stop_sequence: gen_result.matched_stop_sequence,
                         })
                     }
                     Err(e) => Err(e),
@@ -200,6 +205,7 @@ pub(super) async fn execute_local_batch(
                             finish_reason: finish,
                             session_id: request.session_id.clone(),
                             token_logprobs: vec![],
+                            matched_stop_sequence: gen_result.matched_stop_sequence,
                         })
                     }
                     Err(e) => Err(e),

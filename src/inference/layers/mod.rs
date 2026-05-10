@@ -373,10 +373,34 @@ pub(crate) struct MoeFfn {
     pub(crate) n_experts_used: usize, // top-k
 }
 
-/// Select top-k indices and weights from a score vector on CPU.
+/// Select top-k indices and weights from a RAW router-logit vector on CPU.
 ///
-/// Candle 0.9 doesn't have a built-in topk, so we pull scores to CPU,
-/// argsort descending, and take top-k. Fine for small n_experts vectors.
+/// Returns `(indices, weights)` where `weights` is the renormalized
+/// probability slice — the canonical Mixtral / Qwen3 (`norm_topk_prob=true`)
+/// MoE routing semantics:
+///
+/// 1. softmax over **all** experts: `p_i = exp(s_i) / Z`
+/// 2. pick top-k by `p_i` (equivalent to picking by raw `s_i` since
+///    softmax is monotonic)
+/// 3. renormalize the selected slice to sum to 1: `w_i = p_i / Σ_{j∈topk} p_j`
+///
+/// Mathematical identity: step 1 → step 3 collapses to
+/// `w_i = exp(s_i) / Σ_{j∈topk} exp(s_j)`, which is **exactly** what
+/// `softmax(raw[topk])` computes (the global denominator `Z` cancels).
+/// We exploit this identity and apply `softmax` only to the selected k
+/// raw scores — same numerical result, but `O(k)` work instead of
+/// `O(n_experts)` softmax + `O(k)` renormalize.
+///
+/// Reference implementations:
+/// - Mixtral (HuggingFace `modeling_mixtral.py`) — softmax→topk→renorm
+/// - Qwen3MoE with `norm_topk_prob=true` (default for many GGUF variants)
+/// - DeepSeek-V3 routed-experts gate (after the `norm` step)
+///
+/// **Not matched**: DeepSeek-V2 strict spec (no renormalize, weights sum
+/// to less than 1) and Qwen3MoE with `norm_topk_prob=false`. Supporting
+/// the unnormalized variant would require a config flag plumbed from
+/// the GGUF metadata; today's models in this codebase use the
+/// renormalized convention.
 pub(crate) fn topk_cpu(scores: &Tensor, k: usize) -> CandleResult<(Tensor, Tensor)> {
     let scores_vec: Vec<f32> = scores.to_vec1()?;
     let n = scores_vec.len();
@@ -393,7 +417,8 @@ pub(crate) fn topk_cpu(scores: &Tensor, k: usize) -> CandleResult<(Tensor, Tenso
     let device = scores.device();
     let idx_tensor = Tensor::from_vec(idx_i64, (k,), device)?;
     let w_tensor = Tensor::from_vec(weights, (k,), device)?;
-    // Normalize weights via softmax over selected experts
+    // softmax over the selected k raw scores ≡ renormalized softmax-all-restricted-to-topk
+    // (see doc comment above for the algebraic identity).
     let w_tensor = candle_nn::ops::softmax(&w_tensor, 0)?;
     Ok((idx_tensor, w_tensor))
 }

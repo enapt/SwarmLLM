@@ -1570,6 +1570,7 @@ async fn handle_generate(
     let mut accumulated_text = String::new();
     let mut index_pos = prompt_tokens;
     let mut finish_reason = "length".to_string();
+    let mut matched_stop_sequence: Option<String> = None;
 
     if swift_active {
         let calibrator = SwiftCalibrator::new(
@@ -1577,7 +1578,7 @@ async fn handle_generate(
             swift_cfg.skip_ratio,
             swift_cfg.calibration_tokens,
         );
-        let outcome = swift_decode_loop(
+        let (outcome, matched) = swift_decode_loop(
             writer,
             model,
             kv_store,
@@ -1597,6 +1598,9 @@ async fn handle_generate(
         )
         .await?;
         finish_reason = outcome;
+        if matched.is_some() {
+            matched_stop_sequence = matched;
+        }
         tracing::info!(
             request_id = %request_id,
             rounds = calibrator.rounds(),
@@ -1616,9 +1620,10 @@ async fn handle_generate(
             accumulated_text.push_str(&text);
 
             // Check user-provided stop sequences
-            if crate::inference::sampling::find_stop_sequence(&accumulated_text, stop_sequences)
-                .is_some()
+            if let Some(matched) =
+                crate::inference::sampling::find_stop_sequence(&accumulated_text, stop_sequences)
             {
+                matched_stop_sequence = Some(matched.to_string());
                 finish_reason = "stop".to_string();
                 break;
             }
@@ -1687,6 +1692,7 @@ async fn handle_generate(
             prompt_tokens,
             completion_tokens: generated.len(),
             finish_reason,
+            matched_stop_sequence,
         },
         &[],
     )
@@ -1735,7 +1741,7 @@ async fn swift_decode_loop(
     index_pos: &mut usize,
     generated: &mut Vec<u32>,
     accumulated_text: &mut String,
-) -> Result<String, SwarmError> {
+) -> Result<(String, Option<String>), SwarmError> {
     let model_key = model.kv_model_key().to_string();
 
     // Local helper: emit a single committed token and update bookkeeping.
@@ -1762,10 +1768,10 @@ async fn swift_decode_loop(
         }
         let text = decode_token(model, token);
         accumulated_text.push_str(&text);
-        if crate::inference::sampling::find_stop_sequence(accumulated_text, stop_sequences)
-            .is_some()
+        if let Some(matched) =
+            crate::inference::sampling::find_stop_sequence(accumulated_text, stop_sequences)
         {
-            return Ok(EmitOutcome::Stop);
+            return Ok(EmitOutcome::StopMatch(matched.to_string()));
         }
         generated.push(token);
         send_worker(
@@ -1793,10 +1799,10 @@ async fn swift_decode_loop(
     loop {
         // Stop conditions on the carried `next_token` BEFORE running a round.
         if eos.contains(next_token) {
-            return Ok("stop".into());
+            return Ok(("stop".into(), None));
         }
         if generated.len() as u32 >= gen.sampling.max_tokens {
-            return Ok("length".into());
+            return Ok(("length".into(), None));
         }
 
         let p_start = *index_pos;
@@ -1805,7 +1811,7 @@ async fn swift_decode_loop(
         // budget can't cover next_token alone, just emit it via the per-token
         // fallback.
         if remaining_budget == 0 {
-            return Ok("length".into());
+            return Ok(("length".into(), None));
         }
 
         // ── Phase 1: draft γ tokens with the skip mask ──
@@ -1869,7 +1875,7 @@ async fn swift_decode_loop(
 
         // ── Phase 5: emit committed tokens. The carried next_token is
         // committed at p_start, then accepted draft tokens, then bonus.
-        let mut break_outcome: Option<String> = None;
+        let mut break_outcome: Option<(String, Option<String>)> = None;
 
         // Commit next_token at p_start (this is the token we sampled at the
         // end of the previous round — or from prefill on the first round).
@@ -1889,8 +1895,9 @@ async fn swift_decode_loop(
         .await?
         {
             EmitOutcome::Continue => {}
-            EmitOutcome::Stop => break_outcome = Some("stop".into()),
-            EmitOutcome::Length => break_outcome = Some("length".into()),
+            EmitOutcome::Stop => break_outcome = Some(("stop".into(), None)),
+            EmitOutcome::StopMatch(matched) => break_outcome = Some(("stop".into(), Some(matched))),
+            EmitOutcome::Length => break_outcome = Some(("length".into(), None)),
         }
 
         if break_outcome.is_none() {
@@ -1912,11 +1919,15 @@ async fn swift_decode_loop(
                 {
                     EmitOutcome::Continue => {}
                     EmitOutcome::Stop => {
-                        break_outcome = Some("stop".into());
+                        break_outcome = Some(("stop".into(), None));
+                        break;
+                    }
+                    EmitOutcome::StopMatch(matched) => {
+                        break_outcome = Some(("stop".into(), Some(matched)));
                         break;
                     }
                     EmitOutcome::Length => {
-                        break_outcome = Some("length".into());
+                        break_outcome = Some(("length".into(), None));
                         break;
                     }
                 }
@@ -1940,7 +1951,11 @@ async fn swift_decode_loop(
 #[derive(Debug, PartialEq)]
 enum EmitOutcome {
     Continue,
+    /// EOS-token-triggered stop (no user stop sequence matched).
     Stop,
+    /// User-provided stop sequence matched. The string is carried so the
+    /// caller can record `matched_stop_sequence` for the response.
+    StopMatch(String),
     Length,
 }
 
@@ -2143,6 +2158,7 @@ async fn try_register_generate_slot(
         generated_ids: Vec::new(),
         finish_reason: None,
         error_message: None,
+        matched_stop_sequence: None,
     };
     let prompt_len = slot.prompt_tokens;
     let remaining_after_prefix = prompt_len.saturating_sub(prefix_len);
@@ -2428,13 +2444,12 @@ async fn step_decode_pool(
             }
             let text = decode_token(model, last_token);
             slot.accumulated_text.push_str(&text);
-            if crate::inference::sampling::find_stop_sequence(
+            if let Some(matched) = crate::inference::sampling::find_stop_sequence(
                 &slot.accumulated_text,
                 &slot.stop_sequences,
-            )
-            .is_some()
-            {
-                slot.finish_stop();
+            ) {
+                let matched = matched.to_string();
+                slot.finish_stop_with_match(matched);
                 continue;
             }
             let logprob = if slot.use_logprobs {
@@ -2621,6 +2636,7 @@ async fn finalize_slot(
         prompt_tokens,
         finish_reason,
         error_message,
+        matched_stop_sequence,
         ..
     } = slot;
     let finish_label = finish_reason.unwrap_or("length").to_string();
@@ -2649,6 +2665,7 @@ async fn finalize_slot(
             prompt_tokens,
             completion_tokens: generated_count,
             finish_reason: finish_label,
+            matched_stop_sequence,
         },
         &[],
     )

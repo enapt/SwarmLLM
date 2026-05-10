@@ -329,6 +329,7 @@ impl ModelExecutor {
         let eos = model.token_eos();
         let stop_sequences = &params.stop;
         let mut accumulated_text = String::new();
+        let mut matched_stop_sequence: Option<String> = None;
 
         // cur_pos tracks the absolute KV position of the next token to decode,
         // which starts at `tokens.len()` (after prefill) — not at 0. The loop
@@ -352,9 +353,10 @@ impl ModelExecutor {
             accumulated_text.push_str(&piece);
 
             // Check user-provided stop sequences
-            if crate::inference::sampling::find_stop_sequence(&accumulated_text, stop_sequences)
-                .is_some()
+            if let Some(matched) =
+                crate::inference::sampling::find_stop_sequence(&accumulated_text, stop_sequences)
             {
+                matched_stop_sequence = Some(matched.to_string());
                 break;
             }
 
@@ -385,6 +387,7 @@ impl ModelExecutor {
             } else {
                 FinishReason::Stop
             },
+            matched_stop_sequence,
         })
     }
 
@@ -425,6 +428,7 @@ impl ModelExecutor {
             } else {
                 FinishReason::Stop
             },
+            matched_stop_sequence: None,
         })
     }
 
@@ -880,6 +884,9 @@ impl ModelExecutor {
             } else {
                 FinishReason::Stop
             },
+            // Speculative path: stop-sequence detection lives in the worker
+            // path (not exercised here today). Leave None.
+            matched_stop_sequence: None,
         };
 
         Ok((gen_result, spec_state))
@@ -891,6 +898,10 @@ pub struct GenerationResult {
     pub prompt_tokens: u32,
     pub completion_tokens: u32,
     pub finish_reason: FinishReason,
+    /// User-provided stop sequence that triggered termination, if any.
+    /// Populated only when `finish_reason == Stop` and the match was a
+    /// custom stop sequence (not EOS).
+    pub matched_stop_sequence: Option<String>,
 }
 
 #[derive(Debug, Clone)]

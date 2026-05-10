@@ -39,6 +39,10 @@ pub(super) enum AnthropicSseEvent {
     },
     MessageDelta {
         stop_reason: String,
+        /// Anthropic spec: when `stop_reason == "stop_sequence"`, the matched
+        /// custom stop string is reported here so clients can route on which
+        /// sequence fired. `None` for `end_turn` / `max_tokens` reasons.
+        stop_sequence: Option<String>,
         output_tokens: u32,
     },
     MessageStop,
@@ -118,12 +122,13 @@ pub(super) fn serialize_anthropic_event(event: &AnthropicSseEvent) -> (&'static 
         ),
         AnthropicSseEvent::MessageDelta {
             stop_reason,
+            stop_sequence,
             output_tokens,
         } => (
             "message_delta",
             serde_json::json!({
                 "type": "message_delta",
-                "delta": { "stop_reason": stop_reason, "stop_sequence": null },
+                "delta": { "stop_reason": stop_reason, "stop_sequence": stop_sequence },
                 "usage": { "output_tokens": output_tokens }
             })
             .to_string(),
@@ -173,12 +178,24 @@ pub(super) async fn send_sse_epilogue(
     stop_reason: String,
     output_tokens: u32,
 ) {
+    send_sse_epilogue_with_stop(sse_tx, stop_reason, None, output_tokens).await
+}
+
+/// Variant that carries the matched `stop_sequence` string in the
+/// `message_delta` event when `stop_reason == "stop_sequence"`.
+pub(super) async fn send_sse_epilogue_with_stop(
+    sse_tx: &tokio::sync::mpsc::Sender<AnthropicSseEvent>,
+    stop_reason: String,
+    stop_sequence: Option<String>,
+    output_tokens: u32,
+) {
     let _ = sse_tx
         .send(AnthropicSseEvent::ContentBlockStop { index: 0 })
         .await;
     let _ = sse_tx
         .send(AnthropicSseEvent::MessageDelta {
             stop_reason,
+            stop_sequence,
             output_tokens,
         })
         .await;

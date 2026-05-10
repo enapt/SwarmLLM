@@ -195,6 +195,7 @@ impl PipelineExecutor {
                 .send(StreamingTokenEvent {
                     text,
                     finish_reason: None,
+                    matched_stop_sequence: None,
                 })
                 .await;
         }
@@ -309,6 +310,7 @@ impl PipelineExecutor {
                         .send(StreamingTokenEvent {
                             text,
                             finish_reason: None,
+                            matched_stop_sequence: None,
                         })
                         .await
                         .is_err()
@@ -377,6 +379,7 @@ impl PipelineExecutor {
                 .send(StreamingTokenEvent {
                     text: String::new(),
                     finish_reason: Some(finish_reason.clone()),
+                    matched_stop_sequence: None,
                 })
                 .await;
         }

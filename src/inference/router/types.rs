@@ -57,6 +57,13 @@ pub struct InferenceOutput {
     pub session_id: Option<String>,
     /// Per-token log probabilities (populated when logprobs=true in request).
     pub token_logprobs: Vec<TokenLogProbEntry>,
+    /// The user-provided stop sequence that triggered termination, if any.
+    /// Populated only when `finish_reason == "stop"` AND a sequence from
+    /// `SamplingParams.stop` matched the accumulated text. Anthropic's
+    /// `/v1/messages` response contract requires this in the
+    /// `stop_sequence` field; OpenAI doesn't expose it but it's harmless
+    /// extra metadata for compatible clients.
+    pub matched_stop_sequence: Option<String>,
 }
 
 /// A single token's log probability info for the logprobs response field.
@@ -75,6 +82,12 @@ pub struct TokenLogProbEntry {
 pub struct StreamingTokenEvent {
     pub text: String,
     pub finish_reason: Option<String>,
+    /// Set on the final event (`finish_reason: Some("stop")`) when a
+    /// user-provided stop sequence matched. The Anthropic SSE handler
+    /// reads this to populate `message_delta.delta.stop_sequence`.
+    /// Empty/intermediate token events leave this as `None`.
+    #[allow(dead_code)]
+    pub matched_stop_sequence: Option<String>,
 }
 
 /// Command sent to the InferenceRouter from the API layer or network.

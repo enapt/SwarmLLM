@@ -255,6 +255,7 @@ fn build_content_chunk(
             logprobs: None,
         }],
         session_id: None,
+        usage: None,
     }
 }
 

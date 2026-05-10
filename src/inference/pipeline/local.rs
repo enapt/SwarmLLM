@@ -53,6 +53,7 @@ impl PipelineExecutor {
                     finish_reason: gen_result.finish_reason.as_str().to_string(),
                     session_id: self.request.session_id.clone(),
                     token_logprobs: vec![],
+                    matched_stop_sequence: gen_result.matched_stop_sequence.clone(),
                 });
             }
         }
@@ -72,6 +73,7 @@ impl PipelineExecutor {
             finish_reason: gen_result.finish_reason.as_str().to_string(),
             session_id: self.request.session_id.clone(),
             token_logprobs: vec![],
+            matched_stop_sequence: gen_result.matched_stop_sequence.clone(),
         })
     }
 

@@ -200,6 +200,31 @@ impl MessagesResponse {
         input_tokens: u32,
         output_tokens: u32,
     ) -> Self {
+        Self::text_with_stop(
+            id,
+            model,
+            text,
+            stop_reason,
+            None,
+            input_tokens,
+            output_tokens,
+        )
+    }
+
+    /// Like `text` but also fills the `stop_sequence` field per Anthropic
+    /// spec. When `stop_reason == "stop_sequence"` the matched custom stop
+    /// string MUST be reported here; clients route on it for multi-stop
+    /// agent scaffolds.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn text_with_stop(
+        id: String,
+        model: String,
+        text: String,
+        stop_reason: &str,
+        stop_sequence: Option<String>,
+        input_tokens: u32,
+        output_tokens: u32,
+    ) -> Self {
         Self {
             id,
             response_type: "message",
@@ -207,7 +232,7 @@ impl MessagesResponse {
             content: vec![ResponseContentBlock::Text { text }],
             model,
             stop_reason: Some(stop_reason.into()),
-            stop_sequence: None,
+            stop_sequence,
             usage: AnthropicUsage {
                 input_tokens,
                 output_tokens,

@@ -226,6 +226,7 @@ impl PipelineExecutor {
                 .send(StreamingTokenEvent {
                     text,
                     finish_reason: None,
+                    matched_stop_sequence: None,
                 })
                 .await;
         }
@@ -367,6 +368,7 @@ impl PipelineExecutor {
                         .send(StreamingTokenEvent {
                             text,
                             finish_reason: None,
+                            matched_stop_sequence: None,
                         })
                         .await
                         .is_err()
@@ -434,6 +436,7 @@ impl PipelineExecutor {
                 .send(StreamingTokenEvent {
                     text: String::new(),
                     finish_reason: Some(finish_reason.clone()),
+                    matched_stop_sequence: None,
                 })
                 .await;
         }
@@ -486,6 +489,8 @@ impl PipelineExecutor {
             finish_reason,
             session_id: self.request.session_id.clone(),
             token_logprobs: vec![],
+            // Speculative path: matched stop string isn't tracked here today.
+            matched_stop_sequence: None,
         }
     }
 }

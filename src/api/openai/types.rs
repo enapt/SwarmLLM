@@ -504,6 +504,12 @@ pub struct ChatCompletionChunk {
     pub choices: Vec<ChunkChoice>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
+    /// OpenAI 2024+ spec: when the request includes
+    /// `stream_options: {"include_usage": true}`, an extra terminal chunk
+    /// is emitted with `choices: []` and this field populated. Skipped on
+    /// every intermediate chunk so existing clients see no change.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub usage: Option<Usage>,
 }
 
 #[derive(Debug, Serialize)]

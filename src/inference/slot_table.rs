@@ -93,6 +93,11 @@ pub struct Slot {
     /// gets emitted to the daemon as `WorkerMsg::Error`. Lets one bad slot
     /// fail in isolation without aborting its neighbors.
     pub error_message: Option<String>,
+    /// The user-provided stop sequence that triggered termination, if any.
+    /// Set by `finish_stop_with_match`; left as `None` for EOS-triggered
+    /// stops and for `length`/`error` finishes. Plumbed into
+    /// `WorkerMsg::GenerateDone.matched_stop_sequence`.
+    pub matched_stop_sequence: Option<String>,
 }
 
 impl Slot {
@@ -112,6 +117,15 @@ impl Slot {
     pub fn finish_stop(&mut self) {
         if self.finish_reason.is_none() {
             self.finish_reason = Some("stop");
+        }
+    }
+
+    /// Mark `stop` finish triggered by a user-provided stop sequence; records
+    /// the matched string so it can be surfaced in the response.
+    pub fn finish_stop_with_match(&mut self, matched: String) {
+        if self.finish_reason.is_none() {
+            self.finish_reason = Some("stop");
+            self.matched_stop_sequence = Some(matched);
         }
     }
 
@@ -329,6 +343,7 @@ mod tests {
             generated_ids: vec![],
             finish_reason: None,
             error_message: None,
+            matched_stop_sequence: None,
         }
     }
 
@@ -370,6 +385,7 @@ mod tests {
             generated_ids: vec![],
             finish_reason: None,
             error_message: None,
+            matched_stop_sequence: None,
         }
     }
 

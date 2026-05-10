@@ -18,10 +18,7 @@ mod types;
 pub use types::{AnthropicUsage, MessagesResponse, ResponseContentBlock};
 
 use crate::inference::chat_template;
-use convert::{
-    is_connectivity_probe, map_finish_reason, resolve_model, to_internal_messages,
-    to_sampling_params,
-};
+use convert::{is_connectivity_probe, resolve_model, to_internal_messages, to_sampling_params};
 #[cfg(test)]
 use sse::{serialize_anthropic_event, AnthropicSseEvent};
 use types::{AnthropicContent, ContentBlock, MessagesRequest};
@@ -245,11 +242,16 @@ pub async fn messages(
                 .generate(&prompt, &sampling_params)
                 .map_err(ApiError)?;
 
-            let response = MessagesResponse::text(
+            let stop_reason = crate::api::anthropic::convert::map_finish_reason_with_match(
+                result.finish_reason.as_str(),
+                result.matched_stop_sequence.as_deref(),
+            );
+            let response = MessagesResponse::text_with_stop(
                 request_id,
                 model,
                 content,
-                map_finish_reason(result.finish_reason.as_str()),
+                stop_reason,
+                result.matched_stop_sequence,
                 result.prompt_tokens,
                 result.completion_tokens,
             );
@@ -487,9 +489,20 @@ mod tests {
 
     #[test]
     fn finish_reason_mapping() {
+        use convert::{map_finish_reason, map_finish_reason_with_match};
         assert_eq!(map_finish_reason("stop"), "end_turn");
         assert_eq!(map_finish_reason("length"), "max_tokens");
         assert_eq!(map_finish_reason("unknown"), "end_turn");
+        // R109: matched stop sequence overrides the default `end_turn`.
+        assert_eq!(
+            map_finish_reason_with_match("stop", Some("\n\nHuman:")),
+            "stop_sequence"
+        );
+        assert_eq!(map_finish_reason_with_match("stop", None), "end_turn");
+        assert_eq!(
+            map_finish_reason_with_match("length", Some("xxx")),
+            "max_tokens"
+        );
     }
 
     #[test]

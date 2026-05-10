@@ -144,6 +144,19 @@ pub(super) fn map_finish_reason(reason: &str) -> &'static str {
     }
 }
 
+/// Map internal finish reason + matched-stop-string to the Anthropic
+/// `stop_reason`. When a user-provided custom stop sequence matched (rather
+/// than EOS), the spec requires `stop_sequence` instead of `end_turn`.
+pub(super) fn map_finish_reason_with_match(
+    reason: &str,
+    matched_stop: Option<&str>,
+) -> &'static str {
+    match (reason, matched_stop) {
+        ("stop", Some(_)) => "stop_sequence",
+        _ => map_finish_reason(reason),
+    }
+}
+
 /// Resolve model name: strip `provider:` prefix if present, then expand the
 /// bare family aliases `opus` / `sonnet` / `haiku` to the current full IDs.
 ///

@@ -10,7 +10,8 @@ use crate::types::{ChatMessage, InferenceRequest, ModelId, SamplingParams};
 
 use super::convert::map_finish_reason;
 use super::sse::{
-    build_anthropic_sse_response, send_sse_epilogue, send_sse_preamble, AnthropicSseEvent,
+    build_anthropic_sse_response, send_sse_epilogue, send_sse_epilogue_with_stop,
+    send_sse_preamble, AnthropicSseEvent,
 };
 use super::types::{
     AnthropicContent, AnthropicUsage, ContentBlock, MessagesRequest, MessagesResponse,
@@ -56,11 +57,16 @@ pub(super) async fn anthropic_non_stream(
 
     let output = crate::api::submit_to_router(&router_tx, inference_req).await?;
 
-    let response = MessagesResponse::text(
+    let stop_reason = super::convert::map_finish_reason_with_match(
+        &output.finish_reason,
+        output.matched_stop_sequence.as_deref(),
+    );
+    let response = MessagesResponse::text_with_stop(
         request_id,
         model,
         output.content,
-        map_finish_reason(&output.finish_reason),
+        stop_reason,
+        output.matched_stop_sequence,
         output.prompt_tokens,
         output.completion_tokens,
     );
@@ -100,6 +106,7 @@ pub(super) async fn anthropic_stream(
         let mut client_disconnected = false;
         let mut streamed_token_count = 0u32;
         let mut finish_stop_reason = String::new();
+        let mut finish_matched_stop: Option<String> = None;
         while let Some(event) = token_rx.recv().await {
             if let Some(ref reason) = event.finish_reason {
                 got_finish = true;
@@ -112,7 +119,12 @@ pub(super) async fn anthropic_stream(
                         })
                         .await;
                 }
-                finish_stop_reason = map_finish_reason(reason).into();
+                finish_matched_stop = event.matched_stop_sequence.clone();
+                finish_stop_reason = super::convert::map_finish_reason_with_match(
+                    reason,
+                    finish_matched_stop.as_deref(),
+                )
+                .into();
                 break;
             }
             if !event.text.is_empty() {
@@ -146,11 +158,18 @@ pub(super) async fn anthropic_stream(
         // Get authoritative token count from the result when available
         let result = result_rx.await;
         if got_finish {
-            let output_tokens = match &result {
-                Ok(Ok(output)) => output.completion_tokens,
-                _ => streamed_token_count,
+            let (output_tokens, matched_from_result) = match &result {
+                Ok(Ok(output)) => (
+                    output.completion_tokens,
+                    output.matched_stop_sequence.clone(),
+                ),
+                _ => (streamed_token_count, None),
             };
-            send_sse_epilogue(&sse_tx, finish_stop_reason, output_tokens).await;
+            // Stream event takes precedence; result.matched_stop_sequence is
+            // the authoritative fallback when the token stream didn't carry
+            // it (e.g. distributed pipeline with no stop-string plumbing).
+            let matched = finish_matched_stop.or(matched_from_result);
+            send_sse_epilogue_with_stop(&sse_tx, finish_stop_reason, matched, output_tokens).await;
         } else {
             // Fallback: pipeline finished without streaming events
             match result {
@@ -163,9 +182,15 @@ pub(super) async fn anthropic_stream(
                             })
                             .await;
                     }
-                    send_sse_epilogue(
+                    let stop_reason = super::convert::map_finish_reason_with_match(
+                        &output.finish_reason,
+                        output.matched_stop_sequence.as_deref(),
+                    )
+                    .to_string();
+                    send_sse_epilogue_with_stop(
                         &sse_tx,
-                        map_finish_reason(&output.finish_reason).into(),
+                        stop_reason,
+                        output.matched_stop_sequence,
                         output.completion_tokens,
                     )
                     .await;
@@ -201,11 +226,16 @@ pub(super) async fn anthropic_split_non_stream(
     )
     .await?;
 
-    let response = MessagesResponse::text(
+    let stop_reason = super::convert::map_finish_reason_with_match(
+        &output.finish_reason,
+        output.matched_stop_sequence.as_deref(),
+    );
+    let response = MessagesResponse::text_with_stop(
         request_id,
         model,
         output.content,
-        map_finish_reason(&output.finish_reason),
+        stop_reason,
+        output.matched_stop_sequence,
         output.prompt_tokens,
         output.completion_tokens,
     );

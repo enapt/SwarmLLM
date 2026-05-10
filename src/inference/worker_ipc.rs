@@ -104,6 +104,14 @@ pub enum WorkerMsg {
         prompt_tokens: usize,
         completion_tokens: usize,
         finish_reason: String,
+        /// The user-provided stop sequence that matched, if any. Populated
+        /// only when `finish_reason == "stop"` and the match came from
+        /// `SamplingParams.stop` (not EOS). Carried back to the API layer
+        /// so Anthropic clients see the actual matched sequence rather
+        /// than `null`. Optional + default-skipping keeps wire-compat with
+        /// older worker builds.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        matched_stop_sequence: Option<String>,
     },
     /// Error for a specific request.
     Error { request_id: Uuid, message: String },

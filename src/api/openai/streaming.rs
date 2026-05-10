@@ -288,6 +288,16 @@ async fn router_inference_stream(
     let model_name = req.model.clone();
     let rid = request_id.clone();
     let stream_session_id = req.session_id.clone();
+    // OpenAI 2024+ stream_options.include_usage: opt-in via the extras
+    // HashMap (the request type doesn't model `stream_options` explicitly,
+    // so it round-trips through the catch-all). When set, emit a final
+    // chunk with `choices: []` and the usage object filled.
+    let include_usage = req
+        .extras
+        .get("stream_options")
+        .and_then(|v| v.get("include_usage"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
 
     // Bridge the streaming token channel into SSE events
     let (sse_tx, sse_rx) = tokio::sync::mpsc::channel::<StreamEvent>(64);
@@ -295,6 +305,9 @@ async fn router_inference_stream(
     tokio::spawn(async move {
         let stream_start = std::time::Instant::now();
         let mut token_count: u64 = 0;
+        // Track authoritative token counts for the optional terminal usage chunk.
+        let mut prompt_tokens_final: Option<u32> = None;
+        let mut completion_tokens_final: Option<u32> = None;
 
         // Send initial role delta
         if !send_role_preamble(&sse_tx).await {
@@ -385,6 +398,8 @@ async fn router_inference_stream(
             );
             match result_rx.await {
                 Ok(Ok(output)) => {
+                    prompt_tokens_final = Some(output.prompt_tokens);
+                    completion_tokens_final = Some(output.completion_tokens);
                     if !output.content.is_empty()
                         && sse_tx
                             .send(StreamEvent::Delta {
@@ -437,6 +452,38 @@ async fn router_inference_stream(
                         tracing::debug!("DIAG: SSE channel-drop finish send also failed");
                     }
                 }
+            }
+        } else if include_usage {
+            // include_usage path with token-stream finish: the streamed
+            // events already conveyed the deltas, but only `result_rx`
+            // carries authoritative token counts. Best-effort await with
+            // a short timeout so an upstream stall doesn't keep the
+            // client SSE open longer than necessary.
+            match tokio::time::timeout(std::time::Duration::from_secs(5), result_rx).await {
+                Ok(Ok(Ok(output))) => {
+                    prompt_tokens_final = Some(output.prompt_tokens);
+                    completion_tokens_final = Some(output.completion_tokens);
+                }
+                _ => {
+                    tracing::debug!(
+                        "DIAG: include_usage requested but result_rx timed out or errored — falling back to streamed token count"
+                    );
+                }
+            }
+        }
+
+        if include_usage {
+            let prompt_tokens = prompt_tokens_final.unwrap_or(0);
+            let completion_tokens = completion_tokens_final.unwrap_or(token_count as u32);
+            if sse_tx
+                .send(StreamEvent::Usage {
+                    prompt_tokens,
+                    completion_tokens,
+                })
+                .await
+                .is_err()
+            {
+                tracing::debug!("DIAG: include_usage chunk send failed — client disconnected");
             }
         }
         if sse_tx.send(StreamEvent::Done).await.is_err() {
@@ -697,6 +744,7 @@ fn stream_events_to_sse(
                     logprobs: None,
                 }],
                 session_id: sid,
+                usage: None,
             };
             json_buf.clear();
             let json = if serde_json::to_writer(&mut json_buf, &chunk).is_ok() {
@@ -720,6 +768,28 @@ fn stream_events_to_sse(
                 }
             });
             Ok(Event::default().data(serde_json::to_string(&error_json).unwrap_or_default()))
+        }
+        StreamEvent::Usage {
+            prompt_tokens,
+            completion_tokens,
+        } => {
+            // OpenAI 2024+ stream_options.include_usage: emit one extra
+            // chunk with empty `choices: []` and the usage object filled,
+            // immediately before `[DONE]`.
+            let chunk = ChatCompletionChunk {
+                id: request_id.clone(),
+                object: "chat.completion.chunk",
+                created,
+                model: model_name.clone(),
+                choices: Vec::new(),
+                session_id: None,
+                usage: Some(crate::api::openai::types::Usage::from_counts(
+                    prompt_tokens,
+                    completion_tokens,
+                )),
+            };
+            let json = serde_json::to_string(&chunk).unwrap_or_default();
+            Ok(Event::default().data(json))
         }
         StreamEvent::Done => Ok(Event::default().data("[DONE]")),
     });

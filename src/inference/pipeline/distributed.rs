@@ -36,6 +36,7 @@ impl PipelineExecutor {
                 finish_reason: "length".to_string(),
                 session_id: self.request.session_id.clone(),
                 token_logprobs: vec![],
+                matched_stop_sequence: None,
             });
         }
 
@@ -336,6 +337,7 @@ impl PipelineExecutor {
                                     .send(StreamingTokenEvent {
                                         text,
                                         finish_reason: None,
+                                        matched_stop_sequence: None,
                                     })
                                     .await
                                     .is_err()
@@ -366,6 +368,7 @@ impl PipelineExecutor {
                                 .send(StreamingTokenEvent {
                                     text: String::new(),
                                     finish_reason: Some("stop".to_string()),
+                                    matched_stop_sequence: None,
                                 })
                                 .await;
                         }
@@ -381,6 +384,7 @@ impl PipelineExecutor {
                                 .send(StreamingTokenEvent {
                                     text: String::new(),
                                     finish_reason: Some("stop".to_string()),
+                                    matched_stop_sequence: None,
                                 })
                                 .await;
                         }
@@ -401,6 +405,7 @@ impl PipelineExecutor {
                                 .send(StreamingTokenEvent {
                                     text: String::new(),
                                     finish_reason: Some(finish_reason.clone()),
+                                    matched_stop_sequence: None,
                                 })
                                 .await;
                         }
@@ -433,6 +438,7 @@ impl PipelineExecutor {
                     .send(StreamingTokenEvent {
                         text: String::new(),
                         finish_reason: Some("length".to_string()),
+                        matched_stop_sequence: None,
                     })
                     .await;
             }
@@ -530,6 +536,13 @@ impl PipelineExecutor {
                 .unwrap_or_else(|e| e.into_inner())
                 .drain(..)
                 .collect(),
+            // Distributed path: stop-sequence detection happens at the
+            // remote worker level; the matched string isn't currently
+            // carried back across `LayerResult`. Plumbing it would need
+            // a new optional field on `NetworkFinishReason::Stop` —
+            // deferred (the local worker path is the common case for
+            // Anthropic clients).
+            matched_stop_sequence: None,
         })
     }
 

@@ -1663,6 +1663,8 @@ impl ModelProcessPool {
         #[allow(unused_assignments)]
         let mut finish_reason = String::new();
         let mut token_logprobs: Vec<crate::inference::router::TokenLogProbEntry> = Vec::new();
+        #[allow(unused_assignments)]
+        let mut matched_stop_sequence: Option<String> = None;
 
         loop {
             let (msg, _) = match resp_rx.recv().await {
@@ -1696,6 +1698,7 @@ impl ModelProcessPool {
                                 .send(StreamingTokenEvent {
                                     text: text.clone(),
                                     finish_reason: None,
+                                    matched_stop_sequence: None,
                                 })
                                 .await;
                         }
@@ -1706,10 +1709,12 @@ impl ModelProcessPool {
                     prompt_tokens: pt,
                     completion_tokens: ct,
                     finish_reason: fr,
+                    matched_stop_sequence: ms,
                 } if rid == request_id => {
                     prompt_tokens = pt as u32;
                     completion_tokens = ct as u32;
                     finish_reason = fr;
+                    matched_stop_sequence = ms;
                     break;
                 }
                 WorkerMsg::Error {
@@ -1727,6 +1732,7 @@ impl ModelProcessPool {
                 .send(StreamingTokenEvent {
                     text: String::new(),
                     finish_reason: Some(finish_reason.clone()),
+                    matched_stop_sequence: matched_stop_sequence.clone(),
                 })
                 .await;
         }
@@ -1739,6 +1745,7 @@ impl ModelProcessPool {
             finish_reason,
             session_id: None,
             token_logprobs,
+            matched_stop_sequence,
         })
     }
 
