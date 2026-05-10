@@ -1062,3 +1062,6 @@
 {"file":"src/model/auto_manage/wishlist.rs","line":160,"kind":"feature_r112","summary":"wishlist scorer enriched with HF trending downloads; popular_on_hf why-tag","status":"fixed","date":"2026-05-10"}
 {"file":"src/api/admin.rs","line":120,"kind":"feature_r112","summary":"GET /api/admin/hf/trending endpoint exposes the cached trending snapshot","status":"fixed","date":"2026-05-10"}
 {"file":"src/config/inference.rs","line":360,"kind":"feature_r112","summary":"hf_watcher_enabled config flag (default true)","status":"fixed","date":"2026-05-10"}
+{"file":"src/daemon/state/capacity_plan.rs","line":1,"kind":"feature_r113","summary":"new compute_capacity_plan + 3 baked scenarios + headline_target; turns value prop into concrete next step for users","status":"fixed","date":"2026-05-10"}
+{"file":"src/api/admin.rs","line":135,"kind":"feature_r113","summary":"GET /api/admin/swarm/capacity-plan endpoint","status":"fixed","date":"2026-05-10"}
+{"file":"frontend/js/components/swarm-tab.js","line":260,"kind":"feature_r113","summary":"Capacity Plan view rendering with hero target + 3 scenario cards","status":"fixed","date":"2026-05-10"}

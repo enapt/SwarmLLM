@@ -16,6 +16,7 @@ use super::helpers::resolve_api_key;
 
 mod activity;
 mod capacity;
+mod capacity_plan;
 mod credits;
 mod events;
 mod hf;
@@ -27,6 +28,7 @@ pub use activity::{ActivityEvent, DashboardSignal, LoadedModelInfo};
 pub use capacity::{
     compute_swarm_capacity, refresh_swarm_capacity, HeadlineModel, ModelEntry, SwarmCapacity,
 };
+pub use capacity_plan::{compute_capacity_plan, CapacityPlan, CapacityScenario, HeadlineTarget};
 pub use credits::CreditPool;
 pub use events::EventBus;
 pub use hf::{HfProbeInfo, HfSource};

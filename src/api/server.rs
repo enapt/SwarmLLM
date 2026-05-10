@@ -215,6 +215,10 @@ pub fn build_router(state: AppState) -> Router {
         // Admin API
         .route("/api/admin/stats", get(admin::stats))
         .route("/api/admin/swarm/capacity", get(admin::swarm_capacity))
+        .route(
+            "/api/admin/swarm/capacity-plan",
+            get(admin::swarm_capacity_plan),
+        )
         .route("/api/admin/wishlist", get(admin::wishlist))
         .route("/api/admin/hf/trending", get(admin::hf_trending))
         .route(

@@ -123,6 +123,18 @@ pub async fn hf_trending(State(state): State<AppState>) -> Json<serde_json::Valu
     Json(serde_json::to_value(&*snap).unwrap_or_else(|_| serde_json::json!({})))
 }
 
+/// GET /api/admin/swarm/capacity-plan — what-if scenarios.
+///
+/// R113. Drives the dashboard's "if N more contributors joined with X GB
+/// each, you'd unlock Y" message — the educational layer that turns the
+/// product's value prop ("contribute and run huge models together") into
+/// a concrete next step. Three baked scenarios (small/medium/large) +
+/// a headline_target showing the closest aspirational upgrade.
+pub async fn swarm_capacity_plan(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let plan = crate::daemon::state::compute_capacity_plan(&state.shared_state);
+    Json(serde_json::to_value(&plan).unwrap_or_else(|_| serde_json::json!({})))
+}
+
 /// GET /api/admin/storage/breakdown — disk allocation summary for the
 /// stacked-bar UI. Replaces the dual "Max Disk" / "Max Auto-Download Storage"
 /// settings with a single bar showing total / used / auto-manage-budget /

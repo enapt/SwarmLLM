@@ -306,5 +306,91 @@
     }).then(function (data) {
       if (data) _renderRunning(data);
     }).catch(function () { /* non-fatal */ });
+    App.authFetch('/api/admin/swarm/capacity-plan').then(function (r) {
+      if (!r.ok) return null;
+      return r.json();
+    }).then(function (data) {
+      if (data) _renderCapacityPlan(data);
+    }).catch(function () { /* non-fatal */ });
+  }
+
+  // R113: render the Capacity Plan / What-If view. Three baked scenarios
+  // (small / medium / large) + a headline_target. Educational copy:
+  // "if N more contributors joined with X GB each, you'd unlock Y" —
+  // makes the contribution → capability link tangible for non-technical
+  // users.
+  function _renderCapacityPlan(plan) {
+    var container = document.getElementById('capacity-plan-content');
+    if (!container) return;
+    container.innerHTML = '';
+
+    if (plan.headline_target) {
+      var t = plan.headline_target;
+      var hero = document.createElement('div');
+      hero.className = 'capacity-plan-hero';
+      hero.innerHTML =
+        '<div class="capacity-plan-hero-icon">&#127919;</div>' +
+        '<div class="capacity-plan-hero-body">' +
+        '<div class="capacity-plan-hero-title">' +
+        I18n.t('capacity_plan.hero_title', { name: U.escapeHtml(t.display_name) }) +
+        '</div>' +
+        '<div class="capacity-plan-hero-msg">' +
+        I18n.t('capacity_plan.hero_msg', {
+          contributors: t.contributors_needed,
+          shortfall: _humaniseSize(t.vram_shortfall_mb),
+        }) +
+        '</div>' +
+        '</div>';
+      container.appendChild(hero);
+    }
+
+    var grid = document.createElement('div');
+    grid.className = 'capacity-plan-grid';
+    (plan.scenarios || []).forEach(function (sc) {
+      var card = document.createElement('div');
+      card.className = 'capacity-plan-card' + (sc.unlocks_anything ? ' capacity-plan-card-active' : '');
+
+      var title = document.createElement('div');
+      title.className = 'capacity-plan-card-title';
+      title.textContent = I18n.t('capacity_plan.scenario_' + sc.label);
+      card.appendChild(title);
+
+      var sub = document.createElement('div');
+      sub.className = 'capacity-plan-card-sub text-muted text-2xs';
+      sub.textContent = I18n.t('capacity_plan.scenario_sub', {
+        nodes: sc.added_nodes,
+        gb: sc.vram_gb_per_node,
+      });
+      card.appendChild(sub);
+
+      var projected = document.createElement('div');
+      projected.className = 'capacity-plan-projected';
+      projected.innerHTML =
+        '<span class="text-muted">' + I18n.t('capacity_plan.projected_total') +
+        '</span> <strong>' + _humaniseSize(sc.projected_total_vram_mb) + '</strong>';
+      card.appendChild(projected);
+
+      if (sc.unlocks_anything && sc.newly_unlocked.length > 0) {
+        var unlockTitle = document.createElement('div');
+        unlockTitle.className = 'capacity-plan-unlocks-title text-2xs mt-1';
+        unlockTitle.textContent = I18n.t('capacity_plan.unlocks');
+        card.appendChild(unlockTitle);
+        var ul = document.createElement('ul');
+        ul.className = 'capacity-plan-unlocks-list';
+        sc.newly_unlocked.forEach(function (m) {
+          var li = document.createElement('li');
+          li.textContent = m.display_name + ' (' + _humaniseSize(m.size_mb) + ')';
+          ul.appendChild(li);
+        });
+        card.appendChild(ul);
+      } else {
+        var none = document.createElement('div');
+        none.className = 'capacity-plan-no-unlock text-muted text-2xs mt-1';
+        none.textContent = I18n.t('capacity_plan.no_new_unlock');
+        card.appendChild(none);
+      }
+      grid.appendChild(card);
+    });
+    container.appendChild(grid);
   }
 })();

@@ -1096,6 +1096,44 @@ a:hover { color: var(--accent-hover); }
   border-radius: 8px;
 }
 
+/* R113: Capacity Plan view */
+.capacity-plan-hero {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  background: linear-gradient(135deg, rgba(56, 139, 253, 0.12), rgba(125, 89, 229, 0.08));
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 14px 18px;
+  margin-bottom: 12px;
+}
+.capacity-plan-hero-icon { font-size: 1.6em; }
+.capacity-plan-hero-title { font-weight: 600; font-size: 1.05rem; }
+.capacity-plan-hero-msg { color: var(--text-muted); font-size: 0.9rem; }
+.capacity-plan-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 10px;
+}
+.capacity-plan-card {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.capacity-plan-card-active {
+  border-color: rgba(46, 160, 67, 0.4);
+  box-shadow: 0 0 0 1px rgba(46, 160, 67, 0.18);
+}
+.capacity-plan-card-title { font-weight: 600; font-size: 0.95rem; }
+.capacity-plan-projected { font-size: 0.88rem; }
+.capacity-plan-unlocks-list { margin: 4px 0 0 18px; padding: 0; font-size: 0.84rem; }
+.capacity-plan-unlocks-list li { margin-bottom: 2px; }
+.capacity-plan-no-unlock { font-style: italic; }
+
 /* ---- Stat cards ---- */
 /* Compact stat strip — single row */
 .stat-strip {
