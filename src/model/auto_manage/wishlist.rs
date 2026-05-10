@@ -255,6 +255,11 @@ pub fn compute_wishlist(state: &SharedState) -> Wishlist {
         // by 1 so a 1-holder model still scores positive.
         let popularity = ((holders.len() + 1) as f64).log10();
         score += 12.5 * popularity.min(2.0); // log10(100) = 2.0 caps it
+                                             // Surface the popularity boost as a why-tag once the swarm has
+                                             // enough independent hosts that "popular here" is meaningful.
+        if holders.len() >= 5 {
+            why_tags.push("wishlist.why.popular_on_swarm".to_string());
+        }
 
         // Demand component (0..25): regional demand from the gossip
         // index. We re-use the `region_demand` map already maintained

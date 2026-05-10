@@ -50,6 +50,11 @@ const HF_WATCHER_STARTUP_DELAY_SECS: u64 = 30;
 /// On error, exponential back-off doubles the wait up to this cap.
 const HF_WATCHER_MAX_BACKOFF_SECS: u64 = 7200;
 
+/// Initial back-off after the first error. Smaller than the success
+/// interval so a transient blip retries within minutes rather than
+/// jumping straight to MAX_BACKOFF.
+const HF_WATCHER_BASE_BACKOFF_SECS: u64 = 300;
+
 /// HF endpoint we query. `library=gguf` filters to GGUF-compatible repos
 /// (where llama.cpp / our split path will work); `sort=downloads`
 /// dir=-1 ranks by all-time downloads which is the most stable signal
@@ -66,6 +71,25 @@ pub const MAX_TRENDING_ENTRIES: usize = 100;
 /// model to `DemandVerified` (which lets auto-manage act on it).
 const MIN_DOWNLOADS_FOR_TRUST: u64 = 100_000;
 const MIN_AGE_FOR_TRUST_HOURS: i64 = 24;
+
+/// Internal `poll_once` error type — separated so the run loop can
+/// honour HF's `Retry-After` on 429 responses instead of applying the
+/// generic exponential back-off.
+enum PollError {
+    RateLimited { retry_after_secs: u64 },
+    Other(SwarmError),
+}
+
+impl std::fmt::Display for PollError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PollError::RateLimited { retry_after_secs } => {
+                write!(f, "rate-limited (retry-after {retry_after_secs}s)")
+            }
+            PollError::Other(e) => write!(f, "{e}"),
+        }
+    }
+}
 
 /// One model from the HF /api/models response — only the fields we use.
 #[derive(Clone, Debug, Deserialize)]
@@ -167,8 +191,25 @@ impl HfWatcher {
                     tracing::info!(count, "HfWatcher: snapshot refreshed");
                     backoff = self.interval; // reset on success
                 }
-                Err(e) => {
-                    let next = backoff
+                Err(PollError::RateLimited { retry_after_secs }) => {
+                    let secs = retry_after_secs.clamp(60, HF_WATCHER_MAX_BACKOFF_SECS);
+                    tracing::warn!(
+                        retry_after = secs,
+                        "HfWatcher rate-limited; honouring Retry-After"
+                    );
+                    backoff = Duration::from_secs(secs);
+                }
+                Err(PollError::Other(e)) => {
+                    // Start fresh from BASE_BACKOFF instead of from
+                    // self.interval, so the first retry happens in minutes
+                    // (not 2h — the cap is hit immediately if we double the
+                    // success interval).
+                    let prev = if backoff == self.interval {
+                        Duration::from_secs(HF_WATCHER_BASE_BACKOFF_SECS)
+                    } else {
+                        backoff
+                    };
+                    let next = prev
                         .saturating_mul(2)
                         .min(Duration::from_secs(HF_WATCHER_MAX_BACKOFF_SECS));
                     tracing::warn!(error = %e, next_secs = next.as_secs(), "HfWatcher poll failed; backing off");
@@ -188,33 +229,41 @@ impl HfWatcher {
         }
     }
 
-    async fn poll_once(&self) -> Result<usize, SwarmError> {
-        let resp = self
-            .client
-            .get(HF_API_URL)
-            .send()
-            .await
-            .map_err(|e| SwarmError::Internal(format!("HfWatcher fetch: {e}")))?;
+    async fn poll_once(&self) -> Result<usize, PollError> {
+        let resp =
+            self.client.get(HF_API_URL).send().await.map_err(|e| {
+                PollError::Other(SwarmError::Internal(format!("HfWatcher fetch: {e}")))
+            })?;
+        if resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            let retry_after_secs = resp
+                .headers()
+                .get(reqwest::header::RETRY_AFTER)
+                .and_then(|v| v.to_str().ok())
+                .and_then(crate::model::huggingface::parse_retry_after)
+                .unwrap_or(HF_WATCHER_BASE_BACKOFF_SECS);
+            return Err(PollError::RateLimited { retry_after_secs });
+        }
         if !resp.status().is_success() {
-            return Err(SwarmError::Internal(format!(
+            return Err(PollError::Other(SwarmError::Internal(format!(
                 "HfWatcher status {}",
                 resp.status()
-            )));
+            ))));
         }
         // We bound the body size — HF /api/models with limit=100&full=true
         // returns ~1-2 MB. 4 MB is comfortable headroom.
         let bytes = resp
             .bytes()
             .await
-            .map_err(|e| SwarmError::Internal(format!("HfWatcher body: {e}")))?;
+            .map_err(|e| PollError::Other(SwarmError::Internal(format!("HfWatcher body: {e}"))))?;
         if bytes.len() > 4 * 1024 * 1024 {
-            return Err(SwarmError::Internal(format!(
+            return Err(PollError::Other(SwarmError::Internal(format!(
                 "HfWatcher response too large ({} bytes)",
                 bytes.len()
-            )));
+            ))));
         }
-        let raw: Vec<HfApiModel> = serde_json::from_slice(&bytes)
-            .map_err(|e| SwarmError::Internal(format!("HfWatcher decode: {e}")))?;
+        let raw: Vec<HfApiModel> = serde_json::from_slice(&bytes).map_err(|e| {
+            PollError::Other(SwarmError::Internal(format!("HfWatcher decode: {e}")))
+        })?;
 
         let mut entries: Vec<HfTrendingEntry> =
             Vec::with_capacity(raw.len().min(MAX_TRENDING_ENTRIES));
@@ -231,6 +280,13 @@ impl HfWatcher {
                     .any(|t| t == "text-generation" || t == "conversational"),
             };
             if !is_text {
+                continue;
+            }
+            // Defense-in-depth: drop malformed repo_ids (path-traversal, bad
+            // chars). The trending snapshot is exposed via REST and feeds
+            // wishlist scoring; gotcha #142 covers the same gate elsewhere.
+            if crate::model::huggingface::validate_hf_repo_id(&m.repo_id).is_err() {
+                tracing::debug!(repo_id = %m.repo_id, "HfWatcher: skipping malformed repo_id");
                 continue;
             }
             let task_tags = infer_task_tags(&m.tags, m.pipeline_tag.as_deref());

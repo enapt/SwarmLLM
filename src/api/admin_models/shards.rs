@@ -156,6 +156,28 @@ pub async fn delete_shard(
         return Err(ApiError(crate::error::SwarmError::ShardNotFound(shard_id)));
     }
 
+    // R110 follow-up: refuse mid-pipeline deletion. The auto-manage prune
+    // path already protects in-use shards via active_pipeline_shards;
+    // applying the same gate here means a "Delete shard" click during an
+    // active token loop returns 503 instead of yanking the file out from
+    // under the in-flight inference (which would surface as a confusing
+    // mid-stream error to the client).
+    let in_use = shared.active_pipelines.iter().any(|entry| {
+        entry
+            .value()
+            .segments
+            .iter()
+            .any(|seg| seg.shard_id.model_id == mid && seg.shard_id.index == shard_index)
+    });
+    if in_use {
+        return Err(ApiError(crate::error::SwarmError::ServiceUnavailable(
+            format!(
+                "Shard {}/{} is currently serving an active inference; retry shortly",
+                model_id, shard_index
+            ),
+        )));
+    }
+
     // Delete shard file from disk
     let shard_store = state.shared_state.shard_store();
     let shard_path = shard_store.shard_path(&mid, shard_index);

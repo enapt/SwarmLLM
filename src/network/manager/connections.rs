@@ -193,6 +193,11 @@ impl NetworkManager {
                 // Remove from libp2p-connected ground-truth set so HealthMonitor
                 // can now evict the peer_registry entry if it goes stale.
                 self.shared_state.connected_node_ids.remove(nid);
+                // R110: refresh swarm-capacity so the banner contributor count
+                // and serveable-models list reflect the lost peer immediately
+                // (the WS stats-cache otherwise lags by ~1.5s, leaving the
+                // peer-list panel and the banner inconsistent under churn).
+                crate::daemon::state::refresh_swarm_capacity(&self.shared_state);
                 self.shared_state
                     .models
                     .peer_shard_downloads

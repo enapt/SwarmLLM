@@ -20,6 +20,27 @@ pub async fn delete_model(
         return Err(ApiError(crate::error::SwarmError::ModelNotAvailable(mid)));
     }
 
+    // R110 follow-up: refuse to delete a model whose shards are mid-pipeline.
+    // The auto-manage prune path already checks `active_pipeline_shards`;
+    // applying the same gate here means a "Delete model" click during an
+    // in-flight inference returns 503 instead of yanking shards out from
+    // under the running token loop.
+    let in_use = shared.active_pipelines.iter().any(|entry| {
+        entry
+            .value()
+            .segments
+            .iter()
+            .any(|seg| seg.shard_id.model_id == mid)
+    });
+    if in_use {
+        return Err(ApiError(crate::error::SwarmError::ServiceUnavailable(
+            format!(
+                "Model {} is currently serving an active inference; retry shortly",
+                model_id
+            ),
+        )));
+    }
+
     let node_id = shared.identity.node_id().clone();
 
     // Remove shard files from disk (in spawn_blocking to avoid blocking Tokio)

@@ -138,12 +138,22 @@
           } else if (repo.fits_vram === false && variants.length > 0) {
             statsHtml += '<span><span style="color:var(--orange)" title="' + U.escapeHtml(I18n.t('models.hf_exceeds_vram')) + '">&#9888; ' + U.escapeHtml(I18n.t('models.tip_exceeds_vram')) + '</span></span>';
           }
-          // Composite score badge
-          if (repo.composite_score != null) {
-            var scoreColor = repo.composite_score >= 60 ? 'var(--green)' : repo.composite_score >= 30 ? 'var(--yellow)' : 'var(--text-muted)';
-            statsHtml += '<span style="color:' + scoreColor + '; font-weight:600" title="' + U.escapeHtml(I18n.t('models.hf_score_breakdown', { quality: (repo.score_breakdown||{}).quality||0, fit: (repo.score_breakdown||{}).fit||0, demand: (repo.score_breakdown||{}).demand||0, size: (repo.score_breakdown||{}).size||0 })) + '">' + I18n.t('models.hf_score_pts', { score: repo.composite_score }) + '</span>';
-          }
+          // R114: composite score badge replaced by the status-driven CTA
+          // pill below. The raw score number lives on the card title
+          // attribute (debug aid) so the breakdown is still inspectable
+          // for power users without crowding the visible UI.
           card.querySelector('.hf-meta-stats').innerHTML = statsHtml;
+          if (repo.composite_score != null) {
+            var nameEl = card.querySelector('.hf-model-name');
+            if (nameEl) {
+              nameEl.title = I18n.t('models.hf_score_breakdown', {
+                quality: (repo.score_breakdown||{}).quality||0,
+                fit: (repo.score_breakdown||{}).fit||0,
+                demand: (repo.score_breakdown||{}).demand||0,
+                size: (repo.score_breakdown||{}).size||0,
+              });
+            }
+          }
 
           // Network meta
           var replicas = repo.network_replicas || 0;

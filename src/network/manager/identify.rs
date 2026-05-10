@@ -295,6 +295,10 @@ impl NetworkManager {
         // the NodeId after Identify. Identify also re-pushes periodically;
         // DashSet insert is idempotent so repeat inserts are harmless.
         self.shared_state.connected_node_ids.insert(node_id.clone());
+        // R110: refresh swarm-capacity snapshot so the dashboard banner
+        // reflects the new contributor without waiting for the next ~1.5s
+        // stats-cache tick.
+        crate::daemon::state::refresh_swarm_capacity(&self.shared_state);
         // Persistent NodeId → PeerId mapping (survives disconnects, same cap)
         if self.shared_state.peer_id_map.len() < MAX_PEER_TO_NODE
             || self.shared_state.peer_id_map.contains_key(&node_id)
