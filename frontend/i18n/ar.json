@@ -980,6 +980,8 @@
   "setup.summary_hw": "الأجهزة",
   "setup.summary_peer": "ند الشبكة",
   "setup.summary_provider": "المزود السحابي",
+  "setup.summary_storage_label": "Disk preview",
+  "setup.summary_storage_preview": "About {shards} model parts (~{gb} GB)",
   "setup.testing_key": "جارٍ اختبار المفتاح…",
   "setup.welcome": "مرحباً بك في SwarmLLM",
   "shard.already_local": "الجزء {idx} موجود بالفعل على هذا الجهاز",

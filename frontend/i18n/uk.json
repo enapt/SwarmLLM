@@ -980,6 +980,8 @@
   "setup.summary_hw": "Обладнання",
   "setup.summary_peer": "Пір swarm",
   "setup.summary_provider": "Хмарний провайдер",
+  "setup.summary_storage_label": "Disk preview",
+  "setup.summary_storage_preview": "About {shards} model parts (~{gb} GB)",
   "setup.testing_key": "Перевірка ключа…",
   "setup.welcome": "Ласкаво просимо до SwarmLLM",
   "shard.already_local": "Частина {idx} вже є на цьому пристрої",

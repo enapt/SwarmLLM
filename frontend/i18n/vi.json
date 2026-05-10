@@ -980,6 +980,8 @@
   "setup.summary_hw": "Phần cứng",
   "setup.summary_peer": "Nút Swarm",
   "setup.summary_provider": "Nhà cung cấp đám mây",
+  "setup.summary_storage_label": "Disk preview",
+  "setup.summary_storage_preview": "About {shards} model parts (~{gb} GB)",
   "setup.testing_key": "Đang kiểm tra key…",
   "setup.welcome": "Chào mừng đến với SwarmLLM",
   "shard.already_local": "Phần {idx} đã có trên thiết bị này",

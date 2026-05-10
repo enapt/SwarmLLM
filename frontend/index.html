@@ -204,6 +204,12 @@
             <span class="setup-summary-label" data-i18n="setup.summary_auto_download">Auto-Download</span>
             <span class="setup-summary-value" id="summary-auto-manage">---</span>
           </button>
+          <!-- R115: concrete preview — "you'll host ~N model parts (~X GB)".
+               Updates live as the user toggles the contribution slider. -->
+          <div class="setup-summary-row setup-summary-preview" aria-hidden="true">
+            <span class="setup-summary-label" data-i18n="setup.summary_storage_label">Disk preview</span>
+            <span class="setup-summary-value text-muted text-2xs" id="summary-storage-preview">—</span>
+          </div>
           <button type="button" id="summary-invite-row" class="setup-summary-row hidden" data-jump-step="2" data-i18n-title="setup.summary_edit_step2" title="Click to change peer">
             <span class="setup-summary-label" data-i18n="setup.summary_peer">Swarm Peer</span>
             <span class="setup-summary-value" id="summary-invite">---</span>

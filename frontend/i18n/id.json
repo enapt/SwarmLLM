@@ -980,6 +980,8 @@
   "setup.summary_hw": "Perangkat Keras",
   "setup.summary_peer": "Peer Swarm",
   "setup.summary_provider": "Penyedia Cloud",
+  "setup.summary_storage_label": "Disk preview",
+  "setup.summary_storage_preview": "About {shards} model parts (~{gb} GB)",
   "setup.testing_key": "Menguji key…",
   "setup.welcome": "Selamat Datang di SwarmLLM",
   "shard.already_local": "Bagian {idx} sudah ada di perangkat ini",

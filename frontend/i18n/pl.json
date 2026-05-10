@@ -980,6 +980,8 @@
   "setup.summary_hw": "Sprzęt",
   "setup.summary_peer": "Węzeł swarm",
   "setup.summary_provider": "Dostawca chmury",
+  "setup.summary_storage_label": "Disk preview",
+  "setup.summary_storage_preview": "About {shards} model parts (~{gb} GB)",
   "setup.testing_key": "Testowanie klucza…",
   "setup.welcome": "Witaj w SwarmLLM",
   "shard.already_local": "Część {idx} jest już na tym urządzeniu",

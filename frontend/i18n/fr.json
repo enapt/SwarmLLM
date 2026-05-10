@@ -980,6 +980,8 @@
   "setup.summary_hw": "Matériel",
   "setup.summary_peer": "Pair swarm",
   "setup.summary_provider": "Fournisseur cloud",
+  "setup.summary_storage_label": "Disk preview",
+  "setup.summary_storage_preview": "About {shards} model parts (~{gb} GB)",
   "setup.testing_key": "Test de la clé…",
   "setup.welcome": "Bienvenue sur SwarmLLM",
   "shard.already_local": "La partie {idx} est déjà sur cet appareil",

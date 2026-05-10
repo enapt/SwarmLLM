@@ -1068,3 +1068,5 @@
 {"file":"src/api/admin_hf/search.rs","line":18,"kind":"feature_r114","summary":"task filter param + status-driven CTA + task_tags from HfWatcher cache + name-based fallback","status":"fixed","date":"2026-05-10"}
 {"file":"frontend/index.html","line":1640,"kind":"feature_r114","summary":"hf-task-chips multi-select + tmpl-hf-result-card extended with hf-meta-tasks/hf-meta-cta slots","status":"fixed","date":"2026-05-10"}
 {"file":"frontend/js/components/models.js","line":18,"kind":"feature_r114","summary":"App.hf.toggleTaskChip + task_tags pill rendering + status-CTA pill rendering","status":"fixed","date":"2026-05-10"}
+{"file":"frontend/js/components/setup.js","line":340,"kind":"feature_r115","summary":"setup step 3 storage preview — concrete 'about N model parts (~X GB)'","status":"fixed","date":"2026-05-10"}
+{"file":"frontend/i18n","line":1,"kind":"feature_r115","summary":"setup.summary_storage_label / preview keys propagated; final i18n parity audit confirmed all 21 files at 1110 keys","status":"fixed","date":"2026-05-10"}

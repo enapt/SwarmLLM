@@ -980,6 +980,8 @@
   "setup.summary_hw": "Hardware",
   "setup.summary_peer": "Swarm uzel",
   "setup.summary_provider": "Cloudový poskytovatel",
+  "setup.summary_storage_label": "Disk preview",
+  "setup.summary_storage_preview": "About {shards} model parts (~{gb} GB)",
   "setup.testing_key": "Testování klíče…",
   "setup.welcome": "Vítejte ve SwarmLLM",
   "shard.already_local": "Část {idx} již je na tomto zařízení",

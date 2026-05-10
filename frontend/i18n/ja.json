@@ -980,6 +980,8 @@
   "setup.summary_hw": "ハードウェア",
   "setup.summary_peer": "スウォームピア",
   "setup.summary_provider": "クラウドプロバイダー",
+  "setup.summary_storage_label": "Disk preview",
+  "setup.summary_storage_preview": "About {shards} model parts (~{gb} GB)",
   "setup.testing_key": "キーをテスト中…",
   "setup.welcome": "SwarmLLM へようこそ",
   "shard.already_local": "パート{idx}はすでにこのデバイスにあります",

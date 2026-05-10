@@ -980,6 +980,8 @@
   "setup.summary_hw": "हार्डवेयर",
   "setup.summary_peer": "स्वार्म पीयर",
   "setup.summary_provider": "क्लाउड प्रदाता",
+  "setup.summary_storage_label": "Disk preview",
+  "setup.summary_storage_preview": "About {shards} model parts (~{gb} GB)",
   "setup.testing_key": "key परीक्षण हो रहा है…",
   "setup.welcome": "SwarmLLM में आपका स्वागत है",
   "shard.already_local": "भाग {idx} पहले से इस डिवाइस पर है",

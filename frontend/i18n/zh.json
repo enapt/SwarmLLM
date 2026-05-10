@@ -980,6 +980,8 @@
   "setup.summary_hw": "硬件",
   "setup.summary_peer": "群集对等节点",
   "setup.summary_provider": "云服务提供商",
+  "setup.summary_storage_label": "Disk preview",
+  "setup.summary_storage_preview": "About {shards} model parts (~{gb} GB)",
   "setup.testing_key": "正在测试密钥…",
   "setup.welcome": "欢迎使用 SwarmLLM",
   "shard.already_local": "第 {idx} 部分已在本设备上",

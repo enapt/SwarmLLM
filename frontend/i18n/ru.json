@@ -980,6 +980,8 @@
   "setup.summary_hw": "Оборудование",
   "setup.summary_peer": "Пир Swarm",
   "setup.summary_provider": "Облачный провайдер",
+  "setup.summary_storage_label": "Disk preview",
+  "setup.summary_storage_preview": "About {shards} model parts (~{gb} GB)",
   "setup.testing_key": "Проверка ключа…",
   "setup.welcome": "Добро пожаловать в SwarmLLM",
   "shard.already_local": "Часть {idx} уже на этом устройстве",

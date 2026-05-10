@@ -341,6 +341,26 @@
       var contribKey = (contribSel && contribSel.value) || 'moderate';
       var contribLabels = { minimal: I18n.t('setup.contrib_minimal'), moderate: I18n.t('setup.contrib_moderate'), maximum: I18n.t('setup.contrib_maximum') };
       document.getElementById('summary-contribution').textContent = contribLabels[contribKey] || contribKey;
+
+      // R115: concrete preview — "At Moderate × 50 GB disk, you'll host
+      // ~5 model parts (~30 GB)". Replaces the abstract "≤ 50% CPU"
+      // framing with numbers a non-technical user can act on.
+      // 50 GB is the default Max Disk; we don't bother fetching the
+      // user's actual setting yet because they're still in setup.
+      var contribFactor = { minimal: 0.25, moderate: 0.5, maximum: 0.75 }[contribKey] || 0.5;
+      var defaultDiskGb = 50;
+      var autoBudgetGb = Math.round(defaultDiskGb * contribFactor);
+      // Average shard ≈ 4 GB (Q4 7B-class); cap at 12 to keep the
+      // number realistic.
+      var avgShardGb = 4;
+      var estShards = Math.min(12, Math.max(1, Math.round(autoBudgetGb / avgShardGb)));
+      var previewEl = document.getElementById('summary-storage-preview');
+      if (previewEl) {
+        previewEl.textContent = I18n.t('setup.summary_storage_preview', {
+          shards: estShards,
+          gb: autoBudgetGb,
+        });
+      }
       var gpuName = App.setup.hwData && App.setup.hwData.gpu_name ? App.setup.hwData.gpu_name : I18n.t('hw.mode_cpu_only');
       document.getElementById('summary-gpu').textContent = gpuName;
       var autoManage = document.getElementById('setup-auto-manage').checked;

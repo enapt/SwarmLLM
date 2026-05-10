@@ -980,6 +980,8 @@
   "setup.summary_hw": "ฮาร์ดแวร์",
   "setup.summary_peer": "เพียร์สวอร์ม",
   "setup.summary_provider": "ผู้ให้บริการคลาวด์",
+  "setup.summary_storage_label": "Disk preview",
+  "setup.summary_storage_preview": "About {shards} model parts (~{gb} GB)",
   "setup.testing_key": "กำลังทดสอบ key…",
   "setup.welcome": "ยินดีต้อนรับสู่ SwarmLLM",
   "shard.already_local": "ส่วน {idx} มีอยู่บนอุปกรณ์นี้แล้ว",

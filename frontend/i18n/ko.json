@@ -980,6 +980,8 @@
   "setup.summary_hw": "하드웨어",
   "setup.summary_peer": "스웜 피어",
   "setup.summary_provider": "클라우드 공급자",
+  "setup.summary_storage_label": "Disk preview",
+  "setup.summary_storage_preview": "About {shards} model parts (~{gb} GB)",
   "setup.testing_key": "키 테스트 중…",
   "setup.welcome": "SwarmLLM에 오신 것을 환영합니다",
   "shard.already_local": "파트 {idx}는 이미 이 기기에 있습니다",

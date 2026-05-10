@@ -980,6 +980,8 @@
   "setup.summary_hw": "Hårdvara",
   "setup.summary_peer": "Svärmspeer",
   "setup.summary_provider": "Molnleverantör",
+  "setup.summary_storage_label": "Disk preview",
+  "setup.summary_storage_preview": "About {shards} model parts (~{gb} GB)",
   "setup.testing_key": "Testar nyckel…",
   "setup.welcome": "Välkommen till SwarmLLM",
   "shard.already_local": "Del {idx} finns redan på den här enheten",
