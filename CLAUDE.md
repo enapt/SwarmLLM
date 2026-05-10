@@ -13,7 +13,7 @@ SwarmLLM is a single Rust binary that functions as a peer-to-peer node in a dece
 
 ## Architecture
 
-The daemon spawns 11 subsystems as Tokio tasks wired together with `mpsc` channels:
+The daemon spawns 12 subsystems as Tokio tasks wired together with `mpsc` channels:
 
 - **NetworkManager** — libp2p swarm: Kademlia DHT + GossipSub + request_response
 - **InferenceRouter** — request queuing, pipeline assembly, execution coordination
@@ -25,13 +25,14 @@ The daemon spawns 11 subsystems as Tokio tasks wired together with `mpsc` channe
 - **ApiServer** — Axum HTTP: OpenAI + Anthropic APIs + MCP server + admin dashboard + WebSocket
 - **PoolManager** — device pool management, credit forwarding, invitation protocol
 - **AutoShardManager** — VRAM-aware automatic shard acquisition + smart pruning of over-replicated shards
+- **HfWatcher** — R112: hourly HuggingFace trending-GGUF poll, seeds wishlist + auto-promotes models above download/age thresholds to `DemandVerified`
 - **UpdateChecker** — periodic GitHub release polling, SHA256-verified binary download, atomic apply
 
 Shared state lives in `Arc<SharedState>` with `DashMap` for concurrent access. SharedState is organized into 4 logical sub-structs:
 - `state.events` (`EventBus`) — `activity_tx`, `activity_history`, `dashboard_tx`, `update_state`, `ws_tickets`
 - `state.credits` (`CreditPool`) — `credit_balance`, `pool_state`, `pool_registry`, `pool_tx`, `trust_manager`, `escrow_manager`, `anti_gaming`, `private_mode`, `offline_mode`, etc.
-- `state.models` (`ModelMgmt`) — `acquisition_progress`, `hf_sources`, `auto_manage_*`, `model_trust`, `locked_shards`, `prune_history`, etc.
-- `state.metrics` (`MetricsProviders`) — `node_stats`, `inference_requests_total`, `channel_metrics`, `providers_config`, etc.
+- `state.models` (`ModelMgmt`) — `acquisition_progress`, `hf_sources`, `auto_manage_*`, `model_trust`, `locked_shards`, `prune_history`, `wishlist` (R111), `hf_trending_cache` (R112), etc.
+- `state.metrics` (`MetricsProviders`) — `node_stats`, `inference_requests_total`, `channel_metrics`, `providers_config`, `swarm_capacity` (R110), etc.
 
 Cross-cutting fields (config, identity, db, peer_registry, model_registry, executor, split_models, etc.) remain on the root struct.
 
@@ -54,10 +55,12 @@ swarmllm/
 │   ├── bin/       (launcher.rs — Windows GPU/CPU auto-selecting launcher)
 │   ├── cli/       (mod, run, status, chat, bench, peers, pool, split_test, update)
 │   ├── config/    (mod, providers, credit, network, ops, node, inference)
-│   ├── daemon/    (mod, state, manifest, shard_loader, dispatch/, startup, background, helpers, supervisor)
+│   ├── daemon/    (mod, manifest, shard_loader, dispatch/, startup, background, helpers, supervisor)
+│   │   └── state/        (mod, activity, capacity, capacity_plan, credits, events, hf, metrics, models, tp_allreduce)
 │   ├── network/   (manager/{mod,events,requests,tensors,identify,commands,connections,dht,shard_transfer}, behaviour, discovery, protocol, transport, relay, peer_cache, helpers, pipeline_stream)
-│   ├── model/     (manifest, shard, distribution, registry, acquisition, huggingface, auto_manage/, lora)
-│   │   └── auto_manage/  (mod, manager, scoring, download, prune, scan, vram, parallax)
+│   ├── model/     (manifest, shard, distribution, registry, acquisition, huggingface/, auto_manage/, lora)
+│   │   ├── auto_manage/  (mod, manager, scoring, download, prune, scan, vram, parallax, wishlist)
+│   │   └── huggingface/  (mod, download, private_types, probe, search, shards, watcher, tests)
 │   ├── inference/ (executor, sampling, kv_cache, speculative, swift, dsd_controller, quant, tokenizer, tensor_util, shard_layout, model_arch, vision, allreduce, attn_kernel, local_embedder, model_worker, process_pool, slot_table, worker_ipc)
 │   │   ├── router/       (mod, types, batch, local_exec, distributed_exec, spot_check, tests)
 │   │   ├── scheduler/    (mod, parallax, parallax_allocator, tests)
@@ -73,7 +76,7 @@ swarmllm/
 │   ├── api/       (server, sse, admin, admin_providers, websocket, middleware, identity, pool, metrics, providers, claude_sub*, mod, openai/, anthropic/, mcp/, admin_hf/, admin_models/, claude_session/)
 │   ├── storage/   (db)
 │   └── health/    (monitor, rebalancer)
-├── frontend/      (index.html + 12 HTML templates, css/, js/{core/4,components/16,init.js,i18n.js,providers.js,neural-bg.js,topojson-client.min.js}, i18n/)
+├── frontend/      (index.html + 13 HTML templates, css/, js/{core/4,components/17,init.js,i18n.js,providers.js,neural-bg.js,topojson-client.min.js}, i18n/)
 ├── python/        (swarmllm-client SDK)
 ├── monitoring/    (Grafana + Prometheus + docker-compose)
 ├── docs/book/     (mdBook documentation site)
@@ -129,25 +132,25 @@ libp2p 0.56, axum 0.8, candle-core/candle-transformers 0.10 (CUDA), redb 4, ed25
 ### Frontend
 - Vanilla HTML/CSS/JS — no framework, no Node.js build step
 - Embedded into binary via `include_dir!` macro at compile time
-- Component architecture: `App` global namespace, 25 JS files (4 core + 16 components + init.js + 4 standalone utilities)
+- Component architecture: `App` global namespace, 26 JS files (4 core + 17 components + init.js + 4 standalone utilities)
   - `js/core/` — state.js (namespace + shared state + storage keys), utils.js (format helpers, DOM builders, extractErrorMessage, getApiErrorMessage, apiAction), data.js (data store + authFetch + dedup), tooltip.js (unified popover replacing native `title=`)
-  - `js/components/` — ui.js, chat.js, claude-code.js, dashboard.js, dashboard-shards.js (pure shard HTML builders exposed as `App.dashboardShards`), models.js, auto-manage-status.js, settings.js, setup.js, downloads.js, notifications.js, identity.js, network-map.js, compare.js, responses.js, pool.js
+  - `js/components/` — ui.js, chat.js, claude-code.js, dashboard.js, dashboard-shards.js (pure shard HTML builders exposed as `App.dashboardShards`), models.js, auto-manage-status.js, settings.js, setup.js, downloads.js, notifications.js, identity.js, network-map.js, compare.js, responses.js, pool.js, swarm-tab.js (R111 — wishlist + capacity-plan view)
   - `js/init.js` — event binding, initialization, public API export
   - `js/i18n.js`, `js/providers.js`, `js/neural-bg.js`, `js/topojson-client.min.js` — standalone utilities (loaded before App)
-- 12 HTML `<template>` elements for repeating UI structures (session items, chat messages, toasts, model cards, etc.)
+- 13 HTML `<template>` elements for repeating UI structures (session items, chat messages, toasts, model cards, etc.)
 - All storage keys registered as named constants on `App` (e.g., `App.SESSIONS_KEY`, `App.MODEL_SORT_KEY`)
 - Dark/light/system theme toggle, CSS custom properties for theming
-- i18n: 1028 translation keys (1030 entries per locale incl. `_lang` + `_dir`) across 21 languages via `frontend/i18n/{lang}.json`, `I18n.t()` + `data-i18n` attributes. All files sorted by key for parity audits.
+- i18n: 1108 translation keys (1110 entries per locale incl. `_lang` + `_dir`) across 21 languages via `frontend/i18n/{lang}.json`, `I18n.t()` + `data-i18n` attributes. All files sorted by key for parity audits.
 - Total frontend size target: < 200KB
 - Communication: WebSocket for real-time, REST for initial load, SSE for chat streaming
-- WebSocket message types (only 5): `activity_event` (unified event bus — all subsystem events, toasts, prune history), `stats_update` (2s interval — stats, shard registry, acquisitions), `peer_list` (full peer snapshot on change), `models_changed` (shard download/load/prune signals dashboard refresh), `update_available` (new version detected)
+- WebSocket message types (only 5): `activity_event` (unified event bus — all subsystem events, toasts, prune history), `stats_update` (2s interval — stats, shard registry, acquisitions, **swarm_capacity** (R110), **wishlist** (R111)), `peer_list` (full peer snapshot on change), `models_changed` (shard download/load/prune signals dashboard refresh), `update_available` (new version detected)
 - Broadcast channels (only 2): `activity_tx` (ActivityEvent — 256 capacity) for all events + `dashboard_tx` (DashboardSignal enum — 32 capacity) for PeersChanged/ModelsChanged/UpdateAvailable signals
 - Frontend single entry point: all events flow through `_handleActivityEvent()` in notifications.js — handles routing (activity vs network panel), toast display (via `toast_level` field), prune history, per-model ticker, pool refresh
 - Activity events are i18n-ready: frontend formats via `I18n.t('activity.<kind>', params)` with fallback to backend English message
 
 ## Testing
 
-- 897 lib tests passing + 8 ignored (env-var-gated real-model + manual smoke), 75 integration tests in `tests/integration/`, 1 ignored end-to-end (`cargo test --test integration_phase10_11 -- --ignored`), clippy clean
+- 909 lib tests passing + 8 ignored (env-var-gated real-model + manual smoke), 75 integration tests in `tests/integration/`, 1 ignored end-to-end (`cargo test --test integration_phase10_11 -- --ignored`), clippy clean
 - Unit tests: in-module `#[cfg(test)]` blocks
 - Integration tests: `tests/integration/` — multi-node simulations with `--test-threads=1`
 - Real-model spawn-and-infer test: set `SWARMLLM_TEST_MODEL_DIR` to a fully-populated model directory (e.g. `~/.local/share/swarmllm/models/tinyllama-1.1b-...`) and run `cargo test --test integration_phase10_11 -- --ignored end_to_end`. No synthetic GGUF fixture is committed; see `docs/ARCHITECTURE.md` § Deferred Items.
@@ -185,7 +188,7 @@ When spawning subagents in this repo, use these model picks (overrides defaults 
 
 ## Status
 
-All 20 build phases complete. All subsystems wired — no stubs. 897 lib tests + 75 integration tests passing; 8 lib + 1 e2e ignored (env-var or manual). Deferred items in `docs/ARCHITECTURE.md` § "Deferred Items".
+All 20 build phases complete. All subsystems wired — no stubs. 909 lib tests + 75 integration tests passing; 8 lib + 1 e2e ignored (env-var or manual). Deferred items in `docs/ARCHITECTURE.md` § "Deferred Items".
 
 ## Common Commands
 

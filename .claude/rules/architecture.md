@@ -10,8 +10,11 @@ SharedState is organized into 4 sub-structs. Always use the correct accessor:
 - `state.credits.pool_state` — NOT `state.pool_state`
 - `state.models.acquisition_progress` — NOT `state.acquisition_progress`
 - `state.models.hf_sources` — NOT `state.hf_sources`
+- `state.models.wishlist` — R111. ArcSwap<Wishlist>; refresh via `crate::model::auto_manage::refresh_wishlist(state)`.
+- `state.models.hf_trending_cache` — R112. ArcSwap<HfTrendingSnapshot>; written by `HfWatcher` only.
 - `state.metrics.node_stats` — NOT `state.node_stats`
 - `state.metrics.providers_config` — NOT `state.providers_config`
+- `state.metrics.swarm_capacity` — R110. ArcSwap<SwarmCapacity>; refresh via `crate::daemon::state::refresh_swarm_capacity(state)`.
 
 When adding new fields to SharedState, put them in the appropriate sub-struct unless they're accessed by 10+ files across 3+ subsystem boundaries.
 

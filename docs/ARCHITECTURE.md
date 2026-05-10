@@ -42,11 +42,13 @@ Single Rust binary, three simultaneous functions:
 │  │  │  acquisition_progress, hf_sources              │ │  │
 │  │  │  auto_manage_*, model_trust, locked_shards     │ │  │
 │  │  │  prune_history, download_cancel_flags          │ │  │
+│  │  │  wishlist (R111), hf_trending_cache (R112)     │ │  │
 │  │  └────────────────────────────────────────────────┘ │  │
 │  │  ┌─ MetricsProviders (state.metrics) ────────────┐ │  │
 │  │  │  node_stats, inference_requests_total          │ │  │
 │  │  │  channel_metrics, inference_latency_samples    │ │  │
 │  │  │  providers_config, provider_model_map          │ │  │
+│  │  │  swarm_capacity (R110)                         │ │  │
 │  │  └────────────────────────────────────────────────┘ │  │
 │  │                                                     │  │
 │  │  Root: peer_registry, model_registry, executor,     │  │
@@ -108,9 +110,9 @@ The **MessageDispatcher** is a dedicated task in `daemon/dispatch/mod.rs` that r
 10. Scan local shards → register in model_registry (with disk existence verification).
     Claims manifest publisher as our node_id + recomputes BLAKE3 hash (allows gossiping copied shards).
 11. Create mpsc channels (network, router, rebalance, acquisition, pool)
-12. Spawn all tasks (11 tasks: NetworkManager, InferenceRouter, MessageDispatcher,
+12. Spawn all tasks (12 tasks: NetworkManager, InferenceRouter, MessageDispatcher,
     HealthMonitor, ShardRebalancer, CreditLedger, AcquisitionManager, ApiServer,
-    PoolManager, AutoShardManager, UpdateChecker)
+    PoolManager, AutoShardManager, HfWatcher (R112), UpdateChecker)
 13. Open browser if ui.open_browser_on_start is true (setup wizard or admin)
 14. tokio::select! on Ctrl+C signal or any task exit
 15. Signal graceful shutdown via watch channel, save peer cache, flush redb database
@@ -1264,6 +1266,11 @@ Routes Claude model requests through a locally-authenticated `claude` CLI subpro
 ### Admin API (CORS-protected, no Bearer auth)
 - `GET/PUT /api/admin/config` — Configuration read/update
 - `GET     /api/admin/stats` — Node statistics + hardware info
+- `GET     /api/admin/swarm/capacity` — R110: collective capacity snapshot (online_nodes, total_vram_mb, serveable/aspirational/hosted_locally model lists, redundancy)
+- `GET     /api/admin/swarm/capacity-plan` — R113: what-if scenarios + headline_target with concrete `contributors_needed` count
+- `GET     /api/admin/storage/breakdown` — R110: stacked-bar data (total_mb, used_mb, auto_target_mb, free_mb)
+- `GET     /api/admin/wishlist` — R111: ranked list of models the swarm wants (status, score, why_tags, swarm_replicas, target_replicas)
+- `GET     /api/admin/hf/trending` — R112: cached HuggingFace trending-GGUF snapshot from HfWatcher
 - `GET     /api/admin/responses` — List stored `/v1/responses` records for the dashboard (filter by `?status=…&limit=…`)
 - `GET     /api/admin/models` — Model list with shard status, VRAM estimates, acquisition state
 - `POST    /api/admin/models/{id}/add` — Trigger model acquisition
@@ -1282,6 +1289,7 @@ Routes Claude model requests through a locally-authenticated `claude` CLI subpro
 - `POST /api/admin/hf/download` — Download full GGUF model. **⚠ Deprecated** for normal use — the frontend and all new code MUST use `/api/admin/hf/download-shards`. Full-GGUF download exists only for offline-inference / seeding workflows; never call it implicitly. See CLAUDE.md § "No implicit full model downloads".
 - `POST /api/admin/hf/download-shards` — Download specific shard indices (supports `peer_fair_share` for smart distribution). **Preferred entry point.**
 - `GET  /api/admin/hf/source/{model_id}` — Lookup HuggingFace source info for a model
+- `GET  /api/admin/hf/search?q=...&tasks=chat,code,...` — R114: optional `tasks` filter narrows results to chat/code/vision/multilingual/reasoning task tags (server-side filter)
 
 ### Identity API
 - `GET/PUT/DELETE /api/identity/nickname` — Manage local nickname
@@ -1375,7 +1383,7 @@ Routes Claude model requests through a locally-authenticated `claude` CLI subpro
 - Cross-component calls: `App.componentName.method()`. Shared state: `App.state.*`. Utilities: `App.utils.*`.
 
 ### Frontend Features
-- **i18n**: 1028 translation keys (1030 entries per locale incl. `_lang` + `_dir`) across 21 languages (en, es, fr, de, pt, it, nl, ru, zh, ja, ko, ar, tr, pl, sv, th, hi, vi, id, uk, cs). Auto-detects browser language. `I18n.t()` + `data-i18n` DOM attributes. Interpolation via `{variable}` placeholders. Fallback chain: current language → English → raw key. "Continue in English" UX for non-English users who prefer English.
+- **i18n**: 1108 translation keys (1110 entries per locale incl. `_lang` + `_dir`) across 21 languages (en, es, fr, de, pt, it, nl, ru, zh, ja, ko, ar, tr, pl, sv, th, hi, vi, id, uk, cs). Auto-detects browser language. `I18n.t()` + `data-i18n` DOM attributes. Interpolation via `{variable}` placeholders. Fallback chain: current language → English → raw key. "Continue in English" UX for non-English users who prefer English.
 - **Theme**: Light / Dark / System toggle. `[data-theme="light"]` CSS overrides. Persisted in localStorage.
 - **Neural network background**: Animated canvas particle network behind dashboard tiles (`frontend/js/neural-bg.js`). ~60 nodes with connecting edges, gentle drift, mouse repulsion/glow. State-reactive coloring: blue (idle) → cyan (active inference) → red-orange (unhealthy/disconnected). Peer count boosts vibrancy, active requests trigger node firing pulses. Pauses when tab hidden; reduced opacity in light theme.
 
@@ -1386,7 +1394,7 @@ A lightweight cross-subsystem event bus for real-time dashboard observability.
 **Backend** (`ActivityEvent` defined in `src/daemon/state/activity.rs`, re-exported from `state/mod.rs`):
 - `ActivityEvent` struct with fields: `category` (`&'static str`), `kind` (`&'static str`, e.g. `"shard_pruned"`), `message` (English), plus optional `model_id`, `model_name`, `node_id`, `detail_num`, `detail_str`, `toast_level`, `toast_duration_ms`, `shard_index`, `freed_bytes`, `holder_count_before`, `holder_count_after`, `remaining_local_shards`, `timestamp` (ISO 8601)
 - `activity_tx: broadcast::Sender<ActivityEvent>` in `state.events` sub-struct (capacity 256, oldest events dropped on overflow)
-- All 11 subsystems emit events via the `state.emit_activity(ActivityEvent::new(...))` builder — fire-and-forget (send errors ignored)
+- All 12 subsystems emit events via the `state.emit_activity(ActivityEvent::new(...))` builder — fire-and-forget (send errors ignored)
 - Example event kinds (snake_case strings; see `ACTIVITY_ICONS` in `frontend/js/components/notifications.js` for the canonical list): `shard_download_complete`, `shard_pruned`, `inference_request`, `inference_completed`, `peer_connected`, `peer_disconnected`, `model_loaded`, `model_unloaded`, `worker_spawned`, `worker_unloaded`, `pool_device_joined`, `pool_created`, `config_updated`, `daemon_started`, and many more
 
 **WebSocket delivery** (`src/api/websocket.rs`):

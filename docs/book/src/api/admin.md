@@ -313,7 +313,7 @@ WebSocket for live updates. Pushes the following event types:
 | Event | Trigger | Data |
 |-------|---------|------|
 | `activity_event` | Any subsystem event | kind, model_id, message, timestamp, toast_level |
-| `stats_update` | Every 2s | Peer count, credits, acquisitions, shard registry |
+| `stats_update` | Every 2s | Peer count, credits, acquisitions, shard registry, **swarm_capacity** (R110), **wishlist** (R111) |
 | `peer_list` | Peer connect/disconnect | Full peer snapshot |
 | `models_changed` | Shard download/load/prune | (none — signals dashboard to refresh) |
 | `update_available` | New version detected | Version info, changelog |

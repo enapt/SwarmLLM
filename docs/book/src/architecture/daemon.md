@@ -1,6 +1,6 @@
 # Daemon & Subsystems
 
-The daemon spawns 11 Tokio tasks wired together with `mpsc` channels:
+The daemon spawns 12 Tokio tasks wired together with `mpsc` channels:
 
 ```
                            ┌──────────────┐
@@ -8,10 +8,10 @@ The daemon spawns 11 Tokio tasks wired together with `mpsc` channels:
                            │  (bootstrap) │
                            └──────┬───────┘
                                   │ spawns tokio tasks
-  ┌───────┬───────┬───────┬───────┼───────┬──────────┬──────────┬──────────┬──────────┬──────────┐
-  ▼       ▼       ▼       ▼       ▼       ▼          ▼          ▼          ▼          ▼          ▼
-Network  Infer   Credit  Health   API    Rebal-   Acquisi-   Message    Pool     AutoShrd   Update
-Manager  Router  Ledger  Monitor  Server ancer    tion Mgr   Dispatch   Manager  Manager   Checker
+  ┌───────┬───────┬───────┬───────┼───────┬──────────┬──────────┬──────────┬──────────┬──────────┬─────┐
+  ▼       ▼       ▼       ▼       ▼       ▼          ▼          ▼          ▼          ▼          ▼     ▼
+Network  Infer   Credit  Health   API    Rebal-   Acquisi-   Message    Pool     AutoShrd   HfWat- Update
+Manager  Router  Ledger  Monitor  Server ancer    tion Mgr   Dispatch   Manager  Manager   cher   Checker
 ```
 
 ## Subsystem Responsibilities
@@ -27,7 +27,8 @@ Manager  Router  Ledger  Monitor  Server ancer    tion Mgr   Dispatch   Manager 
 | **AcquisitionManager** | `src/model/acquisition.rs` | BLAKE3-verified model downloads from peers and HuggingFace |
 | **ApiServer** | `src/api/server.rs` | Axum HTTP: OpenAI + Anthropic APIs + MCP server + admin dashboard + WebSocket |
 | **PoolManager** | `src/pool/manager/` | Device pool management, credit forwarding |
-| **AutoShardManager** | `src/model/auto_manage/` | VRAM-aware shard acquisition + smart pruning (manager, scoring, download, prune, scan, vram) |
+| **AutoShardManager** | `src/model/auto_manage/` | VRAM-aware shard acquisition + smart pruning (manager, scoring, download, prune, scan, vram, wishlist). R111: refreshes the user-visible wishlist at the end of every tick. |
+| **HfWatcher** (R112) | `src/model/huggingface/watcher.rs` | Background task polling HuggingFace's trending GGUF feed once per hour. Caches the snapshot on `state.models.hf_trending_cache` (consumed by the wishlist scorer) and auto-promotes models above 100k downloads + 24h age from `Discovered` to `DemandVerified`. NonCritical — HF outages don't escalate to a daemon crash. Opt-out via `auto_manage.hf_watcher_enabled = false`. |
 | **UpdateChecker** | `src/update.rs` | Periodic GitHub release polling, SHA256-verified binary download, atomic apply. **Skipped entirely** when `auto_update = "disabled"` (default until binary signing C1 lands), so the supervisor doesn't log a misleading "exited unexpectedly" warning. |
 
 ## Channel Layout
@@ -66,7 +67,7 @@ Manager  Router  Ledger  Monitor  Server ancer    tion Mgr   Dispatch   Manager 
 9. Build `Arc<SharedState>` (includes ModelRegistry from DB)
 10. Scan local shards, register in registries
 11. Create mpsc channels
-12. Spawn all 11 tasks
+12. Spawn all 12 tasks
 13. Open browser if configured
 14. `tokio::select!` on Ctrl+C or task exit
 15. Graceful shutdown: save peer cache, flush database
