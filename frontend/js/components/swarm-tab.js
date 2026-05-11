@@ -237,19 +237,22 @@
       card.className = 'capacity-card' + (m.hosted_by_us ? ' capacity-card-mine' : '');
       var name = document.createElement('div');
       name.className = 'capacity-card-name';
-      name.textContent = _bestModelName(m.display_name, m.model_id);
+      var nameText = document.createElement('span');
+      nameText.textContent = _bestModelName(m.display_name, m.model_id);
+      name.appendChild(nameText);
+      if (m.hosted_by_us) {
+        var badge = document.createElement('span');
+        badge.className = 'capacity-card-badge';
+        badge.textContent = I18n.t('capacity.you_host_this_short');
+        badge.title = I18n.t('capacity.you_host_this');
+        name.appendChild(badge);
+      }
       card.appendChild(name);
       var meta = document.createElement('div');
       meta.className = 'capacity-card-meta text-muted text-2xs';
       meta.textContent = I18n.t('wishlist.meta_size', { size: _humaniseSize(m.size_mb) }) +
         ' · ' + I18n.t(m.holders === 1 ? 'wishlist.meta_replicas_ok_one' : 'wishlist.meta_replicas_ok_other', { have: m.holders });
       card.appendChild(meta);
-      if (m.hosted_by_us) {
-        var badge = document.createElement('span');
-        badge.className = 'capacity-card-badge';
-        badge.textContent = I18n.t('capacity.you_host_this');
-        card.appendChild(badge);
-      }
       grid.appendChild(card);
     });
   }

@@ -134,10 +134,20 @@ pub fn compute_capacity_plan(state: &SharedState) -> CapacityPlan {
         }
     });
 
+    // Scale tier sizes with the current swarm so the "what if more people
+    // joined?" CTA stays meaningful as the swarm grows. A 2-node test cluster
+    // and a 10,000-node production swarm need very different boost tiers —
+    // hardcoded (3 / 10 / 25) makes the latter look trivial. The floors
+    // (3 / 10 / 25) keep the small swarm case identical to the original.
+    let nodes_now = current.online_nodes.max(1);
+    let small_nodes = ((nodes_now as f32 * 0.5).ceil() as u32).max(3);
+    let medium_nodes = ((nodes_now as f32 * 3.0).ceil() as u32).max(10);
+    let large_nodes = ((nodes_now as f32 * 10.0).ceil() as u32).max(25);
+
     let scenarios = vec![
-        scenario(state, &current, "small", 3, 8),
-        scenario(state, &current, "medium", 10, 8),
-        scenario(state, &current, "large", 25, 16),
+        scenario(state, &current, "small", small_nodes, 8),
+        scenario(state, &current, "medium", medium_nodes, 8),
+        scenario(state, &current, "large", large_nodes, 16),
     ];
 
     CapacityPlan {
@@ -145,6 +155,67 @@ pub fn compute_capacity_plan(state: &SharedState) -> CapacityPlan {
         scenarios,
         headline_target,
     }
+}
+
+/// Estimate Q4_K_M GGUF size in MB from a HF repo_id by parsing the
+/// parameter count (e.g. "Qwen3-70B-Instruct" → ~38 GB). Used by the
+/// capacity-plan scenario builder so trending HF models (which we don't
+/// have on-disk size metadata for) can serve as differentiation
+/// candidates across small / medium / large tiers.
+///
+/// Heuristic: Q4_K_M ≈ 0.55 GB per billion parameters (empirical, holds
+/// reasonably from 0.5B through 405B). MoE expert counts (`Nx7B`) are
+/// expanded to total params. Returns None when the name has no clear
+/// parameter token — those entries are dropped rather than guessed at.
+fn estimate_q4_size_mb_from_repo_id(repo_id: &str) -> Option<u64> {
+    let lower = repo_id.to_lowercase();
+    // Match either `<num>x<num>B` (MoE) or just `<num>B`.
+    // We scan tail-to-head so trailing "-70B" wins over an "8x" earlier.
+    let chars: Vec<char> = lower.chars().collect();
+    let mut best_b: Option<f64> = None;
+    let mut i = 0;
+    while i < chars.len() {
+        // Find a digit run.
+        if chars[i].is_ascii_digit() {
+            let start = i;
+            while i < chars.len() && (chars[i].is_ascii_digit() || chars[i] == '.') {
+                i += 1;
+            }
+            let num: f64 = lower[start..i].parse().ok()?;
+            // 'x' for MoE expert count, then another digit run, then 'b'.
+            if i < chars.len() && chars[i] == 'x' {
+                let after_x = i + 1;
+                let mut j = after_x;
+                while j < chars.len() && (chars[j].is_ascii_digit() || chars[j] == '.') {
+                    j += 1;
+                }
+                if j > after_x && j < chars.len() && chars[j] == 'b' {
+                    let per_expert: f64 = lower[after_x..j].parse().ok()?;
+                    let total = num * per_expert;
+                    if (0.1..=2000.0).contains(&total) {
+                        best_b = Some(total);
+                    }
+                    i = j + 1;
+                    continue;
+                }
+            }
+            // Plain `<num>B` (case-insensitive already lowered).
+            if i < chars.len() && chars[i] == 'b' {
+                // Guard against accidental matches inside other tokens
+                // (e.g. "embedding" starts with 'em' so digit+'b' is OK).
+                let next_ok = i + 1 >= chars.len()
+                    || !chars[i + 1].is_ascii_alphabetic()
+                    || chars[i + 1] == '-'
+                    || chars[i + 1] == '.'
+                    || chars[i + 1] == '_';
+                if next_ok && (0.1..=2000.0).contains(&num) {
+                    best_b = Some(num);
+                }
+            }
+        }
+        i += 1;
+    }
+    best_b.map(|b| (b * 0.55 * 1024.0) as u64)
 }
 
 fn scenario(
@@ -157,19 +228,21 @@ fn scenario(
     let added_vram_mb = (added_nodes as u64) * (vram_gb_per_node as u64) * 1024;
     let projected_total_vram_mb = current.total_vram_mb.saturating_add(added_vram_mb);
 
-    // Newly-unlocked: any registry model whose VRAM requirement fits in
-    // projected_total_vram_mb but didn't fit today.
     let mut unlocked: Vec<ProjectedModel> = Vec::new();
+    let mut seen_keys: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    // Registry models — concrete unlocks. Same logic as before: skip
+    // already-serveable, skip still-doesn't-fit.
     for manifest in state.model_registry.models() {
         let vram_required = crate::model::auto_manage::vram::estimate_model_vram_mb_arch(
             manifest.total_size_bytes,
             &manifest.architecture,
         );
         if vram_required <= current.total_vram_mb {
-            continue; // already fits
+            continue;
         }
         if vram_required > projected_total_vram_mb {
-            continue; // still doesn't fit
+            continue;
         }
         let already_serveable = current
             .serveable_models
@@ -178,6 +251,7 @@ fn scenario(
         if already_serveable {
             continue;
         }
+        seen_keys.insert(manifest.id.0.to_lowercase());
         unlocked.push(ProjectedModel {
             model_id: manifest.id.0.clone(),
             display_name: manifest.name.clone(),
@@ -185,6 +259,38 @@ fn scenario(
             reason: "memory_unlock".to_string(),
         });
     }
+
+    // Trending HF repos — aspirational unlocks. Without these the three
+    // scenarios collapse to the same handful of locally-registered models
+    // and the user sees identical lists at every tier (the bug). Pulling
+    // trending in lets a 24 GB boost surface 8B models, an 80 GB boost
+    // surface 30B class models, and a 400 GB boost surface 70B+ models.
+    let trending_snap = state.models.hf_trending_cache.load_full();
+    for entry in trending_snap.entries.iter() {
+        let est_size_mb = match estimate_q4_size_mb_from_repo_id(&entry.repo_id) {
+            Some(s) => s,
+            None => continue,
+        };
+        // VRAM requirement ≈ size × 1.25 (rule-of-thumb in vram.rs)
+        let est_vram_mb = (est_size_mb as f64 * 1.25) as u64;
+        if est_vram_mb <= current.total_vram_mb {
+            continue;
+        }
+        if est_vram_mb > projected_total_vram_mb {
+            continue;
+        }
+        let key = entry.repo_id.to_lowercase();
+        if !seen_keys.insert(key) {
+            continue;
+        }
+        unlocked.push(ProjectedModel {
+            model_id: entry.repo_id.clone(),
+            display_name: pretty_repo_name(&entry.repo_id),
+            size_mb: est_size_mb,
+            reason: "trending_aspirational".to_string(),
+        });
+    }
+
     unlocked.sort_by_key(|m| std::cmp::Reverse(m.size_mb));
     let unlocks_anything = !unlocked.is_empty();
     unlocked.truncate(3);
@@ -197,6 +303,47 @@ fn scenario(
         newly_unlocked: unlocked,
         unlocks_anything,
     }
+}
+
+/// Drop the org prefix from a HF repo_id, strip GGUF/quant suffixes, and
+/// titlecase the remaining tokens. Examples:
+///   meta-llama/Llama-3.1-70B-Instruct      → "Llama 3.1 70B Instruct"
+///   openai/gpt-oss-20b                     → "GPT OSS 20B"
+///   bartowski/Qwen2.5-Coder-7B-Instruct-GGUF → "Qwen2.5 Coder 7B Instruct"
+fn pretty_repo_name(repo_id: &str) -> String {
+    let tail = repo_id.rsplit('/').next().unwrap_or(repo_id);
+    let cleaned = tail
+        .trim_end_matches(".gguf")
+        .trim_end_matches(".GGUF")
+        .replace(['_', '-'], " ");
+    cleaned
+        .split_whitespace()
+        .filter(|tok| {
+            let l = tok.to_lowercase();
+            l != "gguf" && !l.starts_with("q4_") && !l.starts_with("q5_") && l != "q4" && l != "q8"
+        })
+        .map(|tok| {
+            // Already mixed-case (e.g. "Qwen2.5") → keep as-is.
+            // Has uppercase already → keep (preserves acronyms like GGUF/OSS).
+            // All-lower → titlecase first letter.
+            // Numeric/Bs (e.g. "70B") → uppercase.
+            if tok.chars().any(|c| c.is_ascii_uppercase()) {
+                tok.to_string()
+            } else if tok
+                .chars()
+                .all(|c| c.is_ascii_digit() || c == '.' || c == 'b' || c == 'B' || c == 'x')
+            {
+                tok.to_uppercase()
+            } else {
+                let mut cs = tok.chars();
+                match cs.next() {
+                    Some(c) => c.to_uppercase().collect::<String>() + cs.as_str(),
+                    None => String::new(),
+                }
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 #[cfg(test)]

@@ -908,17 +908,23 @@ a:hover { color: var(--accent-hover); }
 .usecase-card:hover { border-color: rgba(56, 139, 253, 0.5); background: rgba(56, 139, 253, 0.06); }
 .usecase-card:active { transform: translateY(1px); }
 .usecase-card.active { border-color: rgba(56, 139, 253, 0.8); background: rgba(56, 139, 253, 0.10); }
-.usecase-emoji {
-  font-size: 1.4rem;
-  line-height: 1;
-  font-family: "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", "Noto Color Emoji", "Noto Sans Symbols 2", "Twemoji Mozilla", system-ui, sans-serif;
+.usecase-icon {
+  width: 22px;
+  height: 22px;
+  color: var(--blue, #6ab1fd);
+  flex-shrink: 0;
 }
+.usecase-card.active .usecase-icon { color: #6ab1fd; }
 .browse-section-header h3 {
-  font-family: inherit;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
 }
-/* Section header emoji prefix (🔥) — same fallback chain */
-#browse-trending-section .browse-section-header h3 {
-  font-family: "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", "Noto Color Emoji", "Noto Sans Symbols 2", "Twemoji Mozilla", inherit;
+.section-icon {
+  width: 16px;
+  height: 16px;
+  color: #d29922;
+  flex-shrink: 0;
 }
 .usecase-title { font-weight: 600; color: var(--text); font-size: 0.95rem; }
 .usecase-sub { font-size: 0.78rem; }
@@ -1405,16 +1411,22 @@ a:hover { color: var(--accent-hover); }
   position: relative;
 }
 .capacity-card-mine { border-color: rgba(46, 160, 67, 0.4); }
-.capacity-card-name { font-weight: 600; }
+.capacity-card-name {
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
 .capacity-card-badge {
-  position: absolute;
-  top: 6px;
-  right: 6px;
   font-size: 0.68rem;
   background: rgba(46, 160, 67, 0.18);
-  color: #2ea043;
-  padding: 1px 6px;
-  border-radius: 8px;
+  color: #58c071;
+  padding: 2px 8px;
+  border-radius: 10px;
+  white-space: nowrap;
+  font-weight: 500;
+  border: 1px solid rgba(46, 160, 67, 0.35);
 }
 
 /* R113: Capacity Plan view */
