@@ -134,42 +134,58 @@
       document.getElementById('settings-modal').classList.add('hidden');
     },
 
-    openModelBrowser: function() {
-      document.getElementById('model-browser-modal').classList.remove('hidden');
-      var input = document.getElementById('hf-search-input');
-      if (input) setTimeout(function() { input.focus(); }, 100);
+    // Now jumps to the Models tab's Search subtab. The legacy modal is
+    // retained in markup for any out-of-tree callers but no longer used
+    // from anywhere we ship.
+    openModelBrowser: function(query) {
+      if (App.swarmTab && typeof App.swarmTab.openSearch === 'function') {
+        App.swarmTab.openSearch(query || '');
+        return;
+      }
+      // Fallback for boot order edge case
+      App.ui.switchTab('swarm');
     },
 
-    closeModelBrowser: function() {
-      document.getElementById('model-browser-modal').classList.add('hidden');
-    },
+    closeModelBrowser: function() { /* no-op since browser is inline now */ },
 
     showBanner: function(type, message) {
       App.notifications.showToast(message, type === 'warning' ? 'warning' : type === 'error' ? 'error' : type === 'success' ? 'success' : 'info');
     }
   };
 
-  // --- Mode Indicator ---
-  App.modeIndicator = {
+  // --- Network Status panel ---
+  // Single source of truth for "what state is this node in?". Replaces the
+  // old swarm-capacity-banner + mode-indicator strip. Six named states:
+  //   connecting | global | private | lan | solo | offline
+  // Cloud-provider count + capacity facts fold in as supporting detail.
+  App.networkStatus = {
     update: function(statsData, providerData) {
-      var indicator = document.getElementById('mode-indicator');
-      var dot = document.getElementById('mode-dot');
-      var label = document.getElementById('mode-label');
-      var detail = document.getElementById('mode-detail');
-      if (!dot || !label || !detail) return;
+      var panel = document.getElementById('network-status-panel');
+      if (!panel) return;
+      var dotEl = document.getElementById('netstatus-dot');
+      var nameEl = document.getElementById('netstatus-name');
+      var chipsEl = document.getElementById('netstatus-chips');
+      var detailEl = document.getElementById('netstatus-detail');
+      var modelsEl = document.getElementById('netstatus-models');
 
-      var peers = statsData ? (statsData.peers || 0) : 0;
-      var hostedShards = statsData ? (statsData.hosted_shards || 0) : 0;
+      var stats = statsData || null;
+      var peers = stats ? (stats.peers || 0) : 0;
+      var lanPeers = stats ? (stats.lan_peers || 0) : 0;
+      var hostedShards = stats ? (stats.hosted_shards || 0) : 0;
       if (hostedShards === 0) {
-        var el = document.getElementById('hosted-shards');
-        if (el) hostedShards = parseInt(el.textContent, 10) || 0;
+        var hsEl = document.getElementById('hosted-shards');
+        if (hsEl) hostedShards = parseInt(hsEl.textContent, 10) || 0;
       }
       var hasLocalModel = hostedShards > 0;
+      var netMode = (stats && stats.network_mode) || {};
+      var privateMode = !!netMode.private_mode;
+      var offlineMode = !!netMode.offline_mode;
+      var allowLan = !!netMode.private_mode_allow_lan;
+      var capacity = stats ? stats.swarm_capacity : null;
 
+      // Healthy cloud provider count (configured + reachable).
       var cloudCount = 0;
-      var cloudDown = 0;
       var seen = {};
-      var claudeSubEnabled = false;
       if (providerData && providerData.providers) {
         providerData.providers.forEach(function(p) {
           if (!p.configured) return;
@@ -177,7 +193,6 @@
           var h = S.providerHealth[p.name] || S.providerHealth[p.provider];
           var isHealthy = !h || h.status === 'up' || h.status === 'rate_limited' || h.status === 'overloaded';
           if (isHealthy) cloudCount++;
-          else cloudDown++;
         });
       }
       Object.keys(S.providerHealth).forEach(function(key) {
@@ -185,61 +200,115 @@
         var h = S.providerHealth[key];
         var isHealthy = h.status === 'up' || h.status === 'rate_limited' || h.status === 'overloaded';
         if (isHealthy) cloudCount++;
-        else cloudDown++;
       });
-      // Claude subscription counts as a provider
       if (providerData && providerData.claude_subscription && providerData.claude_subscription.enabled) {
-        claudeSubEnabled = true;
         cloudCount++;
       }
 
-      if (indicator) indicator.className = 'mode-indicator mb-2';
-
-      var modeName, dotClass, modeClass, modeHelp;
-
-      if (peers > 0 && hasLocalModel && cloudCount > 0) {
-        modeName = I18n.t('mode.swarm_cloud'); dotClass = 'swarm'; modeClass = 'mode-hybrid'; modeHelp = I18n.t('mode.help_swarm_cloud');
-      } else if (peers > 0 && hasLocalModel) {
-        modeName = I18n.t('mode.swarm'); dotClass = 'swarm'; modeClass = 'mode-swarm'; modeHelp = I18n.t('mode.help_swarm');
+      // Pick the named state. Private/offline modes override "global"
+      // because they describe an intentional restriction on outbound
+      // inference scope (src/pool/scope.rs).
+      var stateKey, stateName, stateDetail;
+      if (!stats) {
+        stateKey = 'connecting';
+        stateName = I18n.t('netstatus.connecting');
+        stateDetail = I18n.t('netstatus.detail_connecting');
+      } else if (privateMode && offlineMode) {
+        stateKey = 'lan';
+        stateName = I18n.t('netstatus.lan');
+        stateDetail = I18n.t('netstatus.detail_lan');
+      } else if (privateMode) {
+        stateKey = 'private';
+        stateName = I18n.t('netstatus.private');
+        stateDetail = allowLan
+          ? I18n.t('netstatus.detail_private_with_lan')
+          : I18n.t('netstatus.detail_private');
       } else if (peers > 0) {
-        modeName = I18n.t('mode.swarm_remote'); dotClass = 'swarm'; modeClass = 'mode-swarm'; modeHelp = I18n.t('mode.help_swarm_remote');
-      } else if (hasLocalModel && cloudCount > 0) {
-        modeName = I18n.t('mode.local_cloud'); dotClass = 'hybrid'; modeClass = 'mode-hybrid'; modeHelp = I18n.t('mode.help_local_cloud');
-      } else if (hasLocalModel) {
-        modeName = I18n.t('mode.solo'); dotClass = 'offline'; modeClass = 'mode-offline'; modeHelp = I18n.t('mode.help_solo');
-      } else if (cloudCount > 0) {
-        modeName = I18n.t('dashboard.chip_cloud'); dotClass = 'cloud'; modeClass = 'mode-cloud'; modeHelp = I18n.t('mode.help_cloud');
+        stateKey = 'global';
+        stateName = I18n.t('netstatus.global');
+        stateDetail = hasLocalModel
+          ? I18n.t('netstatus.detail_global_hosting')
+          : I18n.t('netstatus.detail_global_remote');
+      } else if (hasLocalModel || cloudCount > 0) {
+        stateKey = 'solo';
+        stateName = I18n.t('netstatus.solo');
+        stateDetail = hasLocalModel
+          ? I18n.t('netstatus.detail_solo_local')
+          : I18n.t('netstatus.detail_solo_cloud');
       } else {
-        modeName = I18n.t('pool.offline'); dotClass = 'offline'; modeClass = 'mode-offline'; modeHelp = I18n.t('mode.help_offline');
+        stateKey = 'offline';
+        stateName = I18n.t('netstatus.offline');
+        stateDetail = I18n.t('netstatus.detail_offline');
       }
 
-      dot.className = 'mode-dot ' + dotClass;
-      label.textContent = modeName;
-      label.title = modeHelp;
-      if (indicator) indicator.classList.add(modeClass);
+      panel.className = 'panel network-status network-status-' + stateKey;
+      if (nameEl) nameEl.textContent = stateName;
+      if (dotEl) dotEl.title = stateDetail || '';
 
-      var requests = statsData ? (statsData.requests_made || 0) : 0;
-      var served = statsData ? (statsData.requests_served || 0) : 0;
-      var active = statsData ? (statsData.active_requests || 0) : 0;
-
-      var parts = [];
-      if (peers > 0) parts.push('<span class="mode-stat"><strong>' + peers + '</strong> ' + I18n.t(peers !== 1 ? 'mode.stat_peers_other' : 'mode.stat_peers_one', { count: peers }).replace(/^\d+\s*/, '') + '</span>');
-      if (hostedShards > 0) parts.push('<span class="mode-stat"><strong>' + hostedShards + '</strong> ' + I18n.t(hostedShards !== 1 ? 'mode.stat_shards_other' : 'mode.stat_shards_one', { count: hostedShards }).replace(/^\d+\s*/, '') + '</span>');
-      if (cloudCount > 0) parts.push('<span class="mode-stat"><strong>' + cloudCount + '</strong> ' + I18n.t(cloudCount !== 1 ? 'mode.stat_providers_other' : 'mode.stat_providers_one', { count: cloudCount }).replace(/^\d+\s*/, '') + '</span>');
-      if (active > 0) parts.push('<span class="mode-stat" style="color:var(--orange)"><strong>' + active + '</strong> ' + I18n.t('mode.stat_active', { count: active }).replace(/^\d+\s*/, '') + '</span>');
-      if (requests > 0) parts.push('<span class="mode-stat"><strong>' + requests + '</strong> ' + I18n.t('mode.stat_requests', { count: requests }).replace(/^\d+\s*/, '') + '</span>');
-      if (served > 0) parts.push('<span class="mode-stat"><strong>' + served + '</strong> ' + I18n.t('mode.stat_served', { count: served }).replace(/^\d+\s*/, '') + '</span>');
-
-      // Claude Code subscription — no badge in mode indicator text,
-      // it appears in the provider strip below instead
-
-      var detailHtml;
-      if (parts.length > 0) {
-        detailHtml = parts.join('<span class="mode-separator">\u00b7</span>');
-      } else {
-        detailHtml = '<span class="mode-action" data-goto-hf="1">' + U.escapeHtml(I18n.t('mode.empty_cta')) + '</span>';
+      if (chipsEl) {
+        chipsEl.innerHTML = '';
+        var addChip = function(html) {
+          var c = document.createElement('span');
+          c.className = 'netstatus-chip';
+          c.innerHTML = html;
+          chipsEl.appendChild(c);
+        };
+        if (stateKey === 'global' && peers > 0) {
+          addChip('<strong>' + peers + '</strong> ' + U.escapeHtml(I18n.t(peers === 1 ? 'netstatus.chip_peer_one' : 'netstatus.chip_peer_other')));
+          if (lanPeers > 0) addChip('<strong>' + lanPeers + '</strong> ' + U.escapeHtml(I18n.t('netstatus.chip_lan')));
+        } else if (stateKey === 'lan' && lanPeers > 0) {
+          addChip('<strong>' + lanPeers + '</strong> ' + U.escapeHtml(I18n.t(lanPeers === 1 ? 'netstatus.chip_lan_peer_one' : 'netstatus.chip_lan_peer_other')));
+        } else if (stateKey === 'private') {
+          addChip(U.escapeHtml(I18n.t('netstatus.chip_pool_only')));
+          if (allowLan && lanPeers > 0) addChip('<strong>' + lanPeers + '</strong> ' + U.escapeHtml(I18n.t('netstatus.chip_lan')));
+        } else if (stateKey === 'solo') {
+          // Don't echo a "local parts" chip — the supporting models line
+          // below already names them. Cloud provider count is the only
+          // useful chip here.
+          if (cloudCount > 0) addChip('<strong>' + cloudCount + '</strong> ' + U.escapeHtml(I18n.t(cloudCount === 1 ? 'netstatus.chip_provider_one' : 'netstatus.chip_provider_other')));
+        }
       }
-      detail.innerHTML = detailHtml;
+
+      if (detailEl) {
+        var detailHtml = U.escapeHtml(stateDetail || '');
+        if (stateKey === 'global' && cloudCount > 0) {
+          detailHtml += ' · ' + U.escapeHtml(I18n.t(cloudCount === 1 ? 'netstatus.also_cloud_one' : 'netstatus.also_cloud_other', { count: cloudCount }));
+        }
+        detailEl.innerHTML = detailHtml;
+      }
+
+      if (modelsEl) {
+        modelsEl.innerHTML = '';
+        modelsEl.style.display = 'none';
+        if (capacity && stateKey !== 'connecting' && stateKey !== 'offline') {
+          var modelsParts = [];
+          var serveable = capacity.serveable_models || [];
+          var vramMb = capacity.total_vram_mb || 0;
+          var memText = '';
+          if (vramMb >= 1024 * 1024) memText = (vramMb / (1024 * 1024)).toFixed(2) + ' TB';
+          else if (vramMb >= 1024) memText = (vramMb / 1024).toFixed(1) + ' GB';
+          if (memText && (peers > 0 || privateMode)) {
+            modelsParts.push('<strong>' + memText + '</strong> ' + U.escapeHtml(I18n.t('netstatus.memory_word')));
+          }
+          if (serveable.length > 0) {
+            var names = serveable.slice(0, 3).map(function(m) {
+              var d = m.display_name || '';
+              var looksRaw = d && d === d.toLowerCase() && /_/.test(d);
+              if (d && !looksRaw) return U.escapeHtml(d);
+              var src = d || m.model_id || '';
+              return U.escapeHtml(U.formatModelDisplayName ? U.formatModelDisplayName(src) : src);
+            }).join(', ');
+            var more = serveable.length > 3 ? ' +' + (serveable.length - 3) : '';
+            modelsParts.push(U.escapeHtml(I18n.t('netstatus.runs')) + ' ' + names + more);
+          } else if (hasLocalModel) {
+            modelsParts.push('<strong>' + hostedShards + '</strong> ' + U.escapeHtml(I18n.t(hostedShards === 1 ? 'netstatus.shard_one' : 'netstatus.shard_other')));
+          }
+          if (modelsParts.length > 0) {
+            modelsEl.innerHTML = modelsParts.join(' · ');
+            modelsEl.style.display = '';
+          }
+        }
+      }
     },
 
     load: async function() {
@@ -255,8 +324,8 @@
         providerData = await App.data.loadProviders();
         S._cachedProviderData = providerData;
       } catch (e) {}
-      App.modeIndicator.update(statsData, providerData);
-      App.modeIndicator.updateClaudeCodeBadge(providerData);
+      App.networkStatus.update(statsData, providerData);
+      App.networkStatus.updateClaudeCodeBadge(providerData);
     },
 
     updateClaudeCodeBadge: function(providerData) {

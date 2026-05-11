@@ -500,6 +500,19 @@ async fn build_stats_message(state: &SharedState) -> String {
         serde_json::to_value(&*snap).unwrap_or_else(|_| serde_json::json!({}))
     };
 
+    // Network mode flags. Folded into stats_update so the unified Network
+    // Status banner can render the right named state (connecting / global /
+    // private / lan / solo / offline) without a separate fetch.
+    let private_mode = state
+        .credits
+        .private_mode
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let offline_mode = state
+        .credits
+        .offline_mode
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let allow_lan = state.config.pool.private_mode_allow_lan;
+
     let mut data = serde_json::json!({
         "peers": peers_connected,
         "lan_peers": lan_peers,
@@ -515,6 +528,11 @@ async fn build_stats_message(state: &SharedState) -> String {
         "acquisitions": acquisitions,
         "swarm_capacity": capacity_json,
         "wishlist": wishlist_json,
+        "network_mode": {
+            "private_mode": private_mode,
+            "offline_mode": offline_mode,
+            "private_mode_allow_lan": allow_lan,
+        },
     });
 
     data["shard_registry"] = shard_registry_val;

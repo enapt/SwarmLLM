@@ -252,28 +252,7 @@
       });
     }
 
-    // Model browser
-    on('btn-close-model-browser', 'click', function() { App.ui.closeModelBrowser(); });
-    on('btn-hf-search', 'click', function() { App.hf.search(); });
-    on('hf-search-input', 'keydown', function(e) { if (e.key === 'Enter') App.hf.search(); });
-    on('hf-sort', 'change', function() { App.hf.sortResults(); });
-    // HF suggestion chips
-    document.querySelectorAll('[data-hf-suggest]').forEach(function(chip) {
-      chip.addEventListener('click', function() {
-        var query = chip.getAttribute('data-hf-suggest');
-        var input = document.getElementById('hf-search-input');
-        if (input) { input.value = query; }
-        var suggestions = document.getElementById('hf-suggestions');
-        if (suggestions) suggestions.style.display = 'none';
-        App.hf.search();
-      });
-    });
-    // R114: HF task-filter chips. Multi-select; toggles re-trigger search.
-    document.querySelectorAll('[data-hf-task]').forEach(function(chip) {
-      chip.addEventListener('click', function() {
-        App.hf.toggleTaskChip(chip.getAttribute('data-hf-task'));
-      });
-    });
+    // Model browser entry points — all route to the inline Models tab.
     on('btn-open-model-browser', 'click', function() { App.ui.openModelBrowser(); });
     on('btn-browse-hf', 'click', function() { App.ui.openModelBrowser(); });
 
@@ -281,6 +260,7 @@
     on('hamburger-btn', 'click', function() { App.ui.toggleSidebar(); });
     on('logo', 'click', function() { App.ui.switchTab('dashboard'); });
     on('btn-shutdown', 'click', function() { App.models.shutdown(); });
+    on('link-api-log', 'click', function(e) { e.preventDefault(); App.ui.switchTab('responses'); });
 
     // Sidebar
     on('sidebar-overlay', 'click', function() { App.ui.closeSidebar(); });
@@ -380,10 +360,8 @@
       if (e.key === 'Escape') {
         var sidebar = document.getElementById('sidebar');
         var settingsModal = document.getElementById('settings-modal');
-        var modelModal = document.getElementById('model-browser-modal');
         if (sidebar && !sidebar.classList.contains('collapsed') && window.innerWidth < 768) { App.ui.closeSidebar(); }
         else if (settingsModal && !settingsModal.classList.contains('hidden')) { App.ui.closeSettings(); }
-        else if (modelModal && !modelModal.classList.contains('hidden')) { App.ui.closeModelBrowser(); }
       }
       if (e.key === 'Tab') {
         var openModal = document.querySelector('.modal-overlay:not(.hidden) .modal');
@@ -803,7 +781,7 @@
     App.dashboard.loadInitial();
     App.pruneSchedule.loadHistory();
     App.pruneSchedule.loadSchedule();
-    App.modeIndicator.load();
+    App.networkStatus.load();
     App.identity.loadNickname();
     App.notifications.connectWebSocket();
     App.notifications.startPolling();

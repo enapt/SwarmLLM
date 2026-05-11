@@ -451,7 +451,7 @@
             App.data.invalidateDedup('providers');
             App.data.cache.cloudModels = [];
             App.models.load();
-            App.modeIndicator.load();
+            App.networkStatus.load();
           }, 1000);
         }
       } catch (e) {}
@@ -495,7 +495,7 @@
         };
       });
       App.providerHealth.updateBadges();
-      App.modeIndicator.load();
+      App.networkStatus.load();
     } catch (e) {}
   }
 

@@ -643,62 +643,6 @@
     </div>
   </div>
 
-  <!-- Model browser modal -->
-  <div class="modal-overlay hidden" id="model-browser-modal" role="dialog" aria-modal="true" aria-labelledby="model-browser-title">
-    <div class="modal modal-lg">
-      <div class="modal-header">
-        <h2 id="model-browser-title" data-i18n="model_browser.title">Find &amp; Download Models</h2>
-        <button class="btn btn-ghost btn-sm" id="btn-close-model-browser" data-i18n-aria-label="model_browser.close_aria" aria-label="Close model browser">&times;</button>
-      </div>
-      <div class="hf-swarm-notice">
-        <span class="hf-swarm-notice-icon">&#9432;</span>
-        <span data-i18n="model_browser.hosting_notice">Downloading a model lets you <strong>host it</strong> and earn credits. To run inference without enough local VRAM, swarm peers must already be hosting it — check the <strong>On Swarm</strong> badge in results.</span>
-      </div>
-      <div class="model-browser-search">
-        <input type="text" id="hf-search-input" placeholder="Search HuggingFace models (e.g. llama, qwen, phi, gemma)..." data-i18n-placeholder="model_browser.search_placeholder">
-        <button class="btn btn-primary" id="btn-hf-search" data-i18n="model_browser.search_btn">Search</button>
-      </div>
-      <div class="model-browser-filters">
-        <select id="hf-sort" data-i18n-title="model_browser.sort_title">
-          <option value="score" data-i18n="model_browser.sort_score">Best for you</option>
-          <option value="downloads" data-i18n="model_browser.sort_downloads">Most downloaded</option>
-          <option value="size_asc" data-i18n="model_browser.sort_size_asc">Smallest first</option>
-          <option value="size_desc" data-i18n="model_browser.sort_size_desc">Largest first</option>
-        </select>
-        <!-- R114: task filter chips. Multi-select; each click toggles a
-             tag in the search query string. The chip set is small + curated,
-             not a free-form picker — matches the wishlist task taxonomy. -->
-        <div class="hf-task-chips" id="hf-task-chips">
-          <button class="hf-task-chip" data-hf-task="chat" data-i18n="wishlist.task.chat">Chat</button>
-          <button class="hf-task-chip" data-hf-task="code" data-i18n="wishlist.task.code">Code</button>
-          <button class="hf-task-chip" data-hf-task="vision" data-i18n="wishlist.task.vision">Vision</button>
-          <button class="hf-task-chip" data-hf-task="reasoning" data-i18n="wishlist.task.reasoning">Reasoning</button>
-          <button class="hf-task-chip" data-hf-task="multilingual" data-i18n="wishlist.task.multilingual">Multilingual</button>
-        </div>
-      </div>
-      <div id="hf-results">
-        <div class="hf-suggestions" id="hf-suggestions">
-          <p class="text-muted text-base" style="margin:0 0 10px" data-i18n="model_browser.popular_title">Popular models to get started:</p>
-          <div class="hf-suggestion-chips">
-            <button class="hf-suggestion-chip" data-hf-suggest="llama">Llama</button>
-            <button class="hf-suggestion-chip" data-hf-suggest="qwen">Qwen</button>
-            <button class="hf-suggestion-chip" data-hf-suggest="phi">Phi</button>
-            <button class="hf-suggestion-chip" data-hf-suggest="gemma">Gemma</button>
-            <button class="hf-suggestion-chip" data-hf-suggest="mistral">Mistral</button>
-            <button class="hf-suggestion-chip" data-hf-suggest="deepseek">DeepSeek</button>
-            <button class="hf-suggestion-chip" data-hf-suggest="codestral">Codestral</button>
-            <button class="hf-suggestion-chip" data-hf-suggest="tinyllama">TinyLlama</button>
-          </div>
-          <p class="text-muted text-sm" style="margin:10px 0 0" data-i18n="model_browser.results_hint">Results show whether a model is already on the swarm and whether your hardware can host or run it.</p>
-        </div>
-      </div>
-      <div id="hf-loading" class="hidden text-center p-3">
-        <div class="spinner"></div>
-        <span class="text-muted ml-1" data-i18n="model_browser.searching">Searching HuggingFace...</span>
-      </div>
-    </div>
-  </div>
-
   <!-- Header -->
   <header class="app-header">
     <div class="header-left">
@@ -708,11 +652,10 @@
     <div class="header-center">
       <button class="tab-btn tab-btn-chat" data-tab="chat" data-i18n="nav.chat">Chat</button>
       <button class="tab-btn active" data-tab="dashboard" data-i18n="nav.dashboard">Dashboard</button>
-      <button class="tab-btn" data-tab="swarm" data-i18n="nav.swarm">The Swarm</button>
+      <button class="tab-btn" data-tab="swarm" data-i18n="nav.swarm">Models</button>
       <button class="tab-btn" data-tab="leaderboard" data-i18n="nav.leaderboard">Leaderboard</button>
       <button class="tab-btn" data-tab="network-map" data-i18n="nav.network_map">Network Map</button>
       <button class="tab-btn" data-tab="compare" data-i18n="nav.compare">Compare</button>
-      <button class="tab-btn" data-tab="responses" data-i18n="nav.responses">Responses</button>
       <button class="tab-btn" data-tab="devices" data-i18n="pool.title">My Devices</button>
     </div>
     <div class="header-right">
@@ -885,44 +828,24 @@
           <!-- Status banner -->
           <div id="status-banner"></div>
 
-          <!-- R110: swarm-wide capacity banner. Headline answer to
-               "what can my swarm actually run right now?". Hidden until
-               the first WS stats_update arrives so we never show "0 nodes"
-               on the cold-start screen. -->
-          <div class="swarm-capacity-banner mb-2" id="swarm-capacity-banner" style="display:none">
-            <div class="capacity-line capacity-headline">
-              <span class="capacity-icon">&#127760;</span>
-              <span data-i18n="capacity.headline_prefix">Your swarm has</span>
-              <strong id="capacity-nodes">0</strong>
-              <span data-i18n="capacity.nodes_word">contributors</span>
-              <span class="capacity-sep">·</span>
-              <strong id="capacity-vram">0 GB</strong>
-              <span data-i18n="capacity.combined_memory_word">combined memory</span>
-              <span class="capacity-sep">·</span>
-              <strong id="capacity-models-count">0</strong>
-              <span data-i18n="capacity.models_running_word">models ready</span>
+          <!-- Network status panel — single source of truth for "what state
+               is this node in?". Replaces the R110 capacity banner + the
+               older mode-indicator strip. Six named states: connecting /
+               global / private / lan / solo / offline. Capacity facts (peer
+               count, combined memory, headline model, running models) and
+               cloud-provider count fold in as supporting detail. -->
+          <div class="panel network-status network-status-connecting" id="network-status-panel">
+            <div class="netstatus-row netstatus-row-primary">
+              <div class="netstatus-state">
+                <span class="netstatus-dot" id="netstatus-dot"></span>
+                <span class="netstatus-name" id="netstatus-name" data-i18n="netstatus.connecting">Connecting…</span>
+              </div>
+              <div class="netstatus-chips" id="netstatus-chips"></div>
             </div>
-            <div class="capacity-line capacity-headline-model" id="capacity-headline-model" style="display:none">
-              <span data-i18n="capacity.runs_up_to">Runs up to</span>
-              <strong id="capacity-headline-name">—</strong>
+            <div class="netstatus-row netstatus-row-detail" id="netstatus-detail">
+              <span class="text-muted" data-i18n="netstatus.detail_connecting">Looking for peers — usually 10–30 s on first start.</span>
             </div>
-            <div class="capacity-line capacity-running" id="capacity-running" style="display:none">
-              <span class="text-muted" data-i18n="capacity.running_now">Running now:</span>
-              <span id="capacity-running-list"></span>
-            </div>
-            <div class="capacity-line capacity-aspirational" id="capacity-aspirational" style="display:none">
-              <span class="text-muted" data-i18n="capacity.watching">Watching:</span>
-              <span id="capacity-aspirational-list"></span>
-            </div>
-          </div>
-
-          <!-- Operation mode indicator -->
-          <div class="mode-indicator mb-2" id="mode-indicator">
-            <div class="mode-left">
-              <div class="mode-dot offline" id="mode-dot"></div>
-              <span class="mode-label" id="mode-label" data-i18n="mode.starting">STARTING</span>
-            </div>
-            <div class="mode-detail" id="mode-detail"></div>
+            <div class="netstatus-row netstatus-row-models" id="netstatus-models" style="display:none"></div>
           </div>
 
           <!-- Stat strip — compact single row -->
@@ -1178,6 +1101,12 @@
                 </div>
               </div>
             </div>
+
+            <!-- Dashboard footer links — admin/debug surfaces that don't
+                 deserve top-nav real estate but should still be reachable. -->
+            <div class="dashboard-foot-links">
+              <a href="#" class="text-muted text-sm" id="link-api-log" data-i18n="dashboard.api_log_link">View API request log →</a>
+            </div>
           </div>
         </div>
       </div>
@@ -1278,8 +1207,8 @@
         <div class="container">
           <div class="panel">
             <div class="panel-header flex-wrap" style="gap:4px 12px">
-              <h2 data-i18n="responses.title">Responses</h2>
-              <span class="text-muted text-sm" data-i18n="responses.subtitle">Stored responses from the OpenAI /v1/responses endpoint. Retrieve by id, browse recent runs, cancel a background job.</span>
+              <h2 data-i18n="responses.title">API request log</h2>
+              <span class="text-muted text-sm" data-i18n="responses.subtitle">Stored OpenAI Responses API calls — retrieve, browse, or cancel a background job.</span>
             </div>
             <div class="flex gap-1 mb-1" style="align-items:center">
               <input type="text" id="responses-retrieve-id" placeholder="resp_…" data-i18n-placeholder="responses.retrieve_placeholder" style="flex:1;font-size:0.85rem">
@@ -1321,7 +1250,7 @@
         <div class="container">
           <div class="panel">
             <div class="panel-header">
-              <h2 data-i18n="swarm.title">The Swarm</h2>
+              <h2 data-i18n="swarm.title">Models</h2>
               <div class="swarm-subtab-nav">
                 <button class="swarm-subtab active" data-swarm-subtab="wishlist" data-i18n="swarm.tab_wishlist">Wishlist</button>
                 <button class="swarm-subtab" data-swarm-subtab="running" data-i18n="swarm.tab_running">Running now</button>
@@ -1343,10 +1272,74 @@
               <div class="capacity-running-grid" id="swarm-running-grid"></div>
             </div>
 
-            <!-- Search HuggingFace subtab — placeholder hosting the existing model browser. -->
+            <!-- Search HuggingFace subtab — inline full-page browser.
+                 Use-case onramp + trending + filtered search results.
+                 Replaced the old "click button → modal" dead-end UX. -->
             <div class="swarm-subview" id="swarm-subview-search" style="display:none">
-              <div class="text-muted text-sm mb-2" data-i18n="swarm.search_intro">Find a model on HuggingFace. Adding it to the swarm helps everyone — pick something popular, and your contribution unlocks it for the whole network.</div>
-              <button class="btn btn-primary" id="swarm-open-hf-browser" data-i18n="swarm.open_hf_browser">Open HuggingFace browser</button>
+              <!-- Use-case onramp — large cards for non-technical users -->
+              <div class="usecase-row" id="usecase-row">
+                <button class="usecase-card" data-usecase="chat">
+                  <span class="usecase-emoji">💬</span>
+                  <span class="usecase-title" data-i18n="browse.usecase_chat">Chat &amp; assistant</span>
+                  <span class="usecase-sub text-muted" data-i18n="browse.usecase_chat_sub">General conversation</span>
+                </button>
+                <button class="usecase-card" data-usecase="code">
+                  <span class="usecase-emoji">⌨️</span>
+                  <span class="usecase-title" data-i18n="browse.usecase_code">Write code</span>
+                  <span class="usecase-sub text-muted" data-i18n="browse.usecase_code_sub">Programming help</span>
+                </button>
+                <button class="usecase-card" data-usecase="reasoning">
+                  <span class="usecase-emoji">🧠</span>
+                  <span class="usecase-title" data-i18n="browse.usecase_reasoning">Reason &amp; analyze</span>
+                  <span class="usecase-sub text-muted" data-i18n="browse.usecase_reasoning_sub">Math, logic, plans</span>
+                </button>
+                <button class="usecase-card" data-usecase="vision">
+                  <span class="usecase-emoji">👁️</span>
+                  <span class="usecase-title" data-i18n="browse.usecase_vision">See images</span>
+                  <span class="usecase-sub text-muted" data-i18n="browse.usecase_vision_sub">Look at pictures</span>
+                </button>
+                <button class="usecase-card" data-usecase="multilingual">
+                  <span class="usecase-emoji">🌐</span>
+                  <span class="usecase-title" data-i18n="browse.usecase_multilingual">Translate</span>
+                  <span class="usecase-sub text-muted" data-i18n="browse.usecase_multilingual_sub">Many languages</span>
+                </button>
+              </div>
+
+              <!-- Search row -->
+              <div class="browse-search-row">
+                <input type="text" id="browse-search-input" class="browse-search-input"
+                  placeholder="Search for a model by name…"
+                  data-i18n-placeholder="browse.search_placeholder">
+                <label class="browse-fit-toggle" title="Hide models too large for your current swarm">
+                  <input type="checkbox" id="browse-fit-only" checked>
+                  <span data-i18n="browse.fit_only">Only show what my swarm can run</span>
+                </label>
+              </div>
+
+              <!-- Trending row — populated from R112 HfWatcher cache -->
+              <div class="browse-section" id="browse-trending-section">
+                <div class="browse-section-header">
+                  <h3 data-i18n="browse.trending_title">🔥 Trending this week</h3>
+                  <span class="text-muted text-xs" id="browse-trending-meta"></span>
+                </div>
+                <div class="browse-trending-strip" id="browse-trending-strip">
+                  <div class="text-muted text-sm" data-i18n="browse.trending_loading">Loading trending models…</div>
+                </div>
+              </div>
+
+              <!-- Results -->
+              <div class="browse-section" id="browse-results-section" style="display:none">
+                <div class="browse-section-header">
+                  <h3 id="browse-results-title" data-i18n="browse.results_title">Results</h3>
+                  <span class="text-muted text-xs" id="browse-results-meta"></span>
+                </div>
+                <div class="browse-results-list" id="browse-results-list"></div>
+              </div>
+
+              <div id="browse-loading" class="text-center p-3" style="display:none">
+                <div class="spinner"></div>
+                <span class="text-muted ml-1" data-i18n="browse.searching">Searching HuggingFace…</span>
+              </div>
             </div>
 
             <!-- Capacity-plan subtab — what-if calculator (filled in R113) -->

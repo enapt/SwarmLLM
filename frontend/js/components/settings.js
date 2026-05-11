@@ -531,7 +531,7 @@
         });
         App.settings.loadProviders();
         App.models.load();
-        App.modeIndicator.load();
+        App.networkStatus.load();
         App.providerHealth.startHealthPolling();
         App.ui.showBanner('success', I18n.t('settings.providers_saved'));
       } catch (e) {
@@ -580,7 +580,7 @@
           var testCard = badge.closest('.provider-card');
           if (testCard) testCard.classList.add('provider-active');
           App.models.load();
-          App.modeIndicator.load();
+          App.networkStatus.load();
         } else {
           var err = await testResp.text();
           var friendlyErr = err;
