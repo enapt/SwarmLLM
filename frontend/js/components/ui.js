@@ -134,19 +134,15 @@
       document.getElementById('settings-modal').classList.add('hidden');
     },
 
-    // Now jumps to the Models tab's Search subtab. The legacy modal is
-    // retained in markup for any out-of-tree callers but no longer used
-    // from anywhere we ship.
+    // Jumps to the Models tab's Search subtab. The legacy modal has been
+    // deleted — closeModelBrowser is no longer needed.
     openModelBrowser: function(query) {
       if (App.swarmTab && typeof App.swarmTab.openSearch === 'function') {
         App.swarmTab.openSearch(query || '');
         return;
       }
-      // Fallback for boot order edge case
       App.ui.switchTab('swarm');
     },
-
-    closeModelBrowser: function() { /* no-op since browser is inline now */ },
 
     showBanner: function(type, message) {
       App.notifications.showToast(message, type === 'warning' ? 'warning' : type === 'error' ? 'error' : type === 'success' ? 'success' : 'info');

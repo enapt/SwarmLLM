@@ -1643,24 +1643,6 @@
     </tr>
   </template>
 
-  <!-- HuggingFace search result card (used by hf.search) -->
-  <template id="tmpl-hf-result-card">
-    <div class="hf-model-card">
-      <div class="hf-model-info">
-        <div class="hf-model-name"></div>
-        <div class="hf-model-meta hf-meta-stats"></div>
-        <div class="hf-model-meta hf-meta-network"></div>
-        <!-- R114: task-tag chips + swarm CTA pill rendered into these slots. -->
-        <div class="hf-meta-tasks"></div>
-        <div class="hf-meta-cta"></div>
-      </div>
-      <div class="hf-model-actions">
-        <select class="hf-quant-select" hidden></select>
-        <button class="btn btn-sm btn-primary hf-dl-btn" data-i18n="models.download">Download</button>
-      </div>
-    </div>
-  </template>
-
   <!-- Storage model row (used by settings.loadStorageInfo) -->
   <template id="tmpl-storage-model-row">
     <div class="flex-between" style="padding:2px 0">

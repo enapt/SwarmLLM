@@ -12,29 +12,12 @@
 
   // ========================================================================
   // HuggingFace Module
+  // Just download helpers now — the modal browser (search / sort /
+  // _renderResults / toggleTaskChip) was replaced by the inline Models
+  // tab browser in swarm-tab.js. Surface trimmed to the two functions
+  // still called externally: downloadShards + download.
   // ========================================================================
   App.hf = {
-    /** R114: active task filter chips. Set of stable tokens
-     *  (chat/code/vision/multilingual/reasoning). Empty = no filter. */
-    _activeTasks: [],
-
-    /** R114: toggle a task chip on/off and re-search. */
-    toggleTaskChip: function(task) {
-      task = (task || '').toLowerCase();
-      if (!task) return;
-      var idx = App.hf._activeTasks.indexOf(task);
-      if (idx >= 0) App.hf._activeTasks.splice(idx, 1);
-      else App.hf._activeTasks.push(task);
-      // Reflect state on the chip buttons.
-      document.querySelectorAll('.hf-task-chip').forEach(function(el) {
-        var t = (el.dataset.hfTask || '').toLowerCase();
-        el.classList.toggle('active', App.hf._activeTasks.indexOf(t) >= 0);
-      });
-      // Re-run the search if there's already a query.
-      var input = document.getElementById('hf-search-input');
-      if (input && input.value.trim()) App.hf.search();
-    },
-
     /**
      * Centralized HF shard download request.
      * @param {Object} body - Request body (repo_id, filename, shards?, model_id?, peer_fair_share?)
@@ -53,189 +36,6 @@
       }
       return { ok: resp.ok, data: data, errorMsg: errorMsg };
     },
-    search: async function() {
-      var query = document.getElementById('hf-search-input').value.trim();
-      var suggestions = document.getElementById('hf-suggestions');
-      if (!query) {
-        if (suggestions) suggestions.style.display = '';
-        return;
-      }
-
-      var results = document.getElementById('hf-results');
-      var loading = document.getElementById('hf-loading');
-      results.innerHTML = '';
-      if (suggestions) suggestions.style.display = 'none';
-      loading.classList.remove('hidden');
-
-      try {
-        // R114: include the active task-filter chips in the request so
-        // the backend filters server-side. Empty = no filter.
-        var taskFilter = (App.hf._activeTasks || []).join(',');
-        var url = '/api/admin/hf/search?q=' + encodeURIComponent(query) +
-          (taskFilter ? '&tasks=' + encodeURIComponent(taskFilter) : '');
-        var resp = await App.authFetch(url);
-        loading.classList.add('hidden');
-
-        if (!resp.ok) {
-          var errBody = await resp.text();
-          try { var errJson = JSON.parse(errBody); errBody = errJson.error ? errJson.error.message : errBody; } catch (e2) {}
-          results.innerHTML = '<div class="empty-state"><p>' + U.escapeHtml(I18n.t('models.search_failed', { error: errBody })) + '</p></div>';
-          return;
-        }
-
-        var data = await resp.json();
-
-        if (!Array.isArray(data) || data.length === 0) {
-          results.innerHTML = '<div class="empty-state"><p>' + U.escapeHtml(I18n.t('models.no_gguf_found', { query: query })) + '</p></div>';
-          return;
-        }
-
-        // Store data for re-sorting
-        App.hf._lastData = data;
-        App.hf._renderResults(data);
-      } catch (e) {
-        loading.classList.add('hidden');
-        results.innerHTML = '<div class="empty-state"><p>' + U.escapeHtml(I18n.t('models.search_failed', { error: e.message })) + '</p></div>';
-      }
-    },
-
-    _lastData: null,
-
-    sortResults: function() {
-      if (!App.hf._lastData) return;
-      var sortBy = (document.getElementById('hf-sort') || {}).value || 'score';
-      var data = App.hf._lastData.slice();
-      if (sortBy === 'downloads') data.sort(function(a,b) { return (b.downloads||0) - (a.downloads||0); });
-      else if (sortBy === 'size_asc') data.sort(function(a,b) { return (a.est_shard_size||0) - (b.est_shard_size||0); });
-      else if (sortBy === 'size_desc') data.sort(function(a,b) { return (b.est_shard_size||0) - (a.est_shard_size||0); });
-      else data.sort(function(a,b) { return (b.composite_score||0) - (a.composite_score||0); });
-      App.hf._renderResults(data);
-    },
-
-    _renderResults: function(data) {
-        var results = document.getElementById('hf-results');
-        results.innerHTML = '';
-        var hfTmpl = document.getElementById('tmpl-hf-result-card');
-        data.forEach(function(repo) {
-          var card = hfTmpl.content.cloneNode(true).firstElementChild;
-          var safeKey = (repo.repo_id || '').replace(/[^a-zA-Z0-9]/g, '_');
-          var variants = repo.variants || [];
-          var recommended = repo.recommended_variant || '';
-
-          // Name
-          card.querySelector('.hf-model-name').textContent = repo.repo_id;
-
-          // Stats meta (downloads, likes, VRAM fit)
-          var statsHtml = '';
-          if (repo.downloads) statsHtml += '<span>' + I18n.t('models.downloads_count', { count: repo.downloads.toLocaleString() }) + '</span>';
-          if (repo.likes) statsHtml += '<span>' + I18n.t('models.likes_count', { count: repo.likes.toLocaleString() }) + '</span>';
-          var shardSizeStr = repo.est_shard_size ? U.formatBytes(repo.est_shard_size) : '';
-          var boomerangSizeStr = repo.est_boomerang_size ? U.formatBytes(repo.est_boomerang_size) : '';
-          if (repo.fits_boomerang) {
-            statsHtml += '<span><span style="color:var(--green)" title="' + U.escapeHtml(I18n.t('models.hf_fit_boomerang', { size: boomerangSizeStr })) + '">&#9989; ' + U.escapeHtml(I18n.t('models.tip_run_local')) + '</span></span>';
-          } else if (repo.fits_shard) {
-            statsHtml += '<span><span style="color:var(--cyan)" title="' + U.escapeHtml(I18n.t('models.hf_fit_shard', { size: shardSizeStr })) + '">&#128279; ' + U.escapeHtml(I18n.t('models.tip_host_shards')) + '</span></span>';
-          } else if (repo.fits_vram === false && variants.length > 0) {
-            statsHtml += '<span><span style="color:var(--orange)" title="' + U.escapeHtml(I18n.t('models.hf_exceeds_vram')) + '">&#9888; ' + U.escapeHtml(I18n.t('models.tip_exceeds_vram')) + '</span></span>';
-          }
-          // R114: composite score badge replaced by the status-driven CTA
-          // pill below. The raw score number lives on the card title
-          // attribute (debug aid) so the breakdown is still inspectable
-          // for power users without crowding the visible UI.
-          card.querySelector('.hf-meta-stats').innerHTML = statsHtml;
-          if (repo.composite_score != null) {
-            var nameEl = card.querySelector('.hf-model-name');
-            if (nameEl) {
-              nameEl.title = I18n.t('models.hf_score_breakdown', {
-                quality: (repo.score_breakdown||{}).quality||0,
-                fit: (repo.score_breakdown||{}).fit||0,
-                demand: (repo.score_breakdown||{}).demand||0,
-                size: (repo.score_breakdown||{}).size||0,
-              });
-            }
-          }
-
-          // Network meta
-          var replicas = repo.network_replicas || 0;
-          var networkHtml = replicas > 0
-            ? '<span class="badge badge-green" title="' + U.escapeHtml(I18n.t('models.hf_on_swarm', { count: replicas })) + '">' + U.escapeHtml(I18n.t('models.hf_on_swarm', { count: replicas })) + '</span>'
-            : '';
-          if (replicas === 0) networkHtml += '<span style="color:var(--green)">&#128176; ' + U.escapeHtml(I18n.t('models.demand_high')) + '</span>';
-          else if (replicas <= 2) networkHtml += '<span style="color:var(--yellow)">&#128176; ' + U.escapeHtml(I18n.t('models.demand_medium')) + '</span>';
-          else networkHtml += '<span style="color:var(--text-muted)">&#128176; ' + U.escapeHtml(I18n.t('models.well_replicated')) + '</span>';
-          card.querySelector('.hf-meta-network').innerHTML = networkHtml;
-
-          // R114: task-tag chips. Inert (visual only) — clicking the
-          // top-level task filter chips does the actual filtering.
-          var tasksEl = card.querySelector('.hf-meta-tasks');
-          var tasks = repo.task_tags || [];
-          if (tasksEl && tasks.length > 0) {
-            tasksEl.innerHTML = tasks.map(function(t) {
-              var label = I18n.t('wishlist.task.' + t);
-              if (label === 'wishlist.task.' + t) label = t;
-              return '<span class="hf-task-tag-pill">' + U.escapeHtml(label) + '</span>';
-            }).join(' ');
-          }
-
-          // R114: status-driven CTA pill. Replaces the implicit "you
-          // figure it out from the score" UX with a single sentence
-          // that says exactly why this model is interesting (or not).
-          var ctaEl = card.querySelector('.hf-meta-cta');
-          if (ctaEl) {
-            var status = repo.swarm_cta_status || 'downloadable';
-            var ctaKey, ctaClass;
-            switch (status) {
-              case 'be_first_host':
-                ctaKey = 'hf_browser.cta_be_first_host';
-                ctaClass = 'hf-cta-pill hf-cta-be-first';
-                break;
-              case 'needs_more_hosts':
-                ctaKey = 'hf_browser.cta_needs_more_hosts';
-                ctaClass = 'hf-cta-pill hf-cta-needs-more';
-                break;
-              case 'well_replicated':
-                ctaKey = 'hf_browser.cta_well_replicated';
-                ctaClass = 'hf-cta-pill hf-cta-replicated';
-                break;
-              case 'unreachable':
-                ctaKey = 'hf_browser.cta_unreachable';
-                ctaClass = 'hf-cta-pill hf-cta-unreachable';
-                break;
-              default:
-                ctaKey = 'hf_browser.cta_downloadable';
-                ctaClass = 'hf-cta-pill';
-            }
-            ctaEl.innerHTML = '<span class="' + ctaClass + '">' +
-              U.escapeHtml(I18n.t(ctaKey)) + '</span>';
-          }
-
-          // Variant selector
-          var selectEl = card.querySelector('.hf-quant-select');
-          if (variants.length > 1) {
-            selectEl.removeAttribute('hidden');
-            selectEl.id = 'quant-' + safeKey;
-            variants.forEach(function(v) {
-              var opt = document.createElement('option');
-              opt.value = v.filename;
-              var label = v.quant + (v.size_bytes ? ' \u2014 ' + U.formatBytes(v.size_bytes) : '');
-              if (v.quant === recommended) { label += I18n.t('models.hf_recommended'); opt.selected = true; }
-              opt.textContent = label;
-              selectEl.appendChild(opt);
-            });
-          } else {
-            selectEl.remove();
-          }
-
-          // Download button
-          var dlBtn = card.querySelector('.hf-dl-btn');
-          dlBtn.setAttribute('data-hf-download', repo.repo_id);
-          dlBtn.setAttribute('data-hf-variant', safeKey);
-          if (variants.length === 1) dlBtn.setAttribute('data-hf-filename', variants[0].filename);
-
-          results.appendChild(card);
-        });
-    },
-
     download: async function(repoId, variantKey) {
       try {
         var filename = '';
@@ -262,7 +62,6 @@
         }
         if (result.data.status === 'started') {
           App.notifications.showToast(I18n.t('models.download_started'), 'success');
-          App.ui.closeModelBrowser();
         } else {
           App.notifications.showToast(result.data.message || I18n.t('models.download_could_not_start'), 'warning');
         }
