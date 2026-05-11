@@ -210,8 +210,18 @@ pub async fn hf_search(
             // score. The mapping mirrors the wishlist's status taxonomy
             // (Hosting / Serveable / Aspirational / Unreachable / Blocked)
             // so non-technical users see consistent language across views.
+            //
+            // Bug fix (multi-node test): when the local node can't fit *any*
+            // shard but peers host the model, the old logic flagged it as
+            // "unreachable" — which is wrong. If `network_replicas > 0` the
+            // model IS reachable via remote inference through those peers,
+            // so report `swarm_serveable` instead.
             let status = if !fits_full && !fits_boomerang && !fits_shard {
-                "unreachable"
+                if network_replicas > 0 {
+                    "swarm_serveable"
+                } else {
+                    "unreachable"
+                }
             } else if network_replicas == 0 && (fits_boomerang || fits_full) {
                 "be_first_host"
             } else if network_replicas > 0 && network_replicas < 3 {

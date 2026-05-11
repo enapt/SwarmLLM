@@ -297,10 +297,14 @@
   }
 
   // Pick a single fit pill from the backend's fits_* booleans. Order matters:
-  // "Already hosting" wins over "fits", "fits local" wins over "host shards",
-  // "too large" only when nothing fits at all.
+  // "Already hosting" (locally registered) wins, then local fit, then "host
+  // shards via swarm", then swarm-only, then too-large.
+  // `_localHfRepos` is rebuilt on each stats_update; used to detect when a
+  // result row points at a model the user already hosts (so we render a
+  // distinct "★ You host this" pill instead of generic Download CTA).
+  var _localHfRepos = new Set();
   function _fitPill(repo) {
-    if (repo.network_replicas > 0 && repo.you_already_host) {
+    if (_localHfRepos.has((repo.repo_id || '').toLowerCase())) {
       return { key: 'already', text: I18n.t('browse.fit_already') };
     }
     if (repo.fits_boomerang) {
@@ -313,6 +317,20 @@
       return { key: 'swarm', text: I18n.t('browse.fit_swarm_only') };
     }
     return { key: 'too-large', text: I18n.t('browse.fit_too_large') };
+  }
+
+  // Snapshot which HF repos the local node already hosts. Fed by
+  // `App.swarmTab.onStats` so the browser's "★ You host this" pill stays
+  // accurate without a per-render REST round-trip.
+  function _refreshLocalHfRepos() {
+    if (!App.data || !App.data.cache || !App.data.cache.models) return;
+    var fresh = new Set();
+    var models = App.data.cache.models || [];
+    models.forEach(function (m) {
+      var src = m && m.hf_source;
+      if (src && src.repo_id) fresh.add(String(src.repo_id).toLowerCase());
+    });
+    _localHfRepos = fresh;
   }
 
   function _humaniseBytes(bytes) {
@@ -666,6 +684,9 @@
     onStats: function (data) {
       if (data && data.wishlist) _renderWishlist(data.wishlist);
       if (data && data.swarm_capacity) _renderRunning(data.swarm_capacity);
+      // Keep the inline browser's "★ You host this" pill accurate. Cheap —
+      // a few Set operations per WS frame.
+      _refreshLocalHfRepos();
     },
 
     /** Called from init.js after the tab buttons render. */

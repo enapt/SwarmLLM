@@ -154,6 +154,17 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
                     "discovered".to_string()
                 }
             });
+        let hf_source = state
+            .shared_state
+            .models
+            .hf_sources
+            .get(&crate::types::ModelId(id.to_string()))
+            .map(|entry| {
+                serde_json::json!({
+                    "repo_id": entry.repo_id,
+                    "filename": entry.filename,
+                })
+            });
         serde_json::json!({
             "id": id,
             "name": name,
@@ -172,6 +183,7 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
             "encrypted_pipeline": enc_info.0,
             "has_first_shard": enc_info.1,
             "has_last_shard": enc_info.2,
+            "hf_source": hf_source,
         })
     };
 
