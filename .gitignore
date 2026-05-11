@@ -70,3 +70,6 @@ tests/fixtures/tiny_model/*.bin
 node_a_*.png
 *.log
 .claude/worktrees/
+
+# Working-tree screenshots — review artefacts, not repo content
+.claude/screenshots/
