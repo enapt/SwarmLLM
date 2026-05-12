@@ -59,6 +59,13 @@ pub async fn hf_search(
     // R114: task-filter parsing. Tokens are case-insensitive; unknown
     // tokens are silently ignored so a future filter chip the backend
     // doesn't recognise yet doesn't break the response.
+    if let Some(ref t) = params.tasks {
+        if t.len() > 512 {
+            return Err(ApiError(crate::error::SwarmError::Validation(
+                "tasks filter too long (max 512 bytes)".into(),
+            )));
+        }
+    }
     let task_filter: Option<std::collections::HashSet<String>> = params.tasks.as_ref().map(|s| {
         s.split(',')
             .map(|t| t.trim().to_lowercase())

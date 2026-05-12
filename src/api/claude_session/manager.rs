@@ -184,18 +184,18 @@ impl SessionManager {
             .stderr(std::process::Stdio::piped())
             .spawn()
             .map_err(|e| {
-                ApiError(crate::error::SwarmError::Internal(format!(
+                ApiError(crate::error::SwarmError::ServiceUnavailable(format!(
                     "Failed to spawn Claude CLI: {e}"
                 )))
             })?;
 
         let stdin = child.stdin.take().ok_or_else(|| {
-            ApiError(crate::error::SwarmError::Internal(
+            ApiError(crate::error::SwarmError::ServiceUnavailable(
                 "Claude session: no stdin".into(),
             ))
         })?;
         let stdout = child.stdout.take().ok_or_else(|| {
-            ApiError(crate::error::SwarmError::Internal(
+            ApiError(crate::error::SwarmError::ServiceUnavailable(
                 "Claude session: no stdout".into(),
             ))
         })?;

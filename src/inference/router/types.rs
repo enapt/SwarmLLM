@@ -86,7 +86,6 @@ pub struct StreamingTokenEvent {
     /// user-provided stop sequence matched. The Anthropic SSE handler
     /// reads this to populate `message_delta.delta.stop_sequence`.
     /// Empty/intermediate token events leave this as `None`.
-    #[allow(dead_code)]
     pub matched_stop_sequence: Option<String>,
 }
 

@@ -277,14 +277,14 @@ pub async fn create_session_handler(
                     if let Some(evt) = init_evt {
                         return Ok(evt);
                     }
-                    return Err(ApiError(crate::error::SwarmError::Internal(
+                    return Err(ApiError(crate::error::SwarmError::ServiceUnavailable(
                         "Claude CLI exited before sending init message".into(),
                     )));
                 }
                 Ok(Err(e)) => {
-                    return Err(ApiError(crate::error::SwarmError::Internal(format!(
-                        "Error reading Claude CLI stdout: {e}"
-                    ))));
+                    return Err(ApiError(crate::error::SwarmError::ServiceUnavailable(
+                        format!("Error reading Claude CLI stdout: {e}"),
+                    )));
                 }
                 Err(_) => {
                     // Timeout — if we have init, proceed (result may not come)
@@ -294,10 +294,12 @@ pub async fn create_session_handler(
                         );
                         return Ok(evt);
                     }
-                    return Err(ApiError(crate::error::SwarmError::Internal(format!(
-                        "Timeout waiting for Claude CLI init ({}s)",
-                        CLAUDE_INIT_TIMEOUT_SECS
-                    ))));
+                    return Err(ApiError(crate::error::SwarmError::ServiceUnavailable(
+                        format!(
+                            "Timeout waiting for Claude CLI init ({}s)",
+                            CLAUDE_INIT_TIMEOUT_SECS
+                        ),
+                    )));
                 }
             }
         }
