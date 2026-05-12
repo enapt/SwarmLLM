@@ -25,7 +25,21 @@ Run `/cleanup` after committing changes to: SharedState fields, API endpoints, J
 - `SwarmError::Validation` → 400, API input errors
 - `SwarmError::ModelNotAvailable` / `ShardNotFound` → 404
 - `SwarmError::Config` → startup / config file only
-- `SwarmError::Internal` → actual bugs (500)
-- `SwarmError::ProviderError` → upstream cloud errors (preserves status)
+- `SwarmError::ServiceUnavailable` → 503, *this server* can't serve (missing local binary, subprocess spawn/I/O failure, broken pipe, init timeout). Use for all subprocess lifecycle failures (R118-R119 cleanup).
+- `SwarmError::ProviderError {status, body}` → upstream returned an error OR upstream response couldn't be parsed (matches R119 translate.rs fix: parsing malformed upstream chat-completions response uses ProviderError, NOT Internal and NOT Validation, even though the upstream data passes through user-triggered code paths). Preserves upstream HTTP status.
+- `SwarmError::Internal` → actual bugs (500). Reach for it only when no external party can be blamed. Serializing our own well-typed struct failing is Internal; subprocess crashing is NOT.
 
-Never use `Config` or `Internal` for request validation.
+Never use `Config` or `Internal` for request validation. When unsure between Internal vs ProviderError vs ServiceUnavailable, look at the surrounding code in the same function — it usually picks a clear pattern (translate.rs lines 549-559 use ProviderError, so the tool_call missing-field arms should too).
+
+## Verify before deleting sweep findings
+
+Sweep agents report dead code / orphaned keys with confidence ≥80%, but their grep may miss call sites in adjacent directories (R120 caught Agent 4 missing 6 `enc.*` callers in `init.js`, `core/utils.js`, `chat.js`). Before deleting anything an agent flagged:
+```bash
+grep -rn "thing_name" frontend/js/ frontend/index.html frontend/css/   # full frontend
+grep -rn "thing_name\b" src/ tests/ crates/                            # word-boundary; catches re-exports
+```
+Cheap to verify; expensive to mis-restore. If callers exist, log as wontfix in `.claude/sweep-log.jsonl` to prevent re-report.
+
+## Re-exports and visibility downgrades
+
+Before downgrading a `pub` symbol to `pub(super)` or private, check if it's re-exported via `pub use` in any `mod.rs`. Downgrading without removing the re-export is inconsistent; downgrading and removing the re-export can break consumers (notably test modules using `use super::*`). Always re-grep for the symbol after the change and run `cargo clippy --all-targets` — R120 hit a test-only breakage on `coalesce_byte_ranges` exactly this way.
