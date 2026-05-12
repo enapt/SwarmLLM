@@ -72,6 +72,20 @@
       el.innerHTML = '<span class="hw-mode-note-icon" aria-hidden="true">' + U.escapeHtml(icon) + '</span>' +
         '<div class="hw-mode-note-body"><strong>' + U.escapeHtml(title) + '</strong>' + U.escapeHtml(body) + '</div>';
     },
+    _applyContributionMode: function(modeAuto) {
+      // Relabel the contribution segmented control + hint based on mode.
+      // Auto: it's an upper cap; auto-manage scales below it. Manual: it's
+      // a pinned level; auto-manage never goes above OR below.
+      var label = document.getElementById('settings-contribution-label');
+      if (label) {
+        label.textContent = I18n.t(modeAuto ? 'settings.contribution_label_cap' : 'settings.contribution_label');
+      }
+      var hint = document.getElementById('settings-contribution-mode-hint');
+      if (hint) {
+        hint.textContent = I18n.t(modeAuto ? 'settings.contribution_mode_hint_auto' : 'settings.contribution_mode_hint_manual');
+      }
+    },
+
     _applyHwMode: function(hw) {
       // Fallback: dashboard caches flag on App.state._gpuInference
       var isGpu;
@@ -125,6 +139,12 @@
           document.getElementById('settings-auto-manage-storage-group').style.display = isOn ? '' : 'none';
           document.getElementById('settings-storage-info').classList.toggle('hidden', !isOn);
           if (isOn) App.settings.loadStorageInfo();
+        });
+      }
+      var modeSelect = document.getElementById('settings-contribution-mode');
+      if (modeSelect) {
+        modeSelect.addEventListener('change', function() {
+          App.settings._applyContributionMode(this.value === 'auto');
         });
       }
       var healthIntervalEl = document.getElementById('settings-health-interval');
@@ -275,6 +295,11 @@
         var data = result && result.config;
         if (!data) return;
         document.getElementById('settings-contribution').value = data.contribution || 'minimal';
+        // contribution_auto defaults to true — Auto is the recommended mode
+        // because an idle node holds redundant shards at swarm scale.
+        var modeAuto = data.contribution_auto !== false;
+        document.getElementById('settings-contribution-mode').value = modeAuto ? 'auto' : 'manual';
+        App.settings._applyContributionMode(modeAuto);
         document.getElementById('settings-max-requests').value = data.max_concurrent_requests || 10;
         document.getElementById('settings-bandwidth').value = data.max_bandwidth_mbps || 0;
         document.getElementById('settings-disk').value = data.max_disk_mb || 50000;
@@ -602,8 +627,10 @@
       if (saveBtn) { saveBtn.disabled = true; saveBtn.textContent = I18n.t('actions.saving'); }
 
       var autoManageOn = document.getElementById('settings-auto-shards').value === 'on';
+      var modeAuto = document.getElementById('settings-contribution-mode').value === 'auto';
       var config = {
         contribution: document.getElementById('settings-contribution').value,
+        contribution_auto: modeAuto,
         max_concurrent_requests: parseInt(document.getElementById('settings-max-requests').value, 10),
         max_bandwidth_mbps: parseInt(document.getElementById('settings-bandwidth').value, 10),
         max_disk_mb: parseInt(document.getElementById('settings-disk').value, 10),

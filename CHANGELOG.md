@@ -7,6 +7,66 @@ All notable changes to SwarmLLM are documented here.
 Working changelog for commits after the v0.1.0 tag. Will roll into the
 next tagged release.
 
+### R121 — Auto-manage scale-back at swarm saturation (2026-05-12)
+
+Auto-manage learned to scale a node's contribution DOWN, not just up.
+At swarm scale (1000s of nodes), a popular model is held by far more
+peers than the geo-aware target needs — an idle node's shards become
+redundant and just waste VRAM. R121 lets auto-manage shed those shards
+voluntarily, without waiting for VRAM/disk pressure to build.
+
+**New config field** — `[node] contribution_auto: bool` (default `true`).
+Auto mode lets auto-manage scale contribution up AND down within the
+user-set `[node] contribution` cap and `[resources]` caps. Manual mode
+(`false`) pins contribution at the user-set level — pre-R121 behaviour.
+
+**Saturation-aware prune.** `model/auto_manage/prune.rs` gains
+`effective_prune_target(target, pressure, holder_count, contribution_auto,
+min_replicas)`. When `contribution_auto` is true AND
+`holder_count >= 1.5 × target`, the function bypasses the RELAXED-state
++1 nudge from `pressure_adjusted_target` and uses the raw target — so
+the shard is eligible to prune even at zero local pressure. Severe
+saturation (`holder_count >= 2 × target`) gets a flat +1.0 prune-score
+bonus to break ties. All existing prune guards still apply
+(active-pipeline, pinned/locked shards, configured-range, would-eliminate-
+region, can-reacquire, recently-acquired, encrypted-pipeline models).
+
+**Hot-reload.** `state.models.contribution_auto: AtomicBool` mirrors the
+config field. `PUT /api/admin/config` updates the atomic so the toggle
+takes effect on the next prune tick without a daemon restart. `state.config`
+remains startup-frozen — the atomic is the only runtime source of truth
+for the toggle, and the field is documented in `.claude/rules/architecture.md`
+as a SharedState invariant.
+
+**API.** `ConfigUpdate` and `GET /api/admin/config` gain
+`contribution_auto: bool` and `max_gpu_vram_mb: u64`. The latter was
+previously in `[resources]` config but not in the API — users had to
+edit TOML and restart to set a VRAM cap. The VRAM cap is hard-capped
+at 1 TiB on PUT to prevent UI typos from disabling VRAM accounting.
+`OperationalParams` gains `contribution`, `contribution_auto`,
+`max_gpu_vram_mb` for completeness (broadcast on hot-reload).
+
+**Frontend.** Auto/Manual toggle in Settings panel above the existing
+contribution segmented control. In Auto mode, "Contribution Level"
+relabels to "Upper Cap" and the hint explains the scale-back semantics.
+Wired via `App.settings._applyContributionMode(modeAuto)`. New i18n
+keys: `settings.contribution_label_cap`, `settings.contribution_mode_*`
+(8 keys total) translated across all 21 locales by translator-agent.
+
+**Tests.** 4 new unit tests in `prune::tests` cover the saturation
+override at boundaries (not-saturated/fall-through, saturated/no-pressure,
+severe-saturation, min-replicas floor). All 913 lib tests pass; clippy
+clean default + `--features dev,claude-subscription`.
+
+**Deferred to a follow-up.** Setup wizard exposes the toggle (the wizard
+already has the segmented contribution control + auto-manage checkbox;
+the toggle slots in but is additive). Holder counts at >50 use the
+gossip-cached value rather than a separate uncapped DHT-provider count
+— at realistic targets the 50-cap is well above SATURATION_FACTOR×target,
+so prune still fires correctly, only the displayed redundancy_ratio
+underestimates how aggressively to prune. Both items captured in
+`docs/FUTURE_WORK.md`.
+
 ### Security & stability sweep arc R92 → R109 (2026-05-01 → 2026-05-08)
 
 Eighteen rounds of security and stability sweeps, ~150 fixes total.

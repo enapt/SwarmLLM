@@ -12,6 +12,7 @@ SharedState is organized into 4 sub-structs. Always use the correct accessor:
 - `state.models.hf_sources` — NOT `state.hf_sources`
 - `state.models.wishlist` — R111. ArcSwap<Wishlist>; refresh via `crate::model::auto_manage::refresh_wishlist(state)`.
 - `state.models.hf_trending_cache` — R112. ArcSwap<HfTrendingSnapshot>; written by `HfWatcher` only.
+- `state.models.contribution_auto` — R121. AtomicBool runtime mirror of `config.node.contribution_auto`. `state.config` is startup-frozen; this atomic exists so the Auto/Manual toggle on the Settings panel takes effect on the next prune tick without a daemon restart. Read by `model/auto_manage/prune.rs`; written by `PUT /api/admin/config` in `api/admin.rs`. New auto-manage paths that depend on the toggle MUST read this atomic, NOT `state.config.node.contribution_auto`.
 - `state.metrics.node_stats` — NOT `state.node_stats`
 - `state.metrics.providers_config` — NOT `state.providers_config`
 - `state.metrics.swarm_capacity` — R110. ArcSwap<SwarmCapacity>; refresh via `crate::daemon::state::refresh_swarm_capacity(state)`. Eagerly refreshed on peer connect (`network/manager/identify.rs`) and disconnect (`network/manager/connections.rs`) so the dashboard banner stays consistent with the peer-list panel under churn — the WS stats-cache 1.5s coalesce alone is too lazy.

@@ -23,6 +23,14 @@ pub struct NodeConfig {
     pub listen_port: u16,
     #[serde(default)]
     pub contribution: ContributionMode,
+    /// When true, auto-manage scales contribution up AND down within the
+    /// caps in `[resources]`. When false, `contribution` is pinned at the
+    /// user-set level (today's behaviour). Default: true — opt-in users
+    /// who want a fixed level must explicitly set this to false. The auto
+    /// path is the recommended one because at swarm scale a node's
+    /// shards are over-replicated globally and holding them wastes VRAM.
+    #[serde(default = "default_contribution_auto")]
+    pub contribution_auto: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -129,12 +137,17 @@ fn default_prune_aggressiveness() -> String {
     "normal".into()
 }
 
+fn default_contribution_auto() -> bool {
+    true
+}
+
 impl Default for NodeConfig {
     fn default() -> Self {
         Self {
             data_dir: default_data_dir(),
             listen_port: default_port(),
             contribution: ContributionMode::default(),
+            contribution_auto: default_contribution_auto(),
         }
     }
 }

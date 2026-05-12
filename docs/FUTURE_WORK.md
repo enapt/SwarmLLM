@@ -140,6 +140,24 @@ Captures items deliberately deferred from the model-management redesign and from
 
 ---
 
+### Contribution-mode toggle in Setup wizard (R121 follow-up)
+**Context.** R121 added an Auto/Manual contribution toggle to the Settings panel. The Setup wizard (`frontend/js/components/setup.js`, `index.html:56-113`) has the same contribution segmented control + an auto-manage checkbox, but doesn't yet expose the new toggle.
+
+**What's needed.** Mirror the Settings-panel toggle in the wizard step 1, default to Auto, and include `contribution_auto` in the `setup.js::submit()` payload. The wizard's save path already uses `PUT /api/admin/config`, so the wire change is one field.
+
+**Why deferred.** The toggle defaults to Auto on the backend, so new nodes get the recommended behaviour without wizard exposure. It's a UX nicety, not load-bearing.
+
+---
+
+### True global holder count for prune redundancy_ratio (R121 follow-up)
+**Context.** `ModelRegistry::shard_holders` caps stored holders per shard at `MAX_HOLDERS_PER_SHARD = 50`. The R121 scale-back prune sees up to 50 holders even when the swarm has 1000+. Prune still fires correctly — the `holder_count > effective_target` gate triggers as long as 50 > target, which is always true for realistic targets — but the displayed `redundancy_ratio = holder_count / effective_target` underestimates by the cap ratio, so the prune score is artificially low for severely over-replicated shards.
+
+**What's needed.** A separate uncapped `DashMap<ShardId, u32>` populated from DHT `get_providers` query results (today the results merge back into the same 50-capped cache, so the data is lost). Prune reads from this uncapped map for `redundancy_ratio` computation while keeping the bounded `shard_holders` map for routing decisions.
+
+**Why deferred.** The +1.0 severe-saturation score bonus already kicks in at `holder_count >= 2 × target`, which the 50-cap still detects for any target ≤ 25 (i.e., all realistic swarm sizes). At 50+ target replicas the score saturates at 50/target but that's still high enough to prune. Refactoring the holder-count storage is a bigger change with no current behavioural delta.
+
+---
+
 ## How to use this file
 
 When starting a new feature, grep this file for keywords related to the area you're touching. If your feature unblocks a deferred item, either pick it up in the same PR (if scope allows) or move the entry to "completed" with the closing commit reference.

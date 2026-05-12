@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use crate::ids::NodeId;
 
 /// Contribution mode from node config — maps to ContributionLevel.
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ContributionMode {
     #[default]

@@ -834,13 +834,26 @@ over-replicated shards to free VRAM and disk on smaller nodes.
 
 **Prune Scoring** (highest score pruned first):
 ```
-+ redundancy_ratio (holder_count / target)
++ redundancy_ratio (holder_count / effective_target)
 + 1.0 if not loaded in VRAM (cold shard)
 + 0.5 × resource_pressure
++ 1.0 if contribution_auto && holder_count ≥ 2 × target  (R121, severe saturation)
 - 0.5 if first/last shard (pipeline completeness)
 - 0.3 if rarest shard for the model
 - 0.2 if recently acquired (< 30 min)
 ```
+
+**R121 — contribution_auto scale-back.** When `config.node.contribution_auto`
+is true (the default), a shard with `holder_count ≥ 1.5 × target` bypasses
+the RELAXED-state +1 nudge in `pressure_adjusted_target` and is eligible
+to prune even at zero local pressure. This lets an idle node shed slack
+once the swarm has plenty of copies, instead of waiting for VRAM/disk
+pressure to build. Manual mode (`contribution_auto = false`) keeps the
+pre-R121 behaviour — pressure-driven only. The toggle is hot-reloadable
+via `state.models.contribution_auto: AtomicBool` (mirrors the config
+field, updated atomically on `PUT /api/admin/config`). Pure helper:
+`effective_prune_target(target, pressure, holder_count, contribution_auto,
+min_replicas)` in `model/auto_manage/prune.rs`.
 
 **Safety Checks** — pruning is blocked if:
 - Shard is actively being downloaded by this node (prevents download/prune race)

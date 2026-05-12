@@ -328,9 +328,11 @@ pub async fn get_config(State(state): State<AppState>) -> Json<serde_json::Value
 
     let mut result = serde_json::json!({
         "contribution": contribution,
+        "contribution_auto": config.node.contribution_auto,
         "max_concurrent_requests": config.inference.max_concurrent_requests,
         "max_bandwidth_mbps": config.resources.max_bandwidth_mbps,
         "max_disk_mb": config.resources.max_disk_mb,
+        "max_gpu_vram_mb": config.resources.max_gpu_vram_mb,
         "listen_port": config.node.listen_port,
         "session_timeout_seconds": config.inference.session_timeout_seconds,
         "auto_manage_shards": state.shared_state.models.auto_manage_enabled.load(std::sync::atomic::Ordering::Relaxed),
@@ -364,6 +366,17 @@ pub async fn update_config(
             _ => ContributionMode::Moderate,
         };
     }
+    if let Some(auto) = body.contribution_auto {
+        config.node.contribution_auto = auto;
+        // Mirror to the runtime atomic so prune.rs picks it up on the
+        // next tick without a daemon restart. Persisted-config side is
+        // for restart durability only.
+        state
+            .shared_state
+            .models
+            .contribution_auto
+            .store(auto, std::sync::atomic::Ordering::Release);
+    }
     if let Some(max_reqs) = body.max_concurrent_requests {
         config.inference.max_concurrent_requests = max_reqs.clamp(1, MAX_CONCURRENT_REQUESTS_CAP);
     }
@@ -372,6 +385,12 @@ pub async fn update_config(
     }
     if let Some(disk) = body.max_disk_mb {
         config.resources.max_disk_mb = disk.clamp(MIN_DISK_MB, MAX_DISK_MB);
+    }
+    if let Some(vram) = body.max_gpu_vram_mb {
+        // 0 = auto (80% of detected VRAM). Cap at 1 TB so a stray UI
+        // value can't disable VRAM accounting entirely on the dashboard
+        // side; the inference path will still honor whatever this is.
+        config.resources.max_gpu_vram_mb = vram.min(1_048_576);
     }
     if let Some(auto_manage) = body.auto_manage_shards {
         config.auto_manage.enabled = auto_manage;
@@ -518,6 +537,9 @@ pub async fn reload_config(
             "max_batch_size": params.max_batch_size,
             "max_peers": params.max_peers,
             "session_timeout_secs": params.session_timeout_secs,
+            "contribution": params.contribution,
+            "contribution_auto": params.contribution_auto,
+            "max_gpu_vram_mb": params.max_gpu_vram_mb,
         }
     })))
 }
@@ -575,9 +597,11 @@ pub async fn get_api_key(State(state): State<AppState>) -> Json<serde_json::Valu
 #[derive(Debug, Deserialize)]
 pub struct ConfigUpdate {
     pub contribution: Option<String>,
+    pub contribution_auto: Option<bool>,
     pub max_concurrent_requests: Option<u32>,
     pub max_bandwidth_mbps: Option<u64>,
     pub max_disk_mb: Option<u64>,
+    pub max_gpu_vram_mb: Option<u64>,
     pub auto_manage_shards: Option<bool>,
     pub auto_manage_max_storage_mb: Option<u64>,
     pub shard_size_mb: Option<u64>,

@@ -109,6 +109,9 @@ async fn test_config_reload_notifies_subscribers() {
         max_batch_size: 16,
         max_peers: 200,
         session_timeout_secs: 3600,
+        contribution: swarmllm::config::ContributionMode::Moderate,
+        contribution_auto: true,
+        max_gpu_vram_mb: 0,
     };
 
     shared_state.apply_config_reload(new_params.clone());

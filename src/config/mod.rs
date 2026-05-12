@@ -13,6 +13,9 @@ pub struct OperationalParams {
     pub max_batch_size: u32,
     pub max_peers: u32,
     pub session_timeout_secs: u64,
+    pub contribution: ContributionMode,
+    pub contribution_auto: bool,
+    pub max_gpu_vram_mb: u64,
 }
 
 impl OperationalParams {
@@ -24,6 +27,9 @@ impl OperationalParams {
             max_batch_size: config.inference.max_batch_size,
             max_peers: config.network.max_peers,
             session_timeout_secs: config.inference.session_timeout_seconds,
+            contribution: config.node.contribution.clone(),
+            contribution_auto: config.node.contribution_auto,
+            max_gpu_vram_mb: config.resources.max_gpu_vram_mb,
         }
     }
 }
@@ -638,6 +644,8 @@ auto_relay = false
         assert_eq!(params.max_batch_size, 1);
         assert_eq!(params.max_peers, 200);
         assert_eq!(params.session_timeout_secs, 600);
+        assert!(params.contribution_auto);
+        assert_eq!(params.max_gpu_vram_mb, 0);
     }
 
     #[test]

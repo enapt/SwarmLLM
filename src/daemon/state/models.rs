@@ -16,6 +16,12 @@ pub struct ModelMgmt {
     pub hf_sources: DashMap<crate::types::ModelId, HfSource>,
     pub auto_manage_notify: Arc<tokio::sync::Notify>,
     pub auto_manage_enabled: std::sync::atomic::AtomicBool,
+    /// Runtime mirror of `config.node.contribution_auto`. The config struct
+    /// behind `state.config` is startup-frozen; this atomic exists so a
+    /// `PUT /api/admin/config` to the toggle takes effect on the next
+    /// prune cycle without a restart. Read by `prune.rs` to decide whether
+    /// to apply the saturation-scale-back path.
+    pub contribution_auto: std::sync::atomic::AtomicBool,
     pub auto_manage_default_model_cap: AtomicU32,
     pub model_auto_manage_policies:
         DashMap<crate::types::ModelId, crate::config::ModelAutoManagePolicy>,
@@ -315,6 +321,7 @@ mod tests {
             hf_sources: DashMap::new(),
             auto_manage_notify: Arc::new(tokio::sync::Notify::new()),
             auto_manage_enabled: AtomicBool::new(false),
+            contribution_auto: AtomicBool::new(true),
             auto_manage_default_model_cap: AtomicU32::new(0),
             model_auto_manage_policies: DashMap::new(),
             hf_probe_cache: DashMap::new(),

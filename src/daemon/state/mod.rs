@@ -325,6 +325,9 @@ impl SharedState {
                 hf_sources,
                 auto_manage_notify: Arc::new(tokio::sync::Notify::new()),
                 auto_manage_enabled: std::sync::atomic::AtomicBool::new(auto_manage_enabled),
+                contribution_auto: std::sync::atomic::AtomicBool::new(
+                    config.node.contribution_auto,
+                ),
                 auto_manage_default_model_cap: AtomicU32::new(default_model_shard_cap),
                 model_auto_manage_policies,
                 hf_probe_cache: DashMap::new(),

@@ -304,7 +304,25 @@
         </h3>
         <div class="hw-mode-note" id="settings-mode-note" hidden></div>
       <div class="form-group">
-        <label for="settings-contribution" data-i18n="settings.contribution_label">Contribution Level</label>
+        <label for="settings-contribution-mode" data-i18n="settings.contribution_mode_label">Contribution Mode</label>
+        <div class="segmented" data-bound-select="settings-contribution-mode">
+          <button type="button" class="segmented-btn active" data-value="auto">
+            <span class="segmented-title" data-i18n="settings.contribution_mode_auto">Auto</span>
+            <span class="segmented-sub" data-i18n="settings.contribution_mode_auto_sub">Scales within your caps</span>
+          </button>
+          <button type="button" class="segmented-btn" data-value="manual">
+            <span class="segmented-title" data-i18n="settings.contribution_mode_manual">Manual</span>
+            <span class="segmented-sub" data-i18n="settings.contribution_mode_manual_sub">Fixed at level below</span>
+          </button>
+        </div>
+        <select id="settings-contribution-mode" class="visually-hidden">
+          <option value="auto" selected data-i18n="settings.contribution_mode_auto">Auto</option>
+          <option value="manual" data-i18n="settings.contribution_mode_manual">Manual</option>
+        </select>
+        <span class="text-muted field-hint" id="settings-contribution-mode-hint" data-i18n="settings.contribution_mode_hint_auto">Auto sheds redundant shards when the swarm has plenty of copies. Manual pins your contribution at the level below.</span>
+      </div>
+      <div class="form-group">
+        <label for="settings-contribution" id="settings-contribution-label" data-i18n="settings.contribution_label_cap">Upper Cap</label>
         <div class="segmented" data-bound-select="settings-contribution">
           <button type="button" class="segmented-btn" data-value="minimal">
             <span class="segmented-title" data-i18n="setup.contrib_minimal">Minimal</span>

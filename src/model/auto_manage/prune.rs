@@ -19,6 +19,18 @@ const PRESSURE_URGENT: f64 = 0.95;
 /// VRAM soft-unload trigger — try narrowing shard windows before deleting files.
 const PRESSURE_SOFT_UNLOAD: f64 = 0.7;
 
+/// Saturation factor for `contribution_auto`. When `holder_count >=
+/// SATURATION_FACTOR_AUTO * target_replicas`, the shard is over-replicated
+/// enough that auto-mode bypasses the RELAXED-state +1 nudge and uses the
+/// raw target as the prune floor — letting an idle node shed slack at
+/// swarm scale without waiting for local pressure to build.
+const SATURATION_FACTOR_AUTO: f64 = 1.5;
+
+/// Severe-saturation factor. Holder counts at or above this multiple of
+/// the target get a flat +1 score bonus so they always outrank just-
+/// barely-saturated shards in selection.
+const SATURATION_FACTOR_SEVERE: f64 = 2.0;
+
 impl AutoShardManager {
     /// Evaluate and prune over-replicated shards. Called after downloads in each cycle.
     pub(super) async fn evaluate_and_prune(&self) {
@@ -125,12 +137,22 @@ impl AutoShardManager {
                 }
             }
 
-            // Compute target replicas for this model (unified with download path)
+            // Compute target replicas for this model (unified with download
+            // path). The per-shard prune target is computed inside the shard
+            // loop via `effective_prune_target`, which handles both the
+            // pressure-adjusted nudge and the contribution-auto saturation
+            // override — at swarm scale an idle node sheds slack without
+            // waiting for local pressure to build.
             let target = self.geo_target_replicas(&manifest.id, config.min_replicas, pool_size);
-
-            // Adjust target for resource pressure
-            let adjusted_target =
-                self.pressure_adjusted_target(target, resource_pressure, config.min_replicas);
+            // Read from the AtomicBool, not `config.node.contribution_auto`
+            // — the latter is startup-frozen because `state.config` is an
+            // Arc that's never swapped. PUT /api/admin/config updates the
+            // atomic so the toggle takes effect on the next prune tick.
+            let contribution_auto = self
+                .shared_state
+                .models
+                .contribution_auto
+                .load(std::sync::atomic::Ordering::Relaxed);
 
             for shard in &manifest.shards {
                 let shard_id = ShardId {
@@ -238,8 +260,23 @@ impl AutoShardManager {
 
                 let holder_count = holders.len();
 
-                // Skip if at or below target
-                if holder_count <= adjusted_target as usize {
+                // Compute the effective target for THIS shard. In auto mode,
+                // a shard over-replicated by ≥SATURATION_FACTOR_AUTO×target
+                // bypasses the RELAXED nudge and uses the raw target — so a
+                // node with zero local pressure still sheds shards once the
+                // swarm has plenty. Severe saturation (≥SATURATION_FACTOR_
+                // SEVERE×target) gets a score bonus below to break ties
+                // against not-quite-as-saturated shards.
+                let effective_target = effective_prune_target(
+                    target,
+                    resource_pressure,
+                    holder_count,
+                    contribution_auto,
+                    config.min_replicas,
+                );
+
+                // Skip if at or below effective target
+                if holder_count <= effective_target as usize {
                     continue;
                 }
 
@@ -268,8 +305,20 @@ impl AutoShardManager {
                 }
 
                 // Compute prune score (higher = more prunable)
-                let redundancy_ratio = holder_count as f64 / adjusted_target.max(1) as f64;
+                let redundancy_ratio = holder_count as f64 / effective_target.max(1) as f64;
                 let mut score = redundancy_ratio;
+
+                // Severe-saturation bonus: shed shards held by ≥2×target
+                // first when auto mode picks between multiple eligible
+                // shards. The redundancy_ratio already grows with holder
+                // count, but this adds a flat tier-break so a 2×target
+                // shard always outranks a 1.6×target shard at the
+                // selection step.
+                if contribution_auto
+                    && (holder_count as f64) >= (target as f64) * SATURATION_FACTOR_SEVERE
+                {
+                    score += 1.0;
+                }
 
                 // Cold shard bonus (not loaded in VRAM)
                 let is_loaded = self
@@ -362,7 +411,7 @@ impl AutoShardManager {
                     shard_index: shard.index,
                     shard_size_bytes: shard.size_bytes,
                     holder_count,
-                    target_replicas: adjusted_target,
+                    target_replicas: effective_target,
                     score,
                 });
             }
@@ -979,6 +1028,29 @@ pub(crate) fn pressure_adjusted_target(target: u32, pressure: f64, min_replicas:
     }
 }
 
+/// Effective prune target for a given shard, applying both pressure adjustment
+/// and the contribution-auto saturation override.
+///
+/// When `contribution_auto` is true and the shard is over-replicated by
+/// ≥SATURATION_FACTOR_AUTO×target, the function returns `target.max(min_replicas)`
+/// — bypassing the RELAXED-state +1 nudge so an idle node sheds slack at
+/// swarm scale. Otherwise it falls through to `pressure_adjusted_target`.
+pub(crate) fn effective_prune_target(
+    target: u32,
+    pressure: f64,
+    holder_count: usize,
+    contribution_auto: bool,
+    min_replicas: u32,
+) -> u32 {
+    let saturated =
+        contribution_auto && (holder_count as f64) >= (target as f64) * SATURATION_FACTOR_AUTO;
+    if saturated {
+        target.max(min_replicas)
+    } else {
+        pressure_adjusted_target(target, pressure, min_replicas)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1028,5 +1100,42 @@ mod tests {
         assert_eq!(pressure_adjusted_target(1, 1.0, 1), 1);
         // target=0, any pressure → saturating_sub never goes negative.
         assert_eq!(pressure_adjusted_target(0, 1.0, 0), 0);
+    }
+
+    #[test]
+    fn effective_target_matches_pressure_path_when_not_saturated() {
+        // holder_count below SATURATION_FACTOR_AUTO*target → fall through to
+        // the existing pressure-adjusted target. Auto mode shouldn't change
+        // behaviour for shards that are not over-replicated.
+        // target=3, holder=4: 4 < 1.5*3=4.5 → not saturated.
+        assert_eq!(effective_prune_target(3, 0.0, 4, true, 1), 4); // RELAXED +1
+        assert_eq!(effective_prune_target(3, 0.5, 4, true, 1), 3); // NORMAL
+    }
+
+    #[test]
+    fn effective_target_drops_relaxed_nudge_when_saturated_auto() {
+        // target=3, holder=5: 5 >= 1.5*3=4.5 → saturated. Auto-mode returns
+        // raw target (3), not the RELAXED +1 (4). Without saturation override
+        // the node would refuse to prune at zero local pressure.
+        assert_eq!(effective_prune_target(3, 0.0, 5, true, 1), 3);
+        // Same holder count, manual mode: pressure-adjusted path applies.
+        assert_eq!(effective_prune_target(3, 0.0, 5, false, 1), 4);
+    }
+
+    #[test]
+    fn effective_target_extreme_saturation() {
+        // target=3, holder=30 (10× over): saturated. Returns target.
+        assert_eq!(effective_prune_target(3, 0.0, 30, true, 1), 3);
+        // Floors at min_replicas — never drop below it even when saturated.
+        assert_eq!(effective_prune_target(3, 0.0, 30, true, 5), 5);
+    }
+
+    #[test]
+    fn effective_target_floor_at_boundary() {
+        // holder_count exactly at 1.5*target counts as saturated.
+        // target=4, holder=6: 6 >= 1.5*4=6 → saturated.
+        assert_eq!(effective_prune_target(4, 0.0, 6, true, 1), 4);
+        // target=4, holder=5: 5 < 6 → not saturated, RELAXED nudge applies.
+        assert_eq!(effective_prune_target(4, 0.0, 5, true, 1), 5);
     }
 }
