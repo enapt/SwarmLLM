@@ -13,6 +13,12 @@
 //! phase and ensures pending background work has a chance to land before
 //! the daemon exits.
 
+/// Max time `drain` waits for background tasks before forcefully aborting.
+const DRAIN_TIMEOUT_SECS: u64 = 5;
+/// Period for the housekeeping sweep that prunes stored responses,
+/// settled pool_forwards, applied credit_txns, and expired pool invites.
+const SWEEP_INTERVAL_SECS: u64 = 3600;
+
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -35,7 +41,6 @@ pub(super) type BackgroundTasks = JoinSet<&'static str>;
 /// `tokio::spawn`) and gives in-flight chores a brief window to land
 /// before the daemon exits.
 pub(super) async fn drain(mut tasks: BackgroundTasks) {
-    const DRAIN_TIMEOUT_SECS: u64 = 5;
     if tasks.is_empty() {
         return;
     }
@@ -795,7 +800,6 @@ pub(super) fn spawn_responses_sweep(
     db: crate::storage::db::Database,
     mut shutdown_rx: watch::Receiver<bool>,
 ) {
-    const SWEEP_INTERVAL_SECS: u64 = 3600;
     tasks.spawn(async move {
         let mut tick =
             tokio::time::interval(std::time::Duration::from_secs(SWEEP_INTERVAL_SECS));

@@ -47,9 +47,13 @@ pub enum WishlistStatus {
     Blocked,
 }
 
+#[cfg(test)]
 impl WishlistStatus {
     /// Single-token i18n key used by the frontend to localise the badge.
-    /// Keeps copy in en.json, not in this enum.
+    /// Test-only contract guard — the frontend derives the key from the
+    /// serialized enum value (`STATUS_LABELS` in `swarm-tab.js`), so the
+    /// production path never calls this. Kept under `cfg(test)` so renames
+    /// of the serde tag break the test loudly.
     pub fn i18n_key(self) -> &'static str {
         match self {
             Self::Hosting => "wishlist.status.hosting",

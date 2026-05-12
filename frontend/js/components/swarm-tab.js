@@ -537,12 +537,6 @@
       } else {
         var variants = repo.variants || [];
         var pick = variants.length > 0 ? (variants.find(function (v) { return v.quant === repo.recommended_variant; }) || variants[0]) : null;
-        if (pick && App.hf && App.hf.download) {
-          App.hf.download(repo.repo_id, '');
-          // The existing App.hf.download reads the <select> in the modal —
-          // we don't have that, so call the underlying endpoint directly.
-          // Fall through to the direct call below.
-        }
         _browseDownload(repo, pick);
       }
     });
@@ -718,26 +712,19 @@
     },
   };
 
+  function _restFetch(url, renderFn) {
+    App.authFetch(url).then(function (r) {
+      return r.ok ? r.json() : null;
+    }).then(function (data) {
+      if (data) renderFn(data);
+    }).catch(function () { /* non-fatal */ });
+  }
+
   function _refreshFromRest() {
     if (!App.authFetch) return;
-    App.authFetch('/api/admin/wishlist').then(function (r) {
-      if (!r.ok) return null;
-      return r.json();
-    }).then(function (data) {
-      if (data) _renderWishlist(data);
-    }).catch(function () { /* non-fatal */ });
-    App.authFetch('/api/admin/swarm/capacity').then(function (r) {
-      if (!r.ok) return null;
-      return r.json();
-    }).then(function (data) {
-      if (data) _renderRunning(data);
-    }).catch(function () { /* non-fatal */ });
-    App.authFetch('/api/admin/swarm/capacity-plan').then(function (r) {
-      if (!r.ok) return null;
-      return r.json();
-    }).then(function (data) {
-      if (data) _renderCapacityPlan(data);
-    }).catch(function () { /* non-fatal */ });
+    _restFetch('/api/admin/wishlist', _renderWishlist);
+    _restFetch('/api/admin/swarm/capacity', _renderRunning);
+    _restFetch('/api/admin/swarm/capacity-plan', _renderCapacityPlan);
   }
 
   // R113: render the Capacity Plan / What-If view. Three baked scenarios

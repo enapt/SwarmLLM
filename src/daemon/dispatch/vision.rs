@@ -7,6 +7,11 @@ use crate::types::{NetworkCommand, SwarmMessage};
 use super::super::state::SharedState;
 use super::ZSTD_COMPRESS_LEVEL;
 
+/// SEC: Maximum peer-supplied image payload size accepted for vision
+/// encoding. Rejection happens BEFORE module load to prevent a malicious
+/// peer from triggering expensive module loading with large payloads.
+const MAX_IMAGE_BYTES: usize = 20 * 1024 * 1024; // 20 MB
+
 pub(super) async fn handle_vision_encode_request(
     shared_state: Arc<SharedState>,
     network_tx: mpsc::Sender<NetworkCommand>,
@@ -14,9 +19,6 @@ pub(super) async fn handle_vision_encode_request(
 ) {
     let model_id = &req.model_id;
 
-    // SEC: Reject oversized image payloads BEFORE loading vision module to prevent
-    // a malicious peer from triggering expensive module loading with large payloads.
-    const MAX_IMAGE_BYTES: usize = 20 * 1024 * 1024; // 20 MB
     if req.image_data.len() > MAX_IMAGE_BYTES {
         tracing::warn!(
             request_id = %req.request_id,

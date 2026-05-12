@@ -224,6 +224,24 @@ impl CreditLedger {
         Ok(amount)
     }
 
+    /// Saturate a raw f64 credit amount into a non-negative i64, capped at `max`.
+    ///
+    /// SEC: every earn_* path takes peer-influenceable inputs (shard size,
+    /// bytes transferred, relay duration) and multiplies by an f64 rate.
+    /// Without this guard a hostile or buggy upstream could feed `raw =
+    /// f64::INFINITY` or a value beyond `i64::MAX`, and the `as i64` cast
+    /// would saturate to `i64::MAX` — an instant Platinum-tier credit mint.
+    /// Reject non-finite, clamp negatives to zero, and cap to a per-call
+    /// ceiling that's implausibly generous for honest inputs (1M credits).
+    #[inline]
+    fn safe_f64_credits(raw: f64, max: f64) -> i64 {
+        if raw.is_finite() && raw >= 0.0 {
+            raw.min(max) as i64
+        } else {
+            0
+        }
+    }
+
     /// Earn credits for hosting a shard.
     pub async fn earn_shard_hosting(
         &self,
@@ -233,18 +251,8 @@ impl CreditLedger {
     ) -> Result<i64, SwarmError> {
         let rates = self.credit_rates();
         let raw = rates.shard_hosting as f64 * size_gb * hours as f64;
-        // SEC: `size_gb` derives from `ModelManifest.size_bytes` (peer-
-        // controllable u64). With `size_bytes = u64::MAX`, `size_gb ≈ 1.7e10`
-        // and the f64 product saturates the `as i64` cast to `i64::MAX` —
-        // free instant Platinum tier. Reject non-finite, clamp to a sane
-        // per-tick maximum (1M credits/tick/shard is already implausibly
-        // generous for honest inputs).
         const MAX_HOSTING_PER_TICK: f64 = 1_000_000.0;
-        let amount = if raw.is_finite() && raw >= 0.0 {
-            raw.min(MAX_HOSTING_PER_TICK) as i64
-        } else {
-            0
-        };
+        let amount = Self::safe_f64_credits(raw, MAX_HOSTING_PER_TICK);
         if amount > 0 {
             self.apply_credit(amount, true).await?;
             self.persist_balance().await?;
@@ -261,16 +269,8 @@ impl CreditLedger {
         let gb = bytes_transferred as f64 / (1024.0 * 1024.0 * 1024.0);
         let rates = self.credit_rates();
         let raw = rates.shard_seeding as f64 * gb;
-        // SEC: same f64 → i64 saturation pattern. `bytes_transferred` is a
-        // local AtomicU64 today (lower risk than `earn_shard_hosting`'s
-        // peer-supplied size), but apply the same defensive cap so that
-        // any future plumbing change can't turn this into a credit-mint.
         const MAX_SEEDING_PER_CALL: f64 = 1_000_000.0;
-        let amount = if raw.is_finite() && raw >= 0.0 {
-            raw.min(MAX_SEEDING_PER_CALL) as i64
-        } else {
-            0
-        };
+        let amount = Self::safe_f64_credits(raw, MAX_SEEDING_PER_CALL);
         if amount > 0 {
             self.apply_credit(amount, true).await?;
             self.persist_balance().await?;
@@ -284,11 +284,7 @@ impl CreditLedger {
         let rates = self.credit_rates();
         let raw = rates.relay_service as f64 * hours;
         const MAX_RELAY_PER_CALL: f64 = 1_000_000.0;
-        let amount = if raw.is_finite() && raw >= 0.0 {
-            raw.min(MAX_RELAY_PER_CALL) as i64
-        } else {
-            0
-        };
+        let amount = Self::safe_f64_credits(raw, MAX_RELAY_PER_CALL);
         if amount > 0 {
             self.apply_credit(amount, true).await?;
             self.persist_balance().await?;

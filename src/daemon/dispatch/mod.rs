@@ -35,6 +35,20 @@ const MAX_PENDING_TP_PARTIALS: usize = 512;
 const MAX_REGION_SUMMARIES: usize = 10_000;
 /// Maximum demand rate entries across all (model, region) pairs.
 const MAX_DEMAND_ENTRIES: usize = 10_000;
+/// SEC: Cap shards per ShardAnnounce to prevent shard_holders memory exhaustion.
+const MAX_SHARDS_PER_ANNOUNCE: usize = 512;
+/// SEC: Cap blocks per PrefixCacheAnnounce. A 7B model at 64-token blocks
+/// tops out at ~120 blocks per 8K prompt; 1024 leaves headroom for larger
+/// contexts without unbounded growth.
+const MAX_BLOCKS_PER_ANNOUNCE: usize = 1024;
+/// Maximum age (s) for nickname gossip before rejection. Paired with
+/// `GOSSIP_SKEW_MS` for the future-side check — kept in seconds because
+/// nickname records carry `chrono::DateTime<Utc>` (not the `u64`-ms epoch
+/// the other gossip helpers use). One-sided per gotcha #44.
+const NICK_GOSSIP_MAX_AGE_SECS: i64 = 24 * 60 * 60;
+/// Future-side skew tolerance (s) for nickname gossip. Same value as
+/// `GOSSIP_SKEW_MS` but in seconds to match the i64-seconds age math.
+const NICK_GOSSIP_SKEW_SECS: i64 = 30;
 
 /// Generic one-sided staleness check (gotcha #44). Returns `true` when
 /// the timestamp is within `[now - max_age, now + skew]`; `false` (with a
@@ -685,8 +699,6 @@ pub(crate) async fn dispatch_network_messages(
                                             tracing::debug!("Dropping unauthenticated ShardAnnounce");
                                             continue;
                                         }
-                                        // SEC: Cap shards per announce to prevent shard_holders memory exhaustion
-                                        const MAX_SHARDS_PER_ANNOUNCE: usize = 512;
                                         if announce.shards.len() > MAX_SHARDS_PER_ANNOUNCE {
                                             tracing::warn!(
                                                 node_id = %announce.node_id,
@@ -920,8 +932,6 @@ pub(crate) async fn dispatch_network_messages(
                                         // and the record will win the timestamp-tiebreaker for the next day,
                                         // squatting any peer's nickname.
                                         let age_secs = (chrono::Utc::now() - record.timestamp).num_seconds();
-                                        const NICK_GOSSIP_MAX_AGE_SECS: i64 = 24 * 60 * 60;
-                                        const NICK_GOSSIP_SKEW_SECS: i64 = 30;
                                         if age_secs < -NICK_GOSSIP_SKEW_SECS {
                                             tracing::debug!(
                                                 node_id = %record.node_id,
@@ -1678,11 +1688,6 @@ pub(crate) async fn dispatch_network_messages(
                                         if announce.node_id == *shared_state.identity.node_id() {
                                             continue;
                                         }
-                                        // Memory DoS guard: cap blocks per announce. A 7B model
-                                        // at 64-token blocks tops out at ~120 blocks per 8K
-                                        // prompt; 1024 leaves generous headroom for larger
-                                        // contexts without unbounded growth.
-                                        const MAX_BLOCKS_PER_ANNOUNCE: usize = 1024;
                                         if announce.blocks.len() > MAX_BLOCKS_PER_ANNOUNCE {
                                             tracing::warn!(
                                                 node_id = %announce.node_id,

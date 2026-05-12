@@ -17,6 +17,10 @@ const SUBNET_EVICTION_SECS: u64 = 3_600;
 /// recent transactions are counted toward the per-peer rate limit.
 const ANTI_GAMING_RATE_WINDOW_SECS: u64 = 300;
 
+/// Peer-count threshold above which `cleanup` emits a warning that the
+/// rate-limit table is unusually large. Operators may want to alert on this.
+const RATE_LIMITS_WARN_THRESHOLD: usize = 10_000;
+
 /// Rate limiter and anti-gaming checks for the credit system.
 ///
 /// Prevents:
@@ -155,7 +159,6 @@ impl AntiGaming {
         // ticks. Time-based eviction above bounds this in steady state, but
         // a Sybil burst could push it temporarily high. Emitted at ~once per
         // tick when the threshold is crossed.
-        const RATE_LIMITS_WARN_THRESHOLD: usize = 10_000;
         if self.rate_limits.len() > RATE_LIMITS_WARN_THRESHOLD {
             tracing::warn!(
                 size = self.rate_limits.len(),
