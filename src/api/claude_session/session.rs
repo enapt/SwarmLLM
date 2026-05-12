@@ -273,7 +273,7 @@ pub(super) async fn write_to_stdin(
 ) -> Result<(), ApiError> {
     let mut guard = handle.lock().await;
     let stdin = guard.as_mut().ok_or_else(|| {
-        ApiError(crate::error::SwarmError::Internal(
+        ApiError(crate::error::SwarmError::ServiceUnavailable(
             "Claude session: subprocess stdin not available (process may have exited)".into(),
         ))
     })?;
@@ -288,15 +288,15 @@ pub(super) async fn write_to_stdin(
     if let Err(e) = stdin.write_all(line.as_bytes()).await {
         // Mark stdin as dead so future writes fail immediately
         *guard = None;
-        return Err(ApiError(crate::error::SwarmError::Internal(format!(
-            "Failed to write to subprocess stdin: {e}"
-        ))));
+        return Err(ApiError(crate::error::SwarmError::ServiceUnavailable(
+            format!("Failed to write to subprocess stdin: {e}"),
+        )));
     }
     if let Err(e) = stdin.flush().await {
         *guard = None;
-        return Err(ApiError(crate::error::SwarmError::Internal(format!(
-            "Failed to flush subprocess stdin: {e}"
-        ))));
+        return Err(ApiError(crate::error::SwarmError::ServiceUnavailable(
+            format!("Failed to flush subprocess stdin: {e}"),
+        )));
     }
     Ok(())
 }

@@ -427,10 +427,6 @@
       var unloadId = target.getAttribute('data-unload-model');
       if (unloadId) { App.models.unload(unloadId); return; }
 
-      // HF download
-      var hfRepo = target.getAttribute('data-hf-download');
-      if (hfRepo) { App.hf.download(hfRepo, target.getAttribute('data-hf-variant') || ''); return; }
-
       // Per-model activity ticker: click to expand history
       var tickerEl = target.closest('.model-ticker');
       if (tickerEl && !target.closest('button, a')) {

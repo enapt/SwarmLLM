@@ -35,39 +35,6 @@
         errorMsg = (data.error && data.error.message) || I18n.t('shard.download_failed', { error: '' });
       }
       return { ok: resp.ok, data: data, errorMsg: errorMsg };
-    },
-    download: async function(repoId, variantKey) {
-      try {
-        var filename = '';
-        if (variantKey) {
-          var quantEl = document.getElementById('quant-' + variantKey);
-          if (quantEl) {
-            filename = quantEl.value;
-          }
-        }
-        if (!filename) {
-          var btn = document.querySelector('[data-hf-download="' + repoId + '"]');
-          filename = btn ? (btn.getAttribute('data-hf-filename') || '') : '';
-        }
-        if (!filename) {
-          App.ui.showBanner('error', I18n.t('models.no_variant_selected'));
-          return;
-        }
-
-        App.ui.showBanner('info', I18n.t('models.checking'));
-        var result = await App.hf.downloadShards({ repo_id: repoId, filename: filename, peer_fair_share: true });
-        if (!result.ok) {
-          App.ui.showBanner('error', result.errorMsg);
-          return;
-        }
-        if (result.data.status === 'started') {
-          App.notifications.showToast(I18n.t('models.download_started'), 'success');
-        } else {
-          App.notifications.showToast(result.data.message || I18n.t('models.download_could_not_start'), 'warning');
-        }
-      } catch (e) {
-        App.ui.showBanner('error', I18n.t('shard.download_failed', { error: e.message }));
-      }
     }
   };
 

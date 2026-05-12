@@ -521,13 +521,13 @@ async fn spawn_and_stream(
         .stderr(std::process::Stdio::piped())
         .spawn()
         .map_err(|e| {
-            ApiError(crate::error::SwarmError::Internal(format!(
+            ApiError(crate::error::SwarmError::ServiceUnavailable(format!(
                 "Failed to spawn claude CLI: {e}"
             )))
         })?;
 
     let stdout = child.stdout.take().ok_or_else(|| {
-        ApiError(crate::error::SwarmError::Internal(
+        ApiError(crate::error::SwarmError::ServiceUnavailable(
             "claude subprocess: no stdout".into(),
         ))
     })?;
@@ -940,7 +940,7 @@ async fn collect_result(
                 // Security: cap per-line size to prevent OOM from misbehaving subprocess
                 if line.len() > MAX_RESPONSE_LINE {
                     let _ = child.kill().await;
-                    return Err(ApiError(crate::error::SwarmError::Internal(
+                    return Err(ApiError(crate::error::SwarmError::ServiceUnavailable(
                         "Claude CLI response line too large (>1MB)".into(),
                     )));
                 }
@@ -954,9 +954,9 @@ async fn collect_result(
                         let err_msg = parsed["result"]
                             .as_str()
                             .unwrap_or("Claude CLI returned an error");
-                        return Err(ApiError(crate::error::SwarmError::Internal(format!(
-                            "Claude subscription error: {err_msg}"
-                        ))));
+                        return Err(ApiError(crate::error::SwarmError::ServiceUnavailable(
+                            format!("Claude subscription error: {err_msg}"),
+                        )));
                     }
                     return Ok(parsed);
                 }
@@ -971,19 +971,21 @@ async fn collect_result(
                 } else {
                     String::new()
                 };
-                return Err(ApiError(crate::error::SwarmError::Internal(format!(
-                    "Claude CLI exited without result. stderr: {}",
-                    stderr_output.chars().take(500).collect::<String>()
-                ))));
+                return Err(ApiError(crate::error::SwarmError::ServiceUnavailable(
+                    format!(
+                        "Claude CLI exited without result. stderr: {}",
+                        stderr_output.chars().take(500).collect::<String>()
+                    ),
+                )));
             }
             Ok(Err(e)) => {
-                return Err(ApiError(crate::error::SwarmError::Internal(format!(
-                    "Claude CLI stdout error: {e}"
-                ))));
+                return Err(ApiError(crate::error::SwarmError::ServiceUnavailable(
+                    format!("Claude CLI stdout error: {e}"),
+                )));
             }
             Err(_) => {
                 let _ = child.kill().await;
-                return Err(ApiError(crate::error::SwarmError::Internal(
+                return Err(ApiError(crate::error::SwarmError::ServiceUnavailable(
                     "Claude CLI subprocess timed out".into(),
                 )));
             }

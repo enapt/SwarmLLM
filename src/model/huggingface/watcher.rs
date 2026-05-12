@@ -65,7 +65,7 @@ const HF_API_URL: &str =
 
 /// Cap on how many entries we keep — match wishlist's MAX_WISHLIST_ENTRIES
 /// so the watcher can fully cover the wishlist without overflow.
-pub const MAX_TRENDING_ENTRIES: usize = 100;
+const MAX_TRENDING_ENTRIES: usize = 100;
 
 /// Trust-promotion thresholds. Both must be met to lift a `Discovered`
 /// model to `DemandVerified` (which lets auto-manage act on it).

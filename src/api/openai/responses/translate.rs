@@ -622,15 +622,24 @@ pub fn chat_response_to_responses(
             let call_id = tc
                 .get("id")
                 .and_then(|v| v.as_str())
-                .ok_or_else(|| SwarmError::Internal("tool_call missing `id`".into()))?
+                .ok_or_else(|| SwarmError::ProviderError {
+                    status: 502,
+                    body: "Upstream tool_call missing `id`".into(),
+                })?
                 .to_string();
             let func = tc
                 .get("function")
-                .ok_or_else(|| SwarmError::Internal("tool_call missing `function`".into()))?;
+                .ok_or_else(|| SwarmError::ProviderError {
+                    status: 502,
+                    body: "Upstream tool_call missing `function`".into(),
+                })?;
             let name = func
                 .get("name")
                 .and_then(|v| v.as_str())
-                .ok_or_else(|| SwarmError::Internal("tool_call function missing `name`".into()))?
+                .ok_or_else(|| SwarmError::ProviderError {
+                    status: 502,
+                    body: "Upstream tool_call function missing `name`".into(),
+                })?
                 .to_string();
             let arguments = func
                 .get("arguments")
