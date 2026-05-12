@@ -288,6 +288,7 @@ impl ModelMgmt {
     /// for this `(model_id, block_hash)` pair. Empty when no peer has it.
     /// Phase 2 will use this to decide where to fetch from; Phase 1 only
     /// exposes it for tests + diagnostics.
+    #[cfg(test)]
     pub fn cross_node_prefix_holders(
         &self,
         model_id: &crate::types::ModelId,

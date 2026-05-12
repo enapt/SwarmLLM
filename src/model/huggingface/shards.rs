@@ -69,7 +69,7 @@ pub(super) fn parse_http_date(s: &str) -> Option<SystemTime> {
 /// Coalesce nearby byte ranges (within `max_gap` bytes) into fewer requests.
 ///
 /// Input: sorted list of (offset, size) pairs.
-pub fn coalesce_byte_ranges(ranges: &[(u64, u64)], max_gap: u64) -> Vec<(u64, u64)> {
+pub(super) fn coalesce_byte_ranges(ranges: &[(u64, u64)], max_gap: u64) -> Vec<(u64, u64)> {
     if ranges.is_empty() {
         return vec![];
     }

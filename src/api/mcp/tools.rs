@@ -1,7 +1,7 @@
 use serde_json::{json, Value};
 
 use super::dispatch::{
-    collect_handle_results, extract_anthropic_response, spawn_model_call_task, MCP_TASK_TIMEOUT,
+    collect_handle_results, dispatch_model_call, spawn_model_call_task, MCP_TASK_TIMEOUT,
 };
 use super::resources::mcp_peer_json;
 use super::types::{JsonRpcResponse, INTERNAL_ERROR, INVALID_PARAMS, RESOURCE_UNAVAILABLE};
@@ -755,71 +755,44 @@ async fn tool_delegate(state: &AppState, id: Option<Value>, args: Value) -> Json
     let port = state.config.node.listen_port;
     let url = format!("http://127.0.0.1:{port}/v1/messages");
     let api_key = state.shared_state.api_key.clone();
-    let start = std::time::Instant::now();
 
-    let mut body = json!({
+    let call = dispatch_model_call(
+        client,
+        &url,
+        &api_key,
+        &model_id,
+        &prompt,
+        system.as_deref(),
+        0.7,
+        max_tokens,
+    )
+    .await;
+
+    if let Some(err) = call.error {
+        return JsonRpcResponse::error(id, INTERNAL_ERROR, format!("Delegate failed: {err}"));
+    }
+
+    let result = json!({
         "model": model_id,
-        "max_tokens": max_tokens,
-        "temperature": 0.7,
-        "messages": [{"role": "user", "content": prompt}],
-        "stream": false,
+        "source": source,
+        "tier": tier,
+        "content": call.content,
+        "input_tokens": call.input_tokens,
+        "output_tokens": call.output_tokens,
+        "latency_ms": call.elapsed_ms,
     });
-    if let Some(sys) = system {
-        body["system"] = json!(sys);
-    }
 
-    let result = client
-        .post(&url)
-        .header("Authorization", format!("Bearer {api_key}"))
-        .header("Content-Type", "application/json")
-        .json(&body)
-        .send()
-        .await;
-
-    let elapsed_ms = start.elapsed().as_millis() as u64;
-
-    match result {
-        Ok(resp) if resp.status().is_success() => {
-            let resp_body: Value = resp
-                .json()
-                .await
-                .unwrap_or(json!({"error": "parse failed"}));
-            let (content, input_tokens, output_tokens) = extract_anthropic_response(&resp_body);
-
-            let result = json!({
-                "model": model_id,
-                "source": source,
-                "tier": tier,
-                "content": content,
-                "input_tokens": input_tokens,
-                "output_tokens": output_tokens,
-                "latency_ms": elapsed_ms,
-            });
-
-            JsonRpcResponse::success(
-                id,
-                json!({
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": serde_json::to_string_pretty(&result).unwrap_or_default()
-                        }
-                    ]
-                }),
-            )
-        }
-        Ok(resp) => {
-            let status = resp.status().as_u16();
-            let body = resp.text().await.unwrap_or_default();
-            let scrubbed = crate::crypto::scrub_api_keys(&body);
-            JsonRpcResponse::error(
-                id,
-                INTERNAL_ERROR,
-                format!("Delegate failed (HTTP {status}): {scrubbed}"),
-            )
-        }
-        Err(e) => JsonRpcResponse::error(id, INTERNAL_ERROR, format!("Delegate failed: {e}")),
-    }
+    JsonRpcResponse::success(
+        id,
+        json!({
+            "content": [
+                {
+                    "type": "text",
+                    "text": serde_json::to_string_pretty(&result).unwrap_or_default()
+                }
+            ]
+        }),
+    )
 }
 
 /// Node info tool: detailed node status, models, peers, resources.

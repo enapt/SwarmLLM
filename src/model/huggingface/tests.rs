@@ -1,4 +1,4 @@
-use super::shards::parse_http_date;
+use super::shards::{coalesce_byte_ranges, parse_http_date};
 use super::*;
 use std::time::SystemTime;
 

@@ -48,7 +48,7 @@ use crate::error::{ApiError, SwarmError};
 /// Hard cap on the in-memory event buffer for a single background
 /// response. 2000 events comfortably covers a multi-thousand-token
 /// generation (one event per token plus lifecycle events).
-pub(crate) const EVENT_BUFFER_CAP: usize = 2000;
+const EVENT_BUFFER_CAP: usize = 2000;
 
 /// A single buffered SSE event, stored in replayable form. We can't
 /// store the axum `Event` directly (it's not `Clone`), so we hold the
