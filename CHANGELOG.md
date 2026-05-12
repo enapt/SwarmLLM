@@ -7,6 +7,83 @@ All notable changes to SwarmLLM are documented here.
 Working changelog for commits after the v0.1.0 tag. Will roll into the
 next tagged release.
 
+### Security & stability sweep arc R92 → R109 (2026-05-01 → 2026-05-08)
+
+Eighteen rounds of security and stability sweeps, ~150 fixes total.
+Highlights: 14 HTTP/P2P/crypto vulnerabilities (R101), 17 concurrency/
+economic/DoS findings including a CVE-adjacent issue (R102), 13 authz/
+numeric/cancel/CI fixes (R103), 10 auto-manage audit fixes + shard-
+reality messaging (R104), 11 inference math + distributed pipeline +
+DB + HF + metrics fixes (R105), 17 logprobs/oracle/tier-bypass/spec-
+DSD bookkeeping fixes incl. dedup helpers (R106), 9 tier-bypass/weak-
+ordering/DoS-cap/crash-ordering fixes (R107), 9 Qwen3.5 KV mask + API
+parity + hot-path perf fixes (R108), 3 R108-deferred completions (R109).
+AAD now covers spec/kv-truncate trailer fields. Per-page bootstrap
+nonce on `/api/admin/api-key`. MCP method-string reflection cap.
+
+### Model management redesign — R110 → R116 (2026-05-08 → 2026-05-10)
+
+User-visible swarm and model UX rebuild for non-technical audiences:
+
+- **R110 — swarm-capacity foundation.** New `state.metrics.swarm_capacity`
+  (ArcSwap<SwarmCapacity>) snapshot eagerly refreshed on peer connect/
+  disconnect so the dashboard banner stays consistent with the peer
+  panel under churn (the 1.5s stats-cache coalesce alone was too lazy).
+  Makes collective swarm power visible.
+- **R111 — wishlist subsystem.** `state.models.wishlist` shows users
+  what auto-manage is actually planning. Surfaced through a new Swarm
+  tab (`frontend/js/components/swarm-tab.js`) with wishlist + Capacity
+  Plan views.
+- **R112 — HfWatcher.** New subsystem (now 12 Tokio tasks; was 11). Hourly
+  HuggingFace trending-GGUF poll seeds the wishlist and auto-promotes
+  models above download/age thresholds to `DemandVerified`.
+- **R113 — Capacity Plan / What-If.** Turns "contribute" from abstract
+  to concrete: shows what specific shards your VRAM could host.
+- **R114 — HF browse polish.** Task filter chips + status-driven CTAs.
+- **R115 — onboarding storage preview** and i18n parity audit.
+- **R116 — audit closure.** R110-R115 i18n translations finalized
+  across all 21 locales (1122 keys / 1124 entries per locale, native
+  language strings rather than English fallback). Active-pipeline
+  guard added to `delete_model`/`delete_shard` admin handlers — yanking
+  a shard mid-token-loop now returns 503 instead of corrupting state.
+- **Dashboard rework.** Network Status panel + Models tab + inline HF
+  browser. Removed the legacy HF download modal.
+
+### Sweep arc R117 → R120 (2026-05-10 → 2026-05-12)
+
+Four sweep rounds, 22 findings auto-fixed:
+
+- **R117** — `spawn_check_and_load` helper consolidates the "shard
+  landed → reload model → refresh dashboard" pattern across three call
+  sites. `SystemContent::to_plain_text` dedup. `browse.*` translations
+  added to all 20 non-English locales. Modal-only dead code dropped
+  from HTML/CSS/JS/i18n.
+- **R118** — 7 findings: error variant misuse cleanup (subprocess paths
+  Internal → ServiceUnavailable), input validation cap on `tasks`
+  query param, dead `#[allow(dead_code)]` attribute removed, doc drift
+  fixes (HTML template count 13→11, dead "provider badges" prose
+  removed).
+- **R119** — 5 findings: dead pub visibility tightened (`MAX_TRENDING_
+  ENTRIES`), 7 subprocess sites Internal → ServiceUnavailable in
+  `claude_sub.rs`, 3 `write_to_stdin` sites in `claude_session.rs`,
+  `openai/responses/translate.rs` upstream parse failures
+  Internal → ProviderError {502}. Dead `App.hf.download` removed with
+  4 orphaned i18n keys cleared across all 21 locales.
+- **R120** — 5 findings, 1 wontfix: more dead pub visibility tightening
+  (`coalesce_byte_ranges`, `cross_node_prefix_holders`, `EVENT_BUFFER_
+  CAP`). MCP `tool_delegate` replaced 70-line inline /v1/messages
+  dispatch with `dispatch_model_call` helper. Verification gating
+  caught 6 false-positive i18n orphan claims (callers existed in
+  init.js/utils.js/chat.js) — logged as wontfix instead of deleted.
+- **completeness.md** codified the new sweep rules: "Verify before
+  deleting sweep findings" and "Re-exports and visibility downgrades".
+
+909 lib tests + 75 integration tests passing at the end of R120; clippy
+clean on default + `--features llama`. CI now ignores 5 known accepted
+RUSTSEC advisories (added RUSTSEC-2026-0097 ignore to match
+`SECURITY.md` table; rand custom-logger advisory is warning-level
+without a custom logger but is now explicitly ignored for parity).
+
 ### Sweep arc R76 → R81 (2026-04-29 / 2026-04-30, autonomous)
 
 Self-managed overnight sweep covering: doc drift + dead code (R76),

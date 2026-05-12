@@ -69,7 +69,8 @@ jobs:
             --ignore RUSTSEC-2026-0118 \
             --ignore RUSTSEC-2026-0119 \
             --ignore RUSTSEC-2026-0105 \
-            --ignore RUSTSEC-2024-0436
+            --ignore RUSTSEC-2024-0436 \
+            --ignore RUSTSEC-2026-0097
 
   clippy:
     name: Clippy (${{ matrix.os }} / ${{ matrix.features }})

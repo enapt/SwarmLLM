@@ -10,7 +10,7 @@ A peer-to-peer LLM inference network in a single Rust binary. Pool hardware with
 
 **Join the swarm. Run AI together — for free.**
 
-> **Status — alpha**, actively developed. Distributed inference is stable across multi-node deployments. 906 lib tests + 75 integration tests run on every PR; continuous security sweeps. [Report issues](https://github.com/enapt/SwarmLLM/issues).
+> **Status — alpha**, actively developed. Distributed inference is stable across multi-node deployments. 909 lib tests + 75 integration tests run on every PR; continuous security sweeps. [Report issues](https://github.com/enapt/SwarmLLM/issues).
 >
 > **Recent benchmarks:** cross-node prefix-KV sharing delivers a **12.9× iter-1 TTFT speedup** on 7B prompts when a peer has the same prefix cached (measured 2026-04-20). Windows release binaries reach Linux parity on single-node and split inference (validated 2026-04-23).
 
@@ -173,7 +173,7 @@ Private mode is one-way: your data stays private, but your nodes still serve the
 - **Pools** — cryptographic nicknames, leaderboard, multi-device credit pooling with dual-signature invitations.
 - **Auto-shard management** — VRAM-aware acquisition from HuggingFace and peers with popularity/rarity scoring; smart pruning auto-removes over-replicated shards.
 - **Web UI** — chat, model browser, shard visualization, first-run wizard, network map, leaderboard, compare page; mobile-responsive; 21 languages; light/dark/system theme.
-- **Fault tolerance** — JoinSet-based supervisor with restart-on-crash for all 11 subsystems; hot-standby failover; shard replication; atomic shard writes.
+- **Fault tolerance** — JoinSet-based supervisor with restart-on-crash for all 12 subsystems; hot-standby failover; shard replication; atomic shard writes.
 - **Observability** — Prometheus `/metrics`, readiness probe `/health/ready`, structured tracing with request-ID correlation.
 - **Config hot-reload** — change parameters without restarting via SIGHUP or `/api/admin/config/reload`.
 - **Auto-updater** — checks GitHub releases, downloads & replaces binary with restart prompt.
@@ -226,7 +226,7 @@ A single Rust binary running three simultaneous functions on the same port (8800
 | HTTP server | OpenAI + Anthropic + MCP + admin endpoints | `localhost:8800/v1/*` |
 | Web dashboard | Setup wizard, chat, models, network map, settings | `localhost:8800/admin` |
 
-Internally the daemon runs 11 async Tokio tasks wired via mpsc channels, sharing `Arc<SharedState>` + DashMap:
+Internally the daemon runs 12 async Tokio tasks wired via mpsc channels, sharing `Arc<SharedState>` + DashMap:
 
 ```text
 NetworkManager ─── InferenceRouter ─── CreditLedger
@@ -234,8 +234,8 @@ NetworkManager ─── InferenceRouter ─── CreditLedger
 MessageDispatcher    ApiServer         HealthMonitor
        │                  │                  │
 PoolManager        AutoShardManager   ShardRebalancer
-       │                  │
-AcquisitionManager   UpdateChecker
+       │                  │                  │
+AcquisitionManager   UpdateChecker       HfWatcher
 ```
 
 Cargo workspace with 3 crates (`swarmllm`, `swarmllm-types`, `swarmllm-frontend`). Full subsystem deep-dive in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
@@ -440,7 +440,7 @@ cargo run -- run
 
 ## Development Transparency
 
-SwarmLLM was developed collaboratively between a human developer and Claude Code. The human provided architecture direction, testing, and review; Claude wrote the code. We disclose this openly so you can judge the project on its technical merits — 906 lib tests + 75 integration tests run on every PR, every commit passes `cargo fmt` and `cargo clippy -- -D warnings`, and continuous multi-agent code sweeps and security audits track findings in `.claude/sweep-log.jsonl`. Contributions, scrutiny, and feedback all welcome.
+SwarmLLM was developed collaboratively between a human developer and Claude Code. The human provided architecture direction, testing, and review; Claude wrote the code. We disclose this openly so you can judge the project on its technical merits — 909 lib tests + 75 integration tests run on every PR, every commit passes `cargo fmt` and `cargo clippy -- -D warnings`, and continuous multi-agent code sweeps and security audits track findings in `.claude/sweep-log.jsonl`. Contributions, scrutiny, and feedback all welcome.
 
 ## License
 

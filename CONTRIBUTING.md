@@ -96,7 +96,7 @@ Key directories:
 - `src/inference/` — router, pipeline, executor, split inference
 - `src/api/` — HTTP server, OpenAI/Anthropic endpoints, admin dashboard
 - `src/credit/` — credit system, transactions, anti-gaming
-- `frontend/` — vanilla HTML/CSS/JS dashboard (no build step): `js/core/` (4 modules: state, utils, data, tooltip), `js/components/` (15 UI modules), `js/init.js`, 4 standalone utilities (i18n, providers, neural-bg, topojson-client), 12 HTML `<template>` elements, 21 i18n languages
+- `frontend/` — vanilla HTML/CSS/JS dashboard (no build step): `js/core/` (4 modules: state, utils, data, tooltip), `js/components/` (17 UI modules), `js/init.js`, 4 standalone utilities (i18n, providers, neural-bg, topojson-client), 11 HTML `<template>` elements, 21 i18n languages
 
 ## Security Issues
 

@@ -218,9 +218,10 @@ libp2p Swarm
 │   └── Failed publishes buffered and replayed on mesh formation
 │
 ├── request_response (unified protocol, /swarmllm/1.0.0, 600s timeout — slow CPU inference)
-│   ├── JSON control messages — SwarmMessage, ShardRequest/ShardResponse
-│   ├── Binary tensor payloads — LayerForward, LayerResult (type-tag byte: 0x00=JSON, 0x01=tensor, zstd compression optional)
-│   ├── Binary shard data — ShardResponse payload (type-tag byte: 0x03=shard, 32MB chunks as raw bytes, bypasses 4MB JSON limit)
+│   ├── JSON control messages — SwarmMessage, ShardRequest/ShardResponse (type-tag 0x00=WIRE_TAG_JSON)
+│   ├── Binary tensor payloads — LayerForward, LayerResult (type-tag 0x01=WIRE_TAG_TENSOR, or 0x02=WIRE_TAG_TENSOR_COMPRESSED for zstd, flag-gated; inner ChaCha20-Poly1305 encryption marked by TENSOR_TAG_ENCRYPTED=0x10)
+│   ├── Binary shard data — ShardResponse payload (type-tag 0x03=WIRE_TAG_SHARD, 32MB chunks as raw bytes, bypasses 4MB JSON limit)
+│   ├── Cross-node prefix-KV snapshots — (type-tag 0x04=WIRE_TAG_PREFIX_KV, Item 8 Phase 2 fetched path)
 │   └── ACK-timeout fast-fail: streaming-tracked sends (`SendDirectMessage` with `delivery_request_id = Some(uuid)`) are mapped to a Uuid via `pending_rr_observability`. The 10s `RR_ACK_TIMEOUT_SECS` sweep closes `streaming_token_txs[uuid]` if no Response/OutboundFailure event fires (libp2p rr can silently drop sends under load); caller sees Err in ~10–20s instead of 120s
 │
 ├── TCP transport (Noise + Yamux, nodelay=true, port+10)
@@ -1327,6 +1328,7 @@ Routes Claude model requests through a locally-authenticated `claude` CLI subpro
 - `POST   /api/admin/models/{id}/shards/{index}/download` — Download a single shard from P2P network
 - `POST   /api/admin/models/{id}/shards/{index}/load` — Load a shard into memory (expands shard window, restarts worker)
 - `POST   /api/admin/models/{id}/shards/{index}/unload` — Unload a shard from memory (narrows shard window, restarts worker, frees RAM/VRAM)
+- `GET    /api/admin/models/{id}/pipeline-plan` — Pipeline assembly plan: ordered segments + holder candidates per shard window
 - `GET/PUT /api/admin/schedule` — Resource schedule management
 - `GET    /api/admin/prune-history` — Recent auto-prune events
 - `GET/POST /api/admin/adapters` — List/register LoRA adapters
@@ -1378,6 +1380,8 @@ Routes Claude model requests through a locally-authenticated `claude` CLI subpro
   - `frontend/js/components/compare.js` — multi-model comparison tool
   - `frontend/js/components/responses.js` — `/v1/responses` dashboard panel: retrieve-by-id, status-filtered list, cancel/delete/view per row, 5-second polling refresh while visible
   - `frontend/js/components/pool.js` — device pool management (create, join, members, contribution)
+  - `frontend/js/components/swarm-tab.js` — Swarm tab: wishlist + Capacity Plan view (R111)
+  - `frontend/js/components/dashboard-shards.js` — pure shard HTML builders (`App.dashboardShards`)
   - `frontend/js/init.js` — event binding, initialization, public API export (`window.SwarmLLM`)
 - **HTML templates**: 11 `<template id="tmpl-*">` elements for repeating UI structures (session items, chat messages, toasts, compare cards, compare model chips, leaderboard rows, download queue items, peer rows, prune rows, storage model rows, pool member rows). Components clone templates via `template.content.cloneNode(true)` instead of innerHTML string building.
 - Cross-component calls: `App.componentName.method()`. Shared state: `App.state.*`. Utilities: `App.utils.*`.

@@ -39,20 +39,20 @@ cargo run -- run -vv 2>&1 | grep "request_id=<UUID>"
 2. **Dispatch** → `DIAG: dispatch_single starting inference` (router/mod.rs)
 3. **Pipeline assembly** → `DIAG: pipeline assembled` with `segments`, `standbys`, `schedule_ms` (router/distributed_exec.rs)
 4. **Forward start** → `DIAG: starting forward_through_segments` with `seq_num`, `index_pos`, `activation_bytes` (pipeline/distributed.rs)
-5. **Tensor forward send** → `Sent tensor forward` with `is_connected`, `total_connections`, `pending_tensor_count`, `outbound_id` (manager.rs)
+5. **Tensor forward send** → `DIAG: sent tensor forward via send_request` with `is_connected`, `total_connections`, `pending_tensor_count`, `outbound_id` (manager/tensors.rs)
 6. **Codec write** → `DIAG: codec write_request start/done` with `frame_len` (protocol.rs)
-7. **Encryption (if enabled)** → `DIAG: encrypting tensor forward` with `aad_len`, `has_session` (manager.rs)
+7. **Encryption (if enabled)** → `DIAG: encrypting tensor forward` with `aad_len`, `has_session` (manager/tensors.rs)
 8. **Remote receive** → `DIAG: codec read_request header` with `tag`, `len` (protocol.rs)
-9. **Inbound dispatch** → `DIAG: inbound TensorPayload request` → `DIAG: stored ResponseChannel` (manager.rs)
+9. **Inbound dispatch** → `DIAG: inbound TensorPayload request` → `DIAG: stored ResponseChannel` (manager/requests.rs)
 10. **Dispatcher** → `DIAG: dispatcher received LayerForward` with `seq`, `layer_range`, `activation_bytes` (daemon/dispatch/mod.rs)
 11. **Local execution** → `DIAG: processing LayerForward locally` with `elapsed_ms` (daemon/dispatch/mod.rs)
 12. **Split model forward** → `DIAG: SplitModel forward pass complete` with `forward_ms`, `seq_len`, `num_layers` (split/executor.rs)
 13. **Result send** → `DIAG: LayerForward processed, sending result back` (daemon/dispatch/mod.rs)
 14. **Response write** → `DIAG: codec write_response start/done` with `frame_len` (protocol.rs)
-15. **ResponseSent event** → `DIAG: ResponseSent event — response written to wire` (manager.rs)
+15. **ResponseSent event** → `DIAG: ResponseSent event — response written to wire` (manager/events.rs)
 16. **Response read** → `DIAG: codec read_response header` with `tag`, `len` (protocol.rs)
-17. **Response received** → `DIAG: received response` with `kind`, `was_tensor_forward`, `pending_tensor_out` (manager.rs)
-18. **Response dispatch** → `DIAG: received TensorPayload response` (manager.rs)
+17. **Response received** → `DIAG: received response` with `kind`, `was_tensor_forward`, `pending_tensor_out` (manager/events.rs)
+18. **Response dispatch** → `DIAG: received TensorPayload response` (manager/requests.rs)
 19. **Result delivery** → `DIAG: dispatcher received LayerResult` → `DIAG: LayerResult delivered to pipeline` (daemon/dispatch/mod.rs)
 20. **Forward complete** → `DIAG: forward_through_segments returned OK` with `fwd_ms`, `tokens`, `activations_bytes` (pipeline/distributed.rs)
 21. **Local segment** → `DIAG: local segment complete` with `segment_ms`, `activation_bytes` (pipeline/distributed.rs)
@@ -66,18 +66,18 @@ cargo run -- run -vv 2>&1 | grep "request_id=<UUID>"
 
 | Level | What | Where |
 |-------|------|-------|
-| DEBUG | `DIAG: processing swarm event` — event type name for every swarm event | manager.rs |
-| DEBUG | `DIAG: handling outbound command` — command type for every outbound command | manager.rs |
-| INFO  | `DIAG: OutboundFailure` — `is_connected`, `pending_tensor_out`, `pending_channels` | manager.rs |
-| WARN  | `DIAG: InboundFailure` — `pending_channels` | manager.rs |
-| INFO  | `DIAG: ResponseSent event` — confirms response written to wire | manager.rs |
+| DEBUG | `DIAG: processing swarm event` — event type name for every swarm event | manager/events.rs |
+| DEBUG | `DIAG: handling outbound command` — command type for every outbound command | manager/commands.rs |
+| INFO  | `DIAG: OutboundFailure` — `is_connected`, `pending_tensor_out`, `pending_channels` | manager/events.rs |
+| WARN  | `DIAG: InboundFailure` — `pending_channels` | manager/events.rs |
+| INFO  | `DIAG: ResponseSent event` — confirms response written to wire | manager/events.rs |
 
 ### Failure Paths
 
 - **Timeout** → `DIAG: segment TIMED OUT — no result received` (pipeline/local.rs)
-- **Outbound failure** → `DIAG: OutboundFailure` → `Tensor forward OutboundFailure — notifying pipeline` (manager.rs)
-- **Inbound failure** → `DIAG: InboundFailure — response send may have failed` (manager.rs)
-- **Decryption fail** → `DIAG: decrypt FAILED — possible AAD mismatch` (manager.rs)
+- **Outbound failure** → `DIAG: OutboundFailure` → `Tensor forward OutboundFailure — notifying pipeline` (manager/events.rs)
+- **Inbound failure** → `DIAG: InboundFailure — response send may have failed` (manager/events.rs)
+- **Decryption fail** → `DIAG: decrypt FAILED — possible AAD mismatch` (manager/tensors.rs)
 - **No standby** → `DIAG: NO standby available for failed segment` (pipeline/distributed.rs)
 - **Client disconnect** → `DIAG: result_tx receiver dropped` (router/mod.rs)
 - **Channel drop** → `DIAG: LayerResult delivered but pipeline receiver DROPPED` (daemon/dispatch/mod.rs)
@@ -125,12 +125,12 @@ The encrypted tensor path logs at multiple levels:
 
 | Level | What | Where |
 |-------|------|-------|
-| DEBUG | `DIAG: encrypting tensor forward` — AAD length, session state | manager.rs |
-| DEBUG | `DIAG: decrypting tensor` — AAD length, sealed length, session existence | manager.rs |
+| DEBUG | `DIAG: encrypting tensor forward` — AAD length, session state | manager/tensors.rs |
+| DEBUG | `DIAG: decrypting tensor` — AAD length, sealed length, session existence | manager/tensors.rs |
 | TRACE | `DIAG: seal() success` — nonce counter, ciphertext length | session.rs |
 | TRACE | `DIAG: open() decryption success` — nonce, plaintext length | session.rs |
-| ERROR | `DIAG: seal() failed` — full context on encryption failure | manager.rs |
-| ERROR | `DIAG: decrypt FAILED` — AAD mismatch, key mismatch, or corruption | manager.rs, session.rs |
+| ERROR | `DIAG: seal() failed` — full context on encryption failure | manager/tensors.rs |
+| ERROR | `DIAG: decrypt FAILED` — AAD mismatch, key mismatch, or corruption | manager/tensors.rs, session.rs |
 | ERROR | `DIAG: open() decryption FAILED` — nonce state, AAD/sealed lengths | session.rs |
 
 ### Common Encryption Failures
@@ -245,9 +245,8 @@ The `elapsed_ms` field appears at multiple points:
 4. `DIAG: segment result received` — time for a single segment (network + compute)
 5. `DIAG: forward_through_segments completed` — total pipeline forwarding time
 6. `DIAG: execute_request completed successfully` — `schedule_ms` (pipeline assembly) + `execute_ms` (pipeline execution)
-7. `DIAG: split stream prefill complete` — time for prefill only
-8. `DIAG: split stream decode loop complete` — decode time with `tok_per_sec`
-9. `DIAG: inference completed` — total end-to-end time
+7. `DIAG: split stream decode loop complete (subprocess)` — decode time with `tok_per_sec`
+8. `DIAG: inference completed` — total end-to-end time
 
 If `schedule_ms` is high, the bottleneck is pipeline assembly. If `execute_ms` is high but individual `segment_ms` values are low, the bottleneck is inter-segment overhead. If a single segment is slow, check that node's compute or network latency.
 
@@ -449,7 +448,7 @@ For production testing, use native Linux (dual boot or bare metal). WSL2 is suit
 |-------|------|--------|
 | INFO  | `DIAG: server startup` | `addr` |
 
-### Admin (admin.rs)
+### Admin HF (admin_hf/shards.rs)
 
 | Level | What | Fields |
 |-------|------|--------|
@@ -562,7 +561,7 @@ For production testing, use native Linux (dual boot or bare metal). WSL2 is suit
 | DEBUG | `DIAG: key rotation eviction tick` | `active_sessions`, `stale_evicted` |
 | DEBUG | `DIAG: key rotation re-keying tick` | `active_sessions`, `rekey_initiated` |
 
-### Key Exchange (manager.rs)
+### Key Exchange (manager/identify.rs)
 
 | Level | What | Fields |
 |-------|------|--------|
@@ -618,14 +617,14 @@ For production testing, use native Linux (dual boot or bare metal). WSL2 is suit
 | `src/inference/chat_template/mod.rs` | Template matching and fallback detection |
 | `src/model/shard.rs` | Shard verification failures, load_all_local summary |
 | `src/model/registry.rs` | Manifest registration, DB load counts |
-| `src/model/huggingface/mod.rs` | Search result counts, HF_TOKEN auth |
+| `src/model/huggingface/search.rs` | Search result counts, HF_TOKEN auth |
 | `src/model/manifest.rs` | Manifest load with shard count |
 | `src/model/lora.rs` | Adapter load with rank, alpha, target modules |
 | `src/model/acquisition.rs` | Acquisition requests, peer selection |
 | `src/model/auto_manage/` | Prune evaluation (prune.rs), shard registration (download.rs), model readiness (scan.rs) |
 | `src/api/server.rs` | Server startup with bind address |
-| `src/api/openai/mod.rs` | All 3 streaming paths with per-token timing, client disconnect detection, fallback path logging |
-| `src/api/admin.rs` | HF shard download initiation |
+| `src/api/openai/streaming.rs` | All 3 streaming paths with per-token timing, client disconnect detection, fallback path logging |
+| `src/api/admin_hf/shards.rs` | HF shard download initiation |
 | `src/api/providers.rs` | Provider resolution |
 | `src/api/websocket.rs` | WebSocket connection lifecycle |
 | `src/api/middleware.rs` | Auth failure with path context |
@@ -638,7 +637,6 @@ For production testing, use native Linux (dual boot or bare metal). WSL2 is suit
 | `src/health/monitor.rs` | Broadcast failures, stale peer counts, channel cleanup details |
 | `src/api/anthropic/` | Messages API request entry, connectivity probe fast-path, inference path resolution, cloud proxy |
 | `src/api/identity.rs` | Nickname set/gossip, leaderboard query with peer filtering |
-| `src/api/internal.rs` | Hidden states request entry, gate denial |
 | `src/api/metrics.rs` | Metrics scrape, health readiness probe |
 | `src/api/pool.rs` | Pool create, invite, rate set operations |
 | `src/config/mod.rs` | Config load source, data_dir resolution, validation complete |

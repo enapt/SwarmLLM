@@ -77,9 +77,10 @@ measurable wins.
 - ✅ `v0.1.0` tag cut 2026-04-25 (816 tests). Subsequent commits are
   in CHANGELOG `[Unreleased] — post-v0.1.0`. Two black-hat audits
   (2026-04-28 + 2026-04-29) plus the autonomous R76→R91 sweep arc
-  (2026-04-30 → 2026-05-01, 16 rounds) have landed since; current
-  head sits at 887 lib + 75 integration tests, clippy clean, both
-  default and `--features llama` feature sets compile.
+  (2026-04-30 → 2026-05-01, 16 rounds) have landed since, plus the
+  R92→R120 arc through 2026-05-12; current head sits at 909 lib + 75
+  integration tests, clippy clean, both default and `--features llama`
+  feature sets compile.
 - ✅ macOS CI matrix is live (clippy + test + build on `macos-15` in
   `.github/workflows/ci.yml` — clippy default features only, integration
   tests Linux-only by design until macOS multi-process IPC is exercised).
@@ -108,11 +109,6 @@ measurable wins.
 
 ## Anti-goals
 
-- **Don't add the zstd path yet.** The Qwen-7B cross-over showed a
-  140 s absolute win without compression, so zstd is optional polish
-  on the localhost case. It may still matter for WAN (where a smaller
-  wire shrinks RTT-dominated windows), but land the WAN measurement
-  first to know which direction to optimize.
 - **Don't batch release hygiene behind research items.** v0.1.0 should
   cut whenever the tree is green and stable, not whenever the research
   backlog is clear.
