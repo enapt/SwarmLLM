@@ -901,12 +901,15 @@ impl AcquisitionManager {
 
         // Load from shards — no full GGUF reconstruction needed.
         // check_and_load_model handles both partial and complete shard sets.
-        let shared = self.shared_state.clone();
-        let mid = model_id.clone();
-        tokio::spawn(async move {
-            let vram_budget = crate::model::auto_manage::compute_vram_budget(&shared);
-            crate::model::auto_manage::check_and_load_model(&shared, &mid, vram_budget).await;
-        });
+        // The dashboard signal in spawn_check_and_load was previously missing
+        // here; aligning with the other two sites means a freshly acquired
+        // model triggers an immediate Models tab refresh (the subsequent
+        // model_download_complete activity event would refresh anyway, but
+        // the explicit signal removes the dependency on event ordering).
+        crate::model::auto_manage::spawn_check_and_load(
+            self.shared_state.clone(),
+            model_id.clone(),
+        );
     }
 }
 

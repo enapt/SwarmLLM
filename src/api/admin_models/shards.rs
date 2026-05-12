@@ -234,20 +234,7 @@ pub async fn delete_shard(
 
     // Reload remaining shards so the model stays available for inference
     // (check_and_load_model will re-compute layer ranges from remaining shards)
-    {
-        let reload_shared = shared.clone();
-        let reload_mid = mid.clone();
-        tokio::spawn(async move {
-            let vram_budget = crate::model::auto_manage::vram::compute_vram_budget(&reload_shared);
-            crate::model::auto_manage::scan::check_and_load_model(
-                &reload_shared,
-                &reload_mid,
-                vram_budget,
-            )
-            .await;
-            reload_shared.signal_dashboard(crate::daemon::state::DashboardSignal::ModelsChanged);
-        });
-    }
+    crate::model::auto_manage::spawn_check_and_load(shared.clone(), mid.clone());
 
     // Notify dashboard so shard grid and model state update immediately
     shared.signal_dashboard(crate::daemon::state::DashboardSignal::ModelsChanged);

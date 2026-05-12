@@ -726,26 +726,10 @@ impl NetworkManager {
                             ));
 
                         // Load the model with the new shard (spawned async — can't block event loop)
-                        {
-                            let load_shared = self.shared_state.clone();
-                            let load_mid = shard_id.model_id.clone();
-                            tokio::spawn(async move {
-                                let vram_budget =
-                                    crate::model::auto_manage::vram::compute_vram_budget(
-                                        &load_shared,
-                                    );
-                                // check_and_load_model emits model_loaded activity event
-                                crate::model::auto_manage::scan::check_and_load_model(
-                                    &load_shared,
-                                    &load_mid,
-                                    vram_budget,
-                                )
-                                .await;
-                                load_shared.signal_dashboard(
-                                    crate::daemon::state::DashboardSignal::ModelsChanged,
-                                );
-                            });
-                        }
+                        crate::model::auto_manage::spawn_check_and_load(
+                            self.shared_state.clone(),
+                            shard_id.model_id.clone(),
+                        );
                         self.shared_state.models.auto_manage_notify.notify_one();
 
                         // Release the P2P download semaphore permit parked by

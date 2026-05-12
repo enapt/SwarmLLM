@@ -206,6 +206,15 @@ silently break at the wire if duplicated:
 - **`cli::bail_if_no_api_key` / `cli::exit_daemon_unreachable`** (R96)
   — the canonical "daemon not running" / "daemon unreachable"
   messages. Used by `cli::{bench, chat, peers, status}`.
+- **`model::auto_manage::spawn_check_and_load`** — canonical
+  "shard landed → reload model → refresh dashboard" spawn. Always
+  performs the three steps together: compute_vram_budget →
+  check_and_load_model → signal_dashboard(ModelsChanged). Used by
+  `api/admin_models/shards.rs::delete_shard`,
+  `network/manager/requests.rs` shard-download landing, and
+  `model/acquisition.rs::register_model`. New paths that complete a
+  shard or shard-set acquisition MUST go through this helper rather
+  than open-coding the three-step sequence.
 
 ## Cross-feature compile checks
 

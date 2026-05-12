@@ -283,6 +283,25 @@ pub async fn rescan_local_shards(
     changed_models
 }
 
+/// Spawn the canonical "shard landed → reload model → refresh dashboard" task.
+///
+/// Used by every code path that completes a shard or shard-set acquisition
+/// (admin delete-shard reload, P2P shard download landing, full model
+/// acquisition). The three steps are always run together:
+///   1. compute the VRAM budget,
+///   2. run `check_and_load_model` (idempotent — picks up whatever's on disk),
+///   3. signal the dashboard so the shard grid + model state refresh.
+///
+/// Callers MUST NOT block the event loop with the load — it runs on a
+/// detached tokio task.
+pub fn spawn_check_and_load(shared: Arc<SharedState>, model_id: ModelId) {
+    tokio::spawn(async move {
+        let vram_budget = compute_vram_budget(&shared);
+        check_and_load_model(&shared, &model_id, vram_budget).await;
+        shared.signal_dashboard(crate::daemon::state::DashboardSignal::ModelsChanged);
+    });
+}
+
 /// Load whatever local shards are available for inference.
 ///
 /// Called after each shard download completes (both auto-manage and manual).
