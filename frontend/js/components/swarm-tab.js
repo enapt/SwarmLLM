@@ -59,13 +59,6 @@
     return U.formatModelDisplayName ? U.formatModelDisplayName(source) : source;
   }
 
-  function _humaniseSize(mb) {
-    if (mb < 1) return '< 1 MB';
-    if (mb < 1024) return Math.round(mb) + ' MB';
-    if (mb < 1024 * 1024) return (mb / 1024).toFixed(1) + ' GB';
-    return (mb / (1024 * 1024)).toFixed(2) + ' TB';
-  }
-
   // Build a single wishlist card. Returns a DocumentFragment.
   function _renderEntry(entry) {
     var tmpl = document.createElement('div');
@@ -102,9 +95,9 @@
     // Meta row: size + memory required + replication summary
     var meta = document.createElement('div');
     meta.className = 'wishlist-card-meta';
-    meta.appendChild(_metaSpan(I18n.t('wishlist.meta_size', { size: _humaniseSize(entry.size_mb) })));
+    meta.appendChild(_metaSpan(I18n.t('wishlist.meta_size', { size: U.formatSize(entry.size_mb) })));
     if (entry.vram_required_mb > 0) {
-      meta.appendChild(_metaSpan(I18n.t('wishlist.meta_memory', { size: _humaniseSize(entry.vram_required_mb) })));
+      meta.appendChild(_metaSpan(I18n.t('wishlist.meta_memory', { size: U.formatSize(entry.vram_required_mb) })));
     }
     var replicaText;
     if (entry.swarm_replicas === 0) {
@@ -250,7 +243,7 @@
       card.appendChild(name);
       var meta = document.createElement('div');
       meta.className = 'capacity-card-meta text-muted text-2xs';
-      meta.textContent = I18n.t('wishlist.meta_size', { size: _humaniseSize(m.size_mb) }) +
+      meta.textContent = I18n.t('wishlist.meta_size', { size: U.formatSize(m.size_mb) }) +
         ' · ' + I18n.t(m.holders === 1 ? 'wishlist.meta_replicas_ok_one' : 'wishlist.meta_replicas_ok_other', { have: m.holders });
       card.appendChild(meta);
       grid.appendChild(card);
@@ -334,13 +327,6 @@
       if (src && src.repo_id) fresh.add(String(src.repo_id).toLowerCase());
     });
     _localHfRepos = fresh;
-  }
-
-  function _humaniseBytes(bytes) {
-    if (!bytes || bytes < 1024) return (bytes || 0) + ' B';
-    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(0) + ' KB';
-    if (bytes < 1024 * 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(0) + ' MB';
-    return (bytes / (1024 * 1024 * 1024)).toFixed(2) + ' GB';
   }
 
   function _browseEnsureTrending() {
@@ -505,7 +491,7 @@
     var sizeEl = document.createElement('div');
     sizeEl.className = 'browse-result-size';
     var sizeBytes = repo.est_boomerang_size || repo.est_shard_size || 0;
-    sizeEl.textContent = sizeBytes ? _humaniseBytes(sizeBytes) : '—';
+    sizeEl.textContent = sizeBytes ? U.formatBytes(sizeBytes) : '—';
     row.appendChild(sizeEl);
 
     var fit = _fitPill(repo);
@@ -585,7 +571,7 @@
       variants.forEach(function (v) {
         var opt = document.createElement('option');
         opt.value = v.filename;
-        var label = v.quant + (v.size_bytes ? ' — ' + _humaniseBytes(v.size_bytes) : '');
+        var label = v.quant + (v.size_bytes ? ' — ' + U.formatBytes(v.size_bytes) : '');
         if (v.quant === repo.recommended_variant) {
           label += ' ' + I18n.t('models.hf_recommended');
           opt.selected = true;
@@ -750,7 +736,7 @@
         '<div class="capacity-plan-hero-msg">' +
         I18n.t('capacity_plan.hero_msg', {
           contributors: t.contributors_needed,
-          shortfall: _humaniseSize(t.vram_shortfall_mb),
+          shortfall: U.formatSize(t.vram_shortfall_mb),
         }) +
         '</div>' +
         '</div>';
@@ -780,7 +766,7 @@
       projected.className = 'capacity-plan-projected';
       projected.innerHTML =
         '<span class="text-muted">' + I18n.t('capacity_plan.projected_total') +
-        '</span> <strong>' + _humaniseSize(sc.projected_total_vram_mb) + '</strong>';
+        '</span> <strong>' + U.formatSize(sc.projected_total_vram_mb) + '</strong>';
       card.appendChild(projected);
 
       if (sc.unlocks_anything && sc.newly_unlocked.length > 0) {
@@ -792,7 +778,7 @@
         ul.className = 'capacity-plan-unlocks-list';
         sc.newly_unlocked.forEach(function (m) {
           var li = document.createElement('li');
-          li.textContent = m.display_name + ' (' + _humaniseSize(m.size_mb) + ')';
+          li.textContent = m.display_name + ' (' + U.formatSize(m.size_mb) + ')';
           ul.appendChild(li);
         });
         card.appendChild(ul);

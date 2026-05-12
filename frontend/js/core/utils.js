@@ -45,6 +45,17 @@
     return mb + ' MB';
   }
 
+  // Precise size formatter \u2014 used where 0/sub-MB are meaningful values
+  // (model size, VRAM requirement, capacity plan shortfall) rather than
+  // "unknown". Supports the TB range that formatMB doesn't. Sibling of
+  // formatBytes for the megabyte-scale inputs the dashboard works in.
+  function formatSize(mb) {
+    if (mb < 1) return '< 1 MB';
+    if (mb < 1024) return Math.round(mb) + ' MB';
+    if (mb < 1024 * 1024) return (mb / 1024).toFixed(1) + ' GB';
+    return (mb / (1024 * 1024)).toFixed(2) + ' TB';
+  }
+
   function formatCompact(n) {
     if (!n || n === 0) return '0';
     if (n >= 1000000) return (n / 1000000).toFixed(1) + 'M';
@@ -606,6 +617,7 @@
     safeId: safeId,
     formatUptime: formatUptime,
     formatMB: formatMB,
+    formatSize: formatSize,
     formatBytes: formatBytes,
     formatCompact: formatCompact,
     formatDlProgress: formatDlProgress,
