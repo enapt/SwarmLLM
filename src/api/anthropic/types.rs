@@ -52,6 +52,21 @@ pub enum SystemContent {
     Blocks(Vec<SystemBlock>),
 }
 
+impl SystemContent {
+    /// Flatten to a single string; multi-block input joins with newlines.
+    pub(super) fn to_plain_text(&self) -> String {
+        match self {
+            SystemContent::Text(s) => s.clone(),
+            SystemContent::Blocks(blocks) => blocks
+                .iter()
+                .filter_map(|b| b.text.as_ref())
+                .cloned()
+                .collect::<Vec<_>>()
+                .join("\n"),
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 pub struct SystemBlock {
     #[serde(rename = "type")]

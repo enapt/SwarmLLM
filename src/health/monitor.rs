@@ -593,12 +593,14 @@ impl HealthMonitor {
             }
         }
 
-        // pending_tp_partials: remove entries older than 60 seconds (stale AllReduce collectors)
+        // pending_tp_partials: remove entries older than TP_PARTIALS_STALE_SECS
+        // (stale AllReduce collectors — protocol timeout long since elapsed).
+        const TP_PARTIALS_STALE_SECS: u64 = 60;
         let stale_tp: Vec<_> = self
             .shared_state
             .pending_tp_partials
             .iter()
-            .filter(|entry| entry.value().created_at.elapsed().as_secs() > 60)
+            .filter(|entry| entry.value().created_at.elapsed().as_secs() > TP_PARTIALS_STALE_SECS)
             .map(|entry| *entry.key())
             .collect();
         if !stale_tp.is_empty() {

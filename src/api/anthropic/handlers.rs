@@ -15,7 +15,7 @@ use super::sse::{
 };
 use super::types::{
     AnthropicContent, AnthropicUsage, ContentBlock, MessagesRequest, MessagesResponse,
-    ResponseContentBlock, SystemContent,
+    ResponseContentBlock,
 };
 
 /// Tool `type` strings on the Anthropic side that designate hosted server
@@ -423,15 +423,7 @@ fn anthropic_messages_to_openai(req: &MessagesRequest) -> Result<Vec<Value>, Api
     let mut out = Vec::new();
 
     if let Some(ref system) = req.system {
-        let text = match system {
-            SystemContent::Text(s) => s.clone(),
-            SystemContent::Blocks(blocks) => blocks
-                .iter()
-                .filter_map(|b| b.text.as_ref())
-                .cloned()
-                .collect::<Vec<_>>()
-                .join("\n"),
-        };
+        let text = system.to_plain_text();
         if !text.is_empty() {
             out.push(json!({"role": "system", "content": text}));
         }

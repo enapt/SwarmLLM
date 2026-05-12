@@ -1166,35 +1166,6 @@ a:hover { color: var(--accent-hover); }
   color: var(--text-muted);
 }
 .netstatus-chip strong { color: var(--text); }
-.netstatus-chip-action {
-  cursor: pointer;
-  border-color: rgba(56, 139, 253, 0.4);
-  color: var(--text);
-}
-.netstatus-chip-action:hover { background: rgba(56, 139, 253, 0.12); }
-.capacity-pill {
-  display: inline-block;
-  padding: 2px 8px;
-  border-radius: 12px;
-  background: rgba(56, 139, 253, 0.12);
-  border: 1px solid rgba(56, 139, 253, 0.25);
-  font-size: 0.82rem;
-  color: var(--text);
-}
-.capacity-pill-mine {
-  background: rgba(46, 160, 67, 0.18);
-  border-color: rgba(46, 160, 67, 0.35);
-}
-.capacity-pill-aspirational {
-  background: rgba(210, 153, 34, 0.12);
-  border-color: rgba(210, 153, 34, 0.30);
-  color: var(--text-muted);
-}
-.capacity-pill-more {
-  background: transparent;
-  border: 1px dashed var(--border);
-  color: var(--text-muted);
-}
 
 /* R110: stacked-bar storage allocator. Single source of truth for the
    user — their disk allocation visualised as one bar. */

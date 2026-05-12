@@ -8,22 +8,6 @@
 (function() {
   var U = App.utils;
 
-  // Test models keyed by provider — copied from settings.testProvider so the
-  // wizard can validate keys end-to-end before marking the provider configured.
-  var PROVIDER_TEST_MODELS = {
-    openai: 'gpt-4o-mini',
-    deepseek: 'deepseek-chat',
-    mistral: 'mistral-small-latest',
-    groq: 'llama-3.1-8b-instant',
-    nvidia_nim: 'meta/llama-3.1-8b-instruct',
-    cerebras: 'cerebras:llama-3.1-8b',
-    sambanova: 'sambanova:Meta-Llama-3.3-70B-Instruct',
-    fireworks: 'accounts/fireworks/models/llama-v3p3-70b-instruct',
-    together: 'together:meta-llama/Llama-3.3-70B-Instruct-Turbo',
-    deepinfra: 'deepinfra:meta-llama/Llama-3.3-70B-Instruct',
-    moonshot: 'moonshot-v1-8k',
-  };
-
   // Order matters — first 6 are visible above the fold on most screens.
   var PROVIDER_ORDER = [
     'openai', 'anthropic', 'deepseek', 'groq', 'mistral', 'together',

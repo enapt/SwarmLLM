@@ -2,7 +2,7 @@
 
 use crate::types::{ChatMessage, Role, SamplingParams};
 
-use super::types::{AnthropicContent, ContentBlock, MessagesRequest, SystemContent};
+use super::types::{AnthropicContent, ContentBlock, MessagesRequest};
 
 /// Check if a request is a connectivity probe (Claude Code sends these to test the endpoint).
 /// Narrowed to also check message content to avoid false-positiving on legitimate max_tokens=1 requests.
@@ -30,15 +30,7 @@ pub(super) fn to_internal_messages(req: &MessagesRequest) -> Vec<ChatMessage> {
 
     // System prompt → System role
     if let Some(ref system) = req.system {
-        let text = match system {
-            SystemContent::Text(s) => s.clone(),
-            SystemContent::Blocks(blocks) => blocks
-                .iter()
-                .filter_map(|b| b.text.as_ref())
-                .cloned()
-                .collect::<Vec<_>>()
-                .join("\n"),
-        };
+        let text = system.to_plain_text();
         if !text.is_empty() {
             messages.push(ChatMessage {
                 role: Role::System,

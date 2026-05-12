@@ -84,6 +84,9 @@ pub async fn delete_model(
     if let Err(e) = shared.db.remove("hf_sources", &model_id) {
         tracing::warn!(model = %model_id, error = %e, "Failed to remove hf_sources from DB");
     }
+    if let Err(e) = shared.db.remove("model_trust", &model_id) {
+        tracing::warn!(model = %model_id, error = %e, "Failed to remove model_trust from DB");
+    }
 
     // S5: Collect local shards before removal for DHT stop_providing
     let local_shards: Vec<_> = shared
@@ -107,6 +110,7 @@ pub async fn delete_model(
     // Remove from acquisition_progress and request counts
     shared.models.acquisition_progress.remove(&mid);
     shared.models.model_request_counts.remove(&mid);
+    shared.models.model_trust.remove(&mid);
 
     // Remove from gguf_meta
     shared.gguf_meta.remove(&mid);

@@ -613,26 +613,20 @@
   }
 
   function _browseDownload(repo, variant) {
-    if (!App.authFetch) return;
+    if (!App.hf || !App.hf.downloadShards) return;
     var filename = variant ? variant.filename : (repo.variants && repo.variants[0] && repo.variants[0].filename);
     if (!filename) {
       App.notifications && App.notifications.showToast &&
         App.notifications.showToast(I18n.t('browse.error_no_variant'), 'error');
       return;
     }
-    App.authFetch('/api/admin/hf/download-shards', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ repo_id: repo.repo_id, filename: filename }),
-    }).then(function (r) {
-      if (r.ok) {
+    App.hf.downloadShards({ repo_id: repo.repo_id, filename: filename }).then(function (result) {
+      if (result.ok) {
         App.notifications && App.notifications.showToast &&
           App.notifications.showToast(I18n.t('browse.download_started', { name: _prettyRepoName(repo.repo_id) }), 'success');
       } else {
-        return r.json().then(function (e) {
-          App.notifications && App.notifications.showToast &&
-            App.notifications.showToast((e && e.error && e.error.message) || I18n.t('browse.download_failed'), 'error');
-        });
+        App.notifications && App.notifications.showToast &&
+          App.notifications.showToast(result.errorMsg || I18n.t('browse.download_failed'), 'error');
       }
     }).catch(function () {
       App.notifications && App.notifications.showToast &&

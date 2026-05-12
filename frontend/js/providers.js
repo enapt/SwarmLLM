@@ -49,6 +49,22 @@ var PROVIDER_NAMES = {
   moonshot:   'Moonshot (Kimi)',
 };
 
+// Default test models per provider. Used by setup wizard + settings "Test"
+// button to validate an API key with the cheapest credible model.
+var PROVIDER_TEST_MODELS = {
+  openai:     'gpt-4o-mini',
+  deepseek:   'deepseek-chat',
+  mistral:    'mistral-small-latest',
+  groq:       'llama-3.1-8b-instant',
+  nvidia_nim: 'meta/llama-3.1-8b-instruct',
+  cerebras:   'cerebras:llama-3.1-8b',
+  sambanova:  'sambanova:Meta-Llama-3.3-70B-Instruct',
+  fireworks:  'accounts/fireworks/models/llama-v3p3-70b-instruct',
+  together:   'together:meta-llama/Llama-3.3-70B-Instruct-Turbo',
+  deepinfra:  'deepinfra:meta-llama/Llama-3.3-70B-Instruct',
+  moonshot:   'moonshot-v1-8k',
+};
+
 // Signup / API-key URLs for each provider. Single source of truth — consumed
 // by both the setup wizard (`init.js`) and the settings panel (populated into
 // `.provider-signup-link[data-provider=X]` anchors at init time).
