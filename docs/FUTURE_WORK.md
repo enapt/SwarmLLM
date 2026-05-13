@@ -149,6 +149,71 @@ Captures items deliberately deferred from the model-management redesign and from
 
 ---
 
+### Ease-of-use audit follow-ups — bigger UX changes (R125 follow-up)
+
+**Context.** The 2026-05-13 ease-of-use audit (R125) applied ~40 copy fixes
+to make the UI usable by non-technical users. Three structural / behavioural
+items came up that warrant direction beyond a copy refresh:
+
+1. **README architecture section is intimidating.** The "12 async Tokio
+   tasks wired via mpsc channels, sharing `Arc<SharedState>` + DashMap"
+   sentence + the subsystem-name diagram + the node-tier table all appear
+   mid-document and have no value for the first-time-user persona the
+   README leads with. Proposed: wrap behind `<details>` titled
+   "Implementation details (for contributors)".
+
+2. **Header is overloaded on first load.** 12+ icons (hamburger, logo, 7
+   tabs, model dropdown, "+ Find model", share, auto-manage, private-mode
+   lock, settings gear, setup chip, language picker, theme toggle, node ID
+   + tier badge + credits, shutdown) appear on the first visit without any
+   explanation. Proposed: a first-run guided tour (single overlay walking
+   through the 4 most important elements) or `?` tooltips on each.
+
+3. **`activity.worker_*` events duplicate `activity.model_*` events.** Both
+   fire on every model load/unload. The "worker" copy uses internal
+   process-management language. Proposed: stop emitting `worker_spawned` /
+   `worker_unloaded` to the user activity feed; keep them as internal
+   trace events only, or merge into the `model_loaded` / `model_unloaded`
+   path. Requires a backend change (the `with_toast` flag on those events
+   in `daemon/state/activity.rs`).
+
+4. **`models.hf_score_breakdown` exposes a 4-component score
+   decomposition** (quality / fit / demand / size) on every HF browser
+   result row. Useful for tuning auto-manage but meaningless to lay users.
+   Proposed: replace with a single human verdict ("Good match for your
+   computer", "Works but uses lots of space", "Needs more memory than
+   available"); keep the raw decomposition as a developer tooltip.
+
+5. **GGUF metadata panel surfaces raw hyperparameters.** `models.meta_rope_dim`,
+   `models.meta_kv_heads`, `models.meta_rms_epsilon`, etc. are gated
+   behind the `ⓘ` button but the section label "GGUF Metadata" is itself
+   jargon. Proposed: rename to "Technical Details"; group human-readable
+   items (parameters, context length) above a collapsible "Advanced"
+   sub-section that hides RoPE / KV heads / tensor offsets.
+
+6. **`models.encrypted_pipeline` and `enc.unprotected_detail`** reference
+   "first AND last shard" — opaque to a lay user. Proposed: label as
+   "Private mode (end-to-end encryption)"; status as "Available — your
+   computer holds the key parts needed".
+
+7. **`dashboard.api_log_link` text stays English in 20 non-English
+   locales** ("View API request log →"). The arrow may render poorly in
+   RTL locales (ar). Proposed: decide whether to translate (per-locale
+   recordings exist for similar nav strings) or formally adopt a
+   carve-out and document it.
+
+8. **46 country names hardcoded English in `network-map.js:430`** —
+   `countryNames` map. Translating × 21 locales = ~966 entries. Common
+   carve-out for world-map UIs, but inconsistent with the otherwise
+   fully-translated UI. Same decision as #7.
+
+**Why deferred.** Each of these is bigger than a copy fix and needs a UX
+decision (and #3/#4/#5 need backend or schema changes). The R125 copy
+pass got the bulk of the value; these structural items can land
+piecewise once direction is set.
+
+---
+
 ### True global holder count for prune redundancy_ratio (R121 follow-up)
 **Context.** `ModelRegistry::shard_holders` caps stored holders per shard at `MAX_HOLDERS_PER_SHARD = 50`. The R121 scale-back prune sees up to 50 holders even when the swarm has 1000+. Prune still fires correctly — the `holder_count > effective_target` gate triggers as long as 50 > target, which is always true for realistic targets — but the displayed `redundancy_ratio = holder_count / effective_target` underestimates by the cap ratio, so the prune score is artificially low for severely over-replicated shards.
 
