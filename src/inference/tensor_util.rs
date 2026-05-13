@@ -8,8 +8,8 @@ use crate::inference::quant;
 /// dtype_tag values used by `tensor_to_bytes` / `bytes_to_tensor`.
 /// 0 = raw little-endian f32 (legacy default)
 /// 1 = Q8_0 group-32 symmetric quantized (see `inference::quant`)
-pub const DTYPE_TAG_F32: u32 = 0;
-pub const DTYPE_TAG_Q8_0: u32 = 1;
+const DTYPE_TAG_F32: u32 = 0;
+const DTYPE_TAG_Q8_0: u32 = 1;
 
 pub fn tensor_to_bytes(tensor: &Tensor) -> Result<Vec<u8>, SwarmError> {
     let tensor = tensor.to_dtype(DType::F32).map_err(SwarmError::internal)?;

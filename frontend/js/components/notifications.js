@@ -508,6 +508,21 @@
   }
 
   // --- Provider Health Badges ---
+  // Latency-tier class helpers. Three call sites previously inlined the
+  // same 500ms / 2000ms thresholds. Two distinct class systems are in use:
+  //   - `dot-ok / dot-slow / dot-down` for the integrated health bar
+  //   - `health-fast / health-ok / health-slow` for card + dropdown badges
+  // The non-up status mapping diverges across sites and stays inline.
+  function _dotLatencyTier(ms) {
+    if (ms < 500) return 'dot-ok';
+    if (ms < 2000) return 'dot-slow';
+    return 'dot-down';
+  }
+  function _healthLatencyTier(ms) {
+    if (ms < 500) return 'health-fast';
+    if (ms < 2000) return 'health-ok';
+    return 'health-slow';
+  }
   App.providerHealth = {
     // Render the integrated provider health bar
     updateHealthBar: function() {
@@ -532,7 +547,7 @@
         var dotClass = 'dot-down';
         var latencyText = '';
         if (h.status === 'up') {
-          dotClass = h.latency_ms < 500 ? 'dot-ok' : h.latency_ms < 2000 ? 'dot-slow' : 'dot-down';
+          dotClass = _dotLatencyTier(h.latency_ms);
           latencyText = h.latency_ms + 'ms';
         } else if (h.status === 'rate_limited') { dotClass = 'dot-slow'; latencyText = I18n.t('provider.limited'); }
         else if (h.status === 'timeout') { dotClass = 'dot-down'; latencyText = I18n.t('provider.timeout'); }
@@ -558,7 +573,7 @@
         var statusIcon, statusClass;
         if (h.status === 'up') {
           statusIcon = h.latency_ms + 'ms';
-          statusClass = h.latency_ms < 500 ? 'health-fast' : h.latency_ms < 2000 ? 'health-ok' : 'health-slow';
+          statusClass = _healthLatencyTier(h.latency_ms);
         } else if (h.status === 'rate_limited') { statusIcon = I18n.t('provider.rate_limited'); statusClass = 'health-warn'; }
         else if (h.status === 'timeout') { statusIcon = I18n.t('provider.timeout'); statusClass = 'health-down'; }
         else if (h.status === 'auth_error') { statusIcon = I18n.t('provider.auth_error'); statusClass = 'health-down'; }
@@ -598,7 +613,7 @@
           ghead.appendChild(existingBadge);
         }
         if (h.status === 'up') {
-          existingBadge.className = 'provider-health-badge ' + (h.latency_ms < 500 ? 'health-fast' : h.latency_ms < 2000 ? 'health-ok' : 'health-slow');
+          existingBadge.className = 'provider-health-badge ' + _healthLatencyTier(h.latency_ms);
           existingBadge.textContent = h.latency_ms + 'ms';
         } else {
           existingBadge.className = 'provider-health-badge health-down';

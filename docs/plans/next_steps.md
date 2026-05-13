@@ -78,9 +78,9 @@ measurable wins.
   in CHANGELOG `[Unreleased] — post-v0.1.0`. Two black-hat audits
   (2026-04-28 + 2026-04-29) plus the autonomous R76→R91 sweep arc
   (2026-04-30 → 2026-05-01, 16 rounds) have landed since, plus the
-  R92→R120 arc through 2026-05-12; current head sits at 909 lib + 75
-  integration tests, clippy clean, both default and `--features llama`
-  feature sets compile.
+  R92→R120 arc through 2026-05-12 plus R121 contribution-mode landing;
+  current head sits at 913 lib + 75 integration tests, clippy clean,
+  both default and `--features llama` feature sets compile.
 - ✅ macOS CI matrix is live (clippy + test + build on `macos-15` in
   `.github/workflows/ci.yml` — clippy default features only, integration
   tests Linux-only by design until macOS multi-process IPC is exercised).

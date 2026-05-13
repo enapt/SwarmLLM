@@ -701,7 +701,7 @@ impl ModelProcessPool {
             ))
         })?;
         if handle.dead.load(Ordering::Acquire) {
-            return Err(SwarmError::Internal("worker dead".into()));
+            return Err(SwarmError::ServiceUnavailable("worker dead".into()));
         }
         let mut writer = handle.writer.lock().await;
         let present = payload.is_some();
@@ -1064,7 +1064,7 @@ impl ModelProcessPool {
                 unsafe {
                     libc::umask(prev_umask);
                 }
-                SwarmError::Internal(format!("socket bind: {e}"))
+                SwarmError::ServiceUnavailable(format!("socket bind: {e}"))
             })?;
 
         #[cfg(unix)]
@@ -1084,7 +1084,7 @@ impl ModelProcessPool {
 
         // Spawn the worker subprocess (same binary, model-worker subcommand)
         let exe = std::env::current_exe()
-            .map_err(|e| SwarmError::Internal(format!("current_exe: {e}")))?;
+            .map_err(|e| SwarmError::ServiceUnavailable(format!("current_exe: {e}")))?;
         let socket_str = socket_name.as_str();
         let data_dir_str = self
             .data_dir
@@ -1207,7 +1207,7 @@ impl ModelProcessPool {
             .args(&args)
             .kill_on_drop(true)
             .spawn()
-            .map_err(|e| SwarmError::Internal(format!("spawn worker: {e}")))?;
+            .map_err(|e| SwarmError::ServiceUnavailable(format!("spawn worker: {e}")))?;
 
         // Wait for worker to connect
         let conn = tokio::time::timeout(
@@ -1215,19 +1215,19 @@ impl ModelProcessPool {
             listener.accept(),
         )
         .await
-        .map_err(|_| SwarmError::Internal("worker connect timeout".into()))?
-        .map_err(|e| SwarmError::Internal(format!("accept: {e}")))?;
+        .map_err(|_| SwarmError::ServiceUnavailable("worker connect timeout".into()))?
+        .map_err(|e| SwarmError::ServiceUnavailable(format!("accept: {e}")))?;
 
         let (mut read_half, write_half) = conn.split();
 
         // Read Ready message
         let (ready_msg, _) = recv_worker(&mut read_half)
             .await
-            .map_err(|e| SwarmError::Internal(format!("read ready: {e}")))?;
+            .map_err(|e| SwarmError::ServiceUnavailable(format!("read ready: {e}")))?;
         match ready_msg {
             WorkerMsg::Ready => {}
             other => {
-                return Err(SwarmError::Internal(format!(
+                return Err(SwarmError::ServiceUnavailable(format!(
                     "expected Ready, got {other:?}"
                 )))
             }
@@ -1381,7 +1381,7 @@ impl ModelProcessPool {
 
         if handle.dead.load(Ordering::Acquire) {
             self.workers.remove(&model_id);
-            return Err(SwarmError::Internal("worker is dead".into()));
+            return Err(SwarmError::ServiceUnavailable("worker is dead".into()));
         }
 
         // Register a response channel BEFORE sending so the reader actor can
@@ -1410,7 +1410,7 @@ impl ModelProcessPool {
                 drop(writer);
                 self.workers.remove(&model_id);
                 tracing::warn!(model = %model_id, error = %e, "Worker send failed — evicting dead worker");
-                return Err(SwarmError::Internal(format!("send Forward: {e}")));
+                return Err(SwarmError::ServiceUnavailable(format!("send Forward: {e}")));
             }
         }
 
@@ -1477,7 +1477,7 @@ impl ModelProcessPool {
         let handle = self.get_or_spawn(&model_id).await?;
         if handle.dead.load(Ordering::Acquire) {
             self.workers.remove(&model_id);
-            return Err(SwarmError::Internal("worker is dead".into()));
+            return Err(SwarmError::ServiceUnavailable("worker is dead".into()));
         }
 
         // Register one response channel per request_id BEFORE sending.
@@ -1560,7 +1560,9 @@ impl ModelProcessPool {
                 drop(writer);
                 self.workers.remove(&model_id);
                 tracing::warn!(model = %model_id, error = %e, "Worker send failed — evicting dead worker");
-                return Err(SwarmError::Internal(format!("send BatchForward: {e}")));
+                return Err(SwarmError::ServiceUnavailable(format!(
+                    "send BatchForward: {e}"
+                )));
             }
         }
 
@@ -1635,7 +1637,7 @@ impl ModelProcessPool {
 
         if handle.dead.load(Ordering::Acquire) {
             self.workers.remove(model_id);
-            return Err(SwarmError::Internal("worker is dead".into()));
+            return Err(SwarmError::ServiceUnavailable("worker is dead".into()));
         }
 
         let (resp_tx, mut resp_rx) = mpsc::channel(RESPONSE_CHANNEL_CAPACITY);
@@ -1651,7 +1653,9 @@ impl ModelProcessPool {
                 drop(writer);
                 self.workers.remove(model_id);
                 tracing::warn!(model = %model_id, error = %e, "Worker send failed — evicting dead worker");
-                return Err(SwarmError::Internal(format!("send Generate: {e}")));
+                return Err(SwarmError::ServiceUnavailable(format!(
+                    "send Generate: {e}"
+                )));
             }
         }
 

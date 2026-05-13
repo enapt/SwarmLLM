@@ -163,7 +163,7 @@ pub async fn create_session_handler(
         let dir = std::env::temp_dir().join(format!("swarmllm-chat-{}", &session_id));
         if !dir.exists() {
             std::fs::create_dir_all(&dir).map_err(|e| {
-                ApiError(crate::error::SwarmError::Internal(format!(
+                ApiError(crate::error::SwarmError::ServiceUnavailable(format!(
                     "Failed to create temp directory: {e}"
                 )))
             })?;

@@ -417,7 +417,7 @@ impl UpdateChecker {
     ) -> Result<(), SwarmError> {
         tracing::debug!(path = %tmp_path.display(), "DIAG: apply_update starting");
         if !tmp_path.exists() {
-            return Err(SwarmError::Internal(
+            return Err(SwarmError::ServiceUnavailable(
                 "Update file not found — download first".to_string(),
             ));
         }
@@ -443,7 +443,7 @@ impl UpdateChecker {
         if let Some(expected) = expected_checksum_sha256 {
             use sha2::{Digest, Sha256};
             let bytes = std::fs::read(tmp_path)
-                .map_err(|e| SwarmError::Internal(format!("read staged file: {e}")))?;
+                .map_err(|e| SwarmError::ServiceUnavailable(format!("read staged file: {e}")))?;
             let actual = hex::encode(Sha256::digest(&bytes));
             // Sidecar files often have the form "<hash>  <filename>"; take
             // only the first whitespace-delimited token.
@@ -472,7 +472,7 @@ impl UpdateChecker {
             // Step 1: Rename current binary to .old (backup)
             if self.binary_path.exists() {
                 std::fs::rename(&self.binary_path, &backup_path).map_err(|e| {
-                    SwarmError::Internal(format!("Failed to backup current binary: {e}"))
+                    SwarmError::ServiceUnavailable(format!("Failed to backup current binary: {e}"))
                 })?;
             }
 
@@ -480,7 +480,7 @@ impl UpdateChecker {
             if let Err(e) = std::fs::rename(tmp_path, &self.binary_path) {
                 // Rollback: restore backup
                 let _ = std::fs::rename(&backup_path, &self.binary_path);
-                return Err(SwarmError::Internal(format!(
+                return Err(SwarmError::ServiceUnavailable(format!(
                     "Failed to install update (rolled back): {e}"
                 )));
             }

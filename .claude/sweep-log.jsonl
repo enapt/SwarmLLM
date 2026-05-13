@@ -1129,3 +1129,33 @@
 {"file":"CLAUDE.md","line":143,"kind":"doc_out_of_sync","summary":"i18n count 1124→1122 (1126→1124 entries) after dead-key removal","status":"fixed","date":"2026-05-12"}
 {"file":"docs/ARCHITECTURE.md","line":1386,"kind":"doc_out_of_sync","summary":"i18n count 1124→1122 (1126→1124 entries) after dead-key removal","status":"fixed","date":"2026-05-12"}
 {"file":"frontend/i18n/en.json","line":448,"kind":"false_positive_orphaned_i18n","summary":"Agent claimed enc.pipeline_disabled / enc.pipeline_enabled / chat.enc_distributed_hint / chat.enc_e2e_latency / chat.enc_enable_hint / chat.enc_pipeline_tooltip were orphaned, but verification found callers in init.js:498, utils.js:318/322/323, chat.js:234. Agent's grep was incomplete (skipped core/utils.js).","status":"wontfix","date":"2026-05-12"}
+{"file":"src/inference/process_pool.rs","line":704,"kind":"error_variant","summary":"worker dead Internal → ServiceUnavailable","status":"fixed","date":"2026-05-13"}
+{"file":"src/inference/process_pool.rs","line":1067,"kind":"error_variant","summary":"socket bind Internal → ServiceUnavailable","status":"fixed","date":"2026-05-13"}
+{"file":"src/inference/process_pool.rs","line":1087,"kind":"error_variant","summary":"current_exe Internal → ServiceUnavailable","status":"fixed","date":"2026-05-13"}
+{"file":"src/inference/process_pool.rs","line":1210,"kind":"error_variant","summary":"spawn worker Internal → ServiceUnavailable","status":"fixed","date":"2026-05-13"}
+{"file":"src/inference/process_pool.rs","line":1218,"kind":"error_variant","summary":"worker connect timeout Internal → ServiceUnavailable","status":"fixed","date":"2026-05-13"}
+{"file":"src/inference/process_pool.rs","line":1219,"kind":"error_variant","summary":"accept Internal → ServiceUnavailable","status":"fixed","date":"2026-05-13"}
+{"file":"src/inference/process_pool.rs","line":1226,"kind":"error_variant","summary":"read ready Internal → ServiceUnavailable","status":"fixed","date":"2026-05-13"}
+{"file":"src/inference/process_pool.rs","line":1230,"kind":"error_variant","summary":"expected Ready Internal → ServiceUnavailable","status":"fixed","date":"2026-05-13"}
+{"file":"src/inference/process_pool.rs","line":1384,"kind":"error_variant","summary":"worker is dead forward_direct Internal → ServiceUnavailable","status":"fixed","date":"2026-05-13"}
+{"file":"src/inference/process_pool.rs","line":1413,"kind":"error_variant","summary":"send Forward Internal → ServiceUnavailable","status":"fixed","date":"2026-05-13"}
+{"file":"src/inference/process_pool.rs","line":1480,"kind":"error_variant","summary":"worker is dead forward_batch Internal → ServiceUnavailable","status":"fixed","date":"2026-05-13"}
+{"file":"src/inference/process_pool.rs","line":1563,"kind":"error_variant","summary":"send BatchForward Internal → ServiceUnavailable","status":"fixed","date":"2026-05-13"}
+{"file":"src/inference/process_pool.rs","line":1638,"kind":"error_variant","summary":"worker is dead generate Internal → ServiceUnavailable","status":"fixed","date":"2026-05-13"}
+{"file":"src/inference/process_pool.rs","line":1654,"kind":"error_variant","summary":"send Generate Internal → ServiceUnavailable","status":"fixed","date":"2026-05-13"}
+{"file":"src/update.rs","line":420,"kind":"error_variant","summary":"Update file not found Internal → ServiceUnavailable","status":"fixed","date":"2026-05-13"}
+{"file":"src/update.rs","line":446,"kind":"error_variant","summary":"read staged file Internal → ServiceUnavailable","status":"fixed","date":"2026-05-13"}
+{"file":"src/update.rs","line":475,"kind":"error_variant","summary":"backup current binary Internal → ServiceUnavailable","status":"fixed","date":"2026-05-13"}
+{"file":"src/update.rs","line":483,"kind":"error_variant","summary":"install update rolled back Internal → ServiceUnavailable","status":"fixed","date":"2026-05-13"}
+{"file":"src/api/admin_providers.rs","line":1029,"kind":"error_variant","summary":"current_exe Internal → ServiceUnavailable","status":"fixed","date":"2026-05-13"}
+{"file":"src/api/claude_session/handlers.rs","line":166,"kind":"error_variant","summary":"create_dir_all temp Internal → ServiceUnavailable","status":"fixed","date":"2026-05-13"}
+{"file":"src/inference/tensor_util.rs","line":11,"kind":"dead_pub","summary":"DTYPE_TAG_F32/Q8_0 pub→private (in-file only)","status":"fixed","date":"2026-05-13"}
+{"file":"frontend/js/components/notifications.js","line":535,"kind":"duplication","summary":"latency-tier classes extracted to _dotLatencyTier/_healthLatencyTier","status":"fixed","date":"2026-05-13"}
+{"file":"src/api/admin_models/lifecycle.rs","line":28,"kind":"duplication","summary":"active_pipelines check duplicated with shards.rs:165 — not extracted (architectural intent: both call sites must hold guard locally per .claude/rules/architecture.md)","status":"wontfix","date":"2026-05-13"}
+{"file":"frontend/js/components/settings.js","line":198,"kind":"refactor","summary":"4 PUT /api/admin/providers sites without dedup invalidation — surfaced for discussion, not auto-fixed","status":"deferred","date":"2026-05-13"}
+{"file":"frontend/js/components/network-map.js","line":430,"kind":"i18n","summary":"46 country names hardcoded English; not translated across 21 locales — deferred (carve-out: country names on world maps commonly stay in English)","status":"deferred","date":"2026-05-13"}
+{"file":"CLAUDE.md","line":153,"kind":"doc_drift","summary":"test count 909→913 (post-R121)","status":"fixed","date":"2026-05-13"}
+{"file":"README.md","line":13,"kind":"doc_drift","summary":"test count 909→913 (post-R121)","status":"fixed","date":"2026-05-13"}
+{"file":"docs/ARCHITECTURE.md","line":1403,"kind":"doc_drift","summary":"i18n key count 1122/1124→1130/1132 (post-R121)","status":"fixed","date":"2026-05-13"}
+{"file":"docs/book/src/troubleshooting.md","line":162,"kind":"doc_drift","summary":"test count 909→913","status":"fixed","date":"2026-05-13"}
+{"file":"docs/plans/next_steps.md","line":81,"kind":"doc_drift","summary":"test count 909→913","status":"fixed","date":"2026-05-13"}
