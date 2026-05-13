@@ -108,7 +108,7 @@ SwarmLLM distributes transformer model layers across a pool of peer-to-peer node
 
 Running a 70B-class model on your own normally requires a $10K+ GPU. With SwarmLLM your computer holds a few layers, your friend's holds others, and together you run something neither of you could run alone — no cloud subscription, no API fees.
 
-**Who it's for.** Developers who want local/private AI, teams who want to pool GPUs, researchers who need full-control model access, and anyone who wants to contribute spare compute to a public network.
+**Who it's for.** Anyone who wants to chat with AI without paying subscription fees or sharing data with a cloud service. Also: developers who want local/private AI, teams who want to pool GPUs, researchers who need full-control model access, and anyone who wants to contribute spare compute to a public network.
 
 **Key properties.** End-to-end encrypted by default (X25519 + ChaCha20-Poly1305 with forward secrecy); no central server; zero-config peer discovery (mDNS, peer cache, invite codes, PEX, Kademlia DHT); single Rust binary (~33–50 MB); BitTorrent-inspired credit incentives; OpenAI + Anthropic + MCP compatible; shard-only — a node never needs the full model file. See [Capabilities](#capabilities) for the full list.
 

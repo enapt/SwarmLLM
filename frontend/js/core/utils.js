@@ -437,11 +437,18 @@
 
   // --- Extract error message string from a failed response ---
   // Parses the JSON body and returns the error message string, or fallback.
-  // Extract error message from a parsed API response body.
+  // Appends the `hint` field if the backend supplied one — these hints
+  // are the only recovery direction non-technical users get when an
+  // error surfaces (see src/error.rs::error_hint).
   // Usage: var msg = App.utils.extractErrorMessage(data, 'Fallback');
   function extractErrorMessage(data, fallback) {
     if (data && data.error) {
-      return data.error.message || data.error || fallback;
+      var msg = data.error.message || data.error || fallback;
+      var hint = data.error.hint;
+      if (typeof hint === 'string' && hint.length > 0 && typeof msg === 'string') {
+        return msg + ' — ' + hint;
+      }
+      return msg;
     }
     return fallback;
   }

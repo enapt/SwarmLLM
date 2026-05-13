@@ -523,6 +523,18 @@
     if (ms < 2000) return 'health-ok';
     return 'health-slow';
   }
+  // Map a raw backend health status string to a human-readable label
+  // for tooltip text. Falls back to the raw status if no translation
+  // exists (defensive — new backend states won't render as "undefined").
+  function _statusLabel(status) {
+    if (status === 'up') return I18n.t('provider.up') || 'OK';
+    if (status === 'rate_limited') return I18n.t('provider.rate_limited');
+    if (status === 'timeout') return I18n.t('provider.timeout');
+    if (status === 'auth_error') return I18n.t('provider.auth_error');
+    if (status === 'overloaded') return I18n.t('provider.overloaded');
+    if (status === 'down') return I18n.t('provider.down');
+    return status;
+  }
   App.providerHealth = {
     // Render the integrated provider health bar
     updateHealthBar: function() {
@@ -562,7 +574,7 @@
           (typeof isSubscriptionProvider === 'function' && isSubscriptionProvider(p)
             ? '<span class="ph-tag tag-sub">' + I18n.t('dashboard.chip_subscription') + '</span>'
             : '<span class="ph-tag tag-api">' + I18n.t('mode.api') + '</span>');
-        item.title = name + ': ' + h.status + (h.detail ? ' \u2014 ' + h.detail : '');
+        item.title = name + ': ' + _statusLabel(h.status) + (h.detail ? ' \u2014 ' + h.detail : '');
         bar.appendChild(item);
       });
     },
@@ -581,7 +593,7 @@
         else { statusIcon = I18n.t('provider.error'); statusClass = 'health-down'; }
         badge.className = 'provider-health-badge ' + statusClass;
         badge.textContent = statusIcon;
-        badge.title = h.status + (h.detail ? ': ' + h.detail : '') + ' (' + h.latency_ms + 'ms)';
+        badge.title = _statusLabel(h.status) + (h.detail ? ': ' + h.detail : '') + ' (' + h.latency_ms + 'ms)';
       }
       Object.keys(S.providerHealth).forEach(function(p) {
         var h = S.providerHealth[p];
