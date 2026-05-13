@@ -188,7 +188,7 @@ When spawning subagents in this repo, use these model picks (overrides defaults 
 
 ## Status
 
-All 20 build phases complete. All subsystems wired — no stubs. 913 lib tests + 75 integration tests passing; 8 lib + 1 e2e ignored (env-var or manual). Deferred items in `docs/ARCHITECTURE.md` § "Deferred Items".
+All 20 build phases complete. All subsystems wired — no stubs. 913 lib tests + 75 integration tests passing; 8 lib + 1 e2e ignored (env-var or manual). Latest: R121 (auto-manage scale-back at swarm saturation) + sweep arc R122-R124 (28 findings auto-fixed across error variants, dead pub, duplication extraction, input validation, doc drift). Deferred items in `docs/ARCHITECTURE.md` § "Deferred Items".
 
 ## Common Commands
 

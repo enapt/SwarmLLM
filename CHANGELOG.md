@@ -7,6 +7,77 @@ All notable changes to SwarmLLM are documented here.
 Working changelog for commits after the v0.1.0 tag. Will roll into the
 next tagged release.
 
+### Sweep arc R122 → R124 (2026-05-12 → 2026-05-13)
+
+Three rounds of standard-rotation sweeps after R121 closed. R122 and
+R123 found 28 fixable findings; R124 stalled (worktree agents hit the
+10-min watchdog) and was closed without findings — diminishing returns
+on top of the R101-R109 security arc and the R110+ structural work.
+
+**R122 (commit b530c42b) — 22 findings auto-fixed**
+
+- 20 SwarmError variant fixes across `src/inference/process_pool.rs`
+  (14 sites — model-worker subprocess lifecycle: spawn, IPC connect,
+  socket bind, send Forward/BatchForward/Generate, worker-dead),
+  `src/update.rs` (4 sites — apply-update file operations),
+  `src/api/admin_providers.rs:1029` (current_exe), and
+  `src/api/claude_session/handlers.rs:166` (create_dir_all temp).
+  All previously surfaced HTTP 500 ("internal error") for subprocess /
+  OS-level failures that should be 503 ("service unavailable"). Same
+  pattern R118-R120 fixed for `claude_sub.rs` and
+  `claude_session/manager.rs`. The `get_or_spawn` slow path already
+  used `ServiceUnavailable`, making the inconsistency visible.
+- `src/inference/tensor_util.rs:11-12` — `DTYPE_TAG_F32` /
+  `DTYPE_TAG_Q8_0` had `pub` visibility but only in-file callers.
+  Tightened to module-private `const`.
+- `frontend/js/components/notifications.js` — three call sites
+  inlined `500ms / 2000ms` latency-tier thresholds with two distinct
+  class systems (`dot-*` vs `health-fast/ok/slow`). Extracted to
+  `_dotLatencyTier()` and `_healthLatencyTier()` helpers.
+- Doc drift: test count 909→913, i18n key count 1122→1130 (post-R121).
+
+**R123 (commit d2a876bf) — 6 findings auto-fixed; 3 false-positive
+i18n orphans caught**
+
+- `src/api/admin.rs:362` — `update_config` silently mapped any
+  unknown contribution-mode string to `Moderate` via `_ => `. Now
+  returns 400 Validation per the contract.
+- `src/api/admin.rs:471` — config-save `std::fs::write` OS failure
+  promoted from `Internal` to `ServiceUnavailable`.
+- `src/api/anthropic/handlers.rs` — two near-identical
+  `MessagesResponse` builders extracted to
+  `fn build_messages_response(request_id, model, output) ->
+  MessagesResponse`. Third call site (legacy executor in
+  `mod.rs:245`) uses a different result type and stays inline.
+- `frontend/js/core/utils.js:411` — duplicate active-state predicate
+  now defers to `App.downloads.isActiveDlState`.
+- `docs/ARCHITECTURE.md` — `ModelMgmt` sub-struct diagram missing
+  `contribution_auto` (R121); `dashboard-shards.js` listed twice in
+  JS component list. Both fixed.
+- **Verification gating caught 3 false positives**: Agent 4 flagged
+  `settings.section_contribution`, `section_identity`, and
+  `section_preferences` as orphaned i18n keys; the required cross-grep
+  (`frontend/js/`, `index.html`, `css/`) found `data-i18n` callers
+  in `index.html:302/245/270` for all three. Logged as wontfix so
+  next sweep doesn't re-claim them.
+
+**R124 (commit 66426fb4) — inconclusive**
+
+Three specialised agents (concurrency + hot-path, security + authz,
+Rust idioms + perf) all stalled at the 600s worktree watchdog. Closed
+without findings; the deeper categories the round targeted (security,
+concurrency) were already drilled hard in R101-R109 (44 fixes), so the
+miss is not load-bearing. Re-run if a specific concern surfaces.
+
+**Stats**
+
+- 28 findings auto-fixed across R122-R123 (22 + 6)
+- 3 false-positive i18n orphans caught by R120 verification rule
+- 5 deferred (separator divergence, country-names i18n, etc.) —
+  logged in `.claude/sweep-log.jsonl`
+- sweep-log.jsonl grew 1131 → 1173 (+42 entries)
+- 913 lib tests pass; clippy clean default + dev features
+
 ### R121 — Auto-manage scale-back at swarm saturation (2026-05-12)
 
 Auto-manage learned to scale a node's contribution DOWN, not just up.
