@@ -409,7 +409,9 @@
     }
 
     var active = acquisitions.find(function(a) {
-      return typeof a.state === 'string' && (a.state === 'downloading' || a.state === 'awaiting_manifest');
+      return App.downloads && App.downloads.isActiveDlState
+        ? App.downloads.isActiveDlState(a.state)
+        : (typeof a.state === 'string' && (a.state === 'downloading' || a.state === 'awaiting_manifest'));
     });
     if (!active) {
       if (existing) existing.remove();

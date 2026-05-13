@@ -51,6 +51,10 @@
   }
 
   App.downloads = {
+    // Public predicate so other components (e.g. core/utils.js
+    // updateChatDownloadProgress) share the single source of truth
+    // for "is this acquisition currently progressing".
+    isActiveDlState: _isActiveDlState,
     load: async function() {
       try {
         var resp = await App.authFetch('/api/admin/downloads');

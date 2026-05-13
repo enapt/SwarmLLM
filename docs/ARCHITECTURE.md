@@ -43,6 +43,7 @@ Single Rust binary, three simultaneous functions:
 │  │  │  auto_manage_*, model_trust, locked_shards     │ │  │
 │  │  │  prune_history, download_cancel_flags          │ │  │
 │  │  │  wishlist (R111), hf_trending_cache (R112)     │ │  │
+│  │  │  contribution_auto (R121)                      │ │  │
 │  │  └────────────────────────────────────────────────┘ │  │
 │  │  ┌─ MetricsProviders (state.metrics) ────────────┐ │  │
 │  │  │  node_stats, inference_requests_total          │ │  │
@@ -1394,7 +1395,6 @@ Routes Claude model requests through a locally-authenticated `claude` CLI subpro
   - `frontend/js/components/responses.js` — `/v1/responses` dashboard panel: retrieve-by-id, status-filtered list, cancel/delete/view per row, 5-second polling refresh while visible
   - `frontend/js/components/pool.js` — device pool management (create, join, members, contribution)
   - `frontend/js/components/swarm-tab.js` — Swarm tab: wishlist + Capacity Plan view (R111)
-  - `frontend/js/components/dashboard-shards.js` — pure shard HTML builders (`App.dashboardShards`)
   - `frontend/js/init.js` — event binding, initialization, public API export (`window.SwarmLLM`)
 - **HTML templates**: 11 `<template id="tmpl-*">` elements for repeating UI structures (session items, chat messages, toasts, compare cards, compare model chips, leaderboard rows, download queue items, peer rows, prune rows, storage model rows, pool member rows). Components clone templates via `template.content.cloneNode(true)` instead of innerHTML string building.
 - Cross-component calls: `App.componentName.method()`. Shared state: `App.state.*`. Utilities: `App.utils.*`.

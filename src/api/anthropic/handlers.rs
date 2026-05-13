@@ -17,6 +17,31 @@ use super::types::{
     AnthropicContent, AnthropicUsage, ContentBlock, MessagesRequest, MessagesResponse,
     ResponseContentBlock,
 };
+use crate::inference::router::InferenceOutput;
+
+/// Build the final Anthropic `MessagesResponse` from a router-produced
+/// `InferenceOutput`. Centralises the `map_finish_reason_with_match` +
+/// `MessagesResponse::text_with_stop` sequence shared by both the
+/// distributed-router and split-model non-streaming paths.
+fn build_messages_response(
+    request_id: String,
+    model: String,
+    output: InferenceOutput,
+) -> MessagesResponse {
+    let stop_reason = super::convert::map_finish_reason_with_match(
+        &output.finish_reason,
+        output.matched_stop_sequence.as_deref(),
+    );
+    MessagesResponse::text_with_stop(
+        request_id,
+        model,
+        output.content,
+        stop_reason,
+        output.matched_stop_sequence,
+        output.prompt_tokens,
+        output.completion_tokens,
+    )
+}
 
 /// Tool `type` strings on the Anthropic side that designate hosted server
 /// tools (executed by Anthropic, not by the caller). These have no OpenAI
@@ -56,21 +81,7 @@ pub(super) async fn anthropic_non_stream(
         InferenceRequest::local(ModelId(model.clone()), messages, params, false, None, None);
 
     let output = crate::api::submit_to_router(&router_tx, inference_req).await?;
-
-    let stop_reason = super::convert::map_finish_reason_with_match(
-        &output.finish_reason,
-        output.matched_stop_sequence.as_deref(),
-    );
-    let response = MessagesResponse::text_with_stop(
-        request_id,
-        model,
-        output.content,
-        stop_reason,
-        output.matched_stop_sequence,
-        output.prompt_tokens,
-        output.completion_tokens,
-    );
-
+    let response = build_messages_response(request_id, model, output);
     Ok(Json(response).into_response())
 }
 
@@ -226,20 +237,7 @@ pub(super) async fn anthropic_split_non_stream(
     )
     .await?;
 
-    let stop_reason = super::convert::map_finish_reason_with_match(
-        &output.finish_reason,
-        output.matched_stop_sequence.as_deref(),
-    );
-    let response = MessagesResponse::text_with_stop(
-        request_id,
-        model,
-        output.content,
-        stop_reason,
-        output.matched_stop_sequence,
-        output.prompt_tokens,
-        output.completion_tokens,
-    );
-
+    let response = build_messages_response(request_id, model, output);
     Ok(Json(response).into_response())
 }
 

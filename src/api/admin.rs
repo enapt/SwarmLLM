@@ -362,8 +362,13 @@ pub async fn update_config(
     if let Some(contribution) = &body.contribution {
         config.node.contribution = match contribution.as_str() {
             "minimal" => ContributionMode::Minimal,
+            "moderate" => ContributionMode::Moderate,
             "maximum" => ContributionMode::Maximum,
-            _ => ContributionMode::Moderate,
+            other => {
+                return Err(ApiError(crate::error::SwarmError::Validation(format!(
+                    "Unknown contribution mode '{other}' (expected: minimal, moderate, maximum)"
+                ))));
+            }
         };
     }
     if let Some(auto) = body.contribution_auto {
@@ -462,13 +467,12 @@ pub async fn update_config(
         ))
     })?
     .map_err(|e| {
-        // SwarmError::Io has no IntoResponse arm of its own and falls through
-        // to the catch-all 500 with a generic "internal error occurred"
-        // message — the operator never sees which path failed or why
-        // (permission denied, disk full, ENOTDIR, etc). Wrap in Internal
-        // with the path so the structured error log + response body carry
-        // the context needed to triage.
-        ApiError(crate::error::SwarmError::Internal(format!(
+        // OS/disk failure (permission denied, disk full, ENOTDIR, etc)
+        // — not a code bug. ServiceUnavailable (503) surfaces the right
+        // semantics to the client (transient, retryable) and the
+        // structured error log + response body carry the path so the
+        // operator can triage.
+        ApiError(crate::error::SwarmError::ServiceUnavailable(format!(
             "Failed to write config to {}: {e}",
             cp_for_err.display()
         )))

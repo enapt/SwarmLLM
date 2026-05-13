@@ -1159,3 +1159,14 @@
 {"file":"docs/ARCHITECTURE.md","line":1403,"kind":"doc_drift","summary":"i18n key count 1122/1124→1130/1132 (post-R121)","status":"fixed","date":"2026-05-13"}
 {"file":"docs/book/src/troubleshooting.md","line":162,"kind":"doc_drift","summary":"test count 909→913","status":"fixed","date":"2026-05-13"}
 {"file":"docs/plans/next_steps.md","line":81,"kind":"doc_drift","summary":"test count 909→913","status":"fixed","date":"2026-05-13"}
+{"file":"src/api/admin.rs","line":366,"kind":"input_validation","summary":"contribution mode silent fallthrough _ => Moderate replaced with Validation 400 on unknown value","status":"fixed","date":"2026-05-13"}
+{"file":"src/api/admin.rs","line":471,"kind":"error_variant","summary":"config save fs::write Internal → ServiceUnavailable","status":"fixed","date":"2026-05-13"}
+{"file":"src/api/anthropic/handlers.rs","line":60,"kind":"duplication","summary":"3-site MessagesResponse builder extracted to build_messages_response(); legacy executor path in mod.rs:245 left inline (different result type)","status":"fixed","date":"2026-05-13"}
+{"file":"frontend/js/core/utils.js","line":411,"kind":"duplication","summary":"active-dl-state predicate now reuses App.downloads.isActiveDlState single source","status":"fixed","date":"2026-05-13"}
+{"file":"docs/ARCHITECTURE.md","line":45,"kind":"doc_drift","summary":"contribution_auto (R121) added to ModelMgmt sub-struct diagram","status":"fixed","date":"2026-05-13"}
+{"file":"docs/ARCHITECTURE.md","line":1397,"kind":"doc_drift","summary":"duplicate frontend/js/components/dashboard-shards.js line removed","status":"fixed","date":"2026-05-13"}
+{"file":"frontend/i18n/en.json","line":892,"kind":"i18n_orphan_false_positive","summary":"settings.section_contribution flagged orphaned but used at index.html:302","status":"wontfix","date":"2026-05-13"}
+{"file":"frontend/i18n/en.json","line":893,"kind":"i18n_orphan_false_positive","summary":"settings.section_identity flagged orphaned but used at index.html:245","status":"wontfix","date":"2026-05-13"}
+{"file":"frontend/i18n/en.json","line":894,"kind":"i18n_orphan_false_positive","summary":"settings.section_preferences flagged orphaned but used at index.html:270","status":"wontfix","date":"2026-05-13"}
+{"file":"frontend/i18n/*.json","line":0,"kind":"i18n_translation","summary":"dashboard.api_log_link kept as English across all 21 locales — deferred (UX call: link conventions)","status":"deferred","date":"2026-05-13"}
+{"file":"frontend/js/components/dashboard.js","line":1692,"kind":"duplication","summary":"progress-text construction separator divergence (em-dash vs middle-dot) deferred — unclear if intentional","status":"deferred","date":"2026-05-13"}
