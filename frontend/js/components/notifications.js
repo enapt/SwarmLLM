@@ -87,8 +87,6 @@
     'shard_p2p_complete': '\u2705',       // ✅
     'model_loaded': '\uD83E\uDDE0',      // 🧠
     'model_load_skipped': '\u26A0\uFE0F', // ⚠️
-    'worker_spawned': '\uD83D\uDCE5',    // 📥
-    'worker_unloaded': '\uD83D\uDCE4',   // 📤
     'lan_peer_discovered': '\uD83C\uDF10', // 🌐
     'hf_download_failed': '\u274C',      // ❌
     'shard_write_failed': '\u274C',      // ❌

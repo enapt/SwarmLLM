@@ -81,6 +81,27 @@
       });
       sel.addEventListener('change', sync);
       sync();
+
+      // Wire the contribution-mode (Auto/Manual) segmented control.
+      var modeSeg = document.querySelector('.segmented[data-bound-select="setup-contribution-mode"]');
+      var modeSel = document.getElementById('setup-contribution-mode');
+      if (modeSeg && modeSel) {
+        var modeSync = function() {
+          var v = modeSel.value;
+          modeSeg.querySelectorAll('.segmented-btn').forEach(function(b) {
+            b.classList.toggle('active', b.getAttribute('data-value') === v);
+          });
+        };
+        modeSeg.querySelectorAll('.segmented-btn').forEach(function(btn) {
+          btn.addEventListener('click', function() {
+            modeSel.value = btn.getAttribute('data-value');
+            modeSel.dispatchEvent(new Event('change'));
+            modeSync();
+          });
+        });
+        modeSel.addEventListener('change', modeSync);
+        modeSync();
+      }
     },
 
     // Build the cloud-provider tile grid.
@@ -382,6 +403,8 @@
     submit: async function() {
       var contribSel = document.getElementById('setup-contribution');
       var level = (contribSel && contribSel.value) || 'moderate';
+      var modeSel = document.getElementById('setup-contribution-mode');
+      var contributionAuto = !modeSel || modeSel.value !== 'manual';
       var autoManage = document.getElementById('setup-auto-manage').checked;
       try {
         var resp = await App.authFetch('/api/admin/config', {
@@ -389,6 +412,7 @@
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             contribution: level,
+            contribution_auto: contributionAuto,
             auto_manage_shards: autoManage,
           }),
         });

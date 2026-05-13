@@ -226,6 +226,11 @@ A single Rust binary running three simultaneous functions on the same port (8800
 | HTTP server | OpenAI + Anthropic + MCP + admin endpoints | `localhost:8800/v1/*` |
 | Web dashboard | Setup wizard, chat, models, network map, settings | `localhost:8800/admin` |
 
+Full subsystem deep-dive in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+
+<details>
+<summary>Implementation details (for contributors)</summary>
+
 Internally the daemon runs 12 async Tokio tasks wired via mpsc channels, sharing `Arc<SharedState>` + DashMap:
 
 ```text
@@ -238,7 +243,7 @@ PoolManager        AutoShardManager   ShardRebalancer
 AcquisitionManager   UpdateChecker       HfWatcher
 ```
 
-Cargo workspace with 3 crates (`swarmllm`, `swarmllm-types`, `swarmllm-frontend`). Full subsystem deep-dive in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+Cargo workspace with 3 crates (`swarmllm`, `swarmllm-types`, `swarmllm-frontend`).
 
 ### Node tiers & credit priority
 
@@ -254,6 +259,8 @@ Credits determine request priority. Everyone is served — Bronze just waits lon
 - **Gold** (top 30%) — 1–3 second queue
 - **Silver** (positive balance) — 5–15 second queue
 - **Bronze** (zero/negative) — 30+ second queue, never locked out
+
+</details>
 
 ## Installation
 

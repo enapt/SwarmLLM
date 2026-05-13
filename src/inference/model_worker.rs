@@ -806,6 +806,7 @@ async fn run_fused_batch_forward(
                 sealed: false,
                 sealed_payload: None,
                 logprobs: None,
+                matched_stop_sequence: None,
                 has_activations: false,
                 has_spec_logits: false,
                 spec_logits_dims: None,
@@ -830,6 +831,7 @@ async fn run_fused_batch_forward(
                 sealed: false,
                 sealed_payload: None,
                 logprobs: None,
+                matched_stop_sequence: None,
                 has_activations: true,
                 has_spec_logits: false,
                 spec_logits_dims: None,
@@ -1188,6 +1190,8 @@ async fn handle_forward(
                     activations: vec![],
                     sealed_token_ids: None,
                     spec_logits,
+                    matched_stop_sequence: None,
+                    token_logprobs: Vec::new(),
                 });
             }
 
@@ -1235,17 +1239,44 @@ async fn handle_forward(
             };
 
             if is_last && tp_meta.is_none() {
-                let token_id = split::sample_token_with_params_history(
-                    &output,
-                    &fwd.sampling,
-                    &fwd.generated_ids,
-                )
-                .map_err(|e| format!("Sample: {e}"))?;
+                let (token_id, token_logprob) = if fwd.sampling.logprobs {
+                    crate::inference::tensor_util::sample_token_with_logprob_history(
+                        &output,
+                        &fwd.sampling,
+                        &fwd.generated_ids,
+                    )
+                    .map_err(|e| format!("Sample: {e}"))?
+                } else {
+                    let tid = split::sample_token_with_params_history(
+                        &output,
+                        &fwd.sampling,
+                        &fwd.generated_ids,
+                    )
+                    .map_err(|e| format!("Sample: {e}"))?;
+                    (tid, None)
+                };
                 let eos_tokens = model.eos_tokens();
                 let finish = if eos_tokens.contains(&token_id) {
                     Some(NetworkFinishReason::Stop)
                 } else {
                     None
+                };
+                // When the request asked for logprobs, package the per-token
+                // entry so the coordinator's `collected_logprobs` accumulates
+                // it and the final `InferenceOutput.token_logprobs` is
+                // populated for the distributed-pipeline path too.
+                let token_logprobs = match token_logprob {
+                    Some(lp) => vec![swarmllm_types::TokenLogProbEntry {
+                        // Per-token text decoding happens at the coordinator
+                        // (which holds the tokenizer); leave empty here and
+                        // let the API layer fill it if needed. OpenAI clients
+                        // expect the `token` string but distributed-pipeline
+                        // logprobs are an opt-in compatibility feature.
+                        token: String::new(),
+                        logprob: lp,
+                        top_logprobs: Vec::new(),
+                    }],
+                    None => Vec::new(),
                 };
                 Ok(crate::types::LayerResult {
                     request_id,
@@ -1254,6 +1285,8 @@ async fn handle_forward(
                     activations: vec![],
                     sealed_token_ids: None,
                     spec_logits: Vec::new(),
+                    matched_stop_sequence: None,
+                    token_logprobs,
                 })
             } else {
                 let activation_bytes = if activation_compression {
@@ -1268,6 +1301,8 @@ async fn handle_forward(
                     activations: activation_bytes,
                     sealed_token_ids: None,
                     spec_logits: Vec::new(),
+                    matched_stop_sequence: None,
+                    token_logprobs: Vec::new(),
                 })
             }
         });
@@ -1296,7 +1331,12 @@ async fn handle_forward(
         format: None,
         sealed: result.sealed_token_ids.is_some(),
         sealed_payload: result.sealed_token_ids,
-        logprobs: None,
+        logprobs: if result.token_logprobs.is_empty() {
+            None
+        } else {
+            Some(result.token_logprobs)
+        },
+        matched_stop_sequence: result.matched_stop_sequence,
         has_activations,
         has_spec_logits,
         spec_logits_dims,

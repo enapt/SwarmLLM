@@ -913,12 +913,6 @@ impl ModelProcessPool {
         let _ = self.activity_tx.set(tx);
     }
 
-    fn emit_activity(&self, event: crate::daemon::state::ActivityEvent) {
-        if let Some(tx) = self.activity_tx.get() {
-            let _ = tx.send(event);
-        }
-    }
-
     /// Get or spawn a worker for this model.
     async fn get_or_spawn(&self, model_id: &ModelId) -> Result<Arc<WorkerHandle>, SwarmError> {
         // Fast path: worker already exists
@@ -1244,14 +1238,14 @@ impl ModelProcessPool {
                 format!("shards {}", indices.join(", "))
             }
         });
-        let msg = match shard_info {
-            Some(shards) => format!("Spawning worker for {} ({})", model_id.0, shards),
-            None => format!("Spawning worker for {}", model_id.0),
+        match shard_info {
+            Some(shards) => tracing::info!(
+                model_id = %model_id,
+                shards = %shards,
+                "spawning worker"
+            ),
+            None => tracing::info!(model_id = %model_id, "spawning worker"),
         };
-        self.emit_activity(
-            crate::daemon::state::ActivityEvent::new("model", "worker_spawned", msg)
-                .with_model(model_id.0.clone()),
-        );
 
         // Success — defuse the cleanup guard on Unix; WorkerHandle now owns
         // the socket file and its Drop will unlink on process exit.
@@ -1431,6 +1425,8 @@ impl ModelProcessPool {
                             activations,
                             sealed_token_ids: if r.sealed { r.sealed_payload } else { None },
                             spec_logits,
+                            matched_stop_sequence: r.matched_stop_sequence,
+                            token_logprobs: r.logprobs.unwrap_or_default(),
                         });
                     }
                     WorkerMsg::Error {
@@ -1586,6 +1582,8 @@ impl ModelProcessPool {
                             activations,
                             sealed_token_ids: if r.sealed { r.sealed_payload } else { None },
                             spec_logits,
+                            matched_stop_sequence: r.matched_stop_sequence,
+                            token_logprobs: r.logprobs.unwrap_or_default(),
                         });
                         break;
                     }
@@ -1763,17 +1761,6 @@ impl ModelProcessPool {
             // Drop handle → aborts reader, kills child process → OS frees all CUDA memory
             drop(handle);
             tracing::info!(model_id = %model_id, "Model worker killed, GPU memory freed");
-            self.emit_activity(
-                crate::daemon::state::ActivityEvent::new(
-                    "model",
-                    "worker_unloaded",
-                    format!(
-                        "Unloaded {} from memory (worker killed, GPU memory freed)",
-                        model_id.0
-                    ),
-                )
-                .with_model(model_id.0.clone()),
-            );
         }
     }
 

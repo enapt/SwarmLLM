@@ -596,15 +596,19 @@
     if (m.vocab_size) summaryParts.push('<span class="meta-tag">' + I18n.t('models.meta_vocab', { count: m.vocab_size.toLocaleString() }) + '</span>');
     if (summaryParts.length > 0) html += '<div class="meta-summary">' + summaryParts.join('') + '</div>';
 
-    html += '<table class="meta-table"><thead><tr><th colspan="2">' + U.escapeHtml(I18n.t('models.meta_model_params')) + '</th></tr></thead><tbody>';
-    var modelFields = [
-      [I18n.t('models.meta_context_length'), m.context_length], [I18n.t('models.meta_layers_label'), m.block_count],
-      [I18n.t('models.meta_embedding_dim'), m.embedding_length], [I18n.t('models.meta_attention_heads'), m.head_count],
-      [I18n.t('models.meta_kv_heads'), m.head_count_kv], [I18n.t('models.meta_rope_dim'), m.rope_dimension_count],
-      [I18n.t('models.meta_rope_freq'), m.rope_freq_base], [I18n.t('models.meta_rms_epsilon'), m.layer_norm_rms_epsilon],
+    // Basic params: shown by default. Cover what a non-technical user would
+    // recognise — context, layer/embedding sizes, head count, vocab, tokenizer.
+    var basicFields = [
+      [I18n.t('models.meta_context_length'), m.context_length],
+      [I18n.t('models.meta_layers_label'), m.block_count],
+      [I18n.t('models.meta_embedding_dim'), m.embedding_length],
+      [I18n.t('models.meta_attention_heads'), m.head_count],
       [I18n.t('models.meta_vocab_size'), m.vocab_size],
     ];
-    modelFields.forEach(function(f) {
+    var t = data.tokenizer || {};
+    if (t.model != null) basicFields.push([I18n.t('models.meta_tokenizer_model'), t.model]);
+    html += '<table class="meta-table"><thead><tr><th colspan="2">' + U.escapeHtml(I18n.t('models.meta_model_params')) + '</th></tr></thead><tbody>';
+    basicFields.forEach(function(f) {
       if (f[1] != null) {
         var val = typeof f[1] === 'number' ? f[1].toLocaleString() : U.escapeHtml(String(f[1]));
         html += '<tr><td class="meta-key">' + f[0] + '</td><td class="meta-val">' + val + '</td></tr>';
@@ -612,19 +616,34 @@
     });
     html += '</tbody></table>';
 
-    var t = data.tokenizer || {};
-    if (t.model || t.eos_token_id != null || t.bos_token_id != null) {
-      html += '<table class="meta-table"><thead><tr><th colspan="2">' + U.escapeHtml(I18n.t('models.meta_tokenizer')) + '</th></tr></thead><tbody>';
-      [[I18n.t('models.meta_tokenizer_model'), t.model], [I18n.t('models.meta_pre_tokenizer'), t.pre], [I18n.t('models.meta_bos_id'), t.bos_token_id],
-       [I18n.t('models.meta_eos_id'), t.eos_token_id], [I18n.t('models.meta_padding_id'), t.padding_token_id]
-      ].forEach(function(f) {
-        if (f[1] != null) html += '<tr><td class="meta-key">' + U.escapeHtml(f[0]) + '</td><td class="meta-val">' + U.escapeHtml(String(f[1])) + '</td></tr>';
+    // Advanced params: GQA/RoPE/RMS internals + raw tokenizer ids + tensor
+    // offsets. Hidden behind a collapsible section so lay users aren't faced
+    // with hyperparameters they don't need.
+    var advancedFields = [
+      [I18n.t('models.meta_kv_heads'), m.head_count_kv],
+      [I18n.t('models.meta_rope_dim'), m.rope_dimension_count],
+      [I18n.t('models.meta_rope_freq'), m.rope_freq_base],
+      [I18n.t('models.meta_rms_epsilon'), m.layer_norm_rms_epsilon],
+      [I18n.t('models.meta_pre_tokenizer'), t.pre],
+      [I18n.t('models.meta_bos_id'), t.bos_token_id],
+      [I18n.t('models.meta_eos_id'), t.eos_token_id],
+      [I18n.t('models.meta_padding_id'), t.padding_token_id],
+    ];
+    var tens = data.tensors || {};
+    var hasAdvanced = advancedFields.some(function(f) { return f[1] != null; }) || !!tens.count;
+    if (hasAdvanced) {
+      html += '<details class="meta-advanced-details"><summary>' + U.escapeHtml(I18n.t('models.meta_advanced')) + '</summary>';
+      html += '<table class="meta-table"><tbody>';
+      advancedFields.forEach(function(f) {
+        if (f[1] != null) {
+          var val = typeof f[1] === 'number' ? f[1].toLocaleString() : U.escapeHtml(String(f[1]));
+          html += '<tr><td class="meta-key">' + U.escapeHtml(f[0]) + '</td><td class="meta-val">' + val + '</td></tr>';
+        }
       });
       html += '</tbody></table>';
+      if (tens.count) html += '<div class="meta-tensor-info">' + I18n.t('models.meta_tensor_info', { count: tens.count, offset: U.formatBytes(tens.data_offset || 0) }) + '</div>';
+      html += '</details>';
     }
-
-    var tens = data.tensors || {};
-    if (tens.count) html += '<div class="meta-tensor-info">' + I18n.t('models.meta_tensor_info', { count: tens.count, offset: U.formatBytes(tens.data_offset || 0) }) + '</div>';
 
     var raw = data.raw || [];
     if (raw.length > 0) {

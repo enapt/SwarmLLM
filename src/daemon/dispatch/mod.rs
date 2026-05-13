@@ -789,18 +789,52 @@ pub(crate) async fn dispatch_network_messages(
                                                 cap = MAX_SHARDS_PER_MANIFEST,
                                                 "Rejecting peer manifest: too many shards"
                                             );
+                                            if let Some(ref sender) = authenticated_sender {
+                                                shared_state.emit_activity(
+                                                    crate::daemon::state::ActivityEvent::new(
+                                                        "security",
+                                                        "manifest_rejected",
+                                                        format!(
+                                                            "Rejected manifest from {}: {} shards exceeds cap of {}",
+                                                            sender, manifest.shards.len(), MAX_SHARDS_PER_MANIFEST
+                                                        ),
+                                                    )
+                                                    .with_model(manifest.id.0.clone())
+                                                    .with_node(format!("{}", sender))
+                                                    .with_detail_num(manifest.shards.len() as i64)
+                                                    .with_toast("warning", 6000),
+                                                );
+                                            }
                                             continue;
                                         }
-                                        if manifest
+                                        let oversize_tensor_count = manifest
                                             .shards
                                             .iter()
-                                            .any(|s| s.tensors.len() > MAX_TENSORS_PER_SHARD)
-                                        {
+                                            .map(|s| s.tensors.len())
+                                            .filter(|n| *n > MAX_TENSORS_PER_SHARD)
+                                            .max();
+                                        if let Some(n) = oversize_tensor_count {
                                             tracing::warn!(
                                                 model = %manifest.id,
                                                 cap = MAX_TENSORS_PER_SHARD,
                                                 "Rejecting peer manifest: a shard has too many tensor entries"
                                             );
+                                            if let Some(ref sender) = authenticated_sender {
+                                                shared_state.emit_activity(
+                                                    crate::daemon::state::ActivityEvent::new(
+                                                        "security",
+                                                        "manifest_rejected",
+                                                        format!(
+                                                            "Rejected manifest from {}: {} tensors in a shard exceeds cap of {}",
+                                                            sender, n, MAX_TENSORS_PER_SHARD
+                                                        ),
+                                                    )
+                                                    .with_model(manifest.id.0.clone())
+                                                    .with_node(format!("{}", sender))
+                                                    .with_detail_num(n as i64)
+                                                    .with_toast("warning", 6000),
+                                                );
+                                            }
                                             continue;
                                         }
                                         // Strict verification for network-received manifests:
@@ -1737,6 +1771,33 @@ pub(crate) async fn dispatch_network_messages(
                                         tracing::debug!(
                                             "Dropping HealthPing/Pong with missing node_id"
                                         );
+                                    }
+                                    // Cross-node inference cancellation. Originator broadcasts
+                                    // this when the local request flips its cancel flag (or the
+                                    // SSE client hangs up); receiver aborts the matching
+                                    // remote-generate decode so the worker stops streaming
+                                    // wasted tokens back.
+                                    SwarmMessage::CancelInference(cancel) => {
+                                        if authenticated_sender.is_none() {
+                                            tracing::debug!("Dropping unauthenticated CancelInference");
+                                            continue;
+                                        }
+                                        if let Some((_, abort)) = shared_state
+                                            .inbound_generate_aborts
+                                            .remove(&cancel.request_id)
+                                        {
+                                            tracing::info!(
+                                                request_id = %cancel.request_id,
+                                                sender = ?authenticated_sender,
+                                                "CancelInference: aborting inbound remote-generate"
+                                            );
+                                            abort.abort();
+                                        } else {
+                                            tracing::debug!(
+                                                request_id = %cancel.request_id,
+                                                "CancelInference: no in-flight decode for request"
+                                            );
+                                        }
                                     }
                                     // Other messages handled by NetworkManager
                                     _ => {}

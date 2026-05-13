@@ -227,6 +227,12 @@ pub struct IpcLayerResult {
     pub sealed_payload: Option<Vec<u8>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub logprobs: Option<Vec<TokenLogProbEntry>>,
+    /// User-provided stop sequence that triggered termination, if any.
+    /// Populated by the worker when `finish_reason == Stop` and the match
+    /// came from `SamplingParams.stop`. Plumbed up to `LayerResult` so the
+    /// distributed-path coordinator can carry it back to API clients.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub matched_stop_sequence: Option<String>,
     /// True if binary payload contains output activation bytes.
     #[serde(default)]
     pub has_activations: bool,

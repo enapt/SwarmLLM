@@ -67,15 +67,9 @@ pub struct InferenceOutput {
 }
 
 /// A single token's log probability info for the logprobs response field.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct TokenLogProbEntry {
-    /// The token text.
-    pub token: String,
-    /// Log probability of this token.
-    pub logprob: f32,
-    /// Top-N alternative tokens with their logprobs.
-    pub top_logprobs: Vec<(String, f32)>,
-}
+/// Canonical definition lives in `swarmllm-types` so it can also be carried
+/// in `LayerResult` over the distributed-pipeline wire.
+pub use swarmllm_types::TokenLogProbEntry;
 
 /// A single token event sent during streaming distributed inference.
 #[derive(Debug, Clone)]

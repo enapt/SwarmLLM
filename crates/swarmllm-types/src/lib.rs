@@ -28,18 +28,18 @@ pub use inference::{
     AllReduceOp, ChatMessage, GenerateUsage, ImageData, InferenceError, InferenceRequest,
     LayerForward, LayerResult, NetworkFinishReason, PipelineAssignment, PipelineSegment,
     RemoteGenerateRequest, Role, SamplingParams, StreamingToken, TensorFormat, TensorParallelGroup,
-    TensorParallelMeta, TpAllReduceRequest, TpAllReduceResponse, TpPhase, TpRingChunk,
-    VisionEncodeRequest, VisionEncodeResponse,
+    TensorParallelMeta, TokenLogProbEntry, TpAllReduceRequest, TpAllReduceResponse, TpPhase,
+    TpRingChunk, VisionEncodeRequest, VisionEncodeResponse,
 };
 pub use model::{
     MmprojInfo, ModelArchitecture, ModelManifest, ModelTrustInfo, ModelTrustLevel, Quantization,
     ShardInfo, ShardTensorEntry, VisionConfig,
 };
 pub use network::{
-    AuthenticatedMessage, DownloadState, EphemeralKeyExchange, HfSourceGossip, ModelDemandGossip,
-    NetworkCommand, PrefixBlockEntry, PrefixCacheAnnounce, PruneEvent, RebalanceEvent,
-    RegionShardSummary, ShardAnnounce, ShardDownloadProgress, ShardRequest, ShardResponse,
-    SwarmMessage,
+    AuthenticatedMessage, CancelInference, DownloadState, EphemeralKeyExchange, HfSourceGossip,
+    ModelDemandGossip, NetworkCommand, PrefixBlockEntry, PrefixCacheAnnounce, PruneEvent,
+    RebalanceEvent, RegionShardSummary, ShardAnnounce, ShardDownloadProgress, ShardRequest,
+    ShardResponse, SwarmMessage,
 };
 pub use node::{
     ContributionLevel, GpuInfo, LatencyObservation, NodeCapability, NodeStats,

@@ -114,6 +114,18 @@ pub enum SwarmMessage {
 
     // Cross-node prefix-cache sharing (Item 8 Phase 1)
     PrefixCacheAnnounce(PrefixCacheAnnounce),
+
+    // Cross-node inference cancellation. Sent by the request originator to
+    // every peer involved in the pipeline when the caller flips
+    // `InferenceRequest.cancel` or hangs up the SSE stream. Remote dispatch
+    // resolves `request_id` against its `active_pipelines` map and signals
+    // the worker subprocess to bail on the next decode iteration.
+    CancelInference(CancelInference),
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CancelInference {
+    pub request_id: uuid::Uuid,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

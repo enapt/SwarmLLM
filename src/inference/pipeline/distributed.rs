@@ -85,6 +85,10 @@ impl PipelineExecutor {
         // for session-keyed requests (gotcha #4 — stop tokens otherwise
         // contaminate the next session turn's KV).
         let mut hit_stop_string_outer = false;
+        // Captures the actual user-provided stop string that matched, so the
+        // final `InferenceOutput.matched_stop_sequence` mirrors the
+        // local-worker contract that Anthropic clients depend on.
+        let mut matched_stop_seq: Option<String> = None;
 
         // Cumulative position for RoPE / KV-cache
         let mut index_pos: usize = 0;
@@ -257,8 +261,28 @@ impl PipelineExecutor {
                         tokens = result.token_ids.len(),
                         activations_bytes = result.activations.len(),
                         finish = ?result.finish_reason,
+                        logprobs = result.token_logprobs.len(),
                         "DIAG: forward_through_segments returned OK"
                     );
+                    // Accumulate per-token logprobs from the final segment.
+                    // Empty when the request didn't ask for logprobs, or when
+                    // the worker hasn't been extended to compute them on the
+                    // per-segment Forward IPC path. The output is drained in
+                    // `InferenceOutput.token_logprobs` below.
+                    if !result.token_logprobs.is_empty() {
+                        if let Ok(mut g) = self.collected_logprobs.lock() {
+                            g.extend(result.token_logprobs.iter().cloned());
+                        }
+                    }
+                    // Honor matched_stop_sequence from the remote worker if it
+                    // ran its own detection (rare today — most stop-string
+                    // matching happens at the coordinator). Coordinator-side
+                    // capture below takes precedence on a conflict.
+                    if matched_stop_seq.is_none() {
+                        if let Some(ref ms) = result.matched_stop_sequence {
+                            matched_stop_seq = Some(ms.clone());
+                        }
+                    }
                     // After the first forward pass, extract everything we need from the model
                     // in a SINGLE lock acquisition: prompt token count, EOS tokens, and
                     // cached decoder for lock-free per-token decoding.
@@ -313,6 +337,7 @@ impl PipelineExecutor {
                                 &accumulated_text,
                                 &stop_strings,
                             ) {
+                                matched_stop_seq = Some(stop.to_string());
                                 // Trim everything from the stop string onwards
                                 if let Some(pos) = accumulated_text.find(stop) {
                                     accumulated_text.truncate(pos);
@@ -368,7 +393,7 @@ impl PipelineExecutor {
                                 .send(StreamingTokenEvent {
                                     text: String::new(),
                                     finish_reason: Some("stop".to_string()),
-                                    matched_stop_sequence: None,
+                                    matched_stop_sequence: matched_stop_seq.clone(),
                                 })
                                 .await;
                         }
@@ -536,13 +561,10 @@ impl PipelineExecutor {
                 .unwrap_or_else(|e| e.into_inner())
                 .drain(..)
                 .collect(),
-            // Distributed path: stop-sequence detection happens at the
-            // remote worker level; the matched string isn't currently
-            // carried back across `LayerResult`. Plumbing it would need
-            // a new optional field on `NetworkFinishReason::Stop` —
-            // deferred (the local worker path is the common case for
-            // Anthropic clients).
-            matched_stop_sequence: None,
+            // Captured at the coordinator above when `find_stop_sequence`
+            // fired on the accumulated decoded text; honest source of the
+            // user-provided string that triggered termination.
+            matched_stop_sequence: matched_stop_seq,
         })
     }
 
@@ -686,6 +708,8 @@ impl PipelineExecutor {
                         activations: vec![],
                         sealed_token_ids: None,
                         spec_logits: Vec::new(),
+                        matched_stop_sequence: None,
+                        token_logprobs: Vec::new(),
                     });
                 } else {
                     // Intermediate segment: strip the 0x00 tag and continue

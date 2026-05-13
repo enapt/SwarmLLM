@@ -72,8 +72,51 @@ pub fn encode_layer_result(result: &LayerResult) -> Result<Vec<u8>, SwarmError> 
         }
     }
 
+    // Optional: matched_stop_sequence trailer (marker 0x04 + u32 length + UTF-8).
+    // Carries the user-provided stop sequence that triggered termination so
+    // distributed-path inference can surface it to Anthropic clients.
+    if let Some(ref matched) = result.matched_stop_sequence {
+        let bytes = matched.as_bytes();
+        // SEC: cap to 4KB to match the error-message limit; legitimate stop
+        // sequences are short (typically < 32 bytes).
+        let cap = bytes.len().min(4096);
+        let mut end = cap;
+        while end > 0 && !matched.is_char_boundary(end) {
+            end -= 1;
+        }
+        let slice = &bytes[..end];
+        buf.push(0x04);
+        buf.extend_from_slice(&(slice.len() as u32).to_le_bytes());
+        buf.extend_from_slice(slice);
+    }
+
+    // Optional: token_logprobs trailer (marker 0x05 + u32 length + JSON bytes).
+    // Encoded as serde_json for forward-compat with future TokenLogProbEntry
+    // field additions. Limited to MAX_LOGPROBS_JSON_BYTES to bound allocation
+    // on a malicious peer crafting a large payload.
+    if !result.token_logprobs.is_empty() {
+        let json = serde_json::to_vec(&result.token_logprobs).map_err(|e| {
+            SwarmError::Network(format!("token_logprobs serialization failed: {e}"))
+        })?;
+        if json.len() > MAX_LOGPROBS_JSON_BYTES {
+            return Err(SwarmError::Network(format!(
+                "token_logprobs payload too large: {} > {MAX_LOGPROBS_JSON_BYTES}",
+                json.len()
+            )));
+        }
+        buf.push(0x05);
+        buf.extend_from_slice(&(json.len() as u32).to_le_bytes());
+        buf.extend_from_slice(&json);
+    }
+
     Ok(buf)
 }
+
+/// Cap for the `token_logprobs` JSON trailer. 4 MiB accommodates the largest
+/// realistic streaming payload (a 2048-token response with top-N=5 alternatives
+/// and average UTF-8 token length of ~4 bytes per entry stays well under 1 MiB)
+/// while bounding allocation on adversarial payloads.
+const MAX_LOGPROBS_JSON_BYTES: usize = 4 * 1024 * 1024;
 
 /// Decode binary into a LayerResult.
 /// Expects the 1-byte tag prefix to already be stripped (or handles both cases).
@@ -256,6 +299,70 @@ pub fn decode_layer_result(data: &[u8]) -> Result<LayerResult, SwarmError> {
         }
     }
 
+    // Optional: matched_stop_sequence trailer (marker 0x04)
+    let mut matched_stop_sequence: Option<String> = None;
+    if pos < data.len() && data[pos] == 0x04 {
+        pos += 1;
+        if pos + 4 > data.len() {
+            return Err(SwarmError::Network(
+                "matched_stop_sequence header truncated".into(),
+            ));
+        }
+        let len = u32::from_le_bytes(
+            data[pos..pos + 4]
+                .try_into()
+                .map_err(|_| SwarmError::Network("Invalid matched_seq len".into()))?,
+        ) as usize;
+        pos += 4;
+        // SEC: cap to mirror the encoder's 4KB limit.
+        if len > 4096 {
+            return Err(SwarmError::Network(format!(
+                "matched_stop_sequence too long: {len}"
+            )));
+        }
+        if pos + len > data.len() {
+            return Err(SwarmError::Network(
+                "matched_stop_sequence payload truncated".into(),
+            ));
+        }
+        matched_stop_sequence = Some(String::from_utf8_lossy(&data[pos..pos + len]).to_string());
+        pos += len;
+    }
+
+    // Optional: token_logprobs trailer (marker 0x05 + u32 length + JSON bytes)
+    let mut token_logprobs = Vec::new();
+    if pos < data.len() && data[pos] == 0x05 {
+        pos += 1;
+        if pos + 4 > data.len() {
+            return Err(SwarmError::Network(
+                "token_logprobs header truncated".into(),
+            ));
+        }
+        let len = u32::from_le_bytes(
+            data[pos..pos + 4]
+                .try_into()
+                .map_err(|_| SwarmError::Network("Invalid token_logprobs len".into()))?,
+        ) as usize;
+        pos += 4;
+        if len > MAX_LOGPROBS_JSON_BYTES {
+            return Err(SwarmError::Network(format!(
+                "token_logprobs payload too large: {len} > {MAX_LOGPROBS_JSON_BYTES}"
+            )));
+        }
+        if pos + len > data.len() {
+            return Err(SwarmError::Network(
+                "token_logprobs payload truncated".into(),
+            ));
+        }
+        token_logprobs = serde_json::from_slice(&data[pos..pos + len]).map_err(|e| {
+            SwarmError::Network(format!("token_logprobs deserialization failed: {e}"))
+        })?;
+        pos += len;
+    }
+    // Suppress unused-assignment warning on the last pos += that has no
+    // subsequent reader.
+    let _ = pos;
+
     Ok(LayerResult {
         request_id,
         token_ids,
@@ -263,6 +370,8 @@ pub fn decode_layer_result(data: &[u8]) -> Result<LayerResult, SwarmError> {
         activations,
         sealed_token_ids: None,
         spec_logits,
+        matched_stop_sequence,
+        token_logprobs,
     })
 }
 

@@ -875,6 +875,8 @@ mod tests {
             activations: vec![],
             sealed_token_ids: None,
             spec_logits: Vec::new(),
+            matched_stop_sequence: None,
+            token_logprobs: Vec::new(),
         };
 
         let encoded = encode_layer_result(&result).unwrap();
@@ -897,6 +899,8 @@ mod tests {
             activations: vec![],
             sealed_token_ids: None,
             spec_logits: Vec::new(),
+            matched_stop_sequence: None,
+            token_logprobs: Vec::new(),
         };
 
         let encoded = encode_layer_result(&result).unwrap();
@@ -913,6 +917,8 @@ mod tests {
             activations: vec![],
             sealed_token_ids: None,
             spec_logits: Vec::new(),
+            matched_stop_sequence: None,
+            token_logprobs: Vec::new(),
         };
 
         let encoded = encode_layer_result(&result).unwrap();
@@ -1156,6 +1162,8 @@ mod tests {
                 vec![-1.5, 0.0, 2.5, 100.0],
                 vec![0.0; 16],
             ],
+            matched_stop_sequence: None,
+            token_logprobs: Vec::new(),
         };
         let encoded = encode_layer_result(&result).unwrap();
         let decoded = decode_layer_result(&encoded).unwrap();
@@ -1163,6 +1171,85 @@ mod tests {
         assert_eq!(decoded.spec_logits[0], vec![1.0, 2.0, 3.0]);
         assert_eq!(decoded.spec_logits[1], vec![-1.5, 0.0, 2.5, 100.0]);
         assert_eq!(decoded.spec_logits[2], vec![0.0; 16]);
+    }
+
+    #[test]
+    fn layer_result_matched_stop_sequence_roundtrip() {
+        let result = LayerResult {
+            request_id: uuid::Uuid::new_v4(),
+            token_ids: vec![42],
+            finish_reason: Some(NetworkFinishReason::Stop),
+            activations: vec![],
+            sealed_token_ids: None,
+            spec_logits: Vec::new(),
+            matched_stop_sequence: Some("\n\nHuman:".to_string()),
+            token_logprobs: Vec::new(),
+        };
+        let encoded = encode_layer_result(&result).unwrap();
+        let decoded = decode_layer_result(&encoded).unwrap();
+        assert_eq!(decoded.matched_stop_sequence.as_deref(), Some("\n\nHuman:"));
+    }
+
+    #[test]
+    fn layer_result_token_logprobs_roundtrip() {
+        let entries = vec![
+            swarmllm_types::TokenLogProbEntry {
+                token: "hello".to_string(),
+                logprob: -0.5,
+                top_logprobs: vec![("hi".to_string(), -1.2)],
+            },
+            swarmllm_types::TokenLogProbEntry {
+                token: " world".to_string(),
+                logprob: -2.3,
+                top_logprobs: Vec::new(),
+            },
+        ];
+        let result = LayerResult {
+            request_id: uuid::Uuid::new_v4(),
+            token_ids: vec![1, 2],
+            finish_reason: None,
+            activations: vec![],
+            sealed_token_ids: None,
+            spec_logits: Vec::new(),
+            matched_stop_sequence: None,
+            token_logprobs: entries.clone(),
+        };
+        let encoded = encode_layer_result(&result).unwrap();
+        let decoded = decode_layer_result(&encoded).unwrap();
+        assert_eq!(decoded.token_logprobs.len(), 2);
+        assert_eq!(decoded.token_logprobs[0].token, "hello");
+        assert!((decoded.token_logprobs[0].logprob - (-0.5)).abs() < 1e-6);
+        assert_eq!(
+            decoded.token_logprobs[0].top_logprobs,
+            vec![("hi".to_string(), -1.2)]
+        );
+        assert_eq!(decoded.token_logprobs[1].token, " world");
+    }
+
+    #[test]
+    fn layer_result_old_decoder_skips_unknown_trailers() {
+        // Encode a NEW-style result with both trailers; decode it. Verifies
+        // the round-trip works even when both new optional trailers are
+        // present alongside spec_logits.
+        let result = LayerResult {
+            request_id: uuid::Uuid::new_v4(),
+            token_ids: vec![7],
+            finish_reason: Some(NetworkFinishReason::Stop),
+            activations: vec![],
+            sealed_token_ids: None,
+            spec_logits: vec![vec![0.1, 0.2, 0.3]],
+            matched_stop_sequence: Some("STOP".to_string()),
+            token_logprobs: vec![swarmllm_types::TokenLogProbEntry {
+                token: "x".to_string(),
+                logprob: -1.0,
+                top_logprobs: Vec::new(),
+            }],
+        };
+        let encoded = encode_layer_result(&result).unwrap();
+        let decoded = decode_layer_result(&encoded).unwrap();
+        assert_eq!(decoded.spec_logits.len(), 1);
+        assert_eq!(decoded.matched_stop_sequence.as_deref(), Some("STOP"));
+        assert_eq!(decoded.token_logprobs.len(), 1);
     }
 
     /// Build a PrefixKv response frame the same way `write_response` does

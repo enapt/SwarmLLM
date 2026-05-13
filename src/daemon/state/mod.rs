@@ -67,6 +67,12 @@ pub struct SharedState {
     pub gpu_info: Option<crate::inference::executor::GpuInfo>,
     pub model_loaded: std::sync::atomic::AtomicBool,
     pub active_pipelines: DashMap<uuid::Uuid, PipelineAssignment>,
+    /// Abort handles for in-flight remote-generate decodes serving requests
+    /// from peers. Keyed by `request_id`. When the originator broadcasts a
+    /// `SwarmMessage::CancelInference`, the dispatch handler aborts the
+    /// matching task so the worker stops streaming wasted tokens. Cleared
+    /// when the decode finishes naturally.
+    pub inbound_generate_aborts: DashMap<uuid::Uuid, tokio::task::AbortHandle>,
     /// Per-cancel-token cancel signals. The HTTP entry for `chat_completions`
     /// looks up an `Arc<AtomicBool>` by token (passed via the
     /// `x-swarmllm-cancel-token` header) and attaches it to the
@@ -214,6 +220,13 @@ impl SharedState {
         let initial_ops = crate::config::OperationalParams::from_config(&config);
         let (config_watch_tx, _) = watch::channel(initial_ops);
         let trust_manager = crate::credit::trust::TrustManager::new(db.clone());
+        let hydrated = trust_manager.hydrate_cache();
+        if hydrated > 0 {
+            tracing::debug!(
+                trust_entries = hydrated,
+                "DIAG: TrustManager cache hydrated from db"
+            );
+        }
         let escrow_manager = Arc::new(crate::credit::escrow::EscrowManager::new(
             db.clone(),
             crate::credit::escrow::DEFAULT_ESCROW_THRESHOLD,
@@ -251,6 +264,7 @@ impl SharedState {
             peer_registry: DashMap::new(),
             model_registry,
             active_pipelines: DashMap::new(),
+            inbound_generate_aborts: DashMap::new(),
             cancel_signals: DashMap::new(),
             metrics: MetricsProviders {
                 node_stats: RwLock::new(NodeStats::default()),

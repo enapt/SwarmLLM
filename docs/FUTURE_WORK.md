@@ -80,54 +80,7 @@ Captures items deliberately deferred from the model-management redesign and from
 
 ---
 
-### Distributed-pipeline matched_stop_sequence plumbing
-**Context.** R109 plumbed `matched_stop_sequence` through the local-worker path. Distributed pipeline (`pipeline/distributed.rs:516`) leaves it as `None` because `LayerResult.finish_reason: NetworkFinishReason::Stop` doesn't carry a string.
-
-**What's needed.** Extend `NetworkFinishReason::Stop` to `Stop { matched_sequence: Option<String> }` (with `#[serde(default)]` for wire-compat). Propagate in remote-worker decode loop's stop-detection sites. Update `decode_layer_result` to pass through.
-
-**Why deferred.** Multi-segment distributed inference with custom stop sequences is rare in practice. Local-worker path covers the common Anthropic case.
-
-**Sweep log:** `src/inference/pipeline/distributed.rs:528` (R109 closure).
-
----
-
-### Cross-node logprobs in distributed path
-**Context.** R106 plumbed logprobs through the local worker path. Distributed pipeline's `collected_logprobs` field still resolves to empty.
-
-**What's needed.** Worker emits per-token logprob in `LayerResult` → coordinator's `collect_streaming_token` accumulates → final `InferenceOutput.token_logprobs` populated.
-
-**Why deferred.** Same rationale: distributed-path logprobs are a niche feature for billing telemetry; local path covers most users.
-
-**Sweep log:** `src/inference/pipeline/distributed.rs:533` (R106 commentary).
-
----
-
-### Cancel-token plumbing across the wire
-**Context.** `InferenceRequest.cancel: Option<Arc<AtomicBool>>` is `#[serde(skip)]` — local-only (gotcha #66). Cross-node cancellation does not propagate; a flipped cancel only stops the originating node's decode loop. Remote segments keep computing until their next-forward times out.
-
-**What's needed.** Carry cancellation as a `NetworkCommand::CancelInference { request_id }` rather than via the `InferenceRequest` struct. Network manager broadcasts to the peer set involved in the pipeline.
-
-**Why deferred.** Real-cancel-on-wire is observable as a UX win (faster client-disconnect propagation), but the network-level timeout already bounds wasted compute. Lower priority than user-facing model management work.
-
-**Sweep log:** `src/types.rs` `InferenceRequest.cancel` (gotcha #66).
-
----
-
-### TrustManager bulk hydrate optimisation
-**Context.** R109 confirmed `TrustManager::hydrate_from_db` is a test-only helper. Production trust restore is per-peer at connect time via `get_trust()` in identify handler.
-
-**What's needed (only if measured).** If we ever observe slow first-connect latency due to repeated DB reads, switch identify handler to use a single bulk hydrate at startup that warms a `DashMap` cache.
-
-**Why deferred.** Not a performance issue today; existing per-peer reads are sub-millisecond on redb.
-
----
-
-### Manifest tensor-cap UX
-**Context.** R104 added a max-tensors cap in `manifest.rs` to defend against malicious manifests. The cap silently rejects oversized manifests; no operator-visible alert when one is dropped.
-
-**What's needed.** Surface rejection as an `ActivityEvent` (`category: "models", kind: "manifest_rejected"`) with peer + size context. Helps operators diagnose "why is this model not appearing?"
-
-**Why deferred.** Edge case; rejection would only fire on adversarial input, and the security log catches it.
+_(R126 closures: matched_stop_sequence wire plumbing, cross-node logprobs, cancel-over-wire for remote-generate, TrustManager bulk hydrate, manifest tensor-cap ActivityEvent — moved from this section.)_
 
 ---
 
@@ -140,12 +93,7 @@ Captures items deliberately deferred from the model-management redesign and from
 
 ---
 
-### Contribution-mode toggle in Setup wizard (R121 follow-up)
-**Context.** R121 added an Auto/Manual contribution toggle to the Settings panel. The Setup wizard (`frontend/js/components/setup.js`, `index.html:56-113`) has the same contribution segmented control + an auto-manage checkbox, but doesn't yet expose the new toggle.
-
-**What's needed.** Mirror the Settings-panel toggle in the wizard step 1, default to Auto, and include `contribution_auto` in the `setup.js::submit()` payload. The wizard's save path already uses `PUT /api/admin/config`, so the wire change is one field.
-
-**Why deferred.** The toggle defaults to Auto on the backend, so new nodes get the recommended behaviour without wizard exposure. It's a UX nicety, not load-bearing.
+_(R121 Setup-wizard contribution toggle closed in R126.)_
 
 ---
 
@@ -155,12 +103,7 @@ Captures items deliberately deferred from the model-management redesign and from
 to make the UI usable by non-technical users. Three structural / behavioural
 items came up that warrant direction beyond a copy refresh:
 
-1. **README architecture section is intimidating.** The "12 async Tokio
-   tasks wired via mpsc channels, sharing `Arc<SharedState>` + DashMap"
-   sentence + the subsystem-name diagram + the node-tier table all appear
-   mid-document and have no value for the first-time-user persona the
-   README leads with. Proposed: wrap behind `<details>` titled
-   "Implementation details (for contributors)".
+1. **README architecture section is intimidating.** _(Closed R126: wrapped behind `<details>` titled "Implementation details (for contributors)".)_
 
 2. **Header is overloaded on first load.** 12+ icons (hamburger, logo, 7
    tabs, model dropdown, "+ Find model", share, auto-manage, private-mode
@@ -169,13 +112,7 @@ items came up that warrant direction beyond a copy refresh:
    explanation. Proposed: a first-run guided tour (single overlay walking
    through the 4 most important elements) or `?` tooltips on each.
 
-3. **`activity.worker_*` events duplicate `activity.model_*` events.** Both
-   fire on every model load/unload. The "worker" copy uses internal
-   process-management language. Proposed: stop emitting `worker_spawned` /
-   `worker_unloaded` to the user activity feed; keep them as internal
-   trace events only, or merge into the `model_loaded` / `model_unloaded`
-   path. Requires a backend change (the `with_toast` flag on those events
-   in `daemon/state/activity.rs`).
+3. **`activity.worker_*` events duplicate `activity.model_*` events.** _(Closed R126: both emit sites removed from `process_pool.rs`; i18n keys deleted from all 21 locales; `tracing::info!` retained for operator debugging.)_
 
 4. **`models.hf_score_breakdown` exposes a 4-component score
    decomposition** (quality / fit / demand / size) on every HF browser
@@ -184,17 +121,9 @@ items came up that warrant direction beyond a copy refresh:
    computer", "Works but uses lots of space", "Needs more memory than
    available"); keep the raw decomposition as a developer tooltip.
 
-5. **GGUF metadata panel surfaces raw hyperparameters.** `models.meta_rope_dim`,
-   `models.meta_kv_heads`, `models.meta_rms_epsilon`, etc. are gated
-   behind the `ⓘ` button but the section label "GGUF Metadata" is itself
-   jargon. Proposed: rename to "Technical Details"; group human-readable
-   items (parameters, context length) above a collapsible "Advanced"
-   sub-section that hides RoPE / KV heads / tensor offsets.
+5. **GGUF metadata panel surfaces raw hyperparameters.** _(Closed R126: renamed `models.metadata_header` to "Technical Details" across 21 locales; refactored `renderMetadataPanel()` to split basic params (context, layers, embedding, heads, vocab, tokenizer model) from collapsible `<details>` "Advanced" sub-section that hides KV heads / RoPE / RMS epsilon / BOS-EOS-padding ids / tensor offsets.)_
 
-6. **`models.encrypted_pipeline` and `enc.unprotected_detail`** reference
-   "first AND last shard" — opaque to a lay user. Proposed: label as
-   "Private mode (end-to-end encryption)"; status as "Available — your
-   computer holds the key parts needed".
+6. **`models.encrypted_pipeline` and `enc.unprotected_detail`** _(Closed R126: refreshed 19 `enc.*` + `models.encrypted_pipeline` keys across 21 locales — "first piece of the model" / "last piece of the model" replace shard jargon; copy honestly distinguishes "end-to-end encrypted" (when user holds both endpoints) from "encrypted in transit" (when entry/exit nodes are remote).)_
 
 7. **`dashboard.api_log_link` text stays English in 20 non-English
    locales** ("View API request log →"). The arrow may render poorly in
@@ -207,9 +136,8 @@ items came up that warrant direction beyond a copy refresh:
    carve-out for world-map UIs, but inconsistent with the otherwise
    fully-translated UI. Same decision as #7.
 
-**Why deferred.** Each of these is bigger than a copy fix and needs a UX
-decision (and #3/#4/#5 need backend or schema changes). The R125 copy
-pass got the bulk of the value; these structural items can land
+**Why deferred.** Items #2, #4, #7, #8 are bigger than a copy fix and need a UX
+decision. R126 closed #1/#3/#5/#6 from this list; items #2/#4/#7/#8 can land
 piecewise once direction is set.
 
 ---

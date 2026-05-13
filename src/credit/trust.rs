@@ -60,13 +60,56 @@ impl TrustEvent {
 
 /// TrustManager tracks per-peer trust scores, persists them to redb,
 /// and provides update/query methods used by the scheduler and ledger.
+///
+/// `cache` mirrors persisted scores in memory so the Identify handler
+/// can resolve trust without a redb read on every peer connect.
+/// Populated by `hydrate_cache()` at daemon startup and kept current
+/// by every write path (`update_trust`, `decay_all`).
 pub struct TrustManager {
     db: Database,
+    cache: DashMap<NodeId, f32>,
 }
 
 impl TrustManager {
     pub fn new(db: Database) -> Self {
-        Self { db }
+        Self {
+            db,
+            cache: DashMap::new(),
+        }
+    }
+
+    /// Pre-populate the in-memory cache from disk. Call once at daemon
+    /// startup so the first wave of peer Identify handshakes hits an
+    /// in-memory `DashMap` instead of repeated redb reads. Returns the
+    /// number of entries hydrated.
+    pub fn hydrate_cache(&self) -> usize {
+        let mut count = 0;
+        if let Ok(entries) = self.db.iter_raw(TREE_TRUST_SCORES) {
+            for (key_bytes, val_bytes) in entries {
+                let key_str = match std::str::from_utf8(&key_bytes) {
+                    Ok(s) => s,
+                    Err(_) => continue,
+                };
+                let node_id_bytes: [u8; 32] = match hex::decode(key_str) {
+                    Ok(b) if b.len() == 32 => {
+                        let mut arr = [0u8; 32];
+                        arr.copy_from_slice(&b);
+                        arr
+                    }
+                    _ => continue,
+                };
+                let trust: f32 = match serde_json::from_slice(&val_bytes) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+                if trust.is_finite() {
+                    self.cache
+                        .insert(NodeId(node_id_bytes), trust.clamp(0.0, 1.0));
+                    count += 1;
+                }
+            }
+        }
+        count
     }
 
     /// Update the trust score for a peer after a trust-affecting event.
@@ -94,6 +137,7 @@ impl TrustManager {
         if let Err(e) = self.db.put_json(TREE_TRUST_SCORES, &key, &new_score) {
             tracing::warn!(error = %e, node = %node_id, "Failed to persist trust score");
         }
+        self.cache.insert(node_id.clone(), new_score);
 
         tracing::debug!(
             node = %node_id,
@@ -109,12 +153,18 @@ impl TrustManager {
     /// Get the current trust score for a peer.
     /// Falls back to DEFAULT_TRUST if unknown.
     pub fn get_trust(&self, node_id: &NodeId) -> f32 {
+        if let Some(score) = self.cache.get(node_id) {
+            return *score;
+        }
         let key = hex::encode(node_id.0);
-        self.db
+        let score = self
+            .db
             .get_json::<f32>(TREE_TRUST_SCORES, &key)
             .ok()
             .flatten()
-            .unwrap_or(DEFAULT_TRUST)
+            .unwrap_or(DEFAULT_TRUST);
+        self.cache.insert(node_id.clone(), score);
+        score
     }
 
     /// Apply time-based decay toward DEFAULT_TRUST for all known peers.
@@ -132,6 +182,7 @@ impl TrustManager {
             {
                 tracing::warn!(error = %e, node = %key, "Failed to persist decayed trust score");
             }
+            self.cache.insert(entry.node_id.clone(), entry.trust_score);
         }
     }
 

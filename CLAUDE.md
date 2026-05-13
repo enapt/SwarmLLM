@@ -140,7 +140,7 @@ libp2p 0.56, axum 0.8, candle-core/candle-transformers 0.10 (CUDA), redb 4, ed25
 - 11 HTML `<template>` elements for repeating UI structures (session items, chat messages, toasts, model cards, etc.)
 - All storage keys registered as named constants on `App` (e.g., `App.SESSIONS_KEY`, `App.MODEL_SORT_KEY`)
 - Dark/light/system theme toggle, CSS custom properties for theming
-- i18n: 1131 translation keys (1133 entries per locale incl. `_lang` + `_dir`) across 21 languages via `frontend/i18n/{lang}.json`, `I18n.t()` + `data-i18n` attributes. All files sorted by key for parity audits. R110-R115 translations completed in R116, contribution-mode (R121) keys added across all locales, plain-language refresh (R125 ease-of-use audit) translated across all 21 locales — translator-agent pass — every locale has idiomatic native-language strings, not English fallback.
+- i18n: 1130 translation keys (1132 entries per locale incl. `_lang` + `_dir`) across 21 languages via `frontend/i18n/{lang}.json`, `I18n.t()` + `data-i18n` attributes. All files sorted by key for parity audits. R110-R115 translations completed in R116, contribution-mode (R121) keys added across all locales, plain-language refresh (R125 ease-of-use audit) translated across all 21 locales — translator-agent pass — every locale has idiomatic native-language strings, not English fallback. R126 batch: removed dead `activity.worker_*` + `models.meta_tokenizer`, refreshed encryption copy (`enc.*` ×19 keys, end-to-end honest), added `activity.manifest_rejected` + `models.meta_advanced`, renamed `models.metadata_header` to "Technical Details".
 - Total frontend size target: < 200KB
 - Communication: WebSocket for real-time, REST for initial load, SSE for chat streaming
 - WebSocket message types (only 5): `activity_event` (unified event bus — all subsystem events, toasts, prune history), `stats_update` (2s interval — stats, shard registry, acquisitions, **swarm_capacity** (R110), **wishlist** (R111)), `peer_list` (full peer snapshot on change), `models_changed` (shard download/load/prune signals dashboard refresh), `update_available` (new version detected)
@@ -150,7 +150,7 @@ libp2p 0.56, axum 0.8, candle-core/candle-transformers 0.10 (CUDA), redb 4, ed25
 
 ## Testing
 
-- 913 lib tests passing + 8 ignored (env-var-gated real-model + manual smoke), 75 integration tests in `tests/integration/`, 1 ignored end-to-end (`cargo test --test integration_phase10_11 -- --ignored`), clippy clean
+- 926 lib tests passing + 8 ignored (env-var-gated real-model + manual smoke), 75 integration tests in `tests/integration/`, 1 ignored end-to-end (`cargo test --test integration_phase10_11 -- --ignored`), clippy clean
 - Unit tests: in-module `#[cfg(test)]` blocks
 - Integration tests: `tests/integration/` — multi-node simulations with `--test-threads=1`
 - Real-model spawn-and-infer test: set `SWARMLLM_TEST_MODEL_DIR` to a fully-populated model directory (e.g. `~/.local/share/swarmllm/models/tinyllama-1.1b-...`) and run `cargo test --test integration_phase10_11 -- --ignored end_to_end`. No synthetic GGUF fixture is committed; see `docs/ARCHITECTURE.md` § Deferred Items.
@@ -188,7 +188,7 @@ When spawning subagents in this repo, use these model picks (overrides defaults 
 
 ## Status
 
-All 20 build phases complete. All subsystems wired — no stubs. 913 lib tests + 75 integration tests passing; 8 lib + 1 e2e ignored (env-var or manual). Latest: R121 (auto-manage scale-back at swarm saturation) + sweep arc R122-R124 (28 findings auto-fixed across error variants, dead pub, duplication extraction, input validation, doc drift). Deferred items in `docs/ARCHITECTURE.md` § "Deferred Items".
+All 20 build phases complete. All subsystems wired — no stubs. 926 lib tests + 75 integration tests passing; 8 lib + 1 e2e ignored (env-var or manual). Latest: R126 — bulk follow-ups closure (10 items from `docs/FUTURE_WORK.md`): R121 Setup-wizard contribution toggle, R125 README `<details>` wrap, `worker_*` event removal, "GGUF Metadata" → "Technical Details" rename + Advanced collapse, honest end-to-end encryption copy across 21 locales, manifest tensor-cap ActivityEvent, `LayerResult` wire-format trailers (matched_stop_sequence + token_logprobs, 0x04/0x05 markers), cross-node logprobs through distributed pipeline, `SwarmMessage::CancelInference` cross-wire cancel for remote-generate, TrustManager in-memory cache + startup hydrate. Deferred items in `docs/ARCHITECTURE.md` § "Deferred Items".
 
 ## Common Commands
 

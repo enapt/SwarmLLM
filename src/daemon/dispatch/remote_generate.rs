@@ -105,6 +105,8 @@ pub(super) async fn handle_remote_generate_request(
                     )),
                     text: String::new(),
                     usage: None,
+                    matched_stop_sequence: None,
+                    logprob: None,
                 },
             })
             .await;
@@ -134,6 +136,13 @@ pub(super) async fn handle_remote_generate_request(
         )
         .await
     });
+    // Register the abort handle so an inbound `SwarmMessage::CancelInference`
+    // can stop this decode before it streams more wasted tokens back to the
+    // originator. The map entry is removed below once the decode completes
+    // naturally (or after abort fires).
+    shared_state
+        .inbound_generate_aborts
+        .insert(request_id, gen_fut.abort_handle());
 
     // Forward each token back to the coordinator as a `StreamingToken`.
     // Skip the "done" event emitted by `ModelProcessPool::generate` at the
@@ -160,6 +169,8 @@ pub(super) async fn handle_remote_generate_request(
                 finish_reason: None,
                 text: evt.text,
                 usage: None,
+                matched_stop_sequence: None,
+                logprob: None,
             };
             if forward_net_tx
                 .send(NetworkCommand::SendStreamingToken {
@@ -179,6 +190,9 @@ pub(super) async fn handle_remote_generate_request(
     // usage info. If the generate call errored, emit an Error finish token.
     let gen_result = gen_fut.await;
     let _ = forward_task.await;
+    // Drop the abort handle now that the decode has exited. A late
+    // CancelInference for this request_id becomes a no-op (the entry is gone).
+    shared_state.inbound_generate_aborts.remove(&request_id);
     let final_token = match gen_result {
         Ok(Ok(out)) => StreamingToken {
             request_id,
@@ -193,6 +207,8 @@ pub(super) async fn handle_remote_generate_request(
                 prompt_tokens: out.prompt_tokens,
                 completion_tokens: out.completion_tokens,
             }),
+            matched_stop_sequence: out.matched_stop_sequence,
+            logprob: None,
         },
         Ok(Err(e)) => {
             tracing::warn!(%request_id, error = %e, "remote-generate worker error");
@@ -202,6 +218,8 @@ pub(super) async fn handle_remote_generate_request(
                 finish_reason: Some(NetworkFinishReason::Error(e.to_string())),
                 text: String::new(),
                 usage: None,
+                matched_stop_sequence: None,
+                logprob: None,
             }
         }
         Err(e) => {
@@ -212,6 +230,8 @@ pub(super) async fn handle_remote_generate_request(
                 finish_reason: Some(NetworkFinishReason::Error(format!("task join: {e}"))),
                 text: String::new(),
                 usage: None,
+                matched_stop_sequence: None,
+                logprob: None,
             }
         }
     };

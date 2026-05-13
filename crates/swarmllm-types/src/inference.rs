@@ -412,6 +412,34 @@ pub struct LayerResult {
     /// the R67 fix that nailed this contract.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub spec_logits: Vec<Vec<f32>>,
+    /// The user-provided stop sequence that triggered termination, if any.
+    /// Populated only when `finish_reason == Stop` AND a sequence from
+    /// `SamplingParams.stop` matched the accumulated text. Carried so the
+    /// distributed-path coordinator can populate
+    /// `InferenceOutput.matched_stop_sequence` and Anthropic clients see
+    /// the actual matched sequence rather than `null`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub matched_stop_sequence: Option<String>,
+    /// Per-token log probabilities streamed back through the distributed
+    /// pipeline (one entry per token in `token_ids`). The local-worker
+    /// path collects these via `IpcLayerResult.logprobs`; this field is
+    /// the wire-side equivalent for cross-node inference. Empty when
+    /// `logprobs=false` in the originating request.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub token_logprobs: Vec<TokenLogProbEntry>,
+}
+
+/// A single token's log-probability info for distributed inference responses.
+/// Mirrors the type used by the local worker path so the same structure flows
+/// through both code paths.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TokenLogProbEntry {
+    /// The token text.
+    pub token: String,
+    /// Log probability of this token.
+    pub logprob: f32,
+    /// Top-N alternative tokens with their logprobs.
+    pub top_logprobs: Vec<(String, f32)>,
 }
 
 impl LayerResult {
@@ -431,6 +459,8 @@ impl LayerResult {
             activations: Vec::new(),
             sealed_token_ids: None,
             spec_logits: Vec::new(),
+            matched_stop_sequence: None,
+            token_logprobs: Vec::new(),
         }
     }
 }
@@ -451,6 +481,18 @@ pub struct StreamingToken {
     /// `finish_reason` is `Some`. Ignored on in-flight tokens.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<GenerateUsage>,
+    /// User-provided stop sequence that triggered termination, if any.
+    /// Populated only on the terminal token (`finish_reason == Some(Stop)`),
+    /// and only when the remote worker's stop-string detection produced a
+    /// match. Mirrors the local-worker contract; safe to leave `None` on
+    /// in-flight tokens or when EOS terminated generation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub matched_stop_sequence: Option<String>,
+    /// Optional per-token log probability streamed alongside the token text
+    /// for distributed remote-generate. Empty when `logprobs=false` in the
+    /// request or when the remote worker doesn't compute logprobs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub logprob: Option<TokenLogProbEntry>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]

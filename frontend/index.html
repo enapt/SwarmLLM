@@ -102,6 +102,26 @@
           <div class="setup-contribution-callout" id="contribution-desc" data-i18n="setup.contrib_moderate_desc">Balanced: ~25% CPU, moderate storage. Good for most users.</div>
         </div>
 
+        <!-- Contribution mode: Auto (recommended) / Manual -->
+        <div class="form-group mt-2">
+          <label for="setup-contribution-mode" data-i18n="settings.contribution_mode_label">Contribution Mode</label>
+          <div class="segmented" data-bound-select="setup-contribution-mode">
+            <button type="button" class="segmented-btn active" data-value="auto">
+              <span class="segmented-title" data-i18n="settings.contribution_mode_auto">Auto</span>
+              <span class="segmented-sub" data-i18n="settings.contribution_mode_auto_sub">Scales within your caps</span>
+            </button>
+            <button type="button" class="segmented-btn" data-value="manual">
+              <span class="segmented-title" data-i18n="settings.contribution_mode_manual">Manual</span>
+              <span class="segmented-sub" data-i18n="settings.contribution_mode_manual_sub">Fixed at level above</span>
+            </button>
+          </div>
+          <select id="setup-contribution-mode" class="visually-hidden">
+            <option value="auto" selected data-i18n="settings.contribution_mode_auto">Auto</option>
+            <option value="manual" data-i18n="settings.contribution_mode_manual">Manual</option>
+          </select>
+          <span class="text-muted field-hint" data-i18n="settings.contribution_mode_hint_auto">Auto sheds redundant shards when the swarm has plenty of copies. Manual pins your contribution at the level above.</span>
+        </div>
+
         <!-- Auto-download toggle (modernized as toggle row) -->
         <div class="form-group mt-2 setup-toggle-row">
           <label class="setup-toggle-label">

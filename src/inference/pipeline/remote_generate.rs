@@ -108,7 +108,7 @@ impl PipelineExecutor {
         if self
             .network_tx
             .send(NetworkCommand::SendDirectMessage {
-                target_peer_bytes,
+                target_peer_bytes: target_peer_bytes.clone(),
                 message: msg,
                 // Opt into ACK-timeout tracking. If libp2p rr silently drops
                 // the request (observed under load), the daemon closes
@@ -137,6 +137,8 @@ impl PipelineExecutor {
         let mut finish_reason = String::new();
         let mut prompt_tokens = 0u32;
         let mut completion_tokens = 0u32;
+        let mut matched_stop_seq: Option<String> = None;
+        let mut token_logprobs: Vec<swarmllm_types::TokenLogProbEntry> = Vec::new();
         let mut first = true;
 
         loop {
@@ -148,6 +150,19 @@ impl PipelineExecutor {
                     %request_id,
                     "DIAG: remote-generate cancelled externally"
                 );
+                // Tell the remote to stop streaming wasted tokens too. Best
+                // effort — if the send drops, the remote will hit its own
+                // timeout/EOS naturally.
+                let _ = self
+                    .network_tx
+                    .send(NetworkCommand::SendDirectMessage {
+                        target_peer_bytes: target_peer_bytes.clone(),
+                        message: crate::types::SwarmMessage::CancelInference(
+                            swarmllm_types::CancelInference { request_id },
+                        ),
+                        delivery_request_id: None,
+                    })
+                    .await;
                 self.shared_state.streaming_token_txs.remove(&request_id);
                 finish_reason = "stop".to_string();
                 break;
@@ -197,16 +212,26 @@ impl PipelineExecutor {
                     prompt_tokens = usage.prompt_tokens;
                     completion_tokens = usage.completion_tokens;
                 }
+                if let Some(ms) = tok.matched_stop_sequence.clone() {
+                    matched_stop_seq = Some(ms);
+                }
+                if let Some(lp) = tok.logprob.clone() {
+                    token_logprobs.push(lp);
+                }
                 if let Some(ref tx) = token_tx {
                     let _ = tx
                         .send(StreamingTokenEvent {
                             text: String::new(),
                             finish_reason: Some(finish_reason.clone()),
-                            matched_stop_sequence: None,
+                            matched_stop_sequence: matched_stop_seq.clone(),
                         })
                         .await;
                 }
                 break;
+            }
+
+            if let Some(lp) = tok.logprob.clone() {
+                token_logprobs.push(lp);
             }
 
             // Streaming token: append text + forward to SSE client.
@@ -222,13 +247,22 @@ impl PipelineExecutor {
                         .await
                         .is_err()
                     {
-                        // Client disconnected — stop consuming. We don't have
-                        // a "cancel" path to the remote yet, but the receiver
-                        // will just drain silently.
                         tracing::info!(
                             %request_id,
-                            "remote-generate: client disconnected — draining remote tokens silently"
+                            "remote-generate: client disconnected — sending CancelInference"
                         );
+                        // Tell the remote to stop its decode immediately so it
+                        // doesn't keep streaming tokens we'll discard.
+                        let _ = self
+                            .network_tx
+                            .send(NetworkCommand::SendDirectMessage {
+                                target_peer_bytes: target_peer_bytes.clone(),
+                                message: crate::types::SwarmMessage::CancelInference(
+                                    swarmllm_types::CancelInference { request_id },
+                                ),
+                                delivery_request_id: None,
+                            })
+                            .await;
                         finish_reason = "stop".to_string();
                         break;
                     }
@@ -249,11 +283,12 @@ impl PipelineExecutor {
             completion_tokens,
             finish_reason,
             session_id: self.request.session_id.clone(),
-            token_logprobs: vec![],
-            // remote-generate fast path: stop-sequence detection happens
-            // remotely; the matched string isn't carried over the wire
-            // today (see distributed.rs comment).
-            matched_stop_sequence: None,
+            token_logprobs,
+            // Captured from the terminal StreamingToken above; the remote
+            // worker carries the user-provided matched sequence on the
+            // final token so the API layer can surface it to Anthropic
+            // clients.
+            matched_stop_sequence: matched_stop_seq,
         }))
     }
 }
