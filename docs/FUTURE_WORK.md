@@ -105,12 +105,17 @@ items came up that warrant direction beyond a copy refresh:
 
 1. **README architecture section is intimidating.** _(Closed R126: wrapped behind `<details>` titled "Implementation details (for contributors)".)_
 
-2. **Header is overloaded on first load.** 12+ icons (hamburger, logo, 7
-   tabs, model dropdown, "+ Find model", share, auto-manage, private-mode
-   lock, settings gear, setup chip, language picker, theme toggle, node ID
-   + tier badge + credits, shutdown) appear on the first visit without any
-   explanation. Proposed: a first-run guided tour (single overlay walking
-   through the 4 most important elements) or `?` tooltips on each.
+2. **Header is overloaded on first load.** _(Closed R127:
+   `frontend/js/components/welcome.js` + `#welcome-modal` in `index.html`
+   ship a one-time tour overlay highlighting four key elements (model
+   picker / + Find model / auto-manage / settings). Fires from
+   `App.setup.finish()` and `App.setup.complete()`, and on first load if
+   either flag is already set but `WELCOME_SEEN_KEY` isn't. `Got it`
+   button + close icon + backdrop click all dismiss & persist the seen
+   flag. `Show welcome tour` button in Settings re-opens without
+   clearing the flag. 13 new i18n keys (12 welcome.* + close_aria) +
+   2 settings.* keys translated across all 21 locales — verified live
+   in English, Japanese, and Arabic (RTL flips correctly).)_
 
 3. **`activity.worker_*` events duplicate `activity.model_*` events.** _(Closed R126: both emit sites removed from `process_pool.rs`; i18n keys deleted from all 21 locales; `tracing::info!` retained for operator debugging.)_
 
@@ -140,9 +145,8 @@ items came up that warrant direction beyond a copy refresh:
    ISO 3166-1 alpha-2 code in the native language of each locale,
    without 966 hand-translated entries.)_
 
-**Why deferred.** Item #2 is the only remaining open one and needs a UX
-decision (first-run guided tour vs per-icon `?` tooltips). R126 closed
-#1/#3/#5/#6; R127 closed #4/#7/#8.
+**Status.** All R125 follow-up items now closed. R126 closed
+#1/#3/#5/#6; R127 closed #2/#4/#7/#8.
 
 ---
 

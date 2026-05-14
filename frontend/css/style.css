@@ -5493,3 +5493,33 @@ textarea:focus:not(:focus-visible) {
 }
 
 /* R114: HF browse polish — task filter chips + status CTA pills */
+
+/* R127: welcome tour modal — first-run highlights of the 4 most-used header
+   elements. Centered modal, 4 icon + body rows, single CTA. */
+.welcome-modal { max-width: 520px; }
+.welcome-subtitle { margin: 0 0 16px; font-size: 0.9rem; }
+.welcome-cards {
+  list-style: none; padding: 0; margin: 0 0 16px;
+  display: flex; flex-direction: column; gap: 12px;
+}
+.welcome-card {
+  display: flex; gap: 12px; align-items: flex-start;
+  padding: 12px; border-radius: var(--radius);
+  background: var(--bg-tertiary); border: 1px solid var(--border);
+}
+.welcome-card-icon {
+  flex-shrink: 0; width: 36px; height: 36px;
+  display: flex; align-items: center; justify-content: center;
+  border-radius: 50%; background: var(--bg-secondary);
+  color: var(--accent);
+}
+.welcome-card-body h3 {
+  margin: 0 0 4px; font-size: 0.95rem; font-weight: 600;
+  color: var(--text-primary);
+}
+.welcome-card-body p {
+  margin: 0; font-size: 0.85rem; color: var(--text-secondary); line-height: 1.4;
+}
+.welcome-actions {
+  display: flex; justify-content: flex-end;
+}

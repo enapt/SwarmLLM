@@ -441,6 +441,7 @@
       document.getElementById('setup-modal').classList.add('hidden');
       App.setup._renderFinishChip();
       App.ui.showBanner('success', I18n.t('setup.complete'));
+      if (App.welcome) App.welcome.maybeShow();
     },
 
     // Skip without marking setup complete — surfaces the "Finish setup" chip in the dashboard.
@@ -449,6 +450,7 @@
       document.getElementById('setup-modal').classList.add('hidden');
       App.setup._renderFinishChip();
       App.ui.showBanner('info', I18n.t('setup.skipped'));
+      if (App.welcome) App.welcome.maybeShow();
     },
 
     // Show / hide the dashboard "Finish setup" chip based on storage state.

@@ -745,6 +745,14 @@
 
     App.setup.init();
     App.settings.init();
+    if (App.welcome) {
+      App.welcome.init();
+      // Show the welcome tour once if Setup has been completed or skipped.
+      // Setup.init() above runs synchronously and decides whether to show
+      // the wizard; if the wizard isn't shown, we know we're past first-
+      // run and the welcome modal can present itself.
+      App.welcome.maybeShow();
+    }
     if (App.pool) App.pool.init();
     if (App.autoManageStatus) App.autoManageStatus.init();
     if (App.claudeCode) App.claudeCode.init();

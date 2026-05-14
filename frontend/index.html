@@ -676,7 +676,60 @@
       </details>
       <div class="mt-2 flex-center gap-1">
         <button class="btn btn-primary" id="btn-save-settings" data-i18n="actions.save_settings">Save Settings</button>
-        <button class="btn btn-ghost btn-sm field-hint" id="btn-rerun-setup" data-i18n="settings.rerun_setup" data-i18n-title="settings.rerun_setup_title" title="Re-run the first-time setup wizard" style="margin-left:auto">Re-run Setup</button>
+        <button class="btn btn-ghost btn-sm field-hint" id="btn-show-welcome" data-i18n="settings.show_welcome" data-i18n-title="settings.show_welcome_title" title="Re-open the welcome tour" style="margin-left:auto">Show welcome tour</button>
+        <button class="btn btn-ghost btn-sm field-hint" id="btn-rerun-setup" data-i18n="settings.rerun_setup" data-i18n-title="settings.rerun_setup_title" title="Re-run the first-time setup wizard">Re-run Setup</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Welcome tour modal — shown once after Setup completes/skipped. -->
+  <div class="modal-overlay hidden" id="welcome-modal" role="dialog" aria-modal="true" aria-labelledby="welcome-title">
+    <div class="modal welcome-modal">
+      <div class="modal-header">
+        <h2 id="welcome-title" data-i18n="welcome.title">Welcome to SwarmLLM</h2>
+        <button class="btn btn-ghost btn-sm" id="btn-welcome-close" data-i18n-aria-label="welcome.close_aria" aria-label="Close welcome tour">&times;</button>
+      </div>
+      <p class="text-muted welcome-subtitle" data-i18n="welcome.subtitle">Here are the key things to know to get started.</p>
+      <ul class="welcome-cards">
+        <li class="welcome-card">
+          <div class="welcome-card-icon" aria-hidden="true">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+          </div>
+          <div class="welcome-card-body">
+            <h3 data-i18n="welcome.card1_title">Pick a model</h3>
+            <p data-i18n="welcome.card1_body">Use the dropdown at the top to choose which AI you want to chat with.</p>
+          </div>
+        </li>
+        <li class="welcome-card">
+          <div class="welcome-card-icon" aria-hidden="true">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><line x1="12" y1="8" x2="12" y2="16"/><line x1="8" y1="12" x2="16" y2="12"/></svg>
+          </div>
+          <div class="welcome-card-body">
+            <h3 data-i18n="welcome.card2_title">Add more models</h3>
+            <p data-i18n="welcome.card2_body">Click "+ Find model" in the header to browse open-source models from HuggingFace.</p>
+          </div>
+        </li>
+        <li class="welcome-card">
+          <div class="welcome-card-icon" aria-hidden="true">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/></svg>
+          </div>
+          <div class="welcome-card-body">
+            <h3 data-i18n="welcome.card3_title">Storage takes care of itself</h3>
+            <p data-i18n="welcome.card3_body">Auto-manage keeps the models you use and frees space when needed. Switch to Manual anytime in Settings.</p>
+          </div>
+        </li>
+        <li class="welcome-card">
+          <div class="welcome-card-icon" aria-hidden="true">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+          </div>
+          <div class="welcome-card-body">
+            <h3 data-i18n="welcome.card4_title">Tune anything in Settings</h3>
+            <p data-i18n="welcome.card4_body">The gear icon opens Settings — language, theme, contribution caps, and more.</p>
+          </div>
+        </li>
+      </ul>
+      <div class="welcome-actions">
+        <button class="btn btn-primary" id="btn-welcome-got-it" data-i18n="welcome.cta">Got it</button>
       </div>
     </div>
   </div>
@@ -1746,6 +1799,7 @@
   <script src="/static/js/components/models.js"></script>
   <script src="/static/js/components/settings.js"></script>
   <script src="/static/js/components/setup.js"></script>
+  <script src="/static/js/components/welcome.js"></script>
   <script src="/static/js/components/downloads.js"></script>
   <script src="/static/js/components/identity.js"></script>
   <script src="/static/js/components/network-map.js"></script>

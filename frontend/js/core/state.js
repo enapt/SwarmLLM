@@ -51,6 +51,7 @@ window.App = {
   SETUP_DONE_KEY: 'swarmllm_setup_done',
   SETUP_SKIPPED_KEY: 'swarmllm_setup_skipped',
   SETUP_CHIP_DISMISSED_KEY: 'swarmllm_setup_chip_dismissed',
+  WELCOME_SEEN_KEY: 'swarmllm_welcome_seen',
   HEALTH_INTERVAL_KEY: 'swarmllm_health_interval',
   THEME_KEY: 'swarmllm_theme',
   MODEL_SORT_KEY: 'swarmllm_model_sort',
