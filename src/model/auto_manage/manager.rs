@@ -360,6 +360,11 @@ impl AutoShardManager {
                         interval_secs = new_secs;
                         interval = tokio::time::interval(Duration::from_secs(new_secs));
                         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                        // Skip the immediate first tick — tokio::time::interval fires
+                        // on `.tick()` once at t=0 by default, which would trigger a
+                        // spurious evaluation right after the operator changed the
+                        // interval (R104 follow-up).
+                        interval.tick().await;
                     }
                 }
             }

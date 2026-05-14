@@ -163,6 +163,62 @@ global_holder_count_overrides_local_cap`.)_
 
 ---
 
+_(R104 follow-up — auto-manage interval hot-reload spurious first tick:
+closed R128. `src/model/auto_manage/manager.rs::run` now calls
+`interval.tick().await` immediately after rebuilding the interval in
+the `config_watch_rx.changed()` arm, mirroring the existing pattern at
+line 260 for `request_reset_interval`. Without this, `tokio::time::
+interval`'s first `.tick()` fires at t=0 — every interval hot-reload
+fired a spurious auto-manage evaluation cycle the moment the operator
+changed the value, instead of waiting the new interval. Tracking
+entry was the only thing in the original deferred decision; no
+architectural change.)_
+
+---
+
+## Audit deferral — R128 sweep-log triage
+
+The 2026-05-14 audit pass reviewed all 88 sweep-log `deferred` entries
+and confirmed the remaining items genuinely require user discussion or
+have explicit "won't fix" semantics. Concretely:
+
+- **R103 `x-swarm-forwarded` dual-gate dead code** (`src/api/middleware.rs:432`)
+  — already cleaned up; the inline comment at lines 461-466 explains
+  what was dead and why falling through to Bearer auth is correct.
+  Move to `fixed` on next sweep close.
+
+- **R103 `batch_scheduler_loop` no JoinHandle / catch_unwind**
+  (`src/inference/process_pool.rs:792`) — kept deferred. A panic in
+  the scheduler degrades to direct-execution fallback (forward() only
+  uses the channel when batching is on and the channel is alive), so
+  this is performance-degradation not correctness. Adding catch_unwind
+  across an async boundary requires structural changes (UnwindSafe
+  bounds, poison handling) that aren't justified by the failure mode.
+  Won't fix unless a concrete panic site appears.
+
+- **R105 libp2p relay `..Default::default()` "possibly open"**
+  (`src/network/relay.rs:51`) — verified safe against libp2p-relay
+  0.21.1: the only fields covered by the default fallback are
+  `reservation_rate_limiters` and `circuit_src_rate_limiters`, both of
+  which default to **conservative** per-peer/per-IP rate limits
+  (30/peer/2min, 60/ip/min). No "open" surface. Move to `wontfix` on
+  next sweep close.
+
+- **R105 latency sample ring time-coverage**
+  (`src/api/metrics.rs:160`) — kept deferred. Requires changing the
+  sample storage from `VecDeque<f64>` to `VecDeque<(Instant, f64)>`
+  plus drop-by-age on insert and at every `compute_latency_stats`
+  call. Affects multiple call sites and adds memory overhead for a
+  cosmetic improvement on lightly-loaded nodes. Not correctness;
+  defer until p99 inaccuracy becomes a real operator complaint.
+
+- All remaining deferred entries (Qwen 3.5 DeltaNet shape verification,
+  GossipSub PeerScore tuning, DHT provider capability challenge, etc.)
+  are explicitly architectural / design discussions matching the
+  user's "defer items needing discussion" directive.
+
+---
+
 ## How to use this file
 
 When starting a new feature, grep this file for keywords related to the area you're touching. If your feature unblocks a deferred item, either pick it up in the same PR (if scope allows) or move the entry to "completed" with the closing commit reference.
