@@ -105,7 +105,19 @@ jobs:
           sudo apt-get install -y libssl-dev pkg-config
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          key: clippy-${{ matrix.os }}-${{ matrix.features }}
+          # Bump the `vN` suffix whenever an upstream runner-image change
+          # leaves a cached `~/.cargo/bin` incompatible with the new image's
+          # rustup. Symptom is `cargo clippy` failing instantly with
+          # `unexpected argument 'clippy' found` from rustup-init — the
+          # cached cargo proxy is older than the freshly installed rustup.
+          # Observed once on macos-15-arm64 image bump 20260427 → 20260511;
+          # `cache-bin: false` below prevents recurrence, this suffix
+          # invalidates the already-poisoned cache.
+          key: clippy-${{ matrix.os }}-${{ matrix.features }}-v2
+          # We don't `cargo install` anything in clippy, so there's nothing
+          # to cache in `~/.cargo/bin`. Disabling stops cached proxies from
+          # ever overwriting a runtime-installed rustup.
+          cache-bin: false
       - run: cargo clippy --locked ${{ matrix.flags }} --all-targets -- -D warnings
 
   test:
@@ -126,7 +138,9 @@ jobs:
           sudo apt-get install -y libssl-dev pkg-config
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          key: test-${{ matrix.os }}
+          # See clippy step above for the rationale on -v2 + cache-bin: false.
+          key: test-${{ matrix.os }}-v2
+          cache-bin: false
       - name: Run unit tests
         run: cargo test --locked --lib --bins
       - name: Run unit tests (dev,claude-subscription features)
@@ -165,7 +179,9 @@ jobs:
           sudo apt-get install -y libssl-dev pkg-config
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          key: ${{ matrix.os }}
+          # See clippy step above for the rationale on -v2 + cache-bin: false.
+          key: ${{ matrix.os }}-v2
+          cache-bin: false
       - run: cargo build --locked --release
 
   # Compile-check feature paths that aren't covered by the main test/build
@@ -222,7 +238,12 @@ jobs:
           stripdown: true
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          key: feature-check-${{ matrix.features }}
+          # See clippy step for the rationale on cache-bin: false. Ubuntu
+          # hasn't bumped recently, but applying the same defense here
+          # makes the workflow consistently insulated from this failure
+          # mode if/when it does.
+          key: feature-check-${{ matrix.features }}-v2
+          cache-bin: false
       # candle-kernels' build.rs runs `nvidia-smi` to auto-detect the
       # compute capability when CUDA_COMPUTE_CAP is unset. Stock GH
       # runners have no GPU and no nvidia-smi, so we pin the compile
