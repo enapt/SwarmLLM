@@ -233,23 +233,21 @@ jobs:
         if: matrix.features == 'windows-gpu'
         uses: jakoch/install-vulkan-sdk-action@85a045da72257cc52d4b11e0d4125ab8a7b768e4 # v1
         with:
-          # Pin a specific Vulkan SDK version. The action's default
-          # ("latest") has a cache bug where the version-detection path
-          # drifts from the cached version: it restores e.g. cached
-          # 1.4.341.1 but then looks for the SDK at /home/runner/vulkan-sdk/
-          # 1.4.350.0/x86_64, fails with "Vulkan SDK path doesn't exist",
-          # leaves Vulkan_LIBRARY unset, and CMake later panics with
-          # "Could NOT find Vulkan (missing: Vulkan_LIBRARY ...)". This
-          # only surfaces when the cargo cache misses and llama-cpp-sys-2
-          # has to re-run its CMake/Vulkan build (otherwise the action's
-          # warning is harmless because Rust never touches Vulkan
-          # again). Pin to today's latest so the action's path-derivation
-          # matches whatever it (re)downloads or restores from cache.
-          # Bump this whenever the upstream Vulkan SDK installer drops
-          # support for the pinned version.
+          # `cache: false` is mandatory. The action has a bug where its
+          # cache-restore step ignores the `vulkan_version` input: it
+          # restores whatever vulkan-sdk-* cache it can find (e.g. a
+          # stale 1.4.341.1 from prior CI), then sets all env vars
+          # against the *requested* version path (e.g. 1.4.350.0/x86_64),
+          # which doesn't exist. CMake then panics on first
+          # find_package(Vulkan) call. Verified against the action's
+          # behaviour over three CI runs (25854399133, 25855430639,
+          # 25856091708): both default ("latest") and pinned versions
+          # produced identical wrong-version restores. Disabling the
+          # action's cache forces a fresh download (~5s overhead) and
+          # makes the path-derivation match the actual install.
           vulkan_version: 1.4.350.0
           install_runtime: true
-          cache: true
+          cache: false
           stripdown: true
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
