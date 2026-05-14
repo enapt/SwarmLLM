@@ -238,11 +238,18 @@ jobs:
           stripdown: true
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          # See clippy step for the rationale on cache-bin: false. Ubuntu
-          # hasn't bumped recently, but applying the same defense here
-          # makes the workflow consistently insulated from this failure
-          # mode if/when it does.
-          key: feature-check-${{ matrix.features }}-v2
+          # Don't bump this with -vN — the windows-gpu feature pulls in
+          # llama-cpp-sys-2 which CMake-builds `llama.cpp` linked against
+          # Vulkan. A full rebuild needs the Vulkan SDK installed, and
+          # jakoch/install-vulkan-sdk-action has a known cache bug where
+          # the version-detection path drifts from the cached version
+          # (restored 1.4.341.1, expected 1.4.350.0 → CMake "Could NOT
+          # find Vulkan"). On Ubuntu the macOS image-bump issue doesn't
+          # apply, so keeping the cargo cache warm is strictly safer.
+          # If a future image bump invalidates this anyway, pin the
+          # action with `vulkan_version: 1.4.350.0` instead of bumping
+          # the key.
+          key: feature-check-${{ matrix.features }}
           cache-bin: false
       # candle-kernels' build.rs runs `nvidia-smi` to auto-detect the
       # compute capability when CUDA_COMPUTE_CAP is unset. Stock GH
