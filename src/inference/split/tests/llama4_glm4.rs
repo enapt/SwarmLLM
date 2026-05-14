@@ -4,9 +4,8 @@
 
 use super::super::rope::precompute_freqs_cis;
 use super::super::*;
-use candle_core::quantized::QTensor;
+use super::common::{make_qmatmul, make_rms_norm, make_rms_norm_dim};
 use candle_core::{DType, Device, Tensor};
-use candle_transformers::quantized_nn::RmsNorm;
 
 #[test]
 fn test_glm4_arch_supported() {
@@ -39,22 +38,13 @@ fn test_partial_rope_glm4_style() {
     let (cos, sin) = precompute_freqs_cis(rope_dim, 10000.0, max_seq_len, &device).unwrap();
     let neg_inf = Tensor::new(f32::NEG_INFINITY, &device).unwrap();
 
-    let make_qmatmul = |in_d: usize, out_d: usize| -> QMatMul {
-        let w = Tensor::randn(0f32, 0.02, (out_d, in_d), &device).unwrap();
-        let qt = QTensor::quantize(&w, candle_core::quantized::GgmlDType::F32).unwrap();
-        QMatMul::from_qtensor(qt).expect("QMatMul load failed")
-    };
     let norm_w = Tensor::ones((n_head * head_dim,), DType::F32, &device).unwrap();
-    let make_rms_norm = |w: &Tensor| {
-        let qt = QTensor::quantize(w, candle_core::quantized::GgmlDType::F32).unwrap();
-        RmsNorm::from_qtensor(qt, 1e-6).expect("RmsNorm load failed")
-    };
 
     let lw = LayerWeights {
-        attention_wq: make_qmatmul(n_head * head_dim, n_head * head_dim),
-        attention_wk: make_qmatmul(n_head * head_dim, n_head * head_dim),
-        attention_wv: make_qmatmul(n_head * head_dim, n_head * head_dim),
-        attention_wo: make_qmatmul(n_head * head_dim, n_head * head_dim),
+        attention_wq: make_qmatmul(n_head * head_dim, n_head * head_dim, &device),
+        attention_wk: make_qmatmul(n_head * head_dim, n_head * head_dim, &device),
+        attention_wv: make_qmatmul(n_head * head_dim, n_head * head_dim, &device),
+        attention_wo: make_qmatmul(n_head * head_dim, n_head * head_dim, &device),
         attention_bq: None,
         attention_bk: None,
         attention_bv: None,
@@ -62,9 +52,13 @@ fn test_partial_rope_glm4_style() {
         attn_q_norm: None,
         attn_k_norm: None,
         ffn: FfnVariant::Dense(Mlp {
-            ffn_gate: Some(make_qmatmul(n_head * head_dim, n_head * head_dim * 4)),
-            ffn_down: make_qmatmul(n_head * head_dim * 4, n_head * head_dim),
-            ffn_up: make_qmatmul(n_head * head_dim, n_head * head_dim * 4),
+            ffn_gate: Some(make_qmatmul(
+                n_head * head_dim,
+                n_head * head_dim * 4,
+                &device,
+            )),
+            ffn_down: make_qmatmul(n_head * head_dim * 4, n_head * head_dim, &device),
+            ffn_up: make_qmatmul(n_head * head_dim, n_head * head_dim * 4, &device),
             activation: Activation::SiLU,
         }),
         ffn_norm: make_rms_norm(&norm_w),
@@ -115,22 +109,13 @@ fn test_nope_skip_rope() {
     let (cos, sin) = precompute_freqs_cis(head_dim, 10000.0, 32, &device).unwrap();
     let neg_inf = Tensor::new(f32::NEG_INFINITY, &device).unwrap();
 
-    let make_qmatmul = |in_d: usize, out_d: usize| -> QMatMul {
-        let w = Tensor::randn(0f32, 0.02, (out_d, in_d), &device).unwrap();
-        let qt = QTensor::quantize(&w, candle_core::quantized::GgmlDType::F32).unwrap();
-        QMatMul::from_qtensor(qt).expect("QMatMul load failed")
-    };
     let norm_w = Tensor::ones((n_head * head_dim,), DType::F32, &device).unwrap();
-    let make_rms_norm = |w: &Tensor| {
-        let qt = QTensor::quantize(w, candle_core::quantized::GgmlDType::F32).unwrap();
-        RmsNorm::from_qtensor(qt, 1e-6).expect("RmsNorm load failed")
-    };
 
     let lw = LayerWeights {
-        attention_wq: make_qmatmul(n_head * head_dim, n_head * head_dim),
-        attention_wk: make_qmatmul(n_head * head_dim, n_head * head_dim),
-        attention_wv: make_qmatmul(n_head * head_dim, n_head * head_dim),
-        attention_wo: make_qmatmul(n_head * head_dim, n_head * head_dim),
+        attention_wq: make_qmatmul(n_head * head_dim, n_head * head_dim, &device),
+        attention_wk: make_qmatmul(n_head * head_dim, n_head * head_dim, &device),
+        attention_wv: make_qmatmul(n_head * head_dim, n_head * head_dim, &device),
+        attention_wo: make_qmatmul(n_head * head_dim, n_head * head_dim, &device),
         attention_bq: None,
         attention_bk: None,
         attention_bv: None,
@@ -138,9 +123,13 @@ fn test_nope_skip_rope() {
         attn_q_norm: None,
         attn_k_norm: None,
         ffn: FfnVariant::Dense(Mlp {
-            ffn_gate: Some(make_qmatmul(n_head * head_dim, n_head * head_dim * 4)),
-            ffn_down: make_qmatmul(n_head * head_dim * 4, n_head * head_dim),
-            ffn_up: make_qmatmul(n_head * head_dim, n_head * head_dim * 4),
+            ffn_gate: Some(make_qmatmul(
+                n_head * head_dim,
+                n_head * head_dim * 4,
+                &device,
+            )),
+            ffn_down: make_qmatmul(n_head * head_dim * 4, n_head * head_dim, &device),
+            ffn_up: make_qmatmul(n_head * head_dim, n_head * head_dim * 4, &device),
             activation: Activation::SiLU,
         }),
         ffn_norm: make_rms_norm(&norm_w),
@@ -241,17 +230,6 @@ fn test_llama4_moe_layer_forward() {
     let (cos, sin) = precompute_freqs_cis(rope_dim, 10000.0, max_seq_len, &device).unwrap();
     let neg_inf = Tensor::new(f32::NEG_INFINITY, &device).unwrap();
 
-    let make_qmatmul = |in_d: usize, out_d: usize| -> QMatMul {
-        let w = Tensor::randn(0f32, 0.02, (out_d, in_d), &device).unwrap();
-        let qt = QTensor::quantize(&w, candle_core::quantized::GgmlDType::F32).unwrap();
-        QMatMul::from_qtensor(qt).expect("QMatMul load failed")
-    };
-    let make_rms_norm = |dim: usize| -> RmsNorm {
-        let w = Tensor::ones((dim,), DType::F32, &device).unwrap();
-        let qt = QTensor::quantize(&w, candle_core::quantized::GgmlDType::F32).unwrap();
-        RmsNorm::from_qtensor(qt, 1e-6).expect("RmsNorm load failed")
-    };
-
     let kv_dim = n_kv_head * head_dim;
 
     // Build a mix of dense + MoE layers (like Llama 4)
@@ -287,26 +265,26 @@ fn test_llama4_moe_layer_forward() {
         } else {
             // Dense FFN on even indices
             FfnVariant::Dense(Mlp {
-                ffn_gate: Some(make_qmatmul(hidden_dim, intermediate)),
-                ffn_down: make_qmatmul(intermediate, hidden_dim),
-                ffn_up: make_qmatmul(hidden_dim, intermediate),
+                ffn_gate: Some(make_qmatmul(hidden_dim, intermediate, &device)),
+                ffn_down: make_qmatmul(intermediate, hidden_dim, &device),
+                ffn_up: make_qmatmul(hidden_dim, intermediate, &device),
                 activation: Activation::SiLU,
             })
         };
 
         layers.push(LayerVariant::Dense(LayerWeights {
-            attention_wq: make_qmatmul(hidden_dim, hidden_dim),
-            attention_wk: make_qmatmul(hidden_dim, kv_dim),
-            attention_wv: make_qmatmul(hidden_dim, kv_dim),
-            attention_wo: make_qmatmul(hidden_dim, hidden_dim),
+            attention_wq: make_qmatmul(hidden_dim, hidden_dim, &device),
+            attention_wk: make_qmatmul(hidden_dim, kv_dim, &device),
+            attention_wv: make_qmatmul(hidden_dim, kv_dim, &device),
+            attention_wo: make_qmatmul(hidden_dim, hidden_dim, &device),
             attention_bq: None,
             attention_bk: None,
             attention_bv: None,
-            attention_norm: make_rms_norm(hidden_dim),
+            attention_norm: make_rms_norm_dim(hidden_dim, &device),
             attn_q_norm: None,
             attn_k_norm: None,
             ffn,
-            ffn_norm: make_rms_norm(hidden_dim),
+            ffn_norm: make_rms_norm_dim(hidden_dim, &device),
             post_attention_norm: None,
             post_ffw_norm: None,
             n_head,

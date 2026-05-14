@@ -11,6 +11,29 @@ use candle_core::{DType, Device, Tensor};
 use candle_nn::kv_cache::KvCache;
 use candle_transformers::quantized_nn::RmsNorm;
 
+/// Build a randomly-initialised QMatMul of shape (out_d, in_d) on `device`.
+///
+/// All split-model tests use this exact recipe (randn(0, 0.02) → F32 QTensor →
+/// QMatMul). Extracted here to deduplicate ~6 inline copies across `common.rs`,
+/// `llama4_glm4.rs`, and friends.
+pub(super) fn make_qmatmul(in_d: usize, out_d: usize, device: &Device) -> QMatMul {
+    let w = Tensor::randn(0f32, 0.02, (out_d, in_d), device).unwrap();
+    let qt = QTensor::quantize(&w, candle_core::quantized::GgmlDType::F32).unwrap();
+    QMatMul::from_qtensor(qt).expect("QMatMul load failed")
+}
+
+/// Wrap an already-built weight tensor as an `RmsNorm` (eps=1e-6).
+pub(super) fn make_rms_norm(w: &Tensor) -> RmsNorm {
+    let qt = QTensor::quantize(w, candle_core::quantized::GgmlDType::F32).unwrap();
+    RmsNorm::from_qtensor(qt, 1e-6).expect("RmsNorm load failed")
+}
+
+/// Build an `RmsNorm` of the given dimensionality on `device`, initialised to ones.
+pub(super) fn make_rms_norm_dim(dim: usize, device: &Device) -> RmsNorm {
+    let w = Tensor::ones((dim,), DType::F32, device).unwrap();
+    make_rms_norm(&w)
+}
+
 /// Append a single position to a KvCache. Helper for the truncate tests.
 pub(super) fn append_pos(cache: &mut KvCache, key: f32, val: f32) {
     let k = Tensor::from_vec(vec![key, key], &[1, 1, 1, 2], &Device::Cpu).unwrap();
@@ -60,13 +83,6 @@ fn make_test_split_model_impl(
     let n_head = hidden_dim / head_dim;
     let n_kv_head = n_head; // no GQA in test model
 
-    let make_qmatmul = |in_d: usize, out_d: usize| -> QMatMul {
-        // Create a random weight tensor and quantize it
-        let w = Tensor::randn(0f32, 0.02, (out_d, in_d), &device).unwrap();
-        let qt = QTensor::quantize(&w, candle_core::quantized::GgmlDType::F32).unwrap();
-        QMatMul::from_qtensor(qt).expect("QMatMul load failed")
-    };
-
     let max_seq_len = 128;
     let rope_dim = head_dim;
     let freq_base = 10000.0f32;
@@ -84,15 +100,11 @@ fn make_test_split_model_impl(
     let mut layers = Vec::new();
     for _ in 0..num_layers {
         let norm_w = Tensor::ones((hidden_dim,), DType::F32, &device).unwrap();
-        let make_rms_norm = |w: &Tensor| {
-            let qt = QTensor::quantize(w, candle_core::quantized::GgmlDType::F32).unwrap();
-            RmsNorm::from_qtensor(qt, 1e-6).expect("RmsNorm load failed")
-        };
         layers.push(LayerVariant::Dense(LayerWeights {
-            attention_wq: make_qmatmul(hidden_dim, hidden_dim),
-            attention_wk: make_qmatmul(hidden_dim, hidden_dim),
-            attention_wv: make_qmatmul(hidden_dim, hidden_dim),
-            attention_wo: make_qmatmul(hidden_dim, hidden_dim),
+            attention_wq: make_qmatmul(hidden_dim, hidden_dim, &device),
+            attention_wk: make_qmatmul(hidden_dim, hidden_dim, &device),
+            attention_wv: make_qmatmul(hidden_dim, hidden_dim, &device),
+            attention_wo: make_qmatmul(hidden_dim, hidden_dim, &device),
             attention_bq: None,
             attention_bk: None,
             attention_bv: None,
@@ -100,9 +112,9 @@ fn make_test_split_model_impl(
             attn_q_norm: None,
             attn_k_norm: None,
             ffn: FfnVariant::Dense(Mlp {
-                ffn_gate: Some(make_qmatmul(hidden_dim, hidden_dim * 4)),
-                ffn_down: make_qmatmul(hidden_dim * 4, hidden_dim),
-                ffn_up: make_qmatmul(hidden_dim, hidden_dim * 4),
+                ffn_gate: Some(make_qmatmul(hidden_dim, hidden_dim * 4, &device)),
+                ffn_down: make_qmatmul(hidden_dim * 4, hidden_dim, &device),
+                ffn_up: make_qmatmul(hidden_dim, hidden_dim * 4, &device),
                 activation: Activation::SiLU,
             }),
             ffn_norm: make_rms_norm(&norm_w),
@@ -160,12 +172,6 @@ pub(super) fn make_gqa_test_model(
     let device = candle_core::Device::Cpu;
     let head_dim = hidden_dim / n_head;
 
-    let make_qmatmul = |in_d: usize, out_d: usize| -> QMatMul {
-        let w = Tensor::randn(0f32, 0.02, (out_d, in_d), &device).unwrap();
-        let qt = QTensor::quantize(&w, candle_core::quantized::GgmlDType::F32).unwrap();
-        QMatMul::from_qtensor(qt).expect("QMatMul load failed")
-    };
-
     let max_seq_len = 128;
     let rope_dim = head_dim;
     let (cos, sin) = precompute_freqs_cis(rope_dim, 10000.0, max_seq_len, &device).unwrap();
@@ -175,15 +181,11 @@ pub(super) fn make_gqa_test_model(
     let mut layers = Vec::new();
     for _ in 0..num_layers {
         let norm_w = Tensor::ones((hidden_dim,), DType::F32, &device).unwrap();
-        let make_rms_norm = |w: &Tensor| {
-            let qt = QTensor::quantize(w, candle_core::quantized::GgmlDType::F32).unwrap();
-            RmsNorm::from_qtensor(qt, 1e-6).expect("RmsNorm load failed")
-        };
         layers.push(LayerVariant::Dense(LayerWeights {
-            attention_wq: make_qmatmul(hidden_dim, hidden_dim),
-            attention_wk: make_qmatmul(hidden_dim, kv_dim),
-            attention_wv: make_qmatmul(hidden_dim, kv_dim),
-            attention_wo: make_qmatmul(hidden_dim, hidden_dim),
+            attention_wq: make_qmatmul(hidden_dim, hidden_dim, &device),
+            attention_wk: make_qmatmul(hidden_dim, kv_dim, &device),
+            attention_wv: make_qmatmul(hidden_dim, kv_dim, &device),
+            attention_wo: make_qmatmul(hidden_dim, hidden_dim, &device),
             attention_bq: None,
             attention_bk: None,
             attention_bv: None,
@@ -191,9 +193,9 @@ pub(super) fn make_gqa_test_model(
             attn_q_norm: None,
             attn_k_norm: None,
             ffn: FfnVariant::Dense(Mlp {
-                ffn_gate: Some(make_qmatmul(hidden_dim, hidden_dim * 4)),
-                ffn_down: make_qmatmul(hidden_dim * 4, hidden_dim),
-                ffn_up: make_qmatmul(hidden_dim, hidden_dim * 4),
+                ffn_gate: Some(make_qmatmul(hidden_dim, hidden_dim * 4, &device)),
+                ffn_down: make_qmatmul(hidden_dim * 4, hidden_dim, &device),
+                ffn_up: make_qmatmul(hidden_dim, hidden_dim * 4, &device),
                 activation,
             }),
             ffn_norm: make_rms_norm(&norm_w),
@@ -263,17 +265,6 @@ pub(super) fn make_deepseek_test_model(hidden_dim: usize) -> SplitModel {
     let n_experts = 4;
     let n_experts_used = 2;
 
-    let make_qmatmul = |in_d: usize, out_d: usize| -> QMatMul {
-        let w = Tensor::randn(0f32, 0.02, (out_d, in_d), &device).unwrap();
-        let qt = QTensor::quantize(&w, candle_core::quantized::GgmlDType::F32).unwrap();
-        QMatMul::from_qtensor(qt).expect("QMatMul load failed")
-    };
-    let make_rms_norm = |dim: usize| -> RmsNorm {
-        let w = Tensor::ones((dim,), DType::F32, &device).unwrap();
-        let qt = QTensor::quantize(&w, candle_core::quantized::GgmlDType::F32).unwrap();
-        RmsNorm::from_qtensor(qt, 1e-6).expect("RmsNorm load failed")
-    };
-
     let nope_dim = key_length - rope_dim;
     let max_seq_len = 128;
     let (cos, sin) = precompute_freqs_cis(rope_dim, 10000.0, max_seq_len, &device).unwrap();
@@ -284,23 +275,23 @@ pub(super) fn make_deepseek_test_model(hidden_dim: usize) -> SplitModel {
     let (dense_cos, dense_sin) =
         precompute_freqs_cis(head_dim, 10000.0, max_seq_len, &device).unwrap();
     let dense_layer = LayerVariant::Dense(LayerWeights {
-        attention_wq: make_qmatmul(hidden_dim, hidden_dim),
-        attention_wk: make_qmatmul(hidden_dim, hidden_dim),
-        attention_wv: make_qmatmul(hidden_dim, hidden_dim),
-        attention_wo: make_qmatmul(hidden_dim, hidden_dim),
+        attention_wq: make_qmatmul(hidden_dim, hidden_dim, &device),
+        attention_wk: make_qmatmul(hidden_dim, hidden_dim, &device),
+        attention_wv: make_qmatmul(hidden_dim, hidden_dim, &device),
+        attention_wo: make_qmatmul(hidden_dim, hidden_dim, &device),
         attention_bq: None,
         attention_bk: None,
         attention_bv: None,
-        attention_norm: make_rms_norm(hidden_dim),
+        attention_norm: make_rms_norm_dim(hidden_dim, &device),
         attn_q_norm: None,
         attn_k_norm: None,
         ffn: FfnVariant::Dense(Mlp {
-            ffn_gate: Some(make_qmatmul(hidden_dim, intermediate)),
-            ffn_down: make_qmatmul(intermediate, hidden_dim),
-            ffn_up: make_qmatmul(hidden_dim, intermediate),
+            ffn_gate: Some(make_qmatmul(hidden_dim, intermediate, &device)),
+            ffn_down: make_qmatmul(intermediate, hidden_dim, &device),
+            ffn_up: make_qmatmul(hidden_dim, intermediate, &device),
             activation: Activation::SiLU,
         }),
-        ffn_norm: make_rms_norm(hidden_dim),
+        ffn_norm: make_rms_norm_dim(hidden_dim, &device),
         post_attention_norm: None,
         post_ffw_norm: None,
         n_head,
@@ -317,13 +308,13 @@ pub(super) fn make_deepseek_test_model(hidden_dim: usize) -> SplitModel {
 
     // Layer 1: DeepSeek MLA + MoE
     let mla = MlaWeights {
-        q_a: make_qmatmul(hidden_dim, q_lora_rank),
-        q_a_norm: make_rms_norm(q_lora_rank),
-        q_b: make_qmatmul(q_lora_rank, n_head * key_length),
-        kv_a: make_qmatmul(hidden_dim, kv_lora_rank + rope_dim),
-        kv_a_norm: make_rms_norm(kv_lora_rank),
-        kv_b: make_qmatmul(kv_lora_rank, n_head * (nope_dim + value_length)),
-        output: make_qmatmul(n_head * value_length, hidden_dim),
+        q_a: make_qmatmul(hidden_dim, q_lora_rank, &device),
+        q_a_norm: make_rms_norm_dim(q_lora_rank, &device),
+        q_b: make_qmatmul(q_lora_rank, n_head * key_length, &device),
+        kv_a: make_qmatmul(hidden_dim, kv_lora_rank + rope_dim, &device),
+        kv_a_norm: make_rms_norm_dim(kv_lora_rank, &device),
+        kv_b: make_qmatmul(kv_lora_rank, n_head * (nope_dim + value_length), &device),
+        output: make_qmatmul(n_head * value_length, hidden_dim, &device),
         n_head,
         key_length,
         value_length,
@@ -350,8 +341,8 @@ pub(super) fn make_deepseek_test_model(hidden_dim: usize) -> SplitModel {
     let deepseek_layer = LayerVariant::DeepSeek {
         attention: mla,
         ffn: FfnVariant::MoE(moe),
-        attention_norm: make_rms_norm(hidden_dim),
-        ffn_norm: make_rms_norm(hidden_dim),
+        attention_norm: make_rms_norm_dim(hidden_dim, &device),
+        ffn_norm: make_rms_norm_dim(hidden_dim, &device),
     };
 
     SplitModel {
