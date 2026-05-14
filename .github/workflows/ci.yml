@@ -229,31 +229,26 @@ jobs:
       # half builds llama-cpp-sys-2's CMake project with -DGGML_VULKAN=ON,
       # which needs Vulkan_LIBRARY, Vulkan_INCLUDE_DIR, and glslc on the
       # builder. Install only when the matrix is windows-gpu.
+      #
+      # We use Ubuntu's apt-shipped Vulkan packages instead of
+      # jakoch/install-vulkan-sdk-action because that action's Linux
+      # path is broken in multiple ways (verified against four CI runs
+      # 25854399133/25855430639/25856091708/25857316131):
+      #   1. cache: true restores a stale vulkan-sdk-* version
+      #      regardless of the vulkan_version input;
+      #   2. stripdown: true removes libvulkan.so → CMake can't find
+      #      Vulkan_LIBRARY;
+      #   3. stripdown: false + cache: false still doesn't expose
+      #      libvulkan.so where `find_package(Vulkan)` looks.
+      # libvulkan-dev + glslang-tools is the standard Ubuntu route and
+      # exposes Vulkan_LIBRARY, Vulkan_INCLUDE_DIR, and glslangValidator
+      # in /usr/{lib,include,bin} where CMake's FindVulkan module
+      # canonically looks.
       - name: Install Vulkan SDK (windows-gpu feature only)
         if: matrix.features == 'windows-gpu'
-        uses: jakoch/install-vulkan-sdk-action@85a045da72257cc52d4b11e0d4125ab8a7b768e4 # v1
-        with:
-          # `cache: false` is mandatory. The action has a bug where its
-          # cache-restore step ignores the `vulkan_version` input: it
-          # restores whatever vulkan-sdk-* cache it can find (e.g. a
-          # stale 1.4.341.1 from prior CI), then sets all env vars
-          # against the *requested* version path (e.g. 1.4.350.0/x86_64),
-          # which doesn't exist. CMake then panics on first
-          # find_package(Vulkan) call. Verified against the action's
-          # behaviour over three CI runs (25854399133, 25855430639,
-          # 25856091708): both default ("latest") and pinned versions
-          # produced identical wrong-version restores. Disabling the
-          # action's cache forces a fresh download (~5s overhead) and
-          # makes the path-derivation match the actual install.
-          vulkan_version: 1.4.350.0
-          install_runtime: true
-          cache: false
-          # stripdown: true removes the SDK's library files (libvulkan.so
-          # etc.) to save disk space, but `find_package(Vulkan)` then
-          # fails with `Could NOT find Vulkan (missing: Vulkan_LIBRARY)
-          # (found version "1.4.350")` because the SDK metadata is
-          # present but no library to link against. Keep the full SDK.
-          stripdown: false
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libvulkan-dev glslang-tools glslc
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           # Don't bump this with -vN — the windows-gpu feature pulls in
