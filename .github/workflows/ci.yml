@@ -248,7 +248,12 @@ jobs:
           vulkan_version: 1.4.350.0
           install_runtime: true
           cache: false
-          stripdown: true
+          # stripdown: true removes the SDK's library files (libvulkan.so
+          # etc.) to save disk space, but `find_package(Vulkan)` then
+          # fails with `Could NOT find Vulkan (missing: Vulkan_LIBRARY)
+          # (found version "1.4.350")` because the SDK metadata is
+          # present but no library to link against. Keep the full SDK.
+          stripdown: false
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           # Don't bump this with -vN — the windows-gpu feature pulls in
