@@ -233,6 +233,21 @@ jobs:
         if: matrix.features == 'windows-gpu'
         uses: jakoch/install-vulkan-sdk-action@85a045da72257cc52d4b11e0d4125ab8a7b768e4 # v1
         with:
+          # Pin a specific Vulkan SDK version. The action's default
+          # ("latest") has a cache bug where the version-detection path
+          # drifts from the cached version: it restores e.g. cached
+          # 1.4.341.1 but then looks for the SDK at /home/runner/vulkan-sdk/
+          # 1.4.350.0/x86_64, fails with "Vulkan SDK path doesn't exist",
+          # leaves Vulkan_LIBRARY unset, and CMake later panics with
+          # "Could NOT find Vulkan (missing: Vulkan_LIBRARY ...)". This
+          # only surfaces when the cargo cache misses and llama-cpp-sys-2
+          # has to re-run its CMake/Vulkan build (otherwise the action's
+          # warning is harmless because Rust never touches Vulkan
+          # again). Pin to today's latest so the action's path-derivation
+          # matches whatever it (re)downloads or restores from cache.
+          # Bump this whenever the upstream Vulkan SDK installer drops
+          # support for the pinned version.
+          vulkan_version: 1.4.350.0
           install_runtime: true
           cache: true
           stripdown: true
