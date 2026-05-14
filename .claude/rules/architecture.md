@@ -217,6 +217,33 @@ silently break at the wire if duplicated:
   shard or shard-set acquisition MUST go through this helper rather
   than open-coding the three-step sequence.
 
+## ModelRegistry Holder Counts
+
+`ModelRegistry::shard_holders` caches at most `MAX_HOLDERS_PER_SHARD = 50`
+holders per shard (LRU-evicted, local node never evicted). This is the
+**routing oracle** — pipeline scheduler, region eviction, busy-holder
+check etc. all read this map.
+
+`ModelRegistry::global_holder_count` holds the **uncapped swarm-wide
+count** from the most recent DHT `GetProviders` response, written by
+`network/manager/dht.rs::handle_dht_providers_found` with the raw
+`providers.len()` (PeerId count, not the resolved NodeId count — some
+PeerIds may fail to resolve but they're still distinct providers in the
+DHT's view). This is the **prune-score oracle** — `model/auto_manage/
+prune.rs` uses `max(cached_holder_count, global_holder_count)` for the
+`redundancy_ratio` numerator and the severe-saturation bonus check.
+
+Don't:
+- Read `global_holder_count` for routing decisions — DHT staleness is
+  fine for an O(hundreds of seconds) prune cadence but unacceptable for
+  scheduling.
+- Read `shard_holders().len()` alone for `redundancy_ratio` — at 1000-
+  node scale the cache pegs at 50 and the prune score saturates.
+- Forget to clear `global_holder_count` when a model is removed —
+  `remove_all_model_shards` retains over both maps; new code paths that
+  evict a model must do the same or stale figures will inflate future
+  ShardId-reuse scores.
+
 ## Cross-feature compile checks
 
 `cargo check` with default features does NOT compile the `llama` cfg

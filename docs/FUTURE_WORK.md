@@ -115,39 +115,47 @@ items came up that warrant direction beyond a copy refresh:
 3. **`activity.worker_*` events duplicate `activity.model_*` events.** _(Closed R126: both emit sites removed from `process_pool.rs`; i18n keys deleted from all 21 locales; `tracing::info!` retained for operator debugging.)_
 
 4. **`models.hf_score_breakdown` exposes a 4-component score
-   decomposition** (quality / fit / demand / size) on every HF browser
-   result row. Useful for tuning auto-manage but meaningless to lay users.
-   Proposed: replace with a single human verdict ("Good match for your
-   computer", "Works but uses lots of space", "Needs more memory than
-   available"); keep the raw decomposition as a developer tooltip.
+   decomposition.** _(Closed R127: i18n key was orphaned — the swarm-tab
+   HF browser already renders a single human verdict via `_fitPill()`
+   from the backend's `fits_boomerang`/`fits_shard`/`network_replicas`
+   signals. Removed `models.hf_score_breakdown` + 3 sibling orphans
+   (`hf_score_pts`, `hf_on_swarm`, `likes_count`) from all 21 locales
+   per the R120 verification-gating rule. Backend `score_breakdown`
+   JSON field retained as a dev-only surface.)_
 
 5. **GGUF metadata panel surfaces raw hyperparameters.** _(Closed R126: renamed `models.metadata_header` to "Technical Details" across 21 locales; refactored `renderMetadataPanel()` to split basic params (context, layers, embedding, heads, vocab, tokenizer model) from collapsible `<details>` "Advanced" sub-section that hides KV heads / RoPE / RMS epsilon / BOS-EOS-padding ids / tensor offsets.)_
 
 6. **`models.encrypted_pipeline` and `enc.unprotected_detail`** _(Closed R126: refreshed 19 `enc.*` + `models.encrypted_pipeline` keys across 21 locales — "first piece of the model" / "last piece of the model" replace shard jargon; copy honestly distinguishes "end-to-end encrypted" (when user holds both endpoints) from "encrypted in transit" (when entry/exit nodes are remote).)_
 
 7. **`dashboard.api_log_link` text stays English in 20 non-English
-   locales** ("View API request log →"). The arrow may render poorly in
-   RTL locales (ar). Proposed: decide whether to translate (per-locale
-   recordings exist for similar nav strings) or formally adopt a
-   carve-out and document it.
+   locales.** _(Closed R127: translated "View API request log →" across
+   all 21 locales. Arabic flips the arrow to `←` for RTL.)_
 
-8. **46 country names hardcoded English in `network-map.js:430`** —
-   `countryNames` map. Translating × 21 locales = ~966 entries. Common
-   carve-out for world-map UIs, but inconsistent with the otherwise
-   fully-translated UI. Same decision as #7.
+8. **46 country names hardcoded English in `network-map.js:430`.**
+   _(Closed R127: replaced the hand-maintained `countryNames` map with
+   `Intl.DisplayNames([currentLocale], { type: 'region' })` keyed off
+   `I18n.getLang()`, with a `_displayNamesCache` to amortise the cost
+   per locale. Browser support: Chrome 81+/FF 86+/Safari 14.1+. Falls
+   back to the raw ISO code on the very-old-browser path. Covers every
+   ISO 3166-1 alpha-2 code in the native language of each locale,
+   without 966 hand-translated entries.)_
 
-**Why deferred.** Items #2, #4, #7, #8 are bigger than a copy fix and need a UX
-decision. R126 closed #1/#3/#5/#6 from this list; items #2/#4/#7/#8 can land
-piecewise once direction is set.
+**Why deferred.** Item #2 is the only remaining open one and needs a UX
+decision (first-run guided tour vs per-icon `?` tooltips). R126 closed
+#1/#3/#5/#6; R127 closed #4/#7/#8.
 
 ---
 
-### True global holder count for prune redundancy_ratio (R121 follow-up)
-**Context.** `ModelRegistry::shard_holders` caps stored holders per shard at `MAX_HOLDERS_PER_SHARD = 50`. The R121 scale-back prune sees up to 50 holders even when the swarm has 1000+. Prune still fires correctly — the `holder_count > effective_target` gate triggers as long as 50 > target, which is always true for realistic targets — but the displayed `redundancy_ratio = holder_count / effective_target` underestimates by the cap ratio, so the prune score is artificially low for severely over-replicated shards.
-
-**What's needed.** A separate uncapped `DashMap<ShardId, u32>` populated from DHT `get_providers` query results (today the results merge back into the same 50-capped cache, so the data is lost). Prune reads from this uncapped map for `redundancy_ratio` computation while keeping the bounded `shard_holders` map for routing decisions.
-
-**Why deferred.** The +1.0 severe-saturation score bonus already kicks in at `holder_count >= 2 × target`, which the 50-cap still detects for any target ≤ 25 (i.e., all realistic swarm sizes). At 50+ target replicas the score saturates at 50/target but that's still high enough to prune. Refactoring the holder-count storage is a bigger change with no current behavioural delta.
+_(R121 follow-up — True global holder count: closed R127. `ModelRegistry`
+gained `global_holder_count: DashMap<ShardId, u32>` plus `record_/get_`
+accessors. `network/manager/dht.rs::handle_dht_providers_found` records
+`providers.len()` (the raw PeerId count, not the resolved one) on every
+DHT GetProviders response. `model/auto_manage/prune.rs` uses
+`max(cached_holder_count, global_holder_count)` as the redundancy_ratio
+numerator and for the severe-saturation bonus, while gates / region /
+busy / rarest checks keep using the filtered-live cache. Stale entries
+are cleared in `remove_all_model_shards`. Test: `registry::tests::
+global_holder_count_overrides_local_cap`.)_
 
 ---
 

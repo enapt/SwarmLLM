@@ -304,8 +304,20 @@ impl AutoShardManager {
                     continue;
                 }
 
-                // Compute prune score (higher = more prunable)
-                let redundancy_ratio = holder_count as f64 / effective_target.max(1) as f64;
+                // Compute prune score (higher = more prunable). The
+                // redundancy denominator stays as `effective_target`, but
+                // the numerator uses the uncapped DHT-reported global count
+                // when available — the local cached `holder_count` is bounded
+                // by MAX_HOLDERS_PER_SHARD (=50), so at swarm scale the score
+                // would saturate well before reaching truly over-replicated
+                // shards. Fall back to the filtered live count when no DHT
+                // response has landed yet (cold start, etc.).
+                let global_count = registry
+                    .global_holder_count(&shard_id)
+                    .map(|c| c as usize)
+                    .map(|c| c.max(holder_count))
+                    .unwrap_or(holder_count);
+                let redundancy_ratio = global_count as f64 / effective_target.max(1) as f64;
                 let mut score = redundancy_ratio;
 
                 // Severe-saturation bonus: shed shards held by ≥2×target
@@ -313,9 +325,11 @@ impl AutoShardManager {
                 // shards. The redundancy_ratio already grows with holder
                 // count, but this adds a flat tier-break so a 2×target
                 // shard always outranks a 1.6×target shard at the
-                // selection step.
+                // selection step. Uses the same uncapped global count so
+                // the bonus fires for truly severe over-replication at
+                // scale, not just whenever the 50-cap is pegged.
                 if contribution_auto
-                    && (holder_count as f64) >= (target as f64) * SATURATION_FACTOR_SEVERE
+                    && (global_count as f64) >= (target as f64) * SATURATION_FACTOR_SEVERE
                 {
                     score += 1.0;
                 }

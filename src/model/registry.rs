@@ -29,6 +29,15 @@ pub struct ModelRegistry {
     /// Maintained in sync by record_shard_holder() / remove_shard_holder().
     /// Enables O(shards_held) peer departure instead of O(all_shards).
     node_shards: DashMap<NodeId, HashSet<ShardId>>,
+    /// Uncapped global holder count from the most recent DHT GetProviders
+    /// response, keyed by shard. The bounded `shard_holders` cache above
+    /// caps at MAX_HOLDERS_PER_SHARD for routing economy, but the prune
+    /// score's redundancy_ratio needs the true swarm-wide count to detect
+    /// severely over-replicated shards (gotcha: at 1000-node scale, a 50-cap
+    /// cache pegs at 50 regardless of actual replication). Written only by
+    /// `record_global_holder_count` from the DHT query result; readers fall
+    /// back to the cached count if no DHT data is available.
+    global_holder_count: DashMap<ShardId, u32>,
     /// Local node ID — never evicted from holder sets.
     local_node_id: Option<NodeId>,
 }
@@ -39,6 +48,7 @@ impl ModelRegistry {
             manifests: DashMap::new(),
             shard_holders: DashMap::new(),
             node_shards: DashMap::new(),
+            global_holder_count: DashMap::new(),
             local_node_id: None,
         }
     }
@@ -51,6 +61,7 @@ impl ModelRegistry {
             manifests: DashMap::new(),
             shard_holders: DashMap::new(),
             node_shards: DashMap::new(),
+            global_holder_count: DashMap::new(),
             local_node_id: Some(local_node_id),
         }
     }
@@ -190,6 +201,22 @@ impl ModelRegistry {
         }
     }
 
+    /// Record the swarm-wide provider count from a DHT GetProviders response.
+    /// The count comes from the raw PeerId set (before NodeId resolution drops
+    /// any) so it reflects what the DHT reports, independent of our local cache
+    /// cap. Overwrites any previous reading.
+    pub fn record_global_holder_count(&self, shard_id: ShardId, count: u32) {
+        self.global_holder_count.insert(shard_id, count);
+    }
+
+    /// Best-effort uncapped holder count for a shard. Returns the most recent
+    /// DHT-reported count if any query has resolved, else `None` — caller
+    /// should fall back to the cached `shard_holders().len()` for the local
+    /// view.
+    pub fn global_holder_count(&self, shard_id: &ShardId) -> Option<u32> {
+        self.global_holder_count.get(shard_id).map(|v| *v)
+    }
+
     /// Get a model manifest by ID.
     pub fn get_manifest(&self, model_id: &ModelId) -> Option<ModelManifest> {
         self.manifests.get(model_id).map(|v| v.clone())
@@ -261,6 +288,11 @@ impl ModelRegistry {
             .collect();
 
         self.shard_holders
+            .retain(|shard_id, _| &shard_id.model_id != model_id);
+        // Drop the uncapped DHT-derived global count too — stale entries here
+        // would falsely inflate a future shard's redundancy_ratio if the same
+        // ShardId got reused.
+        self.global_holder_count
             .retain(|shard_id, _| &shard_id.model_id != model_id);
 
         // Mirror removal in reverse index
@@ -455,6 +487,35 @@ mod tests {
         assert!(registry.shard_holders(&shard_id).contains(&local));
         // New node present
         assert!(registry.shard_holders(&shard_id).contains(&overflow));
+    }
+
+    #[test]
+    fn global_holder_count_overrides_local_cap() {
+        let registry = ModelRegistry::new();
+        let shard_id = ShardId {
+            model_id: ModelId("test".into()),
+            index: 0,
+        };
+
+        // No DHT data yet — global_holder_count returns None.
+        assert!(registry.global_holder_count(&shard_id).is_none());
+
+        // Cache has 3 holders, DHT reports 247 — the uncapped figure wins
+        // for redundancy_ratio purposes.
+        for i in 1u8..=3 {
+            let mut bytes = [0u8; 32];
+            bytes[0] = i;
+            registry.record_shard_holder(shard_id.clone(), NodeId(bytes));
+        }
+        registry.record_global_holder_count(shard_id.clone(), 247);
+
+        assert_eq!(registry.shard_holders(&shard_id).len(), 3);
+        assert_eq!(registry.global_holder_count(&shard_id), Some(247));
+
+        // remove_all_model_shards must drop the global entry too — a future
+        // shard reusing the ShardId must not inherit a stale 247.
+        registry.remove_all_model_shards(&ModelId("test".into()));
+        assert!(registry.global_holder_count(&shard_id).is_none());
     }
 
     #[test]

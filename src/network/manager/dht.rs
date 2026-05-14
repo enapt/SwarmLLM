@@ -151,10 +151,20 @@ impl NetworkManager {
             }
         }
 
+        // Record the uncapped swarm-wide count even when we couldn't resolve
+        // every PeerId — `providers.len()` is what the DHT reports, and the
+        // prune redundancy_ratio needs the true count, not a cache-capped
+        // undercount. `record_global_holder_count` overwrites, so later
+        // responses for the same shard supersede earlier ones.
+        self.shared_state
+            .model_registry
+            .record_global_holder_count(shard_id.clone(), providers.len() as u32);
+
         if !resolved.is_empty() {
             tracing::debug!(
                 shard = ?shard_id,
                 providers = resolved.len(),
+                global = providers.len(),
                 "Merging DHT providers into shard holders cache"
             );
             self.shared_state

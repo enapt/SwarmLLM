@@ -427,7 +427,20 @@
       if (legendEl) legendEl.textContent = maxCount;
     },
 
-    countryNames: {US:'United States',CA:'Canada',MX:'Mexico',BR:'Brazil',AR:'Argentina',CL:'Chile',CO:'Colombia',GB:'United Kingdom',FR:'France',DE:'Germany',ES:'Spain',IT:'Italy',NL:'Netherlands',SE:'Sweden',NO:'Norway',FI:'Finland',PL:'Poland',UA:'Ukraine',RU:'Russia',TR:'Turkey',IN:'India',CN:'China',JP:'Japan',KR:'South Korea',AU:'Australia',NZ:'New Zealand',ZA:'South Africa',NG:'Nigeria',EG:'Egypt',KE:'Kenya',SG:'Singapore',ID:'Indonesia',TH:'Thailand',VN:'Vietnam',PH:'Philippines',TW:'Taiwan',IL:'Israel',AE:'UAE',SA:'Saudi Arabia',CH:'Switzerland',AT:'Austria',CZ:'Czech Republic',RO:'Romania',IE:'Ireland',PT:'Portugal',DK:'Denmark',BE:'Belgium'},
+    // Per-locale display name for an ISO 3166-1 alpha-2 code. Intl.DisplayNames
+    // is Chrome 81+/FF 86+/Safari 14.1+ — covers everything we ship to. Falls
+    // back to the raw code on the very-old-browser path.
+    _displayNamesCache: {},
+    countryName: function(code) {
+      var lang = (window.I18n && I18n.getLang && I18n.getLang()) || 'en';
+      var cache = App.networkMap._displayNamesCache;
+      if (!cache[lang]) {
+        try { cache[lang] = new Intl.DisplayNames([lang], { type: 'region' }); }
+        catch (e) { cache[lang] = null; }
+      }
+      try { return (cache[lang] && cache[lang].of(code)) || code; }
+      catch (e) { return code; }
+    },
 
     showTooltip: function(event, code) {
       App.networkMap.hideTooltip();
@@ -435,7 +448,7 @@
       var tip = document.createElement('div');
       tip.id = 'map-tooltip';
       tip.className = 'map-tooltip';
-      var countryName = App.networkMap.countryNames[code] || code;
+      var countryName = App.networkMap.countryName(code);
       var html = '<strong>' + countryName + '</strong> <span class="text-muted" style="font-size:0.7rem">' + code + '</span>';
       if (info) {
         html += '<span class="mono" style="margin-left:8px">' + U.escapeHtml(I18n.t(info.total === 1 ? 'map.stats_nodes' : 'map.stats_nodes_plural', { count: info.total })) + '</span>';
