@@ -1,6 +1,4 @@
 {
-  "_dir": "ltr",
-  "_lang": "Türkçe",
   "actions.cancel": "İptal",
   "actions.confirm_cancel_download": "{model} için indirme iptal edilsin mi?",
   "actions.confirm_remove_model": "{model} için tüm yerel parçalar kaldırılsın mı? Bu işlem geri alınamaz.",
@@ -1135,10 +1133,13 @@
   "wishlist.why.fits_your_memory": "Bilgisayarınızın belleğine sığıyor",
   "wishlist.why.needs_review": "Doğrulama bekleniyor — indirmeden önce gözden geçirin",
   "wishlist.why.no_regional_replica": "Bölgenizde barındıran yok",
+  "wishlist.why.other_nodes_want_this": "Diğer düğümler bunu istiyor",
   "wishlist.why.parts_missing": "Hâlâ {missing} model parçası eksik",
   "wishlist.why.popular_on_hf": "HuggingFace'te popüler",
   "wishlist.why.popular_on_swarm": "Sürüde popüler",
   "wishlist.why.swarm_already_serves": "Sürü bunu zaten sunuyor",
   "wishlist.why.you_already_host": "Zaten bir barındırıcısınız",
-  "wishlist.why.your_region_needs_this": "Bölgeniz buna ihtiyaç duyuyor"
+  "wishlist.why.your_region_needs_this": "Bölgeniz buna ihtiyaç duyuyor",
+  "_lang": "Türkçe",
+  "_dir": "ltr"
 }

@@ -1,6 +1,4 @@
 {
-  "_dir": "ltr",
-  "_lang": "Deutsch",
   "actions.cancel": "Abbrechen",
   "actions.confirm_cancel_download": "Download für {model} abbrechen?",
   "actions.confirm_remove_model": "Alle lokalen Shards für {model} entfernen? Dies kann nicht rückgängig gemacht werden.",
@@ -1135,10 +1133,13 @@
   "wishlist.why.fits_your_memory": "Passt in den Speicher deines Computers",
   "wishlist.why.needs_review": "Ausstehende Verifizierung — vor dem Download prüfen",
   "wishlist.why.no_regional_replica": "Kein Host in deiner Region",
+  "wishlist.why.other_nodes_want_this": "Andere Knoten wollen dieses Modell",
   "wishlist.why.parts_missing": "Noch {missing} Modellteile fehlend",
   "wishlist.why.popular_on_hf": "Auf HuggingFace beliebt",
   "wishlist.why.popular_on_swarm": "Im Schwarm beliebt",
   "wishlist.why.swarm_already_serves": "Der Schwarm stellt das bereits bereit",
   "wishlist.why.you_already_host": "Du bist bereits ein Host",
-  "wishlist.why.your_region_needs_this": "Deine Region braucht das"
+  "wishlist.why.your_region_needs_this": "Deine Region braucht das",
+  "_lang": "Deutsch",
+  "_dir": "ltr"
 }

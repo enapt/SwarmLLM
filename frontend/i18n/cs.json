@@ -1,6 +1,4 @@
 {
-  "_dir": "ltr",
-  "_lang": "Čeština",
   "actions.cancel": "Zrušit",
   "actions.confirm_cancel_download": "Zrušit stahování pro {model}?",
   "actions.confirm_remove_model": "Odebrat všechny lokální fragmenty modelu {model}? Tuto akci nelze vrátit.",
@@ -1135,10 +1133,13 @@
   "wishlist.why.fits_your_memory": "Vejde se do paměti tvého počítače",
   "wishlist.why.needs_review": "Čeká na ověření — před stažením zkontroluj",
   "wishlist.why.no_regional_replica": "Ve tvém regionu není žádný hostitel",
+  "wishlist.why.other_nodes_want_this": "Ostatní uzly to chtějí",
   "wishlist.why.parts_missing": "Stále chybí {missing} částí modelu",
   "wishlist.why.popular_on_hf": "Populární na HuggingFace",
   "wishlist.why.popular_on_swarm": "Populární v roji",
   "wishlist.why.swarm_already_serves": "Roj tento model již obsluhuje",
   "wishlist.why.you_already_host": "Již jsi hostitelem",
-  "wishlist.why.your_region_needs_this": "Tvůj region tento model potřebuje"
+  "wishlist.why.your_region_needs_this": "Tvůj region tento model potřebuje",
+  "_lang": "Čeština",
+  "_dir": "ltr"
 }

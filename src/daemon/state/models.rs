@@ -90,7 +90,29 @@ pub struct ModelMgmt {
     /// scorer (boosts trending models) and by the future task-filter
     /// view in the HF browser. Empty until the first successful fetch.
     pub hf_trending_cache: arc_swap::ArcSwap<crate::model::huggingface::HfTrendingSnapshot>,
+    /// R130: foreign wishlist interest, populated from inbound
+    /// `WishlistAnnouncement` gossip. Key = (publisher node id, model id);
+    /// value = (publisher's score 0..100, timestamp_ms received). Capped
+    /// at `MAX_FOREIGN_WISHLIST_ENTRIES`. Pruned on read in
+    /// `compute_wishlist` (drops entries older than
+    /// `FOREIGN_WISHLIST_MAX_AGE_MS`). Empty when wishlist gossip is
+    /// disabled — the publisher gate also blocks ingest unrelated to
+    /// the publish flag, so a node that opts out of *publishing* still
+    /// accepts inbound boosts.
+    pub foreign_wishlist: DashMap<(NodeId, crate::types::ModelId), (u32, u64)>,
 }
+
+/// Maximum number of `(publisher, model_id)` entries we retain from inbound
+/// wishlist gossip. ~10K entries × ~30 models per top-K announce → ~333
+/// publishers worth of state; well within memory budget and protects
+/// against unbounded growth if a small set of nodes churn wildly.
+pub const MAX_FOREIGN_WISHLIST_ENTRIES: usize = 10_000;
+
+/// Maximum age (ms) for a foreign wishlist entry before it's ignored by
+/// the scoring pass. Two hours covers ~240× the 30s republish cadence —
+/// plenty of room for missed broadcasts under network churn, while
+/// keeping the boost responsive to opt-out / pool dissolution.
+pub const FOREIGN_WISHLIST_MAX_AGE_MS: u64 = 2 * 60 * 60 * 1000;
 
 impl ModelMgmt {
     /// Check if a shard is currently being downloaded, pending, or verifying.
@@ -290,6 +312,47 @@ impl ModelMgmt {
         removed
     }
 
+    /// R130: apply an inbound `WishlistAnnouncement` to the foreign wishlist
+    /// index. Replaces this publisher's entire slice (drops models the
+    /// publisher no longer mentions), then inserts the new entries.
+    /// Caller is expected to have already validated authentication,
+    /// freshness, and entry-count cap.
+    ///
+    /// Returns `(added, removed)` counts for logging.
+    pub fn apply_wishlist_announcement(
+        &self,
+        publisher: NodeId,
+        entries: &[(crate::types::ModelId, u32)],
+        timestamp_ms: u64,
+    ) -> (usize, usize) {
+        let new_models: std::collections::HashSet<crate::types::ModelId> =
+            entries.iter().map(|(m, _)| m.clone()).collect();
+        let mut removed = 0usize;
+        self.foreign_wishlist.retain(|(p, m), _| {
+            if p == &publisher && !new_models.contains(m) {
+                removed += 1;
+                false
+            } else {
+                true
+            }
+        });
+        let mut added = 0usize;
+        for (model_id, score) in entries {
+            if model_id.0.len() > 256 {
+                continue;
+            }
+            let bounded = (*score).min(100);
+            let prev = self.foreign_wishlist.insert(
+                (publisher.clone(), model_id.clone()),
+                (bounded, timestamp_ms),
+            );
+            if prev.is_none() {
+                added += 1;
+            }
+        }
+        (added, removed)
+    }
+
     /// Lookup the set of remote peers that announced holding a KV snapshot
     /// for this `(model_id, block_hash)` pair. Empty when no peer has it.
     /// Phase 2 will use this to decide where to fetch from; Phase 1 only
@@ -344,6 +407,7 @@ mod tests {
             hf_trending_cache: arc_swap::ArcSwap::from_pointee(
                 crate::model::huggingface::HfTrendingSnapshot::default(),
             ),
+            foreign_wishlist: DashMap::new(),
         }
     }
 
@@ -509,6 +573,81 @@ mod tests {
         assert_eq!(peer, med_trust_peer);
         assert_eq!(hash, h(20));
         assert_eq!(token_count, 128);
+    }
+
+    /// R130: applying a WishlistAnnouncement replaces the publisher's
+    /// existing slice — models the publisher no longer mentions should
+    /// be dropped, new models inserted, and scores updated for shared
+    /// keys. Other publishers' entries must be left alone.
+    #[test]
+    fn wishlist_announce_replaces_publisher_slice() {
+        let m = make_mgmt();
+        let alice = NodeId([1u8; 32]);
+        let bob = NodeId([2u8; 32]);
+        let a = ModelId("alpha".into());
+        let b = ModelId("beta".into());
+        let g = ModelId("gamma".into());
+
+        // Seed: alice wants alpha+beta; bob wants alpha.
+        m.apply_wishlist_announcement(alice.clone(), &[(a.clone(), 80), (b.clone(), 60)], 1000);
+        m.apply_wishlist_announcement(bob.clone(), &[(a.clone(), 50)], 1000);
+        assert_eq!(m.foreign_wishlist.len(), 3);
+
+        // Alice's next announcement drops beta and adds gamma; alpha
+        // score updated. Bob's entry must survive untouched.
+        let (added, removed) =
+            m.apply_wishlist_announcement(alice.clone(), &[(a.clone(), 95), (g.clone(), 40)], 2000);
+        assert_eq!(added, 1, "gamma is new");
+        assert_eq!(removed, 1, "beta was dropped");
+        assert_eq!(
+            m.foreign_wishlist
+                .get(&(alice.clone(), a.clone()))
+                .map(|v| *v),
+            Some((95, 2000))
+        );
+        assert!(m.foreign_wishlist.get(&(alice.clone(), b)).is_none());
+        assert_eq!(
+            m.foreign_wishlist
+                .get(&(alice.clone(), g.clone()))
+                .map(|v| *v),
+            Some((40, 2000))
+        );
+        assert_eq!(
+            m.foreign_wishlist.get(&(bob, a)).map(|v| *v),
+            Some((50, 1000)),
+            "bob's entry should not be touched"
+        );
+    }
+
+    /// R130: scores >100 are clamped on insert. Long model_ids are
+    /// dropped silently (the caller is expected to have already enforced
+    /// a hard wire-side cap, but the helper defends in depth).
+    #[test]
+    fn wishlist_announce_clamps_scores_and_drops_oversized_ids() {
+        let m = make_mgmt();
+        let p = NodeId([7u8; 32]);
+        let normal = ModelId("normal".into());
+        let oversized = ModelId("x".repeat(257));
+        m.apply_wishlist_announcement(p.clone(), &[(normal.clone(), 250), (oversized, 50)], 1000);
+        let entry = m.foreign_wishlist.get(&(p, normal)).map(|v| *v);
+        assert_eq!(entry, Some((100, 1000)));
+        assert_eq!(m.foreign_wishlist.len(), 1);
+    }
+
+    /// R130: empty announcement from a known publisher drops all of
+    /// their entries — modelling "I no longer want any of these".
+    #[test]
+    fn wishlist_announce_empty_clears_publisher_slice() {
+        let m = make_mgmt();
+        let p = NodeId([3u8; 32]);
+        let a = ModelId("alpha".into());
+        let b = ModelId("beta".into());
+        m.apply_wishlist_announcement(p.clone(), &[(a, 50), (b, 30)], 1000);
+        assert_eq!(m.foreign_wishlist.len(), 2);
+        let (added, removed) = m.apply_wishlist_announcement(p, &[], 2000);
+        assert_eq!(added, 0);
+        assert_eq!(removed, 2);
+        assert_eq!(m.foreign_wishlist.len(), 0);
     }
 
     /// Phase 4: when ALL candidate peers are below the trust threshold,

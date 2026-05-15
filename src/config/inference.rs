@@ -363,6 +363,17 @@ pub struct AutoManageConfig {
     /// per node, well below HF's anonymous rate limits.
     #[serde(default = "default_true")]
     pub hf_watcher_enabled: bool,
+    /// R130: opt-in cross-pool wishlist gossip. When on, this node
+    /// periodically broadcasts the top-N entries of its local wishlist
+    /// (model_id + a coarse 0..100 score) on the regions topic. Inbound
+    /// announcements always feed `state.models.foreign_wishlist` and
+    /// boost scoring regardless of this flag — the flag only gates
+    /// *publishing*, so privacy-conscious nodes can still benefit from
+    /// the swarm-wide signal without leaking their own interests.
+    /// Default off. Publishes "we want this model" at model granularity;
+    /// does not expose pool composition, region, or per-shard interest.
+    #[serde(default)]
+    pub wishlist_gossip_publish: bool,
 }
 
 /// Per-model auto-manage policy controlling whether a model participates
@@ -397,6 +408,7 @@ impl Default for AutoManageConfig {
             max_holder_load_for_prune: default_max_holder_load_for_prune(),
             parallax_auto_rebalance: true,
             hf_watcher_enabled: true,
+            wishlist_gossip_publish: false,
         }
     }
 }

@@ -1,6 +1,4 @@
 {
-  "_dir": "ltr",
-  "_lang": "日本語",
   "actions.cancel": "キャンセル",
   "actions.confirm_cancel_download": "{model} のダウンロードをキャンセルしますか？",
   "actions.confirm_remove_model": "{model} のローカルシャードをすべて削除しますか？この操作は元に戻せません。",
@@ -1135,10 +1133,13 @@
   "wishlist.why.fits_your_memory": "お使いのパソコンのメモリに収まります",
   "wishlist.why.needs_review": "確認待ち — ダウンロード前に確認が必要です",
   "wishlist.why.no_regional_replica": "あなたの地域にホストがいません",
+  "wishlist.why.other_nodes_want_this": "他のノードがこれを求めている",
   "wishlist.why.parts_missing": "モデルパーツがあと{missing}個必要です",
   "wishlist.why.popular_on_hf": "HuggingFace で人気",
   "wishlist.why.popular_on_swarm": "スウォームで人気です",
   "wishlist.why.swarm_already_serves": "スウォームはすでにこれを提供しています",
   "wishlist.why.you_already_host": "すでにホストしています",
-  "wishlist.why.your_region_needs_this": "あなたの地域でこれが必要とされています"
+  "wishlist.why.your_region_needs_this": "あなたの地域でこれが必要とされています",
+  "_lang": "日本語",
+  "_dir": "ltr"
 }

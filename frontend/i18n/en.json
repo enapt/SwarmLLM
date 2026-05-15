@@ -1,6 +1,4 @@
 {
-  "_dir": "ltr",
-  "_lang": "English",
   "actions.cancel": "Cancel",
   "actions.confirm_cancel_download": "Cancel download for {model}?",
   "actions.confirm_remove_model": "Remove all local shards for {model}? This cannot be undone.",
@@ -1135,10 +1133,13 @@
   "wishlist.why.fits_your_memory": "Fits your computer's memory",
   "wishlist.why.needs_review": "Pending verification — review before downloading",
   "wishlist.why.no_regional_replica": "No host in your region",
+  "wishlist.why.other_nodes_want_this": "Other nodes want this",
   "wishlist.why.parts_missing": "{missing} model parts still needed",
   "wishlist.why.popular_on_hf": "Popular on HuggingFace",
   "wishlist.why.popular_on_swarm": "Popular in the swarm",
   "wishlist.why.swarm_already_serves": "The swarm already serves this",
   "wishlist.why.you_already_host": "You're already a host",
-  "wishlist.why.your_region_needs_this": "Your region needs this"
+  "wishlist.why.your_region_needs_this": "Your region needs this",
+  "_lang": "English",
+  "_dir": "ltr"
 }

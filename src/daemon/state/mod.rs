@@ -33,7 +33,7 @@ pub use credits::CreditPool;
 pub use events::EventBus;
 pub use hf::{HfProbeInfo, HfSource};
 pub use metrics::{ChannelCounters, ChannelMetricsSet, MetricsProviders};
-pub use models::ModelMgmt;
+pub use models::{ModelMgmt, FOREIGN_WISHLIST_MAX_AGE_MS, MAX_FOREIGN_WISHLIST_ENTRIES};
 pub use tp_allreduce::TpAllReduceCollector;
 
 // ---- Main SharedState ----
@@ -388,6 +388,7 @@ impl SharedState {
                 hf_trending_cache: arc_swap::ArcSwap::from_pointee(
                     crate::model::huggingface::HfTrendingSnapshot::default(),
                 ),
+                foreign_wishlist: DashMap::new(),
             },
             events: EventBus {
                 dashboard_tx: broadcast::channel(32).0,

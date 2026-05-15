@@ -35,6 +35,10 @@ const MAX_PENDING_TP_PARTIALS: usize = 512;
 const MAX_REGION_SUMMARIES: usize = 10_000;
 /// Maximum demand rate entries across all (model, region) pairs.
 const MAX_DEMAND_ENTRIES: usize = 10_000;
+/// R130: Cap entries per WishlistAnnouncement. Caps the wire size AND the
+/// per-publisher slice of `state.models.foreign_wishlist`. 64 keeps the
+/// headline (a swarm normally has dozens of models, not hundreds).
+const MAX_WISHLIST_ANNOUNCE_ENTRIES: usize = 64;
 /// SEC: Cap shards per ShardAnnounce to prevent shard_holders memory exhaustion.
 const MAX_SHARDS_PER_ANNOUNCE: usize = 512;
 /// SEC: Cap blocks per PrefixCacheAnnounce. A 7B model at 64-token blocks
@@ -1693,6 +1697,69 @@ pub(crate) async fn dispatch_network_messages(
                                             decayed_rate = demand.decayed_rate,
                                             blended_rate = new_rate,
                                             "ModelDemandGossip processed"
+                                        );
+                                    }
+
+                                    // R130: cross-pool wishlist gossip. Publisher's top-K
+                                    // wishlist entries; receivers blend the foreign interest
+                                    // into their own wishlist score as a soft boost.
+                                    SwarmMessage::WishlistAnnouncement(announce) => {
+                                        match &authenticated_sender {
+                                            Some(sender) if *sender != announce.publisher => {
+                                                tracing::warn!(
+                                                    sender = %sender,
+                                                    claimed = %announce.publisher,
+                                                    "WishlistAnnouncement sender mismatch — dropping"
+                                                );
+                                                continue;
+                                            }
+                                            None => {
+                                                tracing::debug!("Dropping unauthenticated WishlistAnnouncement");
+                                                continue;
+                                            }
+                                            Some(_) => {}
+                                        }
+                                        // Skip self-announces — own wishlist already in `state.models.wishlist`.
+                                        if announce.publisher == *shared_state.identity.node_id() {
+                                            continue;
+                                        }
+                                        if announce.entries.len() > MAX_WISHLIST_ANNOUNCE_ENTRIES {
+                                            tracing::warn!(
+                                                publisher = %announce.publisher,
+                                                entries = announce.entries.len(),
+                                                max = MAX_WISHLIST_ANNOUNCE_ENTRIES,
+                                                "WishlistAnnouncement exceeds entry cap — dropping"
+                                            );
+                                            continue;
+                                        }
+                                        let now_ms = crate::types::unix_now_ms();
+                                        if !gossip_timestamp_fresh(announce.timestamp_ms, now_ms, "WishlistAnnouncement") {
+                                            continue;
+                                        }
+                                        let foreign = &shared_state.models.foreign_wishlist;
+                                        let pre_existing = announce.entries.iter().any(|e| {
+                                            foreign.contains_key(&(announce.publisher.clone(), e.model_id.clone()))
+                                        });
+                                        if !pre_existing && foreign.len() >= crate::daemon::state::MAX_FOREIGN_WISHLIST_ENTRIES {
+                                            tracing::debug!("foreign_wishlist at cap, dropping new WishlistAnnouncement");
+                                            continue;
+                                        }
+                                        let entries_pairs: Vec<(crate::types::ModelId, u32)> = announce
+                                            .entries
+                                            .iter()
+                                            .map(|e| (e.model_id.clone(), e.score))
+                                            .collect();
+                                        let (added, removed) = shared_state.models.apply_wishlist_announcement(
+                                            announce.publisher.clone(),
+                                            &entries_pairs,
+                                            announce.timestamp_ms,
+                                        );
+                                        tracing::debug!(
+                                            publisher = %announce.publisher,
+                                            entries = announce.entries.len(),
+                                            added,
+                                            removed,
+                                            "WishlistAnnouncement processed"
                                         );
                                     }
 

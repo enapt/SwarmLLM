@@ -808,6 +808,7 @@ mod tests {
             max_holder_load_for_prune: 3,
             parallax_auto_rebalance: true,
             hf_watcher_enabled: false,
+            wishlist_gossip_publish: false,
         };
         assert_eq!(config.max_shards, 0); // unlimited
     }

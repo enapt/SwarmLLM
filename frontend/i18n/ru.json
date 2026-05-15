@@ -1,6 +1,4 @@
 {
-  "_dir": "ltr",
-  "_lang": "Русский",
   "actions.cancel": "Отмена",
   "actions.confirm_cancel_download": "Отменить загрузку для {model}?",
   "actions.confirm_remove_model": "Удалить все локальные шарды {model}? Это действие нельзя отменить.",
@@ -1135,10 +1133,13 @@
   "wishlist.why.fits_your_memory": "Подходит для памяти вашего компьютера",
   "wishlist.why.needs_review": "Ожидает проверки — просмотрите перед загрузкой",
   "wishlist.why.no_regional_replica": "Нет хоста в вашем регионе",
+  "wishlist.why.other_nodes_want_this": "Другие узлы хотят это",
   "wishlist.why.parts_missing": "Ещё нужны {missing} частей модели",
   "wishlist.why.popular_on_hf": "Популярно на HuggingFace",
   "wishlist.why.popular_on_swarm": "Популярно в рое",
   "wishlist.why.swarm_already_serves": "Рой уже обслуживает это",
   "wishlist.why.you_already_host": "Вы уже являетесь хостом",
-  "wishlist.why.your_region_needs_this": "Ваш регион нуждается в этом"
+  "wishlist.why.your_region_needs_this": "Ваш регион нуждается в этом",
+  "_lang": "Русский",
+  "_dir": "ltr"
 }

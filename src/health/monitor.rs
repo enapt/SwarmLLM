@@ -115,6 +115,7 @@ impl HealthMonitor {
                         self.broadcast_capabilities().await;
                         self.broadcast_manifests().await;
                         self.broadcast_region_summary().await;
+                        self.broadcast_wishlist_announcement().await;
                     }
 
                     // Cleanup tasks: run every tick (cheap, local-only)
@@ -474,6 +475,48 @@ impl HealthMonitor {
             if let Err(e) = self.network_tx.send(msg).await {
                 tracing::debug!(error = %e, "Failed to broadcast demand gossip");
             }
+        }
+    }
+
+    /// R130: cross-pool wishlist gossip publisher. Only runs when
+    /// `config.inference.auto_manage.wishlist_gossip_publish` is on.
+    /// Pulls the top-K entries from the current local wishlist snapshot
+    /// (already capped at `MAX_WISHLIST_ENTRIES`) and broadcasts them.
+    /// The receive side is always on — opt-out is publish only, so
+    /// privacy-conscious operators still benefit from inbound boost.
+    async fn broadcast_wishlist_announcement(&self) {
+        if !self.shared_state.config.auto_manage.wishlist_gossip_publish {
+            return;
+        }
+        let snapshot = self.shared_state.models.wishlist.load_full();
+        if snapshot.entries.is_empty() {
+            return;
+        }
+        // Cap the announcement to the wire limit; entries are already
+        // sorted by score descending in `compute_wishlist`, so a simple
+        // truncate gives us the top-K.
+        const ANNOUNCE_CAP: usize = 64;
+        let entries: Vec<crate::types::WishlistAnnouncementEntry> = snapshot
+            .entries
+            .iter()
+            .take(ANNOUNCE_CAP)
+            .filter(|e| e.score > 0)
+            .map(|e| crate::types::WishlistAnnouncementEntry {
+                model_id: crate::types::ModelId(e.model_id.clone()),
+                score: e.score,
+            })
+            .collect();
+        if entries.is_empty() {
+            return;
+        }
+        let announce = crate::types::WishlistAnnouncement {
+            publisher: self.shared_state.identity.node_id().clone(),
+            entries,
+            timestamp_ms: crate::types::unix_now_ms(),
+        };
+        let msg = NetworkCommand::Broadcast(SwarmMessage::WishlistAnnouncement(announce));
+        if let Err(e) = self.network_tx.send(msg).await {
+            tracing::debug!(error = %e, "Failed to broadcast wishlist announcement");
         }
     }
 

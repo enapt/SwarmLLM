@@ -1,6 +1,4 @@
 {
-  "_dir": "ltr",
-  "_lang": "Nederlands",
   "actions.cancel": "Annuleren",
   "actions.confirm_cancel_download": "Download annuleren voor {model}?",
   "actions.confirm_remove_model": "Alle lokale shards voor {model} verwijderen? Dit kan niet ongedaan worden gemaakt.",
@@ -1135,10 +1133,13 @@
   "wishlist.why.fits_your_memory": "Past in het geheugen van jouw computer",
   "wishlist.why.needs_review": "Verificatie in behandeling — controleer vóór downloaden",
   "wishlist.why.no_regional_replica": "Geen host in jouw regio",
+  "wishlist.why.other_nodes_want_this": "Andere knooppunten willen dit",
   "wishlist.why.parts_missing": "Nog {missing} modelonderdelen nodig",
   "wishlist.why.popular_on_hf": "Populair op HuggingFace",
   "wishlist.why.popular_on_swarm": "Populair in de zwerm",
   "wishlist.why.swarm_already_serves": "De zwerm biedt dit al aan",
   "wishlist.why.you_already_host": "Je bent al een host",
-  "wishlist.why.your_region_needs_this": "Jouw regio heeft dit nodig"
+  "wishlist.why.your_region_needs_this": "Jouw regio heeft dit nodig",
+  "_lang": "Nederlands",
+  "_dir": "ltr"
 }

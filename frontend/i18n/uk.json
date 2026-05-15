@@ -1,6 +1,4 @@
 {
-  "_dir": "ltr",
-  "_lang": "Українська",
   "actions.cancel": "Скасувати",
   "actions.confirm_cancel_download": "Скасувати завантаження {model}?",
   "actions.confirm_remove_model": "Видалити всі локальні шарди моделі {model}? Цю дію неможливо скасувати.",
@@ -1135,10 +1133,13 @@
   "wishlist.why.fits_your_memory": "Вписується в пам'ять вашого комп'ютера",
   "wishlist.why.needs_review": "Очікує перевірки — перегляньте перед завантаженням",
   "wishlist.why.no_regional_replica": "Немає хоста у вашому регіоні",
+  "wishlist.why.other_nodes_want_this": "Інші вузли хочуть це",
   "wishlist.why.parts_missing": "Ще потрібно {missing} частин моделі",
   "wishlist.why.popular_on_hf": "Популярне на HuggingFace",
   "wishlist.why.popular_on_swarm": "Популярна в рої",
   "wishlist.why.swarm_already_serves": "Рій вже обслуговує цю модель",
   "wishlist.why.you_already_host": "Ви вже є хостом",
-  "wishlist.why.your_region_needs_this": "Ваш регіон потребує цієї моделі"
+  "wishlist.why.your_region_needs_this": "Ваш регіон потребує цієї моделі",
+  "_lang": "Українська",
+  "_dir": "ltr"
 }

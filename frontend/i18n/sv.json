@@ -1,6 +1,4 @@
 {
-  "_dir": "ltr",
-  "_lang": "Svenska",
   "actions.cancel": "Avbryt",
   "actions.confirm_cancel_download": "Avbryt nedladdning för {model}?",
   "actions.confirm_remove_model": "Ta bort alla lokala shards för {model}? Detta kan inte ångras.",
@@ -1135,10 +1133,13 @@
   "wishlist.why.fits_your_memory": "Passar datorns minne",
   "wishlist.why.needs_review": "Väntar på verifiering — granska innan nedladdning",
   "wishlist.why.no_regional_replica": "Ingen värd i din region",
+  "wishlist.why.other_nodes_want_this": "Andra noder vill ha denna",
   "wishlist.why.parts_missing": "{missing} modelldelar saknas fortfarande",
   "wishlist.why.popular_on_hf": "Populär på HuggingFace",
   "wishlist.why.popular_on_swarm": "Populär i svärmen",
   "wishlist.why.swarm_already_serves": "Svärmen levererar redan den här",
   "wishlist.why.you_already_host": "Du är redan en värd",
-  "wishlist.why.your_region_needs_this": "Din region behöver det här"
+  "wishlist.why.your_region_needs_this": "Din region behöver det här",
+  "_lang": "Svenska",
+  "_dir": "ltr"
 }

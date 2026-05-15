@@ -1,6 +1,4 @@
 {
-  "_dir": "ltr",
-  "_lang": "中文",
   "actions.cancel": "取消",
   "actions.confirm_cancel_download": "取消 {model} 的下载？",
   "actions.confirm_remove_model": "删除 {model} 的所有本地分片？此操作无法撤销。",
@@ -1135,10 +1133,13 @@
   "wishlist.why.fits_your_memory": "适合您电脑的内存",
   "wishlist.why.needs_review": "待验证——下载前请先审核",
   "wishlist.why.no_regional_replica": "您所在地区暂无托管者",
+  "wishlist.why.other_nodes_want_this": "其他节点想要这个",
   "wishlist.why.parts_missing": "还需要{missing}个模型部分",
   "wishlist.why.popular_on_hf": "在 HuggingFace 上流行",
   "wishlist.why.popular_on_swarm": "在群组中广受欢迎",
   "wishlist.why.swarm_already_serves": "群组已可提供此模型",
   "wishlist.why.you_already_host": "您已是托管者",
-  "wishlist.why.your_region_needs_this": "您所在地区需要此模型"
+  "wishlist.why.your_region_needs_this": "您所在地区需要此模型",
+  "_lang": "中文",
+  "_dir": "ltr"
 }

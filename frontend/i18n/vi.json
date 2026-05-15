@@ -1,6 +1,4 @@
 {
-  "_dir": "ltr",
-  "_lang": "Tiếng Việt",
   "actions.cancel": "Hủy",
   "actions.confirm_cancel_download": "Hủy tải xuống cho {model}?",
   "actions.confirm_remove_model": "Xóa tất cả mảnh cục bộ của {model}? Không thể hoàn tác.",
@@ -1135,10 +1133,13 @@
   "wishlist.why.fits_your_memory": "Phù hợp với bộ nhớ máy tính của bạn",
   "wishlist.why.needs_review": "Đang chờ xác minh — hãy xem xét trước khi tải xuống",
   "wishlist.why.no_regional_replica": "Chưa có ai lưu trữ trong khu vực của bạn",
+  "wishlist.why.other_nodes_want_this": "Các node khác muốn cái này",
   "wishlist.why.parts_missing": "Còn thiếu {missing} phần của mô hình",
   "wishlist.why.popular_on_hf": "Phổ biến trên HuggingFace",
   "wishlist.why.popular_on_swarm": "Phổ biến trong bầy",
   "wishlist.why.swarm_already_serves": "Bầy đã có thể phục vụ mô hình này",
   "wishlist.why.you_already_host": "Bạn đã là người lưu trữ",
-  "wishlist.why.your_region_needs_this": "Khu vực của bạn cần mô hình này"
+  "wishlist.why.your_region_needs_this": "Khu vực của bạn cần mô hình này",
+  "_lang": "Tiếng Việt",
+  "_dir": "ltr"
 }

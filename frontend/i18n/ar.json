@@ -1,6 +1,4 @@
 {
-  "_dir": "rtl",
-  "_lang": "العربية",
   "actions.cancel": "إلغاء",
   "actions.confirm_cancel_download": "هل تريد إلغاء تنزيل {model}؟",
   "actions.confirm_remove_model": "هل تريد إزالة جميع الشظايا المحلية لـ {model}؟ لا يمكن التراجع عن هذا.",
@@ -1135,10 +1133,13 @@
   "wishlist.why.fits_your_memory": "يناسب ذاكرة جهازك",
   "wishlist.why.needs_review": "في انتظار التحقق — راجعه قبل التنزيل",
   "wishlist.why.no_regional_replica": "لا يوجد مستضيف في منطقتك",
+  "wishlist.why.other_nodes_want_this": "عقد أخرى تريد هذا",
   "wishlist.why.parts_missing": "{missing} جزء نموذج لا يزال مطلوباً",
   "wishlist.why.popular_on_hf": "شائع على HuggingFace",
   "wishlist.why.popular_on_swarm": "شائع في السرب",
   "wishlist.why.swarm_already_serves": "السرب يقدم هذا النموذج بالفعل",
   "wishlist.why.you_already_host": "أنت مستضيف بالفعل",
-  "wishlist.why.your_region_needs_this": "منطقتك تحتاج هذا النموذج"
+  "wishlist.why.your_region_needs_this": "منطقتك تحتاج هذا النموذج",
+  "_lang": "العربية",
+  "_dir": "rtl"
 }

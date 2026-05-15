@@ -1,6 +1,4 @@
 {
-  "_dir": "ltr",
-  "_lang": "हिन्दी",
   "actions.cancel": "रद्द करें",
   "actions.confirm_cancel_download": "{model} का डाउनलोड रद्द करें?",
   "actions.confirm_remove_model": "{model} के सभी स्थानीय शार्ड हटाएँ? यह पूर्ववत नहीं किया जा सकता।",
@@ -1135,10 +1133,13 @@
   "wishlist.why.fits_your_memory": "आपके कंप्यूटर की मेमोरी में फिट हो जाता है",
   "wishlist.why.needs_review": "सत्यापन लंबित — डाउनलोड से पहले जाँचें",
   "wishlist.why.no_regional_replica": "आपके क्षेत्र में कोई होस्ट नहीं",
+  "wishlist.why.other_nodes_want_this": "अन्य नोड्स को यह चाहिए",
   "wishlist.why.parts_missing": "{missing} मॉडल भाग अभी भी चाहिए",
   "wishlist.why.popular_on_hf": "HuggingFace पर लोकप्रिय",
   "wishlist.why.popular_on_swarm": "स्वार्म में लोकप्रिय",
   "wishlist.why.swarm_already_serves": "स्वार्म यह पहले से चला रहा है",
   "wishlist.why.you_already_host": "आप पहले से एक होस्ट हैं",
-  "wishlist.why.your_region_needs_this": "आपके क्षेत्र को इसकी जरूरत है"
+  "wishlist.why.your_region_needs_this": "आपके क्षेत्र को इसकी जरूरत है",
+  "_lang": "हिन्दी",
+  "_dir": "ltr"
 }

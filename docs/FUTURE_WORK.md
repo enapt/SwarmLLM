@@ -47,6 +47,24 @@ Captures items deliberately deferred from the model-management redesign and from
 
 **Why deferred.** R111 already gets convergence indirectly through `region_demand` and consistent-hash placement. Direct gossip is an optimisation, not a correctness fix.
 
+_**Closed R130** (2026-05-15). `SwarmMessage::WishlistAnnouncement` carries
+`(publisher, top-K (model_id, 0..100 score), timestamp_ms)` on the existing
+`swarm/regions` topic, reusing the same 30s broadcast cadence as
+`RegionShardSummary`. Inbound entries land in
+`state.models.foreign_wishlist: DashMap<(NodeId, ModelId), (score, ts_ms)>`
+(capped at `MAX_FOREIGN_WISHLIST_ENTRIES = 10_000`, stale entries pruned
+after `FOREIGN_WISHLIST_MAX_AGE_MS = 2h` on read). `compute_wishlist`
+adds a 0..10 boost = `10 * log10(publisher_count+1).min(1.0) * max_score/100`,
+blending breadth (how many nodes care) with depth (how strongly the
+loudest voter cares). New `wishlist.why.other_nodes_want_this` i18n tag
+translated across all 21 locales. Publishing is opt-in via
+`auto_manage.wishlist_gossip_publish` (default `false` — privacy
+default); the receive side is always on so privacy-conscious nodes
+still benefit from the signal without leaking their own interests.
+Wire schema only exposes model granularity — does not leak pool
+composition, region, or per-shard interest. 3 unit tests for
+`apply_wishlist_announcement`._
+
 ---
 
 ### Smarter eviction policy under multi-tenancy

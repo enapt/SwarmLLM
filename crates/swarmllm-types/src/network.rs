@@ -121,6 +121,13 @@ pub enum SwarmMessage {
     // resolves `request_id` against its `active_pipelines` map and signals
     // the worker subprocess to bail on the next decode iteration.
     CancelInference(CancelInference),
+
+    // R130 — cross-pool / cross-node wishlist coordination. Opt-in publisher;
+    // every node that opts in periodically gossips its top-K wishlist entries
+    // on the existing regions topic. Receivers blend foreign interest into
+    // their own wishlist score as a soft boost. Privacy-sensitive (publishes
+    // what THIS node wants) so default-off.
+    WishlistAnnouncement(WishlistAnnouncement),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -197,6 +204,33 @@ pub struct RegionShardSummary {
     pub publisher: NodeId,
     /// Milliseconds since Unix epoch.
     pub timestamp_ms: u64,
+}
+
+/// R130 — wishlist announcement. Publisher's top-K wishlist entries with a
+/// coarse score signal. Receivers aggregate per-model interest across
+/// publishers and apply a small boost in their own wishlist score. The
+/// model_id field is the canonical identifier shared across the swarm; we
+/// do NOT leak hostnames, pool composition, or per-shard interest — only
+/// "we'd like this model" at the model granularity.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct WishlistAnnouncement {
+    pub publisher: NodeId,
+    /// Highest-scoring entries from the publisher's local wishlist
+    /// (bounded; see `MAX_WISHLIST_ANNOUNCE_ENTRIES` on the publishing
+    /// side for the cap). Smaller cap on the wire than the local
+    /// wishlist itself — gossip carries the headline, not the full list.
+    pub entries: Vec<WishlistAnnouncementEntry>,
+    /// Milliseconds since Unix epoch.
+    pub timestamp_ms: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct WishlistAnnouncementEntry {
+    pub model_id: ModelId,
+    /// Publisher's local wishlist score (0..100). Receivers treat this
+    /// purely as a ranking signal; absolute values aren't comparable
+    /// across nodes (different swarm context, different VRAM, etc.).
+    pub score: u32,
 }
 
 /// Model demand gossip — EMA-smoothed request rate per model per region.

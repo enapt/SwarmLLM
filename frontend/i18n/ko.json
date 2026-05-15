@@ -1,6 +1,4 @@
 {
-  "_dir": "ltr",
-  "_lang": "한국어",
   "actions.cancel": "취소",
   "actions.confirm_cancel_download": "{model} 다운로드를 취소하시겠습니까?",
   "actions.confirm_remove_model": "{model}의 모든 로컬 샤드를 제거하시겠습니까? 이 작업은 취소할 수 없습니다.",
@@ -1135,10 +1133,13 @@
   "wishlist.why.fits_your_memory": "내 컴퓨터의 메모리에 적합",
   "wishlist.why.needs_review": "검증 대기 중 — 다운로드 전 검토 필요",
   "wishlist.why.no_regional_replica": "내 지역에 호스트 없음",
+  "wishlist.why.other_nodes_want_this": "다른 노드들이 이것을 원합니다",
   "wishlist.why.parts_missing": "모델 부분 {missing}개가 아직 필요합니다",
   "wishlist.why.popular_on_hf": "HuggingFace에서 인기",
   "wishlist.why.popular_on_swarm": "스웜에서 인기",
   "wishlist.why.swarm_already_serves": "스웜이 이미 제공 중",
   "wishlist.why.you_already_host": "이미 호스트입니다",
-  "wishlist.why.your_region_needs_this": "내 지역에 필요한 모델"
+  "wishlist.why.your_region_needs_this": "내 지역에 필요한 모델",
+  "_lang": "한국어",
+  "_dir": "ltr"
 }

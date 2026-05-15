@@ -1,6 +1,4 @@
 {
-  "_dir": "ltr",
-  "_lang": "ไทย",
   "actions.cancel": "ยกเลิก",
   "actions.confirm_cancel_download": "ยกเลิกการดาวน์โหลดสำหรับ {model}?",
   "actions.confirm_remove_model": "ลบ shards ในเครื่องทั้งหมดสำหรับ {model}? ไม่สามารถยกเลิกได้",
@@ -1135,10 +1133,13 @@
   "wishlist.why.fits_your_memory": "พอดีกับหน่วยความจำของคอมพิวเตอร์คุณ",
   "wishlist.why.needs_review": "รอการตรวจสอบ — ตรวจสอบก่อนดาวน์โหลด",
   "wishlist.why.no_regional_replica": "ไม่มีโฮสต์ในภูมิภาคของคุณ",
+  "wishlist.why.other_nodes_want_this": "โหนดอื่นต้องการสิ่งนี้",
   "wishlist.why.parts_missing": "ยังต้องการอีก {missing} ส่วนของโมเดล",
   "wishlist.why.popular_on_hf": "ยอดนิยมบน HuggingFace",
   "wishlist.why.popular_on_swarm": "ยอดนิยมในฝูง",
   "wishlist.why.swarm_already_serves": "ฝูงให้บริการสิ่งนี้อยู่แล้ว",
   "wishlist.why.you_already_host": "คุณเป็นโฮสต์อยู่แล้ว",
-  "wishlist.why.your_region_needs_this": "ภูมิภาคของคุณต้องการสิ่งนี้"
+  "wishlist.why.your_region_needs_this": "ภูมิภาคของคุณต้องการสิ่งนี้",
+  "_lang": "ไทย",
+  "_dir": "ltr"
 }

@@ -159,6 +159,36 @@ pub fn compute_wishlist(state: &SharedState) -> Wishlist {
         }
     }
 
+    // R130: foreign-wishlist boost. Aggregate per-model interest from
+    // inbound `WishlistAnnouncement` gossip — drop expired entries on the
+    // fly so a publisher that disappeared stops biasing our scoring after
+    // `FOREIGN_WISHLIST_MAX_AGE_MS`. The aggregate carries (publisher
+    // count, max score) so the scorer can ramp the boost smoothly with
+    // both breadth (how many other nodes care) and depth (how strongly
+    // the top voter cares).
+    let foreign_wishlist_summary: HashMap<ModelId, (u32, u32)> = {
+        let now_ms = crate::types::unix_now_ms();
+        let mut per_model: HashMap<ModelId, (u32, u32)> = HashMap::new();
+        let mut stale: Vec<(NodeId, ModelId)> = Vec::new();
+        for entry in state.models.foreign_wishlist.iter() {
+            let (publisher, model_id) = entry.key();
+            let (score, ts_ms) = *entry.value();
+            if now_ms.saturating_sub(ts_ms) > crate::daemon::state::FOREIGN_WISHLIST_MAX_AGE_MS {
+                stale.push((publisher.clone(), model_id.clone()));
+                continue;
+            }
+            let summary = per_model.entry(model_id.clone()).or_insert((0, 0));
+            summary.0 = summary.0.saturating_add(1);
+            if score > summary.1 {
+                summary.1 = score;
+            }
+        }
+        for k in stale {
+            state.models.foreign_wishlist.remove(&k);
+        }
+        per_model
+    };
+
     let mut entries: Vec<WishlistEntry> = Vec::new();
 
     for manifest in state.model_registry.models() {
@@ -316,6 +346,20 @@ pub fn compute_wishlist(state: &SharedState) -> Wishlist {
             let normalised = (log / 7.0).clamp(0.0, 1.0);
             score += 15.0 * normalised;
             why_tags.push("wishlist.why.popular_on_hf".to_string());
+        }
+
+        // R130: foreign-wishlist boost (0..10) — other nodes in the
+        // swarm have signalled they want this model. Blend breadth
+        // (publisher count) with depth (max score). Capped low so it
+        // can nudge ordering but never override local signals.
+        if let Some(&(publisher_count, max_score)) = foreign_wishlist_summary.get(&mid) {
+            // Breadth saturates at ~10 publishers (log10(10+1) ≈ 1.04),
+            // multiplied by depth which is the publisher's own 0..100
+            // score normalised to 0..1.
+            let breadth = ((publisher_count + 1) as f64).log10().min(1.0);
+            let depth = (max_score as f64) / 100.0;
+            score += 10.0 * breadth * depth;
+            why_tags.push("wishlist.why.other_nodes_want_this".to_string());
         }
 
         // Hosting / serveability tags — informational only.

@@ -1,6 +1,4 @@
 {
-  "_dir": "ltr",
-  "_lang": "Polski",
   "actions.cancel": "Anuluj",
   "actions.confirm_cancel_download": "Anulować pobieranie {model}?",
   "actions.confirm_remove_model": "Usunąć wszystkie lokalne shardy modelu {model}? Tej operacji nie można cofnąć.",
@@ -1135,10 +1133,13 @@
   "wishlist.why.fits_your_memory": "Mieści się w pamięci Twojego komputera",
   "wishlist.why.needs_review": "Oczekuje na weryfikację — sprawdź przed pobraniem",
   "wishlist.why.no_regional_replica": "Brak gospodarza w Twoim regionie",
+  "wishlist.why.other_nodes_want_this": "Inne węzły tego chcą",
   "wishlist.why.parts_missing": "Brakuje jeszcze {missing} części modelu",
   "wishlist.why.popular_on_hf": "Popularne na HuggingFace",
   "wishlist.why.popular_on_swarm": "Popularny w roju",
   "wishlist.why.swarm_already_serves": "Rój już to obsługuje",
   "wishlist.why.you_already_host": "Już jesteś gospodarzem",
-  "wishlist.why.your_region_needs_this": "Twój region potrzebuje tego"
+  "wishlist.why.your_region_needs_this": "Twój region potrzebuje tego",
+  "_lang": "Polski",
+  "_dir": "ltr"
 }
