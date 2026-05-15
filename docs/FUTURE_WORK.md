@@ -109,6 +109,21 @@ _(R126 closures: matched_stop_sequence wire plumbing, cross-node logprobs, cance
 
 **Why deferred.** Existing 5-min coalescing window in `gossip_pool_state` keeps the load tractable for typical pools.
 
+_**Partially closed R131** (2026-05-15) via the "Or epoch-based" path
+explicitly invited above. `PoolManager` gains `last_pool_gossip_at` +
+`pool_gossip_dirty` debounce state with a 15s minimum interval between
+broadcasts. Post-acceptance handler now routes through new
+`maybe_gossip_pool_state` (the periodic full-broadcast tick bypasses the
+gate — anti-poison + late-joiner recovery). A 3s coalesce timer in the
+select! loop drains the dirty flag once the cooldown elapses. 50
+acceptances in <15s now coalesce to ≤2 broadcasts (one immediate, one
+trailing). 3 unit tests verify the state machine. **Wire-format diffs
+remain deferred** — debounce captures the bursty-churn win without a
+protocol change; true `PoolStateDiff` variants need a generation
+counter + checksum verification + Full/Diff variant on `PoolMessage`,
+worth doing only if a WAN bench shows the trailing-full-state broadcast
+is actually bandwidth-constrained._
+
 ---
 
 _(R121 Setup-wizard contribution toggle closed in R126.)_

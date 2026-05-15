@@ -57,10 +57,36 @@ pub struct PoolManager {
     /// vector (each forward gets a fresh UUID so the DB dedup key alone
     /// cannot detect repeated claims).
     credit_forward_rl: HashMap<NodeId, std::collections::VecDeque<std::time::Instant>>,
+    /// R131: timestamp of the most recent successful PoolState gossip
+    /// broadcast. Used by `maybe_gossip_pool_state` to debounce bursty
+    /// re-broadcasts (the "flood under 50-member rotation" case from
+    /// FUTURE_WORK.md). `None` until the first broadcast.
+    last_pool_gossip_at: Option<std::time::Instant>,
+    /// R131: set by `maybe_gossip_pool_state` when a broadcast is
+    /// suppressed by the debounce window. The pool-coalesce timer in
+    /// the run loop drains this flag on its next tick after the
+    /// `POOL_GOSSIP_MIN_INTERVAL` cooldown, ensuring a single trailing
+    /// broadcast catches up bursty changes.
+    pool_gossip_dirty: bool,
 }
 
 const CREDIT_FORWARD_WINDOW_SECS: u64 = 60;
 const CREDIT_FORWARD_MAX_PER_WINDOW: usize = 60;
+
+/// R131: minimum interval between unsolicited PoolState broadcasts. Bursty
+/// member-change events within this window collapse into a single trailing
+/// broadcast scheduled by the pool-coalesce timer. New-member visibility
+/// degrades by at most `POOL_GOSSIP_MIN_INTERVAL` — well under the
+/// existing default `gossip_interval_secs = 600` and acceptable for
+/// non-critical state. Receivers always have the option to request
+/// state again via the existing `PoolGet` command if they fall behind.
+pub(crate) const POOL_GOSSIP_MIN_INTERVAL: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// R131: poll cadence for the pool-coalesce timer. Fires regularly so
+/// the trailing broadcast after a debounced burst lands within
+/// `POOL_GOSSIP_MIN_INTERVAL + POOL_GOSSIP_COALESCE_TICK` of the original
+/// event. Cheap when nothing's dirty.
+const POOL_GOSSIP_COALESCE_TICK: std::time::Duration = std::time::Duration::from_secs(3);
 
 impl PoolManager {
     pub fn new(
@@ -80,6 +106,8 @@ impl PoolManager {
             invite_codes: HashMap::new(),
             auto_accept_code_hash: None,
             credit_forward_rl: HashMap::new(),
+            last_pool_gossip_at: None,
+            pool_gossip_dirty: false,
         }
     }
 
@@ -199,6 +227,14 @@ impl PoolManager {
             tokio::time::interval(std::time::Duration::from_secs(gossip_secs));
         gossip_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
+        // R131: pool-state gossip coalescer. Drains the `pool_gossip_dirty`
+        // flag whenever the debounce window has elapsed, so a burst of
+        // member-change events broadcasts at most once per
+        // `POOL_GOSSIP_MIN_INTERVAL` instead of once per event.
+        let mut pool_coalesce_interval = tokio::time::interval(POOL_GOSSIP_COALESCE_TICK);
+        pool_coalesce_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        pool_coalesce_interval.tick().await; // skip the immediate first tick
+
         // R107: periodically prune stale TREE_POOL_REMOVAL_REPLAYS entries.
         // The startup-only sweep at `restore_state` was insufficient under
         // sustained pool churn — entries accumulated continuously between
@@ -229,6 +265,9 @@ impl PoolManager {
                     }
                 }
                 _ = gossip_interval.tick() => {
+                    // Periodic full broadcast: always fires (anti-poison +
+                    // recovery for late joiners), bypassing the debounce
+                    // window. Equivalent to forcing through the rate-limit.
                     self.gossip_pool_state().await;
                     self.send_device_stats_report().await;
                     // Expire stale auto-accept intent
@@ -237,6 +276,17 @@ impl PoolManager {
                             tracing::debug!("Clearing expired auto-accept code hash");
                             self.auto_accept_code_hash = None;
                         }
+                    }
+                }
+                _ = pool_coalesce_interval.tick() => {
+                    // R131: drain a debounced broadcast if one is pending
+                    // AND enough time has passed since the last broadcast.
+                    if self.pool_gossip_dirty
+                        && self.last_pool_gossip_at
+                            .map(|t| t.elapsed() >= POOL_GOSSIP_MIN_INTERVAL)
+                            .unwrap_or(true)
+                    {
+                        self.gossip_pool_state().await;
                     }
                 }
                 _ = replay_sweep_interval.tick() => {
@@ -1141,8 +1191,11 @@ impl PoolManager {
                 members = member_count,
                 "Pool member joined"
             );
-            // Immediately gossip updated pool state so the new member sees full membership
-            self.gossip_pool_state().await;
+            // Trigger updated pool state broadcast — debounced so a burst
+            // of acceptances (or a periodic re-broadcast that lands in the
+            // same window) doesn't flood the network with N copies of an
+            // N-member roster.
+            self.maybe_gossip_pool_state().await;
         }
     }
 
@@ -1647,6 +1700,18 @@ mod tests {
     /// (manager, shared_state, identity) so the caller can introspect /
     /// mutate pool state directly to set up scenarios.
     async fn build_test_pool_manager() -> (PoolManager, Arc<SharedState>, Identity) {
+        let (pm, state, id, _rx) = build_test_pool_manager_with_rx().await;
+        (pm, state, id)
+    }
+
+    /// As above but also returns the network receiver so callers can
+    /// assert on outbound broadcasts.
+    async fn build_test_pool_manager_with_rx() -> (
+        PoolManager,
+        Arc<SharedState>,
+        Identity,
+        mpsc::Receiver<NetworkCommand>,
+    ) {
         let config = Config::default();
         let identity = Identity::generate();
         let db = Database::open_temp().expect("temp db");
@@ -1656,11 +1721,28 @@ mod tests {
             SharedState::new(config, identity.clone(), db, executor, None);
 
         let (_cmd_tx, cmd_rx) = mpsc::channel(16);
-        let (network_tx, _network_rx) = mpsc::channel(16);
+        let (network_tx, network_rx) = mpsc::channel(16);
         let (_shutdown_tx, shutdown_rx) = watch::channel(false);
 
         let pm = PoolManager::new(shared_state.clone(), cmd_rx, network_tx, shutdown_rx);
-        (pm, shared_state, identity)
+        (pm, shared_state, identity, network_rx)
+    }
+
+    /// Drain the network channel and count the number of pending
+    /// `PoolMessage::StateGossip` broadcasts. Used to assert the
+    /// debounce behaviour without depending on `Instant` arithmetic on
+    /// the spawned task side.
+    fn count_state_gossips(rx: &mut mpsc::Receiver<NetworkCommand>) -> usize {
+        let mut count = 0;
+        while let Ok(cmd) = rx.try_recv() {
+            if let NetworkCommand::Broadcast(SwarmMessage::PoolMessage(
+                crate::types::PoolMessage::StateGossip(_),
+            )) = cmd
+            {
+                count += 1;
+            }
+        }
+        count
     }
 
     /// Synthesize a pool membership record for the given node — only
@@ -2087,5 +2169,75 @@ mod tests {
             state.credits.pool_state.read().await.is_none(),
             "must not have joined attacker's pool with wrong code_hash"
         );
+    }
+
+    /// R131: first call to `maybe_gossip_pool_state` fires immediately —
+    /// `last_pool_gossip_at` is `None`, so the cooldown isn't engaged.
+    /// Multi-thread runtime needed because `collect_device_stats` uses
+    /// `tokio::task::block_in_place` (sysinfo memory probe).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn r131_first_gossip_fires_immediately() {
+        let (mut pm, _state, _id, mut rx) = build_test_pool_manager_with_rx().await;
+        pm.handle_create_pool("test".into()).await.unwrap();
+        let _initial = count_state_gossips(&mut rx); // drain the create-pool gossip
+
+        pm.maybe_gossip_pool_state().await;
+        assert_eq!(count_state_gossips(&mut rx), 1, "first call must broadcast");
+        assert!(pm.last_pool_gossip_at.is_some());
+        assert!(!pm.pool_gossip_dirty);
+    }
+
+    /// R131: second call within `POOL_GOSSIP_MIN_INTERVAL` is suppressed
+    /// but sets `pool_gossip_dirty` so the coalesce timer catches up.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn r131_second_gossip_within_window_debounces() {
+        let (mut pm, _state, _id, mut rx) = build_test_pool_manager_with_rx().await;
+        pm.handle_create_pool("test".into()).await.unwrap();
+        let _drain = count_state_gossips(&mut rx);
+
+        pm.maybe_gossip_pool_state().await;
+        let after_first = pm.last_pool_gossip_at;
+        assert_eq!(count_state_gossips(&mut rx), 1);
+
+        // Second call within the window: no broadcast, dirty flag set,
+        // last_pool_gossip_at unchanged.
+        pm.maybe_gossip_pool_state().await;
+        assert_eq!(
+            count_state_gossips(&mut rx),
+            0,
+            "second call within window must not broadcast"
+        );
+        assert!(pm.pool_gossip_dirty);
+        assert_eq!(pm.last_pool_gossip_at, after_first);
+    }
+
+    /// R131: after the cooldown elapses, a third call fires the broadcast
+    /// AND clears the dirty flag. Simulates the coalesce timer's drain.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn r131_gossip_after_cooldown_fires_and_clears_dirty() {
+        let (mut pm, _state, _id, mut rx) = build_test_pool_manager_with_rx().await;
+        pm.handle_create_pool("test".into()).await.unwrap();
+        let _drain = count_state_gossips(&mut rx);
+
+        pm.maybe_gossip_pool_state().await;
+        pm.maybe_gossip_pool_state().await; // suppressed, sets dirty
+        let _drain2 = count_state_gossips(&mut rx);
+        assert!(pm.pool_gossip_dirty);
+
+        // Simulate cooldown expiry by backdating the timestamp. Avoids a
+        // multi-second sleep in the test.
+        pm.last_pool_gossip_at = Some(
+            std::time::Instant::now()
+                - POOL_GOSSIP_MIN_INTERVAL
+                - std::time::Duration::from_secs(1),
+        );
+
+        pm.maybe_gossip_pool_state().await;
+        assert_eq!(
+            count_state_gossips(&mut rx),
+            1,
+            "broadcast after cooldown must fire"
+        );
+        assert!(!pm.pool_gossip_dirty);
     }
 }

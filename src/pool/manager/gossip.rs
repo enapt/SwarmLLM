@@ -172,7 +172,13 @@ impl PoolManager {
         }
     }
 
-    pub(super) async fn gossip_pool_state(&self) {
+    /// Force a PoolState broadcast immediately. Updates owner stats first
+    /// if we're the owner. Sets `last_pool_gossip_at` and clears the
+    /// `pool_gossip_dirty` flag so the coalescer doesn't double-fire.
+    /// Use `maybe_gossip_pool_state` instead from event-driven sites —
+    /// this method bypasses the debounce window and should only be called
+    /// from the periodic interval and from `maybe_gossip_pool_state` itself.
+    pub(super) async fn gossip_pool_state(&mut self) {
         let my_id = self.shared_state.identity.node_id().clone();
         // If we're the owner, update our own stats before gossiping
         {
@@ -192,6 +198,29 @@ impl PoolManager {
         if let Some(ref ps) = *state {
             let msg = SwarmMessage::PoolMessage(crate::types::PoolMessage::StateGossip(ps.clone()));
             let _ = self.network_tx.send(NetworkCommand::Broadcast(msg)).await;
+        }
+        drop(state);
+        self.last_pool_gossip_at = Some(std::time::Instant::now());
+        self.pool_gossip_dirty = false;
+    }
+
+    /// R131: rate-limited event-driven gossip entrypoint. If the last
+    /// broadcast was longer than `POOL_GOSSIP_MIN_INTERVAL` ago (or this
+    /// is the first broadcast), fires immediately. Otherwise sets
+    /// `pool_gossip_dirty` so the pool-coalesce timer fires a trailing
+    /// broadcast once the cooldown expires — collapsing N bursty member
+    /// changes into ≤ 2 broadcasts (one immediate, one trailing) instead
+    /// of N. The periodic full-broadcast tick bypasses this gate.
+    pub(super) async fn maybe_gossip_pool_state(&mut self) {
+        let ready = self
+            .last_pool_gossip_at
+            .map(|t| t.elapsed() >= super::POOL_GOSSIP_MIN_INTERVAL)
+            .unwrap_or(true);
+        if ready {
+            self.gossip_pool_state().await;
+        } else {
+            self.pool_gossip_dirty = true;
+            tracing::debug!("PoolState gossip debounced; trailing broadcast pending");
         }
     }
 
