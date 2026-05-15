@@ -7,6 +7,7 @@
 mod download;
 mod parallax;
 mod prune;
+pub mod quant;
 mod scoring;
 pub mod vram;
 pub mod wishlist;

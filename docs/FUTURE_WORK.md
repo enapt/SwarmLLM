@@ -29,6 +29,43 @@ Captures items deliberately deferred from the model-management redesign and from
 
 **Why deferred.** Touches the GGUF probe path, the ModelManifest schema (would need a `quant_family` link), and the wishlist evaluation function. Big change, separate phase.
 
+_**Closed R133** (2026-05-15) — recommendation surface landed; the
+auto-action layer (actually switching which quant the daemon downloads)
+remains a follow-on for the user to opt into. What shipped:_
+
+_- `Quantization` enum expanded from 5 → 29 variants (K-quants Q2_K..Q6_K,
+  legacy Q4_0..Q5_1+Q8_0, I-quants IQ1_S..IQ4_NL, floats F16/BF16/F32,
+  Unknown fallback). Each carries `parse(str)`, `bits_per_weight()`,
+  `quality_score()` (calibrated against llama.cpp perplexity-loss
+  tables) and `label()`._
+_- New `model/auto_manage/quant.rs` module: groups registry models by
+  inferred base name (model name with quant tag stripped via
+  `inferred_base_name`), picks the highest-quality variant whose
+  VRAM footprint fits the swarm budget (local GPU VRAM OR the
+  aggregate pool VRAM divided by a 3-replica target). Rationale
+  surfaced as an i18n-formatted tag (`quant.rec.{best_fit,
+  would_upgrade, too_big, cpu_only, no_variants}`) with parameter
+  interpolation (`|next=Q5_K_M&need_mb=15000`) matching the existing
+  `wishlist.why.*` pattern._
+_- `state.models.quant_recommendations: ArcSwap<QuantRecommendations>`
+  refreshed alongside the wishlist on every auto-manage tick AND on
+  every WS stats build._
+_- New `GET /api/admin/quant-recommendations` endpoint exposes the
+  cached snapshot to the dashboard / external integrators._
+_- 5 new i18n keys translated across all 21 locales._
+_- 7 unit tests including a registry-backed end-to-end._
+_- Manifest schema NOT changed — recommender derives the family
+  grouping on-the-fly to keep the wire format stable._
+
+_What remains deferred (auto-action + UI surfacing):_
+_- Auto-action layer (download the recommended quant when the user
+  toggles "auto-switch quants" — needs a UI surface for explicit
+  consent + a migration path for replacing a hosted quant with a
+  better variant)._
+_- Frontend integration (the recommendations are exposed via REST
+  + WS-cached state but no dashboard tile renders them yet; will
+  pair naturally with the next dashboard refresh)._
+
 ---
 
 ### GGUF conversion / fine-tune support

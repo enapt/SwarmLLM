@@ -114,6 +114,22 @@ pub async fn wishlist(State(state): State<AppState>) -> Json<serde_json::Value> 
     Json(serde_json::to_value(&*snap).unwrap_or_else(|_| serde_json::json!({})))
 }
 
+/// GET /api/admin/quant-recommendations — per-family quant choice
+/// recommendations (R133).
+///
+/// Groups models in the local registry by inferred base name (model name
+/// with the quant suffix stripped) and surfaces the highest-quality
+/// variant that fits the swarm's aggregate VRAM with reasonable
+/// replication. Read-only — the recommender does NOT auto-switch which
+/// quant the auto-manage system downloads. Frontend can render
+/// "We're hosting Q4_K_M because the swarm only has X TB; with N more
+/// nodes we'd switch to Q5_K_M."
+pub async fn quant_recommendations(State(state): State<AppState>) -> Json<serde_json::Value> {
+    crate::model::auto_manage::quant::refresh_quant_recommendations(&state.shared_state);
+    let snap = state.shared_state.models.quant_recommendations.load_full();
+    Json(serde_json::to_value(&*snap).unwrap_or_else(|_| serde_json::json!({})))
+}
+
 /// GET /api/admin/hf/trending — latest HuggingFace trending-GGUF snapshot
 /// captured by the background HfWatcher (R112). Surfaces the same data the
 /// wishlist scorer consumes so the frontend can render a "trending now"

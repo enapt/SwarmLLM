@@ -389,6 +389,9 @@ impl SharedState {
                     crate::model::huggingface::HfTrendingSnapshot::default(),
                 ),
                 foreign_wishlist: DashMap::new(),
+                quant_recommendations: arc_swap::ArcSwap::from_pointee(
+                    crate::model::auto_manage::quant::QuantRecommendations::default(),
+                ),
             },
             events: EventBus {
                 dashboard_tx: broadcast::channel(32).0,

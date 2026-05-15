@@ -91,13 +91,212 @@ pub struct VisionConfig {
     pub projection_dim: u32,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+/// Quantization level for a GGUF model. Captures the common k-quant,
+/// i-quant, and float-precision variants used in the GGUF ecosystem.
+///
+/// Variants are ordered roughly by quality (lowest → highest), and each
+/// carries an explicit `bits_per_weight()` so the auto-manage quant
+/// recommender (R133) can compare candidates numerically. Renaming or
+/// removing variants is a serde-breaking change — extend with new
+/// variants instead. `Unknown` exists for filenames the parser doesn't
+/// recognise, so the manifest still serialises cleanly.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub enum Quantization {
+    // K-quants (mainline llama.cpp)
+    Q2K,
+    Q3KS,
+    Q3KM,
+    Q3KL,
+    Q4KS,
     Q4KM,
+    Q5KS,
     Q5KM,
     Q6K,
+    // Legacy block-quants kept for completeness — rarely produced post-2024
+    Q4_0,
+    Q4_1,
+    Q5_0,
+    Q5_1,
     Q8_0,
+    // I-quants — smaller, lossier than equivalent k-quant
+    IQ1S,
+    IQ1M,
+    IQ2XXS,
+    IQ2XS,
+    IQ2S,
+    IQ2M,
+    IQ3XXS,
+    IQ3XS,
+    IQ3S,
+    IQ3M,
+    IQ4XS,
+    IQ4NL,
+    // Floats
     FP16,
+    BF16,
+    FP32,
+    /// Filename / metadata didn't yield a recognised quant tag. Treated
+    /// as the lowest-quality bucket by `quality_score`; downstream code
+    /// should never use this to compute size estimates.
+    Unknown,
+}
+
+impl Quantization {
+    /// Parse a quant tag (case-insensitive) into a variant. Returns
+    /// `Unknown` for unrecognised inputs. Accepts both underscore and
+    /// no-underscore forms (`Q4_K_M` and `Q4KM`).
+    pub fn parse(tag: &str) -> Self {
+        let up = tag.to_uppercase();
+        let stripped: String = up.chars().filter(|c| *c != '_').collect();
+        match stripped.as_str() {
+            "Q2K" => Self::Q2K,
+            "Q3KS" => Self::Q3KS,
+            "Q3KM" => Self::Q3KM,
+            "Q3KL" => Self::Q3KL,
+            "Q4KS" => Self::Q4KS,
+            "Q4KM" => Self::Q4KM,
+            "Q5KS" => Self::Q5KS,
+            "Q5KM" => Self::Q5KM,
+            "Q6K" => Self::Q6K,
+            "Q40" => Self::Q4_0,
+            "Q41" => Self::Q4_1,
+            "Q50" => Self::Q5_0,
+            "Q51" => Self::Q5_1,
+            "Q80" => Self::Q8_0,
+            "IQ1S" => Self::IQ1S,
+            "IQ1M" => Self::IQ1M,
+            "IQ2XXS" => Self::IQ2XXS,
+            "IQ2XS" => Self::IQ2XS,
+            "IQ2S" => Self::IQ2S,
+            "IQ2M" => Self::IQ2M,
+            "IQ3XXS" => Self::IQ3XXS,
+            "IQ3XS" => Self::IQ3XS,
+            "IQ3S" => Self::IQ3S,
+            "IQ3M" => Self::IQ3M,
+            "IQ4XS" => Self::IQ4XS,
+            "IQ4NL" => Self::IQ4NL,
+            "F16" | "FP16" => Self::FP16,
+            "BF16" => Self::BF16,
+            "F32" | "FP32" => Self::FP32,
+            _ => Self::Unknown,
+        }
+    }
+
+    /// Approximate bits per weight including k-quant block overhead.
+    /// Source: llama.cpp `ggml-quants.c` block sizes + spec docs.
+    /// Used to estimate model size from parameter count when only the
+    /// quant level is known.
+    pub fn bits_per_weight(self) -> f32 {
+        match self {
+            Self::Q2K => 2.625,
+            Self::Q3KS => 3.4375,
+            Self::Q3KM => 3.9,
+            Self::Q3KL => 4.27,
+            Self::Q4KS => 4.5,
+            Self::Q4KM => 4.83,
+            Self::Q5KS => 5.5,
+            Self::Q5KM => 5.69,
+            Self::Q6K => 6.5625,
+            Self::Q4_0 => 4.5,
+            Self::Q4_1 => 5.0,
+            Self::Q5_0 => 5.5,
+            Self::Q5_1 => 6.0,
+            Self::Q8_0 => 8.5,
+            Self::IQ1S => 1.5625,
+            Self::IQ1M => 1.75,
+            Self::IQ2XXS => 2.0625,
+            Self::IQ2XS => 2.3125,
+            Self::IQ2S => 2.5,
+            Self::IQ2M => 2.7,
+            Self::IQ3XXS => 3.0625,
+            Self::IQ3XS => 3.3,
+            Self::IQ3S => 3.4375,
+            Self::IQ3M => 3.66,
+            Self::IQ4XS => 4.25,
+            Self::IQ4NL => 4.5,
+            Self::FP16 | Self::BF16 => 16.0,
+            Self::FP32 => 32.0,
+            // Conservative for unknown — assume worst-case bits, so
+            // size estimates over-state rather than under-state.
+            Self::Unknown => 8.0,
+        }
+    }
+
+    /// Coarse 0..100 quality score, calibrated against published
+    /// perplexity-loss measurements from llama.cpp's quant docs.
+    /// Higher = closer to FP16 reference output. Used by the quant
+    /// recommender to compare candidates that all fit the swarm's
+    /// VRAM budget.
+    pub fn quality_score(self) -> u32 {
+        match self {
+            Self::FP32 => 100,
+            Self::FP16 | Self::BF16 => 100,
+            Self::Q8_0 => 99,
+            Self::Q6K => 97,
+            Self::Q5KM => 94,
+            Self::Q5KS => 92,
+            Self::Q5_1 => 91,
+            Self::Q5_0 => 89,
+            Self::Q4KM => 87,
+            Self::Q4KS => 85,
+            Self::Q4_1 => 83,
+            Self::Q4_0 => 80,
+            Self::IQ4NL => 86,
+            Self::IQ4XS => 83,
+            Self::Q3KL => 75,
+            Self::Q3KM => 72,
+            Self::Q3KS => 68,
+            Self::IQ3M => 70,
+            Self::IQ3S => 67,
+            Self::IQ3XS => 64,
+            Self::IQ3XXS => 60,
+            Self::Q2K => 55,
+            Self::IQ2M => 52,
+            Self::IQ2S => 48,
+            Self::IQ2XS => 44,
+            Self::IQ2XXS => 40,
+            Self::IQ1M => 28,
+            Self::IQ1S => 20,
+            Self::Unknown => 0,
+        }
+    }
+
+    /// Canonical display label, matching the GGUF filename convention
+    /// (uppercase with underscores). Use this for UI / logging.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Q2K => "Q2_K",
+            Self::Q3KS => "Q3_K_S",
+            Self::Q3KM => "Q3_K_M",
+            Self::Q3KL => "Q3_K_L",
+            Self::Q4KS => "Q4_K_S",
+            Self::Q4KM => "Q4_K_M",
+            Self::Q5KS => "Q5_K_S",
+            Self::Q5KM => "Q5_K_M",
+            Self::Q6K => "Q6_K",
+            Self::Q4_0 => "Q4_0",
+            Self::Q4_1 => "Q4_1",
+            Self::Q5_0 => "Q5_0",
+            Self::Q5_1 => "Q5_1",
+            Self::Q8_0 => "Q8_0",
+            Self::IQ1S => "IQ1_S",
+            Self::IQ1M => "IQ1_M",
+            Self::IQ2XXS => "IQ2_XXS",
+            Self::IQ2XS => "IQ2_XS",
+            Self::IQ2S => "IQ2_S",
+            Self::IQ2M => "IQ2_M",
+            Self::IQ3XXS => "IQ3_XXS",
+            Self::IQ3XS => "IQ3_XS",
+            Self::IQ3S => "IQ3_S",
+            Self::IQ3M => "IQ3_M",
+            Self::IQ4XS => "IQ4_XS",
+            Self::IQ4NL => "IQ4_NL",
+            Self::FP16 => "F16",
+            Self::BF16 => "BF16",
+            Self::FP32 => "F32",
+            Self::Unknown => "unknown",
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

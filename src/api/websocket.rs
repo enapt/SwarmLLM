@@ -495,6 +495,7 @@ async fn build_stats_message(state: &SharedState) -> String {
     // coalescing benefits — every dashboard render gets a fresh ranked
     // queue without spamming a new WS message type or polling REST.
     crate::model::auto_manage::refresh_wishlist(state);
+    crate::model::auto_manage::quant::refresh_quant_recommendations(state);
     let wishlist_json = {
         let snap = state.models.wishlist.load_full();
         serde_json::to_value(&*snap).unwrap_or_else(|_| serde_json::json!({}))

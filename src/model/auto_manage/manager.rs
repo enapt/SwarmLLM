@@ -417,6 +417,7 @@ impl AutoShardManager {
         // pass) and means an idle dashboard sees fresh data the moment
         // it connects.
         crate::model::auto_manage::refresh_wishlist(&self.shared_state);
+        crate::model::auto_manage::quant::refresh_quant_recommendations(&self.shared_state);
 
         let hosted_after = self
             .shared_state

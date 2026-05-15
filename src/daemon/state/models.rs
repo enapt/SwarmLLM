@@ -100,6 +100,11 @@ pub struct ModelMgmt {
     /// the publish flag, so a node that opts out of *publishing* still
     /// accepts inbound boosts.
     pub foreign_wishlist: DashMap<(NodeId, crate::types::ModelId), (u32, u64)>,
+    /// R133: latest cached quant recommendations. Refreshed on every
+    /// auto-manage tick alongside the wishlist. `ArcSwap` so the
+    /// dashboard + REST handler can read a lock-free snapshot.
+    pub quant_recommendations:
+        arc_swap::ArcSwap<crate::model::auto_manage::quant::QuantRecommendations>,
 }
 
 /// Maximum number of `(publisher, model_id)` entries we retain from inbound
@@ -408,6 +413,9 @@ mod tests {
                 crate::model::huggingface::HfTrendingSnapshot::default(),
             ),
             foreign_wishlist: DashMap::new(),
+            quant_recommendations: arc_swap::ArcSwap::from_pointee(
+                crate::model::auto_manage::quant::QuantRecommendations::default(),
+            ),
         }
     }
 
