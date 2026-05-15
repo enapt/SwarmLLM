@@ -3,7 +3,7 @@
 //! RoPE split, layer-variant dispatch, DeepSeek meta parsing,
 //! and full forward through mixed dense + MLA/MoE layers.
 
-use super::super::super::layers::topk_cpu;
+use super::super::super::layers::{topk_cpu, MoeGatingFunc, MoeRoutingConfig};
 use super::super::rope::precompute_freqs_cis;
 use super::super::*;
 use super::common::*;
@@ -30,7 +30,7 @@ fn test_moe_topk_selection() {
     )
     .unwrap();
 
-    let (indices, weights) = topk_cpu(&scores, 2).unwrap();
+    let (indices, weights) = topk_cpu(&scores, 2, MoeRoutingConfig::default()).unwrap();
     let idx_vec: Vec<i64> = indices.to_vec1().unwrap();
     let w_vec: Vec<f32> = weights.to_vec1().unwrap();
 
@@ -51,13 +51,97 @@ fn test_moe_topk_selection() {
 fn test_moe_topk_single_expert() {
     let device = Device::Cpu;
     let scores = Tensor::from_vec(vec![0.2f32, 0.8, 0.5], (3,), &device).unwrap();
-    let (indices, weights) = topk_cpu(&scores, 1).unwrap();
+    let (indices, weights) = topk_cpu(&scores, 1, MoeRoutingConfig::default()).unwrap();
     let idx_vec: Vec<i64> = indices.to_vec1().unwrap();
     let w_vec: Vec<f32> = weights.to_vec1().unwrap();
     assert_eq!(idx_vec, vec![1]);
     assert!(
         (w_vec[0] - 1.0).abs() < 1e-5,
         "Single expert weight should be 1.0"
+    );
+}
+
+/// R132: Softmax + no renormalize (DeepSeek-V2 strict, Qwen3-MoE with
+/// `norm_topk_prob=false`). Top-k indices unchanged; weights are the
+/// softmax probabilities at those positions, summing to less than 1
+/// (since not all softmax mass is captured by the top-k subset).
+#[test]
+fn r132_softmax_no_renorm_weights_sum_below_one() {
+    let device = Device::Cpu;
+    let scores = Tensor::from_vec(
+        vec![0.1f32, 0.5, 0.3, 0.8, 0.2, 0.05, 0.7, 0.4],
+        (8,),
+        &device,
+    )
+    .unwrap();
+    let cfg = MoeRoutingConfig {
+        gating_func: MoeGatingFunc::Softmax,
+        renormalize_weights: false,
+    };
+    let (indices, weights) = topk_cpu(&scores, 2, cfg).unwrap();
+    let idx_vec: Vec<i64> = indices.to_vec1().unwrap();
+    let w_vec: Vec<f32> = weights.to_vec1().unwrap();
+    assert_eq!(
+        idx_vec,
+        vec![3, 6],
+        "top-k indices must match raw-score order"
+    );
+    let w_sum: f32 = w_vec.iter().sum();
+    assert!(
+        w_sum > 0.0 && w_sum < 1.0,
+        "softmax-no-renorm sums to <1, got {w_sum}"
+    );
+    // Sanity: with raw scores 0.8 and 0.7, weight[0] > weight[1] still holds.
+    assert!(w_vec[0] > w_vec[1]);
+}
+
+/// R132: Sigmoid + renormalize (DeepSeek-V3 with `expert_weights_norm=true`).
+/// Sigmoid is monotonic in raw, so top-k indices match raw-score order;
+/// renormalization makes the weights sum to 1.
+#[test]
+fn r132_sigmoid_renorm_weights_sum_to_one() {
+    let device = Device::Cpu;
+    let scores = Tensor::from_vec(vec![-2.0f32, 0.5, 1.5, 0.1], (4,), &device).unwrap();
+    let cfg = MoeRoutingConfig {
+        gating_func: MoeGatingFunc::Sigmoid,
+        renormalize_weights: true,
+    };
+    let (indices, weights) = topk_cpu(&scores, 2, cfg).unwrap();
+    let idx_vec: Vec<i64> = indices.to_vec1().unwrap();
+    let w_vec: Vec<f32> = weights.to_vec1().unwrap();
+    // Top-2 raw: 1.5 at idx 2, 0.5 at idx 1
+    assert_eq!(idx_vec, vec![2, 1]);
+    let w_sum: f32 = w_vec.iter().sum();
+    assert!(
+        (w_sum - 1.0).abs() < 1e-5,
+        "renorm sigmoid weights sum to 1, got {w_sum}"
+    );
+}
+
+/// R132: Sigmoid + no renormalize. Weights are raw sigmoid scores; sum
+/// is whatever sigmoid produces, no normalization.
+#[test]
+fn r132_sigmoid_no_renorm_weights_are_raw_sigmoids() {
+    let device = Device::Cpu;
+    let scores = Tensor::from_vec(vec![0.0f32, 2.0], (2,), &device).unwrap();
+    let cfg = MoeRoutingConfig {
+        gating_func: MoeGatingFunc::Sigmoid,
+        renormalize_weights: false,
+    };
+    let (indices, weights) = topk_cpu(&scores, 2, cfg).unwrap();
+    let idx_vec: Vec<i64> = indices.to_vec1().unwrap();
+    let w_vec: Vec<f32> = weights.to_vec1().unwrap();
+    assert_eq!(idx_vec, vec![1, 0]);
+    // sigmoid(2.0) ≈ 0.8808, sigmoid(0.0) = 0.5
+    assert!(
+        (w_vec[0] - 0.8808).abs() < 1e-3,
+        "expected ~0.8808, got {}",
+        w_vec[0]
+    );
+    assert!(
+        (w_vec[1] - 0.5).abs() < 1e-5,
+        "expected 0.5, got {}",
+        w_vec[1]
     );
 }
 
@@ -85,6 +169,7 @@ fn test_moe_forward_single_expert() {
         shared_down: None,
         shared_up: None,
         n_experts_used: 1,
+        routing: MoeRoutingConfig::default(),
     };
 
     let x = Tensor::randn(0f32, 1.0, (1, 4, hidden), &device).unwrap();
@@ -116,6 +201,7 @@ fn test_moe_forward_multi_expert() {
         shared_down: None,
         shared_up: None,
         n_experts_used: 2,
+        routing: MoeRoutingConfig::default(),
     };
 
     let x = Tensor::randn(0f32, 1.0, (1, 3, hidden), &device).unwrap();
@@ -157,6 +243,7 @@ fn test_shared_expert_integration() {
         shared_down: None,
         shared_up: None,
         n_experts_used: 1,
+        routing: MoeRoutingConfig::default(),
     };
 
     // MoE with shared experts
@@ -169,6 +256,7 @@ fn test_shared_expert_integration() {
         shared_down: Some(make_qmatmul(intermediate, hidden)),
         shared_up: Some(make_qmatmul(hidden, intermediate)),
         n_experts_used: 1,
+        routing: MoeRoutingConfig::default(),
     };
 
     let x = Tensor::randn(0f32, 1.0, (1, 2, hidden), &device).unwrap();

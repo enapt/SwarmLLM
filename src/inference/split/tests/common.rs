@@ -336,6 +336,7 @@ pub(super) fn make_deepseek_test_model(hidden_dim: usize) -> SplitModel {
         shared_down: None,
         shared_up: None,
         n_experts_used,
+        routing: MoeRoutingConfig::default(),
     };
 
     let deepseek_layer = LayerVariant::DeepSeek {

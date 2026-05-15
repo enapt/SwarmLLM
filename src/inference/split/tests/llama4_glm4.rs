@@ -189,6 +189,7 @@ fn test_ffn_variant_moe_forward() {
         shared_down: None,
         shared_up: None,
         n_experts_used,
+        routing: MoeRoutingConfig::default(),
     };
 
     let ffn = FfnVariant::MoE(moe);
@@ -261,6 +262,7 @@ fn test_llama4_moe_layer_forward() {
                 shared_down: None,
                 shared_up: None,
                 n_experts_used,
+                routing: MoeRoutingConfig::default(),
             })
         } else {
             // Dense FFN on even indices

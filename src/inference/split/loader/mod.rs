@@ -20,7 +20,8 @@ use super::model::SplitModel;
 use super::rope::{load_longrope_factors, precompute_freqs_cis, precompute_freqs_cis_longrope};
 use super::{
     Activation, DeepSeekMeta, DeltaNetWeights, FfnVariant, LayerVariant, LayerWeights, MlaWeights,
-    Mlp, ModelArch, MoeFfn, QMatMul, Qwen35AttnWeights, DEFAULT_MAX_SEQ_LEN,
+    Mlp, ModelArch, MoeFfn, MoeGatingFunc, MoeRoutingConfig, QMatMul, Qwen35AttnWeights,
+    DEFAULT_MAX_SEQ_LEN,
 };
 
 /// Per-call options for [`SplitModel::load_model_from_content`]. Bundles the
@@ -203,6 +204,35 @@ impl SplitModel {
                 .get(&key)
                 .ok_or_else(|| SwarmError::Internal(format!("Missing GGUF metadata: {key}")))
         };
+
+        // R132: per-arch MoE router policy. GGUF metadata
+        // `{arch}.expert_gating_func` (uint: 1=softmax / 2=sigmoid;
+        // matches llama.cpp's enum) + `{arch}.expert_weights_norm`
+        // (bool). Missing keys fall back to (Softmax, renormalize) —
+        // matches Mixtral / Qwen3-MoE with `norm_topk_prob=true` /
+        // Llama 4 default. Differentiates DeepSeek-V2 strict (no
+        // renorm) and DeepSeek-V3 (sigmoid gate).
+        let moe_routing = MoeRoutingConfig {
+            gating_func: md_get("expert_gating_func")
+                .and_then(|v| v.to_u32().map_err(SwarmError::internal))
+                .ok()
+                .map(|n| {
+                    if n == 2 {
+                        MoeGatingFunc::Sigmoid
+                    } else {
+                        MoeGatingFunc::Softmax
+                    }
+                })
+                .unwrap_or(MoeGatingFunc::Softmax),
+            renormalize_weights: md_get("expert_weights_norm")
+                .and_then(|v| v.to_bool().map_err(SwarmError::internal))
+                .unwrap_or(true),
+        };
+        tracing::debug!(
+            gating_func = ?moe_routing.gating_func,
+            renormalize = moe_routing.renormalize_weights,
+            "Loaded MoE routing config from GGUF"
+        );
 
         let mut context_length = md_get("context_length")
             .and_then(|v| v.to_u32().map_err(SwarmError::internal))
@@ -504,6 +534,7 @@ impl SplitModel {
                             shared_down,
                             shared_up,
                             n_experts_used: ds_meta.n_experts_used,
+                            routing: moe_routing,
                         })
                     } else {
                         // Dense FFN for early DeepSeek layers
@@ -759,6 +790,7 @@ impl SplitModel {
                         shared_down,
                         shared_up,
                         n_experts_used,
+                        routing: moe_routing,
                     })
                 } else {
                     // Dense FFN — gate is optional (absent in Starcoder2's 2-layer MLP)
@@ -972,6 +1004,7 @@ impl SplitModel {
                         shared_down,
                         shared_up,
                         n_experts_used,
+                        routing: moe_routing,
                     })
                 } else {
                     // Dense FFN

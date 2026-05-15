@@ -96,6 +96,31 @@ composition, region, or per-shard interest. 3 unit tests for
 
 **Sweep log:** `src/inference/layers/mod.rs:397` (R108 finding).
 
+_**Closed R132** (2026-05-15). New `MoeGatingFunc { Softmax, Sigmoid }` +
+`MoeRoutingConfig { gating_func, renormalize_weights }` in
+`src/inference/layers/mod.rs`. Carried directly on `MoeFfn` (not on the
+manifest schema — kept off `ModelArchitecture` to avoid a wire-format
+version bump for a GGUF-loader-only concern; the manifest still
+identifies models, the runtime resolves routing from GGUF metadata).
+`topk_cpu` takes the config and branches on the four combinations,
+keeping the Softmax+renorm fast path (existing algebraic identity).
+GGUF loader reads `{arch}.expert_gating_func` (uint: 1 = softmax,
+2 = sigmoid — matches llama.cpp's `LLM_EXPERT_GATING_FUNC_*` enum)
+and `{arch}.expert_weights_norm` (bool) once and threads through all
+3 `MoeFfn` construction sites. Default (Softmax + renormalize) matches
+Mixtral / Qwen3-MoE (with `norm_topk_prob=true`) / Llama 4 / DeepSeek-V3
+default — historical behaviour preserved when metadata is missing.
+Now correctly handles DeepSeek-V2 strict (softmax + no renorm) and
+DeepSeek-V3 sigmoid gating from the same code path.
+
+Tests: 3 new in `inference/split/tests/moe_mla.rs` covering each
+non-default combination. Numerical correctness referenced against
+llama.cpp `build_moe_ffn` semantics and HuggingFace
+`modeling_deepseek_v3.py::topk_weights`. Live-model integration
+remains the original deferral reason — no DeepSeek-V2/V3 GGUF in the
+test fixtures — but the routing path is now exercised by unit tests
+and ready for the first live-corpus addition._
+
 ---
 
 _(R126 closures: matched_stop_sequence wire plumbing, cross-node logprobs, cancel-over-wire for remote-generate, TrustManager bulk hydrate, manifest tensor-cap ActivityEvent — moved from this section.)_

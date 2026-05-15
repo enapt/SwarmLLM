@@ -356,6 +356,51 @@ impl MlaWeights {
 
 // ── MoE FFN for DeepSeek-V2/V3 ──
 
+/// Gating function applied to raw router logits before top-k selection.
+///
+/// - `Softmax` — softmax over all experts (Mixtral, Qwen3-MoE, DeepSeek-V2
+///   default, Llama 4). This is the historical default.
+/// - `Sigmoid` — element-wise sigmoid (DeepSeek-V3 routed-experts gate).
+///   Scores are independent per expert; no `Σ = 1` constraint pre-topk.
+///
+/// Maps from GGUF `{arch}.expert_gating_func` (uint, 1 = softmax, 2 =
+/// sigmoid; matches llama.cpp's enum). Missing key → `Softmax`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum MoeGatingFunc {
+    #[default]
+    Softmax,
+    Sigmoid,
+}
+
+/// R132: MoE router policy. Combines the gating function with whether the
+/// top-k weights are renormalized to sum to 1. Default = Softmax + renorm
+/// (Mixtral / Qwen3-MoE with `norm_topk_prob=true` / DeepSeek-V3 default).
+///
+/// Non-default combinations:
+/// - `Softmax + renormalize=false`: DeepSeek-V2 strict spec — top-k weights
+///   sum to less than 1.
+/// - `Sigmoid + renormalize=true`: DeepSeek-V3 with weights normalization
+///   on (the GGUF metadata key controls this independently of the gating
+///   function).
+/// - `Sigmoid + renormalize=false`: rare; sigmoid scores used directly.
+///
+/// Sourced from GGUF metadata: `{arch}.expert_gating_func` (uint) +
+/// `{arch}.expert_weights_norm` (bool). Missing keys → softmax + renorm.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct MoeRoutingConfig {
+    pub(crate) gating_func: MoeGatingFunc,
+    pub(crate) renormalize_weights: bool,
+}
+
+impl Default for MoeRoutingConfig {
+    fn default() -> Self {
+        Self {
+            gating_func: MoeGatingFunc::Softmax,
+            renormalize_weights: true,
+        }
+    }
+}
+
 /// Mixture-of-Experts FFN for DeepSeek-V2/V3.
 ///
 /// Router selects top-k experts per token, runs SiLU-gated FFN for each,
@@ -371,55 +416,133 @@ pub(crate) struct MoeFfn {
     pub(crate) shared_down: Option<QMatMul>,
     pub(crate) shared_up: Option<QMatMul>,
     pub(crate) n_experts_used: usize, // top-k
+    /// R132: per-architecture routing policy (gating function + weight
+    /// normalization). Defaults to softmax + renormalize — the historical
+    /// behaviour that matches Mixtral / Qwen3-MoE / Llama 4 / DeepSeek-V3
+    /// default. Differentiates DeepSeek-V2 strict (no renorm) and
+    /// DeepSeek-V3 sigmoid gating.
+    pub(crate) routing: MoeRoutingConfig,
 }
 
-/// Select top-k indices and weights from a RAW router-logit vector on CPU.
+/// Select top-k indices and weights from a RAW router-logit vector on CPU,
+/// applying the gating function + optional renormalization specified by
+/// `config`.
 ///
-/// Returns `(indices, weights)` where `weights` is the renormalized
-/// probability slice — the canonical Mixtral / Qwen3 (`norm_topk_prob=true`)
-/// MoE routing semantics:
+/// **Softmax + renormalize** (default; Mixtral / Qwen3-MoE
+/// `norm_topk_prob=true` / DeepSeek-V3 default / Llama 4) takes the fast
+/// path that exploits the algebraic identity
+/// `softmax(raw[topk]) ≡ softmax(raw)[topk] / Σ_{j∈topk} softmax(raw)[j]`
+/// — same numerical result, but `O(k)` work instead of
+/// `O(n_experts)` softmax + `O(k)` renormalize. Picking is monotonic
+/// in `raw` because softmax is monotonic, so sorting raw scores directly
+/// yields the same top-k as sorting softmax probabilities.
 ///
-/// 1. softmax over **all** experts: `p_i = exp(s_i) / Z`
-/// 2. pick top-k by `p_i` (equivalent to picking by raw `s_i` since
-///    softmax is monotonic)
-/// 3. renormalize the selected slice to sum to 1: `w_i = p_i / Σ_{j∈topk} p_j`
+/// **Softmax + no renormalize** (DeepSeek-V2 strict, Qwen3-MoE with
+/// `norm_topk_prob=false`) computes the full softmax once, then takes
+/// the top-k probabilities directly. Output weights sum to less than 1.
 ///
-/// Mathematical identity: step 1 → step 3 collapses to
-/// `w_i = exp(s_i) / Σ_{j∈topk} exp(s_j)`, which is **exactly** what
-/// `softmax(raw[topk])` computes (the global denominator `Z` cancels).
-/// We exploit this identity and apply `softmax` only to the selected k
-/// raw scores — same numerical result, but `O(k)` work instead of
-/// `O(n_experts)` softmax + `O(k)` renormalize.
+/// **Sigmoid + renormalize** (DeepSeek-V3 with weights_norm=true) applies
+/// sigmoid element-wise (no `Σ = 1` constraint), picks top-k by score,
+/// then renormalizes so weights sum to 1.
 ///
-/// Reference implementations:
-/// - Mixtral (HuggingFace `modeling_mixtral.py`) — softmax→topk→renorm
-/// - Qwen3MoE with `norm_topk_prob=true` (default for many GGUF variants)
-/// - DeepSeek-V3 routed-experts gate (after the `norm` step)
+/// **Sigmoid + no renormalize** picks top-k sigmoid scores directly.
 ///
-/// **Not matched**: DeepSeek-V2 strict spec (no renormalize, weights sum
-/// to less than 1) and Qwen3MoE with `norm_topk_prob=false`. Supporting
-/// the unnormalized variant would require a config flag plumbed from
-/// the GGUF metadata; today's models in this codebase use the
-/// renormalized convention.
-pub(crate) fn topk_cpu(scores: &Tensor, k: usize) -> CandleResult<(Tensor, Tensor)> {
+/// References: llama.cpp `build_moe_ffn`
+/// (`llama_expert_gating_func_type` + `norm_topk_prob`),
+/// `transformers` `modeling_deepseek_v3.py::topk_weights`, Mixtral
+/// `modeling_mixtral.py::sparse_mixtral_block`.
+pub(crate) fn topk_cpu(
+    scores: &Tensor,
+    k: usize,
+    config: MoeRoutingConfig,
+) -> CandleResult<(Tensor, Tensor)> {
+    let device = scores.device();
     let scores_vec: Vec<f32> = scores.to_vec1()?;
     let n = scores_vec.len();
     let k = k.min(n);
+
+    // Apply the gating function to ALL scores. Sigmoid we always need to
+    // realize element-wise (top-k by sigmoid score = top-k by raw, since
+    // sigmoid is monotonic — but the WEIGHTS need the sigmoid value).
+    // Softmax has the fast-path identity that skips the all-experts
+    // softmax when renormalizing.
+    let gated_all: Option<Vec<f32>> = match (config.gating_func, config.renormalize_weights) {
+        (MoeGatingFunc::Softmax, true) => None,
+        (MoeGatingFunc::Softmax, false) => {
+            // Need the full softmax so we can take the (un-renormalized)
+            // probabilities at the top-k positions directly.
+            let max = scores_vec.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+            let mut exps: Vec<f32> = scores_vec.iter().map(|s| (s - max).exp()).collect();
+            let sum: f32 = exps.iter().sum();
+            if sum > 0.0 {
+                for v in exps.iter_mut() {
+                    *v /= sum;
+                }
+            }
+            Some(exps)
+        }
+        (MoeGatingFunc::Sigmoid, _) => Some(
+            scores_vec
+                .iter()
+                .map(|s| 1.0 / (1.0 + (-s).exp()))
+                .collect(),
+        ),
+    };
+
+    // Pick top-k by the (raw or sigmoid) score — sort is the same in
+    // either case because both are monotonic in `raw`.
     let mut indices: Vec<usize> = (0..n).collect();
+    let sort_key: &[f32] = gated_all.as_deref().unwrap_or(&scores_vec);
     indices.sort_by(|&a, &b| {
-        scores_vec[b]
-            .partial_cmp(&scores_vec[a])
+        sort_key[b]
+            .partial_cmp(&sort_key[a])
             .unwrap_or(std::cmp::Ordering::Equal)
     });
     indices.truncate(k);
-    let weights: Vec<f32> = indices.iter().map(|&i| scores_vec[i]).collect();
+
+    // Build the weights vector — semantics depend on gating + renorm.
+    let weights: Vec<f32> = match (config.gating_func, config.renormalize_weights) {
+        (MoeGatingFunc::Softmax, true) => {
+            // Fast path: softmax(raw[topk]) ≡ renorm(softmax(raw)[topk])
+            // Apply softmax-over-k at the end via candle.
+            indices.iter().map(|&i| scores_vec[i]).collect()
+        }
+        (MoeGatingFunc::Softmax, false) => {
+            // Take probabilities at top-k positions directly.
+            let probs = gated_all
+                .as_ref()
+                .expect("gated_all set for softmax+no_norm");
+            indices.iter().map(|&i| probs[i]).collect()
+        }
+        (MoeGatingFunc::Sigmoid, renorm) => {
+            let probs = gated_all.as_ref().expect("gated_all set for sigmoid");
+            let topk_probs: Vec<f32> = indices.iter().map(|&i| probs[i]).collect();
+            if renorm {
+                let sum: f32 = topk_probs.iter().sum();
+                if sum > 0.0 {
+                    topk_probs.iter().map(|w| w / sum).collect()
+                } else {
+                    topk_probs
+                }
+            } else {
+                topk_probs
+            }
+        }
+    };
+
     let idx_i64: Vec<i64> = indices.iter().map(|&i| i as i64).collect();
-    let device = scores.device();
     let idx_tensor = Tensor::from_vec(idx_i64, (k,), device)?;
     let w_tensor = Tensor::from_vec(weights, (k,), device)?;
-    // softmax over the selected k raw scores ≡ renormalized softmax-all-restricted-to-topk
-    // (see doc comment above for the algebraic identity).
-    let w_tensor = candle_nn::ops::softmax(&w_tensor, 0)?;
+    // Only the Softmax+renorm fast path still needs a candle softmax —
+    // the others already produced final weights on CPU.
+    let w_tensor = if matches!(
+        (config.gating_func, config.renormalize_weights),
+        (MoeGatingFunc::Softmax, true)
+    ) {
+        candle_nn::ops::softmax(&w_tensor, 0)?
+    } else {
+        w_tensor
+    };
     Ok((idx_tensor, w_tensor))
 }
 
@@ -446,7 +569,7 @@ impl MoeFfn {
         let mut expert_batches: Vec<Vec<(usize, f32)>> = vec![vec![]; n_experts];
         for pos in 0..num_tokens {
             let token_scores = router_scores.get(pos)?;
-            let (indices, weights) = topk_cpu(&token_scores, self.n_experts_used)?;
+            let (indices, weights) = topk_cpu(&token_scores, self.n_experts_used, self.routing)?;
             let indices_vec: Vec<i64> = indices.to_vec1()?;
             let weights_vec: Vec<f32> = weights.to_vec1()?;
             for (i, &expert_idx) in indices_vec.iter().enumerate() {
