@@ -359,30 +359,24 @@ pub(super) async fn execute_request(
                     "DIAG: streaming done_event send failed — receiver dropped"
                 );
             }
-            return Ok(InferenceOutput {
-                request_id: request.id,
-                content: accumulated,
-                prompt_tokens: gen_result.prompt_tokens,
-                completion_tokens: gen_result.completion_tokens,
-                finish_reason: gen_result.finish_reason.as_str().to_string(),
-                session_id: request.session_id.clone(),
-                token_logprobs: vec![],
-                matched_stop_sequence: gen_result.matched_stop_sequence,
-            });
+            return Ok(InferenceOutput::from_gen_result(
+                request.id,
+                request.session_id.clone(),
+                accumulated,
+                gen_result.finish_reason.as_str().to_string(),
+                &gen_result,
+            ));
         }
 
         let (content, gen_result) = executor.generate(&prompt, &request.sampling_params)?;
 
-        return Ok(InferenceOutput {
-            request_id: request.id,
+        return Ok(InferenceOutput::from_gen_result(
+            request.id,
+            request.session_id.clone(),
             content,
-            prompt_tokens: gen_result.prompt_tokens,
-            completion_tokens: gen_result.completion_tokens,
-            finish_reason: gen_result.finish_reason.as_str().to_string(),
-            session_id: request.session_id.clone(),
-            token_logprobs: vec![],
-            matched_stop_sequence: gen_result.matched_stop_sequence,
-        });
+            gen_result.finish_reason.as_str().to_string(),
+            &gen_result,
+        ));
     }
 
     // ── On-demand shard loading ────────────────────────────────────────

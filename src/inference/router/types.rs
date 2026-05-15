@@ -4,6 +4,7 @@
 use tokio::sync::{mpsc, oneshot};
 
 use crate::error::SwarmError;
+use crate::inference::executor::GenerationResult;
 use crate::types::{InferenceRequest, SwarmMessage};
 
 /// Result channel for returning inference output to API callers.
@@ -64,6 +65,33 @@ pub struct InferenceOutput {
     /// `stop_sequence` field; OpenAI doesn't expose it but it's harmless
     /// extra metadata for compatible clients.
     pub matched_stop_sequence: Option<String>,
+}
+
+impl InferenceOutput {
+    /// Build an `InferenceOutput` from a local executor's `GenerationResult`.
+    /// Used by the six local-execution sites (single-node + the streaming and
+    /// non-streaming variants of local-exec and the distributed-exec early-
+    /// return path) that all pin `token_logprobs: vec![]`. When per-token
+    /// logprob plumbing reaches these paths, swap the `vec![]` here for the
+    /// real value.
+    pub(crate) fn from_gen_result(
+        request_id: uuid::Uuid,
+        session_id: Option<String>,
+        content: String,
+        finish_reason: String,
+        gen_result: &GenerationResult,
+    ) -> Self {
+        Self {
+            request_id,
+            content,
+            prompt_tokens: gen_result.prompt_tokens,
+            completion_tokens: gen_result.completion_tokens,
+            finish_reason,
+            session_id,
+            token_logprobs: vec![],
+            matched_stop_sequence: gen_result.matched_stop_sequence.clone(),
+        }
+    }
 }
 
 /// A single token's log probability info for the logprobs response field.

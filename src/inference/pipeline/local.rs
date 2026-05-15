@@ -45,16 +45,13 @@ impl PipelineExecutor {
                     acceptance_rate = %spec_state.acceptance_rate(),
                     "Speculative decoding acceptance rate"
                 );
-                return Ok(InferenceOutput {
-                    request_id: self.request.id,
+                return Ok(InferenceOutput::from_gen_result(
+                    self.request.id,
+                    self.request.session_id.clone(),
                     content,
-                    prompt_tokens: gen_result.prompt_tokens,
-                    completion_tokens: gen_result.completion_tokens,
-                    finish_reason: gen_result.finish_reason.as_str().to_string(),
-                    session_id: self.request.session_id.clone(),
-                    token_logprobs: vec![],
-                    matched_stop_sequence: gen_result.matched_stop_sequence.clone(),
-                });
+                    gen_result.finish_reason.as_str().to_string(),
+                    &gen_result,
+                ));
             }
         }
 
@@ -65,16 +62,13 @@ impl PipelineExecutor {
         }
         let (content, gen_result) = executor.generate(&prompt, &self.request.sampling_params)?;
 
-        Ok(InferenceOutput {
-            request_id: self.request.id,
+        Ok(InferenceOutput::from_gen_result(
+            self.request.id,
+            self.request.session_id.clone(),
             content,
-            prompt_tokens: gen_result.prompt_tokens,
-            completion_tokens: gen_result.completion_tokens,
-            finish_reason: gen_result.finish_reason.as_str().to_string(),
-            session_id: self.request.session_id.clone(),
-            token_logprobs: vec![],
-            matched_stop_sequence: gen_result.matched_stop_sequence.clone(),
-        })
+            gen_result.finish_reason.as_str().to_string(),
+            &gen_result,
+        ))
     }
 
     /// Process a pipeline segment locally using the split inference engine.

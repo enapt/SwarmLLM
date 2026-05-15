@@ -1400,7 +1400,7 @@ Routes Claude model requests through a locally-authenticated `claude` CLI subpro
 - Cross-component calls: `App.componentName.method()`. Shared state: `App.state.*`. Utilities: `App.utils.*`.
 
 ### Frontend Features
-- **i18n**: 1131 translation keys (1133 entries per locale incl. `_lang` + `_dir`) across 21 languages (en, es, fr, de, pt, it, nl, ru, zh, ja, ko, ar, tr, pl, sv, th, hi, vi, id, uk, cs). Auto-detects browser language. `I18n.t()` + `data-i18n` DOM attributes. Interpolation via `{variable}` placeholders. Fallback chain: current language → English → raw key. "Continue in English" UX for non-English users who prefer English.
+- **i18n**: 1140 translation keys (1142 entries per locale incl. `_lang` + `_dir`) across 21 languages (en, es, fr, de, pt, it, nl, ru, zh, ja, ko, ar, tr, pl, sv, th, hi, vi, id, uk, cs). Auto-detects browser language. `I18n.t()` + `data-i18n` DOM attributes. Interpolation via `{variable}` placeholders. Fallback chain: current language → English → raw key. "Continue in English" UX for non-English users who prefer English.
 - **Theme**: Light / Dark / System toggle. `[data-theme="light"]` CSS overrides. Persisted in localStorage.
 - **Neural network background**: Animated canvas particle network behind dashboard tiles (`frontend/js/neural-bg.js`). ~60 nodes with connecting edges, gentle drift, mouse repulsion/glow. State-reactive coloring: blue (idle) → cyan (active inference) → red-orange (unhealthy/disconnected). Peer count boosts vibrancy, active requests trigger node firing pulses. Pauses when tab hidden; reduced opacity in light theme.
 
@@ -1412,7 +1412,7 @@ A lightweight cross-subsystem event bus for real-time dashboard observability.
 - `ActivityEvent` struct with fields: `category` (`&'static str`), `kind` (`&'static str`, e.g. `"shard_pruned"`), `message` (English), plus optional `model_id`, `model_name`, `node_id`, `detail_num`, `detail_str`, `toast_level`, `toast_duration_ms`, `shard_index`, `freed_bytes`, `holder_count_before`, `holder_count_after`, `remaining_local_shards`, `timestamp` (ISO 8601)
 - `activity_tx: broadcast::Sender<ActivityEvent>` in `state.events` sub-struct (capacity 256, oldest events dropped on overflow)
 - All 12 subsystems emit events via the `state.emit_activity(ActivityEvent::new(...))` builder — fire-and-forget (send errors ignored)
-- Example event kinds (snake_case strings; see `ACTIVITY_ICONS` in `frontend/js/components/notifications.js` for the canonical list): `shard_download_complete`, `shard_pruned`, `inference_request`, `inference_completed`, `peer_connected`, `peer_disconnected`, `model_loaded`, `model_unloaded`, `worker_spawned`, `worker_unloaded`, `pool_device_joined`, `pool_created`, `config_updated`, `daemon_started`, and many more
+- Example event kinds (snake_case strings; see `ACTIVITY_ICONS` in `frontend/js/components/notifications.js` for the canonical list): `shard_download_complete`, `shard_pruned`, `inference_request`, `inference_completed`, `peer_connected`, `peer_disconnected`, `model_loaded`, `model_unloaded`, `pool_device_joined`, `pool_created`, `config_updated`, `daemon_started`, and many more
 
 **WebSocket delivery** (`src/api/websocket.rs`):
 - ApiServer subscribes to `state.events.activity_tx` on WebSocket upgrade

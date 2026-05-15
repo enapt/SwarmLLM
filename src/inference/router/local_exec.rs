@@ -167,16 +167,13 @@ pub(super) async fn execute_local_batch(
                             matched_stop_sequence: gen_result.matched_stop_sequence.clone(),
                         };
                         let _ = tx.try_send(done_event);
-                        Ok(InferenceOutput {
-                            request_id: request.id,
-                            content: accumulated,
-                            prompt_tokens: gen_result.prompt_tokens,
-                            completion_tokens: gen_result.completion_tokens,
-                            finish_reason: finish,
+                        Ok(InferenceOutput::from_gen_result(
+                            request.id,
                             session_id,
-                            token_logprobs: vec![],
-                            matched_stop_sequence: gen_result.matched_stop_sequence,
-                        })
+                            accumulated,
+                            finish,
+                            &gen_result,
+                        ))
                     }
                     Err(e) => Err(e),
                 }
@@ -197,16 +194,13 @@ pub(super) async fn execute_local_batch(
                             &mut content,
                             &local_stop_strings,
                         );
-                        Ok(InferenceOutput {
-                            request_id: request.id,
+                        Ok(InferenceOutput::from_gen_result(
+                            request.id,
+                            request.session_id.clone(),
                             content,
-                            prompt_tokens: gen_result.prompt_tokens,
-                            completion_tokens: gen_result.completion_tokens,
-                            finish_reason: finish,
-                            session_id: request.session_id.clone(),
-                            token_logprobs: vec![],
-                            matched_stop_sequence: gen_result.matched_stop_sequence,
-                        })
+                            finish,
+                            &gen_result,
+                        ))
                     }
                     Err(e) => Err(e),
                 }
