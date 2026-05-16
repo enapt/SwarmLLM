@@ -360,6 +360,21 @@ pub struct ModelTrustInfo {
     /// Whether the user explicitly pinned (approved) this model.
     pub pinned_by_user: bool,
     pub last_request_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// R134: timestamp of the last auto-promotion by the HfWatcher (the
+    /// HF-trending → DemandVerified path). `None` when the model has only
+    /// ever been promoted by real swarm demand or by an explicit user pin.
+    /// Used together with `failed_promotions` to gate re-promotion of
+    /// HF-trending models that never attract real requests — i.e. defeats
+    /// download-pump gaming on HF without breaking models that earned
+    /// their trust through actual usage.
+    #[serde(default)]
+    pub last_auto_promoted_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// R134: number of times an HfWatcher auto-promotion has decayed back
+    /// to `Discovered` without ever receiving a real swarm request. Each
+    /// strike extends the cooldown before HfWatcher will re-promote.
+    /// Reset to 0 on the first real request via `record_request`.
+    #[serde(default)]
+    pub failed_promotions: u32,
 }
 
 impl ModelTrustInfo {
@@ -370,6 +385,8 @@ impl ModelTrustInfo {
             total_requests: 0,
             pinned_by_user: false,
             last_request_at: None,
+            last_auto_promoted_at: None,
+            failed_promotions: 0,
         }
     }
 
@@ -380,13 +397,19 @@ impl ModelTrustInfo {
             total_requests: 0,
             pinned_by_user: true,
             last_request_at: None,
+            last_auto_promoted_at: None,
+            failed_promotions: 0,
         }
     }
 
     /// Record an inference request. Promotes to DemandVerified after threshold.
+    /// R134: a real request clears the failed-promotions strike count —
+    /// once a model has earned actual usage, HfWatcher is allowed to
+    /// re-promote it after a decay without the cooldown penalty.
     pub fn record_request(&mut self) {
         self.total_requests += 1;
         self.last_request_at = Some(chrono::Utc::now());
+        self.failed_promotions = 0;
         // Promote after 3 real requests (prevents single accidental request from promoting)
         if self.total_requests >= 3 && self.trust_level < ModelTrustLevel::DemandVerified {
             self.trust_level = ModelTrustLevel::DemandVerified;
@@ -395,6 +418,10 @@ impl ModelTrustInfo {
 
     /// Check if this model should decay due to inactivity (7 days without requests).
     /// Pinned models never decay. NetworkPopular decays to DemandVerified.
+    /// R134: when an auto-promoted model decays back to `Discovered` with
+    /// `total_requests == 0`, the strike count `failed_promotions` is bumped.
+    /// `HfWatcher::should_auto_promote` consults this counter to enforce
+    /// an exponentially-extending cooldown before re-promoting.
     pub fn maybe_decay(&mut self) {
         if self.pinned_by_user {
             return;
@@ -412,7 +439,17 @@ impl ModelTrustInfo {
                 self.trust_level = ModelTrustLevel::DemandVerified;
             }
             ModelTrustLevel::DemandVerified => {
+                let was_auto_promoted = self.last_auto_promoted_at.is_some();
+                let no_real_usage = self.total_requests == 0;
                 self.trust_level = ModelTrustLevel::Discovered;
+                if was_auto_promoted && no_real_usage {
+                    // Penalise — HfWatcher auto-promoted this but zero swarm
+                    // requests materialised over the inactivity window.
+                    // Could be HF download-pump gaming; could be a model the
+                    // operator simply doesn't care about. Either way, slow
+                    // future auto-promotion to a crawl.
+                    self.failed_promotions = self.failed_promotions.saturating_add(1);
+                }
             }
             _ => {}
         }

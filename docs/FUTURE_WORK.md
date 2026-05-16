@@ -120,6 +120,32 @@ composition, region, or per-shard interest. 3 unit tests for
 
 **Why deferred.** Anti-gaming is a substantial design space. The 24h-aging + min-100k-downloads gate in R112 covers the obvious case.
 
+_**Closed R134** (2026-05-16). `ModelTrustInfo` gains two anti-gaming
+fields (both `#[serde(default)]` for backward-compat with prior DB
+contents):_
+
+_- `last_auto_promoted_at: Option<DateTime<Utc>>` — set by the watcher
+  on each `Discovered → DemandVerified` lift._
+_- `failed_promotions: u32` — strike counter, bumped by `maybe_decay`
+  when an auto-promoted model decays back to `Discovered` with
+  `total_requests == 0`, and reset by `record_request` on the first
+  real swarm request (so a model that briefly fell off the radar but
+  then earned real usage is fully forgiven)._
+
+_`HfWatcher::should_auto_promote` is the gate: virgin entries pass
+unconditionally; subsequent attempts enforce a linear cooldown of
+`7 * failed_promotions` days (capped at 60d). After
+`MAX_AUTO_PROMOTION_FAILURES = 4` strikes the model is locked out from
+auto-promotion entirely — only an explicit user pin via the admin API
+can lift it. This defeats the "pump HF downloads then watch SwarmLLM
+auto-host a junk model" attack without permanently blacklisting models
+that simply haven't been discovered yet. Completion-rate signal not
+wired in this pass — current eviction reasons + activity events already
+surface failed inference, and adding a separate ratio risks
+double-counting until a proper telemetry pipeline ships. 8 unit tests
+cover virgin / pinned / cap / cooldown / growing-cooldown /
+decay-bumps-strike / no-strike-when-real-usage / record-clears-strikes._
+
 ---
 
 ## Audit-deferred items (from sweep rounds R100-R109)

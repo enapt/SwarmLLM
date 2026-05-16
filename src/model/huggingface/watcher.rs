@@ -72,6 +72,19 @@ const MAX_TRENDING_ENTRIES: usize = 100;
 const MIN_DOWNLOADS_FOR_TRUST: u64 = 100_000;
 const MIN_AGE_FOR_TRUST_HOURS: i64 = 24;
 
+/// R134: anti-gaming cooldown after an auto-promoted model decays back
+/// to `Discovered` with zero real swarm requests. The wait grows with
+/// each failed promotion attempt: `BASE_COOLDOWN_DAYS * failed_promotions`,
+/// capped at `MAX_COOLDOWN_DAYS`. Defeats HF download-pump attacks
+/// against newly-published models without permanently locking out
+/// legitimate models that simply haven't been discovered yet.
+const FAILED_PROMOTION_COOLDOWN_BASE_DAYS: i64 = 7;
+const FAILED_PROMOTION_COOLDOWN_MAX_DAYS: i64 = 60;
+/// Hard cap on automatic re-promotion attempts after the model has
+/// repeatedly failed to attract real demand. Beyond this only a user pin
+/// (via the admin API) can lift the trust level.
+const MAX_AUTO_PROMOTION_FAILURES: u32 = 4;
+
 /// Internal `poll_once` error type — separated so the run loop can
 /// honour HF's `Retry-After` on 429 responses instead of applying the
 /// generic exponential back-off.
@@ -358,10 +371,41 @@ pub fn infer_task_tags(tags: &[String], pipeline_tag: Option<&str>) -> Vec<Strin
     out
 }
 
+/// R134: check whether HfWatcher is allowed to auto-promote a model
+/// given its prior strike count. Returns `true` if either we've never
+/// auto-promoted before, or the cooldown after the last attempt has
+/// elapsed AND we haven't exceeded `MAX_AUTO_PROMOTION_FAILURES`.
+pub(crate) fn should_auto_promote(trust: &crate::types::ModelTrustInfo) -> bool {
+    if trust.pinned_by_user {
+        return false; // user already has authority; don't touch
+    }
+    if !matches!(trust.trust_level, crate::types::ModelTrustLevel::Discovered) {
+        return false; // only Discovered is eligible for auto-promotion
+    }
+    if trust.failed_promotions >= MAX_AUTO_PROMOTION_FAILURES {
+        return false; // give up on this model — user pin only from here
+    }
+    if trust.failed_promotions == 0 {
+        return true; // first attempt or never been auto-promoted
+    }
+    // Linear back-off: each strike extends the cooldown by BASE_DAYS
+    // up to the MAX cap.
+    let cooldown_days = (FAILED_PROMOTION_COOLDOWN_BASE_DAYS * trust.failed_promotions as i64)
+        .min(FAILED_PROMOTION_COOLDOWN_MAX_DAYS);
+    match trust.last_auto_promoted_at {
+        Some(t) => (chrono::Utc::now() - t).num_days() >= cooldown_days,
+        None => true,
+    }
+}
+
 /// Walk the local model_trust map and promote any `Discovered` entry
 /// whose HF repo_id appears in the trending list with downloads above
 /// the threshold AND age above the gate. Idempotent — re-running this
 /// is safe.
+///
+/// R134: skips models in cooldown after one or more failed promotions
+/// (auto-promoted but the model never attracted real swarm requests
+/// during the inactivity window — see `should_auto_promote`).
 fn promote_trust_for_trending(state: &SharedState, entries: &[HfTrendingEntry]) {
     use std::collections::HashMap;
 
@@ -389,27 +433,33 @@ fn promote_trust_for_trending(state: &SharedState, entries: &[HfTrendingEntry]) 
             continue;
         }
         // Promote — only if currently Discovered (don't override an
-        // explicit user pin, and don't downgrade higher trust).
+        // explicit user pin, and don't downgrade higher trust) AND
+        // the anti-gaming cooldown allows it.
         let mut upgraded = false;
+        let mut cooldown_skip = false;
         state
             .models
             .model_trust
             .entry(model_id.clone())
             .and_modify(|t| {
-                if matches!(t.trust_level, crate::types::ModelTrustLevel::Discovered) {
-                    t.trust_level = crate::types::ModelTrustLevel::DemandVerified;
-                    upgraded = true;
+                if !should_auto_promote(t) {
+                    if matches!(t.trust_level, crate::types::ModelTrustLevel::Discovered)
+                        && t.failed_promotions > 0
+                    {
+                        cooldown_skip = true;
+                    }
+                    return;
                 }
+                t.trust_level = crate::types::ModelTrustLevel::DemandVerified;
+                t.last_auto_promoted_at = Some(chrono::Utc::now());
+                upgraded = true;
             })
             .or_insert_with(|| {
                 upgraded = true;
-                crate::types::ModelTrustInfo {
-                    trust_level: crate::types::ModelTrustLevel::DemandVerified,
-                    first_seen: chrono::Utc::now(),
-                    total_requests: 0,
-                    pinned_by_user: false,
-                    last_request_at: None,
-                }
+                let mut info = crate::types::ModelTrustInfo::new_discovered();
+                info.trust_level = crate::types::ModelTrustLevel::DemandVerified;
+                info.last_auto_promoted_at = Some(chrono::Utc::now());
+                info
             });
         if upgraded {
             tracing::info!(
@@ -417,6 +467,12 @@ fn promote_trust_for_trending(state: &SharedState, entries: &[HfTrendingEntry]) 
                 repo = %repo_id,
                 downloads = entry.downloads,
                 "HfWatcher: promoted to DemandVerified"
+            );
+        } else if cooldown_skip {
+            tracing::debug!(
+                model = %model_id,
+                repo = %repo_id,
+                "HfWatcher: re-promotion blocked by failed-promotion cooldown"
             );
         }
     }
@@ -460,5 +516,98 @@ mod tests {
         let json = serde_json::to_value(&snap).unwrap();
         assert_eq!(json["fetched_at"], 0);
         assert!(json["entries"].is_array());
+    }
+
+    /// R134: virgin entry is always eligible for auto-promotion — no
+    /// previous strikes, no cooldown.
+    #[test]
+    fn should_auto_promote_virgin_discovered() {
+        let info = crate::types::ModelTrustInfo::new_discovered();
+        assert!(should_auto_promote(&info));
+    }
+
+    /// R134: user-pinned models are never auto-promoted (user already has
+    /// the trust level they want).
+    #[test]
+    fn should_auto_promote_skips_pinned() {
+        let mut info = crate::types::ModelTrustInfo::new_pinned();
+        info.trust_level = crate::types::ModelTrustLevel::Discovered;
+        assert!(!should_auto_promote(&info));
+    }
+
+    /// R134: once the failure cap is hit, no further auto-promotion fires.
+    #[test]
+    fn should_auto_promote_blocks_at_failure_cap() {
+        let mut info = crate::types::ModelTrustInfo::new_discovered();
+        info.failed_promotions = MAX_AUTO_PROMOTION_FAILURES;
+        info.last_auto_promoted_at = Some(chrono::Utc::now() - chrono::Duration::days(365));
+        assert!(!should_auto_promote(&info));
+    }
+
+    /// R134: one strike → 7-day cooldown. Within the window: blocked.
+    #[test]
+    fn should_auto_promote_respects_cooldown() {
+        let mut info = crate::types::ModelTrustInfo::new_discovered();
+        info.failed_promotions = 1;
+        info.last_auto_promoted_at = Some(chrono::Utc::now() - chrono::Duration::days(3));
+        assert!(!should_auto_promote(&info), "3 days < 7-day cooldown");
+
+        info.last_auto_promoted_at = Some(chrono::Utc::now() - chrono::Duration::days(10));
+        assert!(
+            should_auto_promote(&info),
+            "past 7-day cooldown is eligible"
+        );
+    }
+
+    /// R134: cooldown grows with each strike — `BASE_DAYS * failed_promotions`.
+    #[test]
+    fn should_auto_promote_cooldown_grows_with_strikes() {
+        let mut info = crate::types::ModelTrustInfo::new_discovered();
+        info.failed_promotions = 3; // 21-day cooldown expected
+        info.last_auto_promoted_at = Some(chrono::Utc::now() - chrono::Duration::days(20));
+        assert!(!should_auto_promote(&info), "20d < 3*7=21d cooldown");
+
+        info.last_auto_promoted_at = Some(chrono::Utc::now() - chrono::Duration::days(22));
+        assert!(should_auto_promote(&info));
+    }
+
+    /// R134: auto-promoted model that decays with 0 requests bumps the
+    /// strike count via `maybe_decay`.
+    #[test]
+    fn maybe_decay_bumps_strikes_on_auto_promoted_zero_requests() {
+        let mut info = crate::types::ModelTrustInfo::new_discovered();
+        info.trust_level = crate::types::ModelTrustLevel::DemandVerified;
+        info.last_auto_promoted_at = Some(chrono::Utc::now() - chrono::Duration::days(8));
+        info.first_seen = chrono::Utc::now() - chrono::Duration::days(8);
+        info.total_requests = 0;
+        info.maybe_decay();
+        assert_eq!(info.trust_level, crate::types::ModelTrustLevel::Discovered);
+        assert_eq!(info.failed_promotions, 1);
+    }
+
+    /// R134: model that earned real requests, then decayed, does NOT
+    /// take the strike — `record_request` already cleared the counter.
+    #[test]
+    fn maybe_decay_no_strike_when_real_usage() {
+        let mut info = crate::types::ModelTrustInfo::new_discovered();
+        info.trust_level = crate::types::ModelTrustLevel::DemandVerified;
+        info.last_auto_promoted_at = Some(chrono::Utc::now() - chrono::Duration::days(30));
+        info.total_requests = 50;
+        info.last_request_at = Some(chrono::Utc::now() - chrono::Duration::days(8));
+        // failed_promotions stays at 0 because record_request was called.
+        info.maybe_decay();
+        assert_eq!(info.trust_level, crate::types::ModelTrustLevel::Discovered);
+        assert_eq!(info.failed_promotions, 0);
+    }
+
+    /// R134: `record_request` clears strikes when real demand finally
+    /// arrives — defeats permanent lockout from a one-time download spike.
+    #[test]
+    fn record_request_clears_strikes() {
+        let mut info = crate::types::ModelTrustInfo::new_discovered();
+        info.failed_promotions = 2;
+        info.record_request();
+        assert_eq!(info.failed_promotions, 0);
+        assert_eq!(info.total_requests, 1);
     }
 }
