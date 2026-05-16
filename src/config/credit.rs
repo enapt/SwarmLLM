@@ -113,6 +113,17 @@ pub struct PoolConfig {
     /// `share_model_catalog` flag.
     #[serde(default = "default_share_model_catalog_min")]
     pub share_model_catalog_min_members: u32,
+    /// R134.7: opt-in cross-pool inference routing. When BOTH this
+    /// flag AND `private_mode` are on, the scheduler may route
+    /// inference for a model to a foreign pool's members IF that pool
+    /// has advertised serving the model via `foreign_pool_catalog` AND
+    /// no member of the local pool currently holds the model. Default
+    /// off — preserves the existing "your inference stays in your pool"
+    /// contract until the user explicitly opts in. Note: the catalog
+    /// is opt-in to publish; routing is opt-in to consume. Both sides
+    /// must agree for cross-pool requests to actually flow.
+    #[serde(default)]
+    pub allow_cross_pool_inference: bool,
 }
 
 fn default_share_model_catalog_min() -> u32 {
@@ -133,6 +144,7 @@ impl Default for PoolConfig {
             state_diff_gossip: false,
             share_model_catalog: false,
             share_model_catalog_min_members: default_share_model_catalog_min(),
+            allow_cross_pool_inference: false,
         }
     }
 }

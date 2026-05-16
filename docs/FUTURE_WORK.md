@@ -38,14 +38,38 @@ _- Admin surface: `GET /api/admin/foreign-pool-catalog` returns the
 _- 1 new unit test covers determinism + sign/verify roundtrip + tamper
   detection._
 
-_What remains deferred:_
-_- Cross-pool inference routing. Today inference stays within the
-  caller's pool/private-mode scope; the discovery signal is currently
-  read-only telemetry. Wiring the scheduler to actually route requests
-  to a foreign pool changes the privacy contract — needs explicit user
-  consent UI, billing model decisions, and trust escalation policy._
-_- Frontend tile. The REST surface is ready but no dashboard component
-  renders it yet; pairs naturally with the next dashboard refresh._
+_**Frontend tile closed R134.5** (2026-05-16). Models → Running-now
+subview gets a "Models other pools serve" tile fed from a size-bounded
+snapshot in the WS stats payload. Hidden when the catalog is empty so
+users not in a federated setup never see it. +3 i18n keys × 21
+locales. Subline "Discovery only — your inference stays in your pool"
+reinforces the unchanged contract._
+
+_**Routing layer closed R134.7** (2026-05-16). Cross-pool routing is
+now wired but stays strictly opt-in. New `pool.allow_cross_pool_inference`
+flag (default false) gates the contract change; on top of that
+`private_mode` must also be on (otherwise normal global routing
+already applies and no fallback is needed). New
+`pool::scope::cross_pool_extras(state, &model_id)` returns the set of
+NodeIds in foreign pools that have advertised this specific model via
+`foreign_pool_catalog`. The scheduler unions this with the existing
+`allowed_node_set` so cross-pool requests only fall through when the
+local pool genuinely can't serve the model (`any_local_pool_holder ==
+false`). Three guard rails:_
+_1. Both sides must opt in — the FOREIGN pool must have advertised
+   the model via `share_model_catalog`, AND the LOCAL pool must have
+   set `allow_cross_pool_inference`. No drive-by routing._
+_2. Per-model scope — extras are only computed for the model that's
+   currently being requested AND that the local pool can't serve. The
+   "stays in pool" contract is preserved for any model the local
+   pool does host._
+_3. The `PrivateModeUnavailable` error builder also includes extras
+   so error messages stay consistent with what was actually
+   considered eligible._
+_2 unit tests cover the flag-off and private-mode-off early-return
+paths. Billing model + UI consent toast deferred — operators flip the
+config flag directly today; the dashboard surface can grow a consent
+banner in a future dashboard refresh._
 
 ---
 

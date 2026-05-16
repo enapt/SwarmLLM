@@ -159,9 +159,15 @@ impl PipelineScheduler {
                 .private_mode
                 .load(std::sync::atomic::Ordering::Relaxed)
             {
-                // Find which shards no allowed node holds
-                let allowed =
+                // Find which shards no allowed node holds. R134.7: also fold in
+                // cross-pool extras so the error message matches what
+                // gather_candidates considered eligible.
+                let mut allowed =
                     crate::pool::scope::allowed_node_set(&self.shared_state).unwrap_or_default();
+                allowed.extend(crate::pool::scope::cross_pool_extras(
+                    &self.shared_state,
+                    &manifest.id,
+                ));
                 let missing: Vec<u32> = manifest
                     .shards
                     .iter()
@@ -290,7 +296,23 @@ impl PipelineScheduler {
         local_node_id: &NodeId,
     ) -> Vec<NodeCandidate> {
         // Private mode: compute allowed node set (None = unrestricted).
-        let allowed_set = crate::pool::scope::allowed_node_set(&self.shared_state);
+        // R134.7: when `allow_cross_pool_inference` is on and the local pool
+        // can't serve this model, union the cross-pool extras into the
+        // allowed set. No-op when both flags aren't on or when a local pool
+        // member already holds the model.
+        let allowed_set = {
+            let base = crate::pool::scope::allowed_node_set(&self.shared_state);
+            let extras = crate::pool::scope::cross_pool_extras(&self.shared_state, &manifest.id);
+            match (base, extras.is_empty()) {
+                (None, _) => None,
+                (Some(set), true) => Some(set),
+                (Some(set), false) => {
+                    let mut merged = set;
+                    merged.extend(extras);
+                    Some(merged)
+                }
+            }
+        };
 
         // Build set of pool member NodeIds for preferred routing.
         // Pool devices are trusted, free (no credit cost), and usually low latency.
