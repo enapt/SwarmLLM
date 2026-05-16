@@ -510,12 +510,10 @@ async fn build_stats_message(state: &SharedState) -> String {
     let foreign_pool_catalog_json = {
         use std::collections::BTreeMap;
         let now_ms = crate::types::unix_now_ms();
-        let cutoff =
-            now_ms.saturating_sub(crate::daemon::dispatch::FOREIGN_POOL_CATALOG_MAX_AGE_MS);
-        state
-            .credits
-            .foreign_pool_catalog
-            .retain(|_, ts| *ts >= cutoff);
+        state.credits.trim_stale_foreign_pool_catalog(
+            now_ms,
+            crate::daemon::dispatch::FOREIGN_POOL_CATALOG_MAX_AGE_MS,
+        );
         const WS_POOL_CATALOG_MAX_POOLS: usize = 30;
         const WS_POOL_CATALOG_MAX_MODELS_PER_POOL: usize = 12;
         let mut by_pool: BTreeMap<String, Vec<String>> = BTreeMap::new();

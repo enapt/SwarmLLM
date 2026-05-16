@@ -1843,38 +1843,14 @@ pub(crate) async fn dispatch_network_messages(
                                             continue;
                                         }
 
-                                        let catalog = &shared_state.credits.foreign_pool_catalog;
-                                        // Trim stale entries before inserting so the cap eviction
-                                        // doesn't accidentally evict fresh, valid entries.
-                                        let stale_cutoff = now_ms.saturating_sub(FOREIGN_POOL_CATALOG_MAX_AGE_MS);
-                                        catalog.retain(|_, ts| *ts >= stale_cutoff);
-                                        // Replace this publisher's prior set — model availability
-                                        // is a full-snapshot signal, not an incremental delta.
-                                        catalog.retain(|(p, _), _| *p != announce.pool_id);
-                                        // Enforce the global cap by oldest-first eviction.
-                                        while catalog.len()
-                                            + announce.model_ids.len()
-                                            > MAX_FOREIGN_POOL_CATALOG_ENTRIES
-                                        {
-                                            let mut oldest_ts = u64::MAX;
-                                            let mut oldest_key: Option<(crate::pool::types::PoolId, crate::types::ModelId)> = None;
-                                            for entry in catalog.iter() {
-                                                if *entry.value() < oldest_ts {
-                                                    oldest_ts = *entry.value();
-                                                    oldest_key = Some(entry.key().clone());
-                                                }
-                                            }
-                                            match oldest_key {
-                                                Some(k) => { catalog.remove(&k); }
-                                                None => break,
-                                            }
-                                        }
-                                        for mid in &announce.model_ids {
-                                            catalog.insert(
-                                                (announce.pool_id.clone(), mid.clone()),
-                                                announce.timestamp_ms,
-                                            );
-                                        }
+                                        shared_state.credits.apply_pool_model_availability(
+                                            &announce.pool_id,
+                                            &announce.model_ids,
+                                            announce.timestamp_ms,
+                                            now_ms,
+                                            FOREIGN_POOL_CATALOG_MAX_AGE_MS,
+                                            MAX_FOREIGN_POOL_CATALOG_ENTRIES,
+                                        );
                                         tracing::debug!(
                                             pool = %announce.pool_id,
                                             entries = announce.model_ids.len(),

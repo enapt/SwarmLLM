@@ -139,12 +139,10 @@ pub async fn quant_recommendations(State(state): State<AppState>) -> Json<serde_
 pub async fn foreign_pool_catalog(State(state): State<AppState>) -> Json<serde_json::Value> {
     use std::collections::BTreeMap;
     let now_ms = crate::types::unix_now_ms();
-    let cutoff = now_ms.saturating_sub(crate::daemon::dispatch::FOREIGN_POOL_CATALOG_MAX_AGE_MS);
-    state
-        .shared_state
-        .credits
-        .foreign_pool_catalog
-        .retain(|_, ts| *ts >= cutoff);
+    state.shared_state.credits.trim_stale_foreign_pool_catalog(
+        now_ms,
+        crate::daemon::dispatch::FOREIGN_POOL_CATALOG_MAX_AGE_MS,
+    );
     // Group by pool_id for the response shape.
     let mut by_pool: BTreeMap<String, Vec<serde_json::Value>> = BTreeMap::new();
     for entry in state.shared_state.credits.foreign_pool_catalog.iter() {
