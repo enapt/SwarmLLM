@@ -500,6 +500,10 @@ async fn build_stats_message(state: &SharedState) -> String {
         let snap = state.models.wishlist.load_full();
         serde_json::to_value(&*snap).unwrap_or_else(|_| serde_json::json!({}))
     };
+    let quant_recs_json = {
+        let snap = state.models.quant_recommendations.load_full();
+        serde_json::to_value(&*snap).unwrap_or_else(|_| serde_json::json!({}))
+    };
 
     // Network mode flags. Folded into stats_update so the unified Network
     // Status banner can render the right named state (connecting / global /
@@ -529,6 +533,7 @@ async fn build_stats_message(state: &SharedState) -> String {
         "acquisitions": acquisitions,
         "swarm_capacity": capacity_json,
         "wishlist": wishlist_json,
+        "quant_recommendations": quant_recs_json,
         "network_mode": {
             "private_mode": private_mode,
             "offline_mode": offline_mode,

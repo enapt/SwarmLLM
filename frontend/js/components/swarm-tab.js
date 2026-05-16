@@ -250,6 +250,54 @@
     });
   }
 
+  // R134: render quant recommendations. Only renders entries the user can
+  // act on — "best_fit" (already optimal) rows are filtered out. Empty list
+  // → tile is hidden so a swarm that's already optimal sees nothing.
+  function _renderQuantTips(snapshot) {
+    var tile = document.getElementById('quant-tips');
+    var list = document.getElementById('quant-tips-list');
+    if (!tile || !list) return;
+    var families = (snapshot && snapshot.families) || [];
+    var actionable = families.filter(function (f) {
+      var tag = f.rationale_tag || '';
+      return tag.indexOf('would_upgrade') === 0 || tag.indexOf('too_big') === 0;
+    });
+    list.innerHTML = '';
+    if (actionable.length === 0) {
+      tile.style.display = 'none';
+      return;
+    }
+    tile.style.display = '';
+    actionable.forEach(function (fam) {
+      var row = document.createElement('div');
+      row.className = 'quant-tip-row';
+
+      var name = document.createElement('div');
+      name.className = 'quant-tip-name';
+      name.textContent = _bestModelName(fam.display_name, fam.base_name);
+      row.appendChild(name);
+
+      var rec = fam.known_variants[fam.recommended_index || 0];
+      if (rec) {
+        var current = document.createElement('div');
+        current.className = 'quant-tip-current text-muted text-xs';
+        current.textContent = I18n.t('quant.tip_current', {
+          label: rec.quantization,
+          score: rec.quality_score,
+        });
+        row.appendChild(current);
+      }
+
+      var parsed = _parseTag(fam.rationale_tag || '');
+      var rationale = document.createElement('div');
+      rationale.className = 'quant-tip-rationale';
+      rationale.textContent = I18n.t(parsed.key, parsed.params);
+      row.appendChild(rationale);
+
+      list.appendChild(row);
+    });
+  }
+
   function _switchSubtab(name) {
     document.querySelectorAll('.swarm-subtab').forEach(function (b) {
       b.classList.toggle('active', b.dataset.swarmSubtab === name);
@@ -661,6 +709,7 @@
     onStats: function (data) {
       if (data && data.wishlist) _renderWishlist(data.wishlist);
       if (data && data.swarm_capacity) _renderRunning(data.swarm_capacity);
+      if (data && data.quant_recommendations) _renderQuantTips(data.quant_recommendations);
       // Keep the inline browser's "★ You host this" pill accurate. Cheap —
       // a few Set operations per WS frame.
       _refreshLocalHfRepos();
@@ -711,6 +760,7 @@
     _restFetch('/api/admin/wishlist', _renderWishlist);
     _restFetch('/api/admin/swarm/capacity', _renderRunning);
     _restFetch('/api/admin/swarm/capacity-plan', _renderCapacityPlan);
+    _restFetch('/api/admin/quant-recommendations', _renderQuantTips);
   }
 
   // R113: render the Capacity Plan / What-If view. Three baked scenarios

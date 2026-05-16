@@ -1360,6 +1360,18 @@
             <!-- Running-now subtab — reuses swarm_capacity.serveable_models -->
             <div class="swarm-subview" id="swarm-subview-running" style="display:none">
               <div class="text-muted text-sm mb-2" data-i18n="swarm.running_intro">Models the swarm can serve right now. The ones you help host are highlighted.</div>
+              <!-- R134: quant tips — surface upgrade/downsize hints for the
+                   models the swarm is already running. Only renders when
+                   there's at least one actionable hint (would_upgrade or
+                   too_big); a swarm that's hosting the best quant for its
+                   budget sees nothing here. -->
+              <div class="quant-tips" id="quant-tips" style="display:none">
+                <div class="quant-tips-header">
+                  <h3 data-i18n="quant.tips_title">Quality tips for your hosted models</h3>
+                  <span class="text-muted text-xs" data-i18n="quant.tips_sub">A higher number means better answers but a bigger model.</span>
+                </div>
+                <div class="quant-tips-list" id="quant-tips-list"></div>
+              </div>
               <div class="capacity-running-grid" id="swarm-running-grid"></div>
             </div>
 
