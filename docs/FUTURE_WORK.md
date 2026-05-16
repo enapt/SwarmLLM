@@ -447,6 +447,39 @@ have explicit "won't fix" semantics. Concretely:
 
 ---
 
+## R135 cross-pool review — hot-reloadable flag deferral
+
+`pool.allow_cross_pool_inference` and `pool.share_model_catalog` are
+read from `state.config.pool` which is startup-frozen. Unlike
+`private_mode` (an `AtomicBool` on `state.credits`) and
+`contribution_auto` (an `AtomicBool` on `state.models`), these flags
+have no runtime-toggle path. A user who disables
+`allow_cross_pool_inference` via a future
+`PUT /api/admin/config { allow_cross_pool_inference: false }` would
+not actually stop cross-pool routing until daemon restart.
+
+**Status.** Not exploitable today — the API endpoint doesn't currently
+expose these fields, so flipping them via the dashboard isn't
+possible. The risk is purely "future API endpoint will silently
+no-op until restart". Closed properly in a follow-up that:
+1. Adds `allow_cross_pool_inference: AtomicBool` + `share_model_catalog:
+   AtomicBool` to `state.credits` (sub-struct accessor rule —
+   architecture.md).
+2. Mirrors them from `state.config.pool` at startup in
+   `SharedState::new()`.
+3. Adds `allow_cross_pool_inference` + `share_model_catalog` Option
+   fields to `ConfigUpdate` in `api/admin.rs`; on PUT, writes the
+   atomic AND persists the config TOML.
+4. Switches `pool::scope::cross_pool_extras` and
+   `health/monitor.rs::broadcast_pool_model_availability` to read
+   from the atomic.
+
+Pattern is identical to R121's `contribution_auto`. Mechanical work
+but lives in the user-facing config surface, so deferred until a
+config-API pass makes sense.
+
+---
+
 ## R135 sweep — security findings deferred for discussion
 
 The R135 review surfaced two signature/security items that touch wire

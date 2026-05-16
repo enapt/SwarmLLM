@@ -1843,6 +1843,33 @@ pub(crate) async fn dispatch_network_messages(
                                             continue;
                                         }
 
+                                        // R135 sec follow-up: enforce the k-anonymity floor on RECEIVE,
+                                        // not just on PUBLISH. A malicious operator can disable the
+                                        // floor on their own publisher; the receive-side check makes
+                                        // ingestion conservative regardless. We can only check when
+                                        // we've already received the foreign pool's PoolState via the
+                                        // separate StateGossip channel — if we haven't, accept the
+                                        // announcement (the next state gossip will confirm or refute
+                                        // membership before any routing decisions actually fire).
+                                        let local_min_members =
+                                            shared_state.config.pool.share_model_catalog_min_members;
+                                        if local_min_members > 1 {
+                                            if let Some(ps_entry) =
+                                                shared_state.credits.pool_registry.get(&announce.pool_id)
+                                            {
+                                                let cached_count = ps_entry.value().members.len();
+                                                if (cached_count as u32) < local_min_members {
+                                                    tracing::warn!(
+                                                        pool = %announce.pool_id,
+                                                        members = cached_count,
+                                                        floor = local_min_members,
+                                                        "PoolModelAvailability rejected: cached pool size below local k-anonymity floor"
+                                                    );
+                                                    continue;
+                                                }
+                                            }
+                                        }
+
                                         shared_state.credits.apply_pool_model_availability(
                                             &announce.pool_id,
                                             &announce.model_ids,
