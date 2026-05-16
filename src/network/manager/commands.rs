@@ -301,7 +301,8 @@ impl NetworkManager {
             SwarmMessage::PoolMessage(_) => crate::network::protocol::TOPIC_POOLS,
             SwarmMessage::RegionShardSummary(_)
             | SwarmMessage::ModelDemandGossip(_)
-            | SwarmMessage::WishlistAnnouncement(_) => crate::network::protocol::TOPIC_REGIONS,
+            | SwarmMessage::WishlistAnnouncement(_)
+            | SwarmMessage::PoolModelAvailability(_) => crate::network::protocol::TOPIC_REGIONS,
             // AllReduce responses broadcast to TP group via gossip (small group, LAN-local)
             SwarmMessage::TpAllReduceResponse(_) => crate::network::protocol::TOPIC_HEALTH,
             // Inference and credit transaction messages go via request_response, not gossipsub

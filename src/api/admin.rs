@@ -130,6 +130,43 @@ pub async fn quant_recommendations(State(state): State<AppState>) -> Json<serde_
     Json(serde_json::to_value(&*snap).unwrap_or_else(|_| serde_json::json!({})))
 }
 
+/// GET /api/admin/foreign-pool-catalog — R134 — cross-pool model
+/// availability discovery surface. Returns the cached signals from
+/// `PoolModelAvailability` gossip, grouped by pool, with stale entries
+/// trimmed against `FOREIGN_POOL_CATALOG_MAX_AGE_MS`. Pure discovery —
+/// does NOT bind routing decisions. Useful for the admin UI's
+/// "models the swarm knows about but this pool doesn't host yet" tile.
+pub async fn foreign_pool_catalog(State(state): State<AppState>) -> Json<serde_json::Value> {
+    use std::collections::BTreeMap;
+    let now_ms = crate::types::unix_now_ms();
+    let cutoff = now_ms.saturating_sub(crate::daemon::dispatch::FOREIGN_POOL_CATALOG_MAX_AGE_MS);
+    state
+        .shared_state
+        .credits
+        .foreign_pool_catalog
+        .retain(|_, ts| *ts >= cutoff);
+    // Group by pool_id for the response shape.
+    let mut by_pool: BTreeMap<String, Vec<serde_json::Value>> = BTreeMap::new();
+    for entry in state.shared_state.credits.foreign_pool_catalog.iter() {
+        let (pool, model) = entry.key();
+        by_pool
+            .entry(format!("{pool}"))
+            .or_default()
+            .push(serde_json::json!({
+                "model_id": model.0,
+                "received_at_ms": *entry.value(),
+            }));
+    }
+    let pools: Vec<serde_json::Value> = by_pool
+        .into_iter()
+        .map(|(pool_id, models)| serde_json::json!({"pool_id": pool_id, "models": models}))
+        .collect();
+    Json(serde_json::json!({
+        "pools": pools,
+        "computed_at_ms": now_ms,
+    }))
+}
+
 /// GET /api/admin/hf/trending — latest HuggingFace trending-GGUF snapshot
 /// captured by the background HfWatcher (R112). Surfaces the same data the
 /// wishlist scorer consumes so the frontend can render a "trending now"

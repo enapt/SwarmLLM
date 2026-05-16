@@ -116,6 +116,7 @@ impl HealthMonitor {
                         self.broadcast_manifests().await;
                         self.broadcast_region_summary().await;
                         self.broadcast_wishlist_announcement().await;
+                        self.broadcast_pool_model_availability().await;
                     }
 
                     // Cleanup tasks: run every tick (cheap, local-only)
@@ -484,6 +485,67 @@ impl HealthMonitor {
     /// (already capped at `MAX_WISHLIST_ENTRIES`) and broadcasts them.
     /// The receive side is always on — opt-out is publish only, so
     /// privacy-conscious operators still benefit from inbound boost.
+    /// R134: cross-pool model availability publisher. Only the pool owner
+    /// emits; only fires when `pool.share_model_catalog` is on AND the
+    /// pool has at least `share_model_catalog_min_members` members
+    /// (k-anonymity floor). Carries the model IDs the pool can currently
+    /// serve — derived from the local model registry — at the gossip
+    /// granularity that the wishlist announcement already operates at.
+    /// Pure discovery; routing across pool boundaries is NOT enabled.
+    async fn broadcast_pool_model_availability(&self) {
+        let cfg = &self.shared_state.config.pool;
+        if !cfg.share_model_catalog {
+            return;
+        }
+        let min_members = cfg.share_model_catalog_min_members.max(1) as usize;
+        let my_id = self.shared_state.identity.node_id().clone();
+        let pool_id = {
+            let ps = self.shared_state.credits.pool_state.read().await;
+            match ps.as_ref() {
+                Some(ps) if ps.pool_id == my_id && ps.members.len() >= min_members => {
+                    ps.pool_id.clone()
+                }
+                _ => return, // not owner, no pool, or below k-anonymity floor
+            }
+        };
+
+        // The pool serves any model whose shards are locally hosted by
+        // any pool member. For privacy + simplicity we use the owner's
+        // local model registry as the catalog source — distributing the
+        // per-member catalog would expose composition signals.
+        let mut model_ids: Vec<crate::types::ModelId> = self
+            .shared_state
+            .model_registry
+            .models()
+            .into_iter()
+            .map(|m| m.id)
+            .collect();
+        model_ids.sort_by(|a, b| a.0.cmp(&b.0));
+        model_ids.dedup_by(|a, b| a.0 == b.0);
+        model_ids.truncate(crate::daemon::dispatch::MAX_POOL_MODEL_ANNOUNCE_ENTRIES);
+        if model_ids.is_empty() {
+            return;
+        }
+
+        let timestamp_ms = crate::types::unix_now_ms();
+        let payload = crate::pool::crypto::pool_model_availability_payload(
+            &pool_id,
+            &model_ids,
+            timestamp_ms,
+        );
+        let owner_signature = self.shared_state.identity.sign(&payload);
+        let announce = crate::types::PoolModelAvailability {
+            pool_id,
+            model_ids,
+            timestamp_ms,
+            owner_signature,
+        };
+        let msg = NetworkCommand::Broadcast(SwarmMessage::PoolModelAvailability(announce));
+        if let Err(e) = self.network_tx.send(msg).await {
+            tracing::debug!(error = %e, "Failed to broadcast pool model availability");
+        }
+    }
+
     async fn broadcast_wishlist_announcement(&self) {
         if !self.shared_state.config.auto_manage.wishlist_gossip_publish {
             return;

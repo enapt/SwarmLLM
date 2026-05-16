@@ -128,6 +128,13 @@ pub enum SwarmMessage {
     // their own wishlist score as a soft boost. Privacy-sensitive (publishes
     // what THIS node wants) so default-off.
     WishlistAnnouncement(WishlistAnnouncement),
+
+    // R134 — inter-pool model availability. Pool owners opt in via
+    // `pool.share_model_catalog` and announce which models their pool
+    // serves. Receivers cache as a discovery signal — surfaces in the
+    // admin UI as "Pool X also serves Y". Wire format ONLY; cross-pool
+    // routing is a separate design decision still pending discussion.
+    PoolModelAvailability(PoolModelAvailability),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -231,6 +238,37 @@ pub struct WishlistAnnouncementEntry {
     /// purely as a ranking signal; absolute values aren't comparable
     /// across nodes (different swarm context, different VRAM, etc.).
     pub score: u32,
+}
+
+/// R134: inter-pool model availability announcement. When a pool opts
+/// in via `pool.share_model_catalog`, the owner periodically broadcasts
+/// the model_ids the pool can serve. Outsiders cache this as a
+/// "discovery" signal — which pools claim to serve which models — but
+/// nothing about pool composition, member count, or per-shard interest
+/// is exposed. A k-anonymity floor on the sender side blocks pools
+/// smaller than `MIN_K_ANONYMITY_MEMBERS` from announcing, so the
+/// channel cannot be used to enumerate small private pools.
+///
+/// Routing across pool boundaries based on this signal is explicitly
+/// out of scope for the wire format — the private-mode contract that
+/// "your inference stays in your pool" is preserved. Cross-pool
+/// routing is a separate design decision that needs its own opt-in,
+/// trust model, and UI surface.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PoolModelAvailability {
+    /// Pool ID = pool owner's NodeId. Receivers verify the
+    /// `owner_signature` against this key.
+    pub pool_id: NodeId,
+    /// Model IDs the pool can serve. Capped at
+    /// `MAX_POOL_MODEL_ANNOUNCE_ENTRIES` on the wire to keep gossip
+    /// bounded; senders rank by recent local-host activity.
+    pub model_ids: Vec<ModelId>,
+    /// Milliseconds since Unix epoch. Receivers apply the standard
+    /// one-sided staleness window to defeat replay.
+    pub timestamp_ms: u64,
+    /// Ed25519 signature over the gossip payload (see
+    /// `pool::crypto::pool_model_availability_payload`).
+    pub owner_signature: Vec<u8>,
 }
 
 /// Model demand gossip — EMA-smoothed request rate per model per region.

@@ -18,6 +18,7 @@ const PREFIX_ACCEPTANCE: &[u8] = b"pool_acceptance_v1";
 const PREFIX_REMOVAL: &[u8] = b"pool_removal_v1";
 const PREFIX_CREDIT_FORWARD: &[u8] = b"pool_credit_forward_v1";
 const PREFIX_POOL_STATE_DIFF: &[u8] = b"pool_state_diff_v1";
+const PREFIX_POOL_MODEL_AVAIL: &[u8] = b"pool_model_avail_v1";
 #[cfg(test)]
 const PREFIX_BLIND_INVITE: &[u8] = b"pool_blind_invite_v1";
 
@@ -32,6 +33,28 @@ pub(crate) fn pool_create_payload(
     h.update(&owner_id.0);
     h.update(name.as_bytes());
     h.update(created_at.to_rfc3339().as_bytes());
+    h.finalize().as_bytes().to_vec()
+}
+
+/// R134: BLAKE3 payload for inter-pool model availability gossip.
+/// Domain-separated and bound to the pool id + sorted model id list +
+/// wire timestamp so it can't be replayed against a different pool or
+/// with a tampered model list.
+pub(crate) fn pool_model_availability_payload(
+    pool_id: &NodeId,
+    model_ids: &[crate::types::ModelId],
+    timestamp_ms: u64,
+) -> Vec<u8> {
+    let mut sorted: Vec<&crate::types::ModelId> = model_ids.iter().collect();
+    sorted.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut h = blake3::Hasher::new();
+    h.update(PREFIX_POOL_MODEL_AVAIL);
+    h.update(&pool_id.0);
+    h.update(&(sorted.len() as u32).to_le_bytes());
+    for id in sorted {
+        h.update(id.0.as_bytes());
+    }
+    h.update(&timestamp_ms.to_le_bytes());
     h.finalize().as_bytes().to_vec()
 }
 
@@ -603,5 +626,43 @@ mod tests {
         let p1 = invitation_payload(&id, &pool_id, &invitee, &expires);
         let p2 = invitation_payload(&id, &pool_id, &invitee, &expires);
         assert_eq!(p1, p2);
+    }
+
+    /// R134: pool model availability payload is deterministic AND
+    /// order-independent across the model list — the helper sorts before
+    /// hashing so two publishers that build the same list in different
+    /// orders produce the same payload.
+    #[test]
+    fn pool_model_availability_order_independent_and_signed() {
+        let pool_id = NodeId([7u8; 32]);
+        let m1 = crate::types::ModelId("aaa".to_string());
+        let m2 = crate::types::ModelId("bbb".to_string());
+        let ts = 12345u64;
+        let p1 = pool_model_availability_payload(&pool_id, &[m1.clone(), m2.clone()], ts);
+        let p2 = pool_model_availability_payload(&pool_id, &[m2.clone(), m1.clone()], ts);
+        assert_eq!(p1, p2);
+
+        // Different timestamp → different payload.
+        let p3 = pool_model_availability_payload(&pool_id, &[m1.clone(), m2.clone()], ts + 1);
+        assert_ne!(p1, p3);
+
+        // Sign and verify roundtrip.
+        let owner = Identity::generate();
+        let pool_id = owner.node_id().clone();
+        let payload = pool_model_availability_payload(&pool_id, std::slice::from_ref(&m1), ts);
+        let sig = owner.sign(&payload);
+        let key = owner.verifying_key();
+        use ed25519_dalek::Verifier;
+        let sig_bytes: [u8; 64] = sig.as_slice().try_into().unwrap();
+        let signature = ed25519_dalek::Signature::from_bytes(&sig_bytes);
+        assert!(key.verify(&payload, &signature).is_ok());
+
+        // Tampered model list fails.
+        let tampered = pool_model_availability_payload(
+            &pool_id,
+            &[m1, crate::types::ModelId("evil".to_string())],
+            ts,
+        );
+        assert!(key.verify(&tampered, &signature).is_err());
     }
 }

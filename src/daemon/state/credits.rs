@@ -25,4 +25,11 @@ pub struct CreditPool {
     pub private_mode: std::sync::atomic::AtomicBool,
     /// Offline mode: no internet bootstrap, mDNS-only, no automatic HF downloads.
     pub offline_mode: std::sync::atomic::AtomicBool,
+    /// R134: discovery cache for inter-pool model availability announcements.
+    /// Keyed by `(announcing_pool_id, model_id)`; value is `(received_at_ms)`.
+    /// Trimmed on every read against `FOREIGN_POOL_CATALOG_MAX_AGE_MS`. Cap
+    /// `MAX_FOREIGN_POOL_CATALOG_ENTRIES` is enforced on insertion. This is a
+    /// *discovery* surface only — does NOT change routing decisions; the
+    /// private-mode contract is preserved.
+    pub foreign_pool_catalog: DashMap<(crate::pool::types::PoolId, crate::types::ModelId), u64>,
 }

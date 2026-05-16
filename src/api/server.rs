@@ -224,6 +224,10 @@ pub fn build_router(state: AppState) -> Router {
             "/api/admin/quant-recommendations",
             get(admin::quant_recommendations),
         )
+        .route(
+            "/api/admin/foreign-pool-catalog",
+            get(admin::foreign_pool_catalog),
+        )
         .route("/api/admin/hf/trending", get(admin::hf_trending))
         .route(
             "/api/admin/storage/breakdown",

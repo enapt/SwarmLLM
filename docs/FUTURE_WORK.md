@@ -11,6 +11,42 @@ Captures items deliberately deferred from the model-management redesign and from
 
 **Why deferred.** Designing the privacy/trust boundary is a real architectural decision. Doing it inside R111's wishlist refactor would mix concerns.
 
+_**Partially closed R134** (2026-05-16) — discovery layer shipped; the
+routing layer remains deferred pending a separate user discussion about
+the private-mode contract. What landed:_
+
+_- New `SwarmMessage::PoolModelAvailability { pool_id, model_ids,
+  timestamp_ms, owner_signature }` on the existing `swarm/regions`
+  GossipSub topic. Domain-separated BLAKE3 sign payload
+  `pool_model_avail_v1` binds pool id + sorted model id list +
+  timestamp, so a replayed announcement across pools or with a
+  tampered model list fails verification._
+_- Opt-in via `pool.share_model_catalog` (default `false`). Even when
+  on, k-anonymity floor `share_model_catalog_min_members` (default 3)
+  blocks pools smaller than the floor from publishing — prevents the
+  channel from being used to enumerate small private pools._
+_- Receivers cache in `state.credits.foreign_pool_catalog: DashMap<
+  (PoolId, ModelId), received_at_ms>` (cap 5000 with oldest-first
+  eviction, 2h freshness window — matches the wishlist signal cadence).
+  Always-on ingest so privacy-conscious nodes benefit from the
+  discovery signal without publishing their own catalog._
+_- Publisher: `HealthMonitor::broadcast_pool_model_availability` fires
+  on the same gossip cadence as wishlist + region summary. Pool owner
+  only — non-owners never publish even if the flag is on._
+_- Admin surface: `GET /api/admin/foreign-pool-catalog` returns the
+  cached signal grouped by pool with stale trim._
+_- 1 new unit test covers determinism + sign/verify roundtrip + tamper
+  detection._
+
+_What remains deferred:_
+_- Cross-pool inference routing. Today inference stays within the
+  caller's pool/private-mode scope; the discovery signal is currently
+  read-only telemetry. Wiring the scheduler to actually route requests
+  to a foreign pool changes the privacy contract — needs explicit user
+  consent UI, billing model decisions, and trust escalation policy._
+_- Frontend tile. The REST surface is ready but no dashboard component
+  renders it yet; pairs naturally with the next dashboard refresh._
+
 ---
 
 ### Model quality benchmarking

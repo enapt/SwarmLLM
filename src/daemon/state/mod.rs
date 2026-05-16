@@ -333,6 +333,7 @@ impl SharedState {
                         .flatten()
                         .unwrap_or(config.pool.offline_mode)
                 }),
+                foreign_pool_catalog: DashMap::new(),
             },
             models: ModelMgmt {
                 acquisition_progress: DashMap::new(),

@@ -97,6 +97,26 @@ pub struct PoolConfig {
     /// pool size.
     #[serde(default)]
     pub state_diff_gossip: bool,
+    /// R134: opt-in cross-pool model catalog gossip. When on, the pool
+    /// owner periodically broadcasts the model IDs the pool can serve
+    /// on the regions GossipSub topic. Outsiders cache this as a
+    /// discovery signal — "Pool X also serves Y" — but cross-pool
+    /// routing is NOT enabled by this flag (the private-mode contract
+    /// is preserved). Requires the pool to have at least
+    /// `share_model_catalog_min_members` members to actually publish —
+    /// k-anonymity floor prevents the channel from being used to
+    /// enumerate small private pools.
+    #[serde(default)]
+    pub share_model_catalog: bool,
+    /// R134: k-anonymity floor for `share_model_catalog`. Pools smaller
+    /// than this never publish their catalog regardless of the
+    /// `share_model_catalog` flag.
+    #[serde(default = "default_share_model_catalog_min")]
+    pub share_model_catalog_min_members: u32,
+}
+
+fn default_share_model_catalog_min() -> u32 {
+    3
 }
 
 impl Default for PoolConfig {
@@ -111,6 +131,8 @@ impl Default for PoolConfig {
             private_mode_allow_lan: true,
             offline_mode: false,
             state_diff_gossip: false,
+            share_model_catalog: false,
+            share_model_catalog_min_members: default_share_model_catalog_min(),
         }
     }
 }

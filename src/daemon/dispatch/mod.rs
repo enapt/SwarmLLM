@@ -39,6 +39,19 @@ const MAX_DEMAND_ENTRIES: usize = 10_000;
 /// per-publisher slice of `state.models.foreign_wishlist`. 64 keeps the
 /// headline (a swarm normally has dozens of models, not hundreds).
 const MAX_WISHLIST_ANNOUNCE_ENTRIES: usize = 64;
+/// R134: Cap entries per PoolModelAvailability gossip. Senders rank by
+/// recent local-host activity; receivers reject announcements over this
+/// cap. 128 is comfortable headroom over typical pool catalog sizes.
+pub(crate) const MAX_POOL_MODEL_ANNOUNCE_ENTRIES: usize = 128;
+/// R134: maximum cached `foreign_pool_catalog` entries across all pools.
+/// On insertion, evicts the oldest entry by `received_at_ms` to stay
+/// under the cap. Keeps memory bounded even under a hostile-publisher
+/// flood.
+pub const MAX_FOREIGN_POOL_CATALOG_ENTRIES: usize = 5_000;
+/// R134: drop foreign_pool_catalog entries older than this. Two hours
+/// matches `FOREIGN_WISHLIST_MAX_AGE_MS` — both signals expire on the
+/// same cadence so a pool that goes dark stops appearing in discovery.
+pub const FOREIGN_POOL_CATALOG_MAX_AGE_MS: u64 = 2 * 60 * 60 * 1000;
 /// SEC: Cap shards per ShardAnnounce to prevent shard_holders memory exhaustion.
 const MAX_SHARDS_PER_ANNOUNCE: usize = 512;
 /// SEC: Cap blocks per PrefixCacheAnnounce. A 7B model at 64-token blocks
@@ -1765,6 +1778,107 @@ pub(crate) async fn dispatch_network_messages(
                                             added,
                                             removed,
                                             "WishlistAnnouncement processed"
+                                        );
+                                    }
+
+                                    // R134: inter-pool model availability. Pool owners opt in to
+                                    // advertise which model_ids their pool can serve. Receivers
+                                    // cache as a discovery signal — surfaces in the admin REST
+                                    // surface as "Pool X also serves Y". Does NOT change routing.
+                                    SwarmMessage::PoolModelAvailability(announce) => {
+                                        use ed25519_dalek::Verifier;
+                                        match &authenticated_sender {
+                                            Some(sender) if *sender != announce.pool_id => {
+                                                tracing::warn!(
+                                                    sender = %sender,
+                                                    claimed = %announce.pool_id,
+                                                    "PoolModelAvailability sender mismatch — dropping"
+                                                );
+                                                continue;
+                                            }
+                                            None => {
+                                                tracing::debug!("Dropping unauthenticated PoolModelAvailability");
+                                                continue;
+                                            }
+                                            Some(_) => {}
+                                        }
+                                        if announce.pool_id == *shared_state.identity.node_id() {
+                                            // Self-announce; nothing to learn.
+                                            continue;
+                                        }
+                                        if announce.model_ids.len() > MAX_POOL_MODEL_ANNOUNCE_ENTRIES {
+                                            tracing::warn!(
+                                                pool = %announce.pool_id,
+                                                count = announce.model_ids.len(),
+                                                "PoolModelAvailability exceeds cap — dropping"
+                                            );
+                                            continue;
+                                        }
+                                        let now_ms = crate::types::unix_now_ms();
+                                        if !gossip_timestamp_fresh(announce.timestamp_ms, now_ms, "PoolModelAvailability") {
+                                            continue;
+                                        }
+                                        let owner_key = match ed25519_dalek::VerifyingKey::from_bytes(&announce.pool_id.0) {
+                                            Ok(k) => k,
+                                            Err(_) => {
+                                                tracing::warn!(pool = %announce.pool_id, "Invalid pool owner key in PoolModelAvailability");
+                                                continue;
+                                            }
+                                        };
+                                        let payload = crate::pool::crypto::pool_model_availability_payload(
+                                            &announce.pool_id,
+                                            &announce.model_ids,
+                                            announce.timestamp_ms,
+                                        );
+                                        let sig_bytes: &[u8; 64] = match announce.owner_signature.as_slice().try_into() {
+                                            Ok(b) => b,
+                                            Err(_) => {
+                                                tracing::warn!(pool = %announce.pool_id, "Invalid signature length in PoolModelAvailability");
+                                                continue;
+                                            }
+                                        };
+                                        let sig = ed25519_dalek::Signature::from_bytes(sig_bytes);
+                                        if owner_key.verify(&payload, &sig).is_err() {
+                                            tracing::warn!(pool = %announce.pool_id, "Invalid owner signature in PoolModelAvailability");
+                                            continue;
+                                        }
+
+                                        let catalog = &shared_state.credits.foreign_pool_catalog;
+                                        // Trim stale entries before inserting so the cap eviction
+                                        // doesn't accidentally evict fresh, valid entries.
+                                        let stale_cutoff = now_ms.saturating_sub(FOREIGN_POOL_CATALOG_MAX_AGE_MS);
+                                        catalog.retain(|_, ts| *ts >= stale_cutoff);
+                                        // Replace this publisher's prior set — model availability
+                                        // is a full-snapshot signal, not an incremental delta.
+                                        catalog.retain(|(p, _), _| *p != announce.pool_id);
+                                        // Enforce the global cap by oldest-first eviction.
+                                        while catalog.len()
+                                            + announce.model_ids.len()
+                                            > MAX_FOREIGN_POOL_CATALOG_ENTRIES
+                                        {
+                                            let mut oldest_ts = u64::MAX;
+                                            let mut oldest_key: Option<(crate::pool::types::PoolId, crate::types::ModelId)> = None;
+                                            for entry in catalog.iter() {
+                                                if *entry.value() < oldest_ts {
+                                                    oldest_ts = *entry.value();
+                                                    oldest_key = Some(entry.key().clone());
+                                                }
+                                            }
+                                            match oldest_key {
+                                                Some(k) => { catalog.remove(&k); }
+                                                None => break,
+                                            }
+                                        }
+                                        for mid in &announce.model_ids {
+                                            catalog.insert(
+                                                (announce.pool_id.clone(), mid.clone()),
+                                                announce.timestamp_ms,
+                                            );
+                                        }
+                                        tracing::debug!(
+                                            pool = %announce.pool_id,
+                                            entries = announce.model_ids.len(),
+                                            "PoolModelAvailability processed"
                                         );
                                     }
 
