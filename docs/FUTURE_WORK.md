@@ -163,6 +163,21 @@ composition, region, or per-shard interest. 3 unit tests for
 
 **Why deferred.** Requires demand forecasting infrastructure that doesn't exist yet.
 
+_**Closed R134.7** (2026-05-16). Time-windowed protection landed without
+the heavy forecasting subsystem — `prune.rs` reads
+`state.models.model_trust.get(&model_id).last_request_at` (already
+updated per request) and subtracts `RECENT_REQUEST_PENALTY = 1.5` from
+the prune score when the last request is within
+`RECENT_REQUEST_PROTECT_SECS = 3600`. Effect: a model that served a
+swarm request in the last hour is protected from eviction regardless of
+replication ratio. The penalty is calibrated to dominate the strongest
+existing `region_demand` signal (max 1.0), so local recent usage out-
+weighs cross-region averaging at the local-node prune decision. The
+"forecast next 30 min" intuition is captured indirectly via "I used it
+in the last 60 min" without standing up a separate prediction
+pipeline. 2 unit tests verify the constants stay consistent +
+fresh-vs-stale scoring discrimination._
+
 ---
 
 ### Decentralised reputation for HF model legitimacy

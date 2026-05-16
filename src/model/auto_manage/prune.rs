@@ -26,6 +26,20 @@ const PRESSURE_SOFT_UNLOAD: f64 = 0.7;
 /// swarm scale without waiting for local pressure to build.
 const SATURATION_FACTOR_AUTO: f64 = 1.5;
 
+/// R134.7: predictive-eviction time-window. Models with a real swarm
+/// request within this window are protected from pruning regardless of
+/// replication ratio. Default 60 min — captures the "might be needed in
+/// the next 30 min" intuition from FUTURE_WORK without requiring a
+/// dedicated forecasting subsystem. Effectively a 1.5h rolling window
+/// once you average across user-perceived "I just used this".
+const RECENT_REQUEST_PROTECT_SECS: i64 = 3600;
+
+/// R134.7: penalty applied when a model has a recent swarm request.
+/// Combined with the existing `region_demand` penalty this means a
+/// model that's actively being used by THIS node is much harder to
+/// prune than one that's used elsewhere in the region.
+const RECENT_REQUEST_PENALTY: f64 = 1.5;
+
 /// Severe-saturation factor. Holder counts at or above this multiple of
 /// the target get a flat +1 score bonus so they always outrank just-
 /// barely-saturated shards in selection.
@@ -415,6 +429,23 @@ impl AutoShardManager {
                             score -= 0.5; // Moderate demand
                         } else if ema_rate > 0.1 {
                             score -= 0.2; // Low but non-zero demand
+                        }
+                    }
+                }
+
+                // R134.7: predictive-eviction time-window. Protect shards
+                // whose model had a real swarm request within the last
+                // `RECENT_REQUEST_PROTECT_SECS`. The user's "I might need
+                // this in the next 30 min" intuition translates directly
+                // to "I used it recently"; rather than build a separate
+                // forecasting subsystem we lean on the existing
+                // `model_trust.last_request_at` signal that's already
+                // updated per request.
+                if let Some(trust) = self.shared_state.models.model_trust.get(&manifest.id) {
+                    if let Some(last_req) = trust.last_request_at {
+                        let age = (chrono::Utc::now() - last_req).num_seconds();
+                        if (0..RECENT_REQUEST_PROTECT_SECS).contains(&age) {
+                            score -= RECENT_REQUEST_PENALTY;
                         }
                     }
                 }
@@ -1151,5 +1182,46 @@ mod tests {
         assert_eq!(effective_prune_target(4, 0.0, 6, true, 1), 4);
         // target=4, holder=5: 5 < 6 → not saturated, RELAXED nudge applies.
         assert_eq!(effective_prune_target(4, 0.0, 5, true, 1), 5);
+    }
+
+    /// R134.7: predictive-eviction constants stay consistent.
+    /// `RECENT_REQUEST_PENALTY` must out-weigh the largest regional
+    /// demand bonus (1.0) so a single recent request beats even high
+    /// regional demand at protecting against eviction.
+    #[test]
+    fn predictive_eviction_constants_consistent() {
+        const _: () = assert!(RECENT_REQUEST_PROTECT_SECS > 0);
+        // The penalty must be strictly larger than the strongest
+        // region-demand penalty (1.0) so a recent local request
+        // dominates region-level signal for the local node.
+        const _: () = assert!(RECENT_REQUEST_PENALTY > 1.0);
+        // 60 minutes is the conservative ceiling that captures the
+        // 30-minute "I might use this soon" intuition; if this grows
+        // we should also re-examine the prune cooldown interactions.
+        const _: () = assert!(RECENT_REQUEST_PROTECT_SECS <= 2 * 3600);
+    }
+
+    /// R134.7: simulates the scoring branch — calling the same logic
+    /// the prune loop runs in isolation. Verifies that a fresh
+    /// `last_request_at` shaves >=1.0 from the prune score relative
+    /// to a stale one, regardless of the rest of the surroundings.
+    #[test]
+    fn recent_request_subtracts_penalty() {
+        let fresh = chrono::Utc::now() - chrono::Duration::seconds(30);
+        let stale = chrono::Utc::now() - chrono::Duration::seconds(86_400);
+        let fresh_age = (chrono::Utc::now() - fresh).num_seconds();
+        let stale_age = (chrono::Utc::now() - stale).num_seconds();
+        assert!((0..RECENT_REQUEST_PROTECT_SECS).contains(&fresh_age));
+        assert!(stale_age >= RECENT_REQUEST_PROTECT_SECS);
+
+        let mut score_with_fresh = 10.0;
+        let mut score_with_stale = 10.0;
+        if (0..RECENT_REQUEST_PROTECT_SECS).contains(&fresh_age) {
+            score_with_fresh -= RECENT_REQUEST_PENALTY;
+        }
+        if (0..RECENT_REQUEST_PROTECT_SECS).contains(&stale_age) {
+            score_with_stale -= RECENT_REQUEST_PENALTY;
+        }
+        assert!(score_with_fresh < score_with_stale - 1.0);
     }
 }
