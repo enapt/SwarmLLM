@@ -418,6 +418,10 @@ impl AutoShardManager {
         // it connects.
         crate::model::auto_manage::refresh_wishlist(&self.shared_state);
         crate::model::auto_manage::quant::refresh_quant_recommendations(&self.shared_state);
+        // R134.6: opt-in opportunistic quant upgrade. No-op when the flag
+        // is off; otherwise promotes the recommended variant's trust so
+        // the next tick's download pass picks it up naturally.
+        crate::model::auto_manage::quant::apply_quant_auto_action(&self.shared_state);
 
         let hosted_after = self
             .shared_state
@@ -810,6 +814,7 @@ mod tests {
             parallax_auto_rebalance: true,
             hf_watcher_enabled: false,
             wishlist_gossip_publish: false,
+            auto_switch_quants: false,
         };
         assert_eq!(config.max_shards, 0); // unlimited
     }

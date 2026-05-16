@@ -374,6 +374,18 @@ pub struct AutoManageConfig {
     /// does not expose pool composition, region, or per-shard interest.
     #[serde(default)]
     pub wishlist_gossip_publish: bool,
+    /// R134.6: opt-in auto-action for the quant recommendation surface
+    /// (R133). When on, auto-manage promotes the recommended quant
+    /// variant's trust level to `DemandVerified` for any model family
+    /// where the user currently hosts a *different* quant — letting the
+    /// normal scoring/download path opportunistically acquire the better
+    /// variant. The OLD variant is NOT proactively pruned; standard
+    /// prune cycle handles deduplication when VRAM pressure hits, so
+    /// there's no in-flight inference disruption window. Default off
+    /// because acquiring an additional quant doubles disk + bandwidth
+    /// use temporarily; flip on once you have headroom.
+    #[serde(default)]
+    pub auto_switch_quants: bool,
 }
 
 /// Per-model auto-manage policy controlling whether a model participates
@@ -409,6 +421,7 @@ impl Default for AutoManageConfig {
             parallax_auto_rebalance: true,
             hf_watcher_enabled: true,
             wishlist_gossip_publish: false,
+            auto_switch_quants: false,
         }
     }
 }

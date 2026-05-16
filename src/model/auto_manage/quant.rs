@@ -77,6 +77,132 @@ pub fn refresh_quant_recommendations(state: &SharedState) {
         .store(std::sync::Arc::new(snapshot));
 }
 
+/// R134.6: opt-in auto-action for the recommendation surface. When
+/// `auto_manage.auto_switch_quants` is on, walks each family in the
+/// current snapshot and promotes the recommended variant's trust level
+/// to `DemandVerified` for any family where the user currently hosts
+/// at least one shard of a *different* variant in the family. The
+/// normal auto-manage scoring/download path then opportunistically
+/// acquires the recommended variant. The old variant is NOT pruned
+/// proactively — let standard prune handle dedup once VRAM pressure
+/// hits, so there's no in-flight inference disruption window.
+///
+/// Returns the number of trust promotions performed (used by the
+/// activity log + tests).
+pub fn apply_quant_auto_action(state: &SharedState) -> usize {
+    if !state.config.auto_manage.auto_switch_quants {
+        return 0;
+    }
+    let snapshot = state.models.quant_recommendations.load_full();
+    if snapshot.families.is_empty() {
+        return 0;
+    }
+    let local_node_id = state.identity.node_id().clone();
+    let mut promotions = 0usize;
+    let mut pending_activity: Vec<(String, String, String)> = Vec::new();
+    for fam in &snapshot.families {
+        let Some(rec_idx) = fam.recommended_index else {
+            continue;
+        };
+        let Some(recommended) = fam.known_variants.get(rec_idx) else {
+            continue;
+        };
+        let rec_model_id = crate::types::ModelId(recommended.model_id.clone());
+        // Skip when we already host shards of the recommended variant.
+        if hosts_any_shard(state, &rec_model_id, &local_node_id) {
+            continue;
+        }
+        // Switch candidate only when we host a SIBLING variant — otherwise
+        // we'd promote a model we have no interest in. The recommender's
+        // family grouping already requires sibling membership via base name.
+        let hosts_sibling = fam.known_variants.iter().any(|v| {
+            v.model_id != recommended.model_id
+                && hosts_any_shard(
+                    state,
+                    &crate::types::ModelId(v.model_id.clone()),
+                    &local_node_id,
+                )
+        });
+        if !hosts_sibling {
+            continue;
+        }
+        // Promote — only if currently below DemandVerified. User pins
+        // and existing higher-trust entries are left alone. The
+        // `upgraded` flag is captured here and the activity emit happens
+        // OUTSIDE the entry guard so a stray contention can't deadlock.
+        let upgraded = {
+            let mut upgraded_inner = false;
+            state
+                .models
+                .model_trust
+                .entry(rec_model_id.clone())
+                .and_modify(|t| {
+                    if t.trust_level < crate::types::ModelTrustLevel::DemandVerified
+                        && !t.pinned_by_user
+                    {
+                        t.trust_level = crate::types::ModelTrustLevel::DemandVerified;
+                        upgraded_inner = true;
+                    }
+                })
+                .or_insert_with(|| {
+                    upgraded_inner = true;
+                    let mut info = crate::types::ModelTrustInfo::new_discovered();
+                    info.trust_level = crate::types::ModelTrustLevel::DemandVerified;
+                    info
+                });
+            upgraded_inner
+        };
+        if upgraded {
+            promotions += 1;
+            tracing::info!(
+                family = %fam.base_name,
+                model = %rec_model_id,
+                "auto_switch_quants: promoted recommended variant for opportunistic upgrade"
+            );
+            // Stash the activity payload — emit AFTER the iteration completes
+            // so the broadcast send can't interact with the model_trust
+            // DashMap iteration order through any reentrant subscriber.
+            pending_activity.push((
+                fam.display_name.clone(),
+                recommended.display_name.clone(),
+                rec_model_id.0.clone(),
+            ));
+        }
+    }
+    for (family, variant, model_id) in pending_activity {
+        state.emit_activity(
+            crate::daemon::state::ActivityEvent::new(
+                "auto_manage",
+                "quant_auto_switch",
+                format!("Auto-switching {family} to a better quality ({variant})"),
+            )
+            .with_model(&model_id)
+            .with_model_name(&variant),
+        );
+    }
+    promotions
+}
+
+fn hosts_any_shard(
+    state: &SharedState,
+    model_id: &crate::types::ModelId,
+    local_node_id: &crate::types::NodeId,
+) -> bool {
+    let Some(manifest) = state.model_registry.get_manifest(model_id) else {
+        return false;
+    };
+    manifest.shards.iter().any(|s| {
+        let sid = crate::types::ShardId {
+            model_id: model_id.clone(),
+            index: s.index,
+        };
+        state
+            .model_registry
+            .shard_holders(&sid)
+            .contains(local_node_id)
+    })
+}
+
 /// Compute the recommendation snapshot — pure function over registry +
 /// swarm capacity. Returns an empty result when the registry has no
 /// models.
@@ -394,6 +520,27 @@ mod tests {
     fn base_name_passes_through_when_no_tag() {
         assert_eq!(inferred_base_name("plain-model"), "plain-model");
         assert_eq!(inferred_base_name(""), "");
+    }
+
+    /// R134.6: auto-action is a no-op when the config flag is off, even
+    /// if there's a clear upgrade recommendation.
+    #[test]
+    fn apply_quant_auto_action_skips_when_flag_off() {
+        use crate::config::Config;
+        use crate::identity::Identity;
+        use crate::inference::executor::ModelExecutor;
+        use crate::storage::db::Database;
+        use std::sync::Arc;
+        use tokio::sync::Mutex;
+        let config = Config::default();
+        assert!(!config.auto_manage.auto_switch_quants);
+        let identity = Identity::generate();
+        let temp = tempfile::tempdir().unwrap();
+        let db = Database::open(temp.path()).unwrap();
+        let executor = Arc::new(Mutex::new(ModelExecutor::new()));
+        let (state, _, _) = crate::daemon::SharedState::new(config, identity, db, executor, None);
+        let count = apply_quant_auto_action(&state);
+        assert_eq!(count, 0);
     }
 
     /// End-to-end: register two manifests for the same base model at

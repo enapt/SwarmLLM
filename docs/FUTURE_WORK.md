@@ -102,11 +102,21 @@ keys × 21 locales (`quant.tips_title`, `quant.tips_sub`,
 `quant.tip_current`). WS payload picks up `quant_recommendations` so
 the tile updates in real-time without a dedicated REST round-trip._
 
-_What remains deferred (auto-action only):_
-_- Auto-action layer (download the recommended quant when the user
-  toggles "auto-switch quants" — needs a UI surface for explicit
-  consent + a hot-swap migration path for replacing a hosted quant
-  with a better variant without an inference-interruption window)._
+_**Auto-action layer closed R134.6** (2026-05-16). New
+`apply_quant_auto_action` walks the recommendation snapshot once per
+auto-manage tick (after `refresh_quant_recommendations`) and promotes
+the recommended variant's `ModelTrustInfo` to `DemandVerified` for any
+family where the user currently hosts a *different* variant. The normal
+scoring/download path then opportunistically acquires the better quant.
+Opt-in via `auto_manage.auto_switch_quants` (default `false`).
+Non-destructive: the OLD variant is NOT proactively pruned, so there's
+no in-flight inference disruption window — standard prune cycle
+handles dedup once VRAM pressure hits. Net effect: when the flag is on,
+running a Q4_K_M and the swarm grows enough to fit Q5_K_M, the daemon
+quietly starts downloading Q5_K_M; both stay hosted until the natural
+prune cycle decides one is over-replicated. Activity events emitted
+post-iteration (so the broadcast send never interacts with the trust
+DashMap entry guard). 1 unit test covers the flag-off no-op._
 
 ---
 
