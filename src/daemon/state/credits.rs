@@ -68,8 +68,21 @@ pub fn apply_pool_model_availability(
     max_entries: usize,
 ) {
     trim_stale_foreign_pool_catalog(catalog, now_ms, max_age_ms);
+    // Drop this publisher's prior snapshot before inserting — model
+    // availability is a full-snapshot signal, not an incremental delta.
     catalog.retain(|(p, _), _| p != pool_id);
-    while catalog.len() + model_ids.len() > max_entries {
+    // Insert first, then drain back below the cap. Doing eviction
+    // POST-insert makes the post-condition `catalog.len() <=
+    // max_entries` structural — independent of how many model_ids we
+    // were given, whether the pre-insert size estimate was correct,
+    // or whether a concurrent reader's trim shrank the map between
+    // here and the loop. Today this function is only called from the
+    // single-task dispatch loop, so the pre-vs-post ordering is
+    // equivalent; the post-insert form just doesn't *rely* on that.
+    for mid in model_ids {
+        catalog.insert((pool_id.clone(), mid.clone()), timestamp_ms);
+    }
+    while catalog.len() > max_entries {
         let mut oldest_ts = u64::MAX;
         let mut oldest_key: Option<(crate::pool::types::PoolId, crate::types::ModelId)> = None;
         for entry in catalog.iter() {
@@ -84,9 +97,6 @@ pub fn apply_pool_model_availability(
             }
             None => break,
         }
-    }
-    for mid in model_ids {
-        catalog.insert((pool_id.clone(), mid.clone()), timestamp_ms);
     }
 }
 

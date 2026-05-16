@@ -447,6 +447,53 @@ have explicit "won't fix" semantics. Concretely:
 
 ---
 
+## R135 sweep — security findings deferred for discussion
+
+The R135 review surfaced two signature/security items that touch wire
+formats and require user direction before changing:
+
+### Acceptance signature timestamp omission
+**Context.** `acceptance_payload` in `src/pool/crypto.rs:419` signs
+`(PREFIX_ACCEPTANCE | invitation_id | pool_id | invitee_node_id)`. No
+timestamp, no nonce. The invitation itself has an `expires_at` but the
+acceptance does not bind to it.
+
+**Risk.** An adversary who captures an acceptance signature in transit
+(or from a compromised node's storage) can in principle replay it.
+Practical exploitability is low — `invitation_id` is UUIDv4 (~2^122
+collision space) and accepted invitations are tracked in member state,
+so double-acceptance is already prevented by the pool registry. The
+finding is real but the attack scenario requires the same
+`(invitation_id, pool_id, invitee_node_id)` triple to be re-used, which
+the inviter controls.
+
+**What's needed.** Either (a) extend `acceptance_payload` to bind
+`invitation.expires_at` so the sig is implicitly time-bounded, or
+(b) add a per-acceptance nonce to `PoolMembership`. Both are
+wire-format changes; (a) is simpler and matches the existing
+invitation expiry contract.
+
+**Why deferred.** Wire-format change with backward-compat implications
+across all pool members. Want explicit user sign-off on the
+compat strategy (versioned variant vs. flag-day).
+
+### `apply_pool_model_availability` cap eviction relies on single-task dispatch
+**Context.** R135 reordered the eviction in `daemon/state/credits.rs`
+to be POST-insert, which makes the post-condition `catalog.len() <=
+max_entries` structural rather than depending on the pre-insert size
+estimate being accurate. But the eviction loop itself still scans
+the DashMap to find the oldest entry, which is O(n) per eviction —
+not O(log n). For `max_entries = 5000` this is 25M ops per drain in
+the worst case (full re-fill from a single 5000-entry announcement,
+which is bounded above by `MAX_POOL_MODEL_ANNOUNCE_ENTRIES = 128`,
+so the real worst case is bounded). Fine today, would want
+attention if either cap grows materially.
+
+**Why deferred.** Not a correctness bug. Performance discussion for
+when the network scales past current cap assumptions.
+
+---
+
 ## Inference performance — research backlog (R135 brief)
 
 Compiled 2026-05-16 from a survey of state-of-the-art LLM inference

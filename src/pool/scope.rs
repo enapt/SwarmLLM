@@ -115,12 +115,22 @@ pub fn cross_pool_extras(
     // model — keeps the existing "stays in pool" contract for models
     // the pool serves itself.
     let manifest = shared.model_registry.get_manifest(model_id);
-    let local_pool_members: HashSet<NodeId> = {
-        if let Ok(ps) = shared.credits.pool_state.try_read() {
-            ps.as_ref()
-                .map(|s| s.members.iter().map(|m| m.node_id.clone()).collect())
-                .unwrap_or_default()
-        } else {
+    let local_pool_members: HashSet<NodeId> = match shared.credits.pool_state.try_read() {
+        Ok(ps) => ps
+            .as_ref()
+            .map(|s| s.members.iter().map(|m| m.node_id.clone()).collect())
+            .unwrap_or_default(),
+        Err(_) => {
+            // R135: surface the degradation — silently returning an
+            // empty set causes the local-holder-exists check below to
+            // think the pool can't serve, which triggers the cross-pool
+            // fallback even when the local pool does host the model.
+            // Operators should know this is happening so they can size
+            // the pool_state write-lock holders.
+            tracing::warn!(
+                model_id = %model_id.0,
+                "cross_pool_extras: pool_state write-locked — local member set unknown, falling back to empty"
+            );
             HashSet::new()
         }
     };
