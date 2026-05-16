@@ -447,6 +447,324 @@ have explicit "won't fix" semantics. Concretely:
 
 ---
 
+## Inference performance — research backlog (R135 brief)
+
+Compiled 2026-05-16 from a survey of state-of-the-art LLM inference
+optimization (FlashAttention-3/4, FlowSpec, P-EAGLE, EAGLE-3, DSD,
+PowerInfer, DejaVu, SGLang RadixAttention, vLLM PagedAttention,
+Parallax, NVIDIA Dynamo/NIXL, NVFP4 KV, KIVI, etc.) cross-referenced
+against SwarmLLM's existing inference stack.
+
+### Already shipped (do not re-research)
+
+The following are NOT gaps — they are live:
+
+- **SWIFT self-speculative decoding** (`inference/swift.rs`,
+  arxiv 2410.06916) — layer-skip draft from the same model. v2
+  calibration with multiple candidate patterns.
+- **DSD (Distributed Speculative Decoding)** (`pipeline/dsd.rs`,
+  `inference/dsd_controller.rs`).
+- **Sarathi-style chunked prefill** via the slot table state
+  machine (`inference/slot_table.rs`) — `Prefilling` slots advance
+  by `prefill_chunk_tokens` per decode tick.
+- **Continuous batching** via the same slot table.
+- **Tensor parallelism with AllReduce** (`pipeline/tensor_parallel.rs`,
+  `inference/allreduce.rs`).
+- **Activation compression** (`tensor_util.rs::tensor_to_bytes_q8_0`,
+  Q8_0 group-32, ~3.76× over f32) — config-gated by
+  `inference.activation_compression` (default false). Wired through
+  the worker IPC path.
+- **Prefix cache** (`split/prefix_cache.rs`, 53K bytes).
+- **Pipeline failover** with hot-standby nodes per segment.
+
+### Tier 1 — high-leverage, low-risk wins (do these first)
+
+#### A. Default-on activation compression with quality gate
+**Context.** `inference.activation_compression` defaults to `false`.
+For P2P/WAN inference the wire is the bottleneck — every layer
+boundary ships ~`hidden_dim × 4` bytes/token in f32, ~`hidden_dim × 1`
+in Q8_0. A 4096-dim model on a 100 Mbps link spends 1.3ms vs 0.33ms
+per layer hop on f32 vs Q8_0; multiplied across 4-8 pipeline hops per
+token this dominates latency.
+
+**What's needed.** Default `activation_compression = true` for any
+node that is NOT in private-mode local-only inference (where the
+saving is wasted). Add a per-request override so high-stakes
+inference (e.g. coding agents with logprobs) can opt back to f32.
+Then add a one-shot calibration: on first request per model, ship
+both formats over loopback, compute the dequant error, refuse Q8_0
+auto-default if relative L∞ error exceeds 1e-2 on the model's
+first-layer activations. (Mirror of the SWIFT v2 candidate
+selection.)
+
+**Why deferred.** Need an empirical pass on quality — current Q8_0
+group-32 is fine for FFN intermediates but may degrade
+post-attention layernorm outputs on smaller models. Calibration
+harness is small but writing the regression bench is real work.
+
+**Effort.** 1-2 days; ~200 LOC + 1 calibration test fixture.
+
+#### B. Tail-latency hedging for slow pipeline hops
+**Context.** P2P pipeline hops have long-tail latency (geo, NAT
+traversal, transient CPU pressure). `network/manager` already has
+`pending_rr_observability` with a 10s ACK timeout; the
+`is_transient_remote_failure` retry kicks in only AFTER timeout.
+
+**What's needed.** Pre-emptive hedging: if a `LayerForward` rr send
+has not produced a `LayerResult` within `p99 × 1.5` for that
+segment's holder, fire a duplicate to the next-best holder.
+Whichever Response arrives first is used; the other is logged as a
+cancelled hedge. The scheduler already knows the
+`busy_until_ms_per_holder` cache so picking a hedge target is cheap.
+Add a per-segment `latency_ewma_ms` on `ShardHolderStats` to drive
+the threshold.
+
+**Why deferred.** Need to size the duplicate-work budget — at 5%
+hedge rate the network cost is negligible, at 30% it doubles credit
+spend. Default 5% threshold is the natural starting point but the
+operator-facing dial belongs in a config discussion.
+
+**Effort.** 2-3 days; touches `dispatch/layer_forward.rs`, the
+scheduler, and adds a config knob with sane default.
+
+#### C. EAGLE-3 self-speculative draft head
+**Context.** SWIFT is layer-skip — it reuses the same weights but a
+shorter compute. EAGLE-3 trains a 1-2 layer draft head that reads
+the target's intermediate features and predicts. EAGLE-3 reports
+3.0×-6.5× over vanilla; SWIFT plateaus around 1.8-2.2×.
+
+**What's needed.** A draft-head loader path. The draft head is a
+~30M-100M parameter file alongside the target GGUF. Distribute
+draft heads through the existing manifest/shard system (one shard,
+no splitting). At decode time the worker maintains both target and
+draft-head residency on the LOCAL node only — the draft-head
+forward never goes over the wire. Verification fuses with the
+existing target-pass.
+
+**Why deferred.** EAGLE-3 weights need to be trained (or sourced)
+per target model. There's a community repo (SafeAILab/EAGLE) with
+heads for common models but the ones that match SwarmLLM's test set
+(TinyLlama / Qwen2.5 / Phi-3.5 / Gemma-2) are not all available.
+Production rollout depends on a draft-head distribution policy.
+
+**Effort.** 1-2 weeks. New `inference/eagle.rs` module + manifest
+extension + auto-manage acquisition path.
+
+### Tier 2 — moderate-leverage, moderate complexity
+
+#### D. Tree-based draft expansion (FlowSpec-style)
+**Context.** Current `pipeline/speculative.rs` ships a *linear chain*
+of γ draft tokens for verification. FlowSpec ships a *tree* of K
+candidates per position (e.g., top-3 at position +1 × top-2 at +2 ×
+top-2 at +3 = 12-leaf tree). Verification accepts the longest
+matching root-to-leaf path; rejection branches are pruned.
+
+**What's needed.** Extend `LayerForward.draft_tokens: Vec<u32>` to
+`draft_tree: DraftTreeNode { token, children: Vec<DraftTreeNode> }`,
+gated on the same flag. Wire-format extension; `pack_verify_tokens_to_le_bytes`
+needs a tree variant. Worker-side attention mask becomes
+upper-triangular *per branch* (already supported in candle's masked
+attention).
+
+**Why deferred.** Wire-format extension touches the
+`build_spec_verify_forward` helper (R93). Need a test corpus with
+measurable acceptance-rate improvement from tree vs chain — that
+needs a benchmark harness we don't have today.
+
+**Effort.** 2-3 weeks; substantial wire-format + worker-side
+attention-mask work.
+
+#### E. Lookahead decoding (n-gram parallel verify)
+**Context.** Lookahead decoding (LMSYS, May 2024) uses a 2D window
+to generate n-grams in a single forward and verify them in the
+*next* forward. No draft model needed. The mechanism is local — no
+P2P implications — so it stacks cleanly with our distributed
+pipeline. Reported 1.5×-2.5× on chat workloads.
+
+**What's needed.** Add a `LookaheadConfig { window_size, n_gram_size,
+verify_branches }` to `SamplingParams`. The worker's decode loop
+collects n-gram tokens from its lookahead window and merges them
+into the next batch's input positions; the existing
+`generated_ids` history already supports the n-gram emit.
+
+**Why deferred.** Best ROI when running fully locally; for our
+distributed pipeline the extra positions multiply the activation
+payload size, which competes with the chunked-prefill chunk budget
+on the slot table. Need to size both jointly.
+
+**Effort.** 2-3 weeks. New module + slot-table coupling.
+
+#### F. KV cache quantization (KIVI 2-bit / KVQuant 4-bit)
+**Context.** KV cache dominates VRAM on long-context inference. KIVI
+(2-bit per-channel key + per-token value) reports 2.6× peak memory
+reduction with <1% quality drop. Our `inference/kv_cache.rs` stores
+KV in raw fp16/fp32.
+
+**What's needed.** Wrap `KvCache` in a Quantized variant
+`KvCacheQ8 { keys_q: Vec<u8>, values_q: Vec<u8>, scales: Vec<f32>,
+zero_points: Vec<f32> }` with on-the-fly dequant at attention time.
+Group-size 32 per (head, channel) for keys, per (head, token) for
+values matches KIVI's recommendation. Behind config flag
+`inference.kv_quantization = "off" | "q8" | "kivi2"`.
+
+**Why deferred.** Touches every attention call site, requires care
+with RoPE (apply BEFORE quant), and breaks the prefix-cache binary
+compatibility. Sizable phase; new test corpus needed.
+
+**Effort.** 3-4 weeks. Major surface touch.
+
+### Tier 3 — speculative / research-scope
+
+#### G. RadixAttention-style cross-session prefix sharing
+**Context.** Our `split/prefix_cache.rs` shares prefixes per-session.
+SGLang's RadixAttention shares across ALL active requests via a
+radix tree, giving 6.4× on prefix-heavy workloads (RAG, multi-turn).
+
+**What's needed.** Refactor `prefix_cache` to a radix tree keyed on
+the token-id prefix, with reference-counted KV-block ownership. New
+attention path that reads KV from shared blocks with COW on
+divergence.
+
+**Why deferred.** Requires PagedAttention-style block KV management
+which we don't have. Big phase, hard to split.
+
+**Effort.** 4-8 weeks. Architectural change.
+
+#### H. Sub-token streaming (compress activation deltas)
+**Context.** Across consecutive decode tokens, the hidden state at
+each layer changes slowly — sending the full hidden state every
+token is wasteful. Reuse the previous-token state on the receiver
+and ship only `delta = state_t - state_{t-1}` quantized.
+
+**What's needed.** Receiver-side state cache keyed on `(model_id,
+session_id, layer)`. On each forward, sender quantizes the diff
+against its locally-cached previous send. On cache miss (first
+token, eviction, retransmit) sender ships the full state. Delta
+distribution is much tighter than full state distribution → 2-4×
+extra compression on top of Q8_0.
+
+**Why deferred.** Sender + receiver state must stay synced under
+retransmit / reordering. Adds a stateful invariant on top of a
+currently-stateless pipeline. Requires careful failure-mode
+analysis.
+
+**Effort.** 4-6 weeks. Novel — no known production implementation.
+
+#### I. PowerInfer / DejaVu-style activation sparsity
+**Context.** ~5-15% of MLP neurons activate strongly per token (the
+"hot" neurons). PowerInfer keeps hot weights on the GPU, cold
+weights on CPU/disk. For our P2P case we'd keep hot weights local
+and cold weights on a peer.
+
+**What's needed.** Activation-sparsity profiler (run during
+auto-manage idle to identify hot neurons per layer). Then a forward
+path that splits the FFN matmul into a "hot" portion (local) and a
+"cold" portion (remote, only invoked when input projects strongly
+into cold-rows). Cold-cycle is rare so the remote round-trip is
+amortized.
+
+**Why deferred.** Profiling phase plus model-specific tuning. The
+PowerInfer paper is 2023; the cleanest production implementations
+target single-node CPU+GPU rather than distributed.
+
+**Effort.** Major research project; 2-4 months.
+
+### Tier 4 — communication-bound improvements specific to P2P
+
+#### J. Speculative pre-emptive layer dispatch
+**Context.** Today the pipeline is strictly sequential: node A
+finishes layer 0..L1, sends activation to node B for layer L1..L2.
+B sits idle during the wire transfer. With our latency-EWMA cache we
+know roughly how long B's hop will take.
+
+**What's needed.** Sender pre-emptively starts layer L1's compute
+on B BEFORE finishing the activation send, using a stale-but-correct
+activation snapshot from the LAST decode token (decode-to-decode
+activations are very similar). On arrival of the real activation,
+B's compute either accepts the stale path (if delta is small) or
+redoes. Accept-rate models the delta-tightness from H above.
+
+**Why deferred.** Conceptually adjacent to spec-decoding — same
+"verify cheap, redo on miss" framing — but applied to *pipeline
+boundaries* rather than token boundaries. No known production
+implementation. High novelty, high risk.
+
+**Effort.** Research project.
+
+#### K. Communication-computation overlap inside a single forward
+**Context.** Today within a single layer the compute and the
+network send are sequential. We can split layers into pre-attn /
+attn / post-attn / FFN, send the post-attn activation while the
+next layer's pre-attn is computing.
+
+**What's needed.** Extend `TpPhase` (already in the wire format) to
+include sub-layer phases. Worker pipelines compute and send across
+phase boundaries. Net savings: roughly `min(layer_compute_ms,
+send_ms)` per layer hop.
+
+**Why deferred.** TpPhase today is for tensor-parallel allreduce
+choreography; reusing it for pipeline-overlap risks conflating two
+orthogonal partitionings. Probably wants a separate
+`PipelinePhase` enum.
+
+**Effort.** 1-2 weeks.
+
+### Tier 5 — low-priority but easy
+
+#### L. FP8 activation transmission (when both sides support it)
+**Context.** Q8_0 is symmetric int8 with f32 scales. FP8 (E4M3 or
+E5M2) is a true 8-bit float and has better dynamic range, useful
+for outliers in the post-LayerNorm hidden state.
+
+**What's needed.** Add `TensorFormat::FP8` to the existing enum
+(tag 3), implement encode/decode, hardware-conditional path on
+nodes with FP8-capable GPUs (Hopper+, Blackwell). Negotiate during
+handshake.
+
+**Why deferred.** Most SwarmLLM nodes are consumer GPUs without FP8
+hardware; the path is a "nice to have for the hyperscaler edge of
+the network", not a default win.
+
+**Effort.** 1 week.
+
+### Priority recommendation
+
+If the user authorizes one item: **A (default-on activation
+compression with quality gate)** — biggest WAN-bandwidth win, smallest
+risk surface. Closes a deliberate "off by default" deferral that's
+been in tree since the Q8_0 helper landed.
+
+If two: **A + B (hedging)** — both are P2P-tail-latency-direct, both
+add config knobs not architecture.
+
+If three: add **C (EAGLE-3)** — but it needs a draft-head
+distribution policy discussion (which models, who hosts the head
+weights, manifest extension).
+
+### Source survey (as of 2026-05-16)
+
+- FlowSpec (arxiv 2507.02620 v3 2026-01) — tree-based pipelined spec decode, 1.37-1.73×
+- P-EAGLE (AWS, 2026) — parallel draft generation in single forward, 1.69× over EAGLE-3
+- EAGLE-3 (NeurIPS'25, arxiv 2503.01840) — training-time test, 3.0-6.5× vs autoregressive
+- DSD-decentralized (arxiv 2511.11733) — turns communication latency into computation throughput, +15-20% on top of vanilla
+- PicoSpec (arxiv 2603.19133) — edge-cloud collaborative spec decode, 2.9×
+- Parallax (arxiv 2509.26182) — decentralized inference scheduler, 3.6× throughput / 3.2× latency vs Petals
+- vLLM PagedAttention — sub-4% KV memory waste, 24× over HF Transformers
+- SGLang RadixAttention — 29% over vLLM, 6.4× on prefix-heavy
+- KIVI (NeurIPS'24) — 2-bit KV quant, 2.6× peak memory reduction
+- KVQuant — 4-bit KV quant for 10M-token contexts
+- FlashAttention-3 (Hopper) — 2× over FA-2
+- FlashAttention-4 (CuTeDSL, Hopper+Blackwell) — paged KV + cp.async
+- NVFP4 KV (Blackwell, NVIDIA Dynamo) — 50% KV memory cut, 2× context budget
+- DualPath — storage-bandwidth-aware LLM inference
+
+These references should be re-checked before implementation —
+inference research moves fast and the cited speedups assume a
+specific hardware/workload profile that may not match SwarmLLM's
+heterogeneous P2P case.
+
+---
+
 ## How to use this file
 
 When starting a new feature, grep this file for keywords related to the area you're touching. If your feature unblocks a deferred item, either pick it up in the same PR (if scope allows) or move the entry to "completed" with the closing commit reference.
