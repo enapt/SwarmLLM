@@ -567,22 +567,61 @@ in Q8_0. A 4096-dim model on a 100 Mbps link spends 1.3ms vs 0.33ms
 per layer hop on f32 vs Q8_0; multiplied across 4-8 pipeline hops per
 token this dominates latency.
 
-**What's needed.** Default `activation_compression = true` for any
-node that is NOT in private-mode local-only inference (where the
-saving is wasted). Add a per-request override so high-stakes
-inference (e.g. coding agents with logprobs) can opt back to f32.
-Then add a one-shot calibration: on first request per model, ship
-both formats over loopback, compute the dequant error, refuse Q8_0
-auto-default if relative L∞ error exceeds 1e-2 on the model's
-first-layer activations. (Mirror of the SWIFT v2 candidate
-selection.)
+**State of the implementation today** (verified R135).
+`src/inference/quant.rs` ships a group-32 Q8_0 with per-block f16
+scale — same algorithm as llama.cpp's weight Q8_0. Per-block scale
+handles activation outliers (GLU-spike concern from the literature
+applies to per-tensor scale only; group-32 adapts to local dynamic
+range). Wire-format already supports it via `TensorFormat::INT8`
+(tag 2). End-to-end plumbing is in
+`model_worker.rs:817-823`: `if activation_compression {
+tensor_to_bytes_q8_0(output_t) } else { tensor_to_bytes(output_t) }`.
+Process pool fans the flag through `AtomicBool::set_activation_compression`.
+The dispatch path's `decode_layer_forward_encrypted` reads the dtype
+tag from the byte stream so receiver doesn't need a separate flag —
+sender decides per-forward.
 
-**Why deferred.** Need an empirical pass on quality — current Q8_0
-group-32 is fine for FFN intermediates but may degrade
-post-attention layernorm outputs on smaller models. Calibration
-harness is small but writing the regression bench is real work.
+**What the literature says about quality.**
+- llama.cpp empirical: Q8_0 perplexity ≈ FP16 perplexity ± 0.01-0.05
+  on standard benchmarks (Wikitext-2 ≈ 7.49 for both).
+- ATQ (2024): INT8 W8A8 keeps perplexity Δ < 1.0 on OPT + LLaMA.
+- HF docs: 8-bit activation Δ < 2% perplexity in typical case.
+- GLU variants (Gemma, Llama-3, Phi-3): activation-spike risk in
+  GATE × UP intermediate is real but our Q8_0 applies to hidden
+  state OUT of layer, not the FFN-internal intermediate, so the
+  spike is mostly absorbed by the residual + layernorm before
+  quantization.
 
-**Effort.** 1-2 days; ~200 LOC + 1 calibration test fixture.
+**What's needed to ship default-on.**
+1. **Quality gate**: a one-shot calibration on first
+   `attach_request_to_model` per model. Ship both formats over the
+   IPC pair for ONE prefill, compute relative L∞ error on the
+   output hidden state, abort Q8_0 default if `err > 1e-2`. Cache
+   the verdict in `state.models.activation_compression_per_model:
+   DashMap<ModelId, bool>` so subsequent requests skip recalibration.
+2. **Per-request override**: extend `SamplingParams` with
+   `wire_precision: Option<TensorFormat>` so coding agents with
+   logprobs can opt back to f32.
+3. **Diagnostic**: emit `ActivityEvent { kind: "activation_compression_decision",
+   model_id, decision: "q8_0" | "f32", calibration_error_l_inf }` so
+   the dashboard can show "Hosting Llama-3-8B at Q8_0 — measured
+   wire-quality 0.003".
+4. **Default flip** in `config/inference.rs`: `activation_compression:
+   true` for non-private-mode, `false` when private-mode-local-only
+   (the saving is wasted on loopback).
+
+**Effort.** 1-2 days net.
+- Quality gate: ~150 LOC + 1 test fixture (use TinyLlama-1.1B
+  prefill output as ground truth).
+- Override field: ~30 LOC.
+- Activity event + i18n: ~50 LOC + 1 i18n key × 21 locales.
+- Default flip: 1 line, gated on a `--features default-q8` build
+  feature for risk staging.
+
+**Why deferred.** Default change touches every distributed
+inference request. Wants explicit user authorization. The Q8_0
+implementation itself is mature and shipped; this deferral is
+purely about flipping the default safely.
 
 #### B. Tail-latency hedging for slow pipeline hops
 **Context.** P2P pipeline hops have long-tail latency (geo, NAT
