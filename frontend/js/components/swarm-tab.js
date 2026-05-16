@@ -298,6 +298,44 @@
     });
   }
 
+  // R134.5: render the inter-pool catalog tile. Pure read-only discovery
+  // — for each foreign pool we know about, list the model_ids that pool
+  // claims to serve. Hidden when the catalog is empty so users not in a
+  // federated setup never see it.
+  function _renderForeignPoolCatalog(snapshot) {
+    var tile = document.getElementById('foreign-pool-catalog');
+    var list = document.getElementById('foreign-pool-catalog-list');
+    if (!tile || !list) return;
+    var pools = (snapshot && snapshot.pools) || [];
+    list.innerHTML = '';
+    if (pools.length === 0) {
+      tile.style.display = 'none';
+      return;
+    }
+    tile.style.display = '';
+    pools.forEach(function (pool) {
+      var row = document.createElement('div');
+      row.className = 'foreign-pool-row';
+
+      var name = document.createElement('div');
+      name.className = 'foreign-pool-name';
+      // Pool id is a hex-prefixed NodeId — show the first 12 chars only.
+      var shortPool = (pool.pool_id || '').slice(0, 12);
+      name.textContent = I18n.t('foreign_pool.pool_label', { id: shortPool });
+      row.appendChild(name);
+
+      var models = document.createElement('div');
+      models.className = 'foreign-pool-models text-xs';
+      var lines = (pool.models || []).map(function (m) {
+        return U.escapeHtml(_bestModelName('', m));
+      });
+      models.textContent = lines.join(' · ');
+      row.appendChild(models);
+
+      list.appendChild(row);
+    });
+  }
+
   function _switchSubtab(name) {
     document.querySelectorAll('.swarm-subtab').forEach(function (b) {
       b.classList.toggle('active', b.dataset.swarmSubtab === name);
@@ -710,6 +748,7 @@
       if (data && data.wishlist) _renderWishlist(data.wishlist);
       if (data && data.swarm_capacity) _renderRunning(data.swarm_capacity);
       if (data && data.quant_recommendations) _renderQuantTips(data.quant_recommendations);
+      if (data && data.foreign_pool_catalog) _renderForeignPoolCatalog(data.foreign_pool_catalog);
       // Keep the inline browser's "★ You host this" pill accurate. Cheap —
       // a few Set operations per WS frame.
       _refreshLocalHfRepos();
@@ -761,6 +800,10 @@
     _restFetch('/api/admin/swarm/capacity', _renderRunning);
     _restFetch('/api/admin/swarm/capacity-plan', _renderCapacityPlan);
     _restFetch('/api/admin/quant-recommendations', _renderQuantTips);
+    _restFetch('/api/admin/foreign-pool-catalog', function (data) {
+      // REST returns the same shape WS does, so reuse the renderer.
+      _renderForeignPoolCatalog(data);
+    });
   }
 
   // R113: render the Capacity Plan / What-If view. Three baked scenarios

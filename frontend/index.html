@@ -1372,6 +1372,17 @@
                 </div>
                 <div class="quant-tips-list" id="quant-tips-list"></div>
               </div>
+              <!-- R134.5: inter-pool model availability discovery. Read-only
+                   — shows which other pools also serve which models, no
+                   routing across pools. Hidden when the catalog is empty
+                   so users not in a federated setup never see it. -->
+              <div class="foreign-pool-catalog" id="foreign-pool-catalog" style="display:none">
+                <div class="foreign-pool-catalog-header">
+                  <h3 data-i18n="foreign_pool.tile_title">Models other pools serve</h3>
+                  <span class="text-muted text-xs" data-i18n="foreign_pool.tile_sub">Discovery only — your inference stays in your pool.</span>
+                </div>
+                <div class="foreign-pool-catalog-list" id="foreign-pool-catalog-list"></div>
+              </div>
               <div class="capacity-running-grid" id="swarm-running-grid"></div>
             </div>
 
