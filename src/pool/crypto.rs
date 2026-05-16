@@ -4,7 +4,10 @@ use crate::error::SwarmError;
 use crate::identity::Identity;
 #[cfg(test)]
 use crate::pool::types::{BlindSignature, BlindedToken, BlindingFactor, UnblindedToken};
-use crate::pool::types::{PoolAcceptance, PoolCreditForward, PoolId, PoolInvitation, PoolRemoval};
+use crate::pool::types::{
+    PoolAcceptance, PoolCreditForward, PoolId, PoolInvitation, PoolMembership, PoolRemoval,
+    PoolState, ShardPin,
+};
 use crate::types::NodeId;
 
 // Domain-separated BLAKE3 prefixes per the plan.
@@ -14,6 +17,7 @@ const PREFIX_INVITATION: &[u8] = b"pool_invitation_v1";
 const PREFIX_ACCEPTANCE: &[u8] = b"pool_acceptance_v1";
 const PREFIX_REMOVAL: &[u8] = b"pool_removal_v1";
 const PREFIX_CREDIT_FORWARD: &[u8] = b"pool_credit_forward_v1";
+const PREFIX_POOL_STATE_DIFF: &[u8] = b"pool_state_diff_v1";
 #[cfg(test)]
 const PREFIX_BLIND_INVITE: &[u8] = b"pool_blind_invite_v1";
 
@@ -29,6 +33,75 @@ pub(crate) fn pool_create_payload(
     h.update(name.as_bytes());
     h.update(created_at.to_rfc3339().as_bytes());
     h.finalize().as_bytes().to_vec()
+}
+
+/// R134: BLAKE3 payload for pool-state diff gossip (sign + verify). Binds
+/// the pool id, generation transition, the post-apply state checksum, and
+/// the wire timestamp — preventing replay across pools, across generations,
+/// or with a swapped checksum.
+pub(crate) fn pool_state_diff_payload(
+    pool_id: &PoolId,
+    parent_generation: u64,
+    new_generation: u64,
+    state_checksum: &[u8; 32],
+    timestamp_ms: u64,
+) -> Vec<u8> {
+    let mut h = blake3::Hasher::new();
+    h.update(PREFIX_POOL_STATE_DIFF);
+    h.update(&pool_id.0);
+    h.update(&parent_generation.to_le_bytes());
+    h.update(&new_generation.to_le_bytes());
+    h.update(state_checksum);
+    h.update(&timestamp_ms.to_le_bytes());
+    h.finalize().as_bytes().to_vec()
+}
+
+/// R134: checksum of `state` AS IF its generation were `gen_override`.
+/// Used when comparing two states across a generation bump that hasn't
+/// been written back yet — the membership/pin bytes carry the only
+/// real "did anything change" signal, so we must hash with a consistent
+/// generation field on both sides.
+pub(crate) fn pool_state_checksum_at(state: &PoolState, gen_override: u64) -> [u8; 32] {
+    let mut alt = state.clone();
+    alt.generation = gen_override;
+    pool_state_checksum(&alt)
+}
+
+/// R134: canonical checksum of a `PoolState`'s member set + key fields.
+/// Receivers recompute this locally after applying a diff and reject any
+/// diff that would produce a different state than the owner intended.
+/// Order-independent — members are sorted by `node_id` before hashing.
+pub(crate) fn pool_state_checksum(state: &PoolState) -> [u8; 32] {
+    let mut members: Vec<&PoolMembership> = state.members.iter().collect();
+    members.sort_by_key(|m| m.node_id.0);
+    let mut h = blake3::Hasher::new();
+    h.update(b"pool_state_checksum_v1");
+    h.update(&state.pool_id.0);
+    h.update(&state.generation.to_le_bytes());
+    h.update(&state.total_lifetime_credits.to_le_bytes());
+    h.update(&[state.member_credit_split_pct]);
+    h.update(&(members.len() as u32).to_le_bytes());
+    for m in members {
+        h.update(&m.node_id.0);
+        h.update(m.invitation_id.as_bytes());
+    }
+    h.update(&(state.shard_pins.len() as u32).to_le_bytes());
+    let mut pins: Vec<&ShardPin> = state.shard_pins.iter().collect();
+    pins.sort_by(|a, b| {
+        a.model_id
+            .cmp(&b.model_id)
+            .then_with(|| a.target_node_id.0.cmp(&b.target_node_id.0))
+            .then_with(|| a.shard_indices.cmp(&b.shard_indices))
+    });
+    for p in pins {
+        h.update(p.model_id.as_bytes());
+        h.update(&p.target_node_id.0);
+        h.update(&(p.shard_indices.len() as u32).to_le_bytes());
+        for idx in &p.shard_indices {
+            h.update(&idx.to_le_bytes());
+        }
+    }
+    *h.finalize().as_bytes()
 }
 
 /// BLAKE3 payload for member-left notice (sign + verify).

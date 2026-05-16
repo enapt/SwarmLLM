@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use crate::types::NodeId;
 pub use crate::types::{
     BlindedPoolInvitation, PoolAcceptance, PoolCreditForward, PoolId, PoolInvitation,
-    PoolMembership, PoolRemoval, PoolState,
+    PoolMembership, PoolRemoval, PoolState, ShardPin,
 };
 
 /// A short, human-readable invite code for easy device pool setup.
@@ -108,6 +108,12 @@ pub enum PoolCommand {
     /// Received pool state gossip from the network.
     PoolStateGossip {
         state: PoolState,
+    },
+    /// R134: received incremental pool state diff from the network. Applied
+    /// only when the cached state's `generation` matches the diff's
+    /// `parent_generation`; otherwise dropped (next full broadcast resyncs).
+    PoolStateDiffGossip {
+        diff: swarmllm_types::PoolStateDiff,
     },
     /// Received blinded invitation from the network (SEC-M18).
     InboundBlindedInvitation {

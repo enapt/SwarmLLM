@@ -84,10 +84,18 @@ pub struct PoolState {
     /// Shard pins: owner assigns specific models/shards to specific devices.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub shard_pins: Vec<ShardPin>,
+    /// R134: monotonically-increasing version of this pool state. Owner
+    /// increments on every committed change; receivers use this to apply
+    /// `PoolStateDiff` messages safely (only when the cached state's
+    /// generation matches the diff's `parent_generation`). 0 for
+    /// legacy / restored / first-broadcast state — diff gossip resyncs
+    /// via a periodic full broadcast either way.
+    #[serde(default)]
+    pub generation: u64,
 }
 
 /// A shard pinning assignment: a model (or specific shards) pinned to a target device.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ShardPin {
     /// Model ID to pin.
     pub model_id: String,
@@ -182,6 +190,46 @@ pub struct PoolRemoval {
     pub removal_id: uuid::Uuid,
 }
 
+/// R134: incremental pool-state update. Carries only the delta from a
+/// known parent generation, plus a signed checksum the receiver uses to
+/// verify the post-apply state matches what the owner intended. Receivers
+/// drop diffs whose `parent_generation` doesn't match their cached state;
+/// the periodic full-state broadcast resyncs in that case.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PoolStateDiff {
+    pub pool_id: PoolId,
+    /// Cached `PoolState.generation` this diff applies on top of.
+    pub parent_generation: u64,
+    /// `PoolState.generation` after applying this diff. Strictly > parent.
+    pub new_generation: u64,
+    /// Members added in this update (full PoolMembership entries — receivers
+    /// verify each member's `acceptance_signature` independently).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub added_members: Vec<PoolMembership>,
+    /// `NodeId`s of members removed in this update.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub removed_node_ids: Vec<NodeId>,
+    /// Full replacement of `shard_pins` when changed; `None` means no change.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shard_pins: Option<Vec<ShardPin>>,
+    /// `total_lifetime_credits` after this update, or `None` if unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_lifetime_credits: Option<i64>,
+    /// `member_credit_split_pct` after this update, or `None` if unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub member_credit_split_pct: Option<u8>,
+    /// BLAKE3 of the canonical sorted `(node_id, invitation_id)` list AFTER
+    /// applying the diff — receivers recompute it locally and reject any
+    /// diff that would land them on a different state than the owner.
+    pub state_checksum: [u8; 32],
+    /// Unix ms timestamp — receivers apply the standard one-sided
+    /// staleness window to defeat replay.
+    pub timestamp_ms: u64,
+    /// Owner Ed25519 signature over the diff payload (see
+    /// `pool::crypto::pool_state_diff_payload`).
+    pub owner_signature: Vec<u8>,
+}
+
 /// Messages related to device pool management, sent over GossipSub.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum PoolMessage {
@@ -189,6 +237,10 @@ pub enum PoolMessage {
     BlindedInvitation(BlindedPoolInvitation),
     Acceptance(PoolAcceptance),
     StateGossip(PoolState),
+    /// R134: incremental update — applies on top of a cached
+    /// `StateGossip` baseline. Receivers that don't have the parent
+    /// generation cached drop it and wait for the next full broadcast.
+    StateDiff(PoolStateDiff),
     CreditForward(PoolCreditForward),
     Removal(PoolRemoval),
     MemberLeft {

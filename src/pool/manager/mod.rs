@@ -68,6 +68,16 @@ pub struct PoolManager {
     /// `POOL_GOSSIP_MIN_INTERVAL` cooldown, ensuring a single trailing
     /// broadcast catches up bursty changes.
     pool_gossip_dirty: bool,
+    /// R134: snapshot of the `PoolState` as it was at the last broadcast
+    /// (full OR diff). Used as the baseline for computing the next
+    /// outgoing diff — its `generation` is the `parent_generation` field
+    /// the receiver expects. `None` until the first broadcast.
+    last_broadcast_state: Option<PoolState>,
+    /// R134: number of diff broadcasts emitted since the last full
+    /// broadcast. When this hits `MAX_DIFFS_BEFORE_FULL`, the next
+    /// broadcast is forced full so receivers that missed earlier diffs
+    /// recover bounded-time.
+    diffs_since_full: u32,
 }
 
 const CREDIT_FORWARD_WINDOW_SECS: u64 = 60;
@@ -81,6 +91,12 @@ const CREDIT_FORWARD_MAX_PER_WINDOW: usize = 60;
 /// non-critical state. Receivers always have the option to request
 /// state again via the existing `PoolGet` command if they fall behind.
 pub(crate) const POOL_GOSSIP_MIN_INTERVAL: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// R134: maximum number of diff broadcasts emitted between full broadcasts.
+/// After this many diffs the next gossip is forced full so receivers that
+/// missed a diff (network blip, GossipSub propagation gap) recover within
+/// bounded time without waiting for the next periodic full broadcast.
+pub(crate) const MAX_DIFFS_BEFORE_FULL: u32 = 4;
 
 /// R131: poll cadence for the pool-coalesce timer. Fires regularly so
 /// the trailing broadcast after a debounced burst lands within
@@ -108,6 +124,8 @@ impl PoolManager {
             credit_forward_rl: HashMap::new(),
             last_pool_gossip_at: None,
             pool_gossip_dirty: false,
+            last_broadcast_state: None,
+            diffs_since_full: 0,
         }
     }
 
@@ -351,6 +369,9 @@ impl PoolManager {
             PoolCommand::PoolStateGossip { state } => {
                 self.handle_pool_state_gossip(state).await;
             }
+            PoolCommand::PoolStateDiffGossip { diff } => {
+                self.handle_pool_state_diff_gossip(diff).await;
+            }
             PoolCommand::InboundBlindedInvitation { blinded } => {
                 self.handle_inbound_blinded_invitation(blinded).await;
             }
@@ -474,6 +495,7 @@ impl PoolManager {
             total_lifetime_credits: 0,
             member_credit_split_pct: 0,
             shard_pins: Vec::new(),
+            generation: 0,
         };
 
         // Persist and update shared state
@@ -645,6 +667,7 @@ impl PoolManager {
             total_lifetime_credits: 0,
             member_credit_split_pct: 0,
             shard_pins: Vec::new(),
+            generation: 0,
         };
 
         self.persist_pool_state(&state)?;
@@ -1745,6 +1768,33 @@ mod tests {
         count
     }
 
+    /// R134: synthesize a membership with a real `acceptance_signature`
+    /// signed by `identity` for `pool_id` + `invitation_id`. Used by the
+    /// diff-gossip tests so the receiver's per-member signature check
+    /// passes (the legacy `membership_for` helper leaves the field empty).
+    fn signed_membership_for(
+        identity: &Identity,
+        pool_id: &PoolId,
+        invitation_id: uuid::Uuid,
+    ) -> PoolMembership {
+        let payload =
+            crate::pool::crypto::acceptance_payload(&invitation_id, pool_id, identity.node_id());
+        let sig = identity.sign(&payload);
+        let now = chrono::Utc::now();
+        PoolMembership {
+            node_id: identity.node_id().clone(),
+            credits_contributed: 0,
+            joined_at: now,
+            acceptance_signature: sig,
+            invitation_id,
+            device_name: None,
+            last_seen: Some(now),
+            online: true,
+            device_stats: None,
+            contribution_level: 100,
+        }
+    }
+
     /// Synthesize a pool membership record for the given node — only
     /// `node_id` matters for the handler under test.
     fn membership_for(node_id: NodeId) -> PoolMembership {
@@ -2239,5 +2289,366 @@ mod tests {
             "broadcast after cooldown must fire"
         );
         assert!(!pm.pool_gossip_dirty);
+    }
+
+    // ----------------- R134 diff-gossip tests -----------------
+
+    fn count_state_diffs(rx: &mut mpsc::Receiver<NetworkCommand>) -> usize {
+        let mut count = 0;
+        while let Ok(cmd) = rx.try_recv() {
+            if let NetworkCommand::Broadcast(SwarmMessage::PoolMessage(
+                crate::types::PoolMessage::StateDiff(_),
+            )) = cmd
+            {
+                count += 1;
+            }
+        }
+        count
+    }
+
+    /// R134: when diff gossip is off (default) every broadcast stays full.
+    /// Confirms the wire change is opt-in and the legacy path is preserved.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn r134_diff_gossip_off_keeps_full_broadcasts() {
+        let (mut pm, state, _id, mut rx) = build_test_pool_manager_with_rx().await;
+        // Default config has `state_diff_gossip == false`.
+        assert!(!state.config.pool.state_diff_gossip);
+        pm.handle_create_pool("test".into()).await.unwrap();
+        let _drain = count_state_gossips(&mut rx);
+
+        // Add a member, force a broadcast, expect a full state gossip.
+        {
+            let mut ps = state.credits.pool_state.write().await;
+            if let Some(ref mut p) = *ps {
+                p.members
+                    .push(membership_for(Identity::generate().node_id().clone()));
+            }
+        }
+        pm.gossip_pool_state().await;
+        assert_eq!(count_state_diffs(&mut rx), 0);
+        let (mut pm2, state2, _id2, mut rx2) = build_test_pool_manager_with_rx().await;
+        pm2.handle_create_pool("t2".into()).await.unwrap();
+        let _drain2 = count_state_gossips(&mut rx2);
+        // Sanity: full broadcasts still fire when the channel hasn't been drained.
+        pm2.gossip_pool_state().await;
+        assert!(count_state_gossips(&mut rx2) >= 1);
+        drop(state2);
+    }
+
+    /// R134: with diff gossip on, the first post-create broadcast is full
+    /// (no baseline yet); the second broadcast after a state change is a
+    /// signed diff that the receiver can apply.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn r134_diff_gossip_on_emits_diff_after_baseline() {
+        let mut config = Config::default();
+        config.pool.state_diff_gossip = true;
+        let identity = Identity::generate();
+        let db = Database::open_temp().expect("temp db");
+        let executor = Arc::new(Mutex::new(crate::inference::executor::ModelExecutor::new()));
+        let (shared_state, _s, _d) = SharedState::new(config, identity.clone(), db, executor, None);
+        let (_cmd_tx, cmd_rx) = mpsc::channel(16);
+        let (network_tx, mut network_rx) = mpsc::channel(16);
+        let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+        let mut pm = PoolManager::new(shared_state.clone(), cmd_rx, network_tx, shutdown_rx);
+
+        pm.handle_create_pool("test-diff".into()).await.unwrap();
+        let _drain = count_state_gossips(&mut network_rx);
+
+        // First gossip — no baseline yet → must be full.
+        pm.gossip_pool_state().await;
+        assert_eq!(
+            count_state_gossips(&mut network_rx),
+            1,
+            "first gossip is full"
+        );
+        assert_eq!(count_state_diffs(&mut network_rx), 0);
+        assert!(pm.last_broadcast_state.is_some());
+        assert_eq!(pm.diffs_since_full, 0);
+
+        // Mutate state — add a synthetic member — then gossip again.
+        let new_member = Identity::generate();
+        {
+            let mut ps = shared_state.credits.pool_state.write().await;
+            if let Some(ref mut p) = *ps {
+                p.members.push(membership_for(new_member.node_id().clone()));
+            }
+        }
+
+        pm.gossip_pool_state().await;
+        let diffs = count_state_diffs(&mut network_rx);
+        assert_eq!(diffs, 1, "second broadcast must be a diff");
+        assert_eq!(pm.diffs_since_full, 1);
+    }
+
+    /// R134: after `MAX_DIFFS_BEFORE_FULL` consecutive diffs the next
+    /// broadcast is forced full so late-joiners recover bounded-time.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn r134_diff_gossip_forces_full_after_cap() {
+        let mut config = Config::default();
+        config.pool.state_diff_gossip = true;
+        let identity = Identity::generate();
+        let db = Database::open_temp().expect("temp db");
+        let executor = Arc::new(Mutex::new(crate::inference::executor::ModelExecutor::new()));
+        let (shared_state, _s, _d) = SharedState::new(config, identity.clone(), db, executor, None);
+        let (_cmd_tx, cmd_rx) = mpsc::channel(16);
+        let (network_tx, mut network_rx) = mpsc::channel(16);
+        let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+        let mut pm = PoolManager::new(shared_state.clone(), cmd_rx, network_tx, shutdown_rx);
+
+        pm.handle_create_pool("test-cap".into()).await.unwrap();
+        let _drain = count_state_gossips(&mut network_rx);
+        pm.gossip_pool_state().await;
+        let _ = count_state_gossips(&mut network_rx); // baseline full
+
+        for i in 0..MAX_DIFFS_BEFORE_FULL {
+            // Trigger a mutation each iteration so the diff isn't empty.
+            let m = Identity::generate();
+            {
+                let mut ps = shared_state.credits.pool_state.write().await;
+                if let Some(ref mut p) = *ps {
+                    p.members.push(membership_for(m.node_id().clone()));
+                }
+            }
+            pm.gossip_pool_state().await;
+            assert_eq!(count_state_diffs(&mut network_rx), 1, "diff {i}");
+        }
+        assert_eq!(pm.diffs_since_full, MAX_DIFFS_BEFORE_FULL);
+
+        // Next broadcast (with a fresh mutation) is forced full.
+        let m = Identity::generate();
+        {
+            let mut ps = shared_state.credits.pool_state.write().await;
+            if let Some(ref mut p) = *ps {
+                p.members.push(membership_for(m.node_id().clone()));
+            }
+        }
+        pm.gossip_pool_state().await;
+        // Count full broadcasts FIRST — the count_state_diffs helper drains
+        // non-Diff messages in the same call, which would discard the full.
+        let (fulls, diffs) = drain_pool_messages(&mut network_rx);
+        assert_eq!(diffs, 0);
+        assert_eq!(fulls, 1);
+        assert_eq!(pm.diffs_since_full, 0);
+    }
+
+    /// R134: end-to-end — owner emits a diff, "receiver" PoolManager
+    /// (a second instance with the owner's pool already cached) applies
+    /// the diff and lands on the same checksum/generation as the owner.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn r134_receiver_applies_diff_and_advances_generation() {
+        // Owner side: produce a baseline + a diff.
+        let mut owner_cfg = Config::default();
+        owner_cfg.pool.state_diff_gossip = true;
+        let owner_id = Identity::generate();
+        let db_owner = Database::open_temp().unwrap();
+        let executor = Arc::new(Mutex::new(crate::inference::executor::ModelExecutor::new()));
+        let (owner_state, _o, _d) = SharedState::new(
+            owner_cfg,
+            owner_id.clone(),
+            db_owner,
+            executor.clone(),
+            None,
+        );
+        let (_t1, owner_cmd_rx) = mpsc::channel(16);
+        let (owner_net_tx, mut owner_net_rx) = mpsc::channel(16);
+        let (_t2, owner_sd) = watch::channel(false);
+        let mut owner_pm =
+            PoolManager::new(owner_state.clone(), owner_cmd_rx, owner_net_tx, owner_sd);
+
+        owner_pm.handle_create_pool("e2e".into()).await.unwrap();
+        let _ = drain_pool_messages(&mut owner_net_rx);
+        owner_pm.gossip_pool_state().await; // baseline full
+
+        // Snapshot baseline that the receiver will start from.
+        let baseline: PoolState = owner_state
+            .credits
+            .pool_state
+            .read()
+            .await
+            .as_ref()
+            .cloned()
+            .unwrap();
+        let _ = drain_pool_messages(&mut owner_net_rx);
+
+        // Owner mutates state then gossips → diff message on the wire.
+        // Use a properly-signed acceptance so the receiver's per-member
+        // signature verification passes.
+        let new_member = Identity::generate();
+        let inv_id = uuid::Uuid::new_v4();
+        let new_membership = signed_membership_for(&new_member, &baseline.pool_id, inv_id);
+        {
+            let mut ps = owner_state.credits.pool_state.write().await;
+            if let Some(ref mut p) = *ps {
+                p.members.push(new_membership);
+            }
+        }
+        owner_pm.gossip_pool_state().await;
+        let mut diff_msg: Option<swarmllm_types::PoolStateDiff> = None;
+        while let Ok(cmd) = owner_net_rx.try_recv() {
+            if let NetworkCommand::Broadcast(SwarmMessage::PoolMessage(
+                crate::types::PoolMessage::StateDiff(d),
+            )) = cmd
+            {
+                diff_msg = Some(d);
+            }
+        }
+        let diff = diff_msg.expect("owner must emit a StateDiff");
+        let expected_gen = owner_state
+            .credits
+            .pool_state
+            .read()
+            .await
+            .as_ref()
+            .map(|s| s.generation)
+            .unwrap();
+        assert_eq!(diff.new_generation, expected_gen);
+        assert_eq!(diff.parent_generation, expected_gen - 1);
+
+        // Receiver side: a second PoolManager belonging to a non-owner.
+        // Seed `pool_registry` with the baseline so the diff has a parent.
+        let receiver_id = Identity::generate();
+        let db_recv = Database::open_temp().unwrap();
+        let (recv_state, _r, _r2) = SharedState::new(
+            Config::default(),
+            receiver_id.clone(),
+            db_recv,
+            executor,
+            None,
+        );
+        recv_state
+            .credits
+            .pool_registry
+            .insert(baseline.pool_id.clone(), baseline.clone());
+        let (_t3, recv_cmd_rx) = mpsc::channel(16);
+        let (recv_net_tx, _recv_net_rx) = mpsc::channel(16);
+        let (_t4, recv_sd) = watch::channel(false);
+        let mut recv_pm = PoolManager::new(recv_state.clone(), recv_cmd_rx, recv_net_tx, recv_sd);
+
+        recv_pm.handle_pool_state_diff_gossip(diff.clone()).await;
+
+        let cached = recv_state
+            .credits
+            .pool_registry
+            .get(&baseline.pool_id)
+            .map(|e| e.value().clone())
+            .unwrap();
+        assert_eq!(cached.generation, expected_gen);
+        assert!(cached
+            .members
+            .iter()
+            .any(|m| m.node_id == *new_member.node_id()));
+        assert_eq!(
+            crate::pool::crypto::pool_state_checksum(&cached),
+            diff.state_checksum
+        );
+    }
+
+    /// R134: diff with non-matching parent_generation is dropped silently.
+    /// Prevents an out-of-order delivery from corrupting cached state.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn r134_receiver_drops_mismatched_parent_generation() {
+        // Build owner that produces a diff at gen=2 → 3.
+        let mut owner_cfg = Config::default();
+        owner_cfg.pool.state_diff_gossip = true;
+        let owner_id = Identity::generate();
+        let db_owner = Database::open_temp().unwrap();
+        let executor = Arc::new(Mutex::new(crate::inference::executor::ModelExecutor::new()));
+        let (owner_state, _o, _d) = SharedState::new(
+            owner_cfg,
+            owner_id.clone(),
+            db_owner,
+            executor.clone(),
+            None,
+        );
+        let (_t1, ocrx) = mpsc::channel(16);
+        let (otx, mut orx) = mpsc::channel(16);
+        let (_t2, osd) = watch::channel(false);
+        let mut owner_pm = PoolManager::new(owner_state.clone(), ocrx, otx, osd);
+        owner_pm.handle_create_pool("oo".into()).await.unwrap();
+        let _ = drain_pool_messages(&mut orx);
+        owner_pm.gossip_pool_state().await; // full, gen=1
+        let _ = drain_pool_messages(&mut orx);
+        {
+            let mut ps = owner_state.credits.pool_state.write().await;
+            if let Some(ref mut p) = *ps {
+                p.members
+                    .push(membership_for(Identity::generate().node_id().clone()));
+            }
+        }
+        owner_pm.gossip_pool_state().await; // diff gen=1→2
+        let mut diff = None;
+        while let Ok(cmd) = orx.try_recv() {
+            if let NetworkCommand::Broadcast(SwarmMessage::PoolMessage(
+                crate::types::PoolMessage::StateDiff(d),
+            )) = cmd
+            {
+                diff = Some(d);
+            }
+        }
+        let diff = diff.unwrap();
+
+        // Receiver has the pool cached at generation 0 — diff's parent is 1.
+        let receiver_id = Identity::generate();
+        let (recv_state, _r, _r2) = SharedState::new(
+            Config::default(),
+            receiver_id.clone(),
+            Database::open_temp().unwrap(),
+            executor,
+            None,
+        );
+        let mut stale_baseline = owner_state
+            .credits
+            .pool_state
+            .read()
+            .await
+            .as_ref()
+            .cloned()
+            .unwrap();
+        stale_baseline.generation = 0;
+        // Reduce to the baseline membership (just the owner) at stale gen 0.
+        stale_baseline
+            .members
+            .retain(|m| m.node_id == owner_id.node_id().clone());
+        let pool_id = stale_baseline.pool_id.clone();
+        recv_state
+            .credits
+            .pool_registry
+            .insert(pool_id.clone(), stale_baseline.clone());
+        let (_t3, rcrx) = mpsc::channel(16);
+        let (rtx, _rrx) = mpsc::channel(16);
+        let (_t4, rsd) = watch::channel(false);
+        let mut recv_pm = PoolManager::new(recv_state.clone(), rcrx, rtx, rsd);
+        recv_pm.handle_pool_state_diff_gossip(diff.clone()).await;
+
+        let cached = recv_state
+            .credits
+            .pool_registry
+            .get(&pool_id)
+            .unwrap()
+            .value()
+            .clone();
+        assert_eq!(cached.generation, 0, "diff dropped, generation unchanged");
+        assert_eq!(
+            cached.members.len(),
+            1,
+            "diff dropped, membership unchanged"
+        );
+    }
+
+    /// Drain network_rx once, counting full broadcasts and diff broadcasts
+    /// separately so neither categorisation discards the other.
+    fn drain_pool_messages(rx: &mut mpsc::Receiver<NetworkCommand>) -> (usize, usize) {
+        let mut fulls = 0;
+        let mut diffs = 0;
+        while let Ok(cmd) = rx.try_recv() {
+            if let NetworkCommand::Broadcast(SwarmMessage::PoolMessage(msg)) = cmd {
+                match msg {
+                    crate::types::PoolMessage::StateGossip(_) => fulls += 1,
+                    crate::types::PoolMessage::StateDiff(_) => diffs += 1,
+                    _ => {}
+                }
+            }
+        }
+        (fulls, diffs)
     }
 }

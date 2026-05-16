@@ -1083,6 +1083,11 @@ pub(crate) async fn dispatch_network_messages(
                                                         state,
                                                     })
                                                 }
+                                                crate::types::PoolMessage::StateDiff(diff) => {
+                                                    Some(crate::pool::types::PoolCommand::PoolStateDiffGossip {
+                                                        diff,
+                                                    })
+                                                }
                                                 crate::types::PoolMessage::CreditForward(fwd) => {
                                                     Some(crate::pool::types::PoolCommand::ProcessCreditForward {
                                                         forward: fwd,

@@ -87,6 +87,16 @@ pub struct PoolConfig {
     /// Offline LAN mode: disable internet bootstrap, mDNS-only discovery. Air-gapped operation.
     #[serde(default)]
     pub offline_mode: bool,
+    /// R134: opt-in pool-state diff gossip. When on, the pool owner emits
+    /// `PoolMessage::StateDiff` between full broadcasts — added/removed
+    /// members + a signed checksum — instead of always sending the full
+    /// member list. Periodic broadcasts and the first broadcast after
+    /// restart remain full-state to bound recovery time for late
+    /// joiners. Off by default; flip on once a WAN bench shows the
+    /// trailing-full-state broadcast is bandwidth-constrained for your
+    /// pool size.
+    #[serde(default)]
+    pub state_diff_gossip: bool,
 }
 
 impl Default for PoolConfig {
@@ -100,6 +110,7 @@ impl Default for PoolConfig {
             private_mode: false,
             private_mode_allow_lan: true,
             offline_mode: false,
+            state_diff_gossip: false,
         }
     }
 }

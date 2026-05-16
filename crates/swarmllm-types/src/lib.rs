@@ -47,7 +47,8 @@ pub use node::{
 };
 pub use pool::{
     BlindedPoolInvitation, ContributionMode, PoolAcceptance, PoolCreditForward, PoolDeviceStats,
-    PoolId, PoolInvitation, PoolMembership, PoolMessage, PoolRemoval, PoolState, ShardPin,
+    PoolId, PoolInvitation, PoolMembership, PoolMessage, PoolRemoval, PoolState, PoolStateDiff,
+    ShardPin,
 };
 
 #[cfg(test)]

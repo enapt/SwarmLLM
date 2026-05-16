@@ -179,12 +179,28 @@ broadcasts. Post-acceptance handler now routes through new
 gate — anti-poison + late-joiner recovery). A 3s coalesce timer in the
 select! loop drains the dirty flag once the cooldown elapses. 50
 acceptances in <15s now coalesce to ≤2 broadcasts (one immediate, one
-trailing). 3 unit tests verify the state machine. **Wire-format diffs
-remain deferred** — debounce captures the bursty-churn win without a
-protocol change; true `PoolStateDiff` variants need a generation
-counter + checksum verification + Full/Diff variant on `PoolMessage`,
-worth doing only if a WAN bench shows the trailing-full-state broadcast
-is actually bandwidth-constrained._
+trailing). 3 unit tests verify the state machine._
+
+_**Closed R134** (2026-05-16). `PoolState` gains a `generation: u64`
+counter (default 0 — backward-compatible). New `PoolMessage::StateDiff`
+variant carries `(pool_id, parent_generation, new_generation,
+added_members, removed_node_ids, shard_pins?, total_lifetime_credits?,
+member_credit_split_pct?, state_checksum, timestamp_ms,
+owner_signature)`. Domain-separated BLAKE3 sign payload
+`pool_state_diff_v1` binds pool id + generation transition + post-apply
+checksum + wire timestamp so a replayed diff across pools, across
+generations, or with a swapped checksum fails signature verification.
+Receivers also recompute `pool_state_checksum` post-apply and reject
+any diff that lands on a different state than the owner intended; each
+added member's `acceptance_signature` is verified the same way the
+StateGossip handler does. Owner forces a fresh full broadcast every
+`MAX_DIFFS_BEFORE_FULL = 4` diffs so late joiners recover within bounded
+time. Opt-in via `pool.state_diff_gossip` (default `false`) so the
+legacy wire path stays unchanged on existing deployments until a WAN
+bench shows the trailing-full-state broadcast is actually
+bandwidth-constrained for the operator's pool size. 5 new unit tests
+cover diff-off / diff-on / cap-forces-full / receiver-applies-and-
+advances / receiver-drops-stale-parent. 948 lib tests pass._
 
 ---
 
