@@ -93,14 +93,20 @@ _- 7 unit tests including a registry-backed end-to-end._
 _- Manifest schema NOT changed — recommender derives the family
   grouping on-the-fly to keep the wire format stable._
 
-_What remains deferred (auto-action + UI surfacing):_
+_**Frontend tile closed R134** (2026-05-16). Models → Running-now subview
+gets a "Quality tips for your hosted models" tile (`#quant-tips` +
+`_renderQuantTips` in swarm-tab.js) that only renders when there's an
+actionable hint (`would_upgrade` or `too_big` — `best_fit` rows hide
+so a swarm already running the optimal quant sees nothing). +3 i18n
+keys × 21 locales (`quant.tips_title`, `quant.tips_sub`,
+`quant.tip_current`). WS payload picks up `quant_recommendations` so
+the tile updates in real-time without a dedicated REST round-trip._
+
+_What remains deferred (auto-action only):_
 _- Auto-action layer (download the recommended quant when the user
   toggles "auto-switch quants" — needs a UI surface for explicit
-  consent + a migration path for replacing a hosted quant with a
-  better variant)._
-_- Frontend integration (the recommendations are exposed via REST
-  + WS-cached state but no dashboard tile renders them yet; will
-  pair naturally with the next dashboard refresh)._
+  consent + a hot-swap migration path for replacing a hosted quant
+  with a better variant without an inference-interruption window)._
 
 ---
 
