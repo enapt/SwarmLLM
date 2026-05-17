@@ -301,6 +301,7 @@ impl SharedState {
                 stats_building: std::sync::atomic::AtomicBool::new(false),
                 peer_segment_latency_ms_per_layer: DashMap::new(),
                 swarm_capacity: arc_swap::ArcSwap::from_pointee(SwarmCapacity::default()),
+                hedge_tracker: Arc::new(crate::inference::hedging::HedgeTracker::new()),
             },
             credits: CreditPool {
                 credit_balance: Arc::new(RwLock::new(crate::types::CreditBalance {
@@ -566,6 +567,27 @@ impl SharedState {
         // EMA: new = α·sample + (1−α)·old. Use get/set via deref to avoid entry API lock-in.
         const ALPHA: f32 = 0.3;
         *entry = ALPHA * sample + (1.0 - ALPHA) * (*entry);
+    }
+
+    /// SWARM-SPEC Layer 2: record a successful forward observation
+    /// against the hedge tracker. Keyed on (model, segment, holder)
+    /// rather than just holder because different models/segments have
+    /// very different latency profiles on the same physical peer.
+    /// `latency_ms` is the wall-clock time the forward took
+    /// end-to-end (not per-layer).
+    pub fn record_hedge_observation(
+        &self,
+        model_id: &crate::types::ModelId,
+        segment_idx: u8,
+        holder: &crate::types::NodeId,
+        latency_ms: f32,
+    ) {
+        let key = crate::inference::hedging::HedgeKey {
+            model_id: model_id.clone(),
+            segment_idx,
+            holder: holder.clone(),
+        };
+        self.metrics.hedge_tracker.observe(key, latency_ms);
     }
 
     /// Read the observed per-layer latency EMA for a peer. Returns None when

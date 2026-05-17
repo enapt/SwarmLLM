@@ -3,6 +3,7 @@ pub mod attn_kernel;
 pub mod chat_template;
 pub mod dsd_controller;
 pub mod executor;
+pub mod hedging;
 pub mod kv_cache;
 pub(crate) mod layers;
 pub mod local_embedder;

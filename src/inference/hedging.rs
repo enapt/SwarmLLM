@@ -1,0 +1,402 @@
+//! SWARM-SPEC Layer 2: adaptive pipeline hedging.
+//!
+//! Tracks per-segment-holder latency EWMA. When an in-flight forward
+//! exceeds `1.5 × p99_estimate` for that holder, dispatch a duplicate
+//! forward to the second-best holder; whichever Response arrives first
+//! wins; the loser is cancelled via the existing
+//! `SwarmMessage::CancelInference` cross-wire cancel (R126).
+//!
+//! # Why P2P-native
+//!
+//! Data-centre frameworks don't hedge because NVLink RTT is sub-ms.
+//! P2P RTT distributions are long-tail (NAT traversal, residential
+//! bandwidth, congested upstreams). Hedging cuts the p95-p99 by
+//! 30-50% at a bounded cost of ~5% wasted bandwidth on cancelled
+//! losers.
+//!
+//! # Scope
+//!
+//! This module owns the DECISION (latency tracking + should-hedge
+//! query + rate-limit budget). The duplicate-dispatch + cancel
+//! integration lives in `pipeline/distributed.rs` once the scaffolding
+//! is wired. Splitting the module this way keeps the tested unit
+//! small and the integration point reviewable.
+
+use std::time::Instant;
+
+use dashmap::DashMap;
+
+use crate::types::NodeId;
+
+/// Composite key for per-segment-holder latency tracking. Different
+/// models / segments can have very different latency profiles on the
+/// same physical holder (large vs small model, prefill-heavy vs
+/// decode-heavy), so we key on all three.
+#[derive(Clone, Hash, PartialEq, Eq, Debug)]
+pub struct HedgeKey {
+    pub model_id: crate::types::ModelId,
+    pub segment_idx: u8,
+    pub holder: NodeId,
+}
+
+/// Rolling latency stats for one (model, segment, holder) triple.
+/// EWMA-based — bounded memory regardless of request rate.
+#[derive(Clone, Copy, Debug)]
+pub struct HedgeStats {
+    /// EWMA of observed forward latency in milliseconds.
+    pub ewma_ms: f32,
+    /// EWMA of observed latency variance — proxy for tail-heaviness.
+    /// `ewma_ms + 3·sqrt(ewma_var)` is our p99-ish estimate.
+    pub ewma_var: f32,
+    /// Number of samples seen so far. Used to gate hedging until we
+    /// have enough samples to estimate variance meaningfully.
+    pub samples: u32,
+}
+
+impl Default for HedgeStats {
+    fn default() -> Self {
+        Self {
+            ewma_ms: 0.0,
+            ewma_var: 0.0,
+            samples: 0,
+        }
+    }
+}
+
+impl HedgeStats {
+    /// EWMA decay factor. 0.2 means ~20% weight on the new sample,
+    /// 80% on the prior EWMA — converges in ~10 samples.
+    const ALPHA: f32 = 0.2;
+
+    /// Update with a fresh latency sample.
+    pub fn observe(&mut self, latency_ms: f32) {
+        if self.samples == 0 {
+            self.ewma_ms = latency_ms;
+            self.ewma_var = 0.0;
+        } else {
+            let delta = latency_ms - self.ewma_ms;
+            self.ewma_ms += Self::ALPHA * delta;
+            // Variance EWMA via squared deviation
+            let sq = delta * delta;
+            self.ewma_var = (1.0 - Self::ALPHA) * self.ewma_var + Self::ALPHA * sq;
+        }
+        self.samples = self.samples.saturating_add(1);
+    }
+
+    /// Rough p99 estimate: mean + 3σ. Conservative on heavy-tail
+    /// distributions but cheap (no histogram).
+    pub fn p99_estimate_ms(&self) -> f32 {
+        self.ewma_ms + 3.0 * self.ewma_var.sqrt()
+    }
+}
+
+/// Per-holder hedge tracker. Shared across the pipeline executor;
+/// concurrent reads/writes via DashMap shards.
+#[derive(Default)]
+pub struct HedgeTracker {
+    stats: DashMap<HedgeKey, HedgeStats>,
+    /// Hedge counter: count of (decisions made, hedges actually fired,
+    /// hedges where the duplicate won). Used to derive the live
+    /// hedge rate against the budget.
+    decisions: std::sync::atomic::AtomicU64,
+    hedges_fired: std::sync::atomic::AtomicU64,
+    hedges_won: std::sync::atomic::AtomicU64,
+    /// Rolling start time — hedge rate is "hedges_fired / decisions
+    /// since reset". Reset every `RESET_INTERVAL_SECS`.
+    window_start_ms: std::sync::atomic::AtomicU64,
+}
+
+/// Reset window for the hedge-rate counter. Each window measures the
+/// hedge rate independently; long-running daemons don't accumulate
+/// rate-budget across days. 600s = 10 minutes — long enough for the
+/// EWMA to stabilise, short enough to react to a network shift.
+pub const HEDGE_RATE_WINDOW_SECS: u64 = 600;
+
+impl HedgeTracker {
+    pub fn new() -> Self {
+        Self {
+            stats: DashMap::new(),
+            decisions: 0.into(),
+            hedges_fired: 0.into(),
+            hedges_won: 0.into(),
+            window_start_ms: now_ms().into(),
+        }
+    }
+
+    /// Record a successful forward observation.
+    pub fn observe(&self, key: HedgeKey, latency_ms: f32) {
+        let mut entry = self.stats.entry(key).or_default();
+        entry.observe(latency_ms);
+    }
+
+    /// Snapshot the current stats for `key`. `None` if no samples yet.
+    pub fn get(&self, key: &HedgeKey) -> Option<HedgeStats> {
+        self.stats.get(key).map(|e| *e.value())
+    }
+
+    /// Should we hedge a forward that's been in flight for `elapsed_ms`
+    /// against the stats for `key`? Returns true when:
+    /// - hedging is enabled
+    /// - we have enough samples for a meaningful p99 estimate
+    ///   (`min_samples`)
+    /// - elapsed exceeds `factor × p99_estimate`
+    /// - we're under the rolling rate budget
+    pub fn should_hedge(&self, key: &HedgeKey, elapsed_ms: f32, cfg: HedgeConfig) -> bool {
+        self.maybe_reset_window();
+        if !cfg.enabled {
+            return false;
+        }
+        let stats = match self.get(key) {
+            Some(s) => s,
+            None => return false,
+        };
+        if stats.samples < cfg.min_samples {
+            return false;
+        }
+        let threshold = stats.p99_estimate_ms() * cfg.after_factor;
+        if elapsed_ms < threshold {
+            return false;
+        }
+        // Rate budget check.
+        let decisions = self.decisions.load(std::sync::atomic::Ordering::Relaxed);
+        let fired = self.hedges_fired.load(std::sync::atomic::Ordering::Relaxed);
+        if decisions > 0 {
+            let current_rate = fired as f32 / decisions as f32;
+            if current_rate >= cfg.max_rate {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Record a decision point — whether or not we actually hedged.
+    /// Drives the rate budget.
+    pub fn record_decision(&self, hedged: bool, won: bool) {
+        self.decisions
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if hedged {
+            self.hedges_fired
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if won {
+                self.hedges_won
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+    }
+
+    fn maybe_reset_window(&self) {
+        let now = now_ms();
+        let start = self
+            .window_start_ms
+            .load(std::sync::atomic::Ordering::Relaxed);
+        if now.saturating_sub(start) >= HEDGE_RATE_WINDOW_SECS * 1000 {
+            // Best-effort CAS. If two threads race we'll just reset once.
+            if self
+                .window_start_ms
+                .compare_exchange(
+                    start,
+                    now,
+                    std::sync::atomic::Ordering::AcqRel,
+                    std::sync::atomic::Ordering::Relaxed,
+                )
+                .is_ok()
+            {
+                self.decisions
+                    .store(0, std::sync::atomic::Ordering::Release);
+                self.hedges_fired
+                    .store(0, std::sync::atomic::Ordering::Release);
+                self.hedges_won
+                    .store(0, std::sync::atomic::Ordering::Release);
+            }
+        }
+    }
+
+    /// Current snapshot of hedge metrics — exposed via /api/admin/stats
+    /// for operator visibility.
+    pub fn metrics(&self) -> HedgeMetrics {
+        HedgeMetrics {
+            tracked_keys: self.stats.len(),
+            decisions: self.decisions.load(std::sync::atomic::Ordering::Relaxed),
+            hedges_fired: self.hedges_fired.load(std::sync::atomic::Ordering::Relaxed),
+            hedges_won: self.hedges_won.load(std::sync::atomic::Ordering::Relaxed),
+            window_start_ms: self
+                .window_start_ms
+                .load(std::sync::atomic::Ordering::Relaxed),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct HedgeConfig {
+    pub enabled: bool,
+    /// Hedge when elapsed > `after_factor × p99_estimate`. Default 1.5.
+    /// Lower values hedge more aggressively (higher cost, more tail
+    /// latency cut). Higher values are more conservative.
+    pub after_factor: f32,
+    /// Maximum fraction of decisions that fire a hedge. Default 0.05.
+    /// Prevents runaway duplicate traffic when the network is in a
+    /// degraded state (every request would exceed threshold).
+    pub max_rate: f32,
+    /// Minimum samples before we trust the EWMA enough to hedge against
+    /// it. Default 5 — variance estimate stabilises by then.
+    pub min_samples: u32,
+}
+
+impl Default for HedgeConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            after_factor: 1.5,
+            max_rate: 0.05,
+            min_samples: 5,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
+pub struct HedgeMetrics {
+    pub tracked_keys: usize,
+    pub decisions: u64,
+    pub hedges_fired: u64,
+    pub hedges_won: u64,
+    pub window_start_ms: u64,
+}
+
+fn now_ms() -> u64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// Time the elapsed milliseconds since a fixed Instant. Wrapper to
+/// keep call sites short.
+pub fn elapsed_ms(since: Instant) -> f32 {
+    since.elapsed().as_secs_f32() * 1000.0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn key(seed: u8) -> HedgeKey {
+        HedgeKey {
+            model_id: crate::types::ModelId(format!("m{seed}")),
+            segment_idx: 0,
+            holder: crate::types::NodeId([seed; 32]),
+        }
+    }
+
+    #[test]
+    fn ewma_converges_to_repeated_sample() {
+        let mut s = HedgeStats::default();
+        for _ in 0..30 {
+            s.observe(100.0);
+        }
+        assert!((s.ewma_ms - 100.0).abs() < 0.5);
+        // Variance should also converge to ~0 for a constant signal.
+        assert!(s.ewma_var < 0.5);
+        // p99 with zero variance ≈ mean
+        assert!((s.p99_estimate_ms() - 100.0).abs() < 1.0);
+    }
+
+    #[test]
+    fn ewma_widens_p99_under_jitter() {
+        let mut s = HedgeStats::default();
+        // Alternate 80 and 120 → mean 100, std ~20
+        for i in 0..40 {
+            s.observe(if i % 2 == 0 { 80.0 } else { 120.0 });
+        }
+        assert!(
+            s.ewma_var > 100.0,
+            "var should reflect jitter: {}",
+            s.ewma_var
+        );
+        let p99 = s.p99_estimate_ms();
+        assert!(p99 > 100.0 + 30.0, "p99 should exceed mean+30: {}", p99);
+    }
+
+    #[test]
+    fn should_hedge_disabled_returns_false() {
+        let t = HedgeTracker::new();
+        let k = key(1);
+        for _ in 0..10 {
+            t.observe(k.clone(), 100.0);
+        }
+        let cfg = HedgeConfig {
+            enabled: false,
+            ..HedgeConfig::default()
+        };
+        assert!(!t.should_hedge(&k, 1000.0, cfg));
+    }
+
+    #[test]
+    fn should_hedge_below_min_samples_returns_false() {
+        let t = HedgeTracker::new();
+        let k = key(2);
+        // Only 2 samples — below default min_samples=5.
+        t.observe(k.clone(), 100.0);
+        t.observe(k.clone(), 100.0);
+        let cfg = HedgeConfig {
+            enabled: true,
+            ..HedgeConfig::default()
+        };
+        assert!(!t.should_hedge(&k, 1000.0, cfg));
+    }
+
+    #[test]
+    fn should_hedge_fires_when_elapsed_exceeds_factor_times_p99() {
+        let t = HedgeTracker::new();
+        let k = key(3);
+        for _ in 0..10 {
+            t.observe(k.clone(), 100.0);
+        }
+        let cfg = HedgeConfig {
+            enabled: true,
+            after_factor: 1.5,
+            ..HedgeConfig::default()
+        };
+        // p99 ~ 100, threshold = 150. Elapsed 200 should fire.
+        assert!(t.should_hedge(&k, 200.0, cfg));
+        // Elapsed 120 should NOT fire.
+        assert!(!t.should_hedge(&k, 120.0, cfg));
+    }
+
+    #[test]
+    fn should_hedge_respects_max_rate_budget() {
+        let t = HedgeTracker::new();
+        let k = key(4);
+        for _ in 0..10 {
+            t.observe(k.clone(), 100.0);
+        }
+        let cfg = HedgeConfig {
+            enabled: true,
+            after_factor: 1.0,
+            max_rate: 0.05,
+            ..HedgeConfig::default()
+        };
+        // Simulate having already fired 10 hedges in 100 decisions
+        // (10% rate, above the 5% budget).
+        for _ in 0..100 {
+            t.record_decision(false, false);
+        }
+        for _ in 0..10 {
+            t.record_decision(true, false);
+        }
+        // Even with a clear timeout (elapsed >> p99), budget refuses.
+        assert!(!t.should_hedge(&k, 1000.0, cfg));
+    }
+
+    #[test]
+    fn metrics_count_decisions_correctly() {
+        let t = HedgeTracker::new();
+        t.record_decision(false, false);
+        t.record_decision(true, false);
+        t.record_decision(true, true);
+        let m = t.metrics();
+        assert_eq!(m.decisions, 3);
+        assert_eq!(m.hedges_fired, 2);
+        assert_eq!(m.hedges_won, 1);
+    }
+}

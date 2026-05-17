@@ -972,6 +972,16 @@ impl PipelineExecutor {
                                 seg_elapsed_ms,
                                 seg_layers,
                             );
+                            // SWARM-SPEC Layer 2: also record against the
+                            // hedge tracker. Keyed on (model, segment_idx,
+                            // holder) so different models / segments on the
+                            // same physical peer get distinct EWMAs.
+                            self.shared_state.record_hedge_observation(
+                                &self.request.model_id,
+                                idx as u8,
+                                &segment.node_id,
+                                seg_elapsed_ms as f32,
+                            );
                             tracing::debug!(
                                 request_id = %request_id,
                                 segment = idx,
