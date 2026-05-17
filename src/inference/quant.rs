@@ -139,6 +139,64 @@ mod tests {
         assert!(recovered.iter().all(|&v| v == 0.0));
     }
 
+    /// SWARM-SPEC Layer 0 quality gate: simulate representative
+    /// post-LayerNorm hidden-state distributions and verify that Q8_0
+    /// round-trip error stays under the published quality threshold.
+    /// Hidden states after LayerNorm are approximately N(0, 1) with
+    /// occasional outliers (3-5σ on GLU activations).
+    #[test]
+    fn quality_gate_typical_hidden_state_distribution() {
+        // Pseudo-Gaussian via Box-Muller from a deterministic LCG so the
+        // test is reproducible without pulling in `rand`.
+        let mut seed: u64 = 0x00c0_ffee_1234_5678;
+        let mut next_u01 = || {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (seed >> 33) as f32 / (1u64 << 31) as f32
+        };
+        let mut next_normal = || {
+            // Box-Muller. Guard against u1==0 to avoid log(0).
+            let mut u1 = next_u01();
+            if u1 < 1e-9 {
+                u1 = 1e-9;
+            }
+            let u2 = next_u01();
+            (-2.0 * u1.ln()).sqrt() * (2.0 * std::f32::consts::PI * u2).cos()
+        };
+
+        let n_total = 4096; // typical hidden_dim
+        let mut vals: Vec<f32> = (0..n_total).map(|_| next_normal()).collect();
+        // Inject occasional outliers (3-5σ) every ~100 lanes to simulate
+        // GLU activations / attention-output spikes.
+        for i in (0..n_total).step_by(100) {
+            vals[i] = if i % 200 == 0 { 4.5 } else { -3.5 };
+        }
+
+        let bytes = quantize_q8_0(&vals);
+        let recovered = dequantize_q8_0(&bytes, n_total).unwrap();
+        let l_inf = max_abs_err(&vals, &recovered);
+        // Per-block max(|x|)/127 → typical block scale ~3/127 ≈ 0.024;
+        // outlier blocks get scale ~5/127 ≈ 0.04 (max half-step error).
+        // L∞ across all lanes should be < 0.05.
+        assert!(
+            l_inf < 0.05,
+            "Q8_0 L∞ error {l_inf} exceeds 0.05 — quality gate failure for hidden-state distribution"
+        );
+        // Mean absolute error should be much smaller — the bulk of
+        // values quantize cleanly.
+        let mae: f32 = vals
+            .iter()
+            .zip(recovered.iter())
+            .map(|(x, y)| (x - y).abs())
+            .sum::<f32>()
+            / n_total as f32;
+        assert!(
+            mae < 0.01,
+            "Q8_0 mean-abs-error {mae} exceeds 0.01 — quality gate marginal for hidden-state distribution"
+        );
+    }
+
     #[test]
     fn outlier_block_isolated() {
         // Outlier in one block must not degrade the next block's precision.

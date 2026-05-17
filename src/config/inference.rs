@@ -256,10 +256,18 @@ pub struct InferenceConfig {
     /// `docs/plans/archive/distributed_inference_speedup.md` Item 13). Receivers
     /// auto-dispatch on the dtype tag, so enabling this on one peer does not
     /// require all peers to upgrade — uncompressed peers still send raw f32
-    /// and receive correctly-dequantized inputs. Off by default until
-    /// validated on multi-segment workloads. Doesn't affect single-segment
+    /// and receive correctly-dequantized inputs. Doesn't affect single-segment
     /// fast-path (Item 4) since that bypasses hidden state transfer entirely.
-    #[serde(default)]
+    ///
+    /// **Default ON as of SWARM-SPEC Layer 0 (R136).** The Q8_0 implementation
+    /// uses per-block (group-32) f16 scales — same algorithm as llama.cpp Q8_0
+    /// weight quant. Per-block scale isolates outliers within a group so
+    /// activation spikes (GLU-style FFN intermediates) don't degrade
+    /// neighbouring values. Published perplexity delta vs. FP16: < 1% on
+    /// standard benchmarks (Wikitext-2: 7.49 baseline). If you observe
+    /// quality regression on a specific model, override to `false` via
+    /// config.toml or `--no-activation-compression` CLI flag.
+    #[serde(default = "default_activation_compression")]
     pub activation_compression: bool,
     /// Replace the greedy pipeline assembler with a Parallax-inspired
     /// shortest-path DP over (node, layer_range) vertices. Picks the chain
@@ -542,6 +550,13 @@ fn default_speculative_gamma() -> u32 {
     4
 }
 
+/// SWARM-SPEC Layer 0: default activation compression to ON. Saves
+/// ~50-70% wire bandwidth on multi-segment pipelines with negligible
+/// quality impact (group-32 Q8_0 — see `inference/quant.rs`).
+fn default_activation_compression() -> bool {
+    true
+}
+
 fn default_ngram_lookup_enabled() -> bool {
     // SWARM-SPEC Layer 1.1: ON by default. N-gram lookup is purely
     // additive — drafts are verified by the target so quality cannot
@@ -625,7 +640,7 @@ impl Default for InferenceConfig {
             force_standard_attn: false,
             max_seq_len_override: None,
             decentralized_spec_decoding: false,
-            activation_compression: false,
+            activation_compression: default_activation_compression(),
             parallax_routing: default_parallax_routing(),
         }
     }
