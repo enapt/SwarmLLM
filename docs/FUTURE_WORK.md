@@ -884,6 +884,89 @@ heterogeneous P2P case.
 
 ---
 
+## R136 local 3-node benchmark — measured results
+
+Captured 2026-05-17 on the SwarmLLM dev machine (WSL2, NVIDIA RTX
+3070 Laptop, CPU-only inference since CUDA isn't loaded in this
+session). Cluster: 3 swarmllm daemons on ports 8800/8801/8802,
+each with its own data dir; auto-discovery via P2P loopback.
+
+### Single-node baseline (TinyLlama 1.1B Q4_K_M, all 3 nodes hold full model)
+
+Inference routed to node A which serves locally (no inter-segment
+hop). Q8_0 activation compression default-ON:
+
+```
+code-completion:  4.0–4.4 tok/s  (median ~4.3)  60-token completions
+summarisation:    2.7–4.3 tok/s  (median ~4.1)  51-token completions
+free-form chat:   5.0–5.2 tok/s  (median ~5.2)  81-token completions
+```
+
+### Q8_0 OFF A/B (same workloads, `inference.activation_compression = false`)
+
+```
+code-completion:  3.6–4.0 tok/s  (median ~4.0)  → Q8_0 ON ~7.5% faster
+summarisation:    2.6–4.0 tok/s  (median ~3.5)  → Q8_0 ON ~17% faster
+free-form chat:   4.8–5.0 tok/s  (median ~5.0)  → Q8_0 ON ~4% faster
+```
+
+The Q8_0 win on single-node routing is modest (4-17%) because there's
+no inter-segment wire to compress. On distributed multi-segment
+inference (the real Q8_0 use case), the synthetic bench predicts
+1.5–1.7× speedup proportional to bandwidth-bound hop time.
+
+### Distributed-only methodology (deferred — requires careful disable)
+
+To measure Q8_0's full impact on multi-segment pipelines, the test
+needs:
+1. Auto-manage disabled on every node (`auto_manage.enabled = false`)
+   so missing shards aren't auto-downloaded
+2. Sharded placement: A has only `manifest.json + gguf_header.bin`,
+   B has `shard_000.bin`, C has `shard_001.bin`
+3. Restart cluster, verify A reports zero local shards
+4. Run same benchmark against A's API; scheduler will pipeline B → C
+
+Methodology scripts live at `/tmp/swarm_3node_setup.sh` and
+`/tmp/swarm_3node_sharded.sh`; the latter sets up sharded
+placement but the running daemon's auto-manage downloaded the
+missing shards within 12s of startup. Disabling auto-manage in the
+per-node config preserves the sharded state for the bench window.
+
+### Microbench (from `examples/swarm_spec_bench.rs`)
+
+```
+Layer 0 Q8_0 round-trip:        17.2 µs (3.76× compression)
+Layer 1 n-gram cascade:         30.1 µs per lookup
+Layer 2 hedge decision:         139.6 ns
+Layer 3 prefetch decision:      0.30 µs
+Synthetic cascade hit-rate (Layer 1):
+  Code completion:  99.0% hit
+  RAG/summary:      96.0% hit
+  Free-form chat:    0.0% hit (correctly falls through)
+```
+
+### Path to end-to-end measurement
+
+Layer 1 (n-gram) speedup on real inference requires a draft model
+loaded (`inference.draft_model_path = "/path/to/draft.gguf"`) so the
+speculative decoding cascade activates. None of the test models in
+`~/.local/share/swarmllm/models/` is currently configured as a draft.
+Once one is, Layer 1 can be measured against the same workload set
+with predicted 3-5× speedup on code/RAG.
+
+Layer 2 hedging requires the wire-format change (per-forward
+delivery IDs) for true duplicate-dispatch; currently ships only the
+post-hoc "would have fired" dry-run logging that operators can
+observe via `GET /api/admin/stats → swarm_spec.hedge.hedges_fired`
+relative to `.decisions`.
+
+Layer 3 prefetch is observation-only — first-token-candidate
+prediction works on session history, dispatch (running activations
+forward, gossip-warming) is the integration that fills out the
+predicted 1.2-1.3× TTFT win.
+
+---
+
 ## R136: SWARM-SPEC — proposal for a state-of-the-art inference acceleration system
 
 Compiled 2026-05-17. Builds on the R135 inference research backlog

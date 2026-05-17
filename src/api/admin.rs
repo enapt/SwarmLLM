@@ -323,6 +323,14 @@ pub async fn stats(State(state): State<AppState>) -> Json<serde_json::Value> {
         }),
     };
 
+    // SWARM-SPEC layer metrics (R136): hedge + prefetch tracker
+    // snapshots. Empty / zero counters until those layers see real
+    // traffic with their feature flags enabled.
+    let swarm_spec_metrics = serde_json::json!({
+        "hedge": state.shared_state.metrics.hedge_tracker.metrics(),
+        "prefetch": state.shared_state.metrics.prefetch_orchestrator.metrics(),
+    });
+
     Json(serde_json::json!({
         "node_id": node_id,
         "version": env!("CARGO_PKG_VERSION"),
@@ -337,6 +345,7 @@ pub async fn stats(State(state): State<AppState>) -> Json<serde_json::Value> {
         "credits": credit_json,
         "hardware": hardware,
         "inference": inference_perf,
+        "swarm_spec": swarm_spec_metrics,
     }))
 }
 
