@@ -229,6 +229,10 @@ path = "tests/integration/main.rs"
 name = "yamux_substream"
 path = "tests/integration/test_yamux_substream.rs"
 
+[[example]]
+name = "swarm_spec_bench"
+path = "examples/swarm_spec_bench.rs"
+
 [patch.crates-io]
 libp2p-request-response = { path = "vendor/libp2p-request-response" }
 # Upstream candle 0.10.1 hardcodes `cudarc/dynamic-linking` in its
