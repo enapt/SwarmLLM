@@ -915,6 +915,36 @@ no inter-segment wire to compress. On distributed multi-segment
 inference (the real Q8_0 use case), the synthetic bench predicts
 1.5–1.7× speedup proportional to bandwidth-bound hop time.
 
+### Layer 1 multi-segment (sharded production case) measured
+
+Captured 2026-05-17 after extending `try_ngram_only_distributed` to
+multi-segment pipelines via the extracted `forward_verify_through_segments`
+helper. Cluster: A=manifest, B=shard_000, C=shard_001 (true sharded
+2-segment pipeline). L1 fires on every request — verified in logs
+via `SWARM-SPEC L1 ngram-only: complete`.
+
+```
+Workload    tok/s   L1 hit-rate
+code        3.7     35.7%
+summary     3.3     8-77% (high variance across trials — cache effect)
+chat        4.7     17.2%
+```
+
+vs the single-segment-routing case (B/C each holding full model
+where pipeline = 1 hop): L1 active gave 4.3/4.0/4.5 tok/s.
+Multi-segment is slightly slower per token because each verify
+round is 2 hops (B→C) vs 1, but **now works for the real
+production sharded scenario**.
+
+**Bug found and fixed during integration**: the shape-match check
+in DSD's `forward_verify_through_segments` fired incorrectly on
+segment 0 transitions (input = token IDs 8 bytes × N, output =
+hidden state hidden_dim × 2-4 × N — naturally different total
+bytes). Was latent in DSD (multi-segment + draft model is an
+uncommon combination, never exercised in prod). Fixed by gating
+the check on `idx >= 1` (intermediate-to-intermediate, where
+shape preservation IS expected).
+
 ### Layer 1 (n-gram-only spec, draft-free) measured on real inference
 
 Captured 2026-05-17 after shipping `try_ngram_only_distributed`
