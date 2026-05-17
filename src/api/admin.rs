@@ -400,6 +400,10 @@ pub async fn get_config(State(state): State<AppState>) -> Json<serde_json::Value
         "shard_size_mb": config.model.shard_size_mb,
         "max_batch_size": config.inference.max_batch_size,
         "batch_timeout_ms": config.inference.batch_timeout_ms,
+        // R137: surface the runtime values (not the startup-frozen config)
+        // so the dashboard reflects post-PUT state immediately.
+        "allow_cross_pool_inference": state.shared_state.credits.allow_cross_pool_inference.load(std::sync::atomic::Ordering::Relaxed),
+        "share_model_catalog": state.shared_state.credits.share_model_catalog.load(std::sync::atomic::Ordering::Relaxed),
     });
     if let Some(cs) = claude_sub {
         result["claude_subscription"] = cs;
@@ -502,6 +506,28 @@ pub async fn update_config(
     }
     if let Some(timeout) = body.batch_timeout_ms {
         config.inference.batch_timeout_ms = timeout.clamp(1, MAX_BATCH_TIMEOUT_MS);
+    }
+    if let Some(allow) = body.allow_cross_pool_inference {
+        // R137: persist to TOML for restart durability AND mirror to the
+        // runtime atomic so cross_pool_extras picks it up on the next
+        // request without a daemon restart.
+        config.pool.allow_cross_pool_inference = allow;
+        state
+            .shared_state
+            .credits
+            .allow_cross_pool_inference
+            .store(allow, std::sync::atomic::Ordering::Release);
+    }
+    if let Some(share) = body.share_model_catalog {
+        // R137: same pattern as above for the model-catalog gossip flag.
+        // Read by HealthMonitor::broadcast_pool_model_availability on the
+        // next gossip tick (≤30s by default).
+        config.pool.share_model_catalog = share;
+        state
+            .shared_state
+            .credits
+            .share_model_catalog
+            .store(share, std::sync::atomic::Ordering::Release);
     }
 
     // Write updated config to disk
@@ -671,6 +697,14 @@ pub struct ConfigUpdate {
     pub shard_size_mb: Option<u64>,
     pub max_batch_size: Option<u32>,
     pub batch_timeout_ms: Option<u64>,
+    /// R137: hot-reloadable cross-pool inference fallback toggle.
+    /// Persisted to config TOML + mirrored to
+    /// `state.credits.allow_cross_pool_inference`.
+    pub allow_cross_pool_inference: Option<bool>,
+    /// R137: hot-reloadable cross-pool model catalog gossip toggle.
+    /// Persisted to config TOML + mirrored to
+    /// `state.credits.share_model_catalog`.
+    pub share_model_catalog: Option<bool>,
 }
 
 /// POST /api/admin/shutdown — Gracefully shut down the node.

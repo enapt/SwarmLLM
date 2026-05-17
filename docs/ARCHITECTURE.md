@@ -37,6 +37,7 @@ Single Rust binary, three simultaneous functions:
 │  │  ┌─ CreditPool (state.credits) ──────────────────┐ │  │
 │  │  │  credit_balance, pool_state, pool_registry     │ │  │
 │  │  │  trust_manager, escrow_manager, anti_gaming    │ │  │
+│  │  │  foreign_pool_catalog (R134)                   │ │  │
 │  │  └────────────────────────────────────────────────┘ │  │
 │  │  ┌─ ModelMgmt (state.models) ────────────────────┐ │  │
 │  │  │  acquisition_progress, hf_sources              │ │  │
@@ -44,16 +45,21 @@ Single Rust binary, three simultaneous functions:
 │  │  │  prune_history, download_cancel_flags          │ │  │
 │  │  │  wishlist (R111), hf_trending_cache (R112)     │ │  │
 │  │  │  contribution_auto (R121)                      │ │  │
+│  │  │  foreign_wishlist (R130)                       │ │  │
+│  │  │  quant_recommendations (R133)                  │ │  │
 │  │  └────────────────────────────────────────────────┘ │  │
 │  │  ┌─ MetricsProviders (state.metrics) ────────────┐ │  │
 │  │  │  node_stats, inference_requests_total          │ │  │
 │  │  │  channel_metrics, inference_latency_samples    │ │  │
 │  │  │  providers_config, provider_model_map          │ │  │
 │  │  │  swarm_capacity (R110)                         │ │  │
+│  │  │  hedge_tracker (R136 L2)                       │ │  │
+│  │  │  prefetch_orchestrator (R136 L3)               │ │  │
 │  │  └────────────────────────────────────────────────┘ │  │
 │  │                                                     │  │
 │  │  Root: peer_registry, model_registry, executor,     │  │
-│  │    identity, db, active_pipelines, config, ...      │  │
+│  │    identity, db, active_pipelines, config,          │  │
+│  │    standalone_tokenizers (R136 L1/L3 follow-on)     │  │
 │  └────────────────────────────────────────────────────┘  │
 └──────────────────────────────────────────────────────────┘
 ```
@@ -1400,7 +1406,7 @@ Routes Claude model requests through a locally-authenticated `claude` CLI subpro
 - Cross-component calls: `App.componentName.method()`. Shared state: `App.state.*`. Utilities: `App.utils.*`.
 
 ### Frontend Features
-- **i18n**: 1146 translation keys (1148 entries per locale incl. `_lang` + `_dir`) across 21 languages (en, es, fr, de, pt, it, nl, ru, zh, ja, ko, ar, tr, pl, sv, th, hi, vi, id, uk, cs). Auto-detects browser language. `I18n.t()` + `data-i18n` DOM attributes. Interpolation via `{variable}` placeholders. Fallback chain: current language → English → raw key. "Continue in English" UX for non-English users who prefer English.
+- **i18n**: 1152 translation keys (1154 entries per locale incl. `_lang` + `_dir`) across 21 languages (en, es, fr, de, pt, it, nl, ru, zh, ja, ko, ar, tr, pl, sv, th, hi, vi, id, uk, cs). Auto-detects browser language. `I18n.t()` + `data-i18n` DOM attributes. Interpolation via `{variable}` placeholders. Fallback chain: current language → English → raw key. "Continue in English" UX for non-English users who prefer English.
 - **Theme**: Light / Dark / System toggle. `[data-theme="light"]` CSS overrides. Persisted in localStorage.
 - **Neural network background**: Animated canvas particle network behind dashboard tiles (`frontend/js/neural-bg.js`). ~60 nodes with connecting edges, gentle drift, mouse repulsion/glow. State-reactive coloring: blue (idle) → cyan (active inference) → red-orange (unhealthy/disconnected). Peer count boosts vibrancy, active requests trigger node firing pulses. Pauses when tab hidden; reduced opacity in light theme.
 

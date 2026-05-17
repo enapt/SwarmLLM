@@ -32,6 +32,18 @@ pub struct CreditPool {
     /// *discovery* surface only — does NOT change routing decisions; the
     /// private-mode contract is preserved.
     pub foreign_pool_catalog: DashMap<(crate::pool::types::PoolId, crate::types::ModelId), u64>,
+    /// R137: runtime mirror of `config.pool.allow_cross_pool_inference`.
+    /// The config struct behind `state.config` is startup-frozen, so without
+    /// this atomic a `PUT /api/admin/config` toggle would not take effect
+    /// until daemon restart. Pattern mirrors R121's `contribution_auto` on
+    /// `state.models`. Read by `pool::scope::cross_pool_extras` to gate
+    /// cross-pool fallback routing; written by the admin config update path.
+    pub allow_cross_pool_inference: std::sync::atomic::AtomicBool,
+    /// R137: runtime mirror of `config.pool.share_model_catalog`. Same
+    /// rationale as `allow_cross_pool_inference`. Read by
+    /// `HealthMonitor::broadcast_pool_model_availability` to gate the
+    /// `PoolModelAvailability` gossip on each tick.
+    pub share_model_catalog: std::sync::atomic::AtomicBool,
 }
 
 /// R135: free function — drop `foreign_pool_catalog` entries older than

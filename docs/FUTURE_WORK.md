@@ -449,34 +449,43 @@ have explicit "won't fix" semantics. Concretely:
 
 ## R135 cross-pool review — hot-reloadable flag deferral
 
-`pool.allow_cross_pool_inference` and `pool.share_model_catalog` are
+_**Closed R137** (2026-05-17). All 4 steps from the original plan
+shipped:_
+
+_1. `state.credits.allow_cross_pool_inference: AtomicBool` and
+   `state.credits.share_model_catalog: AtomicBool` added to the
+   `CreditPool` sub-struct (`src/daemon/state/credits.rs`)._
+_2. Both mirrored from `config.pool.*` at startup in
+   `SharedState::new()` (`src/daemon/state/mod.rs:351-356`)._
+_3. `ConfigUpdate` in `src/api/admin.rs` extended with
+   `allow_cross_pool_inference: Option<bool>` and
+   `share_model_catalog: Option<bool>` Option fields. On PUT, both the
+   runtime atomic AND the persisted TOML config are written. The
+   `GET /api/admin/config` getter surfaces the runtime atomic values
+   (not the startup-frozen config) so the dashboard reflects post-PUT
+   state immediately._
+_4. `pool::scope::cross_pool_extras` and
+   `health/monitor.rs::broadcast_pool_model_availability` switched to
+   read from the atomic. The k-anonymity floor
+   (`share_model_catalog_min_members`) remains startup-frozen — that
+   value is a privacy-policy parameter, not an on/off gate, and a
+   restart pulse is acceptable when the operator wants to widen it._
+
+_Pattern follows R121's `contribution_auto` mirror exactly. Regression
+test `cross_pool_extras_honors_runtime_flag_toggle` in
+`src/pool/scope.rs` verifies the runtime mirror takes precedence over
+the startup-frozen config. 999 lib tests pass._
+
+**Original deferral note preserved below for context.**
+
+`pool.allow_cross_pool_inference` and `pool.share_model_catalog` were
 read from `state.config.pool` which is startup-frozen. Unlike
 `private_mode` (an `AtomicBool` on `state.credits`) and
 `contribution_auto` (an `AtomicBool` on `state.models`), these flags
-have no runtime-toggle path. A user who disables
+had no runtime-toggle path. A user who disables
 `allow_cross_pool_inference` via a future
 `PUT /api/admin/config { allow_cross_pool_inference: false }` would
 not actually stop cross-pool routing until daemon restart.
-
-**Status.** Not exploitable today — the API endpoint doesn't currently
-expose these fields, so flipping them via the dashboard isn't
-possible. The risk is purely "future API endpoint will silently
-no-op until restart". Closed properly in a follow-up that:
-1. Adds `allow_cross_pool_inference: AtomicBool` + `share_model_catalog:
-   AtomicBool` to `state.credits` (sub-struct accessor rule —
-   architecture.md).
-2. Mirrors them from `state.config.pool` at startup in
-   `SharedState::new()`.
-3. Adds `allow_cross_pool_inference` + `share_model_catalog` Option
-   fields to `ConfigUpdate` in `api/admin.rs`; on PUT, writes the
-   atomic AND persists the config TOML.
-4. Switches `pool::scope::cross_pool_extras` and
-   `health/monitor.rs::broadcast_pool_model_availability` to read
-   from the atomic.
-
-Pattern is identical to R121's `contribution_auto`. Mechanical work
-but lives in the user-facing config surface, so deferred until a
-config-API pass makes sense.
 
 ---
 

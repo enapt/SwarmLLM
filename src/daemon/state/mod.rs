@@ -348,6 +348,12 @@ impl SharedState {
                         .unwrap_or(config.pool.offline_mode)
                 }),
                 foreign_pool_catalog: DashMap::new(),
+                allow_cross_pool_inference: std::sync::atomic::AtomicBool::new(
+                    config.pool.allow_cross_pool_inference,
+                ),
+                share_model_catalog: std::sync::atomic::AtomicBool::new(
+                    config.pool.share_model_catalog,
+                ),
             },
             models: ModelMgmt {
                 acquisition_progress: DashMap::new(),
