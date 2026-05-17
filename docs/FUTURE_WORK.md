@@ -433,12 +433,17 @@ have explicit "won't fix" semantics. Concretely:
   next sweep close.
 
 - **R105 latency sample ring time-coverage**
-  (`src/api/metrics.rs:160`) — kept deferred. Requires changing the
-  sample storage from `VecDeque<f64>` to `VecDeque<(Instant, f64)>`
-  plus drop-by-age on insert and at every `compute_latency_stats`
-  call. Affects multiple call sites and adds memory overhead for a
-  cosmetic improvement on lightly-loaded nodes. Not correctness;
-  defer until p99 inaccuracy becomes a real operator complaint.
+  (`src/api/metrics.rs:160`) — **closed R137** (2026-05-17). Sample
+  storage migrated from `VecDeque<f64>` to
+  `VecDeque<(Instant, f64)>` with `LATENCY_SAMPLE_MAX_AGE = 600s`
+  (matches Prometheus `rate(...[10m])` typical). Drop-by-age applies
+  both on insert (in `router/mod.rs` completion path) and on every
+  read (`compute_latency_stats` + `write_latency_histogram`) — the
+  per-call drop is needed because at low rates the writer's own
+  drop pass can be hours apart. Memory overhead: +16 bytes/entry
+  (a u128 Instant), capped at 1000 entries = +16KB worst case.
+  Regression test `latency_age_filter_drops_old_entries` verifies
+  the filter logic without needing a full SharedState build.
 
 - All remaining deferred entries (Qwen 3.5 DeltaNet shape verification,
   GossipSub PeerScore tuning, DHT provider capability challenge, etc.)

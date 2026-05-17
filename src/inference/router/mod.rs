@@ -858,10 +858,18 @@ impl InferenceRouter {
                     );
                     if let Ok(mut samples) = shared_state.metrics.inference_latency_samples.write()
                     {
+                        // R137: drop entries older than the freshness window
+                        // before applying the cap. Without this, a lightly-loaded
+                        // node accumulates day-old samples and reports stale p99.
+                        let cutoff =
+                            std::time::Instant::now() - crate::api::metrics::LATENCY_SAMPLE_MAX_AGE;
+                        while samples.front().is_some_and(|(t, _)| *t < cutoff) {
+                            samples.pop_front();
+                        }
                         if samples.len() >= 1000 {
                             samples.pop_front();
                         }
-                        samples.push_back(latency_secs);
+                        samples.push_back((std::time::Instant::now(), latency_secs));
                     }
                     // CORRECTNESS (R105): keep a monotonic total alongside
                     // the bounded ring. Prometheus histogram `_count` /

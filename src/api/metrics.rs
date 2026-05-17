@@ -1,11 +1,20 @@
 use std::fmt::Write;
 use std::sync::atomic::Ordering;
+use std::time::Duration;
 
 use axum::extract::State;
 use axum::http::header;
 use axum::response::{IntoResponse, Response};
 
 use crate::api::server::AppState;
+
+/// R137 (closes R105 deferral): time-coverage bound on the latency sample ring.
+/// Without this, a lightly-loaded node accumulates samples that may be hours
+/// or days old, surfacing stale p99 values that no longer reflect reality.
+/// 10 minutes matches Prometheus's typical `rate(...[5m])` / `rate(...[10m])`
+/// window for histogram quantiles. The 1000-entry memory cap remains; this
+/// is an additional freshness bound on top.
+pub(crate) const LATENCY_SAMPLE_MAX_AGE: Duration = Duration::from_secs(600);
 
 /// GET /metrics — Prometheus/OpenMetrics text-format endpoint.
 ///
@@ -145,34 +154,43 @@ pub(crate) struct LatencyStats {
 
 /// Compute latency percentile statistics from the shared inference sample buffer.
 /// Returns `None` if the lock is poisoned or there are no samples.
+///
+/// R137: drops entries older than `LATENCY_SAMPLE_MAX_AGE` before computing
+/// statistics. Per-call drop is needed because at low rates the writer's
+/// own drop-on-insert pass can be hours apart, leaving stale samples in
+/// the ring between calls.
 pub(crate) fn compute_latency_stats(shared: &crate::daemon::SharedState) -> Option<LatencyStats> {
     let total_requests = shared
         .metrics
         .inference_requests_total
         .load(std::sync::atomic::Ordering::Relaxed);
-    let samples = match shared.metrics.inference_latency_samples.read() {
-        Ok(s) => s,
+    let cutoff = std::time::Instant::now() - LATENCY_SAMPLE_MAX_AGE;
+    let mut latencies: Vec<f64> = match shared.metrics.inference_latency_samples.read() {
+        Ok(s) => s
+            .iter()
+            .filter(|(t, _)| *t >= cutoff)
+            .map(|(_, v)| *v)
+            .collect(),
         Err(_) => {
             tracing::warn!("inference_latency_samples lock poisoned — skipping stats");
             return None;
         }
     };
-    if samples.is_empty() {
+    if latencies.is_empty() {
         return None;
     }
-    let count = samples.len();
-    let sum: f64 = samples.iter().sum();
+    let count = latencies.len();
+    let sum: f64 = latencies.iter().sum();
     let avg_ms = (sum / count as f64) * 1000.0;
-    let min_ms = samples.iter().cloned().fold(f64::INFINITY, f64::min) * 1000.0;
-    let max_ms = samples.iter().cloned().fold(f64::NEG_INFINITY, f64::max) * 1000.0;
-    let mut sorted: Vec<f64> = samples.iter().cloned().collect();
-    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    let p50_ms = sorted[(count - 1) / 2] * 1000.0;
-    let p95_ms = sorted[((count as f64 * 0.95).ceil() as usize)
+    let min_ms = latencies.iter().cloned().fold(f64::INFINITY, f64::min) * 1000.0;
+    let max_ms = latencies.iter().cloned().fold(f64::NEG_INFINITY, f64::max) * 1000.0;
+    latencies.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let p50_ms = latencies[(count - 1) / 2] * 1000.0;
+    let p95_ms = latencies[((count as f64 * 0.95).ceil() as usize)
         .saturating_sub(1)
         .min(count - 1)]
         * 1000.0;
-    let p99_ms = sorted[((count as f64 * 0.99).ceil() as usize)
+    let p99_ms = latencies[((count as f64 * 0.99).ceil() as usize)
         .saturating_sub(1)
         .min(count - 1)]
         * 1000.0;
@@ -208,8 +226,13 @@ fn write_latency_histogram(buf: &mut String, shared: &crate::daemon::SharedState
     const BUCKETS: &[f64] = &[0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0];
     let name = "swarmllm_inference_latency_seconds";
 
-    let samples_guard = match shared.metrics.inference_latency_samples.read() {
-        Ok(g) => g,
+    let cutoff = std::time::Instant::now() - LATENCY_SAMPLE_MAX_AGE;
+    let fresh_latencies: Vec<f64> = match shared.metrics.inference_latency_samples.read() {
+        Ok(g) => g
+            .iter()
+            .filter(|(t, _)| *t >= cutoff)
+            .map(|(_, v)| *v)
+            .collect(),
         Err(_) => {
             tracing::warn!(
                 module = "metrics",
@@ -237,13 +260,18 @@ fn write_latency_histogram(buf: &mut String, shared: &crate::daemon::SharedState
     let _ = writeln!(buf, "# TYPE {name} histogram");
 
     // Bucket counts come from the bounded ring — they're best-effort
-    // distribution snapshots. They may not equal `_count` (the ring is
-    // capped). That's expected for a sliding-window histogram.
+    // distribution snapshots filtered to entries within the freshness
+    // window (R137). They may not equal `_count` (the ring is capped
+    // AND age-bounded). That's expected for a sliding-window histogram.
     for &bound in BUCKETS {
-        let bucket_count = samples_guard.iter().filter(|&&s| s <= bound).count();
+        let bucket_count = fresh_latencies.iter().filter(|&&s| s <= bound).count();
         let _ = writeln!(buf, "{name}_bucket{{le=\"{bound}\"}} {bucket_count}");
     }
-    let _ = writeln!(buf, "{name}_bucket{{le=\"+Inf\"}} {}", samples_guard.len());
+    let _ = writeln!(
+        buf,
+        "{name}_bucket{{le=\"+Inf\"}} {}",
+        fresh_latencies.len()
+    );
     let _ = writeln!(buf, "{name}_sum {total_sum_secs}");
     let _ = writeln!(buf, "{name}_count {total_count}");
 }
@@ -383,5 +411,28 @@ mod tests {
                 _ => {}
             }
         }
+    }
+
+    /// R137 (closes R105 deferral): time-coverage filter drops stale entries
+    /// when computing histogram-bucket counts, leaving only fresh samples.
+    /// Reproduces the gist of the per-call age filter without needing a full
+    /// SharedState construction.
+    #[test]
+    fn latency_age_filter_drops_old_entries() {
+        let now = std::time::Instant::now();
+        let cutoff = now - LATENCY_SAMPLE_MAX_AGE;
+        // Use a clearly stale instant — older than the freshness window.
+        let stale = cutoff - Duration::from_secs(60);
+        let fresh = cutoff + Duration::from_secs(60);
+        let samples: Vec<(std::time::Instant, f64)> =
+            vec![(stale, 9.5), (fresh, 0.1), (fresh, 0.3)];
+        let kept: Vec<f64> = samples
+            .iter()
+            .filter(|(t, _)| *t >= cutoff)
+            .map(|(_, v)| *v)
+            .collect();
+        // Stale 9.5s entry must be filtered; only the two fresh values remain.
+        assert_eq!(kept.len(), 2);
+        assert!(kept.iter().all(|&v| v < 1.0));
     }
 }

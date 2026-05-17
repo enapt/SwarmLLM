@@ -21,7 +21,15 @@ pub struct MetricsProviders {
     pub requests_served_atomic: AtomicU64,
     /// Mirror of node_stats.forwards_served — same try_write→atomic story.
     pub forwards_served_atomic: AtomicU64,
-    pub inference_latency_samples: std::sync::RwLock<std::collections::VecDeque<f64>>,
+    /// Bounded ring of recent inference latencies for percentile computation.
+    /// Entries are `(observed_at_instant, latency_seconds)`; the timestamp lets
+    /// `compute_latency_stats` and the Prometheus histogram emitter drop entries
+    /// older than `LATENCY_SAMPLE_MAX_AGE` (10 min) so a lightly-loaded node
+    /// doesn't keep showing a p99 from yesterday's spike. The 1000-entry cap
+    /// remains the memory bound; the age window is a freshness bound on top.
+    /// R137 (closes R105 deferral).
+    pub inference_latency_samples:
+        std::sync::RwLock<std::collections::VecDeque<(std::time::Instant, f64)>>,
     /// Monotonic total count of latency samples ever recorded. The
     /// `inference_latency_samples` ring buffer caps at a fixed size and
     /// would otherwise produce a non-monotonic Prometheus histogram
