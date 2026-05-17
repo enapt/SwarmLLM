@@ -7,6 +7,7 @@
 
 mod distributed;
 mod dsd;
+mod hedge_dispatch;
 mod local;
 mod ngram_only_spec;
 mod prompt;
