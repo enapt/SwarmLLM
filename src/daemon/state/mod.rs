@@ -578,6 +578,14 @@ impl SharedState {
     /// very different latency profiles on the same physical peer.
     /// `latency_ms` is the wall-clock time the forward took
     /// end-to-end (not per-layer).
+    ///
+    /// Also performs a post-hoc "would have hedged" dry-run check: if
+    /// the latency exceeded the configured hedge threshold AND the
+    /// rate budget allowed it, increments the would-fire counter and
+    /// emits a tracing::info event. Lets operators measure hedge
+    /// potential without paying the duplicate-bandwidth cost of
+    /// actual dispatch (which requires a wire-format change for
+    /// per-forward delivery IDs — deferred to a follow-up).
     pub fn record_hedge_observation(
         &self,
         model_id: &crate::types::ModelId,
@@ -590,6 +598,37 @@ impl SharedState {
             segment_idx,
             holder: holder.clone(),
         };
+        // Post-hoc dry-run hedge decision: would we have fired a hedge
+        // for this forward if dispatch were wired? Check BEFORE the
+        // observe call so the EWMA reflects the same baseline the
+        // pre-completion decision would have used.
+        let cfg = crate::inference::hedging::HedgeConfig {
+            enabled: true, // always evaluate the would-have-fired branch
+            after_factor: self.config.inference.hedge_after_factor,
+            max_rate: self.config.inference.hedge_max_rate,
+            min_samples: self.config.inference.hedge_min_samples,
+        };
+        if self
+            .metrics
+            .hedge_tracker
+            .should_hedge(&key, latency_ms, cfg)
+        {
+            tracing::info!(
+                model_id = %model_id.0,
+                segment_idx,
+                holder = %holder,
+                latency_ms,
+                p99_estimate = ?self.metrics.hedge_tracker.get(&key).map(|s| s.p99_estimate_ms()),
+                hedge_dispatch_enabled = self.config.inference.hedge_enabled,
+                "DIAG: hedge would have fired (dry-run; dispatch needs wire-format follow-up)"
+            );
+            // Count the decision so operators can compute the would-hedge
+            // rate. record_decision(true, false) increments hedges_fired;
+            // when actual dispatch lands, the winner-flag will be wired.
+            self.metrics.hedge_tracker.record_decision(true, false);
+        } else {
+            self.metrics.hedge_tracker.record_decision(false, false);
+        }
         self.metrics.hedge_tracker.observe(key, latency_ms);
     }
 
