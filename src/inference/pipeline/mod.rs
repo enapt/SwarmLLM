@@ -160,6 +160,116 @@ pub(super) fn build_spec_verify_forward(
     }
 }
 
+/// Propagate a γ-token verify request through every pipeline segment in
+/// order. First segment receives `verify_tokens` encoded as i64 LE bytes
+/// (`8 × verify_tokens.len()` bytes). Intermediate segments receive the
+/// previous segment's `[1, γ, hidden]` activations. The final segment
+/// returns γ+1 logit vectors via `LayerResult.spec_logits`.
+///
+/// Local segments (`peer_id_for_segment[idx] == None`) dispatch directly
+/// to the local `model_process_pool` worker.
+///
+/// Shared by DSD multi-segment spec (`dsd.rs::try_dsd_distributed`)
+/// and SWARM-SPEC L1 n-gram-only spec (`ngram_only_spec.rs`). Extracted
+/// from dsd.rs (R136 Layer 1 multi-segment) so it's available without
+/// the `llama` feature gate.
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn forward_verify_through_segments(
+    shared_state: &Arc<SharedState>,
+    network_tx: &mpsc::Sender<NetworkCommand>,
+    request_id: uuid::Uuid,
+    index_pos: u32,
+    segments: &[crate::types::PipelineSegment],
+    peer_id_for_segment: &[Option<Vec<u8>>],
+    verify_tokens: &[u32],
+    truncate_kv_to: Option<u32>,
+) -> Result<Vec<Vec<f32>>, SwarmError> {
+    let num_segments = segments.len();
+    debug_assert_eq!(num_segments, peer_id_for_segment.len());
+
+    let mut activation_bytes: Vec<u8> = pack_verify_tokens_to_le_bytes(verify_tokens);
+
+    for (idx, segment) in segments.iter().enumerate() {
+        let is_last = idx == num_segments - 1;
+        let target_peer_bytes = &peer_id_for_segment[idx];
+
+        let forward = build_spec_verify_forward(
+            request_id,
+            index_pos,
+            activation_bytes.clone(),
+            segment,
+            shared_state.identity.node_id().0,
+            truncate_kv_to,
+        );
+
+        let result = if let Some(peer_bytes) = target_peer_bytes {
+            let (rx, mut pending_guard) =
+                register_pending_layer_result(&shared_state.pending_layer_results, request_id)?;
+
+            if network_tx
+                .send(NetworkCommand::SendTensor {
+                    target_peer_bytes: peer_bytes.clone(),
+                    forward,
+                })
+                .await
+                .is_err()
+            {
+                shared_state.pending_layer_results.remove(&request_id);
+                return Err(SwarmError::Network(
+                    "fwd_verify_through_segments: send dropped".into(),
+                ));
+            }
+
+            let num_layers = segment.layer_range.1 - segment.layer_range.0;
+            let result = PipelineExecutor::wait_for_result(
+                rx,
+                request_id,
+                idx,
+                &segment.node_id,
+                num_layers,
+                activation_bytes.len(),
+            )
+            .await?;
+            pending_guard.disarm();
+            result
+        } else {
+            shared_state.model_process_pool.forward(forward).await?
+        };
+
+        if let Some(crate::types::NetworkFinishReason::Error(msg)) = &result.finish_reason {
+            return Err(SwarmError::Inference(format!(
+                "spec verify segment {idx}: {msg}"
+            )));
+        }
+
+        if is_last {
+            if result.spec_logits.is_empty() {
+                return Err(SwarmError::Inference(
+                    "spec verify: last segment returned no spec_logits".into(),
+                ));
+            }
+            return Ok(result.spec_logits);
+        }
+
+        // Intermediate: feed hidden state to next segment. SEC: validate
+        // intermediate-to-intermediate shape preservation. The first
+        // segment's input is token IDs (8 bytes/position via
+        // pack_verify_tokens_to_le_bytes) but its OUTPUT is the hidden
+        // state (hidden_dim × bytes_per_elem per position) — those don't
+        // match, so the size check only applies once we've seen at least
+        // one hidden-state activation to compare against.
+        if idx > 0 && result.activations.len() != activation_bytes.len() {
+            return Err(SwarmError::Inference(format!(
+                "spec verify segment {idx} returned wrong activation shape: got {} bytes, expected {}",
+                result.activations.len(),
+                activation_bytes.len()
+            )));
+        }
+        activation_bytes = result.activations;
+    }
+    unreachable!("loop returns on the last segment")
+}
+
 /// Build the `LayerForward` envelope for a stop-sequence KV-truncate
 /// signal sent to a remote segment. Empty activations + no compute,
 /// `truncate_kv_to: Some(truncate_to)` is the only signal — the receiver

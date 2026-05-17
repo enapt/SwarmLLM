@@ -30,7 +30,6 @@
 
 use crate::error::SwarmError;
 use crate::inference::router::{InferenceOutput, StreamingTokenEvent, StreamingTokenTx};
-use crate::types::{LayerForward, NetworkCommand, TensorFormat};
 
 use super::PipelineExecutor;
 
@@ -48,11 +47,17 @@ fn eligible(exec: &PipelineExecutor) -> bool {
     if exec.request.sampling_params.temperature != 0.0 {
         return false;
     }
-    if exec.assignment.segments.len() != 1 {
+    if exec.assignment.segments.is_empty() {
         return false;
     }
+    // Don't take over pure-local pipelines — execute_local handles those.
     let local_node_id = exec.shared_state.identity.node_id();
-    if exec.assignment.segments[0].node_id == *local_node_id {
+    if exec
+        .assignment
+        .segments
+        .iter()
+        .all(|s| s.node_id == *local_node_id)
+    {
         return false;
     }
     if super::fastpath_request_disqualified(exec) {
@@ -100,13 +105,24 @@ impl PipelineExecutor {
 
         let request_id = self.request.id;
         let max_tokens = self.request.sampling_params.max_tokens;
-        let segment = self.assignment.segments[0].clone();
-        let target_peer_bytes = self
-            .shared_state
-            .resolve_peer_id_bytes(&segment.node_id)
-            .ok_or_else(|| {
-                SwarmError::Network(format!("No peer_id_bytes for {}", segment.node_id))
-            })?;
+
+        // Resolve per-segment peer ids upfront (None for local segments).
+        let local_node_id = self.shared_state.identity.node_id().clone();
+        let mut peer_id_for_segment: Vec<Option<Vec<u8>>> =
+            Vec::with_capacity(self.assignment.segments.len());
+        for segment in &self.assignment.segments {
+            if segment.node_id == local_node_id {
+                peer_id_for_segment.push(None);
+                continue;
+            }
+            match self.shared_state.resolve_peer_id_bytes(&segment.node_id) {
+                Some(p) => peer_id_for_segment.push(Some(p)),
+                None => {
+                    tracing::debug!(%request_id, node = %segment.node_id, "ngram-only: missing peer_id_bytes — falling back");
+                    return Ok(None);
+                }
+            }
+        }
 
         // ── Tokenise prompt locally for n-gram lookup ──
         let prompt = self.build_prompt().await;
@@ -116,7 +132,6 @@ impl PipelineExecutor {
         {
             Some(t) => t,
             None => {
-                // Should be unreachable given eligibility; defensive fallthrough.
                 return Ok(None);
             }
         };
@@ -132,69 +147,25 @@ impl PipelineExecutor {
         tracing::info!(
             request_id = %request_id,
             prompt_tokens_local = prompt_tokens.len(),
-            target_peer = %segment.node_id,
+            num_segments = self.assignment.segments.len(),
             "SWARM-SPEC L1 ngram-only: starting"
         );
 
-        // ── Phase 1: prefill (standard forward) ──
+        // ── Phase 1: prefill via standard multi-segment forward ──
+        // Uses existing forward_through_segments which handles N-segment
+        // pipelines + local-vs-remote dispatch + retries.
         let prompt_bytes = prompt.as_bytes().to_vec();
-        let prompt_byte_len = prompt_bytes.len();
-        let num_layers = segment.layer_range.1 - segment.layer_range.0;
-        let (first_token, prompt_token_count, eos_tokens, decoder) = {
-            let (rx, mut prefill_guard) = super::register_pending_layer_result(
-                &self.shared_state.pending_layer_results,
-                request_id,
-            )?;
-            let forward = LayerForward {
-                request_id,
-                sequence_num: 0,
-                index_pos: 0,
-                activations: prompt_bytes,
-                format: TensorFormat::FP32,
-                model_id: self.request.model_id.clone(),
-                layer_range: segment.layer_range,
-                tp_meta: None,
-                vision_embeddings: None,
-                sender_peer_bytes: None,
-                requester_node_id: Some(self.shared_state.identity.node_id().0),
-                pre_embedded: false,
-                generated_ids: Vec::new(),
-                adapter_id: None,
-                draft_tokens: Vec::new(),
-                spec_logits_requested: false,
-                truncate_kv_to: None,
-            };
-            if self
-                .network_tx
-                .send(NetworkCommand::SendTensor {
-                    target_peer_bytes: target_peer_bytes.clone(),
-                    forward,
-                })
-                .await
-                .is_err()
-            {
-                return Err(SwarmError::Network("ngram-only prefill send failed".into()));
-            }
-            let prefill_result = Self::wait_for_result(
-                rx,
-                request_id,
-                0,
-                &segment.node_id,
-                num_layers,
-                prompt_byte_len,
-            )
+        let prefill_result = self
+            .forward_through_segments(request_id, 0, 0, prompt_bytes, None, false, &[])
             .await?;
-            prefill_guard.disarm();
-            if prefill_result.token_ids.is_empty() {
-                return Err(SwarmError::Inference(
-                    "ngram-only: prefill returned no tokens".into(),
-                ));
-            }
-            let first_token = prefill_result.token_ids[0];
-            let (ptc, eos, decoder) = self.extract_model_cache(&prompt).await;
-            let eos_set: std::collections::HashSet<u32> = eos.into_iter().collect();
-            (first_token, ptc, eos_set, decoder)
-        };
+        if prefill_result.token_ids.is_empty() {
+            return Err(SwarmError::Inference(
+                "ngram-only: prefill returned no tokens".into(),
+            ));
+        }
+        let first_token = prefill_result.token_ids[0];
+        let (prompt_token_count, eos_tokens, decoder) = self.extract_model_cache(&prompt).await;
+        let eos_tokens: std::collections::HashSet<u32> = eos_tokens.into_iter().collect();
 
         // ── Phase 2: decode loop ──
         let mut generated: Vec<u32> = vec![first_token];
@@ -242,13 +213,13 @@ impl PipelineExecutor {
                 // ── Fallback: single-token verify (γ=0 batch = 1 position) ──
                 fallback_rounds += 1;
                 let verify_tokens = vec![last_token];
-                let spec_logits = super::speculative::send_verify_batch(
+                let spec_logits = super::forward_verify_through_segments(
                     &self.shared_state,
                     &self.network_tx,
                     request_id,
                     current_pos as u32,
-                    &segment,
-                    &target_peer_bytes,
+                    &self.assignment.segments,
+                    &peer_id_for_segment,
                     &verify_tokens,
                     None,
                 )
@@ -284,13 +255,13 @@ impl PipelineExecutor {
             verify_tokens.push(last_token);
             verify_tokens.extend_from_slice(&drafts);
 
-            let spec_logits = super::speculative::send_verify_batch(
+            let spec_logits = super::forward_verify_through_segments(
                 &self.shared_state,
                 &self.network_tx,
                 request_id,
                 current_pos as u32,
-                &segment,
-                &target_peer_bytes,
+                &self.assignment.segments,
+                &peer_id_for_segment,
                 &verify_tokens,
                 None,
             )
