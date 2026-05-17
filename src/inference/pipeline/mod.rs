@@ -215,6 +215,12 @@ pub(super) async fn forward_verify_through_segments(
                 .await
                 .is_err()
             {
+                // Disarm BEFORE the inline remove so the guard's Drop
+                // doesn't double-remove on return (the guard would
+                // otherwise fire its own remove when this stack frame
+                // unwinds). Exposed by L2 hedging which doubles the
+                // call rate through this function.
+                pending_guard.disarm();
                 shared_state.pending_layer_results.remove(&request_id);
                 return Err(SwarmError::Network(
                     "fwd_verify_through_segments: send dropped".into(),

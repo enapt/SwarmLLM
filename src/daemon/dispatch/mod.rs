@@ -303,12 +303,17 @@ pub(crate) async fn dispatch_network_messages(
                                                 );
                                             }
                                         } else {
-                                            tracing::warn!(
+                                            // Hedge losers (R136 L2) and genuine timeouts both
+                                            // arrive here. Hedge-loser is normal operation under
+                                            // hedge_enabled, so debug-level — the rare genuine
+                                            // timeout case loses some signal but operators can
+                                            // still see it via -v.
+                                            tracing::debug!(
                                                 request_id = %result.request_id,
                                                 tokens = result.token_ids.len(),
                                                 finish = ?result.finish_reason,
                                                 pending_count = shared_state.pending_layer_results.len(),
-                                                "DIAG: No pending channel for LayerResult — already timed out or duplicate"
+                                                "DIAG: No pending channel for LayerResult — timed out, duplicate, or hedge loser"
                                             );
                                         }
                                     }

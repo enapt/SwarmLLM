@@ -220,9 +220,14 @@ where
                 if let Some((_, tx)) = shared_state.pending_layer_results.remove(&rid) {
                     let _ = tx.send(result);
                 } else {
-                    tracing::debug!(
+                    // Common after R136 L2 hedging — when a hedge race
+                    // resolves, the loser's response arrives here with no
+                    // pending oneshot (the guard drop already evicted the
+                    // map entry). Trace-level so it doesn't pollute -v / -vv
+                    // logs with what is normal operation.
+                    tracing::trace!(
                         %rid,
-                        "pipeline stream reader: no pending oneshot (late result?)"
+                        "pipeline stream reader: no pending oneshot (late result or hedge loser)"
                     );
                 }
             }

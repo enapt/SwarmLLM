@@ -603,7 +603,7 @@ fn default_hedge_max_rate() -> f32 {
 }
 
 fn default_hedge_min_samples() -> u32 {
-    5
+    20
 }
 
 fn default_prefetch_min_idle_ms() -> u64 {

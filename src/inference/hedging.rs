@@ -237,8 +237,14 @@ pub struct HedgeConfig {
     /// Prevents runaway duplicate traffic when the network is in a
     /// degraded state (every request would exceed threshold).
     pub max_rate: f32,
-    /// Minimum samples before we trust the EWMA enough to hedge against
-    /// it. Default 5 — variance estimate stabilises by then.
+    /// Minimum samples before we trust the EWMA enough to hedge
+    /// against it. Default 20 — at α=0.2 the variance EWMA reaches
+    /// ~90% of its true value by sample 20; below that the variance
+    /// estimate severely undershoots and p99_estimate_ms() collapses
+    /// to roughly the mean, causing hedge to fire on any +50%
+    /// latency spike during the warm-up window (violating the
+    /// max_rate budget guarantee). Was 5 in the initial scaffolding;
+    /// bumped to 20 after the L2 review found warm-up over-firing.
     pub min_samples: u32,
 }
 
@@ -248,7 +254,7 @@ impl Default for HedgeConfig {
             enabled: false,
             after_factor: 1.5,
             max_rate: 0.05,
-            min_samples: 5,
+            min_samples: 20,
         }
     }
 }
@@ -335,7 +341,7 @@ mod tests {
     fn should_hedge_below_min_samples_returns_false() {
         let t = HedgeTracker::new();
         let k = key(2);
-        // Only 2 samples — below default min_samples=5.
+        // Only 2 samples — below default min_samples=20.
         t.observe(k.clone(), 100.0);
         t.observe(k.clone(), 100.0);
         let cfg = HedgeConfig {
@@ -349,7 +355,9 @@ mod tests {
     fn should_hedge_fires_when_elapsed_exceeds_factor_times_p99() {
         let t = HedgeTracker::new();
         let k = key(3);
-        for _ in 0..10 {
+        // Default min_samples is 20 (bumped from 5 after L2 review).
+        // Feed enough observations to clear the gate.
+        for _ in 0..25 {
             t.observe(k.clone(), 100.0);
         }
         let cfg = HedgeConfig {
@@ -367,7 +375,7 @@ mod tests {
     fn should_hedge_respects_max_rate_budget() {
         let t = HedgeTracker::new();
         let k = key(4);
-        for _ in 0..10 {
+        for _ in 0..25 {
             t.observe(k.clone(), 100.0);
         }
         let cfg = HedgeConfig {
