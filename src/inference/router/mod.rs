@@ -950,6 +950,53 @@ impl InferenceRouter {
                         }
                     }
                 }
+                // SWARM-SPEC Layer 3 dispatch: query the orchestrator
+                // for top-K candidates. When prefetch_enabled is on AND
+                // history is sufficient AND idle window has elapsed,
+                // returns Vec<u32> of predicted first-tokens. We
+                // record_dispatch immediately (counter for throttling)
+                // and emit an ActivityEvent so the dashboard surfaces
+                // the decision. Actual K-layer activation prefetch is
+                // workload-dependent and deferred to a model-size /
+                // hardware specific follow-up — for small models on
+                // fast hardware the prefill saving is in the noise.
+                let prefetch_cfg = crate::inference::prefetch::PrefetchConfig {
+                    enabled: shared_state.config.inference.prefetch_enabled,
+                    min_idle_ms: shared_state.config.inference.prefetch_min_idle_ms,
+                    min_turns_for_prediction: shared_state
+                        .config
+                        .inference
+                        .prefetch_min_turns_for_prediction,
+                    max_candidates: shared_state.config.inference.prefetch_max_candidates as usize,
+                    ..Default::default()
+                };
+                let candidates = shared_state.metrics.prefetch_orchestrator.should_prefetch(
+                    session_id,
+                    now_ms,
+                    prefetch_cfg,
+                );
+                if !candidates.is_empty() {
+                    shared_state.metrics.prefetch_orchestrator.record_dispatch();
+                    tracing::info!(
+                        session_id = %session_id,
+                        model_id = %request.model_id,
+                        candidate_count = candidates.len(),
+                        first_candidates = ?&candidates[..candidates.len().min(3)],
+                        "SWARM-SPEC L3: prefetch would fire — observability-only (K-layer compute deferred)"
+                    );
+                    shared_state.emit_activity(
+                        crate::daemon::state::ActivityEvent::new(
+                            "system",
+                            "prefetch_decision",
+                            format!(
+                                "Predictive prefetch: {} candidate(s) for session {}",
+                                candidates.len(),
+                                &session_id[..session_id.len().min(8)]
+                            ),
+                        )
+                        .with_model(request.model_id.0.clone()),
+                    );
+                }
             }
 
             // Disarm the guard — normal completion does the same work below.
