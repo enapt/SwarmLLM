@@ -62,6 +62,16 @@ impl PipelineExecutor {
         if let Some(out) = self.try_speculative_distributed(token_tx.clone()).await? {
             return Ok(out);
         }
+        // SWARM-SPEC Layer 1 (R136): n-gram-only spec path, no draft
+        // model required. Tokenises locally via gguf_header.bin; uses
+        // n-gram lookup for drafts and falls back to single-token
+        // forwards on miss. Only fires when ngram_lookup_enabled is on
+        // AND draft_model_path is NOT set (the draft-configured case
+        // is handled by try_speculative_distributed above which
+        // already cascades through n-gram first).
+        if let Some(out) = self.try_ngram_only_distributed(token_tx.clone()).await? {
+            return Ok(out);
+        }
 
         // Read GGUF header ONCE and cache for both prompt building and stop strings
         let header_data: Option<(Option<String>, String, String)> = {

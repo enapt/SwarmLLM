@@ -120,6 +120,16 @@ pub struct SharedState {
     pub encrypted_pipeline_models: DashMap<crate::types::ModelId, bool>,
     pub local_embedders:
         DashMap<crate::types::ModelId, Arc<crate::inference::local_embedder::LocalEmbedder>>,
+    /// R136 Layer 1 / Layer 3 follow-on: lightweight tokenizer cache
+    /// keyed by ModelId. Lazily populated from the model's
+    /// `gguf_header.bin` (no shard files needed). Unlocks coordinator-
+    /// side tokenization without loading the full model — required for:
+    /// (1) n-gram-only spec path (no draft model needed), (2) Layer 3
+    /// first-token observation. Loaded on first request per model that
+    /// needs it; cached for subsequent reuse. Sized: typically a few
+    /// hundred KB per model (vocab + merges).
+    pub standalone_tokenizers:
+        DashMap<crate::types::ModelId, Arc<crate::inference::split::SplitTokenizer>>,
     pub adapter_registry: Arc<crate::model::lora::AdapterRegistry>,
     pub model_process_pool: Arc<crate::inference::process_pool::ModelProcessPool>,
     // Network & crypto
@@ -454,6 +464,7 @@ impl SharedState {
                 map
             },
             local_embedders: DashMap::new(),
+            standalone_tokenizers: DashMap::new(),
             pending_vision_results: DashMap::new(),
             pending_tp_partials: DashMap::new(),
             allreduce_registry: Arc::new(crate::inference::allreduce::AllReduceRegistry::new()),
@@ -570,6 +581,47 @@ impl SharedState {
         // EMA: new = α·sample + (1−α)·old. Use get/set via deref to avoid entry API lock-in.
         const ALPHA: f32 = 0.3;
         *entry = ALPHA * sample + (1.0 - ALPHA) * (*entry);
+    }
+
+    /// R136 Layer 1 / Layer 3 follow-on: get or lazy-load a standalone
+    /// tokenizer for `model_id` from the local `gguf_header.bin`.
+    /// Returns `None` when the header file isn't on disk (either the
+    /// model hasn't been registered locally OR auto-manage's catalog
+    /// has the manifest but no header yet). Read-side is lock-free
+    /// (DashMap shard); load happens at most once per model.
+    pub fn standalone_tokenizer(
+        &self,
+        model_id: &crate::types::ModelId,
+    ) -> Option<Arc<crate::inference::split::SplitTokenizer>> {
+        if let Some(t) = self.standalone_tokenizers.get(model_id) {
+            return Some(t.value().clone());
+        }
+        let header_path = self
+            .model_dir(&model_id.0)
+            .join(crate::model::shard::HEADER_FILENAME);
+        if !header_path.exists() {
+            return None;
+        }
+        let meta = match crate::inference::split::GgufTokenizerMeta::from_gguf_file(&header_path) {
+            Ok(m) => m,
+            Err(e) => {
+                tracing::debug!(
+                    model_id = %model_id.0,
+                    error = %e,
+                    "standalone_tokenizer: failed to read gguf header"
+                );
+                return None;
+            }
+        };
+        let tokenizer = meta.build_tokenizer()?;
+        let arc = Arc::new(tokenizer);
+        self.standalone_tokenizers
+            .insert(model_id.clone(), arc.clone());
+        tracing::info!(
+            model_id = %model_id.0,
+            "standalone_tokenizer: loaded from gguf_header.bin"
+        );
+        Some(arc)
     }
 
     /// SWARM-SPEC Layer 2: record a successful forward observation

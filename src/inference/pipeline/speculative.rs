@@ -559,7 +559,7 @@ impl PipelineExecutor {
 // ─── Network helper ────────────────────────────────────────────────────────
 
 #[allow(clippy::too_many_arguments)]
-async fn send_verify_batch(
+pub(super) async fn send_verify_batch(
     shared_state: &Arc<SharedState>,
     network_tx: &mpsc::Sender<NetworkCommand>,
     request_id: uuid::Uuid,
@@ -623,7 +623,7 @@ async fn send_verify_batch(
     Ok(result.spec_logits)
 }
 
-fn argmax(logits: &[f32]) -> u32 {
+pub(super) fn argmax(logits: &[f32]) -> u32 {
     let mut best_idx: usize = 0;
     let mut best_val = f32::NEG_INFINITY;
     for (i, &v) in logits.iter().enumerate() {

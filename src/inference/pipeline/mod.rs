@@ -8,6 +8,7 @@
 mod distributed;
 mod dsd;
 mod local;
+mod ngram_only_spec;
 mod prompt;
 mod remote_generate;
 mod speculative;
