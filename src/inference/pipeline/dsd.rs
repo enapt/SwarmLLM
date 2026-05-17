@@ -53,7 +53,9 @@ use crate::types::{NetworkCommand, NetworkFinishReason};
 use tokio::sync::mpsc;
 
 #[cfg(feature = "llama")]
-use super::speculative::{draft_next_gamma, draft_prefill, draft_sync_after_round};
+use super::speculative::{
+    draft_next_gamma, draft_prefill, draft_sync_after_round, draft_sync_tokens, ngram_lookup_drafts,
+};
 use super::PipelineExecutor;
 #[cfg(feature = "llama")]
 #[cfg(feature = "llama")]
@@ -223,16 +225,49 @@ impl PipelineExecutor {
             let remaining = max_tokens - generated.len() as u32;
             let gamma = controller.current_gamma().min(remaining).max(1);
 
-            // Draft phase — sync, llama-cpp.
-            let draft_outcome = tokio::task::block_in_place(|| {
-                draft_next_gamma(&mut draft_state, &mut draft, last_token, gamma)
-            });
-            let drafts = match draft_outcome {
-                Ok(d) => d,
-                Err(e) => {
-                    tracing::warn!(%request_id, error = %e, "DSD: draft step failed");
-                    finish_reason = "stop".to_string();
-                    break;
+            // SWARM-SPEC Layer 1 cascade (same pattern as single-segment
+            // speculative.rs): try n-gram lookup first; on miss fall back
+            // to the draft model. On hit, still sync draft KV via
+            // draft_sync_tokens so subsequent rounds remain consistent.
+            let ngram_drafts = ngram_lookup_drafts(
+                &self.shared_state.config.inference,
+                &draft_state.prompt_tokens,
+                &generated,
+                gamma,
+            );
+            let drafts = if !ngram_drafts.is_empty() {
+                let sync_outcome = tokio::task::block_in_place(|| {
+                    draft_sync_tokens(&mut draft_state, &mut draft, last_token, &ngram_drafts)
+                });
+                match sync_outcome {
+                    Ok(()) => ngram_drafts,
+                    Err(e) => {
+                        tracing::warn!(%request_id, error = %e, "DSD: ngram-sync failed — falling back to draft sample");
+                        let draft_outcome = tokio::task::block_in_place(|| {
+                            draft_next_gamma(&mut draft_state, &mut draft, last_token, gamma)
+                        });
+                        match draft_outcome {
+                            Ok(d) => d,
+                            Err(e2) => {
+                                tracing::warn!(%request_id, error = %e2, "DSD: draft step failed");
+                                finish_reason = "stop".to_string();
+                                break;
+                            }
+                        }
+                    }
+                }
+            } else {
+                // Draft phase — sync, llama-cpp.
+                let draft_outcome = tokio::task::block_in_place(|| {
+                    draft_next_gamma(&mut draft_state, &mut draft, last_token, gamma)
+                });
+                match draft_outcome {
+                    Ok(d) => d,
+                    Err(e) => {
+                        tracing::warn!(%request_id, error = %e, "DSD: draft step failed");
+                        finish_reason = "stop".to_string();
+                        break;
+                    }
                 }
             };
             if drafts.is_empty() {

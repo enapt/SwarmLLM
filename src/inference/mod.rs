@@ -8,6 +8,7 @@ pub(crate) mod layers;
 pub mod local_embedder;
 pub(crate) mod model_arch;
 pub mod model_worker;
+pub mod ngram_lookup;
 pub mod pipeline;
 pub mod process_pool;
 pub mod quant;

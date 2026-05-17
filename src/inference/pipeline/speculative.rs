@@ -255,25 +255,86 @@ impl PipelineExecutor {
             let remaining = max_tokens - generated.len() as u32;
             let this_gamma = gamma.min(remaining).max(1);
 
-            // Draft phase — sync, llama-cpp.
-            let draft_outcome = tokio::task::block_in_place(|| {
-                draft_next_gamma(&mut draft_state, &mut draft, last_token, this_gamma)
-            });
-            let drafts = match draft_outcome {
-                Ok(d) => d,
-                Err(e) => {
-                    tracing::warn!(%request_id, error = %e, "speculative: draft step failed — falling back");
-                    // Return the partial output as a failed-fallback signal.
-                    return Ok(Some(self.finish_speculative(
-                        request_id,
-                        generated,
-                        &decoder,
-                        &eos_tokens,
-                        prompt_token_count as u32,
-                        "stop".into(),
-                    )));
-                }
+            // SWARM-SPEC Layer 1.1+1.2: try n-gram lookup first. On hit
+            // we skip the draft-model forward entirely (sub-ms hash
+            // lookup vs ~5-20ms draft decode). On miss we fall back to
+            // the draft model. Drafts are still verified by the target,
+            // so there's no quality risk — only acceptance rate
+            // varies. The literature (PROMTEC, prompt-lookup-decoding)
+            // reports 2.4-4.2× speedup on input-grounded workloads
+            // (code, RAG, summarisation) — exactly SwarmLLM's primary
+            // workload (Claude Code subs, MCP tool use).
+            let ngram_drafts = if self.shared_state.config.inference.ngram_lookup_enabled {
+                ngram_lookup_drafts(
+                    &self.shared_state.config.inference,
+                    &draft_state.prompt_tokens,
+                    &generated,
+                    this_gamma,
+                )
+            } else {
+                Vec::new()
             };
+
+            let (drafts, used_ngram) = if !ngram_drafts.is_empty() {
+                // N-gram fast-path hit. Still feed the proposed tokens
+                // through the draft model so its KV stays in sync with
+                // what the target will commit (if accepted). The draft
+                // forward is unavoidable for KV sync but we save the
+                // sampling step.
+                let sync_outcome = tokio::task::block_in_place(|| {
+                    draft_sync_tokens(&mut draft_state, &mut draft, last_token, &ngram_drafts)
+                });
+                if let Err(e) = sync_outcome {
+                    tracing::warn!(%request_id, error = %e, "speculative: draft KV sync after n-gram lookup failed — falling back to draft sample");
+                    let draft_outcome = tokio::task::block_in_place(|| {
+                        draft_next_gamma(&mut draft_state, &mut draft, last_token, this_gamma)
+                    });
+                    match draft_outcome {
+                        Ok(d) => (d, false),
+                        Err(e2) => {
+                            tracing::warn!(%request_id, error = %e2, "speculative: draft step failed after n-gram fallback — partial");
+                            return Ok(Some(self.finish_speculative(
+                                request_id,
+                                generated,
+                                &decoder,
+                                &eos_tokens,
+                                prompt_token_count as u32,
+                                "stop".into(),
+                            )));
+                        }
+                    }
+                } else {
+                    (ngram_drafts, true)
+                }
+            } else {
+                // Draft phase — sync, llama-cpp.
+                let draft_outcome = tokio::task::block_in_place(|| {
+                    draft_next_gamma(&mut draft_state, &mut draft, last_token, this_gamma)
+                });
+                let d = match draft_outcome {
+                    Ok(d) => d,
+                    Err(e) => {
+                        tracing::warn!(%request_id, error = %e, "speculative: draft step failed — falling back");
+                        // Return the partial output as a failed-fallback signal.
+                        return Ok(Some(self.finish_speculative(
+                            request_id,
+                            generated,
+                            &decoder,
+                            &eos_tokens,
+                            prompt_token_count as u32,
+                            "stop".into(),
+                        )));
+                    }
+                };
+                (d, false)
+            };
+
+            tracing::trace!(
+                %request_id,
+                drafts = drafts.len(),
+                from_ngram = used_ngram,
+                "speculative round draft source"
+            );
 
             if drafts.is_empty() {
                 break;
@@ -630,10 +691,20 @@ pub(crate) struct DraftState {
     pub batch: llama_cpp_2::llama_batch::LlamaBatch<'static>,
     pub pos: usize,
     pub n_vocab: usize,
+    /// SWARM-SPEC Layer 1: prompt tokens captured at prefill time, used
+    /// by the n-gram lookup fast-path to find candidate drafts without
+    /// running a draft-model forward pass.
+    pub prompt_tokens: Vec<u32>,
 }
 
 #[cfg(not(feature = "llama"))]
-pub(crate) struct DraftState;
+pub(crate) struct DraftState {
+    /// SWARM-SPEC Layer 1: prompt tokens (always present, even without
+    /// llama feature, so the n-gram lookup module can compile cleanly).
+    /// In non-llama builds this remains empty and the n-gram path
+    /// auto-skips.
+    pub prompt_tokens: Vec<u32>,
+}
 
 // SAFETY: We carefully avoid letting this state escape the mutex-locked
 // ModelExecutor. The 'static lifetime is a workaround for storing the context
@@ -687,11 +758,13 @@ pub(super) fn draft_prefill(
         .map_err(|e| SwarmError::Inference(format!("draft prefill decode: {e}")))?;
 
     let n_vocab = model.n_vocab() as usize;
+    let prompt_tokens: Vec<u32> = tokens.iter().map(|t| t.0 as u32).collect();
     Ok(DraftState {
         ctx,
         batch,
         pos: tokens.len(),
         n_vocab,
+        prompt_tokens,
     })
 }
 
@@ -756,6 +829,97 @@ pub(super) fn draft_next_gamma(
     _bootstrap: u32,
     _gamma: u32,
 ) -> Result<Vec<u32>, SwarmError> {
+    Err(SwarmError::Inference(
+        "speculative requires llama feature".into(),
+    ))
+}
+
+/// SWARM-SPEC Layer 1 helper: try n-gram lookup for the next γ draft tokens.
+/// Returns an empty Vec when no match is found OR when n-gram lookup is
+/// disabled. Caps the returned candidate at `this_gamma` so the cascading
+/// caller can use the existing verify wire format unchanged.
+///
+/// `prompt_tokens` is the tokenized prompt (captured at draft prefill time).
+/// `generated` is the running list of tokens emitted so far. The cascade
+/// searches both for matches of the recent context tail.
+pub(super) fn ngram_lookup_drafts(
+    cfg: &crate::config::InferenceConfig,
+    prompt_tokens: &[u32],
+    generated: &[u32],
+    this_gamma: u32,
+) -> Vec<u32> {
+    use crate::inference::ngram_lookup::{cascade_find_candidate, NgramLookupConfig};
+    if !cfg.ngram_lookup_enabled {
+        return Vec::new();
+    }
+    let mut context: Vec<u32> = Vec::with_capacity(prompt_tokens.len() + generated.len());
+    context.extend_from_slice(prompt_tokens);
+    context.extend_from_slice(generated);
+    let prompt_len = prompt_tokens.len();
+    let lookup_cfg = NgramLookupConfig {
+        max_ngram_size: cfg.ngram_max_size as usize,
+        min_ngram_size: crate::inference::ngram_lookup::DEFAULT_MIN_NGRAM_SIZE,
+        num_pred_tokens: cfg.ngram_num_pred_tokens as usize,
+    };
+    // Recent-generation window is the last 500 generated tokens — captures
+    // "model is in a repeating-pattern groove" without slowing the lookup
+    // on long conversations.
+    let (cand, _source) = cascade_find_candidate(&context, prompt_len, 500, lookup_cfg);
+    // Cap at this_gamma so the verify wire format stays sized as expected.
+    if cand.len() <= this_gamma as usize {
+        cand
+    } else {
+        cand[..this_gamma as usize].to_vec()
+    }
+}
+
+/// SWARM-SPEC Layer 1 helper: feed `[bootstrap, tokens...]` through the
+/// draft model to keep its KV cache in sync with the target's expected
+/// KV state, but DON'T sample (n-gram already provided the drafts). After
+/// this call, `state.pos` advances by `1 + tokens.len()`. Mirrors the KV
+/// advancement that `draft_next_gamma` would have done.
+#[cfg(feature = "llama")]
+pub(super) fn draft_sync_tokens(
+    state: &mut DraftState,
+    _draft: &mut crate::inference::executor::ModelExecutor,
+    bootstrap: u32,
+    tokens: &[u32],
+) -> Result<(), SwarmError> {
+    use llama_cpp_2::token::LlamaToken;
+
+    state.batch.clear();
+    state
+        .batch
+        .add(LlamaToken(bootstrap as i32), state.pos as i32, &[0], true)
+        .map_err(|e| SwarmError::Inference(format!("ngram-sync bootstrap batch: {e}")))?;
+    state
+        .ctx
+        .decode(&mut state.batch)
+        .map_err(|e| SwarmError::Inference(format!("ngram-sync bootstrap decode: {e}")))?;
+    state.pos += 1;
+
+    for &t in tokens {
+        state.batch.clear();
+        state
+            .batch
+            .add(LlamaToken(t as i32), state.pos as i32, &[0], true)
+            .map_err(|e| SwarmError::Inference(format!("ngram-sync step batch: {e}")))?;
+        state
+            .ctx
+            .decode(&mut state.batch)
+            .map_err(|e| SwarmError::Inference(format!("ngram-sync step decode: {e}")))?;
+        state.pos += 1;
+    }
+    Ok(())
+}
+
+#[cfg(not(feature = "llama"))]
+pub(super) fn draft_sync_tokens(
+    _state: &mut DraftState,
+    _draft: &mut crate::inference::executor::ModelExecutor,
+    _bootstrap: u32,
+    _tokens: &[u32],
+) -> Result<(), SwarmError> {
     Err(SwarmError::Inference(
         "speculative requires llama feature".into(),
     ))

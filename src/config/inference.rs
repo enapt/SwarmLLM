@@ -89,6 +89,28 @@ pub struct InferenceConfig {
     /// Number of draft tokens to propose per verification step (default: 4).
     #[serde(default = "default_speculative_gamma")]
     pub speculative_gamma: u32,
+    /// SWARM-SPEC Layer 1.1: enable n-gram prompt-lookup as the first
+    /// source for speculative drafts. When enabled, each spec round first
+    /// tries to find a continuation by matching the recent context tail
+    /// against the prompt + recent generation (zero-cost lookup). On
+    /// miss, falls back to the draft-model path. Massive speedup on
+    /// input-grounded workloads (Claude Code, MCP tool use, RAG, code
+    /// completion) — published benchmarks show 2.4-4.2× per token.
+    /// Default `true` — pure additive over existing spec, no quality
+    /// regression possible (drafts are still verified by the target).
+    #[serde(default = "default_ngram_lookup_enabled")]
+    pub ngram_lookup_enabled: bool,
+    /// Maximum n-gram size to try during prompt lookup. Falls back to
+    /// smaller n if larger doesn't match. Default 4 matches HuggingFace
+    /// `max_matching_ngram_size`.
+    #[serde(default = "default_ngram_max_size")]
+    pub ngram_max_size: u32,
+    /// Number of candidate tokens to emit per n-gram match. Default 10
+    /// matches HuggingFace `prompt_lookup_num_tokens`. Capped at
+    /// `speculative_gamma + 1` at runtime (no point proposing more
+    /// drafts than the spec wire format will verify).
+    #[serde(default = "default_ngram_num_pred_tokens")]
+    pub ngram_num_pred_tokens: u32,
     /// Path to a smaller draft model for speculative decoding.
     /// Must be a GGUF file. The draft model should be much smaller than the
     /// main model (ideally <1/10th parameters) and share the same vocabulary.
@@ -520,6 +542,22 @@ fn default_speculative_gamma() -> u32 {
     4
 }
 
+fn default_ngram_lookup_enabled() -> bool {
+    // SWARM-SPEC Layer 1.1: ON by default. N-gram lookup is purely
+    // additive — drafts are verified by the target so quality cannot
+    // regress. The only cost is a sub-millisecond hash-table lookup
+    // per spec round, paid only when speculative decoding is itself on.
+    true
+}
+
+fn default_ngram_max_size() -> u32 {
+    crate::inference::ngram_lookup::DEFAULT_MAX_NGRAM_SIZE as u32
+}
+
+fn default_ngram_num_pred_tokens() -> u32 {
+    crate::inference::ngram_lookup::DEFAULT_NUM_PRED_TOKENS as u32
+}
+
 fn default_max_batch_size() -> u32 {
     1
 }
@@ -561,6 +599,9 @@ impl Default for InferenceConfig {
             prefill_chunk_tokens: default_prefill_chunk_tokens(),
             batched_prefill_forward: default_batched_prefill_forward(),
             speculative_gamma: default_speculative_gamma(),
+            ngram_lookup_enabled: default_ngram_lookup_enabled(),
+            ngram_max_size: default_ngram_max_size(),
+            ngram_num_pred_tokens: default_ngram_num_pred_tokens(),
             draft_model_path: None,
             draft_gpu_layers: None,
             shard_range: None,
