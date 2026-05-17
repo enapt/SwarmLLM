@@ -108,6 +108,24 @@ pub struct InferenceConfig {
     /// Minimum samples before EWMA is trusted. Default 5.
     #[serde(default = "default_hedge_min_samples")]
     pub hedge_min_samples: u32,
+    /// SWARM-SPEC Layer 3: enable conversation-level predictive
+    /// prefetch — use peer idle time between user turns to
+    /// pre-compute activations for likely next-message first tokens.
+    /// Cuts TTFT by ~50-200 ms on multi-turn chat workloads.
+    /// Default `false` until full prefetch dispatch is wired (this
+    /// commit ships the decision logic + per-session history learner).
+    #[serde(default)]
+    pub prefetch_enabled: bool,
+    /// Minimum idle ms before prefetch fires. Default 2000.
+    #[serde(default = "default_prefetch_min_idle_ms")]
+    pub prefetch_min_idle_ms: u64,
+    /// Minimum user turns of history before prediction is trusted.
+    /// Default 2.
+    #[serde(default = "default_prefetch_min_turns")]
+    pub prefetch_min_turns_for_prediction: u32,
+    /// Max prefetch candidates per cycle. Default 3.
+    #[serde(default = "default_prefetch_max_candidates")]
+    pub prefetch_max_candidates: u32,
     /// SWARM-SPEC Layer 1.1: enable n-gram prompt-lookup as the first
     /// source for speculative drafts. When enabled, each spec round first
     /// tries to find a continuation by matching the recent context tail
@@ -588,6 +606,18 @@ fn default_hedge_min_samples() -> u32 {
     5
 }
 
+fn default_prefetch_min_idle_ms() -> u64 {
+    2_000
+}
+
+fn default_prefetch_min_turns() -> u32 {
+    2
+}
+
+fn default_prefetch_max_candidates() -> u32 {
+    3
+}
+
 fn default_ngram_lookup_enabled() -> bool {
     // SWARM-SPEC Layer 1.1: ON by default. N-gram lookup is purely
     // additive — drafts are verified by the target so quality cannot
@@ -649,6 +679,10 @@ impl Default for InferenceConfig {
             hedge_after_factor: default_hedge_after_factor(),
             hedge_max_rate: default_hedge_max_rate(),
             hedge_min_samples: default_hedge_min_samples(),
+            prefetch_enabled: false,
+            prefetch_min_idle_ms: default_prefetch_min_idle_ms(),
+            prefetch_min_turns_for_prediction: default_prefetch_min_turns(),
+            prefetch_max_candidates: default_prefetch_max_candidates(),
             ngram_lookup_enabled: default_ngram_lookup_enabled(),
             ngram_max_size: default_ngram_max_size(),
             ngram_num_pred_tokens: default_ngram_num_pred_tokens(),

@@ -302,6 +302,9 @@ impl SharedState {
                 peer_segment_latency_ms_per_layer: DashMap::new(),
                 swarm_capacity: arc_swap::ArcSwap::from_pointee(SwarmCapacity::default()),
                 hedge_tracker: Arc::new(crate::inference::hedging::HedgeTracker::new()),
+                prefetch_orchestrator: Arc::new(
+                    crate::inference::prefetch::PrefetchOrchestrator::new(),
+                ),
             },
             credits: CreditPool {
                 credit_balance: Arc::new(RwLock::new(crate::types::CreditBalance {

@@ -70,6 +70,14 @@ pub struct MetricsProviders {
     /// Always present; `hedge_enabled` config flag gates whether the
     /// decision actually fires a hedge.
     pub hedge_tracker: Arc<crate::inference::hedging::HedgeTracker>,
+    /// SWARM-SPEC Layer 3: conversation-level prefetch orchestrator.
+    /// Tracks per-session first-token histograms + idle time; emits
+    /// candidate first-tokens to prefetch when the predicted next
+    /// request becomes likely. The decision-and-history surface lives
+    /// here; the actual prefetch dispatch (running activations
+    /// forward, gossiping warming) is a follow-up integration point
+    /// per docs/FUTURE_WORK.md § R136 Layer 3.
+    pub prefetch_orchestrator: crate::inference::prefetch::PrefetchHandle,
 }
 
 /// Atomic counters for a single mpsc channel.

@@ -11,6 +11,7 @@ pub(crate) mod model_arch;
 pub mod model_worker;
 pub mod ngram_lookup;
 pub mod pipeline;
+pub mod prefetch;
 pub mod process_pool;
 pub mod quant;
 pub mod router;
