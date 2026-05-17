@@ -915,22 +915,53 @@ no inter-segment wire to compress. On distributed multi-segment
 inference (the real Q8_0 use case), the synthetic bench predicts
 1.5–1.7× speedup proportional to bandwidth-bound hop time.
 
-### Distributed-only methodology (deferred — requires careful disable)
+### Distributed-pipeline measurement (run completed)
 
-To measure Q8_0's full impact on multi-segment pipelines, the test
-needs:
-1. Auto-manage disabled on every node (`auto_manage.enabled = false`)
-   so missing shards aren't auto-downloaded
-2. Sharded placement: A has only `manifest.json + gguf_header.bin`,
-   B has `shard_000.bin`, C has `shard_001.bin`
-3. Restart cluster, verify A reports zero local shards
-4. Run same benchmark against A's API; scheduler will pipeline B → C
+Forced 2-segment pipeline (A=manifest only, B=shard_000,
+C=shard_001, all with `auto_manage.enabled = false` to preserve
+sharded state past startup). Every request from A's API forces
+B → C activation forwards. Same workload set as the single-node
+baseline above.
 
-Methodology scripts live at `/tmp/swarm_3node_setup.sh` and
-`/tmp/swarm_3node_sharded.sh`; the latter sets up sharded
-placement but the running daemon's auto-manage downloaded the
-missing shards within 12s of startup. Disabling auto-manage in the
-per-node config preserves the sharded state for the bench window.
+```
+                  Q8_0 ON (loopback)   Q8_0 OFF (loopback)   Δ
+code-completion   4.0 tok/s            3.5 tok/s             ON +14%
+summarisation     2.75 tok/s           2.9 tok/s             OFF +5%
+free-form chat    4.5 tok/s            4.8 tok/s             OFF +7%
+```
+
+(Medians of full-length trials. Several trials in both runs hit
+early EOS at 6 tokens — TinyLlama 1.1B Q4_K_M chat-template
+artefact, not a SWARM-SPEC issue; those trials excluded from
+the median.)
+
+**Honest finding: Q8_0 doesn't win on loopback distributed pipelines.**
+The Q8_0 encode/decode CPU cost (~17 µs per 4096-dim hidden state)
+rivals the wire-time saved on sub-ms loopback hops. The synthetic
+bench prediction (1.5–1.7× on bandwidth-bound hops) only applies
+when the wire IS bandwidth-bound — i.e., 10–100ms WAN RTT, not
+loopback.
+
+**Practical implication for the default-on flip.** Q8_0 default-ON
+is still the right call for WAN deployments (the real SwarmLLM
+target — geo-distributed P2P nodes). But operators running
+loopback / single-host clusters for testing or LAN-isolated pools
+should see a small regression. The activation_compression flag is
+already exposable per-node in config.toml so operators can override.
+
+**Future bench work needed.** Real-WAN measurement requires a
+multi-host setup or artificial latency injection (e.g., Linux
+`tc qdisc add netem delay 50ms`) to simulate the WAN case where
+bandwidth IS the bottleneck. Without that, the loopback A/B is a
+lower bound on the WAN gain — not the WAN gain itself.
+
+### Original sharded test attempt (auto-manage on)
+
+The first attempt placed sharded files but left auto-manage on by
+default; the daemon auto-downloaded missing shards within ~12s,
+defeating the sharded test. The fix (per-node config with
+`auto_manage.enabled = false`) is now reflected in the example
+scripts.
 
 ### Microbench (from `examples/swarm_spec_bench.rs`)
 
