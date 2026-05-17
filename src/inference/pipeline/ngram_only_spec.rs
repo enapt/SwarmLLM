@@ -164,11 +164,20 @@ impl PipelineExecutor {
             ));
         }
         let first_token = prefill_result.token_ids[0];
-        let (prompt_token_count, eos_tokens, decoder) = self.extract_model_cache(&prompt).await;
+        let (_extract_ptc, eos_tokens, decoder) = self.extract_model_cache(&prompt).await;
         let eos_tokens: std::collections::HashSet<u32> = eos_tokens.into_iter().collect();
+        // Use the standalone tokenizer's count (consistent with the n-gram
+        // history and with the remote worker, since both derive from the
+        // same gguf_header.bin). extract_model_cache may estimate when
+        // the local split_model entry isn't populated (all-remote pipelines).
+        let prompt_token_count = prompt_tokens.len();
 
         // ── Phase 2: decode loop ──
         let mut generated: Vec<u32> = vec![first_token];
+        // After prefill: remote KV holds `prompt_token_count` positions
+        // (0..prompt_token_count-1). The first verify batch ships
+        // `[last_token, drafts...]` and the remote appends each to KV,
+        // growing it by `verify_tokens.len()` per round.
         let mut current_pos = prompt_token_count;
         let mut last_token = first_token;
         let mut finish_reason = String::new();
@@ -192,6 +201,13 @@ impl PipelineExecutor {
 
         let cfg = &self.shared_state.config.inference;
         let max_draft = cfg.ngram_num_pred_tokens.min(cfg.speculative_gamma);
+        // SWARM-SPEC L1: pending truncate carries over to the NEXT verify
+        // call. When a verify round partially rejects drafts, the remote
+        // KV still holds k+1 positions from this round, but only
+        // accepted+1 are valid. The NEXT verify must include
+        // truncate_kv_to=Some(valid_pos) so the worker rewinds its KV
+        // before applying the new tokens. Mirrors DSD's pattern.
+        let mut pending_truncate: Option<u32> = None;
 
         while finish_reason.is_empty() && (generated.len() as u32) < max_tokens {
             if self.request.is_cancelled() {
@@ -213,6 +229,7 @@ impl PipelineExecutor {
                 // ── Fallback: single-token verify (γ=0 batch = 1 position) ──
                 fallback_rounds += 1;
                 let verify_tokens = vec![last_token];
+                let truncate_for_this_round = pending_truncate.take();
                 let spec_logits = super::forward_verify_through_segments(
                     &self.shared_state,
                     &self.network_tx,
@@ -221,7 +238,7 @@ impl PipelineExecutor {
                     &self.assignment.segments,
                     &peer_id_for_segment,
                     &verify_tokens,
-                    None,
+                    truncate_for_this_round,
                 )
                 .await?;
                 if spec_logits.is_empty() {
@@ -255,6 +272,7 @@ impl PipelineExecutor {
             verify_tokens.push(last_token);
             verify_tokens.extend_from_slice(&drafts);
 
+            let truncate_for_this_round = pending_truncate.take();
             let spec_logits = super::forward_verify_through_segments(
                 &self.shared_state,
                 &self.network_tx,
@@ -263,7 +281,7 @@ impl PipelineExecutor {
                 &self.assignment.segments,
                 &peer_id_for_segment,
                 &verify_tokens,
-                None,
+                truncate_for_this_round,
             )
             .await?;
             if spec_logits.len() < drafts.len() + 1 {
@@ -313,8 +331,22 @@ impl PipelineExecutor {
                     break;
                 }
             }
-            // Remote KV grew by verify_tokens.len() positions
+            // Remote KV grew by verify_tokens.len() positions. If we
+            // partially rejected (emitted.len() < verify_tokens.len()),
+            // the trailing rejected positions hold incorrect content
+            // (the rejected drafts ran through the forward but our
+            // coordinator state diverged). Set pending_truncate to the
+            // first invalid position so the NEXT verify call rewinds the
+            // remote KV before applying new tokens — same pattern as DSD.
             current_pos += verify_tokens.len();
+            let valid_kv_len = (current_pos - verify_tokens.len()) + emitted.len();
+            if emitted.len() < verify_tokens.len() {
+                pending_truncate = Some(valid_kv_len as u32);
+                // After truncate fires, current_pos will reflect the
+                // actual remote KV length. Adjust now so the next
+                // iteration's index_pos matches.
+                current_pos = valid_kv_len;
+            }
             last_token = *emitted.last().unwrap_or(&last_token);
 
             if (generated.len() as u32) >= max_tokens {

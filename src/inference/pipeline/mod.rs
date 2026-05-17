@@ -256,8 +256,24 @@ pub(super) async fn forward_verify_through_segments(
         // segment's input is token IDs (8 bytes/position via
         // pack_verify_tokens_to_le_bytes) but its OUTPUT is the hidden
         // state (hidden_dim × bytes_per_elem per position) — those don't
-        // match, so the size check only applies once we've seen at least
-        // one hidden-state activation to compare against.
+        // match, so equality only applies for idx >= 1.
+        //
+        // For idx == 0 we instead apply an absolute upper-bound sanity
+        // check. The wire-level MAX_ACTIVATION_SIZE (128 MB at
+        // network/protocol/mod.rs) already caps malicious sends, but
+        // the per-segment hidden-state activation should be
+        // (γ+1) × hidden_dim × bytes/elem — well under 64 MB even for
+        // huge models with γ=64 and hidden_dim=12288 fp32. A larger
+        // response from segment 0 indicates a broken / malicious peer
+        // and would crash the next worker if forwarded.
+        const MAX_INTERMEDIATE_ACTIVATION_BYTES: usize = 64 * 1024 * 1024;
+        if idx == 0 && result.activations.len() > MAX_INTERMEDIATE_ACTIVATION_BYTES {
+            return Err(SwarmError::Inference(format!(
+                "spec verify segment 0 returned oversized activation: {} bytes (max {})",
+                result.activations.len(),
+                MAX_INTERMEDIATE_ACTIVATION_BYTES
+            )));
+        }
         if idx > 0 && result.activations.len() != activation_bytes.len() {
             return Err(SwarmError::Inference(format!(
                 "spec verify segment {idx} returned wrong activation shape: got {} bytes, expected {}",
