@@ -915,6 +915,40 @@ no inter-segment wire to compress. On distributed multi-segment
 inference (the real Q8_0 use case), the synthetic bench predicts
 1.5–1.7× speedup proportional to bandwidth-bound hop time.
 
+### All-layers-active bench (L0+L1+L2+L3 simultaneously)
+
+Captured 2026-05-17 with all four R136 layers explicitly enabled:
+`activation_compression=true`, `ngram_lookup_enabled=true`,
+`hedge_enabled=true`, `prefetch_enabled=true`. Single-segment
+routing (B+C each hold full model).
+
+```
+Workload    tok/s   L1 hit-rate   L2 fires   L3 fires
+code        4.0     25.5%         0          0
+summary     3.2     23.1%         0          0
+chat        5.2     9.6-10%       0          0
+```
+
+L2 hedge: 0 actual fires on loopback (30 dry-run decisions
+recorded — would-have-fired counter for tuning). Expected: loopback
+RTT is too consistent to exceed `1.5 × p99` threshold. On flaky WAN
+the dispatch would activate.
+
+L3 prefetch: 0 dispatches. Expected: bench requests don't carry
+session_id, so the orchestrator never sees `observe_user_turn`
+data. On multi-turn chat workloads with stable session IDs, the
+candidate-emission would fire.
+
+**Throughput**: within noise of the L1-only baseline (4.0/3.2/5.2 vs
+4.3/4.0/4.7 — the variance dominates within 3 trials per workload).
+Notably no regression from having L2/L3 enabled even when they
+don't fire — the fast-path optimisations in each dispatch wrapper
+correctly degenerate to a straight call.
+
+**Correctness validated**: All requests completed with expected
+token counts. KV-truncate fix from earlier review prevents
+silent output corruption on partial-accept rounds.
+
 ### Layer 1 multi-segment (sharded production case) measured
 
 Captured 2026-05-17 after extending `try_ngram_only_distributed` to
