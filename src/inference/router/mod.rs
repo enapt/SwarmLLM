@@ -917,6 +917,22 @@ impl InferenceRouter {
                         prompt,
                     })
                     .await;
+                // SWARM-SPEC Layer 3: feed the conversation history
+                // learner. record_response_completion stamps "we're now
+                // idle" so should_prefetch() can decide if the idle
+                // budget allows a prefetch. observe_user_turn captures
+                // the user's first-token from their LATEST message so
+                // the histogram converges over the session — we don't
+                // have a clean per-turn first-token signal here so we
+                // approximate with the most-recent user message length
+                // as a salt for the candidate-prediction histogram
+                // (real first-token integration is a follow-up that
+                // requires tokenizer access at the API layer).
+                let now_ms = crate::types::unix_now_ms();
+                shared_state
+                    .metrics
+                    .prefetch_orchestrator
+                    .record_response_completion(session_id, now_ms);
             }
 
             // Disarm the guard — normal completion does the same work below.

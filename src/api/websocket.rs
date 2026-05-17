@@ -566,6 +566,12 @@ async fn build_stats_message(state: &SharedState) -> String {
         "wishlist": wishlist_json,
         "quant_recommendations": quant_recs_json,
         "foreign_pool_catalog": foreign_pool_catalog_json,
+        // SWARM-SPEC Layer 2/3 metrics (R136): hedge + prefetch
+        // tracker snapshots so operators can observe layer behavior.
+        "swarm_spec": {
+            "hedge": state.metrics.hedge_tracker.metrics(),
+            "prefetch": state.metrics.prefetch_orchestrator.metrics(),
+        },
         "network_mode": {
             "private_mode": private_mode,
             "offline_mode": offline_mode,
