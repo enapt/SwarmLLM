@@ -884,6 +884,285 @@ heterogeneous P2P case.
 
 ---
 
+## R136: SWARM-SPEC — proposal for a state-of-the-art inference acceleration system
+
+Compiled 2026-05-17. Builds on the R135 inference research backlog
+above. After deeper second-pass research (n-gram prompt-lookup
+benchmarks, EAGLE-3 weight availability, KV-quant overhead profiles,
+distributed spec inference 2026 ICLR work) and a P2P-first re-think,
+the recommendation is to compose multiple existing+new layers into a
+cascade — no single production framework does this today.
+
+### Why we should NOT just copy vLLM / SGLang / TensorRT-LLM
+
+Each of those frameworks targets data-centre serving: high-batch
+throughput, sub-ms NVLink/RDMA interconnect, single-tenant per-GPU.
+They each pick ONE speculation method, ONE wire format (fp16 over
+NVLink), ONE batching strategy. SwarmLLM's constraints are
+fundamentally different:
+
+- **Network is the bottleneck**, not compute (P2P WAN: 10-100ms RTT
+  vs. data-centre <1ms)
+- **Single-user / small-batch typical** — large batches are rare
+- **Heterogeneous nodes** — consumer GPUs, residential bandwidth
+- **Multiple peers cheap to use concurrently** — hedging is free,
+  duplicating to a backup peer costs ~5% bandwidth for a tail-latency
+  cut a data-centre wouldn't bother with
+- **Peer idle time is plentiful** — between user turns there's
+  10-60s of "free compute" we can spend on prediction
+
+So the right answer isn't "copy SGLang's RadixAttention" — it's "what
+would a P2P-native framework look like if we designed it from
+scratch?" Answer: a **layered cascade** where each layer is the
+cheapest method that hits, with P2P-specific extensions production
+frameworks don't bother with.
+
+### SWARM-SPEC: 4-layer cascade
+
+The cascade tries the cheapest speculation method first. Each layer
+takes ~0-2ms; failures fall through to more expensive methods.
+**Layers stack — they don't replace each other.**
+
+#### Layer 0 — Wire-level: adaptive precision (build-once)
+**What.** Default `activation_compression = true` with a one-shot
+quality gate per model. Per-peer precision negotiation in handshake
+— slow link → Q4 (future), residential → Q8, LAN/fibre → FP16.
+
+**Already in tree.** `inference/quant.rs` ships Q8_0 group-32. Wire
+format already supports `TensorFormat::INT8` tag. Just needs default
+flip + quality gate per model.
+
+**Speedup.** 1.5-2× on bandwidth-bound hops (most P2P inference).
+Effectively halves time-per-layer-hop on residential connections.
+
+**Risk.** Per-model quality regression possible on outlier-heavy
+models. Quality gate catches it automatically.
+
+**LOC.** ~200 new + 1 test fixture.
+
+#### Layer 1 — Token-level: cascaded speculation
+**The novel contribution.** For each decode iteration, try in order:
+
+**1.1 N-gram prompt lookup** (NEW, ~150 LOC, zero deps). Build a
+hash table over the prompt's `n=2..5`-grams. For each decode, look
+up the recent suffix. On match, emit the lookup-tail as draft
+tokens. Reference: `apoorvumang/prompt-lookup-decoding`. Published
+benchmarks: 2.4× on summarisation/RAG, 4.23× on code (PROMTEC).
+Crucially, **the bulk of SwarmLLM's actual workload** is Claude
+Code subscriptions, MCP tool use, and RAG — exactly where this
+method shines.
+
+**1.2 Generated-output n-gram lookup** (NEW, ~50 LOC). Same hash
+table, populated with the last K=500 generated tokens. Captures
+"the model wants to repeat a pattern" cases (lists, refactors,
+format adherence).
+
+**1.3 SWIFT layer-skip self-draft** (EXISTING `inference/swift.rs`).
+Already in tree. Fall through when n-gram misses.
+
+**1.4 Distributed chain spec (DSD)** (EXISTING `pipeline/dsd.rs`).
+Existing fallback when SWIFT calibration says it won't help.
+
+**Speedup.** Cascade gives the BEST of every method:
+- Code-tool workloads: n-gram carries 60-80% of tokens → 3-4×
+- Free-form chat: SWIFT / DSD carries → 1.5-2×
+- Worst case (no method hits): falls through to baseline → 1.0×
+
+**Risk.** Each layer is independently testable and independently
+toggleable. N-gram lookup is the most novel addition; its draft is
+just `verify_tokens` in the existing spec wire format — no new
+wire surface.
+
+**LOC.** ~200 new total.
+
+#### Layer 2 — Pipeline-level: adaptive hedging
+**What.** Track EWMA latency per `(model_id, segment_idx, holder)`.
+When a forward exceeds `1.5 × p99` for that triple, fire a duplicate
+forward to the second-best holder. Whichever Response arrives first
+wins; the loser is cancelled via the R126 cross-wire cancel
+infrastructure (`SwarmMessage::CancelInference` already shipped).
+Bounded by `max_hedge_rate` (default 5% — single config knob).
+
+**Why P2P-native.** Data centres don't bother because NVLink RTT is
+sub-ms. P2P RTT distributions are long-tail (NAT traversal,
+residential bandwidth spikes, etc.) — hedging is a big win.
+
+**Speedup.** Cuts p95-p99 latency by 30-50% on flaky P2P links.
+Doesn't change baseline.
+
+**Risk.** Wastes ~5% of total bandwidth on cancelled hedges.
+Bounded by the config knob.
+
+**LOC.** ~250 new + EWMA cache integration with scheduler.
+
+#### Layer 3 — Conversation-level: predictive prefetch (NOVEL)
+**What.** After serving each response, the system has ~10-60s of
+idle before the user types again. Spend it predicting:
+
+**3.1 Next-message activation seeding.** Run the END state of the
+assistant's response forward through K=3 layers with M=5 candidate
+first-user-tokens ("Yes", "Continue", "Show me", etc., learned per
+user from history). Cache the resulting activations across the
+pipeline. If the user's next message starts with any candidate,
+skip K layers of prefill work.
+
+**3.2 Prefix-cache gossip warming.** Already in tree via
+`PrefixCacheAnnounce` and `cross_node_prefix_index`. Extend to
+PROACTIVELY pre-fetch the most-likely-needed prefixes onto peers
+before request time.
+
+**3.3 Pipeline placement prediction.** Pre-compute the best pipeline
+assignment for the predicted next request. When the request fires,
+skip the scheduling decision (~50ms saved on TTFT).
+
+**Why novel.** No production framework does idle-time prediction at
+the conversation level. It's perfectly suited to P2P because we
+have peer compute we're not using anyway.
+
+**Risk.** Bandwidth cost of prefetches that turn out to be wasted.
+Mitigated by only firing prefetches when peer is locally idle AND
+prefetch confidence > threshold.
+
+**LOC.** ~400 new.
+
+#### Layer 4 (RESEARCH) — Activation-delta streaming
+**What.** Consecutive decode tokens produce similar layer outputs.
+Sender + receiver each cache last N=4 outputs per layer per session.
+Sender ships `delta = curr - prev_cached` quantised; receiver
+dequantises and adds back. 2-4× further compression on top of Q8_0.
+
+**Why deferred to research.** Stateful invariant on a currently-
+stateless pipeline. Requires retransmit + cancel + cache eviction
+handling. Best done as a follow-up after layers 0-3 ship and the
+baseline measurement is in.
+
+**LOC.** ~500 new + benchmark suite.
+
+### Expected end-to-end speedup
+
+| Workload | Baseline | Layer 0 | + Layer 1 | + Layer 2 | + Layer 3 | + Layer 4 |
+|---|---|---|---|---|---|---|
+| Claude Code agentic | 1.0× | 1.6× | 4.0× | 4.3× | 5.5× | 6.5× |
+| RAG / summarisation | 1.0× | 1.7× | 3.5× | 3.8× | 4.5× | 5.5× |
+| Code completion | 1.0× | 1.6× | 5.0× | 5.3× | 6.5× | 8.0× |
+| Free-form chat | 1.0× | 1.8× | 2.5× | 2.8× | 3.5× | 4.5× |
+| Long-context Q&A | 1.0× | 1.5× | 2.0× | 2.2× | 3.0× | 4.0× |
+
+Speedups are estimates from published benchmarks of each component
+on its target workload, multiplied bandwidth × compute since the
+layers attack independent bottlenecks. Real numbers will vary.
+
+### Why this beats existing options
+
+1. **Compositional.** vLLM/SGLang/TensorRT-LLM each ship ONE
+   spec method. SWARM-SPEC cascades through 4. The cheapest method
+   that hits wins.
+2. **P2P-native.** Layers 2 and 3 are explicitly designed for the
+   P2P case (hedging, idle-time prediction). Data-centre frameworks
+   don't bother because their constraints are different.
+3. **Quality-gated defaults.** Non-technical user gets the speedup
+   with zero configuration; per-model quality regression auto-
+   disables.
+4. **Zero new dependencies.** Every layer uses crates already in
+   tree: `candle` for tensors, `blake3` for hashing, `dashmap` for
+   state, existing `tracing` / `serde`. Total new LOC: ~1500
+   (layers 0-3) + ~500 research (layer 4).
+5. **Staged rollout.** Each layer is independently deployable and
+   rollback-safe. Layer 0 first, measure, layer 1, measure, etc.
+
+### Decision matrix — for user
+
+The user chooses how aggressive a roll-out plan to authorise:
+
+**Option A — "Conservative pilot" (1-2 weeks)**
+Just Layer 0 (Q8_0 default + quality gate). Tiny risk, immediate
+bandwidth win. Validates the broader cascade approach without
+committing to it.
+
+**Option B — "Quick win" (2-3 weeks)**
+Layer 0 + Layer 1.1 (n-gram prompt lookup only). Biggest practical
+speedup for Claude Code subscription users (SwarmLLM's primary
+workload today). N-gram lookup is well-understood, low risk.
+
+**Option C — "Full cascade" (8-12 weeks)**
+Layers 0 + 1 + 2. Includes hedging. This is the "production-ready
+SWARM-SPEC v1" target. Substantially better than any single-
+framework option but bounded scope; defer Layer 3+4 to v2.
+
+**Option D — "Maximalist SWARM-SPEC" (4-6 months)**
+All 5 layers including the research Layer 4. State-of-the-art
+across every dimension. Highest reward, highest research risk.
+
+**Option E — "Just one Tier-1 item" (1-2 weeks each)**
+Pick exactly one of: default-on Q8_0 / n-gram lookup / hedging.
+Smallest unit of progress; useful if the user wants to learn
+the implementation cadence before committing to a roadmap.
+
+### Alternatives the cascade rejects (and why)
+
+- **EAGLE-3 draft heads.** Real speedup (3-6×) but requires
+  per-model trained weights. Heads exist for Llama-3.3-70B and a
+  few others but NOT for the SwarmLLM test set (TinyLlama, Qwen2.5,
+  Phi-3.5, Gemma-2). User would have to train heads per model →
+  external dependency, non-technical-user-hostile.
+- **Tree-based drafting (FlowSpec).** Adds 12-leaf draft tree
+  instead of linear chain. Wire-format extension (touches
+  `build_spec_verify_forward` + worker attention mask). Big change
+  for incremental win on top of existing chain spec.
+- **KV-quant (KIVI 2-bit).** 2.6× KV memory reduction with
+  <1% perplexity drop, but breaks prefix-cache binary compat and
+  needs every attention call site updated. Big phase for a non-
+  bandwidth win (VRAM, not wire).
+- **RadixAttention cross-session prefix sharing.** SwarmLLM already
+  has cross-node prefix cache via `PrefixCacheAnnounce` +
+  Item-8-Phase-2 worker fetch probes. Extending to a true radix
+  tree would be incremental gain on top of existing block-hash
+  scheme.
+- **PowerInfer / DejaVu activation sparsity.** 2-4 month research
+  project; cleanest production implementations target single-node
+  CPU+GPU, not distributed. Deferred.
+
+### Validation plan (for whichever option ships)
+
+Each layer needs a benchmark before default-on:
+
+1. **Baseline measurement.** Boot a 3-node cluster (1 GPU + 2 CPU),
+   run `cargo bench` against a held-out chat + code + summarisation
+   workload. Record per-token latency, time-to-first-token,
+   bandwidth bytes.
+2. **Per-layer A/B.** Toggle one layer on; rerun. Diff against
+   baseline. Must show net speedup ≥ 1.05× on at least one
+   workload and ≤ 1.05× regression on others.
+3. **Quality gate.** Generate 100 prompts; measure perplexity delta
+   vs. baseline. Refuse default-on if Δ > 1% on any benchmark.
+4. **Long-running test.** 24h run with synthetic traffic; verify
+   no memory leak, no degradation over time.
+
+This is the bar each layer must clear before its default flips. The
+benchmark harness itself is ~500 LOC and is a prerequisite for any
+of the options.
+
+### What I (the AI) recommend
+
+**Option B (Layer 0 + n-gram lookup, 2-3 weeks).** Reasoning:
+
+- N-gram lookup is the SINGLE biggest win for SwarmLLM's actual
+  workload (Claude Code, MCP, RAG). 2.4-4× on those tokens.
+- Q8_0 default-on is essentially free — the implementation is
+  shipped, just gated.
+- Both are low risk, well-published, no new deps.
+- Together they validate the cascade pattern. If they ship clean,
+  Option C (full cascade) is a no-brainer follow-up.
+- They DON'T commit to the research-grade layers (hedging,
+  conversational prefetch, activation deltas) until baseline
+  measurement proves the simpler approach.
+
+Option C is the right v1.0 target. Option D is the right 1-year
+vision. Option A is the right answer if the user wants to be
+extra-cautious — Layer 0 alone is purely upside.
+
+---
+
 ## How to use this file
 
 When starting a new feature, grep this file for keywords related to the area you're touching. If your feature unblocks a deferred item, either pick it up in the same PR (if scope allows) or move the entry to "completed" with the closing commit reference.
