@@ -918,21 +918,38 @@ impl InferenceRouter {
                     })
                     .await;
                 // SWARM-SPEC Layer 3: feed the conversation history
-                // learner. record_response_completion stamps "we're now
-                // idle" so should_prefetch() can decide if the idle
-                // budget allows a prefetch. observe_user_turn captures
-                // the user's first-token from their LATEST message so
-                // the histogram converges over the session — we don't
-                // have a clean per-turn first-token signal here so we
-                // approximate with the most-recent user message length
-                // as a salt for the candidate-prediction histogram
-                // (real first-token integration is a follow-up that
-                // requires tokenizer access at the API layer).
+                // learner. record_response_completion stamps idle-time
+                // anchor; observe_user_turn captures the first token
+                // of the user's latest message so the histogram of
+                // next-turn first-tokens converges over the session.
+                // Uses the standalone tokenizer (R136 follow-on)
+                // loaded from gguf_header.bin — same cache the
+                // n-gram-only spec path uses.
                 let now_ms = crate::types::unix_now_ms();
                 shared_state
                     .metrics
                     .prefetch_orchestrator
                     .record_response_completion(session_id, now_ms);
+                // Find the most-recent user-role message
+                let latest_user = request
+                    .messages
+                    .iter()
+                    .rev()
+                    .find(|m| matches!(m.role, crate::types::Role::User))
+                    .map(|m| m.content.clone())
+                    .unwrap_or_default();
+                if !latest_user.is_empty() {
+                    if let Some(tok) = shared_state.standalone_tokenizer(&request.model_id) {
+                        let ids = tok.encode(&latest_user);
+                        if let Some(first) = ids.first() {
+                            let first_u32 = *first as u32;
+                            shared_state
+                                .metrics
+                                .prefetch_orchestrator
+                                .observe_user_turn(session_id, first_u32);
+                        }
+                    }
+                }
             }
 
             // Disarm the guard — normal completion does the same work below.
