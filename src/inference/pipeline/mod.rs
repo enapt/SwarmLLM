@@ -613,4 +613,147 @@ mod tests {
         // The local path falls through to the stub
         assert!(result.is_err()); // NoModelLoaded
     }
+
+    /// R137 (closes R136 test-coverage deferral, partial): the wire-format
+    /// helpers `pack_verify_tokens_to_le_bytes`, `build_spec_verify_forward`,
+    /// and `build_kv_truncate_forward` are pure and unit-testable. Full
+    /// `forward_verify_through_segments` orchestration still needs worker
+    /// subprocess infrastructure, but the building blocks now have direct
+    /// coverage so a wire-format drift fails a fast test before integration.
+    #[test]
+    fn pack_verify_tokens_to_le_bytes_packs_i64_le() {
+        // Empty input → empty output (no allocator panic).
+        assert!(pack_verify_tokens_to_le_bytes(&[]).is_empty());
+        // u32 → i64 widening preserves value; LE means the low byte is first.
+        let bytes = pack_verify_tokens_to_le_bytes(&[1u32, 0xFFFFFFFFu32]);
+        assert_eq!(bytes.len(), 16);
+        assert_eq!(&bytes[..8], &[1, 0, 0, 0, 0, 0, 0, 0]);
+        // 0xFFFFFFFF widened to i64 is 0x00000000FFFFFFFF (positive — u32 is
+        // unsigned). Verifies we're using `as i64` (zero-extend) not a signed
+        // re-interpret that would produce 0xFFFFFFFFFFFFFFFF.
+        assert_eq!(&bytes[8..], &[0xFF, 0xFF, 0xFF, 0xFF, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn build_spec_verify_forward_carries_requested_fields() {
+        let request_id = uuid::Uuid::new_v4();
+        let segment = PipelineSegment {
+            node_id: NodeId([7u8; 32]),
+            shard_id: ShardId {
+                model_id: ModelId("test-model".into()),
+                index: 3,
+            },
+            layer_range: (4, 8),
+        };
+        let activations = vec![1u8, 2, 3, 4];
+        let requester = [9u8; 32];
+        let fwd = build_spec_verify_forward(
+            request_id,
+            42,
+            activations.clone(),
+            &segment,
+            requester,
+            Some(100),
+        );
+        assert_eq!(fwd.request_id, request_id);
+        assert_eq!(fwd.index_pos, 42);
+        assert_eq!(fwd.sequence_num, 1, "spec verify is never prefill");
+        assert_eq!(fwd.activations, activations);
+        assert!(matches!(fwd.format, TensorFormat::FP32));
+        assert_eq!(fwd.model_id.0, "test-model");
+        assert_eq!(fwd.layer_range, (4, 8));
+        assert!(fwd.vision_embeddings.is_none());
+        assert!(fwd.sender_peer_bytes.is_none());
+        assert!(fwd.tp_meta.is_none());
+        assert_eq!(fwd.requester_node_id, Some(requester));
+        assert!(!fwd.pre_embedded);
+        assert!(fwd.generated_ids.is_empty());
+        assert!(fwd.adapter_id.is_none());
+        assert!(
+            fwd.draft_tokens.is_empty(),
+            "spec verify packs draft tokens in activations, not draft_tokens"
+        );
+        assert!(
+            fwd.spec_logits_requested,
+            "spec verify always sets the flag"
+        );
+        assert_eq!(fwd.truncate_kv_to, Some(100));
+    }
+
+    #[test]
+    fn build_kv_truncate_forward_uniquely_identified_by_empty_activations() {
+        let request_id = uuid::Uuid::new_v4();
+        let segment = PipelineSegment {
+            node_id: NodeId([3u8; 32]),
+            shard_id: ShardId {
+                model_id: ModelId("trunc-model".into()),
+                index: 1,
+            },
+            layer_range: (0, 4),
+        };
+        let requester = [5u8; 32];
+        let fwd = build_kv_truncate_forward(request_id, &segment, 50, requester);
+        // Three invariants the receiver uses to identify a truncate-only:
+        assert!(
+            fwd.activations.is_empty(),
+            "truncate signals MUST carry no compute payload"
+        );
+        assert!(
+            !fwd.spec_logits_requested,
+            "truncate signals MUST NOT request spec logits"
+        );
+        assert_eq!(fwd.truncate_kv_to, Some(50), "truncate target MUST be set");
+        // And the index_pos carries the truncation point (the receiver uses
+        // this to size its retain window).
+        assert_eq!(fwd.index_pos, 50);
+    }
+
+    /// R137 (partial closure of R136 test deferral): the network-send-failure
+    /// arm in `forward_verify_through_segments` disarms the
+    /// `PendingLayerResultGuard` AND removes the pending entry inline so the
+    /// guard's Drop doesn't double-remove. Verify the failure path without
+    /// needing a worker subprocess — close the network_tx side, dispatch a
+    /// remote segment, and assert the error surfaces + pending_layer_results
+    /// is clean post-call.
+    #[tokio::test]
+    async fn forward_verify_through_segments_disarms_guard_on_network_drop() {
+        let state = make_test_state();
+        let (tx, rx) = mpsc::channel::<NetworkCommand>(64);
+        drop(rx); // close the receive side so any send fails.
+
+        let request_id = uuid::Uuid::new_v4();
+        // Single remote segment pointing at a fake peer; the send will fail
+        // synchronously because the rx is closed.
+        let segments = vec![PipelineSegment {
+            node_id: NodeId([42u8; 32]),
+            shard_id: ShardId {
+                model_id: ModelId("test-model".into()),
+                index: 0,
+            },
+            layer_range: (0, 8),
+        }];
+        let peer_id_for_segment: Vec<Option<Vec<u8>>> = vec![Some(vec![1, 2, 3, 4])];
+        let verify_tokens: Vec<u32> = vec![100, 101, 102];
+
+        let result = forward_verify_through_segments(
+            &state,
+            &tx,
+            request_id,
+            10,
+            &segments,
+            &peer_id_for_segment,
+            &verify_tokens,
+            None,
+        )
+        .await;
+        assert!(result.is_err(), "closed-channel send must surface as Err");
+        // CRITICAL: pending_layer_results must be empty — proves the guard
+        // disarm + inline remove worked. A double-remove would not break
+        // this assertion but a missed remove WOULD leave an entry behind,
+        // leaking the oneshot. We check the leak direction.
+        assert!(
+            state.pending_layer_results.is_empty(),
+            "pending_layer_results leak after network-drop failure path"
+        );
+    }
 }
