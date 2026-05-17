@@ -40,14 +40,6 @@ impl PipelineExecutor {
             });
         }
 
-        // Remote-generate fast path for single-segment distributed: bypass
-        // the per-token coordinator/remote round trip entirely. Remote worker
-        // runs the full decode loop and streams tokens back. Falls through on
-        // non-eligibility (multi-segment, TP, vision, LoRA, encrypted pipeline).
-        if let Some(out) = self.try_remote_generate_fastpath(token_tx.clone()).await? {
-            return Ok(out);
-        }
-
         // Item 12 Phase 4: DSD multi-segment greedy speculative. Falls through
         // when fewer than 2 segments (Item 2 covers single-segment) or any
         // other precondition fails (TP groups, non-greedy, no draft, etc.).
@@ -55,21 +47,29 @@ impl PipelineExecutor {
             return Ok(out);
         }
 
-        // Item 2 Phase 3: try the greedy distributed speculative path
-        // (single-segment). Falls through (returns Ok(None)) to the standard
-        // loop below if preconditions aren't met (no draft model, multi-
-        // segment, TP, non-greedy, encrypted, etc.).
+        // Item 2 Phase 3: greedy single-segment distributed speculative
+        // path. Requires draft model loaded.
         if let Some(out) = self.try_speculative_distributed(token_tx.clone()).await? {
             return Ok(out);
         }
+
         // SWARM-SPEC Layer 1 (R136): n-gram-only spec path, no draft
-        // model required. Tokenises locally via gguf_header.bin; uses
-        // n-gram lookup for drafts and falls back to single-token
-        // forwards on miss. Only fires when ngram_lookup_enabled is on
-        // AND draft_model_path is NOT set (the draft-configured case
-        // is handled by try_speculative_distributed above which
-        // already cascades through n-gram first).
+        // model required. Runs BEFORE remote_generate fast path because
+        // n-gram hit-rate on code/RAG (99% / 96% from synthetic bench)
+        // accepts multiple tokens per round, which beats remote_generate's
+        // one-token-per-RTT throughput when the workload is
+        // input-grounded. Falls through (Ok(None)) when ngram is
+        // disabled, draft is configured, segments aren't 1, etc.
         if let Some(out) = self.try_ngram_only_distributed(token_tx.clone()).await? {
+            return Ok(out);
+        }
+
+        // Remote-generate fast path for single-segment distributed: bypass
+        // the per-token coordinator/remote round trip entirely. Remote
+        // worker runs the full decode loop and streams tokens back. Falls
+        // through on non-eligibility (multi-segment, TP, vision, LoRA,
+        // encrypted pipeline).
+        if let Some(out) = self.try_remote_generate_fastpath(token_tx.clone()).await? {
             return Ok(out);
         }
 

@@ -915,6 +915,47 @@ no inter-segment wire to compress. On distributed multi-segment
 inference (the real Q8_0 use case), the synthetic bench predicts
 1.5–1.7× speedup proportional to bandwidth-bound hop time.
 
+### Layer 1 (n-gram-only spec, draft-free) measured on real inference
+
+Captured 2026-05-17 after shipping `try_ngram_only_distributed`
+(the no-draft-model n-gram cascade). Cluster: A=manifest only,
+B+C=full model. Single-segment routing A→B with the n-gram-only
+spec path active. Same workload set as the Q8_0 A/B above.
+
+```
+Workload       Baseline (remote_generate)   L1 active   Gain   L1 hit-rate
+code (60 tok)  4.0 tok/s                    4.3         +7%    23%
+summary (50)   2.75 tok/s                   4.0        +45%    77%
+chat (80)      4.5 tok/s                    ~4.5       mixed  18-23%
+```
+
+The summarisation 45% win on a 77% n-gram hit-rate is the strongest
+real-inference validation of the cascade design to date. The
+synthetic bench predicted 96% hit rate on RAG-shaped workloads; the
+real TinyLlama summary workload achieved 77%, consistent with the
+prediction's order of magnitude.
+
+The code-completion result is more modest because TinyLlama 1.1B
+has limited overlap on the short fibonacci prompt — synthetic
+benches used 200-token contrived high-repeat prompts; real prompts
+rarely have that density. The hit-rate scales with prompt-overlap;
+a longer multi-file code completion would hit higher.
+
+Free-form chat is correctly low-hit (~20%) — the cascade's
+design-intent fallthrough path. Falls back to single-token
+forwards, throughput within noise of the remote_generate baseline.
+
+Per-request hit-rate metrics now visible in tracing logs:
+`SWARM-SPEC L1 ngram-only: complete generated_tokens=N
+ngram_rounds=X fallback_rounds=Y ngram_hit_rate="Z%"`
+
+**Dispatch order change.** L1 now precedes `try_remote_generate_fastpath`
+in `pipeline/distributed.rs::execute_distributed`. The reasoning:
+when n-gram hits, accepting multiple tokens per round beats
+remote_generate's one-token-per-RTT throughput. When n-gram misses,
+single-token fallback within L1 has comparable per-token cost to
+remote_generate. So L1 is dominant on hit, neutral on miss.
+
 ### Distributed-pipeline measurement (run completed)
 
 Forced 2-segment pipeline (A=manifest only, B=shard_000,

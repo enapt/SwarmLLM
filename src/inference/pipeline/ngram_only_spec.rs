@@ -77,9 +77,26 @@ impl PipelineExecutor {
         &mut self,
         token_tx: Option<StreamingTokenTx>,
     ) -> Result<Option<InferenceOutput>, SwarmError> {
+        let cfg = &self.shared_state.config.inference;
+        tracing::debug!(
+            request_id = %self.request.id,
+            ngram_lookup_enabled = cfg.ngram_lookup_enabled,
+            draft_model_path_is_some = cfg.draft_model_path.is_some(),
+            temperature = self.request.sampling_params.temperature,
+            num_segments = self.assignment.segments.len(),
+            "DIAG: try_ngram_only_distributed entry"
+        );
         if !eligible(self) {
+            tracing::debug!(
+                request_id = %self.request.id,
+                "DIAG: try_ngram_only_distributed ineligible — skipping"
+            );
             return Ok(None);
         }
+        tracing::info!(
+            request_id = %self.request.id,
+            "DIAG: try_ngram_only_distributed ELIGIBLE — entering n-gram-only path"
+        );
 
         let request_id = self.request.id;
         let max_tokens = self.request.sampling_params.max_tokens;
