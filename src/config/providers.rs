@@ -216,6 +216,47 @@ impl ProvidersConfig {
             other => unreachable!("unknown provider: {other} — update field_mut() match arms"),
         }
     }
+
+    /// R137 (closes R72 deferral): the 12-provider name list was repeated
+    /// 4×+ across `api/admin_providers.rs`. This is the canonical iteration
+    /// over keyed cloud providers — call sites destructure to whichever
+    /// data they need (name only, name+entry, name+is_some, etc).
+    /// `custom` and `claude_subscription` are deliberately NOT included
+    /// here — they have different shapes and shouldn't share this path.
+    pub fn keyed_entries(&self) -> [(&'static str, &Option<ProviderEntry>); 12] {
+        [
+            ("anthropic", &self.anthropic),
+            ("openai", &self.openai),
+            ("deepseek", &self.deepseek),
+            ("mistral", &self.mistral),
+            ("groq", &self.groq),
+            ("nvidia_nim", &self.nvidia_nim),
+            ("cerebras", &self.cerebras),
+            ("sambanova", &self.sambanova),
+            ("fireworks", &self.fireworks),
+            ("together", &self.together),
+            ("deepinfra", &self.deepinfra),
+            ("moonshot", &self.moonshot),
+        ]
+    }
+
+    /// R137: stable list of keyed-provider names. Matches `keyed_entries`
+    /// order. Useful for response-shape building where you need just the
+    /// name + a derived value (e.g. `is_some` bool map).
+    pub const PROVIDER_NAMES: &'static [&'static str] = &[
+        "anthropic",
+        "openai",
+        "deepseek",
+        "mistral",
+        "groq",
+        "nvidia_nim",
+        "cerebras",
+        "sambanova",
+        "fireworks",
+        "together",
+        "deepinfra",
+        "moonshot",
+    ];
 }
 
 /// Load a `.env` file into the process environment.

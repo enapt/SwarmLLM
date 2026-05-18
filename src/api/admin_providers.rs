@@ -40,21 +40,9 @@ static HEALTH_CLIENT: std::sync::LazyLock<reqwest::Client> = std::sync::LazyLock
 pub async fn get_providers(State(state): State<AppState>) -> Json<serde_json::Value> {
     let config = state.shared_state.metrics.providers_config.read().await;
 
-    let entries: &[(&str, &Option<crate::config::ProviderEntry>)] = &[
-        ("anthropic", &config.anthropic),
-        ("openai", &config.openai),
-        ("deepseek", &config.deepseek),
-        ("mistral", &config.mistral),
-        ("groq", &config.groq),
-        ("nvidia_nim", &config.nvidia_nim),
-        ("cerebras", &config.cerebras),
-        ("sambanova", &config.sambanova),
-        ("fireworks", &config.fireworks),
-        ("together", &config.together),
-        ("deepinfra", &config.deepinfra),
-        ("moonshot", &config.moonshot),
-    ];
-
+    // R137: use the canonical ProvidersConfig::keyed_entries() iteration
+    // instead of re-listing all 12 providers (R72 deferral closure).
+    let entries = config.keyed_entries();
     #[allow(unused_mut)]
     let mut providers: Vec<serde_json::Value> = entries
         .iter()
@@ -147,27 +135,37 @@ pub struct ProvidersUpdate {
     pub claude_subscription_enabled: Option<bool>,
 }
 
+impl ProvidersUpdate {
+    /// R137 (R72 deferral closure): canonical iteration over the 12
+    /// keyed-provider Option<String> fields. Order matches
+    /// `ProvidersConfig::keyed_entries`. Adding a new provider only
+    /// requires editing this and the corresponding ProvidersConfig.
+    fn keyed_entries(&self) -> [(&'static str, &Option<String>); 12] {
+        [
+            ("anthropic", &self.anthropic_key),
+            ("openai", &self.openai_key),
+            ("deepseek", &self.deepseek_key),
+            ("mistral", &self.mistral_key),
+            ("groq", &self.groq_key),
+            ("nvidia_nim", &self.nvidia_nim_key),
+            ("cerebras", &self.cerebras_key),
+            ("sambanova", &self.sambanova_key),
+            ("fireworks", &self.fireworks_key),
+            ("together", &self.together_key),
+            ("deepinfra", &self.deepinfra_key),
+            ("moonshot", &self.moonshot_key),
+        ]
+    }
+}
+
 /// PUT /api/admin/providers — Update provider API keys. Empty string = remove key.
 pub async fn update_providers(
     State(state): State<AppState>,
     Json(body): Json<ProvidersUpdate>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     // Validate all keys before applying any changes
-    let all_keys: &[(&str, &Option<String>)] = &[
-        ("anthropic", &body.anthropic_key),
-        ("openai", &body.openai_key),
-        ("deepseek", &body.deepseek_key),
-        ("mistral", &body.mistral_key),
-        ("groq", &body.groq_key),
-        ("nvidia_nim", &body.nvidia_nim_key),
-        ("cerebras", &body.cerebras_key),
-        ("sambanova", &body.sambanova_key),
-        ("fireworks", &body.fireworks_key),
-        ("together", &body.together_key),
-        ("deepinfra", &body.deepinfra_key),
-        ("moonshot", &body.moonshot_key),
-    ];
-    for (name, key) in all_keys {
+    let all_keys = body.keyed_entries();
+    for (name, key) in &all_keys {
         if let Some(k) = key {
             if let Err(e) = crate::crypto::validate_api_key(k) {
                 return Err(ApiError(crate::error::SwarmError::Validation(format!(
@@ -279,22 +277,16 @@ pub async fn update_providers(
         }
     }
 
-    // Build response before moving new_config into the write guard
-    let response = serde_json::json!({
-        "status": "ok",
-        "anthropic": new_config.anthropic.is_some(),
-        "openai": new_config.openai.is_some(),
-        "deepseek": new_config.deepseek.is_some(),
-        "mistral": new_config.mistral.is_some(),
-        "groq": new_config.groq.is_some(),
-        "nvidia_nim": new_config.nvidia_nim.is_some(),
-        "cerebras": new_config.cerebras.is_some(),
-        "sambanova": new_config.sambanova.is_some(),
-        "fireworks": new_config.fireworks.is_some(),
-        "together": new_config.together.is_some(),
-        "deepinfra": new_config.deepinfra.is_some(),
-        "moonshot": new_config.moonshot.is_some(),
-    });
+    // Build response before moving new_config into the write guard.
+    // R137: derive the per-provider is_some map from keyed_entries() so
+    // adding a new provider only requires editing the canonical list
+    // in src/config/providers.rs (R72 deferral closure).
+    let mut response = serde_json::Map::with_capacity(13);
+    response.insert("status".into(), "ok".into());
+    for (name, entry) in new_config.keyed_entries() {
+        response.insert((*name).into(), entry.is_some().into());
+    }
+    let response = serde_json::Value::Object(response);
 
     // Persist succeeded — briefly acquire write lock to commit to in-memory state
     *state.shared_state.metrics.providers_config.write().await = new_config;
