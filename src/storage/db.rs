@@ -21,13 +21,50 @@ use crate::error::SwarmError;
 const CRITICAL_TREES: &[&str] = &[
     "manifests",
     "credits",
-    "identity",
     "nicknames",
     "pool_state",
     "credit_txns",
     "pool_removal_replays",
     "pool_invite_codes",
 ];
+
+/// R138 — strict per-tree type validation for `check_integrity`.
+///
+/// R105 flagged that the previous JSON-only check (deserialise into
+/// `serde_json::Value`) lets type mismatches pass — e.g. a `bool` payload
+/// landing in a tree whose contract is "JSON object" parses as valid JSON
+/// and gets counted as healthy. With each tree now single-typed (R138
+/// moved private/offline mode out of `pool_state`), we can enforce the
+/// type contract at integrity-check time.
+///
+/// Layering note: db.rs only depends on `swarmllm_types` (the upstream
+/// shared-types crate, NO `crate::` reverse deps); types defined in
+/// higher modules fall through to JSON-shape validation rather than
+/// pull a non-existent type-erased registry. The `pool_invite_codes`
+/// tree is one such case — see below.
+fn validate_strict(tree: &str, value: &[u8]) -> bool {
+    match tree {
+        "manifests" => serde_json::from_slice::<swarmllm_types::ModelManifest>(value).is_ok(),
+        "credits" => serde_json::from_slice::<swarmllm_types::CreditBalance>(value).is_ok(),
+        "nicknames" => serde_json::from_slice::<swarmllm_types::NicknameRecord>(value).is_ok(),
+        "pool_state" => serde_json::from_slice::<swarmllm_types::PoolState>(value).is_ok(),
+        "credit_txns" => serde_json::from_slice::<swarmllm_types::CreditTransaction>(value).is_ok(),
+        // pool_removal_replays stores raw i64 timestamps as keyed records
+        // (see pool/manager/mod.rs::process_pool_removal). serde_json
+        // deserialises a JSON number into i64 — strict enough to catch
+        // a stray non-numeric payload that would otherwise pass JSON-shape.
+        "pool_removal_replays" => serde_json::from_slice::<i64>(value).is_ok(),
+        // pool_invite_codes stores PoolInviteCode (defined in
+        // src/pool/types.rs, NOT in swarmllm_types). Cross-layer import
+        // would invert the storage→pool dep, so this tree falls through
+        // to JSON-shape validation. Acceptable: a structural mismatch
+        // still trips the existing per-key load path in
+        // pool/manager/mod.rs::restore_state where the strict type IS
+        // available — the integrity scan here is defence-in-depth, not
+        // the only line.
+        _ => serde_json::from_slice::<serde_json::Value>(value).is_ok(),
+    }
+}
 
 /// Single redb table storing all logical trees via composite keys.
 /// Key format: "{tree_name}\0{key}" (NUL separator).
@@ -553,7 +590,7 @@ impl Database {
 
             for (key_bytes, value) in &entries {
                 total += 1;
-                if serde_json::from_slice::<serde_json::Value>(value).is_ok() {
+                if validate_strict(tree_name, value) {
                     valid += 1;
                 } else {
                     corrupt += 1;
@@ -629,12 +666,47 @@ mod tests {
         }
     }
 
+    /// Build a minimal but type-valid ModelManifest for integrity-check tests.
+    fn test_model_manifest_json() -> Vec<u8> {
+        use swarmllm_types::{ModelArchitecture, ModelId, ModelManifest, NodeId, Quantization};
+        let m = ModelManifest {
+            id: ModelId("test".into()),
+            name: "test".into(),
+            architecture: ModelArchitecture::Llama,
+            num_layers: 1,
+            num_params_billions: 0.001,
+            quantization: Quantization::Q4KM,
+            total_size_bytes: 0,
+            shard_count: 0,
+            shards: vec![],
+            tokenizer_hash: [0u8; 32],
+            manifest_hash: [0u8; 32],
+            publisher: NodeId([0u8; 32]),
+            publish_date: chrono::Utc::now(),
+            license: "MIT".into(),
+            mmproj: None,
+        };
+        serde_json::to_vec(&m).expect("serialise ModelManifest")
+    }
+
+    fn test_credit_balance_json() -> Vec<u8> {
+        use swarmllm_types::{CreditBalance, NodeId};
+        let cb = CreditBalance {
+            node_id: NodeId([0u8; 32]),
+            balance: 100,
+            lifetime_earned: 0,
+            lifetime_spent: 0,
+            last_updated: chrono::Utc::now(),
+        };
+        serde_json::to_vec(&cb).expect("serialise CreditBalance")
+    }
+
     #[test]
     fn integrity_check_valid_entries() {
         let db = Database::open_temp().unwrap();
-        db.put_json("manifests", "model1", &serde_json::json!({"name": "test"}))
+        db.insert_raw("manifests", "model1", &test_model_manifest_json())
             .unwrap();
-        db.put_json("credits", "node1", &serde_json::json!({"balance": 100}))
+        db.insert_raw("credits", "balance", &test_credit_balance_json())
             .unwrap();
 
         let report = db.check_integrity();
@@ -649,8 +721,8 @@ mod tests {
     #[test]
     fn integrity_check_detects_corrupt_entry() {
         let db = Database::open_temp().unwrap();
-        // Insert a valid JSON entry
-        db.put_json("manifests", "good", &serde_json::json!({"ok": true}))
+        // Insert a type-valid manifest entry
+        db.insert_raw("manifests", "good", &test_model_manifest_json())
             .unwrap();
         // Insert raw invalid bytes directly
         db.insert_raw("manifests", "corrupt_key", b"not valid json {{{")
@@ -663,6 +735,50 @@ mod tests {
         assert_eq!(manifests.total_entries, 2);
         assert_eq!(manifests.valid_entries, 1);
         assert_eq!(manifests.corrupt_entries, 1);
+    }
+
+    /// R138 — `validate_strict` enforces per-tree type contracts, so a
+    /// type-mismatched JSON payload that previously passed the JSON-only
+    /// integrity check is now reported as corrupt. This is the R105
+    /// concern in concrete form: a bool payload landing in `pool_state`
+    /// (whose contract is `PoolState`) used to be counted as healthy.
+    #[test]
+    fn integrity_check_strict_rejects_type_mismatch() {
+        let db = Database::open_temp().unwrap();
+        // Valid JSON shape, but NOT a PoolState — mirrors the legacy
+        // pre-R138 private_mode bool collision that R105 flagged.
+        db.put_json("pool_state", "some_pool_id", &true).unwrap();
+        // Valid JSON shape, but NOT a CreditBalance.
+        db.put_json(
+            "credits",
+            "balance",
+            &serde_json::json!({"random":"object"}),
+        )
+        .unwrap();
+
+        let report = db.check_integrity();
+        assert_eq!(report.total_corrupt, 2);
+        assert_eq!(report.trees.get("pool_state").unwrap().corrupt_entries, 1);
+        assert_eq!(report.trees.get("credits").unwrap().corrupt_entries, 1);
+    }
+
+    /// R138 — `pool_removal_replays` stores i64 timestamps; validator
+    /// uses `serde_json::from_slice::<i64>`. A JSON object payload (which
+    /// would slip past JSON-Value validation) must now be flagged.
+    #[test]
+    fn integrity_check_strict_rejects_non_i64_in_replays() {
+        let db = Database::open_temp().unwrap();
+        db.put_json("pool_removal_replays", "key1", &1_700_000_000_i64)
+            .unwrap();
+        // Wrong type: object instead of bare i64.
+        db.put_json("pool_removal_replays", "key2", &serde_json::json!({"ts":1}))
+            .unwrap();
+
+        let report = db.check_integrity();
+        let replays = report.trees.get("pool_removal_replays").unwrap();
+        assert_eq!(replays.total_entries, 2);
+        assert_eq!(replays.valid_entries, 1);
+        assert_eq!(replays.corrupt_entries, 1);
     }
 
     #[test]
