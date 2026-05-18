@@ -642,10 +642,13 @@ impl SharedState {
     /// Also performs a post-hoc "would have hedged" dry-run check: if
     /// the latency exceeded the configured hedge threshold AND the
     /// rate budget allowed it, increments the would-fire counter and
-    /// emits a tracing::info event. Lets operators measure hedge
-    /// potential without paying the duplicate-bandwidth cost of
-    /// actual dispatch (which requires a wire-format change for
-    /// per-forward delivery IDs — deferred to a follow-up).
+    /// emits a tracing::info event. Lets operators see hedge potential
+    /// even when running with `hedge_enabled = false`. True duplicate
+    /// dispatch (race-then-discard) ships in
+    /// `pipeline/hedge_dispatch.rs::forward_verify_with_hedge` for
+    /// single-segment pipelines without a wire-format change — uses a
+    /// fresh Uuid for the hedge so `pending_layer_results` doesn't
+    /// collide with the primary. Multi-segment hedging remains deferred.
     pub fn record_hedge_observation(
         &self,
         model_id: &crate::types::ModelId,

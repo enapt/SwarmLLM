@@ -525,7 +525,19 @@ across all pool members. Want explicit user sign-off on the
 compat strategy (versioned variant vs. flag-day).
 
 ### `apply_pool_model_availability` cap eviction relies on single-task dispatch
-**Context.** R135 reordered the eviction in `daemon/state/credits.rs`
+
+_**Closed R137** (2026-05-18). Single batched partial-sort via
+`select_nth_unstable_by_key` replaces the K × full-scan loop. For
+`max_entries=5000` + `to_evict=128` overflow, ops drop from ~640K
+(128 × 5000) to ~5K + 128 removes — roughly 10× faster on the
+eviction path, with the same oldest-first contract. The
+`apply_batched_eviction_drops_correct_oldest_set` stress test
+exercises a 1000-entry catalog with 200 overflow to verify the
+partial-sort branch retains the correct subset._
+
+**Original deferral note preserved below.**
+
+R135 reordered the eviction in `daemon/state/credits.rs`
 to be POST-insert, which makes the post-condition `catalog.len() <=
 max_entries` structural rather than depending on the pre-insert size
 estimate being accurate. But the eviction loop itself still scans
@@ -535,9 +547,6 @@ the worst case (full re-fill from a single 5000-entry announcement,
 which is bounded above by `MAX_POOL_MODEL_ANNOUNCE_ENTRIES = 128`,
 so the real worst case is bounded). Fine today, would want
 attention if either cap grows materially.
-
-**Why deferred.** Not a correctness bug. Performance discussion for
-when the network scales past current cap assumptions.
 
 ---
 

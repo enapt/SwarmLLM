@@ -112,7 +112,7 @@ pub(crate) const PREFILL_ACTIVATION_THRESHOLD_BYTES: usize = 100_000;
 /// activation byte format the worker expects for first-segment
 /// multi-token decode (DSD Phase 4 / Item 12). Shared by
 /// `speculative.rs::send_verify_batch` and
-/// `dsd.rs::forward_verify_through_segments` so a wire-format change
+/// `super::forward_verify_through_segments` (multi-segment) so a wire-format change
 /// has a single source of truth.
 pub(super) fn pack_verify_tokens_to_le_bytes(tokens: &[u32]) -> Vec<u8> {
     let mut out = Vec::with_capacity(tokens.len() * 8);
@@ -124,7 +124,7 @@ pub(super) fn pack_verify_tokens_to_le_bytes(tokens: &[u32]) -> Vec<u8> {
 
 /// Build the `LayerForward` envelope for a speculative-verify send.
 /// Shared by `speculative.rs::send_verify_batch` (single-segment) and
-/// `dsd.rs::forward_verify_through_segments` (multi-segment) so adding
+/// `super::forward_verify_through_segments` (multi-segment) so adding
 /// a `LayerForward` field can't drift between the two paths. The
 /// `spec_logits_requested` flag is set uniformly; the receiver gates
 /// emission on `is_last`.
