@@ -150,7 +150,7 @@ libp2p 0.56, axum 0.8, candle-core/candle-transformers 0.10 (CUDA), redb 4, ed25
 
 ## Testing
 
-- 1005 lib tests passing + 8 ignored (env-var-gated real-model + manual smoke), 75 integration tests in `tests/integration/`, 1 ignored end-to-end (`cargo test --test integration_phase10_11 -- --ignored`), clippy clean. Microbench: `cargo run --release --no-default-features --features dev,claude-subscription --example swarm_spec_bench` (R136 — measures all 4 SWARM-SPEC layer primitives + synthetic cascade hit-rate). Local-cluster bench: `examples/3node_setup.sh` (boots 3 daemons) + `examples/3node_inference_bench.sh` (runs 3 workloads × 3 trials and prints tok/s + swarm_spec metrics). Sharded variant: `examples/3node_sharded_setup.sh` (forced distributed pipeline — requires `auto_manage.enabled = false` in per-node config.toml to preserve sharded state).
+- 1015 lib tests passing + 8 ignored (env-var-gated real-model + manual smoke), 75 integration tests in `tests/integration/`, 1 ignored end-to-end (`cargo test --test integration_phase10_11 -- --ignored`), clippy clean. Microbench: `cargo run --release --no-default-features --features dev,claude-subscription --example swarm_spec_bench` (R136 — measures all 4 SWARM-SPEC layer primitives + synthetic cascade hit-rate). Local-cluster bench: `examples/3node_setup.sh` (boots 3 daemons) + `examples/3node_inference_bench.sh` (runs 3 workloads × 3 trials and prints tok/s + swarm_spec metrics). Sharded variant: `examples/3node_sharded_setup.sh` (forced distributed pipeline — requires `auto_manage.enabled = false` in per-node config.toml to preserve sharded state).
 - Unit tests: in-module `#[cfg(test)]` blocks
 - Integration tests: `tests/integration/` — multi-node simulations with `--test-threads=1`
 - Real-model spawn-and-infer test: set `SWARMLLM_TEST_MODEL_DIR` to a fully-populated model directory (e.g. `~/.local/share/swarmllm/models/tinyllama-1.1b-...`) and run `cargo test --test integration_phase10_11 -- --ignored end_to_end`. No synthetic GGUF fixture is committed; see `docs/ARCHITECTURE.md` § Deferred Items.
@@ -188,9 +188,33 @@ When spawning subagents in this repo, use these model picks (overrides defaults 
 
 ## Status
 
-All 20 build phases complete. All subsystems wired — no stubs. **1005 lib tests + 75 integration tests passing**; 8 lib + 1 e2e ignored (env-var or manual). Clippy clean default + `--features llama`.
+All 20 build phases complete. All subsystems wired — no stubs. **1015 lib tests + 75 integration tests passing**; 8 lib + 1 e2e ignored (env-var or manual). Clippy clean default + `--features llama`.
 
-### Latest: R137 — extended FUTURE_WORK deferrals batch
+### Latest: R138 — autonomous defer-batch (sweep-log triage + 4 real fixes)
+
+Eight commits closing ~20 deferred sweep-log items. Real changes:
+
+1. **Auto-manage rescan respects `auto_manage_paused`** (closes R104). `model/auto_manage/manager.rs` reads `auto_manage_enabled` atomic and passes `Option<&network_tx>` accordingly; rescan still runs locally (correctness — picking up manually-placed shards) but the network re-announce is gated on the pause toggle. Manual `POST /api/admin/rescan-shards` always announces.
+
+2. **`active_count` fetch_add inside the spawn closure** (closes R103). `inference/router/mod.rs:718` moved into the spawned task so a `tokio::spawn` OOM panic can no longer leak the tier-cap counter.
+
+3. **`CreditBalance` schema-upgrade safety** (closes R105 deferral about forward-compat). `#[serde(default)]` on `balance/lifetime_earned/lifetime_spent/last_updated`; `node_id` intentionally not defaulted (missing identity is data corruption, fail loudly). Type-level doc spells out the rule for future additions. 4 regression tests + drive-by `serde_json` dev-dep added to `swarmllm-types` so 15 previously-dead crate-local tests now run.
+
+4. **`private_mode`/`offline_mode` moved out of `pool_state` tree** (closes R105). New `TREE_NODE_MODES` + one-shot legacy migration via `restore_node_mode()` helper. Each tree single-typed; no namespace-collision risk for `iter_json::<PoolState>`.
+
+5. **`check_integrity` strict per-tree type validation** (closes R105). `validate_strict` routes each `CRITICAL_TREES` entry through the actual `swarmllm_types` type (`ModelManifest` / `CreditBalance` / `NicknameRecord` / `PoolState` / `CreditTransaction`) or `i64` (`pool_removal_replays`). Type mismatches that previously passed JSON-Value validation are now reported as corrupt. Dropped the unused "identity" entry. Updated existing tests + 2 new tests demonstrating the R105 concern in concrete form.
+
+6. **`credit_percentile_cache` no longer held across `DashMap` iter** (closes R97). Three-phase pattern (peek under lock → iter outside → re-lock to write) replaces the lock-over-iter that could block the router task on long iters.
+
+7. **`api.metrics_auth_required` config flag** (closes R101/R102 about `/metrics` credit-balance disclosure). Default `false` preserves Prometheus convention + dashboard loopback scrape; when `true`, `auth_middleware` short-circuits the loopback `/metrics` exemption.
+
+8. **Credit forward per-window TOTAL value cap** (closes R102). `CREDIT_FORWARD_MAX_VALUE_PER_WINDOW = 200_000` credits (2× per-tx max). `credit_forward_rl` now stores `(Instant, i64)` pairs; `check_credit_forward_rate` sums amounts in the window and rejects if projected total exceeds the cap, atomic with the existing count cap. 3 unit tests.
+
+Plus ~15 verification-only sweep-log closures for items intervening rounds had already addressed (`x-swarm-forwarded` dead code, relay defaults safe per libp2p 0.20.x, umask race serialised by `spawn_lock`, scan zero-hash auto-compute, `peer_cache` `replace_tree` atomicity, `BACKGROUND_CANCEL_AGES` TTL sweep, MCP `sampling/createMessage` explicit arm, Anthropic→OpenAI tool block translation, SWIFT `emit_token` cap, `auto_manage` config hot-reload first-tick, etc.).
+
+1005 → 1015 lib tests (+10) and 15 newly-runnable `swarmllm-types` tests. Clippy clean default + features dev,claude-subscription + features llama. Detail: `round_log_R138.md` and full sweep-log.
+
+### Prior: R137 — extended FUTURE_WORK deferrals batch
 
 1. **Hot-reloadable cross-pool flags** (closes R135 deferral). `state.credits.allow_cross_pool_inference` + `state.credits.share_model_catalog` AtomicBool mirrors of `config.pool.*`. PUT /api/admin/config writes both atomic + persists TOML; GET surfaces runtime atomic. Pattern follows R121's `contribution_auto`. `pool::scope::cross_pool_extras` + `health::broadcast_pool_model_availability` read from the atomic. New `cross_pool_extras_honors_runtime_flag_toggle` regression test.
 
