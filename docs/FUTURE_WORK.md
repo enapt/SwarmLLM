@@ -590,10 +590,19 @@ The following are NOT gaps — they are live:
   `inference/allreduce.rs`).
 - **Activation compression** (`tensor_util.rs::tensor_to_bytes_q8_0`,
   Q8_0 group-32, ~3.76× over f32) — config-gated by
-  `inference.activation_compression` (default false). Wired through
-  the worker IPC path.
+  `inference.activation_compression`. Default **TRUE** since R136
+  (was deferred when first written). Wired through the worker IPC
+  path.
 - **Prefix cache** (`split/prefix_cache.rs`, 53K bytes).
 - **Pipeline failover** with hot-standby nodes per segment.
+- **Q8_0 wire compression (L0)**, **n-gram cascade (L1, draft-free
+  + draft+ngram, single + multi-segment)**, **tail-latency hedging
+  (L2, single-segment race-then-discard)**, **predictive prefetch
+  (L3, observability-complete decision dispatch)** — all R136.
+  See `## R136 local 3-node benchmark — measured results` below.
+- **L1 hit/miss telemetry** (R137) surfaced via
+  `GET /api/admin/stats → swarm_spec.ngram = { hits, misses, total,
+  hit_rate }` — operator-facing signal of whether L1 is firing.
 
 ### Tier 1 — high-leverage, low-risk wins (do these first)
 

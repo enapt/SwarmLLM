@@ -38,6 +38,8 @@ Single Rust binary, three simultaneous functions:
 │  │  │  credit_balance, pool_state, pool_registry     │ │  │
 │  │  │  trust_manager, escrow_manager, anti_gaming    │ │  │
 │  │  │  foreign_pool_catalog (R134)                   │ │  │
+│  │  │  allow_cross_pool_inference (R137)             │ │  │
+│  │  │  share_model_catalog (R137)                    │ │  │
 │  │  └────────────────────────────────────────────────┘ │  │
 │  │  ┌─ ModelMgmt (state.models) ────────────────────┐ │  │
 │  │  │  acquisition_progress, hf_sources              │ │  │
@@ -55,6 +57,8 @@ Single Rust binary, three simultaneous functions:
 │  │  │  swarm_capacity (R110)                         │ │  │
 │  │  │  hedge_tracker (R136 L2)                       │ │  │
 │  │  │  prefetch_orchestrator (R136 L3)               │ │  │
+│  │  │  ngram_hits / ngram_misses (R137 L1 telemetry) │ │  │
+│  │  │  inference_latency_samples (R137: (Instant,f64))│ │  │
 │  │  └────────────────────────────────────────────────┘ │  │
 │  │                                                     │  │
 │  │  Root: peer_registry, model_registry, executor,     │  │
@@ -1292,6 +1296,8 @@ Routes Claude model requests through a locally-authenticated `claude` CLI subpro
 - `GET     /api/admin/storage/breakdown` — R110: stacked-bar data (total_mb, used_mb, auto_target_mb, free_mb)
 - `GET     /api/admin/wishlist` — R111: ranked list of models the swarm wants (status, score, why_tags, swarm_replicas, target_replicas)
 - `GET     /api/admin/hf/trending` — R112: cached HuggingFace trending-GGUF snapshot from HfWatcher
+- `GET     /api/admin/quant-recommendations` — R133: per-family quant-choice recommendations with rationale tags
+- `GET     /api/admin/foreign-pool-catalog` — R134: discovery-only cache of models advertised by other pools (gated on `pool.share_model_catalog`)
 - `GET     /api/admin/responses` — List stored `/v1/responses` records for the dashboard (filter by `?status=…&limit=…`)
 - `GET     /api/admin/models` — Model list with shard status, VRAM estimates, acquisition state
 - `POST    /api/admin/models/{id}/add` — Trigger model acquisition
