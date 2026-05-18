@@ -107,12 +107,14 @@ pub struct PoolManager {
     /// When set, auto-accept the next invitation (set by JoinWithCode).
     /// Includes a timestamp so the intent expires after 5 minutes.
     auto_accept_code_hash: Option<([u8; 32], std::time::Instant)>,
-    /// Per-member sliding window of recent credit-forward timestamps.
-    /// Caps a single member at CREDIT_FORWARD_MAX_PER_WINDOW forwards per
-    /// CREDIT_FORWARD_WINDOW_SECS — defeats the UUID-replay-with-fresh-id
-    /// vector (each forward gets a fresh UUID so the DB dedup key alone
-    /// cannot detect repeated claims).
-    credit_forward_rl: HashMap<NodeId, std::collections::VecDeque<std::time::Instant>>,
+    /// Per-member sliding window of recent credit-forward `(timestamp, amount)`
+    /// pairs. Caps a single member at `CREDIT_FORWARD_MAX_PER_WINDOW` forwards
+    /// AND at `CREDIT_FORWARD_MAX_VALUE_PER_WINDOW` cumulative credits per
+    /// `CREDIT_FORWARD_WINDOW_SECS` — the count cap defeats the
+    /// UUID-replay-with-fresh-id vector, the value cap (R138, closes R102
+    /// deferral) bounds the worst-case TOTAL credit transfer a single member
+    /// can attempt per window even if they stay under the count cap.
+    credit_forward_rl: HashMap<NodeId, std::collections::VecDeque<(std::time::Instant, i64)>>,
     /// R131: timestamp of the most recent successful PoolState gossip
     /// broadcast. Used by `maybe_gossip_pool_state` to debounce bursty
     /// re-broadcasts (the "flood under 50-member rotation" case from
@@ -138,6 +140,16 @@ pub struct PoolManager {
 
 const CREDIT_FORWARD_WINDOW_SECS: u64 = 60;
 const CREDIT_FORWARD_MAX_PER_WINDOW: usize = 60;
+
+/// R138 (closes R102 deferral) — cumulative credit-forward value a single
+/// member can attempt within `CREDIT_FORWARD_WINDOW_SECS`. Sized at
+/// `2 * max_transaction_amount` (200k) — defense-in-depth above the
+/// existing per-tx 100k cap. A legitimate slave device forwarding for
+/// per-token credit spend at OpenAI-level rates never approaches this;
+/// a member sustaining forwards near the per-tx max gets a hint to slow
+/// down. Independent of the count cap (60 forwards/window) — either limit
+/// alone is sufficient to reject.
+const CREDIT_FORWARD_MAX_VALUE_PER_WINDOW: i64 = 200_000;
 
 /// R131: minimum interval between unsolicited PoolState broadcasts. Bursty
 /// member-change events within this window collapse into a single trailing
@@ -185,21 +197,45 @@ impl PoolManager {
         }
     }
 
-    /// Returns true if this member is under the credit-forward rate limit.
-    fn check_credit_forward_rate(&mut self, member: &NodeId) -> bool {
+    /// Returns true if this member is under the credit-forward rate limits.
+    ///
+    /// Two independent checks (R138 closes R102 deferral):
+    /// 1. **Count cap** — at most `CREDIT_FORWARD_MAX_PER_WINDOW` forwards
+    ///    per `CREDIT_FORWARD_WINDOW_SECS`. Defeats the UUID-replay-with-
+    ///    fresh-id vector.
+    /// 2. **Value cap** — cumulative `amount` summed across forwards in the
+    ///    same window cannot exceed `CREDIT_FORWARD_MAX_VALUE_PER_WINDOW`.
+    ///    Defense-in-depth above the existing per-tx 100k cap; bounds the
+    ///    worst-case TOTAL credit transfer per window.
+    ///
+    /// The pair is appended atomically only if BOTH checks pass.
+    fn check_credit_forward_rate(&mut self, member: &NodeId, amount: i64) -> bool {
         let window = std::time::Duration::from_secs(CREDIT_FORWARD_WINDOW_SECS);
         let now = std::time::Instant::now();
         let entry = self.credit_forward_rl.entry(member.clone()).or_default();
         while entry
             .front()
-            .is_some_and(|t| now.duration_since(*t) > window)
+            .is_some_and(|(t, _)| now.duration_since(*t) > window)
         {
             entry.pop_front();
         }
         if entry.len() >= CREDIT_FORWARD_MAX_PER_WINDOW {
             return false;
         }
-        entry.push_back(now);
+        // Value cap: project the window total post-insert and reject if over.
+        // saturating_add so a malicious overflow attempt can't bypass via
+        // negative-amount wrap (the caller's amount > 0 check at
+        // handle_credit_forward already blocks non-positive amounts, but
+        // saturate defensively in case the call surface changes).
+        let projected: i64 = entry
+            .iter()
+            .map(|(_, a)| *a)
+            .fold(0_i64, i64::saturating_add)
+            .saturating_add(amount);
+        if projected > CREDIT_FORWARD_MAX_VALUE_PER_WINDOW {
+            return false;
+        }
+        entry.push_back((now, amount));
 
         // Bound the outer HashMap by sweeping NodeIds whose VecDeque emptied
         // out (member left the pool, restart, etc.). Without this sweep the
@@ -208,7 +244,7 @@ impl PoolManager {
         const CREDIT_FORWARD_RL_SOFT_CAP: usize = 256;
         if self.credit_forward_rl.len() > CREDIT_FORWARD_RL_SOFT_CAP {
             self.credit_forward_rl.retain(|_, deque| {
-                !deque.is_empty() && now.duration_since(*deque.back().unwrap()) <= window
+                !deque.is_empty() && now.duration_since(deque.back().unwrap().0) <= window
             });
         }
         true
@@ -927,12 +963,17 @@ impl PoolManager {
         // Rate-limit per-member forwards. The UUID is member-generated, so the DB
         // dedup above only blocks exact-UUID replays — a fresh UUID with identical
         // amount/timestamp would bypass it. Rate-limiting bounds the exploitability.
-        if !self.check_credit_forward_rate(&forward.from_node_id) {
+        // R138: also enforces a cumulative-value cap per window
+        // (CREDIT_FORWARD_MAX_VALUE_PER_WINDOW = 200k credits) on top of the
+        // count cap (60 forwards/window). Either limit rejects.
+        if !self.check_credit_forward_rate(&forward.from_node_id, forward.amount) {
             tracing::warn!(
                 from = %forward.from_node_id,
+                amount = forward.amount,
                 window_secs = CREDIT_FORWARD_WINDOW_SECS,
-                max = CREDIT_FORWARD_MAX_PER_WINDOW,
-                "Credit forward rate limit exceeded — dropping"
+                max_count = CREDIT_FORWARD_MAX_PER_WINDOW,
+                max_value = CREDIT_FORWARD_MAX_VALUE_PER_WINDOW,
+                "Credit forward rate limit exceeded (count or cumulative value) — dropping"
             );
             return;
         }
@@ -2797,5 +2838,57 @@ mod tests {
         db.put_json(TREE_POOL_STATE, KEY_PRIVATE_MODE, &false)
             .unwrap();
         assert_eq!(restore_node_mode(&db, KEY_PRIVATE_MODE), Some(true));
+    }
+
+    /// R138 (closes R102 deferral) — value-cap path of
+    /// `check_credit_forward_rate`. Verifies that the second forward is
+    /// rejected when the cumulative amount would exceed
+    /// `CREDIT_FORWARD_MAX_VALUE_PER_WINDOW`, even though the count is
+    /// still under `CREDIT_FORWARD_MAX_PER_WINDOW`.
+    #[tokio::test]
+    async fn credit_forward_rate_limit_value_cap_rejects_over_total() {
+        let (mut pm, _state, _id) = build_test_pool_manager().await;
+        let member = NodeId([7u8; 32]);
+        // First forward at exactly half the value cap — allowed.
+        assert!(pm.check_credit_forward_rate(&member, CREDIT_FORWARD_MAX_VALUE_PER_WINDOW / 2));
+        // Second forward at slightly more than half — would push total
+        // over the cap. Rejected.
+        assert!(
+            !pm.check_credit_forward_rate(&member, CREDIT_FORWARD_MAX_VALUE_PER_WINDOW / 2 + 1),
+            "value cap must reject when total would exceed limit"
+        );
+        // The rejected forward was NOT recorded — verify by trying a
+        // small amount that fits in the remaining headroom.
+        assert!(
+            pm.check_credit_forward_rate(&member, CREDIT_FORWARD_MAX_VALUE_PER_WINDOW / 2),
+            "rejected forward must not have consumed budget"
+        );
+    }
+
+    /// R138 — count cap still fires before the value cap on tiny forwards.
+    #[tokio::test]
+    async fn credit_forward_rate_limit_count_cap_rejects_burst() {
+        let (mut pm, _state, _id) = build_test_pool_manager().await;
+        let member = NodeId([8u8; 32]);
+        // Tiny forwards (value cap won't trip): hit count cap first.
+        for _ in 0..CREDIT_FORWARD_MAX_PER_WINDOW {
+            assert!(pm.check_credit_forward_rate(&member, 1));
+        }
+        // Next one is rejected by count even though value is far below cap.
+        assert!(!pm.check_credit_forward_rate(&member, 1));
+    }
+
+    /// R138 — independent windows per member.
+    #[tokio::test]
+    async fn credit_forward_rate_limit_is_per_member() {
+        let (mut pm, _state, _id) = build_test_pool_manager().await;
+        let alice = NodeId([9u8; 32]);
+        let bob = NodeId([0xAA; 32]);
+        // Alice spends her full value budget.
+        assert!(pm.check_credit_forward_rate(&alice, CREDIT_FORWARD_MAX_VALUE_PER_WINDOW));
+        // Bob is unaffected.
+        assert!(pm.check_credit_forward_rate(&bob, CREDIT_FORWARD_MAX_VALUE_PER_WINDOW));
+        // Alice cannot forward more.
+        assert!(!pm.check_credit_forward_rate(&alice, 1));
     }
 }
