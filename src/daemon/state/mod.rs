@@ -315,6 +315,8 @@ impl SharedState {
                 prefetch_orchestrator: Arc::new(
                     crate::inference::prefetch::PrefetchOrchestrator::new(),
                 ),
+                ngram_hits: std::sync::atomic::AtomicU64::new(0),
+                ngram_misses: std::sync::atomic::AtomicU64::new(0),
             },
             credits: CreditPool {
                 credit_balance: Arc::new(RwLock::new(crate::types::CreditBalance {

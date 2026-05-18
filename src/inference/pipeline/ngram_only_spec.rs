@@ -228,6 +228,12 @@ impl PipelineExecutor {
             if drafts.is_empty() {
                 // ── Fallback: single-token verify (γ=0 batch = 1 position) ──
                 fallback_rounds += 1;
+                // R137: bump lifetime miss counter for /api/admin/stats →
+                // swarm_spec.ngram visibility.
+                self.shared_state
+                    .metrics
+                    .ngram_misses
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 let verify_tokens = vec![last_token];
                 let truncate_for_this_round = pending_truncate.take();
                 let spec_logits = super::forward_verify_through_segments(
@@ -268,6 +274,12 @@ impl PipelineExecutor {
 
             // ── N-gram HIT path ──
             ngram_rounds += 1;
+            // R137: bump lifetime hit counter (counts hit-rounds, not
+            // accepted tokens — accept count is in the spec_logits result).
+            self.shared_state
+                .metrics
+                .ngram_hits
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let mut verify_tokens: Vec<u32> = Vec::with_capacity(drafts.len() + 1);
             verify_tokens.push(last_token);
             verify_tokens.extend_from_slice(&drafts);

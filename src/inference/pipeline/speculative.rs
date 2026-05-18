@@ -265,12 +265,26 @@ impl PipelineExecutor {
             // (code, RAG, summarisation) — exactly SwarmLLM's primary
             // workload (Claude Code subs, MCP tool use).
             let ngram_drafts = if self.shared_state.config.inference.ngram_lookup_enabled {
-                ngram_lookup_drafts(
+                let d = ngram_lookup_drafts(
                     &self.shared_state.config.inference,
                     &draft_state.prompt_tokens,
                     &generated,
                     this_gamma,
-                )
+                );
+                // R137: bump lifetime hit/miss counters for visibility via
+                // /api/admin/stats → swarm_spec.ngram.
+                if d.is_empty() {
+                    self.shared_state
+                        .metrics
+                        .ngram_misses
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                } else {
+                    self.shared_state
+                        .metrics
+                        .ngram_hits
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+                d
             } else {
                 Vec::new()
             };

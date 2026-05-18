@@ -86,6 +86,13 @@ pub struct MetricsProviders {
     /// forward, gossiping warming) is a follow-up integration point
     /// per docs/FUTURE_WORK.md § R136 Layer 3.
     pub prefetch_orchestrator: crate::inference::prefetch::PrefetchHandle,
+    /// SWARM-SPEC Layer 1: lifetime counters for n-gram-cascade
+    /// hits / misses across all spec paths (`speculative.rs` draft+ngram
+    /// path AND `ngram_only_spec.rs` draft-free path). Surfaced in
+    /// `GET /api/admin/stats → swarm_spec.ngram` so operators can see
+    /// whether L1 is actually firing on their workload mix. R137.
+    pub ngram_hits: AtomicU64,
+    pub ngram_misses: AtomicU64,
 }
 
 /// Atomic counters for a single mpsc channel.

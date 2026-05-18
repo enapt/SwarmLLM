@@ -326,9 +326,33 @@ pub async fn stats(State(state): State<AppState>) -> Json<serde_json::Value> {
     // SWARM-SPEC layer metrics (R136): hedge + prefetch tracker
     // snapshots. Empty / zero counters until those layers see real
     // traffic with their feature flags enabled.
+    // R137: + L1 n-gram hit/miss lifetime counters so operators can
+    // tell whether the cascade is actually firing on their workload mix.
+    let ngram_hits = state
+        .shared_state
+        .metrics
+        .ngram_hits
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let ngram_misses = state
+        .shared_state
+        .metrics
+        .ngram_misses
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let ngram_total = ngram_hits + ngram_misses;
+    let ngram_hit_rate = if ngram_total > 0 {
+        ngram_hits as f64 / ngram_total as f64
+    } else {
+        0.0
+    };
     let swarm_spec_metrics = serde_json::json!({
         "hedge": state.shared_state.metrics.hedge_tracker.metrics(),
         "prefetch": state.shared_state.metrics.prefetch_orchestrator.metrics(),
+        "ngram": {
+            "hits": ngram_hits,
+            "misses": ngram_misses,
+            "total": ngram_total,
+            "hit_rate": (ngram_hit_rate * 10000.0).round() / 10000.0,
+        },
     });
 
     Json(serde_json::json!({
