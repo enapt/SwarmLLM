@@ -411,9 +411,10 @@ and confirmed the remaining items genuinely require user discussion or
 have explicit "won't fix" semantics. Concretely:
 
 - **R103 `x-swarm-forwarded` dual-gate dead code** (`src/api/middleware.rs:432`)
-  — already cleaned up; the inline comment at lines 461-466 explains
-  what was dead and why falling through to Bearer auth is correct.
-  Move to `fixed` on next sweep close.
+  — **closed R138** (2026-05-18). The dead branch was already removed
+  in an intervening round; the inline comment at lines 461-466 documents
+  why falling through to Bearer auth is correct. R138 moved the
+  sweep-log entry from `deferred` to `fixed`.
 
 - **R103 `batch_scheduler_loop` no JoinHandle / catch_unwind**
   (`src/inference/process_pool.rs:792`) — kept deferred. A panic in
@@ -425,12 +426,11 @@ have explicit "won't fix" semantics. Concretely:
   Won't fix unless a concrete panic site appears.
 
 - **R105 libp2p relay `..Default::default()` "possibly open"**
-  (`src/network/relay.rs:51`) — verified safe against libp2p-relay
-  0.21.1: the only fields covered by the default fallback are
-  `reservation_rate_limiters` and `circuit_src_rate_limiters`, both of
-  which default to **conservative** per-peer/per-IP rate limits
-  (30/peer/2min, 60/ip/min). No "open" surface. Move to `wontfix` on
-  next sweep close.
+  (`src/network/relay.rs:51`) — **closed R138** (`wontfix`). Verified
+  against libp2p-relay 0.20.x: the only fields covered by the default
+  fallback are `reservation_rate_limiters` and `circuit_src_rate_limiters`,
+  both of which default to **conservative** per-peer/per-IP rate limits
+  (30/peer/2min, 60/ip/min). No "open" surface.
 
 - **R105 latency sample ring time-coverage**
   (`src/api/metrics.rs:160`) — **closed R137** (2026-05-17). Sample
@@ -449,6 +449,87 @@ have explicit "won't fix" semantics. Concretely:
   GossipSub PeerScore tuning, DHT provider capability challenge, etc.)
   are explicitly architectural / design discussions matching the
   user's "defer items needing discussion" directive.
+
+## Audit deferral — R138 sweep-log triage
+
+The 2026-05-18 autonomous defer-batch round closed ~20 sweep-log
+deferrals via a mix of real fixes and verification-only entries.
+The headline closures:
+
+- **R103 `active_count.fetch_add` before RAII guard armed**
+  (`src/inference/router/mod.rs:689`) — `fetch_add` moved INSIDE the
+  spawned task so a `tokio::spawn` OOM panic can no longer leak the
+  tier-cap counter.
+
+- **R103 umask race during concurrent worker spawn**
+  (`src/inference/process_pool.rs:1048`) — verified already serialised
+  by the `spawn_lock` (tokio Mutex held across the entire
+  `spawn_worker` call); no second caller. R138 marked `fixed`.
+
+- **R103 cuda-keyring .deb no SHA verify** + **R103 Docker base images
+  not pinned by digest** — both supply-chain integrity items: cuda-keyring
+  pinned to SHA256 d93190d5... in both ci.yml + release.yml; all 4 FROM
+  directives in Dockerfile/Dockerfile.cuda pinned with @sha256: digest
+  alongside their tag.
+
+- **R104 scan ignores `auto_manage_paused` for re-announce**
+  (`src/model/auto_manage/scan.rs`) — `model/auto_manage/manager.rs`
+  passes `Option<&network_tx>` based on the `auto_manage_enabled`
+  atomic. Rescan still runs locally (correctness — picking up manually-
+  placed shards) but the network re-announce is gated on the pause
+  toggle. Manual `POST /api/admin/rescan-shards` always announces.
+
+- **R104 config hot-reload first-tick** — verified already fixed by
+  `interval.tick().await` at `model/auto_manage/manager.rs:377`.
+
+- **R105 `CreditBalance` schema-upgrade safety** — `#[serde(default)]`
+  on numeric + timestamp fields; type-level doc encodes the rule for
+  future field additions. Drive-by: `[dev-dependencies] serde_json`
+  added to `swarmllm-types` Cargo.toml so 15 previously-dead lib tests
+  now run.
+
+- **R105 `private_mode`/`offline_mode` mixed-type in `pool_state`
+  tree** — moved to a new `node_modes` redb tree via the
+  `restore_node_mode()` migration helper. Each tree now single-typed;
+  no namespace collision risk for `iter_json::<PoolState>`.
+
+- **R105 `check_integrity` validates JSON only not types** —
+  `validate_strict` routes each `CRITICAL_TREES` entry through the
+  actual `swarmllm_types` type. Type mismatches that previously
+  passed JSON-Value validation are now reported as corrupt. Dropped
+  the unused "identity" tree from `CRITICAL_TREES`.
+
+- **R105 HF .tmp resume vulnerable to layout change** — added a
+  BLAKE3 layout-hash sidecar `<shard>.tmp.layout` written BEFORE
+  any data lands in .tmp. Resume path verifies hash match; mismatch
+  → discard both files and restart. Closes the coincidental-
+  size-match-across-layout-revisions vector.
+
+- **R97 `credit_percentile_cache` lock held across `DashMap` iter** —
+  three-phase pattern (peek under lock → iter outside → re-lock to
+  write) so the router task no longer blocks on long iters.
+
+- **R101/R102 `/metrics` no auth + credit-balance disclosure** —
+  new `api.metrics_auth_required: bool` config flag tightens the
+  loopback exemption for public-internet nodes. Default false
+  preserves Prometheus convention.
+
+- **R102 credit forward per-window TOTAL value cap** —
+  `CREDIT_FORWARD_MAX_VALUE_PER_WINDOW = 200_000` credits/min/member
+  on top of the existing count cap (60 forwards). Either limit
+  alone is sufficient to reject.
+
+Plus ~15 verification-only closures across R66/R67/R68/R89/R97/R102/
+R103/R104/R105/R123 for items intervening rounds had already
+addressed (anti_gaming TTL bounds; SWIFT `emit_token` cap;
+`peer_cache` replace_tree atomicity; `BACKGROUND_CANCEL_AGES` TTL
+sweep; MCP `sampling/createMessage` explicit arm; Anthropic→OpenAI
+tool block translation; `dashboard.api_log_link` translated; etc.).
+
+Test count: 1005 → 1015 lib tests + 15 newly-runnable
+`swarmllm-types` tests. Clippy clean default + features
+dev,claude-subscription + features llama. Detail: commits
+d122e9e8..e6dad63f in `.claude/sweep-log.jsonl` R138 entries.
 
 ---
 
