@@ -128,7 +128,14 @@ jobs:
       - name: Install CUDA toolkit (Linux)
         if: matrix.cuda_linux
         run: |
+          # R138 (closes R103 deferral): pin cuda-keyring .deb to a verified
+          # SHA256 so a compromised mirror or in-transit modification can't
+          # land a tampered keyring on the release builder. Captured
+          # 2026-05-18 from the NVIDIA URL via direct wget. Kept in sync
+          # with the matching pin in .github/workflows/ci.yml.
+          CUDA_KEYRING_SHA256=d93190d50b98ad4699ff40f4f7af50f16a76dac3bb8da1eaaf366d47898ff8df
           wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb
+          echo "${CUDA_KEYRING_SHA256}  cuda-keyring_1.1-1_all.deb" | sha256sum -c -
           sudo dpkg -i cuda-keyring_1.1-1_all.deb
           sudo apt-get update
           sudo apt-get install -y cuda-toolkit-12-4
