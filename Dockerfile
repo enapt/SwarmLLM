@@ -9,7 +9,12 @@
 # ---------------------------------------------------------------------------
 # Stage 1: Builder
 # ---------------------------------------------------------------------------
-FROM rust:1.94-bookworm AS builder
+# R138 (closes R103 deferral): pin base images by digest so a registry-side
+# tag move (compromise, accidental retag, supply-chain shift) cannot silently
+# change the build inputs. Tag retained alongside `@sha256:` for human
+# readability — Docker still pulls by digest. Re-capture the digest with
+# `docker buildx imagetools inspect rust:1.94-bookworm` when bumping the tag.
+FROM rust:1.94-bookworm@sha256:6ae102bdbf528294bc79ad6e1fae682f6f7c2a6e6621506ba959f9685b308a55 AS builder
 
 # Install system dependencies required for compilation
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -52,7 +57,10 @@ RUN cargo build --release
 # ---------------------------------------------------------------------------
 # Stage 2: Runtime
 # ---------------------------------------------------------------------------
-FROM debian:bookworm-slim
+# R138 (closes R103 deferral): digest-pinned for the same reasons as the
+# builder stage above. Re-capture with
+# `docker buildx imagetools inspect debian:bookworm-slim` when bumping.
+FROM debian:bookworm-slim@sha256:67b30a61dc87758f0caf819646104f29ecbda97d920aaf5edc834128ac8493d3
 
 # Install only runtime dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \

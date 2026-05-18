@@ -8,7 +8,10 @@
 # ---------------------------------------------------------------------------
 # Stage 1: Builder (CUDA dev image + Rust toolchain)
 # ---------------------------------------------------------------------------
-FROM nvidia/cuda:12.4.0-devel-ubuntu22.04 AS builder
+# R138 (closes R103 deferral): pin base images by digest. Re-capture with
+# `docker buildx imagetools inspect nvidia/cuda:12.4.0-devel-ubuntu22.04`
+# when bumping the tag.
+FROM nvidia/cuda:12.4.0-devel-ubuntu22.04@sha256:28326fefd36d43ecf82447e9ca1175db639b931e234019b2807f35a0d1551656 AS builder
 
 # Prevent interactive prompts during package installation
 ENV DEBIAN_FRONTEND=noninteractive
@@ -62,7 +65,9 @@ RUN cargo build --release --features candle-cuda
 # ---------------------------------------------------------------------------
 # Stage 2: Runtime (CUDA runtime image)
 # ---------------------------------------------------------------------------
-FROM nvidia/cuda:12.4.0-runtime-ubuntu22.04
+# R138 (closes R103 deferral): digest-pinned. Re-capture with
+# `docker buildx imagetools inspect nvidia/cuda:12.4.0-runtime-ubuntu22.04`.
+FROM nvidia/cuda:12.4.0-runtime-ubuntu22.04@sha256:af8bd179ed3bf69d4b63b19a763662a6141f0f62ef099283f68d0b14b4bab0e3
 
 ENV DEBIAN_FRONTEND=noninteractive
 
