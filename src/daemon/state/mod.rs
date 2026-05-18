@@ -337,17 +337,20 @@ impl SharedState {
                 peer_credit_balances: DashMap::new(),
                 credit_percentile_cache: parking_lot::Mutex::new((std::time::Instant::now(), 0.5)),
                 private_mode: std::sync::atomic::AtomicBool::new({
-                    // Restore from DB, fall back to config
-                    db.get_json::<bool>("pool_state", "private_mode")
-                        .ok()
-                        .flatten()
-                        .unwrap_or(config.pool.private_mode)
+                    // Restore from DB (with R138 legacy-path migration handled
+                    // inside `restore_node_mode`), fall back to config default.
+                    crate::pool::manager::restore_node_mode(
+                        &db,
+                        crate::pool::manager::KEY_PRIVATE_MODE,
+                    )
+                    .unwrap_or(config.pool.private_mode)
                 }),
                 offline_mode: std::sync::atomic::AtomicBool::new({
-                    db.get_json::<bool>("pool_state", "offline_mode")
-                        .ok()
-                        .flatten()
-                        .unwrap_or(config.pool.offline_mode)
+                    crate::pool::manager::restore_node_mode(
+                        &db,
+                        crate::pool::manager::KEY_OFFLINE_MODE,
+                    )
+                    .unwrap_or(config.pool.offline_mode)
                 }),
                 foreign_pool_catalog: DashMap::new(),
                 allow_cross_pool_inference: std::sync::atomic::AtomicBool::new(

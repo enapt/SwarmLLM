@@ -632,11 +632,11 @@ pub async fn set_private_mode(
         .credits
         .private_mode
         .store(body.enabled, std::sync::atomic::Ordering::Relaxed);
-    if let Err(e) = state
-        .shared_state
-        .db
-        .put_json("pool_state", "private_mode", &body.enabled)
-    {
+    if let Err(e) = state.shared_state.db.put_json(
+        crate::pool::manager::TREE_NODE_MODES,
+        crate::pool::manager::KEY_PRIVATE_MODE,
+        &body.enabled,
+    ) {
         tracing::warn!(error = %e, "Failed to persist private_mode — will revert on restart");
     }
 
@@ -647,11 +647,11 @@ pub async fn set_private_mode(
             .credits
             .offline_mode
             .store(offline, std::sync::atomic::Ordering::Relaxed);
-        if let Err(e) = state
-            .shared_state
-            .db
-            .put_json("pool_state", "offline_mode", &offline)
-        {
+        if let Err(e) = state.shared_state.db.put_json(
+            crate::pool::manager::TREE_NODE_MODES,
+            crate::pool::manager::KEY_OFFLINE_MODE,
+            &offline,
+        ) {
             tracing::warn!(error = %e, "Failed to persist offline_mode — will revert on restart");
         }
     }

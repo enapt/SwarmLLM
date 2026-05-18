@@ -26,6 +26,62 @@ const TREE_POOL_REMOVAL_REPLAYS: &str = "pool_removal_replays";
 const TREE_POOL_INVITE_CODES: &str = "pool_invite_codes";
 pub(crate) const KEY_MY_POOL: &str = "my_pool";
 
+/// Tree for persisted per-node mode bools (`private_mode`, `offline_mode`).
+///
+/// **Why a separate tree from `pool_state`** (R105 deferral closure):
+/// these flags used to share the `pool_state` tree with `PoolState` JSON
+/// records keyed by `my_pool`. The risk was a future reader iterating
+/// `pool_state` with `iter_json::<PoolState>` (e.g. an audit tool, or a
+/// stricter `check_integrity` validator) hitting the `bool` payloads under
+/// `private_mode`/`offline_mode` keys and reporting them as corrupt. Moving
+/// the mode flags out of `pool_state` removes the namespace collision and
+/// keeps each tree single-typed.
+pub(crate) const TREE_NODE_MODES: &str = "node_modes";
+pub(crate) const KEY_PRIVATE_MODE: &str = "private_mode";
+pub(crate) const KEY_OFFLINE_MODE: &str = "offline_mode";
+
+/// Restore a per-node mode flag (`private_mode` / `offline_mode`) from
+/// persistent storage, migrating any legacy entry left behind in the
+/// `pool_state` tree by daemons predating R138.
+///
+/// Lookup order:
+/// 1. `node_modes/{key}` — the canonical home (post-R138).
+/// 2. `pool_state/{key}` — legacy path. If found, the value is **moved**
+///    (written into `node_modes`, removed from `pool_state`) so a single
+///    restart finishes the migration and the namespace-collision risk
+///    that motivated this split (R105) goes away permanently for that
+///    node.
+/// 3. `None` — caller falls back to the config default.
+///
+/// Errors on the write/remove half of the migration are intentionally
+/// swallowed with a warn-level log: the in-memory value is still correct
+/// for this run, and the next restart will retry the migration.
+pub(crate) fn restore_node_mode(db: &crate::storage::db::Database, key: &str) -> Option<bool> {
+    if let Ok(Some(v)) = db.get_json::<bool>(TREE_NODE_MODES, key) {
+        return Some(v);
+    }
+    if let Ok(Some(v)) = db.get_json::<bool>(TREE_POOL_STATE, key) {
+        if let Err(e) = db.put_json(TREE_NODE_MODES, key, &v) {
+            tracing::warn!(
+                error = %e,
+                key,
+                "Failed to migrate legacy pool_state mode flag into node_modes — will retry next restart"
+            );
+            // Still return v: the runtime read succeeded, only the migration write failed.
+            return Some(v);
+        }
+        if let Err(e) = db.remove(TREE_POOL_STATE, key) {
+            tracing::warn!(
+                error = %e,
+                key,
+                "Migrated mode flag into node_modes but failed to delete legacy pool_state entry; benign — next restart will skip migration"
+            );
+        }
+        return Some(v);
+    }
+    None
+}
+
 /// Max lifetime of a pending auto-accept intent created by a code-based join.
 /// Used both by the periodic expiry sweep and the inbound invitation handler.
 const AUTO_ACCEPT_TIMEOUT_SECS: u64 = 300;
@@ -2650,5 +2706,96 @@ mod tests {
             }
         }
         (fulls, diffs)
+    }
+
+    /// R138 — `restore_node_mode` returns `None` and writes nothing when
+    /// neither tree has the key. SharedState falls through to config default.
+    #[test]
+    fn restore_node_mode_empty_db_returns_none() {
+        let db = Database::open_temp().expect("temp db");
+        assert_eq!(restore_node_mode(&db, KEY_PRIVATE_MODE), None);
+        assert_eq!(restore_node_mode(&db, KEY_OFFLINE_MODE), None);
+        // No spurious writes.
+        let v: Option<bool> = db
+            .get_json::<bool>(TREE_NODE_MODES, KEY_PRIVATE_MODE)
+            .unwrap();
+        assert!(v.is_none());
+    }
+
+    /// R138 — canonical case: `node_modes` already holds the value; the
+    /// helper returns it without touching `pool_state`.
+    #[test]
+    fn restore_node_mode_reads_new_tree_directly() {
+        let db = Database::open_temp().expect("temp db");
+        db.put_json(TREE_NODE_MODES, KEY_PRIVATE_MODE, &true)
+            .unwrap();
+        assert_eq!(restore_node_mode(&db, KEY_PRIVATE_MODE), Some(true));
+        // Sanity: pool_state stays untouched.
+        let legacy: Option<bool> = db
+            .get_json::<bool>(TREE_POOL_STATE, KEY_PRIVATE_MODE)
+            .unwrap();
+        assert!(legacy.is_none());
+    }
+
+    /// R138 — migration path: a legacy `pool_state/{key}` bool from a
+    /// pre-R138 daemon is copied to `node_modes` and removed from
+    /// `pool_state` on first restart. Idempotent: a second call goes
+    /// straight through the new-tree branch.
+    #[test]
+    fn restore_node_mode_migrates_legacy_pool_state_entry() {
+        let db = Database::open_temp().expect("temp db");
+        // Simulate a pre-R138 persisted entry.
+        db.put_json(TREE_POOL_STATE, KEY_PRIVATE_MODE, &true)
+            .unwrap();
+        db.put_json(TREE_POOL_STATE, KEY_OFFLINE_MODE, &false)
+            .unwrap();
+
+        // First restore: returns the legacy value AND migrates.
+        assert_eq!(restore_node_mode(&db, KEY_PRIVATE_MODE), Some(true));
+        assert_eq!(restore_node_mode(&db, KEY_OFFLINE_MODE), Some(false));
+
+        // node_modes now owns the values.
+        assert_eq!(
+            db.get_json::<bool>(TREE_NODE_MODES, KEY_PRIVATE_MODE)
+                .unwrap(),
+            Some(true)
+        );
+        assert_eq!(
+            db.get_json::<bool>(TREE_NODE_MODES, KEY_OFFLINE_MODE)
+                .unwrap(),
+            Some(false)
+        );
+
+        // pool_state no longer contains the bools — the namespace
+        // collision risk that motivated R138 (iter_json::<PoolState>
+        // hitting bool payloads) is gone.
+        assert_eq!(
+            db.get_json::<bool>(TREE_POOL_STATE, KEY_PRIVATE_MODE)
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            db.get_json::<bool>(TREE_POOL_STATE, KEY_OFFLINE_MODE)
+                .unwrap(),
+            None
+        );
+
+        // Idempotent: a second restore goes through the new-tree path.
+        assert_eq!(restore_node_mode(&db, KEY_PRIVATE_MODE), Some(true));
+    }
+
+    /// R138 — when both trees hold the same key, `node_modes` wins
+    /// (canonical home). The stale legacy entry is left untouched —
+    /// the migration only fires on the new-tree-empty branch.
+    #[test]
+    fn restore_node_mode_prefers_new_tree_over_legacy() {
+        let db = Database::open_temp().expect("temp db");
+        db.put_json(TREE_NODE_MODES, KEY_PRIVATE_MODE, &true)
+            .unwrap();
+        // Hypothetical stale legacy entry (different value to make the
+        // assertion meaningful).
+        db.put_json(TREE_POOL_STATE, KEY_PRIVATE_MODE, &false)
+            .unwrap();
+        assert_eq!(restore_node_mode(&db, KEY_PRIVATE_MODE), Some(true));
     }
 }
