@@ -119,6 +119,20 @@ pub async fn download_shard(
         "{}.tmp",
         crate::model::shard::shard_filename(shard_index)
     ));
+    // R138 (closes R105 deferral): sidecar that binds the on-disk
+    // partial .tmp to the layout it was downloaded against. Without
+    // this, an HF tensor layout change between a partial download
+    // (V1 offsets) and a resume attempt (V2 offsets) could coincidentally
+    // size-match and resume by APPENDING V2 bytes to V1 prefix — silently
+    // corrupting the shard. We hash the (offset, size) pairs sorted by
+    // offset and refuse to resume if the layout drifted. The sidecar is
+    // tiny (32 bytes hex + a u64) and lives alongside the .tmp file; it
+    // is removed on successful rename to dest_path AND on any error
+    // cleanup of the .tmp.
+    let layout_path = dest_dir.join(format!(
+        "{}.tmp.layout",
+        crate::model::shard::shard_filename(shard_index)
+    ));
 
     // Build byte ranges from tensor locations (gguf_offset, size)
     let tensor_ranges: Vec<(u64, u64)> = layout
@@ -126,6 +140,22 @@ pub async fn download_shard(
         .iter()
         .map(|(_, offset, size)| (*offset, *size))
         .collect();
+
+    // Compute a stable layout hash over the (offset, size) ordered list.
+    // Tensor names omitted on purpose: the bytes we write only depend on
+    // (offset, size). Two different tensor namings with identical offsets
+    // would produce identical bytes; one HF revision that renamed a
+    // tensor without changing offsets is safe to resume.
+    let layout_hash: [u8; 32] = {
+        let mut sorted = tensor_ranges.clone();
+        sorted.sort_by_key(|(off, _)| *off);
+        let mut hasher = blake3::Hasher::new();
+        for (off, sz) in &sorted {
+            hasher.update(&off.to_le_bytes());
+            hasher.update(&sz.to_le_bytes());
+        }
+        hasher.finalize().into()
+    };
 
     // Coalesce nearby ranges (4MB gap tolerance) to reduce HTTP requests
     let coalesced = coalesce_byte_ranges(&tensor_ranges, BYTE_RANGE_COALESCE_GAP);
@@ -151,33 +181,56 @@ pub async fn download_shard(
         .unwrap_or(0);
     let mut ranges_to_skip: usize = 0;
     if existing_bytes > 0 {
-        // Determine how many complete ranges are already in the tmp file
-        let mut cumulative = 0u64;
-        for &rb in &range_tensor_bytes {
-            if cumulative + rb <= existing_bytes {
-                cumulative += rb;
-                ranges_to_skip += 1;
-            } else {
-                break;
+        // R138 (closes R105 deferral) — guard the resume against an HF
+        // tensor layout change between the prior partial download and
+        // this attempt. We refuse to resume unless the sidecar layout
+        // hash exists AND matches the current layout. Mismatch or
+        // missing sidecar → discard both files and restart.
+        let sidecar = tokio::fs::read(&layout_path).await.ok();
+        let layout_matches = sidecar
+            .as_deref()
+            .map(|raw| raw == layout_hash.as_slice())
+            .unwrap_or(false);
+        if !layout_matches {
+            tracing::info!(
+                shard = shard_index,
+                existing_bytes,
+                sidecar_present = sidecar.is_some(),
+                "HF layout drift detected (or sidecar missing) — discarding .tmp and restarting"
+            );
+            let _ = tokio::fs::remove_file(&tmp_path).await;
+            let _ = tokio::fs::remove_file(&layout_path).await;
+        } else {
+            // Determine how many complete ranges are already in the tmp file
+            let mut cumulative = 0u64;
+            for &rb in &range_tensor_bytes {
+                if cumulative + rb <= existing_bytes {
+                    cumulative += rb;
+                    ranges_to_skip += 1;
+                } else {
+                    break;
+                }
             }
-        }
-        if ranges_to_skip > 0 && cumulative == existing_bytes {
-            tracing::info!(
-                shard = shard_index,
-                existing_bytes,
-                ranges_complete = ranges_to_skip,
-                ranges_total = coalesced.len(),
-                "Resuming shard download from partial .tmp file"
-            );
-        } else if cumulative != existing_bytes {
-            // Partial range — can't resume cleanly, restart
-            ranges_to_skip = 0;
-            tracing::info!(
-                shard = shard_index,
-                existing_bytes,
-                expected_boundary = cumulative,
-                "Partial .tmp file doesn't align to range boundary, restarting download"
-            );
+            if ranges_to_skip > 0 && cumulative == existing_bytes {
+                tracing::info!(
+                    shard = shard_index,
+                    existing_bytes,
+                    ranges_complete = ranges_to_skip,
+                    ranges_total = coalesced.len(),
+                    "Resuming shard download from partial .tmp file"
+                );
+            } else if cumulative != existing_bytes {
+                // Partial range — can't resume cleanly, restart
+                ranges_to_skip = 0;
+                let _ = tokio::fs::remove_file(&tmp_path).await;
+                let _ = tokio::fs::remove_file(&layout_path).await;
+                tracing::info!(
+                    shard = shard_index,
+                    existing_bytes,
+                    expected_boundary = cumulative,
+                    "Partial .tmp file doesn't align to range boundary, restarting download"
+                );
+            }
         }
     }
 
@@ -193,16 +246,25 @@ pub async fn download_shard(
 
     use tokio::io::AsyncWriteExt;
     let mut file = if ranges_to_skip > 0 {
-        // Append mode — open existing tmp file for appending
+        // Append mode — open existing tmp file for appending. Sidecar
+        // already exists and matched (we checked above), so no rewrite.
         tokio::fs::OpenOptions::new()
             .append(true)
             .open(&tmp_path)
             .await
             .map_err(|e| format!("Failed to open tmp file for resume: {e}"))?
     } else {
-        tokio::fs::File::create(&tmp_path)
+        let f = tokio::fs::File::create(&tmp_path)
             .await
-            .map_err(|e| format!("Failed to create tmp file: {e}"))?
+            .map_err(|e| format!("Failed to create tmp file: {e}"))?;
+        // Pin the layout to the new .tmp by writing the sidecar BEFORE
+        // any bytes land in .tmp — a subsequent resume can only match
+        // the layout if the data we're about to write was produced by
+        // THIS run's `layout`.
+        tokio::fs::write(&layout_path, layout_hash)
+            .await
+            .map_err(|e| format!("Failed to write layout sidecar: {e}"))?;
+        f
     };
 
     // Account for already-downloaded bytes in progress tracking
@@ -282,9 +344,14 @@ pub async fn download_shard(
             // Check cancel flag every chunk
             if let Some(flag) = cancel_flag {
                 if flag.load(std::sync::atomic::Ordering::Acquire) {
-                    // Clean up tmp file
+                    // Clean up tmp file AND its R138 layout sidecar.
+                    // Keeping the sidecar alone would mismatch a future
+                    // fresh-download's data; removing the .tmp without
+                    // the sidecar would let the next attempt resume
+                    // against stale bytes — both files move as a unit.
                     drop(file);
                     let _ = tokio::fs::remove_file(&tmp_path).await;
+                    let _ = tokio::fs::remove_file(&layout_path).await;
                     return Err("Download cancelled".to_string());
                 }
             }
@@ -388,8 +455,9 @@ pub async fn download_shard(
         .map(|m| m.len())
         .unwrap_or(0);
     if actual_size != expected_size {
-        // Clean up the incomplete file
+        // Clean up the incomplete file AND its R138 layout sidecar.
         let _ = tokio::fs::remove_file(&tmp_path).await;
+        let _ = tokio::fs::remove_file(&layout_path).await;
         return Err(format!(
             "Shard {} size mismatch: expected {} bytes (from {} tensors) but wrote {} bytes",
             shard_index,
@@ -403,6 +471,9 @@ pub async fn download_shard(
     tokio::fs::rename(&tmp_path, &dest_path)
         .await
         .map_err(|e| format!("Failed to rename tmp to final shard file: {e}"))?;
+    // Remove the R138 layout sidecar — the .bin file is the new source
+    // of truth; the sidecar only existed to guard partial-resume.
+    let _ = tokio::fs::remove_file(&layout_path).await;
 
     tracing::info!(
         shard = shard_index,
