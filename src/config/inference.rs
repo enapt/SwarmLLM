@@ -95,8 +95,11 @@ pub struct InferenceConfig {
     /// to the second-best holder. Whichever Response arrives first
     /// wins; the loser is cancelled. Cuts p95-p99 latency 30-50% on
     /// flaky P2P links; costs ~`hedge_max_rate` extra bandwidth.
-    /// Default `false` until full duplicate-dispatch integration ships
-    /// (this commit ships the decision logic + EWMA tracker).
+    /// Default `false` because loopback RTT is too consistent to
+    /// exceed `1.5 × p99` — needs a WAN deployment to validate the
+    /// win before flipping defaults. Single-segment dispatch is fully
+    /// wired (R136); multi-segment requires alt-pipeline assembly
+    /// (still deferred — see docs/FUTURE_WORK.md).
     #[serde(default)]
     pub hedge_enabled: bool,
     /// Hedge when elapsed > `factor × p99_estimate`. Default 1.5.
@@ -105,15 +108,18 @@ pub struct InferenceConfig {
     /// Max fraction of decisions that fire a hedge. Default 0.05 (5%).
     #[serde(default = "default_hedge_max_rate")]
     pub hedge_max_rate: f32,
-    /// Minimum samples before EWMA is trusted. Default 5.
+    /// Minimum samples before EWMA is trusted. Default 20 (bumped from
+    /// 5 in R136 L2 review after the warm-up period over-fired).
     #[serde(default = "default_hedge_min_samples")]
     pub hedge_min_samples: u32,
     /// SWARM-SPEC Layer 3: enable conversation-level predictive
     /// prefetch — use peer idle time between user turns to
     /// pre-compute activations for likely next-message first tokens.
     /// Cuts TTFT by ~50-200 ms on multi-turn chat workloads.
-    /// Default `false` until full prefetch dispatch is wired (this
-    /// commit ships the decision logic + per-session history learner).
+    /// Default `false`. Observability-complete dispatch shipped in
+    /// R136 (records decision + emits ActivityEvent); the K-layer
+    /// activation prefetch compute itself is workload-dependent and
+    /// deferred (small models on fast hardware see negligible savings).
     #[serde(default)]
     pub prefetch_enabled: bool,
     /// Minimum idle ms before prefetch fires. Default 2000.
