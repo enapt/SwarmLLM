@@ -190,7 +190,7 @@ When spawning subagents in this repo, use these model picks (overrides defaults 
 
 All 20 build phases complete. All subsystems wired — no stubs. **1005 lib tests + 75 integration tests passing**; 8 lib + 1 e2e ignored (env-var or manual). Clippy clean default + `--features llama`.
 
-### Latest: R137 — three FUTURE_WORK deferrals closed
+### Latest: R137 — extended FUTURE_WORK deferrals batch
 
 1. **Hot-reloadable cross-pool flags** (closes R135 deferral). `state.credits.allow_cross_pool_inference` + `state.credits.share_model_catalog` AtomicBool mirrors of `config.pool.*`. PUT /api/admin/config writes both atomic + persists TOML; GET surfaces runtime atomic. Pattern follows R121's `contribution_auto`. `pool::scope::cross_pool_extras` + `health::broadcast_pool_model_availability` read from the atomic. New `cross_pool_extras_honors_runtime_flag_toggle` regression test.
 
@@ -200,7 +200,13 @@ All 20 build phases complete. All subsystems wired — no stubs. **1005 lib test
 
 4. **L1 hit/miss lifetime counters** in `MetricsProviders`. Bumped at both call sites of `ngram_lookup_drafts` (draft-free in `ngram_only_spec.rs` + draft+ngram in `speculative.rs`). Surfaced in `GET /api/admin/stats → swarm_spec.ngram = { hits, misses, total, hit_rate }`.
 
-Doc sweep alongside: i18n key counts (1156→1154 entries), test counts (943→1004 across README/book/plans), SharedState diagram in ARCHITECTURE.md updated with R130/R133/R134/R136 fields.
+5. **`foreign_pool_catalog` eviction O(K×N) → O(N)** (closes R135 sweep deferral). Replaced K-iteration full-scan loop with `select_nth_unstable_by_key` partial-sort + batched removes; ~10× faster on the eviction path. New stress test exercises 1000+200 entries.
+
+6. **12-provider list extraction** (closes R72 deferral). `ProvidersConfig::keyed_entries()` + `ProvidersUpdate::keyed_entries()` collapse the 4× duplicated name list across `admin_providers.rs`. Adding a 13th provider now requires editing 2 lists instead of 5+.
+
+Also: verification-only sweep-log closures for 10 R69-R76 deferred items that intervening rounds have already addressed (is_valid_draft_pair dead code; ShardPin::matches extracted; sample_token_with_params delegates; prefix_cache last_hit is AtomicU64; check_multi_turn_reuse uses HashSet; pool/manager rate-limiter releases lock; protocol.rs read_wire_frame extracted; build_json_frame extracted; anti_gaming TTL is 1h not 24h; sleep-in-handle_acquire removed).
+
+Doc sweep alongside: i18n key counts (1156→1154 entries), test counts (943→1005 across CLAUDE.md/README/book/plans), SharedState diagram in ARCHITECTURE.md updated with R130/R133/R134/R136 fields.
 
 ### Prior: R136 SWARM-SPEC v0.1 — 4-layer P2P-native inference acceleration cascade
 
