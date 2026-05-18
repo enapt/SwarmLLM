@@ -150,7 +150,7 @@ libp2p 0.56, axum 0.8, candle-core/candle-transformers 0.10 (CUDA), redb 4, ed25
 
 ## Testing
 
-- 998 lib tests passing + 8 ignored (env-var-gated real-model + manual smoke), 75 integration tests in `tests/integration/`, 1 ignored end-to-end (`cargo test --test integration_phase10_11 -- --ignored`), clippy clean. Microbench: `cargo run --release --no-default-features --features dev,claude-subscription --example swarm_spec_bench` (R136 — measures all 4 SWARM-SPEC layer primitives + synthetic cascade hit-rate). Local-cluster bench: `examples/3node_setup.sh` (boots 3 daemons) + `examples/3node_inference_bench.sh` (runs 3 workloads × 3 trials and prints tok/s + swarm_spec metrics). Sharded variant: `examples/3node_sharded_setup.sh` (forced distributed pipeline — requires `auto_manage.enabled = false` in per-node config.toml to preserve sharded state).
+- 1004 lib tests passing + 8 ignored (env-var-gated real-model + manual smoke), 75 integration tests in `tests/integration/`, 1 ignored end-to-end (`cargo test --test integration_phase10_11 -- --ignored`), clippy clean. Microbench: `cargo run --release --no-default-features --features dev,claude-subscription --example swarm_spec_bench` (R136 — measures all 4 SWARM-SPEC layer primitives + synthetic cascade hit-rate). Local-cluster bench: `examples/3node_setup.sh` (boots 3 daemons) + `examples/3node_inference_bench.sh` (runs 3 workloads × 3 trials and prints tok/s + swarm_spec metrics). Sharded variant: `examples/3node_sharded_setup.sh` (forced distributed pipeline — requires `auto_manage.enabled = false` in per-node config.toml to preserve sharded state).
 - Unit tests: in-module `#[cfg(test)]` blocks
 - Integration tests: `tests/integration/` — multi-node simulations with `--test-threads=1`
 - Real-model spawn-and-infer test: set `SWARMLLM_TEST_MODEL_DIR` to a fully-populated model directory (e.g. `~/.local/share/swarmllm/models/tinyllama-1.1b-...`) and run `cargo test --test integration_phase10_11 -- --ignored end_to_end`. No synthetic GGUF fixture is committed; see `docs/ARCHITECTURE.md` § Deferred Items.
@@ -188,9 +188,21 @@ When spawning subagents in this repo, use these model picks (overrides defaults 
 
 ## Status
 
-All 20 build phases complete. All subsystems wired — no stubs. **998 lib tests + 75 integration tests passing**; 8 lib + 1 e2e ignored (env-var or manual). Clippy clean default + `--features llama`.
+All 20 build phases complete. All subsystems wired — no stubs. **1004 lib tests + 75 integration tests passing**; 8 lib + 1 e2e ignored (env-var or manual). Clippy clean default + `--features llama`.
 
-### Latest: R136 SWARM-SPEC v0.1 — 4-layer P2P-native inference acceleration cascade
+### Latest: R137 — three FUTURE_WORK deferrals closed
+
+1. **Hot-reloadable cross-pool flags** (closes R135 deferral). `state.credits.allow_cross_pool_inference` + `state.credits.share_model_catalog` AtomicBool mirrors of `config.pool.*`. PUT /api/admin/config writes both atomic + persists TOML; GET surfaces runtime atomic. Pattern follows R121's `contribution_auto`. `pool::scope::cross_pool_extras` + `health::broadcast_pool_model_availability` read from the atomic. New `cross_pool_extras_honors_runtime_flag_toggle` regression test.
+
+2. **Latency sample ring time-coverage** (closes R105 deferral). `inference_latency_samples` migrated from `VecDeque<f64>` to `VecDeque<(Instant, f64)>` with `LATENCY_SAMPLE_MAX_AGE = 600s`. Drop-by-age both on insert AND on every read (per-call read filter needed at low rates). Fixes stale p99 on lightly-loaded nodes. +16KB worst case. Monotonic `_count`/`_sum` atomics unchanged.
+
+3. **L1 forward_verify_through_segments test coverage** (partial closure of R136 deferral). 4 new pipeline tests: 3 pure-function (`pack_verify_tokens_to_le_bytes`, `build_spec_verify_forward`, `build_kv_truncate_forward` — wire-format drift now fails fast), 1 network-drop unit test (closed channel → assert error + `pending_layer_results` clean). Full multi-segment orchestration still needs worker subprocess infra.
+
+4. **L1 hit/miss lifetime counters** in `MetricsProviders`. Bumped at both call sites of `ngram_lookup_drafts` (draft-free in `ngram_only_spec.rs` + draft+ngram in `speculative.rs`). Surfaced in `GET /api/admin/stats → swarm_spec.ngram = { hits, misses, total, hit_rate }`.
+
+Doc sweep alongside: i18n key counts (1156→1154 entries), test counts (943→1004 across README/book/plans), SharedState diagram in ARCHITECTURE.md updated with R130/R133/R134/R136 fields.
+
+### Prior: R136 SWARM-SPEC v0.1 — 4-layer P2P-native inference acceleration cascade
 
 All 4 layers shipped with **true dispatch** (not scaffolding) and real-inference validation on a 3-node local cluster:
 
