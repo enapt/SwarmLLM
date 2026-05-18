@@ -87,6 +87,21 @@ pub struct ApiConfig {
     /// Default: 200.
     #[serde(default)]
     pub rate_limit_admin_rpm: Option<u64>,
+    /// Require Bearer auth on `/metrics` even from loopback.
+    ///
+    /// Default `false` — matches the Prometheus "metrics endpoints are
+    /// unauthenticated" convention and keeps the existing dashboard's
+    /// loopback scrape working without a token. When `true`, /metrics
+    /// goes through the normal `auth_middleware` regardless of source
+    /// IP, so a Prometheus scraper must set
+    /// `Authorization: Bearer <api_key>` in its scrape config.
+    ///
+    /// R138 (closes R101/R102 deferrals about /metrics disclosing the
+    /// credit balance on publicly-reachable nodes): operator-facing
+    /// dial. Public nodes that expose port 8800 to the internet
+    /// should set this to `true`.
+    #[serde(default)]
+    pub metrics_auth_required: bool,
 }
 
 fn default_theme() -> String {

@@ -261,27 +261,50 @@ impl InferenceRouter {
 
         // Compute network percentile from peer credit balances, cached at the
         // module-level PERCENTILE_CACHE_TTL_MS interval.
+        //
+        // R138: don't hold `credit_percentile_cache.lock()` across the
+        // DashMap iter — `peer_credit_balances` can hold thousands of
+        // entries and other router tasks racing to read the cached
+        // percentile would all block behind this synchronous mutex while
+        // the iter runs. Three-phase pattern instead: peek under lock
+        // (hot fresh-cache path stays one acquire), drop lock + run
+        // iter, re-acquire + write under lock. Two concurrent stale-
+        // cache callers may both recompute (last-write-wins) but
+        // neither blocks the other on the iter.
         let network_percentile = {
             let now = std::time::Instant::now();
-            let mut cache = self.shared_state.credits.credit_percentile_cache.lock();
-            if now.duration_since(cache.0).as_millis() < PERCENTILE_CACHE_TTL_MS {
-                cache.1
-            } else {
-                let mut count = 0u32;
-                let mut below = 0u32;
-                for entry in self.shared_state.credits.peer_credit_balances.iter() {
-                    count += 1;
-                    if *entry.value() < balance {
-                        below += 1;
-                    }
-                }
-                let pct = if count == 0 {
-                    0.5
+            // Phase 1 — peek.
+            {
+                let cache = self.shared_state.credits.credit_percentile_cache.lock();
+                if now.duration_since(cache.0).as_millis() < PERCENTILE_CACHE_TTL_MS {
+                    let cached = cache.1;
+                    drop(cache);
+                    cached
                 } else {
-                    below as f32 / count as f32
-                };
-                *cache = (now, pct);
-                pct
+                    drop(cache);
+                    // Phase 2 — iter outside the lock.
+                    let mut count = 0u32;
+                    let mut below = 0u32;
+                    for entry in self.shared_state.credits.peer_credit_balances.iter() {
+                        count += 1;
+                        if *entry.value() < balance {
+                            below += 1;
+                        }
+                    }
+                    let pct = if count == 0 {
+                        0.5
+                    } else {
+                        below as f32 / count as f32
+                    };
+                    // Phase 3 — re-lock and write. The post-iter timestamp
+                    // is used so a fast follower that races us into the
+                    // stale branch and finishes its own iter after ours
+                    // ends up overwriting with its own (slightly fresher)
+                    // value — fine for cache semantics.
+                    let mut cache = self.shared_state.credits.credit_percentile_cache.lock();
+                    *cache = (std::time::Instant::now(), pct);
+                    pct
+                }
             }
         };
 

@@ -343,7 +343,12 @@ fn is_exempt_request(path: &str, method: &Method, is_loopback: bool) -> bool {
         return true;
     }
 
-    // /metrics is exempt but only from localhost to prevent remote recon
+    // /metrics is exempt but only from localhost to prevent remote recon.
+    // R138 (closes R101/R102 deferrals): the `api.metrics_auth_required`
+    // config flag can tighten this further by REMOVING the loopback
+    // exemption — see `auth_middleware`, which short-circuits to the
+    // non-exempt branch when the flag is set. We keep this helper itself
+    // pure (no AppState) so the test matrix stays simple.
     if path == "/metrics" && is_loopback {
         return true;
     }
@@ -383,8 +388,15 @@ pub async fn auth_middleware(
     let path = req.uri().path().to_string();
     let method = req.method().clone();
 
-    // Exempt frontend routes, health, read-only dashboard endpoints (loopback-gated)
-    if is_exempt_request(&path, &method, addr.ip().is_loopback()) {
+    // R138 (closes R101/R102 deferrals about /metrics credit-balance
+    // disclosure): when `api.metrics_auth_required` is set, /metrics
+    // is NOT exempt even on loopback — Prometheus scrapers must send
+    // a Bearer token. Default false preserves the existing convention
+    // (and the dashboard's loopback scrape).
+    if state.shared_state.config.api.metrics_auth_required && path == "/metrics" {
+        // Skip the loopback-exempt branch — fall through to Bearer check.
+    } else if is_exempt_request(&path, &method, addr.ip().is_loopback()) {
+        // Exempt frontend routes, health, read-only dashboard endpoints (loopback-gated)
         return next.run(req).await;
     }
 
@@ -862,5 +874,23 @@ mod tests {
         // Cleanup with large window keeps recent entries
         limiter.cleanup(std::time::Duration::from_secs(3600));
         assert_eq!(limiter.buckets.len(), 1);
+    }
+
+    /// R138 — pins the documented contract of the `metrics_auth_required`
+    /// flag: `is_exempt_request` itself stays simple (no AppState
+    /// reference), and the runtime gate in `auth_middleware` is what
+    /// flips the loopback-/metrics exemption off. This test pins the
+    /// helper's behaviour so any future refactor that tries to fold
+    /// the flag into the helper signature has to update the test
+    /// matrix above too.
+    #[test]
+    fn is_exempt_request_metrics_loopback_exemption_intact() {
+        // Default contract: loopback /metrics is exempt; remote /metrics
+        // is not. The R138 metrics_auth_required gate sits OUTSIDE this
+        // helper in auth_middleware so the simple matrix below stays
+        // accurate regardless of the flag.
+        let get = Method::GET;
+        assert!(is_exempt_request("/metrics", &get, true));
+        assert!(!is_exempt_request("/metrics", &get, false));
     }
 }
