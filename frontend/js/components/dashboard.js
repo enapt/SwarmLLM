@@ -1730,7 +1730,10 @@
               var pct2 = Math.min(100, Math.round((dlBytes2 / acq.total_bytes) * 100));
               var speed2 = acq.speed_bytes_per_sec || 0;
               var shardLabel2 = acq.downloaded_shards !== undefined ? I18n.t('dashboard.shard_progress_label', { dl: acq.downloaded_shards, total: acq.total_shards || '?' }) : I18n.t('dashboard.downloading_label');
-              var rightText2 = U.formatDlProgress(dlBytes2, acq.total_bytes, pct2) + (speed2 > 0 ? ' \u2014 ' + U.formatSpeed(speed2) : '');
+              // R137: unify speed separator with the active-update branch
+              // above (line ~1706) which uses U+00B7 middle-dot. Em-dash
+              // here was inconsistent \u2014 flagged as deferred in R123 sweep.
+              var rightText2 = U.formatDlProgress(dlBytes2, acq.total_bytes, pct2) + (speed2 > 0 ? ' \u00b7 ' + U.formatSpeed(speed2) : '');
               var progWrapper = document.createElement('div');
               progWrapper.innerHTML = _buildProgressBar({ safeId: safeId, pct: pct2, label: shardLabel2, rightText: rightText2 });
               var progDiv = progWrapper.firstChild;
