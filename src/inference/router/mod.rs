@@ -715,7 +715,12 @@ impl InferenceRouter {
             }
         }
 
-        self.active_count.fetch_add(1, Ordering::Relaxed);
+        // Don't `fetch_add` until we're INSIDE the spawned task. If we incremented
+        // here and `tokio::spawn` then panicked (rare — OOM during task alloc),
+        // the closure would never run, its Drop guard would never fire, and the
+        // tier-cap counter would leak permanently. Inside the closure, the
+        // increment + `armed = true` happen synchronously with no `.await`
+        // between them, so any panic still triggers Drop.
         let active_count = self.active_count.clone();
         let queue_notify = self.queue_notify.clone();
         let shared_state = self.shared_state.clone();
@@ -755,6 +760,11 @@ impl InferenceRouter {
                     }
                 }
             }
+            // Increment the tier-cap counter and arm the guard together —
+            // pair the fetch_add with the matching fetch_sub in `Drop`. If
+            // anything inside this task panics (incl. between here and the
+            // first `.await`), the guard's `Drop` runs and decrements.
+            active_count.fetch_add(1, Ordering::Relaxed);
             let mut active_guard = ActivePipelineGuard {
                 shared_state: shared_state.clone(),
                 count: active_count.clone(),

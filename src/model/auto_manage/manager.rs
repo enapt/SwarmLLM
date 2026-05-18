@@ -275,11 +275,21 @@ impl AutoShardManager {
                     }
                 }
                 _ = interval.tick() => {
-                    // Always rescan for new shard files on disk (even if auto-manage disabled)
-                    let changed = rescan_local_shards(
-                        &self.shared_state,
-                        Some(&self.network_tx),
-                    ).await;
+                    // Always rescan for new shard files on disk (even if auto-manage disabled
+                    // — picking up a manually-placed shard is a correctness fix, not policy).
+                    // The network re-announce is gated on `auto_manage_enabled`: when the
+                    // user has paused auto-manage they have opted out of participating
+                    // automatically, so we register the shard locally + load the metadata
+                    // but DON'T tell the swarm we host it. The manual
+                    // `POST /api/admin/rescan-shards` admin endpoint always re-announces
+                    // (user-driven action overrides the pause).
+                    let auto_enabled = self
+                        .shared_state
+                        .models
+                        .auto_manage_enabled
+                        .load(std::sync::atomic::Ordering::Acquire);
+                    let net_arg = if auto_enabled { Some(&self.network_tx) } else { None };
+                    let changed = rescan_local_shards(&self.shared_state, net_arg).await;
                     if !changed.is_empty() {
                         tracing::info!(
                             models = ?changed.iter().map(|m| m.0.as_str()).collect::<Vec<_>>(),
