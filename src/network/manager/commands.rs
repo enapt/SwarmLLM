@@ -18,6 +18,7 @@ impl NetworkManager {
         let cmd_name = match &cmd {
             NetworkCommand::Broadcast(_) => "Broadcast",
             NetworkCommand::SendTensor { .. } => "SendTensor",
+            NetworkCommand::SendEncodedTensor { .. } => "SendEncodedTensor",
             NetworkCommand::SendTensorResult { .. } => "SendTensorResult",
             NetworkCommand::SendStreamingToken { .. } => "SendStreamingToken",
             NetworkCommand::SendShardRequest { .. } => "SendShardRequest",
@@ -42,6 +43,21 @@ impl NetworkManager {
                 forward,
             } => {
                 self.handle_send_tensor(target_peer_bytes, forward);
+            }
+            NetworkCommand::SendEncodedTensor {
+                target_peer_bytes,
+                payload,
+                request_id,
+                num_layers,
+                activation_bytes,
+            } => {
+                self.handle_send_encoded_tensor(
+                    target_peer_bytes,
+                    payload,
+                    request_id,
+                    num_layers,
+                    activation_bytes,
+                );
             }
             NetworkCommand::SendTensorResult {
                 target_peer_bytes,

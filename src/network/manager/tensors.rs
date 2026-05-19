@@ -19,7 +19,7 @@
 //! before spawning blocking I/O) and `resolve_peer_id` (peer-bytes decode).
 
 use crate::network::protocol::{self, SwarmRequest, SwarmResponse};
-use crate::types::SwarmMessage;
+use crate::types::{NetworkCommand, SwarmMessage};
 
 use super::NetworkManager;
 
@@ -27,6 +27,20 @@ impl NetworkManager {
     /// Send a tensor forward to a specific peer via the unified binary tensor protocol.
     /// Uses WIRE_TAG_TENSOR (0x01) framing. Encrypts activations when an encryption
     /// session exists, falls back to plaintext.
+    ///
+    /// Encryption path (default config — `enable_encryption=true`) offloads the
+    /// CPU-bound ChaCha20-Poly1305 sealing + protocol encoding to a
+    /// `tokio::spawn` task so the NetworkManager event loop stays responsive
+    /// during high-volume distributed inference. The spawn posts back a
+    /// `NetworkCommand::SendEncodedTensor` once the wire-ready payload is in
+    /// hand; the critical task then performs only `send_request` +
+    /// `pending_tensor_outbound` bookkeeping. ~50–200µs saved per token on the
+    /// event loop for 1MB activations; multiplied across concurrent decode
+    /// traffic this is the difference between a smooth event loop and
+    /// observable jitter on libp2p ping / gossip / connection events.
+    ///
+    /// Plaintext path stays inline — `encode_layer_forward` is memcpy-cheap
+    /// and the spawn dispatch overhead would exceed the saving.
     pub(super) fn handle_send_tensor(
         &mut self,
         target_peer_bytes: Vec<u8>,
@@ -36,116 +50,11 @@ impl NetworkManager {
             return;
         };
 
-        // Try to find the peer's NodeId for encryption
-        let peer_node_id = self.peer_to_node_id(&peer_id);
-        let use_encryption =
-            self.shared_state.config.network.enable_encryption && peer_node_id.is_some();
-
-        let payload = if use_encryption {
-            let node_id = match peer_node_id {
-                Some(n) => n,
-                None => {
-                    tracing::warn!(%peer_id, "Encryption enabled but no NodeId for peer");
-                    return;
-                }
-            };
-            let aad = protocol::build_layer_forward_aad(&forward);
-
-            tracing::debug!(
-                request_id = %forward.request_id,
-                %peer_id,
-                node_id = %node_id,
-                aad_len = aad.len(),
-                activation_len = forward.activations.len(),
-                has_session = self.shared_state.session_manager.has_session(&node_id),
-                session_count = self.shared_state.session_manager.session_count(),
-                "DIAG: encrypting tensor forward"
-            );
-
-            match self
-                .shared_state
-                .session_manager
-                .seal(&node_id, &forward.activations, &aad)
-            {
-                Ok(sealed) => match protocol::encode_layer_forward_encrypted(&forward, sealed) {
-                    Ok(p) => p,
-                    Err(e) => {
-                        tracing::warn!(error = %e, "Failed to encode encrypted tensor");
-                        return;
-                    }
-                },
-                Err(e) => {
-                    // SEC: Never fall back to plaintext — fail the forward instead.
-                    // Plaintext fallback would silently strip encryption, allowing
-                    // eavesdroppers to read intermediate tensor activations.
-                    tracing::warn!(
-                        error = %e,
-                        request_id = %forward.request_id,
-                        %peer_id,
-                        node_id = %node_id,
-                        aad_len = aad.len(),
-                        has_session = self.shared_state.session_manager.has_session(&node_id),
-                        "DIAG: seal() failed — dropping forward (no plaintext fallback)"
-                    );
-                    // Notify the pipeline immediately so it fails fast
-                    // instead of waiting for the AllReduce timeout.
-                    let request_id = forward.request_id;
-                    if let Some((_, channel)) = self.pending_tensor_channels.remove(&request_id) {
-                        let _ = self
-                            .swarm
-                            .behaviour_mut()
-                            .request_response
-                            .send_response(channel, SwarmResponse::Ack);
-                    }
-                    let error_result = crate::types::LayerResult::error(
-                        request_id,
-                        "Encryption session lost — reconnecting",
-                    );
-                    if let Some((_, tx)) =
-                        self.shared_state.pending_layer_results.remove(&request_id)
-                    {
-                        let _ = tx.send(error_result);
-                    }
-                    return;
-                }
-            }
-        } else {
-            match protocol::encode_layer_forward(&forward) {
-                Ok(p) => p,
-                Err(e) => {
-                    tracing::warn!(error = %e, "Failed to encode tensor forward");
-                    return;
-                }
-            }
-        };
-
-        let payload_len = payload.len();
-        let is_connected = self.swarm.is_connected(&peer_id);
-        // R108: gate the diagnostic `rr_is_connected` / `network_info()`
-        // probes and the per-token info! log behind the DEBUG level. Each
-        // ran unconditionally on every LayerForward — at default `info`
-        // they were burning a UUID/PeerId Display allocation pair plus an
-        // O(n_connections) network_info snapshot per token with no subscriber
-        // listening. The is_connected fast-fail below stays unconditional.
-        if tracing::enabled!(tracing::Level::DEBUG) {
-            let rr_is_connected = self
-                .swarm
-                .behaviour()
-                .request_response
-                .is_connected(&peer_id);
-            tracing::debug!(
-                %peer_id,
-                request_id = %forward.request_id,
-                rr_is_connected,
-                swarm_is_connected = is_connected,
-                "DIAG: PRE-send_request state"
-            );
-        }
-        // CRITICAL: If the swarm says the peer is not connected, fail immediately.
-        // The rr behaviour may have a stale connection entry (rr_connected=true)
-        // after a disconnect, causing send_request() to target a dead ConnectionId
-        // whose NotifyHandler is silently dropped by the swarm pool.
-        if !is_connected {
+        // Fast-fail on disconnected peer BEFORE doing any encrypt work — avoids
+        // wasted CPU on the spawn task when the peer is gone. The
+        // post-spawn handler re-checks connectivity in case the peer
+        // disconnects during the brief encrypt window.
+        if !self.swarm.is_connected(&peer_id) {
             tracing::warn!(
                 %peer_id,
                 request_id = %forward.request_id,
@@ -154,32 +63,197 @@ impl NetworkManager {
             self.fail_tensor_forward(forward.request_id, &peer_id, "Peer not connected".into());
             return;
         }
+
+        // Try to find the peer's NodeId for encryption
+        let peer_node_id = self.peer_to_node_id(&peer_id);
+        let use_encryption =
+            self.shared_state.config.network.enable_encryption && peer_node_id.is_some();
+
+        if use_encryption {
+            // Encryption path — offload ChaCha20 sealing + encode to a spawn
+            // task so the event loop is not blocked. The shared
+            // `encode_forward_for_wire` helper (network/pipeline_stream.rs)
+            // performs the same encrypt+encode as the inline pre-R139 path;
+            // wire bytes are byte-identical with the persistent-stream path.
+            let shared_state = self.shared_state.clone();
+            let internal_cmd_tx = self.internal_cmd_tx.clone();
+            let request_id = forward.request_id;
+            let num_layers = forward.layer_range.1.saturating_sub(forward.layer_range.0);
+            let activation_bytes = forward.activations.len();
+            let target_peer_bytes_for_cmd = target_peer_bytes.clone();
+            tokio::spawn(async move {
+                let payload = match crate::network::pipeline_stream::encode_forward_for_wire(
+                    &forward,
+                    &peer_id,
+                    &shared_state,
+                ) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        // SEC: Never fall back to plaintext — fail the forward
+                        // instead. Plaintext fallback would silently strip
+                        // encryption, allowing eavesdroppers to read
+                        // intermediate tensor activations.
+                        tracing::warn!(
+                            error = %e,
+                            %request_id,
+                            %peer_id,
+                            activation_len = activation_bytes,
+                            "DIAG: tensor encrypt+encode failed — dropping forward"
+                        );
+                        let error_result = crate::types::LayerResult::error(
+                            request_id,
+                            format!("Encryption failed: {e}"),
+                        );
+                        if let Some((_, tx)) =
+                            shared_state.pending_layer_results.remove(&request_id)
+                        {
+                            let _ = tx.send(error_result);
+                        }
+                        return;
+                    }
+                };
+                let cmd = NetworkCommand::SendEncodedTensor {
+                    target_peer_bytes: target_peer_bytes_for_cmd,
+                    payload,
+                    request_id,
+                    num_layers,
+                    activation_bytes,
+                };
+                if let Err(e) = internal_cmd_tx.send(cmd).await {
+                    tracing::warn!(
+                        error = %e,
+                        %request_id,
+                        "internal_cmd_tx send failed — dropping encoded tensor"
+                    );
+                    let error_result = crate::types::LayerResult::error(
+                        request_id,
+                        "Internal command queue closed",
+                    );
+                    if let Some((_, tx)) = shared_state.pending_layer_results.remove(&request_id) {
+                        let _ = tx.send(error_result);
+                    }
+                }
+            });
+            return;
+        }
+
+        // Plaintext path — stays inline (encode_layer_forward is memcpy-cheap).
+        let payload = match protocol::encode_layer_forward(&forward) {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!(error = %e, "Failed to encode tensor forward");
+                return;
+            }
+        };
+
+        let num_layers = forward.layer_range.1.saturating_sub(forward.layer_range.0);
+        let activation_bytes = forward.activations.len();
+        let request_id = forward.request_id;
+        let sequence_num = forward.sequence_num;
+        // Plaintext forwards go straight through — no spawn, no extra channel
+        // hop. `dispatch_tensor_payload` is the shared write path for both
+        // the inline-plaintext route here and the post-encrypt
+        // `handle_send_encoded_tensor` continuation.
+        self.dispatch_tensor_payload(
+            peer_id,
+            payload,
+            request_id,
+            Some(sequence_num),
+            num_layers,
+            activation_bytes,
+            /*encrypted*/ false,
+        );
+    }
+
+    /// Continuation of `handle_send_tensor`'s encryption branch. The spawned
+    /// encrypt task posts a `NetworkCommand::SendEncodedTensor` back through
+    /// `internal_cmd_tx` once the wire-ready payload is built; the
+    /// NetworkManager event loop picks it up here and performs only the
+    /// synchronous `send_request` + bookkeeping that requires `&mut self`.
+    pub(super) fn handle_send_encoded_tensor(
+        &mut self,
+        target_peer_bytes: Vec<u8>,
+        payload: Vec<u8>,
+        request_id: uuid::Uuid,
+        num_layers: u32,
+        activation_bytes: usize,
+    ) {
+        let Some(peer_id) = Self::resolve_peer_id(&target_peer_bytes, "encoded tensor send") else {
+            return;
+        };
+        // Re-check connectivity — the peer may have disconnected during the
+        // brief encrypt window. The original `handle_send_tensor` already
+        // fast-failed at entry, so this catches only mid-encrypt disconnects.
+        if !self.swarm.is_connected(&peer_id) {
+            tracing::warn!(
+                %peer_id,
+                %request_id,
+                "Peer disconnected during encrypt — failing tensor forward"
+            );
+            self.fail_tensor_forward(
+                request_id,
+                &peer_id,
+                "Peer disconnected during encrypt".into(),
+            );
+            return;
+        }
+        self.dispatch_tensor_payload(
+            peer_id,
+            payload,
+            request_id,
+            None,
+            num_layers,
+            activation_bytes,
+            /*encrypted*/ true,
+        );
+    }
+
+    /// Shared write path used by `handle_send_tensor` (plaintext) and
+    /// `handle_send_encoded_tensor` (post-encrypt). Performs `send_request`
+    /// and records the pending-outbound entry. R108 verbose DIAG logging is
+    /// gated behind `tracing::Level::DEBUG` so default `info` builds pay
+    /// nothing.
+    #[allow(clippy::too_many_arguments)]
+    fn dispatch_tensor_payload(
+        &mut self,
+        peer_id: libp2p::PeerId,
+        payload: Vec<u8>,
+        request_id: uuid::Uuid,
+        sequence_num: Option<u32>,
+        num_layers: u32,
+        activation_bytes: usize,
+        encrypted: bool,
+    ) {
+        let payload_len = payload.len();
+        if tracing::enabled!(tracing::Level::DEBUG) {
+            let rr_is_connected = self
+                .swarm
+                .behaviour()
+                .request_response
+                .is_connected(&peer_id);
+            tracing::debug!(
+                %peer_id,
+                %request_id,
+                rr_is_connected,
+                "DIAG: PRE-send_request state"
+            );
+        }
         let req = SwarmRequest::TensorPayload(payload);
         let outbound_id = self
             .swarm
             .behaviour_mut()
             .request_response
             .send_request(&peer_id, req);
-        // Track OutboundRequestId → (UUID, time, peer, layers, activation_size)
-        // so we can notify pipeline on OutboundFailure and compute adaptive stale timeouts.
-        let num_layers = forward.layer_range.1.saturating_sub(forward.layer_range.0);
-        let activation_bytes = forward.activations.len();
         self.pending_tensor_outbound.insert(
             outbound_id,
             (
-                forward.request_id,
+                request_id,
                 std::time::Instant::now(),
                 peer_id,
                 num_layers,
                 activation_bytes,
             ),
         );
-        // R108: every diagnostic call (`is_pending_outbound`, `connected_peers().filter().count()`,
-        // `network_info()`, `connection_addrs` enumeration) is gated together
-        // so the default `info` log level no longer pays for any of them.
-        // Previously `peer_established_count` ran the O(n_peers) iterator
-        // outside the gate even though the value was only read inside the
-        // `tracing::debug!` macro arguments below.
         if tracing::enabled!(tracing::Level::DEBUG) {
             let is_rr_pending = self
                 .swarm
@@ -203,11 +277,10 @@ impl NetworkManager {
                 .collect();
             tracing::debug!(
                 %peer_id,
-                request_id = %forward.request_id,
-                seq = forward.sequence_num,
-                encrypted = use_encryption,
+                %request_id,
+                seq = ?sequence_num,
+                encrypted,
                 payload_len,
-                is_connected,
                 total_connections = total_conn_count,
                 peer_established_count,
                 is_rr_pending,
@@ -459,80 +532,95 @@ impl NetworkManager {
                     payload_len = payload.len(),
                     "DIAG: Received encrypted tensor"
                 );
-                match protocol::decode_layer_forward_encrypted(payload) {
-                    Ok((mut forward, sealed, aad)) => {
-                        let sender_node_id = self.peer_to_node_id(&peer);
-                        tracing::debug!(
-                            %peer,
-                            request_id = %forward.request_id,
-                            sender_node_id = ?sender_node_id.as_ref().map(|n| format!("{}", n)),
-                            aad_len = aad.len(),
-                            sealed_len = sealed.len(),
-                            has_session = sender_node_id.as_ref().is_some_and(|n| self.shared_state.session_manager.has_session(n)),
-                            "DIAG: decrypting tensor"
-                        );
-                        if let Some(node_id) = sender_node_id {
-                            match self
-                                .shared_state
-                                .session_manager
-                                .open(&node_id, &sealed, &aad)
-                            {
-                                Ok(plaintext) => {
-                                    let request_id = forward.request_id;
-                                    let is_tp = forward.tp_meta.is_some();
-                                    forward.activations = plaintext;
-                                    forward.sender_peer_bytes = Some(peer.to_bytes());
-                                    if let Err(e) = self.dispatch_authenticated(
-                                        Some(&peer),
-                                        SwarmMessage::LayerForward(forward),
-                                    ) {
-                                        self.shared_state
-                                            .metrics
-                                            .channel_metrics
-                                            .network_out
-                                            .record_dropped();
-                                        tracing::warn!(error = %e, "Outbound channel full, dropping decrypted tensor");
-                                        return None;
-                                    } else {
-                                        self.shared_state
-                                            .metrics
-                                            .channel_metrics
-                                            .network_out
-                                            .record_sent();
-                                    }
-                                    // TP forwards respond via TpAllReduceRequest, not this channel
-                                    if is_tp {
-                                        return None;
-                                    }
-                                    return Some(request_id);
-                                }
-                                Err(e) => {
-                                    tracing::error!(
-                                        error = %e,
-                                        %peer,
-                                        request_id = %forward.request_id,
-                                        node_id = %node_id,
-                                        aad_len = aad.len(),
-                                        sealed_len = sealed.len(),
-                                        model_id = %forward.model_id,
-                                        layer_range = ?forward.layer_range,
-                                        seq = forward.sequence_num,
-                                        "DIAG: decrypt FAILED — possible AAD mismatch, key mismatch, or corruption"
-                                    );
-                                }
-                            }
-                        } else {
-                            tracing::warn!(
-                                %peer,
-                                "Encrypted tensor from unknown peer — dropping"
-                            );
-                        }
-                    }
+                // Decode the envelope on the critical task (cheap parse — just
+                // header + trailer split, no crypto). ChaCha20 sealing of the
+                // activation blob runs on a tokio::spawn so the event loop
+                // is not blocked for ~50–200µs per inbound forward.
+                let (forward, sealed, aad) = match protocol::decode_layer_forward_encrypted(payload)
+                {
+                    Ok(parts) => parts,
                     Err(e) => {
                         tracing::warn!(error = %e, "Failed to decode encrypted tensor");
+                        return None;
                     }
+                };
+                let sender_node_id = self.peer_to_node_id(&peer);
+                let request_id = forward.request_id;
+                let is_tp = forward.tp_meta.is_some();
+                tracing::debug!(
+                    %peer,
+                    %request_id,
+                    sender_node_id = ?sender_node_id.as_ref().map(|n| format!("{}", n)),
+                    aad_len = aad.len(),
+                    sealed_len = sealed.len(),
+                    has_session = sender_node_id.as_ref().is_some_and(|n| self.shared_state.session_manager.has_session(n)),
+                    "DIAG: decrypting tensor"
+                );
+                let Some(node_id) = sender_node_id else {
+                    tracing::warn!(%peer, "Encrypted tensor from unknown peer — dropping");
+                    return None;
+                };
+                // Spawn decrypt + dispatch. The caller stores the
+                // ResponseChannel keyed by the returned request_id; if
+                // decrypt later fails, the channel is reaped by the existing
+                // stale-channel cleanup tick (same outcome as if the spawn
+                // succeeded but dispatch_authenticated saw a full outbound
+                // channel).
+                let shared_state = self.shared_state.clone();
+                let outbound_tx = self.outbound_tx.clone();
+                let peer_bytes = peer.to_bytes();
+                tokio::spawn(async move {
+                    let mut forward = forward;
+                    let plaintext = match shared_state.session_manager.open(&node_id, &sealed, &aad)
+                    {
+                        Ok(p) => p,
+                        Err(e) => {
+                            tracing::error!(
+                                error = %e,
+                                %request_id,
+                                %node_id,
+                                aad_len = aad.len(),
+                                sealed_len = sealed.len(),
+                                model_id = %forward.model_id,
+                                layer_range = ?forward.layer_range,
+                                seq = forward.sequence_num,
+                                "DIAG: decrypt FAILED — possible AAD mismatch, key mismatch, or corruption"
+                            );
+                            return;
+                        }
+                    };
+                    forward.activations = plaintext;
+                    forward.sender_peer_bytes = Some(peer_bytes);
+                    let msg = crate::types::AuthenticatedMessage {
+                        sender: Some(node_id),
+                        message: SwarmMessage::LayerForward(forward),
+                    };
+                    if let Err(e) = outbound_tx.try_send(msg) {
+                        shared_state
+                            .metrics
+                            .channel_metrics
+                            .network_out
+                            .record_dropped();
+                        tracing::warn!(
+                            error = %e,
+                            %request_id,
+                            "Outbound channel full, dropping decrypted tensor"
+                        );
+                    } else {
+                        shared_state
+                            .metrics
+                            .channel_metrics
+                            .network_out
+                            .record_sent();
+                    }
+                });
+                // TP forwards respond via TpAllReduceRequest, not the original
+                // RR channel — caller should ACK rather than store the channel.
+                if is_tp {
+                    None
+                } else {
+                    Some(request_id)
                 }
-                None
             }
             _ => {
                 tracing::warn!(%peer, tag, "Unknown tensor message tag");

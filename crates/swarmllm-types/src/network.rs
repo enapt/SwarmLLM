@@ -319,6 +319,22 @@ pub enum NetworkCommand {
         target_peer_bytes: Vec<u8>,
         forward: LayerForward,
     },
+    /// Internal: post-encrypt `SendTensor` continuation. The encrypt+encode
+    /// step in `handle_send_tensor` is offloaded to a `tokio::spawn` task so
+    /// the NetworkManager's event loop is not blocked for ~50–200µs/forward
+    /// on ChaCha20 sealing of large activations. The spawned task posts
+    /// this variant back through `internal_cmd_tx` once the wire-ready
+    /// payload is in hand; the handler then performs only the synchronous
+    /// `send_request` + `pending_tensor_outbound` bookkeeping on the
+    /// critical task. Not constructed by daemon-side callers — they keep
+    /// sending the plain `SendTensor` variant.
+    SendEncodedTensor {
+        target_peer_bytes: Vec<u8>,
+        payload: Vec<u8>,
+        request_id: uuid::Uuid,
+        num_layers: u32,
+        activation_bytes: usize,
+    },
     /// Send a tensor result back to a specific peer as a new request.
     SendTensorResult {
         target_peer_bytes: Vec<u8>,
