@@ -325,6 +325,79 @@ impl ChunkMeta {
     }
 }
 
+/// Tier 4K receiver-side assembly state for a single chunked activation
+/// transfer. Stored in `SharedState.pending_activation_chunks` keyed by
+/// `request_id`. The receiver inserts each chunk at its `chunk_idx` slot;
+/// when all slots are filled, the dispatch path concatenates and forwards
+/// the reassembled activation to the worker as a single non-chunked
+/// LayerForward.
+///
+/// `total_chunks` is set on the first chunk that arrives. Subsequent chunks
+/// MUST agree on `total_chunks` (validated by AAD — flipping it on the wire
+/// fails Poly1305 — and re-checked here as defence-in-depth). `last_update_at`
+/// drives the TTL eviction sweep.
+///
+/// Fields are kept simple (no internal locks) — DashMap's per-entry lock is
+/// sufficient because each chunk lookup/insert happens under `DashMap::entry`.
+/// The dispatch path holds the entry while reassembling, then removes it
+/// atomically.
+#[derive(Debug)]
+pub struct ChunkAssemblyState {
+    /// Pre-allocated `Vec<Option<Vec<u8>>>` of length `total_chunks`.
+    /// Index = `chunk_idx`. `None` until the chunk arrives.
+    pub received: Vec<Option<Vec<u8>>>,
+    /// Sender-asserted total, locked on first chunk; later chunks with a
+    /// different `total_chunks` are rejected.
+    pub total_chunks: u32,
+    /// Cleartext template for the eventually-dispatched LayerForward
+    /// (request_id, layer_range, model_id, sequence_num, ...). All chunks
+    /// in a transfer carry identical cleartext metadata except for
+    /// chunk_meta itself — captured once on first-chunk arrival.
+    pub template: Box<LayerForward>,
+    /// Sender peer ID (for routing the result back). Captured on first
+    /// chunk; verified equal on subsequent chunks.
+    pub sender_peer_bytes: Vec<u8>,
+    /// Wall-clock instant of last chunk insertion. Used by the TTL sweep
+    /// to evict stale incomplete assemblies.
+    pub last_update_at: std::time::Instant,
+    /// Cached count of slots filled — avoids an O(K) scan per insert.
+    pub filled: u32,
+}
+
+impl ChunkAssemblyState {
+    /// Allocate a new assembly with `total_chunks` empty slots.
+    pub fn new(total_chunks: u32, template: LayerForward, sender_peer_bytes: Vec<u8>) -> Self {
+        Self {
+            received: (0..total_chunks).map(|_| None).collect(),
+            total_chunks,
+            template: Box::new(template),
+            sender_peer_bytes,
+            last_update_at: std::time::Instant::now(),
+            filled: 0,
+        }
+    }
+
+    /// True when every chunk slot has been filled.
+    pub fn is_complete(&self) -> bool {
+        self.filled == self.total_chunks
+    }
+
+    /// Concatenate received chunks in order. Caller must verify
+    /// `is_complete()` first; this unwraps each `Option` directly.
+    pub fn assemble(&self) -> Vec<u8> {
+        let total: usize = self
+            .received
+            .iter()
+            .map(|c| c.as_ref().map_or(0, |v| v.len()))
+            .sum();
+        let mut out = Vec::with_capacity(total);
+        for bytes in self.received.iter().flatten() {
+            out.extend_from_slice(bytes);
+        }
+        out
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum TensorFormat {
     FP16,
@@ -575,4 +648,100 @@ pub struct InferenceError {
     pub request_id: uuid::Uuid,
     pub error: String,
     pub recoverable: bool,
+}
+
+#[cfg(test)]
+mod chunk_assembly_tests {
+    use super::*;
+    use uuid::Uuid;
+
+    fn base_template() -> LayerForward {
+        LayerForward {
+            request_id: Uuid::from_u128(0xFEED_FACE_DEAD_BEEF_1234_5678_9ABC_DEF0),
+            sequence_num: 1,
+            index_pos: 0,
+            activations: Vec::new(),
+            format: TensorFormat::FP32,
+            model_id: ModelId("test-model".into()),
+            layer_range: (0, 8),
+            tp_meta: None,
+            vision_embeddings: None,
+            sender_peer_bytes: None,
+            requester_node_id: None,
+            pre_embedded: false,
+            generated_ids: Vec::new(),
+            adapter_id: None,
+            draft_tokens: Vec::new(),
+            spec_logits_requested: false,
+            truncate_kv_to: None,
+            chunk_meta: None,
+        }
+    }
+
+    #[test]
+    fn chunk_meta_is_final_only_for_last_index() {
+        assert!(!ChunkMeta {
+            chunk_idx: 0,
+            total_chunks: 4
+        }
+        .is_final());
+        assert!(!ChunkMeta {
+            chunk_idx: 1,
+            total_chunks: 4
+        }
+        .is_final());
+        assert!(!ChunkMeta {
+            chunk_idx: 2,
+            total_chunks: 4
+        }
+        .is_final());
+        assert!(ChunkMeta {
+            chunk_idx: 3,
+            total_chunks: 4
+        }
+        .is_final());
+    }
+
+    #[test]
+    fn assembly_state_reports_complete_after_all_slots_filled() {
+        let mut state = ChunkAssemblyState::new(3, base_template(), vec![1, 2, 3]);
+        assert!(!state.is_complete());
+        state.received[0] = Some(vec![1, 2]);
+        state.filled = 1;
+        assert!(!state.is_complete());
+        state.received[2] = Some(vec![5, 6]);
+        state.filled = 2;
+        assert!(!state.is_complete());
+        state.received[1] = Some(vec![3, 4]);
+        state.filled = 3;
+        assert!(state.is_complete());
+    }
+
+    #[test]
+    fn assembly_concatenates_chunks_in_index_order() {
+        let mut state = ChunkAssemblyState::new(3, base_template(), vec![]);
+        state.received[2] = Some(vec![7, 8, 9]);
+        state.received[0] = Some(vec![1, 2, 3]);
+        state.received[1] = Some(vec![4, 5, 6]);
+        state.filled = 3;
+        assert_eq!(state.assemble(), vec![1, 2, 3, 4, 5, 6, 7, 8, 9]);
+    }
+
+    #[test]
+    fn assembly_with_uneven_chunks_preserves_total_length() {
+        // 5000 bytes, K=3 → 2048, 2048, 904
+        let mut state = ChunkAssemblyState::new(3, base_template(), vec![]);
+        state.received[0] = Some(vec![0xAAu8; 2048]);
+        state.received[1] = Some(vec![0xBBu8; 2048]);
+        state.received[2] = Some(vec![0xCCu8; 904]);
+        state.filled = 3;
+        let asm = state.assemble();
+        assert_eq!(asm.len(), 5000);
+        assert_eq!(asm[0], 0xAA);
+        assert_eq!(asm[2047], 0xAA);
+        assert_eq!(asm[2048], 0xBB);
+        assert_eq!(asm[4095], 0xBB);
+        assert_eq!(asm[4096], 0xCC);
+        assert_eq!(asm[4999], 0xCC);
+    }
 }

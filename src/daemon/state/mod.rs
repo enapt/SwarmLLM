@@ -92,6 +92,18 @@ pub struct SharedState {
     pub streaming_token_txs: DashMap<uuid::Uuid, mpsc::Sender<crate::types::StreamingToken>>,
     pub pending_layer_results:
         DashMap<uuid::Uuid, tokio::sync::oneshot::Sender<crate::types::LayerResult>>,
+    /// R139 Tier 4K — receiver-side assembly state for STREAM-chunked
+    /// activation forwards. Keyed by `request_id`. Each chunk arriving on
+    /// the wire (LayerForward with `chunk_meta = Some(_)`) gets inserted at
+    /// its `chunk_idx` slot; once all `total_chunks` slots are filled, the
+    /// dispatch path concatenates and forwards a single reassembled
+    /// LayerForward to the worker. The 0x05 trailer is bound into the AAD
+    /// via `build_layer_forward_aad`, so reorder, truncation, and
+    /// cross-transfer-substitution attempts fail Poly1305 before reaching
+    /// this state. A periodic TTL sweep evicts incomplete assemblies older
+    /// than `STREAM_CHUNK_ASSEMBLY_TTL_SECS` so a stuck/abandoned sender
+    /// cannot leak memory.
+    pub pending_activation_chunks: DashMap<uuid::Uuid, crate::types::ChunkAssemblyState>,
     /// Remote-side (segment holder) pending result routes for forwards received
     /// on a persistent pipeline stream. Keyed by request_id; the handler task
     /// registers a oneshot before dispatch, and NetworkManager delivers the
@@ -434,6 +446,7 @@ impl SharedState {
             loaded_model_info: RwLock::new(None),
             gpu_info,
             pending_layer_results: DashMap::new(),
+            pending_activation_chunks: DashMap::new(),
             pending_stream_result_routes: DashMap::new(),
             pending_prefix_kv_fetches: DashMap::new(),
             pipeline_stream_client: tokio::sync::OnceCell::new(),
@@ -569,6 +582,152 @@ impl SharedState {
     }
 
     /// Update the observed per-layer latency EMA for a peer after a successful
+    /// R139 Tier 4K — receiver-side assembly entry point for a chunked
+    /// activation forward. Called from the decrypt-dispatch path
+    /// (`tensors.rs::handle_tensor_payload` TENSOR_TAG_ENCRYPTED, and the
+    /// `pipeline_stream.rs` reader) when a decoded LayerForward carries
+    /// `chunk_meta = Some(_)`.
+    ///
+    /// Returns:
+    /// - `Ok(Some(complete_forward))` when this chunk completes the assembly.
+    ///   Caller dispatches the returned `LayerForward` through the normal
+    ///   `SwarmMessage::LayerForward` path (worker IPC). The `chunk_meta`
+    ///   field on the returned forward is cleared.
+    /// - `Ok(None)` when the chunk was accepted but the assembly is not yet
+    ///   complete. Caller should NOT dispatch.
+    /// - `Err(_)` for protocol violations (mismatched `total_chunks` across
+    ///   chunks of the same `request_id`, duplicate chunk_idx, etc.). Caller
+    ///   should drop the forward and log.
+    ///
+    /// AAD-bound metadata (chunk_idx, total_chunks) was already verified by
+    /// the AEAD open() step — this function only enforces the orthogonal
+    /// integrity invariants that ride on top of authentication (e.g., a peer
+    /// authenticating each chunk individually but with internally inconsistent
+    /// counts across chunks).
+    pub fn try_assemble_chunked_forward(
+        &self,
+        forward: crate::types::LayerForward,
+        sender_peer_bytes: Vec<u8>,
+    ) -> Result<Option<crate::types::LayerForward>, crate::error::SwarmError> {
+        let cm = forward.chunk_meta.ok_or_else(|| {
+            crate::error::SwarmError::Network("chunked assembly called without chunk_meta".into())
+        })?;
+        let request_id = forward.request_id;
+        let chunk_idx = cm.chunk_idx as usize;
+        let total_chunks = cm.total_chunks;
+        // AAD-validated by decrypt; defence-in-depth re-check.
+        if total_chunks == 0 || chunk_idx >= total_chunks as usize {
+            return Err(crate::error::SwarmError::Network(format!(
+                "Invalid chunk_meta: chunk_idx={chunk_idx}, total_chunks={total_chunks}"
+            )));
+        }
+        // Memory cap: total_chunks × chunk_size ≤ MAX_ACTIVATION_SIZE. The
+        // received chunk's `activations.len()` is already capped by
+        // `decode_layer_forward(_encrypted)` ≤ MAX_ACTIVATION_SIZE / chunk;
+        // here we additionally bound `total_chunks` so a peer can't allocate
+        // a huge `Vec<Option<...>>` slot table even if each chunk is tiny.
+        const MAX_TOTAL_CHUNKS: u32 = 4096;
+        if total_chunks > MAX_TOTAL_CHUNKS {
+            return Err(crate::error::SwarmError::Network(format!(
+                "total_chunks={total_chunks} exceeds cap {MAX_TOTAL_CHUNKS}"
+            )));
+        }
+
+        // Insert under entry-lock so two concurrent chunks for the same
+        // request_id can't race on completion check.
+        let mut completion: Option<crate::types::LayerForward> = None;
+        let mut error: Option<crate::error::SwarmError> = None;
+        self.pending_activation_chunks
+            .entry(request_id)
+            .and_modify(|state| {
+                if state.total_chunks != total_chunks {
+                    error = Some(crate::error::SwarmError::Network(format!(
+                        "chunk total_chunks mismatch: stored={}, got={}",
+                        state.total_chunks, total_chunks
+                    )));
+                    return;
+                }
+                if state.sender_peer_bytes != sender_peer_bytes {
+                    error = Some(crate::error::SwarmError::Network(
+                        "chunk sender peer changed mid-transfer".into(),
+                    ));
+                    return;
+                }
+                if state.received[chunk_idx].is_some() {
+                    error = Some(crate::error::SwarmError::Network(format!(
+                        "duplicate chunk_idx={chunk_idx} for request_id={request_id}"
+                    )));
+                    return;
+                }
+                state.received[chunk_idx] = Some(forward.activations.clone());
+                state.filled += 1;
+                state.last_update_at = std::time::Instant::now();
+            })
+            .or_insert_with(|| {
+                // First chunk: capture the cleartext template (we'll clone
+                // activations onto it after reassembly). Strip chunk_meta
+                // before inserting into the slot table so the template field
+                // doesn't shadow assembly state.
+                let mut template = forward.clone();
+                template.activations = Vec::new();
+                template.chunk_meta = None;
+                let mut state = crate::types::ChunkAssemblyState::new(
+                    total_chunks,
+                    template,
+                    sender_peer_bytes.clone(),
+                );
+                state.received[chunk_idx] = Some(forward.activations.clone());
+                state.filled = 1;
+                state
+            });
+
+        if let Some(e) = error {
+            return Err(e);
+        }
+
+        // Check for completion. Take the entry briefly to inspect.
+        if let Some(entry) = self.pending_activation_chunks.get(&request_id) {
+            if entry.is_complete() {
+                let assembled = entry.assemble();
+                let mut out = (*entry.template).clone();
+                out.activations = assembled;
+                out.sender_peer_bytes = Some(entry.sender_peer_bytes.clone());
+                completion = Some(out);
+            }
+        }
+        if completion.is_some() {
+            self.pending_activation_chunks.remove(&request_id);
+        }
+        Ok(completion)
+    }
+
+    /// R139 Tier 4K — TTL sweep for stale chunk assemblies. Called from the
+    /// HealthMonitor periodic tick. Evicts entries whose last chunk arrived
+    /// more than `ttl_secs` ago, preventing a stuck/abandoned sender from
+    /// leaking `pending_activation_chunks` slots. Returns the number of
+    /// assemblies evicted (for diagnostics).
+    pub fn sweep_stale_chunk_assemblies(&self, ttl_secs: u64) -> usize {
+        let cutoff = std::time::Instant::now()
+            .checked_sub(std::time::Duration::from_secs(ttl_secs))
+            .unwrap_or_else(std::time::Instant::now);
+        let stale: Vec<uuid::Uuid> = self
+            .pending_activation_chunks
+            .iter()
+            .filter_map(|entry| {
+                if entry.value().last_update_at < cutoff {
+                    Some(*entry.key())
+                } else {
+                    None
+                }
+            })
+            .collect();
+        let count = stale.len();
+        for key in stale {
+            self.pending_activation_chunks.remove(&key);
+        }
+        count
+    }
+
     /// remote segment. `segment_ms` is the wall-clock round-trip; `layers` is
     /// the number of transformer layers this segment covered. Per-layer
     /// normalisation lets later lookups scale the cost to arbitrary widths.

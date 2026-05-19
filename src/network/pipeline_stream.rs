@@ -359,6 +359,27 @@ async fn handle_inbound_stream(
                 None => continue,
             };
 
+        // R139 Tier 4K — if this is a chunked transfer, route the chunk
+        // through the assembly state. Only the final-chunk completion
+        // dispatches to the worker; intermediate chunks accumulate.
+        let forward = if forward.chunk_meta.is_some() {
+            let peer_bytes = peer_id.to_bytes();
+            match shared_state.try_assemble_chunked_forward(forward, peer_bytes) {
+                Ok(Some(complete)) => complete,
+                Ok(None) => continue,
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        %request_id,
+                        "Chunk assembly rejected on stream — dropping forward"
+                    );
+                    continue;
+                }
+            }
+        } else {
+            forward
+        };
+
         // Register the result route BEFORE dispatching so we never race the
         // dispatcher's SendTensorResult against our own insertion.
         //
@@ -485,6 +506,49 @@ fn decode_inbound_forward(
     }
 }
 
+/// R139 Tier 4K — split a `LayerForward` carrying a large activation tensor
+/// into K chunks of at most `chunk_size_bytes` for STREAM-style chunked
+/// transport. The activation byte buffer is split at byte-offset boundaries;
+/// each emitted `LayerForward` carries a `ChunkMeta { chunk_idx, total_chunks }`
+/// that the AAD helper binds into the Poly1305 tag (single source of truth via
+/// `build_layer_forward_aad`). Cleartext metadata (request_id, layer_range,
+/// model_id, etc.) is duplicated across all K frames — receivers assemble by
+/// `request_id`.
+///
+/// Returns the input verbatim wrapped in a single-element vec when the
+/// activation is at or below `chunk_size_bytes` (single-chunk implicit
+/// fallback — caller can ship as today's monolithic frame without the
+/// chunk-meta trailer).
+///
+/// Chunk-size policy and rationale: 256 KiB default (matches age STREAM
+/// construction + TokenWeave MLSys 2026 K=2-4 sweet spot); 64 KiB floor;
+/// SwarmLLM's `inference.streaming_chunk_size_bytes` /
+/// `streaming_min_activation_bytes` knobs override these. See
+/// `docs/FUTURE_WORK.md § Tier 4K`.
+pub fn chunk_layer_forward(forward: &LayerForward, chunk_size_bytes: usize) -> Vec<LayerForward> {
+    let total = forward.activations.len();
+    let chunk_size = chunk_size_bytes.max(1);
+    if total <= chunk_size {
+        return vec![forward.clone()];
+    }
+    let total_chunks = total.div_ceil(chunk_size);
+    // u32 wire-format cap: chunk_idx and total_chunks are encoded as u32 LE.
+    let total_chunks = total_chunks.min(u32::MAX as usize) as u32;
+    let mut out = Vec::with_capacity(total_chunks as usize);
+    for idx in 0..total_chunks {
+        let start = (idx as usize) * chunk_size;
+        let end = ((idx as usize + 1) * chunk_size).min(total);
+        let mut chunk = forward.clone();
+        chunk.activations = forward.activations[start..end].to_vec();
+        chunk.chunk_meta = Some(crate::types::ChunkMeta {
+            chunk_idx: idx,
+            total_chunks,
+        });
+        out.push(chunk);
+    }
+    out
+}
+
 /// Encode a `LayerForward` into wire bytes suitable for a pipeline-stream
 /// frame. Applies ChaCha sealing when encryption is enabled and a session
 /// exists for the target peer. Mirrors the logic in
@@ -578,5 +642,83 @@ mod tests {
         let mut cursor = futures::io::Cursor::new(&buf[..]);
         let err = read_frame(&mut cursor).await.expect_err("should reject");
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    // --- R139 A-rev: chunk_layer_forward splitter ------------------------
+
+    fn base_layer_forward(activations: Vec<u8>) -> LayerForward {
+        LayerForward {
+            request_id: uuid::Uuid::from_u128(0xABCD_1234_5678_9ABC_DEF0_1122_3344_5566),
+            sequence_num: 1,
+            index_pos: 0,
+            activations,
+            format: crate::types::TensorFormat::FP32,
+            model_id: crate::types::ModelId("test-model".into()),
+            layer_range: (0, 8),
+            tp_meta: None,
+            vision_embeddings: None,
+            sender_peer_bytes: None,
+            requester_node_id: None,
+            pre_embedded: false,
+            generated_ids: Vec::new(),
+            adapter_id: None,
+            draft_tokens: Vec::new(),
+            spec_logits_requested: false,
+            truncate_kv_to: None,
+            chunk_meta: None,
+        }
+    }
+
+    #[test]
+    fn chunk_layer_forward_passthrough_when_under_threshold() {
+        let forward = base_layer_forward(vec![0u8; 1024]);
+        let chunks = chunk_layer_forward(&forward, 2048);
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].activations, forward.activations);
+        assert!(chunks[0].chunk_meta.is_none());
+    }
+
+    #[test]
+    fn chunk_layer_forward_passthrough_at_exact_size() {
+        let forward = base_layer_forward(vec![0u8; 2048]);
+        let chunks = chunk_layer_forward(&forward, 2048);
+        assert_eq!(chunks.len(), 1);
+        assert!(chunks[0].chunk_meta.is_none());
+    }
+
+    #[test]
+    fn chunk_layer_forward_splits_into_k_equal_chunks() {
+        let mut activations = Vec::with_capacity(8 * 1024);
+        for i in 0..(8 * 1024) {
+            activations.push((i & 0xFF) as u8);
+        }
+        let forward = base_layer_forward(activations.clone());
+        let chunks = chunk_layer_forward(&forward, 2048);
+        assert_eq!(chunks.len(), 4);
+        for (idx, c) in chunks.iter().enumerate() {
+            let cm = c.chunk_meta.expect("chunk should have chunk_meta");
+            assert_eq!(cm.chunk_idx as usize, idx);
+            assert_eq!(cm.total_chunks, 4);
+            assert_eq!(c.activations.len(), 2048);
+            assert_eq!(c.request_id, forward.request_id);
+        }
+        // Reassembling must equal the original.
+        let reassembled: Vec<u8> = chunks
+            .iter()
+            .flat_map(|c| c.activations.iter().copied())
+            .collect();
+        assert_eq!(reassembled, activations);
+    }
+
+    #[test]
+    fn chunk_layer_forward_handles_uneven_final_chunk() {
+        let activations = vec![0xCDu8; 5000];
+        let forward = base_layer_forward(activations.clone());
+        let chunks = chunk_layer_forward(&forward, 2048);
+        assert_eq!(chunks.len(), 3);
+        assert_eq!(chunks[0].activations.len(), 2048);
+        assert_eq!(chunks[1].activations.len(), 2048);
+        assert_eq!(chunks[2].activations.len(), 904);
+        assert!(chunks[2].chunk_meta.unwrap().is_final());
     }
 }

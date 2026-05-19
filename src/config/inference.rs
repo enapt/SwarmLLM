@@ -42,6 +42,38 @@ pub struct InferenceConfig {
     /// Off by default until validated. See `docs/plans/archive/distributed_inference_speedup.md`.
     #[serde(default)]
     pub persistent_pipeline_stream: bool,
+    /// R139 Tier 4K — daemon-side STREAM-chunked activation send. When on AND
+    /// the segment-boundary activation exceeds
+    /// `streaming_min_activation_bytes`, the coordinator splits the activation
+    /// into K = ceil(size / streaming_chunk_size_bytes) chunks, encrypts each
+    /// with its own session-nonce + chunk-meta-bound AAD, and ships them
+    /// sequentially. Receiver assembles by request_id before dispatching to
+    /// the worker. **Default `false` until WAN-bench evidence justifies.** On
+    /// LAN/loopback the activation send is already sub-millisecond — chunking
+    /// adds per-chunk fixed cost with near-zero compute-send overlap; the
+    /// win only materializes when wire transfer dominates encrypt time
+    /// (typically <30 Mbps WAN per current research). See
+    /// `docs/FUTURE_WORK.md § Tier 4K`.
+    #[serde(default)]
+    pub streaming_chunked_send: bool,
+    /// Chunk size in bytes for `streaming_chunked_send`. Defaults to 256 KiB
+    /// matching age STREAM construction guidance + TokenWeave (MLSys 2026)
+    /// K=2-4 sweet spot. Set lower to widen overlap window at the cost of
+    /// per-chunk encrypt/encode fixed overhead.
+    #[serde(default = "default_streaming_chunk_size_bytes")]
+    pub streaming_chunk_size_bytes: u32,
+    /// Activation-size floor for `streaming_chunked_send`. Activations below
+    /// this threshold ship as a single (un-chunked) frame regardless of the
+    /// flag — chunking overhead exceeds benefit at small sizes. Default
+    /// 64 KiB matches age + RFC 9771 STREAM guidance.
+    #[serde(default = "default_streaming_min_activation_bytes")]
+    pub streaming_min_activation_bytes: u32,
+    /// TTL for incomplete chunk assemblies on the receiver side. A stuck or
+    /// abandoned sender would otherwise leak `pending_activation_chunks`
+    /// entries; the periodic sweep evicts assemblies whose last chunk
+    /// arrived more than this many seconds ago.
+    #[serde(default = "default_streaming_chunk_assembly_ttl_secs")]
+    pub streaming_chunk_assembly_ttl_secs: u64,
     /// Enable speculative decoding for the distributed inference path. Requires
     /// `speculative_decoding = true` AND a loaded draft model. Off by default.
     #[serde(default)]
@@ -663,6 +695,18 @@ fn default_batch_collection_ms() -> u64 {
     5
 }
 
+fn default_streaming_chunk_size_bytes() -> u32 {
+    262_144 // 256 KiB — age STREAM construction default, TokenWeave K=2-4 sweet spot
+}
+
+fn default_streaming_min_activation_bytes() -> u32 {
+    65_536 // 64 KiB — below this, per-chunk overhead exceeds benefit
+}
+
+fn default_streaming_chunk_assembly_ttl_secs() -> u64 {
+    30 // 30s — matches existing pipeline timeouts; stuck assemblies evicted
+}
+
 impl Default for InferenceConfig {
     fn default() -> Self {
         Self {
@@ -674,6 +718,10 @@ impl Default for InferenceConfig {
             kv_cache_ttl_secs: default_kv_cache_ttl(),
             speculative_decoding: false,
             persistent_pipeline_stream: false,
+            streaming_chunked_send: false,
+            streaming_chunk_size_bytes: default_streaming_chunk_size_bytes(),
+            streaming_min_activation_bytes: default_streaming_min_activation_bytes(),
+            streaming_chunk_assembly_ttl_secs: default_streaming_chunk_assembly_ttl_secs(),
             speculative_distributed: false,
             continuous_batching: default_continuous_batching(),
             max_concurrent_decode_batch: default_max_decode_batch(),

@@ -590,10 +590,34 @@ impl NetworkManager {
                         }
                     };
                     forward.activations = plaintext;
-                    forward.sender_peer_bytes = Some(peer_bytes);
+                    forward.sender_peer_bytes = Some(peer_bytes.clone());
+                    // R139 Tier 4K — if this is a chunked transfer, route
+                    // through the assembly state instead of dispatching to
+                    // the worker. The worker only sees the reassembled
+                    // single LayerForward once the final chunk lands.
+                    let dispatch_forward = if forward.chunk_meta.is_some() {
+                        match shared_state.try_assemble_chunked_forward(forward, peer_bytes) {
+                            Ok(Some(complete)) => complete,
+                            Ok(None) => {
+                                // Accumulating — wait for more chunks. Don't
+                                // dispatch and don't error.
+                                return;
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    error = %e,
+                                    %request_id,
+                                    "Chunk assembly rejected — dropping forward"
+                                );
+                                return;
+                            }
+                        }
+                    } else {
+                        forward
+                    };
                     let msg = crate::types::AuthenticatedMessage {
                         sender: Some(node_id),
-                        message: SwarmMessage::LayerForward(forward),
+                        message: SwarmMessage::LayerForward(dispatch_forward),
                     };
                     if let Err(e) = outbound_tx.try_send(msg) {
                         shared_state
