@@ -22,6 +22,7 @@ SharedState is organized into 4 sub-structs. Always use the correct accessor:
 - `state.metrics.hedge_tracker` — R136 Layer 2. `Arc<HedgeTracker>` with per-(model, segment, holder) EWMA latency + rate-budget counters. Always present; observation via `state.record_hedge_observation(...)` from the existing forward-success path in `pipeline/distributed.rs`. Post-hoc dry-run "would have hedged" decisions logged at info level when latency exceeds the EWMA threshold; full duplicate-dispatch awaits a focused wire-format follow-up.
 - `state.metrics.prefetch_orchestrator` — R136 Layer 3. `PrefetchHandle` (Arc<PrefetchOrchestrator>) with per-session first-token histogram + idle-time learner + throttling. Observation via `observe_user_turn(session, first_token)` + `record_response_completion(session, now_ms)` at the router success site. K-layer prefetch dispatch is the next integration; data-collection side is complete.
 - `state.standalone_tokenizers` — R136 Layer 1/3 follow-on. `DashMap<ModelId, Arc<SplitTokenizer>>` on the ROOT SharedState (not a sub-struct — used by both `state.metrics`-derived L3 prefetch AND the `pipeline/ngram_only_spec.rs` L1 path, so cross-cutting). Lazy-loaded from `gguf_header.bin` via `state.standalone_tokenizer(&model_id)` accessor. Returns `None` when the header isn't on disk; caller falls through gracefully.
+- `state.pending_activation_chunks` — R139 Tier 4K. `DashMap<Uuid, ChunkAssemblyState>` on the ROOT SharedState (cross-cuts the RR-decrypt path in `network/manager/tensors.rs` and the persistent-stream reader in `network/pipeline_stream.rs`). Receiver-side assembly for STREAM-chunked activation forwards. Entry-locked insert via `state.try_assemble_chunked_forward(forward, sender_peer_bytes)`. Stale-entry sweep via `state.sweep_stale_chunk_assemblies(ttl_secs)` (helper present, periodic wiring deferred — see `docs/FUTURE_WORK.md § Tier 4K`). Chunk-meta is bound into AAD via `build_layer_forward_aad`, so reorder/truncation/cross-transfer-substitution fail Poly1305 before reaching the assembly.
 
 When adding new fields to SharedState, put them in the appropriate sub-struct unless they're accessed by 10+ files across 3+ subsystem boundaries.
 
@@ -157,6 +158,19 @@ silently break at the wire if duplicated:
   trailer fields; the decoder reconstructs AAD via the helper after
   parsing trailers (since trailer bytes don't appear contiguously
   on the wire — sealed payload sits between header and trailers).
+  Post-R139, also covers the chunk-meta trailer (0x05) so chunked
+  STREAM frames can't be reordered / truncated / substituted across
+  transfers without Poly1305 rejection.
+- **`network::pipeline_stream::chunk_layer_forward`** (R139) — splits
+  a `LayerForward` at byte-offset boundaries into K chunks for
+  STREAM-style chunked send. Returns the input verbatim wrapped in a
+  single-element Vec when `activations.len() ≤ chunk_size_bytes`
+  (single-chunk implicit fallthrough — no chunk_meta on the wire).
+  Sender call sites that opt into chunked send MUST go through this
+  helper rather than re-implementing the split; the chunk_meta
+  values it sets are the contract the receiver's
+  `try_assemble_chunked_forward` and `build_layer_forward_aad` both
+  rely on.
 - **`daemon::dispatch::timestamp_fresh_one_sided`** — generic
   one-sided staleness check (R94). Time units must be consistent
   across `ts`/`now`/`max_age`/`skew`. Use directly for any new

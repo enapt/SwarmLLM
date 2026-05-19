@@ -188,9 +188,80 @@ When spawning subagents in this repo, use these model picks (overrides defaults 
 
 ## Status
 
-All 20 build phases complete. All subsystems wired — no stubs. **1015 lib tests + 75 integration tests passing**; 8 lib + 1 e2e ignored (env-var or manual). Clippy clean default + `--features llama`.
+All 20 build phases complete. All subsystems wired — no stubs. **1030 lib tests + 75 integration tests passing**; 8 lib + 1 e2e ignored (env-var or manual). Clippy clean default + `--features llama`.
 
-### Latest: R138 — autonomous defer-batch (sweep-log triage + 4 real fixes)
+### Latest: R139 — Tier 4K communication-computation overlap
+
+Four commits closing FUTURE_WORK Tier 4K with a research-driven scope pivot.
+Phase B turned out to be already shipped via the existing async architecture
+(`router::distributed_exec` per-request `tokio::spawn` + `pipeline_stream`
+keyed-by-(peer, request_id) + `process_pool::batch_scheduler_loop`); R139
+documented and skipped it.
+
+1. **Phase C — encrypt/decrypt off the NetworkManager event loop** (commit
+   11333f67). The CPU-bound ChaCha20-Poly1305 sealing in `handle_send_tensor`
+   and the open in `handle_tensor_payload` (TENSOR_TAG_ENCRYPTED arm) are
+   offloaded to `tokio::spawn` tasks. New `NetworkCommand::SendEncodedTensor`
+   variant carries the encrypt-result back to the event loop for the
+   `send_request` + bookkeeping step. Default config (`enable_encryption=true`,
+   `persistent_pipeline_stream=false`) sees ~50–200µs/forward event-loop block
+   savings; under concurrent decode traffic this is the difference between
+   smooth event-loop responsiveness and observable jitter on libp2p ping /
+   gossip / connection events.
+
+2. **Phase A pivot** — original "worker streams row-tiled output during
+   matmul" framing matched the SGLang PD-disaggregation anti-pattern
+   (rolled back per-tile streaming, 2-5× slower at high concurrency due to
+   per-chunk fixed costs). 2026-05-19 research pass found no production
+   inference system streams forward-output tensors (Triton decoupled, vLLM v1,
+   NVIDIA Dynamo/NIXL — all single-tensor responses). Pivoted to
+   **daemon-side STREAM-chunked encrypt+send** on a single libp2p stream
+   (age STREAM construction + TokenWeave K=2-4 sweet spot + Tink Streaming
+   AEAD precedent). Single stream → QUIC preserves byte order → no
+   receiver assembly state machine.
+
+3. **A-rev.1 — wire format 0x05 + AAD binding** (commit 4b5fc10c).
+   New `ChunkMeta { chunk_idx: u32, total_chunks: u32 }` field on
+   `LayerForward`. Encoded as optional 0x05 trailer. Bound into AAD via
+   `build_layer_forward_aad` so reorder, wrong-total, and cross-transfer
+   substitution attempts fail Poly1305 before reaching dispatch. 11 new
+   tests across plaintext + encrypted paths (roundtrip first/middle/last,
+   trailer adjacency vs 0x04, decoder rejection of invalid metas, AAD
+   bytes diverge on chunk_idx/total_chunks flip, backward compat).
+
+4. **A-rev.2/3 — receiver assembly + helper + config** (commit 1d0a5d55).
+   `ChunkAssemblyState` slot table on
+   `SharedState.pending_activation_chunks: DashMap<Uuid, ChunkAssemblyState>`
+   (root-level — cross-cuts RR + persistent stream paths, mirrors
+   `pending_layer_results` precedent).
+   `SharedState.try_assemble_chunked_forward` accumulates chunks under
+   entry-lock with `total_chunks` consistency check, sender-peer binding,
+   duplicate-chunk_idx rejection. `chunk_layer_forward` splits at byte
+   offsets; passthrough when activation ≤ chunk_size. 4 config knobs:
+   `streaming_chunked_send` (default false), `streaming_chunk_size_bytes`
+   (default 256 KiB), `streaming_min_activation_bytes` (default 64 KiB
+   floor), `streaming_chunk_assembly_ttl_secs` (default 30s). Receiver
+   wiring in both `tensors.rs` decrypt-spawn and `pipeline_stream.rs`
+   reader paths.
+
+5. **A-rev.4 — sender wired to persistent-stream path** (commit e32c0a5d).
+   `pipeline/distributed.rs::forward_through_segments` consults the
+   eligibility check (streaming_chunked_send + persistent_pipeline_stream +
+   activation > min_bytes) and ships K chunks on the same libp2p stream
+   when on. Chunked-over-RR fallback path stays untouched — the existing
+   1:1 ResponseChannel pattern would need explicit per-chunk Ack handling
+   to support chunking; that's tracked in FUTURE_WORK § Tier 4K remaining.
+
+Remaining for full Tier 4K close-out (small follow-ons): TTL sweep wired to
+HealthMonitor tick, chunked-over-RR support, microbench in
+`examples/swarm_spec_bench.rs`, worker-side row-tiled output streaming
+(literal "true" Tier 4K, 3-4 weeks, deferred pending slow-WAN bench data
+that justifies fighting the SGLang result).
+
+1015 → 1030 lib tests (+15) and +4 swarmllm-types. Clippy clean default +
+features dev,claude-subscription. Detail: commits 11333f67..e32c0a5d.
+
+### Prior: R138 — autonomous defer-batch (sweep-log triage + 4 real fixes)
 
 Eight commits closing ~20 deferred sweep-log items. Real changes:
 

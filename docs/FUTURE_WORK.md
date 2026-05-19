@@ -974,23 +974,107 @@ implementation. High novelty, high risk.
 
 **Effort.** Research project.
 
-#### K. Communication-computation overlap inside a single forward
-**Context.** Today within a single layer the compute and the
-network send are sequential. We can split layers into pre-attn /
-attn / post-attn / FFN, send the post-attn activation while the
-next layer's pre-attn is computing.
+#### K. Communication-computation overlap inside a single forward — **SHIPPED R139** (Phase C + A-rev), one piece remains
 
-**What's needed.** Extend `TpPhase` (already in the wire format) to
-include sub-layer phases. Worker pipelines compute and send across
-phase boundaries. Net savings: roughly `min(layer_compute_ms,
-send_ms)` per layer hop.
+**Status.** Closed in R139 across 4 commits via a research-driven
+pivot from the original "worker streams row-tiled output during
+matmul" framing to "daemon-side STREAM-chunked encrypt+send on a
+single libp2p stream":
 
-**Why deferred.** TpPhase today is for tensor-parallel allreduce
-choreography; reusing it for pipeline-overlap risks conflating two
-orthogonal partitionings. Probably wants a separate
-`PipelinePhase` enum.
+- **Phase C** (commit 11333f67) — ChaCha20-Poly1305 encrypt+decrypt
+  offloaded from the NetworkManager event loop to tokio::spawn tasks
+  via the new `NetworkCommand::SendEncodedTensor` continuation. Saves
+  ~50–200µs of event-loop block time per forward (default config
+  `enable_encryption=true`, `persistent_pipeline_stream=false`).
+- **A-rev.1** (commit 4b5fc10c) — wire-format trailer 0x05 carrying
+  `ChunkMeta { chunk_idx, total_chunks }` on `LayerForward`. Bound
+  into the AAD via `build_layer_forward_aad` so reorder /
+  wrong-total / cross-transfer-substitution attempts fail Poly1305
+  before reaching the dispatch path. Backward compat: frames
+  without the trailer decode to `chunk_meta=None` and run today's
+  single-frame path.
+- **A-rev.2/3** (commit 1d0a5d55) — receiver-side assembly state on
+  `SharedState.pending_activation_chunks: DashMap<Uuid,
+  ChunkAssemblyState>` (root-level — cross-cuts RR + stream paths,
+  mirrors `pending_layer_results` precedent).
+  `try_assemble_chunked_forward` accumulates chunks under entry-lock
+  with `total_chunks` consistency check + sender-peer binding +
+  duplicate-chunk_idx rejection. `chunk_layer_forward` helper splits
+  a LayerForward at byte-offset boundaries. Config knobs:
+  `streaming_chunked_send` (default false), `streaming_chunk_size_bytes`
+  (default 262144 / 256 KiB — age STREAM + TokenWeave K=2-4 sweet
+  spot), `streaming_min_activation_bytes` (default 65536 / 64 KiB
+  floor), `streaming_chunk_assembly_ttl_secs` (default 30s).
+- **A-rev.4** (commit e32c0a5d) — wired the chunked send into
+  `pipeline/distributed.rs::forward_through_segments` persistent-
+  stream path. All K chunks ride the same libp2p stream → QUIC
+  preserves byte order → no receiver assembly race.
 
-**Effort.** 1-2 weeks.
+**Pivot rationale (research, 2026-05-19).** Original proposal
+("worker emits row-tiled chunks during matmul") matches the SGLang
+PD-disaggregation anti-pattern: SGLang explicitly rolled back per-
+tile streaming because per-chunk fixed costs outran overlap gains.
+No production inference system today (Triton decoupled, vLLM v1,
+NVIDIA Dynamo/NIXL) streams forward-output tensors. Per-token text
+streaming yes; tensor streaming no. The age STREAM AEAD
+construction + single-libp2p-stream pattern is the cited best
+practice (TokenWeave MLSys 2026, FlashOverlap 2025, age spec, Tink
+Streaming AEAD, RFC 9771). See commit message bodies for full
+citations.
+
+**Phase B (multi-request token interleaving)** turned out to be
+already shipped via the existing architecture: `router/distributed_exec.rs`
+spawns one tokio task per concurrent request; `pipeline_stream`
+keys streams by `(peer, request_id)` so concurrent requests fan
+out across separate streams; `process_pool::batch_scheduler_loop`
+auto-coalesces concurrent worker `forward()` calls into batched
+IPC. R139 documented this and skipped Phase B.
+
+**Remaining for full Tier 4K close-out** (small follow-ons):
+
+1. **TTL sweep wired to HealthMonitor periodic tick** — the
+   `SharedState.sweep_stale_chunk_assemblies(ttl_secs)` helper
+   ships, but no periodic caller invokes it yet. A stuck or
+   abandoned sender would otherwise leak `pending_activation_chunks`
+   entries. ~10 LOC in `health/monitor.rs`.
+
+2. **Chunked-send on RR fallback path** — the current sender wiring
+   is stream-only. Chunked-over-RR needs explicit per-chunk Ack
+   handling because the existing ResponseChannel pattern is 1:1.
+   `handle_tensor_payload` would have to inspect `chunk_meta` on
+   the critical task (it's in the cleartext trailer, so this is
+   feasible without decrypt) and return `None` for non-final
+   chunks so the caller ACKs immediately instead of storing the
+   ResponseChannel. ~30 LOC + plumbing.
+
+3. **Microbench** in `examples/swarm_spec_bench.rs` comparing
+   chunked vs monolithic at activation sizes covering the 64 KiB
+   floor + 256 KiB chunk + 1.6 MB prefill cases. WAN bench script
+   to measure actual win.
+
+4. **Worker-side row-tiled output streaming** — the literal "true"
+   form of Tier 4K. Requires worker IPC streaming protocol changes
+   (multi-frame `WorkerMsg::ActivationChunk` matching today's
+   per-token `WorkerMsg::Token` precedent), plus candle Tensor
+   row-slicing in `SplitExecutor::forward_inner_impl`'s final-layer
+   matmul. SGLang's evidence is that this loses on RDMA fabrics;
+   re-evaluate when slow-WAN bench data justifies. Estimated 3–4
+   weeks. Tracked in this entry but not actively scheduled.
+
+**Win this delivered (default config, no flag flip).** Phase C ships
+unconditionally: ~50–200µs/forward event-loop block savings on the
+default RR encrypted path. Multiplied across concurrent decode
+traffic this is the difference between smooth event-loop responsiveness
+and observable jitter on libp2p ping / gossip / connection events.
+
+**Win this delivered (flag-on, when both ends opt in).** Sender chunks
++ pipelined encrypt + receiver reassembly across a single libp2p
+stream. On encrypt-dominated paths (1 MB activation,
+ChaCha20-Poly1305 ~50–200µs each), per-forward saving is
+~100–150µs. On wire-dominated paths (slow WAN <30 Mbps) the
+saving comes from receiver-side decrypt+forward overlap with
+remaining sender-side send. LAN/loopback: no measurable win
+(activation send is already sub-millisecond).
 
 ### Tier 5 — low-priority but easy
 
