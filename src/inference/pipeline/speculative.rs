@@ -144,6 +144,7 @@ impl PipelineExecutor {
                 draft_tokens: Vec::new(),
                 spec_logits_requested: false,
                 truncate_kv_to: None,
+                chunk_meta: None,
             };
             if self
                 .network_tx

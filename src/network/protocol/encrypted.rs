@@ -73,6 +73,18 @@ pub fn build_layer_forward_aad(forward: &LayerForward) -> Vec<u8> {
         aad.extend_from_slice(&target_len.to_le_bytes());
     }
 
+    // Chunk-meta trailer (mirror 0x05 emission gate). Binds chunk_idx +
+    // total_chunks into the AAD so a peer cannot reorder chunks, forge a
+    // wrong total, or substitute a chunk from a different transfer without
+    // Poly1305 rejecting the open. Mid-chunk frames have `chunk_meta.is_final
+    // == false`; the receiver assembles all `total_chunks` frames before
+    // dispatching the reassembled activation to the worker.
+    if let Some(cm) = forward.chunk_meta {
+        aad.push(0x05);
+        aad.extend_from_slice(&cm.chunk_idx.to_le_bytes());
+        aad.extend_from_slice(&cm.total_chunks.to_le_bytes());
+    }
+
     aad
 }
 
@@ -162,6 +174,14 @@ pub fn encode_layer_forward_encrypted(
     if let Some(target_len) = forward.truncate_kv_to {
         buf.push(0x04);
         buf.extend_from_slice(&target_len.to_le_bytes());
+    }
+
+    // Optional: chunk-meta trailer (marker 0x05 + chunk_idx(4 LE) +
+    // total_chunks(4 LE)). Mirrors the plaintext encoder.
+    if let Some(cm) = forward.chunk_meta {
+        buf.push(0x05);
+        buf.extend_from_slice(&cm.chunk_idx.to_le_bytes());
+        buf.extend_from_slice(&cm.total_chunks.to_le_bytes());
     }
 
     Ok(buf)
@@ -337,7 +357,34 @@ pub fn decode_layer_forward_encrypted(
                 .try_into()
                 .map_err(|_| SwarmError::Network("Invalid truncate_kv_to".into()))?,
         );
+        cursor += 5;
         Some(len)
+    } else {
+        None
+    };
+
+    // Optional: chunk-meta trailer (marker 0x05 + chunk_idx(4 LE) +
+    // total_chunks(4 LE)). Mirrored from the plaintext decoder.
+    let chunk_meta = if data.len() >= cursor + 9 && data[cursor] == 0x05 {
+        let chunk_idx = u32::from_le_bytes(
+            data[cursor + 1..cursor + 5]
+                .try_into()
+                .map_err(|_| SwarmError::Network("Invalid chunk_idx".into()))?,
+        );
+        let total_chunks = u32::from_le_bytes(
+            data[cursor + 5..cursor + 9]
+                .try_into()
+                .map_err(|_| SwarmError::Network("Invalid total_chunks".into()))?,
+        );
+        if total_chunks == 0 || chunk_idx >= total_chunks {
+            return Err(SwarmError::Network(format!(
+                "Invalid chunk_meta: chunk_idx={chunk_idx}, total_chunks={total_chunks}"
+            )));
+        }
+        Some(crate::types::ChunkMeta {
+            chunk_idx,
+            total_chunks,
+        })
     } else {
         None
     };
@@ -360,6 +407,7 @@ pub fn decode_layer_forward_encrypted(
         draft_tokens,
         spec_logits_requested,
         truncate_kv_to,
+        chunk_meta,
     };
 
     // Reconstruct AAD from the parsed forward via the helper. This MUST
@@ -396,6 +444,7 @@ mod tests {
             draft_tokens: Vec::new(),
             spec_logits_requested: false,
             truncate_kv_to: None,
+            chunk_meta: None,
         }
     }
 
@@ -607,6 +656,103 @@ mod tests {
         let bytes = encode_layer_forward_encrypted(&orig, vec![0u8; 32]).unwrap();
         // Lop off most of the payload — decoder must error, not panic.
         assert!(decode_layer_forward_encrypted(&bytes[..10]).is_err());
+    }
+
+    // --- R139 Phase A-rev: chunk-meta in encrypted envelope ---------------
+
+    #[test]
+    fn encrypted_envelope_preserves_chunk_meta() {
+        let mut orig = base_forward();
+        orig.chunk_meta = Some(crate::types::ChunkMeta {
+            chunk_idx: 2,
+            total_chunks: 5,
+        });
+        let sealed = vec![0u8; 256];
+        let bytes = encode_layer_forward_encrypted(&orig, sealed.clone()).unwrap();
+        let (decoded, sealed_out, _aad) = decode_layer_forward_encrypted(&bytes).unwrap();
+        assert_eq!(decoded.chunk_meta, orig.chunk_meta);
+        assert_eq!(sealed_out, sealed);
+    }
+
+    #[test]
+    fn aad_authenticates_chunk_idx_flip() {
+        // Security claim: an attacker who reorders chunks on the wire (swaps
+        // chunk_idx between two captured frames) MUST produce a different AAD
+        // than the sender used to seal — Poly1305 rejects the open. This locks
+        // the chunk-meta-in-AAD binding from the encoder side.
+        let mut a = base_forward();
+        a.chunk_meta = Some(crate::types::ChunkMeta {
+            chunk_idx: 0,
+            total_chunks: 4,
+        });
+        let aad_a = build_layer_forward_aad(&a);
+
+        let mut b = a.clone();
+        b.chunk_meta = Some(crate::types::ChunkMeta {
+            chunk_idx: 1,
+            total_chunks: 4,
+        });
+        let aad_b = build_layer_forward_aad(&b);
+
+        assert_ne!(
+            aad_a, aad_b,
+            "swapping chunk_idx MUST change AAD bytes (prevents reorder attack)"
+        );
+    }
+
+    #[test]
+    fn aad_authenticates_total_chunks_change() {
+        let mut a = base_forward();
+        a.chunk_meta = Some(crate::types::ChunkMeta {
+            chunk_idx: 0,
+            total_chunks: 4,
+        });
+        let aad_a = build_layer_forward_aad(&a);
+
+        let mut b = a.clone();
+        b.chunk_meta = Some(crate::types::ChunkMeta {
+            chunk_idx: 0,
+            total_chunks: 5,
+        });
+        let aad_b = build_layer_forward_aad(&b);
+
+        assert_ne!(
+            aad_a, aad_b,
+            "modifying total_chunks MUST change AAD bytes (prevents truncation attack)"
+        );
+    }
+
+    #[test]
+    fn aad_omits_chunk_trailer_when_none() {
+        // Legacy single-frame forwards have no 0x05 trailer in the AAD —
+        // preserves backward compat with peers that don't emit the trailer.
+        let forward = base_forward();
+        let aad = build_layer_forward_aad(&forward);
+        let mid_bytes = forward.model_id.0.as_bytes();
+        assert_eq!(aad.len(), 35 + mid_bytes.len());
+    }
+
+    #[test]
+    fn aad_includes_chunk_trailer_when_set() {
+        let mut forward = base_forward();
+        forward.chunk_meta = Some(crate::types::ChunkMeta {
+            chunk_idx: 7,
+            total_chunks: 10,
+        });
+        let aad = build_layer_forward_aad(&forward);
+        let mid_bytes = forward.model_id.0.as_bytes();
+        // Chunk-meta trailer: 1 (marker 0x05) + 4 (chunk_idx) + 4 (total_chunks) = 9
+        assert_eq!(aad.len(), 35 + mid_bytes.len() + 9);
+        let trailer_start = 35 + mid_bytes.len();
+        assert_eq!(aad[trailer_start], 0x05);
+        assert_eq!(
+            &aad[trailer_start + 1..trailer_start + 5],
+            &7u32.to_le_bytes()
+        );
+        assert_eq!(
+            &aad[trailer_start + 5..trailer_start + 9],
+            &10u32.to_le_bytes()
+        );
     }
 }
 

@@ -289,6 +289,40 @@ pub struct LayerForward {
     /// draft entries committed in the previous verify round.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub truncate_kv_to: Option<u32>,
+    /// Tier 4K — daemon-side STREAM-chunked activation send. Present when this
+    /// frame carries one chunk of a multi-chunk activation transfer; absent
+    /// when the activation fits in a single frame (the common case for decode
+    /// where activations are ~16 KB). Bound into the AAD via
+    /// `protocol::build_layer_forward_aad` so a receiver cannot accept chunks
+    /// out of order, with a wrong total, or with a forged final-flag.
+    ///
+    /// Backward compat: frames without the trailer behave as
+    /// `(chunk_idx=0, total_chunks=1)` — single-chunk implicit. Existing wire
+    /// paths and older peers see exactly today's behaviour.
+    ///
+    /// `is_final` is derived: `chunk_idx + 1 == total_chunks`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chunk_meta: Option<ChunkMeta>,
+}
+
+/// Tier 4K — chunked activation transport metadata. Carried as the optional
+/// 0x05 trailer on `LayerForward`. AAD-bound so reorder/truncation attempts
+/// fail authentication before reaching the dispatch path.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ChunkMeta {
+    /// 0-indexed chunk position within the logical activation transfer.
+    pub chunk_idx: u32,
+    /// Total number of chunks in this transfer. The receiver assembles all
+    /// `total_chunks` frames (same `request_id`) into the original activation
+    /// before dispatching to the worker.
+    pub total_chunks: u32,
+}
+
+impl ChunkMeta {
+    /// True for the last chunk of a transfer — terminates receiver assembly.
+    pub fn is_final(&self) -> bool {
+        self.chunk_idx + 1 == self.total_chunks
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

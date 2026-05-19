@@ -1337,6 +1337,7 @@ impl ModelProcessPool {
             draft_tokens,
             spec_logits_requested,
             truncate_kv_to,
+            chunk_meta: _,
         } = forward;
 
         // Split vision embeddings out of the JSON header into the binary
@@ -1518,6 +1519,7 @@ impl ModelProcessPool {
                 draft_tokens,
                 spec_logits_requested,
                 truncate_kv_to,
+                chunk_meta: _,
             } = f;
             activation_lens.push(activations.len() as u32);
             concat_payload.extend_from_slice(&activations);

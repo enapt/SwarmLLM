@@ -158,6 +158,7 @@ pub(super) fn build_spec_verify_forward(
         draft_tokens: Vec::new(),
         spec_logits_requested: true,
         truncate_kv_to,
+        chunk_meta: None,
     }
 }
 
@@ -323,6 +324,7 @@ pub(super) fn build_kv_truncate_forward(
         draft_tokens: Vec::new(),
         spec_logits_requested: false,
         truncate_kv_to: Some(truncate_to),
+        chunk_meta: None,
     }
 }
 

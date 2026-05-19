@@ -103,6 +103,14 @@ pub fn encode_layer_forward(forward: &LayerForward) -> Result<Vec<u8>, SwarmErro
         buf.extend_from_slice(&target_len.to_le_bytes());
     }
 
+    // Optional: chunk-meta trailer (marker 0x05 + chunk_idx(4 LE) +
+    // total_chunks(4 LE)) — Tier 4K STREAM-chunked activation send.
+    if let Some(cm) = forward.chunk_meta {
+        buf.push(0x05);
+        buf.extend_from_slice(&cm.chunk_idx.to_le_bytes());
+        buf.extend_from_slice(&cm.total_chunks.to_le_bytes());
+    }
+
     Ok(buf)
 }
 
@@ -289,7 +297,41 @@ pub fn decode_layer_forward(data: &[u8]) -> Result<LayerForward, SwarmError> {
                 .try_into()
                 .map_err(|_| SwarmError::Network("Invalid truncate_kv_to".into()))?,
         );
+        cursor += 5;
         Some(len)
+    } else {
+        None
+    };
+
+    // Optional: chunk-meta trailer (marker 0x05 + chunk_idx(4 LE) + total_chunks(4 LE)).
+    // Carries STREAM-style chunk binding for Tier 4K daemon-side chunked
+    // activation send. Bound into AAD via `build_layer_forward_aad` so
+    // chunk reorder / wrong-total attempts fail authentication. Frames
+    // without this trailer are treated as `(chunk_idx=0, total_chunks=1)`
+    // — single-chunk implicit (the common-case decode wire-form pre-R139).
+    let chunk_meta = if data.len() >= cursor + 9 && data[cursor] == 0x05 {
+        let chunk_idx = u32::from_le_bytes(
+            data[cursor + 1..cursor + 5]
+                .try_into()
+                .map_err(|_| SwarmError::Network("Invalid chunk_idx".into()))?,
+        );
+        let total_chunks = u32::from_le_bytes(
+            data[cursor + 5..cursor + 9]
+                .try_into()
+                .map_err(|_| SwarmError::Network("Invalid total_chunks".into()))?,
+        );
+        // SEC: validate self-consistency. A peer sending (idx=5, total=3)
+        // would otherwise pass through and crash the assembly state
+        // machine.
+        if total_chunks == 0 || chunk_idx >= total_chunks {
+            return Err(SwarmError::Network(format!(
+                "Invalid chunk_meta: chunk_idx={chunk_idx}, total_chunks={total_chunks}"
+            )));
+        }
+        Some(crate::types::ChunkMeta {
+            chunk_idx,
+            total_chunks,
+        })
     } else {
         None
     };
@@ -312,6 +354,7 @@ pub fn decode_layer_forward(data: &[u8]) -> Result<LayerForward, SwarmError> {
         draft_tokens,
         spec_logits_requested,
         truncate_kv_to,
+        chunk_meta,
     })
 }
 
@@ -347,6 +390,7 @@ mod tests {
             draft_tokens: Vec::new(),
             spec_logits_requested: false,
             truncate_kv_to: None,
+            chunk_meta: None,
         }
     }
 
@@ -367,6 +411,7 @@ mod tests {
         assert_eq!(decoded.draft_tokens, orig.draft_tokens);
         assert_eq!(decoded.spec_logits_requested, orig.spec_logits_requested);
         assert_eq!(decoded.truncate_kv_to, orig.truncate_kv_to);
+        assert_eq!(decoded.chunk_meta, orig.chunk_meta);
         match (&decoded.tp_meta, &orig.tp_meta) {
             (Some(a), Some(b)) => {
                 assert_eq!(a.tp_rank, b.tp_rank);
@@ -562,5 +607,89 @@ mod tests {
             );
             assert!(same, "format roundtrip failed");
         }
+    }
+
+    // --- R139 Phase A-rev: chunk-meta trailer (0x05) -----------------------
+
+    #[test]
+    fn roundtrip_with_chunk_meta_first_chunk() {
+        let mut orig = base_forward();
+        orig.chunk_meta = Some(crate::types::ChunkMeta {
+            chunk_idx: 0,
+            total_chunks: 4,
+        });
+        let bytes = encode_layer_forward(&orig).unwrap();
+        let decoded = decode_layer_forward(&bytes).unwrap();
+        assert_roundtrip_eq(&orig, &decoded);
+        assert!(!decoded.chunk_meta.unwrap().is_final());
+    }
+
+    #[test]
+    fn roundtrip_with_chunk_meta_last_chunk_is_final() {
+        let mut orig = base_forward();
+        orig.chunk_meta = Some(crate::types::ChunkMeta {
+            chunk_idx: 3,
+            total_chunks: 4,
+        });
+        let bytes = encode_layer_forward(&orig).unwrap();
+        let decoded = decode_layer_forward(&bytes).unwrap();
+        assert_roundtrip_eq(&orig, &decoded);
+        assert!(decoded.chunk_meta.unwrap().is_final());
+    }
+
+    #[test]
+    fn chunk_meta_stacks_with_kv_truncate_trailer() {
+        // Chunked spec-decode KV-truncate path: 0x04 (kv-truncate) THEN 0x05
+        // (chunk-meta) must round-trip without trailer adjacency confusion.
+        let mut orig = base_forward();
+        orig.truncate_kv_to = Some(42);
+        orig.chunk_meta = Some(crate::types::ChunkMeta {
+            chunk_idx: 2,
+            total_chunks: 5,
+        });
+        let bytes = encode_layer_forward(&orig).unwrap();
+        let decoded = decode_layer_forward(&bytes).unwrap();
+        assert_eq!(decoded.truncate_kv_to, Some(42));
+        assert_eq!(
+            decoded.chunk_meta,
+            Some(crate::types::ChunkMeta {
+                chunk_idx: 2,
+                total_chunks: 5,
+            })
+        );
+    }
+
+    #[test]
+    fn decoder_rejects_invalid_chunk_meta_idx_at_or_above_total() {
+        // Build a frame manually with chunk_idx == total_chunks (invalid).
+        let orig = base_forward();
+        let mut bytes = encode_layer_forward(&orig).unwrap();
+        bytes.push(0x05);
+        bytes.extend_from_slice(&4u32.to_le_bytes()); // chunk_idx = 4
+        bytes.extend_from_slice(&4u32.to_le_bytes()); // total_chunks = 4
+        let result = decode_layer_forward(&bytes);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn decoder_rejects_chunk_meta_with_zero_total() {
+        let orig = base_forward();
+        let mut bytes = encode_layer_forward(&orig).unwrap();
+        bytes.push(0x05);
+        bytes.extend_from_slice(&0u32.to_le_bytes()); // chunk_idx = 0
+        bytes.extend_from_slice(&0u32.to_le_bytes()); // total_chunks = 0
+        let result = decode_layer_forward(&bytes);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn legacy_frame_without_chunk_meta_decodes_as_none() {
+        // Verify backward-compat: existing peers send frames without the 0x05
+        // trailer; receiver sees `chunk_meta: None` and treats as single-chunk
+        // implicit (the common-case decode wire-form pre-R139).
+        let orig = base_forward();
+        let bytes = encode_layer_forward(&orig).unwrap();
+        let decoded = decode_layer_forward(&bytes).unwrap();
+        assert!(decoded.chunk_meta.is_none());
     }
 }
