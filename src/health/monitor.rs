@@ -135,6 +135,18 @@ impl HealthMonitor {
                     // Clean up stale AllReduce/RingChunk entries (receiver dropped/timed out)
                     self.shared_state.allreduce_registry.cleanup_stale();
                     self.shared_state.ring_chunk_registry.cleanup_stale();
+                    // R139 Tier 4K — evict incomplete chunk assemblies whose last
+                    // chunk arrived past the TTL. Without this a stuck or abandoned
+                    // sender would leak `pending_activation_chunks` slots.
+                    let chunk_ttl = self.shared_state.config.inference.streaming_chunk_assembly_ttl_secs;
+                    let evicted = self.shared_state.sweep_stale_chunk_assemblies(chunk_ttl);
+                    if evicted > 0 {
+                        tracing::debug!(
+                            target: "swarmllm::health::monitor",
+                            evicted, ttl_secs = chunk_ttl,
+                            "Swept stale chunk assemblies"
+                        );
+                    }
                     // Suspend idle Claude Code sessions and warn about upcoming timeouts
                     #[cfg(feature = "claude-subscription")]
                     crate::api::claude_session::SessionManager::global()
