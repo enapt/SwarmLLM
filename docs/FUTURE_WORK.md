@@ -1032,11 +1032,13 @@ IPC. R139 documented this and skipped Phase B.
 
 **Remaining for full Tier 4K close-out** (small follow-ons):
 
-1. **TTL sweep wired to HealthMonitor periodic tick** — the
-   `SharedState.sweep_stale_chunk_assemblies(ttl_secs)` helper
-   ships, but no periodic caller invokes it yet. A stuck or
-   abandoned sender would otherwise leak `pending_activation_chunks`
-   entries. ~10 LOC in `health/monitor.rs`.
+1. **TTL sweep wired to HealthMonitor periodic tick** —
+   **closed 2026-05-19** (commit ff2f7b4d). Wired
+   `SharedState.sweep_stale_chunk_assemblies(ttl_secs)` into the
+   existing 30s cleanup block in `src/health/monitor.rs` alongside
+   the AllReduce/RingChunk cleanups. TTL sourced from
+   `config.inference.streaming_chunk_assembly_ttl_secs` (default
+   30s). Debug-level log when evictions occur.
 
 2. **Chunked-send on RR fallback path** — the current sender wiring
    is stream-only. Chunked-over-RR needs explicit per-chunk Ack
