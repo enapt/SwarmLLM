@@ -20,7 +20,9 @@ use swarmllm::inference::ngram_lookup::{
 };
 use swarmllm::inference::prefetch::{PrefetchConfig, PrefetchOrchestrator};
 use swarmllm::inference::quant::{dequantize_q8_0, quantize_q8_0};
-use swarmllm::types::{ModelId, NodeId};
+use swarmllm::network::pipeline_stream::chunk_layer_forward;
+use swarmllm::network::protocol::{decode_layer_forward, encode_layer_forward};
+use swarmllm::types::{ChunkAssemblyState, LayerForward, ModelId, NodeId, TensorFormat};
 
 fn main() {
     println!("=== SWARM-SPEC microbenchmark harness ===\n");
@@ -33,6 +35,8 @@ fn main() {
     bench_prefetch_history();
     println!();
     bench_cascade_synthetic_workload();
+    println!();
+    bench_chunked_send();
     println!();
     println!("=== Done. See docs/FUTURE_WORK.md § R136 for end-to-end methodology. ===");
 }
@@ -355,4 +359,144 @@ fn make_chat_workload() -> (Vec<u32>, Vec<u32>) {
     // Generation uses a different distribution.
     let generated: Vec<u32> = (0..100).map(|i| (i * 17 + 1000) as u32).collect();
     (prompt, generated)
+}
+
+// ─── Tier 4K: chunked vs monolithic activation transport ────────────────────
+//
+// Measures the CPU overhead the chunked-send path adds vs the monolithic
+// path at the activation sizes that matter for default config:
+//   - 32 KiB:    below the streaming_min_activation_bytes=64 KiB floor;
+//                chunk_layer_forward returns the input verbatim. Zero
+//                chunk-meta cost.
+//   - 64 KiB:    exactly the floor — one chunk, also passthrough.
+//   - 256 KiB:   exactly streaming_chunk_size_bytes default — one chunk.
+//   - 1 MiB:     four chunks, the typical K=2-4 sweet spot.
+//   - 1.6 MiB:   prefill-class. ~7 chunks. Stresses the assembly path.
+//
+// Wire transit cost is identical between paths; only the serialise +
+// split + reassemble CPU work differs. WAN measurement (where chunking
+// recovers latency via encrypt/decrypt overlap) needs a real-network
+// harness — see docs/FUTURE_WORK.md § Tier 4K.
+fn bench_chunked_send() {
+    println!("--- Tier 4K: chunked vs monolithic activation transport ---");
+
+    const CHUNK_SIZE: usize = 256 * 1024;
+    let sizes: &[(&str, usize)] = &[
+        ("32 KiB ", 32 * 1024),
+        ("64 KiB ", 64 * 1024),
+        ("256 KiB", 256 * 1024),
+        ("1 MiB  ", 1024 * 1024),
+        ("1.6 MiB", 1600 * 1024),
+    ];
+
+    println!(
+        "  {:<8}  {:>10}  {:>10}  {:>10}  {:>10}  {:>6}",
+        "size", "mono µs", "chunk µs", "split µs", "asm µs", "K"
+    );
+
+    for (label, size) in sizes {
+        let activations: Vec<u8> = (0..*size).map(|i| (i & 0xFF) as u8).collect();
+        let forward = make_bench_forward(activations);
+
+        // Monolithic: encode → decode roundtrip.
+        let iters = if *size < 256 * 1024 { 500 } else { 100 };
+        let t0 = Instant::now();
+        for _ in 0..iters {
+            let encoded = encode_layer_forward(&forward).unwrap();
+            let decoded = decode_layer_forward(&encoded).unwrap();
+            std::hint::black_box(decoded);
+        }
+        let mono_us = t0.elapsed().as_micros() as f64 / iters as f64;
+
+        // Chunked split cost only.
+        let t_split = Instant::now();
+        let mut k = 0usize;
+        for _ in 0..iters {
+            let chunks = chunk_layer_forward(&forward, CHUNK_SIZE);
+            k = chunks.len();
+            std::hint::black_box(chunks);
+        }
+        let split_us = t_split.elapsed().as_micros() as f64 / iters as f64;
+
+        // Full chunked roundtrip. Mirrors production dispatch: when
+        // chunk_layer_forward returns K==1 (size below or at chunk_size),
+        // the helper sets chunk_meta=None and the receive path skips
+        // assembly entirely (see pipeline_stream.rs:365 + tensors.rs:598).
+        // So we only pay the assembly cost on the multi-chunk case.
+        let t1 = Instant::now();
+        let mut asm_us_acc = 0u128;
+        for _ in 0..iters {
+            let chunks = chunk_layer_forward(&forward, CHUNK_SIZE);
+            let total_chunks = chunks.len() as u32;
+            let encoded: Vec<Vec<u8>> = chunks
+                .iter()
+                .map(|c| encode_layer_forward(c).unwrap())
+                .collect();
+            let decoded: Vec<LayerForward> = encoded
+                .iter()
+                .map(|bytes| decode_layer_forward(bytes).unwrap())
+                .collect();
+
+            if total_chunks <= 1 {
+                std::hint::black_box(&decoded);
+                continue;
+            }
+
+            // Assembly: mimic SharedState::try_assemble_chunked_forward
+            // without going through DashMap (the slot-table contention is
+            // not what we're measuring here — the CPU work is).
+            let t_asm = Instant::now();
+            let mut template = decoded[0].clone();
+            template.activations = Vec::new();
+            template.chunk_meta = None;
+            let mut state = ChunkAssemblyState::new(total_chunks, template, vec![1, 2, 3]);
+            for d in &decoded {
+                let cm = d
+                    .chunk_meta
+                    .expect("multi-chunk decoded forwards must carry chunk_meta");
+                state.received[cm.chunk_idx as usize] = Some(d.activations.clone());
+                state.filled += 1;
+            }
+            let assembled = state.assemble();
+            asm_us_acc += t_asm.elapsed().as_micros();
+            std::hint::black_box(assembled);
+        }
+        let chunked_us = t1.elapsed().as_micros() as f64 / iters as f64;
+        let asm_us = if k > 1 {
+            asm_us_acc as f64 / iters as f64
+        } else {
+            0.0
+        };
+
+        println!(
+            "  {}  {:>10.1}  {:>10.1}  {:>10.1}  {:>10.1}  {:>6}",
+            label, mono_us, chunked_us, split_us, asm_us, k
+        );
+    }
+    println!(
+        "\n  Reading: 'mono µs' is encode+decode of one LayerForward. 'chunk µs'\n  is the full split→encode×K→decode×K→assemble path. 'K' is the chunk\n  count at the default 256 KiB chunk size. The delta (chunk-mono) is the\n  CPU overhead the chunked path adds over monolithic on this host;\n  the WAN win comes from encrypt/decrypt and send/receive overlap that\n  this microbench does NOT capture."
+    );
+}
+
+fn make_bench_forward(activations: Vec<u8>) -> LayerForward {
+    LayerForward {
+        request_id: uuid::Uuid::from_u128(0xDEAD_BEEF_CAFE_F00D_0011_2233_4455_6677),
+        sequence_num: 0,
+        index_pos: 0,
+        activations,
+        format: TensorFormat::FP32,
+        model_id: ModelId("bench-model".into()),
+        layer_range: (0, 16),
+        tp_meta: None,
+        vision_embeddings: None,
+        sender_peer_bytes: None,
+        requester_node_id: None,
+        pre_embedded: false,
+        generated_ids: Vec::new(),
+        adapter_id: None,
+        draft_tokens: Vec::new(),
+        spec_logits_requested: false,
+        truncate_kv_to: None,
+        chunk_meta: None,
+    }
 }
