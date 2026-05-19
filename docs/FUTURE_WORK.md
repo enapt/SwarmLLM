@@ -1040,19 +1040,51 @@ IPC. R139 documented this and skipped Phase B.
    `config.inference.streaming_chunk_assembly_ttl_secs` (default
    30s). Debug-level log when evictions occur.
 
-2. **Chunked-send on RR fallback path** — the current sender wiring
-   is stream-only. Chunked-over-RR needs explicit per-chunk Ack
-   handling because the existing ResponseChannel pattern is 1:1.
-   `handle_tensor_payload` would have to inspect `chunk_meta` on
-   the critical task (it's in the cleartext trailer, so this is
-   feasible without decrypt) and return `None` for non-final
-   chunks so the caller ACKs immediately instead of storing the
-   ResponseChannel. ~30 LOC + plumbing.
+2. **Chunked-send on RR fallback path** — **deferred 2026-05-19**
+   pending WAN bench data. End-to-end call-graph trace confirmed
+   the mechanism would work (sender: K `NetworkCommand::SendTensor`
+   commands per forward; receiver: inspect `chunk_meta` BEFORE the
+   decrypt spawn and return `None` from `handle_tensor_payload` for
+   non-final chunks so `requests.rs:340-381` sends the Ack instead
+   of storing the ResponseChannel; FINAL chunk's RR exchange holds
+   the channel for the eventual LayerResult). True scope is ~50 LOC
+   spread across `distributed.rs::forward_through_segments` (sender
+   split + K-send loop), `tensors.rs::handle_tensor_payload`
+   (encrypted + unencrypted arms, the latter currently has no
+   assembly wiring), plus 3-4 receiver tests covering the
+   out-of-order arrival cases (final chunk first, duplicate
+   chunk_idx, total_chunks mismatch on second chunk). Reason for
+   deferral: the microbench (item 3, closed) shows chunked is 3.3×
+   slower in pure CPU terms on multi-chunk paths; the win comes
+   from encrypt/decrypt + wire overlap which the persistent stream
+   path already captures. On the RR path each chunk pays its own
+   per-request overhead (separate libp2p substreams, separate
+   encrypt context), so the overlap window is narrower than on
+   stream. Without real WAN bench data confirming the RR win, we'd
+   be adding ~50 LOC + branch surface for a code path that ships
+   default-off. Re-open when WAN bench script (Tier 4K item 5
+   below) demonstrates a measurable RR win.
 
-3. **Microbench** in `examples/swarm_spec_bench.rs` comparing
-   chunked vs monolithic at activation sizes covering the 64 KiB
-   floor + 256 KiB chunk + 1.6 MB prefill cases. WAN bench script
-   to measure actual win.
+3. **Microbench** in `examples/swarm_spec_bench.rs` —
+   **closed 2026-05-19** (commit dd0a6b74). Added `bench_chunked_send`
+   covering 32/64/256 KiB + 1/1.6 MiB activation sizes at the
+   default 256 KiB chunk size. Reports mono encode+decode, full
+   chunked split→encode×K→decode×K→assemble, split-only, and
+   assembly-only timings. Mirrors production dispatch (skips
+   assembly when K=1 so passthrough rows are honest). Measured
+   3.3× CPU overhead at K=4/7 on this host (WSL2); WAN overlap
+   win not captured here — needs a separate harness.
+
+5. **WAN bench script** — needs two daemons on different networks
+   (or VPN'd cloud regions). Compare `streaming_chunked_send=true`
+   vs `false` on a workload that fits the prefill-class activation
+   regime (1+ MiB activations). Win is "chunked completes earlier
+   than monolithic because encrypt+send and recv+decrypt overlap";
+   loss is "fixed-cost-per-chunk dominates on low-latency links".
+   Crossover point is RTT-dependent, so test 5/25/100/200 ms RTT.
+   Wire up via existing `examples/3node_inference_bench.sh` recipe
+   with a `--chunked-send` flag toggle on each daemon's config.toml.
+   Deferred — needs a real two-network test setup.
 
 4. **Worker-side row-tiled output streaming** — the literal "true"
    form of Tier 4K. Requires worker IPC streaming protocol changes
