@@ -1,16 +1,42 @@
 # Security & Encryption
 
-## Three Encryption Tiers
+## Two Operator-Facing Encryption Layers
+
+SwarmLLM ships with two distinct encryption layers that solve different
+problems. The first is on by default; the second is an opt-in
+stronger privacy mode.
+
+| Layer | Config flag | Default | What it protects |
+|-------|-------------|---------|------------------|
+| **Layer 1 — pairwise session encryption** | `network.enable_encryption` | **`true`** (on) | Every inter-node tensor forward is ChaCha20-Poly1305 sealed on the wire. Eavesdroppers on the network see ciphertext only. Entry/exit nodes still see plaintext at their boundary (first segment sees prompt embedding, last segment sees sampled tokens). |
+| **Layer 2 — encrypted (boomerang) pipeline** | `inference.encrypted_pipeline` | `false` (opt-in, per-model override available) | Forces the requesting node to handle BOTH the first segment (embedding) AND the last segment (sampling). Remote nodes only ever see intermediate encrypted hidden states. No remote node sees plaintext prompt OR output. Requires shard 0 + final shard locally. Adds ~1 RTT/token. |
+
+Layer 1 is "encryption in transit." Layer 2 is "no third party ever
+sees plaintext, even at the endpoints." Disabling Layer 1 is only
+sensible for local-loopback debugging — there is NO plaintext
+fallback on `seal()` failure (forwards are dropped). Enabling Layer
+2 is the strongest privacy mode SwarmLLM offers; combine with
+`local_embedding_privacy: true` (auto-enabled when encrypted_pipeline
+is on) for full protection.
+
+R139 hardened Layer 1 by offloading the ChaCha20-Poly1305 seal/open
+operations from the NetworkManager event loop via `tokio::spawn`, so
+encryption no longer adds jitter to libp2p ping / gossip / connection
+handling under concurrent decode load.
+
+## Three Encryption Tiers (internal mechanisms)
 
 ### Tier 1: Pairwise Sessions (Unicast)
 
-For direct peer-to-peer communication:
+Underlying mechanism for the operator-facing Layer 1 above. For direct
+peer-to-peer communication:
 - Ed25519 → X25519 → ECDH → ChaCha20-Poly1305
 - Forward secrecy via ephemeral X25519 re-keying every 10 minutes
 - Nonce reuse prevented by session clearing on disconnect (`remove_session()`)
 - Replay protection: RFC 6479 sliding window (128-bit bitmap) — allows packet reordering within window while rejecting duplicates
 - Nonce state updated only after successful decryption (prevents DoS)
 - Pending ephemeral keys expire after 60 seconds (prevents memory exhaustion from unanswered re-keys)
+- AAD covers cleartext header AND optional trailers (spec/kv-truncate/chunk-meta) via `build_layer_forward_aad` — flipping cleartext metadata on the wire fails Poly1305
 
 ### Tier 2: Pipeline Sealing (Inference)
 
@@ -159,15 +185,26 @@ A malicious node can send garbage activations instead of computing the actual tr
 
 ### Summary of privacy guarantees
 
+All rows below assume **`network.enable_encryption = true`** (the
+default) — every wire byte between nodes is ChaCha20-Poly1305 sealed
+regardless of which row you're in. The columns describe what the
+*endpoints* see; the wire is always encrypted.
+
 | Configuration | Prompt privacy | Response privacy | Activation risk |
 |---|---|---|---|
-| Default (no privacy flags) | First segment sees plaintext | Final segment sees plaintext | Intermediate nodes see activations |
-| `local_embedding_privacy: true` | No remote node sees raw tokens | Final segment sees plaintext | Reduced — no trivial embedding inversion |
-| `encrypted_pipeline: true` | No remote node sees raw tokens | No remote node sees output | Only intermediate activations visible to remote nodes |
-| + Tier 2 pipeline sealing | No remote node sees raw tokens | Encrypted on the wire | Reduced — no trivial embedding inversion |
+| **Default** (Layer 1 only, no privacy flags) | First segment sees plaintext prompt embedding | Final segment sees plaintext sampled tokens | Intermediate nodes see encrypted-on-wire activations; can decrypt at their boundary |
+| `local_embedding_privacy: true` | No remote node sees raw token IDs | Final segment sees plaintext | Reduced — no trivial embedding inversion |
+| `encrypted_pipeline: true` ("boomerang") | No remote node sees plaintext | No remote node sees output | Only intermediate activations visible to remote nodes |
+| + Tier 2 pipeline sealing on output | No remote node sees plaintext | Final tokens sealed for requester's X25519 key | Reduced — no trivial embedding inversion |
 | All protections enabled | Best available | Best available | Remote nodes only see intermediate activations; inversion theoretically possible but computationally expensive |
 
-> **Bottom line:** With `encrypted_pipeline`, no remote node sees plaintext input or output — the pipeline "boomerangs" through remote nodes and returns to the requester. This is the strongest privacy mode. Without it, `local_embedding_privacy` still protects raw token IDs but the final-segment node sees generated output.
+> **Bottom line:** Layer 1 (basic wire encryption) is on by default
+> — eavesdroppers on the network see ciphertext. The "boomerang"
+> mode (`encrypted_pipeline`) is the additional opt-in step that
+> stops even the first/last remote node from seeing plaintext.
+> Without `encrypted_pipeline`, `local_embedding_privacy` still
+> protects raw token IDs but the final-segment node sees generated
+> output.
 
 ## Local Embedding Privacy
 

@@ -41,7 +41,7 @@ cargo run -- run -vv 2>&1 | grep "request_id=<UUID>"
 4. **Forward start** → `DIAG: starting forward_through_segments` with `seq_num`, `index_pos`, `activation_bytes` (pipeline/distributed.rs)
 5. **Tensor forward send** → `DIAG: sent tensor forward via send_request` with `is_connected`, `total_connections`, `pending_tensor_count`, `outbound_id` (manager/tensors.rs)
 6. **Codec write** → `DIAG: codec write_request start/done` with `frame_len` (protocol.rs)
-7. **Encryption (if enabled)** → `DIAG: encrypting tensor forward` with `aad_len`, `has_session` (manager/tensors.rs)
+7. **Encryption (if enabled, R139)** → encrypt offloaded from event loop via `tokio::spawn`. Failure: `DIAG: tensor encrypt+encode failed — dropping forward` (manager/tensors.rs). On success the spawn task posts `NetworkCommand::SendEncodedTensor` back through `internal_cmd_tx`; the critical task then performs only the `send_request` step. Decode/decrypt offloaded symmetrically in the inbound path; failures log `DIAG: decrypt FAILED — possible AAD mismatch, key mismatch, or corruption`
 8. **Remote receive** → `DIAG: codec read_request header` with `tag`, `len` (protocol.rs)
 9. **Inbound dispatch** → `DIAG: inbound TensorPayload request` → `DIAG: stored ResponseChannel` (manager/requests.rs)
 10. **Dispatcher** → `DIAG: dispatcher received LayerForward` with `seq`, `layer_range`, `activation_bytes` (daemon/dispatch/mod.rs)

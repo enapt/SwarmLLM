@@ -63,6 +63,9 @@ Single Rust binary, three simultaneous functions:
 │  │                                                     │  │
 │  │  Root: peer_registry, model_registry, executor,     │  │
 │  │    identity, db, active_pipelines, config,          │  │
+│  │    pending_layer_results, pending_stream_result_    │  │
+│  │    routes, pending_prefix_kv_fetches,               │  │
+│  │    pending_activation_chunks (R139 Tier 4K),        │  │
 │  │    standalone_tokenizers (R136 L1/L3 follow-on)     │  │
 │  └────────────────────────────────────────────────────┘  │
 └──────────────────────────────────────────────────────────┘
@@ -436,6 +439,42 @@ For a 7B model (hidden_dim=3584):
 - `tensor_compress_level = 3` — zstd compression level (1-22, default 3)
 - `tensor_compress_threshold = 4096` — minimum payload bytes to trigger compression
 - Reduces bandwidth for prefill payloads by 30-60% with minimal latency overhead
+
+**LayerForward optional trailers** — the wire envelope appends
+optional trailer blocks after the activation bytes. Each trailer is a
+single tag byte + fixed payload. Decoders scan in tag order and
+ignore unknown tags (forward-compatible).
+
+| Tag | Field | Layout | Purpose |
+|-----|-------|--------|---------|
+| 0x01 | layer_range + model_id | `start(4)+end(4)+len(2)+model_id` | Required — receiver loads correct segment weights |
+| 0x02 | tp_meta | `rank(1)+size(1)+layer(4)+phase(1)+pre_embedded(1)` | Tensor-parallel AllReduce routing |
+| 0x03 | speculative | `flags(1)+n_drafts(2)+drafts(n×4)` | Draft tokens + `spec_logits_requested` flag |
+| 0x04 | kv_truncate | `target_len(4)` | Spec-decode KV-cache fixup after partial acceptance |
+| 0x05 | chunk_meta (R139) | `chunk_idx(4)+total_chunks(4)` | Tier 4K daemon-side STREAM-chunked transport |
+
+All trailers are bound into the encryption AAD via
+`build_layer_forward_aad` (single source of truth in
+`network/protocol/encrypted.rs`). An attacker who flips a trailer
+byte on the wire fails Poly1305 on the receiver's decrypt.
+
+**Tier 4K daemon-side chunked send (R139)** — gated by
+`inference.streaming_chunked_send` (default `false`). When on AND
+the activation exceeds `streaming_min_activation_bytes` (default
+64 KiB), the coordinator splits the activation at byte-offset
+boundaries into K = `ceil(size / streaming_chunk_size_bytes)` chunks
+(default chunk size 256 KiB — matches age STREAM construction +
+TokenWeave MLSys 2026 K=2-4 sweet spot). Each chunk carries the
+same `request_id` and a distinct `(chunk_idx, total_chunks)` in the
+0x05 trailer. All chunks ride the **same libp2p stream** (QUIC
+preserves byte order within a stream → no receiver-side reorder
+state machine). Receiver assembles in
+`SharedState.pending_activation_chunks: DashMap<Uuid,
+ChunkAssemblyState>` via `try_assemble_chunked_forward`, then
+dispatches a single reassembled LayerForward to the worker. The
+0x05 trailer is AAD-bound so reorder / wrong-total /
+cross-transfer-substitution attempts fail Poly1305 before reaching
+assembly.
 
 ### Pipeline Assembly Algorithm
 

@@ -174,6 +174,43 @@ stream per pipeline session.
   batched prefill).
 - **Config:** `inference.persistent_pipeline_stream = true`
 
+### Daemon-side STREAM-chunked activation send (R139, `streaming_chunked_send`)
+
+Split large activation tensors into K = ceil(size / chunk_size) chunks at
+the wire boundary and ship them sequentially on a single libp2p stream.
+Each chunk is sealed independently with ChaCha20-Poly1305; `chunk_idx` +
+`total_chunks` are bound into the AAD so reorder / wrong-total /
+cross-transfer-substitution fail Poly1305 before reaching dispatch.
+Receiver reassembles via `SharedState.pending_activation_chunks` before
+dispatching a single LayerForward to the worker.
+
+- **Status:** Wire-format, AAD binding, receiver assembly, and sender
+  wiring (persistent-stream path only) shipped in R139. Default
+  off — needs WAN-bench evidence before the default flips. On
+  LAN/loopback the activation send is already sub-millisecond and
+  chunking adds per-chunk fixed cost with near-zero overlap win.
+- **Requires:** `persistent_pipeline_stream = true` (RR fallback path
+  not yet wired — needs per-chunk Acks).
+- **Config:**
+  - `inference.streaming_chunked_send = false` — master switch
+  - `inference.streaming_chunk_size_bytes = 262144` — 256 KiB default
+    (age STREAM construction + TokenWeave MLSys 2026 K=2-4 sweet spot)
+  - `inference.streaming_min_activation_bytes = 65536` — 64 KiB floor;
+    activations below this ship as one frame regardless of the flag
+  - `inference.streaming_chunk_assembly_ttl_secs = 30` — receiver
+    eviction TTL for stuck assemblies
+
+### Encrypt/decrypt offload from event loop (R139 Phase C)
+
+Unconditional benefit (no flag). ChaCha20-Poly1305 sealing in
+`handle_send_tensor` and the open in `handle_tensor_payload`
+(TENSOR_TAG_ENCRYPTED arm) are offloaded to `tokio::spawn` tasks so
+the NetworkManager event loop stays responsive under concurrent
+decode load. Saves ~50–200µs/forward of event-loop block time on the
+default RR encrypted path; multiplied across concurrent traffic this
+is the difference between smooth libp2p ping / gossip / connection
+handling and observable jitter.
+
 ## Debugging slow inference
 
 Default verbosity (`-v`) gives an `INFO`-level stream. Bump to `-vv` to
