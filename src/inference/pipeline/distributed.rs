@@ -856,53 +856,77 @@ impl PipelineExecutor {
                     "Sending LayerForward to remote segment"
                 );
 
+                // R139 Tier 4K — daemon-side STREAM-chunked send (gated by
+                // `inference.streaming_chunked_send`). Splits large
+                // activations into K chunks at the wire boundary and ships
+                // them sequentially over the SAME persistent stream — QUIC
+                // preserves order within a stream so no reorder/loss
+                // handling is needed. Chunked send is only wired on the
+                // stream path; RR fallback ships the un-chunked forward
+                // because the RR ResponseChannel pattern is 1:1 (a future
+                // commit can plumb chunked-over-RR with explicit Acks).
+                let streaming_cfg = &self.shared_state.config.inference;
+                let chunked_eligible = streaming_cfg.streaming_chunked_send
+                    && streaming_cfg.persistent_pipeline_stream
+                    && (forward.activations.len() as u32)
+                        > streaming_cfg.streaming_min_activation_bytes;
+                let chunk_size = streaming_cfg.streaming_chunk_size_bytes.max(1) as usize;
+
                 // Persistent pipeline stream path: if enabled AND the client
                 // handle is installed, encode + seal locally and ship on the
                 // stream. Falls back to NetworkCommand::SendTensor on any
                 // setup failure (stream open error, encoding error, etc.).
-                let used_stream = if self
-                    .shared_state
-                    .config
-                    .inference
-                    .persistent_pipeline_stream
-                {
+                let used_stream = if streaming_cfg.persistent_pipeline_stream {
                     if let Some(client) = self.shared_state.pipeline_stream_client.get() {
                         match libp2p::PeerId::from_bytes(&target_peer_bytes) {
                             Ok(peer_id) => {
-                                match crate::network::pipeline_stream::encode_forward_for_wire(
-                                    &forward,
-                                    &peer_id,
-                                    &self.shared_state,
-                                ) {
-                                    Ok(payload) => match client
-                                        .send_forward(
-                                            request_id,
-                                            peer_id,
-                                            payload,
-                                            self.shared_state.clone(),
-                                        )
-                                        .await
-                                    {
-                                        Ok(()) => true,
+                                let frames: Vec<crate::types::LayerForward> = if chunked_eligible {
+                                    crate::network::pipeline_stream::chunk_layer_forward(
+                                        &forward, chunk_size,
+                                    )
+                                } else {
+                                    vec![forward.clone()]
+                                };
+                                let mut all_ok = true;
+                                for chunk in &frames {
+                                    match crate::network::pipeline_stream::encode_forward_for_wire(
+                                        chunk,
+                                        &peer_id,
+                                        &self.shared_state,
+                                    ) {
+                                        Ok(payload) => match client
+                                            .send_forward(
+                                                request_id,
+                                                peer_id,
+                                                payload,
+                                                self.shared_state.clone(),
+                                            )
+                                            .await
+                                        {
+                                            Ok(()) => {}
+                                            Err(e) => {
+                                                tracing::warn!(
+                                                    %request_id,
+                                                    error = %e,
+                                                    "pipeline stream send failed — falling back to RR"
+                                                );
+                                                client.close(request_id);
+                                                all_ok = false;
+                                                break;
+                                            }
+                                        },
                                         Err(e) => {
                                             tracing::warn!(
                                                 %request_id,
                                                 error = %e,
-                                                "pipeline stream send failed — falling back to RR"
+                                                "pipeline stream encode failed — falling back to RR"
                                             );
-                                            client.close(request_id);
-                                            false
+                                            all_ok = false;
+                                            break;
                                         }
-                                    },
-                                    Err(e) => {
-                                        tracing::warn!(
-                                            %request_id,
-                                            error = %e,
-                                            "pipeline stream encode failed — falling back to RR"
-                                        );
-                                        false
                                     }
                                 }
+                                all_ok
                             }
                             Err(e) => {
                                 tracing::warn!(
