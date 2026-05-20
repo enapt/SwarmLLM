@@ -72,15 +72,30 @@ Headline ranking by signal-to-effort for SwarmLLM today: **17 > 18 > 14**.
 Item 14 inherits Item 6 (SWIFT) blocker — defer until SWIFT lands
 measurable wins.
 
+> **2026-05-20 note.** R136 SWARM-SPEC v0.1 shipped a 4-layer
+> acceleration cascade (Q8_0 + n-gram + hedging + prefetch) that
+> measured **+45% summary throughput** on input-grounded workloads
+> single-segment. That changes the bottleneck calculus: distributed
+> wire-time is no longer the obvious dominator on workloads where L1
+> hits. Re-run the bottleneck-identification question against the
+> R136 numbers (see `docs/FUTURE_WORK.md § R136 local 3-node
+> benchmark`) before pulling 14/17/18 in.
+
 ### 4. Release hygiene
 
 - ✅ `v0.1.0` tag cut 2026-04-25 (816 tests). Subsequent commits are
   in CHANGELOG `[Unreleased] — post-v0.1.0`. Two black-hat audits
   (2026-04-28 + 2026-04-29) plus the autonomous R76→R91 sweep arc
   (2026-04-30 → 2026-05-01, 16 rounds) have landed since, plus the
-  R92→R120 arc through 2026-05-12 plus R121 contribution-mode landing;
-  current head sits at 1005 lib + 75 integration tests, clippy clean,
-  both default and `--features llama` feature sets compile.
+  R92→R120 arc through 2026-05-12, R121 contribution-mode landing,
+  R130-R135 (cross-pool gossip / quant automation / cross-pool
+  routing / ngram cascade research), R136 SWARM-SPEC v0.1 (Q8_0
+  default-on + n-gram cascade + adaptive hedging + predictive
+  prefetch), R137-R138 (FUTURE_WORK + sweep-log defer batches), and
+  R139 Tier 4K (encrypt-offload from event loop + STREAM-chunked
+  activation send). Current head sits at **1030 lib + 75 integration
+  tests**, clippy clean, both default and `--features llama` feature
+  sets compile.
 - ✅ macOS CI matrix is live (clippy + test + build on `macos-15` in
   `.github/workflows/ci.yml` — clippy default features only, integration
   tests Linux-only by design until macOS multi-process IPC is exercised).

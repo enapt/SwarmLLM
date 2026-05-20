@@ -633,20 +633,35 @@ attention if either cap grows materially.
 
 ## Inference performance — research backlog (R135 brief)
 
-> **STATUS as of R136 (2026-05-17):** Tier 1 items A (Q8_0 default-on)
-> and B (tail-latency hedging) are now SHIPPED. Tier 1 item C
-> (EAGLE-3) remains deferred (per-model trained weights not
-> available for SwarmLLM test models). Tier 2-5 items remain as
-> documented below. Layer 1 of the original R136 SWARM-SPEC proposal
-> (n-gram cascade) shipped both draft-required and draft-free
-> variants via `inference/ngram_lookup.rs` +
-> `pipeline/ngram_only_spec.rs::try_ngram_only_distributed` — the
-> draft-free path also covers ~half the value of Tier 2E (lookahead
-> decoding) since both are training-free spec sources. Layer 3
-> observation hooks shipped but K-layer activation prefetch
-> (workload-dependent) remains deferred. See `## R136 local 3-node
-> benchmark — measured results` below for the actual numbers, and
-> the per-Tier sections below for what specifically remains.
+> **STATUS as of 2026-05-20 (post-R139):**
+>
+> **Shipped (in tree, not gaps):**
+> - Tier 1A — activation compression default-on (R136)
+> - Tier 1B — tail-latency hedging single-segment (R136); multi-segment open
+> - Tier 2E — compute-win shipped via R136 Layer 1 (different algorithm —
+>   prompt-lookup-decoding rather than LMSYS 2D-window — but same gain
+>   in the input-grounded workload). LMSYS 2D variant itself open.
+> - Tier 3G — cross-REQUEST prefix sharing (block-boundary BLAKE3
+>   chain in `prefix_cache.rs` gives system-prompt dedup across users).
+>   True radix-tree refinement open.
+> - Tier 4K — daemon-side STREAM-chunked send + receive (R139). RR
+>   chunked + WAN bench script + worker row-tiled streaming open.
+>
+> **Genuinely open:**
+> - Tier 1C (EAGLE-3) — needs externally-trained draft heads per model.
+> - Tier 2D (tree-based draft expansion / FlowSpec) — `speculative.rs`
+>   is linear γ-chain only.
+> - Tier 2F (KV cache quantization / KIVI) — no `kv_quantization`
+>   config; kv_cache stores raw.
+> - Tier 3H (sub-token activation deltas) — no delta path.
+> - Tier 3I (PowerInfer-style activation sparsity) — no sparsity
+>   profiler.
+> - Tier 4J (pre-emptive layer dispatch) — speculative novelty.
+> - Tier 5L (FP8 activation) — needs Hopper+ hardware.
+>
+> See `## R136 local 3-node benchmark — measured results` below for
+> the actual numbers, and the per-Tier sections below for full
+> context on what's open.
 
 Compiled 2026-05-16 from a survey of state-of-the-art LLM inference
 optimization (FlashAttention-3/4, FlowSpec, P-EAGLE, EAGLE-3, DSD,
@@ -857,7 +872,35 @@ needs a benchmark harness we don't have today.
 **Effort.** 2-3 weeks; substantial wire-format + worker-side
 attention-mask work.
 
-#### E. Lookahead decoding (n-gram parallel verify)
+#### E. Lookahead decoding (n-gram parallel verify) — **compute-win SHIPPED R136** (different algorithm, same gain); LMSYS 2D-window variant remains open
+
+**Status.** The headline win of LMSYS Lookahead Decoding — draft-free
+spec from n-gram lookup — ships via R136 Layer 1
+(`inference/ngram_lookup.rs` + `pipeline/ngram_only_spec.rs::try_ngram_only_distributed`).
+Real-inference single-segment bench: **+45% summary throughput at 77%
+n-gram hit-rate** (`docs/FUTURE_WORK.md § R136 local 3-node benchmark`).
+Different algorithm — we do prompt-lookup-decoding (apoorvumang /
+PROMTEC ACL 2025) rather than LMSYS's 2D-window — but same compute
+gain in the input-grounded workload where it matters.
+
+**What remains open.** The specific LMSYS 2D-window mechanism (n-grams
+emitted in the SAME forward, verified in the NEXT) is a separate
+algorithm and not implemented. It could stack on top of L1 for the
+non-prompt-grounded fraction of the workload (free-form chat where L1
+hit-rate dropped to 0% in the synthetic bench).
+
+**Why this gap is low-priority.** L1 already covers code completion +
+RAG (the workloads that matter for Claude Code / MCP). Free-form chat
+is the residual case, and there the gain over greedy decode is the
+~5-25ms per-token saved by parallel verify on n-grams that may or may
+not match — a smaller absolute win than L1's 45%. Defer until a
+workload mix surfaces where the residual matters.
+
+**Effort.** 2-3 weeks if pursued. New module + slot-table coupling.
+
+Original analysis preserved below.
+
+#### E. Lookahead decoding — original analysis
 **Context.** Lookahead decoding (LMSYS, May 2024) uses a 2D window
 to generate n-grams in a single forward and verify them in the
 *next* forward. No draft model needed. The mechanism is local — no
@@ -898,7 +941,36 @@ compatibility. Sizable phase; new test corpus needed.
 
 ### Tier 3 — speculative / research-scope
 
-#### G. RadixAttention-style cross-session prefix sharing
+#### G. RadixAttention-style cross-session prefix sharing — **cross-REQUEST sharing SHIPPED**; true radix-tree refinement open
+
+**Status.** `inference/split/prefix_cache.rs` ships cross-REQUEST (not
+cross-session) prefix-KV sharing. Block-boundary BLAKE3 hash chain
+(`compute_block_hashes`) means two prompts sharing the first N blocks
+get an instant prefix hit on the second request — including across
+DIFFERENT users with the SAME system prompt. The big win from
+RadixAttention (system-prompt dedup, multi-turn reuse) is captured.
+
+**What remains open.** True radix-tree storage with reference-counted
+KV-block ownership and COW on divergence. The current implementation
+is a flat set of entries per model with LRU eviction; storage is
+`O(entries × prompt_len × hidden × layers)` worst-case, so a
+deployment with 1000s of distinct prompts pays for redundant prefix
+storage that a radix tree would dedup at the block level.
+
+**Why this gap is low-priority for SwarmLLM specifically.** Radix-tree
+storage matters when one worker has many concurrent same-prefix
+requests — vLLM / SGLang on a single GPU serving a public API. Our
+P2P case rarely concentrates that many requests on a single worker
+(load is sharded across the pipeline + spread across peers), so the
+block-boundary flat cache already captures most of the realistic gain.
+
+**Effort if pursued.** 4-8 weeks. Requires PagedAttention-style block
+KV management which we don't have today; this is an architectural
+change to `kv_cache.rs` and every attention call site.
+
+Original analysis preserved below.
+
+#### G. RadixAttention — original analysis
 **Context.** Our `split/prefix_cache.rs` shares prefixes per-session.
 SGLang's RadixAttention shares across ALL active requests via a
 radix tree, giving 6.4× on prefix-heavy workloads (RAG, multi-turn).
@@ -912,6 +984,11 @@ divergence.
 which we don't have. Big phase, hard to split.
 
 **Effort.** 4-8 weeks. Architectural change.
+
+> _Note: the "shares prefixes per-session" framing in the original
+> analysis was inaccurate even at the time it was written —
+> `prefix_cache.rs` was already cross-request via block-boundary
+> hashing. Status note above corrects this._
 
 #### H. Sub-token streaming (compress activation deltas)
 **Context.** Across consecutive decode tokens, the hidden state at
