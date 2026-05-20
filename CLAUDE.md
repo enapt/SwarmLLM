@@ -191,9 +191,61 @@ When spawning subagents in this repo, use these model picks (overrides defaults 
 
 ## Status
 
-All 20 build phases complete. All subsystems wired — no stubs. **1030 lib tests + 75 integration tests passing**; 8 lib + 1 e2e ignored (env-var or manual). Clippy clean default + `--features llama`.
+All 20 build phases complete. All subsystems wired — no stubs. **1048 lib tests + 75 integration tests passing**; 8 lib + 1 e2e ignored (env-var or manual). Clippy clean default + `--features llama`.
 
-### Latest: R139 — Tier 4K communication-computation overlap
+### Latest: R140 — Pool invite codes v2 (bootstrap-before-decentralization)
+
+The 8-character pool invite code (`A3F7K2M9`) worked only when both nodes
+were already on the same libp2p swarm — useful in a mature decentralized
+network, but useless for the case the invite code was originally designed
+for: helping two fresh nodes find each other before decentralization is
+achieved. R140 closes that gap.
+
+**New `swarmpool://...` blob** (`src/pool/invite.rs`) wraps the existing
+8-char code with the inviter's reachable listen multiaddrs. Encoded as
+JSON → ChaCha20-Poly1305 (random key embedded, anti-IP-harvesting only) →
+base64url. ~300-500 chars, fits in a copy-paste. Inner payload:
+`{ version, pool_id, pool_name, multiaddrs[], code (8-char), expires_at_unix }`.
+
+**`SharedState.listen_multiaddrs: arc_swap::ArcSwap<Vec<String>>`** —
+live snapshot rebuilt by NetworkManager on `NewListenAddr` /
+`ExpiredListenAddr` / `ListenerClosed` / `ExternalAddrConfirmed`. Each entry
+is suffixed with `/p2p/<local_peer_id>` for identity verification. Filtered
+via a new `addr_is_remotely_reachable` that drops loopback / unspecified /
+link-local / AWS-IMDS but **keeps** Tailscale CGN (100.64.0.0/10) — the
+existing `is_non_public_addr` filter is for anti-gaming / PEX-leak
+prevention and explicitly rejects CGN, the exact range the WAN-bootstrap
+use case needs.
+
+**`handle_join_with_code` dual-mode**: v2 blob → dial each multiaddr via
+`NetworkCommand::DialAddress` then broadcast the existing
+`PoolMessage::JoinRequest`. Legacy 8-char → direct broadcast (preserves
+on-swarm flow). **Wire protocol unchanged** — v2 is purely the rendezvous
+wrapper around the existing pool-join handshake.
+
+**Generation rejects empty addresses**: if `listen_multiaddrs` is empty
+(daemon hasn't bound yet), `handle_generate_invite_code` returns
+`ServiceUnavailable` instead of silently handing out a useless code.
+
+**Frontend**: dropped the fake-QR pattern (only hashed 8 chars, was never
+scannable — misleading), replaced with a monospace code box + Copy button
+sized for the ~500-char v2 blob. Paste field upgraded from
+`<input maxlength=8>` to `<textarea>` so the full blob fits without
+scroll. Join handler in `pool.js` + `setup.js` sniffs prefix to route to
+v2 (case-preserved) or legacy 8-char (uppercased).
+
+**i18n**: 5 strings refreshed across 21 locales (`pool.code_invalid`,
+`pool.enter_code`, `pool.share_code`, `pool.how_to_join`, +
+`pool.enter_code_hint` new), 1 dead key removed (`pool.scan_or_type` —
+was for the fake QR). All translated, not English-fallback.
+
+**Tests**: 18 new (10 codec — roundtrip, tamper, expiry, version, truncated,
+oversized, whitespace, prefix sniff, malformed token, missing-prefix; 3
+listen-addr filter; 5 PoolManager — empty-addrs error, decode roundtrip,
+v2 dials-then-broadcasts, legacy skips-dial, garbage rejected).
+1030 → 1048 lib tests. Clippy clean default + features dev,claude-subscription.
+
+### Prior: R139 — Tier 4K communication-computation overlap
 
 Four commits closing FUTURE_WORK Tier 4K with a research-driven scope pivot.
 Phase B turned out to be already shipped via the existing async architecture

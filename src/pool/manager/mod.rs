@@ -2965,4 +2965,148 @@ mod tests {
         // Alice cannot forward more.
         assert!(!pm.check_credit_forward_rate(&alice, 1));
     }
+
+    // ── Invite code v2: end-to-end through the PoolManager ─────────────
+
+    /// Owner-side: with no reachable listen addresses snapshotted, code
+    /// generation must surface a clean ServiceUnavailable. This guards
+    /// against the regression where a fresh daemon (before the swarm has
+    /// emitted NewListenAddr) silently hands out a code with an empty
+    /// multiaddr list — which v2's whole purpose is to prevent.
+    #[tokio::test]
+    async fn v2_generate_fails_when_no_listen_addrs_yet() {
+        let (mut pm, state, _id) = build_test_pool_manager().await;
+        pm.handle_create_pool("test".into()).await.unwrap();
+        // listen_multiaddrs is empty by default in tests.
+        assert!(state.listen_multiaddrs.load().is_empty());
+        let err = pm.handle_generate_invite_code().await.unwrap_err();
+        match err {
+            SwarmError::ServiceUnavailable(msg) => {
+                assert!(
+                    msg.to_lowercase().contains("network addresses"),
+                    "msg: {msg}"
+                );
+            }
+            other => panic!("expected ServiceUnavailable, got {other:?}"),
+        }
+    }
+
+    /// Owner-side: with a listen address present, generation returns a
+    /// well-formed `swarmpool://` blob whose decoded payload carries the
+    /// owner's NodeId, pool name, multiaddrs, and a still-valid 8-char
+    /// join token. This is the round-trip the joining node will see.
+    #[tokio::test]
+    async fn v2_generate_returns_decodable_blob() {
+        let (mut pm, state, identity) = build_test_pool_manager().await;
+        pm.handle_create_pool("Test Pool".into()).await.unwrap();
+        state.listen_multiaddrs.store(std::sync::Arc::new(vec![
+            "/ip4/100.64.0.5/tcp/8810/p2p/12D3KooWFakeXXX".into(),
+            "/ip4/192.168.1.5/udp/8800/quic-v1/p2p/12D3KooWFakeXXX".into(),
+        ]));
+
+        let encoded = pm.handle_generate_invite_code().await.unwrap();
+        assert!(encoded.starts_with("swarmpool://"));
+
+        let payload = crate::pool::invite::decode_invite_code(&encoded).unwrap();
+        assert_eq!(payload.pool_id, *identity.node_id());
+        assert_eq!(payload.pool_name, "Test Pool");
+        assert_eq!(payload.multiaddrs.len(), 2);
+        assert!(payload.multiaddrs[0].contains("100.64.0.5"));
+        assert_eq!(payload.code.len(), 8);
+        assert!(payload.code.chars().all(|c| c.is_ascii_alphanumeric()));
+        // The owner's in-memory invite_codes map now keys on hash(code).
+        let hash = *blake3::hash(payload.code.as_bytes()).as_bytes();
+        assert!(pm.invite_codes.contains_key(&hash));
+    }
+
+    /// Joiner-side: pasting a v2 code dials each multiaddr in the bundle
+    /// AND broadcasts the JoinRequest with the hash of the inner 8-char
+    /// token. The auto-accept hint is armed so a subsequent invitation
+    /// from the owner is auto-accepted.
+    #[tokio::test]
+    async fn v2_join_dials_then_broadcasts() {
+        // Owner side — mint a v2 code we can paste.
+        let (mut owner_pm, owner_state, _owner_id) = build_test_pool_manager().await;
+        owner_pm
+            .handle_create_pool("From Owner".into())
+            .await
+            .unwrap();
+        owner_state
+            .listen_multiaddrs
+            .store(std::sync::Arc::new(vec![
+                "/ip4/100.64.0.5/tcp/8810/p2p/12D3KooWFakeXXX".into(),
+                "/ip4/198.51.100.5/udp/8800/quic-v1/p2p/12D3KooWFakeXXX".into(),
+            ]));
+        let encoded = owner_pm.handle_generate_invite_code().await.unwrap();
+        let payload = crate::pool::invite::decode_invite_code(&encoded).unwrap();
+        let expected_hash = *blake3::hash(payload.code.as_bytes()).as_bytes();
+
+        // Joiner side — paste the code.
+        let (mut joiner_pm, _joiner_state, _joiner_id, mut net_rx) =
+            build_test_pool_manager_with_rx().await;
+        joiner_pm.handle_join_with_code(encoded).await.unwrap();
+
+        // Collect outbound: expect two DialAddress (one per multiaddr) and
+        // one Broadcast(JoinRequest) — in some order, but all present.
+        let mut dialed = Vec::<String>::new();
+        let mut broadcast_hash: Option<[u8; 32]> = None;
+        while let Ok(cmd) = net_rx.try_recv() {
+            match cmd {
+                NetworkCommand::DialAddress(addr) => dialed.push(addr),
+                NetworkCommand::Broadcast(SwarmMessage::PoolMessage(
+                    crate::types::PoolMessage::JoinRequest { code_hash, .. },
+                )) => broadcast_hash = Some(code_hash),
+                _ => {}
+            }
+        }
+        assert_eq!(dialed.len(), 2, "both multiaddrs must be dialed");
+        assert!(dialed.iter().any(|a| a.contains("100.64.0.5")));
+        assert!(dialed.iter().any(|a| a.contains("198.51.100.5")));
+        assert_eq!(
+            broadcast_hash,
+            Some(expected_hash),
+            "join request must carry hash of the inner 8-char code"
+        );
+        assert!(
+            joiner_pm.auto_accept_code_hash.is_some(),
+            "auto-accept must be armed"
+        );
+    }
+
+    /// Joiner-side: legacy 8-char code path still works (broadcast-only,
+    /// no dial) so existing on-swarm flows aren't regressed.
+    #[tokio::test]
+    async fn legacy_8char_join_skips_dial() {
+        let (mut joiner_pm, _state, _id, mut net_rx) = build_test_pool_manager_with_rx().await;
+        joiner_pm
+            .handle_join_with_code("A3F7K2M9".into())
+            .await
+            .unwrap();
+        let mut dialed = 0usize;
+        let mut broadcast = 0usize;
+        while let Ok(cmd) = net_rx.try_recv() {
+            match cmd {
+                NetworkCommand::DialAddress(_) => dialed += 1,
+                NetworkCommand::Broadcast(SwarmMessage::PoolMessage(
+                    crate::types::PoolMessage::JoinRequest { .. },
+                )) => broadcast += 1,
+                _ => {}
+            }
+        }
+        assert_eq!(dialed, 0, "legacy path must not dial");
+        assert_eq!(broadcast, 1, "legacy path must broadcast exactly once");
+    }
+
+    /// Joiner-side: malformed input (not v2, not 8 chars) is rejected
+    /// cleanly with Validation — no panic, no half-armed auto-accept.
+    #[tokio::test]
+    async fn join_rejects_garbage_input() {
+        let (mut pm, _state, _id) = build_test_pool_manager().await;
+        let err = pm
+            .handle_join_with_code("hello, world".into())
+            .await
+            .unwrap_err();
+        assert!(matches!(err, SwarmError::Validation(_)));
+        assert!(pm.auto_accept_code_hash.is_none());
+    }
 }

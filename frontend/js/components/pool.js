@@ -56,6 +56,7 @@
         'pool-create-submit': function () { self.createPool(); },
         'pool-join-submit': function () { self.joinPool(); },
         'pool-invite-code-btn': function () { self.generateInviteCode(); },
+        'pool-invite-code-btn-settings': function () { self.generateInviteCode(); },
         'pool-leave-btn': function () { self.leavePool(); },
         'pool-copy-code-btn': function () { self.copyInviteCode(); },
         'pool-save-name-btn': function () { self.saveDeviceName(); }
@@ -74,13 +75,16 @@
         });
       });
 
-      // Setup wizard pool join button
+      // Setup wizard pool join button — accepts both swarmpool:// blob and
+      // legacy 8-char code; only the legacy form gets case-normalized.
       var setupPoolJoin = document.getElementById('setup-pool-join');
       if (setupPoolJoin) setupPoolJoin.addEventListener('click', function () {
         var input = document.getElementById('setup-pool-code');
-        var code = input ? input.value.trim().toUpperCase() : '';
+        var raw = input ? input.value.trim() : '';
         var status = document.getElementById('setup-pool-status');
-        if (!code || code.length !== 8) {
+        var isV2 = /^swarmpool:\/\//i.test(raw);
+        var code = isV2 ? raw : raw.toUpperCase();
+        if (!code || (!isV2 && !/^[A-Z0-9]{8}$/.test(code))) {
           if (status) { status.textContent = I18n.t('pool.code_invalid'); status.style.color = 'var(--red)'; }
           return;
         }
@@ -162,14 +166,24 @@
         }
       }
 
-      // Show owner-only controls
-      var inviteBtn = document.getElementById('pool-invite-code-btn');
-      if (inviteBtn) inviteBtn.style.display = this._isOwner ? '' : 'none';
+      // Show owner-only controls. The invite-code button has two homes:
+      //   - Header (prominent): shown on a fresh pool to drive the
+      //     bootstrap-another-device flow that everyone starts with.
+      //   - Settings section (demoted): shown once the pool is "mature"
+      //     so the header isn't pestering an owner who already has a
+      //     working group of devices. The owner can still mint codes
+      //     anytime; they just have to scroll to find the button.
+      var members = data.members || [];
+      var MATURE_POOL_THRESHOLD = 3;
+      var poolIsMature = members.length >= MATURE_POOL_THRESHOLD;
+      var headerInvite = document.getElementById('pool-invite-code-btn');
+      var settingsInvite = document.getElementById('pool-settings-invite-section');
+      if (headerInvite) headerInvite.style.display = (this._isOwner && !poolIsMature) ? '' : 'none';
+      if (settingsInvite) settingsInvite.style.display = (this._isOwner && poolIsMature) ? '' : 'none';
       var splitSection = document.getElementById('pool-split-section');
       if (splitSection) splitSection.style.display = this._isOwner ? '' : 'none';
 
       // Stats
-      var members = data.members || [];
       var el = function (id) { return document.getElementById(id); };
       if (el('pool-member-count')) el('pool-member-count').textContent = members.length;
       if (el('pool-total-credits')) el('pool-total-credits').textContent = (data.total_lifetime_credits || 0).toLocaleString();
@@ -346,8 +360,12 @@
 
     joinPool: async function () {
       var input = document.getElementById('pool-join-code');
-      var code = input ? input.value.trim().toUpperCase() : '';
-      if (!code || code.length !== 8) {
+      var raw = input ? input.value.trim() : '';
+      // v2 swarmpool:// blob OR legacy 8-char code (case-preserved for v2
+      // since the base64url body is case-sensitive)
+      var isV2 = /^swarmpool:\/\//i.test(raw);
+      var code = isV2 ? raw : raw.toUpperCase();
+      if (!code || (!isV2 && !/^[A-Z0-9]{8}$/.test(code))) {
         App.notifications.showToast(I18n.t('pool.code_invalid'), 'error');
         return;
       }
@@ -379,83 +397,9 @@
         if (display) display.classList.remove('hidden');
         if (codeVal) codeVal.textContent = code;
         this._lastCode = code;
-
-        // Also generate QR code
-        this.renderQR(code);
       } catch (e) {
         App.notifications.showToast(I18n.t('pool.failed_generic', { error: e.message }), 'error');
       }
-    },
-
-    renderQR: function (code) {
-      var container = document.getElementById('pool-qr-code');
-      if (!container) return;
-      container.innerHTML = '';
-      container.classList.remove('hidden');
-
-      // Simple QR code using a canvas-based generator
-      // We use a minimal QR encoding — for 8 alphanumeric chars, version 1 is sufficient
-      // Fallback: just show the code in a styled box if QR lib isn't available
-      // Create a visual representation using CSS grid (works without any library)
-      var size = 120;
-      var canvas = document.createElement('canvas');
-      canvas.width = size;
-      canvas.height = size;
-      canvas.style.borderRadius = '8px';
-      canvas.style.border = '4px solid white';
-      var ctx = canvas.getContext('2d');
-
-      // Generate a simple visual pattern from the code hash (not a real QR, but distinctive)
-      // Real QR would require a library — this is a recognizable visual shorthand
-      ctx.fillStyle = '#ffffff';
-      ctx.fillRect(0, 0, size, size);
-      ctx.fillStyle = '#000000';
-
-      // Use code bytes to create a unique grid pattern
-      var gridSize = 11;
-      var cellSize = Math.floor(size / (gridSize + 2));
-      var offset = Math.floor((size - cellSize * gridSize) / 2);
-
-      // QR-style finder patterns in corners
-      var drawFinder = function (x, y) {
-        for (var r = 0; r < 7; r++) {
-          for (var c = 0; c < 7; c++) {
-            var fill = (r === 0 || r === 6 || c === 0 || c === 6) ||
-                       (r >= 2 && r <= 4 && c >= 2 && c <= 4);
-            if (fill) {
-              ctx.fillRect(offset + (x + c) * cellSize, offset + (y + r) * cellSize, cellSize, cellSize);
-            }
-          }
-        }
-      };
-      drawFinder(0, 0);
-      drawFinder(gridSize - 7, 0);
-      drawFinder(0, gridSize - 7);
-
-      // Data area — use code chars to fill
-      for (var i = 0; i < code.length; i++) {
-        var charCode = code.charCodeAt(i);
-        for (var bit = 0; bit < 5; bit++) {
-          if ((charCode >> bit) & 1) {
-            var pos = i * 5 + bit;
-            var row = 7 + Math.floor(pos / 4);
-            var col = 7 + (pos % 4);
-            if (row < gridSize && col < gridSize) {
-              ctx.fillRect(offset + col * cellSize, offset + row * cellSize, cellSize, cellSize);
-            }
-          }
-        }
-      }
-
-      container.appendChild(canvas);
-
-      // Add "scan or type" label
-      var label = document.createElement('div');
-      label.className = 'text-muted';
-      label.style.fontSize = '0.72rem';
-      label.style.marginTop = '4px';
-      label.textContent = I18n.t('pool.scan_or_type');
-      container.appendChild(label);
     },
 
     copyInviteCode: function () {

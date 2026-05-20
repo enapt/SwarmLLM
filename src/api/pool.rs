@@ -324,7 +324,12 @@ pub async fn pool_set_contribution(
     Ok(Json(serde_json::json!({"status": "ok"})))
 }
 
-/// POST /api/pool/generate-code — Generate a short invite code (owner only).
+/// POST /api/pool/generate-code — Generate a v2 invite code (owner only).
+///
+/// Returns the `swarmpool://...` blob; the joining device pastes it on the
+/// other side to dial + join. The `code` field is the full blob (not the
+/// 8-char short token inside it) — the short token is an internal detail
+/// the joiner never has to see.
 pub async fn pool_generate_code(
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
@@ -339,26 +344,61 @@ pub async fn pool_generate_code(
     })))
 }
 
+/// Upper bound for invite codes the API will accept. v2 blobs are typically
+/// ~300–500 chars; 4 KiB leaves headroom for many multiaddrs while still
+/// rejecting obvious junk before any parsing.
+const POOL_INVITE_CODE_MAX_LEN: usize = 4096;
+
 /// POST /api/pool/join — Join a pool using an invite code.
+///
+/// Accepts either:
+/// - A v2 `swarmpool://...` blob (rendezvous + join token). Dials embedded
+///   multiaddrs then broadcasts the join request. This is the path users
+///   should use whenever the inviter isn't already on a shared swarm.
+/// - A legacy 8-character code `A3F7K2M9`. Only works when both nodes are
+///   already on a shared swarm (LAN mDNS, DHT-bootstrapped, etc.).
 pub async fn pool_join(
     State(state): State<AppState>,
     Json(body): Json<PoolJoinRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let code = body.code.trim().to_uppercase();
-    if code.len() != 8 || !code.chars().all(|c| c.is_ascii_alphanumeric()) {
+    let raw = body.code.trim();
+    if raw.is_empty() {
         return Err(ApiError(crate::error::SwarmError::Validation(
-            "Invite code must be 8 uppercase alphanumeric characters".into(),
+            "Invite code is empty".into(),
         )));
+    }
+    if raw.len() > POOL_INVITE_CODE_MAX_LEN {
+        return Err(ApiError(crate::error::SwarmError::Validation(format!(
+            "Invite code too long (max {POOL_INVITE_CODE_MAX_LEN} chars)"
+        ))));
+    }
+
+    // Format-validate upfront so the user gets a precise error before the
+    // command queues. The pool manager re-validates internally (sole source
+    // of truth) — this is purely a UX shortcut.
+    if !crate::pool::invite::looks_like_v2(raw) {
+        let upper = raw.to_uppercase();
+        if upper.len() != 8 || !upper.chars().all(|c| c.is_ascii_alphanumeric()) {
+            return Err(ApiError(crate::error::SwarmError::Validation(
+                "Invite code must be a swarmpool:// link or 8 letters/digits".into(),
+            )));
+        }
     }
 
     let (tx, rx) = tokio::sync::oneshot::channel();
-
-    send_pool_command(&state, PoolCommand::JoinWithCode { code, reply: tx }).await?;
+    send_pool_command(
+        &state,
+        PoolCommand::JoinWithCode {
+            code: raw.to_string(),
+            reply: tx,
+        },
+    )
+    .await?;
 
     await_pool_reply(rx).await?;
     Ok(Json(serde_json::json!({
         "status": "ok",
-        "message": "Join request broadcast. You will be added to the pool once the owner's node processes the request.",
+        "message": "Join request sent. You'll be added to the pool once the inviter's node accepts it.",
     })))
 }
 

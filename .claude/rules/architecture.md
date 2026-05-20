@@ -23,6 +23,7 @@ SharedState is organized into 4 sub-structs. Always use the correct accessor:
 - `state.metrics.prefetch_orchestrator` — R136 Layer 3. `PrefetchHandle` (Arc<PrefetchOrchestrator>) with per-session first-token histogram + idle-time learner + throttling. Observation via `observe_user_turn(session, first_token)` + `record_response_completion(session, now_ms)` at the router success site. K-layer prefetch dispatch is the next integration; data-collection side is complete.
 - `state.standalone_tokenizers` — R136 Layer 1/3 follow-on. `DashMap<ModelId, Arc<SplitTokenizer>>` on the ROOT SharedState (not a sub-struct — used by both `state.metrics`-derived L3 prefetch AND the `pipeline/ngram_only_spec.rs` L1 path, so cross-cutting). Lazy-loaded from `gguf_header.bin` via `state.standalone_tokenizer(&model_id)` accessor. Returns `None` when the header isn't on disk; caller falls through gracefully.
 - `state.pending_activation_chunks` — R139 Tier 4K. `DashMap<Uuid, ChunkAssemblyState>` on the ROOT SharedState (cross-cuts the RR-decrypt path in `network/manager/tensors.rs` and the persistent-stream reader in `network/pipeline_stream.rs`). Receiver-side assembly for STREAM-chunked activation forwards. Entry-locked insert via `state.try_assemble_chunked_forward(forward, sender_peer_bytes)`. Stale-entry sweep via `state.sweep_stale_chunk_assemblies(ttl_secs)` (helper present, periodic wiring deferred — see `docs/FUTURE_WORK.md § Tier 4K`). Chunk-meta is bound into AAD via `build_layer_forward_aad`, so reorder/truncation/cross-transfer-substitution fail Poly1305 before reaching the assembly.
+- `state.listen_multiaddrs` — R140. `arc_swap::ArcSwap<Vec<String>>` on the ROOT SharedState (cross-cuts NetworkManager-writes and PoolManager-reads). Live snapshot of the swarm's current listen multiaddrs, each terminated with `/p2p/<local_peer_id>`. Written by `NetworkManager::refresh_listen_multiaddrs()` (events.rs) on `NewListenAddr` / `ExpiredListenAddr` / `ListenerClosed` / `ExternalAddrConfirmed`, plus once at startup after `listen_on()`. Filtered through `addr_is_remotely_reachable` — keeps LAN + Tailscale CGN (100.64.0.0/10) + public, drops loopback / unspecified / link-local / IMDS. Read by `PoolManager::handle_generate_invite_code` when minting v2 `swarmpool://` codes; empty list → `SwarmError::ServiceUnavailable` instead of silently handing out a useless code.
 
 When adding new fields to SharedState, put them in the appropriate sub-struct unless they're accessed by 10+ files across 3+ subsystem boundaries.
 
@@ -236,6 +237,20 @@ silently break at the wire if duplicated:
   `model/acquisition.rs::register_model`. New paths that complete a
   shard or shard-set acquisition MUST go through this helper rather
   than open-coding the three-step sequence.
+- **`pool::invite::{encode_invite_code, decode_invite_code}`** (R140) —
+  canonical `swarmpool://` v2 invite code codec. Encode JSON-serializes
+  `InviteCodePayload` → ChaCha20-Poly1305 seals with a random embedded
+  key → base64url; decode reverses with version + expiry + token-length
+  validation. The decoder normalizes ANY user-pasted error to
+  `SwarmError::Validation` (clean UX message) rather than `Internal` —
+  the most likely failure cause is a truncated/mistyped paste, not a
+  daemon bug. New entry points that accept v2 codes (CLI, MCP tool, web
+  API) MUST go through `decode_invite_code` rather than parsing the
+  blob manually. Adding a field to `InviteCodePayload` requires bumping
+  `INVITE_VERSION` AND updating the decoder's mismatch error to point
+  users at a daemon upgrade. `pool::invite::looks_like_v2` is the
+  prefix-sniff helper used by API + frontend to route between v2 and
+  the legacy 8-char path.
 
 ## ModelRegistry Holder Counts
 

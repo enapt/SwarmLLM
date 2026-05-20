@@ -149,11 +149,21 @@ SwarmLLM uses a 5-layer zero-config discovery stack. Each layer is independent �
 │    Loads on startup → fastest reconnect path                │
 │    File: src/network/peer_cache.rs                          │
 │                                                             │
-│  Layer 3: Encrypted Network Invite Codes                      │
-│    Format: swarm://<base64url(key‖nonce‖encrypted_addr)>   │
-│    Encryption: ChaCha20Poly1305 (IP not visible in code)    │
-│    API: GET /api/admin/network-code                         │
-│          POST /api/admin/join-network                       │
+│  Layer 3: Encrypted Network + Pool Invite Codes              │
+│    Network-only (single multiaddr):                         │
+│      Format: swarm://<base64url(key‖nonce‖encrypted_addr)> │
+│      API: GET /api/admin/network-code                       │
+│            POST /api/admin/join-network                     │
+│    Pool join (R140 — bundles discovery + join token):       │
+│      Format: swarmpool://<base64url(key‖nonce‖encrypted_json)>│
+│      Payload: { version, pool_id, pool_name, multiaddrs[],  │
+│                 code, expires_at_unix }                     │
+│      API: POST /api/pool/generate-code                      │
+│            POST /api/pool/join (accepts both v2 + legacy 8) │
+│      Module: src/pool/invite.rs                             │
+│    Encryption: ChaCha20-Poly1305 (key embedded in code —    │
+│      anti-IP-harvesting only; the code itself is the auth   │
+│      token).                                                │
 │                                                             │
 │  Layer 4: Peer Exchange (PEX) + RTT Measurement              │
 │    On each ConnectionEstablished, exchange up to 20 known   │
@@ -713,19 +723,35 @@ Main Device (owner)                 Linked Device (member)
 └──────────────────┘               └──────────────────┘
 ```
 
-**Setup flow**:
+**Setup flow** (R140 — bootstrap-before-decentralization):
 1. Main device: `swarmllm pool create --name "My Devices"`
-2. Main device: `swarmllm pool invite-code` → generates 8-char code (e.g., `A3F7K2M9`)
-3. Linked device: `swarmllm pool join A3F7K2M9`
-4. Code validated over gossip, invitation auto-created, member auto-accepted
+2. Main device: `swarmllm pool invite-code` → generates a `swarmpool://...` blob
+   that bundles the 8-char join token with the device's reachable listen
+   multiaddrs (LAN + Tailscale CGN + public — everything except loopback /
+   link-local).
+3. Linked device: `swarmllm pool join "swarmpool://..."`. The joiner decodes
+   the blob, dials each multiaddr (Tailscale, LAN, public IP — whatever
+   reaches the owner), then broadcasts the existing
+   `PoolMessage::JoinRequest { code_hash, ... }` over GossipSub.
+4. Owner's code_hash matches → invitation auto-created → member auto-accepted.
+
+The legacy 8-char form (`A3F7K2M9`) is still accepted by `pool/join` for
+nodes already on a shared swarm (LAN mDNS, DHT-bootstrapped). v2 codes are
+strictly an additive wrapper; the JoinRequest wire protocol is unchanged.
 
 **Invite code security**:
-- 8-char uppercase alphanumeric (32^8 ≈ 1.1 trillion combos, no 0/O/1/I)
-- One-time use, consumed immediately on claim
-- 24h expiry (configurable `invitation_ttl_hours`)
-- Max 5 active codes at once
-- Code hash (BLAKE3) on the wire — plaintext code never transmitted
-- Join requests signed with Ed25519
+- 8-char uppercase alphanumeric inner token (32^8 ≈ 1.1 trillion combos,
+  no 0/O/1/I) — single source of truth for join authorization.
+- One-time use, consumed immediately on claim.
+- 24h expiry (configurable `invitation_ttl_hours`); v2 blob carries the
+  same expiry so decoders can fail fast before dialing.
+- Max 5 active codes at once per owner.
+- Code hash (BLAKE3) on the wire — plaintext code never transmitted.
+- v2 blob: ChaCha20-Poly1305 encrypted with embedded key — protects
+  against casual IP harvesting from a code pasted into chat, not a
+  cryptographic boundary (the code IS the auth token).
+- Join requests signed with Ed25519.
+- API input cap: 4096 chars (typical v2 blob is ~300-500 chars).
 
 **Pool features**:
 - Device nicknames (owner sets per device for easy identification)
@@ -1371,8 +1397,8 @@ Routes Claude model requests through a locally-authenticated `claude` CLI subpro
 - `POST /api/pool/leave` — Leave the current pool
 - `GET  /api/pool/invitations` — List pending invitations
 - `GET  /api/pool/leaderboard` — Pool member contribution rankings
-- `POST /api/pool/generate-code` — Generate an 8-char invite code (owner only)
-- `POST /api/pool/join` — Join a pool via invite code
+- `POST /api/pool/generate-code` — Generate a v2 `swarmpool://` invite code (owner only). R140: bundles the 8-char join token with the device's reachable listen multiaddrs so joiners can bootstrap without a shared DHT.
+- `POST /api/pool/join` — Join a pool via invite code. Accepts either a v2 `swarmpool://...` blob (dials embedded multiaddrs then broadcasts the join request) or the legacy 8-char form (broadcast-only — assumes joiner is already on the swarm).
 - `POST /api/pool/device-name` — Set this device's display name
 - `PUT  /api/pool/credit-split` — Set credit split percentage (owner only)
 - `PUT  /api/pool/contribution` — Set per-member contribution level (owner only, `{"node_id": "...", "level": 75}` where level is 0–100)

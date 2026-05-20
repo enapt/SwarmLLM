@@ -192,9 +192,9 @@
             </div>
             <div class="setup-advanced-divider">
               <label class="field-label" for="setup-pool-code" data-i18n="setup.link_device">Link your other devices</label>
-              <p class="text-muted text-sm setup-section-desc" data-i18n="setup.link_device_desc">Enter the invite code from your main device to link this machine. Credits earned here will be combined with your main device.</p>
+              <p class="text-muted text-sm setup-section-desc" data-i18n="setup.link_device_desc">Paste the invite code from your main device to link this machine. Credits earned here will be combined with your main device.</p>
               <div class="flex gap-1">
-                <input type="text" id="setup-pool-code" placeholder="A3F7K2M9" maxlength="8" class="flex-1 pool-code-input">
+                <textarea id="setup-pool-code" rows="2" placeholder="swarmpool://..." class="flex-1 pool-code-input mono"></textarea>
                 <button class="btn btn-sm" id="setup-pool-join" data-i18n="pool.join">Link</button>
               </div>
               <div id="setup-pool-status" class="text-sm mt-0" aria-live="polite"></div>
@@ -1517,10 +1517,11 @@
             </div>
 
             <!-- Join form (hidden until Join Pool clicked) -->
-            <div id="pool-join-form" class="mt-2 hidden mx-auto" style="max-width:320px">
+            <div id="pool-join-form" class="mt-2 hidden mx-auto" style="max-width:480px">
               <div class="form-group">
-                <label data-i18n="pool.enter_code">Enter invite code</label>
-                <input type="text" id="pool-join-code" placeholder="A3F7K2M9" maxlength="8" class="pool-code-input">
+                <label data-i18n="pool.enter_code">Paste invite code</label>
+                <textarea id="pool-join-code" rows="3" placeholder="swarmpool://..." class="pool-code-input mono"></textarea>
+                <p class="text-muted text-xs mt-0" data-i18n="pool.enter_code_hint">Paste the whole code from your other device. It looks like a long string starting with swarmpool://</p>
               </div>
               <button class="btn btn-primary w-full" id="pool-join-submit" data-i18n="pool.join">Join</button>
             </div>
@@ -1558,14 +1559,13 @@
 
             <!-- Invite code display (shown after generating) -->
             <div id="pool-invite-code-display" class="panel mt-1 hidden pool-invite-display">
-              <p class="text-muted mb-1" data-i18n="pool.share_code">Share this code with your other devices:</p>
-              <div id="pool-invite-code-value" class="pool-invite-code"></div>
-              <div id="pool-qr-code" class="hidden mx-auto" style="margin:12px auto"></div>
+              <p class="text-muted mb-1" data-i18n="pool.share_code">Copy this code and paste it on your other device:</p>
+              <div id="pool-invite-code-value" class="pool-invite-code mono"></div>
               <p class="text-muted text-sm" style="margin:4px 0 12px" data-i18n="pool.code_expires">One-time use. Expires in 24 hours.</p>
               <div class="flex justify-center gap-1">
-                <button class="btn btn-sm btn-outline" id="pool-copy-code-btn" data-i18n="actions.copy">Copy</button>
+                <button class="btn btn-sm btn-primary" id="pool-copy-code-btn" data-i18n="actions.copy">Copy</button>
               </div>
-              <p class="text-muted text-xs" style="margin:12px 0 0" data-i18n="pool.how_to_join">On your other device, open the dashboard and go to My Devices → Join, or run: swarmllm pool join CODE</p>
+              <p class="text-muted text-xs" style="margin:12px 0 0" data-i18n="pool.how_to_join">On your other device, open the dashboard and go to My Devices → Join Pool, then paste the code.</p>
             </div>
 
             <!-- Stats strip -->
@@ -1614,6 +1614,19 @@
                 <div class="panel-header"><h3 style="margin:0" data-i18n="pool.credit_forwarding">Credit Forwarding</h3></div>
                 <div class="panel-body" style="padding:12px">
                   <p class="text-muted" style="font-size:0.82rem;margin:0" data-i18n="pool.forward_info">All credits earned by linked devices are automatically forwarded to this device (your main balance). Since these are all your machines, there's no split — 100% is consolidated here.</p>
+                </div>
+              </div>
+
+              <!-- Settings-area invite button (owner-only). Shown when the
+                   pool is "mature" (≥3 members) so the header isn't pestering
+                   you to add more devices once you clearly have a working
+                   group. Pre-maturity, the header button is the prominent
+                   one. -->
+              <div class="panel" id="pool-settings-invite-section" style="display:none">
+                <div class="panel-header"><h3 style="margin:0" data-i18n="pool.add_device_header">Add another device</h3></div>
+                <div class="panel-body" style="padding:12px">
+                  <p class="text-muted" style="font-size:0.82rem;margin:0 0 12px" data-i18n="pool.add_device_settings_desc">Generate an invite code if you ever want to link another machine into this group.</p>
+                  <button class="btn btn-sm btn-outline" id="pool-invite-code-btn-settings" data-i18n="pool.generate_code">Add Another Device</button>
                 </div>
               </div>
             </div>

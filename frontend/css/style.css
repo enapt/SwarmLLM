@@ -3314,8 +3314,34 @@ textarea:focus:not(:focus-visible) {
 /* ─── Pool / device utilities ─── */
 .pool-stat-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-top: 8px; }
 .pool-invite-display { text-align: center; padding: 24px; }
-.pool-invite-code { font-size: 2rem; font-weight: 700; letter-spacing: 6px; font-family: var(--font-mono); color: var(--accent); margin: 8px 0; }
-.pool-code-input { text-align: center; font-size: 1.3rem; letter-spacing: 3px; text-transform: uppercase; font-family: var(--font-mono); }
+/* v2 invite codes are ~300-500 chars (swarmpool:// blob), not 8 — wrap into a
+   scrollable monospace box rather than blow up the layout. */
+.pool-invite-code {
+  font-size: 0.8rem;
+  font-family: var(--font-mono);
+  color: var(--accent);
+  margin: 8px auto;
+  padding: 12px 14px;
+  max-width: 560px;
+  max-height: 8.5em;
+  overflow-y: auto;
+  word-break: break-all;
+  white-space: pre-wrap;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  text-align: left;
+  user-select: all;
+}
+/* Paste-side input: textarea sized to fit a typical v2 blob without scrolling.
+   No upper-case transform anymore — v2 base64url body is case-sensitive. */
+.pool-code-input {
+  font-family: var(--font-mono);
+  font-size: 0.85rem;
+  width: 100%;
+  resize: vertical;
+}
+textarea.pool-code-input { min-height: 4.5em; }
 
 /* ─── Summary / next-steps ─── */
 .next-steps-box { margin-top: 16px; padding: 12px; background: var(--bg-tertiary); border-radius: var(--radius); border: 1px solid var(--border); }
