@@ -1619,13 +1619,13 @@ impl PoolManager {
 
     /// Generate a short invite code (owner only). One-time use, expires after TTL.
     async fn handle_generate_invite_code(&mut self) -> Result<String, SwarmError> {
-        // Snapshot the two values we need from pool_state and drop the read
+        // Snapshot the values we need from pool_state and drop the read
         // lock before the rate-limit / code-generation work below. Holding
         // the lock across rate_limiter.check_and_record() and key generation
         // would block a concurrent pool_state writer (handle_remove_member,
         // handle_accept_invitation) for no reason.
         let max_size = self.shared_state.config.pool.max_pool_size;
-        let (is_owner, member_count) = {
+        let (is_owner, member_count, pool_name) = {
             let pool_state = self.shared_state.credits.pool_state.read().await;
             let ps = pool_state
                 .as_ref()
@@ -1633,6 +1633,7 @@ impl PoolManager {
             (
                 ps.pool_id == *self.shared_state.identity.node_id(),
                 ps.members.len() as u32,
+                ps.name.clone(),
             )
         };
 
@@ -1664,15 +1665,28 @@ impl PoolManager {
             )));
         }
 
+        // Snapshot the swarm's current reachable listen addresses BEFORE
+        // committing the code, so we can return a clear error if there are
+        // none. An invite code without any addresses would technically work
+        // for any joiner already on the swarm, but the v2 promise is
+        // "bootstrap-before-decentralization": if we can't deliver that, fail
+        // loudly rather than silently regress to legacy behavior.
+        let multiaddrs: Vec<String> = self.shared_state.listen_multiaddrs.load().as_ref().clone();
+        if multiaddrs.is_empty() {
+            return Err(SwarmError::ServiceUnavailable(
+                "No reachable network addresses yet — wait a few seconds after startup and try again".into(),
+            ));
+        }
+
         let ttl = self.shared_state.config.pool.invitation_ttl_hours;
         let invite = PoolInviteCode::generate(self.shared_state.identity.node_id(), ttl);
-        let code = invite.code.clone();
+        let short_code = invite.code.clone();
+        let code_hash_hex = hex::encode(invite.code_hash);
         // SEC: persist alongside the in-memory map so a restart between
         // generate-code and the joiner sending JoinRequest doesn't lose the
         // code (without this, every owner crash silently breaks join flows
         // that were in flight). Keyed on hex(code_hash) — DB keys are
         // strings.
-        let code_hash_hex = hex::encode(invite.code_hash);
         if let Err(e) =
             self.shared_state
                 .db
@@ -1682,9 +1696,24 @@ impl PoolManager {
         }
         self.invite_codes.insert(invite.code_hash, invite);
 
-        tracing::info!(code_preview = &code[..4], "Generated pool invite code");
+        // Build the v2 wire payload.
+        let payload = crate::pool::invite::InviteCodePayload {
+            version: crate::pool::invite::INVITE_VERSION,
+            pool_id: self.shared_state.identity.node_id().clone(),
+            pool_name,
+            multiaddrs,
+            code: short_code.clone(),
+            expires_at_unix: chrono::Utc::now().timestamp() + (ttl as i64) * 3600,
+        };
+        let encoded = crate::pool::invite::encode_invite_code(&payload)?;
 
-        Ok(code)
+        tracing::info!(
+            code_preview = &short_code[..4],
+            multiaddr_count = payload.multiaddrs.len(),
+            "Generated v2 pool invite code"
+        );
+
+        Ok(encoded)
     }
 
     /// Join a pool using an invite code (from the joining device).
@@ -1695,16 +1724,31 @@ impl PoolManager {
             return Err(SwarmError::Validation("Already in a pool".into()));
         }
 
-        // Validate code format (8 uppercase alphanumeric)
-        let code = code.trim().to_uppercase();
-        if code.len() != 8 || !code.chars().all(|c| c.is_ascii_alphanumeric()) {
-            return Err(SwarmError::Validation(
-                "Invalid invite code format (expected 8 characters)".into(),
-            ));
-        }
+        // Two acceptance paths:
+        //  - v2 `swarmpool://...` blob with multiaddrs. We dial first so the
+        //    joiner doesn't depend on already being on the same swarm. This is
+        //    the "bootstrap-before-decentralization" mode.
+        //  - Legacy 8-char `A3F7K2M9` code. Kept for shared-swarm cases (LAN
+        //    via mDNS, joiner already bootstrapped via DHT). Surfaces a
+        //    clearer error if the joiner ISN'T already on the swarm — they'll
+        //    see "join request broadcast" with no follow-up.
+        let trimmed = code.trim();
+        let short_code = if crate::pool::invite::looks_like_v2(trimmed) {
+            let payload = crate::pool::invite::decode_invite_code(trimmed)?;
+            self.dial_invite_multiaddrs(&payload.multiaddrs).await;
+            payload.code.to_uppercase()
+        } else {
+            let upper = trimmed.to_uppercase();
+            if upper.len() != 8 || !upper.chars().all(|c| c.is_ascii_alphanumeric()) {
+                return Err(SwarmError::Validation(
+                    "Invite code must be a swarmpool:// link or 8 letters/digits".into(),
+                ));
+            }
+            upper
+        };
 
         // Compute code hash and broadcast join request
-        let code_hash = *blake3::hash(code.as_bytes()).as_bytes();
+        let code_hash = *blake3::hash(short_code.as_bytes()).as_bytes();
         let my_id = self.shared_state.identity.node_id().clone();
 
         // Sign the join request
@@ -1712,10 +1756,16 @@ impl PoolManager {
         payload_hasher.update(b"pool_join_request_v1");
         payload_hasher.update(&code_hash);
         payload_hasher.update(&my_id.0);
-        let payload = payload_hasher.finalize();
-        let signature = self.shared_state.identity.sign(payload.as_bytes()).to_vec();
+        let signed_payload = payload_hasher.finalize();
+        let signature = self
+            .shared_state
+            .identity
+            .sign(signed_payload.as_bytes())
+            .to_vec();
 
-        // Broadcast join request over gossip
+        // Broadcast join request over gossip — owner picks it up either via
+        // the direct dial we just made (v2 path) or via the existing swarm
+        // (legacy path / mature DHT).
         let msg = crate::types::SwarmMessage::PoolMessage(crate::types::PoolMessage::JoinRequest {
             code_hash,
             requester: my_id,
@@ -1729,8 +1779,32 @@ impl PoolManager {
         // Set auto-accept with the code hash and a timestamp so it expires after 5 minutes.
         self.auto_accept_code_hash = Some((code_hash, std::time::Instant::now()));
 
-        tracing::info!(code_hash = %hex::encode(code_hash), "Broadcast pool join request with invite code (auto-accept enabled)");
+        tracing::info!(
+            code_hash = %hex::encode(code_hash),
+            "Broadcast pool join request with invite code (auto-accept enabled)"
+        );
         Ok(())
+    }
+
+    /// Dial each multiaddr from a v2 invite code. Fire-and-forget — the
+    /// subsequent `JoinRequest` broadcast will land via whichever dial
+    /// succeeds. We don't `await` connection establishment here because (a)
+    /// libp2p's `dial` returns immediately and the connection lands later via
+    /// `ConnectionEstablished`, and (b) we don't want to block the pool
+    /// manager event loop on network round trips. The owner's GossipSub
+    /// subscription will pick up the JoinRequest as soon as any one peering
+    /// completes — usually within a few hundred ms of this call.
+    async fn dial_invite_multiaddrs(&self, multiaddrs: &[String]) {
+        for addr in multiaddrs {
+            if let Err(e) = self
+                .network_tx
+                .send(crate::types::NetworkCommand::DialAddress(addr.clone()))
+                .await
+            {
+                tracing::warn!(error = %e, addr = %addr, "Failed to send DialAddress to network manager");
+            }
+        }
+        tracing::info!(count = multiaddrs.len(), "Dialing invite code multiaddrs");
     }
 
     /// Handle an inbound join request (owner only). If the code_hash matches

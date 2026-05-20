@@ -607,6 +607,17 @@ impl NetworkManager {
 
             SwarmEvent::NewListenAddr { address, .. } => {
                 tracing::info!(%address, "New listen address");
+                self.refresh_listen_multiaddrs();
+            }
+
+            SwarmEvent::ExpiredListenAddr { address, .. } => {
+                tracing::info!(%address, "Listen address expired");
+                self.refresh_listen_multiaddrs();
+            }
+
+            SwarmEvent::ListenerClosed { addresses, .. } => {
+                tracing::debug!(?addresses, "Listener closed");
+                self.refresh_listen_multiaddrs();
             }
 
             // NET-I7: Switch Kademlia to Server mode when external address is confirmed
@@ -616,6 +627,7 @@ impl NetworkManager {
                     .behaviour_mut()
                     .kademlia
                     .set_mode(Some(libp2p::kad::Mode::Server));
+                self.refresh_listen_multiaddrs();
             }
 
             SwarmEvent::OutgoingConnectionError { peer_id, error, .. } => {
@@ -636,5 +648,109 @@ impl NetworkManager {
                 tracing::trace!(?other, "Unhandled swarm event");
             }
         }
+    }
+
+    /// Rebuild `state.listen_multiaddrs` from the swarm's current listeners.
+    ///
+    /// Each entry is appended with `/p2p/<local_peer_id>` so a remote dialer
+    /// can both connect and verify the target identity. We deliberately keep
+    /// LAN + Tailscale CGN (100.64.0.0/10) addresses in the list — those are
+    /// the addresses a remote node on the same overlay can actually reach us
+    /// on. Only loopback / unspecified / link-local / metadata addresses are
+    /// dropped: nothing a remote dialer could productively use anyway.
+    pub(super) fn refresh_listen_multiaddrs(&self) {
+        let local_peer_id = *self.swarm.local_peer_id();
+        let p2p_suffix = libp2p::multiaddr::Protocol::P2p(local_peer_id);
+        let mut addrs: Vec<String> = self
+            .swarm
+            .listeners()
+            .filter(|addr| addr_is_remotely_reachable(addr))
+            .map(|addr| addr.clone().with(p2p_suffix.clone()).to_string())
+            .collect();
+        addrs.sort();
+        addrs.dedup();
+        self.shared_state
+            .listen_multiaddrs
+            .store(std::sync::Arc::new(addrs));
+    }
+}
+
+/// Decide whether a listen address is something a remote peer could plausibly
+/// dial. Excludes loopback, unspecified, IPv4 link-local, and the AWS/GCP
+/// IMDS address; keeps everything else (LAN, CGN/Tailscale, public).
+fn addr_is_remotely_reachable(addr: &Multiaddr) -> bool {
+    for proto in addr.iter() {
+        match proto {
+            libp2p::multiaddr::Protocol::Ip4(ip)
+                if ip.is_loopback()
+                    || ip.is_unspecified()
+                    || ip.is_link_local()
+                    || ip == std::net::Ipv4Addr::new(169, 254, 169, 254) =>
+            {
+                return false;
+            }
+            libp2p::multiaddr::Protocol::Ip6(ip)
+                if ip.is_loopback()
+                    || ip.is_unspecified()
+                    // IPv6 link-local (fe80::/10)
+                    || (ip.segments()[0] & 0xffc0) == 0xfe80 =>
+            {
+                return false;
+            }
+            _ => {}
+        }
+    }
+    true
+}
+
+#[cfg(test)]
+mod listen_filter_tests {
+    use super::*;
+
+    fn addr(s: &str) -> Multiaddr {
+        s.parse().unwrap()
+    }
+
+    #[test]
+    fn drops_loopback_and_unspecified() {
+        assert!(!addr_is_remotely_reachable(&addr(
+            "/ip4/127.0.0.1/tcp/8810"
+        )));
+        assert!(!addr_is_remotely_reachable(&addr("/ip4/0.0.0.0/tcp/8810")));
+        assert!(!addr_is_remotely_reachable(&addr("/ip6/::1/tcp/8810")));
+        assert!(!addr_is_remotely_reachable(&addr("/ip6/::/tcp/8810")));
+    }
+
+    #[test]
+    fn drops_link_local_and_metadata() {
+        assert!(!addr_is_remotely_reachable(&addr(
+            "/ip4/169.254.1.5/tcp/8810"
+        )));
+        assert!(!addr_is_remotely_reachable(&addr(
+            "/ip4/169.254.169.254/tcp/8810"
+        )));
+        assert!(!addr_is_remotely_reachable(&addr("/ip6/fe80::1/tcp/8810")));
+    }
+
+    #[test]
+    fn keeps_lan_and_tailscale_and_public() {
+        // RFC 1918 LAN
+        assert!(addr_is_remotely_reachable(&addr(
+            "/ip4/192.168.1.5/tcp/8810"
+        )));
+        assert!(addr_is_remotely_reachable(&addr("/ip4/10.0.0.5/tcp/8810")));
+        // Tailscale CGN
+        assert!(addr_is_remotely_reachable(&addr(
+            "/ip4/100.64.10.5/tcp/8810"
+        )));
+        // Public
+        assert!(addr_is_remotely_reachable(&addr(
+            "/ip4/203.0.113.5/udp/8800/quic-v1"
+        )));
+        // IPv6 ULA + global
+        assert!(addr_is_remotely_reachable(&addr("/ip6/fc00::1/tcp/8810")));
+        assert!(addr_is_remotely_reachable(&addr(
+            "/ip6/2001:db8::1/tcp/8810"
+        )));
     }
 }

@@ -148,6 +148,12 @@ pub struct SharedState {
     pub session_manager: Arc<crate::crypto::SessionManager>,
     pub gossip_sealer: Arc<crate::crypto::GossipSealer>,
     pub lan_peer_count: std::sync::atomic::AtomicUsize,
+    /// Live snapshot of the swarm's current listen multiaddrs, each terminated
+    /// with `/p2p/<local_peer_id>` so they can be dialed directly. Updated by
+    /// NetworkManager on `NewListenAddr` / `ExpiredListenAddr` events. Read by
+    /// the pool invite-code generator so a freshly-minted code carries every
+    /// address a remote peer might reach this node on.
+    pub listen_multiaddrs: arc_swap::ArcSwap<Vec<String>>,
     pub detected_region: RwLock<Option<String>>,
     pub shard_bytes_served: AtomicU64,
     pub relay_seconds_served: AtomicU64,
@@ -477,6 +483,7 @@ impl SharedState {
                 &config.node.data_dir,
             )),
             lan_peer_count: std::sync::atomic::AtomicUsize::new(0),
+            listen_multiaddrs: arc_swap::ArcSwap::from_pointee(Vec::new()),
             vision_modules: DashMap::new(),
             encrypted_pipeline_models: {
                 let map = DashMap::new();

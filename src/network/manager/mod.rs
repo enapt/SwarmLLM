@@ -474,6 +474,15 @@ impl NetworkManager {
             tracing::info!(%tcp_addr, "Listening for P2P connections (QUIC disabled)");
         }
 
+        // listen_on returns before NewListenAddr fires (the listener task hasn't
+        // finished binding the socket yet), so the listen_multiaddrs snapshot
+        // stays empty until the event loop pumps. NewListenAddr will refresh
+        // again with the bound address shortly — but if an invite code is
+        // minted in that tiny window we'd hand out an empty address list. Seed
+        // the snapshot now from the swarm's known listeners; usually still
+        // empty here, but the cost is one ArcSwap store.
+        self.refresh_listen_multiaddrs();
+
         // Subscribe to GossipSub topics
         discovery::subscribe_topics(&mut self.swarm)?;
 
