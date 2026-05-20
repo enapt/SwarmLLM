@@ -234,6 +234,17 @@ sized for the ~500-char v2 blob. Paste field upgraded from
 scroll. Join handler in `pool.js` + `setup.js` sniffs prefix to route to
 v2 (case-preserved) or legacy 8-char (uppercased).
 
+**Maturity-fade UI**: while the local node sees <50 swarm peers, the
+"Add Another Device" button sits prominently in the dashboard header
+(bootstrap-before-decentralization mission — invite codes are how the
+swarm grows in this phase). Once peer count ≥50, the button demotes
+to a settings-area panel: the swarm is mature enough that Kademlia DHT
+discovery is reliable, so explicit rendezvous via invite code is no
+longer the load-bearing path. The threshold is against **connected swarm
+peers (read from `stats.peer_count`)** — NOT pool member count, since
+pools cap at `max_pool_size=10` and a pool-member threshold would never
+fire for the typical 2-3 device user.
+
 **i18n**: 5 strings refreshed across 21 locales (`pool.code_invalid`,
 `pool.enter_code`, `pool.share_code`, `pool.how_to_join`, +
 `pool.enter_code_hint` new), 1 dead key removed (`pool.scan_or_type` —

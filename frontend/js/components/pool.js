@@ -167,19 +167,29 @@
       }
 
       // Show owner-only controls. The invite-code button has two homes:
-      //   - Header (prominent): shown on a fresh pool to drive the
-      //     bootstrap-another-device flow that everyone starts with.
-      //   - Settings section (demoted): shown once the pool is "mature"
-      //     so the header isn't pestering an owner who already has a
-      //     working group of devices. The owner can still mint codes
-      //     anytime; they just have to scroll to find the button.
+      //   - Header (prominent): shown while the global swarm is still
+      //     young (this node sees <50 connected peers). The whole point
+      //     of the invite code is to bootstrap-before-decentralization,
+      //     so during the growth phase it should be in everyone's face.
+      //   - Settings section (demoted): shown once this node is well
+      //     embedded in the swarm — at 50+ peers, Kademlia DHT discovery
+      //     is reliable enough that new joiners can usually find this
+      //     node without explicit rendezvous, so the prominent button
+      //     stops serving a network-bootstrap mission. The owner can
+      //     still mint codes anytime for personal-device pool joins;
+      //     it's just demoted, not hidden.
+      // Threshold of 50 matches the network-level maturity signal — NOT
+      // the pool member count (pools cap at 10, threshold would never
+      // trigger). Source: stats cache, populated by App.data.loadStats.
       var members = data.members || [];
-      var MATURE_POOL_THRESHOLD = 3;
-      var poolIsMature = members.length >= MATURE_POOL_THRESHOLD;
+      var MATURE_SWARM_THRESHOLD = 50;
+      var statsCache = (App.data && App.data.cache && App.data.cache.stats) || null;
+      var connectedPeers = statsCache ? (statsCache.peer_count || 0) : 0;
+      var swarmIsMature = connectedPeers >= MATURE_SWARM_THRESHOLD;
       var headerInvite = document.getElementById('pool-invite-code-btn');
       var settingsInvite = document.getElementById('pool-settings-invite-section');
-      if (headerInvite) headerInvite.style.display = (this._isOwner && !poolIsMature) ? '' : 'none';
-      if (settingsInvite) settingsInvite.style.display = (this._isOwner && poolIsMature) ? '' : 'none';
+      if (headerInvite) headerInvite.style.display = (this._isOwner && !swarmIsMature) ? '' : 'none';
+      if (settingsInvite) settingsInvite.style.display = (this._isOwner && swarmIsMature) ? '' : 'none';
       var splitSection = document.getElementById('pool-split-section');
       if (splitSection) splitSection.style.display = this._isOwner ? '' : 'none';
 
