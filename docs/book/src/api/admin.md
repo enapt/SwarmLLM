@@ -45,7 +45,7 @@ Gracefully shut down the node. Localhost only, Bearer auth required.
 ### GET /api/admin/models
 List models with shard status, VRAM estimates, and acquisition state. Each model includes:
 - `mmproj` field with `available` (bool), `local` (bool), and `holders` (count) for VLM vision encoder status
-- `trust_level` field: one of `"Discovered"`, `"Pinned"`, `"DemandVerified"`, or `"NetworkPopular"` indicating the model's trust status (auto-manage only downloads shards for DemandVerified+ or Pinned models)
+- `trust_level` field: one of `"Discovered"`, `"Pinned"`, `"DemandVerified"`, or `"NetworkPopular"` indicating the model's trust status (auto-manage only downloads shards for DemandVerified+ or Pinned models, OR for any model where this node already hosts at least one shard — gap-filling exemption). R141: trusted curator publishers (meta-llama, Qwen, mistralai, bartowski, unsloth, etc.) promote at 10k HF downloads instead of 100k
 
 ### POST /api/admin/models/{id}/add
 Trigger model acquisition from the network.
@@ -299,6 +299,67 @@ Optional query params: `?limit=N` (cap on returned records, default 100,
 max 500) and `?status=...` (filter by `completed` / `in_progress` /
 `cancelled` / `failed` / `queued`). See [Responses API](./responses.md)
 for the user-facing surface.
+
+## Auto-Manage Surfaces
+
+### GET /api/admin/wishlist
+R111 — ranked list of models the swarm wants. Triggers a wishlist
+refresh on every call so the response always reflects current state.
+Response shape:
+
+```json
+{
+  "computed_at": 1727712345,
+  "entries": [
+    {
+      "model_id": "mistral-7b-instruct-v0.3-Q4_K_M",
+      "display_name": "Mistral 7B Instruct v0.3",
+      "status": "serveable",
+      "score": 78,
+      "swarm_replicas": 4,
+      "target_replicas": 3,
+      "size_mb": 4368,
+      "vram_required_mb": 5023,
+      "shards_covered": 8,
+      "total_shards": 8,
+      "hosted_by_us": false,
+      "why_tags": ["wishlist.why.popular_on_swarm", "wishlist.why.fits_your_memory"]
+    },
+    {
+      "model_id": "hf-candidate:bartowski/Llama-3.2-3B-Instruct-GGUF",
+      "display_name": "Llama-3.2-3B-Instruct-GGUF",
+      "status": "candidate",
+      "score": 65,
+      "hf_repo_id": "bartowski/Llama-3.2-3B-Instruct-GGUF",
+      "task_tags": ["chat"],
+      "why_tags": ["wishlist.why.popular_on_hf", "wishlist.why.trusted_publisher", "wishlist.why.candidate_one_click"]
+    }
+  ]
+}
+```
+
+`status` is one of `hosting` / `serveable` / `aspirational` / `candidate`
+(**R141**) / `unreachable` / `blocked`. Candidate entries carry an
+`hf_repo_id` field and a synthetic `model_id` (prefix `hf-candidate:`)
+so the frontend can route the click to the HF browse without colliding
+with real model_ids. See [Wishlist architecture](../architecture.md) for the
+score formula and trust-promotion path.
+
+### GET /api/admin/hf/trending
+R112 — most recent HF trending GGUF snapshot from the background
+HfWatcher (refreshed hourly). Response shape mirrors `HfTrendingSnapshot`
+with `entries: [{ repo_id, downloads, likes, task_tags, created_at_secs }]`
+and `fetched_at: <unix-secs>`. Empty `entries` means the watcher hasn't
+completed its first poll yet (30s startup delay) OR the daemon is
+configured with `auto_manage.hf_watcher_enabled = false`.
+
+### GET /api/admin/quant-recommendations
+R133 — per-family quant-choice recommendations. Returns the
+highest-quality variant that fits the swarm's aggregate VRAM with
+reasonable replication for each model family. R141 flipped
+`auto_manage.auto_switch_quants` to default `true`, so this surface
+now drives automatic trust promotion of the recommended variant — the
+UI uses it as a transparency view rather than a manual action surface.
 
 ## Authentication
 

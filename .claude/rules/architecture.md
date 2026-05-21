@@ -251,6 +251,23 @@ silently break at the wire if duplicated:
   users at a daemon upgrade. `pool::invite::looks_like_v2` is the
   prefix-sniff helper used by API + frontend to route between v2 and
   the legacy 8-char path.
+- **`model::huggingface::is_trusted_publisher`** (R141) — canonical
+  curator-allowlist check for an HF `repo_id`. Splits on the first `/`
+  and case-insensitively matches the prefix against
+  `TRUSTED_HF_PUBLISHERS` (in `huggingface/watcher.rs`). Used by BOTH
+  the watcher's trust-promotion path (`promote_trust_for_trending` →
+  `min_downloads_for_repo` consumes the tiered 10k/100k threshold) AND
+  the wishlist scorer (`compute_wishlist` Candidate-row pass — flat +10
+  score bonus + `wishlist.why.trusted_publisher` why-tag). Any new
+  surface that needs to gate on "is this from a known-good curator"
+  MUST go through this helper rather than re-creating the allowlist —
+  the allowlist is a trust delegation and divergence creates a security
+  / consistency gap. Adding a curator: append to
+  `TRUSTED_HF_PUBLISHERS` (one place); both consumers pick it up
+  automatically. Removing a curator (compromise, abandoned account,
+  loss of trust) requires the same one-place edit; do not soft-disable
+  via wrappers because the trust delta is a real security event worth
+  surfacing in the diff.
 
 ## ModelRegistry Holder Counts
 

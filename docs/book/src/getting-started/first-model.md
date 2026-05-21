@@ -2,7 +2,26 @@
 
 You need at least one AI model before you can chat.
 
-## Download via Dashboard
+## Easiest path: use what the swarm already runs (R141)
+
+When the daemon starts and connects to peers, the Chat tab's empty state
+shows three rows of models you can use **without setting anything up**:
+
+- **"Available right now on the swarm"** — models the network can route
+  inference to today. Click any chip → that model is selected and a
+  fresh chat opens. Start typing.
+- **"The swarm is gathering these"** — models with partial shard
+  coverage; ready as the missing parts download.
+- **"Popular models the swarm could adopt"** — popular HuggingFace
+  releases the swarm hasn't picked up yet. Click one to open the HF
+  browse pre-filtered to that repo so you can pick the quant variant
+  and download it locally.
+
+This is the recommended path for most users — the swarm handles the rest.
+
+## Manual download via Dashboard
+
+If you want to add a specific model the swarm doesn't already run:
 
 1. Open the Dashboard at `http://localhost:8800`
 2. Click **Browse HuggingFace** in the Models section
@@ -10,6 +29,11 @@ You need at least one AI model before you can chat.
 4. Choose a quantization variant (Q4_K_M recommended for most hardware)
 5. Click **Add to node** — the node downloads its fair share of shards, and peers with auto-manage enabled auto-acquire the rest
 6. The dashboard auto-refreshes when downloads complete (no page reload needed)
+
+> **Heads-up**: models from trusted curators (meta-llama, mistralai,
+> Qwen, bartowski, unsloth, …) replicate across the swarm faster than
+> obscure publishers because R141 lowered their auto-promotion
+> threshold. If you pick an unpopular model, expect weaker distribution.
 
 ## Download via CLI
 

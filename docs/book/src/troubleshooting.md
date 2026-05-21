@@ -201,6 +201,32 @@ Models go through trust levels: Discovered → Pinned → DemandVerified → Net
 - Pin it manually from the Dashboard to promote to "Pinned"
 - Models reach "DemandVerified" after receiving inference requests
 - Models reach "NetworkPopular" when enough peers host them
+- **R141**: HfWatcher auto-promotes `Discovered` → `DemandVerified` for trending HF models above the per-publisher download floor + 24h age:
+  - **Trusted curators** (meta-llama, mistralai, Qwen, google, microsoft, deepseek-ai, bartowski, TheBloke, unsloth, etc. — full list in `src/model/huggingface/watcher.rs::TRUSTED_HF_PUBLISHERS`) promote at **10k** downloads
+  - **Unknown publishers** promote at **100k** downloads
+  - Both tiers respect the 24h age gate (defeats download-pump attacks)
+- Failed promotions accrue strikes that exponentially extend the cooldown — 4 strikes blocks auto-promotion until you pin it manually
+
+## Chat dropdown shows "No models available yet"
+
+This is the cold-start state. R141 surfaces actionable swarm-available
+models directly in the chat empty state — the dashboard renders three
+rows when no model is selected:
+
+- **"Available right now on the swarm"** — Hosting + Serveable wishlist
+  entries the swarm can route inference to today. Click any chip to
+  select that model and open a fresh chat.
+- **"The swarm is gathering these"** — Aspirational entries (partial
+  shard coverage on the network). Will be ready as the missing parts
+  finish downloading.
+- **"Popular models the swarm could adopt"** — HF trending Candidate
+  entries the swarm doesn't have yet. Click to route to the HF browse
+  pre-filtered to the repo so you can pick the quant variant.
+
+If none of these appear: your node hasn't received any peer gossip yet
+AND HfWatcher hasn't returned a snapshot. Check **Settings → Connection**
+to verify the daemon found bootstrap peers; an air-gapped node with
+`hf_watcher_enabled = false` won't see Candidate entries by design.
 
 ## Still Stuck?
 

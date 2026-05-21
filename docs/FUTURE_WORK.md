@@ -132,7 +132,10 @@ auto-manage tick (after `refresh_quant_recommendations`) and promotes
 the recommended variant's `ModelTrustInfo` to `DemandVerified` for any
 family where the user currently hosts a *different* variant. The normal
 scoring/download path then opportunistically acquires the better quant.
-Opt-in via `auto_manage.auto_switch_quants` (default `false`).
+**R141**: default flipped from `false` to `true`. A recommendation
+surface gated by a manual button-click isn't a recommendation; trust +
+prune cooldown already cap the bandwidth cost. Operators on metered
+links can flip back off via `[auto_manage] auto_switch_quants = false`.
 Non-destructive: the OLD variant is NOT proactively pruned, so there's
 no in-flight inference disruption window — standard prune cycle
 handles dedup once VRAM pressure hits. Net effect: when the flag is on,
@@ -401,6 +404,27 @@ fired a spurious auto-manage evaluation cycle the moment the operator
 changed the value, instead of waiting the new interval. Tracking
 entry was the only thing in the original deferred decision; no
 architectural change.)_
+
+---
+
+_(R141 — Auto-manage cold-start UX: shipped 2026-05-21.
+Closed the long-standing "fresh node has nothing to chat with" gap via
+six coordinated changes. **Trusted-publisher allowlist**
+(`TRUSTED_HF_PUBLISHERS` in `huggingface/watcher.rs` — official authors
++ curator community) drops the HF-trending promotion threshold from
+100k to 10k downloads for vetted accounts; unknown publishers retain
+the 100k floor and 24h age gate. **Wishlist `Candidate` status**
+(`compute_wishlist` merges HF trending entries the swarm hasn't
+adopted, cap 24, with `hf_repo_id` + `task_tags` fields). **Chat empty
+state swarm catalog** (`createEmptyState` in `utils.js` builds 3 rows
+— Serveable / Aspirational / Candidate — when no model selected; chip
+click selects model + opens fresh chat OR routes to HF browse for
+Candidate). **`auto_switch_quants` default → true** (R134.6 flip).
+**`P2P_PERMIT_STALL_SECS` 600 → 180** (silent libp2p drops fail over
+to HF fallback in 3 min, not 10). **`hf_sources` cap activity event**
+(`activity.hf_sources_cap_reached`, throttled 1st + every 50th, fires
+warning toast pointing the user at Settings cleanup). 15 new i18n keys
+× 21 locales (1156 → 1171 entries). 1030 → 1053 lib tests.)_
 
 ---
 

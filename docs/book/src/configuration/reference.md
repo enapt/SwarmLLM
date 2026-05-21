@@ -113,6 +113,11 @@ Every configuration option, organized by section.
 | `min_replicas` | integer | `2` | Min network replicas before pruning |
 | `prune_cooldown_secs` | integer | `300` | Seconds between prune actions per model |
 | `max_holder_load_for_prune` | integer | `3` | Block pruning if holders are busy |
+| `hf_watcher_enabled` | boolean | `true` | Background poll of HF trending GGUF feed (hourly). Disable for air-gapped / bandwidth-constrained nodes |
+| `wishlist_gossip_publish` | boolean | `false` | Opt-in: publish your wishlist as cross-pool demand gossip (R130) |
+| `auto_switch_quants` | boolean | `true` | **R141 default flip**: auto-acquire the recommended quant variant when the recommender (R133) suggests a better one. Set `false` on metered links to keep the current quant |
+| `parallax_auto_rebalance` | boolean | `true` | Bias scoring toward Parallax allocator recommendations (C.2) |
+| `default_model_shard_cap` | integer | `0` | Max shards auto-manage acquires per model. `0` = unlimited |
 
 ## `[pool]` — Device Pool
 

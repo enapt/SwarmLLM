@@ -895,7 +895,8 @@ score = model_popularity × rarity_bonus × configured_bonus × vram_fitness
 - **mmproj support**: Vision encoder (mmproj.gguf) treated as download candidate with 5x priority bonus; full-file HF download (not byte-range); higher pruning floor (min 3 replicas), only pruned under extreme pressure (>0.95)
 - **Download priority**: HuggingFace CDN first (fast, doesn't burden peers). If no HF source available but peers hold the shard, falls back to P2P `ShardRequest` to a random holder. P2P is single-source per shard (future: multi-source parallel download)
 - **Upload bandwidth cap**: `max_bandwidth_mbps` config enforced on shard serving via proportional delay after chunk reads. Tensor forwards exempt (latency-critical). Default 0 = unlimited
-- **Config**: `[auto_manage]` section — `enabled`, `max_storage_mb`, `interval_minutes`, `max_shards`, `prune_enabled`, `min_replicas`, `prune_cooldown_secs`, `max_holder_load_for_prune`
+- **Config**: `[auto_manage]` section — `enabled`, `max_storage_mb`, `interval_minutes`, `max_shards`, `prune_enabled`, `min_replicas`, `prune_cooldown_secs`, `max_holder_load_for_prune`, `auto_switch_quants` (R134.6, **default true since R141**), `hf_watcher_enabled`, `wishlist_gossip_publish`
+- **R141 — P2P stall timeout** = 180s (was 600s). A silently-dropped libp2p send now fails over to the HF fallback path in ~3 minutes instead of 10. The original ceiling was sized for worst-case slow peers + pessimistic retries; the new value still covers an honest 32 MiB chunk over a slow link (~150 KiB/s sustained). Constant: `P2P_PERMIT_STALL_SECS` in `model/auto_manage/manager.rs`.
 
 ### Smart Shard Pruning
 
@@ -974,14 +975,20 @@ Discovered → Pinned → DemandVerified → NetworkPopular
 - **DemandVerified**: Model has received ≥3 real inference requests. Auto-manage propagates.
 - **NetworkPopular**: ≥3 unique holder nodes across the network. Highest priority.
 
-**Auto-manage gate**: `gather_candidates()` skips models below `DemandVerified` unless `pinned_by_user = true`. This means a node will never auto-download shards for a model nobody has actually used.
+**Auto-manage gate**: `gather_candidates()` skips models below `DemandVerified` unless `pinned_by_user = true` or this node already hosts at least one shard. This means a node will never auto-download shards for a model nobody has actually used.
 
 **Trust transitions**:
 - Gossip-discovered models start as `Discovered` (auto-created on first manifest registration)
 - User downloads via HF browser → `Pinned` (persisted immediately to redb)
 - 3rd inference request → `DemandVerified` (persisted on promotion)
 - 3+ unique holder nodes → `NetworkPopular` (checked periodically by AutoShardManager)
+- HfWatcher trending feed promotes `Discovered` → `DemandVerified` when the matching HF repo crosses the per-publisher download floor + 24h age gate (anti-gaming). R141 tiered the floor:
+  - **Trusted curators** (`TRUSTED_HF_PUBLISHERS` allowlist in `huggingface/watcher.rs` — meta-llama, mistralai, Qwen, google, microsoft, deepseek-ai, HuggingFaceH4, stabilityai, tiiuae, 01-ai, NousResearch, allenai, ibm-granite, CohereForAI, bartowski, TheBloke, unsloth, lmstudio-community, MaziyarPanahi, QuantFactory, second-state) promote at **10k downloads** (`MIN_DOWNLOADS_FOR_TRUST_TRUSTED`).
+  - **Unknown publishers** keep the original **100k downloads** floor (`MIN_DOWNLOADS_FOR_TRUST`).
+  - The 24h age gate is unchanged for both tiers — a fresh repo can still be a download-pump even from a trusted account if it's compromised.
+  - Helper `is_trusted_publisher` is the canonical check, re-exported via `crate::model::huggingface`. Used by both the watcher's promotion path AND the wishlist scorer for the `wishlist.why.trusted_publisher` why-tag + score bonus.
 - 7 days without requests → decay (`NetworkPopular` → `DemandVerified`, `DemandVerified` → `Discovered`)
+- Auto-promoted models that decay back to `Discovered` with zero real swarm requests bump `failed_promotions` (anti-gaming cooldown for re-promotion; `FAILED_PROMOTION_COOLDOWN_BASE_DAYS = 7`, cap 4 strikes — beyond that only a user pin lifts the level)
 - Pinned models never decay
 
 **Persistence**: `model_trust` tree in redb, keyed by model_id, values are JSON `ModelTrustInfo`.
@@ -989,6 +996,71 @@ Discovered → Pinned → DemandVerified → NetworkPopular
 **API**: Trust level exposed as `trust_level` field in `GET /api/admin/models` response.
 
 **Scaling**: Trust decisions are local per-node (no consensus needed). Each node independently decides what to download based on its own observed demand. This scales to thousands of nodes without coordination overhead.
+
+### Wishlist (R111 + R141)
+
+The **wishlist** (`src/model/auto_manage/wishlist.rs`) is the user-visible
+face of auto-manage. Instead of the daemon downloading models in silence,
+the dashboard renders a ranked list with status badges + human-readable
+"why" tags so non-technical users understand *why* the swarm cares about
+each entry.
+
+**Generation cadence**: rebuilt on every auto-manage tick AND every WS
+`stats_update` build. Cheap (single registry pass), so the dashboard
+sees fresh data the moment it connects. Stored as
+`ArcSwap<Wishlist>` on `state.models.wishlist`, refreshed via
+`crate::model::auto_manage::refresh_wishlist(state)`.
+
+**Status taxonomy** (`WishlistStatus` enum):
+
+| Status | Meaning | CTA |
+|--------|---------|-----|
+| `hosting` | This node hosts ≥1 shard | "You're helping host this" (no action) |
+| `serveable` | Network has every shard at least once — can route today | "Help host" (one-click contribute) |
+| `aspirational` | Partial swarm coverage; gathering in progress | "Help unlock this" |
+| `candidate` (**R141**) | HF trending model the swarm hasn't adopted yet | "Set this up" → routes to HF browse pre-filtered |
+| `unreachable` | Larger than the whole swarm pool VRAM | Informational only |
+| `blocked` | Trust gate / private mode / explicit user-ignore | "Awaiting verification" |
+
+**R141 — Candidate entries**. `compute_wishlist` merges `HfTrending` entries
+the swarm hasn't adopted (cap `MAX_CANDIDATE_ENTRIES = 24`) as `Candidate`
+rows. Distinguishes from `Blocked` (trust-gated existing entries) and
+`Aspirational` (real partial coverage). Candidate entries populate two
+extra fields the frontend uses for routing:
+
+- `hf_repo_id: Option<String>` — the HF repo identifier (`publisher/repo`).
+  Frontend deep-links the user into the HF browse view pre-filtered to
+  this repo so they pick the quant variant themselves (no auto-pick,
+  preserving the user-controlled adoption flow).
+- `task_tags: Vec<String>` — capability tokens (`chat`, `code`, `vision`,
+  `multilingual`, `reasoning`) sourced from `HfWatcher::infer_task_tags`.
+  Drives optional filter chips in the swarm-tab Search subtab.
+
+Synthetic key format: `model_id = "hf-candidate:" + repo_id` so Candidate
+rows dedup cleanly against the registry-walking loop without colliding
+with real `ModelId`s. Both fields use `#[serde(skip_serializing_if = ...)]`
+so the wire payload stays small for the 99% case (non-Candidate).
+
+**Score blend** (0..100, advisory only — frontend renders a heat bar):
+- Coverage component (0..40): fully serveable hits the cap; partial scales linearly.
+- Popularity component (0..25): log-scaled unique holder count.
+- Demand component (0..25): regional `region_demand` gossip.
+- VRAM-fit component (0..10): pool VRAM / model VRAM ratio, clamped.
+- HF trending boost (0..15): log10(downloads) when matching the cached
+  HF trending feed.
+- Foreign-wishlist boost (0..10, R130): cross-pool demand breadth × depth.
+- First-host nudge (+10): no holders yet → strong "be the first" signal.
+- R141 Candidate bonus (+10): models from `is_trusted_publisher` get a
+  flat bonus so curator releases rank above unknown publishers with
+  similar download counts.
+
+**Why-tags** (each is an i18n key under `wishlist.why.*`):
+`be_first_host`, `exceeds_swarm_capacity`, `fits_your_memory`,
+`needs_review`, `no_regional_replica`, `other_nodes_want_this`,
+`parts_missing|missing=N` (with params), `popular_on_hf`,
+`popular_on_swarm`, `swarm_already_serves`, `you_already_host`,
+`your_region_needs_this`, plus R141 additions `trusted_publisher` and
+`candidate_one_click`.
 
 ### On-Demand Shard Loading
 
@@ -1489,7 +1561,7 @@ A lightweight cross-subsystem event bus for real-time dashboard observability.
 - `ActivityEvent` struct with fields: `category` (`&'static str`), `kind` (`&'static str`, e.g. `"shard_pruned"`), `message` (English), plus optional `model_id`, `model_name`, `node_id`, `detail_num`, `detail_str`, `toast_level`, `toast_duration_ms`, `shard_index`, `freed_bytes`, `holder_count_before`, `holder_count_after`, `remaining_local_shards`, `timestamp` (ISO 8601)
 - `activity_tx: broadcast::Sender<ActivityEvent>` in `state.events` sub-struct (capacity 256, oldest events dropped on overflow)
 - All 12 subsystems emit events via the `state.emit_activity(ActivityEvent::new(...))` builder — fire-and-forget (send errors ignored)
-- Example event kinds (snake_case strings; see `ACTIVITY_ICONS` in `frontend/js/components/notifications.js` for the canonical list): `shard_download_complete`, `shard_pruned`, `inference_request`, `inference_completed`, `peer_connected`, `peer_disconnected`, `model_loaded`, `model_unloaded`, `pool_device_joined`, `pool_created`, `config_updated`, `daemon_started`, and many more
+- Example event kinds (snake_case strings; see `ACTIVITY_ICONS` in `frontend/js/components/notifications.js` for the canonical list): `shard_download_complete`, `shard_pruned`, `inference_request`, `inference_completed`, `peer_connected`, `peer_disconnected`, `model_loaded`, `model_unloaded`, `pool_device_joined`, `pool_created`, `config_updated`, `daemon_started`, `hf_sources_cap_reached` (R141 — throttled 1st + every 50th, surfaces dropped HfSourceGossip due to `MAX_HF_SOURCES = 1024` cap), and many more
 
 **WebSocket delivery** (`src/api/websocket.rs`):
 - ApiServer subscribes to `state.events.activity_tx` on WebSocket upgrade
