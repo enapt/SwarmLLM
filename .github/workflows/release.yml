@@ -302,7 +302,23 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          gh release upload "${GITHUB_REF_NAME}" "${{ matrix.archive }}" --clobber
+          # GitHub's release-asset upload endpoint intermittently returns
+          # 5xx (observed 502 Bad Gateway on the v0.2.0-alpha third-attempt
+          # run for the Linux CUDA archive — the build succeeded, the
+          # upload flaked, and the whole release job got marked failed).
+          # `gh release upload` doesn't auto-retry 5xx, so wrap with three
+          # attempts at 15s/30s back-off.
+          for i in 1 2 3; do
+            if gh release upload "${GITHUB_REF_NAME}" "${{ matrix.archive }}" --clobber; then
+              break
+            fi
+            if [ "$i" -eq 3 ]; then
+              echo "Release upload failed after 3 attempts" >&2
+              exit 1
+            fi
+            echo "Upload attempt $i failed; retrying after $((i * 15))s" >&2
+            sleep $((i * 15))
+          done
 
       # Bare-binary asset + SHA256 sidecar for in-app auto-update (src/update.rs).
       # update.rs looks for an asset named exactly:
@@ -324,7 +340,14 @@ jobs:
           BARE="swarmllm-${OS}-${ARCH}"
           cp "target/release/${{ matrix.binary }}" "$BARE"
           shasum -a 256 "$BARE" > "${BARE}.sha256"
-          gh release upload "${GITHUB_REF_NAME}" "$BARE" "${BARE}.sha256" --clobber
+          # See "Upload archive to release" for the retry rationale.
+          for i in 1 2 3; do
+            if gh release upload "${GITHUB_REF_NAME}" "$BARE" "${BARE}.sha256" --clobber; then
+              break
+            fi
+            if [ "$i" -eq 3 ]; then exit 1; fi
+            sleep $((i * 15))
+          done
 
       - name: Publish bare binary + sha256 (Windows CPU)
         if: matrix.name == 'Windows x86_64 CPU'
@@ -339,7 +362,13 @@ jobs:
           # checksum parser already handles via `split_whitespace().next()`.
           $hash = (Get-FileHash $bare -Algorithm SHA256).Hash.ToLower()
           "$hash  $bare" | Out-File -Encoding ascii -NoNewline "${bare}.sha256"
-          gh release upload "${env:GITHUB_REF_NAME}" $bare "${bare}.sha256" --clobber
+          # See "Upload archive to release" for the retry rationale.
+          for ($i = 1; $i -le 3; $i++) {
+            gh release upload "${env:GITHUB_REF_NAME}" $bare "${bare}.sha256" --clobber
+            if ($LASTEXITCODE -eq 0) { break }
+            if ($i -eq 3) { exit 1 }
+            Start-Sleep -Seconds ($i * 15)
+          }
 
       # .deb package (Linux CPU only)
       - name: Build and upload .deb
@@ -357,7 +386,14 @@ jobs:
           VERSION="${GITHUB_REF_NAME#v}"
           DEB="swarmllm_${VERSION}_amd64.deb"
           cp target/debian/*.deb "$DEB"
-          gh release upload "$GITHUB_REF_NAME" "$DEB" --clobber
+          # See "Upload archive to release" for the retry rationale.
+          for i in 1 2 3; do
+            if gh release upload "$GITHUB_REF_NAME" "$DEB" --clobber; then
+              break
+            fi
+            if [ "$i" -eq 3 ]; then exit 1; fi
+            sleep $((i * 15))
+          done
 
       # .rpm package (Linux CPU only)
       - name: Build and upload .rpm
@@ -390,7 +426,14 @@ jobs:
           VERSION="${GITHUB_REF_NAME#v}"
           RPM="swarmllm_${VERSION}.x86_64.rpm"
           cp target/generate-rpm/*.rpm "$RPM"
-          gh release upload "$GITHUB_REF_NAME" "$RPM" --clobber
+          # See "Upload archive to release" for the retry rationale.
+          for i in 1 2 3; do
+            if gh release upload "$GITHUB_REF_NAME" "$RPM" --clobber; then
+              break
+            fi
+            if [ "$i" -eq 3 ]; then exit 1; fi
+            sleep $((i * 15))
+          done
 
   # Publish the draft release — only if at least one build succeeded. Uses
   # `always() && !cancelled()` so a single-platform failure (e.g. macOS flake)

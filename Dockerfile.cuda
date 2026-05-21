@@ -40,6 +40,18 @@ ENV RUSTFLAGS=""
 
 WORKDIR /build
 
+# CUDA libraries live under /usr/local/cuda-12.4/lib64 in the
+# nvidia/cuda:12.4.0-devel base image. The build's final link step
+# needs `-lcuda` + `-lcudart` (emitted by candle-kernels' build.rs).
+# `LIBRARY_PATH` is what gcc/lld read at link time to resolve `-l…`
+# flags; `LD_LIBRARY_PATH` is for runtime and not what failed here.
+# Without this the link errors with
+#   rust-lld: error: unable to find library -lcudart
+# Pinned alongside CUDA_PATH so a CUDA version bump only requires
+# touching these two lines.
+ENV CUDA_PATH=/usr/local/cuda
+ENV LIBRARY_PATH=/usr/local/cuda/lib64:${LIBRARY_PATH}
+
 # `candle-kernels` build.rs runs `nvidia-smi` to autodetect the GPU
 # compute capability when building. Docker BuildKit cannot pass GPU
 # devices through to `docker build` (GPUs only attach at `docker run
