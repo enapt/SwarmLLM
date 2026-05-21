@@ -676,6 +676,7 @@
   "network.your_peer_address": "Alamat Peer Swarm Anda",
   "pool.add_device_header": "Tambah perangkat lain",
   "pool.add_device_settings_desc": "Buat kode undangan jika sewaktu-waktu Anda ingin menautkan mesin lain ke grup ini.",
+  "pool.code_address_warning": "Kode ini berisi alamat jaringan perangkat Anda agar perangkat lain dapat terhubung. Bagikan hanya dengan orang yang Anda percaya.",
   "pool.code_copied": "Kode disalin!",
   "pool.code_expires": "Sekali pakai. Kedaluwarsa dalam 24 jam.",
   "pool.code_invalid": "Tempel kode undangan dari perangkat lain Anda",

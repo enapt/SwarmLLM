@@ -676,6 +676,7 @@
   "network.your_peer_address": "Twój adres węzła swarm",
   "pool.add_device_header": "Dodaj kolejne urządzenie",
   "pool.add_device_settings_desc": "Wygeneruj kod zaproszenia, jeśli kiedykolwiek zechcesz dodać kolejną maszynę do tej grupy.",
+  "pool.code_address_warning": "Ten kod zawiera adresy sieciowe Twojego urządzenia, aby drugie urządzenie mogło się połączyć. Udostępniaj go tylko zaufanym osobom.",
   "pool.code_copied": "Kod skopiowany!",
   "pool.code_expires": "Jednorazowy. Wygasa po 24 godzinach.",
   "pool.code_invalid": "Wklej kod zaproszenia z drugiego urządzenia",

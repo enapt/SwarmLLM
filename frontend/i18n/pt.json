@@ -676,6 +676,7 @@
   "network.your_peer_address": "Seu Endereço de Par Swarm",
   "pool.add_device_header": "Adicionar outro dispositivo",
   "pool.add_device_settings_desc": "Gere um código de convite caso queira vincular outra máquina a este grupo.",
+  "pool.code_address_warning": "Este código contém os endereços de rede do seu dispositivo para que o outro possa se conectar. Compartilhe apenas com pessoas de confiança.",
   "pool.code_copied": "Código copiado!",
   "pool.code_expires": "Uso único. Expira em 24 horas.",
   "pool.code_invalid": "Cole o código de convite do seu outro dispositivo",

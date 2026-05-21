@@ -676,6 +676,7 @@
   "network.your_peer_address": "您的群集对等地址",
   "pool.add_device_header": "添加另一台设备",
   "pool.add_device_settings_desc": "如果以后想把另一台机器加入这个小组，可以生成一个邀请码。",
+  "pool.code_address_warning": "此代码包含您设备的网络地址，以便其他设备可以连接。仅与您信任的人分享。",
   "pool.code_copied": "代码已复制！",
   "pool.code_expires": "一次性使用，24小时后过期。",
   "pool.code_invalid": "粘贴来自另一台设备的邀请码",

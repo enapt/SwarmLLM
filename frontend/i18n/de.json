@@ -676,6 +676,7 @@
   "network.your_peer_address": "Deine Swarm-Peer-Adresse",
   "pool.add_device_header": "Weiteres Gerät hinzufügen",
   "pool.add_device_settings_desc": "Erstellen Sie einen Einladungscode, wenn Sie eine weitere Maschine mit dieser Gruppe verknüpfen möchten.",
+  "pool.code_address_warning": "Dieser Code enthält die Netzwerkadressen deines Geräts, damit das andere sich verbinden kann. Teile ihn nur mit Personen, denen du vertraust.",
   "pool.code_copied": "Code kopiert!",
   "pool.code_expires": "Einmalige Verwendung. Läuft in 24 Stunden ab.",
   "pool.code_invalid": "Fügen Sie den Einladungscode von Ihrem anderen Gerät ein",

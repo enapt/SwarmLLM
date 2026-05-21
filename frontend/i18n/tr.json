@@ -676,6 +676,7 @@
   "network.your_peer_address": "Swarm Eş Adresiniz",
   "pool.add_device_header": "Başka bir cihaz ekle",
   "pool.add_device_settings_desc": "Bu gruba başka bir makine eklemek istediğinizde bir davet kodu oluşturun.",
+  "pool.code_address_warning": "Bu kod, diğer cihazın bağlanabilmesi için cihazınızın ağ adreslerini içerir. Yalnızca güvendiğiniz kişilerle paylaşın.",
   "pool.code_copied": "Kod kopyalandı!",
   "pool.code_expires": "Tek kullanımlık. 24 saat içinde geçersiz.",
   "pool.code_invalid": "Diğer cihazınızdaki davet kodunu yapıştırın",

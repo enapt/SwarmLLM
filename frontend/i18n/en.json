@@ -676,6 +676,7 @@
   "network.your_peer_address": "Your Swarm Peer Address",
   "pool.add_device_header": "Add another device",
   "pool.add_device_settings_desc": "Generate an invite code if you ever want to link another machine into this group.",
+  "pool.code_address_warning": "This code carries your device's network addresses so the other device can connect. Share only with people you trust.",
   "pool.code_copied": "Code copied!",
   "pool.code_expires": "One-time use. Expires in 24 hours.",
   "pool.code_invalid": "Paste the invite code from your other device",

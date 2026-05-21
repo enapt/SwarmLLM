@@ -3418,6 +3418,31 @@ textarea:focus:not(:focus-visible) {
 }
 textarea.pool-code-input { min-height: 4.5em; }
 
+/* R141: trust warning on the invite-share view. Code carries the
+   inviter's reachable multiaddrs so sharing widely is an IP-disclosure
+   issue. Visual treatment matches caution panels elsewhere. */
+.pool-invite-warning {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  max-width: 560px;
+  margin: 0 auto 12px;
+  padding: 8px 12px;
+  background: rgba(210, 153, 34, 0.10);
+  border: 1px solid rgba(210, 153, 34, 0.4);
+  border-radius: var(--radius);
+  color: var(--text-primary);
+  font-size: 0.82rem;
+  line-height: 1.4;
+  text-align: left;
+}
+.pool-invite-warning-icon {
+  color: #d29922;
+  font-size: 1rem;
+  line-height: 1.25;
+  flex-shrink: 0;
+}
+
 /* ─── Summary / next-steps ─── */
 .next-steps-box { margin-top: 16px; padding: 12px; background: var(--bg-tertiary); border-radius: var(--radius); border: 1px solid var(--border); }
 

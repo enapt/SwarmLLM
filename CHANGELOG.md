@@ -7,6 +7,175 @@ All notable changes to SwarmLLM are documented here.
 Working changelog for commits after the v0.1.0 tag. Will roll into the
 next tagged release.
 
+### R141 — Auto-manage cold-start UX (2026-05-21)
+
+Closed the "fresh node has nothing to chat with" gap by removing every
+silent gate that blocked auto-manage from acting and surfacing what
+the swarm already runs directly in the chat empty state. Coordinated
+six changes:
+
+- **Trusted-publisher allowlist** in `src/model/huggingface/watcher.rs`.
+  `TRUSTED_HF_PUBLISHERS` covers official model authors (meta-llama,
+  mistralai, Qwen, google, microsoft, deepseek-ai, HuggingFaceH4,
+  stabilityai, tiiuae, 01-ai, NousResearch, allenai, ibm-granite,
+  CohereForAI) + curator community (bartowski, TheBloke, unsloth,
+  lmstudio-community, MaziyarPanahi, QuantFactory, second-state).
+  Models from trusted publishers promote to `DemandVerified` at 10k
+  HF downloads instead of 100k — fresh releases from known curators
+  reach the swarm in hours not weeks. 24h age gate unchanged.
+- **Wishlist `Candidate` status** in `src/model/auto_manage/wishlist.rs`.
+  `compute_wishlist` now merges HfTrending entries the swarm hasn't
+  adopted (cap 24) as `Candidate` rows with new `hf_repo_id` +
+  `task_tags` fields. Frontend renders these with a "Set this up"
+  CTA that opens the HF browse pre-filtered to the repo — user
+  picks the quant variant, no auto-pick. +10 score bonus for trusted
+  publishers.
+- **`auto_switch_quants` default → `true`** in `src/config/inference.rs`.
+  Recommendation surface that required a button-click became automatic.
+  Trust + prune cooldown still guard bandwidth cost. Operators on
+  metered links can flip back off.
+- **`P2P_PERMIT_STALL_SECS` 600 → 180** in `model/auto_manage/manager.rs`.
+  Silent libp2p drops fail over to HF fallback in 3 min, not 10.
+- **`activity.hf_sources_cap_reached` activity event** in
+  `daemon/dispatch/mod.rs`. Throttled 1st + every 50th drop, warning
+  toast pointing the user at Settings cleanup. Previously silent
+  `tracing::warn!`-only.
+- **Chat empty state swarm catalog** — `createEmptyState` in
+  `frontend/js/core/utils.js` builds a `buildSwarmCatalog()` block
+  when no model is selected. Three rows: Serveable (one-click select),
+  Aspirational (gathering), Candidate (route to HF browse). Chip click
+  handlers route through `App.models.selectDropdown` +
+  `App.chat.newSession` so the user lands in a fresh chat with the
+  model loaded in one click. Re-rendered on every `stats_update` so
+  the catalog comes alive within ~2s of daemon start.
+
+i18n: 15 new keys × 21 locales (1156 → 1171 entries per locale) —
+idiomatic translations. Tests: +5 watcher + +3 wishlist. 1030 → 1053
+lib tests. Clippy clean default + features dev,claude-subscription +
+features llama. Commit: `50225f7c`.
+
+### R140 — Pool invite codes v2 (2026-05-19)
+
+The 8-character pool invite code (`A3F7K2M9`) worked only when both
+nodes were already on the same libp2p swarm — useful in a mature
+decentralized network, useless for helping two fresh nodes find each
+other before decentralization is achieved. R140 closed that gap.
+
+New `swarmpool://...` blob (`src/pool/invite.rs`) wraps the existing
+8-char code with the inviter's reachable listen multiaddrs. Encoded as
+JSON → ChaCha20-Poly1305 (random embedded key, anti-IP-harvesting
+only) → base64url. ~300-500 chars, fits in a copy-paste. Inner
+payload: `{ version, pool_id, pool_name, multiaddrs[], code (8-char),
+expires_at_unix }`.
+
+- New `SharedState.listen_multiaddrs: ArcSwap<Vec<String>>` — live
+  snapshot rebuilt by NetworkManager on `NewListenAddr` /
+  `ExpiredListenAddr` / `ListenerClosed` / `ExternalAddrConfirmed`.
+  Filtered via `addr_is_remotely_reachable` that drops loopback,
+  unspecified, link-local, and AWS IMDS but keeps Tailscale CGN
+  (100.64.0.0/10) — the WAN-bootstrap use case needs that range.
+- `handle_join_with_code` dual-mode: v2 blob → dial each multiaddr
+  via `NetworkCommand::DialAddress` then broadcast existing
+  `PoolMessage::JoinRequest`. Legacy 8-char → direct broadcast
+  preserves on-swarm flow. Wire protocol unchanged.
+- Generation rejects empty addresses: if `listen_multiaddrs` is empty
+  (daemon hasn't bound yet), `handle_generate_invite_code` returns
+  `ServiceUnavailable` instead of handing out a useless code.
+- Frontend: dropped the fake-QR pattern (only hashed 8 chars, was
+  never scannable — misleading). Monospace code box + Copy button
+  sized for ~500-char v2 blob. Paste field upgraded from `<input
+  maxlength=8>` to `<textarea>`. Join handler sniffs prefix to route.
+- Maturity-fade UI: while local node sees <50 swarm peers, "Add
+  Another Device" sits in the dashboard header. ≥50 peers demotes it
+  to Settings — swarm is mature enough that DHT discovery is reliable.
+
+5 i18n strings refreshed × 21 locales + 1 dead key removed (`pool.
+scan_or_type` — for the fake QR). 18 new tests (codec roundtrip,
+tamper, expiry, version, truncated/oversized, prefix sniff; 3 listen-
+addr filter; 5 PoolManager paths). 1030 → 1048 lib tests. Commits:
+`c49632af..d7d77e6e`.
+
+### R139 — Tier 4K communication-computation overlap (2026-05-19)
+
+Five commits closing FUTURE_WORK Tier 4K with a research-driven scope
+pivot. Phase B turned out to already be shipped via existing async
+architecture; documented and skipped. Original "worker streams row-
+tiled output during matmul" pivoted to **daemon-side STREAM-chunked
+encrypt+send** on a single libp2p stream (age STREAM construction +
+TokenWeave K=2-4 sweet spot + Tink Streaming AEAD precedent) after
+research found no production inference system streams forward-output
+tensors (Triton decoupled, vLLM v1, NVIDIA Dynamo/NIXL — all single-
+tensor responses).
+
+- **Phase C** (`11333f67`) — ChaCha20-Poly1305 encrypt/decrypt
+  offloaded from NetworkManager event loop. CPU-bound sealing in
+  `handle_send_tensor` and the open in `handle_tensor_payload`
+  (TENSOR_TAG_ENCRYPTED arm) now `tokio::spawn` tasks. New
+  `NetworkCommand::SendEncodedTensor` carries the encrypt-result
+  back. ~50-200µs/forward event-loop savings; under concurrent
+  decode this is the difference between smooth event-loop
+  responsiveness and observable jitter on libp2p ping / gossip /
+  connection events.
+- **A-rev.1** (`4b5fc10c`) — Wire-format `ChunkMeta { chunk_idx,
+  total_chunks }` trailer 0x05 + AAD binding via
+  `build_layer_forward_aad`. Reorder, wrong-total, and cross-transfer
+  substitution all fail Poly1305 before reaching dispatch. 11 new
+  tests.
+- **A-rev.2/3** (`1d0a5d55`) — Receiver assembly on
+  `SharedState.pending_activation_chunks: DashMap<Uuid,
+  ChunkAssemblyState>` (root-level). `chunk_layer_forward` splits at
+  byte offsets; passthrough when activation ≤ chunk_size. 4 config
+  knobs (`streaming_chunked_send`, `streaming_chunk_size_bytes`,
+  `streaming_min_activation_bytes`, `streaming_chunk_assembly_ttl_secs`),
+  default off.
+- **A-rev.4** (`e32c0a5d`) — Sender wired in
+  `pipeline/distributed.rs::forward_through_segments` persistent-
+  stream path. RR fallback intentionally NOT wired (needs per-chunk
+  Acks — deferred).
+
+1015 → 1030 lib tests (+15) + 4 new swarmllm-types tests. Clippy
+clean default + features dev,claude-subscription. Commits:
+`11333f67..1108c817`.
+
+### R138 — Autonomous defer-batch sweep-log triage (2026-05-18)
+
+Eight commits closing ~20 deferred sweep-log items via 8 real fixes +
+~15 verification-only entries:
+
+1. **Auto-manage rescan respects `auto_manage_paused`** (R104 closure).
+   Rescan still runs locally (correctness — picking up manually-
+   placed shards) but the network re-announce gates on
+   `auto_manage_enabled`.
+2. **`active_count.fetch_add` inside spawn closure** (R103 closure).
+   No leak on `tokio::spawn` OOM panic.
+3. **`CreditBalance` `#[serde(default)]` + doc convention** (R105
+   closure). Forward-compat for schema upgrade; node never silently
+   restarts at zero balance on field addition. `swarmllm-types` got
+   a `[dev-dependencies] serde_json` so 15 previously-dead lib tests
+   now run.
+4. **`private_mode`/`offline_mode` moved out of `pool_state` tree**
+   (R105 closure). New `TREE_NODE_MODES` + `restore_node_mode()`
+   migration helper. Each tree single-typed.
+5. **`check_integrity` strict per-tree type validation** (R105
+   closure). `validate_strict` routes each `CRITICAL_TREES` entry
+   through the actual `swarmllm_types` type. Type mismatches that
+   passed JSON-Value validation are now flagged corrupt.
+6. **`credit_percentile_cache` no longer held across DashMap iter**
+   (R97 closure). Three-phase pattern; router task no longer blocks
+   on long iters.
+7. **`api.metrics_auth_required` config flag** (R101/R102 closure).
+   Tightens `/metrics` for public-internet nodes by removing the
+   loopback exemption.
+8. **Credit forward per-window value cap** (R102 closure).
+   `CREDIT_FORWARD_MAX_VALUE_PER_WINDOW = 200k` credits/min/member
+   on top of the existing count cap.
+
+Plus ~15 verification-only sweep-log closures for items intervening
+rounds had already addressed (R66/R67/R68/R89/R97/R102/R103/R104/R105/
+R123). 1005 → 1015 lib tests (+10) plus 15 newly-runnable
+`swarmllm-types` tests. Clippy clean default + features dev,claude-
+subscription + features llama. Commits: `d122e9e8..cb60b2ed`.
+
 ### Sweep arc R122 → R124 (2026-05-12 → 2026-05-13)
 
 Three rounds of standard-rotation sweeps after R121 closed. R122 and

@@ -676,6 +676,7 @@
   "network.your_peer_address": "내 스웜 피어 주소",
   "pool.add_device_header": "다른 기기 추가",
   "pool.add_device_settings_desc": "이 그룹에 다른 컴퓨터를 연결하고 싶을 때 초대 코드를 만드세요.",
+  "pool.code_address_warning": "이 코드에는 다른 기기가 연결할 수 있도록 이 기기의 네트워크 주소가 포함되어 있습니다. 신뢰하는 사람에게만 공유하세요.",
   "pool.code_copied": "코드가 복사되었습니다!",
   "pool.code_expires": "일회용. 24시간 후 만료됩니다.",
   "pool.code_invalid": "다른 기기에서 초대 코드를 붙여넣으세요",

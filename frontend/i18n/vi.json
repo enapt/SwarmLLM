@@ -676,6 +676,7 @@
   "network.your_peer_address": "Địa chỉ nút swarm của bạn",
   "pool.add_device_header": "Thêm thiết bị khác",
   "pool.add_device_settings_desc": "Tạo mã mời nếu bạn muốn liên kết một máy khác vào nhóm này.",
+  "pool.code_address_warning": "Mã này chứa địa chỉ mạng của thiết bị bạn để thiết bị kia có thể kết nối. Chỉ chia sẻ với người bạn tin tưởng.",
   "pool.code_copied": "Đã sao chép mã!",
   "pool.code_expires": "Dùng một lần. Hết hạn sau 24 giờ.",
   "pool.code_invalid": "Dán mã mời từ thiết bị khác của bạn",

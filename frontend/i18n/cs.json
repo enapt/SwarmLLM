@@ -676,6 +676,7 @@
   "network.your_peer_address": "Vaše adresa swarm uzlu",
   "pool.add_device_header": "Přidat další zařízení",
   "pool.add_device_settings_desc": "Vygenerujte zvací kód, pokud někdy budete chtít připojit další stroj k této skupině.",
+  "pool.code_address_warning": "Tento kód obsahuje síťové adresy vašeho zařízení, aby se druhé zařízení mohlo připojit. Sdílejte pouze s lidmi, kterým důvěřujete.",
   "pool.code_copied": "Kód zkopírován!",
   "pool.code_expires": "Jednorázové použití. Vyprší za 24 hodin.",
   "pool.code_invalid": "Vložte zvací kód z druhého zařízení",

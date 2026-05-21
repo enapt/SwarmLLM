@@ -676,6 +676,7 @@
   "network.your_peer_address": "Il tuo indirizzo peer Swarm",
   "pool.add_device_header": "Aggiungi un altro dispositivo",
   "pool.add_device_settings_desc": "Genera un codice di invito se vuoi collegare un'altra macchina a questo gruppo.",
+  "pool.code_address_warning": "Questo codice contiene gli indirizzi di rete del tuo dispositivo per consentire la connessione dell'altro. Condividilo solo con persone fidate.",
   "pool.code_copied": "Codice copiato!",
   "pool.code_expires": "Uso singolo. Scade in 24 ore.",
   "pool.code_invalid": "Incolla il codice di invito dal tuo altro dispositivo",

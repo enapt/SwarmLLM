@@ -676,6 +676,7 @@
   "network.your_peer_address": "عنوان الند في الشبكة",
   "pool.add_device_header": "إضافة جهاز آخر",
   "pool.add_device_settings_desc": "أنشئ رمز دعوة إذا أردت ربط جهاز آخر بهذه المجموعة.",
+  "pool.code_address_warning": "يحتوي هذا الرمز على عناوين الشبكة لجهازك حتى يتمكن الجهاز الآخر من الاتصال. لا تشاركه إلا مع أشخاص تثق بهم.",
   "pool.code_copied": "تم نسخ الرمز!",
   "pool.code_expires": "للاستخدام مرة واحدة. ينتهي خلال 24 ساعة.",
   "pool.code_invalid": "الصق رمز الدعوة من جهازك الآخر",

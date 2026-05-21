@@ -676,6 +676,7 @@
   "network.your_peer_address": "スウォームピアアドレス",
   "pool.add_device_header": "別のデバイスを追加",
   "pool.add_device_settings_desc": "別のマシンをこのグループに追加したい場合は、招待コードを生成してください。",
+  "pool.code_address_warning": "このコードには、もう一方のデバイスが接続するためのこのデバイスのネットワークアドレスが含まれます。信頼できる相手にのみ共有してください。",
   "pool.code_copied": "コードをコピーしました！",
   "pool.code_expires": "1回限り使用。24時間で有効期限が切れます。",
   "pool.code_invalid": "他のデバイスから招待コードを貼り付けてください",

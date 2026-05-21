@@ -676,6 +676,7 @@
   "network.your_peer_address": "Din svärmspeeradress",
   "pool.add_device_header": "Lägg till en annan enhet",
   "pool.add_device_settings_desc": "Generera en inbjudningskod om du någonsin vill länka en annan maskin till den här gruppen.",
+  "pool.code_address_warning": "Den här koden innehåller enhetens nätverksadresser så att den andra enheten kan ansluta. Dela bara med personer du litar på.",
   "pool.code_copied": "Kod kopierad!",
   "pool.code_expires": "Engångsanvändning. Går ut inom 24 timmar.",
   "pool.code_invalid": "Klistra in inbjudningskoden från din andra enhet",

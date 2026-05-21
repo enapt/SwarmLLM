@@ -676,6 +676,7 @@
   "network.your_peer_address": "Tu Dirección de Par del Enjambre",
   "pool.add_device_header": "Añadir otro dispositivo",
   "pool.add_device_settings_desc": "Genera un código de invitación si alguna vez quieres vincular otra máquina a este grupo.",
+  "pool.code_address_warning": "Este código incluye las direcciones de red de tu dispositivo para que el otro pueda conectarse. Compártelo solo con personas de confianza.",
   "pool.code_copied": "¡Código copiado!",
   "pool.code_expires": "Uso único. Caduca en 24 horas.",
   "pool.code_invalid": "Pega el código de invitación de tu otro dispositivo",

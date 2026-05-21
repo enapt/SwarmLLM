@@ -676,6 +676,7 @@
   "network.your_peer_address": "Votre adresse de pair du réseau",
   "pool.add_device_header": "Ajouter un autre appareil",
   "pool.add_device_settings_desc": "Générez un code d'invitation si vous souhaitez ajouter une autre machine à ce groupe.",
+  "pool.code_address_warning": "Ce code contient les adresses réseau de votre appareil pour que l'autre puisse se connecter. Ne le partagez qu'avec des personnes de confiance.",
   "pool.code_copied": "Code copié !",
   "pool.code_expires": "Usage unique. Expire dans 24 heures.",
   "pool.code_invalid": "Collez le code d'invitation de votre autre appareil",
