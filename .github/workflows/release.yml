@@ -142,6 +142,29 @@ jobs:
           echo "/usr/local/cuda-12.4/bin" >> "$GITHUB_PATH"
           echo "CUDA_PATH=/usr/local/cuda-12.4" >> "$GITHUB_ENV"
 
+      # Linux CUDA release build links 3000+ object files against heavy
+      # libraries (libcuda, libcudart, libllama-cpp, libstdc++, …). The
+      # default Rust-1.95 linker (`rust-lld`) SIGBUSes mid-link on the
+      # standard GitHub-hosted Linux runner (7 GB RAM) — observed in
+      # release runs for v0.1.0-alpha.2 (run 24785498231 and four
+      # earlier retries, all "ld terminated with signal 7 [Bus error]"
+      # from rust-lld). mold is much more memory-efficient at link
+      # time and ~5× faster on this kind of workload. Installing it
+      # here + exporting `RUSTFLAGS=-C link-arg=-fuse-ld=mold` (only
+      # for the CUDA-Linux build via $GITHUB_ENV) lets the workflow
+      # complete inside runner-memory limits.
+      #
+      # The `RUSTFLAGS` set here overrides the workflow-level empty
+      # value for the subsequent build step in this job. Other matrix
+      # cells (macOS, Windows, Linux non-CUDA) keep the empty override
+      # — important so `.cargo/config.toml`'s `target-cpu=native`
+      # doesn't leak into portable release artefacts.
+      - name: Install mold linker + select for Linux CUDA build
+        if: matrix.cuda_linux
+        run: |
+          sudo apt-get install -y mold
+          echo "RUSTFLAGS=-C link-arg=-fuse-ld=mold" >> "$GITHUB_ENV"
+
       - name: Install CUDA toolkit (Windows)
         if: matrix.cuda_windows
         uses: Jimver/cuda-toolkit@4bd727d5619dc6fa323b1e76c3aa5dca94f5ec6d # v0.2.19
