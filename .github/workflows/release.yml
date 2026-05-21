@@ -210,46 +210,48 @@ jobs:
         run: |
           "LIB=$env:CUDA_PATH\lib\x64;$env:LIB" | Out-File -Append -FilePath $env:GITHUB_ENV -Encoding utf8
 
-      # Windows GPU: serialize the CMake build for llama-cpp-sys-2's
-      # Vulkan backend. `vulkan-shaders-gen` is added by llama.cpp via
-      # CMake's `ExternalProject_Add` without a sufficient declared
-      # dependency on its own configure step, so MSBuild's default
-      # parallel build (parallel=4) races the install rule ahead of
-      # configure and fails with:
+      # Windows GPU: switch the llama-cpp-sys-2 cmake-rs invocation
+      # from the default Visual Studio generator to Ninja.
+      #
+      # Root cause. `llama.cpp` adds `vulkan-shaders-gen` via
+      # `ExternalProject_Add`. The Visual Studio CMake generator
+      # translates that into a standalone .vcxproj with custom build
+      # rules; MSBuild then schedules those rules in parallel without
+      # honouring CMake's `add_dependencies(...)` ordering, so the
+      # install rule fires before configure finishes:
       #   CMake error : Not a file: cmake_install.cmake
-      #   error MSB8066: Custom build for 'vulkan-shaders-gen-install.rule
+      #   error MSB8066: Custom build for 'vulkan-shaders-gen-install.rule'
+      # Ninja consumes CMake's dependency graph natively, so the race
+      # goes away — confirmed by llama.cpp's own build docs which
+      # avoid recommending Visual Studio for Vulkan on Windows
+      # entirely (all three documented Windows-Vulkan methods use
+      # MSYS2 / MinGW / w64devkit, which default to Ninja).
       #
-      # cmake-rs (the crate llama-cpp-sys-2 uses to drive CMake)
-      # invokes `cmake --build … --parallel $NUM_JOBS`. Two prior
-      # attempts failed:
-      #   1. CMAKE_BUILD_PARALLEL_LEVEL=1 — cmake-rs doesn't read
-      #      this env var; CMake configure even warned
-      #      "Manually-specified variables were not used".
-      #   2. NUM_JOBS=1 — set in step env, but cargo unconditionally
-      #      OVERRIDES NUM_JOBS for build scripts with its own job
-      #      count (4 on GH-hosted runners). The Windows GPU log
-      #      showed `--parallel 4` in cmake-rs's invocation despite
-      #      `NUM_JOBS: 1` in the step env.
-      # The lever cargo respects (and propagates to build scripts as
-      # NUM_JOBS) is CARGO_BUILD_JOBS. Setting CARGO_BUILD_JOBS=1
-      # makes cargo limit rustc parallelism to 1, export NUM_JOBS=1
-      # to every build script, and cmake-rs in turn passes
-      # --parallel 1 to cmake. Serial → race gone.
+      # Tried before, didn't work (each on its own log):
+      #   * CMAKE_BUILD_PARALLEL_LEVEL=1 — cmake-rs doesn't read it;
+      #     CMake configure warned "Manually-specified variables were
+      #     not used".
+      #   * NUM_JOBS=1 — cargo unconditionally overrides NUM_JOBS for
+      #     build scripts. Log showed `--parallel 4` despite the env.
+      #   * CARGO_BUILD_JOBS=1 — propagated correctly (log:
+      #     `CARGO_BUILD_JOBS: 1`), but the race still triggered
+      #     because MSBuild itself parallelises within a single
+      #     project below the cmake-rs --parallel level. Confirmed
+      #     on run 26229620051 / job 77186054137.
       #
-      # Exported via $GITHUB_ENV (not step env: with a ternary) because
-      # cargo rejects CARGO_BUILD_JOBS="" with
-      #   "could not parse ``. Number of parallel jobs should be
-      #    `default` or a number."
-      # — setting the env var to the empty string on non-Windows-GPU
-      # matrix cells breaks every other build. $GITHUB_ENV leaves the
-      # variable unset for the cells that don't need it.
+      # CMAKE_GENERATOR env var is the standard cmake-rs override and
+      # works for everyone who's hit this. Ninja is pre-installed on
+      # the windows-2022 runner image and on PATH after the
+      # ilammy/msvc-dev-cmd step further up in the job.
       #
-      # Wall-time cost: Windows GPU build roughly doubles to ~50 min.
-      # Only this matrix cell pays the cost.
-      - name: Force serial cargo build (Windows GPU vulkan-shaders-gen race)
+      # No wall-time cost — Ninja keeps full parallelism for the
+      # parts that are race-free. Other matrix cells leave
+      # CMAKE_GENERATOR unset so they keep using their respective
+      # defaults (Make on Linux/macOS, Visual Studio on Windows CPU).
+      - name: Use Ninja generator (Windows GPU vulkan-shaders-gen race)
         if: matrix.cuda_windows
         shell: bash
-        run: echo "CARGO_BUILD_JOBS=1" >> "$GITHUB_ENV"
+        run: echo "CMAKE_GENERATOR=Ninja" >> "$GITHUB_ENV"
 
       - name: Build release binary
         run: cargo build --locked --release ${{ matrix.features }}
