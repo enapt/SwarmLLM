@@ -229,23 +229,26 @@ jobs:
           #   error MSB8066: Custom build for 'vulkan-shaders-gen-install.rule
           #
           # cmake-rs (the crate llama-cpp-sys-2 uses to drive CMake)
-          # invokes `cmake --build … --parallel $NUM_JOBS`. NUM_JOBS is
-          # set by cargo to the host CPU count (4 on GitHub-hosted
-          # runners). A previous attempt set CMAKE_BUILD_PARALLEL_LEVEL
-          # which cmake-rs does NOT read — CMake's own configure
-          # warned `Manually-specified variables were not used`, and
-          # the build still ran with `--parallel 4`. The actual lever
-          # is `NUM_JOBS=1`: cmake-rs reads it via env::var_os and
-          # threads it through to the --parallel flag, serialising
-          # the MSBuild invocation and avoiding the race.
-          #
-          # NUM_JOBS only affects build scripts (cmake-rs reads it for
-          # parallel build). Rust's own compilation parallelism is
-          # controlled by CARGO_BUILD_JOBS / --jobs, which we leave at
-          # the default, so rustc still uses all 4 cores. Cost is ~5
-          # minutes on a build that already takes ~25; correctness >>
-          # wall-time on the release path.
-          NUM_JOBS: ${{ matrix.cuda_windows && '1' || '' }}
+          # invokes `cmake --build … --parallel $NUM_JOBS`. Two prior
+          # attempts failed:
+          #   1. CMAKE_BUILD_PARALLEL_LEVEL=1 — cmake-rs doesn't read
+          #      this env var; CMake configure even warned
+          #      "Manually-specified variables were not used".
+          #   2. NUM_JOBS=1 — set in step env, but cargo unconditionally
+          #      OVERRIDES NUM_JOBS for build scripts with its own job
+          #      count (4 on GH-hosted runners). The Windows GPU log
+          #      showed `--parallel 4` in cmake-rs's invocation despite
+          #      `NUM_JOBS: 1` in the step env.
+          # The lever cargo respects (and propagates to build scripts as
+          # NUM_JOBS) is CARGO_BUILD_JOBS. Setting CARGO_BUILD_JOBS=1
+          # makes cargo:
+          #   * limit rustc parallelism to 1 (slower Rust build);
+          #   * export NUM_JOBS=1 to every build script;
+          #   * cmake-rs reads NUM_JOBS=1, passes --parallel 1, serial.
+          # Wall-time cost: Windows GPU build doubles to ~50 min.
+          # Acceptable cost for the only fix that actually works without
+          # patching llama-cpp-sys-2 or switching generators.
+          CARGO_BUILD_JOBS: ${{ matrix.cuda_windows && '1' || '' }}
 
       - name: Package archive (Linux/macOS)
         if: runner.os != 'Windows'
