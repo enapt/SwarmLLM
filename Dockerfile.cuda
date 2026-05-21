@@ -40,6 +40,18 @@ ENV RUSTFLAGS=""
 
 WORKDIR /build
 
+# `candle-kernels` build.rs runs `nvidia-smi` to autodetect the GPU
+# compute capability when building. Docker BuildKit cannot pass GPU
+# devices through to `docker build` (GPUs only attach at `docker run
+# --gpus all`), so the autodetect fails with:
+#   ComputeCapDetectionFailed("Failed to run nvidia-smi: No such file…")
+# Pin compute-cap to 80 (Ampere — RTX 3060+, A100, H100, …) so nvcc
+# emits PTX targeting that arch. Generated PTX is JIT-compiled at
+# runtime to the user's actual GPU, so the only thing 80 affects is
+# the lower-bound: any modern NVIDIA card can JIT this. Matches the
+# release.yml release-binary build for the same reason.
+ENV CUDA_COMPUTE_CAP=80
+
 # Cache dependency compilation
 COPY Cargo.toml Cargo.lock build.rs ./
 COPY vendor/ vendor/

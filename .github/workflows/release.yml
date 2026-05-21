@@ -227,13 +227,25 @@ jobs:
           # configure and fails with:
           #   CMake error : Not a file: cmake_install.cmake
           #   error MSB8066: Custom build for 'vulkan-shaders-gen-install.rule
-          # Setting CMAKE_BUILD_PARALLEL_LEVEL=1 forces sequential build
-          # for the cmake-rs invocation (which threads this var through to
-          # `cmake --build`), eliminating the race. Cost is ~5-10 extra
-          # minutes on the Windows GPU build; correctness >> wall-time on a
-          # release path. Other matrix cells leave the variable unset so
-          # they keep the default parallel build.
-          CMAKE_BUILD_PARALLEL_LEVEL: ${{ matrix.cuda_windows && '1' || '' }}
+          #
+          # cmake-rs (the crate llama-cpp-sys-2 uses to drive CMake)
+          # invokes `cmake --build … --parallel $NUM_JOBS`. NUM_JOBS is
+          # set by cargo to the host CPU count (4 on GitHub-hosted
+          # runners). A previous attempt set CMAKE_BUILD_PARALLEL_LEVEL
+          # which cmake-rs does NOT read — CMake's own configure
+          # warned `Manually-specified variables were not used`, and
+          # the build still ran with `--parallel 4`. The actual lever
+          # is `NUM_JOBS=1`: cmake-rs reads it via env::var_os and
+          # threads it through to the --parallel flag, serialising
+          # the MSBuild invocation and avoiding the race.
+          #
+          # NUM_JOBS only affects build scripts (cmake-rs reads it for
+          # parallel build). Rust's own compilation parallelism is
+          # controlled by CARGO_BUILD_JOBS / --jobs, which we leave at
+          # the default, so rustc still uses all 4 cores. Cost is ~5
+          # minutes on a build that already takes ~25; correctness >>
+          # wall-time on the release path.
+          NUM_JOBS: ${{ matrix.cuda_windows && '1' || '' }}
 
       - name: Package archive (Linux/macOS)
         if: runner.os != 'Windows'
@@ -362,8 +374,16 @@ jobs:
           # `-` → `~` for cargo-generate-rpm's --set-metadata override
           # without touching Cargo.toml. Stable releases (`0.2.0`) are a
           # no-op for the substitution.
+          #
+          # NOTE: do NOT use bash's `${var//-/~}` parameter expansion —
+          # the replacement string undergoes tilde expansion per the
+          # bash manual ("string undergoes tilde expansion ..."), so
+          # `~` becomes `$HOME` (`/home/runner` on the runner). A
+          # previous attempt produced `0.2.0/home/runneralpha`. sed is
+          # not subject to bash's tilde-expansion rule, so it's the
+          # safe substitution path here.
           CARGO_VERSION=$(awk -F'"' '/^version = / {print $2; exit}' Cargo.toml)
-          RPM_VERSION="${CARGO_VERSION//-/~}"
+          RPM_VERSION=$(printf '%s' "$CARGO_VERSION" | sed 's/-/~/g')
           cargo generate-rpm --set-metadata "version = '${RPM_VERSION}'"
           # Filename keeps the SemVer `-` form (tester-facing artefact
           # name; matches the .deb / archive convention).
