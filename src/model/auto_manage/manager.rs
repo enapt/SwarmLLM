@@ -60,10 +60,17 @@ pub(super) async fn read_shard_pins_blocking(state: &SharedState) -> Vec<crate::
 
 /// Maximum time a P2P download permit may sit in `p2p_download_permits`
 /// before being considered stalled. Matches the rough order of the longest
-/// honest shard chunk fetch (32 MiB chunk × multi-segment retry) plus
-/// generous slack for slow peers. Anything older is almost certainly a
-/// silent drop in the libp2p path.
-const P2P_PERMIT_STALL_SECS: u64 = 600;
+/// honest shard chunk fetch (32 MiB chunk × multi-segment retry).
+/// Anything older is almost certainly a silent drop in the libp2p path.
+///
+/// R141: tightened from 600s → 180s. The previous window was sized for
+/// the absolute-worst-case slow peer including pessimistic retries, but
+/// a non-technical user staring at a stuck download for 10 minutes is a
+/// product-broken experience. 3 minutes still comfortably covers an
+/// honest 32 MiB chunk over a slow link (~150 KiB/s sustained), and a
+/// genuine slow-peer wins the next cycle when the HF fallback kicks in
+/// or a faster holder is selected.
+const P2P_PERMIT_STALL_SECS: u64 = 180;
 
 /// Sweep `p2p_download_permits` for entries older than `P2P_PERMIT_STALL_SECS`.
 /// Releases the permit (drop semantics on the OwnedSemaphorePermit) and

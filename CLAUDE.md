@@ -140,7 +140,7 @@ libp2p 0.56, axum 0.8, candle-core/candle-transformers 0.10 (CUDA), redb 4, ed25
 - 12 HTML modals/templates incl. R127 `#welcome-modal` (first-run tour). 11 `<template>` elements for repeating UI structures (session items, chat messages, toasts, model cards, etc.)
 - All storage keys registered as named constants on `App` (e.g., `App.SESSIONS_KEY`, `App.MODEL_SORT_KEY`)
 - Dark/light/system theme toggle, CSS custom properties for theming
-- i18n: 1152 translation keys (1154 entries per locale incl. `_lang` + `_dir`) across 21 languages via `frontend/i18n/{lang}.json`, `I18n.t()` + `data-i18n` attributes. All files sorted by key for parity audits. R110-R115 translations completed in R116, contribution-mode (R121) keys added across all locales, plain-language refresh (R125 ease-of-use audit) translated across all 21 locales — translator-agent pass — every locale has idiomatic native-language strings, not English fallback. R126 batch: removed dead `activity.worker_*` + `models.meta_tokenizer`, refreshed encryption copy (`enc.*` ×19 keys, end-to-end honest), added `activity.manifest_rejected` + `models.meta_advanced`, renamed `models.metadata_header` to "Technical Details". R127 batch: dropped 4 orphans (`models.hf_score_breakdown`, `models.hf_score_pts`, `models.hf_on_swarm`, `models.likes_count`); translated `dashboard.api_log_link` across 21 locales; country names now resolved via `Intl.DisplayNames` keyed off `I18n.getLang()` (no hand map).
+- i18n: 1169 translation keys (1171 entries per locale incl. `_lang` + `_dir`) across 21 languages via `frontend/i18n/{lang}.json`, `I18n.t()` + `data-i18n` attributes. All files sorted by key for parity audits. R110-R115 translations completed in R116, contribution-mode (R121) keys added across all locales, plain-language refresh (R125 ease-of-use audit) translated across all 21 locales — translator-agent pass — every locale has idiomatic native-language strings, not English fallback. R126 batch: removed dead `activity.worker_*` + `models.meta_tokenizer`, refreshed encryption copy (`enc.*` ×19 keys, end-to-end honest), added `activity.manifest_rejected` + `models.meta_advanced`, renamed `models.metadata_header` to "Technical Details". R127 batch: dropped 4 orphans (`models.hf_score_breakdown`, `models.hf_score_pts`, `models.hf_on_swarm`, `models.likes_count`); translated `dashboard.api_log_link` across 21 locales; country names now resolved via `Intl.DisplayNames` keyed off `I18n.getLang()` (no hand map).
 - Total frontend size target: < 200KB
 - Communication: WebSocket for real-time, REST for initial load, SSE for chat streaming
 - WebSocket message types (only 5): `activity_event` (unified event bus — all subsystem events, toasts, prune history), `stats_update` (2s interval — stats, shard registry, acquisitions, **swarm_capacity** (R110), **wishlist** (R111)), `peer_list` (full peer snapshot on change), `models_changed` (shard download/load/prune signals dashboard refresh), `update_available` (new version detected)
@@ -150,7 +150,7 @@ libp2p 0.56, axum 0.8, candle-core/candle-transformers 0.10 (CUDA), redb 4, ed25
 
 ## Testing
 
-- 1030 lib tests passing + 8 ignored (env-var-gated real-model + manual smoke), 75 integration tests in `tests/integration/`, 1 ignored end-to-end (`cargo test --test integration_phase10_11 -- --ignored`), clippy clean. Microbench: `cargo run --release --no-default-features --features dev,claude-subscription --example swarm_spec_bench` (R136 — measures all 4 SWARM-SPEC layer primitives + synthetic cascade hit-rate). Local-cluster bench: `examples/3node_setup.sh` (boots 3 daemons) + `examples/3node_inference_bench.sh` (runs 3 workloads × 3 trials and prints tok/s + swarm_spec metrics). Sharded variant: `examples/3node_sharded_setup.sh` (forced distributed pipeline — requires `auto_manage.enabled = false` in per-node config.toml to preserve sharded state).
+- 1053 lib tests passing + 8 ignored (env-var-gated real-model + manual smoke), 75 integration tests in `tests/integration/`, 1 ignored end-to-end (`cargo test --test integration_phase10_11 -- --ignored`), clippy clean. Microbench: `cargo run --release --no-default-features --features dev,claude-subscription --example swarm_spec_bench` (R136 — measures all 4 SWARM-SPEC layer primitives + synthetic cascade hit-rate). Local-cluster bench: `examples/3node_setup.sh` (boots 3 daemons) + `examples/3node_inference_bench.sh` (runs 3 workloads × 3 trials and prints tok/s + swarm_spec metrics). Sharded variant: `examples/3node_sharded_setup.sh` (forced distributed pipeline — requires `auto_manage.enabled = false` in per-node config.toml to preserve sharded state).
 - Unit tests: in-module `#[cfg(test)]` blocks
 - Integration tests: `tests/integration/` — multi-node simulations with `--test-threads=1`
 - Real-model spawn-and-infer test: set `SWARMLLM_TEST_MODEL_DIR` to a fully-populated model directory (e.g. `~/.local/share/swarmllm/models/tinyllama-1.1b-...`) and run `cargo test --test integration_phase10_11 -- --ignored end_to_end`. No synthetic GGUF fixture is committed; see `docs/ARCHITECTURE.md` § Deferred Items.
@@ -191,9 +191,84 @@ When spawning subagents in this repo, use these model picks (overrides defaults 
 
 ## Status
 
-All 20 build phases complete. All subsystems wired — no stubs. **1048 lib tests + 75 integration tests passing**; 8 lib + 1 e2e ignored (env-var or manual). Clippy clean default + `--features llama`.
+All 20 build phases complete. All subsystems wired — no stubs. **1053 lib tests + 75 integration tests passing**; 8 lib + 1 e2e ignored (env-var or manual). Clippy clean default + `--features llama`.
 
-### Latest: R140 — Pool invite codes v2 (bootstrap-before-decentralization)
+### Latest: R141 — Auto-manage cold-start UX (non-tech-user fixes)
+
+Closes the long-standing "fresh node has nothing to chat with" gap by
+removing every silent gate that blocked auto-manage from acting and
+surfacing what the swarm already runs directly in the chat empty state.
+
+**Backend**:
+
+1. **Trusted-publisher allowlist** in `src/model/huggingface/watcher.rs`.
+   `TRUSTED_HF_PUBLISHERS` covers official model authors (meta-llama,
+   mistralai, Qwen, google, microsoft, deepseek-ai, etc.) + curator
+   community (bartowski, TheBloke, unsloth, lmstudio-community,
+   MaziyarPanahi, QuantFactory, second-state). Models from trusted
+   publishers promote to `DemandVerified` at 10k downloads instead of
+   100k — fixes the "Phi-4 / Qwen3 / fresh Mistral release just landed
+   but auto-manage won't touch it for a month" UX. Helper
+   `is_trusted_publisher` re-exported via `crate::model::huggingface`
+   for use in the wishlist scorer.
+
+2. **Wishlist `Candidate` status** in `src/model/auto_manage/wishlist.rs`.
+   `compute_wishlist` now merges HfTrending entries the swarm hasn't
+   adopted yet (cap 24) as `Candidate` rows with new fields
+   `hf_repo_id` + `task_tags`. Frontend renders these with a
+   "Set this up" CTA that opens the HF browse pre-filtered to the
+   repo — user picks the quant variant (no auto-pick, preserving the
+   existing trust boundary). Trusted publishers get a +10 score bonus
+   and the `wishlist.why.trusted_publisher` tag.
+
+3. **`auto_switch_quants` default → `true`** in `src/config/inference.rs`.
+   A recommendation surface that requires the user to read it and
+   click a button isn't a recommendation, it's a chore. Trust + prune
+   cooldown already guard bandwidth; operators on metered links can
+   flip back off.
+
+4. **`P2P_PERMIT_STALL_SECS = 180`** (was 600) in `manager.rs`. A
+   non-tech user staring at a stuck download for 10 minutes is
+   product-broken; 3 minutes still covers an honest 32 MiB chunk over
+   a slow link.
+
+5. **Activity event on `hf_sources` cap** in `daemon/dispatch/mod.rs`.
+   New `activity.hf_sources_cap_reached` event fires on the 1st and
+   every 50th drop, with a warning toast pointing the user at the
+   Settings cleanup path. Previously silent → user wouldn't notice
+   they were losing models from peer gossip.
+
+**Frontend**:
+
+6. **Chat empty state shows swarm-available models** — `createEmptyState`
+   in `frontend/js/core/utils.js` builds a `buildSwarmCatalog()` block
+   when no model is selected. Three rows: Serveable (one-click select),
+   Aspirational ("the swarm is gathering these"), Candidate (only
+   shown when nothing is Serveable, routes to HF browse). Chip click
+   handlers route through `App.models.selectDropdown` +
+   `App.chat.newSession` so the user is in a fresh chat with the model
+   loaded in one click. Re-rendered on every `stats_update` so the
+   catalog comes alive within ~2s of daemon start. Style: new
+   `.chat-empty-catalog*` rules in `frontend/css/style.css`.
+
+7. **Wishlist `Candidate` CTA** in `frontend/js/components/swarm-tab.js`
+   — `wishlist.cta_candidate` button routes to `App.swarmTab.openSearch`
+   with the HF repo_id, dropping the user into the existing search
+   subtab pre-filtered to the right repo.
+
+**i18n**: 15 new keys translated across all 21 locales (1156 → 1171
+entries per locale) — idiomatic, not English fallback. New keys cover
+the chat catalog (titles, hints, chip meta, replica counts), the
+wishlist Candidate status + CTA, the trusted-publisher tag, and the
+hf_sources cap activity event.
+
+**Tests**: +5 watcher tests (trusted-publisher thresholds, case-
+insensitive match, repo_id parsing edge cases), +3 wishlist tests
+(i18n key parity, Candidate serialisation roundtrip, hf_repo_id/
+task_tags omitted from wire when empty). 1048 → 1053 lib tests. Clippy
+clean default + features dev,claude-subscription + features llama.
+
+### Prior: R140 — Pool invite codes v2 (bootstrap-before-decentralization)
 
 The 8-character pool invite code (`A3F7K2M9`) worked only when both nodes
 were already on the same libp2p swarm — useful in a mature decentralized

@@ -19,6 +19,7 @@
     hosting: 'wishlist.status.hosting',
     serveable: 'wishlist.status.serveable',
     aspirational: 'wishlist.status.aspirational',
+    candidate: 'wishlist.status.candidate',
     unreachable: 'wishlist.status.unreachable',
     blocked: 'wishlist.status.blocked',
   };
@@ -29,6 +30,7 @@
     hosting: 'wishlist-pill-hosting',
     serveable: 'wishlist-pill-serveable',
     aspirational: 'wishlist-pill-aspirational',
+    candidate: 'wishlist-pill-candidate',
     unreachable: 'wishlist-pill-unreachable',
     blocked: 'wishlist-pill-blocked',
   };
@@ -162,6 +164,21 @@
       btn2.dataset.modelId = entry.model_id;
       btn2.addEventListener('click', function () { _onHelpHost(entry); });
       cta.appendChild(btn2);
+    } else if (entry.status === 'candidate') {
+      // R141: Candidate = HF trending model the swarm hasn't picked
+      // up yet. Routes to the HF browse pre-filtered to the repo so
+      // the user picks the quant variant (no auto-pick — user-driven
+      // adoption preserves the existing trust boundary).
+      var btn3 = document.createElement('button');
+      btn3.className = 'btn btn-sm btn-primary';
+      btn3.textContent = I18n.t('wishlist.cta_candidate');
+      btn3.dataset.hfRepo = entry.hf_repo_id || '';
+      btn3.addEventListener('click', function () {
+        if (entry.hf_repo_id && App.swarmTab && App.swarmTab.openSearch) {
+          App.swarmTab.openSearch(entry.hf_repo_id);
+        }
+      });
+      cta.appendChild(btn3);
     } else if (entry.status === 'unreachable') {
       cta.appendChild(_actionLabel(I18n.t('wishlist.cta_unreachable')));
     } else {

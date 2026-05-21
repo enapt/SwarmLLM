@@ -1230,6 +1230,7 @@ a:hover { color: var(--accent-hover); }
 .wishlist-card-hosting { border-left-color: rgba(46, 160, 67, 0.7); }
 .wishlist-card-serveable { border-left-color: rgba(56, 139, 253, 0.7); }
 .wishlist-card-aspirational { border-left-color: rgba(210, 153, 34, 0.7); }
+.wishlist-card-candidate { border-left-color: rgba(150, 110, 220, 0.7); }
 .wishlist-card-unreachable { border-left-color: rgba(120, 120, 120, 0.6); }
 .wishlist-card-blocked { border-left-color: rgba(190, 50, 50, 0.6); }
 .wishlist-card-header {
@@ -1254,6 +1255,7 @@ a:hover { color: var(--accent-hover); }
 .wishlist-pill-hosting { background: rgba(46, 160, 67, 0.18); color: #2ea043; }
 .wishlist-pill-serveable { background: rgba(56, 139, 253, 0.18); color: #388bfd; }
 .wishlist-pill-aspirational { background: rgba(210, 153, 34, 0.18); color: #d29922; }
+.wishlist-pill-candidate { background: rgba(150, 110, 220, 0.18); color: #a98ee0; }
 .wishlist-pill-unreachable { background: rgba(120, 120, 120, 0.2); color: var(--text-muted); }
 .wishlist-pill-blocked { background: rgba(190, 50, 50, 0.18); color: #e25c5c; }
 .wishlist-heat {
@@ -2124,6 +2126,79 @@ input[type="range"]::-webkit-slider-thumb {
 .chat-empty .chat-empty-icon img { border-radius: var(--radius-lg); }
 .chat-empty-title { font-size: 1.2rem; font-weight: 600; color: var(--text-primary); }
 .chat-empty-hint { color: var(--text-muted); }
+
+/* ---- R141 swarm catalog inside chat empty state ---- */
+.chat-empty-catalog {
+  width: 100%;
+  max-width: 720px;
+  margin-top: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.chat-empty-catalog-row {
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 12px 14px;
+  text-align: left;
+}
+.chat-empty-catalog-serveable {
+  border-left: 3px solid var(--green, #4ade80);
+}
+.chat-empty-catalog-aspirational {
+  border-left: 3px solid var(--cyan, #38bdf8);
+}
+.chat-empty-catalog-candidate {
+  border-left: 3px solid var(--text-muted);
+  opacity: 0.92;
+}
+.chat-empty-catalog-head { margin-bottom: 10px; }
+.chat-empty-catalog-title {
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  letter-spacing: 0.01em;
+}
+.chat-empty-catalog-hint {
+  margin-top: 2px;
+  line-height: 1.35;
+}
+.chat-empty-catalog-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.chat-empty-catalog-chip {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 1px;
+  padding: 6px 10px;
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  font: inherit;
+  color: var(--text-primary);
+  transition: border-color 0.15s ease, transform 0.05s ease;
+  max-width: 100%;
+}
+.chat-empty-catalog-chip:hover {
+  border-color: var(--accent, var(--green, #4ade80));
+}
+.chat-empty-catalog-chip:active { transform: translateY(1px); }
+.chat-empty-catalog-chip-name {
+  font-size: 0.85rem;
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 240px;
+}
+.chat-empty-catalog-chip-meta { font-size: 0.7rem; }
+.chat-empty-catalog-chip-aspirational { opacity: 0.85; }
+.chat-empty-catalog-chip-candidate { font-style: italic; }
 
 /* ---- Chat Layout (linear with pinned avatar) ---- */
 .chat-msg {

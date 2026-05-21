@@ -435,6 +435,17 @@
           if (App.swarmTab && typeof App.swarmTab.onStats === 'function') {
             App.swarmTab.onStats(msg.data);
           }
+          // R141: re-render the chat empty state so the swarm catalog
+          // (Available / Aspirational / Candidate chips) appears the
+          // moment fresh stats arrive — without this the empty state
+          // is frozen with whatever was cached at first render.
+          // Cheap: only fires when the user is sitting on an empty
+          // session that already shows the catalog wrapper.
+          if (S.activeTab === 'chat' && S.currentSessionId && S.sessions[S.currentSessionId] &&
+              S.sessions[S.currentSessionId].messages.length === 0 &&
+              App.chat && App.chat.renderMessages) {
+            App.chat.renderMessages();
+          }
         } else if (msg.type === 'update_available') {
           showUpdateBanner(msg.data);
         } else if (msg.type === 'peer_list') {

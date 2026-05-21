@@ -69,8 +69,74 @@ const MAX_TRENDING_ENTRIES: usize = 100;
 
 /// Trust-promotion thresholds. Both must be met to lift a `Discovered`
 /// model to `DemandVerified` (which lets auto-manage act on it).
+///
+/// Two tiers: trusted curator publishers (`TRUSTED_HF_PUBLISHERS`) get
+/// a 10× lower download threshold because their releases are vetted +
+/// the publisher reputation acts as anti-gaming. Random publishers
+/// keep the original 100k floor. The 24h age gate applies to BOTH
+/// tiers — a freshly-published repo can still be a download-pump even
+/// from a trusted curator's account if compromised.
 const MIN_DOWNLOADS_FOR_TRUST: u64 = 100_000;
+const MIN_DOWNLOADS_FOR_TRUST_TRUSTED: u64 = 10_000;
 const MIN_AGE_FOR_TRUST_HOURS: i64 = 24;
+
+/// Curator allowlist: HF publishers whose releases are known-good
+/// quantisations / official model weights. Maintainers earn this slot
+/// through track record (years of clean releases) — adding a name here
+/// loosens the auto-promotion floor 10× for any GGUF they publish.
+///
+/// Matched against the case-insensitive `<publisher>/<repo>` prefix on
+/// the HF repo_id. Update sparingly; each entry is a trust delegation.
+const TRUSTED_HF_PUBLISHERS: &[&str] = &[
+    // Official model authors
+    "meta-llama",
+    "mistralai",
+    "Qwen",
+    "google",
+    "microsoft",
+    "deepseek-ai",
+    "HuggingFaceH4",
+    "stabilityai",
+    "tiiuae",
+    "01-ai",
+    "NousResearch",
+    "allenai",
+    "ibm-granite",
+    "CohereForAI",
+    // Curator / quantiser community heavyweights
+    "bartowski",
+    "TheBloke",
+    "unsloth",
+    "lmstudio-community",
+    "MaziyarPanahi",
+    "QuantFactory",
+    "second-state",
+];
+
+/// Return the per-tier download threshold for a given HF repo_id.
+/// Repo IDs look like `publisher/model-name`; the prefix before the
+/// first `/` selects the tier.
+pub(crate) fn min_downloads_for_repo(repo_id: &str) -> u64 {
+    let publisher = repo_id.split('/').next().unwrap_or("");
+    if TRUSTED_HF_PUBLISHERS
+        .iter()
+        .any(|p| p.eq_ignore_ascii_case(publisher))
+    {
+        MIN_DOWNLOADS_FOR_TRUST_TRUSTED
+    } else {
+        MIN_DOWNLOADS_FOR_TRUST
+    }
+}
+
+/// Whether the given HF repo_id belongs to a trusted curator/publisher.
+/// Used by the wishlist (Task #2) to mark Candidate entries that bypass
+/// the user's "review before adopt" friction.
+pub fn is_trusted_publisher(repo_id: &str) -> bool {
+    let publisher = repo_id.split('/').next().unwrap_or("");
+    TRUSTED_HF_PUBLISHERS
+        .iter()
+        .any(|p| p.eq_ignore_ascii_case(publisher))
+}
 
 /// R134: anti-gaming cooldown after an auto-promoted model decays back
 /// to `Discovered` with zero real swarm requests. The wait grows with
@@ -426,7 +492,7 @@ fn promote_trust_for_trending(state: &SharedState, entries: &[HfTrendingEntry]) 
         let Some(entry) = by_repo.get(repo_id) else {
             continue;
         };
-        if entry.downloads < MIN_DOWNLOADS_FOR_TRUST {
+        if entry.downloads < min_downloads_for_repo(repo_id) {
             continue;
         }
         if entry.created_at_secs > 0 && (now - entry.created_at_secs) < age_threshold {
@@ -598,6 +664,45 @@ mod tests {
         info.maybe_decay();
         assert_eq!(info.trust_level, crate::types::ModelTrustLevel::Discovered);
         assert_eq!(info.failed_promotions, 0);
+    }
+
+    /// Trusted publishers get the 10× lower threshold.
+    #[test]
+    fn min_downloads_threshold_trusted_publisher() {
+        assert_eq!(
+            min_downloads_for_repo("bartowski/Mistral-7B-Instruct-v0.3-GGUF"),
+            MIN_DOWNLOADS_FOR_TRUST_TRUSTED
+        );
+        assert_eq!(
+            min_downloads_for_repo("Qwen/Qwen2.5-7B-Instruct-GGUF"),
+            MIN_DOWNLOADS_FOR_TRUST_TRUSTED
+        );
+        // Case-insensitive match
+        assert_eq!(
+            min_downloads_for_repo("UNSLOTH/Phi-3-mini-4k-instruct-GGUF"),
+            MIN_DOWNLOADS_FOR_TRUST_TRUSTED
+        );
+    }
+
+    /// Unknown publishers retain the original 100k floor.
+    #[test]
+    fn min_downloads_threshold_unknown_publisher() {
+        assert_eq!(
+            min_downloads_for_repo("rando-user/some-model-GGUF"),
+            MIN_DOWNLOADS_FOR_TRUST
+        );
+        assert_eq!(min_downloads_for_repo("no-slash"), MIN_DOWNLOADS_FOR_TRUST);
+        assert_eq!(min_downloads_for_repo(""), MIN_DOWNLOADS_FOR_TRUST);
+    }
+
+    /// is_trusted_publisher mirrors the threshold helper.
+    #[test]
+    fn is_trusted_publisher_matches_allowlist() {
+        assert!(is_trusted_publisher("meta-llama/Llama-3.1-8B-Instruct"));
+        assert!(is_trusted_publisher("bartowski/anything"));
+        assert!(is_trusted_publisher("Bartowski/Anything"));
+        assert!(!is_trusted_publisher("random/repo"));
+        assert!(!is_trusted_publisher("/no-publisher"));
     }
 
     /// R134: `record_request` clears strikes when real demand finally

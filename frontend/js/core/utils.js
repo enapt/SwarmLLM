@@ -330,7 +330,184 @@
       '<div class="chat-empty-hint text-sm mt-0">' +
         (modelName ? '' : escapeHtml(I18n.t('chat.pick_model_hint')) + ' \u2022 ') +
         '<kbd>' + escapeHtml(I18n.t('chat.shift_enter')) + '</kbd></div>';
+
+    // When the user hasn't picked a model yet, render the live "what's on
+    // the swarm right now" catalog underneath the empty state so they can
+    // one-click into any serveable model. This is the cold-start fix: a
+    // fresh node sees concrete options instead of "no models available".
+    if (!modelName) {
+      var catalog = buildSwarmCatalog();
+      if (catalog) div.appendChild(catalog);
+    }
+
     return div;
+  }
+
+  // Build the swarm-catalog block rendered inside the empty chat state.
+  // Reads from `App.data.cache.stats.wishlist` (populated by the WS
+  // stats_update \u2014 already broadcast every ~2s, no extra fetch needed).
+  // Returns null if there's nothing useful to show so the caller can
+  // skip the wrapper entirely.
+  function buildSwarmCatalog() {
+    var stats = (App.data && App.data.cache && App.data.cache.stats) || null;
+    var wishlist = stats && stats.wishlist && Array.isArray(stats.wishlist.entries)
+      ? stats.wishlist.entries
+      : [];
+    if (wishlist.length === 0) return null;
+
+    var serveable = [];
+    var aspirational = [];
+    var candidates = [];
+    for (var i = 0; i < wishlist.length; i++) {
+      var e = wishlist[i];
+      // Hosting + Serveable are both runnable RIGHT NOW.
+      if (e.status === 'hosting' || e.status === 'serveable') {
+        serveable.push(e);
+      } else if (e.status === 'aspirational') {
+        aspirational.push(e);
+      } else if (e.status === 'candidate') {
+        candidates.push(e);
+      }
+    }
+
+    // Cap per row so the empty state doesn't become a wall of chips.
+    var MAX_PER_ROW = 8;
+    serveable = serveable.slice(0, MAX_PER_ROW);
+    aspirational = aspirational.slice(0, MAX_PER_ROW);
+    candidates = candidates.slice(0, MAX_PER_ROW);
+
+    if (serveable.length === 0 && aspirational.length === 0 && candidates.length === 0) {
+      return null;
+    }
+
+    var wrap = document.createElement('div');
+    wrap.className = 'chat-empty-catalog';
+
+    if (serveable.length > 0) {
+      wrap.appendChild(_buildCatalogRow(
+        I18n.t('chat.swarm_available_title'),
+        I18n.t('chat.swarm_available_hint'),
+        serveable,
+        'serveable'
+      ));
+    }
+    if (aspirational.length > 0) {
+      wrap.appendChild(_buildCatalogRow(
+        I18n.t('chat.swarm_aspirational_title'),
+        I18n.t('chat.swarm_aspirational_hint'),
+        aspirational,
+        'aspirational'
+      ));
+    }
+    // Candidates only render when there are NO runnable models to avoid
+    // pushing actionable serveable chips below "add this to swarm"
+    // suggestions that take a download cycle to materialise.
+    if (candidates.length > 0 && serveable.length === 0 && aspirational.length === 0) {
+      wrap.appendChild(_buildCatalogRow(
+        I18n.t('chat.swarm_candidate_title'),
+        I18n.t('chat.swarm_candidate_hint'),
+        candidates,
+        'candidate'
+      ));
+    }
+
+    return wrap;
+  }
+
+  function _buildCatalogRow(title, hint, entries, kind) {
+    var row = document.createElement('div');
+    row.className = 'chat-empty-catalog-row chat-empty-catalog-' + kind;
+
+    var head = document.createElement('div');
+    head.className = 'chat-empty-catalog-head';
+    var titleEl = document.createElement('div');
+    titleEl.className = 'chat-empty-catalog-title';
+    titleEl.textContent = title;
+    head.appendChild(titleEl);
+    if (hint) {
+      var hintEl = document.createElement('div');
+      hintEl.className = 'chat-empty-catalog-hint text-muted text-sm';
+      hintEl.textContent = hint;
+      head.appendChild(hintEl);
+    }
+    row.appendChild(head);
+
+    var chips = document.createElement('div');
+    chips.className = 'chat-empty-catalog-chips';
+    entries.forEach(function(entry) {
+      chips.appendChild(_buildCatalogChip(entry, kind));
+    });
+    row.appendChild(chips);
+
+    return row;
+  }
+
+  function _buildCatalogChip(entry, kind) {
+    var chip = document.createElement('button');
+    chip.type = 'button';
+    chip.className = 'chat-empty-catalog-chip chat-empty-catalog-chip-' + kind;
+    chip.setAttribute('data-status', entry.status);
+
+    var name = document.createElement('span');
+    name.className = 'chat-empty-catalog-chip-name';
+    name.textContent = formatModelDisplayName(entry.display_name || entry.model_id || '');
+    chip.appendChild(name);
+
+    // Compact meta: size + replica count for real models; "popular on HF"
+    // for candidates that have no manifest yet.
+    var meta = document.createElement('span');
+    meta.className = 'chat-empty-catalog-chip-meta text-muted text-2xs';
+    if (kind === 'candidate') {
+      meta.textContent = I18n.t('chat.swarm_candidate_chip_meta');
+    } else {
+      var bits = [];
+      if (entry.size_mb > 0) bits.push(formatSize(entry.size_mb));
+      if (entry.swarm_replicas > 0) {
+        bits.push(I18n.t(entry.swarm_replicas === 1
+          ? 'chat.swarm_chip_replicas_one'
+          : 'chat.swarm_chip_replicas_other', { n: entry.swarm_replicas }));
+      } else if (kind === 'aspirational' && entry.total_shards > 0) {
+        bits.push(I18n.t('chat.swarm_chip_partial', {
+          covered: entry.shards_covered,
+          total: entry.total_shards
+        }));
+      }
+      meta.textContent = bits.join(' \u00b7 ');
+    }
+    chip.appendChild(meta);
+
+    chip.addEventListener('click', function() {
+      _handleCatalogChipClick(entry, kind);
+    });
+
+    return chip;
+  }
+
+  function _handleCatalogChipClick(entry, kind) {
+    // Candidate: route to HF browse pre-filtered to this repo so the
+    // user picks the quant variant (we never auto-pick \u2014 preserves the
+    // existing user-controlled adoption flow).
+    if (kind === 'candidate' && entry.hf_repo_id) {
+      if (App.ui && App.ui.openModelBrowser) {
+        App.ui.openModelBrowser(entry.hf_repo_id);
+      }
+      return;
+    }
+    // Serveable / Aspirational: select the model. Aspirational fires
+    // the same path but the inference will queue while the missing
+    // shards download (or surfaces a clearer error if they're not yet
+    // available). The session creates lazily on first send.
+    var modelId = entry.model_id;
+    if (!modelId) return;
+    if (App.models && App.models.selectDropdown) {
+      App.models.selectDropdown(modelId);
+    }
+    if (App.chat && App.chat.newSession) {
+      App.chat.newSession();
+    }
+    if (App.ui && App.ui.switchTab) {
+      App.ui.switchTab('chat');
+    }
   }
 
   function autoResizeInput() {

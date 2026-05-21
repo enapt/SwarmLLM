@@ -37,6 +37,11 @@ pub enum WishlistStatus {
     /// Some shards exist on the network but coverage is incomplete.
     /// Surfaced so the user sees "the swarm is working on this".
     Aspirational,
+    /// HF trending model that no peer is hosting yet. One-click adopt
+    /// path — opens the HF browse view filtered to this repo so the
+    /// user picks the quant variant. Distinguishes from `Blocked`
+    /// (gated) and `Aspirational` (partial coverage in progress).
+    Candidate,
     /// Even with everyone helping, no individual node has the VRAM/disk
     /// to host. Effectively unreachable for this swarm size; we still
     /// show it so the user understands the upper bound.
@@ -59,6 +64,7 @@ impl WishlistStatus {
             Self::Hosting => "wishlist.status.hosting",
             Self::Serveable => "wishlist.status.serveable",
             Self::Aspirational => "wishlist.status.aspirational",
+            Self::Candidate => "wishlist.status.candidate",
             Self::Unreachable => "wishlist.status.unreachable",
             Self::Blocked => "wishlist.status.blocked",
         }
@@ -100,6 +106,18 @@ pub struct WishlistEntry {
     /// Whether THIS node hosts at least one shard. Drives the "your
     /// contribution" pill on the entry card.
     pub hosted_by_us: bool,
+    /// HF repo_id for `Candidate` entries (None for everything else).
+    /// Frontend uses this to deep-link the user into the HF browse
+    /// view pre-filtered to the repo so they can pick the quant
+    /// variant. Other statuses leave this empty because the
+    /// authoritative model identity is `model_id`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hf_repo_id: Option<String>,
+    /// Free-form capability tokens for `Candidate` entries (chat /
+    /// code / vision / multilingual / reasoning). Sourced from
+    /// HfWatcher's `task_tags`. Empty for non-Candidate entries.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub task_tags: Vec<String>,
 }
 
 /// The full wishlist — ranked, capped at MAX_ENTRIES.
@@ -382,6 +400,12 @@ pub fn compute_wishlist(state: &SharedState) -> Wishlist {
             WishlistStatus::Blocked => {
                 why_tags.push("wishlist.why.needs_review".to_string());
             }
+            // Unreachable here is the registry-walking loop, where status
+            // is one of the four computed branches above — Candidate is
+            // only built later from the trending feed and never lands in
+            // this match arm. Tag inert so the exhaustiveness check stays
+            // honest.
+            WishlistStatus::Candidate => {}
         }
 
         // Region-coverage tag — if we have a region but no holder of
@@ -422,7 +446,79 @@ pub fn compute_wishlist(state: &SharedState) -> Wishlist {
             shards_covered,
             total_shards,
             hosted_by_us,
+            hf_repo_id: None,
+            task_tags: Vec::new(),
         });
+    }
+
+    // Candidate entries: HF trending repos the swarm hasn't picked up
+    // yet. Lets the user see "popular models the swarm could adopt"
+    // without having to navigate to the Search subtab. One click on a
+    // Candidate card opens the HF browse view pre-filtered to that
+    // repo so the user picks the quant variant (we never auto-pick).
+    //
+    // Dedup against the registry: any repo already represented by a
+    // local hf_sources entry is excluded — it's already in the loop
+    // above with a real status.
+    {
+        let mut have_repos: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for src in state.models.hf_sources.iter() {
+            have_repos.insert(src.value().repo_id.clone());
+        }
+        // Cap how many Candidate entries we add so they don't drown
+        // out real (locally-known) entries. The frontend renders a
+        // distinct section anyway, but the global MAX_WISHLIST_ENTRIES
+        // truncate still applies after sorting.
+        const MAX_CANDIDATE_ENTRIES: usize = 24;
+        let mut candidate_count = 0usize;
+        for entry in &trending_snapshot.entries {
+            if candidate_count >= MAX_CANDIDATE_ENTRIES {
+                break;
+            }
+            if have_repos.contains(&entry.repo_id) {
+                continue;
+            }
+            // Score: HF downloads on a log scale (matches the boost
+            // helper above). Trusted publishers get a flat +10 bonus
+            // so curator-released models rank above randoms with
+            // similar download counts.
+            let log = ((entry.downloads.max(1)) as f64).log10();
+            let normalised = (log / 7.0).clamp(0.0, 1.0);
+            let mut cand_score = 60.0 * normalised;
+            let mut why_tags: Vec<String> = vec!["wishlist.why.popular_on_hf".to_string()];
+            if crate::model::huggingface::is_trusted_publisher(&entry.repo_id) {
+                cand_score += 10.0;
+                why_tags.push("wishlist.why.trusted_publisher".to_string());
+            }
+            why_tags.push("wishlist.why.candidate_one_click".to_string());
+
+            let display_name = entry
+                .repo_id
+                .split('/')
+                .next_back()
+                .unwrap_or(&entry.repo_id)
+                .to_string();
+
+            entries.push(WishlistEntry {
+                // Synthetic key so the frontend can dedup across renders
+                // without colliding with real model_ids.
+                model_id: format!("hf-candidate:{}", entry.repo_id),
+                display_name,
+                status: WishlistStatus::Candidate,
+                score: cand_score.clamp(0.0, 100.0).round() as u32,
+                why_tags,
+                swarm_replicas: 0,
+                target_replicas: recommended_replica_target(online_node_count, 0.0),
+                size_mb: 0,
+                vram_required_mb: 0,
+                shards_covered: 0,
+                total_shards: 0,
+                hosted_by_us: false,
+                hf_repo_id: Some(entry.repo_id.clone()),
+                task_tags: entry.task_tags.clone(),
+            });
+            candidate_count += 1;
+        }
     }
 
     // Sort: highest score first, then biggest model (proxy for
@@ -502,6 +598,56 @@ mod tests {
         assert_eq!(
             WishlistStatus::Aspirational.i18n_key(),
             "wishlist.status.aspirational"
+        );
+        assert_eq!(
+            WishlistStatus::Candidate.i18n_key(),
+            "wishlist.status.candidate"
+        );
+    }
+
+    /// A Candidate entry serialises with `hf_repo_id` populated and a
+    /// synthetic `hf-candidate:` model_id. Frontend uses both to
+    /// route the click handler.
+    #[test]
+    fn candidate_entry_round_trip() {
+        let e = WishlistEntry {
+            model_id: "hf-candidate:bartowski/Mistral-7B".into(),
+            display_name: "Mistral-7B".into(),
+            status: WishlistStatus::Candidate,
+            score: 70,
+            why_tags: vec!["wishlist.why.popular_on_hf".into()],
+            swarm_replicas: 0,
+            target_replicas: 2,
+            size_mb: 0,
+            vram_required_mb: 0,
+            shards_covered: 0,
+            total_shards: 0,
+            hosted_by_us: false,
+            hf_repo_id: Some("bartowski/Mistral-7B".into()),
+            task_tags: vec!["chat".into()],
+        };
+        let json = serde_json::to_value(&e).unwrap();
+        assert_eq!(json["status"], "candidate");
+        assert_eq!(json["hf_repo_id"], "bartowski/Mistral-7B");
+        assert_eq!(json["task_tags"][0], "chat");
+        let round: WishlistEntry = serde_json::from_value(json).unwrap();
+        assert_eq!(round.status, WishlistStatus::Candidate);
+    }
+
+    /// hf_repo_id and task_tags are omitted from the wire for non-Candidate
+    /// entries (skip_serializing_if) — keeps the payload small for the
+    /// common case.
+    #[test]
+    fn non_candidate_entry_omits_hf_fields() {
+        let e = WishlistEntry::default();
+        let json = serde_json::to_value(&e).unwrap();
+        assert!(
+            json.get("hf_repo_id").is_none(),
+            "hf_repo_id should not serialise when None: {json}"
+        );
+        assert!(
+            json.get("task_tags").is_none(),
+            "task_tags should not serialise when empty: {json}"
         );
     }
 }

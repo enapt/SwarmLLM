@@ -1238,6 +1238,27 @@ pub(crate) async fn dispatch_network_messages(
                                                 cap = MAX_HF_SOURCES,
                                                 "HfSourceGossip dropped — hf_sources at capacity"
                                             );
+                                            // R141: throttled activity event so the dashboard
+                                            // surfaces "we're missing models" instead of silently
+                                            // dropping. fetch_add is per-process; first drop +
+                                            // every 50th after fires an event — caps log/UI noise
+                                            // when a malicious peer floods unique model_ids.
+                                            use std::sync::atomic::{AtomicU64, Ordering};
+                                            static DROP_COUNTER: AtomicU64 = AtomicU64::new(0);
+                                            let prev = DROP_COUNTER.fetch_add(1, Ordering::Relaxed);
+                                            if prev == 0 || prev % 50 == 0 {
+                                                shared_state.emit_activity(
+                                                    crate::daemon::state::ActivityEvent::new(
+                                                        "capacity",
+                                                        "hf_sources_cap_reached",
+                                                        format!(
+                                                            "Discovered model catalogue is full ({MAX_HF_SOURCES} entries). New models from peers are being dropped — remove unused models in Settings to free slots."
+                                                        ),
+                                                    )
+                                                    .with_detail_num(MAX_HF_SOURCES as i64)
+                                                    .with_toast("warning", 6000),
+                                                );
+                                            }
                                             continue;
                                         }
                                         if !shared_state.models.hf_sources.contains_key(&mid) {
