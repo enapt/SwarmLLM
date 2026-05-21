@@ -219,6 +219,21 @@ jobs:
           # targeting RTX 3060+, A100, H100, etc. Set for any CUDA build —
           # leaving it empty panics bindgen_cuda with `ParseIntError { kind: Empty }`.
           CUDA_COMPUTE_CAP: ${{ (matrix.cuda_linux || matrix.cuda_windows) && '80' || '' }}
+          # Windows GPU: serialize the CMake build for llama-cpp-sys-2's
+          # Vulkan backend. `vulkan-shaders-gen` is added by llama.cpp via
+          # CMake's `ExternalProject_Add` without a sufficient declared
+          # dependency on its own configure step, so MSBuild's default
+          # parallel build (parallel=4) races the install rule ahead of
+          # configure and fails with:
+          #   CMake error : Not a file: cmake_install.cmake
+          #   error MSB8066: Custom build for 'vulkan-shaders-gen-install.rule
+          # Setting CMAKE_BUILD_PARALLEL_LEVEL=1 forces sequential build
+          # for the cmake-rs invocation (which threads this var through to
+          # `cmake --build`), eliminating the race. Cost is ~5-10 extra
+          # minutes on the Windows GPU build; correctness >> wall-time on a
+          # release path. Other matrix cells leave the variable unset so
+          # they keep the default parallel build.
+          CMAKE_BUILD_PARALLEL_LEVEL: ${{ matrix.cuda_windows && '1' || '' }}
 
       - name: Package archive (Linux/macOS)
         if: runner.os != 'Windows'
@@ -340,8 +355,18 @@ jobs:
         run: |
           set -euo pipefail
           cargo install cargo-generate-rpm --locked 2>/dev/null || true
-          cargo generate-rpm
-          # Same naming rule as the .deb build — RPM tools strip the "v".
+          # RPM Version fields disallow `-`, which Cargo's SemVer
+          # pre-release syntax uses (e.g. `0.2.0-alpha`). RPM convention
+          # uses `~` for prerelease markers (sorts BEFORE the
+          # corresponding release version: 0.2.0~alpha < 0.2.0). Map
+          # `-` → `~` for cargo-generate-rpm's --set-metadata override
+          # without touching Cargo.toml. Stable releases (`0.2.0`) are a
+          # no-op for the substitution.
+          CARGO_VERSION=$(awk -F'"' '/^version = / {print $2; exit}' Cargo.toml)
+          RPM_VERSION="${CARGO_VERSION//-/~}"
+          cargo generate-rpm --set-metadata "version = '${RPM_VERSION}'"
+          # Filename keeps the SemVer `-` form (tester-facing artefact
+          # name; matches the .deb / archive convention).
           VERSION="${GITHUB_REF_NAME#v}"
           RPM="swarmllm_${VERSION}.x86_64.rpm"
           cp target/generate-rpm/*.rpm "$RPM"
