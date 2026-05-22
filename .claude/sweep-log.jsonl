@@ -1348,3 +1348,4 @@
 {"file":"frontend/js/components/pool.js","line":199,"kind":"json_wire_format_drift","summary":"renderActivePool read peer_count; field is peers — R140 maturity fade never fired","status":"fixed","date":"2026-05-22"}
 {"file":"src/model/registry.rs","line":463,"kind":"missing_test","summary":"added test for last-holder tombstone cleanup (R142.9 remove_if path)","status":"fixed","date":"2026-05-22"}
 {"file":"src/api/anthropic/mod.rs","line":610,"kind":"missing_test","summary":"added 2 tests for MessageDelta+stop_sequence wire format (R142.10)","status":"fixed","date":"2026-05-22"}
+{"file":"frontend/js/components/auto-manage-status.js","line":46,"kind":"json_wire_format_drift","summary":"PascalCase state strings never match backend snake_case — activeDownloads always 0","status":"fixed","date":"2026-05-22"}

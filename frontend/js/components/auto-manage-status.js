@@ -40,13 +40,19 @@
     if (Array.isArray(acquisitions)) {
       acquisitions.forEach(function(a) {
         if (!a || !a.state) return;
-        // Count in-progress downloads: state is an object {Downloading: {...}} or string "Downloading"
+        // AcquisitionState is `#[serde(rename_all = "snake_case")]` in the
+        // backend (src/model/acquisition.rs). The variants serialize as:
+        //   string  "awaiting_manifest"  — waiting for manifest gossip
+        //   string  "downloading"        — actively pulling shards
+        //   string  "complete"           — done (don't count)
+        //   object  {"failed": {...}}    — terminal failure (don't count)
+        // Prior code matched PascalCase ('Downloading', 'Queued',
+        // 'Verifying') which never fires, so the orb always read zero.
         var s = a.state;
         if (typeof s === 'string') {
-          if (s === 'Downloading' || s === 'Queued' || s === 'Verifying') active++;
-        } else if (typeof s === 'object') {
-          if ('Downloading' in s || 'Queued' in s || 'Verifying' in s) active++;
+          if (s === 'downloading' || s === 'awaiting_manifest') active++;
         }
+        // No object-form active states; {"failed": {...}} is terminal.
       });
     }
     state.activeDownloads = active;
