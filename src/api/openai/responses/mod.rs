@@ -676,7 +676,16 @@ async fn run_background_inference(
     // Mark in_progress before running so pollers see the transition.
     if let Ok(Some(mut rec)) = store::load(&state.db, &response_id) {
         rec.response.status = ResponseStatus::InProgress;
-        let _ = store::store(&state.db, &rec);
+        if let Err(e) = store::store(&state.db, &rec) {
+            // Was discarded silently; pollers then saw stale `queued`
+            // forever on a DB-write failure with no operator visibility.
+            // Mirrors the warn already in place on the finalize-write path.
+            tracing::warn!(
+                error = %e,
+                id = %response_id,
+                "background in_progress store failed",
+            );
+        }
     }
 
     let finalize = |status: ResponseStatus,

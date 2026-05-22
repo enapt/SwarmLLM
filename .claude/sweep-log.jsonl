@@ -1331,3 +1331,14 @@
 {"file":"src/inference/router/mod.rs","line":595,"kind":"orphan_task","summary":"batch tokio::spawn discards JoinHandle — matches single-request pattern","status":"wontfix","date":"2026-05-22"}
 {"file":"docs/book/src/configuration/reference.md","line":70,"kind":"stale_doc","summary":"streaming_* config knobs (R139) doc rows missing","status":"deferred","date":"2026-05-22"}
 {"file":"docs/book/src/architecture/networking.md","line":41,"kind":"stale_doc","summary":"swarmpool:// v2 invite code (R140) doc missing","status":"deferred","date":"2026-05-22"}
+{"file":"src/model/auto_manage/manager.rs","line":99,"kind":"toctou","summary":"sweep_stalled_p2p_permits blind-remove aborted concurrent fresh transfers","status":"fixed","date":"2026-05-22"}
+{"file":"src/inference/process_pool.rs","line":1445,"kind":"wrong_error_variant","summary":"Internal → ServiceUnavailable for worker-died forward path","status":"fixed","date":"2026-05-22"}
+{"file":"src/inference/process_pool.rs","line":1605,"kind":"wrong_error_variant","summary":"Internal → ServiceUnavailable for worker-died batch forward","status":"fixed","date":"2026-05-22"}
+{"file":"src/inference/process_pool.rs","line":1679,"kind":"wrong_error_variant","summary":"Internal → ServiceUnavailable for worker-died mid-generate","status":"fixed","date":"2026-05-22"}
+{"file":"src/inference/process_pool.rs","line":489,"kind":"wrong_error_variant","summary":"batch_scheduler_loop fan-out re-wrap Internal → ServiceUnavailable","status":"fixed","date":"2026-05-22"}
+{"file":"src/api/openai/streaming.rs","line":111,"kind":"discarded_error","summary":"local streaming generate error logged instead of silently dropping","status":"fixed","date":"2026-05-22"}
+{"file":"src/api/openai/responses/mod.rs","line":679,"kind":"discarded_error","summary":"in_progress store error logged instead of swallowed","status":"fixed","date":"2026-05-22"}
+{"file":"src/api/anthropic/handlers.rs","line":286,"kind":"streaming_protocol","summary":"anthropic_split_stream now propagates matched_stop_sequence","status":"fixed","date":"2026-05-22"}
+{"file":"src/inference/vision.rs","line":814,"kind":"vlm_bug","summary":"ffn_up/ffn_down possibly inverted — needs VLM integration test before swap","status":"deferred","date":"2026-05-22"}
+{"file":"src/inference/chat_template/mod.rs","line":106,"kind":"chat_template_drift","summary":"LLaVA fallback chain when template eval fails — needs verification","status":"deferred","date":"2026-05-22"}
+{"file":"src/inference/layers/qwen35.rs","line":51,"kind":"prod_unwrap","summary":"Defensive unwrap; loader enforces invariant — wontfix per existing analysis","status":"wontfix","date":"2026-05-22"}

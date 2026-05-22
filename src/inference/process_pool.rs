@@ -484,9 +484,16 @@ async fn dispatch_scheduler_group(pool: &Arc<ModelProcessPool>, msgs: Vec<BatchS
             }
         }
         Err(e) => {
-            let msg = e.to_string();
+            // SwarmError isn't Clone, so we can't propagate `e` to each
+            // tx. The vast-majority batch failure cause is worker death
+            // (subprocess closed IPC) — ServiceUnavailable is correct
+            // for that. Was previously Internal which mapped to 500 and
+            // misled operators about the failure class.
+            let err_str = e.to_string();
             for tx in resp_txs {
-                let _ = tx.send(Err(SwarmError::Internal(format!("batch failed: {msg}"))));
+                let _ = tx.send(Err(SwarmError::ServiceUnavailable(format!(
+                    "batch failed: {err_str}"
+                ))));
             }
         }
     }
@@ -1441,8 +1448,10 @@ impl ModelProcessPool {
                 },
                 None => {
                     // Reader actor closed the channel — worker died while we were waiting.
+                    // Subprocess lifecycle failure → ServiceUnavailable (per
+                    // .claude/rules/completeness.md); Internal is for code bugs.
                     self.workers.remove(&model_id);
-                    return Err(SwarmError::Internal(
+                    return Err(SwarmError::ServiceUnavailable(
                         "worker closed connection before reply".into(),
                     ));
                 }
@@ -1601,8 +1610,10 @@ impl ModelProcessPool {
                     }
                     Some(_) => continue,
                     None => {
+                        // Subprocess lifecycle failure → ServiceUnavailable
+                        // (mirrors the single-forward arm above).
                         self.workers.remove(&model_id);
-                        return Err(SwarmError::Internal(
+                        return Err(SwarmError::ServiceUnavailable(
                             "worker closed connection during batch forward".into(),
                         ));
                     }
@@ -1675,8 +1686,11 @@ impl ModelProcessPool {
             let (msg, _) = match resp_rx.recv().await {
                 Some(v) => v,
                 None => {
+                    // Subprocess lifecycle failure → ServiceUnavailable.
+                    // Was Internal; operators saw 500s here and misattributed
+                    // them to code bugs rather than worker crashes.
                     self.workers.remove(model_id);
-                    return Err(SwarmError::Internal(
+                    return Err(SwarmError::ServiceUnavailable(
                         "worker closed connection mid-generate".into(),
                     ));
                 }

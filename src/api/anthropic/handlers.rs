@@ -279,10 +279,16 @@ pub(super) async fn anthropic_split_stream(
 
         let mut total_output_tokens = 0u32;
         let mut stop_reason = "max_tokens".to_string();
+        let mut matched_stop_sequence: Option<String> = None;
 
         while let Some(event) = token_rx.recv().await {
             if let Some(fr) = &event.finish_reason {
-                stop_reason = map_finish_reason(fr).to_string();
+                stop_reason = super::convert::map_finish_reason_with_match(
+                    fr,
+                    event.matched_stop_sequence.as_deref(),
+                )
+                .to_string();
+                matched_stop_sequence = event.matched_stop_sequence.clone();
                 break;
             }
             total_output_tokens += 1;
@@ -298,7 +304,13 @@ pub(super) async fn anthropic_split_stream(
             }
         }
 
-        send_sse_epilogue(&sse_tx, stop_reason, total_output_tokens).await;
+        send_sse_epilogue_with_stop(
+            &sse_tx,
+            stop_reason,
+            matched_stop_sequence,
+            total_output_tokens,
+        )
+        .await;
     });
 
     Ok(build_anthropic_sse_response(sse_rx))

@@ -96,7 +96,20 @@ pub(super) fn sweep_stalled_p2p_permits(state: &SharedState) {
         }
     }
     for sid in stalled {
-        state.models.p2p_download_permits.remove(&sid);
+        // Re-check the timestamp under the entry-lock via remove_if: if a
+        // concurrent transfer completion + restart inserted a fresh permit
+        // between the iter pass above and this point (the auto_manage tick
+        // and the network-manager completion handler run on different
+        // tasks), the new timestamp won't satisfy the cutoff and we leave
+        // it alone. Without this guard the blind remove would silently
+        // abort an in-progress legitimate transfer.
+        let removed = state
+            .models
+            .p2p_download_permits
+            .remove_if(&sid, |_, (_, ts)| now.duration_since(*ts) > cutoff);
+        if removed.is_none() {
+            continue;
+        }
         state.models.shard_p2p_failed.insert(sid.clone());
         if let Some(mut entry) = state.models.acquisition_progress.get_mut(&sid.model_id) {
             entry.shard_progress.remove(&sid.index);

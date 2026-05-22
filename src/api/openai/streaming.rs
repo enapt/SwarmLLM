@@ -108,7 +108,7 @@ pub fn spawn_split_stream(
     let model_id = model_id.clone();
     let layer_range = meta.layer_range;
     tokio::spawn(async move {
-        let _ = pool
+        if let Err(e) = pool
             .generate(
                 &model_id,
                 layer_range,
@@ -118,7 +118,19 @@ pub fn spawn_split_stream(
                 None,
                 Some(token_tx),
             )
-            .await;
+            .await
+        {
+            // Streaming channel closes when this scope ends. Without the
+            // log the SSE stream silently truncates with no operator-
+            // visible diagnostic — workers crashing mid-stream looked
+            // like a clean client disconnect.
+            tracing::warn!(
+                error = %e,
+                model = %model_id,
+                request_id = %rid,
+                "DIAG: local streaming generate failed",
+            );
+        }
     });
     Some(token_rx)
 }
