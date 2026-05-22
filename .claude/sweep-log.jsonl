@@ -1256,3 +1256,6 @@
 {"file":"frontend/js/components/pool.js","line":85,"kind":"copy_paste","summary":"v2/legacy pool-code sniff+normalise duplicated at 2 entry points","status":"fixed","date":"2026-05-22"}
 {"file":"CLAUDE.md","line":135,"kind":"stale_doc","summary":"JS component count 17 vs actual 18; 26 vs actual 27","status":"fixed","date":"2026-05-22"}
 {"file":"CLAUDE.md","line":143,"kind":"stale_doc","summary":"i18n key count 1169 vs actual 1170; 1171 entries vs actual 1172","status":"fixed","date":"2026-05-22"}
+{"file":"src/inference/hedging.rs","line":95,"kind":"unbounded_collection","summary":"HedgeTracker.stats DashMap had no eviction — departed peers leave dead entries","status":"fixed","date":"2026-05-22"}
+{"file":"src/inference/prefetch.rs","line":223,"kind":"unbounded_collection","summary":"PrefetchOrchestrator.evict_idle defined but never called","status":"fixed","date":"2026-05-22"}
+{"file":"CLAUDE.md","line":396,"kind":"stale_doc","summary":"R139 TTL-sweep follow-on listed as remaining; actually wired since R139","status":"fixed","date":"2026-05-22"}
