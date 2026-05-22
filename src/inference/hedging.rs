@@ -49,6 +49,12 @@ pub struct HedgeStats {
     /// Number of samples seen so far. Used to gate hedging until we
     /// have enough samples to estimate variance meaningfully.
     pub samples: u32,
+    /// Wall-clock ms of the last `observe` call. Drives stale-entry
+    /// eviction in `HedgeTracker::evict_stale` — entries for peers
+    /// that have left the swarm stop receiving observations and grow
+    /// stale, accumulating one `(model × segment × holder)` triple
+    /// per departed peer.
+    pub last_observed_at_ms: u64,
 }
 
 impl Default for HedgeStats {
@@ -57,6 +63,7 @@ impl Default for HedgeStats {
             ewma_ms: 0.0,
             ewma_var: 0.0,
             samples: 0,
+            last_observed_at_ms: 0,
         }
     }
 }
@@ -79,6 +86,7 @@ impl HedgeStats {
             self.ewma_var = (1.0 - Self::ALPHA) * self.ewma_var + Self::ALPHA * sq;
         }
         self.samples = self.samples.saturating_add(1);
+        self.last_observed_at_ms = now_ms();
     }
 
     /// Rough p99 estimate: mean + 3σ. Conservative on heavy-tail
@@ -207,6 +215,25 @@ impl HedgeTracker {
                     .store(0, std::sync::atomic::Ordering::Release);
             }
         }
+    }
+
+    /// Drop per-(model, segment, holder) entries whose last observation
+    /// is older than `max_age_ms`. Called periodically by the daemon
+    /// to bound memory — peers that have left the swarm stop receiving
+    /// observations and would otherwise accumulate one entry per
+    /// (model × segment) they ever touched. Returns the number of
+    /// entries evicted.
+    pub fn evict_stale(&self, now_ms: u64, max_age_ms: u64) -> usize {
+        let before = self.stats.len();
+        self.stats.retain(|_, s| {
+            if s.last_observed_at_ms == 0 {
+                // Default entry with no observations — keep; the next
+                // call to `observe` will stamp it.
+                return true;
+            }
+            now_ms.saturating_sub(s.last_observed_at_ms) < max_age_ms
+        });
+        before - self.stats.len()
     }
 
     /// Current snapshot of hedge metrics — exposed via /api/admin/stats
@@ -398,5 +425,47 @@ mod tests {
         assert_eq!(m.decisions, 3);
         assert_eq!(m.hedges_fired, 2);
         assert_eq!(m.hedges_won, 1);
+    }
+
+    #[test]
+    fn evict_stale_drops_aged_entries() {
+        let t = HedgeTracker::new();
+        // Observe two keys, then synthetically backdate the first's
+        // `last_observed_at_ms` so it looks aged.
+        t.observe(key(1), 100.0);
+        t.observe(key(2), 100.0);
+        // Backdate key(1) to 2h ago — past the 1h eviction horizon used
+        // in HealthMonitor.
+        let now = now_ms();
+        let two_hours_ago = now.saturating_sub(2 * 3_600_000);
+        if let Some(mut e) = t.stats.get_mut(&key(1)) {
+            e.last_observed_at_ms = two_hours_ago;
+        }
+        let evicted = t.evict_stale(now, 3_600_000);
+        assert_eq!(evicted, 1);
+        assert!(t.get(&key(1)).is_none());
+        assert!(t.get(&key(2)).is_some());
+    }
+
+    #[test]
+    fn evict_stale_preserves_fresh_observations() {
+        let t = HedgeTracker::new();
+        t.observe(key(1), 100.0);
+        let now = now_ms();
+        // Eviction with a long max_age — fresh entry must remain.
+        let evicted = t.evict_stale(now, 3_600_000);
+        assert_eq!(evicted, 0);
+        assert!(t.get(&key(1)).is_some());
+    }
+
+    #[test]
+    fn observe_stamps_last_observed_at_ms() {
+        let t = HedgeTracker::new();
+        let before = now_ms();
+        t.observe(key(1), 100.0);
+        let after = now_ms();
+        let stats = t.get(&key(1)).unwrap();
+        assert!(stats.last_observed_at_ms >= before);
+        assert!(stats.last_observed_at_ms <= after.saturating_add(1));
     }
 }

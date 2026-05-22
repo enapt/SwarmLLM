@@ -44,6 +44,19 @@ const PING_INTERVAL: Duration = Duration::from_secs(30);
 /// Number of missed pings before a peer is considered dead.
 const MAX_MISSED_PINGS: u32 = 3;
 
+/// Drop `HedgeTracker.stats` entries that haven't seen a new observation
+/// in this many ms. Departed peers leave dead entries that would otherwise
+/// accumulate one per (model × segment) they ever served. 1h matches the
+/// scale at which a peer being gone is treated as "really gone" by the
+/// scheduler — short reconnects don't lose useful latency history.
+const HEDGE_STATS_MAX_AGE_MS: u64 = 3_600_000;
+
+/// Drop `PrefetchOrchestrator.histories` entries whose last activity is
+/// older than this. Matches the KV-cache session expiry (10 min): a
+/// session that has been idle longer than the KV-cache TTL has no usable
+/// cache to prefetch against anyway.
+const PREFETCH_HISTORY_MAX_IDLE_MS: u64 = 600_000;
+
 impl HealthMonitor {
     pub fn new(
         shared_state: Arc<SharedState>,
@@ -145,6 +158,40 @@ impl HealthMonitor {
                             target: "swarmllm::health::monitor",
                             evicted, ttl_secs = chunk_ttl,
                             "Swept stale chunk assemblies"
+                        );
+                    }
+                    // R142 — bound SWARM-SPEC Layer 2/3 in-memory state.
+                    // `HedgeTracker.stats` accumulates one entry per
+                    // (model × segment × holder) triple ever observed; peers
+                    // that have left the swarm stop receiving observations
+                    // but their entries stick. `PrefetchOrchestrator.histories`
+                    // grows one entry per unique session id (UUID — unbounded
+                    // cardinality). Both have eviction methods; wire them here.
+                    let now_ms = crate::types::unix_now_secs().saturating_mul(1000);
+                    let hedge_evicted = self
+                        .shared_state
+                        .metrics
+                        .hedge_tracker
+                        .evict_stale(now_ms, HEDGE_STATS_MAX_AGE_MS);
+                    if hedge_evicted > 0 {
+                        tracing::debug!(
+                            target: "swarmllm::health::monitor",
+                            evicted = hedge_evicted,
+                            max_age_ms = HEDGE_STATS_MAX_AGE_MS,
+                            "Evicted stale hedge-tracker entries"
+                        );
+                    }
+                    let prefetch_evicted = self
+                        .shared_state
+                        .metrics
+                        .prefetch_orchestrator
+                        .evict_idle(now_ms, PREFETCH_HISTORY_MAX_IDLE_MS);
+                    if prefetch_evicted > 0 {
+                        tracing::debug!(
+                            target: "swarmllm::health::monitor",
+                            evicted = prefetch_evicted,
+                            max_idle_ms = PREFETCH_HISTORY_MAX_IDLE_MS,
+                            "Evicted idle prefetch session histories"
                         );
                     }
                     // Suspend idle Claude Code sessions and warn about upcoming timeouts
