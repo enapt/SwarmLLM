@@ -10,22 +10,6 @@ impl AutoShardManager {
         config: &crate::config::AutoManageConfig,
         local_node_id: &NodeId,
     ) -> u64 {
-        let max_bytes = if config.max_storage_mb > 0 {
-            config
-                .max_storage_mb
-                .saturating_mul(1024)
-                .saturating_mul(1024)
-        } else {
-            // Fall back to global max_disk_mb, using 50% for auto-manage
-            self.shared_state
-                .config
-                .resources
-                .max_disk_mb
-                .saturating_mul(1024)
-                .saturating_mul(1024)
-                / 2
-        };
-
         // Sum up bytes of shards we already hold (O(local_shards) via reverse index)
         let (current_bytes, current_shard_count) = self.local_shard_bytes(local_node_id);
 
@@ -34,13 +18,11 @@ impl AutoShardManager {
             return 0;
         }
 
-        // Scale budget by ContributionMode
-        let effective_max = match self.shared_state.config.node.contribution {
-            swarmllm_types::ContributionMode::Minimal => max_bytes / 4,
-            swarmllm_types::ContributionMode::Moderate => max_bytes,
-            swarmllm_types::ContributionMode::Maximum => max_bytes.saturating_mul(3) / 2,
-        };
-
+        let effective_max = super::compute_budget_max_bytes(
+            config.max_storage_mb,
+            self.shared_state.config.resources.max_disk_mb,
+            &self.shared_state.config.node.contribution,
+        );
         effective_max.saturating_sub(current_bytes)
     }
 

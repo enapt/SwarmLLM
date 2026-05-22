@@ -53,3 +53,33 @@ pub(crate) fn shard_size_exact(path: &std::path::Path, expected_size: u64) -> bo
             .map(|m| m.len() == expected_size)
             .unwrap_or(false)
 }
+
+/// Compute the auto-manage byte budget after applying the
+/// `ContributionMode` scaling. Source of truth for both the
+/// auto-manage download scheduler (`scoring::remaining_budget_bytes`)
+/// and the admin storage-breakdown API (`api::admin::storage_breakdown`)
+/// — both used to mirror this body with a brittle comment pointing at
+/// the other. If the scaling factors change here, both sides pick it up.
+///
+/// `auto_max_storage_mb=0` falls back to half of `resources.max_disk_mb`.
+pub(crate) fn compute_budget_max_bytes(
+    auto_max_storage_mb: u64,
+    resources_max_disk_mb: u64,
+    contribution: &swarmllm_types::ContributionMode,
+) -> u64 {
+    let raw_max_bytes = if auto_max_storage_mb > 0 {
+        auto_max_storage_mb
+            .saturating_mul(1024)
+            .saturating_mul(1024)
+    } else {
+        resources_max_disk_mb
+            .saturating_mul(1024)
+            .saturating_mul(1024)
+            / 2
+    };
+    match contribution {
+        swarmllm_types::ContributionMode::Minimal => raw_max_bytes / 4,
+        swarmllm_types::ContributionMode::Moderate => raw_max_bytes,
+        swarmllm_types::ContributionMode::Maximum => raw_max_bytes.saturating_mul(3) / 2,
+    }
+}

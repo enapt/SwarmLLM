@@ -1259,3 +1259,8 @@
 {"file":"src/inference/hedging.rs","line":95,"kind":"unbounded_collection","summary":"HedgeTracker.stats DashMap had no eviction — departed peers leave dead entries","status":"fixed","date":"2026-05-22"}
 {"file":"src/inference/prefetch.rs","line":223,"kind":"unbounded_collection","summary":"PrefetchOrchestrator.evict_idle defined but never called","status":"fixed","date":"2026-05-22"}
 {"file":"CLAUDE.md","line":396,"kind":"stale_doc","summary":"R139 TTL-sweep follow-on listed as remaining; actually wired since R139","status":"fixed","date":"2026-05-22"}
+{"file":"src/daemon/dispatch/layer_forward.rs","line":63,"kind":"unused_helper","summary":"manual local_shard_indices loop should use registry helper","status":"fixed","date":"2026-05-22"}
+{"file":"src/api/admin.rs","line":223,"kind":"duplicate_transform","summary":"storage_breakdown mirrors auto_manage::scoring budget computation","status":"fixed","date":"2026-05-22"}
+{"file":"CLAUDE.md","line":401,"kind":"stale_doc","summary":"R139 entry referenced nonexistent R142 round entry","status":"fixed","date":"2026-05-22"}
+{"file":"docs/ARCHITECTURE.md","line":68,"kind":"stale_doc","summary":"SharedState diagram missing listen_multiaddrs (R140)","status":"fixed","date":"2026-05-22"}
+{"file":"CLAUDE.md","line":397,"kind":"stale_doc","summary":"R139 microbench follow-on listed as remaining; bench_chunked_send shipped","status":"fixed","date":"2026-05-22"}

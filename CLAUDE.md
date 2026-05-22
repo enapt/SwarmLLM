@@ -394,11 +394,12 @@ documented and skipped it.
    to support chunking; that's tracked in FUTURE_WORK § Tier 4K remaining.
 
 Remaining for full Tier 4K close-out (small follow-ons): chunked-over-RR
-support, microbench in `examples/swarm_spec_bench.rs`, worker-side
-row-tiled output streaming (literal "true" Tier 4K, 3-4 weeks, deferred
-pending slow-WAN bench data that justifies fighting the SGLang result).
-The pending_activation_chunks TTL sweep landed in `health/monitor.rs`
-alongside R142 hedge/prefetch eviction (see R142 round entry).
+support, worker-side row-tiled output streaming (literal "true" Tier 4K,
+3-4 weeks, deferred pending slow-WAN bench data that justifies fighting
+the SGLang result). The pending_activation_chunks TTL sweep landed in
+`health/monitor.rs` alongside R142's hedge/prefetch eviction wiring.
+The chunked-send microbench (`bench_chunked_send`) shipped as part of
+`examples/swarm_spec_bench.rs`.
 
 1015 → 1030 lib tests (+15) and +4 swarmllm-types. Clippy clean default +
 features dev,claude-subscription. Detail: commits 11333f67..e32c0a5d.

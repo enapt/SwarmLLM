@@ -215,30 +215,14 @@ pub async fn storage_breakdown(State(state): State<AppState>) -> Json<serde_json
         }
     }
 
-    // What auto-manage will try to grow to. Mirrors the budget computation
-    // in `auto_manage::scoring::remaining_budget_bytes` — we don't call it
-    // directly because the helper is `pub(super)` and locking it down
-    // is the right architecture (no cross-module reach into auto-manage
-    // internals from the API layer).
-    let raw_auto_max_bytes = if config.auto_manage.max_storage_mb > 0 {
-        config
-            .auto_manage
-            .max_storage_mb
-            .saturating_mul(1024)
-            .saturating_mul(1024)
-    } else {
-        config
-            .resources
-            .max_disk_mb
-            .saturating_mul(1024)
-            .saturating_mul(1024)
-            / 2
-    };
-    let auto_target_bytes = match config.node.contribution {
-        ContributionMode::Minimal => raw_auto_max_bytes / 4,
-        ContributionMode::Moderate => raw_auto_max_bytes,
-        ContributionMode::Maximum => raw_auto_max_bytes.saturating_mul(3) / 2,
-    };
+    // What auto-manage will try to grow to. Shared with the scheduler
+    // via `model::auto_manage::compute_budget_max_bytes` so the two
+    // can't drift if the ContributionMode scaling changes.
+    let auto_target_bytes = crate::model::auto_manage::compute_budget_max_bytes(
+        config.auto_manage.max_storage_mb,
+        config.resources.max_disk_mb,
+        &config.node.contribution,
+    );
     let total_bytes = config
         .resources
         .max_disk_mb

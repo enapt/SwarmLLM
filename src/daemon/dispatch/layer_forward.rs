@@ -60,17 +60,9 @@ pub(super) async fn handle_layer_forward(
 
     // Figure out which shard indices we hold locally
     let local_node_id = shared_state.identity.node_id().clone();
-    let mut local_shard_indices: Vec<u32> = Vec::new();
-    for shard_info in &manifest.shards {
-        let shard_id = crate::types::ShardId {
-            model_id: model_id.clone(),
-            index: shard_info.index,
-        };
-        let holders = shared_state.model_registry.shard_holders(&shard_id);
-        if holders.contains(&local_node_id) {
-            local_shard_indices.push(shard_info.index);
-        }
-    }
+    let local_shard_indices = shared_state
+        .model_registry
+        .local_shard_indices_in(&manifest, &local_node_id);
 
     if local_shard_indices.is_empty() {
         send_error_result(

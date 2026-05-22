@@ -171,26 +171,39 @@ impl ModelRegistry {
     }
 
     /// Get the shard indices held locally by a node for a given model.
+    /// Convenience wrapper around `local_shard_indices_in` for call
+    /// sites that don't already have the manifest in scope.
     pub fn local_shard_indices(
         &self,
         model_id: &crate::types::ModelId,
         node_id: &NodeId,
     ) -> Vec<u32> {
         self.get_manifest(model_id)
-            .map(|m| {
-                m.shards
-                    .iter()
-                    .filter(|s| {
-                        let sid = ShardId {
-                            model_id: model_id.clone(),
-                            index: s.index,
-                        };
-                        self.shard_holders(&sid).contains(node_id)
-                    })
-                    .map(|s| s.index)
-                    .collect()
-            })
+            .map(|m| self.local_shard_indices_in(&m, node_id))
             .unwrap_or_default()
+    }
+
+    /// Filter the shards of an already-resolved manifest down to indices
+    /// held by `node_id`. Lets hot-path callers (per-token LayerForward)
+    /// reuse a manifest they already fetched rather than paying for a
+    /// second `get_manifest` clone.
+    pub fn local_shard_indices_in(
+        &self,
+        manifest: &crate::types::ModelManifest,
+        node_id: &NodeId,
+    ) -> Vec<u32> {
+        manifest
+            .shards
+            .iter()
+            .filter(|s| {
+                let sid = ShardId {
+                    model_id: manifest.id.clone(),
+                    index: s.index,
+                };
+                self.shard_holders(&sid).contains(node_id)
+            })
+            .map(|s| s.index)
+            .collect()
     }
 
     /// Merge holders discovered via DHT provider queries into the cache.

@@ -66,7 +66,8 @@ Single Rust binary, three simultaneous functions:
 │  │    pending_layer_results, pending_stream_result_    │  │
 │  │    routes, pending_prefix_kv_fetches,               │  │
 │  │    pending_activation_chunks (R139 Tier 4K),        │  │
-│  │    standalone_tokenizers (R136 L1/L3 follow-on)     │  │
+│  │    standalone_tokenizers (R136 L1/L3 follow-on),    │  │
+│  │    listen_multiaddrs (R140 pool invite v2)          │  │
 │  └────────────────────────────────────────────────────┘  │
 └──────────────────────────────────────────────────────────┘
 ```
