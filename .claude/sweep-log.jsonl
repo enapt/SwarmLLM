@@ -1280,3 +1280,13 @@
 {"file":"src/inference/pipeline/dsd.rs","line":114,"kind":"copy_paste","summary":"DSD/ngram_only_spec peer_id_for_segment resolution duplicated","status":"fixed","date":"2026-05-22"}
 {"file":"src/network/protocol/layer_result.rs","line":36,"kind":"copy_paste","summary":"UTF-8 char-boundary truncate block duplicated in encode_layer_result","status":"fixed","date":"2026-05-22"}
 {"file":"frontend/i18n/en.json","line":-1,"kind":"dead_i18n_key","summary":"netstatus.chip_shard_one/_other dead across 21 locales (no callers)","status":"fixed","date":"2026-05-22"}
+{"file":"src/config/inference.rs","line":533,"kind":"inconsistency","summary":"auto_switch_quants Default false vs serde default_true mismatch","status":"fixed","date":"2026-05-22"}
+{"file":"src/inference/kv_cache.rs","line":166,"kind":"lifecycle","summary":"register_multi_turn orphans old session in self.sessions on re-register","status":"fixed","date":"2026-05-22"}
+{"file":"src/model/huggingface/download.rs","line":119,"kind":"dos_alloc","summary":"size cap bypassed when Content-Length absent — streaming loop now checks too","status":"fixed","date":"2026-05-22"}
+{"file":"src/inference/hedging.rs","line":167,"kind":"ordering","summary":"Relaxed loads on counters that need to pair with Release stores in maybe_reset_window","status":"fixed","date":"2026-05-22"}
+{"file":"src/inference/prefetch.rs","line":179,"kind":"ordering","summary":"same Relaxed-load ordering bug as hedging.rs","status":"fixed","date":"2026-05-22"}
+{"file":"tests/integration/test_vram_eviction.rs","line":1,"kind":"stale_doc","summary":"filename test_vram_eviction.rs but file contains metrics/health tests","status":"fixed","date":"2026-05-22"}
+{"file":"frontend/js/i18n.js","line":117,"kind":"dead_js","summary":"I18n.onChange/getAvailableStrings + listeners[] never used","status":"fixed","date":"2026-05-22"}
+{"file":"src/network/manager/mod.rs","line":57,"kind":"undocumented_constant","summary":"SHARD_STALL_SECS/P2P_PERMIT_STALL_SECS coupling now cross-referenced","status":"fixed","date":"2026-05-22"}
+{"file":"python/swarmllm_client/admin.py","line":260,"kind":"api_drift","summary":"PoolClient missing R140 generate_code/join","status":"deferred","date":"2026-05-22"}
+{"file":"tests/integration/api_test.rs","line":12,"kind":"copy_paste","summary":"spawn_test_server/auth_client duplicated with test_metrics_health.rs across binaries","status":"deferred","date":"2026-05-22"}

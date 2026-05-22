@@ -9,7 +9,6 @@ var I18n = (function() {
   var fallback = {};
   var currentLang = '';
   var STORAGE_KEY = 'swarmllm_lang'; // raw string — i18n.js loads before state.js
-  var listeners = [];
 
   function detectLang(available) {
     var stored;
@@ -94,7 +93,6 @@ var I18n = (function() {
       currentLang = 'en';
       try { localStorage.setItem(STORAGE_KEY, lang); } catch(e) {}
       translatePage();
-      listeners.forEach(function(fn) { fn(lang); });
       if (cb) cb();
       return;
     }
@@ -109,22 +107,17 @@ var I18n = (function() {
         try { localStorage.setItem(STORAGE_KEY, lang); } catch(e) {}
       }
       translatePage();
-      listeners.forEach(function(fn) { fn(currentLang); });
       if (cb) cb();
     });
   }
 
-  function onChange(fn) { listeners.push(fn); }
   function getLang() { return currentLang; }
-  function getAvailableStrings() { return Object.assign({}, fallback, strings); }
 
   return {
     t: t,
     init: init,
     setLang: setLang,
     getLang: getLang,
-    onChange: onChange,
-    translatePage: translatePage,
-    getAvailableStrings: getAvailableStrings
+    translatePage: translatePage
   };
 })();

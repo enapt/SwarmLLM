@@ -163,9 +163,12 @@ impl HedgeTracker {
         if elapsed_ms < threshold {
             return false;
         }
-        // Rate budget check.
-        let decisions = self.decisions.load(std::sync::atomic::Ordering::Relaxed);
-        let fired = self.hedges_fired.load(std::sync::atomic::Ordering::Relaxed);
+        // Rate budget check. Acquire ordering pairs with the
+        // Release stores in maybe_reset_window so a thread that
+        // observes the new window_start_ms also observes the zeroed
+        // counters on weakly-ordered architectures (ARM, RISC-V).
+        let decisions = self.decisions.load(std::sync::atomic::Ordering::Acquire);
+        let fired = self.hedges_fired.load(std::sync::atomic::Ordering::Acquire);
         if decisions > 0 {
             let current_rate = fired as f32 / decisions as f32;
             if current_rate >= cfg.max_rate {

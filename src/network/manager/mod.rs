@@ -54,6 +54,15 @@ const RR_PING_INTERVAL_SECS: u64 = 120;
 const STALE_TENSOR_CLEANUP_SECS: u64 = 10;
 /// Cancel a shard download after this many seconds without any chunk progress.
 /// Catches silent connection drops and handler starvation where no OutboundFailure fires.
+///
+/// **Layering with `model/auto_manage/manager.rs::P2P_PERMIT_STALL_SECS` (180s):**
+/// This is the network-layer first-line guard — fires on a single peer-shard
+/// transfer that stalls, triggering `retry_shard_or_fallback` (try another peer
+/// for this shard). The auto-manage permit sweep is the second-line escalation
+/// — after 180s of no progress on the whole acquisition it releases the
+/// semaphore permit so the HF fallback path can run. Keep this strictly less
+/// than `P2P_PERMIT_STALL_SECS` so per-peer retries get a chance before the
+/// outer permit gives up.
 const SHARD_STALL_SECS: u64 = 30;
 /// Retention cutoff (seconds) for ping_sent_times entries when pruning under pressure.
 const PING_SENT_TIMES_CUTOFF_SECS: u64 = 120;

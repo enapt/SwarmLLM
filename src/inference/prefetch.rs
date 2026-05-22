@@ -175,9 +175,12 @@ impl PrefetchOrchestrator {
             return Vec::new();
         }
         // Rate budget — total compute spent on prefetch shouldn't
-        // exceed cfg.max_rate of total decisions.
-        let dispatched = self.dispatched.load(std::sync::atomic::Ordering::Relaxed);
-        let useful = self.useful.load(std::sync::atomic::Ordering::Relaxed);
+        // exceed cfg.max_rate of total decisions. Acquire pairs with
+        // the Release stores in maybe_reset_window so a thread that
+        // observes the new window_start_ms also observes the zeroed
+        // counters on weakly-ordered architectures.
+        let dispatched = self.dispatched.load(std::sync::atomic::Ordering::Acquire);
+        let useful = self.useful.load(std::sync::atomic::Ordering::Acquire);
         if dispatched > 0 {
             // If our hit-rate is below the floor AND we've already
             // dispatched a meaningful number, throttle.

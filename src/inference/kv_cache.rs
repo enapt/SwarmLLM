@@ -163,6 +163,16 @@ impl KvCacheManager {
             }
         }
 
+        // If this user_session_id already had an entry, evict the prior
+        // internal_id's KvCacheSession — the multi_turn_sessions.insert
+        // below replaces the mapping, orphaning the old sessions[] slot
+        // (it stays around until TTL cleanup, bloating sessions over
+        // MAX_MULTI_TURN_SESSIONS bounds for session-keyed inference
+        // nodes that re-register often).
+        if let Some(old_internal_id) = self.multi_turn_sessions.get(user_session_id).copied() {
+            self.sessions.remove(&old_internal_id);
+        }
+
         self.sessions.insert(internal_id, entry);
         self.multi_turn_sessions
             .insert(user_session_id.to_string(), internal_id);

@@ -530,7 +530,7 @@ impl Default for AutoManageConfig {
             parallax_auto_rebalance: true,
             hf_watcher_enabled: true,
             wishlist_gossip_publish: false,
-            auto_switch_quants: false,
+            auto_switch_quants: true,
         }
     }
 }

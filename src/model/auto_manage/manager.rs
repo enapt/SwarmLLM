@@ -70,6 +70,14 @@ pub(super) async fn read_shard_pins_blocking(state: &SharedState) -> Vec<crate::
 /// honest 32 MiB chunk over a slow link (~150 KiB/s sustained), and a
 /// genuine slow-peer wins the next cycle when the HF fallback kicks in
 /// or a faster holder is selected.
+///
+/// **Layering with `network/manager/mod.rs::SHARD_STALL_SECS` (30s):**
+/// SHARD_STALL_SECS is the first-line per-peer guard — fires on a single
+/// stalled peer-shard transfer and tries another peer. This permit sweep
+/// is the second-line escalation — after 180s of no progress on the whole
+/// acquisition it releases the semaphore permit so the HF fallback path
+/// can run. Keep `SHARD_STALL_SECS < P2P_PERMIT_STALL_SECS` so per-peer
+/// retries get a chance before the outer permit gives up.
 const P2P_PERMIT_STALL_SECS: u64 = 180;
 
 /// Sweep `p2p_download_permits` for entries older than `P2P_PERMIT_STALL_SECS`.

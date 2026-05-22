@@ -118,10 +118,22 @@ pub async fn download_model(
 
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(|e| format!("Download chunk error: {e}"))?;
+        downloaded = downloaded.saturating_add(chunk.len() as u64);
+        // SEC: enforce the file-size cap on every chunk so a response
+        // missing `Content-Length` (CDN redirect, MITM, malicious repo
+        // configuration) still can't stream us to disk exhaustion. The
+        // pre-flight check at the top of this function only triggers
+        // when `total_size > 0`; this is the streaming-time guard.
+        if downloaded > MAX_MODEL_FILE_BYTES {
+            drop(file);
+            let _ = tokio::fs::remove_file(&tmp_path).await;
+            return Err(format!(
+                "Download exceeded size cap {MAX_MODEL_FILE_BYTES} (at {downloaded} bytes) — aborting"
+            ));
+        }
         file.write_all(&chunk)
             .await
             .map_err(|e| format!("Write error: {e}"))?;
-        downloaded += chunk.len() as u64;
 
         if let Some(ref tx) = progress_tx {
             let _ = tx.try_send(DownloadProgress {

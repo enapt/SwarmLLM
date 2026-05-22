@@ -532,8 +532,10 @@ mod tests {
         use crate::storage::db::Database;
         use std::sync::Arc;
         use tokio::sync::Mutex;
-        let config = Config::default();
-        assert!(!config.auto_manage.auto_switch_quants);
+        let mut config = Config::default();
+        // R141 made `true` the user-facing default; this test exercises the
+        // explicit-opt-out behaviour, so disable the flag manually.
+        config.auto_manage.auto_switch_quants = false;
         let identity = Identity::generate();
         let temp = tempfile::tempdir().unwrap();
         let db = Database::open(temp.path()).unwrap();
