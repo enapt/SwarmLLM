@@ -22,8 +22,6 @@
 //! is wired. Splitting the module this way keeps the tested unit
 //! small and the integration point reviewable.
 
-use std::time::Instant;
-
 use dashmap::DashMap;
 
 use crate::types::NodeId;
@@ -274,12 +272,6 @@ fn now_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
-}
-
-/// Time the elapsed milliseconds since a fixed Instant. Wrapper to
-/// keep call sites short.
-pub fn elapsed_ms(since: Instant) -> f32 {
-    since.elapsed().as_secs_f32() * 1000.0
 }
 
 #[cfg(test)]

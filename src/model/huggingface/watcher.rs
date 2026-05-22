@@ -117,11 +117,7 @@ const TRUSTED_HF_PUBLISHERS: &[&str] = &[
 /// Repo IDs look like `publisher/model-name`; the prefix before the
 /// first `/` selects the tier.
 pub(crate) fn min_downloads_for_repo(repo_id: &str) -> u64 {
-    let publisher = repo_id.split('/').next().unwrap_or("");
-    if TRUSTED_HF_PUBLISHERS
-        .iter()
-        .any(|p| p.eq_ignore_ascii_case(publisher))
-    {
+    if is_trusted_publisher(repo_id) {
         MIN_DOWNLOADS_FOR_TRUST_TRUSTED
     } else {
         MIN_DOWNLOADS_FOR_TRUST
@@ -404,7 +400,7 @@ impl HfWatcher {
 /// Infer a small set of capability tags from HF metadata. Stable tokens
 /// the frontend can localise via `wishlist.task.<tag>` keys (added with
 /// the rest of the wishlist i18n; this returns the bare token).
-pub fn infer_task_tags(tags: &[String], pipeline_tag: Option<&str>) -> Vec<String> {
+fn infer_task_tags(tags: &[String], pipeline_tag: Option<&str>) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     let lower: Vec<String> = tags.iter().map(|t| t.to_lowercase()).collect();
     let pl = pipeline_tag.unwrap_or("").to_lowercase();

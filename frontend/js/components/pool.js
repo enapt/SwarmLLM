@@ -17,6 +17,19 @@
     return false;
   }
 
+  // Sniff v2 (`swarmpool://...`) vs legacy 8-char code and normalise.
+  // Returns `null` when input is empty or fails the legacy charset check;
+  // v2 blobs are case-preserved (base64url body is case-sensitive),
+  // legacy codes are upper-cased. The two pool-join entry points
+  // (setup-wizard click handler and `joinPool`) share this.
+  function _normaliseCode(raw) {
+    if (!raw) return null;
+    var isV2 = /^swarmpool:\/\//i.test(raw);
+    var code = isV2 ? raw : raw.toUpperCase();
+    if (!code || (!isV2 && !/^[A-Z0-9]{8}$/.test(code))) return null;
+    return { isV2: isV2, code: code };
+  }
+
   async function _poolAction(url, opts, successMsg) {
     try {
       var resp = await App.authFetch(url, opts);
@@ -82,13 +95,12 @@
         var input = document.getElementById('setup-pool-code');
         var raw = input ? input.value.trim() : '';
         var status = document.getElementById('setup-pool-status');
-        var isV2 = /^swarmpool:\/\//i.test(raw);
-        var code = isV2 ? raw : raw.toUpperCase();
-        if (!code || (!isV2 && !/^[A-Z0-9]{8}$/.test(code))) {
+        var parsed = _normaliseCode(raw);
+        if (!parsed) {
           if (status) { status.textContent = I18n.t('pool.code_invalid'); status.style.color = 'var(--red)'; }
           return;
         }
-        U.submitCodeForm('/api/pool/join', code, status, {
+        U.submitCodeForm('/api/pool/join', parsed.code, status, {
           pendingMsg: I18n.t('pool.linking'),
           successMsg: I18n.t('pool.link_sent'),
           failMsg: I18n.t('pool.join_failed'),
@@ -371,11 +383,8 @@
     joinPool: async function () {
       var input = document.getElementById('pool-join-code');
       var raw = input ? input.value.trim() : '';
-      // v2 swarmpool:// blob OR legacy 8-char code (case-preserved for v2
-      // since the base64url body is case-sensitive)
-      var isV2 = /^swarmpool:\/\//i.test(raw);
-      var code = isV2 ? raw : raw.toUpperCase();
-      if (!code || (!isV2 && !/^[A-Z0-9]{8}$/.test(code))) {
+      var parsed = _normaliseCode(raw);
+      if (!parsed) {
         App.notifications.showToast(I18n.t('pool.code_invalid'), 'error');
         return;
       }
@@ -383,7 +392,7 @@
         var resp = await App.authFetch('/api/pool/join', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ code: code })
+          body: JSON.stringify({ code: parsed.code })
         });
         var data = await resp.json();
         if (_hasError(data)) return;

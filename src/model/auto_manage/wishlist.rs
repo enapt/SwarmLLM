@@ -359,10 +359,7 @@ pub fn compute_wishlist(state: &SharedState) -> Wishlist {
         // wishlist too. Log-scaled so a 1M-download model doesn't
         // crowd out the long tail of niche-but-useful models.
         if let Some(&hf_downloads) = trending_for_model.get(&mid) {
-            // log10(downloads).clamp(0, 7) maps 1 dl → 0, 10M → 7.
-            let log = ((hf_downloads.max(1)) as f64).log10();
-            let normalised = (log / 7.0).clamp(0.0, 1.0);
-            score += 15.0 * normalised;
+            score += 15.0 * hf_downloads_normalised(hf_downloads);
             why_tags.push("wishlist.why.popular_on_hf".to_string());
         }
 
@@ -482,9 +479,7 @@ pub fn compute_wishlist(state: &SharedState) -> Wishlist {
             // helper above). Trusted publishers get a flat +10 bonus
             // so curator-released models rank above randoms with
             // similar download counts.
-            let log = ((entry.downloads.max(1)) as f64).log10();
-            let normalised = (log / 7.0).clamp(0.0, 1.0);
-            let mut cand_score = 60.0 * normalised;
+            let mut cand_score = 60.0 * hf_downloads_normalised(entry.downloads);
             let mut why_tags: Vec<String> = vec!["wishlist.why.popular_on_hf".to_string()];
             if crate::model::huggingface::is_trusted_publisher(&entry.repo_id) {
                 cand_score += 10.0;
@@ -535,6 +530,16 @@ pub fn compute_wishlist(state: &SharedState) -> Wishlist {
         entries,
         computed_at: chrono::Utc::now().timestamp(),
     }
+}
+
+/// Normalise an HF download count to the 0..1 wishlist boost range.
+/// log10-scaled: 1 download → 0, 10M → 1. Shared between the
+/// `Hosting`/`Serveable`/`Aspirational` HF-trending boost (×15) and the
+/// `Candidate`-row score (×60) so the two stay in lockstep when the
+/// curve is tweaked.
+fn hf_downloads_normalised(downloads: u64) -> f64 {
+    let log = (downloads.max(1) as f64).log10();
+    (log / 7.0).clamp(0.0, 1.0)
 }
 
 /// Recommended replica target — log-scaled with pool size, optionally

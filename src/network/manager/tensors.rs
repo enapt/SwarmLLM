@@ -100,15 +100,11 @@ impl NetworkManager {
                             activation_len = activation_bytes,
                             "DIAG: tensor encrypt+encode failed — dropping forward"
                         );
-                        let error_result = crate::types::LayerResult::error(
+                        fail_pending_forward(
+                            &shared_state,
                             request_id,
                             format!("Encryption failed: {e}"),
                         );
-                        if let Some((_, tx)) =
-                            shared_state.pending_layer_results.remove(&request_id)
-                        {
-                            let _ = tx.send(error_result);
-                        }
                         return;
                     }
                 };
@@ -125,13 +121,11 @@ impl NetworkManager {
                         %request_id,
                         "internal_cmd_tx send failed — dropping encoded tensor"
                     );
-                    let error_result = crate::types::LayerResult::error(
+                    fail_pending_forward(
+                        &shared_state,
                         request_id,
                         "Internal command queue closed",
                     );
-                    if let Some((_, tx)) = shared_state.pending_layer_results.remove(&request_id) {
-                        let _ = tx.send(error_result);
-                    }
                 }
             });
             return;
@@ -766,5 +760,22 @@ impl NetworkManager {
                 delivery_request_id,
             ),
         );
+    }
+}
+
+/// Drain the `pending_layer_results` oneshot for `request_id` and resolve
+/// it with a `LayerResult::error(reason)`. Used from within `tokio::spawn`
+/// closures that don't have `&mut self` access (where the
+/// `NetworkManager::fail_tensor_forward` method can't be called). Silently
+/// returns if no pending entry exists — the request may have already
+/// resolved on another path.
+pub(crate) fn fail_pending_forward(
+    shared_state: &std::sync::Arc<crate::daemon::SharedState>,
+    request_id: uuid::Uuid,
+    reason: impl Into<String>,
+) {
+    let result = crate::types::LayerResult::error(request_id, reason.into());
+    if let Some((_, tx)) = shared_state.pending_layer_results.remove(&request_id) {
+        let _ = tx.send(result);
     }
 }
