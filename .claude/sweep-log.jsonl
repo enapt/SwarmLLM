@@ -1264,3 +1264,15 @@
 {"file":"CLAUDE.md","line":401,"kind":"stale_doc","summary":"R139 entry referenced nonexistent R142 round entry","status":"fixed","date":"2026-05-22"}
 {"file":"docs/ARCHITECTURE.md","line":68,"kind":"stale_doc","summary":"SharedState diagram missing listen_multiaddrs (R140)","status":"fixed","date":"2026-05-22"}
 {"file":"CLAUDE.md","line":397,"kind":"stale_doc","summary":"R139 microbench follow-on listed as remaining; bench_chunked_send shipped","status":"fixed","date":"2026-05-22"}
+{"file":"src/storage/db.rs","line":485,"kind":"copy_paste","summary":"clear_tree/replace_tree both built same range-then-collect key snapshot","status":"fixed","date":"2026-05-22"}
+{"file":"src/api/anthropic/handlers.rs","line":348,"kind":"duplicate_transform","summary":"status-check error path duplicated extract_provider_error logic","status":"fixed","date":"2026-05-22"}
+{"file":"src/api/openai/peer_forward.rs","line":123,"kind":"duplicate_transform","summary":"status-check error path duplicated extract_provider_error logic","status":"fixed","date":"2026-05-22"}
+{"file":"src/inference/pipeline/speculative.rs","line":224,"kind":"copy_paste","summary":"first-token + emitted-batch streaming pattern triplicated across speculative/dsd/ngram_only_spec","status":"fixed","date":"2026-05-22"}
+{"file":"src/pool/forward.rs","line":80,"kind":"lock_across_await","summary":"pool_tx.read() guard held across tx.send().await","status":"fixed","date":"2026-05-22"}
+{"file":"src/inference/router/distributed_exec.rs","line":148,"kind":"lock_across_await","summary":"pool_tx.read() guard held across tx.send().await (finalize)","status":"fixed","date":"2026-05-22"}
+{"file":"src/inference/router/distributed_exec.rs","line":583,"kind":"lock_across_await","summary":"pool_tx.read() guard held across tx.send().await (penalty forward)","status":"fixed","date":"2026-05-22"}
+{"file":"src/api/pool.rs","line":408,"kind":"lock_across_await","summary":"send_pool_command holds pool_tx guard across tx.send().await","status":"fixed","date":"2026-05-22"}
+{"file":"src/inference/process_pool.rs","line":459,"kind":"panic_in_subsystem","summary":"dispatch_scheduler_group 1-msg unwrap → expect with reason","status":"fixed","date":"2026-05-22"}
+{"file":"frontend/js/components/notifications.js","line":98,"kind":"dead_js","summary":"ACTIVITY_ICONS missing hf_sources_cap_reached and manifest_rejected","status":"fixed","date":"2026-05-22"}
+{"file":"CLAUDE.md","line":259,"kind":"stale_doc","summary":"R141 entry count 1171 corrected to 1172","status":"fixed","date":"2026-05-22"}
+{"file":"frontend/css/style.css","line":2200,"kind":"dead_css","summary":"chat-empty-catalog-chip-serveable class with no CSS rule (intentional — default styling)","status":"wontfix","date":"2026-05-22"}
