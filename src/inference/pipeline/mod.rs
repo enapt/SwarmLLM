@@ -465,6 +465,41 @@ impl PipelineExecutor {
         }
     }
 
+    /// Resolve a `peer_id_bytes` for each segment in `self.assignment`.
+    /// `None` for local segments (dispatched to the worker subprocess),
+    /// `Some(bytes)` for remote segments. Returns `Ok(None)` when any
+    /// remote segment can't be resolved — the caller (DSD, ngram-only
+    /// spec, …) treats that as "fall back to the standard distributed
+    /// loop" without surfacing a hard error. `label` flows into the
+    /// debug log for fall-back attribution.
+    pub(super) fn resolve_peer_id_for_segments(
+        &self,
+        request_id: uuid::Uuid,
+        label: &str,
+    ) -> Option<Vec<Option<Vec<u8>>>> {
+        let local_node_id = self.shared_state.identity.node_id().clone();
+        let mut out: Vec<Option<Vec<u8>>> = Vec::with_capacity(self.assignment.segments.len());
+        for segment in &self.assignment.segments {
+            if segment.node_id == local_node_id {
+                out.push(None);
+                continue;
+            }
+            match self.shared_state.resolve_peer_id_bytes(&segment.node_id) {
+                Some(p) => out.push(Some(p)),
+                None => {
+                    tracing::debug!(
+                        %request_id,
+                        node = %segment.node_id,
+                        "{}: missing peer_id_bytes — falling back",
+                        label
+                    );
+                    return None;
+                }
+            }
+        }
+        Some(out)
+    }
+
     /// Ensure the split model metadata entry exists in SharedState.
     ///
     /// Lightweight — reads GGUF header only, no GPU loading.

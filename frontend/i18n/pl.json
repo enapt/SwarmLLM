@@ -644,8 +644,6 @@
   "netstatus.chip_pool_only": "Pool only",
   "netstatus.chip_provider_one": "cloud provider",
   "netstatus.chip_provider_other": "cloud providers",
-  "netstatus.chip_shard_one": "local part",
-  "netstatus.chip_shard_other": "local parts",
   "netstatus.connecting": "Connecting…",
   "netstatus.detail_connecting": "Looking for peers — usually 10–30 s on first start.",
   "netstatus.detail_global_hosting": "You are part of the public swarm and helping host models.",

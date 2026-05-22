@@ -3,6 +3,20 @@ use crate::types::{LayerResult, NetworkFinishReason};
 
 use super::{MAX_ACTIVATION_SIZE, MAX_RESULT_TOKENS, TENSOR_TAG_RESULT};
 
+/// Truncate `s` to at most `max` bytes, slicing on a UTF-8 character
+/// boundary so the returned slice is always valid UTF-8. Used by the
+/// error-message and matched-stop-sequence trailers, which share a
+/// 4 KiB cap on the encoded byte count.
+fn cap_utf8_to_bytes(s: &str, max: usize) -> &[u8] {
+    let bytes = s.as_bytes();
+    let cap = bytes.len().min(max);
+    let mut end = cap;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &bytes[..end]
+}
+
 pub fn encode_layer_result(result: &LayerResult) -> Result<Vec<u8>, SwarmError> {
     let num_tokens = result.token_ids.len();
     if num_tokens > MAX_RESULT_TOKENS {
@@ -33,14 +47,7 @@ pub fn encode_layer_result(result: &LayerResult) -> Result<Vec<u8>, SwarmError> 
         Some(NetworkFinishReason::Error(msg)) => {
             buf.push(3);
             // Error message length + message — capped to match the 4KB decode-side limit.
-            let bytes = msg.as_bytes();
-            let cap = bytes.len().min(4096);
-            // Slice on a UTF-8 boundary ≤ cap.
-            let mut end = cap;
-            while end > 0 && !msg.is_char_boundary(end) {
-                end -= 1;
-            }
-            let slice = &bytes[..end];
+            let slice = cap_utf8_to_bytes(msg, 4096);
             buf.extend_from_slice(&(slice.len() as u32).to_le_bytes());
             buf.extend_from_slice(slice);
         }
@@ -76,15 +83,9 @@ pub fn encode_layer_result(result: &LayerResult) -> Result<Vec<u8>, SwarmError> 
     // Carries the user-provided stop sequence that triggered termination so
     // distributed-path inference can surface it to Anthropic clients.
     if let Some(ref matched) = result.matched_stop_sequence {
-        let bytes = matched.as_bytes();
         // SEC: cap to 4KB to match the error-message limit; legitimate stop
         // sequences are short (typically < 32 bytes).
-        let cap = bytes.len().min(4096);
-        let mut end = cap;
-        while end > 0 && !matched.is_char_boundary(end) {
-            end -= 1;
-        }
-        let slice = &bytes[..end];
+        let slice = cap_utf8_to_bytes(matched, 4096);
         buf.push(0x04);
         buf.extend_from_slice(&(slice.len() as u32).to_le_bytes());
         buf.extend_from_slice(slice);

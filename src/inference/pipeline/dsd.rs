@@ -111,22 +111,10 @@ impl PipelineExecutor {
         // the worker subprocess in `forward_verify_through_segments`; remote
         // segments need a resolved peer_id_bytes so we can fall through
         // cleanly if any are missing.
-        let local_node_id = self.shared_state.identity.node_id().clone();
-        let mut peer_id_for_segment: Vec<Option<Vec<u8>>> =
-            Vec::with_capacity(self.assignment.segments.len());
-        for segment in &self.assignment.segments {
-            if segment.node_id == local_node_id {
-                peer_id_for_segment.push(None);
-                continue;
-            }
-            match self.shared_state.resolve_peer_id_bytes(&segment.node_id) {
-                Some(p) => peer_id_for_segment.push(Some(p)),
-                None => {
-                    tracing::debug!(%request_id, node = %segment.node_id, "DSD: missing peer_id_bytes — falling back");
-                    return Ok(None);
-                }
-            }
-        }
+        let peer_id_for_segment = match self.resolve_peer_id_for_segments(request_id, "DSD") {
+            Some(v) => v,
+            None => return Ok(None),
+        };
 
         // Build prompt and confirm a draft model is loaded BEFORE any pipeline
         // forward — we want to fail fast and fall back cleanly. The lock is

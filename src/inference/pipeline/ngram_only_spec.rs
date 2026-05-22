@@ -107,22 +107,11 @@ impl PipelineExecutor {
         let max_tokens = self.request.sampling_params.max_tokens;
 
         // Resolve per-segment peer ids upfront (None for local segments).
-        let local_node_id = self.shared_state.identity.node_id().clone();
-        let mut peer_id_for_segment: Vec<Option<Vec<u8>>> =
-            Vec::with_capacity(self.assignment.segments.len());
-        for segment in &self.assignment.segments {
-            if segment.node_id == local_node_id {
-                peer_id_for_segment.push(None);
-                continue;
-            }
-            match self.shared_state.resolve_peer_id_bytes(&segment.node_id) {
-                Some(p) => peer_id_for_segment.push(Some(p)),
-                None => {
-                    tracing::debug!(%request_id, node = %segment.node_id, "ngram-only: missing peer_id_bytes — falling back");
-                    return Ok(None);
-                }
-            }
-        }
+        let peer_id_for_segment = match self.resolve_peer_id_for_segments(request_id, "ngram-only")
+        {
+            Some(v) => v,
+            None => return Ok(None),
+        };
 
         // ── Tokenise prompt locally for n-gram lookup ──
         let prompt = self.build_prompt().await;

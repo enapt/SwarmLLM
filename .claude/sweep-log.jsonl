@@ -1276,3 +1276,7 @@
 {"file":"frontend/js/components/notifications.js","line":98,"kind":"dead_js","summary":"ACTIVITY_ICONS missing hf_sources_cap_reached and manifest_rejected","status":"fixed","date":"2026-05-22"}
 {"file":"CLAUDE.md","line":259,"kind":"stale_doc","summary":"R141 entry count 1171 corrected to 1172","status":"fixed","date":"2026-05-22"}
 {"file":"frontend/css/style.css","line":2200,"kind":"dead_css","summary":"chat-empty-catalog-chip-serveable class with no CSS rule (intentional — default styling)","status":"wontfix","date":"2026-05-22"}
+{"file":"src/inference/router/mod.rs","line":590,"kind":"race","summary":"batch active_count fetch_add outside spawn — same leak class as R103 single path","status":"fixed","date":"2026-05-22"}
+{"file":"src/inference/pipeline/dsd.rs","line":114,"kind":"copy_paste","summary":"DSD/ngram_only_spec peer_id_for_segment resolution duplicated","status":"fixed","date":"2026-05-22"}
+{"file":"src/network/protocol/layer_result.rs","line":36,"kind":"copy_paste","summary":"UTF-8 char-boundary truncate block duplicated in encode_layer_result","status":"fixed","date":"2026-05-22"}
+{"file":"frontend/i18n/en.json","line":-1,"kind":"dead_i18n_key","summary":"netstatus.chip_shard_one/_other dead across 21 locales (no callers)","status":"fixed","date":"2026-05-22"}

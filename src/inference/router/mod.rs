@@ -586,9 +586,6 @@ impl InferenceRouter {
             // Multi-request batch: dispatch as a group
             tracing::info!(batch_size, "Dispatching inference batch");
 
-            // Each request in the batch counts toward active_count
-            self.active_count.fetch_add(batch_size, Ordering::Relaxed);
-
             let active_count = self.active_count.clone();
             let queue_notify = self.queue_notify.clone();
             let shared_state = self.shared_state.clone();

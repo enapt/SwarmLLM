@@ -31,6 +31,15 @@ pub(super) async fn execute_batch(
     queue_notify: Arc<tokio::sync::Notify>,
 ) {
     let batch_size = batch.len();
+    // Increment the tier-cap counter INSIDE this spawned task — pairs
+    // with the fetch_sub side that lives inside BatchCleanup (local) and
+    // the per-request completion arms (distributed). The same R103/R138
+    // hygiene as `dispatch_single`: if `tokio::spawn` of this task
+    // failed or the task was dropped before running, the counter would
+    // leak `batch_size` slots permanently. Performing the add here
+    // guarantees the spawn succeeded; the sub paths (BatchCleanup Drop +
+    // explicit fetch_sub arms in distributed) handle every exit.
+    active_count.fetch_add(batch_size, std::sync::atomic::Ordering::Relaxed);
     let is_split_mode = shared_state.config.inference.shard_range.is_some();
     let model_loaded = shared_state
         .model_loaded
