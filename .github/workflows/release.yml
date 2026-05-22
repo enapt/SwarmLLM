@@ -253,6 +253,31 @@ jobs:
         shell: bash
         run: echo "CMAKE_GENERATOR=Ninja" >> "$GITHUB_ENV"
 
+      # Force nvcc (candle-kernels) to compile CUDA kernels with the
+      # dynamic Microsoft C runtime (/MD) so the resulting libmoe.a
+      # matches llama-cpp-sys-2's /MD-compiled objects at link time.
+      #
+      # nvcc on Windows defaults to /MT (static CRT). When the final
+      # rustc link step combines candle-kernels (/MT) with
+      # llama-cpp-sys-2 (/MD), link.exe rejects the mismatch:
+      #   error LNK2038: mismatch detected for 'RuntimeLibrary': value
+      #     'MT_StaticRelease' doesn't match value 'MD_DynamicRelease'
+      #     in libllama_cpp_sys_2-….rlib
+      #   fatal error LNK1319: 3 mismatches detected
+      # Observed on run 26231281183 / job 77192135456 once the Ninja
+      # generator switch unblocked the vulkan-shaders-gen ExternalProject
+      # race and the build progressed to the final link.
+      #
+      # `NVCC_PREPEND_FLAGS=-Xcompiler /MD` instructs nvcc to forward
+      # the /MD flag to cl.exe for every host-side compilation unit it
+      # emits, so candle-kernels' .obj files all end up tagged
+      # MD_DynamicRelease. Linux CUDA is unaffected (no /MT-/MD concept
+      # outside MSVC).
+      - name: Force nvcc /MD on Windows GPU (CRT match with llama-cpp-sys-2)
+        if: matrix.cuda_windows
+        shell: bash
+        run: echo "NVCC_PREPEND_FLAGS=-Xcompiler /MD" >> "$GITHUB_ENV"
+
       - name: Build release binary
         run: cargo build --locked --release ${{ matrix.features }}
         env:
