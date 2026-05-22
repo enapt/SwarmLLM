@@ -404,6 +404,10 @@ mod tests {
                 is_lan_peer: false,
             },
         );
+        // Scheduler liveness oracle (R142.9): allocate_offline now filters by
+        // connected_node_ids — without this, the remote peer would be treated
+        // as disconnected and the allocator would refuse to plan against it.
+        state.connected_node_ids.insert(remote.clone());
 
         // Sanity: the allocator does in fact pick a plan with no local
         // segments. Stability counters track that recommendation.

@@ -49,10 +49,10 @@ six changes:
   model loaded in one click. Re-rendered on every `stats_update` so
   the catalog comes alive within ~2s of daemon start.
 
-i18n: 15 new keys × 21 locales (1156 → 1171 entries per locale) —
-idiomatic translations. Tests: +5 watcher + +3 wishlist. 1030 → 1053
-lib tests. Clippy clean default + features dev,claude-subscription +
-features llama. Commit: `50225f7c`.
+i18n: 15 new keys × 21 locales (1156 → 1172 entries per locale) —
+idiomatic translations. Tests: +5 watcher + +3 wishlist. 1048 → 1053
+lib tests (R140 had brought it to 1048). Clippy clean default + features
+dev,claude-subscription + features llama. Commit: `50225f7c`.
 
 ### R140 — Pool invite codes v2 (2026-05-19)
 

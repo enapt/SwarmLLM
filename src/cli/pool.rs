@@ -47,6 +47,7 @@ pub async fn run_pool_command(
             let body: serde_json::Value = resp.json().await?;
             if let Some(err) = body.get("error") {
                 eprintln!("Error: {err}");
+                std::process::exit(1);
             } else {
                 println!("Pool created: {}", body["name"].as_str().unwrap_or(&name));
                 println!(
@@ -65,6 +66,7 @@ pub async fn run_pool_command(
             let body: serde_json::Value = resp.json().await?;
             if let Some(err) = body.get("error") {
                 eprintln!("Error: {err}");
+                std::process::exit(1);
             } else if let Some(code) = body.get("code").and_then(|v| v.as_str()) {
                 println!("Invite Code: {code}");
                 println!();
@@ -84,6 +86,7 @@ pub async fn run_pool_command(
             let body: serde_json::Value = resp.json().await?;
             if let Some(err) = body.get("error") {
                 eprintln!("Error: {err}");
+                std::process::exit(1);
             } else {
                 println!("Join request sent! Your device will be added to the pool");
                 println!("once the owner's node processes the request.");
@@ -169,6 +172,7 @@ pub async fn run_pool_command(
             let body: serde_json::Value = resp.json().await?;
             if let Some(err) = body.get("error") {
                 eprintln!("Error: {err}");
+                std::process::exit(1);
             } else {
                 println!("Left the device pool. Credits will no longer be forwarded.");
             }

@@ -44,7 +44,14 @@ fn main() {
         process::exit(1);
     }
 
-    eprintln!("[SwarmLLM] {} — launching {}", reason, binary_name);
+    // Use the resolved file_name so the message reflects the binary
+    // actually being launched (post-fallback), not the originally-
+    // chosen `binary_name` which we don't update when falling back.
+    let launching = binary_path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or(binary_name);
+    eprintln!("[SwarmLLM] {} — launching {}", reason, launching);
 
     let args: Vec<String> = env::args().skip(1).collect();
 

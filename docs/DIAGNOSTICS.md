@@ -44,10 +44,10 @@ cargo run -- run -vv 2>&1 | grep "request_id=<UUID>"
 7. **Encryption (if enabled, R139)** → encrypt offloaded from event loop via `tokio::spawn`. Failure: `DIAG: tensor encrypt+encode failed — dropping forward` (manager/tensors.rs). On success the spawn task posts `NetworkCommand::SendEncodedTensor` back through `internal_cmd_tx`; the critical task then performs only the `send_request` step. Decode/decrypt offloaded symmetrically in the inbound path; failures log `DIAG: decrypt FAILED — possible AAD mismatch, key mismatch, or corruption`
 8. **Remote receive** → `DIAG: codec read_request header` with `tag`, `len` (protocol.rs)
 9. **Inbound dispatch** → `DIAG: inbound TensorPayload request` → `DIAG: stored ResponseChannel` (manager/requests.rs)
-10. **Dispatcher** → `DIAG: dispatcher received LayerForward` with `seq`, `layer_range`, `activation_bytes` (daemon/dispatch/mod.rs)
-11. **Local execution** → `DIAG: processing LayerForward locally` with `elapsed_ms` (daemon/dispatch/mod.rs)
+10. **Dispatcher** → `DIAG: dispatcher received LayerForward, spawning handler` with `seq`, `layer_range`, `activation_bytes` (daemon/dispatch/mod.rs)
+11. **Local execution** → `DIAG: processing LayerForward locally` with `elapsed_ms` (daemon/dispatch/layer_forward.rs)
 12. **Split model forward** → `DIAG: SplitModel forward pass complete` with `forward_ms`, `seq_len`, `num_layers` (split/executor.rs)
-13. **Result send** → `DIAG: LayerForward processed, sending result back` (daemon/dispatch/mod.rs)
+13. **Result send** → `DIAG: LayerForward processed via worker subprocess` with `tokens`, `activations_bytes`, `elapsed_ms`, `layer_start`, `layer_end` (daemon/dispatch/layer_forward.rs)
 14. **Response write** → `DIAG: codec write_response start/done` with `frame_len` (protocol.rs)
 15. **ResponseSent event** → `DIAG: ResponseSent event — response written to wire` (manager/events.rs)
 16. **Response read** → `DIAG: codec read_response header` with `tag`, `len` (protocol.rs)
@@ -81,7 +81,7 @@ cargo run -- run -vv 2>&1 | grep "request_id=<UUID>"
 - **No standby** → `DIAG: NO standby available for failed segment` (pipeline/distributed.rs)
 - **Client disconnect** → `DIAG: result_tx receiver dropped` (router/mod.rs)
 - **Channel drop** → `DIAG: LayerResult delivered but pipeline receiver DROPPED` (daemon/dispatch/mod.rs)
-- **No pending channel** → `DIAG: No pending channel for LayerResult — already timed out or duplicate` (daemon/dispatch/mod.rs)
+- **No pending channel** → `DIAG: No pending channel for LayerResult — timed out, duplicate, or hedge loser` (daemon/dispatch/mod.rs)
 - **Streaming done event** → `DIAG: streaming done_event send failed` (router/mod.rs or router/distributed_exec.rs)
 
 ## SSE Streaming Diagnostics

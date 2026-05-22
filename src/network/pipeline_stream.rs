@@ -137,9 +137,39 @@ impl PipelineStreamClient {
         });
         self.streams.insert(request_id, handle);
 
-        tx.send(payload)
+        // RAII guard: if the caller's future is cancelled between the
+        // `streams.insert` above and the `tx.send().await` below — e.g.,
+        // the parent dropped this future via tokio::select! — the entry
+        // would otherwise sit in the DashMap with both background tasks
+        // running until pipeline completion. Disarmed only on successful
+        // first send; the explicit `close()` call at pipeline completion
+        // remains the steady-state cleanup path.
+        struct InsertGuard<'a> {
+            streams: &'a DashMap<Uuid, Arc<OutboundStreamHandle>>,
+            request_id: Uuid,
+            armed: bool,
+        }
+        impl Drop for InsertGuard<'_> {
+            fn drop(&mut self) {
+                if self.armed {
+                    self.streams.remove(&self.request_id);
+                }
+            }
+        }
+        let mut guard = InsertGuard {
+            streams: &self.streams,
+            request_id,
+            armed: true,
+        };
+
+        let result = tx
+            .send(payload)
             .await
-            .map_err(|_| SwarmError::Network("pipeline stream writer closed".into()))
+            .map_err(|_| SwarmError::Network("pipeline stream writer closed".into()));
+        if result.is_ok() {
+            guard.armed = false;
+        }
+        result
     }
 
     /// Drop the stream for `request_id`. Writer/reader tasks terminate on drop.

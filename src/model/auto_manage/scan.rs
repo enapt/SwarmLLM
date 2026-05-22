@@ -457,12 +457,15 @@ pub async fn check_and_load_model(
                 .sum();
             if total_loaded + estimated > budget {
                 // Try LRU eviction first
-                crate::inference::split::evict_split_models_lru(
+                let evicted = crate::inference::split::evict_split_models_lru(
                     &shared.split_models,
                     &shared.active_pipelines,
                     budget,
                     estimated,
                 );
+                if !evicted.is_empty() {
+                    shared.purge_split_model_index_entries(&evicted);
+                }
                 let total_after: u64 = shared
                     .split_models
                     .iter()
@@ -541,12 +544,15 @@ manifest.name, budget.saturating_sub(total_after)
         // Safety-net eviction: use VRAM budget (falls back to max_split_model_memory_mb)
         let eviction_budget = vram_budget_mb.or(shared.config.inference.max_split_model_memory_mb);
         if let Some(budget) = eviction_budget {
-            crate::inference::split::evict_split_models_lru(
+            let evicted = crate::inference::split::evict_split_models_lru(
                 &shared.split_models,
                 &shared.active_pipelines,
                 budget,
                 new_entry.estimated_vram_mb,
             );
+            if !evicted.is_empty() {
+                shared.purge_split_model_index_entries(&evicted);
+            }
         }
         shared.index_split_model_insert(&split_key.0, split_key.1, split_key.2);
         shared.split_models.insert(split_key, new_entry);

@@ -964,6 +964,13 @@ impl PipelineScheduler {
             if &node_id == local_node_id {
                 continue;
             }
+            // Scheduler Liveness Oracle: peer_registry retains disconnected
+            // peers (for reconnect attempts); allocate against currently
+            // connected nodes only. Mirrors gather_candidates and the R142
+            // fixes for the routing paths.
+            if !self.shared_state.connected_node_ids.contains(&node_id) {
+                continue;
+            }
             // Prefer VRAM when the peer has a GPU, else fall back to RAM —
             // the worker subprocess can host layers in either.
             let available_mb = peer

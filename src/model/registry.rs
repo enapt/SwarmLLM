@@ -130,15 +130,16 @@ impl ModelRegistry {
     /// Remove a node from shard holders (e.g., node went offline).
     /// Maintains reverse index.
     pub fn remove_shard_holder(&self, shard_id: &ShardId, node_id: &NodeId) {
-        let mut empty = false;
         if let Some(mut holders) = self.shard_holders.get_mut(shard_id) {
             holders.remove(node_id);
-            empty = holders.is_empty();
         }
-        // Remove empty tombstones to prevent unbounded growth on peer churn
-        if empty {
-            self.shard_holders.remove(shard_id);
-        }
+        // Remove empty tombstones atomically — `remove_if` holds the
+        // shard lock for both the empty check and the removal, so a
+        // concurrent `record_shard_holder` inserting a fresh holder
+        // can't be silently dropped between a separate check + remove
+        // (the prior two-step pattern lost holders under peer churn).
+        self.shard_holders
+            .remove_if(shard_id, |_, holders| holders.is_empty());
         if let Some(mut shards) = self.node_shards.get_mut(node_id) {
             shards.remove(shard_id);
         }

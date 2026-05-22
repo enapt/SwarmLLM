@@ -370,7 +370,7 @@ fn lru_eviction_respects_budget() {
     // Budget is 1200MB, we need 400MB more → total 1000 + 400 = 1400 > 1200
     // Must evict 1 model (oldest) to bring it under: 500 + 400 = 900 ≤ 1200
     let evicted = evict_split_models_lru(&split_models, &active_pipelines, 1200, 400);
-    assert_eq!(evicted, 1);
+    assert_eq!(evicted.len(), 1);
     assert_eq!(split_models.len(), 1);
     // The older model (model-a, last_used=100) should have been evicted
     assert!(!split_models.contains_key(&key_a));
@@ -391,7 +391,7 @@ fn lru_eviction_no_eviction_under_budget() {
 
     // Budget is 1000MB, need 100MB → no eviction needed
     let evicted = evict_split_models_lru(&split_models, &active_pipelines, 1000, 100);
-    assert_eq!(evicted, 0);
+    assert_eq!(evicted.len(), 0);
     assert_eq!(split_models.len(), 1);
 }
 
@@ -433,7 +433,7 @@ fn lru_eviction_protects_active_models() {
 
     // Budget is 800MB, need 400MB → should evict idle-model (not active one)
     let evicted = evict_split_models_lru(&split_models, &active_pipelines, 800, 400);
-    assert_eq!(evicted, 1);
+    assert_eq!(evicted.len(), 1);
     assert!(split_models.contains_key(&key_a)); // Protected by active pipeline
     assert!(!split_models.contains_key(&key_b)); // Evicted
 }
@@ -456,7 +456,7 @@ fn lru_eviction_multiple_models() {
 
     // Budget 800MB, need 200MB → need to free 600MB → evict 2 oldest
     let evicted = evict_split_models_lru(&split_models, &active_pipelines, 800, 200);
-    assert_eq!(evicted, 2);
+    assert_eq!(evicted.len(), 2);
     assert_eq!(split_models.len(), 1);
     // Only model-2 (last_used=200, newest) should remain
     assert!(split_models.contains_key(&(ModelId("model-2".into()), 0, 10)));

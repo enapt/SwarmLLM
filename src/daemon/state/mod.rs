@@ -692,18 +692,23 @@ impl SharedState {
             return Err(e);
         }
 
-        // Check for completion. Take the entry briefly to inspect.
-        if let Some(entry) = self.pending_activation_chunks.get(&request_id) {
-            if entry.is_complete() {
-                let assembled = entry.assemble();
-                let mut out = (*entry.template).clone();
-                out.activations = assembled;
-                out.sender_peer_bytes = Some(entry.sender_peer_bytes.clone());
-                completion = Some(out);
-            }
-        }
-        if completion.is_some() {
-            self.pending_activation_chunks.remove(&request_id);
+        // Completion check + remove must be atomic — otherwise two
+        // concurrent decrypt-spawn tasks for the same request_id can
+        // BOTH observe `is_complete()` true (the get and remove were
+        // separate locks), each assemble a copy, and double-dispatch the
+        // reassembled LayerForward to the worker. `remove_if` performs
+        // the check + remove under one DashMap shard lock; only the
+        // winning thread observes Some, the loser sees None and
+        // gracefully returns Ok(None).
+        if let Some((_, state)) = self
+            .pending_activation_chunks
+            .remove_if(&request_id, |_, s| s.is_complete())
+        {
+            let assembled = state.assemble();
+            let mut out = (*state.template).clone();
+            out.activations = assembled;
+            out.sender_peer_bytes = Some(state.sender_peer_bytes.clone());
+            completion = Some(out);
         }
         Ok(completion)
     }
@@ -1227,12 +1232,13 @@ impl SharedState {
                 budget_mb,
                 entry.estimated_vram_mb,
             );
-            if evicted > 0 {
+            if !evicted.is_empty() {
                 tracing::info!(
-                    evicted,
+                    evicted = evicted.len(),
                     budget_mb,
                     "Evicted LRU split models for VRAM budget"
                 );
+                self.purge_split_model_index_entries(&evicted);
             }
         }
         self.index_split_model_insert(model_id, layer_start, layer_end);
@@ -1251,6 +1257,22 @@ impl SharedState {
             .entry(model_id.clone())
             .or_default()
             .push((layer_start, layer_end));
+    }
+
+    /// Purge a list of evicted split-model keys from the secondary index.
+    /// Pair with `evict_split_models_lru`'s return value to keep the
+    /// `(model_id, layer_start, layer_end)` index in lockstep with the
+    /// primary `split_models` map; without this, the index grows
+    /// unboundedly under sustained VRAM pressure.
+    pub fn purge_split_model_index_entries(
+        &self,
+        evicted: &[crate::inference::split::SplitModelKey],
+    ) {
+        for (model_id, layer_start, layer_end) in evicted {
+            if let Some(mut ranges) = self.split_model_index.get_mut(model_id) {
+                ranges.retain(|(s, e)| (s, e) != (layer_start, layer_end));
+            }
+        }
     }
 
     /// Remove all segments for a model from the secondary index.

@@ -9,6 +9,7 @@ Every configuration option, organized by section.
 | `listen_port` | integer | `8800` | Port for web dashboard and P2P networking |
 | `data_dir` | path | Platform-specific | Where SwarmLLM stores data |
 | `contribution` | string | `"minimal"` | Resource contribution: `"minimal"`, `"moderate"`, `"maximum"` |
+| `contribution_auto` | boolean | `true` | R121: auto-scale contribution at swarm saturation. Read at runtime via the `state.models.contribution_auto` AtomicBool so the Settings panel can flip Auto/Manual without a daemon restart. |
 
 ## `[resources]` — Resource Limits
 
@@ -146,7 +147,7 @@ Every configuration option, organized by section.
 
 | Option | Type | Default | Description |
 |---|---|---|---|
-| `auto_update` | string | `"stable"` | Policy: `"disabled"`, `"stable"`, `"all"` |
+| `auto_update` | string | `"disabled"` | Policy: `"disabled"`, `"stable"`, `"all"`. Default flipped to disabled in R88 (security — users opt in via `[updates] auto_update = "stable"`). |
 | `check_interval_hours` | integer | `6` | Update check frequency |
 
 ## `[identity]` — Your Identity

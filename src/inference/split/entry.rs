@@ -138,20 +138,25 @@ pub struct BatchItem<'a> {
 /// VRAM usage is under `budget_mb`. Models that have active requests (present
 /// in `active_pipelines`) are never evicted.
 ///
-/// Returns the number of models evicted.
+/// Returns the keys of evicted entries so the caller can synchronise the
+/// secondary `split_model_index` (without this, the index Vec would
+/// accumulate stale `(layer_start, layer_end)` tuples for evicted models
+/// indefinitely — readers compensate with a `split_models.contains_key`
+/// check per range, but every check pays for the stale entries until
+/// daemon restart).
 pub fn evict_split_models_lru(
     split_models: &dashmap::DashMap<SplitModelKey, SplitModelEntry>,
     active_pipelines: &dashmap::DashMap<uuid::Uuid, crate::types::PipelineAssignment>,
     budget_mb: u64,
     needed_mb: u64,
-) -> usize {
+) -> Vec<SplitModelKey> {
     let mut total_mb: u64 = split_models
         .iter()
         .map(|e| e.value().estimated_vram_mb)
         .sum();
 
     if total_mb + needed_mb <= budget_mb {
-        return 0;
+        return Vec::new();
     }
 
     // Collect all active model_ids from active pipelines to protect them
@@ -179,7 +184,7 @@ pub fn evict_split_models_lru(
 
     candidates.sort_by_key(|(_key, last_used, _vram)| *last_used);
 
-    let mut evicted = 0;
+    let mut evicted = Vec::new();
     for (key, _last_used, vram) in candidates {
         if total_mb + needed_mb <= budget_mb {
             break;
@@ -187,12 +192,13 @@ pub fn evict_split_models_lru(
         if split_models.remove(&key).is_some() {
             tracing::info!(
                 model = %key.0,
-                layers = format!("{}-{}", key.1, key.2),
+                layer_start = key.1,
+                layer_end = key.2,
                 vram_mb = vram,
                 "Evicted LRU split model to free VRAM"
             );
             total_mb = total_mb.saturating_sub(vram);
-            evicted += 1;
+            evicted.push(key);
         }
     }
 

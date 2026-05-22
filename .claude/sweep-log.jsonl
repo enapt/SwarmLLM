@@ -1316,3 +1316,18 @@
 {"file":"src/api/providers.rs","line":67,"kind":"missing_test","summary":"extract_provider_error — deferred (covered by integration tests)","status":"deferred","date":"2026-05-22"}
 {"file":"src/inference/pipeline/distributed.rs","line":657,"kind":"hot_path_lookup","summary":"tp_groups iter find — borderline ~3ns when empty, deferred","status":"deferred","date":"2026-05-22"}
 {"file":"src/update.rs","line":412,"kind":"dead_pub","summary":"apply_update_with_version Option arg — defensive cleanup, deferred","status":"deferred","date":"2026-05-22"}
+{"file":"src/daemon/state/mod.rs","line":696,"kind":"toctou","summary":"try_assemble_chunked_forward completion check + remove was non-atomic — could double-dispatch reassembled forward","status":"fixed","date":"2026-05-22"}
+{"file":"src/model/registry.rs","line":134,"kind":"toctou","summary":"remove_shard_holder check-then-remove racing record_shard_holder dropped holders","status":"fixed","date":"2026-05-22"}
+{"file":"src/inference/split/entry.rs","line":142,"kind":"cache_drift","summary":"evict_split_models_lru did not purge split_model_index — unbounded growth","status":"fixed","date":"2026-05-22"}
+{"file":"src/inference/scheduler/mod.rs","line":961,"kind":"scheduler_bug","summary":"allocate_offline iterated peer_registry without connected_node_ids filter","status":"fixed","date":"2026-05-22"}
+{"file":"src/cli/pool.rs","line":49,"kind":"cli_ux","summary":"pool subcommand error arms exited 0; now exit 1","status":"fixed","date":"2026-05-22"}
+{"file":"src/bin/launcher.rs","line":47,"kind":"cli_ux","summary":"GPU→CPU fallback log message labeled with original binary","status":"fixed","date":"2026-05-22"}
+{"file":"src/network/pipeline_stream.rs","line":138,"kind":"leaked_entry","summary":"send_forward could orphan streams entry on caller-future cancel","status":"fixed","date":"2026-05-22"}
+{"file":"docs/DIAGNOSTICS.md","line":47,"kind":"stale_doc","summary":"DIAG log string + file references drifted from src","status":"fixed","date":"2026-05-22"}
+{"file":"docs/book/src/introduction.md","line":36,"kind":"stale_doc","summary":"11 subsystems → 12; 887 tests → 1072","status":"fixed","date":"2026-05-22"}
+{"file":"docs/book/src/configuration/reference.md","line":149,"kind":"stale_doc","summary":"auto_update default disabled (R88); contribution_auto added","status":"fixed","date":"2026-05-22"}
+{"file":"CHANGELOG.md","line":53,"kind":"stale_doc","summary":"R141 test count baseline 1030 → 1048","status":"fixed","date":"2026-05-22"}
+{"file":"src/inference/process_pool.rs","line":1386,"kind":"cancellation_unsafe","summary":"forward_direct cancel wastes worker compute — needs CancelRequest IPC","status":"deferred","date":"2026-05-22"}
+{"file":"src/inference/router/mod.rs","line":595,"kind":"orphan_task","summary":"batch tokio::spawn discards JoinHandle — matches single-request pattern","status":"wontfix","date":"2026-05-22"}
+{"file":"docs/book/src/configuration/reference.md","line":70,"kind":"stale_doc","summary":"streaming_* config knobs (R139) doc rows missing","status":"deferred","date":"2026-05-22"}
+{"file":"docs/book/src/architecture/networking.md","line":41,"kind":"stale_doc","summary":"swarmpool:// v2 invite code (R140) doc missing","status":"deferred","date":"2026-05-22"}
