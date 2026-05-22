@@ -422,6 +422,18 @@
       try {
         var msg = JSON.parse(event.data);
         if (msg.type === 'stats_update') {
+          // Merge the WS payload into `App.data.cache.stats` so consumers
+          // that read the cache (e.g. pool.js maturity-fade check on
+          // `peers`, chat empty-state catalog reading `wishlist`,
+          // dashboard reads after-load) see the live values. Without
+          // this merge, REST-only fields (the /api/admin/stats response
+          // body, fetched once by loadStats) were the only thing in
+          // the cache and WS-only fields (wishlist, swarm_capacity)
+          // were silently missing.
+          if (App.data) {
+            App.data.cache = App.data.cache || {};
+            App.data.cache.stats = Object.assign(App.data.cache.stats || {}, msg.data);
+          }
           // Download activity logging is handled by activity_event messages —
           // stats_update only drives UI progress bars and data refreshes.
           App.dashboard.updateStats(msg.data);

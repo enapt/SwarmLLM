@@ -610,6 +610,37 @@ mod tests {
     }
 
     #[test]
+    fn sse_message_delta_with_stop_sequence_serializes_correctly() {
+        // R142.10: the split-stream handler now propagates
+        // matched_stop_sequence into the MessageDelta. Pin the JSON
+        // wire format so a regression here would silently violate the
+        // Anthropic spec contract clients (incl. Claude Code) use to
+        // detect which user-provided stop sequence fired.
+        let (event_type, data) = serialize_anthropic_event(&AnthropicSseEvent::MessageDelta {
+            stop_reason: "stop_sequence".into(),
+            stop_sequence: Some("\n\nHuman:".into()),
+            output_tokens: 42,
+        });
+        assert_eq!(event_type, "message_delta");
+        let v: serde_json::Value = serde_json::from_str(&data).unwrap();
+        assert_eq!(v["delta"]["stop_reason"], "stop_sequence");
+        assert_eq!(v["delta"]["stop_sequence"], "\n\nHuman:");
+        assert_eq!(v["usage"]["output_tokens"], 42);
+    }
+
+    #[test]
+    fn sse_message_delta_without_stop_sequence_is_null() {
+        let (_, data) = serialize_anthropic_event(&AnthropicSseEvent::MessageDelta {
+            stop_reason: "end_turn".into(),
+            stop_sequence: None,
+            output_tokens: 10,
+        });
+        let v: serde_json::Value = serde_json::from_str(&data).unwrap();
+        assert_eq!(v["delta"]["stop_reason"], "end_turn");
+        assert!(v["delta"]["stop_sequence"].is_null());
+    }
+
+    #[test]
     fn deserialize_full_request() {
         let json = r#"{
             "model": "claude-opus-4-7",

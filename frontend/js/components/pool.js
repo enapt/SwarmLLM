@@ -196,7 +196,11 @@
       var members = data.members || [];
       var MATURE_SWARM_THRESHOLD = 50;
       var statsCache = (App.data && App.data.cache && App.data.cache.stats) || null;
-      var connectedPeers = statsCache ? (statsCache.peer_count || 0) : 0;
+      // R140 maturity fade: stats serializes connected count as `peers`
+      // (admin.rs and websocket.rs both — `peer_count` was a different
+      // endpoint and gave undefined here, leaving the prominent button
+      // up forever regardless of swarm size).
+      var connectedPeers = statsCache ? (statsCache.peers || 0) : 0;
       var swarmIsMature = connectedPeers >= MATURE_SWARM_THRESHOLD;
       var headerInvite = document.getElementById('pool-invite-code-btn');
       var settingsInvite = document.getElementById('pool-settings-invite-section');

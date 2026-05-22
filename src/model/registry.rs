@@ -463,6 +463,31 @@ mod tests {
     }
 
     #[test]
+    fn remove_last_shard_holder_cleans_tombstone() {
+        // R142.9: empty-tombstone cleanup must be atomic with the empty
+        // check (remove_if). Verify a single-holder removal clears the
+        // entry entirely (not just empties the inner HashSet) so a
+        // subsequent record_shard_holder starts from a clean slot.
+        let registry = ModelRegistry::new();
+        let shard_id = ShardId {
+            model_id: ModelId("test".into()),
+            index: 0,
+        };
+        let node_a = NodeId([1u8; 32]);
+        registry.record_shard_holder(shard_id.clone(), node_a.clone());
+        assert_eq!(registry.shard_holder_count(&shard_id), 1);
+
+        registry.remove_shard_holder(&shard_id, &node_a);
+        assert_eq!(registry.shard_holder_count(&shard_id), 0);
+        assert!(registry.shard_holders(&shard_id).is_empty());
+
+        // Re-inserting a fresh holder after the last was removed must work.
+        let node_b = NodeId([2u8; 32]);
+        registry.record_shard_holder(shard_id.clone(), node_b.clone());
+        assert_eq!(registry.shard_holders(&shard_id), vec![node_b]);
+    }
+
+    #[test]
     fn bounded_eviction() {
         let local = NodeId([0u8; 32]);
         let registry = ModelRegistry::with_local_node(local.clone());
