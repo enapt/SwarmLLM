@@ -49,7 +49,6 @@ use super::speculative::{
 };
 use super::PipelineExecutor;
 #[cfg(feature = "llama")]
-#[cfg(feature = "llama")]
 use crate::inference::dsd_controller::GammaController;
 
 /// Fast-path preconditions for the DSD coordinator loop.

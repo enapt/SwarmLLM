@@ -1290,3 +1290,11 @@
 {"file":"src/network/manager/mod.rs","line":57,"kind":"undocumented_constant","summary":"SHARD_STALL_SECS/P2P_PERMIT_STALL_SECS coupling now cross-referenced","status":"fixed","date":"2026-05-22"}
 {"file":"python/swarmllm_client/admin.py","line":260,"kind":"api_drift","summary":"PoolClient missing R140 generate_code/join","status":"deferred","date":"2026-05-22"}
 {"file":"tests/integration/api_test.rs","line":12,"kind":"copy_paste","summary":"spawn_test_server/auth_client duplicated with test_metrics_health.rs across binaries","status":"deferred","date":"2026-05-22"}
+{"file":"src/inference/pipeline/dsd.rs","line":51,"kind":"redundant_cfg_attr","summary":"duplicate #[cfg(feature = llama)] on same use statement","status":"fixed","date":"2026-05-22"}
+{"file":"src/inference/hedging.rs","line":196,"kind":"clock_dependence","summary":"maybe_reset_window stuck on backward SystemTime jump","status":"fixed","date":"2026-05-22"}
+{"file":"src/inference/prefetch.rs","line":237,"kind":"clock_dependence","summary":"same backward-clock-jump bug as hedging.rs","status":"fixed","date":"2026-05-22"}
+{"file":"src/inference/router/distributed_exec.rs","line":266,"kind":"panic_leak","summary":"batch panic arm didn't clean up active_pipelines","status":"fixed","date":"2026-05-22"}
+{"file":"examples/3node_setup.sh","line":7,"kind":"dead_script","summary":"hardcoded /home/user binary path","status":"fixed","date":"2026-05-22"}
+{"file":"examples/3node_sharded_setup.sh","line":17,"kind":"dead_script","summary":"hardcoded /home/user binary path","status":"fixed","date":"2026-05-22"}
+{"file":"examples/swarm_spec_bench.rs","line":168,"kind":"stale_doc","summary":"min_samples 5 vs production 20","status":"fixed","date":"2026-05-22"}
+{"file":".env.example","line":-1,"kind":"stale_doc","summary":"agent claimed missing; file actually exists + git-tracked","status":"wontfix","date":"2026-05-22"}

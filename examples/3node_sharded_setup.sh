@@ -14,7 +14,10 @@ set -e
 
 SRC_MODEL=~/.local/share/swarmllm/models/tinyllama-1.1b-chat-v1.0.q4-k-m
 MODEL_NAME=tinyllama-1.1b-chat-v1.0.q4-k-m
-BINARY=/home/user/SwarmLLM/target/release/swarmllm
+# Resolve binary relative to this script (repo_root/target/release/swarmllm)
+# so the cluster works regardless of clone path. Override BINARY=... to
+# point at a different build (e.g. CUDA, llama feature).
+BINARY="${BINARY:-$(cd "$(dirname "$0")/.." && pwd)/target/release/swarmllm}"
 
 killall -9 swarmllm 2>/dev/null || true
 sleep 1

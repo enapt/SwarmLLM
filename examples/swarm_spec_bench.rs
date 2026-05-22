@@ -165,7 +165,10 @@ fn bench_hedge_decision() {
         enabled: true,
         after_factor: 1.5,
         max_rate: 0.05,
-        min_samples: 5,
+        // Matches production default (`HedgeConfig::default().min_samples`)
+        // bumped from 5 to 20 after the warm-up over-firing review; bench
+        // should reflect production thresholds.
+        min_samples: 20,
     };
 
     // Populate observations across 100 distinct (segment, holder) keys.

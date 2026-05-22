@@ -217,7 +217,14 @@ pub(super) async fn execute_distributed_batch(
     active_count: Arc<AtomicUsize>,
     queue_notify: Arc<tokio::sync::Notify>,
 ) {
-    let mut handles = Vec::with_capacity(batch.len());
+    // Pair each JoinHandle with the request_id of the spawned task so the
+    // panic-recovery arm below can clean up `active_pipelines` too — the
+    // normal-completion path inside the spawn removes the entry, but a
+    // panic bypasses that. Without the pair, a panicked request leaves a
+    // permanent `active_pipelines` entry that blocks shard pruning and
+    // inflates the scheduler's local-load metric.
+    let mut handles: Vec<(uuid::Uuid, tokio::task::JoinHandle<bool>)> =
+        Vec::with_capacity(batch.len());
 
     for queued in batch {
         let shared_state = shared_state.clone();
@@ -226,44 +233,53 @@ pub(super) async fn execute_distributed_batch(
         let active_count = active_count.clone();
         let queue_notify = queue_notify.clone();
 
-        handles.push(tokio::spawn(async move {
-            let request = queued.request;
-            let result_tx = queued.result_tx;
-            let token_tx = queued.token_tx;
+        let request_id = queued.request.id;
+        handles.push((
+            request_id,
+            tokio::spawn(async move {
+                let request = queued.request;
+                let result_tx = queued.result_tx;
+                let token_tx = queued.token_tx;
 
-            let output = execute_request(
-                shared_state.clone(),
-                network_tx,
-                scheduler,
-                request.clone(),
-                token_tx,
-                None, // No pipeline affinity for batched requests
-            )
-            .await;
+                let output = execute_request(
+                    shared_state.clone(),
+                    network_tx,
+                    scheduler,
+                    request.clone(),
+                    token_tx,
+                    None, // No pipeline affinity for batched requests
+                )
+                .await;
 
-            finalize_request(&shared_state, &request, &output, None).await;
-            shared_state.active_pipelines.remove(&request.id);
-            // Decrement active_count and wake drain_queue so the next queued
-            // request can dispatch (without notify, the queue stalls until a
-            // new Submit arrives).
-            active_count.fetch_sub(1, Ordering::Relaxed);
-            queue_notify.notify_one();
-            if result_tx.send(output).is_err() {
-                tracing::warn!(
-                    request_id = %request.id,
-                    "DIAG: distributed batch result_tx receiver dropped"
-                );
-            }
-            true // task completed normally, already decremented
-        }));
+                finalize_request(&shared_state, &request, &output, None).await;
+                shared_state.active_pipelines.remove(&request.id);
+                // Decrement active_count and wake drain_queue so the next queued
+                // request can dispatch (without notify, the queue stalls until a
+                // new Submit arrives).
+                active_count.fetch_sub(1, Ordering::Relaxed);
+                queue_notify.notify_one();
+                if result_tx.send(output).is_err() {
+                    tracing::warn!(
+                        request_id = %request.id,
+                        "DIAG: distributed batch result_tx receiver dropped"
+                    );
+                }
+                true // task completed normally, already decremented
+            }),
+        ));
     }
 
     // Wait for all requests in the batch to complete.
     // Only decrement if the task panicked BEFORE it could decrement itself.
-    for handle in handles {
+    for (request_id, handle) in handles {
         match handle.await {
             Ok(_) => {} // task already decremented
             Err(_) => {
+                // Panic: clean up both counters AND the active_pipelines
+                // entry the panicked task would have removed on its
+                // normal-exit path. Without this, the entry stays
+                // forever and blocks shard pruning (gotcha #85).
+                shared_state.active_pipelines.remove(&request_id);
                 active_count.fetch_sub(1, Ordering::Relaxed);
                 queue_notify.notify_one();
             }

@@ -239,7 +239,15 @@ impl PrefetchOrchestrator {
         let start = self
             .window_start_ms
             .load(std::sync::atomic::Ordering::Relaxed);
-        if now.saturating_sub(start) >= PREFETCH_WINDOW_SECS * 1000
+        // Reset on elapsed-window OR on backward clock jump (NTP
+        // correction, container/VM clock drift). Without the
+        // `start > now` arm a backwards jump leaves `now - start = 0`
+        // permanently below the threshold, freezing the rate budget
+        // indefinitely and blocking all future prefetches once the
+        // throttle was triggered.
+        let backward_jump = start > now;
+        let elapsed_ok = now.saturating_sub(start) >= PREFETCH_WINDOW_SECS * 1000;
+        if (elapsed_ok || backward_jump)
             && self
                 .window_start_ms
                 .compare_exchange(
