@@ -1298,3 +1298,21 @@
 {"file":"examples/3node_sharded_setup.sh","line":17,"kind":"dead_script","summary":"hardcoded /home/user binary path","status":"fixed","date":"2026-05-22"}
 {"file":"examples/swarm_spec_bench.rs","line":168,"kind":"stale_doc","summary":"min_samples 5 vs production 20","status":"fixed","date":"2026-05-22"}
 {"file":".env.example","line":-1,"kind":"stale_doc","summary":"agent claimed missing; file actually exists + git-tracked","status":"wontfix","date":"2026-05-22"}
+{"file":"src/api/admin_providers.rs","line":922,"kind":"bug","summary":"hardcoded enapt/SwarmLLM string instead of SWARMLLM_GITHUB_REPO constant","status":"fixed","date":"2026-05-22"}
+{"file":"src/daemon/dispatch/layer_forward.rs","line":150,"kind":"hot_path_format","summary":"format!() in tracing::info on per-token forward path","status":"fixed","date":"2026-05-22"}
+{"file":"src/inference/pipeline/distributed.rs","line":888,"kind":"hot_path_clone","summary":"vec![forward.clone()] cloned activation buffer on non-chunked persistent-stream path","status":"fixed","date":"2026-05-22"}
+{"file":".claude/rules/architecture.md","line":22,"kind":"stale_doc","summary":"hedge_tracker doc said duplicate-dispatch awaits follow-up; shipped R136","status":"fixed","date":"2026-05-22"}
+{"file":".claude/rules/architecture.md","line":25,"kind":"stale_doc","summary":"pending_activation_chunks TTL sweep marked deferred; wired since R139","status":"fixed","date":"2026-05-22"}
+{"file":".claude/rules/architecture.md","line":180,"kind":"stale_doc","summary":"gossip_timestamp_fresh said used by events.rs; actually private to dispatch/mod.rs","status":"fixed","date":"2026-05-22"}
+{"file":".claude/rules/architecture.md","line":199,"kind":"stale_doc","summary":"build_spec_verify_forward 17-field → 18-field (R139 chunk_meta)","status":"fixed","date":"2026-05-22"}
+{"file":".claude/rules/learn.md","line":10,"kind":"stale_doc","summary":"gotchas file path MEMORY.md → memory/gotchas.md","status":"fixed","date":"2026-05-22"}
+{"file":".claude/rules/learn.md","line":28,"kind":"stale_doc","summary":"CLAUDE.md 250-line target unreached; rule rephrased","status":"fixed","date":"2026-05-22"}
+{"file":"src/model/auto_manage/mod.rs","line":65,"kind":"missing_test","summary":"compute_budget_max_bytes 5 tests added","status":"fixed","date":"2026-05-22"}
+{"file":"src/network/protocol/layer_result.rs","line":10,"kind":"missing_test","summary":"cap_utf8_to_bytes 6 tests added (UTF-8 boundary correctness)","status":"fixed","date":"2026-05-22"}
+{"file":"src/model/auto_manage/wishlist.rs","line":540,"kind":"missing_test","summary":"hf_downloads_normalised 5 tests added","status":"fixed","date":"2026-05-22"}
+{"file":"src/inference/router/local_exec.rs","line":33,"kind":"missing_test","summary":"BatchCleanup::Drop — deferred (existing distributed-exec tests indirectly exercise)","status":"deferred","date":"2026-05-22"}
+{"file":"src/model/registry.rs","line":190,"kind":"missing_test","summary":"local_shard_indices_in — deferred (existing registry tests cover shard_holders)","status":"deferred","date":"2026-05-22"}
+{"file":"src/inference/hedging.rs","line":207,"kind":"missing_test","summary":"backward-clock-jump test — deferred (would require time mocking)","status":"deferred","date":"2026-05-22"}
+{"file":"src/api/providers.rs","line":67,"kind":"missing_test","summary":"extract_provider_error — deferred (covered by integration tests)","status":"deferred","date":"2026-05-22"}
+{"file":"src/inference/pipeline/distributed.rs","line":657,"kind":"hot_path_lookup","summary":"tp_groups iter find — borderline ~3ns when empty, deferred","status":"deferred","date":"2026-05-22"}
+{"file":"src/update.rs","line":412,"kind":"dead_pub","summary":"apply_update_with_version Option arg — defensive cleanup, deferred","status":"deferred","date":"2026-05-22"}

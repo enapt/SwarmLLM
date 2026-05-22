@@ -573,6 +573,43 @@ mod tests {
     }
 
     #[test]
+    fn hf_downloads_normalised_zero_at_one_download() {
+        // log10(1) = 0 → curve floor is 0.
+        assert!(hf_downloads_normalised(1) < 0.01);
+    }
+
+    #[test]
+    fn hf_downloads_normalised_clamps_at_ten_million() {
+        // log10(10_000_000) = 7, divided by 7 = 1.0 → curve ceiling.
+        assert!((hf_downloads_normalised(10_000_000) - 1.0).abs() < 0.001);
+        // Even a 1B-download model stays clamped at 1.0.
+        assert!((hf_downloads_normalised(1_000_000_000) - 1.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn hf_downloads_normalised_monotonic() {
+        let a = hf_downloads_normalised(1_000);
+        let b = hf_downloads_normalised(10_000);
+        let c = hf_downloads_normalised(100_000);
+        let d = hf_downloads_normalised(1_000_000);
+        assert!(a < b && b < c && c < d);
+    }
+
+    #[test]
+    fn hf_downloads_normalised_midpoint_around_log_4_div_7() {
+        // 10k downloads = log10 = 4, normalised = 4/7 ≈ 0.5714. Drift
+        // here would silently re-rank every wishlist Candidate row.
+        let got = hf_downloads_normalised(10_000);
+        assert!((got - 4.0 / 7.0).abs() < 0.001, "got {got}");
+    }
+
+    #[test]
+    fn hf_downloads_normalised_handles_zero() {
+        // Saturating max(1) — log10(1) = 0 — clamp guards both ends.
+        assert!(hf_downloads_normalised(0) < 0.01);
+    }
+
+    #[test]
     fn replica_target_grows_with_pool() {
         // Should be log2(pool) and >=1.
         let t = recommended_replica_target(16, 0.0);

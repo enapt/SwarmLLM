@@ -392,3 +392,50 @@ pub fn decode_layer_result(data: &[u8]) -> Result<LayerResult, SwarmError> {
 //   [40+M..]   sealed activations (nonce + ciphertext + AEAD tag)
 //
 // The AAD for the AEAD is the header bytes [1..36+M].
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cap_utf8_below_max_is_identity() {
+        let s = "hello";
+        assert_eq!(cap_utf8_to_bytes(s, 10), s.as_bytes());
+    }
+
+    #[test]
+    fn cap_utf8_truncates_ascii_to_exact_byte_count() {
+        assert_eq!(cap_utf8_to_bytes("hello", 3), b"hel");
+    }
+
+    #[test]
+    fn cap_utf8_walks_back_on_multibyte_boundary() {
+        // "é" is U+00E9, 2 bytes in UTF-8 (0xC3 0xA9). Asking for 2 bytes
+        // from "hé" (h + é = 3 bytes) would land mid-codepoint; the
+        // helper must retract to a valid boundary at byte 1 ("h").
+        let slice = cap_utf8_to_bytes("hé", 2);
+        assert_eq!(slice, b"h");
+        // Result must be valid UTF-8.
+        assert!(std::str::from_utf8(slice).is_ok());
+    }
+
+    #[test]
+    fn cap_utf8_handles_4_byte_emoji() {
+        // 🦀 = U+1F980, 4 bytes (0xF0 0x9F 0xA6 0x80). Asking for 2 bytes
+        // from "🦀" alone retracts all the way to empty (no valid prefix
+        // under 4 bytes for this codepoint).
+        let slice = cap_utf8_to_bytes("🦀", 2);
+        assert_eq!(slice, b"");
+        assert!(std::str::from_utf8(slice).is_ok());
+    }
+
+    #[test]
+    fn cap_utf8_max_zero_returns_empty() {
+        assert_eq!(cap_utf8_to_bytes("anything", 0), b"");
+    }
+
+    #[test]
+    fn cap_utf8_empty_input() {
+        assert_eq!(cap_utf8_to_bytes("", 100), b"");
+    }
+}

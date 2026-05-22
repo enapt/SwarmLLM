@@ -7,7 +7,7 @@ Update knowledge artifacts the same commit as the change — not at session end.
 | Discovery | Update target |
 |---|---|
 | New architectural pattern or convention | `.claude/rules/architecture.md` |
-| New gotcha or pitfall | `memory/MEMORY.md` Key Technical Gotchas |
+| New gotcha or pitfall | `memory/gotchas.md` (append at the next free index) |
 | Changed file structure (new/renamed/deleted) | `CLAUDE.md` Repository Structure |
 | Changed API endpoint | `docs/ARCHITECTURE.md` HTTP API |
 | Changed SharedState fields/sub-structs | `CLAUDE.md` Architecture + `architecture.md` |
@@ -25,6 +25,6 @@ Update knowledge artifacts the same commit as the change — not at session end.
 ## Memory hygiene
 
 - `MEMORY.md` under 200 lines (loaded limit). Move details to topic-specific files.
-- `CLAUDE.md` under 250 lines.
+- `CLAUDE.md` target: keep round-log entries terse. The doc has grown to ~500 lines as build rounds accumulate; prune aggressively when adding new content — the "Latest" section should be a few paragraphs, older rounds compressed to one-line CHANGELOG-style entries pointing at the full round-log in `memory/`.
 - Delete entries verifiably outdated (check code first).
 - Don't duplicate between `CLAUDE.md` and `rules/` — `CLAUDE.md` summarizes, `rules/` has detail.

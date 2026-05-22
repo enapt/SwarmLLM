@@ -140,6 +140,9 @@ pub(super) async fn handle_layer_forward(
     };
 
     let forward_elapsed = forward_start.elapsed();
+    // Use structured fields instead of `format!("[{a}..{b})")` — Rust eval
+    // is eager and would heap-alloc one String per token even when info-
+    // level is filtered out. Per-decode-step hot path on the serving node.
     tracing::info!(
         request_id = %request_id,
         tokens = result.token_ids.len(),
@@ -147,7 +150,8 @@ pub(super) async fn handle_layer_forward(
         is_last,
         elapsed_ms = forward_elapsed.as_millis() as u64,
         model_id = %model_id,
-        layers = format!("[{layer_start}..{layer_end})"),
+        layer_start,
+        layer_end,
         tp = tp_meta.is_some(),
         "DIAG: LayerForward processed via worker subprocess"
     );

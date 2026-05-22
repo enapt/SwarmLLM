@@ -880,15 +880,21 @@ impl PipelineExecutor {
                     if let Some(client) = self.shared_state.pipeline_stream_client.get() {
                         match libp2p::PeerId::from_bytes(&target_peer_bytes) {
                             Ok(peer_id) => {
-                                let frames: Vec<crate::types::LayerForward> = if chunked_eligible {
-                                    crate::network::pipeline_stream::chunk_layer_forward(
+                                // Build the per-frame slice WITHOUT cloning the
+                                // activation buffer on the non-chunked path.
+                                // Chunked path owns its frames (already split copies);
+                                // non-chunked path borrows the original `&forward`.
+                                let chunks: Vec<crate::types::LayerForward>;
+                                let frames: &[crate::types::LayerForward] = if chunked_eligible {
+                                    chunks = crate::network::pipeline_stream::chunk_layer_forward(
                                         &forward, chunk_size,
-                                    )
+                                    );
+                                    &chunks
                                 } else {
-                                    vec![forward.clone()]
+                                    std::slice::from_ref(&forward)
                                 };
                                 let mut all_ok = true;
-                                for chunk in &frames {
+                                for chunk in frames {
                                     match crate::network::pipeline_stream::encode_forward_for_wire(
                                         chunk,
                                         &peer_id,

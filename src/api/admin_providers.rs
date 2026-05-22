@@ -919,7 +919,7 @@ pub async fn check_update(
 
     let checker = crate::update::UpdateChecker::new(
         config,
-        "enapt/SwarmLLM".to_string(),
+        crate::update::SWARMLLM_GITHUB_REPO.to_string(),
         update_state.clone(),
         dash_tx,
     );
@@ -1012,7 +1012,7 @@ pub async fn apply_update(
     let (tx, _) = tokio::sync::broadcast::channel(1);
     let checker = crate::update::UpdateChecker::new(
         config,
-        "enapt/SwarmLLM".to_string(),
+        crate::update::SWARMLLM_GITHUB_REPO.to_string(),
         state.shared_state.events.update_state.clone(),
         tx,
     );

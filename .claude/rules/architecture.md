@@ -19,10 +19,10 @@ SharedState is organized into 4 sub-structs. Always use the correct accessor:
 - `state.metrics.node_stats` — NOT `state.node_stats`
 - `state.metrics.providers_config` — NOT `state.providers_config`
 - `state.metrics.swarm_capacity` — R110. ArcSwap<SwarmCapacity>; refresh via `crate::daemon::state::refresh_swarm_capacity(state)`. Eagerly refreshed on peer connect (`network/manager/identify.rs`) and disconnect (`network/manager/connections.rs`) so the dashboard banner stays consistent with the peer-list panel under churn — the WS stats-cache 1.5s coalesce alone is too lazy.
-- `state.metrics.hedge_tracker` — R136 Layer 2. `Arc<HedgeTracker>` with per-(model, segment, holder) EWMA latency + rate-budget counters. Always present; observation via `state.record_hedge_observation(...)` from the existing forward-success path in `pipeline/distributed.rs`. Post-hoc dry-run "would have hedged" decisions logged at info level when latency exceeds the EWMA threshold; full duplicate-dispatch awaits a focused wire-format follow-up.
-- `state.metrics.prefetch_orchestrator` — R136 Layer 3. `PrefetchHandle` (Arc<PrefetchOrchestrator>) with per-session first-token histogram + idle-time learner + throttling. Observation via `observe_user_turn(session, first_token)` + `record_response_completion(session, now_ms)` at the router success site. K-layer prefetch dispatch is the next integration; data-collection side is complete.
+- `state.metrics.hedge_tracker` — R136 Layer 2. `Arc<HedgeTracker>` with per-(model, segment, holder) EWMA latency + rate-budget counters. Always present. Observation via `state.record_hedge_observation(...)` from the forward-success path in `pipeline/distributed.rs` (post-hoc dry-run metrics). Real race-then-discard duplicate dispatch for speculative-verify hops ships in `pipeline/hedge_dispatch.rs::forward_verify_with_hedge` — single-segment only; multi-segment hedging remains deferred (`docs/FUTURE_WORK.md`). R142.6 added `last_observed_at_ms` to `HedgeStats` and `HedgeTracker::evict_stale` wired to the HealthMonitor tick to bound the (model × segment × holder) map.
+- `state.metrics.prefetch_orchestrator` — R136 Layer 3. `PrefetchHandle` (Arc<PrefetchOrchestrator>) with per-session first-token histogram + idle-time learner + throttling. Observation via `observe_user_turn(session, first_token)` + `record_response_completion(session, now_ms)` at the router success site. R142.6 wired `evict_idle` to the HealthMonitor tick to bound the histories map. K-layer prefetch dispatch is the remaining integration; data-collection and orchestration are complete.
 - `state.standalone_tokenizers` — R136 Layer 1/3 follow-on. `DashMap<ModelId, Arc<SplitTokenizer>>` on the ROOT SharedState (not a sub-struct — used by both `state.metrics`-derived L3 prefetch AND the `pipeline/ngram_only_spec.rs` L1 path, so cross-cutting). Lazy-loaded from `gguf_header.bin` via `state.standalone_tokenizer(&model_id)` accessor. Returns `None` when the header isn't on disk; caller falls through gracefully.
-- `state.pending_activation_chunks` — R139 Tier 4K. `DashMap<Uuid, ChunkAssemblyState>` on the ROOT SharedState (cross-cuts the RR-decrypt path in `network/manager/tensors.rs` and the persistent-stream reader in `network/pipeline_stream.rs`). Receiver-side assembly for STREAM-chunked activation forwards. Entry-locked insert via `state.try_assemble_chunked_forward(forward, sender_peer_bytes)`. Stale-entry sweep via `state.sweep_stale_chunk_assemblies(ttl_secs)` (helper present, periodic wiring deferred — see `docs/FUTURE_WORK.md § Tier 4K`). Chunk-meta is bound into AAD via `build_layer_forward_aad`, so reorder/truncation/cross-transfer-substitution fail Poly1305 before reaching the assembly.
+- `state.pending_activation_chunks` — R139 Tier 4K. `DashMap<Uuid, ChunkAssemblyState>` on the ROOT SharedState (cross-cuts the RR-decrypt path in `network/manager/tensors.rs` and the persistent-stream reader in `network/pipeline_stream.rs`). Receiver-side assembly for STREAM-chunked activation forwards. Entry-locked insert via `state.try_assemble_chunked_forward(forward, sender_peer_bytes)`. Periodic stale-entry sweep wired to the HealthMonitor tick via `state.sweep_stale_chunk_assemblies(ttl_secs)`. Chunk-meta is bound into AAD via `build_layer_forward_aad`, so reorder/truncation/cross-transfer-substitution fail Poly1305 before reaching the assembly.
 - `state.listen_multiaddrs` — R140. `arc_swap::ArcSwap<Vec<String>>` on the ROOT SharedState (cross-cuts NetworkManager-writes and PoolManager-reads). Live snapshot of the swarm's current listen multiaddrs, each terminated with `/p2p/<local_peer_id>`. Written by `NetworkManager::refresh_listen_multiaddrs()` (events.rs) on `NewListenAddr` / `ExpiredListenAddr` / `ListenerClosed` / `ExternalAddrConfirmed`, plus once at startup after `listen_on()`. Filtered through `addr_is_remotely_reachable` — keeps LAN + Tailscale CGN (100.64.0.0/10) + public, drops loopback / unspecified / link-local / IMDS. Read by `PoolManager::handle_generate_invite_code` when minting v2 `swarmpool://` codes; empty list → `SwarmError::ServiceUnavailable` instead of silently handing out a useless code.
 
 When adding new fields to SharedState, put them in the appropriate sub-struct unless they're accessed by 10+ files across 3+ subsystem boundaries.
@@ -177,11 +177,14 @@ silently break at the wire if duplicated:
   across `ts`/`now`/`max_age`/`skew`. Use directly for any new
   timestamp gate; gossip and pre-signed-message helpers below are
   thin wrappers around it.
-- **`daemon::dispatch::gossip_timestamp_fresh`** — `u64`-ms wrapper
-  used by regional gossip (`RegionShardSummary`, `ModelDemandGossip`)
-  and by the `network::manager::events.rs` GossipSub pre-filter (R94
-  routed it through here too, so the seconds-unit wire-level check
-  shares the one-sided invariant).
+- **`daemon::dispatch::gossip_timestamp_fresh`** — private `u64`-ms
+  wrapper used inside `daemon/dispatch/mod.rs` itself for the four
+  inbound gossip handlers (`RegionShardSummary`, `ModelDemandGossip`,
+  `WishlistAnnouncement`, `PoolModelAvailability`). The
+  `network::manager::events.rs` GossipSub pre-filter uses
+  `timestamp_fresh_one_sided` directly via an inline closure — both
+  sites share the same one-sided invariant, but via the underlying
+  primitive rather than this wrapper.
 - **`credit::ledger::check_signed_freshness`** — one-sided staleness
   check for `chrono::DateTime<Utc>`-typed signed messages (balance
   reports, credit transactions, pool removals). Constants
@@ -193,7 +196,8 @@ silently break at the wire if duplicated:
   multi-token decode branch. Shared by `speculative.rs::send_verify_batch`
   and `dsd.rs::forward_verify_through_segments`.
 - **`pipeline::build_spec_verify_forward`** (R93) — constructs the
-  17-field `LayerForward` envelope for spec verify. Adding a new field
+  18-field `LayerForward` envelope for spec verify (R139 added the
+  18th field, `chunk_meta`). Adding a new field
   to `LayerForward` extends this helper, not the call sites.
 - **`pipeline::build_kv_truncate_forward`** (R95) — sibling helper
   for stop-sequence KV-truncate signals (empty activations,

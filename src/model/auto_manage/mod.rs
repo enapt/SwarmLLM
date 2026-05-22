@@ -83,3 +83,52 @@ pub(crate) fn compute_budget_max_bytes(
         swarmllm_types::ContributionMode::Maximum => raw_max_bytes.saturating_mul(3) / 2,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use swarmllm_types::ContributionMode;
+
+    fn mib(n: u64) -> u64 {
+        n.saturating_mul(1024).saturating_mul(1024)
+    }
+
+    #[test]
+    fn budget_uses_explicit_auto_storage_when_positive() {
+        // auto_max_storage_mb > 0 takes precedence over resources_max_disk_mb.
+        let got = compute_budget_max_bytes(1024, 999_999, &ContributionMode::Moderate);
+        assert_eq!(got, mib(1024));
+    }
+
+    #[test]
+    fn budget_falls_back_to_half_of_resources_when_auto_unset() {
+        // auto_max_storage_mb == 0 falls back to resources/2.
+        let got = compute_budget_max_bytes(0, 2048, &ContributionMode::Moderate);
+        assert_eq!(got, mib(2048) / 2);
+    }
+
+    #[test]
+    fn budget_minimal_scales_to_quarter() {
+        let got = compute_budget_max_bytes(1024, 0, &ContributionMode::Minimal);
+        assert_eq!(got, mib(1024) / 4);
+    }
+
+    #[test]
+    fn budget_maximum_scales_to_3_over_2() {
+        let got = compute_budget_max_bytes(1024, 0, &ContributionMode::Maximum);
+        assert_eq!(got, mib(1024).saturating_mul(3) / 2);
+    }
+
+    #[test]
+    fn budget_handles_zero_inputs() {
+        // Neither configured → zero budget.
+        assert_eq!(
+            compute_budget_max_bytes(0, 0, &ContributionMode::Moderate),
+            0
+        );
+        assert_eq!(
+            compute_budget_max_bytes(0, 0, &ContributionMode::Maximum),
+            0
+        );
+    }
+}
