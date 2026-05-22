@@ -256,7 +256,7 @@ surfacing what the swarm already runs directly in the chat empty state.
    with the HF repo_id, dropping the user into the existing search
    subtab pre-filtered to the right repo.
 
-**i18n**: 15 new keys translated across all 21 locales (1156 → 1171
+**i18n**: 15 new keys translated across all 21 locales (1156 → 1172
 entries per locale) — idiomatic, not English fallback. New keys cover
 the chat catalog (titles, hints, chip meta, replica counts), the
 wishlist Candidate status + CTA, the trusted-publisher tag, and the

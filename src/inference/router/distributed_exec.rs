@@ -145,7 +145,10 @@ pub(super) async fn finalize_request(
             if is_pool_member {
                 // Slave device: forward the spend to the master's balance.
                 // Use the same credit forward mechanism as earning, but negative.
-                if let Some(ref tx) = *shared_state.credits.pool_tx.read().await {
+                // Clone the sender out of the RwLock guard before awaiting so a
+                // concurrent PoolManager start/stop doesn't stall behind this send.
+                let pool_tx = shared_state.credits.pool_tx.read().await.clone();
+                if let Some(tx) = pool_tx {
                     let my_id = shared_state.identity.node_id();
                     if let Some(pid) = pool_id_opt.clone() {
                         let forward = crate::pool::crypto::create_credit_forward(
@@ -580,7 +583,8 @@ pub(super) async fn execute_request(
                 })
             };
             if let Some(pid) = pool_id_opt {
-                if let Some(ref tx) = *shared_state.credits.pool_tx.read().await {
+                let pool_tx = shared_state.credits.pool_tx.read().await.clone();
+                if let Some(tx) = pool_tx {
                     let my_id = shared_state.identity.node_id();
                     let forward = crate::pool::crypto::create_credit_forward(
                         &shared_state.identity,

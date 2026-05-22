@@ -456,7 +456,8 @@ async fn dispatch_scheduler_group(pool: &Arc<ModelProcessPool>, msgs: Vec<BatchS
         return;
     }
     if msgs.len() == 1 {
-        let BatchSchedulerMsg::Forward { fwd, resp_tx } = msgs.into_iter().next().unwrap();
+        let BatchSchedulerMsg::Forward { fwd, resp_tx } =
+            msgs.into_iter().next().expect("len == 1 checked above");
         let result = pool.forward_direct(fwd).await;
         let _ = resp_tx.send(result);
         return;

@@ -185,16 +185,7 @@ impl PipelineExecutor {
         let mut fallback_rounds: u32 = 0;
 
         // Stream first token
-        if let Some(ref tx) = token_tx {
-            let text = decoder.decode_tokens(&[first_token]);
-            let _ = tx
-                .send(StreamingTokenEvent {
-                    text,
-                    finish_reason: None,
-                    matched_stop_sequence: None,
-                })
-                .await;
-        }
+        super::emit_first_streaming_token(&token_tx, &decoder, first_token).await;
         if eos_tokens.contains(&first_token) {
             finish_reason = "stop".into();
         }
@@ -335,24 +326,7 @@ impl PipelineExecutor {
             }
 
             // Emit (stream + accumulate)
-            if let Some(ref tx) = token_tx {
-                for &t in &emitted {
-                    let text = decoder.decode_tokens(&[t]);
-                    if tx
-                        .send(StreamingTokenEvent {
-                            text,
-                            finish_reason: None,
-                            matched_stop_sequence: None,
-                        })
-                        .await
-                        .is_err()
-                    {
-                        // Client disconnected
-                        finish_reason = "stop".into();
-                        break;
-                    }
-                }
-            }
+            super::emit_streaming_batch(&token_tx, &decoder, &emitted, &mut finish_reason).await;
             for &t in &emitted {
                 generated.push(t);
                 if eos_tokens.contains(&t) {

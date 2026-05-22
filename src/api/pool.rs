@@ -405,12 +405,21 @@ pub async fn pool_join(
 // ---- Helpers ----
 
 async fn send_pool_command(state: &AppState, cmd: PoolCommand) -> Result<(), ApiError> {
-    let tx_lock = state.shared_state.credits.pool_tx.read().await;
-    let tx = tx_lock.as_ref().ok_or_else(|| {
-        ApiError(crate::error::SwarmError::ServiceUnavailable(
-            "Pool manager not running".into(),
-        ))
-    })?;
+    // Clone the sender out of the RwLock guard before awaiting `send` so a
+    // concurrent PoolManager start/stop (write lock) doesn't stall behind
+    // channel backpressure on this admin send.
+    let tx = state
+        .shared_state
+        .credits
+        .pool_tx
+        .read()
+        .await
+        .clone()
+        .ok_or_else(|| {
+            ApiError(crate::error::SwarmError::ServiceUnavailable(
+                "Pool manager not running".into(),
+            ))
+        })?;
     tx.send(cmd).await.map_err(|_| {
         ApiError(crate::error::SwarmError::ServiceUnavailable(
             "Pool manager channel closed".into(),

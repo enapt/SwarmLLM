@@ -123,12 +123,12 @@ pub(super) async fn forward_to_peer(
     if !peer_resp.status().is_success() {
         let status = peer_resp.status();
         let raw_body = peer_resp.text().await.unwrap_or_default();
-        let body = crate::api::scrub_truncate_error(&raw_body);
-        tracing::warn!(status = %status, body = %body, "Peer returned error");
-        return Err(ApiError(crate::error::SwarmError::ProviderError {
-            status: status.as_u16(),
-            body,
-        }));
+        return Err(crate::api::providers::extract_provider_error(
+            &raw_body,
+            status,
+            "peer-forward",
+            crate::api::providers::OPENAI_ERROR_KEYS,
+        ));
     }
 
     let response = crate::api::providers::build_passthrough_response(peer_resp, stream).await?;

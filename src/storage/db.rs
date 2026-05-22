@@ -476,23 +476,32 @@ impl Database {
         })
     }
 
+    /// Collect every key in `table` falling within `[start, end)`.
+    /// Used by mutating routines that need a snapshot of keys to remove
+    /// before iterating mutably — redb forbids `remove` during an open
+    /// range iterator. Shared between `clear_tree` and `replace_tree`.
+    fn collect_tree_keys(
+        table: &redb::Table<'_, &'static [u8], &'static [u8]>,
+        start: &[u8],
+        end: &[u8],
+    ) -> Result<Vec<Vec<u8>>, SwarmError> {
+        let range = table
+            .range(start..end)
+            .map_err(|e| SwarmError::Database(e.to_string()))?;
+        let mut ks = Vec::new();
+        for entry in range {
+            let (key_guard, _) = entry.map_err(|e| SwarmError::Database(e.to_string()))?;
+            ks.push(key_guard.value().to_vec());
+        }
+        Ok(ks)
+    }
+
     /// Clear all entries from a named tree.
     pub fn clear_tree(&self, tree_name: &str) -> Result<(), SwarmError> {
         let start = tree_range_start(tree_name);
         let end = tree_range_end(tree_name);
         self.with_write_table(|table| {
-            // Collect keys to remove (can't mutate while iterating)
-            let keys: Vec<Vec<u8>> = {
-                let range = table
-                    .range(start.as_slice()..end.as_slice())
-                    .map_err(|e| SwarmError::Database(e.to_string()))?;
-                let mut ks = Vec::new();
-                for entry in range {
-                    let (key_guard, _) = entry.map_err(|e| SwarmError::Database(e.to_string()))?;
-                    ks.push(key_guard.value().to_vec());
-                }
-                ks
-            };
+            let keys = Self::collect_tree_keys(table, start.as_slice(), end.as_slice())?;
             for key in &keys {
                 table
                     .remove(key.as_slice())
@@ -519,19 +528,9 @@ impl Database {
         let start = tree_range_start(tree_name);
         let end = tree_range_end(tree_name);
         self.with_write_table(|table| {
-            // Collect existing keys then remove them — same pattern as
-            // clear_tree, but inside the same txn as the inserts.
-            let stale_keys: Vec<Vec<u8>> = {
-                let range = table
-                    .range(start.as_slice()..end.as_slice())
-                    .map_err(|e| SwarmError::Database(e.to_string()))?;
-                let mut ks = Vec::new();
-                for entry in range {
-                    let (key_guard, _) = entry.map_err(|e| SwarmError::Database(e.to_string()))?;
-                    ks.push(key_guard.value().to_vec());
-                }
-                ks
-            };
+            // Remove existing keys then insert the new set inside the
+            // same transaction.
+            let stale_keys = Self::collect_tree_keys(table, start.as_slice(), end.as_slice())?;
             for key in &stale_keys {
                 table
                     .remove(key.as_slice())

@@ -76,8 +76,12 @@ pub async fn forward_credits_to_owner(
     let forward =
         crypto::create_credit_forward(&shared_state.identity, &pool_id, my_id, &owner_id, amount);
 
-    // Send to pool manager for processing + broadcasting
-    if let Some(ref tx) = *shared_state.credits.pool_tx.read().await {
+    // Send to pool manager for processing + broadcasting. Clone the
+    // sender out of the RwLock guard before awaiting on `tx.send` so a
+    // concurrent PoolManager start/stop (which takes the write lock)
+    // doesn't stall behind channel backpressure on this send.
+    let pool_tx = shared_state.credits.pool_tx.read().await.clone();
+    if let Some(tx) = pool_tx {
         if tx
             .send(PoolCommand::ProcessCreditForward { forward })
             .await

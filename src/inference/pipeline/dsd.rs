@@ -182,16 +182,7 @@ impl PipelineExecutor {
         let mut expected_kv_len: u32 = prompt_token_count as u32;
         let mut pending_truncate: Option<u32> = None;
 
-        if let Some(ref tx) = token_tx {
-            let text = decoder.decode_tokens(&[first_token]);
-            let _ = tx
-                .send(StreamingTokenEvent {
-                    text,
-                    finish_reason: None,
-                    matched_stop_sequence: None,
-                })
-                .await;
-        }
+        super::emit_first_streaming_token(&token_tx, &decoder, first_token).await;
 
         let mut acceptance_proposed: u32 = 0;
         let mut acceptance_accepted: u32 = 0;
@@ -329,23 +320,7 @@ impl PipelineExecutor {
                 emitted.truncate(eos_at + 1);
             }
 
-            if let Some(ref tx) = token_tx {
-                for &t in &emitted {
-                    let text = decoder.decode_tokens(&[t]);
-                    if tx
-                        .send(StreamingTokenEvent {
-                            text,
-                            finish_reason: None,
-                            matched_stop_sequence: None,
-                        })
-                        .await
-                        .is_err()
-                    {
-                        finish_reason = "stop".to_string();
-                        break;
-                    }
-                }
-            }
+            super::emit_streaming_batch(&token_tx, &decoder, &emitted, &mut finish_reason).await;
 
             // Bail before the per-round bookkeeping when the client has
             // disconnected. Mirrors speculative.rs — the inner `break` only

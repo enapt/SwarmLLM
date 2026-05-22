@@ -348,11 +348,12 @@ pub(super) async fn anthropic_to_openai_proxy(
     if !resp.status().is_success() {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
-        let truncated = crate::api::scrub_truncate_error(&body);
-        return Err(ApiError(crate::error::SwarmError::ProviderError {
-            status: status.as_u16(),
-            body: truncated,
-        }));
+        return Err(crate::api::providers::extract_provider_error(
+            &body,
+            status,
+            "anthropic-proxy",
+            crate::api::providers::ANTHROPIC_ERROR_KEYS,
+        ));
     }
 
     if req.stream {

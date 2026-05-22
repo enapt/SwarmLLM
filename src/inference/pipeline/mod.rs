@@ -328,6 +328,62 @@ pub(super) fn build_kv_truncate_forward(
     }
 }
 
+/// Send a single token's decoded text down the streaming channel,
+/// ignoring any send error (matches the "first-token" pattern that
+/// fires before the per-round loop). Used by speculative / DSD /
+/// ngram-only-spec where the first token is always emitted
+/// fire-and-forget — disconnection at this point is fine, the per-round
+/// loop will detect it on the next emit.
+pub(in crate::inference::pipeline) async fn emit_first_streaming_token(
+    token_tx: &Option<StreamingTokenTx>,
+    decoder: &prompt::CachedDecoder,
+    token: u32,
+) {
+    if let Some(tx) = token_tx {
+        let text = decoder.decode_tokens(&[token]);
+        let _ = tx
+            .send(crate::inference::router::StreamingTokenEvent {
+                text,
+                finish_reason: None,
+                matched_stop_sequence: None,
+            })
+            .await;
+    }
+}
+
+/// Emit a slice of accepted tokens to the streaming channel. On a
+/// channel-closed error (client disconnect), stamp `finish_reason =
+/// "stop"` and break. Returns whether a disconnect happened so the
+/// caller can bail out of further bookkeeping. Shared by
+/// speculative / DSD / ngram-only-spec.
+pub(in crate::inference::pipeline) async fn emit_streaming_batch(
+    token_tx: &Option<StreamingTokenTx>,
+    decoder: &prompt::CachedDecoder,
+    tokens: &[u32],
+    finish_reason: &mut String,
+) -> bool {
+    let tx = match token_tx {
+        Some(tx) => tx,
+        None => return false,
+    };
+    for &t in tokens {
+        let text = decoder.decode_tokens(&[t]);
+        if tx
+            .send(crate::inference::router::StreamingTokenEvent {
+                text,
+                finish_reason: None,
+                matched_stop_sequence: None,
+            })
+            .await
+            .is_err()
+        {
+            *finish_reason = "stop".to_string();
+            return true;
+        }
+    }
+    false
+}
+
 /// Request-level disqualifiers shared by every "fast path" coordinator:
 /// remote-generate (`remote_generate.rs`), distributed-speculative
 /// (`speculative.rs`), and DSD multi-segment (`dsd.rs`). Returns

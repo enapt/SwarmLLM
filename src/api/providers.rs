@@ -59,7 +59,12 @@ pub fn build_sse_response(body: axum::body::Body) -> Result<axum::response::Resp
 /// Scrubs API keys, attempts to parse JSON and extract a human-readable message
 /// field (trying keys in the given priority order), then truncates.
 /// Returns the provider error as an `ApiError` with the original HTTP status.
-fn extract_provider_error(
+///
+/// Pass an empty `key_priority` (`&[]`) for a pass-through caller that doesn't
+/// know the provider's JSON error shape — the scrubbed/truncated body is
+/// returned as-is. Either way the helper emits a single structured
+/// `tracing::warn!` so call sites don't need to log separately.
+pub(crate) fn extract_provider_error(
     raw_body: &str,
     status: reqwest::StatusCode,
     provider_label: &str,
@@ -90,9 +95,11 @@ fn extract_provider_error(
 }
 
 /// JSON key priority for OpenAI-compatible provider error responses.
-const OPENAI_ERROR_KEYS: &[&[&str]] = &[&["detail"], &["error", "message"], &["message"]];
+pub(crate) const OPENAI_ERROR_KEYS: &[&[&str]] =
+    &[&["detail"], &["error", "message"], &["message"]];
 /// JSON key priority for Anthropic provider error responses.
-const ANTHROPIC_ERROR_KEYS: &[&[&str]] = &[&["error", "message"], &["message"], &["detail"]];
+pub(crate) const ANTHROPIC_ERROR_KEYS: &[&[&str]] =
+    &[&["error", "message"], &["message"], &["detail"]];
 
 /// Known provider base URLs (OpenAI-compatible).
 pub fn provider_base_url(name: &str) -> Option<&'static str> {

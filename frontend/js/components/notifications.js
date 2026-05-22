@@ -95,6 +95,8 @@
     'pool_member_removed': '\u26D4',     // ⛔
     'config_updated': '\u2699\uFE0F',    // ⚙️
     'download_slow': '\u26A0\uFE0F',    // ⚠️
+    'hf_sources_cap_reached': '\u26A0\uFE0F', // ⚠️ R141 (peer-gossip cap drops)
+    'manifest_rejected': '\u274C',       // ❌ R126 (bad manifest from peer)
   };
 
   // Category CSS class for color coding
