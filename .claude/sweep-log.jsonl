@@ -1342,3 +1342,5 @@
 {"file":"src/inference/vision.rs","line":814,"kind":"vlm_bug","summary":"ffn_up/ffn_down possibly inverted — needs VLM integration test before swap","status":"deferred","date":"2026-05-22"}
 {"file":"src/inference/chat_template/mod.rs","line":106,"kind":"chat_template_drift","summary":"LLaVA fallback chain when template eval fails — needs verification","status":"deferred","date":"2026-05-22"}
 {"file":"src/inference/layers/qwen35.rs","line":51,"kind":"prod_unwrap","summary":"Defensive unwrap; loader enforces invariant — wontfix per existing analysis","status":"wontfix","date":"2026-05-22"}
+{"file":"src/model/auto_manage/prune.rs","line":471,"kind":"logic_bug","summary":"mmproj prune candidate-collection missed connected_node_ids liveness filter","status":"fixed","date":"2026-05-22"}
+{"file":".claude/sweep-log.jsonl","line":-1,"kind":"regression_audit","summary":"R142.7-10 regression audit clean — 8 invariant questions checked, 0 issues","status":"fixed","date":"2026-05-22"}

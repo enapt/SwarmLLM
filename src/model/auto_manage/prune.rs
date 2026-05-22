@@ -472,6 +472,20 @@ impl AutoShardManager {
                 // Private mode: filter mmproj holders to allowed set
                 let mmproj_holders =
                     crate::pool::scope::filter_allowed_holders(mmproj_holders, &allowed_set);
+                // SEC: also filter against connected_node_ids — mirrors the
+                // regular shard path above. Without this, gossip-cached offline
+                // peers inflate `mmproj_holder_count`, candidates get scored
+                // against a wrong replica picture, and the activity log
+                // reports counts that don't match real availability. The
+                // execution-time re-check at lines 528-541 catches the
+                // pre-delete race, but skipping work + correct logs are
+                // worth the consistency.
+                let mmproj_holders: Vec<crate::types::NodeId> = mmproj_holders
+                    .into_iter()
+                    .filter(|h| {
+                        *h == local_node_id || self.shared_state.connected_node_ids.contains(h)
+                    })
+                    .collect();
                 if mmproj_holders.contains(&local_node_id) {
                     let mmproj_path = crate::model::shard::model_dir(
                         &self.shared_state.config.node.data_dir,
