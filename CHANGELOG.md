@@ -7,6 +7,59 @@ All notable changes to SwarmLLM are documented here.
 Working changelog for commits after the v0.1.0 tag. Will roll into the
 next tagged release.
 
+### R142 — Autonomous 8-hour sweep (2026-05-22 → 2026-05-23)
+
+14 sweep rounds dispatched as a self-paced `/loop /sweep`, 15 commits
+to `main`, 60+ findings closed. Standout: **3 silent production bugs**
+from frontend↔backend JSON wire-format drift — bugs no test caught
+because the broken path emits no error:
+
+1. R141 chat empty-state catalog never rendered (WS `stats_update`
+   never merged into `App.data.cache.stats` → `cache.stats.wishlist`
+   always undefined).
+2. R140 maturity-fade button stuck prominent forever (`pool.js` read
+   `peer_count` but stats field is `peers`).
+3. Auto-manage activity orb permanently zero (`auto-manage-status.js`
+   matched PascalCase `'Downloading'`; backend serializes
+   `"downloading"`).
+
+Real concurrency bugs: 3 TOCTOU fixed with atomic `remove_if`
+(`try_assemble_chunked_forward` double-dispatch, `remove_shard_holder`
+holder-drop race, `evict_split_models_lru` cache drift), 2 clock-
+dependence bugs (`maybe_reset_window` froze on backward NTP
+correction in both hedging + prefetch), atomic ordering on Release-
+paired counters, batch `active_count.fetch_add` outside spawn
+closure (R103-class leak), `register_multi_turn` orphan
+`KvCacheSession`, pipeline-stream `send_forward` orphan on caller-
+future cancel, batch panic arm missed `active_pipelines` cleanup.
+
+Security / correctness: HF download size cap bypassed when
+`Content-Length` absent (DoS), `auto_switch_quants` Default vs
+serde-default mismatch, 4× wrong `SwarmError::Internal` for worker-
+died (should be `ServiceUnavailable`), 2 discarded errors that
+silently closed SSE streams, `anthropic_split_stream` dropped
+`matched_stop_sequence`. Scheduler oracle violation in
+`allocate_offline` + mmproj prune missing the same liveness filter.
+
+Hot-path perf: per-token `format!()` in info-level tracing,
+`vec![forward.clone()]` deep-copying activation buffer on persistent-
+stream non-chunked path.
+
+11 helper extractions, 19 new tests pinning invariants, 4
+`.claude/rules/architecture.md` doc drifts fixed, DIAGNOSTICS.md
+DIAG strings synced, book introduction + config reference updated.
+
+Deferred to `docs/FUTURE_WORK.md § R142 deferred items`: VLM
+`ffn_up/down` weight inversion (needs LLaVA integration test),
+LLaVA chat-template fallback edge case, Python SDK R140 endpoints,
+test-binary `spawn_test_server` extraction, streaming + invite v2
+config-reference doc rows, `apply_update_with_version` Option
+cleanup, worker compute waste on cancel.
+
+1056 → 1075 lib tests. Clippy clean default + features
+dev,claude-subscription + features llama. Commits:
+`05233184..dfcfaa8d`. Detail: `memory/round_log_R142.md`.
+
 ### R141 — Auto-manage cold-start UX (2026-05-21)
 
 Closed the "fresh node has nothing to chat with" gap by removing every

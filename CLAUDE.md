@@ -150,7 +150,7 @@ libp2p 0.56, axum 0.8, candle-core/candle-transformers 0.10 (CUDA), redb 4, ed25
 
 ## Testing
 
-- 1053 lib tests passing + 8 ignored (env-var-gated real-model + manual smoke), 75 integration tests in `tests/integration/`, 1 ignored end-to-end (`cargo test --test integration_phase10_11 -- --ignored`), clippy clean. Microbench: `cargo run --release --no-default-features --features dev,claude-subscription --example swarm_spec_bench` (R136 — measures all 4 SWARM-SPEC layer primitives + synthetic cascade hit-rate). Local-cluster bench: `examples/3node_setup.sh` (boots 3 daemons) + `examples/3node_inference_bench.sh` (runs 3 workloads × 3 trials and prints tok/s + swarm_spec metrics). Sharded variant: `examples/3node_sharded_setup.sh` (forced distributed pipeline — requires `auto_manage.enabled = false` in per-node config.toml to preserve sharded state).
+- 1075 lib tests passing + 8 ignored (env-var-gated real-model + manual smoke), 75 integration tests in `tests/integration/`, 1 ignored end-to-end (`cargo test --test integration_phase10_11 -- --ignored`), clippy clean. Microbench: `cargo run --release --no-default-features --features dev,claude-subscription --example swarm_spec_bench` (R136 — measures all 4 SWARM-SPEC layer primitives + synthetic cascade hit-rate). Local-cluster bench: `examples/3node_setup.sh` (boots 3 daemons) + `examples/3node_inference_bench.sh` (runs 3 workloads × 3 trials and prints tok/s + swarm_spec metrics). Sharded variant: `examples/3node_sharded_setup.sh` (forced distributed pipeline — requires `auto_manage.enabled = false` in per-node config.toml to preserve sharded state).
 - Unit tests: in-module `#[cfg(test)]` blocks
 - Integration tests: `tests/integration/` — multi-node simulations with `--test-threads=1`
 - Real-model spawn-and-infer test: set `SWARMLLM_TEST_MODEL_DIR` to a fully-populated model directory (e.g. `~/.local/share/swarmllm/models/tinyllama-1.1b-...`) and run `cargo test --test integration_phase10_11 -- --ignored end_to_end`. No synthetic GGUF fixture is committed; see `docs/ARCHITECTURE.md` § Deferred Items.
@@ -191,9 +191,93 @@ When spawning subagents in this repo, use these model picks (overrides defaults 
 
 ## Status
 
-All 20 build phases complete. All subsystems wired — no stubs. **1053 lib tests + 75 integration tests passing**; 8 lib + 1 e2e ignored (env-var or manual). Clippy clean default + `--features llama`.
+All 20 build phases complete. All subsystems wired — no stubs. **1075 lib tests + 75 integration tests passing**; 8 lib + 1 e2e ignored (env-var or manual). Clippy clean default + features dev,claude-subscription + `--features llama`.
 
-### Latest: R141 — Auto-manage cold-start UX (non-tech-user fixes)
+### Latest: R142 — Autonomous 8-hour sweep (2026-05-22→05-23)
+
+14 sweep rounds, 60+ findings closed, 15 commits to `main`. Standout
+finds were **3 silent production bugs from frontend↔backend JSON
+wire-format drift** — bugs no test would catch because the broken
+path emits no error:
+
+1. **R141 chat empty-state catalog never rendered** — WS
+   `stats_update` payload was never merged into `App.data.cache.stats`,
+   so `buildSwarmCatalog()` reading `cache.stats.wishlist` always saw
+   `undefined`. Three-row Serveable/Aspirational/Candidate catalog
+   that's the entire point of R141 was permanently invisible.
+2. **R140 maturity-fade button stuck prominent** —
+   `pool.js:199` read `statsCache.peer_count` but `/api/admin/stats`
+   serializes that field as `peers` (a different endpoint at
+   `admin.rs:1070` exposes `peer_count`). `connectedPeers` was always
+   0 → `swarmIsMature` always false → R140's prominent
+   "Add Another Device" button never demoted to settings as the swarm
+   grew.
+3. **Auto-manage activity orb permanently zero** —
+   `auto-manage-status.js` matched PascalCase `'Downloading'`/
+   `'Queued'`/`'Verifying'`; backend `AcquisitionState` is
+   `#[serde(rename_all = "snake_case")]` so values arrive as
+   `"downloading"`, `"awaiting_manifest"`. `activeDownloads` always 0;
+   users got no visual signal while auto-manage was pulling shards.
+
+Plus **real concurrency bugs**:
+- 3 TOCTOU on multi-step DashMap ops (`try_assemble_chunked_forward`
+  could double-dispatch, `remove_shard_holder` could drop fresh
+  holders, `evict_split_models_lru` cache drift). All fixed with
+  atomic `remove_if` predicates.
+- 2 clock-dependence bugs in hedging + prefetch
+  `maybe_reset_window` — backward NTP correction froze the rate-
+  budget windows indefinitely. Fixed with `start > now` recovery.
+- Atomic ordering on hedge/prefetch rate counters — `Relaxed` loads
+  paired with `Release` stores were broken on weak-memory archs.
+- Batch `active_count.fetch_add` outside spawn closure (matched
+  R103-class single-path leak).
+- `register_multi_turn` orphaned `KvCacheSession` slots on re-
+  register.
+- HF download size cap bypassed when `Content-Length` absent (DoS).
+- 4× wrong `SwarmError::Internal` for worker-died (should be
+  `ServiceUnavailable` — operators misattributed 500s to bugs).
+- 2 discarded errors that silently closed SSE streams.
+- Anthropic `anthropic_split_stream` dropped `matched_stop_sequence`
+  — Claude Code's stop_sequence detection broke on split-model
+  inference.
+- Scheduler oracle violation in `allocate_offline` + mmproj prune
+  missing the same `connected_node_ids` filter.
+- Hot-path perf: per-token `format!()` in `tracing::info!` allocated
+  even when filtered; `vec![forward.clone()]` deep-copied the
+  activation buffer on the persistent-stream non-chunked path.
+
+Plus 11 helper extractions consolidating duplicated logic
+(`compute_budget_max_bytes`, `local_shard_indices_in`,
+`extract_provider_error` pub-elevated, `collect_tree_keys`,
+`emit_first_streaming_token`/`emit_streaming_batch`,
+`fail_pending_forward`, `resolve_peer_id_for_segments`,
+`cap_utf8_to_bytes`, `hf_downloads_normalised`,
+`purge_split_model_index_entries`, `_normaliseCode`).
+
+19 new tests pinning invariants (`compute_budget_max_bytes`,
+`cap_utf8_to_bytes`, `hf_downloads_normalised`, hedge eviction,
+last-holder tombstone, Anthropic stop_sequence wire format).
+
+Docs cleaned: 4 stale `.claude/rules/architecture.md` entries, 3
+stale `docs/DIAGNOSTICS.md` DIAG strings, book introduction (11→12
+subsystems, 887→1075 tests), `auto_update` default flipped to
+disabled note, `contribution_auto` (R121) row added, CHANGELOG R141
+test-count baseline, `learn.md` gotchas filename + CLAUDE.md line-
+target relaxed.
+
+Deferred to `docs/FUTURE_WORK.md § R142 deferred items`: VLM
+`ffn_up/down` weight-loading inversion (needs LLaVA integration
+test), LLaVA chat-template eval-failure fallback, Python SDK
+R140 endpoints, test-binary `spawn_test_server` shared-helper
+extraction, streaming + invite-code v2 config-reference rows,
+`apply_update_with_version` Option cleanup, worker compute waste
+on cancel (needs new IPC message).
+
+1056 → 1075 lib tests (+19). Clippy clean default + features dev,
+claude-subscription + features llama. Detail: commits
+05233184..dfcfaa8d + `memory/round_log_R142.md`.
+
+### Prior: R141 — Auto-manage cold-start UX (non-tech-user fixes)
 
 Closes the long-standing "fresh node has nothing to chat with" gap by
 removing every silent gate that blocked auto-manage from acting and

@@ -557,6 +557,132 @@ d122e9e8..e6dad63f in `.claude/sweep-log.jsonl` R138 entries.
 
 ---
 
+## R142 deferred items (autonomous 8-hour sweep, 2026-05-22→05-23)
+
+The R142 sweep loop closed 60+ findings across 14 rounds. The
+following items were flagged with confidence but explicitly NOT
+fixed because they need either real-model integration testing, a
+maintainer architectural decision, or a feature addition beyond
+sweep scope. Full per-item context is in `.claude/sweep-log.jsonl`
+under `"status":"deferred"`.
+
+### VLM weight loading: `ffn_up`/`ffn_down` possibly inverted
+
+`src/inference/vision.rs:814-820` loads `mlp_fc1` (applied FIRST,
+before GELU) as `v.blk.{i}.ffn_down.weight`, and `mlp_fc2` (applied
+SECOND) as `v.blk.{i}.ffn_up.weight`. The text-model convention in
+this codebase (`src/inference/layers/mod.rs:142,188`; test fixtures
+in `src/inference/split/tests/gqa.rs:244-245` and `llama4_glm4.rs`)
+treats `ffn_up` as the expansion (hidden → 4×hidden, applied first)
+and `ffn_down` as the contraction (4×hidden → hidden, applied
+second). If the GGUF CLIP convention matches the text-model
+convention, the vision MLP weights are swapped and VLM inference
+silently produces incorrect embeddings.
+
+**Why deferred.** llama.cpp's CLIP code has a runtime
+`is_ffn_swapped` check, suggesting at least some CLIP variants
+follow the opposite convention. Swapping without a real-LLaVA
+end-to-end correctness test risks turning a possibly-working VLM
+path into a definitely-broken one. The risk asymmetry (swap could
+break a working path) > (don't swap, possibly fix). Needs a
+side-by-side LLaVA inference comparison against llama.cpp / a known
+reference before committing.
+
+**Owner action:** run `cargo test --test integration_phase10_11 -- --ignored end_to_end`
+with `SWARMLLM_TEST_MODEL_DIR=...llava...` and a fixed prompt; compare
+the embedding output cosine-similarity against a llama.cpp reference.
+If >0.99 with the current loader, the GGUF CLIP convention is the
+swapped one (current code is right). If close to 0 / random,
+swap `mlp_fc1` ↔ `mlp_fc2` source tensors.
+
+### LLaVA chat template eval-failure fallback path
+
+`src/inference/chat_template/mod.rs:106` handles the case where a
+LLaVA model has a chat template string but the Jinja engine fails to
+evaluate it. The current fallback chain falls through to ChatML and
+silently drops the `<image>\n` placeholder, causing vision embeddings
+to be prepended rather than inserted at the correct token position.
+The model-name LLaVA heuristic at line 123 only applies in the
+`template.is_none()` branch.
+
+**Why deferred.** Same class as the ffn finding — needs a real LLaVA
+model with a known-bad-template GGUF to verify the failure mode
+fires, and to validate the fix doesn't regress models with working
+templates. Sweep can't construct that fixture.
+
+### Python SDK missing R140 pool endpoints
+
+`python/swarmllm_client/admin.py:260` `PoolClient` wraps the pre-
+R140 pool endpoints (`state`, `create`, `invite`, `accept`, `remove`,
+`leave`, `invitations`, `leaderboard`) but has no `generate_code()`
+or `join()` method matching the R140 backend additions. SDK users
+implementing the bootstrap-before-decentralization flow have to
+fall back to raw `_post()` calls.
+
+**Why deferred.** Public-API surface addition; needs SDK release +
+docs update. Not sweep scope.
+
+### Test infra: spawn_test_server duplicated across binaries
+
+`tests/integration/api_test.rs` and `test_metrics_health.rs` belong
+to different `[[test]]` binaries (`integration` vs
+`integration_phase10_11`) so they can't share via `mod common`. Both
+files have ~60 lines of byte-identical `spawn_test_server` +
+`auth_client` setup that must be updated in lockstep on every test-
+infra change. The R86 readiness-probe fix was correctly applied to
+both, but future changes risk drift.
+
+**Why deferred.** Fix requires a Cargo path-import workaround
+(`#[path = "../common.rs"] mod common;` in each test binary) — small
+but needs verification on Linux + macOS CI.
+
+### Configuration-reference doc additions
+
+`docs/book/src/configuration/reference.md` is missing rows for:
+- 4× R139 streaming knobs: `streaming_chunked_send`,
+  `streaming_chunk_size_bytes`, `streaming_min_activation_bytes`,
+  `streaming_chunk_assembly_ttl_secs`
+- R140 `swarmpool://` v2 invite-code format (the `docs/book/src/
+  architecture/networking.md` Discovery Layer 3 section still only
+  documents the network-only `swarm://` code).
+
+**Why deferred.** Both are doc additions, not corrections — the code
++ behavior already ships. Sweep ran out of time before composing the
+new rows with the exact same style as existing rows.
+
+### `update.rs::apply_update_with_version` dead Option branch
+
+`Option<&str>` parameter has a `None` arm that bypasses the
+downgrade-prevention check. Currently unreachable (only caller
+always passes `Some`). Simplify signature to `&str` and remove the
+guard to remove a future-refactor footgun.
+
+**Why deferred.** Defensive cleanup, not a live bug.
+
+### Worker compute waste on request cancel
+
+`src/inference/process_pool.rs:1386` — when a `forward_direct` future
+is cancelled mid-IPC (caller dropped via `tokio::select!`), the
+`ResponseGuard` correctly removes the response channel, but the IPC
+message has already been sent to the worker subprocess. The worker
+keeps computing the cancelled request; its eventual reply gets
+silently dropped by the reader actor. Under burst-cancel workloads
+(speculative decode hedge races, request timeouts), worker GPU
+compute is wasted on requests no one wants.
+
+**Why deferred.** Needs a new IPC message type (`DaemonMsg::CancelRequest`)
+and worker-side cancel handling. Larger feature, not sweep scope.
+
+### Batch JoinHandle discard (wontfix)
+
+`src/inference/router/mod.rs:595` `tokio::spawn(execute_batch)`
+discards the JoinHandle. Mirrors the single-request dispatch
+pattern at line 754; in-flight batches complete after the router
+exits accepting work. R142.9 audit confirmed this matches the
+documented design. Marked wontfix.
+
+---
+
 ## R135 cross-pool review — hot-reloadable flag deferral
 
 _**Closed R137** (2026-05-17). All 4 steps from the original plan
