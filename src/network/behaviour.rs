@@ -5,7 +5,7 @@ use libp2p::identity::Keypair;
 use libp2p::kad::store::MemoryStore;
 use libp2p::swarm::NetworkBehaviour;
 use libp2p::{
-    autonat, dcutr, gossipsub, identify, kad, mdns, relay, request_response, StreamProtocol,
+    autonat, dcutr, gossipsub, identify, kad, mdns, relay, request_response, upnp, StreamProtocol,
 };
 
 use crate::config::NetworkConfig;
@@ -54,6 +54,11 @@ pub struct SwarmBehaviour {
     pub identify: identify::Behaviour,
     pub autonat: libp2p::swarm::behaviour::toggle::Toggle<autonat::Behaviour>,
     pub dcutr: libp2p::swarm::behaviour::toggle::Toggle<dcutr::Behaviour>,
+    /// UPnP/IGD automatic gateway port-mapping (toggleable — disable on WSL2).
+    /// On a home router with UPnP enabled this maps the P2P TCP/QUIC ports on
+    /// the gateway and confirms the resulting public address with the swarm,
+    /// which flows into the invite code via `refresh_listen_multiaddrs`.
+    pub upnp: libp2p::swarm::behaviour::toggle::Toggle<upnp::tokio::Behaviour>,
     pub relay_client: relay::client::Behaviour,
     /// Relay server: accepts reservations from NAT'd peers and forwards circuits.
     pub relay_server: relay::Behaviour,
@@ -81,6 +86,7 @@ pub fn build_behaviour(
     enable_mdns: bool,
     enable_autonat: bool,
     enable_dcutr: bool,
+    enable_upnp: bool,
     known_peers: usize,
     network_config: Option<&NetworkConfig>,
 ) -> Result<SwarmBehaviour, Box<dyn std::error::Error>> {
@@ -215,6 +221,17 @@ pub fn build_behaviour(
         None
     };
 
+    // UPnP/IGD gateway port-mapping (toggleable — disable on WSL2). On a
+    // cooperative home router this opens the P2P ports on the gateway and
+    // confirms the public address with the swarm automatically. On routers
+    // without UPnP it emits GatewayNotFound and is otherwise inert.
+    let upnp_behaviour = if enable_upnp {
+        Some(upnp::tokio::Behaviour::default())
+    } else {
+        tracing::debug!("DIAG: upnp disabled by config");
+        None
+    };
+
     // Relay server: if config provided, use those limits; otherwise use defaults.
     let relay_config = relay_server_config
         .map(crate::network::relay::build_relay_server_config)
@@ -262,6 +279,7 @@ pub fn build_behaviour(
         identify,
         autonat: autonat_behaviour.into(),
         dcutr: dcutr_behaviour.into(),
+        upnp: upnp_behaviour.into(),
         relay_client: relay_behaviour,
         relay_server,
         connection_limits,
@@ -280,7 +298,17 @@ mod tests {
         let (relay_transport, relay_behaviour) = relay::client::new(keypair.public().to_peer_id());
         // relay_transport isn't used in this test
         drop(relay_transport);
-        let result = build_behaviour(&keypair, relay_behaviour, None, false, true, true, 0, None);
+        let result = build_behaviour(
+            &keypair,
+            relay_behaviour,
+            None,
+            false,
+            true,
+            true,
+            false,
+            0,
+            None,
+        );
         assert!(result.is_ok());
     }
 
@@ -301,6 +329,7 @@ mod tests {
             false,
             true,
             true,
+            false,
             0,
             None,
         );
@@ -312,7 +341,17 @@ mod tests {
         let keypair = Keypair::generate_ed25519();
         let (relay_transport, relay_behaviour) = relay::client::new(keypair.public().to_peer_id());
         drop(relay_transport);
-        let result = build_behaviour(&keypair, relay_behaviour, None, true, true, true, 0, None);
+        let result = build_behaviour(
+            &keypair,
+            relay_behaviour,
+            None,
+            true,
+            true,
+            true,
+            false,
+            0,
+            None,
+        );
         assert!(result.is_ok());
         let behaviour = result.unwrap();
         // mDNS should be enabled (Toggle wraps Some)

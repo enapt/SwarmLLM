@@ -10,6 +10,12 @@ max_disk_mb = 50000            # 50GB for model storage
 max_bandwidth_mbps = 0         # 0 = unlimited
 
 [network]
+# Bootstrap peers: one or more publicly-reachable "anchor" nodes new nodes
+# dial on startup to join the network before decentralized discovery kicks in.
+# Empty by default — LAN nodes find each other via mDNS, and once enough
+# publicly-reachable nodes exist the DHT self-bootstraps. To seed a public
+# network, add your anchor's multiaddr(s), e.g. (see docs/NETWORKING.md):
+#   bootstrap_peers = ["/dns4/anchor.example.net/tcp/8810/p2p/12D3KooW...your-anchor-peer-id..."]
 bootstrap_peers = []
 enable_relay = true
 enable_relay_client = true
@@ -17,6 +23,14 @@ max_peers = 200
 enable_mdns = true                 # LAN discovery via mDNS (finds peers on same network)
 enable_autonat = true              # NAT detection (set false on WSL2 to prevent connection races)
 enable_dcutr = true                # Hole punching (set false on WSL2 to prevent connection races)
+enable_upnp = true                 # UPnP/IGD gateway port-mapping — auto-opens the P2P port on a
+                                   # cooperative home router for zero-config internet reachability
+                                   # (set false on WSL2; inert behind CGNAT / non-UPnP routers)
+# external_address = "/dns4/anchor.example.net/tcp/8810"  # Declare how THIS node is reachable from
+                                   # the internet (port-forwarded box, VPS, or dyndns anchor). Omit
+                                   # the trailing /p2p — the daemon appends its own. Flows into
+                                   # identify, the DHT, and every invite code this node mints.
+                                   # Examples: "/ip4/203.0.113.5/tcp/8810", "/ip6/2001:db8::1/tcp/8810"
 enable_encryption = true           # E2E encryption for tensor forwards.
                                    # Note: speculative / DSD / remote-generate
                                    # fast paths currently bypass the per-tensor

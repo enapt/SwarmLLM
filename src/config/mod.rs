@@ -302,6 +302,10 @@ impl Config {
                 net.enable_dcutr = false;
                 adapted.push("enable_dcutr=false");
             }
+            if !has("enable_upnp") {
+                net.enable_upnp = false;
+                adapted.push("enable_upnp=false");
+            }
             if !has("enable_mdns") {
                 net.enable_mdns = false;
                 adapted.push("enable_mdns=false");

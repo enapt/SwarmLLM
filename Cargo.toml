@@ -48,6 +48,7 @@ libp2p = { version = "0.56", features = [
     "identify",
     "autonat",
     "dcutr",
+    "upnp",
     "relay",
     "noise",
     "dns",

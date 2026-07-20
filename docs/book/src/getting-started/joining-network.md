@@ -42,8 +42,12 @@ gossip_network_id = "my-private-network"
 
 Only nodes with the same `gossip_network_id` can communicate.
 
-## Firewall
+## Firewall & internet reachability
 
-SwarmLLM needs **TCP port 8810** (P2P primary transport) and optionally **UDP port 8800** (QUIC) open. If you're behind a router, either:
-- Set up port forwarding (TCP 8810 + UDP 8800 to your machine's local IP)
-- Rely on SwarmLLM's built-in relay (works automatically in most cases)
+SwarmLLM needs **TCP port 8810** (P2P primary transport) and optionally **UDP port 8800** (QUIC) open. On the same LAN, mDNS handles everything — no ports to open. To be reachable **across the internet** you need one of:
+
+- **UPnP** (on by default) — opens the port on a cooperative home router automatically.
+- **Manual port-forward** (TCP 8810 + UDP 8800 to your machine) plus `external_address` in config.
+- **A relay/anchor node** — reach the swarm through a publicly-reachable node, even behind CGNAT.
+
+If your invite code says *"only works on your local network,"* your node isn't internet-reachable yet. See **[docs/NETWORKING.md](https://github.com/enapt/SwarmLLM/blob/main/docs/NETWORKING.md)** for the full guide — including the CGNAT check and how to run your own anchor node.

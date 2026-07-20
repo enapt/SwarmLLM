@@ -291,6 +291,7 @@ impl NetworkManager {
         let enable_mdns = config.network.enable_mdns;
         let enable_autonat = config.network.enable_autonat;
         let enable_dcutr = config.network.enable_dcutr;
+        let enable_upnp = config.network.enable_upnp;
         // Load cached peer count to auto-scale GossipSub mesh parameters.
         let known_peers = crate::network::peer_cache::load_peer_cache(&shared_state.db).len()
             + config.network.bootstrap_peers.len();
@@ -317,6 +318,7 @@ impl NetworkManager {
                     enable_mdns,
                     enable_autonat,
                     enable_dcutr,
+                    enable_upnp,
                     known_peers,
                     Some(&config.network),
                 )
@@ -481,6 +483,40 @@ impl NetworkManager {
                 .listen_on(tcp_addr.clone())
                 .map_err(|e| SwarmError::Network(format!("Failed to listen on TCP: {e}")))?;
             tracing::info!(%tcp_addr, "Listening for P2P connections (QUIC disabled)");
+        }
+
+        // Manual external-address override: a node that already knows how it is
+        // reachable from the internet — a port-forwarded box, a VPS, or a
+        // dynamic-DNS anchor — declares it via `network.external_address`.
+        // Confirm it with the swarm so it flows into identify, the DHT, and
+        // every invite code this node mints. This is the load-bearing path for
+        // a self-hosted anchor node behind CGNAT-free hosting.
+        if let Some(ext) = config.network.external_address.as_deref() {
+            let ext = ext.trim();
+            if !ext.is_empty() {
+                match ext.parse::<Multiaddr>() {
+                    Ok(mut maddr) => {
+                        // The swarm tracks external addresses without our own
+                        // peer id; strip a trailing /p2p if the user added one.
+                        if matches!(
+                            maddr.iter().last(),
+                            Some(libp2p::multiaddr::Protocol::P2p(_))
+                        ) {
+                            maddr.pop();
+                        }
+                        self.swarm.add_external_address(maddr.clone());
+                        tracing::info!(%maddr, "Declared external address from config (network.external_address)");
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            external_address = %ext,
+                            error = %e,
+                            "network.external_address is not a valid multiaddr — ignoring. \
+                             Expected e.g. /dns4/anchor.example.net/tcp/8810 or /ip4/203.0.113.5/tcp/8810"
+                        );
+                    }
+                }
+            }
         }
 
         // listen_on returns before NewListenAddr fires (the listener task hasn't

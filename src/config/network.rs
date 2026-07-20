@@ -47,6 +47,23 @@ pub struct NetworkConfig {
     /// Disable on WSL2 to prevent protocol negotiation noise that starves outbound substreams.
     #[serde(default = "default_true")]
     pub enable_dcutr: bool,
+    /// Enable UPnP/IGD automatic gateway port-mapping (default: true).
+    /// On a home router with UPnP enabled this opens the P2P ports on the
+    /// gateway and confirms the resulting public address with the swarm — the
+    /// zero-config path to internet reachability for most home users. Inert
+    /// (emits GatewayNotFound) on routers without UPnP. Auto-disabled on WSL2.
+    #[serde(default = "default_true")]
+    pub enable_upnp: bool,
+    /// Manually declared external address for nodes that already know how they
+    /// are reachable from the internet — a port-forwarded home box, a VPS, or a
+    /// dynamic-DNS anchor. Accepts an IP or DNS multiaddr WITHOUT the trailing
+    /// `/p2p/<peer_id>` (the daemon appends its own), e.g.
+    /// `/dns4/anchor.example.net/tcp/8810`, `/ip4/203.0.113.5/tcp/8810`, or
+    /// `/ip6/2001:db8::1/tcp/8810`. Added via `Swarm::add_external_address` at
+    /// startup so it flows into identify, the DHT, and every invite code this
+    /// node mints. `None` (default) leaves discovery to UPnP/AutoNAT/relay.
+    #[serde(default)]
+    pub external_address: Option<String>,
     /// Enable E2E encryption for tensor forwards and control messages (default: true).
     #[serde(default = "default_true")]
     pub enable_encryption: bool,
@@ -129,6 +146,8 @@ impl Default for NetworkConfig {
             enable_mdns: true,
             enable_autonat: true,
             enable_dcutr: true,
+            enable_upnp: true,
+            external_address: None,
             enable_encryption: true,
             gossip_network_id: None,
             tensor_compression: true,
@@ -138,5 +157,27 @@ impl Default for NetworkConfig {
             listen_address: default_listen_address(),
             enable_quic: true,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn upnp_and_external_address_defaults() {
+        let cfg = NetworkConfig::default();
+        // UPnP is on by default — the zero-config internet-reachability path.
+        assert!(cfg.enable_upnp);
+        // No external address is declared by default; discovery handles it.
+        assert!(cfg.external_address.is_none());
+    }
+
+    #[test]
+    fn enable_upnp_defaults_true_when_absent_from_toml() {
+        // A config file that predates the enable_upnp field must default to on.
+        let cfg: NetworkConfig = toml::from_str("bootstrap_peers = []").unwrap();
+        assert!(cfg.enable_upnp);
+        assert!(cfg.external_address.is_none());
     }
 }

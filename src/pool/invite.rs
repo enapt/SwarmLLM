@@ -187,6 +187,70 @@ pub fn looks_like_v2(raw: &str) -> bool {
     raw.trim().starts_with(INVITE_PREFIX)
 }
 
+/// Does at least one of these multiaddrs denote an address reachable from the
+/// **open internet** (as opposed to LAN-only)?
+///
+/// Distinct from `network::manager::events::addr_is_remotely_reachable`, which
+/// keeps LAN + CGNAT/Tailscale addresses (reachable on the same overlay). This
+/// is the stricter test used to decide whether an invite code will actually
+/// work for a stranger somewhere else on the internet — if it returns false,
+/// the code is LAN-only and we warn the user rather than let it fail silently.
+///
+/// True for: global/public IPv4 & IPv6, any DNS name (`/dns4`, `/dns6`,
+/// `/dnsaddr` — a dynamic-DNS anchor), and relay-circuit addresses
+/// (`/p2p-circuit`). False for RFC1918 LAN, loopback, link-local, IPv6 ULA,
+/// and CGNAT/Tailscale (100.64.0.0/10) — those only work locally or within a
+/// private overlay.
+pub fn any_internet_reachable(multiaddrs: &[String]) -> bool {
+    multiaddrs
+        .iter()
+        .any(|s| match s.parse::<libp2p::Multiaddr>() {
+            Ok(m) => multiaddr_is_internet_reachable(&m),
+            Err(_) => false,
+        })
+}
+
+fn multiaddr_is_internet_reachable(addr: &libp2p::Multiaddr) -> bool {
+    use libp2p::multiaddr::Protocol;
+    let mut via_relay = false;
+    for proto in addr.iter() {
+        match proto {
+            Protocol::P2pCircuit => via_relay = true,
+            Protocol::Dns(_) | Protocol::Dns4(_) | Protocol::Dns6(_) | Protocol::Dnsaddr(_) => {
+                return true
+            }
+            Protocol::Ip4(ip) if is_public_ipv4(ip) => return true,
+            Protocol::Ip6(ip) if is_public_ipv6(ip) => return true,
+            _ => {}
+        }
+    }
+    via_relay
+}
+
+fn is_public_ipv4(ip: std::net::Ipv4Addr) -> bool {
+    !(ip.is_private()
+        || ip.is_loopback()
+        || ip.is_link_local()
+        || ip.is_unspecified()
+        || ip.is_broadcast()
+        || is_cgnat_ipv4(ip))
+}
+
+/// RFC 6598 shared address space (100.64.0.0/10) — carrier-grade NAT and the
+/// range Tailscale hands out. Reachable within the overlay, not the internet.
+fn is_cgnat_ipv4(ip: std::net::Ipv4Addr) -> bool {
+    let o = ip.octets();
+    o[0] == 100 && (o[1] & 0xc0) == 0x40
+}
+
+fn is_public_ipv6(ip: std::net::Ipv6Addr) -> bool {
+    let seg0 = ip.segments()[0];
+    !(ip.is_loopback()
+        || ip.is_unspecified()
+        || (seg0 & 0xffc0) == 0xfe80  // link-local fe80::/10
+        || (seg0 & 0xfe00) == 0xfc00) // unique-local fc00::/7
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -311,5 +375,94 @@ mod tests {
         assert!(!looks_like_v2("A3F7K2M9"));
         assert!(!looks_like_v2("swarm://abc"));
         assert!(!looks_like_v2(""));
+    }
+
+    // A real, parseable peer id — the fixtures below carry a valid `/p2p/...`
+    // suffix exactly like production `listen_multiaddrs` entries do, so the
+    // classifier is exercised on strings that actually parse.
+    fn pid() -> libp2p::PeerId {
+        libp2p::PeerId::random()
+    }
+
+    #[test]
+    fn internet_reachable_public_ipv4() {
+        let p = pid();
+        assert!(any_internet_reachable(&[format!(
+            "/ip4/203.0.113.5/tcp/8810/p2p/{p}"
+        )]));
+        assert!(any_internet_reachable(&[format!(
+            "/ip4/8.8.8.8/udp/8800/quic-v1/p2p/{p}"
+        )]));
+    }
+
+    #[test]
+    fn internet_reachable_dns_anchor() {
+        // A dynamic-DNS anchor address is internet-reachable regardless of the
+        // IP it currently resolves to.
+        let p = pid();
+        assert!(any_internet_reachable(&[format!(
+            "/dns4/anchor.example.net/tcp/8810/p2p/{p}"
+        )]));
+        assert!(any_internet_reachable(&[format!(
+            "/dns6/anchor.example.net/tcp/8810/p2p/{p}"
+        )]));
+    }
+
+    #[test]
+    fn internet_reachable_relay_circuit() {
+        let (relay, me) = (pid(), pid());
+        assert!(any_internet_reachable(&[format!(
+            "/ip4/203.0.113.9/tcp/8810/p2p/{relay}/p2p-circuit/p2p/{me}"
+        )]));
+    }
+
+    #[test]
+    fn internet_reachable_public_ipv6() {
+        let p = pid();
+        assert!(any_internet_reachable(&[format!(
+            "/ip6/2001:db8::1/tcp/8810/p2p/{p}"
+        )]));
+    }
+
+    #[test]
+    fn not_internet_reachable_lan_only() {
+        // RFC1918 LAN, loopback, link-local, IPv6 ULA — none reachable from
+        // the open internet.
+        let p = pid();
+        assert!(!any_internet_reachable(&[
+            format!("/ip4/192.168.1.5/tcp/8810/p2p/{p}"),
+            format!("/ip4/10.0.0.7/udp/8800/quic-v1/p2p/{p}"),
+            format!("/ip4/127.0.0.1/tcp/8810/p2p/{p}"),
+            format!("/ip6/fc00::1/tcp/8810/p2p/{p}"),
+        ]));
+    }
+
+    #[test]
+    fn not_internet_reachable_cgnat_tailscale() {
+        // 100.64.0.0/10 — CGNAT / Tailscale. Works on the overlay, not the
+        // open internet, so an invite with only these must warn.
+        let p = pid();
+        assert!(!any_internet_reachable(&[format!(
+            "/ip4/100.64.10.5/tcp/8810/p2p/{p}"
+        )]));
+        assert!(!any_internet_reachable(&[format!(
+            "/ip4/100.127.255.254/tcp/8810/p2p/{p}"
+        )]));
+    }
+
+    #[test]
+    fn internet_reachable_mixed_list_true_if_any() {
+        // A LAN address alongside a public one still counts as reachable.
+        let p = pid();
+        assert!(any_internet_reachable(&[
+            format!("/ip4/192.168.1.5/tcp/8810/p2p/{p}"),
+            format!("/dns4/anchor.example.net/tcp/8810/p2p/{p}"),
+        ]));
+    }
+
+    #[test]
+    fn not_internet_reachable_empty_or_garbage() {
+        assert!(!any_internet_reachable(&[]));
+        assert!(!any_internet_reachable(&["not a multiaddr".into()]));
     }
 }

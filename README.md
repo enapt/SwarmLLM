@@ -127,6 +127,8 @@ A 5-layer discovery stack means nodes find each other without manual configurati
 
 Two laptops on the same Wi-Fi find each other in seconds. First-time joiners get an invite code from the dashboard. Returning users reconnect cached peers in under a second. For private networks, set `gossip_network_id` in config to isolate from the public network.
 
+**Connecting across the internet** (not just LAN) involves NAT/port-forwarding. SwarmLLM handles the common case automatically via UPnP, and falls back to relays. If you want to run a publicly-reachable **anchor node** to help bootstrap the network — or your invite code says *"only works on your local network"* — see the **[Networking guide](docs/NETWORKING.md)** (CGNAT check, port-forwarding, dynamic DNS, anchor setup).
+
 ### Private Mode
 
 Restricts your *outbound* inference to your device pool — your prompts never leave your machines. Toggle via the dashboard shield icon or the API; a confirmation dialog shows your pool's model coverage before activating.

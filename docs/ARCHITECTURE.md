@@ -256,8 +256,20 @@ libp2p Swarm
 ├── Identify (protocol identification + peer_to_node reverse map)
 ├── AutoNAT (NAT detection → Kademlia Mode::Client/Server switch)
 ├── DCUtR (hole punching)
+├── UPnP (IGD gateway port-mapping → auto-confirms public external address; default on, off on WSL2)
 └── relay::client (circuit relay)
 ```
+
+**Internet reachability (R143).** A node's advertised address set
+(`state.listen_multiaddrs`, consumed by v2 invite codes) is the UNION of
+`swarm.listeners()` (bound sockets — private LAN on a NAT'd node) and
+`swarm.external_addresses()` (public addresses confirmed by UPnP, AutoNAT,
+relay circuits, or the manual `network.external_address` override). This closes
+the gap where a NAT'd node minted invite codes carrying only its LAN address.
+UPnP (default on) auto-opens the gateway port for the common home-router case;
+`network.external_address` lets a port-forwarded box / VPS / dyndns anchor
+declare its reachable address explicitly. See `docs/NETWORKING.md` for the
+operator guide (CGNAT check, port-forwarding, running an anchor node).
 
 ## Inference Pipeline
 

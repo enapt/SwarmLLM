@@ -150,7 +150,7 @@ libp2p 0.56, axum 0.8, candle-core/candle-transformers 0.10 (CUDA), redb 4, ed25
 
 ## Testing
 
-- 1075 lib tests passing + 8 ignored (env-var-gated real-model + manual smoke), 75 integration tests in `tests/integration/`, 1 ignored end-to-end (`cargo test --test integration_phase10_11 -- --ignored`), clippy clean. Microbench: `cargo run --release --no-default-features --features dev,claude-subscription --example swarm_spec_bench` (R136 — measures all 4 SWARM-SPEC layer primitives + synthetic cascade hit-rate). Local-cluster bench: `examples/3node_setup.sh` (boots 3 daemons) + `examples/3node_inference_bench.sh` (runs 3 workloads × 3 trials and prints tok/s + swarm_spec metrics). Sharded variant: `examples/3node_sharded_setup.sh` (forced distributed pipeline — requires `auto_manage.enabled = false` in per-node config.toml to preserve sharded state).
+- 1089 lib tests passing + 8 ignored (env-var-gated real-model + manual smoke), 75 integration tests in `tests/integration/`, 1 ignored end-to-end (`cargo test --test integration_phase10_11 -- --ignored`), clippy clean. Microbench: `cargo run --release --no-default-features --features dev,claude-subscription --example swarm_spec_bench` (R136 — measures all 4 SWARM-SPEC layer primitives + synthetic cascade hit-rate). Local-cluster bench: `examples/3node_setup.sh` (boots 3 daemons) + `examples/3node_inference_bench.sh` (runs 3 workloads × 3 trials and prints tok/s + swarm_spec metrics). Sharded variant: `examples/3node_sharded_setup.sh` (forced distributed pipeline — requires `auto_manage.enabled = false` in per-node config.toml to preserve sharded state).
 - Unit tests: in-module `#[cfg(test)]` blocks
 - Integration tests: `tests/integration/` — multi-node simulations with `--test-threads=1`
 - Real-model spawn-and-infer test: set `SWARMLLM_TEST_MODEL_DIR` to a fully-populated model directory (e.g. `~/.local/share/swarmllm/models/tinyllama-1.1b-...`) and run `cargo test --test integration_phase10_11 -- --ignored end_to_end`. No synthetic GGUF fixture is committed; see `docs/ARCHITECTURE.md` § Deferred Items.
@@ -191,9 +191,50 @@ When spawning subagents in this repo, use these model picks (overrides defaults 
 
 ## Status
 
-All 20 build phases complete. All subsystems wired — no stubs. **1075 lib tests + 75 integration tests passing**; 8 lib + 1 e2e ignored (env-var or manual). Clippy clean default + features dev,claude-subscription + `--features llama`.
+All 20 build phases complete. All subsystems wired — no stubs. **1089 lib tests + 75 integration tests passing**; 8 lib + 1 e2e ignored (env-var or manual). Clippy clean default + features dev,claude-subscription + `--features llama`.
 
-### Latest: R142 — Autonomous 8-hour sweep (2026-05-22→05-23)
+### Latest: R143 — Internet reachability & NAT traversal (2026-07-20)
+
+Closes the critical "remote/internet nodes are not discoverable / invite code
+carries no public IP" gap reported by the first real external user (issue #16 +
+Discord). Root cause: the whole NAT-traversal stack (AutoNAT, DCUtR, relay) was
+wired but **inert** because there was no public anchor node, AND
+`refresh_listen_multiaddrs` read only `swarm.listeners()` (bound sockets =
+private LAN on a NAT'd node), so invite codes silently shipped a LAN-only
+address that worked on the LAN and died over the internet.
+
+Self-contained code fixes (infra decision — a self-hosted anchor VPS/Proxmox —
+tracked separately with the user):
+
+1. **UPnP default-on** (`libp2p-upnp` added to features). New
+   `upnp: Toggle<upnp::tokio::Behaviour>` in `SwarmBehaviour`; `enable_upnp`
+   config (default true, auto-off on WSL2 like autonat/dcutr). On a cooperative
+   home router this opens the P2P port + confirms the public address with the
+   swarm automatically. UPnP `Event` handled in `events.rs`: `NewExternalAddr`
+   → success toast + refresh; `NonRoutableGateway` → CGNAT-detected nat_status.
+2. **External addresses unioned into invite codes.** `refresh_listen_multiaddrs`
+   now unions `swarm.listeners()` ∪ `swarm.external_addresses()` (UPnP /
+   AutoNAT / relay-circuit / manual). Extracted to unit-tested
+   `build_reachable_multiaddr_list` + `ensure_p2p_suffix` helpers.
+3. **`network.external_address` manual override** — a port-forwarded box / VPS /
+   dyndns anchor declares its reachable address (`/dns4/...` or `/ip4/...`,
+   no `/p2p`); added via `Swarm::add_external_address` at startup so it flows
+   into identify, DHT, and every invite code.
+4. **Killed the silent LAN-only invite.** New pure `pool::invite::any_internet_reachable`
+   (public IP / DNS / relay-circuit; excludes LAN + CGN/Tailscale). When an
+   invite has no internet-reachable address, generation still succeeds but emits
+   a `pool`/`invite_lan_only` warning toast.
+5. **Docs + config**: `docs/NETWORKING.md` (CGNAT check, port-forwarding,
+   dynamic DNS, step-by-step anchor setup), `config/default.toml` anchor +
+   `external_address` examples, README Discord link + networking pointer,
+   book joining-network + ARCHITECTURE + architecture-rules updates.
+
+i18n: 2 new keys (`activity.invite_lan_only`, `activity.upnp_mapped`) × 21
+locales, idiomatic. Tests: +14 (8 invite reachability, 4 listen-addr
+union/suffix, 2 config default). 1075 → 1089 lib tests. Clippy clean default +
+features dev,claude-subscription + features llama.
+
+### Prior: R142 — Autonomous 8-hour sweep (2026-05-22→05-23)
 
 14 sweep rounds, 60+ findings closed, 15 commits to `main`. Standout
 finds were **3 silent production bugs from frontend↔backend JSON

@@ -1707,9 +1707,31 @@ impl PoolManager {
         };
         let encoded = crate::pool::invite::encode_invite_code(&payload)?;
 
+        // Kill the silent LAN-only failure: the code is valid, but if none of
+        // our addresses are reachable from the open internet it will only work
+        // for a joiner on the same LAN/overlay. Warn the user loudly rather
+        // than let them share a code that silently dies over the internet.
+        let internet_reachable = crate::pool::invite::any_internet_reachable(&payload.multiaddrs);
+        if !internet_reachable {
+            tracing::warn!(
+                multiaddr_count = payload.multiaddrs.len(),
+                "Generated invite code has only local-network addresses — it will not work over the internet"
+            );
+            self.shared_state.emit_activity(
+                crate::daemon::state::ActivityEvent::new(
+                    "pool",
+                    "invite_lan_only",
+                    "This invite code only works on your local network. To invite someone over the internet, enable UPnP on your router, forward the P2P port, or set up a relay/anchor node (see the networking docs)."
+                        .to_string(),
+                )
+                .with_toast("warning", 9000),
+            );
+        }
+
         tracing::info!(
             code_preview = &short_code[..4],
             multiaddr_count = payload.multiaddrs.len(),
+            internet_reachable,
             "Generated v2 pool invite code"
         );
 

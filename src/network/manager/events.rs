@@ -417,6 +417,57 @@ impl NetworkManager {
                 }
             }
 
+            // ── UPnP gateway port-mapping ──
+            SwarmEvent::Behaviour(SwarmBehaviourEvent::Upnp(event)) => {
+                use libp2p::upnp::Event as UpnpEvent;
+                match event {
+                    UpnpEvent::NewExternalAddr(addr) => {
+                        // The UPnP behaviour has already confirmed this address
+                        // with the swarm (ExternalAddrConfirmed), which our
+                        // handler above catches. Refresh explicitly too so the
+                        // invite-code snapshot picks up the public address even
+                        // if the confirm event ordering differs, and let the
+                        // user know their node is now internet-reachable.
+                        tracing::info!(%addr, "UPnP mapped a public address — node is now reachable from the internet");
+                        if let Ok(mut stats) = self.shared_state.metrics.node_stats.try_write() {
+                            stats.nat_status = Some("Public (UPnP-mapped)".to_string());
+                        }
+                        self.refresh_listen_multiaddrs();
+                        self.shared_state.emit_activity(
+                            crate::daemon::state::ActivityEvent::new(
+                                "network",
+                                "upnp_mapped",
+                                format!("Your router opened a public address — this node is now reachable across the internet ({addr})"),
+                            )
+                            .with_detail_str(addr.to_string())
+                            .with_toast("success", 6000),
+                        );
+                    }
+                    UpnpEvent::ExpiredExternalAddr(addr) => {
+                        tracing::warn!(%addr, "UPnP external address mapping expired");
+                        self.refresh_listen_multiaddrs();
+                    }
+                    UpnpEvent::GatewayNotFound => {
+                        tracing::info!(
+                            "UPnP: no IGD gateway found — router has UPnP disabled or none is present. \
+                             Internet peers will need a relay or a manually port-forwarded address."
+                        );
+                    }
+                    UpnpEvent::NonRoutableGateway => {
+                        // The gateway exists but is itself behind another NAT —
+                        // the classic carrier-grade NAT (CGNAT) signature. Port
+                        // mapping cannot make this node publicly reachable.
+                        tracing::warn!(
+                            "UPnP: gateway is not routable (behind carrier-grade NAT). This node cannot be \
+                             reached directly from the internet — it will need a public relay to receive inbound connections."
+                        );
+                        if let Ok(mut stats) = self.shared_state.metrics.node_stats.try_write() {
+                            stats.nat_status = Some("Private (CGNAT — relay required)".to_string());
+                        }
+                    }
+                }
+            }
+
             // ── Identify ──
             SwarmEvent::Behaviour(SwarmBehaviourEvent::Identify(
                 libp2p::identify::Event::Received {
@@ -650,28 +701,68 @@ impl NetworkManager {
         }
     }
 
-    /// Rebuild `state.listen_multiaddrs` from the swarm's current listeners.
+    /// Rebuild `state.listen_multiaddrs` from the swarm's current listeners
+    /// **unioned with its confirmed external addresses**.
     ///
-    /// Each entry is appended with `/p2p/<local_peer_id>` so a remote dialer
-    /// can both connect and verify the target identity. We deliberately keep
-    /// LAN + Tailscale CGN (100.64.0.0/10) addresses in the list — those are
-    /// the addresses a remote node on the same overlay can actually reach us
-    /// on. Only loopback / unspecified / link-local / metadata addresses are
-    /// dropped: nothing a remote dialer could productively use anyway.
+    /// The listeners are the bound sockets — on a NAT'd node those are private
+    /// LAN IPs (`192.168.x`, `10.x`), useless to a remote dialer. The confirmed
+    /// external addresses (UPnP-mapped, AutoNAT-confirmed, relay-circuit, or
+    /// manually declared via `network.external_address`) are the ones an
+    /// internet peer can actually reach. Without the union the invite code
+    /// silently ships a LAN-only address that works on the LAN and dies over
+    /// the internet — the exact failure a fresh node hits.
+    ///
+    /// Each entry is appended with `/p2p/<local_peer_id>` (when it doesn't
+    /// already terminate in a peer id) so a remote dialer can both connect and
+    /// verify the target identity. We deliberately keep LAN + Tailscale CGN
+    /// (100.64.0.0/10) addresses too — those are reachable by a node on the
+    /// same overlay. Only loopback / unspecified / link-local / metadata
+    /// addresses are dropped: nothing a remote dialer could productively use.
     pub(super) fn refresh_listen_multiaddrs(&self) {
         let local_peer_id = *self.swarm.local_peer_id();
-        let p2p_suffix = libp2p::multiaddr::Protocol::P2p(local_peer_id);
-        let mut addrs: Vec<String> = self
+        let candidates = self
             .swarm
             .listeners()
-            .filter(|addr| addr_is_remotely_reachable(addr))
-            .map(|addr| addr.clone().with(p2p_suffix.clone()).to_string())
-            .collect();
-        addrs.sort();
-        addrs.dedup();
+            .cloned()
+            .chain(self.swarm.external_addresses().cloned());
+        let addrs = build_reachable_multiaddr_list(candidates, local_peer_id);
         self.shared_state
             .listen_multiaddrs
             .store(std::sync::Arc::new(addrs));
+    }
+}
+
+/// Build the deduped, `/p2p`-suffixed, remotely-reachable multiaddr string list
+/// from an iterator of candidate addresses (listeners ∪ external addresses).
+/// Extracted from `refresh_listen_multiaddrs` so the filter/suffix/dedup logic
+/// is unit-testable without a live swarm.
+fn build_reachable_multiaddr_list(
+    candidates: impl Iterator<Item = Multiaddr>,
+    local_peer_id: libp2p::PeerId,
+) -> Vec<String> {
+    let mut addrs: Vec<String> = candidates
+        .filter(addr_is_remotely_reachable)
+        .map(|addr| ensure_p2p_suffix(addr, local_peer_id).to_string())
+        .collect();
+    addrs.sort();
+    addrs.dedup();
+    addrs
+}
+
+/// Append `/p2p/<local_peer_id>` to `addr` unless it already terminates in a
+/// peer-id component. A relay-circuit listener ends in `/p2p-circuit`, so it
+/// correctly gets our id appended (`.../p2p-circuit/p2p/<us>` — the canonical
+/// relayed dial form). A bare `/ip4/.../tcp/port` external address gets our id
+/// appended. An address a user already suffixed is returned verbatim so we
+/// never double-append.
+fn ensure_p2p_suffix(addr: Multiaddr, local_peer_id: libp2p::PeerId) -> Multiaddr {
+    if matches!(
+        addr.iter().last(),
+        Some(libp2p::multiaddr::Protocol::P2p(_))
+    ) {
+        addr
+    } else {
+        addr.with(libp2p::multiaddr::Protocol::P2p(local_peer_id))
     }
 }
 
@@ -752,5 +843,57 @@ mod listen_filter_tests {
         assert!(addr_is_remotely_reachable(&addr(
             "/ip6/2001:db8::1/tcp/8810"
         )));
+    }
+
+    #[test]
+    fn union_includes_external_address_and_drops_loopback() {
+        let pid = libp2p::PeerId::random();
+        let candidates = vec![
+            addr("/ip4/127.0.0.1/tcp/8810"),   // loopback listener → dropped
+            addr("/ip4/192.168.1.5/tcp/8810"), // LAN listener → kept
+            addr("/ip4/203.0.113.5/tcp/8810"), // confirmed external → kept
+        ];
+        let list = build_reachable_multiaddr_list(candidates.into_iter(), pid);
+        assert_eq!(list.len(), 2);
+        assert!(list.iter().all(|s| s.contains(&pid.to_string())));
+        assert!(list.iter().any(|s| s.contains("192.168.1.5")));
+        assert!(list.iter().any(|s| s.contains("203.0.113.5")));
+        assert!(!list.iter().any(|s| s.contains("127.0.0.1")));
+    }
+
+    #[test]
+    fn ensure_p2p_suffix_appends_when_absent_and_preserves_when_present() {
+        let pid = libp2p::PeerId::random();
+        let suffixed = ensure_p2p_suffix(addr("/ip4/203.0.113.5/tcp/8810"), pid);
+        assert!(suffixed.to_string().ends_with(&format!("/p2p/{pid}")));
+
+        // Already carries a peer id → returned verbatim, no double-append.
+        let already = addr(&format!("/ip4/203.0.113.5/tcp/8810/p2p/{pid}"));
+        let out = ensure_p2p_suffix(already.clone(), pid);
+        assert_eq!(out, already);
+        assert_eq!(out.to_string().matches("/p2p/").count(), 1);
+    }
+
+    #[test]
+    fn relay_circuit_address_gets_our_suffix() {
+        let pid = libp2p::PeerId::random();
+        let relay = libp2p::PeerId::random();
+        // A relay-reservation listener ends in /p2p-circuit; our id appends.
+        let circuit = addr(&format!(
+            "/ip4/203.0.113.9/tcp/8810/p2p/{relay}/p2p-circuit"
+        ));
+        let s = ensure_p2p_suffix(circuit, pid).to_string();
+        assert!(s.ends_with(&format!("/p2p-circuit/p2p/{pid}")), "got {s}");
+    }
+
+    #[test]
+    fn union_dedups_listener_and_external_overlap() {
+        let pid = libp2p::PeerId::random();
+        let candidates = vec![
+            addr("/ip4/203.0.113.5/tcp/8810"),
+            addr("/ip4/203.0.113.5/tcp/8810"), // same addr present in both sets
+        ];
+        let list = build_reachable_multiaddr_list(candidates.into_iter(), pid);
+        assert_eq!(list.len(), 1);
     }
 }
