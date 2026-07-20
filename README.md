@@ -5,6 +5,7 @@
 [![Rust 1.80+](https://img.shields.io/badge/rust-1.80%2B-orange.svg)](https://www.rust-lang.org/)
 [![Docker](https://img.shields.io/badge/docker-ghcr.io-blue.svg)](https://ghcr.io/enapt/swarmllm)
 [![Release](https://img.shields.io/github/v/release/enapt/SwarmLLM?include_prereleases&label=release)](https://github.com/enapt/SwarmLLM/releases)
+[![Discord](https://img.shields.io/badge/discord-join%20chat-5865F2.svg?logo=discord&logoColor=white)](https://discord.gg/R3tamKNaj)
 
 A peer-to-peer LLM inference network in a single Rust binary. Pool hardware with other nodes to run 70B+ parameter models on machines that couldn't host them alone — no API tokens, no cloud fees, end-to-end encryption between every peer.
 
@@ -433,6 +434,7 @@ Full mdBook site: [https://enapt.github.io/SwarmLLM/](https://enapt.github.io/Sw
 
 ## Contributing & Support
 
+- **Community chat** — [Join the Discord](https://discord.gg/R3tamKNaj) — share node addresses, coordinate the network, get help
 - **Bug reports & feature requests** — [GitHub Issues](https://github.com/enapt/SwarmLLM/issues)
 - **Questions & discussion** — [GitHub Discussions](https://github.com/enapt/SwarmLLM/discussions)
 - **Security vulnerabilities** — [SECURITY.md](SECURITY.md) (email `security@enapt.dev`, do not open a public issue)
