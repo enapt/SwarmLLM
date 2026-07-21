@@ -63,7 +63,7 @@ curl http://localhost:8800/v1/chat/completions \
   -H "Authorization: Bearer <your-api-key>" \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "claude-sonnet-4-6",
+    "model": "claude-sonnet-5",
     "messages": [{"role": "user", "content": "Hello!"}],
     "stream": true
   }'
@@ -73,7 +73,7 @@ curl http://localhost:8800/v1/messages \
   -H "x-api-key: <your-api-key>" \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "claude-sonnet-4-6",
+    "model": "claude-sonnet-5",
     "max_tokens": 100,
     "messages": [{"role": "user", "content": "Hello!"}],
     "stream": true

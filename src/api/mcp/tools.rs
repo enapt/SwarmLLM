@@ -677,7 +677,7 @@ async fn tool_delegate(state: &AppState, id: Option<Value>, args: Value) -> Json
     // Cloud models (only for "smart" tier — avoid surprise costs)
     if tier == "smart" {
         // Prefer known-capable cloud models
-        let smart_prefixes = ["claude", "gpt-4", "o1", "o3", "gemini-2"];
+        let smart_prefixes = ["claude", "gpt-", "o3", "o4", "gemini-", "kimi", "deepseek"];
         for entry in state.shared_state.metrics.provider_model_map.iter() {
             let model_id = entry.key().clone();
             let is_smart = smart_prefixes

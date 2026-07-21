@@ -559,7 +559,7 @@ async fn prepare_proxy(
 ) -> Result<ProxySetup, ApiError> {
     let permit = acquire_permit(config)?;
 
-    let model = req["model"].as_str().unwrap_or("claude-sonnet-4-6");
+    let model = req["model"].as_str().unwrap_or("claude-sonnet-5");
     let model = config.default_model.as_deref().unwrap_or(model);
     validate_model_name(model)?;
     let stream = req["stream"].as_bool().unwrap_or(false);
@@ -1051,11 +1051,11 @@ mod tests {
 
     #[test]
     fn test_build_cli_args_basic() {
-        let args = build_cli_args("claude-sonnet-4-6", "Hello", None, None, true);
+        let args = build_cli_args("claude-sonnet-5", "Hello", None, None, true);
         assert!(args.contains(&"--print".to_string()));
         assert!(args.contains(&"stream-json".to_string()));
         assert!(args.contains(&"--model".to_string()));
-        assert!(args.contains(&"claude-sonnet-4-6".to_string()));
+        assert!(args.contains(&"claude-sonnet-5".to_string()));
         assert!(args.contains(&"--no-session-persistence".to_string()));
         assert!(args.contains(&"Hello".to_string()));
         assert!(!args.contains(&"--resume".to_string()));
@@ -1064,7 +1064,7 @@ mod tests {
     #[test]
     fn test_build_cli_args_with_session() {
         let args = build_cli_args(
-            "claude-opus-4-7",
+            "claude-opus-4-8",
             "Follow up",
             Some("Be helpful"),
             Some("abc-123"),
@@ -1116,8 +1116,8 @@ mod tests {
             serde_json::json!({"role": "assistant", "content": "Hello"}),
             serde_json::json!({"role": "user", "content": "Different question"}),
         ];
-        let key1 = session_key("claude-sonnet-4-6", &msgs1);
-        let key2 = session_key("claude-sonnet-4-6", &msgs2);
+        let key1 = session_key("claude-sonnet-5", &msgs1);
+        let key2 = session_key("claude-sonnet-5", &msgs2);
         // Same prefix (first 2 messages), different last message — same session key
         assert_eq!(key1, key2);
         // Both should be Some (multi-turn)
@@ -1127,7 +1127,7 @@ mod tests {
     #[test]
     fn test_session_key_single_turn_none() {
         let msgs = vec![serde_json::json!({"role": "user", "content": "Hi"})];
-        let key = session_key("claude-sonnet-4-6", &msgs);
+        let key = session_key("claude-sonnet-5", &msgs);
         // Single-turn requests should NOT produce a session key
         assert!(key.is_none());
     }

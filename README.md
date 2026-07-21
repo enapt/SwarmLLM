@@ -83,7 +83,7 @@ curl http://localhost:8800/v1/chat/completions \
   }'
 ```
 
-**As a Claude Code backend** — full Anthropic Messages API with tools, thinking, and streaming. Claude Code reaches every model in the swarm: local GGUF, distributed across peers, or any of 12 cloud providers (`claude --model gpt-4o`, `claude --model claude-sonnet-4-6`, etc.).
+**As a Claude Code backend** — full Anthropic Messages API with tools, thinking, and streaming. Claude Code reaches every model in the swarm: local GGUF, distributed across peers, or any of 12 cloud providers (`claude --model gpt-5.4`, `claude --model claude-sonnet-5`, etc.).
 
 ```bash
 ANTHROPIC_BASE_URL="http://localhost:8800" \

@@ -13,6 +13,7 @@ use super::session::{write_to_stdin, SessionState, CLAUDE_INIT_TIMEOUT_SECS};
 /// Allowed permission modes.
 const ALLOWED_PERMISSION_MODES: &[&str] = &[
     "default",
+    "manual", // Claude Code 2.1.200+ alias for "default"
     "acceptEdits",
     "auto",
     "plan",

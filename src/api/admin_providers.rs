@@ -401,9 +401,10 @@ async fn fetch_provider_models_inner(state: &AppState) -> Vec<serde_json::Value>
     // Anthropic has no /models endpoint — use static list
     if config.anthropic.is_some() {
         for (id, name) in [
-            ("claude-opus-4-7", "Claude Opus 4.7"),
-            ("claude-sonnet-4-6", "Claude Sonnet 4.6"),
+            ("claude-opus-4-8", "Claude Opus 4.8"),
+            ("claude-sonnet-5", "Claude Sonnet 5"),
             ("claude-haiku-4-5-20251001", "Claude Haiku 4.5"),
+            ("claude-fable-5", "Claude Fable 5"),
         ] {
             models.push(serde_json::json!({
                 "id": id, "name": name, "provider": "anthropic"
@@ -414,10 +415,10 @@ async fn fetch_provider_models_inner(state: &AppState) -> Vec<serde_json::Value>
     // Moonshot/Kimi static fallback — common models that may not appear in /models
     if config.moonshot.is_some() {
         for (id, name) in [
-            ("moonshot:kimi-k2-0527", "Kimi K2 (Kimi 2.5)"),
-            ("moonshot:moonshot-v1-8k", "Moonshot v1 8K"),
-            ("moonshot:moonshot-v1-32k", "Moonshot v1 32K"),
-            ("moonshot:moonshot-v1-128k", "Moonshot v1 128K"),
+            ("moonshot:kimi-k3", "Kimi K3"),
+            ("moonshot:kimi-k2.7-code", "Kimi K2.7 Code"),
+            ("moonshot:kimi-k2.6", "Kimi K2.6"),
+            ("moonshot:kimi-k2.5", "Kimi K2.5"),
         ] {
             // Only add if not already present from /models fetch
             if !models
@@ -448,9 +449,10 @@ async fn fetch_provider_models_inner(state: &AppState) -> Vec<serde_json::Value>
         if sub_config.enabled {
             let provider_label = "claude_subscription";
             for (id, name, ctx) in [
-                ("claude-opus-4-7", "Claude Opus 4.7", "1M"),
-                ("claude-sonnet-4-6", "Claude Sonnet 4.6", "200K"),
+                ("claude-opus-4-8", "Claude Opus 4.8", "1M"),
+                ("claude-sonnet-5", "Claude Sonnet 5", "1M"),
                 ("claude-haiku-4-5-20251001", "Claude Haiku 4.5", "200K"),
+                ("claude-fable-5", "Claude Fable 5", "1M"),
             ] {
                 // Don't duplicate if already present from Anthropic API key
                 if !models
@@ -582,7 +584,7 @@ pub async fn provider_health(State(state): State<AppState>) -> Json<serde_json::
             config.anthropic.as_ref(),
             "claude-haiku-4-5-20251001",
         ),
-        ("deepseek", config.deepseek.as_ref(), "deepseek-chat"),
+        ("deepseek", config.deepseek.as_ref(), "deepseek-v4-flash"),
         ("mistral", config.mistral.as_ref(), "mistral-small-latest"),
         ("groq", config.groq.as_ref(), "llama-3.1-8b-instant"),
         (
@@ -611,7 +613,7 @@ pub async fn provider_health(State(state): State<AppState>) -> Json<serde_json::
             config.deepinfra.as_ref(),
             "meta-llama/Meta-Llama-3.1-8B-Instruct",
         ),
-        ("moonshot", config.moonshot.as_ref(), "moonshot-v1-8k"),
+        ("moonshot", config.moonshot.as_ref(), "kimi-k2.5"),
     ];
 
     for &(name, ref entry, test_model) in candidates {

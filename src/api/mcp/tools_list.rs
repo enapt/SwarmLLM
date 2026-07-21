@@ -86,7 +86,7 @@ pub(super) fn handle_tools_list(id: Option<Value>) -> JsonRpcResponse {
                             },
                             "models": {
                                 "type": "array",
-                                "description": "Array of model IDs to compare (e.g. [\"qwen2.5-coder-7b\", \"gpt-4o\", \"claude-sonnet-4-6\"])",
+                                "description": "Array of model IDs to compare (e.g. [\"qwen2.5-coder-7b\", \"gpt-5.4\", \"claude-sonnet-5\"])",
                                 "items": { "type": "string" }
                             },
                             "temperature": {

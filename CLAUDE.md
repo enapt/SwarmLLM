@@ -194,7 +194,43 @@ When spawning subagents in this repo, use these model picks (overrides defaults 
 
 All 20 build phases complete. All subsystems wired — no stubs. **1099 lib tests + 75 integration tests passing**; 8 lib + 1 e2e ignored (env-var or manual). Clippy clean default + features dev,claude-subscription + `--features llama`.
 
-### Latest: R144 — Dashboard peer-clarity + reachability docs (2026-07-21)
+### Latest: R145 — Cloud model/provider refresh (Claude Opus 4.8 / Sonnet 5 / Fable 5, Kimi, Claude Code 2.1) (2026-07-21)
+
+Periodic currency pass — the cloud-provider surface hadn't been touched since
+R142 (~2 months). Research-driven (claude-api skill + web) refresh of every stale
+model ID and one broken endpoint. **No routing-architecture changes** — the
+providers that fetch `/models` dynamically + route by prefix (openai, groq,
+nvidia_nim, cerebras, sambanova, fireworks, together, deepinfra) pick up new
+models automatically; only hardcoded lists / aliases / one base URL were stale.
+
+- **Claude lineup Opus 4.7→4.8, Sonnet 4.6→5, +Fable 5** (Haiku 4.5 unchanged).
+  Single alias bump point `anthropic/convert.rs::resolve_model` (`opus`→
+  `claude-opus-4-8`, `sonnet`→`claude-sonnet-5`, `haiku`→`claude-haiku-4-5`, NEW
+  `fable`→`claude-fable-5`); three display lists in `admin_providers.rs` (picker
+  + subscription, ctx windows corrected to 1M/1M/200K/1M); `claude_sub.rs` default
+  fallback `claude-sonnet-4-6`→`claude-sonnet-5` (matches Claude Code 2.1's new
+  default). `anthropic-version: 2023-06-01` header still current — unchanged.
+- **Claude Code 2.1.215 compat**: verified every subprocess flag SwarmLLM spawns
+  is still valid (no breaking removals). Added `"manual"` to
+  `claude_session` `ALLOWED_PERMISSION_MODES` (2.1.200+ alias for `default`).
+  `set_model` mid-turn control request deferred (enhancement, not a fix).
+- **Moonshot/Kimi**: base URL `api.moonshot.cn`→**`api.moonshot.ai`** (`.cn` is
+  China-only; `.ai` is the international platform — matters for a global audience)
+  + static list `kimi-k2-0527`/`moonshot-v1-*` (all discontinued 2026-05-25)→
+  `kimi-k3`/`kimi-k2.7-code`/`kimi-k2.6`/`kimi-k2.5`.
+- **DeepSeek**: `deepseek-chat`/`deepseek-reasoner` legacy names discontinue
+  2026-07-24 — probe + doc examples → `deepseek-v4-flash` (routing needs nothing,
+  `deepseek` prefix matches the new IDs).
+- **Mistral**: added `magistral`/`ministral` prefix routing (new families that
+  don't start with `mistral`). **OpenAI**: no code change — GPT-5.x matches
+  `gpt-`, o-series matches `o3-`/`o4-`; refreshed `mcp/tools.rs` `smart_prefixes`
+  (`gpt-4`→`gpt-`, added `o4`/`kimi`/`deepseek`) + doc examples.
+- Docs: README, `docs/book` admin + claude-subscription examples. Test fixtures
+  refreshed to current IDs across `anthropic/mod.rs`, `providers.rs`,
+  `claude_sub.rs`, `anthropic_bridge.rs`. 1099 lib tests unchanged (0 regressions),
+  clippy clean default + dev,claude-subscription.
+
+### R144 — Dashboard peer-clarity + reachability docs (2026-07-21)
 
 Follow-on to R143, driven by the first external user (#16) testing 0.3.x live.
 Their home node bootstrapped to the anchor and the dashboard called the **remote

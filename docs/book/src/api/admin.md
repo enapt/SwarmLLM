@@ -234,7 +234,7 @@ Status values: `up`, `rate_limited`, `overloaded`, `timeout`, `unreachable`, `er
 ### POST /api/admin/provider-model-status
 Probe availability and latency for a list of specific cloud model IDs (up to 20 per request). Sends a `max_tokens=1` request to each model's provider endpoint. Anthropic models are skipped (no cloud proxy probing). Bearer auth not required.
 
-Request body: `{ "models": ["gpt-4o", "claude-sonnet-4-6", "deepseek-chat"] }`
+Request body: `{ "models": ["gpt-5.4", "claude-sonnet-5", "deepseek-v4-flash"] }`
 
 Response:
 ```json

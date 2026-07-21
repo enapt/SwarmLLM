@@ -1299,7 +1299,7 @@ mod tests {
 
     fn base_req() -> ResponsesRequest {
         ResponsesRequest {
-            model: "claude-sonnet-4-6".into(),
+            model: "claude-sonnet-5".into(),
             input: ResponsesInput::Text("hello".into()),
             instructions: None,
             previous_response_id: None,
@@ -1334,7 +1334,7 @@ mod tests {
     fn text_input_maps_to_user_message_with_string_content() {
         let req = base_req();
         let body = responses_to_messages(&req, false).unwrap();
-        assert_eq!(body["model"], "claude-sonnet-4-6");
+        assert_eq!(body["model"], "claude-sonnet-5");
         assert_eq!(body["max_tokens"], 2048);
         let messages = body["messages"].as_array().unwrap();
         assert_eq!(messages.len(), 1);
@@ -1477,7 +1477,7 @@ mod tests {
     #[test]
     fn messages_response_text_becomes_output_message_item() {
         let msg = json!({
-            "model": "claude-sonnet-4-6",
+            "model": "claude-sonnet-5",
             "content": [{"type": "text", "text": "hi there"}],
             "stop_reason": "end_turn",
             "usage": {"input_tokens": 10, "output_tokens": 3},

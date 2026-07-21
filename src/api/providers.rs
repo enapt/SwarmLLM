@@ -115,7 +115,7 @@ pub fn provider_base_url(name: &str) -> Option<&'static str> {
         "fireworks" => Some("https://api.fireworks.ai/inference/v1"),
         "together" => Some("https://api.together.xyz/v1"),
         "deepinfra" => Some("https://api.deepinfra.com/v1/openai"),
-        "moonshot" => Some("https://api.moonshot.cn/v1"),
+        "moonshot" => Some("https://api.moonshot.ai/v1"),
         _ => None,
     }
 }
@@ -189,6 +189,8 @@ fn resolve_provider_inner(model: &str, config: &ProvidersConfig) -> Option<Provi
         return resolve_by_name("deepseek", config);
     }
     if lower.starts_with("mistral")
+        || lower.starts_with("magistral")
+        || lower.starts_with("ministral")
         || lower.starts_with("codestral")
         || lower.starts_with("pixtral")
     {
@@ -833,7 +835,7 @@ mod tests {
             }),
             ..Default::default()
         };
-        let p = resolve_provider("claude-opus-4-7", &config).unwrap();
+        let p = resolve_provider("claude-opus-4-8", &config).unwrap();
         assert_eq!(p.name, "anthropic");
         assert!(p.is_anthropic);
     }
@@ -968,7 +970,7 @@ mod tests {
     fn resolve_unconfigured_returns_none() {
         let config = ProvidersConfig::default();
         assert!(resolve_provider("gpt-4o", &config).is_none());
-        assert!(resolve_provider("claude-opus-4-7", &config).is_none());
+        assert!(resolve_provider("claude-opus-4-8", &config).is_none());
     }
 
     #[test]
@@ -1015,7 +1017,7 @@ mod tests {
         );
         assert_eq!(
             provider_base_url("moonshot"),
-            Some("https://api.moonshot.cn/v1")
+            Some("https://api.moonshot.ai/v1")
         );
         assert_eq!(provider_base_url("unknown"), None);
     }
@@ -1029,16 +1031,16 @@ mod tests {
             }),
             ..Default::default()
         };
-        // kimi-k2 prefix
-        let p = resolve_provider("kimi-k2-0527", &config).unwrap();
+        // kimi prefix (current flagship)
+        let p = resolve_provider("kimi-k3", &config).unwrap();
         assert_eq!(p.name, "moonshot");
-        assert_eq!(p.base_url, "https://api.moonshot.cn/v1");
+        assert_eq!(p.base_url, "https://api.moonshot.ai/v1");
 
-        // k2 prefix
-        let p2 = resolve_provider("k2-0527", &config).unwrap();
+        // k2 prefix (bare shorthand)
+        let p2 = resolve_provider("k2-base", &config).unwrap();
         assert_eq!(p2.name, "moonshot");
 
-        // moonshot prefix
+        // moonshot- prefix (legacy IDs still route)
         let p3 = resolve_provider("moonshot-v1-8k", &config).unwrap();
         assert_eq!(p3.name, "moonshot");
     }
