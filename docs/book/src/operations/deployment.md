@@ -101,7 +101,7 @@ docker compose --profile gpu up -d
 | `ghcr.io/enapt/swarmllm:latest` | CPU-only (Debian bookworm-slim) |
 | `ghcr.io/enapt/swarmllm:latest-cuda` | NVIDIA GPU (CUDA 12.4 runtime) |
 
-Versioned tags follow semver: `0.1.0`, `0.1.0-cuda`, `0.1`, `0.1-cuda`.
+Versioned tags follow semver — e.g. `0.3.4-alpha`, `0.3.4-alpha-cuda` (pre-releases publish the full version; stable releases additionally get the `0.3` / `0.3-cuda` minor tags).
 
 ### Manual Docker Run
 

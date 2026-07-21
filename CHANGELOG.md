@@ -2,6 +2,32 @@
 
 All notable changes to SwarmLLM are documented here.
 
+## [0.3.4-alpha] — 2026-07-21
+
+**Cloud model & provider currency refresh + audit sweep (R145).** The cloud
+surface hadn't been refreshed in ~2 months. No routing-architecture changes —
+providers that fetch `/models` dynamically and route by prefix pick up new
+models automatically; only hardcoded lists, aliases, and one base URL were
+stale.
+
+- **Claude lineup** — Opus 4.7 → **4.8**, Sonnet 4.6 → **5**, added **Fable 5**
+  (Haiku 4.5 unchanged) across the model picker, subscription list, and the
+  bare-alias resolver (`opus`/`sonnet`/`haiku`/`fable`). The `claude_subscription`
+  default now matches Claude Code 2.1's new default (Sonnet 5). `anthropic-version`
+  header confirmed current.
+- **Claude Code 2.1.215** — verified every subprocess CLI flag is still valid
+  (no breaking removals); added the `manual` permission-mode alias.
+- **Moonshot/Kimi** — base URL switched from the China-only `api.moonshot.cn`
+  to the international `api.moonshot.ai`; refreshed the model list to Kimi K3 /
+  K2.7 Code / K2.6 / K2.5 (the K2-0527 and Moonshot-v1 models were discontinued).
+- **DeepSeek** — probe/examples updated to `deepseek-v4-flash` ahead of the
+  `deepseek-chat`/`deepseek-reasoner` legacy-name retirement (2026-07-24).
+- **Mistral** — added `magistral`/`ministral` prefix routing. **OpenAI** needed
+  no change (GPT-5.x and o-series already route correctly).
+- **Security** — bumped `anyhow` 1.0.102 → 1.0.104 and `memmap2` 0.9.10 → 0.9.11,
+  clearing two RustSec "unsound" advisories surfaced by `cargo audit`.
+- Docs refreshed (README, book, config examples). 1099 lib tests, no regressions.
+
 ## [0.3.3-alpha] — 2026-07-21
 
 **Dashboard peer-clarity + reachability docs (R144).** Follow-on to 0.3.1/0.3.2,

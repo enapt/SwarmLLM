@@ -11,7 +11,7 @@ A peer-to-peer LLM inference network in a single Rust binary. Pool hardware with
 
 **Join the swarm. Run AI together — for free.**
 
-> **Status — alpha**, actively developed. Distributed inference is stable across multi-node deployments. 1075 lib tests + 75 integration tests run on every PR; continuous security sweeps. [Report issues](https://github.com/enapt/SwarmLLM/issues).
+> **Status — alpha**, actively developed. Distributed inference is stable across multi-node deployments. 1099 lib tests + 75 integration tests run on every PR; continuous security sweeps. [Report issues](https://github.com/enapt/SwarmLLM/issues).
 >
 > **Recent benchmarks:** cross-node prefix-KV sharing delivers a **12.9× iter-1 TTFT speedup** on 7B prompts when a peer has the same prefix cached (measured 2026-04-20). Windows release binaries reach Linux parity on single-node and split inference (validated 2026-04-23).
 
@@ -287,8 +287,8 @@ Credits determine request priority. Everyone is served — Bronze just waits lon
 ```bash
 brew tap enapt/swarmllm && brew install swarmllm       # Homebrew (macOS / Linux)
 yay -S swarmllm                                        # AUR (Arch Linux)
-sudo dpkg -i swarmllm_0.1.0_amd64.deb                  # Debian / Ubuntu
-sudo rpm -i swarmllm-0.1.0-1.x86_64.rpm                # Fedora / RHEL
+sudo dpkg -i swarmllm_0.3.4-alpha_amd64.deb            # Debian / Ubuntu
+sudo rpm -i swarmllm_0.3.4-alpha.x86_64.rpm            # Fedora / RHEL
 ```
 
 ### Docker
@@ -464,7 +464,7 @@ cargo run -- run
 
 ## Development Transparency
 
-SwarmLLM was developed collaboratively between a human developer and Claude Code. The human provided architecture direction, testing, and review; Claude wrote the code. We disclose this openly so you can judge the project on its technical merits — 1075 lib tests + 75 integration tests run on every PR, every commit passes `cargo fmt` and `cargo clippy -- -D warnings`, and continuous multi-agent code sweeps and security audits track findings in `.claude/sweep-log.jsonl`. Contributions, scrutiny, and feedback all welcome.
+SwarmLLM was developed collaboratively between a human developer and Claude Code. The human provided architecture direction, testing, and review; Claude wrote the code. We disclose this openly so you can judge the project on its technical merits — 1099 lib tests + 75 integration tests run on every PR, every commit passes `cargo fmt` and `cargo clippy -- -D warnings`, and continuous multi-agent code sweeps and security audits track findings in `.claude/sweep-log.jsonl`. Contributions, scrutiny, and feedback all welcome.
 
 ## License
 
