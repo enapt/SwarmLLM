@@ -24,6 +24,15 @@ to work over the internet:
 | **Relay** | A publicly-reachable node forwards traffic to you | Always (even behind CGNAT), if an anchor/relay exists | Nothing on your side; someone must run a relay |
 | **Hole punching (DCUtR)** | Two NAT'd nodes connect directly, coordinated by a relay | Both behind cone-NAT; needs a relay to coordinate | Nothing — automatic when a relay exists |
 
+> **How does my node know which of these it has?** It runs **AutoNAT v2** — it
+> asks other nodes to dial it back on each of its candidate addresses and reports,
+> *per address*, whether that address is publicly reachable. That per-address
+> verdict is what drives the dashboard's reachability status, the *"only works on
+> your local network"* invite warning, and the node's own decision to fall back
+> to a relay. (AutoNAT v2 is stricter than v1: it verifies each address
+> individually instead of a single global yes/no, so a node with one working
+> path isn't masked by another that fails.)
+
 The invite code you generate automatically includes whichever reachable
 addresses your node currently has. **If your node only has a local-network
 address, the dashboard warns you** — that code will work on your LAN but not

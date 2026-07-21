@@ -53,6 +53,10 @@ Download a binary from [GitHub Releases](https://github.com/enapt/SwarmLLM/relea
 
 Your browser opens to `localhost:8800`. The setup wizard auto-detects your hardware. Pick a model, download it, start chatting.
 
+**It connects to the live network on its own.** On first run your node auto-joins the public swarm — nothing to configure, no ports to forward. A built-in bootstrap anchor gets you onto the network, UPnP opens your port when your router supports it, AutoNAT v2 tells you your reachability, and a relay fallback keeps you connected even behind CGNAT. Peers and shared models appear on the dashboard within seconds.
+
+> 💬 **New here? [Join the Discord](https://discord.gg/R3tamKNaj).** It's the fastest way to find peers to pool with, share node addresses, and get help — the network grows one member at a time, so come say hi.
+
 | Platform | File | Notes |
 |----------|------|-------|
 | **Windows x86_64** | **`SwarmLLM-Setup.exe`** | **Recommended** — installer auto-detects GPU (NVIDIA / AMD / Intel) |
@@ -115,19 +119,27 @@ Running a 70B-class model on your own normally requires a $10K+ GPU. With SwarmL
 
 ## Networking & Privacy
 
-A 5-layer discovery stack means nodes find each other without manual configuration:
+A layered discovery stack means nodes find each other without manual configuration:
 
 | Layer | How it works | When |
 |-------|-------------|------|
+| **Default Anchor** | Fresh installs bootstrap off a built-in public anchor — auto-join the live network, zero config | Instantly on first run |
 | **mDNS** | Auto-discovers peers on the same LAN/Wi-Fi | Instantly on startup |
 | **Peer Cache** | Remembers peers from previous sessions (redb-backed, max 200) | On restart |
-| **Invite Codes** | Share a `swarm://...` code with a friend | First time joining |
+| **Invite Codes** | Share a `swarm://...` network code, or a `swarmpool://...` code to link your own devices into a pool | First time joining |
 | **Peer Exchange** | Connected peers share their known peer lists | On each new connection |
 | **Kademlia DHT** | Network-wide peer routing | Continuously |
 
-Two laptops on the same Wi-Fi find each other in seconds. First-time joiners get an invite code from the dashboard. Returning users reconnect cached peers in under a second. For private networks, set `gossip_network_id` in config to isolate from the public network.
+Two laptops on the same Wi-Fi find each other in seconds. A brand-new install auto-joins the public network via a built-in bootstrap anchor — nothing to configure. Returning users reconnect cached peers in under a second. For private networks, set `gossip_network_id` in config to isolate from the public network.
 
-**Connecting across the internet** (not just LAN) involves NAT/port-forwarding. SwarmLLM handles the common case automatically via UPnP, and falls back to relays. If you want to run a publicly-reachable **anchor node** to help bootstrap the network — or your invite code says *"only works on your local network"* — see the **[Networking guide](docs/NETWORKING.md)** (CGNAT check, port-forwarding, dynamic DNS, anchor setup).
+**Connecting across the internet** used to need manual NAT/port-forwarding — now it mostly just works:
+
+- **UPnP (default on)** asks your router to open the P2P port and learns your public address automatically.
+- **AutoNAT v2** probes your real reachability per-address and tells you (on the dashboard) whether you're publicly reachable or need a relay — no guesswork.
+- **Circuit Relay v2 + DCUtR hole-punching** keep you connected even behind CGNAT, where port-forwarding is impossible: you reserve a slot on a public relay, then upgrade to a direct connection when hole-punching succeeds.
+- **Built-in bootstrap anchor** means there's a reachable node to find on day one, before the network is dense enough for DHT discovery alone.
+
+If you want to run your own publicly-reachable **anchor node** to help bootstrap the network — or your invite code says *"only works on your local network"* — see the **[Networking guide](docs/NETWORKING.md)** (CGNAT check, port-forwarding, dynamic DNS, anchor setup) and the turnkey installer in **[`deploy/anchor/`](deploy/anchor/)**.
 
 ### Private Mode
 
@@ -163,7 +175,8 @@ Private mode is one-way: your data stays private, but your nodes still serve the
 
 ### Networking & security
 
-- **libp2p transport** — Kademlia DHT, GossipSub, TCP+Yamux + QUIC, NAT traversal (auto-relay + DCUtR), connection limits, gossip replay protection.
+- **libp2p transport** — Kademlia DHT, GossipSub, TCP+Yamux + QUIC (with DNS-resolving `/dns4` dialing), connection limits, gossip replay protection.
+- **Zero-config internet reachability** — UPnP/IGD port-mapping (default on), AutoNAT v2 per-address reachability probing, Circuit Relay v2 + DCUtR hole-punching for CGNAT, and a built-in default bootstrap anchor so fresh installs auto-join the live network. Internet-capable `swarmpool://` invite blobs carry reachable addresses so two fresh nodes can find each other before the DHT is dense.
 - **Three-tier encryption** — pairwise sessions with forward secrecy, pipeline sealing (final segment encrypts output for the requester's key), authenticated sealed gossip. Intermediate pipeline nodes process activation tensors but never see plaintext output. See [Security Model](https://enapt.github.io/SwarmLLM/architecture/security.html).
 - **Encrypted pipeline (optional)** — boomerang topology where the requester holds first + last shards, so no remote node ever sees plaintext. Adds ~1 RTT per token.
 - **Local embedding privacy** — token→embedding happens locally so first-segment nodes never see raw tokens.
