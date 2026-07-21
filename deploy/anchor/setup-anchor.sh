@@ -1,32 +1,59 @@
 #!/usr/bin/env bash
 #
-# SwarmLLM anchor installer — run as root INSIDE a fresh Debian/Ubuntu VM.
+# SwarmLLM anchor installer — run as root on a fresh Debian/Ubuntu host
+# (a VPS with a static IP, or a home VM on a non-CGNAT connection).
 #
-#   sudo DUCKDNS_DOMAIN=your-name DUCKDNS_TOKEN=xxxx bash setup-anchor.sh
+# Pick how the node advertises itself, then run:
 #
-# Installs a hardened, non-root, bootstrap/relay-only SwarmLLM node:
-#   - dedicated `swarmllm` system user (no login)
-#   - latest release binary (SHA256-verified) at /usr/local/bin/swarmllm
-#   - config at /etc/swarmllm/config.toml (anchor mode, relay on)
-#   - DuckDNS updater (systemd timer, token stored root-only)
-#   - ufw firewall: only the P2P ports open; dashboard stays loopback
-#   - unattended-upgrades for OS patches
-#   - systemd service (sandboxed) that auto-starts on boot
+#   # VPS with a static public IP + a human-readable DuckDNS name (recommended):
+#   sudo PUBLIC_IP=203.0.113.5 DUCKDNS_DOMAIN=my-swarm DUCKDNS_TOKEN=xxxx bash setup-anchor.sh
 #
-# Read docs/NETWORKING.md for the surrounding Proxmox/VLAN/port-forward steps.
+#   # VPS static IP only (no DNS account):
+#   sudo PUBLIC_IP=203.0.113.5 bash setup-anchor.sh
+#
+#   # Home box, dynamic (non-CGNAT) IP — DuckDNS auto-tracks it:
+#   sudo DUCKDNS_DOMAIN=my-swarm DUCKDNS_TOKEN=xxxx bash setup-anchor.sh
+#
+# Optional:
+#   SSH_ALLOW_CIDR=1.2.3.4/32   restrict SSH to an IP/subnet (default: any)
+#   SKIP_DOWNLOAD=1             keep an already-placed /usr/local/bin/swarmllm.
+#                              Use when you built the anchor-capable binary
+#                              yourself and scp'd it (the current published
+#                              release may predate --anchor).
+#
+# Installs a hardened, non-root, bootstrap/relay-only node. See
+# deploy/anchor/README.md + docs/NETWORKING.md.
 set -euo pipefail
 
 RAW_BASE="https://raw.githubusercontent.com/enapt/SwarmLLM/main/deploy/anchor"
 REPO="enapt/SwarmLLM"
 BIN="/usr/local/bin/swarmllm"
 ASSET="swarmllm-linux-x86_64"          # matches src/update.rs asset naming
+P2P_TCP=8810                            # listen_port (8800) + 10
+P2P_UDP=8800
 
-# --- 0. sanity ---------------------------------------------------------------
+# --- 0. inputs / sanity ------------------------------------------------------
 [[ $EUID -eq 0 ]] || { echo "Run as root (sudo)."; exit 1; }
 [[ "$(uname -m)" == "x86_64" ]] || { echo "This installer is for x86_64."; exit 1; }
-: "${DUCKDNS_DOMAIN:?Set DUCKDNS_DOMAIN (the part before .duckdns.org)}"
-: "${DUCKDNS_TOKEN:?Set DUCKDNS_TOKEN (from your duckdns.org dashboard)}"
-SSH_ALLOW_CIDR="${SSH_ALLOW_CIDR:-any}"   # e.g. 192.168.0.0/16 to lock SSH to LAN
+PUBLIC_IP="${PUBLIC_IP:-}"
+DUCKDNS_DOMAIN="${DUCKDNS_DOMAIN:-}"
+DUCKDNS_TOKEN="${DUCKDNS_TOKEN:-}"
+SSH_ALLOW_CIDR="${SSH_ALLOW_CIDR:-any}"
+SKIP_DOWNLOAD="${SKIP_DOWNLOAD:-0}"
+
+# Decide the advertised external address. A DuckDNS name (human-readable +
+# portable) wins when present; otherwise advertise the raw static IP.
+if [[ -n "$DUCKDNS_DOMAIN" ]]; then
+  [[ -n "$DUCKDNS_TOKEN" ]] || { echo "DUCKDNS_DOMAIN set but DUCKDNS_TOKEN missing."; exit 1; }
+  HOST="${DUCKDNS_DOMAIN}.duckdns.org"
+  EXTERNAL_ADDR="/dns4/${HOST}/tcp/${P2P_TCP}"
+elif [[ -n "$PUBLIC_IP" ]]; then
+  HOST="$PUBLIC_IP"
+  EXTERNAL_ADDR="/ip4/${PUBLIC_IP}/tcp/${P2P_TCP}"
+else
+  echo "Set PUBLIC_IP (static IP) and/or DUCKDNS_DOMAIN+DUCKDNS_TOKEN (DNS name)."; exit 1
+fi
+echo ">> Advertising external address: ${EXTERNAL_ADDR}"
 
 echo ">> Installing packages..."
 export DEBIAN_FRONTEND=noninteractive
@@ -39,50 +66,72 @@ if ! id swarmllm &>/dev/null; then
   useradd --system --no-create-home --shell /usr/sbin/nologin swarmllm
 fi
 
-# --- 2. download + verify the binary ----------------------------------------
-echo ">> Fetching latest release binary ($ASSET)..."
-API="https://api.github.com/repos/${REPO}/releases/latest"
-DL=$(curl -fsSL "$API" | jq -r ".assets[] | select(.name==\"$ASSET\") | .browser_download_url")
-SHA=$(curl -fsSL "$API" | jq -r ".assets[] | select(.name==\"${ASSET}.sha256\") | .browser_download_url")
-[[ -n "$DL" && "$DL" != "null" ]] || { echo "Could not find $ASSET in the latest release."; exit 1; }
-tmp=$(mktemp -d)
-curl -fsSL "$DL" -o "$tmp/swarmllm"
-if [[ -n "$SHA" && "$SHA" != "null" ]]; then
-  curl -fsSL "$SHA" -o "$tmp/swarmllm.sha256"
-  echo ">> Verifying SHA256..."
-  ( cd "$tmp" && echo "$(cat swarmllm.sha256 | awk '{print $1}')  swarmllm" | sha256sum -c - )
+# --- 2. binary ---------------------------------------------------------------
+if [[ "$SKIP_DOWNLOAD" == "1" ]]; then
+  [[ -x "$BIN" ]] || { echo "SKIP_DOWNLOAD=1 but $BIN is missing. scp your binary there first."; exit 1; }
+  echo ">> Using existing binary at $BIN (SKIP_DOWNLOAD=1)."
 else
-  echo "!! No .sha256 sidecar found for this release — skipping checksum verify."
+  echo ">> Fetching latest release binary ($ASSET)..."
+  META=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest")
+  DL=$(echo "$META" | jq -r ".assets[] | select(.name==\"$ASSET\") | .browser_download_url")
+  SHA=$(echo "$META" | jq -r ".assets[] | select(.name==\"${ASSET}.sha256\") | .browser_download_url")
+  [[ -n "$DL" && "$DL" != "null" ]] || {
+    echo "No $ASSET in the latest release. Build the anchor binary on your dev box"
+    echo "(RUSTFLAGS=\"\" cargo build --release), scp it to $BIN, and re-run with SKIP_DOWNLOAD=1."
+    exit 1
+  }
+  tmp=$(mktemp -d)
+  curl -fsSL "$DL" -o "$tmp/swarmllm"
+  if [[ -n "$SHA" && "$SHA" != "null" ]]; then
+    curl -fsSL "$SHA" -o "$tmp/swarmllm.sha256"
+    echo ">> Verifying SHA256..."
+    ( cd "$tmp" && echo "$(awk '{print $1}' swarmllm.sha256)  swarmllm" | sha256sum -c - )
+  else
+    echo "!! No .sha256 sidecar — skipping checksum verify."
+  fi
+  install -m 0755 "$tmp/swarmllm" "$BIN"
+  rm -rf "$tmp"
 fi
-install -m 0755 "$tmp/swarmllm" "$BIN"
-rm -rf "$tmp"
+
+# Fail fast if this binary predates anchor mode (else the service would crash-loop
+# on an "unexpected argument --anchor").
+if ! "$BIN" run --help 2>/dev/null | grep -q -- '--anchor'; then
+  echo "!! This swarmllm binary does not support --anchor (predates R143)."
+  echo "   On your dev box:  RUSTFLAGS=\"\" cargo build --release"
+  echo "   Then:             scp target/release/swarmllm root@<host>:$BIN"
+  echo "   And re-run this installer with SKIP_DOWNLOAD=1."
+  exit 1
+fi
 "$BIN" --version || true
 
 # --- 3. config ---------------------------------------------------------------
 echo ">> Writing /etc/swarmllm/config.toml..."
 install -d -m 0755 /etc/swarmllm
 curl -fsSL "$RAW_BASE/config.toml" -o /etc/swarmllm/config.toml
-sed -i "s#YOUR-NAME.duckdns.org#${DUCKDNS_DOMAIN}.duckdns.org#g" /etc/swarmllm/config.toml
+sed -i "s#^external_address = .*#external_address = \"${EXTERNAL_ADDR}\"#" /etc/swarmllm/config.toml
 install -d -o swarmllm -g swarmllm -m 0700 /var/lib/swarmllm
 
-# --- 4. DuckDNS updater (token root-only, systemd timer every 5 min) ---------
-echo ">> Installing DuckDNS updater..."
-umask 077
-cat > /etc/swarmllm/duckdns.env <<EOF
+# --- 4. DuckDNS updater (only when a DuckDNS name was given) -----------------
+if [[ -n "$DUCKDNS_DOMAIN" ]]; then
+  echo ">> Installing DuckDNS updater..."
+  umask 077
+  cat > /etc/swarmllm/duckdns.env <<EOF
 DUCKDNS_DOMAIN=${DUCKDNS_DOMAIN}
 DUCKDNS_TOKEN=${DUCKDNS_TOKEN}
+DUCKDNS_IP=${PUBLIC_IP}
 EOF
-chmod 600 /etc/swarmllm/duckdns.env
-cat > /usr/local/bin/swarmllm-duckdns.sh <<'EOF'
+  chmod 600 /etc/swarmllm/duckdns.env
+  cat > /usr/local/bin/swarmllm-duckdns.sh <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 . /etc/swarmllm/duckdns.env
-# Empty ip= lets DuckDNS use the request's source IP (our current public IP).
-curl -fsS "https://www.duckdns.org/update?domains=${DUCKDNS_DOMAIN}&token=${DUCKDNS_TOKEN}&ip=" \
+# DUCKDNS_IP empty -> DuckDNS uses the request source IP (dynamic tracking).
+# Set (static VPS IP) -> pins the record to it.
+curl -fsS "https://www.duckdns.org/update?domains=${DUCKDNS_DOMAIN}&token=${DUCKDNS_TOKEN}&ip=${DUCKDNS_IP}" \
   | grep -q '^OK$' || { echo "DuckDNS update failed"; exit 1; }
 EOF
-chmod 700 /usr/local/bin/swarmllm-duckdns.sh
-cat > /etc/systemd/system/swarmllm-duckdns.service <<'EOF'
+  chmod 700 /usr/local/bin/swarmllm-duckdns.sh
+  cat > /etc/systemd/system/swarmllm-duckdns.service <<'EOF'
 [Unit]
 Description=Update DuckDNS record for the SwarmLLM anchor
 After=network-online.target
@@ -91,7 +140,7 @@ Wants=network-online.target
 Type=oneshot
 ExecStart=/usr/local/bin/swarmllm-duckdns.sh
 EOF
-cat > /etc/systemd/system/swarmllm-duckdns.timer <<'EOF'
+  cat > /etc/systemd/system/swarmllm-duckdns.timer <<'EOF'
 [Unit]
 Description=Refresh DuckDNS every 5 minutes
 [Timer]
@@ -100,17 +149,18 @@ OnUnitActiveSec=5min
 [Install]
 WantedBy=timers.target
 EOF
+fi
 
 # --- 5. firewall: only the P2P ports open, dashboard stays loopback ----------
 echo ">> Configuring ufw..."
 ufw --force reset >/dev/null
 ufw default deny incoming
 ufw default allow outgoing
-ufw allow 8810/tcp comment 'SwarmLLM P2P (TCP)'
-ufw allow 8800/udp comment 'SwarmLLM P2P (QUIC)'
+ufw allow ${P2P_TCP}/tcp comment 'SwarmLLM P2P (TCP)'
+ufw allow ${P2P_UDP}/udp comment 'SwarmLLM P2P (QUIC)'
 if [[ "$SSH_ALLOW_CIDR" == "any" ]]; then
   ufw allow 22/tcp comment 'SSH'
-  echo "!! SSH allowed from anywhere. Re-run with SSH_ALLOW_CIDR=192.168.0.0/16 to restrict."
+  echo "!! SSH allowed from anywhere. Re-run with SSH_ALLOW_CIDR=<your-ip>/32 to restrict."
 else
   ufw allow from "$SSH_ALLOW_CIDR" to any port 22 proto tcp comment 'SSH (restricted)'
 fi
@@ -125,25 +175,29 @@ systemctl enable --now unattended-upgrades >/dev/null 2>&1 || true
 echo ">> Installing systemd service..."
 curl -fsSL "$RAW_BASE/swarmllm-anchor.service" -o /etc/systemd/system/swarmllm-anchor.service
 systemctl daemon-reload
-systemctl enable --now swarmllm-duckdns.timer
-systemctl start swarmllm-duckdns.service    # register the DNS record now
+if [[ -n "$DUCKDNS_DOMAIN" ]]; then
+  systemctl enable --now swarmllm-duckdns.timer
+  systemctl start swarmllm-duckdns.service    # register the DNS record now
+fi
 systemctl enable --now swarmllm-anchor.service
 
 # --- 8. done -----------------------------------------------------------------
 echo ""
 echo "============================================================"
 echo "  SwarmLLM anchor is up."
-echo "  Hostname:  ${DUCKDNS_DOMAIN}.duckdns.org"
-echo "  Status:    systemctl status swarmllm-anchor"
-echo "  Logs:      journalctl -u swarmllm-anchor -f"
+echo "  Advertising: ${EXTERNAL_ADDR}"
+echo "  Status:      systemctl status swarmllm-anchor"
+echo "  Logs:        journalctl -u swarmllm-anchor -f"
 echo ""
-echo "  Get the exact bootstrap address for your other nodes (wait ~10s first):"
+echo "  Get the exact bootstrap address for your other nodes (wait ~10s):"
 echo "    KEY=\$(sudo cat /var/lib/swarmllm/api_key)"
 echo "    curl -s -H \"Authorization: Bearer \$KEY\" \\"
 echo "      http://127.0.0.1:8800/api/admin/network-code | jq -r '.listen_multiaddrs[]'"
 echo ""
-echo "  Copy the /dns4/${DUCKDNS_DOMAIN}.duckdns.org/... line into your other"
-echo "  nodes' config:"
+echo "  Copy the ${HOST} line into your other nodes' config:"
 echo "    [network]"
 echo "    bootstrap_peers = [\"<that line>\"]"
+echo ""
+echo "  NOTE (VPS): also open TCP ${P2P_TCP} + UDP ${P2P_UDP} in your provider's"
+echo "  firewall panel (e.g. IONOS Cloud Panel) — it sits in front of ufw."
 echo "============================================================"

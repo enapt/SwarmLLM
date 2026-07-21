@@ -12,8 +12,12 @@ anchor_mode = true          # no inference; no models; dashboard bound to loopba
 [network]
 enable_relay = true         # serve as a relay for NAT'd peers — the anchor's main job
 enable_upnp = false         # a public/forwarded host doesn't need UPnP (it'd just no-op)
-# How THIS node is reachable from the internet. Replace with YOUR DuckDNS host.
+# How THIS node is reachable from the internet (the installer rewrites this line).
 # No trailing /p2p — the daemon appends its own peer id. TCP port = listen_port + 10.
+#   DNS name (readable, portable):  /dns4/YOUR-NAME.duckdns.org/tcp/8810
+#   Static IP (VPS, no DNS):        /ip4/203.0.113.5/tcp/8810
+# On a VPS whose public IP is on the interface, both TCP + QUIC (UDP 8800) are
+# auto-advertised from the listeners anyway; this line adds the readable name.
 external_address = "/dns4/YOUR-NAME.duckdns.org/tcp/8810"
 
 [updates]

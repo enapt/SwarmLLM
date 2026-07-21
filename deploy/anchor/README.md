@@ -21,10 +21,15 @@ only thing reachable from the internet is the P2P transport.
   from source *on* a 512 MB anchor VM isn't practical — candle needs more RAM to
   compile; build on your dev box and copy the binary over.)
 - A host with a **real public IP** (not CGNAT — check: router WAN IP must equal
-  `curl -4 ifconfig.me`). A cheap VPS, or a home box on a non-CGNAT connection.
-- A **DuckDNS** hostname + token (free, sign in at duckdns.org). This installer
-  uses DuckDNS; adapt the updater for Cloudflare/etc. if you prefer.
-- For a home host: a router you can port-forward.
+  `curl -4 ifconfig.me`). **A cheap VPS (static IP) is the simplest + safest** —
+  no port-forwarding, no dynamic DNS, and your home network is never exposed.
+  A home box on a non-CGNAT connection also works.
+- **How the node advertises itself** — pick one (the installer takes both):
+  - **Static IP** (VPS): pass `PUBLIC_IP=<your-static-ip>`. No DNS account needed.
+  - **DuckDNS name** (readable + portable): a free hostname + token from
+    duckdns.org. Recommended even with a static IP — if you ever move hosts you
+    update one DNS record instead of every peer's config.
+- For a home host with a **dynamic** IP: use DuckDNS alone (it auto-tracks the IP).
 
 ## 1. Create an isolated VM (Proxmox)
 
@@ -56,15 +61,29 @@ Forward to the VM's LAN IP:
 
 ## 4. Run the installer
 
-Copy `setup-anchor.sh` into the VM and run it as root with your DuckDNS details:
+Copy `setup-anchor.sh` onto the host and run it as root. Pick the invocation
+that matches your setup:
 
 ```bash
-sudo DUCKDNS_DOMAIN=your-name DUCKDNS_TOKEN=xxxxxxxx \
-     SSH_ALLOW_CIDR=192.168.0.0/16 \
-     bash setup-anchor.sh
+# VPS: static IP + a readable DuckDNS name pinned to it (recommended)
+sudo PUBLIC_IP=203.0.113.5 DUCKDNS_DOMAIN=your-name DUCKDNS_TOKEN=xxxx bash setup-anchor.sh
+
+# VPS: static IP only (no DNS account)
+sudo PUBLIC_IP=203.0.113.5 bash setup-anchor.sh
+
+# Home box, dynamic non-CGNAT IP (DuckDNS auto-tracks it)
+sudo DUCKDNS_DOMAIN=your-name DUCKDNS_TOKEN=xxxx bash setup-anchor.sh
 ```
 
-(`SSH_ALLOW_CIDR` is optional but recommended — it restricts SSH to your LAN.)
+Optional env vars:
+- `SSH_ALLOW_CIDR=1.2.3.4/32` — restrict SSH to your IP/subnet (recommended).
+- `SKIP_DOWNLOAD=1` — keep a binary you already placed at
+  `/usr/local/bin/swarmllm` (see the version note above — until a release ships
+  anchor mode, build it on your dev box and `scp` it over, then use this).
+
+**VPS firewall:** most providers (IONOS Cloud Panel, etc.) have their own
+firewall *in front of* the VM. Open **TCP 8810 + UDP 8800** there too — the
+installer's `ufw` only covers the OS-level firewall.
 
 The script: creates a non-root `swarmllm` user; downloads + SHA256-verifies the
 latest release binary; writes `/etc/swarmllm/config.toml` (anchor mode, relay on,
