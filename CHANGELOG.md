@@ -2,6 +2,31 @@
 
 All notable changes to SwarmLLM are documented here.
 
+## [0.3.0-alpha] — 2026-07-21
+
+**Internet reachability & NAT traversal (R143).** Makes SwarmLLM reachable
+across the internet, not just the LAN — the biggest gap for real-world use.
+
+- **UPnP** automatic gateway port-mapping (default on) — zero-config internet
+  reachability on cooperative home routers.
+- **Invite codes now carry a public address** — `refresh_listen_multiaddrs`
+  unions confirmed external addresses (UPnP / AutoNAT / relay / manual) with the
+  bound listeners, closing the gap where a NAT'd node minted LAN-only codes.
+- **AutoNAT v1 → v2** — v1 falsely reported NAT'd nodes as "Public" over QUIC
+  (so they never reserved a relay and stayed unreachable); v2 tests each address
+  for real reachability. Plus a belt-and-suspenders relay fallback.
+- **`network.external_addresses`** — declare a reachable address (or a list, to
+  cover TCP + QUIC) for a port-forwarded box / VPS / dyndns anchor.
+- **`--anchor` mode** + a hardened `deploy/anchor/` kit (sandboxed systemd unit,
+  non-root user, SHA256-verified binary, firewall, DuckDNS updater) for running
+  a public bootstrap/relay node. See `docs/NETWORKING.md`.
+- **Security**: quinn-proto → 0.11.15 (RUSTSEC-2026-0185, remote QUIC memory
+  exhaustion, HIGH), crossbeam-epoch → 0.9.20 (RUSTSEC-2026-0204); installer
+  input validation; relay abuse limits reviewed.
+
+1075 → 1093 lib tests. Known gap: the relay/DCUtR CGNAT path is wired but awaits
+live multi-NAT validation.
+
 ## [Unreleased] — post-v0.1.0
 
 Working changelog for commits after the v0.1.0 tag. Will roll into the
