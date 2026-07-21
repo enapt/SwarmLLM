@@ -1850,58 +1850,6 @@
       }
     },
 
-    renderPeerItem: function(p) {
-      var tmpl = document.getElementById('tmpl-peer-row');
-      if (!tmpl) return document.createElement('div');
-      var node = tmpl.content.cloneNode(true);
-      var div = node.querySelector('.peer-row-item');
-
-      var dot = node.querySelector('.status-dot');
-      dot.classList.add(p.healthy ? 'online' : 'degraded');
-
-      // Every peer gets exactly one type tag so it's never ambiguous whether a
-      // peer is your own pool device, on your local network, or out on the
-      // internet. Priority Pool > LAN > Remote (matches the backend taxonomy
-      // in websocket.rs). The <self> node never appears in this list.
-      var typeBadge = node.querySelector('.peer-lan-badge');
-      if (typeBadge) {
-        typeBadge.classList.remove('badge-purple', 'badge-green', 'badge-blue');
-        if (p.is_pool_member) {
-          typeBadge.classList.add('badge-green');
-          typeBadge.textContent = I18n.t('dashboard.peer_type_pool');
-        } else if (p.is_lan_peer) {
-          typeBadge.classList.add('badge-purple');
-          typeBadge.textContent = I18n.t('dashboard.peer_type_lan');
-        } else {
-          typeBadge.classList.add('badge-blue');
-          typeBadge.textContent = I18n.t('dashboard.peer_type_remote');
-        }
-        typeBadge.removeAttribute('hidden');
-      }
-
-      var label = node.querySelector('.peer-label');
-      if (p.nickname) {
-        label.textContent = p.nickname;
-        var sub = document.createElement('span');
-        sub.className = 'text-muted mono';
-        sub.style.fontSize = '0.65rem';
-        sub.textContent = ' (' + (p.node_id || '').substring(0, 8) + ')';
-        label.appendChild(sub);
-      } else {
-        label.className = 'peer-label mono';
-        label.textContent = (p.node_id || I18n.t('utils.unknown_model')).substring(0, 16);
-      }
-
-      var gpu = node.querySelector('.peer-gpu');
-      if (p.gpu) {
-        gpu.textContent = p.gpu;
-      } else {
-        gpu.remove();
-      }
-
-      return div;
-    },
-
     _peerSort: 'shards',
     _peerSortDir: 'desc',
 
@@ -2003,7 +1951,14 @@
       sorted.forEach(function(p) {
         var name = p.nickname || (p.node_id || 'unknown').substring(0, 12);
         var idSub = p.nickname ? '<span class="peer-id-sub">' + (p.node_id || '').substring(0, 8) + '</span>' : '';
-        var lanBadge = p.is_lan_peer ? ' <span class="badge badge-purple lan-badge">' + U.escapeHtml(I18n.t('dashboard.lan_badge')) + '</span>' : '';
+        // Every peer gets exactly one type tag (Pool > LAN > Internet) so it's
+        // never ambiguous whether a peer is your own pool device, on your local
+        // network, or out on the internet. Matches the backend taxonomy.
+        var lanBadge = p.is_pool_member
+          ? ' <span class="badge badge-green">' + U.escapeHtml(I18n.t('dashboard.peer_type_pool')) + '</span>'
+          : (p.is_lan_peer
+              ? ' <span class="badge badge-purple lan-badge">' + U.escapeHtml(I18n.t('dashboard.peer_type_lan')) + '</span>'
+              : ' <span class="badge badge-blue">' + U.escapeHtml(I18n.t('dashboard.peer_type_remote')) + '</span>');
         var dotClass = p.healthy ? 'online' : 'degraded';
         var latency = p.latency_ms ? p.latency_ms + 'ms' : '\u2014';
         var shards = p.hosted_shards || 0;

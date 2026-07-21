@@ -3824,26 +3824,6 @@ textarea.pool-code-input { min-height: 4.5em; }
   transform: translateX(0);
 }
 
-/* Peer list row (used via <template id="tmpl-peer-row">) */
-.peer-row-item {
-  padding: 6px 10px;
-  background: var(--bg-tertiary);
-  border-radius: var(--radius);
-  border: 1px solid var(--border);
-  margin-bottom: 4px;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 0.8rem;
-}
-.peer-row-item .peer-label {
-  flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-}
-.peer-row-item .peer-gpu {
-  font-size: 0.7rem;
-  margin-left: auto;
-}
-
 /* LAN peer badge */
 .lan-badge { margin-left: 4px; }
 
