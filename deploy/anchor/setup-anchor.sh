@@ -41,6 +41,15 @@ DUCKDNS_TOKEN="${DUCKDNS_TOKEN:-}"
 SSH_ALLOW_CIDR="${SSH_ALLOW_CIDR:-any}"
 SKIP_DOWNLOAD="${SKIP_DOWNLOAD:-0}"
 
+# Validate inputs strictly. These values are written into config, a sourced env
+# file, URLs, and multiaddrs — constraining them to safe character sets prevents
+# both shell injection (duckdns.env is sourced) and silently-broken configs.
+valid() { [[ "$2" =~ $3 ]] || { echo "Invalid $1: '$2'"; exit 1; }; }
+[[ -n "$PUBLIC_IP" ]]      && valid PUBLIC_IP      "$PUBLIC_IP"      '^[0-9]{1,3}(\.[0-9]{1,3}){3}$'
+[[ -n "$DUCKDNS_DOMAIN" ]] && valid DUCKDNS_DOMAIN "$DUCKDNS_DOMAIN" '^[a-zA-Z0-9][a-zA-Z0-9-]{0,62}$'
+[[ -n "$DUCKDNS_TOKEN" ]]  && valid DUCKDNS_TOKEN  "$DUCKDNS_TOKEN"  '^[a-zA-Z0-9-]{8,100}$'
+[[ "$SSH_ALLOW_CIDR" == "any" ]] || valid SSH_ALLOW_CIDR "$SSH_ALLOW_CIDR" '^[0-9./]+$'
+
 # Decide the advertised external address. A DuckDNS name (human-readable +
 # portable) wins when present; otherwise advertise the raw static IP.
 if [[ -n "$DUCKDNS_DOMAIN" ]]; then
