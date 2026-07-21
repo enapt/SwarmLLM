@@ -87,7 +87,7 @@ installer's `ufw` only covers the OS-level firewall.
 
 The script: creates a non-root `swarmllm` user; downloads + SHA256-verifies the
 latest release binary; writes `/etc/swarmllm/config.toml` (anchor mode, relay on,
-your DuckDNS host as `external_address`); installs a DuckDNS updater
+your DuckDNS host in `external_addresses`); installs a DuckDNS updater
 (systemd timer, token stored root-only); sets a default-deny `ufw` firewall
 (only the P2P ports open); enables `unattended-upgrades`; and installs a
 **sandboxed** systemd service (see `swarmllm-anchor.service`) that starts on boot.

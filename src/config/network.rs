@@ -54,16 +54,18 @@ pub struct NetworkConfig {
     /// (emits GatewayNotFound) on routers without UPnP. Auto-disabled on WSL2.
     #[serde(default = "default_true")]
     pub enable_upnp: bool,
-    /// Manually declared external address for nodes that already know how they
-    /// are reachable from the internet — a port-forwarded home box, a VPS, or a
-    /// dynamic-DNS anchor. Accepts an IP or DNS multiaddr WITHOUT the trailing
-    /// `/p2p/<peer_id>` (the daemon appends its own), e.g.
-    /// `/dns4/anchor.example.net/tcp/8810`, `/ip4/203.0.113.5/tcp/8810`, or
-    /// `/ip6/2001:db8::1/tcp/8810`. Added via `Swarm::add_external_address` at
-    /// startup so it flows into identify, the DHT, and every invite code this
-    /// node mints. `None` (default) leaves discovery to UPnP/AutoNAT/relay.
-    #[serde(default)]
-    pub external_address: Option<String>,
+    /// Manually declared external addresses for nodes that already know how
+    /// they are reachable from the internet — a port-forwarded home box, a VPS,
+    /// or a dynamic-DNS anchor. Each is an IP or DNS multiaddr WITHOUT the
+    /// trailing `/p2p/<peer_id>` (the daemon appends its own). List both
+    /// transports to advertise your readable name on TCP *and* QUIC, e.g.
+    /// `["/dns4/anchor.example.net/tcp/8810", "/dns4/anchor.example.net/udp/8800/quic-v1"]`.
+    /// Each is added via `Swarm::add_external_address` at startup so it flows
+    /// into identify, the DHT, and every invite code this node mints. Empty
+    /// (default) leaves discovery to UPnP/AutoNAT/relay + auto-advertised
+    /// listeners.
+    #[serde(default, alias = "external_address")]
+    pub external_addresses: ExternalAddresses,
     /// Enable E2E encryption for tensor forwards and control messages (default: true).
     #[serde(default = "default_true")]
     pub enable_encryption: bool,
@@ -147,7 +149,7 @@ impl Default for NetworkConfig {
             enable_autonat: true,
             enable_dcutr: true,
             enable_upnp: true,
-            external_address: None,
+            external_addresses: ExternalAddresses::default(),
             enable_encryption: true,
             gossip_network_id: None,
             tensor_compression: true,
@@ -157,6 +159,31 @@ impl Default for NetworkConfig {
             listen_address: default_listen_address(),
             enable_quic: true,
         }
+    }
+}
+
+/// A list of manually-declared external multiaddr strings. Accepts EITHER a
+/// single string (`external_address = "/dns4/.../tcp/8810"`) or a list
+/// (`external_addresses = ["...", "..."]`) in TOML, so a one-address config
+/// stays terse while multi-transport advertising (TCP + QUIC) is possible.
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct ExternalAddresses(pub Vec<String>);
+
+impl<'de> Deserialize<'de> for ExternalAddresses {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum OneOrMany {
+            One(String),
+            Many(Vec<String>),
+        }
+        Ok(match OneOrMany::deserialize(deserializer)? {
+            OneOrMany::One(s) => ExternalAddresses(vec![s]),
+            OneOrMany::Many(v) => ExternalAddresses(v),
+        })
     }
 }
 
@@ -170,7 +197,7 @@ mod tests {
         // UPnP is on by default — the zero-config internet-reachability path.
         assert!(cfg.enable_upnp);
         // No external address is declared by default; discovery handles it.
-        assert!(cfg.external_address.is_none());
+        assert!(cfg.external_addresses.0.is_empty());
     }
 
     #[test]
@@ -178,6 +205,21 @@ mod tests {
         // A config file that predates the enable_upnp field must default to on.
         let cfg: NetworkConfig = toml::from_str("bootstrap_peers = []").unwrap();
         assert!(cfg.enable_upnp);
-        assert!(cfg.external_address.is_none());
+        assert!(cfg.external_addresses.0.is_empty());
+    }
+
+    #[test]
+    fn external_addresses_accepts_single_string_or_list() {
+        // Backward-compatible single string (via the `external_address` alias).
+        let one: NetworkConfig =
+            toml::from_str(r#"external_address = "/dns4/a.example/tcp/8810""#).unwrap();
+        assert_eq!(one.external_addresses.0, vec!["/dns4/a.example/tcp/8810"]);
+
+        // New list form — advertise the same host on TCP + QUIC.
+        let many: NetworkConfig = toml::from_str(
+            "external_addresses = [\"/dns4/a.example/tcp/8810\", \"/dns4/a.example/udp/8800/quic-v1\"]",
+        )
+        .unwrap();
+        assert_eq!(many.external_addresses.0.len(), 2);
     }
 }

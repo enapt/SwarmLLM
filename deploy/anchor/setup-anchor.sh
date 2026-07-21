@@ -46,14 +46,17 @@ SKIP_DOWNLOAD="${SKIP_DOWNLOAD:-0}"
 if [[ -n "$DUCKDNS_DOMAIN" ]]; then
   [[ -n "$DUCKDNS_TOKEN" ]] || { echo "DUCKDNS_DOMAIN set but DUCKDNS_TOKEN missing."; exit 1; }
   HOST="${DUCKDNS_DOMAIN}.duckdns.org"
-  EXTERNAL_ADDR="/dns4/${HOST}/tcp/${P2P_TCP}"
+  PROTO="dns4"
 elif [[ -n "$PUBLIC_IP" ]]; then
   HOST="$PUBLIC_IP"
-  EXTERNAL_ADDR="/ip4/${PUBLIC_IP}/tcp/${P2P_TCP}"
+  PROTO="ip4"
 else
   echo "Set PUBLIC_IP (static IP) and/or DUCKDNS_DOMAIN+DUCKDNS_TOKEN (DNS name)."; exit 1
 fi
-echo ">> Advertising external address: ${EXTERNAL_ADDR}"
+# Advertise the host on both transports (TCP + QUIC). Single-line TOML array so
+# the sed rewrite below is a one-liner.
+EXTERNAL_ADDRS="[\"/${PROTO}/${HOST}/tcp/${P2P_TCP}\", \"/${PROTO}/${HOST}/udp/${P2P_UDP}/quic-v1\"]"
+echo ">> Advertising external addresses: ${EXTERNAL_ADDRS}"
 
 echo ">> Installing packages..."
 export DEBIAN_FRONTEND=noninteractive
@@ -108,7 +111,7 @@ fi
 echo ">> Writing /etc/swarmllm/config.toml..."
 install -d -m 0755 /etc/swarmllm
 curl -fsSL "$RAW_BASE/config.toml" -o /etc/swarmllm/config.toml
-sed -i "s#^external_address = .*#external_address = \"${EXTERNAL_ADDR}\"#" /etc/swarmllm/config.toml
+sed -i "s#^external_addresses = .*#external_addresses = ${EXTERNAL_ADDRS}#" /etc/swarmllm/config.toml
 install -d -o swarmllm -g swarmllm -m 0700 /var/lib/swarmllm
 
 # --- 4. DuckDNS updater (only when a DuckDNS name was given) -----------------
@@ -185,7 +188,7 @@ systemctl enable --now swarmllm-anchor.service
 echo ""
 echo "============================================================"
 echo "  SwarmLLM anchor is up."
-echo "  Advertising: ${EXTERNAL_ADDR}"
+echo "  Advertising: ${EXTERNAL_ADDRS}"
 echo "  Status:      systemctl status swarmllm-anchor"
 echo "  Logs:        journalctl -u swarmllm-anchor -f"
 echo ""

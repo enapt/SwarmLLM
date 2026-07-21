@@ -487,34 +487,36 @@ impl NetworkManager {
 
         // Manual external-address override: a node that already knows how it is
         // reachable from the internet — a port-forwarded box, a VPS, or a
-        // dynamic-DNS anchor — declares it via `network.external_address`.
-        // Confirm it with the swarm so it flows into identify, the DHT, and
-        // every invite code this node mints. This is the load-bearing path for
-        // a self-hosted anchor node behind CGNAT-free hosting.
-        if let Some(ext) = config.network.external_address.as_deref() {
+        // dynamic-DNS anchor — declares it via `network.external_addresses`.
+        // Confirm each with the swarm so it flows into identify, the DHT, and
+        // every invite code this node mints. List both transports (TCP + QUIC)
+        // to advertise a readable DNS name over each. Load-bearing path for a
+        // self-hosted anchor node behind CGNAT-free hosting.
+        for ext in &config.network.external_addresses.0 {
             let ext = ext.trim();
-            if !ext.is_empty() {
-                match ext.parse::<Multiaddr>() {
-                    Ok(mut maddr) => {
-                        // The swarm tracks external addresses without our own
-                        // peer id; strip a trailing /p2p if the user added one.
-                        if matches!(
-                            maddr.iter().last(),
-                            Some(libp2p::multiaddr::Protocol::P2p(_))
-                        ) {
-                            maddr.pop();
-                        }
-                        self.swarm.add_external_address(maddr.clone());
-                        tracing::info!(%maddr, "Declared external address from config (network.external_address)");
+            if ext.is_empty() {
+                continue;
+            }
+            match ext.parse::<Multiaddr>() {
+                Ok(mut maddr) => {
+                    // The swarm tracks external addresses without our own peer
+                    // id; strip a trailing /p2p if the user added one.
+                    if matches!(
+                        maddr.iter().last(),
+                        Some(libp2p::multiaddr::Protocol::P2p(_))
+                    ) {
+                        maddr.pop();
                     }
-                    Err(e) => {
-                        tracing::warn!(
-                            external_address = %ext,
-                            error = %e,
-                            "network.external_address is not a valid multiaddr — ignoring. \
-                             Expected e.g. /dns4/anchor.example.net/tcp/8810 or /ip4/203.0.113.5/tcp/8810"
-                        );
-                    }
+                    self.swarm.add_external_address(maddr.clone());
+                    tracing::info!(%maddr, "Declared external address from config (network.external_addresses)");
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        external_address = %ext,
+                        error = %e,
+                        "network.external_addresses entry is not a valid multiaddr — ignoring. \
+                         Expected e.g. /dns4/anchor.example.net/tcp/8810 or /ip4/203.0.113.5/tcp/8810"
+                    );
                 }
             }
         }

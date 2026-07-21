@@ -83,11 +83,15 @@ If UPnP is off or unavailable but you have a public IP:
 2. Tell SwarmLLM how it's reachable so it advertises the right address:
    ```toml
    [network]
-   external_address = "/ip4/203.0.113.5/tcp/8810"      # your static public IP
-   # or, with dynamic DNS:
-   # external_address = "/dns4/myname.duckdns.org/tcp/8810"
+   external_address = "/ip4/203.0.113.5/tcp/8810"      # single address (string)
+   # or advertise a DNS name on BOTH transports (TCP + QUIC):
+   # external_addresses = [
+   #   "/dns4/myname.duckdns.org/tcp/8810",
+   #   "/dns4/myname.duckdns.org/udp/8800/quic-v1",
+   # ]
    ```
    > Omit the trailing `/p2p/...` — the daemon appends its own peer id.
+   > `external_address` (string) and `external_addresses` (list) are both accepted.
 
 ---
 
