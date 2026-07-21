@@ -23,8 +23,13 @@ across the internet, not just the LAN — the biggest gap for real-world use.
 - **Security**: quinn-proto → 0.11.15 (RUSTSEC-2026-0185, remote QUIC memory
   exhaustion, HIGH), crossbeam-epoch → 0.9.20 (RUSTSEC-2026-0204); installer
   input validation; relay abuse limits reviewed.
+- **Auto-updater tracks pre-releases** — the updater listed `/releases/latest`,
+  which skips pre-releases, so alpha nodes never auto-updated. It now lists
+  `/releases` and selects by mode: `all` tracks alpha/beta (stays patched during
+  the alpha phase), `stable`/`disabled` track stable only. Anchors default to
+  `all`.
 
-1075 → 1093 lib tests. Known gap: the relay/DCUtR CGNAT path is wired but awaits
+1075 → 1096 lib tests. Known gap: the relay/DCUtR CGNAT path is wired but awaits
 live multi-NAT validation.
 
 ## [Unreleased] — post-v0.1.0

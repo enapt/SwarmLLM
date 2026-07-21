@@ -29,5 +29,10 @@ external_addresses = ["/dns4/YOUR-NAME.duckdns.org/tcp/8810", "/dns4/YOUR-NAME.d
 
 [updates]
 # Keep an internet-exposed node patched. SHA256-verified binaries from GitHub.
-# "stable" auto-applies stable releases; "disabled" turns it off; "all" includes pre-releases.
-auto_update = "stable"
+#   "all"      — track every release incl. alpha/beta (stays patched during the
+#                alpha phase, but the anchor restarts briefly on each release).
+#   "stable"   — only stable releases (no restart churn; patch manually meanwhile).
+#   "disabled" — off.
+# During the alpha phase (no stable releases yet) "all" is the way to stay
+# current; switch to "stable" once stable releases exist and you want max uptime.
+auto_update = "all"

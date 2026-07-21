@@ -79,12 +79,34 @@ struct GitHubRelease {
     body: Option<String>,
     published_at: Option<String>,
     assets: Vec<GitHubAsset>,
+    /// Pre-release flag (alpha/beta/rc). `/releases/latest` never returns these,
+    /// which is why we list `/releases` and filter by mode instead.
+    #[serde(default)]
+    prerelease: bool,
+    /// Draft releases are only visible to authenticated requests; filtered out
+    /// defensively so an unpublished release is never selected.
+    #[serde(default)]
+    draft: bool,
 }
 
 #[derive(Debug, Deserialize)]
 struct GitHubAsset {
     name: String,
     browser_download_url: String,
+}
+
+/// Pick the newest applicable release from a `/releases` list (GitHub returns
+/// them newest-first). Always skips drafts; skips pre-releases unless
+/// `include_prereleases` (i.e. `AutoUpdateMode::All`). Returns `None` when no
+/// release qualifies — e.g. a fresh repo with only draft/pre-release tags in
+/// Stable mode.
+fn select_target_release(
+    releases: &[GitHubRelease],
+    include_prereleases: bool,
+) -> Option<&GitHubRelease> {
+    releases
+        .iter()
+        .find(|r| !r.draft && (include_prereleases || !r.prerelease))
 }
 
 impl UpdateChecker {
@@ -118,7 +140,14 @@ impl UpdateChecker {
     pub async fn check_for_update(&self) -> Result<Option<UpdateInfo>, SwarmError> {
         tracing::debug!("DIAG: check_for_update starting");
         let current = env!("CARGO_PKG_VERSION");
-        let url = format!("https://api.github.com/repos/{}/releases/latest", self.repo);
+        // `/releases/latest` only ever returns the newest STABLE, non-draft
+        // release — it silently skips pre-releases. SwarmLLM ships alpha/beta
+        // tags AS pre-releases, so we list `/releases` (returned newest-first)
+        // and select ourselves; otherwise auto-update would never see an alpha.
+        let url = format!(
+            "https://api.github.com/repos/{}/releases?per_page=30",
+            self.repo
+        );
 
         let resp = UPDATE_CHECK_CLIENT
             .get(&url)
@@ -131,10 +160,25 @@ impl UpdateChecker {
             return Err(SwarmError::Network(format!("GitHub API returned {status}")));
         }
 
-        let release: GitHubRelease = resp
+        let releases: Vec<GitHubRelease> = resp
             .json()
             .await
-            .map_err(|e| SwarmError::Network(format!("Failed to parse release JSON: {e}")))?;
+            .map_err(|e| SwarmError::Network(format!("Failed to parse releases JSON: {e}")))?;
+
+        // Include pre-releases only in `All` mode. `Stable`/`Disabled` track
+        // stable releases only (Disabled still checks so the dashboard can
+        // surface "update available" without auto-applying).
+        let include_prereleases =
+            matches!(self.config.auto_update, crate::config::AutoUpdateMode::All);
+        let release = match select_target_release(&releases, include_prereleases) {
+            Some(r) => r,
+            None => {
+                let mut state = self.state.write().await;
+                state.last_checked = Some(chrono::Utc::now().to_rfc3339());
+                state.last_error = None;
+                return Ok(None);
+            }
+        };
 
         let latest_tag = release.tag_name.trim_start_matches('v').to_string();
 
@@ -194,8 +238,8 @@ impl UpdateChecker {
             latest_version: latest_tag,
             current_version: current.to_string(),
             download_url,
-            changelog: release.body.unwrap_or_default(),
-            published_at: release.published_at.unwrap_or_default(),
+            changelog: release.body.clone().unwrap_or_default(),
+            published_at: release.published_at.clone().unwrap_or_default(),
             checksum_sha256,
             downloaded: false,
         };
@@ -657,6 +701,64 @@ fn platform_strings() -> (&'static str, &'static str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn rel(tag: &str, prerelease: bool, draft: bool) -> GitHubRelease {
+        GitHubRelease {
+            tag_name: tag.to_string(),
+            body: None,
+            published_at: None,
+            assets: vec![],
+            prerelease,
+            draft,
+        }
+    }
+
+    #[test]
+    fn select_target_release_respects_mode() {
+        // Newest-first, as GitHub returns them: a draft alpha, a published
+        // alpha, then a stable release.
+        let releases = vec![
+            rel("v0.4.0-alpha", true, true),  // draft — never selected
+            rel("v0.3.0-alpha", true, false), // published pre-release
+            rel("v0.2.0", false, false),      // stable
+        ];
+
+        // Stable/Disabled (include_prereleases = false) → newest *stable*.
+        assert_eq!(
+            select_target_release(&releases, false).unwrap().tag_name,
+            "v0.2.0"
+        );
+        // All (include_prereleases = true) → newest non-draft, incl. pre-release.
+        assert_eq!(
+            select_target_release(&releases, true).unwrap().tag_name,
+            "v0.3.0-alpha"
+        );
+    }
+
+    #[test]
+    fn select_target_release_none_when_only_prereleases_in_stable() {
+        // A fresh repo whose only published releases are alphas: Stable mode
+        // finds nothing (so auto-update stays quiet instead of downgrading).
+        let releases = vec![
+            rel("v0.3.0-alpha", true, false),
+            rel("v0.2.0-alpha", true, false),
+        ];
+        assert!(select_target_release(&releases, false).is_none());
+        assert_eq!(
+            select_target_release(&releases, true).unwrap().tag_name,
+            "v0.3.0-alpha"
+        );
+    }
+
+    #[test]
+    fn select_target_release_skips_drafts() {
+        let releases = vec![rel("v0.3.0", false, true), rel("v0.2.0", false, false)];
+        // Even in "include prereleases" mode, drafts are skipped.
+        assert_eq!(
+            select_target_release(&releases, true).unwrap().tag_name,
+            "v0.2.0"
+        );
+    }
 
     #[test]
     fn semver_newer() {
