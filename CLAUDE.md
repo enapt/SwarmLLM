@@ -151,7 +151,7 @@ libp2p 0.56, axum 0.8, candle-core/candle-transformers 0.10 (CUDA), redb 4, ed25
 
 ## Testing
 
-- 1097 lib tests passing + 8 ignored (env-var-gated real-model + manual smoke), 75 integration tests in `tests/integration/`, 1 ignored end-to-end (`cargo test --test integration_phase10_11 -- --ignored`), clippy clean. Microbench: `cargo run --release --no-default-features --features dev,claude-subscription --example swarm_spec_bench` (R136 — measures all 4 SWARM-SPEC layer primitives + synthetic cascade hit-rate). Local-cluster bench: `examples/3node_setup.sh` (boots 3 daemons) + `examples/3node_inference_bench.sh` (runs 3 workloads × 3 trials and prints tok/s + swarm_spec metrics). Sharded variant: `examples/3node_sharded_setup.sh` (forced distributed pipeline — requires `auto_manage.enabled = false` in per-node config.toml to preserve sharded state).
+- 1099 lib tests passing + 8 ignored (env-var-gated real-model + manual smoke), 75 integration tests in `tests/integration/`, 1 ignored end-to-end (`cargo test --test integration_phase10_11 -- --ignored`), clippy clean. Microbench: `cargo run --release --no-default-features --features dev,claude-subscription --example swarm_spec_bench` (R136 — measures all 4 SWARM-SPEC layer primitives + synthetic cascade hit-rate). Local-cluster bench: `examples/3node_setup.sh` (boots 3 daemons) + `examples/3node_inference_bench.sh` (runs 3 workloads × 3 trials and prints tok/s + swarm_spec metrics). Sharded variant: `examples/3node_sharded_setup.sh` (forced distributed pipeline — requires `auto_manage.enabled = false` in per-node config.toml to preserve sharded state).
 - Unit tests: in-module `#[cfg(test)]` blocks
 - Integration tests: `tests/integration/` — multi-node simulations with `--test-threads=1`
 - Real-model spawn-and-infer test: set `SWARMLLM_TEST_MODEL_DIR` to a fully-populated model directory (e.g. `~/.local/share/swarmllm/models/tinyllama-1.1b-...`) and run `cargo test --test integration_phase10_11 -- --ignored end_to_end`. No synthetic GGUF fixture is committed; see `docs/ARCHITECTURE.md` § Deferred Items.
@@ -192,9 +192,40 @@ When spawning subagents in this repo, use these model picks (overrides defaults 
 
 ## Status
 
-All 20 build phases complete. All subsystems wired — no stubs. **1097 lib tests + 75 integration tests passing**; 8 lib + 1 e2e ignored (env-var or manual). Clippy clean default + features dev,claude-subscription + `--features llama`.
+All 20 build phases complete. All subsystems wired — no stubs. **1099 lib tests + 75 integration tests passing**; 8 lib + 1 e2e ignored (env-var or manual). Clippy clean default + features dev,claude-subscription + `--features llama`.
 
-### Latest: R143 — Internet reachability & NAT traversal (2026-07-20)
+### Latest: R144 — Dashboard peer-clarity + reachability docs (2026-07-21)
+
+Follow-on to R143, driven by the first external user (#16) testing 0.3.x live.
+Their home node bootstrapped to the anchor and the dashboard called the **remote
+anchor "LAN"** (`1 peer 1 lan`). Fixes (`round_log_R144.md`, commits
+`938e8de4`+`245c8062`):
+
+- **LAN misclassification** (`network/manager/identify.rs`): a peer was tagged
+  LAN if **any** advertised `listen_addr` was private/loopback — but a public
+  `0.0.0.0` node advertises `127.0.0.1`, so every remote peer counted as LAN. New
+  `multiaddr_is_local` classifies only on the actual connection addr +
+  observed-us addr, never on advertised listen_addrs (+2 tests).
+- **Peer taxonomy Pool > LAN > Remote** in the WS stats builder
+  (`pool_peers+lan_peers+remote_peers == connected`, keyed on
+  `connected_node_ids`) + per-peer `is_pool_member` in `serialize_peer_to_json`.
+  Frontend: header chips read "1 internet peer / N on your network / N pool
+  devices"; every peer row gets a Pool(green)/LAN(purple)/Internet(blue) badge.
+- **Version in header** (`#app-version` by the logo; version added to WS stats).
+- **Honest empty-state**: `#models-empty` no longer says "Connecting…" when
+  `peers>0` — new `models.empty_connected` copy.
+- **Swarm-resources strip** (`#netstatus-resources`): computers online (incl.
+  you), GPU machines, combined VRAM, shared storage, regions — from
+  `swarm_capacity`.
+- **i18n**: 14 new keys × 21 locales + translated adjacent English-fallback
+  netstatus chip keys (1172 → 1186/locale).
+- **Docs**: README promotes out-of-the-box auto-join (anchor + UPnP + AutoNAT v2
+  + relay) + Discord; `docs/NETWORKING.md` gained an explicit AutoNAT-v2 note.
+
+Unreleased on `main` → bundle into **v0.3.3-alpha** once v0.3.2 (DNS fix)
+publishes. 1097 → 1099 lib tests (+2).
+
+### R143 — Internet reachability & NAT traversal (2026-07-20)
 
 Closes the critical "remote/internet nodes are not discoverable / invite code
 carries no public IP" gap reported by the first real external user (issue #16 +
