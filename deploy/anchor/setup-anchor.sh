@@ -189,7 +189,14 @@ echo ">> Enabling unattended-upgrades..."
 dpkg-reconfigure -f noninteractive unattended-upgrades >/dev/null 2>&1 || true
 systemctl enable --now unattended-upgrades >/dev/null 2>&1 || true
 
-# --- 7. systemd service ------------------------------------------------------
+# --- 7. root-run auto-updater (the daemon can't self-update under the sandbox) -
+echo ">> Installing root auto-updater (daily)..."
+curl -fsSL "$RAW_BASE/swarmllm-update.sh" -o /usr/local/bin/swarmllm-update.sh
+chmod 700 /usr/local/bin/swarmllm-update.sh
+curl -fsSL "$RAW_BASE/swarmllm-update.service" -o /etc/systemd/system/swarmllm-update.service
+curl -fsSL "$RAW_BASE/swarmllm-update.timer" -o /etc/systemd/system/swarmllm-update.timer
+
+# --- 8. systemd service ------------------------------------------------------
 echo ">> Installing systemd service..."
 curl -fsSL "$RAW_BASE/swarmllm-anchor.service" -o /etc/systemd/system/swarmllm-anchor.service
 systemctl daemon-reload
@@ -197,6 +204,7 @@ if [[ -n "$DUCKDNS_DOMAIN" ]]; then
   systemctl enable --now swarmllm-duckdns.timer
   systemctl start swarmllm-duckdns.service    # register the DNS record now
 fi
+systemctl enable --now swarmllm-update.timer
 systemctl enable --now swarmllm-anchor.service
 
 # --- 8. done -----------------------------------------------------------------

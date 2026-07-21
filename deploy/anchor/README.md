@@ -124,13 +124,20 @@ become discoverable to each other.
 - Dashboard/API **loopback-only** (reach it via `ssh -L 8800:localhost:8800`).
 - Default-deny firewall; only TCP 8810 + UDP 8800 exposed.
 - Inference surface **not running at all** (`--anchor`).
-- OS auto-patched; swarmllm auto-updates stable releases (SHA256-verified).
+- OS auto-patched (`unattended-upgrades`).
+- **swarmllm auto-updated by a root-run timer** (`swarmllm-update.timer`, daily),
+  *not* by the daemon. The sandboxed non-root daemon deliberately can't rewrite
+  its own binary, so a separate root-privileged updater checks for a newer
+  release, verifies the SHA256, swaps the binary and restarts the service — the
+  same split as `unattended-upgrades` for the OS. Refuses unverified binaries;
+  never downgrades.
 
 ## Maintenance
 
 - **Status / logs**: `systemctl status swarmllm-anchor`, `journalctl -u swarmllm-anchor -f`
-- **Update binary now**: `sudo systemctl restart swarmllm-anchor` (auto-update is on),
-  or `sudo -u swarmllm /usr/local/bin/swarmllm update`.
+- **Update binary now** (instead of waiting for the daily timer):
+  `sudo systemctl start swarmllm-update.service` then `journalctl -u swarmllm-update`.
+- **Check the auto-updater**: `systemctl list-timers swarmllm-update.timer`.
 - **Back up** `/var/lib/swarmllm` (holds the node identity keypair + credit
   balance) and snapshot the VM so you can roll back cleanly.
 - **Retiring it**: once enough publicly-reachable nodes exist organically, the

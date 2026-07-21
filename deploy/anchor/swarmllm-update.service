@@ -1,0 +1,11 @@
+[Unit]
+Description=Update the SwarmLLM anchor binary if a newer release exists
+Documentation=https://github.com/enapt/SwarmLLM/blob/main/deploy/anchor/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# Runs as root (default) — it must write /usr/local/bin and restart the service,
+# which the sandboxed non-root daemon deliberately cannot do itself.
+ExecStart=/usr/local/bin/swarmllm-update.sh
