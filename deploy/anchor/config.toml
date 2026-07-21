@@ -11,6 +11,12 @@ anchor_mode = true          # no inference; no models; dashboard bound to loopba
 
 [network]
 enable_relay = true         # serve as a relay for NAT'd peers — the anchor's main job
+# Max simultaneous relay circuits. Default 16 is fine for bootstrapping; raise it
+# if this anchor should serve many CGNAT peers at once (each open circuit uses
+# bandwidth + memory, so size it to your VPS's traffic allowance). DCUtR upgrades
+# most relayed connections to direct, freeing circuits — only strict/symmetric
+# NAT peers hold a circuit for the whole session.
+relay_max_circuits = 64
 enable_upnp = false         # a public/forwarded host doesn't need UPnP (it'd just no-op)
 # How THIS node is reachable from the internet (the installer rewrites this line).
 # No trailing /p2p — the daemon appends its own peer id. TCP port = listen_port+10,
