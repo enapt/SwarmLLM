@@ -317,6 +317,13 @@ impl NetworkManager {
             )
             .map_err(|e| SwarmError::Network(format!("TCP transport error: {e}")))?
             .with_quic()
+            // Wrap the transports with DNS resolution so `/dns4` / `/dns6` /
+            // `/dnsaddr` multiaddrs are dialable — without this, dialing a
+            // DNS-named peer (e.g. the default `swarmllm.duckdns.org` bootstrap
+            // anchor, or any `network.external_addresses` DNS entry) fails with
+            // "Multiaddr is not supported". Uses the system resolver.
+            .with_dns()
+            .map_err(|e| SwarmError::Network(format!("DNS transport error: {e}")))?
             .with_relay_client(libp2p::noise::Config::new, libp2p::yamux::Config::default)
             .map_err(|e| SwarmError::Network(format!("Relay client error: {e}")))?
             .with_behaviour(|_key, relay_behaviour| {

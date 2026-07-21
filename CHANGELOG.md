@@ -2,6 +2,17 @@
 
 All notable changes to SwarmLLM are documented here.
 
+## [0.3.2-alpha] — 2026-07-21
+
+**Fix: `/dns4` bootstrap peers were undialable.** The swarm transport was
+missing the DNS-resolution wrapper (`.with_dns()`), so any DNS-named multiaddr —
+including the default `swarmllm.duckdns.org` bootstrap anchor added in 0.3.1 —
+failed with "Multiaddr is not supported". Result: fresh installs couldn't
+auto-join. Added `.with_dns()`; the default bootstrap also gained an `/ip4`
+fallback for hosts where DNS resolution is unavailable. (Caught by live
+multi-node validation — the unit test only checked the address string was
+present, not that it was dialable.)
+
 ## [0.3.1-alpha] — 2026-07-21
 
 **Internet reachability & NAT traversal (R143).** Makes SwarmLLM reachable

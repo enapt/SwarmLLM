@@ -112,8 +112,13 @@ fn default_listen_address() -> String {
 /// `bootstrap_peers` in config (an empty list opts out entirely).
 fn default_bootstrap_peers() -> Vec<String> {
     vec![
+        // DNS form (primary, portable across a host IP change — requires the
+        // swarm's DNS transport, wired via `.with_dns()` in the manager).
         "/dns4/swarmllm.duckdns.org/tcp/8810/p2p/12D3KooWNisnVha2jYj1gqqY5WP82vNQbRhFtBcKzj4XrYmGEn8G".to_string(),
         "/dns4/swarmllm.duckdns.org/udp/8800/quic-v1/p2p/12D3KooWNisnVha2jYj1gqqY5WP82vNQbRhFtBcKzj4XrYmGEn8G".to_string(),
+        // IP fallback (in case DNS resolution is unavailable). A stale IP after
+        // a host move just yields one failed dial — the DNS entries still work.
+        "/ip4/212.132.104.177/tcp/8810/p2p/12D3KooWNisnVha2jYj1gqqY5WP82vNQbRhFtBcKzj4XrYmGEn8G".to_string(),
     ]
 }
 
