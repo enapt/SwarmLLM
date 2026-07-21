@@ -83,10 +83,16 @@ if [[ "$SKIP_DOWNLOAD" == "1" ]]; then
   [[ -x "$BIN" ]] || { echo "SKIP_DOWNLOAD=1 but $BIN is missing. scp your binary there first."; exit 1; }
   echo ">> Using existing binary at $BIN (SKIP_DOWNLOAD=1)."
 else
-  echo ">> Fetching latest release binary ($ASSET)..."
-  META=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest")
-  DL=$(echo "$META" | jq -r ".assets[] | select(.name==\"$ASSET\") | .browser_download_url")
-  SHA=$(echo "$META" | jq -r ".assets[] | select(.name==\"${ASSET}.sha256\") | .browser_download_url")
+  echo ">> Fetching newest release binary ($ASSET)..."
+  # NOTE: /releases/latest skips pre-releases. SwarmLLM ships alpha/beta tags as
+  # pre-releases, so list all releases and take the newest non-draft one (the
+  # API returns them newest-first). This picks the current alpha.
+  META=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases" \
+    | jq '[.[] | select(.draft==false)][0]')
+  REL_TAG=$(echo "$META" | jq -r '.tag_name // "?"')
+  echo ">> Newest release: ${REL_TAG}"
+  DL=$(echo "$META" | jq -r ".assets[]? | select(.name==\"$ASSET\") | .browser_download_url")
+  SHA=$(echo "$META" | jq -r ".assets[]? | select(.name==\"${ASSET}.sha256\") | .browser_download_url")
   [[ -n "$DL" && "$DL" != "null" ]] || {
     echo "No $ASSET in the latest release. Build the anchor binary on your dev box"
     echo "(RUSTFLAGS=\"\" cargo build --release), scp it to $BIN, and re-run with SKIP_DOWNLOAD=1."
