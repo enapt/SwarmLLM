@@ -1939,6 +1939,21 @@ extra-cautious — Layer 0 alone is purely upside.
 
 ---
 
+## CI / build infra
+
+### Node.js-20 GitHub Actions deprecation (R145 sweep, 2026-07-21)
+**Context.** GitHub is deprecating the Node.js 20 runtime on Actions runners; three pinned actions in `.github/workflows/release.yml` still target Node 20 and are currently *force-upgraded* to Node 24 (a warning annotation, not a failure — the v0.3.3-alpha release built and published fine):
+
+- `ilammy/msvc-dev-cmd@v1` — **no fix available**: latest is v1.13.0 (2024-01-01); the maintainer never shipped a Node-24 release. Bumping the pin won't help. Either wait for upstream or replace the MSVC-setup step.
+- `jakoch/install-vulkan-sdk-action@v1` — a newer v1.6.0 (2026-06-26) exists, but **gotcha #132** records this action as broken on Linux; a blind bump is risky and needs CI validation on all platforms.
+- `Jimver/cuda-toolkit@v0.2.19` — newer v0.2.35 (2026-03-29) exists (keep the `cuda: '12.4.0'` pin — that's a candle/RTX-50 constraint, not the action version). Only validatable through the ~56-min CUDA CI job.
+
+**Why deferred.** All three work today; GitHub has not yet removed the Node-20 runtime. Two of the three are either unfixable-by-bump or historically fragile, and validation is slow/expensive (CUDA build is the release long-pole). Revisit when GitHub sets a hard Node-20 removal date, and validate any bump on a throwaway tag before a real release.
+
+**Also noted this sweep (no action needed):** `hickory-proto 0.25.2` carries RUSTSEC-2026-0118 + -0119 (transitive via libp2p 0.56 DNS/mDNS). CI ignores both — no upgrade path until libp2p bumps its hickory deps. `anyhow`/`memmap2` unsound advisories were cleared by patch bumps in commit `4b4d5307`.
+
+---
+
 ## How to use this file
 
 When starting a new feature, grep this file for keywords related to the area you're touching. If your feature unblocks a deferred item, either pick it up in the same PR (if scope allows) or move the entry to "completed" with the closing commit reference.
