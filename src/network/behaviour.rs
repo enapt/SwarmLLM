@@ -52,7 +52,12 @@ pub struct SwarmBehaviour {
     pub kademlia: kad::Behaviour<MemoryStore>,
     pub gossipsub: gossipsub::Behaviour,
     pub identify: identify::Behaviour,
-    pub autonat: libp2p::swarm::behaviour::toggle::Toggle<autonat::Behaviour>,
+    /// AutoNAT v2 client — tests whether OUR advertised addresses are reachable
+    /// (drives auto-relay when they're not). Toggleable; disabled on WSL2.
+    pub autonat_client: libp2p::swarm::behaviour::toggle::Toggle<autonat::v2::client::Behaviour>,
+    /// AutoNAT v2 server — answers other nodes' dial-back probes so they can
+    /// detect their own NAT status. An anchor running this helps the swarm.
+    pub autonat_server: libp2p::swarm::behaviour::toggle::Toggle<autonat::v2::server::Behaviour>,
     pub dcutr: libp2p::swarm::behaviour::toggle::Toggle<dcutr::Behaviour>,
     /// UPnP/IGD automatic gateway port-mapping (toggleable — disable on WSL2).
     /// On a home router with UPnP enabled this maps the P2P TCP/QUIC ports on
@@ -202,15 +207,25 @@ pub fn build_behaviour(
         local_key.public(),
     ));
 
-    // AutoNAT for NAT detection (toggleable — disable on WSL2)
-    let autonat_behaviour = if enable_autonat {
-        Some(autonat::Behaviour::new(
-            local_peer_id,
-            autonat::Config::default(),
-        ))
+    // AutoNAT v2 for NAT detection (toggleable — disable on WSL2). v2 replaces
+    // v1: it tests reachability on ONE specific address at a time (driven by
+    // identify's observed-address candidates) instead of guessing an overall
+    // status, which eliminates v1's false-"Public" reports (notably over QUIC,
+    // rust-libp2p #3900) that left NAT'd nodes thinking they were reachable and
+    // never reserving a relay. A node runs BOTH roles: the client tests its own
+    // reachability; the server answers other nodes' dial-back probes (so an
+    // anchor helps the swarm detect NAT). On a confirmed-reachable result the
+    // client emits ToSwarm::ExternalAddrConfirmed (flows into listen_multiaddrs
+    // via refresh_listen_multiaddrs); on AddressNotReachable it emits a client
+    // Event that drives auto-relay activation.
+    let (autonat_client, autonat_server) = if enable_autonat {
+        (
+            Some(autonat::v2::client::Behaviour::default()),
+            Some(autonat::v2::server::Behaviour::default()),
+        )
     } else {
         tracing::debug!("DIAG: autonat disabled by config");
-        None
+        (None, None)
     };
 
     // DCUtR for hole punching (toggleable — disable on WSL2)
@@ -277,7 +292,8 @@ pub fn build_behaviour(
         kademlia,
         gossipsub,
         identify,
-        autonat: autonat_behaviour.into(),
+        autonat_client: autonat_client.into(),
+        autonat_server: autonat_server.into(),
         dcutr: dcutr_behaviour.into(),
         upnp: upnp_behaviour.into(),
         relay_client: relay_behaviour,
@@ -356,6 +372,31 @@ mod tests {
         let behaviour = result.unwrap();
         // mDNS should be enabled (Toggle wraps Some)
         assert!(behaviour.mdns.is_enabled());
+        // AutoNAT v2 client + server both wired when enable_autonat = true.
+        assert!(behaviour.autonat_client.is_enabled());
+        assert!(behaviour.autonat_server.is_enabled());
+    }
+
+    #[tokio::test]
+    async fn build_behaviour_autonat_v2_disabled() {
+        let keypair = Keypair::generate_ed25519();
+        let (relay_transport, relay_behaviour) = relay::client::new(keypair.public().to_peer_id());
+        drop(relay_transport);
+        // enable_autonat = false (5th bool) — e.g. the WSL2 override.
+        let result = build_behaviour(
+            &keypair,
+            relay_behaviour,
+            None,
+            false,
+            false,
+            true,
+            false,
+            0,
+            None,
+        );
+        let behaviour = result.unwrap();
+        assert!(!behaviour.autonat_client.is_enabled());
+        assert!(!behaviour.autonat_server.is_enabled());
     }
 
     #[test]

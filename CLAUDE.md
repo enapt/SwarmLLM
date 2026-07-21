@@ -151,7 +151,7 @@ libp2p 0.56, axum 0.8, candle-core/candle-transformers 0.10 (CUDA), redb 4, ed25
 
 ## Testing
 
-- 1091 lib tests passing + 8 ignored (env-var-gated real-model + manual smoke), 75 integration tests in `tests/integration/`, 1 ignored end-to-end (`cargo test --test integration_phase10_11 -- --ignored`), clippy clean. Microbench: `cargo run --release --no-default-features --features dev,claude-subscription --example swarm_spec_bench` (R136 — measures all 4 SWARM-SPEC layer primitives + synthetic cascade hit-rate). Local-cluster bench: `examples/3node_setup.sh` (boots 3 daemons) + `examples/3node_inference_bench.sh` (runs 3 workloads × 3 trials and prints tok/s + swarm_spec metrics). Sharded variant: `examples/3node_sharded_setup.sh` (forced distributed pipeline — requires `auto_manage.enabled = false` in per-node config.toml to preserve sharded state).
+- 1093 lib tests passing + 8 ignored (env-var-gated real-model + manual smoke), 75 integration tests in `tests/integration/`, 1 ignored end-to-end (`cargo test --test integration_phase10_11 -- --ignored`), clippy clean. Microbench: `cargo run --release --no-default-features --features dev,claude-subscription --example swarm_spec_bench` (R136 — measures all 4 SWARM-SPEC layer primitives + synthetic cascade hit-rate). Local-cluster bench: `examples/3node_setup.sh` (boots 3 daemons) + `examples/3node_inference_bench.sh` (runs 3 workloads × 3 trials and prints tok/s + swarm_spec metrics). Sharded variant: `examples/3node_sharded_setup.sh` (forced distributed pipeline — requires `auto_manage.enabled = false` in per-node config.toml to preserve sharded state).
 - Unit tests: in-module `#[cfg(test)]` blocks
 - Integration tests: `tests/integration/` — multi-node simulations with `--test-threads=1`
 - Real-model spawn-and-infer test: set `SWARMLLM_TEST_MODEL_DIR` to a fully-populated model directory (e.g. `~/.local/share/swarmllm/models/tinyllama-1.1b-...`) and run `cargo test --test integration_phase10_11 -- --ignored end_to_end`. No synthetic GGUF fixture is committed; see `docs/ARCHITECTURE.md` § Deferred Items.
@@ -192,7 +192,7 @@ When spawning subagents in this repo, use these model picks (overrides defaults 
 
 ## Status
 
-All 20 build phases complete. All subsystems wired — no stubs. **1091 lib tests + 75 integration tests passing**; 8 lib + 1 e2e ignored (env-var or manual). Clippy clean default + features dev,claude-subscription + `--features llama`.
+All 20 build phases complete. All subsystems wired — no stubs. **1093 lib tests + 75 integration tests passing**; 8 lib + 1 e2e ignored (env-var or manual). Clippy clean default + features dev,claude-subscription + `--features llama`.
 
 ### Latest: R143 — Internet reachability & NAT traversal (2026-07-20)
 
@@ -246,9 +246,31 @@ upgrades), anchor `config.toml`, runbook README. NOTE: this is a *runtime* slim
 mode (candle still compiled in); the compile-time candle-ectomy (`--features anchor`
 → tiny binary) is the deferred Phase 2.
 
-Tests: +16 (8 invite reachability, 4 listen-addr union/suffix, 2 config default,
-2 anchor-mode). 1075 → 1091 lib tests. Clippy clean default + features
-dev,claude-subscription + features llama.
+**Dual-transport + AutoNAT v2 + security (same round):**
+- `network.external_addresses` (list; single-string `external_address` still
+  accepted via serde alias) so a DuckDNS name is advertised on TCP **and** QUIC.
+- **AutoNAT v1 → v2 migration** (research-driven: v1 falsely reports NAT'd nodes
+  as "Public" over QUIC, rust-libp2p #3900, → never reserve a relay → unreachable).
+  `SwarmBehaviour.autonat_client` + `autonat_server` (both `v2::*::Behaviour::default()`,
+  toggled by `enable_autonat`, off on WSL2). v2 client emits `ExternalAddrConfirmed`
+  on a reachable result (flows into listen_multiaddrs) and `AddressNotReachable`
+  → `NetworkManager::try_activate_relay` (extracted from the old NET-M3 block,
+  now rate-limited + retryable). **Belt-and-suspenders relay fallback** on the
+  liveness tick: reserve a relay if no internet-reachable address
+  `RELAY_FALLBACK_DELAY_SECS=45` after startup, so CGNAT reachability doesn't
+  depend on AutoNAT firing. **Relay/DCUtR CGNAT path is wired but needs live
+  multi-NAT validation** (deferred — needs the anchor + a real CGNAT node).
+- Security sweep (anchor + network/comms): verdict well-hardened (auth-gated
+  tensor injection, size caps, conn/relay per-peer limits, signed gossip, no
+  plaintext fallback). Applied: installer strict input validation (injection/
+  typo guard), `relay_max_circuits`→64 anchor tunable. Research: DCUtR ~70%
+  hole-punch success → relay is the essential fallback; QUIC/TCP punch equally.
+
+Tests: +18 (8 invite reachability, 4 listen-addr union/suffix, 2 config default,
+2 anchor-mode, 1 external_addresses string-or-list, 1 AutoNAT-v2 toggle; the
+AutoNAT v2 relay path itself needs live multi-NAT validation, not unit tests).
+1075 → 1093 lib tests. Clippy clean default + features dev,claude-subscription
++ features llama.
 
 ### Prior: R142 — Autonomous 8-hour sweep (2026-05-22→05-23)
 

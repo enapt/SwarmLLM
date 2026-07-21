@@ -254,7 +254,7 @@ libp2p Swarm
 ├── mDNS (optional, LAN peer discovery — conditional dial, not added to Kademlia)
 ├── connection_limits (max 1/peer, 500 total)
 ├── Identify (protocol identification + peer_to_node reverse map)
-├── AutoNAT (NAT detection → Kademlia Mode::Client/Server switch)
+├── AutoNAT v2 client+server (per-address reachability test → ExternalAddrConfirmed / relay activation; replaced v1 in R143 to fix false-"Public")
 ├── DCUtR (hole punching)
 ├── UPnP (IGD gateway port-mapping → auto-confirms public external address; default on, off on WSL2)
 └── relay::client (circuit relay)
@@ -267,9 +267,19 @@ libp2p Swarm
 relay circuits, or the manual `network.external_address` override). This closes
 the gap where a NAT'd node minted invite codes carrying only its LAN address.
 UPnP (default on) auto-opens the gateway port for the common home-router case;
-`network.external_address` lets a port-forwarded box / VPS / dyndns anchor
-declare its reachable address explicitly. See `docs/NETWORKING.md` for the
-operator guide (CGNAT check, port-forwarding, running an anchor node).
+`network.external_addresses` lets a port-forwarded box / VPS / dyndns anchor
+declare its reachable address(es) explicitly (list form covers TCP + QUIC).
+
+**NAT detection + relay (R143).** AutoNAT **v2** (client + server, replacing v1)
+tests each candidate address for real reachability; a confirmed address emits
+`ExternalAddrConfirmed`, an `AddressNotReachable` result triggers relay
+activation via `NetworkManager::try_activate_relay` (reserve a `/p2p-circuit` on
+a `bootstrap_peers` relay). A belt-and-suspenders fallback in the run loop
+reserves a relay if the node still has **no** internet-reachable address
+`RELAY_FALLBACK_DELAY_SECS` after startup — so reachability for a CGNAT node
+doesn't depend on AutoNAT producing a conclusive answer. The relay path
+(reservation → circuit dial → DCUtR upgrade) is wired but still needs live
+multi-NAT validation. See `docs/NETWORKING.md` for the operator guide.
 
 ## Inference Pipeline
 

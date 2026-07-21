@@ -114,6 +114,11 @@ const BOOTSTRAP_POLL_INTERVAL_SECS: u64 = 5;
 const NO_PEERS_WARN_INTERVAL_SECS: u64 = 30;
 /// Cadence for the liveness heartbeat that refreshes `last_seen` on connected peers.
 const LIVENESS_INTERVAL_SECS: u64 = 30;
+/// Grace period after startup before the belt-and-suspenders relay fallback fires
+/// (gives UPnP + AutoNAT a chance to confirm a direct address first). Checked on
+/// the liveness tick, so the effective first check lands at the next 30s tick past
+/// this delay.
+const RELAY_FALLBACK_DELAY_SECS: u64 = 45;
 /// Minimum redial delay added to peers that never completed Identify handshake.
 /// Jitter breaks mDNS simultaneous-dial race symmetry.
 const REDIAL_JITTER_MIN_MS: u64 = 2000;
@@ -151,6 +156,10 @@ pub struct NetworkManager {
     buffered_gossip: Vec<(String, Vec<u8>)>,
     /// Whether relay listen has been activated for this session (at most once).
     relay_activated: bool,
+    /// Last time we attempted relay activation, to rate-limit retries until one
+    /// succeeds (AutoNAT-unreachable results + the startup fallback both trigger
+    /// `try_activate_relay`).
+    last_relay_attempt: Option<std::time::Instant>,
     /// Maps OutboundRequestId → (inference UUID, send time, target PeerId, num_layers, activation_bytes)
     /// for tensor forwards. Used to notify the pipeline on OutboundFailure.
     /// The Instant + workload info are used for adaptive stale tensor cleanup.
@@ -360,6 +369,7 @@ impl NetworkManager {
             peer_to_node: DashMap::new(),
             buffered_gossip: Vec::new(),
             relay_activated: false,
+            last_relay_attempt: None,
             pending_tensor_outbound: HashMap::new(),
             pending_tensor_result_outbound: HashMap::new(),
             pending_rr_observability: HashMap::new(),
@@ -788,6 +798,23 @@ impl NetworkManager {
                         self.swarm.connected_peers().cloned().collect();
                     for peer_id in &connected {
                         self.refresh_peer_last_seen(peer_id);
+                    }
+                    // Belt-and-suspenders relay fallback: if, well after startup,
+                    // this node still has NO internet-reachable address (no public
+                    // listener, no UPnP/AutoNAT-confirmed external addr, no relay
+                    // circuit yet), reserve a relay proactively — don't wait for
+                    // AutoNAT to produce a conclusive "unreachable", which can fail
+                    // to fire if no AutoNAT servers are reachable. `try_activate_relay`
+                    // is idempotent + rate-limited and no-ops once we're reachable.
+                    if !self.relay_activated
+                        && startup_instant.elapsed().as_secs() >= RELAY_FALLBACK_DELAY_SECS
+                    {
+                        let reachable = crate::pool::invite::any_internet_reachable(
+                            self.shared_state.listen_multiaddrs.load().as_ref(),
+                        );
+                        if !reachable {
+                            self.try_activate_relay("no internet-reachable address after startup");
+                        }
                     }
                 }
                 // Periodic request_response health ping.

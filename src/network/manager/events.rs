@@ -6,11 +6,12 @@
 //! `identify.rs` for Identify, `connections.rs` for ConnectionEstablished and
 //! ConnectionClosed, `dht.rs` for DHT provider results — and handles the rest
 //! inline: gossipsub Message (signed-seal verify + dispatcher push), gossipsub
-//! Subscribed (replay buffered topic publishes), AutoNAT StatusChanged
-//! (auto-relay listen activation on private NAT), mDNS Discovered/Expired
-//! (LAN peer count + peer_registry sync), Kademlia DHT record verify,
-//! ExternalAddrConfirmed (Kademlia → Server mode), plus the various
-//! connection-error edges.
+//! Subscribed (replay buffered topic publishes), AutoNAT v2 client results
+//! (reachable → ExternalAddrConfirmed; unreachable → `try_activate_relay`),
+//! AutoNAT v2 server dial-back probes, UPnP mapping events, mDNS
+//! Discovered/Expired (LAN peer count + peer_registry sync), Kademlia DHT
+//! record verify, ExternalAddrConfirmed (Kademlia → Server mode), plus the
+//! various connection-error edges.
 
 use libp2p::gossipsub::{self, IdentTopic};
 use libp2p::request_response;
@@ -23,6 +24,11 @@ use crate::network::protocol::{self, SwarmRequest, SwarmResponse};
 use crate::types::SwarmMessage;
 
 use super::NetworkManager;
+
+/// Minimum spacing between relay-activation attempts until one succeeds. Bounds
+/// how often repeated AutoNAT-unreachable results (or the startup fallback tick)
+/// can issue `listen_on` for a relay circuit.
+const RELAY_RETRY_MIN_SECS: u64 = 20;
 
 impl NetworkManager {
     pub(super) async fn handle_swarm_event(&mut self, event: SwarmEvent<SwarmBehaviourEvent>) {
@@ -345,76 +351,37 @@ impl NetworkManager {
                 crate::network::relay::handle_relay_server_event(event, &self.shared_state);
             }
 
-            // ── AutoNAT status changes ──
-            SwarmEvent::Behaviour(SwarmBehaviourEvent::Autonat(
-                libp2p::autonat::Event::StatusChanged { old, new },
-            )) => {
-                tracing::info!(?old, ?new, "AutoNAT status changed");
-                {
-                    if let Ok(mut stats) = self.shared_state.metrics.node_stats.try_write() {
-                        stats.nat_status = Some(format!("{new:?}"));
-                    }
-                }
-                // NET-M3: Auto-listen on relay when NAT is detected as Private
-                if matches!(new, libp2p::autonat::NatStatus::Private)
-                    && !self.relay_activated
-                    && self.shared_state.config.network.auto_relay
-                {
-                    self.relay_activated = true;
-                    tracing::info!(target: "swarmllm::network::manager", "NAT detected, activating relay listener");
-
-                    // Try bootstrap peers as relay candidates — they are most likely
-                    // to be publicly reachable and have relay enabled.
-                    let bootstrap_addrs = &self.shared_state.config.network.bootstrap_peers;
-                    let mut relayed = false;
-                    for addr_str in bootstrap_addrs {
-                        if let Ok(maddr) = addr_str.parse::<Multiaddr>() {
-                            // Extract the peer ID from the multiaddr (/p2p/<peer_id>)
-                            let maybe_pid = maddr.iter().find_map(|proto| {
-                                if let libp2p::multiaddr::Protocol::P2p(pid) = proto {
-                                    Some(pid)
-                                } else {
-                                    None
-                                }
-                            });
-                            if let Some(relay_pid) = maybe_pid {
-                                // Build a relay-listen address without the trailing /p2p
-                                let base: Multiaddr = maddr
-                                    .iter()
-                                    .take_while(|p| {
-                                        !matches!(p, libp2p::multiaddr::Protocol::P2p(_))
-                                    })
-                                    .collect();
-                                let relay_addr =
-                                    crate::network::relay::relay_listen_addr(&relay_pid, &base);
-                                match self.swarm.listen_on(relay_addr.clone()) {
-                                    Ok(_) => {
-                                        tracing::info!(
-                                            relay_peer = %relay_pid,
-                                            %relay_addr,
-                                            "Relay listen activated"
-                                        );
-                                        relayed = true;
-                                        break; // One relay is sufficient
-                                    }
-                                    Err(e) => {
-                                        tracing::debug!(
-                                            relay_peer = %relay_pid,
-                                            error = %e,
-                                            "Failed to listen via relay peer"
-                                        );
-                                    }
-                                }
-                            }
+            // ── AutoNAT v2 client — reachability test results for OUR addresses ──
+            SwarmEvent::Behaviour(SwarmBehaviourEvent::AutonatClient(event)) => {
+                let tested_addr = event.tested_addr;
+                let server = event.server;
+                match event.result {
+                    Ok(()) => {
+                        // Address is reachable from the internet. The v2 client has
+                        // already emitted ToSwarm::ExternalAddrConfirmed for it
+                        // (caught by the ExternalAddrConfirmed arm below → Kademlia
+                        // Server mode + refresh_listen_multiaddrs).
+                        tracing::info!(%tested_addr, %server, "AutoNAT: address confirmed reachable (public)");
+                        if let Ok(mut stats) = self.shared_state.metrics.node_stats.try_write() {
+                            stats.nat_status = Some("Public".to_string());
                         }
                     }
-
-                    if !relayed && !bootstrap_addrs.is_empty() {
-                        tracing::warn!(
-                            "NAT detected but no relay peers accepted — node may be unreachable"
-                        );
+                    Err(e) => {
+                        // Address is NOT reachable — we're behind NAT/CGNAT for it.
+                        // Reserve a relay so peers can still reach us. (v2 fixes
+                        // v1's false-"Public" that silently skipped this.)
+                        tracing::info!(%tested_addr, %server, error = %e, "AutoNAT: address not reachable (private) — activating relay");
+                        if let Ok(mut stats) = self.shared_state.metrics.node_stats.try_write() {
+                            stats.nat_status = Some("Private (relay)".to_string());
+                        }
+                        self.try_activate_relay("AutoNAT reported our address unreachable");
                     }
                 }
+            }
+
+            // ── AutoNAT v2 server — we answered another node's dial-back probe ──
+            SwarmEvent::Behaviour(SwarmBehaviourEvent::AutonatServer(event)) => {
+                tracing::debug!(?event, "AutoNAT server: served a dial-back probe");
             }
 
             // ── UPnP gateway port-mapping ──
@@ -698,6 +665,72 @@ impl NetworkManager {
             other => {
                 tracing::trace!(?other, "Unhandled swarm event");
             }
+        }
+    }
+
+    /// Reserve a relay circuit on a bootstrap peer so a node that isn't directly
+    /// reachable (NAT/CGNAT) can still receive inbound connections.
+    ///
+    /// Called from two places: the AutoNAT v2 client's "address not reachable"
+    /// result (primary), and a startup fallback timer in the run loop (in case
+    /// AutoNAT never gets a conclusive answer — e.g. no AutoNAT servers reachable).
+    /// Idempotent: latches `relay_activated` once a relay listen succeeds, and
+    /// rate-limits attempts to at most once per `RELAY_RETRY_MIN_SECS` until then,
+    /// so repeated triggers don't spam `listen_on`. No-op when `auto_relay` is off
+    /// or there are no bootstrap peers to relay through.
+    pub(super) fn try_activate_relay(&mut self, reason: &str) {
+        if self.relay_activated || !self.shared_state.config.network.auto_relay {
+            return;
+        }
+        let now = std::time::Instant::now();
+        if let Some(last) = self.last_relay_attempt {
+            if now.duration_since(last).as_secs() < RELAY_RETRY_MIN_SECS {
+                return;
+            }
+        }
+        let bootstrap_addrs = self.shared_state.config.network.bootstrap_peers.clone();
+        if bootstrap_addrs.is_empty() {
+            return; // nothing publicly-reachable to relay through
+        }
+        self.last_relay_attempt = Some(now);
+        tracing::info!(
+            reason,
+            "Activating relay listener (node not directly reachable)"
+        );
+        let mut relayed = false;
+        for addr_str in &bootstrap_addrs {
+            let Ok(maddr) = addr_str.parse::<Multiaddr>() else {
+                continue;
+            };
+            let Some(relay_pid) = maddr.iter().find_map(|p| match p {
+                libp2p::multiaddr::Protocol::P2p(pid) => Some(pid),
+                _ => None,
+            }) else {
+                continue;
+            };
+            // Relay-listen address without the trailing /p2p component.
+            let base: Multiaddr = maddr
+                .iter()
+                .take_while(|p| !matches!(p, libp2p::multiaddr::Protocol::P2p(_)))
+                .collect();
+            let relay_addr = crate::network::relay::relay_listen_addr(&relay_pid, &base);
+            match self.swarm.listen_on(relay_addr.clone()) {
+                Ok(_) => {
+                    tracing::info!(relay_peer = %relay_pid, %relay_addr, "Relay listen activated");
+                    relayed = true;
+                    break; // one relay is sufficient
+                }
+                Err(e) => {
+                    tracing::debug!(relay_peer = %relay_pid, error = %e, "Failed to listen via relay peer");
+                }
+            }
+        }
+        if relayed {
+            self.relay_activated = true;
+        } else {
+            tracing::warn!(
+                "No relay peers accepted yet — will retry; node may be unreachable meanwhile"
+            );
         }
     }
 
