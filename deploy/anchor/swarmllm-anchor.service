@@ -1,0 +1,46 @@
+[Unit]
+Description=SwarmLLM bootstrap/relay anchor node
+Documentation=https://github.com/enapt/SwarmLLM/blob/main/docs/NETWORKING.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=swarmllm
+Group=swarmllm
+ExecStart=/usr/local/bin/swarmllm run --anchor --config /etc/swarmllm/config.toml
+Restart=on-failure
+RestartSec=5
+
+# --- Sandboxing / hardening ---
+# This node is internet-exposed alpha software, so lock it down hard. If the
+# daemon ever fails to start after editing these, the usual culprit is
+# SystemCallFilter or RestrictAddressFamilies — loosen those first.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+RestrictNamespaces=true
+LockPersonality=true
+# AF_NETLINK is required — libp2p watches interface changes via netlink on Linux.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+# Read-only filesystem except the data dir (systemd creates /var/lib/swarmllm).
+StateDirectory=swarmllm
+ReadWritePaths=/var/lib/swarmllm
+UMask=0077
+# MemoryDenyWriteExecute is left off for safety (some deps may map W^X pages).
+# You can try MemoryDenyWriteExecute=true and confirm the daemon still starts.
+
+[Install]
+WantedBy=multi-user.target

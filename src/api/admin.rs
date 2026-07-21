@@ -1066,6 +1066,13 @@ pub async fn network_code(State(state): State<AppState>) -> Json<serde_json::Val
     Json(serde_json::json!({
         "code": code,
         "node_id": format!("{}", state.shared_state.identity.node_id()),
+        "peer_id": peer_id_str,
+        // The node's current reachable dial addresses (listeners ∪ confirmed
+        // external addresses), each terminated with /p2p/<peer_id>. For a node
+        // with `network.external_address` set (e.g. an anchor with a DuckDNS
+        // host) this is the exact string to drop into other nodes'
+        // `bootstrap_peers`. Empty until the swarm has bound + confirmed addrs.
+        "listen_multiaddrs": state.shared_state.listen_multiaddrs.load().as_ref().clone(),
         "phase": phase,
         "peer_count": peer_count,
     }))

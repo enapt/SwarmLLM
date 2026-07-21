@@ -18,6 +18,7 @@ pub struct DaemonArgs {
     pub bootstrap: Vec<String>,
     pub shards: Option<String>,
     pub no_update_check: bool,
+    pub anchor: bool,
 }
 
 pub async fn run_daemon(args: DaemonArgs) -> anyhow::Result<()> {
@@ -53,6 +54,14 @@ pub async fn run_daemon(args: DaemonArgs) -> anyhow::Result<()> {
     // CLI --no-update-check overrides config
     if args.no_update_check {
         config.updates.auto_update = swarmllm::config::AutoUpdateMode::Disabled;
+    }
+
+    // --anchor makes the flag self-sufficient: a bootstrap/relay node that
+    // never runs inference. `apply_anchor_mode` forces every inference/model
+    // knob off (no model load, HF poll, shard acquisition, auto-manage, or
+    // browser pop). The API bind is narrowed to loopback in the server.
+    if args.anchor || config.node.anchor_mode {
+        config.apply_anchor_mode();
     }
 
     // Ensure data directory exists

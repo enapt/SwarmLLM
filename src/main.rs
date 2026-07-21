@@ -57,6 +57,11 @@ enum Commands {
         /// Disable automatic update checking
         #[arg(long)]
         no_update_check: bool,
+        /// Run as a bootstrap/relay anchor: no inference, no models, no
+        /// HuggingFace/shard downloads; dashboard bound to loopback only.
+        /// The node still relays + helps peers discover each other.
+        #[arg(long)]
+        anchor: bool,
     },
     /// Print version information
     Version,
@@ -239,11 +244,14 @@ async fn async_main(mut cli: Cli) -> anyhow::Result<()> {
     let no_update_check = matches!(
         &cli.command,
         Some(Commands::Run {
-            no_update_check: true
+            no_update_check: true,
+            ..
         })
     );
+    let anchor = matches!(&cli.command, Some(Commands::Run { anchor: true, .. }));
     let command = cli.command.take().unwrap_or(Commands::Run {
         no_update_check: false,
+        anchor: false,
     });
 
     let resolve_data_dir = |cli_data_dir: &Option<PathBuf>| -> PathBuf {
@@ -280,6 +288,7 @@ async fn async_main(mut cli: Cli) -> anyhow::Result<()> {
                 bootstrap: cli.bootstrap,
                 shards: cli.shards,
                 no_update_check,
+                anchor,
             };
             cli::run::run_daemon(args).await
         }

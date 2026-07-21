@@ -541,8 +541,13 @@ pub async fn run_server_with_state(
         }
     });
 
+    // Anchor nodes bind the dashboard/API to loopback only — the P2P ports are
+    // the only thing that should be reachable off-box. Normal nodes bind all
+    // interfaces so the dashboard is reachable on the LAN.
+    let anchor = state.config.node.anchor_mode;
     let app = build_router(state);
-    let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port));
+    let bind_ip = if anchor { [127, 0, 0, 1] } else { [0, 0, 0, 0] };
+    let addr = std::net::SocketAddr::from((bind_ip, port));
 
     tracing::debug!(%addr, "DIAG: server startup");
 

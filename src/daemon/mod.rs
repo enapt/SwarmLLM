@@ -196,6 +196,15 @@ impl Daemon {
             gpu_info,
         );
 
+        // Anchor mode: a pure bootstrap/relay/AutoNAT node. The inference and
+        // model-management subsystems below are skipped so no models load, no
+        // HuggingFace polling / shard acquisition runs, and no inference
+        // subprocess ever spawns. The node still runs NetworkManager (relay
+        // server, AutoNAT, DCUtR, UPnP, DHT, gossip), the dispatcher, health,
+        // credit ledger, and pool manager, so it fully participates in P2P
+        // discovery without exposing any inference surface. See `--anchor`.
+        let anchor = self.config.node.anchor_mode;
+
         *shared_state.loaded_model_info.write().await = cached_info;
 
         // Not set in shard/split mode — those nodes use split_models instead.
@@ -378,12 +387,16 @@ impl Daemon {
         // watcher exits cleanly when `auto_manage.hf_watcher_enabled` is
         // false; the spawned task is still useful as a one-shot "is HF
         // reachable?" probe in that case (run() returns immediately).
-        let hf_watcher =
-            crate::model::huggingface::HfWatcher::new(shared_state.clone(), shutdown_rx.clone());
-        subsystems.spawn(async move {
-            let result = hf_watcher.run().await.map_err(|e| e.to_string());
-            ("HfWatcher", SubsystemCriticality::NonCritical, result)
-        });
+        if !anchor {
+            let hf_watcher = crate::model::huggingface::HfWatcher::new(
+                shared_state.clone(),
+                shutdown_rx.clone(),
+            );
+            subsystems.spawn(async move {
+                let result = hf_watcher.run().await.map_err(|e| e.to_string());
+                ("HfWatcher", SubsystemCriticality::NonCritical, result)
+            });
+        }
 
         let (pool_cmd_tx, pool_cmd_rx) = mpsc::channel::<crate::pool::types::PoolCommand>(64);
         {
@@ -400,19 +413,21 @@ impl Daemon {
             ("PoolManager", SubsystemCriticality::NonCritical, result)
         });
 
-        let auto_manage = crate::model::auto_manage::AutoShardManager::new(
-            shared_state.clone(),
-            network_tx.clone(),
-            shutdown_rx.clone(),
-        );
-        subsystems.spawn(async move {
-            auto_manage.run().await;
-            (
-                "AutoShardManager",
-                SubsystemCriticality::NonCritical,
-                Ok(()),
-            )
-        });
+        if !anchor {
+            let auto_manage = crate::model::auto_manage::AutoShardManager::new(
+                shared_state.clone(),
+                network_tx.clone(),
+                shutdown_rx.clone(),
+            );
+            subsystems.spawn(async move {
+                auto_manage.run().await;
+                (
+                    "AutoShardManager",
+                    SubsystemCriticality::NonCritical,
+                    Ok(()),
+                )
+            });
+        }
 
         // Spawn UpdateChecker (11th subsystem task — optional, runs only if not disabled).
         // When disabled, skip the spawn entirely — otherwise the supervisor logs a
@@ -470,10 +485,17 @@ impl Daemon {
         let api_key_path = self.config.node.data_dir.join("api_key");
         eprintln!();
         eprintln!("============================================================");
-        eprintln!("  SwarmLLM is running");
-        eprintln!("  Dashboard:  http://localhost:{port}");
-        eprintln!("  API key:    {}", api_key_path.display());
-        eprintln!("  OpenAI API: http://localhost:{port}/v1/chat/completions");
+        if anchor {
+            eprintln!("  SwarmLLM ANCHOR is running (bootstrap / relay only)");
+            eprintln!("  Inference disabled — no models, no downloads.");
+            eprintln!("  Dashboard:  http://127.0.0.1:{port}  (loopback only)");
+            eprintln!("  P2P:        TCP {}  +  UDP {} (QUIC)", port + 10, port);
+        } else {
+            eprintln!("  SwarmLLM is running");
+            eprintln!("  Dashboard:  http://localhost:{port}");
+            eprintln!("  API key:    {}", api_key_path.display());
+            eprintln!("  OpenAI API: http://localhost:{port}/v1/chat/completions");
+        }
         eprintln!("============================================================");
         eprintln!();
 
@@ -549,11 +571,15 @@ impl Daemon {
             shutdown_rx.clone(),
         );
         background::spawn_browser_open(&mut background_tasks, &self.config, shutdown_rx.clone());
-        background::spawn_model_autoload(
-            &mut background_tasks,
-            shared_state.clone(),
-            shutdown_rx.clone(),
-        );
+        // Anchor nodes never load models — skip autoload entirely (the main
+        // memory win: no candle model weights in RAM).
+        if !anchor {
+            background::spawn_model_autoload(
+                &mut background_tasks,
+                shared_state.clone(),
+                shutdown_rx.clone(),
+            );
+        }
         background::spawn_sighup_handler(
             &mut background_tasks,
             shared_state.clone(),

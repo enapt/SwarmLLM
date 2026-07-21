@@ -79,6 +79,7 @@ swarmllm/
 ├── frontend/      (index.html + 11 HTML templates, css/, js/{core/4,components/18,init.js,i18n.js,providers.js,neural-bg.js,topojson-client.min.js}, i18n/)
 ├── python/        (swarmllm-client SDK)
 ├── monitoring/    (Grafana + Prometheus + docker-compose)
+├── deploy/anchor/ (R143 — hardened bootstrap/relay anchor kit: setup-anchor.sh, systemd unit, config.toml, runbook)
 ├── docs/book/     (mdBook documentation site)
 └── tests/         (integration tests)
 ```
@@ -150,7 +151,7 @@ libp2p 0.56, axum 0.8, candle-core/candle-transformers 0.10 (CUDA), redb 4, ed25
 
 ## Testing
 
-- 1089 lib tests passing + 8 ignored (env-var-gated real-model + manual smoke), 75 integration tests in `tests/integration/`, 1 ignored end-to-end (`cargo test --test integration_phase10_11 -- --ignored`), clippy clean. Microbench: `cargo run --release --no-default-features --features dev,claude-subscription --example swarm_spec_bench` (R136 — measures all 4 SWARM-SPEC layer primitives + synthetic cascade hit-rate). Local-cluster bench: `examples/3node_setup.sh` (boots 3 daemons) + `examples/3node_inference_bench.sh` (runs 3 workloads × 3 trials and prints tok/s + swarm_spec metrics). Sharded variant: `examples/3node_sharded_setup.sh` (forced distributed pipeline — requires `auto_manage.enabled = false` in per-node config.toml to preserve sharded state).
+- 1091 lib tests passing + 8 ignored (env-var-gated real-model + manual smoke), 75 integration tests in `tests/integration/`, 1 ignored end-to-end (`cargo test --test integration_phase10_11 -- --ignored`), clippy clean. Microbench: `cargo run --release --no-default-features --features dev,claude-subscription --example swarm_spec_bench` (R136 — measures all 4 SWARM-SPEC layer primitives + synthetic cascade hit-rate). Local-cluster bench: `examples/3node_setup.sh` (boots 3 daemons) + `examples/3node_inference_bench.sh` (runs 3 workloads × 3 trials and prints tok/s + swarm_spec metrics). Sharded variant: `examples/3node_sharded_setup.sh` (forced distributed pipeline — requires `auto_manage.enabled = false` in per-node config.toml to preserve sharded state).
 - Unit tests: in-module `#[cfg(test)]` blocks
 - Integration tests: `tests/integration/` — multi-node simulations with `--test-threads=1`
 - Real-model spawn-and-infer test: set `SWARMLLM_TEST_MODEL_DIR` to a fully-populated model directory (e.g. `~/.local/share/swarmllm/models/tinyllama-1.1b-...`) and run `cargo test --test integration_phase10_11 -- --ignored end_to_end`. No synthetic GGUF fixture is committed; see `docs/ARCHITECTURE.md` § Deferred Items.
@@ -191,7 +192,7 @@ When spawning subagents in this repo, use these model picks (overrides defaults 
 
 ## Status
 
-All 20 build phases complete. All subsystems wired — no stubs. **1089 lib tests + 75 integration tests passing**; 8 lib + 1 e2e ignored (env-var or manual). Clippy clean default + features dev,claude-subscription + `--features llama`.
+All 20 build phases complete. All subsystems wired — no stubs. **1091 lib tests + 75 integration tests passing**; 8 lib + 1 e2e ignored (env-var or manual). Clippy clean default + features dev,claude-subscription + `--features llama`.
 
 ### Latest: R143 — Internet reachability & NAT traversal (2026-07-20)
 
@@ -230,9 +231,24 @@ tracked separately with the user):
    book joining-network + ARCHITECTURE + architecture-rules updates.
 
 i18n: 2 new keys (`activity.invite_lan_only`, `activity.upnp_mapped`) × 21
-locales, idiomatic. Tests: +14 (8 invite reachability, 4 listen-addr
-union/suffix, 2 config default). 1075 → 1089 lib tests. Clippy clean default +
-features dev,claude-subscription + features llama.
+locales, idiomatic.
+
+**Anchor mode + deploy kit** (same round): `--anchor` / `[node] anchor_mode` /
+`SWARMLLM_NODE_ANCHOR_MODE` — a bootstrap/relay-only run mode. `Config::apply_anchor_mode`
+forces every inference/model knob off; the daemon skips HfWatcher, AutoShardManager,
+and model-autoload spawns (no models load — the RAM win); the API binds loopback
+(`api/server.rs` reads `node.anchor_mode`). NetworkManager (relay/AutoNAT/DCUtR/UPnP/
+DHT/gossip) is untouched. `GET /api/admin/network-code` now also returns `peer_id`
++ `listen_multiaddrs` (the exact `/dns4/…/p2p/<id>` bootstrap string). Turnkey
+`deploy/anchor/` kit: hardened sandboxed systemd unit, self-contained installer
+(non-root user, SHA256-verified binary, ufw, DuckDNS systemd timer, unattended-
+upgrades), anchor `config.toml`, runbook README. NOTE: this is a *runtime* slim
+mode (candle still compiled in); the compile-time candle-ectomy (`--features anchor`
+→ tiny binary) is the deferred Phase 2.
+
+Tests: +16 (8 invite reachability, 4 listen-addr union/suffix, 2 config default,
+2 anchor-mode). 1075 → 1091 lib tests. Clippy clean default + features
+dev,claude-subscription + features llama.
 
 ### Prior: R142 — Autonomous 8-hour sweep (2026-05-22→05-23)
 

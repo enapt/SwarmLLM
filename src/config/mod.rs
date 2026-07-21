@@ -149,6 +149,21 @@ impl Default for Config {
 }
 
 impl Config {
+    /// Force every inference/model knob off for a bootstrap/relay anchor node.
+    ///
+    /// Called when `--anchor` is passed (or `[node] anchor_mode = true`) so the
+    /// single flag is self-sufficient: the daemon won't load models, poll
+    /// HuggingFace, acquire shards, auto-manage, or pop a browser — and the API
+    /// binds to loopback (read from `node.anchor_mode` in the server). The P2P
+    /// network stack (relay, AutoNAT, DCUtR, UPnP, DHT, gossip) is untouched.
+    pub fn apply_anchor_mode(&mut self) {
+        self.node.anchor_mode = true;
+        self.auto_manage.enabled = false;
+        self.auto_manage.hf_watcher_enabled = false;
+        self.node.contribution_auto = false;
+        self.ui.open_browser_on_start = false;
+    }
+
     /// Load config with priority: CLI overrides > env vars > config file > defaults.
     pub fn load_or_create(
         config_path: Option<&Path>,
@@ -424,6 +439,45 @@ mod tests {
         assert_eq!(config.node.listen_port, 8800);
         assert_eq!(config.resources.max_disk_mb, 50_000);
         assert_eq!(config.inference.session_timeout_seconds, 600);
+    }
+
+    #[test]
+    fn anchor_mode_defaults_off() {
+        assert!(!Config::default().node.anchor_mode);
+        assert!(!NodeConfig::default().anchor_mode);
+    }
+
+    #[test]
+    fn apply_anchor_mode_forces_inference_knobs_off() {
+        let mut config = Config::default();
+        // Simulate a node that would otherwise run inference + auto-manage.
+        config.auto_manage.enabled = true;
+        config.auto_manage.hf_watcher_enabled = true;
+        config.node.contribution_auto = true;
+        config.ui.open_browser_on_start = true;
+
+        config.apply_anchor_mode();
+
+        assert!(config.node.anchor_mode, "anchor_mode must be set");
+        assert!(!config.auto_manage.enabled, "auto-manage must be off");
+        assert!(
+            !config.auto_manage.hf_watcher_enabled,
+            "HF watcher must be off"
+        );
+        assert!(
+            !config.node.contribution_auto,
+            "contribution_auto must be off"
+        );
+        assert!(
+            !config.ui.open_browser_on_start,
+            "browser open must be off on a headless anchor"
+        );
+        // The P2P stack is untouched — an anchor is still a full network peer.
+        assert!(
+            config.network.enable_relay,
+            "relay must stay on for an anchor"
+        );
+        assert!(config.network.enable_autonat, "autonat must stay on");
     }
 
     #[test]

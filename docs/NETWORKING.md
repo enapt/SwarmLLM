@@ -105,6 +105,14 @@ You only need this while the network is young. Once enough publicly-reachable
 nodes exist organically, discovery self-sustains and you can retire the anchor.
 A handful of stable reachable nodes is enough.
 
+> **Turnkey installer:** [`deploy/anchor/`](../deploy/anchor/) has a hardened,
+> one-command setup (dedicated non-root user, sandboxed systemd service,
+> firewall, DuckDNS updater, auto-updates) for a Proxmox VM or VPS. It runs the
+> daemon with **`--anchor`** — a bootstrap/relay-only mode that loads no models,
+> does no downloads, spawns no inference, and binds the dashboard to loopback.
+> Run any node as an anchor with `swarmllm run --anchor` (or `[node]
+> anchor_mode = true`).
+
 ### 4.1 Where to run it
 
 - **A VPS with a static IP** (~$4–5/mo) — most reliable, no dynamic DNS needed.

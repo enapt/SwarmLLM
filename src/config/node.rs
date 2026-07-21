@@ -31,6 +31,16 @@ pub struct NodeConfig {
     /// shards are over-replicated globally and holding them wastes VRAM.
     #[serde(default = "default_contribution_auto")]
     pub contribution_auto: bool,
+    /// Anchor mode: run as a pure bootstrap / relay / AutoNAT node. Skips all
+    /// inference — no models load, no HuggingFace polling, no shard
+    /// acquisition, no auto-manage — and binds the dashboard/API to loopback
+    /// only. The node still participates fully in the P2P network (relay
+    /// server, AutoNAT prober, DCUtR, DHT, gossip), so it helps the swarm
+    /// bootstrap without exposing any inference surface to the internet. Set
+    /// via `--anchor`, `[node] anchor_mode = true`, or
+    /// `SWARMLLM_NODE_ANCHOR_MODE=true`. Default: false.
+    #[serde(default)]
+    pub anchor_mode: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -148,6 +158,7 @@ impl Default for NodeConfig {
             listen_port: default_port(),
             contribution: ContributionMode::default(),
             contribution_auto: default_contribution_auto(),
+            anchor_mode: false,
         }
     }
 }
