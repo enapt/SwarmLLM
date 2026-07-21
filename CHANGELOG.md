@@ -2,6 +2,32 @@
 
 All notable changes to SwarmLLM are documented here.
 
+## [0.3.3-alpha] — 2026-07-21
+
+**Dashboard peer-clarity + reachability docs (R144).** Follow-on to 0.3.1/0.3.2,
+driven by the first external user testing live — their dashboard called the
+remote bootstrap anchor a "LAN" peer.
+
+- **Fixed LAN misclassification** — a peer was tagged LAN if any of its
+  *advertised* addresses was private/loopback, but a public `0.0.0.0`-bound node
+  also advertises `127.0.0.1`, so every remote peer (including the anchor) was
+  mislabeled. Now classified only on the actual connection address + the peer's
+  observed-us address.
+- **Clear peer typing everywhere** — every peer is tagged **Pool / LAN /
+  Internet** (green / purple / blue). The header reads "N internet peers / N on
+  your network / N pool devices" instead of an ambiguous "peers / lan". The
+  backend exposes a mutually-exclusive taxonomy (pool + lan + remote == connected
+  peers).
+- **Version in the header** — next to the SwarmLLM logo.
+- **Honest empty state** — no longer says "Connecting to the network…" when you
+  are already connected with no shared models yet.
+- **Swarm-resources strip** — computers online (incl. yours), GPU machines,
+  combined VRAM, shared storage, regions — "how big is the swarm actually?".
+- **Docs** — README promotes out-of-the-box auto-join (default anchor + UPnP +
+  AutoNAT v2 + relay) + Discord; `docs/NETWORKING.md` gained an explicit
+  AutoNAT-v2 note.
+- i18n: 14 new keys × 21 locales. 1097 → 1099 lib tests.
+
 ## [0.3.2-alpha] — 2026-07-21
 
 **Fix: `/dns4` bootstrap peers were undialable.** The swarm transport was
