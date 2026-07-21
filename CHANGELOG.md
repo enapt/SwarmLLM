@@ -2,11 +2,15 @@
 
 All notable changes to SwarmLLM are documented here.
 
-## [0.3.0-alpha] — 2026-07-21
+## [0.3.1-alpha] — 2026-07-21
 
 **Internet reachability & NAT traversal (R143).** Makes SwarmLLM reachable
 across the internet, not just the LAN — the biggest gap for real-world use.
 
+- **Default bootstrap anchor** — fresh installs now dial a publicly-reachable
+  seed node (`swarmllm.duckdns.org`) on startup and **auto-join the network
+  with zero config**, then decentralized discovery (DHT/PEX) takes over. Set
+  an explicit `bootstrap_peers` to override (empty list opts out).
 - **UPnP** automatic gateway port-mapping (default on) — zero-config internet
   reachability on cooperative home routers.
 - **Invite codes now carry a public address** — `refresh_listen_multiaddrs`
@@ -29,7 +33,7 @@ across the internet, not just the LAN — the biggest gap for real-world use.
   the alpha phase), `stable`/`disabled` track stable only. Anchors default to
   `all`.
 
-1075 → 1096 lib tests. Known gap: the relay/DCUtR CGNAT path is wired but awaits
+1075 → 1097 lib tests. Known gap: the relay/DCUtR CGNAT path is wired but awaits
 live multi-NAT validation.
 
 ## [Unreleased] — post-v0.1.0

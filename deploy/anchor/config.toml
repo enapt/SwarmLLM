@@ -10,6 +10,7 @@ listen_port = 8800          # dashboard/API on TCP 8800 (loopback only in anchor
 anchor_mode = true          # no inference; no models; dashboard bound to loopback
 
 [network]
+bootstrap_peers = []        # the anchor IS the bootstrap — don't dial itself
 enable_relay = true         # serve as a relay for NAT'd peers — the anchor's main job
 # Max simultaneous relay circuits. Default 16 is fine for bootstrapping; raise it
 # if this anchor should serve many CGNAT peers at once (each open circuit uses

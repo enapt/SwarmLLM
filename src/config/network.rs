@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct NetworkConfig {
-    #[serde(default)]
+    #[serde(default = "default_bootstrap_peers")]
     pub bootstrap_peers: Vec<String>,
     #[serde(default = "default_true")]
     pub peer_exchange: bool,
@@ -104,6 +104,19 @@ fn default_listen_address() -> String {
     "0.0.0.0".to_string()
 }
 
+/// Default bootstrap anchor(s) — publicly-reachable seed nodes a fresh install
+/// dials on startup to join the network before decentralized discovery (DHT/PEX)
+/// takes over. DNS form so the entry survives a host IP change (the anchor keeps
+/// its DuckDNS record pointed at its current IP). A dead anchor is harmless — the
+/// dial just fails and the node falls back to mDNS/DHT. Override with an explicit
+/// `bootstrap_peers` in config (an empty list opts out entirely).
+fn default_bootstrap_peers() -> Vec<String> {
+    vec![
+        "/dns4/swarmllm.duckdns.org/tcp/8810/p2p/12D3KooWNisnVha2jYj1gqqY5WP82vNQbRhFtBcKzj4XrYmGEn8G".to_string(),
+        "/dns4/swarmllm.duckdns.org/udp/8800/quic-v1/p2p/12D3KooWNisnVha2jYj1gqqY5WP82vNQbRhFtBcKzj4XrYmGEn8G".to_string(),
+    ]
+}
+
 /// Detect WSL2 by checking /proc/version for "microsoft" or "WSL".
 pub(super) fn is_wsl2() -> bool {
     std::fs::read_to_string("/proc/version")
@@ -137,7 +150,7 @@ fn default_relay_max_circuits() -> usize {
 impl Default for NetworkConfig {
     fn default() -> Self {
         Self {
-            bootstrap_peers: vec![],
+            bootstrap_peers: default_bootstrap_peers(),
             peer_exchange: true,
             enable_relay: true,
             enable_relay_client: true,
@@ -206,6 +219,23 @@ mod tests {
         let cfg: NetworkConfig = toml::from_str("bootstrap_peers = []").unwrap();
         assert!(cfg.enable_upnp);
         assert!(cfg.external_addresses.0.is_empty());
+    }
+
+    #[test]
+    fn bootstrap_peers_default_includes_anchor() {
+        // Fresh installs (no config file) auto-join via the seed anchor.
+        let cfg = NetworkConfig::default();
+        assert!(!cfg.bootstrap_peers.is_empty());
+        assert!(cfg
+            .bootstrap_peers
+            .iter()
+            .any(|p| p.contains("swarmllm.duckdns.org")));
+        // A config that omits the field also gets the default (serde default fn),
+        // while an explicit empty list opts out.
+        let omitted: NetworkConfig = toml::from_str("enable_relay = true").unwrap();
+        assert!(!omitted.bootstrap_peers.is_empty());
+        let explicit: NetworkConfig = toml::from_str("bootstrap_peers = []").unwrap();
+        assert!(explicit.bootstrap_peers.is_empty());
     }
 
     #[test]
