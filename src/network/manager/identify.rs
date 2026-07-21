@@ -122,28 +122,18 @@ impl NetworkManager {
             .unwrap_or(0);
         let was_lan = existing.as_ref().map(|p| p.is_lan_peer).unwrap_or(false);
         drop(existing);
-        // Auto-detect LAN peers from advertised addresses. Check both the peer's
-        // listen_addrs AND observed_addr (the address they see US on) — if either
-        // is loopback/private/link-local/ULA, we're on the same network. Also
-        // check the actual connected remote addresses tracked per-connection,
-        // which covers peers whose initial identify had empty listen_addrs.
-        let is_local_multiaddr = |a: &libp2p::Multiaddr| {
-            a.iter().any(|proto| match proto {
-                libp2p::multiaddr::Protocol::Ip4(ip) => {
-                    ip.is_loopback() || ip.is_private() || ip.is_link_local()
-                }
-                libp2p::multiaddr::Protocol::Ip6(ip) => {
-                    ip.is_loopback() || (ip.segments()[0] & 0xfe00) == 0xfc00
-                }
-                _ => false,
-            })
-        };
-        let addr_is_lan = info.listen_addrs.iter().any(&is_local_multiaddr)
-            || is_local_multiaddr(&info.observed_addr)
+        // A peer is on our LAN only if the ACTUAL connection to it runs over a
+        // private/loopback/link-local address, or it observes US on such an
+        // address (same private network). We deliberately do NOT infer LAN from
+        // the peer's advertised `listen_addrs`: a public node bound to 0.0.0.0
+        // advertises `127.0.0.1` (and often a private cloud-interface IP) too,
+        // which used to mislabel every remote peer — e.g. a public relay anchor
+        // reached over its public IP — as "LAN".
+        let addr_is_lan = multiaddr_is_local(&info.observed_addr)
             || self
                 .peer_remote_addrs
                 .get(&peer_id)
-                .map(&is_local_multiaddr)
+                .map(multiaddr_is_local)
                 .unwrap_or(false);
         let is_lan = was_lan || addr_is_lan;
         let peer_info = PeerInfo {
@@ -327,5 +317,49 @@ impl NetworkManager {
                 break; // One IP per peer is enough
             }
         }
+    }
+}
+
+/// Does this multiaddr denote a private / loopback / link-local address — one
+/// that implies same-LAN reachability? Applied by the identify handler to the
+/// ACTUAL connection address and to the peer's observed view of us, NOT to the
+/// peer's advertised listen_addrs (those include 127.0.0.1 for any 0.0.0.0-bound
+/// node, which would mislabel remote peers as LAN).
+fn multiaddr_is_local(a: &libp2p::Multiaddr) -> bool {
+    a.iter().any(|proto| match proto {
+        libp2p::multiaddr::Protocol::Ip4(ip) => {
+            ip.is_loopback() || ip.is_private() || ip.is_link_local()
+        }
+        libp2p::multiaddr::Protocol::Ip6(ip) => {
+            ip.is_loopback() || (ip.segments()[0] & 0xfe00) == 0xfc00
+        }
+        _ => false,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::multiaddr_is_local;
+
+    fn a(s: &str) -> libp2p::Multiaddr {
+        s.parse().unwrap()
+    }
+
+    #[test]
+    fn public_addr_is_not_local() {
+        // The bug this fixes: a public relay anchor reached over its public IP
+        // must NOT be classified as LAN.
+        assert!(!multiaddr_is_local(&a("/ip4/212.132.104.177/tcp/8810")));
+        assert!(!multiaddr_is_local(&a("/ip4/8.8.8.8/udp/8800/quic-v1")));
+        assert!(!multiaddr_is_local(&a("/ip6/2001:db8::1/tcp/8810")));
+    }
+
+    #[test]
+    fn private_and_loopback_are_local() {
+        assert!(multiaddr_is_local(&a("/ip4/192.168.1.5/tcp/8810")));
+        assert!(multiaddr_is_local(&a("/ip4/10.0.0.7/tcp/8810")));
+        assert!(multiaddr_is_local(&a("/ip4/127.0.0.1/tcp/8810")));
+        assert!(multiaddr_is_local(&a("/ip6/::1/tcp/8810")));
+        assert!(multiaddr_is_local(&a("/ip6/fc00::1/tcp/8810")));
     }
 }

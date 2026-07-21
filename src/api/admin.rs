@@ -58,6 +58,20 @@ pub fn serialize_peer_to_json(
         .nickname_registry
         .get(&peer.node_id)
         .map(|r| r.nickname.clone());
+    // Is this peer a member of our device pool? `try_read` avoids blocking the
+    // peer-list build on a contended pool_state write; on contention we treat it
+    // as "not a pool member" (the frontend falls back to LAN/Remote labelling,
+    // which is never wrong, just less specific).
+    let is_pool_member = state
+        .credits
+        .pool_state
+        .try_read()
+        .ok()
+        .and_then(|g| {
+            g.as_ref()
+                .map(|ps| ps.members.iter().any(|m| m.node_id == peer.node_id))
+        })
+        .unwrap_or(false);
     let mut obj = serde_json::json!({
         "node_id": format!("{}", peer.node_id),
         "nickname": nickname,
@@ -68,6 +82,7 @@ pub fn serialize_peer_to_json(
         "hosted_models": hosted_models,
         "hosted_shards": hosted_shards_count,
         "is_lan_peer": peer.is_lan_peer,
+        "is_pool_member": is_pool_member,
     });
     if include_addresses {
         if let Some(o) = obj.as_object_mut() {

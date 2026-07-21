@@ -577,6 +577,13 @@
     },
 
     updateFull: function(data) {
+      if (data.version) {
+        var vEl = document.getElementById('app-version');
+        if (vEl) {
+          vEl.textContent = 'v' + data.version;
+          vEl.removeAttribute('hidden');
+        }
+      }
       if (data.node_id) {
         var el = document.getElementById('node-id');
         var short = data.node_id.substring(0, 8);
@@ -715,6 +722,16 @@
     },
 
     updateStats: function(data) {
+      // Node version in the header, next to the logo. Guarded so the every-2s
+      // WS tick doesn't rewrite the DOM when the (static) version is unchanged.
+      if (data.version) {
+        var vEl = document.getElementById('app-version');
+        if (vEl && vEl.getAttribute('data-v') !== data.version) {
+          vEl.textContent = 'v' + data.version;
+          vEl.setAttribute('data-v', data.version);
+          vEl.removeAttribute('hidden');
+        }
+      }
       if (data.uptime_seconds !== undefined) {
         document.getElementById('uptime').textContent = U.formatUptime(data.uptime_seconds);
       }
@@ -830,6 +847,20 @@
       var empty = document.getElementById('models-empty');
       var loading = document.getElementById('models-loading');
       if (loading) loading.remove();
+
+      // Keep the empty-state copy honest about connection state. Once we have
+      // any swarm peer, "Connecting to the network…" is wrong — we're already
+      // connected, there just aren't any shared models yet. Update data-i18n
+      // too so a later language switch keeps the right variant.
+      (function () {
+        var txt = document.getElementById('models-empty-text');
+        if (!txt) return;
+        var st = (App.data && App.data.cache && App.data.cache.stats) || null;
+        var connected = !!(st && (st.peers || 0) > 0);
+        var key = connected ? 'models.empty_connected' : 'models.empty_state';
+        txt.setAttribute('data-i18n', key);
+        txt.textContent = I18n.t(key);
+      })();
 
       // Split cloud models into API-key providers vs subscription providers
       var apiModels = [];
@@ -1828,10 +1859,24 @@
       var dot = node.querySelector('.status-dot');
       dot.classList.add(p.healthy ? 'online' : 'degraded');
 
-      var lanBadge = node.querySelector('.peer-lan-badge');
-      if (p.is_lan_peer) {
-        lanBadge.removeAttribute('hidden');
-        lanBadge.textContent = I18n.t('dashboard.lan_badge');
+      // Every peer gets exactly one type tag so it's never ambiguous whether a
+      // peer is your own pool device, on your local network, or out on the
+      // internet. Priority Pool > LAN > Remote (matches the backend taxonomy
+      // in websocket.rs). The <self> node never appears in this list.
+      var typeBadge = node.querySelector('.peer-lan-badge');
+      if (typeBadge) {
+        typeBadge.classList.remove('badge-purple', 'badge-green', 'badge-blue');
+        if (p.is_pool_member) {
+          typeBadge.classList.add('badge-green');
+          typeBadge.textContent = I18n.t('dashboard.peer_type_pool');
+        } else if (p.is_lan_peer) {
+          typeBadge.classList.add('badge-purple');
+          typeBadge.textContent = I18n.t('dashboard.peer_type_lan');
+        } else {
+          typeBadge.classList.add('badge-blue');
+          typeBadge.textContent = I18n.t('dashboard.peer_type_remote');
+        }
+        typeBadge.removeAttribute('hidden');
       }
 
       var label = node.querySelector('.peer-label');
@@ -1878,6 +1923,7 @@
         return (p.node_id || '') + '|' + (p.healthy ? 1 : 0) + '|' +
           (p.latency_ms || 0) + '|' + (p.hosted_shards || 0) + '|' +
           (p.trust_score || 0) + '|' + (p.is_lan_peer ? 1 : 0) + '|' +
+          (p.is_pool_member ? 1 : 0) + '|' +
           (p.nickname || '') + '|' + (p.gpu || '');
       }).sort().join('||') + '#' + App.dashboard._peerSort + ':' + App.dashboard._peerSortDir;
       if (App.dashboard._lastPeerRenderSig === renderSig) return;

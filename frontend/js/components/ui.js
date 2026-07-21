@@ -167,6 +167,10 @@
       var stats = statsData || null;
       var peers = stats ? (stats.peers || 0) : 0;
       var lanPeers = stats ? (stats.lan_peers || 0) : 0;
+      // Mutually-exclusive peer taxonomy from the backend (Pool > LAN > Remote).
+      // remotePeers + lanPeers + poolPeers === peers.
+      var poolPeers = stats ? (stats.pool_peers || 0) : 0;
+      var remotePeers = stats ? (stats.remote_peers || 0) : 0;
       var hostedShards = stats ? (stats.hosted_shards || 0) : 0;
       if (hostedShards === 0) {
         var hsEl = document.getElementById('hosted-shards');
@@ -250,13 +254,20 @@
           chipsEl.appendChild(c);
         };
         if (stateKey === 'global' && peers > 0) {
-          addChip('<strong>' + peers + '</strong> ' + U.escapeHtml(I18n.t(peers === 1 ? 'netstatus.chip_peer_one' : 'netstatus.chip_peer_other')));
-          if (lanPeers > 0) addChip('<strong>' + lanPeers + '</strong> ' + U.escapeHtml(I18n.t('netstatus.chip_lan')));
+          // One chip per non-empty peer type so the header spells out exactly
+          // who's connected: internet peers, same-network peers, pool devices.
+          if (remotePeers > 0) addChip('<strong>' + remotePeers + '</strong> ' + U.escapeHtml(I18n.t(remotePeers === 1 ? 'netstatus.chip_remote_one' : 'netstatus.chip_remote_other')));
+          if (lanPeers > 0) addChip('<strong>' + lanPeers + '</strong> ' + U.escapeHtml(I18n.t(lanPeers === 1 ? 'netstatus.chip_lan_peer_one' : 'netstatus.chip_lan_peer_other')));
+          if (poolPeers > 0) addChip('<strong>' + poolPeers + '</strong> ' + U.escapeHtml(I18n.t(poolPeers === 1 ? 'netstatus.chip_pool_one' : 'netstatus.chip_pool_other')));
         } else if (stateKey === 'lan' && lanPeers > 0) {
           addChip('<strong>' + lanPeers + '</strong> ' + U.escapeHtml(I18n.t(lanPeers === 1 ? 'netstatus.chip_lan_peer_one' : 'netstatus.chip_lan_peer_other')));
         } else if (stateKey === 'private') {
-          addChip(U.escapeHtml(I18n.t('netstatus.chip_pool_only')));
-          if (allowLan && lanPeers > 0) addChip('<strong>' + lanPeers + '</strong> ' + U.escapeHtml(I18n.t('netstatus.chip_lan')));
+          if (poolPeers > 0) {
+            addChip('<strong>' + poolPeers + '</strong> ' + U.escapeHtml(I18n.t(poolPeers === 1 ? 'netstatus.chip_pool_one' : 'netstatus.chip_pool_other')));
+          } else {
+            addChip(U.escapeHtml(I18n.t('netstatus.chip_pool_only')));
+          }
+          if (allowLan && lanPeers > 0) addChip('<strong>' + lanPeers + '</strong> ' + U.escapeHtml(I18n.t(lanPeers === 1 ? 'netstatus.chip_lan_peer_one' : 'netstatus.chip_lan_peer_other')));
         } else if (stateKey === 'solo') {
           // Don't echo a "local parts" chip — the supporting models line
           // below already names them. Cloud provider count is the only
@@ -303,6 +314,37 @@
             modelsEl.innerHTML = modelsParts.join(' · ');
             modelsEl.style.display = '';
           }
+        }
+      }
+
+      // Swarm resources strip: spell out the collective hardware the swarm has
+      // right now (computers online incl. yours, GPU machines, combined VRAM,
+      // shared storage, regions). This is the "how big is the swarm actually?"
+      // answer the header was missing. online_nodes already counts self + peers.
+      var resourcesEl = document.getElementById('netstatus-resources');
+      if (resourcesEl) {
+        resourcesEl.innerHTML = '';
+        resourcesEl.style.display = 'none';
+        var showRes = capacity && stateKey !== 'connecting' && stateKey !== 'offline' &&
+          (capacity.online_nodes || 0) > 1 && (peers > 0 || privateMode);
+        if (showRes) {
+          var fmtGB = function(mb, dp) {
+            if (mb >= 1024 * 1024) return (mb / (1024 * 1024)).toFixed(2) + ' TB';
+            return (mb / 1024).toFixed(dp) + ' GB';
+          };
+          var resParts = [];
+          var nodes = capacity.online_nodes || 0;
+          resParts.push('<strong>' + nodes + '</strong> ' + U.escapeHtml(I18n.t(nodes === 1 ? 'netstatus.res_computers_one' : 'netstatus.res_computers_other')));
+          var gpus = capacity.gpu_nodes || 0;
+          if (gpus > 0) resParts.push('<strong>' + gpus + '</strong> ' + U.escapeHtml(I18n.t(gpus === 1 ? 'netstatus.res_gpu_one' : 'netstatus.res_gpu_other')));
+          var vmb = capacity.total_vram_mb || 0;
+          if (vmb > 0) resParts.push('<strong>' + fmtGB(vmb, 1) + '</strong> ' + U.escapeHtml(I18n.t('netstatus.memory_word')));
+          var dmb = capacity.total_disk_mb || 0;
+          if (dmb > 0) resParts.push('<strong>' + fmtGB(dmb, 0) + '</strong> ' + U.escapeHtml(I18n.t('netstatus.res_disk')));
+          var regions = capacity.regions_represented || 0;
+          if (regions > 1) resParts.push('<strong>' + regions + '</strong> ' + U.escapeHtml(I18n.t('netstatus.res_regions_other')));
+          resourcesEl.innerHTML = '<span class="netstatus-res-icon" aria-hidden="true">🌐</span> ' + resParts.join(' · ');
+          resourcesEl.style.display = '';
         }
       }
     },

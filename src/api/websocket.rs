@@ -466,19 +466,39 @@ async fn build_stats_message(state: &SharedState) -> String {
         .collect::<serde_json::Map<String, serde_json::Value>>()
         .into();
 
-    // Derive LAN count from the authoritative peer_registry rather than the
-    // monotonically-incremented atomic counter, which can overcount after
-    // reconnect cycles on platforms without mDNS-expire events (WSL2).
-    let lan_peers = state
-        .peer_registry
-        .iter()
-        .filter(|entry| entry.is_lan_peer)
-        .count();
-
-    // Use connected_node_ids as the connectivity oracle (gotcha #86).
-    // peer_registry is intentionally preserved across mid-pipeline disconnects
-    // for reconnect attempts, so it overcounts live peers. R105 fixed the
-    // Prometheus metric the same way; the WS payload was missed.
+    // Peer taxonomy for unambiguous reporting: every connected peer is exactly
+    // one of Pool / LAN / Remote (priority Pool > LAN > Remote), so the three
+    // counts sum to peers_connected. This is what lets the dashboard say
+    // "1 device in your pool" / "2 on your local network" / "3 over the internet"
+    // instead of a bare "3 peers, 1 lan" that reads as if the anchor were local.
+    //
+    // Keyed on connected_node_ids (gotcha #86): peer_registry is preserved
+    // across mid-pipeline disconnects for reconnect attempts, so it overcounts
+    // live peers. A connected node absent from the registry counts as Remote
+    // (unknown provenance → treat as internet, never as same-LAN).
+    let pool_member_ids: std::collections::HashSet<_> = match state.credits.pool_state.try_read() {
+        Ok(guard) => guard
+            .as_ref()
+            .map(|ps| ps.members.iter().map(|m| m.node_id.clone()).collect())
+            .unwrap_or_default(),
+        Err(_) => std::collections::HashSet::new(),
+    };
+    let (mut pool_peers, mut lan_peers, mut remote_peers) = (0u32, 0u32, 0u32);
+    for node_id in state.connected_node_ids.iter() {
+        let nid = node_id.key();
+        if pool_member_ids.contains(nid) {
+            pool_peers += 1;
+        } else if state
+            .peer_registry
+            .get(nid)
+            .map(|e| e.is_lan_peer)
+            .unwrap_or(false)
+        {
+            lan_peers += 1;
+        } else {
+            remote_peers += 1;
+        }
+    }
     let peers_connected = state.connected_node_ids.len() as u32;
 
     // R110: refresh + serialise the swarm capacity snapshot. Cheap (single
@@ -550,8 +570,11 @@ async fn build_stats_message(state: &SharedState) -> String {
     let allow_lan = state.config.pool.private_mode_allow_lan;
 
     let mut data = serde_json::json!({
+        "version": env!("CARGO_PKG_VERSION"),
         "peers": peers_connected,
         "lan_peers": lan_peers,
+        "pool_peers": pool_peers,
+        "remote_peers": remote_peers,
         "credits": credit_json,
         "active_requests": state.active_pipelines.len(),
         "requests_served": state.metrics.requests_served_atomic.load(std::sync::atomic::Ordering::Relaxed),

@@ -184,6 +184,15 @@ a:hover { color: var(--accent-hover); }
   gap: 7px;
 }
 .app-header .logo .logo-icon { flex-shrink: 0; display: block; }
+.app-header .logo .app-version {
+  font-size: 0.62rem;
+  font-weight: 500;
+  color: var(--text-muted);
+  letter-spacing: 0;
+  margin-left: 1px;
+  align-self: flex-start;
+  margin-top: 1px;
+}
 
 /* Tab buttons */
 .tab-btn {
@@ -1114,6 +1123,15 @@ a:hover { color: var(--accent-hover); }
 .network-status .netstatus-row-models {
   font-size: 0.86rem;
 }
+.network-status .netstatus-row-resources {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 6px;
+  align-items: baseline;
+}
+.network-status .netstatus-row-resources .netstatus-res-icon { opacity: 0.7; }
 .network-status strong { color: var(--text); font-weight: 600; }
 
 /* Dot — 10px circle, color comes from state class on the panel root */

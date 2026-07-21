@@ -738,7 +738,7 @@
   <header class="app-header">
     <div class="header-left">
       <button class="hamburger-btn" id="hamburger-btn" data-i18n-aria-label="nav.toggle_sidebar" aria-label="Toggle sidebar" aria-expanded="false">&#9776;</button>
-      <div class="logo" id="logo" style="cursor:pointer"><img src="/static/icons/swarm.svg" width="20" height="20" alt="" aria-hidden="true" class="logo-icon">SwarmLLM</div>
+      <div class="logo" id="logo" style="cursor:pointer"><img src="/static/icons/swarm.svg" width="20" height="20" alt="" aria-hidden="true" class="logo-icon">SwarmLLM<span class="app-version" id="app-version" hidden></span></div>
     </div>
     <div class="header-center">
       <button class="tab-btn tab-btn-chat" data-tab="chat" data-i18n="nav.chat">Chat</button>
@@ -937,6 +937,7 @@
               <span class="text-muted" data-i18n="netstatus.detail_connecting">Looking for peers — usually 10–30 s on first start.</span>
             </div>
             <div class="netstatus-row netstatus-row-models" id="netstatus-models" style="display:none"></div>
+            <div class="netstatus-row netstatus-row-resources" id="netstatus-resources" style="display:none"></div>
           </div>
 
           <!-- Stat strip — compact single row -->
@@ -1107,7 +1108,7 @@
               <div id="models-list"></div>
               <div class="empty-state" id="models-empty" style="display:none">
                 <div class="empty-icon">&#127760;</div>
-                <p data-i18n="models.empty_state">Connecting to the network... Models shared by other users will appear here automatically. You can also browse HuggingFace or add a cloud provider in Settings.</p>
+                <p id="models-empty-text" data-i18n="models.empty_state">Connecting to the network... Models shared by other users will appear here automatically. You can also browse HuggingFace or add a cloud provider in Settings.</p>
               </div>
             </div>
           </div>
