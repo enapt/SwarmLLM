@@ -151,7 +151,7 @@ libp2p 0.56, axum 0.8, candle-core/candle-transformers 0.10 (CUDA), redb 4, ed25
 
 ## Testing
 
-- 1124 lib tests passing + 8 ignored (env-var-gated real-model + manual smoke), 75 integration tests in `tests/integration/`, 1 ignored end-to-end (`cargo test --test integration_phase10_11 -- --ignored`), clippy clean. Microbench: `cargo run --release --no-default-features --features dev,claude-subscription --example swarm_spec_bench` (R136 — measures all 4 SWARM-SPEC layer primitives + synthetic cascade hit-rate). Local-cluster bench: `examples/3node_setup.sh` (boots 3 daemons) + `examples/3node_inference_bench.sh` (runs 3 workloads × 3 trials and prints tok/s + swarm_spec metrics). Sharded variant: `examples/3node_sharded_setup.sh` (forced distributed pipeline — requires `auto_manage.enabled = false` in per-node config.toml to preserve sharded state).
+- 1134 lib tests passing + 8 ignored (env-var-gated real-model + manual smoke), 75 integration tests in `tests/integration/`, 1 ignored end-to-end (`cargo test --test integration_phase10_11 -- --ignored`), clippy clean. Microbench: `cargo run --release --no-default-features --features dev,claude-subscription --example swarm_spec_bench` (R136 — measures all 4 SWARM-SPEC layer primitives + synthetic cascade hit-rate). Local-cluster bench: `examples/3node_setup.sh` (boots 3 daemons) + `examples/3node_inference_bench.sh` (runs 3 workloads × 3 trials and prints tok/s + swarm_spec metrics). Sharded variant: `examples/3node_sharded_setup.sh` (forced distributed pipeline — requires `auto_manage.enabled = false` in per-node config.toml to preserve sharded state).
 - Unit tests: in-module `#[cfg(test)]` blocks
 - Integration tests: `tests/integration/` — multi-node simulations with `--test-threads=1`
 - Real-model spawn-and-infer test: set `SWARMLLM_TEST_MODEL_DIR` to a fully-populated model directory (e.g. `~/.local/share/swarmllm/models/tinyllama-1.1b-...`) and run `cargo test --test integration_phase10_11 -- --ignored end_to_end`. No synthetic GGUF fixture is committed; see `docs/ARCHITECTURE.md` § Deferred Items.
@@ -192,9 +192,49 @@ When spawning subagents in this repo, use these model picks (overrides defaults 
 
 ## Status
 
-All 20 build phases complete. All subsystems wired — no stubs. **1124 lib tests + 75 integration tests passing**; 8 lib + 1 e2e ignored (env-var or manual). Clippy clean default + features dev,claude-subscription + `--features llama`.
+All 20 build phases complete. All subsystems wired — no stubs. **1134 lib tests + 75 integration tests passing**; 8 lib + 1 e2e ignored (env-var or manual). Clippy clean default + features dev,claude-subscription + `--features llama`.
 
-### Latest: R147 — FUTURE_WORK push (request cancellation + deferral closures) (2026-07-22)
+### Latest: R148 — VLM deferrals + CI cache-warm fix (2026-07-22)
+
+Two R142 deferrals that had been waiting on a real-LLaVA test rig, both
+resolved from the artefacts instead.
+
+**Chat template empty-prompt bug** (`inference/chat_template/mod.rs`). The
+reported gap was that a template which existed but failed fell through to
+ChatML, dropping LLaVA's `<image>` placeholder — the model-name heuristic that
+selects the vicuna format lived only in the `template.is_none()` branch.
+Extracted to `fallback_by_model_name`, now consulted by both branches
+(template-body evidence still wins — it describes the model that shipped it).
+
+The larger bug underneath: **that path was almost never reached.** Probing the
+evaluator showed only structural token errors return `None` (unclosed
+`{% for %}`, bare `{{`); an unknown filter, unknown variable, stray
+`{% endfor %}` and unclosed `{% if %}` all evaluate to `Some("")`. That was
+reported as success, so `build_prompt` returned an **empty prompt** — whole
+conversation dropped, and for a VLM no `<image>` marker. `apply_chat_template`
+now treats an empty render from a non-empty message list as `None`; fixed
+there rather than at the call site because `cli/split_test.rs` is a second
+caller with identical exposure.
+
+**CLIP FFN naming** (`inference/vision.rs`). Settled the "possibly inverted
+`ffn_up`/`ffn_down`" question by reading the mmproj GGUF rather than running
+the model: in `llava-v1.5-7b-mmproj-f16.gguf`, `ffn_down` has `ne =
+[1024, 4096]` with a 4096-wide bias, so it is unambiguously the expansion —
+**the existing loader was correct**. But hardcoding that legacy layout broke
+every correctly-named mmproj (Pixtral, InternVL, newer conversions) with a
+dimension mismatch. Now detected per-file by `clip_ffn_is_swapped`, mirroring
+llama.cpp `tools/mtmd/clip.cpp:1913`. Note candle reverses GGUF `ne` on read,
+so `dims()` is `[out, in]` (gotcha #150).
+
+**CI**: `cache-warm.yml` (added the commit before) hardcoded
+`runs-on: ubuntu-latest` while `release.yml` pins CUDA to `ubuntu-22.04`. It
+failed on a package uninstallable on 24.04 — and since the runner image is part
+of the `rust-cache` key, a green run would still have warmed a cache the
+release could never restore. Per-entry `runner:` added.
+
+1124 → 1134 lib tests.
+
+### Prior: R147 — FUTURE_WORK push (request cancellation + deferral closures) (2026-07-22)
 
 Research-led pass over `docs/FUTURE_WORK.md`. One real feature, four small
 closures, and one item deliberately *not* built.
