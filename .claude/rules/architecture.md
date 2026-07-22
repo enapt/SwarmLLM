@@ -255,6 +255,37 @@ silently break at the wire if duplicated:
   users at a daemon upgrade. `pool::invite::looks_like_v2` is the
   prefix-sniff helper used by API + frontend to route between v2 and
   the legacy 8-char path.
+- **`inference::worker_ipc::worker_error_is_fatal`** (R146) — the single
+  source of truth for "did this worker error destroy the worker's device
+  state, or just this request?". Used by the worker to stamp
+  `WorkerMsg::Error.fatal` AND by the daemon's
+  `ModelProcessPool::classify_worker_error` to re-derive the verdict from
+  the message text (the field is `#[serde(default)]`, so a worker binary
+  older than the field always reports `false`). A `true` verdict evicts
+  the worker from the pool, which drops the last `Arc<WorkerHandle>` and
+  lets `Drop` kill the child — the only thing that actually returns VRAM
+  to the OS. New fatal-error classes go in the pattern list, not into a
+  caller-side special case; divergence between the two sides means a
+  stranded worker holding its whole allocation for the daemon's lifetime.
+  Lean inclusive: a needless respawn costs one model reload.
+- **`daemon::shard_loader::force_cpu_for`** (R146) — the single mapping
+  from `inference.gpu_layers` (`-1` auto / `0` CPU only / `>0` GPU) to the
+  loader's `force_cpu` flag. Every device-placement decision goes through
+  it: `ModelProcessPool::effective_gpu_layers` → `--gpu-layers` spawn arg
+  → `model_worker::set_worker_force_cpu` → `ShardLoadParams.force_cpu` /
+  `SplitModel::load_from_gguf(force_cpu)`. Do NOT re-derive placement by
+  calling `Device::cuda_if_available` directly in a new load path — that
+  is exactly how `gpu_layers` came to be silently ignored for every
+  sharded model. Partial offload is not expressible (see
+  `docs/FUTURE_WORK.md`); a fractional value logs a warning rather than
+  being quietly rounded.
+- **`inference::router::distributed_exec::failure_is_penalty_worthy`**
+  (R146) — gates `penalty_serve_failure` on (a) the assignment actually
+  having had a remote segment and (b) the error not being locally
+  attributable. Any new automatic credit or reputation penalty MUST route
+  through an equivalent attribution check. `ServiceUnavailable` means
+  "THIS server can't serve" and `Internal` means our own bug — neither can
+  ever justify charging a peer.
 - **`model::huggingface::is_trusted_publisher`** (R141) — canonical
   curator-allowlist check for an HF `repo_id`. Splits on the first `/`
   and case-insensitively matches the prefix against

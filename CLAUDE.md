@@ -141,7 +141,7 @@ libp2p 0.56, axum 0.8, candle-core/candle-transformers 0.10 (CUDA), redb 4, ed25
 - 12 HTML modals/templates incl. R127 `#welcome-modal` (first-run tour). 11 `<template>` elements for repeating UI structures (session items, chat messages, toasts, model cards, etc.)
 - All storage keys registered as named constants on `App` (e.g., `App.SESSIONS_KEY`, `App.MODEL_SORT_KEY`)
 - Dark/light/system theme toggle, CSS custom properties for theming
-- i18n: 1168 translation keys (1170 entries per locale incl. `_lang` + `_dir`) across 21 languages via `frontend/i18n/{lang}.json`, `I18n.t()` + `data-i18n` attributes. All files sorted by key for parity audits. R110-R115 translations completed in R116, contribution-mode (R121) keys added across all locales, plain-language refresh (R125 ease-of-use audit) translated across all 21 locales — translator-agent pass — every locale has idiomatic native-language strings, not English fallback. R126 batch: removed dead `activity.worker_*` + `models.meta_tokenizer`, refreshed encryption copy (`enc.*` ×19 keys, end-to-end honest), added `activity.manifest_rejected` + `models.meta_advanced`, renamed `models.metadata_header` to "Technical Details". R127 batch: dropped 4 orphans (`models.hf_score_breakdown`, `models.hf_score_pts`, `models.hf_on_swarm`, `models.likes_count`); translated `dashboard.api_log_link` across 21 locales; country names now resolved via `Intl.DisplayNames` keyed off `I18n.getLang()` (no hand map).
+- i18n: 1186 translation keys (1188 entries per locale incl. `_lang` + `_dir`) across 21 languages via `frontend/i18n/{lang}.json`, `I18n.t()` + `data-i18n` attributes. All files sorted by key for parity audits. R110-R115 translations completed in R116, contribution-mode (R121) keys added across all locales, plain-language refresh (R125 ease-of-use audit) translated across all 21 locales — translator-agent pass — every locale has idiomatic native-language strings, not English fallback. R126 batch: removed dead `activity.worker_*` + `models.meta_tokenizer`, refreshed encryption copy (`enc.*` ×19 keys, end-to-end honest), added `activity.manifest_rejected` + `models.meta_advanced`, renamed `models.metadata_header` to "Technical Details". R127 batch: dropped 4 orphans (`models.hf_score_breakdown`, `models.hf_score_pts`, `models.hf_on_swarm`, `models.likes_count`); translated `dashboard.api_log_link` across 21 locales; country names now resolved via `Intl.DisplayNames` keyed off `I18n.getLang()` (no hand map). R146 batch: added `leaderboard.balance_unknown`, `activity.model_cpu_fallback`, `hw.vram_live_tip`, `hw.vram_live_only_tip`; dropped `hw.vram_active` + `hw.vram_reserved_tip` (the estimated-VRAM display they belonged to is gone).
 - Total frontend size target: < 200KB
 - Communication: WebSocket for real-time, REST for initial load, SSE for chat streaming
 - WebSocket message types (only 5): `activity_event` (unified event bus — all subsystem events, toasts, prune history), `stats_update` (2s interval — stats, shard registry, acquisitions, **swarm_capacity** (R110), **wishlist** (R111)), `peer_list` (full peer snapshot on change), `models_changed` (shard download/load/prune signals dashboard refresh), `update_available` (new version detected)
@@ -151,7 +151,7 @@ libp2p 0.56, axum 0.8, candle-core/candle-transformers 0.10 (CUDA), redb 4, ed25
 
 ## Testing
 
-- 1099 lib tests passing + 8 ignored (env-var-gated real-model + manual smoke), 75 integration tests in `tests/integration/`, 1 ignored end-to-end (`cargo test --test integration_phase10_11 -- --ignored`), clippy clean. Microbench: `cargo run --release --no-default-features --features dev,claude-subscription --example swarm_spec_bench` (R136 — measures all 4 SWARM-SPEC layer primitives + synthetic cascade hit-rate). Local-cluster bench: `examples/3node_setup.sh` (boots 3 daemons) + `examples/3node_inference_bench.sh` (runs 3 workloads × 3 trials and prints tok/s + swarm_spec metrics). Sharded variant: `examples/3node_sharded_setup.sh` (forced distributed pipeline — requires `auto_manage.enabled = false` in per-node config.toml to preserve sharded state).
+- 1118 lib tests passing + 8 ignored (env-var-gated real-model + manual smoke), 75 integration tests in `tests/integration/`, 1 ignored end-to-end (`cargo test --test integration_phase10_11 -- --ignored`), clippy clean. Microbench: `cargo run --release --no-default-features --features dev,claude-subscription --example swarm_spec_bench` (R136 — measures all 4 SWARM-SPEC layer primitives + synthetic cascade hit-rate). Local-cluster bench: `examples/3node_setup.sh` (boots 3 daemons) + `examples/3node_inference_bench.sh` (runs 3 workloads × 3 trials and prints tok/s + swarm_spec metrics). Sharded variant: `examples/3node_sharded_setup.sh` (forced distributed pipeline — requires `auto_manage.enabled = false` in per-node config.toml to preserve sharded state).
 - Unit tests: in-module `#[cfg(test)]` blocks
 - Integration tests: `tests/integration/` — multi-node simulations with `--test-threads=1`
 - Real-model spawn-and-infer test: set `SWARMLLM_TEST_MODEL_DIR` to a fully-populated model directory (e.g. `~/.local/share/swarmllm/models/tinyllama-1.1b-...`) and run `cargo test --test integration_phase10_11 -- --ignored end_to_end`. No synthetic GGUF fixture is committed; see `docs/ARCHITECTURE.md` § Deferred Items.
@@ -192,9 +192,63 @@ When spawning subagents in this repo, use these model picks (overrides defaults 
 
 ## Status
 
-All 20 build phases complete. All subsystems wired — no stubs. **1099 lib tests + 75 integration tests passing**; 8 lib + 1 e2e ignored (env-var or manual). Clippy clean default + features dev,claude-subscription + `--features llama`.
+All 20 build phases complete. All subsystems wired — no stubs. **1118 lib tests + 75 integration tests passing**; 8 lib + 1 e2e ignored (env-var or manual). Clippy clean default + features dev,claude-subscription + `--features llama`.
 
-### Latest: R145 — Cloud model/provider refresh (Claude Opus 4.8 / Sonnet 5 / Fable 5, Kimi, Claude Code 2.1) (2026-07-21)
+### Latest: R146 — External bug report (raw-pc / raw-proxamd5, v0.3.4-alpha) (2026-07-22)
+
+Five bugs from the second external user, found while deliberately splitting a
+9-shard 8B model across two home machines. Four were real defects; one was a
+display lie that cost them debugging time. A sixth (fabricated peer credit
+balances) fell out of investigating #4.
+
+1. **Unneeded TP group → hard failure** (`inference/scheduler/mod.rs`). The
+   single-local-segment fast path still called `detect_tp_groups`, so a
+   fully-replicated small model formed a tensor-parallel group with a LAN peer
+   the request never needed; when the peer went quiet the whole request died
+   with `AllReduce timeout after 10s for layer 0`. Fixed three ways: fast path
+   no longer forms groups, new **`inference.tensor_parallel` flag (default
+   false** — per-layer AllReduce over Ethernet costs more than the compute it
+   splits), and `forward_through_segments` now degrades to plain local compute
+   on TP failure (truncating the request's KV to `index_pos` first, since
+   `kv_model_key` carries no TP rank so TP and non-TP share a KV namespace).
+2. **Worker VRAM leak on inference failure** (`inference/process_pool.rs`). Only
+   explicit unloads ever killed a worker, so a CUDA OOM left the subprocess
+   resident holding 4456 MB indefinitely and every retry had less VRAM than the
+   last. `WorkerMsg::Error` gained a `fatal` flag stamped via the new
+   `worker_ipc::worker_error_is_fatal`; the three daemon receive sites route
+   through `classify_worker_error`, which evicts (→ `Drop` → kill) and returns
+   `ServiceUnavailable`.
+3. **`gpu_layers` was dead code for sharded models** (`config/inference.rs`,
+   `daemon/shard_loader.rs`, `inference/model_worker.rs`). It was read only by
+   the legacy llama.cpp executor; the split path called
+   `Device::cuda_if_available(0)` and never saw it — hence an identical 4456 MB
+   at gpu_layers 20, 8 and 0. Worse, the shipped default was `0` documented as
+   "CPU only". Now `i32` with llama.cpp semantics (**default flipped 0 → -1** =
+   auto, so honouring it doesn't drop CUDA nodes to CPU on upgrade), plumbed
+   pool → `--gpu-layers` → worker → `ShardLoadParams.force_cpu`. A GPU OOM pins
+   that model to CPU for the run. Partial offload is unsupported and now says
+   so instead of ignoring the number (deferred: `docs/FUTURE_WORK.md`).
+4. **Flat credit penalty on framework bugs** (`router/distributed_exec.rs`).
+   Every failure charged `penalty_serve_failure`; debugging bugs 1-3 drove the
+   reporter's own node to -470 with no peer ever misbehaving. New
+   `failure_is_penalty_worthy` requires a remote segment AND a
+   non-locally-attributable error.
+4b. **Peer credits were fabricated** (`api/identity.rs`). With no gossiped
+   balance the leaderboard rendered `trust_score * 5000.0` — at DEFAULT_TRUST
+   0.5 that is exactly the mysterious "+2500" the reporter saw for a node
+   showing itself at -90. Now `credits: null` + `balance_known: false`, shown
+   as an em dash.
+5. **Dashboard VRAM gauge showed estimates as live usage**
+   (`frontend/js/components/dashboard.js`). Summed `estimated_vram_mb` over
+   loaded models and displayed it in place of the live nvidia-smi figure,
+   with a clarifying tooltip only when real usage *exceeded* the estimate. An
+   idle machine read "5.3 GB / 5.7 GB — 93%" on a red gauge against a real
+   ~1 GB. Live usage is now always primary; the estimate is tooltip-only.
+
+i18n: 4 keys added / 2 removed across 21 locales (1186 → 1188 entries).
+1099 → 1118 lib tests.
+
+### Prior: R145 — Cloud model/provider refresh (Claude Opus 4.8 / Sonnet 5 / Fable 5, Kimi, Claude Code 2.1) (2026-07-21)
 
 Periodic currency pass — the cloud-provider surface hadn't been touched since
 R142 (~2 months). Research-driven (claude-api skill + web) refresh of every stale
