@@ -29,6 +29,15 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
 
+      # `github.repository` preserves the repo's capitalisation (enapt/SwarmLLM),
+      # but a registry reference must be lowercase. The `tags:` below are fine
+      # because metadata-action lowercases for us; a hand-written cache ref is
+      # not, and buildx rejects the whole build rather than skipping the cache.
+      - name: Lowercase image name for registry refs
+        run: echo "IMAGE_LC=${GH_REPO,,}" >> "$GITHUB_ENV"
+        env:
+          GH_REPO: ${{ github.repository }}
+
       - name: Log in to GHCR
         uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
@@ -67,8 +76,8 @@ jobs:
           # Scoped per variant: an unscoped cache is a single ref, so the CPU
           # and CUDA builds were overwriting each other's entries and each
           # rebuilding what the other had just evicted.
-          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:buildcache-cpu
-          cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:buildcache-cpu,mode=max
+          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_LC }}:buildcache-cpu
+          cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_LC }}:buildcache-cpu,mode=max
           platforms: linux/amd64
 
   build-cuda:
@@ -79,6 +88,15 @@ jobs:
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
+
+      # `github.repository` preserves the repo's capitalisation (enapt/SwarmLLM),
+      # but a registry reference must be lowercase. The `tags:` below are fine
+      # because metadata-action lowercases for us; a hand-written cache ref is
+      # not, and buildx rejects the whole build rather than skipping the cache.
+      - name: Lowercase image name for registry refs
+        run: echo "IMAGE_LC=${GH_REPO,,}" >> "$GITHUB_ENV"
+        env:
+          GH_REPO: ${{ github.repository }}
 
       - name: Log in to GHCR
         uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
@@ -109,6 +127,6 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           # See the CPU build for why this is registry-backed and scoped.
-          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:buildcache-cuda
-          cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:buildcache-cuda,mode=max
+          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_LC }}:buildcache-cuda
+          cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_LC }}:buildcache-cuda,mode=max
           platforms: linux/amd64
