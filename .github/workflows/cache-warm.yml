@@ -1,0 +1,120 @@
+####################################################################
+# Populate the release build caches on the DEFAULT BRANCH.
+#
+# Why this workflow exists
+# ------------------------
+# `release.yml` only runs on tag pushes. GitHub scopes Actions caches by
+# ref, and per the docs a workflow run "cannot restore caches created for
+# different tag names" — while tags CAN read caches from the default
+# branch. So a release would write a cache scoped to its own tag that no
+# later release could ever read.
+#
+# Measured effect before this existed: a 1268 MB CUDA dependency cache sat
+# on `refs/tags/v0.3.4-alpha`, unreadable by v0.3.5, and every release
+# rebuilt candle-kernels + llama.cpp's CUDA kernels from scratch.
+#
+# This workflow runs the same builds on `main` with the same `shared-key`,
+# so the cache lands on `refs/heads/main` where tag runs can restore it.
+#
+# It is deliberately NOT on every push: the CUDA build is the long pole
+# (~1h). It runs when the dependency graph actually changes, weekly to
+# stay ahead of cache eviction (GitHub evicts after 7 days unused), and
+# on demand.
+#
+# Failure here never blocks a release — a cold release build is exactly
+# the old behaviour.
+####################################################################
+name: Cache warm
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "crates/*/Cargo.toml"
+      - ".github/workflows/cache-warm.yml"
+      - ".github/workflows/release.yml"
+  schedule:
+    # Weekly, comfortably inside GitHub's 7-day unused-cache eviction.
+    - cron: "0 4 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  # Never stack hour-long builds; a newer run supersedes an in-flight one.
+  group: cache-warm-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: ""
+
+jobs:
+  warm:
+    name: Warm ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The long pole, and the whole reason this workflow exists.
+          - name: Linux x86_64 CUDA
+            target: x86_64-unknown-linux-gnu
+            features: "--features cuda"
+            cuda_linux: true
+          # Cheap by comparison, but the same ref-scoping problem applies.
+          - name: Linux x86_64
+            target: x86_64-unknown-linux-gnu
+            features: ""
+            cuda_linux: false
+
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      # MUST stay byte-identical to release.yml's cache step, or the key
+      # differs and the release gets no hit. Both use `shared-key` so the
+      # job id is excluded from the key.
+      - name: Rust cache
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          shared-key: release-${{ matrix.target }}-${{ matrix.features }}
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libssl-dev pkg-config
+
+      - name: Install CUDA toolkit
+        if: matrix.cuda_linux
+        run: |
+          # Pinned + checksum-verified, mirroring release.yml.
+          CUDA_KEYRING_SHA256=d93190d50b98ad4699ff40f4f7af50f16a76dac3bb8da1eaaf366d47898ff8df
+          wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb
+          echo "${CUDA_KEYRING_SHA256}  cuda-keyring_1.1-1_all.deb" | sha256sum -c -
+          sudo dpkg -i cuda-keyring_1.1-1_all.deb
+          sudo apt-get update
+          sudo apt-get install -y cuda-toolkit-12-4
+          echo "/usr/local/cuda-12.4/bin" >> "$GITHUB_PATH"
+          echo "CUDA_PATH=/usr/local/cuda-12.4" >> "$GITHUB_ENV"
+
+      - name: Install mold linker
+        if: matrix.cuda_linux
+        run: |
+          sudo apt-get install -y mold
+          echo "RUSTFLAGS=-C link-arg=-fuse-ld=mold" >> "$GITHUB_ENV"
+
+      # Same profile, features and env as the release build, so the cached
+      # dependency artefacts are the ones a release will actually reuse.
+      # A different profile or feature set would populate a cache the
+      # release cannot use.
+      - name: Build (populates the dependency cache)
+        run: cargo build --locked --release ${{ matrix.features }}
+        env:
+          CUDA_COMPUTE_CAP: ${{ matrix.cuda_linux && '80' || '' }}

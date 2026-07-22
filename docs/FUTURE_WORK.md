@@ -2012,6 +2012,43 @@ extra-cautious — Layer 0 alone is purely upside.
 
 ## CI / build infra
 
+### CUDA release build: pin `CMAKE_CUDA_ARCHITECTURES`? (R147, 2026-07-22)
+
+**Context.** The Linux CUDA release job is the release long pole (~1 h). Two
+causes were investigated:
+
+1. *Cache never restored across tags* — **fixed** in R147. GitHub scopes
+   Actions caches by ref: a run "cannot restore caches created for different
+   tag names", though tags CAN read the default branch's caches. `release.yml`
+   only runs on tag pushes, so it wrote a cache scoped to its own tag that no
+   later release could read — a measured 1268 MB CUDA dependency cache sat
+   orphaned on `refs/tags/v0.3.4-alpha`. Fixed by switching the release cache
+   step from `key:` to `shared-key:` (which excludes the job id) and adding
+   `.github/workflows/cache-warm.yml`, which runs the same builds on `main` so
+   the cache lands where tag runs can restore it.
+
+2. *llama.cpp compiles a wide CUDA arch spread* — **open, needs a product
+   decision.** `CUDA_COMPUTE_CAP: 80` only governs candle's kernels. The `cuda`
+   feature also builds `llama-cpp-sys-2`, whose CMake build defaults to
+   `-arch=native`; on a GPU-less CI runner nvcc can't detect anything, and per
+   llama.cpp's build docs the fallback "results in a larger binary and longer
+   compilation time". `llama-cpp-sys-2`'s `build.rs` forwards any `CMAKE_*` env
+   var straight to CMake, so this is a one-line env addition:
+   `CMAKE_CUDA_ARCHITECTURES: "61-real;75-real;80-real;86-real;89-real;90-real;90-virtual"`.
+
+**Why deferred.** The arch list is a decision about which GPUs SwarmLLM
+supports, not a build tweak. Getting it wrong is silent for us and fatal for
+the user — an omitted arch surfaces as `no kernel image is available for
+execution on the device` at runtime. Specifically: dropping `61` cuts Pascal
+(GTX 10-series, still widely used); dropping the `-virtual` PTX entry removes
+JIT forward-compatibility for Blackwell/RTX 50-series. And it can only be
+validated on hardware — the maintainer's box is sm_86, so every other
+generation would ship untested.
+
+**If picked up:** decide the supported-GPU floor first, keep at least one
+`-virtual` entry for forward compat, and validate on at least one pre-Ampere
+card before releasing.
+
 ### Node.js-20 GitHub Actions deprecation (R145 sweep, 2026-07-21)
 **Context.** GitHub is deprecating the Node.js 20 runtime on Actions runners; three pinned actions in `.github/workflows/release.yml` still target Node 20 and are currently *force-upgraded* to Node 24 (a warning annotation, not a failure — the v0.3.3-alpha release built and published fine):
 

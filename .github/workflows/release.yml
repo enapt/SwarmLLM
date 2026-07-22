@@ -114,10 +114,21 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
 
+      # `shared-key` (not `key`) on purpose. `key` folds the job id into the
+      # cache key; `shared-key` does not, which is what lets the
+      # `cache-warm.yml` workflow on `main` produce a byte-identical key.
+      #
+      # That matters because of how GitHub scopes caches: a release only runs
+      # on a tag push, so with `key` it wrote a cache scoped to that tag —
+      # and per GitHub's docs a run "cannot restore caches created for
+      # different tag names", while tags CAN read the default branch's caches.
+      # So every release rebuilt ~1.2 GB of CUDA dependencies cold and then
+      # saved a cache no later release could ever read. Warming the same
+      # shared key on `main` fixes that.
       - name: Rust cache
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          key: ${{ matrix.target }}-${{ matrix.features }}
+          shared-key: release-${{ matrix.target }}-${{ matrix.features }}
 
       - name: Install system dependencies (Linux)
         if: runner.os == 'Linux'
