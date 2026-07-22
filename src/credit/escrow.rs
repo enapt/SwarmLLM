@@ -142,12 +142,29 @@ impl EscrowManager {
         Ok(escrow_id)
     }
 
-    /// Release escrowed credits to the serving node on successful completion.
-    /// The requester's credits are not returned — they are considered paid.
+    /// Settle a completed request against its escrow.
+    ///
+    /// `actual_cost` is what the request really consumed. The escrow held an
+    /// *estimate* built from `max_tokens`, and the difference is reconciled
+    /// here — refunded when the request used less than reserved, charged when
+    /// it used more (possible because the estimate covers completion tokens
+    /// while the real cost also counts the prompt).
+    ///
+    /// Reconciling matters more than it sounds. The estimate is
+    /// `RATE_INFERENCE_CONSUME * max_tokens`, which at the shipped defaults of
+    /// 10 and 2048 is 20,480 credits — charged in full whether the model
+    /// returned two thousand tokens or one. An operator debugging a failing
+    /// setup reported a balance of -41,400 after a handful of requests, which
+    /// is that estimate applied twice over. The non-escrow path next to this
+    /// one always charged actual usage, so the two disagreed by orders of
+    /// magnitude depending only on whether the estimate crossed the escrow
+    /// threshold.
     pub async fn release_escrow(
         &self,
         escrow_id: uuid::Uuid,
         to_node: &NodeId,
+        actual_cost: i64,
+        balance: &Arc<RwLock<CreditBalance>>,
     ) -> Result<i64, SwarmError> {
         // Snapshot the entry while holding the DashMap shard lock briefly,
         // then drop the lock before the synchronous redb write. Holding the
@@ -182,18 +199,39 @@ impl EscrowManager {
         // Remove from in-memory map — entry is persisted to DB
         self.entries.remove(&escrow_id);
 
-        // Credit the serving node's perspective (in a real network this would
-        // be sent to the serving node; locally we just log it).
-        // The requester already paid — no balance change for requester.
+        // Reconcile the estimate against what was actually used. Clamp at zero
+        // so a negative actual can never mint credits.
+        let actual = actual_cost.max(0);
+        let delta = amount - actual;
+        if delta > 0 {
+            // Reserved more than needed — hand the remainder back.
+            if let Err(e) = apply_credit_direct(balance, &self.db, delta, CreditDelta::Refund).await
+            {
+                tracing::warn!(error = %e, "Failed to persist escrow over-reservation refund");
+            }
+        } else if delta < 0 {
+            // Used more than reserved (long prompt, small max_tokens).
+            // `apply_credit_direct` takes a SIGNED delta and adds it — `kind`
+            // only selects which lifetime counter moves — so a charge passes
+            // the negative through rather than negating it.
+            if let Err(e) =
+                apply_credit_direct(balance, &self.db, delta, CreditDelta::Spending).await
+            {
+                tracing::warn!(error = %e, "Failed to persist escrow shortfall charge");
+            }
+        }
+
         tracing::info!(
             escrow_id = %escrow_id,
-            amount,
+            reserved = amount,
+            actual,
+            reconciled = delta,
             to_node = %to_node,
             state = "released",
             "DIAG: escrow release"
         );
 
-        Ok(amount)
+        Ok(actual)
     }
 
     /// Refund escrowed credits to the requester on failure or timeout.
@@ -429,7 +467,10 @@ mod tests {
         assert_eq!(balance.read().await.balance, 900);
 
         // Release to serving node
-        let released = em.release_escrow(escrow_id, &to).await.unwrap();
+        let released = em
+            .release_escrow(escrow_id, &to, 100, &balance)
+            .await
+            .unwrap();
         assert_eq!(released, 100);
 
         // Balance stays the same (credits went to serving node)
@@ -461,6 +502,82 @@ mod tests {
         assert!(em.get_escrow(&escrow_id).is_none());
     }
 
+    /// The bug an operator hit as a -41,400 balance: the escrow reserves
+    /// `RATE_INFERENCE_CONSUME * max_tokens` (20,480 at shipped defaults) and
+    /// release used to keep all of it regardless of what the request used.
+    #[tokio::test]
+    async fn release_refunds_the_unused_reservation() {
+        let db = Database::open_temp().unwrap();
+        let em = EscrowManager::new(db, 10);
+        let balance = make_balance(100_000);
+        let (from, to) = (NodeId([1u8; 32]), NodeId([2u8; 32]));
+
+        // Reserve for max_tokens=2048 at 10/token.
+        let escrow_id = em
+            .create_escrow(uuid::Uuid::new_v4(), 20_480, &from, &balance)
+            .await
+            .unwrap();
+        assert_eq!(balance.read().await.balance, 79_520);
+
+        // The model answered in one token after a 9-token prompt.
+        let actual = 10 * (9 + 1);
+        let settled = em
+            .release_escrow(escrow_id, &to, actual, &balance)
+            .await
+            .unwrap();
+
+        assert_eq!(settled, actual, "release should report real usage");
+        assert_eq!(
+            balance.read().await.balance,
+            100_000 - actual,
+            "only actual usage should leave the balance"
+        );
+    }
+
+    /// A long prompt with a small max_tokens can cost more than reserved —
+    /// the estimate only covers completion tokens.
+    #[tokio::test]
+    async fn release_charges_the_shortfall() {
+        let db = Database::open_temp().unwrap();
+        let em = EscrowManager::new(db, 10);
+        let balance = make_balance(100_000);
+        let (from, to) = (NodeId([1u8; 32]), NodeId([2u8; 32]));
+
+        let escrow_id = em
+            .create_escrow(uuid::Uuid::new_v4(), 100, &from, &balance)
+            .await
+            .unwrap();
+        let settled = em
+            .release_escrow(escrow_id, &to, 250, &balance)
+            .await
+            .unwrap();
+
+        assert_eq!(settled, 250);
+        assert_eq!(balance.read().await.balance, 100_000 - 250);
+    }
+
+    /// A negative actual must never mint credits.
+    #[tokio::test]
+    async fn release_clamps_negative_actual_to_zero() {
+        let db = Database::open_temp().unwrap();
+        let em = EscrowManager::new(db, 10);
+        let balance = make_balance(1000);
+        let (from, to) = (NodeId([1u8; 32]), NodeId([2u8; 32]));
+
+        let escrow_id = em
+            .create_escrow(uuid::Uuid::new_v4(), 100, &from, &balance)
+            .await
+            .unwrap();
+        em.release_escrow(escrow_id, &to, -500, &balance)
+            .await
+            .unwrap();
+        assert_eq!(
+            balance.read().await.balance,
+            1000,
+            "full reservation returned, nothing minted"
+        );
+    }
+
     #[tokio::test]
     async fn double_release_fails() {
         let db = Database::open_temp().unwrap();
@@ -474,9 +591,11 @@ mod tests {
             .await
             .unwrap();
 
-        em.release_escrow(escrow_id, &to).await.unwrap();
+        em.release_escrow(escrow_id, &to, 100, &balance)
+            .await
+            .unwrap();
         // Entry removed from map after release — second release fails (not found)
-        let result = em.release_escrow(escrow_id, &to).await;
+        let result = em.release_escrow(escrow_id, &to, 100, &balance).await;
         assert!(result.is_err());
     }
 
@@ -493,7 +612,9 @@ mod tests {
             .await
             .unwrap();
 
-        em.release_escrow(escrow_id, &to).await.unwrap();
+        em.release_escrow(escrow_id, &to, 100, &balance)
+            .await
+            .unwrap();
         // Entry removed from map after release — refund fails (not found)
         let result = em.refund_escrow(escrow_id, &balance).await;
         assert!(result.is_err());
@@ -574,7 +695,7 @@ mod tests {
             .unwrap();
         assert_eq!(em.pending_count(), 2);
 
-        em.release_escrow(id1, &to).await.unwrap();
+        em.release_escrow(id1, &to, 100, &balance).await.unwrap();
         assert_eq!(em.pending_count(), 1);
     }
 

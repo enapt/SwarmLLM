@@ -146,6 +146,8 @@ impl ShardRebalancer {
                         node_id: local_node_id.clone(),
                         shards: vec![shard_id.clone()],
                         timestamp: chrono::Utc::now(),
+                        // Re-announcing one shard we still hold — incremental.
+                        complete_for_models: Vec::new(),
                     };
                     let msg = NetworkCommand::Broadcast(SwarmMessage::ShardAnnounce(announce));
                     if let Err(e) = self.network_tx.send(msg).await {

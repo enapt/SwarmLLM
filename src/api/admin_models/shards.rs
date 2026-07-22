@@ -222,6 +222,8 @@ pub async fn delete_shard(
             node_id: local_node_id,
             shards: remaining_shards,
             timestamp: chrono::Utc::now(),
+            // Complete for this model: whatever is absent was just deleted.
+            complete_for_models: vec![mid.clone()],
         });
         let _ = ntx
             .send(crate::types::NetworkCommand::Broadcast(announce))

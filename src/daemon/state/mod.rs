@@ -1335,6 +1335,10 @@ impl SharedState {
             node_id,
             shards: vec![shard_id.clone()],
             timestamp: chrono::Utc::now(),
+            // Incremental: one shard we just acquired says nothing about the
+            // rest, so declaring completeness here would delete every other
+            // shard of this model we hold.
+            complete_for_models: Vec::new(),
         });
         let _ = net_tx.try_send(crate::types::NetworkCommand::Broadcast(announce));
         let _ = net_tx.try_send(crate::types::NetworkCommand::StartProviding(vec![

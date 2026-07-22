@@ -48,7 +48,10 @@ async fn test_escrow_create_and_release() {
     assert!(entry.to_node.is_none());
 
     // Release to serving node — credits stay with provider
-    let released = em.release_escrow(escrow_id, &to).await.unwrap();
+    let released = em
+        .release_escrow(escrow_id, &to, 100, &balance)
+        .await
+        .unwrap();
     assert_eq!(released, 100);
     assert_eq!(balance.read().await.balance, 900); // Not refunded
     assert_eq!(em.pending_count(), 0);
@@ -139,10 +142,12 @@ async fn test_escrow_double_release_rejected() {
         .unwrap();
 
     // First release succeeds
-    em.release_escrow(escrow_id, &to).await.unwrap();
+    em.release_escrow(escrow_id, &to, 100, &balance)
+        .await
+        .unwrap();
 
     // Second release fails
-    let result = em.release_escrow(escrow_id, &to).await;
+    let result = em.release_escrow(escrow_id, &to, 100, &balance).await;
     assert!(result.is_err());
 }
 
@@ -161,7 +166,9 @@ async fn test_escrow_refund_after_release_rejected() {
         .await
         .unwrap();
 
-    em.release_escrow(escrow_id, &to).await.unwrap();
+    em.release_escrow(escrow_id, &to, 100, &balance)
+        .await
+        .unwrap();
 
     // Cannot refund a released escrow
     let result = em.refund_escrow(escrow_id, &balance).await;

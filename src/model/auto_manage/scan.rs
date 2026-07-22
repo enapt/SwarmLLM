@@ -266,10 +266,19 @@ pub async fn rescan_local_shards(
                 let _ = tx
                     .send(NetworkCommand::StartProviding(hosted_shards.clone()))
                     .await;
+                // A rescan read the disk, so it is authoritative for the
+                // models it found shards of.
+                let complete_for_models: Vec<crate::types::ModelId> = hosted_shards
+                    .iter()
+                    .map(|s| s.model_id.clone())
+                    .collect::<std::collections::HashSet<_>>()
+                    .into_iter()
+                    .collect();
                 let announce = crate::types::ShardAnnounce {
                     node_id: local_node_id,
                     shards: hosted_shards,
                     timestamp: chrono::Utc::now(),
+                    complete_for_models,
                 };
                 let _ = tx
                     .send(NetworkCommand::Broadcast(

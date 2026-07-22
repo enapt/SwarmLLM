@@ -145,6 +145,46 @@ impl ModelRegistry {
         }
     }
 
+    /// Make `node_id`'s holder records for `model_id` exactly `keep`, dropping
+    /// any shard of that model it is no longer listed as holding.
+    ///
+    /// This is the only way a node's claim is ever retracted by someone other
+    /// than the node itself. `remove_shard_holder` is always called with the
+    /// LOCAL node id — a peer dropping a shard had no way to tell us, so its
+    /// stale claim survived for as long as it stayed connected and the
+    /// scheduler kept routing layers to a node that could not serve them.
+    ///
+    /// Scoped to one model on purpose: a `ShardAnnounce` is only ever complete
+    /// for the models it declares, so retracting beyond them would delete
+    /// records the announcement says nothing about.
+    ///
+    /// Returns the number of records removed.
+    pub fn retain_node_shards_for_model(
+        &self,
+        model_id: &ModelId,
+        node_id: &NodeId,
+        keep: &std::collections::HashSet<u32>,
+    ) -> usize {
+        // Collect first: mutating shard_holders while iterating it can deadlock
+        // on the same DashMap shard.
+        let stale: Vec<ShardId> = self
+            .node_shards
+            .get(node_id)
+            .map(|shards| {
+                shards
+                    .iter()
+                    .filter(|sid| sid.model_id == *model_id && !keep.contains(&sid.index))
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        for shard_id in &stale {
+            self.remove_shard_holder(shard_id, node_id);
+        }
+        stale.len()
+    }
+
     /// Get nodes that hold the mmproj (vision encoder) for a model.
     pub fn mmproj_holders(&self, model_id: &ModelId) -> Vec<NodeId> {
         self.shard_holders(&ShardId {
@@ -441,6 +481,114 @@ mod tests {
 
         let holders = registry.shard_holders(&shard_id);
         assert_eq!(holders.len(), 2);
+    }
+
+    /// The reported failure: a peer deleted shards 0-4 and restarted, but the
+    /// scheduler kept assigning it layers 0..32 because nothing could retract
+    /// a still-connected peer's claim.
+    #[test]
+    fn retain_node_shards_drops_what_a_peer_no_longer_holds() {
+        let registry = ModelRegistry::new();
+        let model = ModelId("llama-3.1-8b".into());
+        let peer = NodeId([7u8; 32]);
+
+        for idx in 0..9u32 {
+            registry.record_shard_holder(
+                ShardId {
+                    model_id: model.clone(),
+                    index: idx,
+                },
+                peer.clone(),
+            );
+        }
+
+        // Peer re-announces holding only 5-8.
+        let keep: std::collections::HashSet<u32> = (5..9).collect();
+        let dropped = registry.retain_node_shards_for_model(&model, &peer, &keep);
+        assert_eq!(dropped, 5, "shards 0-4 should be retracted");
+
+        for idx in 0..5u32 {
+            assert!(
+                registry
+                    .shard_holders(&ShardId {
+                        model_id: model.clone(),
+                        index: idx
+                    })
+                    .is_empty(),
+                "shard {idx} should have no holders left"
+            );
+        }
+        for idx in 5..9u32 {
+            assert!(
+                registry
+                    .shard_holders(&ShardId {
+                        model_id: model.clone(),
+                        index: idx
+                    })
+                    .contains(&peer),
+                "shard {idx} should still be held"
+            );
+        }
+    }
+
+    /// Retraction is scoped to one model — an announce complete for model A
+    /// says nothing about model B, and must not delete it.
+    #[test]
+    fn retain_node_shards_leaves_other_models_alone() {
+        let registry = ModelRegistry::new();
+        let (a, b) = (ModelId("model-a".into()), ModelId("model-b".into()));
+        let peer = NodeId([7u8; 32]);
+
+        registry.record_shard_holder(
+            ShardId {
+                model_id: a.clone(),
+                index: 0,
+            },
+            peer.clone(),
+        );
+        registry.record_shard_holder(
+            ShardId {
+                model_id: b.clone(),
+                index: 0,
+            },
+            peer.clone(),
+        );
+
+        // Complete for A with nothing held → drops A only.
+        let dropped = registry.retain_node_shards_for_model(&a, &peer, &Default::default());
+        assert_eq!(dropped, 1);
+        assert!(registry
+            .shard_holders(&ShardId {
+                model_id: a,
+                index: 0
+            })
+            .is_empty());
+        assert!(registry
+            .shard_holders(&ShardId {
+                model_id: b,
+                index: 0
+            })
+            .contains(&peer));
+    }
+
+    /// One peer retracting must not evict another peer's holding.
+    #[test]
+    fn retain_node_shards_only_touches_the_announcing_node() {
+        let registry = ModelRegistry::new();
+        let model = ModelId("m".into());
+        let (peer_a, peer_b) = (NodeId([1u8; 32]), NodeId([2u8; 32]));
+        let sid = ShardId {
+            model_id: model.clone(),
+            index: 0,
+        };
+
+        registry.record_shard_holder(sid.clone(), peer_a.clone());
+        registry.record_shard_holder(sid.clone(), peer_b.clone());
+
+        registry.retain_node_shards_for_model(&model, &peer_a, &Default::default());
+        let holders = registry.shard_holders(&sid);
+        assert!(!holders.contains(&peer_a));
+        assert!(holders.contains(&peer_b), "peer B must be untouched");
     }
 
     #[test]

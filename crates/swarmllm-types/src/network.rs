@@ -147,6 +147,26 @@ pub struct ShardAnnounce {
     pub node_id: NodeId,
     pub shards: Vec<ShardId>,
     pub timestamp: chrono::DateTime<chrono::Utc>,
+    /// Models for which `shards` is the sender's COMPLETE set.
+    ///
+    /// A receiver drops any holder record it has for this node under these
+    /// models that is absent from `shards`. Models not listed here are only
+    /// added to, never retracted.
+    ///
+    /// This field exists because the same message is sent with three different
+    /// scopes — the whole local shard set (periodic re-announce), one model's
+    /// remaining shards (shard deletion), and a single newly-acquired shard —
+    /// and a receiver cannot tell them apart. Without it the handler had to
+    /// assume the additive case, so nothing could ever retract: a peer that
+    /// deleted shards kept its claim on them, and `delete_model`'s
+    /// `shards: vec![]` "we no longer host anything" broadcast decoded to a
+    /// loop over zero elements and did nothing at all.
+    ///
+    /// `#[serde(default)]` keeps this compatible with older nodes: their
+    /// announcements arrive with an empty list and stay purely additive, which
+    /// is exactly the pre-existing behaviour.
+    #[serde(default)]
+    pub complete_for_models: Vec<ModelId>,
 }
 
 /// State of a shard download.

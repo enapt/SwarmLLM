@@ -932,11 +932,21 @@ impl InferenceRouter {
             // Release escrow on success. Refund on failure is handled by
             // finalize_request — calling refund_escrow again here races and
             // logs a spurious "Escrow not found" warning.
-            if let (Some(eid), Ok(_)) = (escrow_id, &output) {
+            if let (Some(eid), Ok(ref result)) = (escrow_id, &output) {
+                // Settle against real usage, not the max_tokens estimate the
+                // escrow reserved. Same formula the non-escrow charge below
+                // uses, so the two paths bill identically.
+                let actual_cost = crate::credit::ledger::RATE_INFERENCE_CONSUME
+                    * (result.prompt_tokens + result.completion_tokens) as i64;
                 if let Err(e) = shared_state
                     .credits
                     .escrow_manager
-                    .release_escrow(eid, shared_state.identity.node_id())
+                    .release_escrow(
+                        eid,
+                        shared_state.identity.node_id(),
+                        actual_cost,
+                        &shared_state.credits.credit_balance,
+                    )
                     .await
                 {
                     tracing::warn!(escrow_id = %eid, error = %e, "Failed to release escrow");

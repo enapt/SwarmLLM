@@ -266,10 +266,21 @@ pub(super) fn spawn_initial_announcements(
                 .send(NetworkCommand::StartProviding(hosted_shards.clone()))
                 .await;
 
+            // Complete for every model represented, so a receiver converges
+            // even if it missed a targeted retraction — the anti-entropy half
+            // of the design (a Kademlia provider record is soft state kept
+            // alive by republish, not by explicit delete).
+            let complete_for_models: Vec<crate::types::ModelId> = hosted_shards
+                .iter()
+                .map(|s| s.model_id.clone())
+                .collect::<std::collections::HashSet<_>>()
+                .into_iter()
+                .collect();
             let announce = crate::types::ShardAnnounce {
                 node_id: node_id.clone(),
                 shards: hosted_shards,
                 timestamp: chrono::Utc::now(),
+                complete_for_models,
             };
             tracing::info!(
                 shards = announce.shards.len(),

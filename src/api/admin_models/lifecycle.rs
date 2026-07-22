@@ -139,8 +139,12 @@ pub async fn delete_model(
     if let Some(ref ntx) = state.network_tx {
         let announce = crate::types::SwarmMessage::ShardAnnounce(crate::types::ShardAnnounce {
             node_id: node_id.clone(),
-            shards: vec![], // Empty shards = we no longer host anything for this model
+            shards: vec![],
             timestamp: chrono::Utc::now(),
+            // Empty + complete-for-this-model = "I host none of it any more".
+            // Before `complete_for_models` existed the receiver looped over the
+            // empty vec and did nothing, so this broadcast was a no-op.
+            complete_for_models: vec![mid.clone()],
         });
         let _ = ntx
             .send(crate::types::NetworkCommand::Broadcast(announce))

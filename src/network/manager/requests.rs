@@ -722,6 +722,8 @@ impl NetworkManager {
                                     node_id: local_node_id,
                                     shards: vec![shard_id.clone()],
                                     timestamp: chrono::Utc::now(),
+                                    // One shard we just fetched — incremental.
+                                    complete_for_models: Vec::new(),
                                 },
                             ));
 

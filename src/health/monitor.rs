@@ -381,10 +381,21 @@ impl HealthMonitor {
 
             if shards_changed || periodic_reannounce {
                 let shard_count = hosted_shards.len();
+                // Complete for every model represented. `shards_changed` above
+                // fires when shards are deleted, so this is what actually
+                // retracts them on peers — previously it re-sent the smaller
+                // set and receivers merged it, keeping the deleted shards.
+                let complete_for_models: Vec<crate::types::ModelId> = hosted_shards
+                    .iter()
+                    .map(|s| s.model_id.clone())
+                    .collect::<std::collections::HashSet<_>>()
+                    .into_iter()
+                    .collect();
                 let announce = crate::types::ShardAnnounce {
                     node_id,
                     shards: hosted_shards,
                     timestamp: chrono::Utc::now(),
+                    complete_for_models,
                 };
                 let msg = NetworkCommand::Broadcast(SwarmMessage::ShardAnnounce(announce));
                 if let Err(e) = self.network_tx.send(msg).await {

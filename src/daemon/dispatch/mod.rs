@@ -754,6 +754,32 @@ pub(crate) async fn dispatch_network_messages(
                                                 .record_shard_holder(shard_id.clone(), announce.node_id.clone());
                                             *models_announced.entry(shard_id.model_id.0.clone()).or_insert(0) += 1;
                                         }
+                                        // Retract whatever this node no longer holds, for the
+                                        // models it declared complete. Additive-only handling
+                                        // left a peer claiming shards it had deleted, and the
+                                        // scheduler kept assigning it layers it could not serve.
+                                        // Runs AFTER the inserts above so an announce that both
+                                        // adds and drops shards of one model lands atomically
+                                        // from the scheduler's point of view.
+                                        for model_id in &announce.complete_for_models {
+                                            let keep: std::collections::HashSet<u32> = announce
+                                                .shards
+                                                .iter()
+                                                .filter(|s| s.model_id == *model_id)
+                                                .map(|s| s.index)
+                                                .collect();
+                                            let dropped = shared_state.model_registry
+                                                .retain_node_shards_for_model(model_id, &announce.node_id, &keep);
+                                            if dropped > 0 {
+                                                tracing::info!(
+                                                    node_id = %announce.node_id,
+                                                    model = %model_id,
+                                                    dropped,
+                                                    retained = keep.len(),
+                                                    "Peer retracted shards it no longer hosts"
+                                                );
+                                            }
+                                        }
                                         // Emit activity for each model announced
                                         let peer_label = crate::identity::nickname::short_display_name(
                                             &announce.node_id,
