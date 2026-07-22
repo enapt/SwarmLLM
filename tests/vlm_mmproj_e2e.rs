@@ -1,15 +1,58 @@
-// Standalone test: load mmproj GGUF and encode an image
+// Standalone test: load a real mmproj GGUF and encode an image.
+//
 // Run with: cargo test --test vlm_mmproj_e2e -- --nocapture
+//
+// Point it at a file with SWARMLLM_TEST_MMPROJ, otherwise it looks in the
+// platform data dir. Skips (does not fail) when no mmproj is present, since
+// the file is ~600 MB and not committed.
+//
+// What this covers that unit tests cannot: `load_from_mmproj_gguf` resolves
+// the CLIP FFN tensor naming by shape (see `vision::clip_ffn_is_swapped`).
+// Getting that backwards is not silent — the first MLP matmul fails on a
+// dimension mismatch — so a successful encode here is the real check that
+// the detection agrees with an actual file.
 
-use std::path::Path;
+use std::path::PathBuf;
+
+/// Where to look for an mmproj, in order.
+fn find_mmproj() -> Option<PathBuf> {
+    if let Ok(p) = std::env::var("SWARMLLM_TEST_MMPROJ") {
+        let p = PathBuf::from(p);
+        return p.exists().then_some(p);
+    }
+    let mut roots = Vec::new();
+    if let Some(home) = std::env::var_os("HOME") {
+        roots.push(PathBuf::from(&home).join(".local/share/swarmllm/mmproj"));
+        roots.push(PathBuf::from(&home).join("Library/Application Support/swarmllm/mmproj"));
+    }
+    if let Some(appdata) = std::env::var_os("APPDATA") {
+        roots.push(PathBuf::from(appdata).join("swarmllm/mmproj"));
+    }
+    roots.push(PathBuf::from("/tmp/vlm_test"));
+
+    for dir in roots {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for e in entries.flatten() {
+            let p = e.path();
+            if p.extension().is_some_and(|x| x == "gguf") {
+                return Some(p);
+            }
+        }
+    }
+    None
+}
 
 #[test]
 fn vlm_mmproj_load_and_encode() {
-    let mmproj_path = Path::new("/tmp/vlm_test/mmproj-model-f16.gguf");
-    if !mmproj_path.exists() {
-        eprintln!("SKIP: mmproj file not found at {}", mmproj_path.display());
+    let Some(mmproj_path) = find_mmproj() else {
+        eprintln!(
+            "SKIP: no mmproj .gguf found. Set SWARMLLM_TEST_MMPROJ=/path/to/mmproj.gguf to run."
+        );
         return;
-    }
+    };
+    let mmproj_path = mmproj_path.as_path();
 
     let device = candle_core::Device::Cpu;
 
