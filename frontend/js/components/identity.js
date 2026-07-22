@@ -85,11 +85,22 @@
             mono.textContent = e.node_id;
             nameCell.appendChild(mono);
           }
-          row.querySelector('.lb-credits').textContent = e.credits || 0;
+          // `credits: null` means this peer's balance gossip hasn't arrived.
+          // Show an em dash — NOT 0, which would read as a real balance.
+          var creditsEl = row.querySelector('.lb-credits');
           var tierEl = row.querySelector('.lb-tier');
-          var tierClass = (e.tier || 'silver').toLowerCase().replace(/[^a-z]/g, '');
-          tierEl.className = 'tier-badge ' + tierClass;
-          tierEl.textContent = e.tier || I18n.t('leaderboard.tier_default');
+          if (e.credits === null || e.credits === undefined) {
+            creditsEl.textContent = '—';
+            creditsEl.title = I18n.t('leaderboard.balance_unknown');
+            tierEl.className = 'tier-badge';
+            tierEl.textContent = '—';
+            tierEl.title = I18n.t('leaderboard.balance_unknown');
+          } else {
+            creditsEl.textContent = e.credits;
+            var tierClass = (e.tier || 'silver').toLowerCase().replace(/[^a-z]/g, '');
+            tierEl.className = 'tier-badge ' + tierClass;
+            tierEl.textContent = e.tier || I18n.t('leaderboard.tier_default');
+          }
           tbody.appendChild(row);
         }
       } catch (e) {

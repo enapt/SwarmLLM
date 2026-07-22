@@ -580,13 +580,35 @@ pub(super) async fn execute_request(
                 "DIAG: execute_request failed"
             );
 
-            // Apply credit penalty for distributed inference failure.
+            // Apply credit penalty for distributed inference failure — but
+            // only when a remote peer's serving actually let us down. See
+            // `failure_is_penalty_worthy`.
+            let penalty = shared_state.config.pool.credit_rates.penalty_serve_failure;
+            let had_remote_segment = assignment_ref
+                .segments
+                .iter()
+                .any(|seg| seg.node_id != local_node_id);
+            if !failure_is_penalty_worthy(e, had_remote_segment) {
+                tracing::info!(
+                    request_id = %request.id,
+                    error = %e,
+                    had_remote_segment,
+                    "Skipping credit penalty — failure is not attributable to a peer"
+                );
+                crate::inference::pipeline::broadcast_pipeline_error(
+                    &network_tx_for_error,
+                    request.id,
+                    &e.to_string(),
+                )
+                .await;
+                return result;
+            }
+
             // Pool slaves: forward the negative delta to the master so the
             // pool owner sees the penalty, not the slave's local balance.
             // Without this branch the slave's local balance went negative on
             // failures even though it doesn't own the credits, which then
             // gated the slave's own future inference via MIN_BALANCE_FOR_INFERENCE.
-            let penalty = shared_state.config.pool.credit_rates.penalty_serve_failure;
             let pool_id_opt: Option<crate::types::NodeId> = {
                 let ps = shared_state.credits.pool_state.read().await;
                 let me = shared_state.identity.node_id();
@@ -650,4 +672,129 @@ pub(super) async fn execute_request(
         }
     }
     result
+}
+
+/// Should a failed distributed request cost the serving side credits?
+///
+/// Every failure used to apply the flat `penalty_serve_failure`, including
+/// failures that were entirely our own doing. A user debugging the three bugs
+/// in the 2026-07-21 report drove their own node from 0 to -470 credits
+/// without a single peer ever misbehaving — the penalties came from an
+/// unnecessary AllReduce group, a local GPU OOM, and a config setting that
+/// wasn't being honoured.
+///
+/// The rule: penalise only when a remote peer was actually asked to serve and
+/// the failure is consistent with that peer letting us down. Anything the
+/// local node caused, or that failed before a peer was ever engaged, is free.
+///
+/// Being wrong in the "penalise" direction is the expensive mistake — it
+/// pushes an honest, reachable, correctly-configured node toward Bronze tier
+/// and eventually below `MIN_BALANCE_FOR_INFERENCE`, degrading a node for
+/// bugs it did not cause. Being wrong the other way just means a genuinely
+/// bad peer keeps its credits for one more request; trust scoring and
+/// spot-checks still catch it.
+fn failure_is_penalty_worthy(err: &SwarmError, had_remote_segment: bool) -> bool {
+    // Nobody else was involved — there is no peer to blame.
+    if !had_remote_segment {
+        return false;
+    }
+    match err {
+        // Local-only failures. `ServiceUnavailable` is by definition "THIS
+        // server can't serve" (worker died, subprocess spawn failed, GPU OOM);
+        // `Internal` is our own bug; the rest are scheduling/config problems
+        // that a peer has no part in.
+        SwarmError::ServiceUnavailable(_)
+        | SwarmError::Internal(_)
+        | SwarmError::Validation(_)
+        | SwarmError::Config(_)
+        | SwarmError::NotFound(_)
+        | SwarmError::Unauthorized(_)
+        | SwarmError::NoModelLoaded
+        | SwarmError::ModelNotAvailable(_)
+        | SwarmError::InsufficientCapacity(_)
+        | SwarmError::PrivateModeUnavailable { .. }
+        | SwarmError::InsufficientCredits { .. }
+        | SwarmError::InsufficientDisk { .. }
+        | SwarmError::Database(_)
+        | SwarmError::PipelineError(_) => false,
+
+        // Everything else reaches the wire: network faults, timeouts waiting
+        // on a peer, decryption failures on a peer's payload, shard integrity
+        // mismatches, bad signatures, inference errors raised on a remote
+        // segment. These are the failures the penalty exists for.
+        _ => true,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::ModelId;
+
+    #[test]
+    fn local_only_pipeline_is_never_penalised() {
+        // No remote segment means no peer to blame, whatever the error.
+        assert!(!failure_is_penalty_worthy(
+            &SwarmError::Network("connection reset".into()),
+            false
+        ));
+        assert!(!failure_is_penalty_worthy(
+            &SwarmError::InferenceTimeout(120),
+            false
+        ));
+    }
+
+    #[test]
+    fn locally_attributable_failures_are_not_penalised() {
+        // The three bug-report cases, in order.
+        assert!(
+            !failure_is_penalty_worthy(
+                &SwarmError::Internal("AllReduce timeout after 10s for layer 0".into()),
+                true
+            ),
+            "an unnecessary TP group is our scheduling mistake, not a peer's fault"
+        );
+        assert!(
+            !failure_is_penalty_worthy(
+                &SwarmError::ServiceUnavailable("worker fatal error: out of memory".into()),
+                true
+            ),
+            "a local GPU OOM says nothing about the peer"
+        );
+        assert!(!failure_is_penalty_worthy(
+            &SwarmError::ModelNotAvailable(ModelId("m".into())),
+            true
+        ));
+        assert!(!failure_is_penalty_worthy(
+            &SwarmError::PipelineError("no node available for layer 3".into()),
+            true
+        ));
+    }
+
+    #[test]
+    fn genuine_remote_serve_failures_are_penalised() {
+        assert!(failure_is_penalty_worthy(
+            &SwarmError::Network("peer dropped mid-forward".into()),
+            true
+        ));
+        assert!(failure_is_penalty_worthy(
+            &SwarmError::InferenceTimeout(120),
+            true
+        ));
+        assert!(failure_is_penalty_worthy(
+            &SwarmError::ShardIntegrity {
+                expected: "aaa".into(),
+                actual: "bbb".into()
+            },
+            true
+        ));
+        assert!(failure_is_penalty_worthy(
+            &SwarmError::DecryptionFailed,
+            true
+        ));
+        assert!(failure_is_penalty_worthy(
+            &SwarmError::InvalidSignature,
+            true
+        ));
+    }
 }

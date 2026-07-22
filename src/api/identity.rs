@@ -193,35 +193,45 @@ pub async fn leaderboard(
         }
 
         let peer_name = display_name(&peer.node_id, &state.shared_state.nickname_registry);
-        // Use actual gossiped balance if available, otherwise estimate from trust
+        // Only a gossiped balance is real. This used to fall back to
+        // `trust_score * 5000.0` when no balance had been received — which,
+        // at the DEFAULT_TRUST of 0.5, rendered a confident "+2500 credits"
+        // for every peer we knew nothing about. The 2026-07-21 bug report
+        // chased that number as a ledger inconsistency: one node showed
+        // itself at -90 while its peer displayed +2500 for it. Neither
+        // figure was wrong about the ledger; the +2500 was never a ledger
+        // figure at all. A number the user cannot distinguish from a real
+        // balance must not be invented.
         let balance = state
             .shared_state
             .credits
             .peer_credit_balances
             .get(&peer.node_id)
-            .map(|v| *v)
-            .unwrap_or_else(|| {
-                // Scale trust score [0.0, 1.0] to a synthetic credit balance for display
-                const TRUST_CREDIT_SCALE: f32 = 5000.0;
-                (peer.trust_score * TRUST_CREDIT_SCALE) as i64
-            });
-        let peer_tier = crate::credit::priority::PriorityCalculator::tier_name(balance);
+            .map(|v| *v);
         entries.push(serde_json::json!({
             "node_id": format!("{}", peer.node_id),
             "display_name": peer_name,
+            // null = "we have not received this peer's balance gossip yet".
+            // The dashboard renders it as an em dash rather than a number.
             "credits": balance,
-            "tier": peer_tier,
+            "balance_known": balance.is_some(),
+            "tier": balance.map(crate::credit::priority::PriorityCalculator::tier_name),
             "trust_score": peer.trust_score,
             "eligible": true,
         }));
     }
 
-    // Sort by credits descending
-    entries.sort_by(|a, b| {
-        let ca = a["credits"].as_i64().unwrap_or(0);
-        let cb = b["credits"].as_i64().unwrap_or(0);
-        cb.cmp(&ca)
-    });
+    // Sort by credits descending. Peers with no known balance sort last
+    // rather than being treated as zero — an unknown balance is not a claim
+    // that the peer has nothing.
+    entries.sort_by(
+        |a, b| match (a["credits"].as_i64(), b["credits"].as_i64()) {
+            (Some(ca), Some(cb)) => cb.cmp(&ca),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => std::cmp::Ordering::Equal,
+        },
+    );
     entries.truncate(limit);
 
     // Add rank
