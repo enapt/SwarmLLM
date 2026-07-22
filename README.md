@@ -287,8 +287,8 @@ Credits determine request priority. Everyone is served — Bronze just waits lon
 ```bash
 brew tap enapt/swarmllm && brew install swarmllm       # Homebrew (macOS / Linux)
 yay -S swarmllm                                        # AUR (Arch Linux)
-sudo dpkg -i swarmllm_0.3.5-alpha_amd64.deb            # Debian / Ubuntu
-sudo rpm -i swarmllm_0.3.5-alpha.x86_64.rpm            # Fedora / RHEL
+sudo dpkg -i swarmllm_0.3.6-alpha_amd64.deb            # Debian / Ubuntu
+sudo rpm -i swarmllm_0.3.6-alpha.x86_64.rpm            # Fedora / RHEL
 ```
 
 ### Docker
