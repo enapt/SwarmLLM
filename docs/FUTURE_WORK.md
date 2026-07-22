@@ -2148,6 +2148,31 @@ top of scattering placement would make pipelines deeper, not better.
 
 ---
 
+## Separate LAN and public peer caches (2026-07-22)
+
+**Context.** One `peer_cache` tree holds every remembered address. R148 split
+the questions "is this worth *storing*" (`filter_storable`) from "is this worth
+*dialling from here*" (`filter_dialable`), the latter deciding from whether this
+node has a private address of its own. That fixed the public anchor retrying a
+home user's LAN, docker-bridge and libvirt addresses forever, without costing
+LAN reconnection for home nodes or pools.
+
+**What separate trees would add.** The split above keeps everything and filters
+on read, so nothing is lost — a laptop moving between a home network and a
+hotspot retains both sets. Distinct trees would additionally allow: per-network
+eviction (a LAN cache from a network you have left is dead weight the 200-entry
+cap still counts), keying LAN entries by which network they belong to so a
+laptop with two homes does not mix them, and different retention policies (LAN
+addresses are stable for years, public ones churn with DHCP).
+
+**Why deferred.** The read-time filter already fixes the reported problem, and
+splitting storage does not remove the need for the same "where am I now?"
+judgement — it relocates it. The extra structure only pays off for a device that
+moves between several networks, which is not the deployment causing trouble
+today. Revisit if laptops roaming between networks turn out to reconnect poorly.
+
+---
+
 ## How to use this file
 
 When starting a new feature, grep this file for keywords related to the area you're touching. If your feature unblocks a deferred item, either pick it up in the same PR (if scope allows) or move the entry to "completed" with the closing commit reference.

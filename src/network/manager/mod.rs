@@ -1157,7 +1157,12 @@ impl NetworkManager {
     /// would otherwise outlive every restart.
     fn dialable_peer_cache(&self) -> Vec<String> {
         let cached = crate::network::peer_cache::load_peer_cache(&self.shared_state.db);
-        crate::network::peer_cache::filter_dialable(&cached, self.swarm.local_peer_id())
+        let local_addrs = self.shared_state.listen_multiaddrs.load();
+        crate::network::peer_cache::filter_dialable(
+            &cached,
+            self.swarm.local_peer_id(),
+            &local_addrs,
+        )
     }
 
     fn save_peer_cache(&self) {
@@ -1188,7 +1193,10 @@ impl NetworkManager {
             .collect();
         // Filter before persisting so the cache never grows entries the read
         // path would just discard.
-        let addrs = crate::network::peer_cache::filter_dialable(&addrs, self.swarm.local_peer_id());
+        // Storable, not dialable: keep a peer's LAN addresses even when this
+        // node currently has no use for them. Whether they are worth dialling
+        // is a question about where we are now, and that is asked on read.
+        let addrs = crate::network::peer_cache::filter_storable(&addrs, self.swarm.local_peer_id());
         if !addrs.is_empty() {
             crate::network::peer_cache::save_peer_cache(&self.shared_state.db, &addrs);
         }

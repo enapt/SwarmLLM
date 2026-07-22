@@ -222,7 +222,9 @@ pub async fn diagnostics(State(state): State<AppState>) -> impl axum::response::
         let cached = crate::network::peer_cache::load_peer_cache(&ss.db);
         match crate::network::transport::node_id_to_peer_id(ss.identity.node_id()) {
             Some(me) => {
-                let dialable = crate::network::peer_cache::filter_dialable(&cached, &me);
+                let local_addrs = ss.listen_multiaddrs.load();
+                let dialable =
+                    crate::network::peer_cache::filter_dialable(&cached, &me, &local_addrs);
                 let _ = writeln!(
                     out,
                     "\n-- peer cache --\n  {} stored, {} dialable",
