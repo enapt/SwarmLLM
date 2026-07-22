@@ -682,9 +682,25 @@ want. Research note: this matches the explicit-abort design vLLM converged on
 `is_disconnected()` polling approach, which is unreliable behind middleware
 ([issue #10087](https://github.com/vllm-project/vllm/issues/10087))._
 
-_Still open: cancelling a hedge loser running on a **remote** peer needs a
-network-level abort (`SwarmMessage`), not just IPC. The local mechanism above
-is the prerequisite._
+_Remote cancellation closed in the same round. Two paths:_
+
+_**Remote-generate** was closed as a side effect: the inbound handler already
+aborted its `gen_fut` on `SwarmMessage::CancelInference`, and aborting that
+task now drops `ModelProcessPool::generate`'s future → drops the armed
+`ResponseGuard` → messages the worker. Before the guard change, `abort()`
+stopped the daemon-side task while the worker generated the full token budget
+anyway._
+
+_**Hedge losers** needed the explicit send. `hedge_dispatch` now dispatches
+`CancelInference` to the losing holder after the race resolves — hedging
+deliberately creates a duplicate remote forward on every fire, so leaving the
+loser to compute a result we discard on arrival was the single largest source
+of hedging's bandwidth/compute cost. The inbound handler gained a
+`ModelProcessPool::cancel_request(request_id)` fan-out alongside the existing
+abort-handle lookup, because an in-flight `LayerForward` has no abort handle —
+the coordinator simply stopped waiting. Fan-out across workers (rather than
+keyed by model) because the wire message carries only the request id; workers
+are few and an unknown id is a no-op._
 
 ### Batch JoinHandle discard (wontfix)
 
@@ -1101,6 +1117,37 @@ with RoPE (apply BEFORE quant), and breaks the prefix-cache binary
 compatibility. Sizable phase; new test corpus needed.
 
 **Effort.** 3-4 weeks. Major surface touch.
+
+**Research update (R147, 2026-07-22) — do NOT implement KIVI as specced
+above.** Two findings change the recommendation:
+
+1. **KIVI's numbers depend on kernels we don't have.** The speedup comes
+   from fusing dequantisation into the attention matmul plus a Triton
+   kernel for group-wise quantisation; the authors state plainly that
+   "dequantization can be computationally expensive" without them.
+   SwarmLLM runs on candle with no custom CUDA/Triton. Implementing the
+   storage format without the kernels buys the memory saving and pays
+   full dequant cost on every attention call — on a decode step that is
+   very likely a net loss. There is also a `residual length` buffer of
+   unquantised recent tokens that partially offsets the compression,
+   sized by a parameter the paper's summary doesn't pin down.
+2. **Production converged on FP8, not 2-bit.** vLLM and TensorRT-LLM
+   ship FP8 KV caches with quantised-domain execution via
+   FlashAttention-3. That is the design with real deployment evidence
+   behind it, and it also depends on kernel support we lack.
+
+**Revised recommendation.** If KV memory becomes the binding constraint,
+the tractable version for this codebase is **Q8_0 KV reusing
+`inference/quant.rs`** — the group-32 + f16-scale path already shipped
+for R136 Layer 0, already has a quality gate (`L∞ < 0.05`, `MAE < 0.01`
+on representative hidden states), and is already exercised on the wire.
+Roughly 2× KV reduction rather than KIVI's 2.6×, with no new dependency
+and no new numerical risk. **Measure first**: instrument KV bytes vs
+total VRAM on a real long-context run to confirm KV actually dominates
+for our workloads before touching the attention path at all. On the
+short-to-medium contexts this project's users actually run, model
+weights dominate and shard windows / `gpu_layers = 0` are the cheaper
+lever (see R146).
 
 ### Tier 3 — speculative / research-scope
 

@@ -2013,6 +2013,26 @@ pub(crate) async fn dispatch_network_messages(
                                                 "CancelInference: no in-flight decode for request"
                                             );
                                         }
+                                        // Also reach the worker directly. Two
+                                        // cases need this beyond the abort
+                                        // handle above:
+                                        //   - a LayerForward already dispatched
+                                        //     to the worker (e.g. we are the
+                                        //     losing holder of a hedge race)
+                                        //     has no abort handle — the
+                                        //     coordinator simply stopped
+                                        //     waiting, and without this the
+                                        //     worker computes a reply nobody
+                                        //     will read;
+                                        //   - the abort fires between the
+                                        //     worker receiving the request and
+                                        //     the daemon-side future being
+                                        //     dropped.
+                                        // Idempotent on the worker side.
+                                        shared_state
+                                            .model_process_pool
+                                            .cancel_request(cancel.request_id)
+                                            .await;
                                     }
                                     // Other messages handled by NetworkManager
                                     _ => {}

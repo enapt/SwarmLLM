@@ -1939,6 +1939,34 @@ impl ModelProcessPool {
         SwarmError::Inference(message)
     }
 
+    /// Tell every live worker to abandon `request_id`.
+    ///
+    /// Used for cancellations that arrive over the network
+    /// (`SwarmMessage::CancelInference`), where the sender knows only the
+    /// request id — the coordinator's id space is global, ours is per-worker.
+    /// Workers are few (one per loaded model) and a cancel for an unknown id
+    /// is a no-op on the worker side, so the fan-out is cheap and safe.
+    ///
+    /// Locally-originated cancels don't need this: `ResponseGuard` knows its
+    /// own worker and messages it directly on drop.
+    pub async fn cancel_request(&self, request_id: Uuid) {
+        // Collect handles before awaiting — never hold a DashMap ref across an
+        // await point.
+        let workers: Vec<Arc<WorkerHandle>> = self
+            .workers
+            .iter()
+            .filter(|e| !e.value().dead.load(Ordering::Acquire))
+            .map(|e| e.value().clone())
+            .collect();
+        if workers.is_empty() {
+            return;
+        }
+        for worker in workers {
+            let mut writer = worker.writer.lock().await;
+            let _ = send_daemon(&mut *writer, &DaemonMsg::CancelRequest { request_id }, &[]).await;
+        }
+    }
+
     /// Unload all segments for a model (kills the worker subprocess).
     pub async fn unload_model(&self, model_id: &ModelId) {
         if let Some((_, handle)) = self.workers.remove(model_id) {
