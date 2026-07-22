@@ -755,6 +755,7 @@
     }
     if (App.pool) App.pool.init();
     if (App.autoManageStatus) App.autoManageStatus.init();
+    if (App.referenceModels) App.referenceModels.init();
     if (App.claudeCode) App.claudeCode.init();
     if (App.responses) App.responses.init();
     // R111: bind subtab + button handlers for the Swarm tab. Safe to call

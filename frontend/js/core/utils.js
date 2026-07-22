@@ -337,10 +337,58 @@
     // fresh node sees concrete options instead of "no models available".
     if (!modelName) {
       var catalog = buildSwarmCatalog();
-      if (catalog) div.appendChild(catalog);
+      if (catalog) {
+        div.appendChild(catalog);
+      } else {
+        // Nothing on the swarm to offer. A brand-new node with no peers
+        // yet lands here, and "no models available" is a dead end — so
+        // offer a pinned model that is guaranteed to exist.
+        var fallback = buildReferenceFallback();
+        if (fallback) div.appendChild(fallback);
+      }
     }
 
     return div;
+  }
+
+  // Cold-start fallback: the swarm has nothing to suggest, so offer the
+  // standard reference model. Returns null when the pinned list has not
+  // loaded yet, so the empty state degrades to its previous form rather
+  // than rendering a broken block.
+  function buildReferenceFallback() {
+    if (!App.referenceModels || !App.referenceModels._cache) return null;
+    var list = App.referenceModels._cache;
+    var std = null;
+    for (var i = 0; i < list.length; i++) {
+      if (list[i].tier === 'standard') { std = list[i]; break; }
+    }
+    if (!std || std.held) return null;
+
+    var wrap = document.createElement('div');
+    wrap.className = 'chat-empty-catalog';
+
+    var title = document.createElement('div');
+    title.className = 'chat-empty-catalog-title';
+    title.textContent = I18n.t('reference.cold_start_title');
+    wrap.appendChild(title);
+
+    var hint = document.createElement('div');
+    hint.className = 'chat-empty-hint text-sm';
+    hint.textContent = I18n.t('reference.cold_start_hint', {
+      size: formatSize(std.size_mb),
+    });
+    wrap.appendChild(hint);
+
+    var btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'btn btn-sm mt-1';
+    btn.textContent = I18n.t('reference.cold_start_cta');
+    btn.addEventListener('click', function () {
+      App.referenceModels.acquire('standard', true);
+    });
+    wrap.appendChild(btn);
+
+    return wrap;
   }
 
   // Build the swarm-catalog block rendered inside the empty chat state.

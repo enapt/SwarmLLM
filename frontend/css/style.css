@@ -5705,3 +5705,27 @@ textarea.pool-code-input { min-height: 4.5em; }
 .welcome-actions {
   display: flex; justify-content: flex-end;
 }
+
+/* Reference test models (settings) + first-run opt-in. */
+.reference-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--border);
+}
+.reference-row:last-child { border-bottom: none; }
+.reference-row-info { flex: 1; min-width: 0; }
+.reference-row-name { font-weight: 500; }
+
+/* Checkbox and its explanation sit on one baseline; the hint wraps under the
+   label rather than beside the box. */
+.setup-optin {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  cursor: pointer;
+  font-size: 0.875rem;
+}
+.setup-optin input { margin-top: 3px; flex-shrink: 0; }
+.setup-optin .block { display: block; }

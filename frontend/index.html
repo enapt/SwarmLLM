@@ -243,6 +243,16 @@
           <div class="next-steps-title" data-i18n="setup.next_steps_title">What happens next:</div>
           <ul id="summary-next-list" class="next-steps-list"></ul>
         </div>
+        <!-- Unchecked on purpose. Most people setting up want something to
+             chat with, not a benchmark fixture, and this is a real download —
+             it has to be a choice, not a default someone discovers later. -->
+        <label class="setup-optin mt-2" for="setup-reference-model">
+          <input type="checkbox" id="setup-reference-model">
+          <span>
+            <span data-i18n="reference.setup_optin">Also help test the network</span>
+            <span class="text-muted text-2xs block" data-i18n="reference.setup_optin_hint">Downloads a share of a small model everyone testing uses, so speed results can be compared. You can do this later in Settings.</span>
+          </span>
+        </label>
       </div>
 
       <!-- Footer -->
@@ -423,6 +433,18 @@
         </div>
       </div>
       </section>
+
+      <details class="settings-section settings-collapsible" id="settings-testing-section">
+        <summary class="settings-section-summary" data-i18n="reference.section">Testing &amp; Diagnostics</summary>
+        <div class="mt-2 text-sm">
+          <span class="text-muted" data-i18n="reference.section_desc">Shared models everyone can run, so speed results from different machines mean the same thing. Also here: a one-click summary to paste when reporting a problem.</span>
+        </div>
+        <div id="reference-models-list" class="mt-2"></div>
+        <div class="mt-3">
+          <button type="button" class="btn btn-sm" id="copy-diagnostics-btn" data-i18n="reference.copy_diagnostics">Copy diagnostics</button>
+          <div class="text-muted field-hint mt-1" data-i18n="reference.copy_diagnostics_hint">Copies a short summary of this node — version, connections, models and recent events — for pasting into a bug report. No keys or invite codes are included.</div>
+        </div>
+      </details>
 
       <details class="settings-section settings-collapsible settings-providers" id="settings-providers-section">
         <summary class="settings-section-summary" data-i18n="settings.cloud_providers">Cloud Providers</summary>
@@ -1840,6 +1862,7 @@
   <script src="/static/js/components/pool.js"></script>
   <script src="/static/js/components/auto-manage-status.js"></script>
   <script src="/static/js/components/swarm-tab.js"></script>
+  <script src="/static/js/components/reference-models.js"></script>
   <!-- Init (must be last — wires everything together) -->
   <script src="/static/js/init.js"></script>
 </body>

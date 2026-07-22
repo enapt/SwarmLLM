@@ -403,6 +403,13 @@
           });
         } catch (e) {}
       }
+      // Opt-in test model. Fire-and-forget after setup is marked done, and
+      // fair-share rather than the whole model — a first-run user should not
+      // be committed to a full download by a checkbox.
+      var refOptIn = document.getElementById('setup-reference-model');
+      if (refOptIn && refOptIn.checked && App.referenceModels) {
+        App.referenceModels.acquire('standard', true);
+      }
       localStorage.setItem(App.SETUP_DONE_KEY, 'true');
       // Clear the skipped flag so the chip disappears for sure.
       localStorage.removeItem(App.SETUP_SKIPPED_KEY);

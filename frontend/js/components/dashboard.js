@@ -1373,6 +1373,14 @@
               '<div class="model-card-name-row">' +
                 creatorIconHtml +
                 '<span class="model-name" title="' + U.escapeHtml(m.id) + '">' + U.escapeHtml(name) + '</span>' +
+                // Mark pinned test models so they are not mistaken for a
+                // recommendation — they exist to make speed results
+                // comparable, not because they are the best choice to chat to.
+                ((App.referenceModels && App.referenceModels.isReference(m.id))
+                  ? '<span class="badge badge-purple" title="' +
+                      U.escapeHtml(I18n.t('reference.badge_hint')) + '">' +
+                      U.escapeHtml(I18n.t('reference.badge')) + '</span>'
+                  : '') +
                 compositeBadgeHtml +
               '</div>' +
             '</div>' +
