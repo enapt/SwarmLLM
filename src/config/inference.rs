@@ -230,8 +230,27 @@ pub struct InferenceConfig {
     /// Default: false.
     #[serde(default)]
     pub encrypted_pipeline: bool,
+    /// Enable tensor parallelism (per-layer AllReduce across LAN peers).
+    ///
+    /// Default: **false**. TP splits a single layer's matmuls across nodes and
+    /// AllReduces the partial results twice per layer (attention + FFN). That
+    /// exchange is only a win when the interconnect is far faster than the
+    /// compute it replaces — NVLink / PCIe inside one box. Over Ethernet the
+    /// per-layer round trips dominate, and for small models TP is a
+    /// straight-up regression: the pipeline pays 2 × num_layers network RTTs
+    /// to save compute that a single node would have finished sooner alone.
+    /// Pipeline parallelism (which SwarmLLM uses by default) moves one
+    /// activation per *segment* instead of two per *layer*, which is why it
+    /// tolerates LAN/WAN links and TP does not.
+    ///
+    /// Turn this on only for a genuinely large model on a low-latency LAN,
+    /// after measuring. It is never used when the local node can serve the
+    /// whole model alone (see `assemble_pipeline_for`).
+    #[serde(default)]
+    pub tensor_parallel: bool,
     /// Maximum peer RTT (ms) to consider for tensor parallelism AllReduce.
     /// Peers with measured latency above this threshold are excluded from TP groups.
+    /// Only consulted when `tensor_parallel` is enabled.
     /// Default: 10ms (LAN-only).
     #[serde(default = "default_tp_max_latency_ms")]
     pub tp_max_latency_ms: u32,
@@ -753,6 +772,7 @@ impl Default for InferenceConfig {
             privacy_mode: false,
             local_embedding_privacy: false,
             encrypted_pipeline: false,
+            tensor_parallel: false,
             tp_max_latency_ms: default_tp_max_latency_ms(),
             prefix_cache_enabled: true,
             prefix_cache_max_entries: default_prefix_cache_max_entries(),

@@ -664,20 +664,50 @@ impl PipelineExecutor {
                 })
                 .cloned();
 
-            if let Some(ref group) = tp_group {
-                // Tensor-parallel execution: layer-by-layer with AllReduce
-                let tp_result = self
-                    .execute_tp_segment(
-                        request_id,
-                        sequence_num,
-                        index_pos,
-                        &activations,
-                        segment,
-                        group,
-                        is_last,
-                    )
-                    .await?;
+            // Tensor-parallel execution: layer-by-layer with AllReduce.
+            // A `None` outcome means either "no TP group for this segment" or
+            // "the TP group failed and we degraded to plain local compute" —
+            // both fall through to the standard path below.
+            let tp_outcome = match tp_group {
+                Some(ref group) => {
+                    match self
+                        .execute_tp_segment(
+                            request_id,
+                            sequence_num,
+                            index_pos,
+                            &activations,
+                            segment,
+                            group,
+                            is_last,
+                        )
+                        .await
+                    {
+                        Ok(result) => Some(result),
+                        // Graceful degradation: a TP peer that stalls or drops
+                        // must not kill a request this node can serve alone.
+                        // We hold the segment's full layer range (TP groups are
+                        // only formed around a local segment), so reset the
+                        // partial KV this request wrote during the failed
+                        // AllReduce rounds and recompute the segment locally.
+                        Err(e) if segment.node_id == *self.shared_state.identity.node_id() => {
+                            tracing::warn!(
+                                request_id = %request_id,
+                                segment = idx,
+                                layers = ?(segment.layer_range.0..segment.layer_range.1),
+                                error = %e,
+                                "Tensor-parallel segment failed — falling back to local compute"
+                            );
+                            self.reset_kv_after_tp_failure(request_id, segment, index_pos)
+                                .await;
+                            None
+                        }
+                        Err(e) => return Err(e),
+                    }
+                }
+                None => None,
+            };
 
+            if let Some(tp_result) = tp_outcome {
                 // Parse the tagged result: 0x01 prefix = sampled token, 0x00 = raw activations
                 if !tp_result.is_empty() && tp_result[0] == 0x01 {
                     // Last segment returned a sampled token ID

@@ -404,4 +404,42 @@ impl PipelineExecutor {
             }
         }
     }
+
+    /// Roll this request's local KV cache back to `index_pos` after a failed
+    /// tensor-parallel segment, so the caller can safely recompute the segment
+    /// with a plain (non-TP) forward.
+    ///
+    /// A TP segment runs one AllReduce-coordinated layer at a time and each
+    /// `AttnOnly` phase appends to the same per-request KV cache a normal
+    /// forward uses — `SplitModel::kv_model_key()` is `"{start}-{end}-{blocks}"`,
+    /// which carries no TP rank/size, so the two paths share a namespace. If
+    /// the group dies at layer k, layers `0..k` already hold entries for this
+    /// step; recomputing from layer 0 without truncating would double-append
+    /// and silently corrupt the attention context.
+    ///
+    /// Best-effort: a truncate failure is logged, not propagated. The caller is
+    /// already on a degraded path and a wrong-but-present KV is caught by the
+    /// worker's own bounds checks on the retry.
+    pub(super) async fn reset_kv_after_tp_failure(
+        &self,
+        request_id: uuid::Uuid,
+        segment: &PipelineSegment,
+        index_pos: usize,
+    ) {
+        let truncate_to = u32::try_from(index_pos).unwrap_or(u32::MAX);
+        let forward = super::build_kv_truncate_forward(
+            request_id,
+            segment,
+            truncate_to,
+            self.shared_state.identity.node_id().0,
+        );
+        if let Err(e) = self.shared_state.model_process_pool.forward(forward).await {
+            tracing::warn!(
+                request_id = %request_id,
+                truncate_to,
+                error = %e,
+                "KV truncate after TP failure did not complete — local retry may see stale cache"
+            );
+        }
+    }
 }

@@ -68,7 +68,8 @@ Every configuration option, organized by section.
 | `speculative_gamma` | integer | `4` | Draft tokens per verification step |
 | `draft_model_path` | path | none | Path to draft model |
 | `max_split_model_memory_mb` | integer | none | Max GPU memory for split model cache |
-| `tp_max_latency_ms` | integer | `10` | Max peer latency (ms) for tensor parallelism groups |
+| `tensor_parallel` | boolean | `false` | Split single layers across LAN peers via per-layer AllReduce. Off by default — over Ethernet the two round trips per layer cost more than the compute they split, and a node that holds every layer never forms a group regardless |
+| `tp_max_latency_ms` | integer | `10` | Max peer latency (ms) for tensor parallelism groups (only consulted when `tensor_parallel = true`) |
 | `local_embedding_privacy` | boolean | `false` | Embed tokens locally before sending to first segment. Remote nodes never see raw token IDs |
 | `encrypted_pipeline` | boolean | `false` | Force first+last segment to local node (boomerang topology). No remote sees plaintext. Adds ~1 RTT/token. Per-model override via API. Requires shard 0 + final shard locally |
 

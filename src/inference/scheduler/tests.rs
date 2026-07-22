@@ -8,7 +8,15 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 
 fn make_shared_state() -> Arc<SharedState> {
-    let config = Config::default();
+    make_shared_state_with(|_| {})
+}
+
+/// `make_shared_state` with a hook to tweak the config before the state is
+/// built. Needed for tensor parallelism, which is opt-in (`inference.
+/// tensor_parallel`, default false) since R146.
+fn make_shared_state_with(tweak: impl FnOnce(&mut Config)) -> Arc<SharedState> {
+    let mut config = Config::default();
+    tweak(&mut config);
     let identity = Identity::generate();
     let temp = tempfile::tempdir().unwrap();
     let db = Database::open(temp.path()).unwrap();
@@ -355,9 +363,93 @@ fn prefers_lower_load_node() {
     assert_eq!(assignment.segments[0].node_id, node_b);
 }
 
+/// Two-shard topology in which the local node holds only the first half of
+/// the model: local + `node_b` cover layers 0..16, `node_c` covers 16..32.
+///
+/// This is the only shape where a tensor-parallel group is worth considering.
+/// When the local node covers every layer it can serve alone, and pulling a
+/// peer in can only add latency and a failure mode.
+fn setup_tp_split_topology(
+    state: &Arc<SharedState>,
+    model_id: &str,
+    node_b: &NodeId,
+    node_b_is_lan: bool,
+    node_b_latency_ms: u32,
+) {
+    let local_id = state.identity.node_id().clone();
+    let node_c = NodeId([99u8; 32]);
+
+    let shards = vec![
+        ShardInfo {
+            index: 0,
+            layer_range: (0, 16),
+            size_bytes: 2_000_000_000,
+            hash: [0u8; 32],
+            tensors: vec![],
+        },
+        ShardInfo {
+            index: 1,
+            layer_range: (16, 32),
+            size_bytes: 2_000_000_000,
+            hash: [1u8; 32],
+            tensors: vec![],
+        },
+    ];
+    state
+        .model_registry
+        .register_manifest(make_manifest(model_id, 32, shards));
+
+    let shard0 = ShardId {
+        model_id: ModelId(model_id.into()),
+        index: 0,
+    };
+    let shard1 = ShardId {
+        model_id: ModelId(model_id.into()),
+        index: 1,
+    };
+    state
+        .model_registry
+        .record_shard_holder(shard0.clone(), local_id);
+    state
+        .model_registry
+        .record_shard_holder(shard0, node_b.clone());
+    state
+        .model_registry
+        .record_shard_holder(shard1, node_c.clone());
+
+    for (node, is_lan, latency) in [
+        (node_b.clone(), node_b_is_lan, node_b_latency_ms),
+        (node_c, false, 50),
+    ] {
+        state.peer_registry.insert(
+            node.clone(),
+            PeerInfo {
+                node_id: node.clone(),
+                addresses: vec![],
+                capability: None,
+                last_seen: chrono::Utc::now(),
+                latency_ms: Some(latency),
+                trust_score: 0.9,
+                peer_id_bytes: None,
+                active_request_count: 0,
+                first_seen: 0,
+                verified_transaction_count: 0,
+                is_lan_peer: is_lan,
+            },
+        );
+        state.connected_node_ids.insert(node);
+    }
+}
+
 #[test]
-fn detects_tp_group_for_lan_peers() {
-    let state = make_shared_state();
+fn no_tp_group_when_local_node_covers_every_layer() {
+    // Regression (user bug report 2026-07-21 #1): a fully-replicated model on
+    // two LAN peers used to form a tensor-parallel group anyway. The local
+    // node could have answered alone; instead the request died with
+    // "AllReduce timeout after 10s for layer 0" when the peer went quiet.
+    // Full local coverage must take the single-local-segment fast path with
+    // NO TP group — even with tensor parallelism explicitly enabled.
+    let state = make_shared_state_with(|c| c.inference.tensor_parallel = true);
     let local_id = state.identity.node_id().clone();
     let node_b = NodeId([20u8; 32]);
 
@@ -368,12 +460,12 @@ fn detects_tp_group_for_lan_peers() {
         hash: [0u8; 32],
         tensors: vec![],
     }];
-    let manifest = make_manifest("tp-model", 32, shards);
-    state.model_registry.register_manifest(manifest);
+    state
+        .model_registry
+        .register_manifest(make_manifest("tp-full-model", 32, shards));
 
-    // Both local node and Node B host the same shard
     let shard_id = ShardId {
-        model_id: ModelId("tp-model".into()),
+        model_id: ModelId("tp-full-model".into()),
         index: 0,
     };
     state
@@ -383,7 +475,6 @@ fn detects_tp_group_for_lan_peers() {
         .model_registry
         .record_shard_holder(shard_id, node_b.clone());
 
-    // Mark Node B as a LAN peer
     state.peer_registry.insert(
         node_b.clone(),
         PeerInfo {
@@ -400,132 +491,93 @@ fn detects_tp_group_for_lan_peers() {
             is_lan_peer: true,
         },
     );
-    state.connected_node_ids.insert(node_b.clone());
+    state.connected_node_ids.insert(node_b);
 
     let scheduler = PipelineScheduler::new(state);
     let assignment = scheduler
-        .assemble_pipeline(&ModelId("tp-model".into()), &local_id)
+        .assemble_pipeline(&ModelId("tp-full-model".into()), &local_id)
         .unwrap();
 
-    // AllReduce is now implemented — LAN peer forms a TP group
     assert_eq!(assignment.segments.len(), 1);
+    assert_eq!(assignment.segments[0].node_id, local_id);
+    assert!(
+        assignment.tp_groups.is_empty(),
+        "local node holds every layer — no peer should be pulled into the request"
+    );
+}
+
+#[test]
+fn detects_tp_group_for_lan_peers_when_enabled() {
+    let state = make_shared_state_with(|c| c.inference.tensor_parallel = true);
+    let local_id = state.identity.node_id().clone();
+    let node_b = NodeId([20u8; 32]);
+    setup_tp_split_topology(&state, "tp-lan-model", &node_b, true, 1);
+
+    let scheduler = PipelineScheduler::new(state);
+    let assignment = scheduler
+        .assemble_pipeline(&ModelId("tp-lan-model".into()), &local_id)
+        .unwrap();
+
     assert_eq!(assignment.tp_groups.len(), 1);
     assert_eq!(assignment.tp_groups[0].nodes.len(), 2);
     assert!(assignment.tp_groups[0].nodes.contains(&local_id));
     assert!(assignment.tp_groups[0].nodes.contains(&node_b));
-    assert_eq!(assignment.tp_groups[0].layer_range, (0, 32));
+    assert_eq!(assignment.tp_groups[0].layer_range, (0, 16));
+}
+
+#[test]
+fn no_tp_group_when_tensor_parallel_disabled() {
+    // Same topology as the test above, but with the default config. TP is
+    // opt-in: per-layer AllReduce over Ethernet costs more than the compute
+    // it splits for anything short of a large model on a very fast LAN.
+    let state = make_shared_state();
+    assert!(
+        !state.config.inference.tensor_parallel,
+        "tensor parallelism must default to off"
+    );
+    let local_id = state.identity.node_id().clone();
+    let node_b = NodeId([20u8; 32]);
+    setup_tp_split_topology(&state, "tp-off-model", &node_b, true, 1);
+
+    let scheduler = PipelineScheduler::new(state);
+    let assignment = scheduler
+        .assemble_pipeline(&ModelId("tp-off-model".into()), &local_id)
+        .unwrap();
+
+    assert!(assignment.tp_groups.is_empty());
 }
 
 #[test]
 fn no_tp_group_for_wan_peers() {
-    let state = make_shared_state();
+    // Even with TP enabled and a genuinely split model, a high-latency peer
+    // is excluded — AllReduce round trips would dominate.
+    let state = make_shared_state_with(|c| c.inference.tensor_parallel = true);
     let local_id = state.identity.node_id().clone();
     let node_b = NodeId([21u8; 32]);
-
-    let shards = vec![ShardInfo {
-        index: 0,
-        layer_range: (0, 32),
-        size_bytes: 4_000_000_000,
-        hash: [0u8; 32],
-        tensors: vec![],
-    }];
-    let manifest = make_manifest("wan-model", 32, shards);
-    state.model_registry.register_manifest(manifest);
-
-    let shard_id = ShardId {
-        model_id: ModelId("wan-model".into()),
-        index: 0,
-    };
-    state
-        .model_registry
-        .record_shard_holder(shard_id.clone(), local_id.clone());
-    state
-        .model_registry
-        .record_shard_holder(shard_id, node_b.clone());
-
-    // Node B is NOT a LAN peer
-    state.peer_registry.insert(
-        node_b.clone(),
-        PeerInfo {
-            node_id: node_b.clone(),
-            addresses: vec![],
-            capability: None,
-            last_seen: chrono::Utc::now(),
-            latency_ms: Some(100),
-            trust_score: 0.8,
-            peer_id_bytes: None,
-            active_request_count: 0,
-            first_seen: 0,
-            verified_transaction_count: 0,
-            is_lan_peer: false,
-        },
-    );
-    state.connected_node_ids.insert(node_b.clone());
+    setup_tp_split_topology(&state, "wan-model", &node_b, false, 100);
 
     let scheduler = PipelineScheduler::new(state);
     let assignment = scheduler
         .assemble_pipeline(&ModelId("wan-model".into()), &local_id)
         .unwrap();
 
-    // Should have segments but NO TP groups (WAN peer)
-    assert_eq!(assignment.segments.len(), 1);
     assert!(assignment.tp_groups.is_empty());
 }
 
 #[test]
 fn tp_group_from_low_latency_only() {
-    // TP group should form when peer has low measured latency
-    // but was NOT discovered via mDNS (is_lan_peer = false).
-    let state = make_shared_state();
+    // TP group should form when the peer has low measured latency but was NOT
+    // discovered via mDNS (is_lan_peer = false).
+    let state = make_shared_state_with(|c| c.inference.tensor_parallel = true);
     let local_id = state.identity.node_id().clone();
     let node_b = NodeId([22u8; 32]);
-
-    let shards = vec![ShardInfo {
-        index: 0,
-        layer_range: (0, 32),
-        size_bytes: 4_000_000_000,
-        hash: [0u8; 32],
-        tensors: vec![],
-    }];
-    let manifest = make_manifest("latency-tp-model", 32, shards);
-    state.model_registry.register_manifest(manifest);
-
-    let shard_id = ShardId {
-        model_id: ModelId("latency-tp-model".into()),
-        index: 0,
-    };
-    state
-        .model_registry
-        .record_shard_holder(shard_id.clone(), local_id.clone());
-    state
-        .model_registry
-        .record_shard_holder(shard_id, node_b.clone());
-
-    // Node B: NOT mDNS discovered, but has measured 2ms latency
-    state.peer_registry.insert(
-        node_b.clone(),
-        PeerInfo {
-            node_id: node_b.clone(),
-            addresses: vec![],
-            capability: None,
-            last_seen: chrono::Utc::now(),
-            latency_ms: Some(2),
-            trust_score: 0.9,
-            peer_id_bytes: None,
-            active_request_count: 0,
-            first_seen: 0,
-            verified_transaction_count: 0,
-            is_lan_peer: false,
-        },
-    );
-    state.connected_node_ids.insert(node_b.clone());
+    setup_tp_split_topology(&state, "latency-tp-model", &node_b, false, 2);
 
     let scheduler = PipelineScheduler::new(state);
     let assignment = scheduler
         .assemble_pipeline(&ModelId("latency-tp-model".into()), &local_id)
         .unwrap();
 
-    // Should form TP group based on low latency alone
     assert_eq!(assignment.tp_groups.len(), 1);
     assert_eq!(assignment.tp_groups[0].nodes.len(), 2);
 }

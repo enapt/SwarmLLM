@@ -209,14 +209,18 @@ impl PipelineScheduler {
                 shard_id: local_cand.shard_id.clone(),
                 layer_range: (0, num_layers),
             };
-            // Still detect TP groups — LAN peers covering the same range
-            // can participate in tensor parallelism even in single-segment mode.
-            let tp_groups = self.detect_tp_groups(std::slice::from_ref(&segment), &candidates);
+            // No TP groups here — deliberately. When the local node already
+            // holds every layer, pulling a LAN peer into a tensor-parallel
+            // group can only make the request slower (2 × num_layers AllReduce
+            // round trips replacing compute we were about to do anyway) and
+            // adds a hard dependency on a peer we did not need. A peer that
+            // stalls then fails the whole request with an AllReduce timeout,
+            // even though this node could have answered alone.
             return Ok(PipelineAssignment {
                 request_id,
                 segments: vec![segment],
                 standbys: vec![],
-                tp_groups,
+                tp_groups: vec![],
                 supports_speculative: true,
             });
         }
@@ -256,9 +260,12 @@ impl PipelineScheduler {
         let standbys = self.find_standbys(&segments, &candidates);
 
         // Detect tensor-parallel opportunities: LAN peers sharing the same layer range.
+        // Opt-in only (`inference.tensor_parallel`, default false) — per-layer
+        // AllReduce over Ethernet costs more than the compute it splits for
+        // anything but a large model on a very fast LAN.
         // Skip TP when encrypted pipeline is active — no remote node should process
         // tensor data in encrypted mode (defeats the purpose of local-only embedding/sampling).
-        let tp_groups = if encrypted {
+        let tp_groups = if encrypted || !self.shared_state.config.inference.tensor_parallel {
             vec![]
         } else {
             self.detect_tp_groups(&segments, &candidates)

@@ -55,6 +55,11 @@ batch_timeout_ms = 50          # Ms to wait for more requests before dispatching
 privacy_mode = false           # When true, user prompts are NOT written to disk (KV-cache sessions stay in-memory only)
 # local_embedding_privacy = false  # Embed tokens locally before sending to first segment (remote never sees raw tokens)
 # encrypted_pipeline = false   # Force first+last segment local (boomerang). No remote sees plaintext. Adds ~1 RTT/token. Per-model override via API.
+# tensor_parallel = false      # Split single layers across LAN peers with per-layer AllReduce. OFF by default:
+                               # over Ethernet the 2 round trips per layer cost more than the compute they split,
+                               # and SwarmLLM's default pipeline parallelism moves one activation per SEGMENT instead.
+                               # Only worth enabling for a large model on a very fast LAN, after measuring.
+# tp_max_latency_ms = 10       # Max peer RTT to admit into a tensor-parallel group (only used when tensor_parallel = true)
 
 [logging]
 level = "info"                 # trace, debug, info, warn, error
