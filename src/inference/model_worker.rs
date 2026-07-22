@@ -394,7 +394,7 @@ pub async fn run_worker(
         if !cancelled.is_empty() {
             if !slot_table.is_empty() {
                 for slot in slot_table.take_matching(|s| cancelled.contains_key(&s.request_id)) {
-                    tracing::debug!(
+                    tracing::info!(
                         request_id = %slot.request_id,
                         generated = slot.generated_count(),
                         "model-worker: dropping cancelled decode slot"
@@ -1790,7 +1790,7 @@ async fn handle_generate(
             // daemon-side abandonment reaches us. Checking per token bounds
             // wasted compute to one forward instead of the full max_tokens.
             if cancelled.remove(&request_id).is_some() {
-                tracing::debug!(
+                tracing::info!(
                     %request_id,
                     generated = generated.len(),
                     "model-worker: generation cancelled by daemon"

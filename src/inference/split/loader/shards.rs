@@ -212,10 +212,16 @@ impl SplitModel {
         if device.is_cuda() {
             tracing::info!(layer_start, layer_end, "Split model using CUDA GPU");
         } else if force_cpu {
+            // `force_cpu` has two callers now. Before R146 it was set only by
+            // the load-time GPU-OOM retry in `shard_loader`, so the message
+            // named that cause outright; since `gpu_layers = 0` also routes
+            // here, saying "GPU OOM fallback" to an operator who simply
+            // configured CPU-only is actively misleading — it reads as a
+            // failure report for a deliberate setting.
             tracing::info!(
                 layer_start,
                 layer_end,
-                "Split model using CPU (GPU OOM fallback)"
+                "Split model using CPU (requested: gpu_layers = 0, or GPU OOM fallback)"
             );
         } else {
             tracing::info!(

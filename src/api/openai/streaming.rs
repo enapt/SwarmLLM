@@ -107,29 +107,50 @@ pub fn spawn_split_stream(
     let pool = state.shared_state.model_process_pool.clone();
     let model_id = model_id.clone();
     let layer_range = meta.layer_range;
+    // Watch handle for consumer liveness. `Sender::closed()` resolves when the
+    // RECEIVER is dropped, which is what happens when the SSE bridge task exits
+    // — and that task exits as soon as a send to the disconnected client fails.
+    let disconnect_watch = token_tx.clone();
     tokio::spawn(async move {
-        if let Err(e) = pool
-            .generate(
-                &model_id,
-                layer_range,
-                prompt,
-                params,
-                rid,
-                None,
-                Some(token_tx),
-            )
-            .await
-        {
-            // Streaming channel closes when this scope ends. Without the
-            // log the SSE stream silently truncates with no operator-
-            // visible diagnostic — workers crashing mid-stream looked
-            // like a clean client disconnect.
-            tracing::warn!(
-                error = %e,
-                model = %model_id,
-                request_id = %rid,
-                "DIAG: local streaming generate failed",
-            );
+        let generate = pool.generate(
+            &model_id,
+            layer_range,
+            prompt,
+            params,
+            rid,
+            None,
+            Some(token_tx),
+        );
+        tokio::select! {
+            result = generate => {
+                if let Err(e) = result {
+                    // Streaming channel closes when this scope ends. Without the
+                    // log the SSE stream silently truncates with no operator-
+                    // visible diagnostic — workers crashing mid-stream looked
+                    // like a clean client disconnect.
+                    tracing::warn!(
+                        error = %e,
+                        model = %model_id,
+                        request_id = %rid,
+                        "DIAG: local streaming generate failed",
+                    );
+                }
+            }
+            // Nobody is reading any more. Selecting this branch DROPS the
+            // `generate` future, which drops its armed `ResponseGuard`, which
+            // tells the worker to stop — the whole point of the cancellation
+            // path. Before this existed the task was spawned detached and its
+            // JoinHandle discarded, so a client that hung up mid-stream left
+            // the worker generating its full token budget into a channel with
+            // no receiver. Measured: 754% CPU still burning 30s after the
+            // client was killed.
+            _ = disconnect_watch.closed() => {
+                tracing::info!(
+                    model = %model_id,
+                    request_id = %rid,
+                    "Client disconnected mid-stream — abandoning generation",
+                );
+            }
         }
     });
     Some(token_rx)

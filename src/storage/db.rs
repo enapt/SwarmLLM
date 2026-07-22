@@ -141,7 +141,17 @@ pub struct Database {
 
 /// RAII guard for `open_temp()` files — removes the path on drop so test
 /// runs don't leak redb files into the system temp directory.
+///
+/// Carries the same `cfg` gate as its only constructor. Without it, release
+/// builds (no `test`, no `debug_assertions`) compile the struct with nothing
+/// left to construct it and warn `struct TempFileGuard is never constructed`.
+/// `cargo clippy --all-targets` hides that, because building the test targets
+/// re-enables `open_temp` — so it only ever showed up in a plain
+/// `cargo build --release`.
+#[cfg(any(test, debug_assertions))]
 struct TempFileGuard(std::path::PathBuf);
+
+#[cfg(any(test, debug_assertions))]
 impl Drop for TempFileGuard {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.0);

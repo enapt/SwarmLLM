@@ -808,6 +808,16 @@ L1 precedes remote_generate because multi-token-per-round acceptance on hits win
 - **R131**: pool-state gossip debounce
 - **R130**: cross-pool wishlist gossip
 
+## Public-Facing Repo (2026-07-22)
+
+The repo is public and a **GitHub webhook relays activity to the project Discord** —
+every commit and push is broadcast to real users, including non-technical ones
+deciding whether to run this software. Commit subjects must stand alone in a feed
+with no context; lead with user-visible impact before mechanism; never name a person
+or paste private correspondence; get sign-off before force-pushes or history rewrites
+(they surface in the feed and look like something broke). Full guidance in
+`.claude/rules/workflow.md` § "Pushes are public-facing".
+
 ## Common Commands
 
 ```bash
