@@ -162,6 +162,14 @@ impl Config {
         self.auto_manage.hf_watcher_enabled = false;
         self.node.contribution_auto = false;
         self.ui.open_browser_on_start = false;
+        // An anchor never loads a model, so no worker should ever spawn and
+        // this is belt-and-braces. It is here because R146 flipped the
+        // `gpu_layers` default from `0` to `-1` (auto) — which silently moved
+        // anchors from "CPU only" to "use the GPU if there is one". Nothing
+        // reads it on an anchor today, but the doc comment above promises
+        // every inference knob is off, and a promise that depends on an
+        // unrelated default staying put is not one worth making.
+        self.inference.gpu_layers = 0;
     }
 
     /// Load config with priority: CLI overrides > env vars > config file > defaults.
@@ -455,6 +463,7 @@ mod tests {
         config.auto_manage.hf_watcher_enabled = true;
         config.node.contribution_auto = true;
         config.ui.open_browser_on_start = true;
+        config.inference.gpu_layers = -1;
 
         config.apply_anchor_mode();
 
@@ -467,6 +476,10 @@ mod tests {
         assert!(
             !config.node.contribution_auto,
             "contribution_auto must be off"
+        );
+        assert_eq!(
+            config.inference.gpu_layers, 0,
+            "anchor must not claim a GPU — the default is -1 (auto) since R146"
         );
         assert!(
             !config.ui.open_browser_on_start,
