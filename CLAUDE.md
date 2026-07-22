@@ -151,7 +151,7 @@ libp2p 0.56, axum 0.8, candle-core/candle-transformers 0.10 (CUDA), redb 4, ed25
 
 ## Testing
 
-- 1134 lib tests passing + 8 ignored (env-var-gated real-model + manual smoke), 75 integration tests in `tests/integration/`, 1 ignored end-to-end (`cargo test --test integration_phase10_11 -- --ignored`), clippy clean. Microbench: `cargo run --release --no-default-features --features dev,claude-subscription --example swarm_spec_bench` (R136 — measures all 4 SWARM-SPEC layer primitives + synthetic cascade hit-rate). Local-cluster bench: `examples/3node_setup.sh` (boots 3 daemons) + `examples/3node_inference_bench.sh` (runs 3 workloads × 3 trials and prints tok/s + swarm_spec metrics). Sharded variant: `examples/3node_sharded_setup.sh` (forced distributed pipeline — requires `auto_manage.enabled = false` in per-node config.toml to preserve sharded state).
+- 1144 lib tests passing + 8 ignored (env-var-gated real-model + manual smoke), 75 integration tests in `tests/integration/`, 1 ignored end-to-end (`cargo test --test integration_phase10_11 -- --ignored`), clippy clean. Microbench: `cargo run --release --no-default-features --features dev,claude-subscription --example swarm_spec_bench` (R136 — measures all 4 SWARM-SPEC layer primitives + synthetic cascade hit-rate). Local-cluster bench: `examples/3node_setup.sh` (boots 3 daemons) + `examples/3node_inference_bench.sh` (runs 3 workloads × 3 trials and prints tok/s + swarm_spec metrics). Sharded variant: `examples/3node_sharded_setup.sh` (forced distributed pipeline — requires `auto_manage.enabled = false` in per-node config.toml to preserve sharded state).
 - Unit tests: in-module `#[cfg(test)]` blocks
 - Integration tests: `tests/integration/` — multi-node simulations with `--test-threads=1`
 - Real-model spawn-and-infer test: set `SWARMLLM_TEST_MODEL_DIR` to a fully-populated model directory (e.g. `~/.local/share/swarmllm/models/tinyllama-1.1b-...`) and run `cargo test --test integration_phase10_11 -- --ignored end_to_end`. No synthetic GGUF fixture is committed; see `docs/ARCHITECTURE.md` § Deferred Items.
@@ -192,7 +192,7 @@ When spawning subagents in this repo, use these model picks (overrides defaults 
 
 ## Status
 
-All 20 build phases complete. All subsystems wired — no stubs. **1134 lib tests + 75 integration tests passing**; 8 lib + 1 e2e ignored (env-var or manual). Clippy clean default + features dev,claude-subscription + `--features llama`.
+All 20 build phases complete. All subsystems wired — no stubs. **1144 lib tests + 75 integration + 2 repo-consistency tests passing**; 8 lib + 1 e2e ignored (env-var or manual). Clippy clean default + features dev,claude-subscription + `--features llama`.
 
 ### Latest: R148 — VLM deferrals + CI cache-warm fix (2026-07-22)
 
@@ -232,7 +232,28 @@ failed on a package uninstallable on 24.04 — and since the runner image is par
 of the `rust-cache` key, a green run would still have warmed a cache the
 release could never restore. Per-entry `runner:` added.
 
-1124 → 1134 lib tests.
+**Sweep + release (same round).** Four-agent sweep: dead-code clean, 2
+duplication finds (two private `now_ms()` copies of `types::unix_now_ms()` —
+R142 had to fix the same clock bug in both *because* they were copies), 1
+error-attribution find, 1 stale doc count. The doc count had drifted ~20 times,
+so `tests/repo_consistency.rs` now asserts it **and** true key-set parity across
+all 21 locales. The sweep log itself had been invalid JSONL since 2026-05-08
+(unescaped quotes), silently breaking every round's dedup pass — repaired.
+
+**AllReduce attribution** (`inference/allreduce.rs`, `daemon/state/tp_allreduce.rs`,
+`pipeline/tensor_parallel.rs`): the four checks reading data *received from a
+peer* now raise `Inference` (chargeable) instead of `Internal` (which
+`failure_is_penalty_worthy` excludes), so a peer that poisons a reduction is
+recorded. The ring timeout and the local-partial check deliberately keep
+`Internal` — a ring stalls for whoever is slowest and that can be us; R146 is
+the record of what charging an ambiguous failure costs.
+
+**v0.3.6-alpha released** (09:00Z, 17 assets — up from 13; the 4 new ones are
+the GPU bare binaries + sha256 that make the updater fix effective). Cache-warm
+proved out: Linux CUDA **58m54s → 9m48s** despite the `Cargo.lock` bump shifting
+the primary key (rust-cache prefix fallback restored the deps).
+
+1124 → 1144 lib tests.
 
 ### Prior: R147 — FUTURE_WORK push (request cancellation + deferral closures) (2026-07-22)
 
