@@ -2,6 +2,38 @@
 
 All notable changes to SwarmLLM are documented here.
 
+## [0.3.10-alpha] — 2026-07-22
+
+### Fixed
+
+- **The dashboard showed no readable text.** Every label, button and heading
+  that comes from a translation file appeared as its internal name instead of
+  words. A fault in the test-model panel added in 0.3.9 ran during startup and
+  stopped everything after it, including the step that applies translations.
+  That panel can no longer take the rest of the interface down with it.
+  **Anyone on 0.3.9 should update.**
+- **"No models available" now explains itself.** It used to say that and
+  nothing more, which tells you something is wrong without saying what or what
+  to do. It now says whether it is still looking for other computers, has found
+  none, or has found some that are not sharing anything yet — and offers a way
+  forward in each case rather than leaving you at a dead end.
+- **A model said "Installed" when it was not.** The test-model list treated
+  simply having heard of a model as having it, and a machine hears about a
+  model as soon as any other machine mentions it. It now means what it says:
+  this computer is actually storing part of it.
+- **A backup copy of a model folder was offered to the network as a real
+  model.** Copying a model folder — to `.FULLBACKUP`, `.old` or similar — made
+  a model that other machines recorded, counted, and could never obtain,
+  because its name came from the folder rather than the model. Such folders are
+  now ignored, with a note in the log saying how to fix it if the model is
+  genuine.
+
+### Added
+
+- **More in Copy diagnostics.** It now also reports the addresses this computer
+  can be reached at, and how many remembered addresses are actually usable — the
+  two things most often needed when working out why a machine cannot be found.
+
 ## [0.3.9-alpha] — 2026-07-22
 
 ### Added
