@@ -799,10 +799,16 @@ fn ensure_p2p_suffix(addr: Multiaddr, local_peer_id: libp2p::PeerId) -> Multiadd
     }
 }
 
-/// Decide whether a listen address is something a remote peer could plausibly
-/// dial. Excludes loopback, unspecified, IPv4 link-local, and the AWS/GCP
-/// IMDS address; keeps everything else (LAN, CGN/Tailscale, public).
-fn addr_is_remotely_reachable(addr: &Multiaddr) -> bool {
+/// Decide whether an address is something a remote peer could plausibly dial.
+/// Excludes loopback, unspecified, IPv4 link-local, and the AWS/GCP IMDS
+/// address; keeps everything else (LAN, CGN/Tailscale, public).
+///
+/// Shared with `network::peer_cache::filter_dialable` — the same question is
+/// asked of our own listen addresses before we advertise them and of a peer's
+/// advertised addresses before we cache and re-dial them. Keep it one
+/// predicate; a cache that admits addresses the advertiser would have
+/// suppressed just relocates the problem.
+pub(crate) fn addr_is_remotely_reachable(addr: &Multiaddr) -> bool {
     for proto in addr.iter() {
         match proto {
             libp2p::multiaddr::Protocol::Ip4(ip)

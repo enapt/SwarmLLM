@@ -20,6 +20,16 @@ All notable changes to SwarmLLM are documented here.
   may still fetch the CPU build, because the *currently installed* binary is
   the one choosing. Reinstall the GPU archive once and it will track the right
   variant from then on.
+- **Nodes kept re-dialling addresses that could never work.** Remembered peer
+  addresses were stored exactly as each peer advertised them, including their
+  loopback and private network addresses. A node on the public internet then
+  retried those every minute forever — and a relay node could end up trying to
+  reach a peer by relaying through itself. Remembered addresses are now checked
+  before being stored *and* before being dialled, so an existing bad list is
+  cleaned up on the next start rather than persisting. Local network addresses
+  are still kept, since that is how two machines in one home find each other
+  again after a reboot. The per-address log line also moved to debug level; an
+  idle node was writing one line per remembered address every minute.
 - **A model whose chat template failed to load could be sent an empty prompt.**
   Several kinds of broken template produced no text at all instead of
   reporting an error, and the empty result was used as the prompt — so the

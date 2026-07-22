@@ -44,7 +44,11 @@ pub fn bootstrap_peers(
 
                 match swarm.dial(addr.clone()) {
                     Ok(_) => {
-                        tracing::info!(addr = %addr, peer_id = ?maybe_peer_id, "Dialing bootstrap peer");
+                        // Per-address at debug: this runs on every bootstrap
+                        // retry, so at info an idle node emitted one line per
+                        // cached address per minute, forever. Callers log a
+                        // single line with the returned count.
+                        tracing::debug!(addr = %addr, peer_id = ?maybe_peer_id, "Dialing bootstrap peer");
                         dialed += 1;
                     }
                     Err(e) => {

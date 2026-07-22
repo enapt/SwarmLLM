@@ -24,6 +24,9 @@ mod commands;
 mod connections;
 mod dht;
 mod events;
+/// Shared with `network::peer_cache` so the advertise path and the cache path
+/// apply one reachability predicate rather than two that can drift.
+pub(crate) use events::addr_is_remotely_reachable;
 mod identify;
 mod requests;
 mod shard_transfer;
@@ -592,7 +595,7 @@ impl NetworkManager {
                 "Offline LAN mode — skipping bootstrap peers and peer cache, mDNS discovery only"
             );
         } else {
-            let cached_peers = crate::network::peer_cache::load_peer_cache(&self.shared_state.db);
+            let cached_peers = self.dialable_peer_cache();
             if !cached_peers.is_empty() {
                 let cached_count = discovery::bootstrap_peers(&mut self.swarm, &cached_peers)?;
                 if cached_count > 0 {
@@ -716,7 +719,7 @@ impl NetworkManager {
                         let _ = discovery::trigger_bootstrap(&mut self.swarm);
                         // Re-dial cached peers that we're not currently connected to.
                         // This handles peers that went offline and came back.
-                        let cached = crate::network::peer_cache::load_peer_cache(&self.shared_state.db);
+                        let cached = self.dialable_peer_cache();
                         if !cached.is_empty() {
                             let _ = discovery::bootstrap_peers(&mut self.swarm, &cached);
                         }
@@ -751,9 +754,7 @@ impl NetworkManager {
                                 &mut self.swarm,
                                 &self.shared_state.config.network.bootstrap_peers,
                             );
-                            let cached = crate::network::peer_cache::load_peer_cache(
-                                &self.shared_state.db,
-                            );
+                            let cached = self.dialable_peer_cache();
                             if !cached.is_empty() {
                                 let _ = discovery::bootstrap_peers(&mut self.swarm, &cached);
                             }
@@ -777,9 +778,10 @@ impl NetworkManager {
                     if connected == 0 {
                         let cfg = &self.shared_state.config.network;
                         let age_secs = startup_instant.elapsed().as_secs();
-                        let cached = crate::network::peer_cache::load_peer_cache(
-                            &self.shared_state.db,
-                        );
+                        // Report the dialable count, not the raw one — an
+                        // operator acting on this line needs the number of
+                        // addresses actually being tried.
+                        let cached = self.dialable_peer_cache();
                         let offline = self.shared_state.credits.offline_mode
                             .load(std::sync::atomic::Ordering::Relaxed);
                         tracing::warn!(
@@ -1148,6 +1150,16 @@ impl NetworkManager {
     /// Save current peer addresses to the persistent cache.
     /// Appends `/p2p/<peer_id>` to each address so that `bootstrap_peers` can
     /// skip already-connected peers via the `is_connected()` check.
+    /// Cached peer addresses worth dialling, with unreachable and
+    /// self-referencing entries removed. Filtering on *read* (not only on
+    /// write) is what repairs a cache poisoned by an older build — the write
+    /// path is skipped entirely while no peers are connected, so a bad cache
+    /// would otherwise outlive every restart.
+    fn dialable_peer_cache(&self) -> Vec<String> {
+        let cached = crate::network::peer_cache::load_peer_cache(&self.shared_state.db);
+        crate::network::peer_cache::filter_dialable(&cached, self.swarm.local_peer_id())
+    }
+
     fn save_peer_cache(&self) {
         let addrs: Vec<String> = self
             .shared_state
@@ -1174,6 +1186,9 @@ impl NetworkManager {
                     .collect::<Vec<_>>()
             })
             .collect();
+        // Filter before persisting so the cache never grows entries the read
+        // path would just discard.
+        let addrs = crate::network::peer_cache::filter_dialable(&addrs, self.swarm.local_peer_id());
         if !addrs.is_empty() {
             crate::network::peer_cache::save_peer_cache(&self.shared_state.db, &addrs);
         }
