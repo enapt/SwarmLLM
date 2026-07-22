@@ -4,7 +4,9 @@
 set -e
 API_KEY_A=$(cat /tmp/swarm_bench_a/api_key)
 PORT=8800
-MODEL=tinyllama-1.1b-chat-v1.0.q4-k-m
+# Model under test. Defaults to the Smoke tier; see docs/REFERENCE_MODELS.md
+# for the Standard/Stress pins and why the choice matters for comparability.
+MODEL="${SWARM_BENCH_MODEL:-tinyllama-1.1b-chat-v1.0.q4-k-m}"
 
 json_escape() {
     python3 -c 'import sys, json; print(json.dumps(sys.stdin.read()), end="")'

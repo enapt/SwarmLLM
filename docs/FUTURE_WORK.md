@@ -2104,6 +2104,50 @@ card before releasing.
 
 ---
 
+## Adaptive shard sizing from node capability (2026-07-22)
+
+**Context.** `model.shard_size_mb` is a single global constant (default 512,
+min 64) applied when a node first probes a model:
+`shard_count = ceil(total_size / shard_size_mb)` in
+`model/huggingface/probe.rs`. Every model on every node in the swarm is cut the
+same way regardless of who will end up hosting it.
+
+That is a poor fit for a swarm of unlike machines. A 24 GB workstation and a
+4 GB laptop get identical granularity, so the small node either cannot take a
+shard at all or takes one sized for hardware it does not have. Finer shards
+would let weak nodes contribute a slice they can actually hold; coarser shards
+would cut bookkeeping for strong ones.
+
+**What it would take.**
+- A capability signal already exists — `swarm_capacity` (R110) aggregates VRAM
+  and node counts, and `auto_manage/vram.rs` computes per-node budgets. Sizing
+  would consume those rather than adding new telemetry.
+- The hard constraint is that **shard layout is global, not local**. The layout
+  travels with the manifest and is fixed by whichever node probes the model
+  first; two nodes that disagree produce incompatible manifests for identical
+  weights. So adaptive sizing cannot be a per-node decision — it needs either a
+  negotiated layout at model-adoption time, or a manifest that expresses
+  multiple granularities (e.g. sub-shard ranges a weak node can hold a subset
+  of) so nodes can choose within one agreed layout.
+- Splits are layer-aligned, so the achievable sizes are quantised by layer
+  size. A 32-layer model cannot be cut into more than 32 pieces, and uneven
+  layer sizes mean the target is approximate.
+
+**Why deferred.** The second point makes this a protocol design problem rather
+than a tuning knob, and getting it wrong splits the swarm into groups that
+cannot share shards of the same model. It also interacts with a gap worth
+fixing first: nothing in `auto_manage/scoring.rs` prefers *contiguous* shards,
+so a node can hold 0, 1, 4, 5, which
+`shard_layout.rs::available_layer_ranges_from_manifest` turns into two segments
+and an extra hop. Finer shards multiply that effect. Contiguity-aware
+acquisition is the cheaper win and probably a prerequisite — adaptive sizing on
+top of scattering placement would make pipelines deeper, not better.
+
+**Interim.** `shard_size_mb` is settable per node for deliberate splits; see
+`docs/REFERENCE_MODELS.md` for when lowering it helps and when it backfires.
+
+---
+
 ## How to use this file
 
 When starting a new feature, grep this file for keywords related to the area you're touching. If your feature unblocks a deferred item, either pick it up in the same PR (if scope allows) or move the entry to "completed" with the closing commit reference.
