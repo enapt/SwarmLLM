@@ -2,7 +2,7 @@
 
 All notable changes to SwarmLLM are documented here.
 
-## [0.3.8-alpha] — 2026-07-22
+## [0.3.9-alpha] — 2026-07-22
 
 ### Added
 
@@ -39,6 +39,10 @@ All notable changes to SwarmLLM are documented here.
   build depends on, which took that build from about 10 minutes back to nearly
   an hour. Image layers are now cached elsewhere, and the two image builds no
   longer overwrite each other's cache.
+
+_(0.3.8-alpha was tagged and withdrawn before publishing — a mistake in the
+build-cache change above stopped the container images from building. Nothing
+was released under that version.)_
 
 ## [0.3.7-alpha] — 2026-07-22
 
