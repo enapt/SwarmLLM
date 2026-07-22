@@ -2,6 +2,33 @@
 
 All notable changes to SwarmLLM are documented here.
 
+## [Unreleased]
+
+### Fixed
+
+- **A GPU node could auto-update itself into a CPU-only build.** The updater
+  matched a release asset on operating system and processor only, and the only
+  bare binaries published were the CPU ones — so a machine running the CUDA or
+  Windows-GPU build downloaded the CPU binary and installed it over itself,
+  silently losing GPU acceleration. Every variant now publishes its own binary,
+  and the updater will only install one built the same way as the one running.
+  If nothing matches, it reports no update rather than installing something
+  else. Auto-update is off by default, so only nodes that opted in were
+  affected.
+
+  Upgrading a GPU node that already has auto-update enabled: one more update
+  may still fetch the CPU build, because the *currently installed* binary is
+  the one choosing. Reinstall the GPU archive once and it will track the right
+  variant from then on.
+- **A model whose chat template failed to load could be sent an empty prompt.**
+  Several kinds of broken template produced no text at all instead of
+  reporting an error, and the empty result was used as the prompt — so the
+  model received none of the conversation. For image models this also dropped
+  the marker saying where the picture belonged. Broken templates are now
+  detected and fall back to a sensible format for the model.
+- **Vision models with newer image-encoder files failed to load.** Support for
+  the two possible layouts is now detected per file instead of assumed.
+
 ## [0.3.5-alpha] — 2026-07-22
 
 **Five externally-reported bugs fixed (R146) + request cancellation and

@@ -67,6 +67,7 @@ jobs:
             target: x86_64-unknown-linux-gnu
             binary: swarmllm
             archive: swarmllm-linux-x86_64.tar.gz
+            bare_asset: swarmllm-linux-x86_64
             features: ""
 
           - name: Linux x86_64 CUDA
@@ -74,6 +75,7 @@ jobs:
             target: x86_64-unknown-linux-gnu
             binary: swarmllm
             archive: swarmllm-linux-x86_64-cuda.tar.gz
+            bare_asset: swarmllm-linux-x86_64-cuda
             features: "--features cuda"
             cuda_linux: true
 
@@ -82,6 +84,7 @@ jobs:
             target: aarch64-apple-darwin
             binary: swarmllm
             archive: swarmllm-macos-aarch64.tar.gz
+            bare_asset: swarmllm-macos-aarch64
             features: ""
 
           # Windows CPU: works on any Windows PC, no GPU drivers required.
@@ -91,6 +94,7 @@ jobs:
             runner: windows-2022
             target: x86_64-pc-windows-msvc
             archive: swarmllm-windows-x86_64-cpu.zip
+            bare_asset: swarmllm-windows-x86_64.exe
             features: ""
             windows: true
 
@@ -102,6 +106,7 @@ jobs:
             runner: windows-2022
             target: x86_64-pc-windows-msvc
             archive: swarmllm-windows-x86_64-gpu.zip
+            bare_asset: swarmllm-windows-x86_64-gpu.exe
             features: "--features windows-gpu"
             windows: true
             windows_gpu: true
@@ -373,23 +378,26 @@ jobs:
           done
 
       # Bare-binary asset + SHA256 sidecar for in-app auto-update (src/update.rs).
-      # update.rs looks for an asset named exactly:
-      #   linux/macos: swarmllm-{os}-{arch}
-      #   windows:     swarmllm-{os}-{arch}.exe
-      # plus an `<asset>.sha256` sidecar (mandatory — download is rejected
-      # without it). Only the CPU-only variants are published as bare binaries
-      # because update.rs picks one asset per (os, arch) pair and has no
-      # GPU-vs-CPU selection logic. CUDA/GPU users update via archive download.
-      - name: Publish bare binary + sha256 (Linux/macOS CPU)
-        if: matrix.name == 'Linux x86_64' || matrix.name == 'macOS aarch64'
+      # The asset name is `matrix.bare_asset` and MUST equal what
+      # `update.rs::update_asset_name()` builds for that variant:
+      #   linux/macos: swarmllm-{os}-{arch}{variant}
+      #   windows:     swarmllm-{os}-{arch}{variant}.exe
+      # where {variant} is "" for CPU, "-cuda" for --features cuda, and "-gpu"
+      # for --features windows-gpu. The `.sha256` sidecar is mandatory —
+      # update.rs rejects a download that has none.
+      #
+      # Every variant gets one, GPU included. Publishing only the CPU binaries
+      # did not mean "GPU users can't auto-update"; it meant a GPU node matched
+      # the same-(os, arch) CPU asset and quietly replaced its own GPU build
+      # with a CPU one.
+      - name: Publish bare binary + sha256 (Linux/macOS)
+        if: matrix.bare_asset != '' && runner.os != 'Windows'
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          OS=$([ "${{ runner.os }}" = "macOS" ] && echo "macos" || echo "linux")
-          ARCH=$([ "${{ matrix.target }}" = "aarch64-apple-darwin" ] && echo "aarch64" || echo "x86_64")
-          BARE="swarmllm-${OS}-${ARCH}"
+          BARE="${{ matrix.bare_asset }}"
           cp "target/release/${{ matrix.binary }}" "$BARE"
           shasum -a 256 "$BARE" > "${BARE}.sha256"
           # See "Upload archive to release" for the retry rationale.
@@ -401,13 +409,13 @@ jobs:
             sleep $((i * 15))
           done
 
-      - name: Publish bare binary + sha256 (Windows CPU)
-        if: matrix.name == 'Windows x86_64 CPU'
+      - name: Publish bare binary + sha256 (Windows)
+        if: matrix.bare_asset != '' && runner.os == 'Windows'
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $bare = "swarmllm-windows-x86_64.exe"
+          $bare = "${{ matrix.bare_asset }}"
           Copy-Item "target\release\swarmllm.exe" $bare
           # PowerShell Get-FileHash → "<hash>  <filename>" two-space delimiter
           # matches the `shasum -a 256` format on Linux/macOS, which update.rs's

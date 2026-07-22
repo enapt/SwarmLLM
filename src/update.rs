@@ -192,23 +192,23 @@ impl UpdateChecker {
             return Ok(None);
         }
 
-        // Find the binary asset for this platform
-        let (os_str, arch_str) = platform_strings();
-        let asset_name = if cfg!(target_os = "windows") {
-            format!("swarmllm-{os_str}-{arch_str}.exe")
-        } else {
-            format!("swarmllm-{os_str}-{arch_str}")
-        };
+        // Find the binary asset matching this platform AND build variant.
+        let asset_name = update_asset_name();
 
         let binary_asset = release.assets.iter().find(|a| a.name == asset_name);
 
         let download_url = match binary_asset {
             Some(asset) => asset.browser_download_url.clone(),
             None => {
+                // Offer nothing rather than fall back to a same-platform asset
+                // of a different variant — that path silently swaps a GPU
+                // build for a CPU one. Releases before the variant-suffixed
+                // assets existed legitimately land here on GPU builds.
                 tracing::warn!(
                     expected = %asset_name,
                     available = ?release.assets.iter().map(|a| &a.name).collect::<Vec<_>>(),
-                    "No matching binary asset found for this platform"
+                    "No matching binary asset for this platform and build variant — \
+                     skipping update rather than installing a different variant"
                 );
                 return Ok(None);
             }
@@ -696,6 +696,46 @@ fn platform_strings() -> (&'static str, &'static str) {
     (os, arch)
 }
 
+/// Build-variant suffix for release asset names (`""` for a CPU build).
+///
+/// The OS/arch pair alone does not identify a release binary: a GPU build and a
+/// CPU build share both. Without this, a CUDA node matched
+/// `swarmllm-linux-x86_64` — the *CPU* asset — and updated itself into a
+/// GPU-less binary, silently losing the only capability that made the machine
+/// worth running. The variant is a compile-time property of the running
+/// binary, so read it from cfg rather than probing the host for a GPU: what
+/// matters is which artefact this binary was built from, not what hardware it
+/// happens to be sitting on.
+///
+/// Keep in sync with the `bare_asset` names in `.github/workflows/release.yml`.
+fn build_variant_suffix() -> &'static str {
+    if cfg!(feature = "cuda") {
+        "-cuda"
+    } else if cfg!(feature = "windows-gpu") {
+        "-gpu"
+    } else {
+        ""
+    }
+}
+
+/// Compose a bare-binary release asset name. Pure so every published variant
+/// can be pinned by tests, not just the one this binary happens to be.
+fn asset_name_for(os: &str, arch: &str, variant: &str, windows: bool) -> String {
+    let ext = if windows { ".exe" } else { "" };
+    format!("swarmllm-{os}-{arch}{variant}{ext}")
+}
+
+/// Name of the bare-binary release asset this build should update itself from.
+fn update_asset_name() -> String {
+    let (os, arch) = platform_strings();
+    asset_name_for(
+        os,
+        arch,
+        build_variant_suffix(),
+        cfg!(target_os = "windows"),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -795,6 +835,64 @@ mod tests {
         assert_eq!(arch, "x86_64");
         // Suppress warnings on other platforms
         let _ = (os, arch);
+    }
+
+    /// Pins the bare-binary asset names against
+    /// `.github/workflows/release.yml`'s `bare_asset` matrix fields. If a name
+    /// changes on either side without the other, auto-update silently stops
+    /// finding a binary — the failure is a quiet "no update available", not an
+    /// error, so nothing else would catch the drift.
+    #[test]
+    fn asset_names_match_the_published_release_matrix() {
+        for (os, arch, variant, windows, expected) in [
+            ("linux", "x86_64", "", false, "swarmllm-linux-x86_64"),
+            (
+                "linux",
+                "x86_64",
+                "-cuda",
+                false,
+                "swarmllm-linux-x86_64-cuda",
+            ),
+            ("macos", "aarch64", "", false, "swarmllm-macos-aarch64"),
+            ("windows", "x86_64", "", true, "swarmllm-windows-x86_64.exe"),
+            (
+                "windows",
+                "x86_64",
+                "-gpu",
+                true,
+                "swarmllm-windows-x86_64-gpu.exe",
+            ),
+        ] {
+            assert_eq!(asset_name_for(os, arch, variant, windows), expected);
+        }
+    }
+
+    /// A GPU build must never resolve to the CPU asset: same os/arch, no GPU.
+    #[test]
+    fn gpu_variants_do_not_collide_with_the_cpu_asset() {
+        let cpu = asset_name_for("linux", "x86_64", "", false);
+        let cuda = asset_name_for("linux", "x86_64", "-cuda", false);
+        assert_ne!(cpu, cuda);
+
+        let win_cpu = asset_name_for("windows", "x86_64", "", true);
+        let win_gpu = asset_name_for("windows", "x86_64", "-gpu", true);
+        assert_ne!(win_cpu, win_gpu);
+    }
+
+    #[test]
+    fn build_variant_matches_this_builds_features() {
+        let variant = build_variant_suffix();
+        // Exactly one of the three known variants, and it must agree with the
+        // features this test binary was compiled with.
+        if cfg!(feature = "cuda") {
+            assert_eq!(variant, "-cuda");
+        } else if cfg!(feature = "windows-gpu") {
+            assert_eq!(variant, "-gpu");
+        } else {
+            assert_eq!(variant, "");
+        }
+        // The composed name always starts with the product prefix.
+        assert!(update_asset_name().starts_with("swarmllm-"));
     }
 
     #[test]
