@@ -586,6 +586,28 @@ pub fn collect_images(messages: &[crate::types::ChatMessage]) -> Vec<&ImageData>
 
 // ── mmproj GGUF Loading ──
 
+/// Decide whether an mmproj GGUF uses the legacy *inverted* CLIP FFN naming.
+///
+/// GGUF CLIP exports disagree on this. LLaVA-1.5-era conversions store the
+/// expansion (applied first, before GELU) as `ffn_down` and the contraction as
+/// `ffn_up` — the inverse of the text-model convention used everywhere else in
+/// this codebase. Newer exports name them correctly. Guessing wrong is not
+/// silent: the first matmul fails on a dimension mismatch.
+///
+/// So decide from the shape, mirroring llama.cpp's `is_ffn_swapped` check in
+/// `tools/mtmd/clip.cpp` — the expansion is whichever weight *consumes*
+/// `hidden_size` inputs. `dims` is candle order (`[out, in]`); candle reverses
+/// GGUF's `ne` on read, so this is llama.cpp's `ff_down_w->ne[0] == n_embd`
+/// spelled the other way round.
+///
+/// A square FFN (`n_ff == hidden_size`) is genuinely undecidable from shape
+/// alone. That returns `true`, preserving the legacy reading — the only
+/// convention any mmproj this code has been exercised against actually uses.
+/// No CLIP-family vision tower does this in practice; they are all 4×.
+fn clip_ffn_is_swapped(ffn_down_dims: &[usize], hidden_size: usize) -> bool {
+    ffn_down_dims.len() == 2 && ffn_down_dims[1] == hidden_size
+}
+
 /// Load a VisionModule from a LLaVA-style mmproj GGUF file.
 ///
 /// The mmproj GGUF contains the CLIP ViT encoder weights and multimodal projection
@@ -600,6 +622,9 @@ pub fn collect_images(messages: &[crate::types::ChatMessage]) -> Vec<&ImageData>
 /// - `v.blk.N.ffn_down.weight/bias`, `v.blk.N.ffn_up.weight/bias` — MLP
 /// - `v.post_ln.weight/bias` — post layer norm
 /// - `mm.0.weight/bias`, `mm.2.weight/bias` — multimodal projection (2-layer MLP with GELU)
+///
+/// The two MLP tensors are resolved by shape rather than by name — see
+/// [`clip_ffn_is_swapped`].
 pub fn load_from_mmproj_gguf(
     path: &std::path::Path,
     device: &Device,
@@ -770,6 +795,19 @@ pub fn load_from_mmproj_gguf(
     };
 
     // ── Transformer blocks ──
+    // Resolve the FFN naming convention once — every block shares it.
+    let ffn_swapped = ct
+        .tensor_infos
+        .get("v.blk.0.ffn_down.weight")
+        .map(|t| clip_ffn_is_swapped(t.shape.dims(), hidden_size))
+        .unwrap_or(true);
+    let (fc1_name, fc2_name) = if ffn_swapped {
+        tracing::debug!("mmproj uses legacy inverted CLIP FFN naming (ffn_down is the expansion)");
+        ("ffn_down", "ffn_up")
+    } else {
+        ("ffn_up", "ffn_down")
+    };
+
     let mut blocks = Vec::with_capacity(num_layers);
     for i in 0..num_layers {
         // Layer norms
@@ -810,13 +848,15 @@ pub fn load_from_mmproj_gguf(
         let attn_out_b = load_opt!(&format!("v.blk.{i}.attn_out.bias"));
         let attn_proj = Linear::new(attn_out_w, attn_out_b);
 
-        // MLP
-        let fc1_w = load!(&format!("v.blk.{i}.ffn_down.weight"));
-        let fc1_b = load_opt!(&format!("v.blk.{i}.ffn_down.bias"));
+        // MLP — `fc1_name` is the expansion, applied before GELU. Which GGUF
+        // tensor that is depends on the export convention; see
+        // `clip_ffn_is_swapped`.
+        let fc1_w = load!(&format!("v.blk.{i}.{fc1_name}.weight"));
+        let fc1_b = load_opt!(&format!("v.blk.{i}.{fc1_name}.bias"));
         let mlp_fc1 = Linear::new(fc1_w, fc1_b);
 
-        let fc2_w = load!(&format!("v.blk.{i}.ffn_up.weight"));
-        let fc2_b = load_opt!(&format!("v.blk.{i}.ffn_up.bias"));
+        let fc2_w = load!(&format!("v.blk.{i}.{fc2_name}.weight"));
+        let fc2_b = load_opt!(&format!("v.blk.{i}.{fc2_name}.bias"));
         let mlp_fc2 = Linear::new(fc2_w, fc2_b);
 
         blocks.push(VisionTransformerBlock::new(
@@ -875,6 +915,37 @@ pub fn load_from_mmproj_gguf(
 mod tests {
     use super::*;
     use candle_core::DType;
+
+    // ── CLIP FFN naming convention ──
+    //
+    // Shapes are candle order (`[out, in]`); candle reverses GGUF's `ne` on
+    // read. The legacy values below are the real ones from
+    // `llava-v1.5-7b-mmproj-f16.gguf` (CLIP ViT-L/14-336: hidden 1024,
+    // n_ff 4096), whose GGUF stores `ffn_down` with `ne = [1024, 4096]`.
+
+    #[test]
+    fn legacy_llava_mmproj_is_detected_as_swapped() {
+        // ffn_down consumes 1024 and emits 4096 — it is really the expansion.
+        assert!(clip_ffn_is_swapped(&[4096, 1024], 1024));
+    }
+
+    #[test]
+    fn correctly_named_mmproj_is_not_swapped() {
+        // ffn_down consumes 4096 and emits 1024 — a genuine contraction.
+        assert!(!clip_ffn_is_swapped(&[1024, 4096], 1024));
+    }
+
+    #[test]
+    fn square_ffn_keeps_the_legacy_reading() {
+        // Undecidable from shape alone; documented to preserve legacy behaviour.
+        assert!(clip_ffn_is_swapped(&[1024, 1024], 1024));
+    }
+
+    #[test]
+    fn non_2d_ffn_shape_is_not_swapped() {
+        assert!(!clip_ffn_is_swapped(&[1024], 1024));
+        assert!(!clip_ffn_is_swapped(&[], 1024));
+    }
 
     #[test]
     fn preprocess_image_creates_correct_shape() {

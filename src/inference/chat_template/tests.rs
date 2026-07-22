@@ -480,3 +480,119 @@ fn phi35_actual_template() {
     );
     assert!(result.ends_with("<|assistant|>\n"), "Got: {:?}", result);
 }
+
+// ── Fallback selection when a template exists but fails to evaluate ──
+
+/// A template the engine cannot usefully apply. LLaVA GGUFs in the wild ship
+/// templates referencing filters/objects our engine doesn't implement; the
+/// failure path has to behave like the no-template path, not drop to ChatML.
+///
+/// An unknown filter renders empty rather than failing evaluation outright,
+/// which `apply_chat_template` reports as `None` — see its doc comment.
+const UNEVALUABLE_TEMPLATE: &str = "{{ messages | this_filter_does_not_exist }}";
+
+#[test]
+fn failed_template_falls_back_to_vicuna_for_llava() {
+    let msgs = user_only_messages();
+    let result = build_prompt_with_model(
+        &msgs,
+        Some(UNEVALUABLE_TEMPLATE),
+        "",
+        "</s>",
+        Some("llava-v1.5-7b"),
+    );
+    assert!(
+        result.contains("USER: ") && result.contains("ASSISTANT:"),
+        "expected vicuna format, got: {result:?}"
+    );
+    assert!(
+        !result.contains("<|im_start|>"),
+        "must not silently drop to ChatML, got: {result:?}"
+    );
+}
+
+#[test]
+fn failed_template_falls_back_to_gemma_by_model_name() {
+    let msgs = user_only_messages();
+    let result = build_prompt_with_model(
+        &msgs,
+        Some(UNEVALUABLE_TEMPLATE),
+        "",
+        "<eos>",
+        Some("gemma-2-2b-it"),
+    );
+    assert!(
+        result.contains("<start_of_turn>"),
+        "expected gemma format, got: {result:?}"
+    );
+}
+
+#[test]
+fn failed_template_body_evidence_beats_model_name() {
+    // A gemma-shaped template that fails to evaluate should pick gemma from the
+    // template body even when the model name says otherwise. Unclosed `{% for %}`
+    // is a genuine structural failure, so nothing renders from the body itself.
+    let msgs = user_only_messages();
+    let broken_gemma = "{% for m in messages %}<start_of_turn>user";
+    assert!(
+        apply_chat_template(broken_gemma, &msgs, "", "<eos>", true).is_none(),
+        "fixture must actually fail to evaluate"
+    );
+    let result = build_prompt_with_model(&msgs, Some(broken_gemma), "", "<eos>", Some("llava-7b"));
+    assert!(
+        result.contains("<start_of_turn>"),
+        "template body should win over model name, got: {result:?}"
+    );
+}
+
+// ── Empty renders are failures, not success ──
+
+#[test]
+fn template_rendering_nothing_is_reported_as_failure() {
+    let msgs = user_only_messages();
+    // Each of these parses and evaluates cleanly but emits nothing.
+    for tmpl in [
+        "{{ messages | this_filter_does_not_exist }}",
+        "{{ nonexistent_var }}",
+        "{% endfor %}",
+        "{% if true %}",
+        "   ",
+    ] {
+        assert!(
+            apply_chat_template(tmpl, &msgs, "", "</s>", true).is_none(),
+            "empty render should be a failure: {tmpl:?}"
+        );
+    }
+}
+
+#[test]
+fn empty_message_list_may_legitimately_render_empty() {
+    // With nothing to render, an empty result is not evidence of a broken
+    // template — don't turn it into a failure.
+    assert_eq!(
+        apply_chat_template(
+            "{% for m in messages %}x{% endfor %}",
+            &[],
+            "",
+            "</s>",
+            false
+        ),
+        Some(String::new())
+    );
+}
+
+#[test]
+fn failed_template_with_unknown_model_name_still_uses_chatml() {
+    let msgs = user_only_messages();
+    let result = build_prompt_with_model(
+        &msgs,
+        Some(UNEVALUABLE_TEMPLATE),
+        "",
+        "</s>",
+        Some("some-unknown-model-7b"),
+    );
+    assert!(
+        result.contains("<|im_start|>"),
+        "expected ChatML for an unrecognised name, got: {result:?}"
+    );
+}

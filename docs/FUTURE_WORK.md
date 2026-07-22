@@ -566,49 +566,61 @@ maintainer architectural decision, or a feature addition beyond
 sweep scope. Full per-item context is in `.claude/sweep-log.jsonl`
 under `"status":"deferred"`.
 
-### VLM weight loading: `ffn_up`/`ffn_down` possibly inverted
+### VLM weight loading: `ffn_up`/`ffn_down` inverted — **CLOSED R148** (2026-07-22)
 
-`src/inference/vision.rs:814-820` loads `mlp_fc1` (applied FIRST,
-before GELU) as `v.blk.{i}.ffn_down.weight`, and `mlp_fc2` (applied
-SECOND) as `v.blk.{i}.ffn_up.weight`. The text-model convention in
-this codebase (`src/inference/layers/mod.rs:142,188`; test fixtures
-in `src/inference/split/tests/gqa.rs:244-245` and `llama4_glm4.rs`)
-treats `ffn_up` as the expansion (hidden → 4×hidden, applied first)
-and `ffn_down` as the contraction (4×hidden → hidden, applied
-second). If the GGUF CLIP convention matches the text-model
-convention, the vision MLP weights are swapped and VLM inference
-silently produces incorrect embeddings.
+_Resolved by reading the shapes out of the mmproj GGUF rather than by running
+the model, which is why it stayed open: the deferral asked for a llama.cpp
+cosine-similarity comparison, but the tensor metadata answers it outright._
 
-**Why deferred.** llama.cpp's CLIP code has a runtime
-`is_ffn_swapped` check, suggesting at least some CLIP variants
-follow the opposite convention. Swapping without a real-LLaVA
-end-to-end correctness test risks turning a possibly-working VLM
-path into a definitely-broken one. The risk asymmetry (swap could
-break a working path) > (don't swap, possibly fix). Needs a
-side-by-side LLaVA inference comparison against llama.cpp / a known
-reference before committing.
+_**The existing loader was correct.** In `llava-v1.5-7b-mmproj-f16.gguf`
+(CLIP ViT-L/14-336, hidden 1024, n_ff 4096), `v.blk.0.ffn_down.weight` has
+GGUF `ne = [1024, 4096]` with `bias = [4096]`, and `ffn_up` has
+`ne = [4096, 1024]` with `bias = [1024]`. Since a bias length must equal the
+output width, `ffn_down` is unambiguously the 1024→4096 **expansion** and
+`ffn_up` the contraction — inverted relative to the text-model convention,
+exactly as the loader assumed. The R142 finding was a false alarm for this
+file._
 
-**Owner action:** run `cargo test --test integration_phase10_11 -- --ignored end_to_end`
-with `SWARMLLM_TEST_MODEL_DIR=...llava...` and a fixed prompt; compare
-the embedding output cosine-similarity against a llama.cpp reference.
-If >0.99 with the current loader, the GGUF CLIP convention is the
-swapped one (current code is right). If close to 0 / random,
-swap `mlp_fc1` ↔ `mlp_fc2` source tensors.
+_**But the hardcoded assumption was still a bug for every other mmproj.**_
+_llama.cpp gates its swap on a shape test (`tools/mtmd/clip.cpp:1913`:
+`ff_down_w->ne[0] == hparams.n_embd`, plus a legacy projector-type allowlist),
+precisely because newer exports name these correctly. SwarmLLM assumed the
+legacy layout unconditionally, so a correctly-named mmproj (Pixtral, InternVL,
+newer conversions) hard-failed on a dimension mismatch in the first MLP matmul._
 
-### LLaVA chat template eval-failure fallback path
+_Now resolved per-file by `vision.rs::clip_ffn_is_swapped`, mirroring
+llama.cpp's check. Note candle reverses GGUF's `ne` on read
+(`vendor/candle/candle-core/src/quantized/gguf_file.rs:438`), so `dims()` is
+`[out, in]` and the test reads as `dims[1] == hidden_size`. A square FFN is
+undecidable from shape and keeps the legacy reading; no CLIP-family tower is
+square in practice. 4 unit tests._
 
-`src/inference/chat_template/mod.rs:106` handles the case where a
-LLaVA model has a chat template string but the Jinja engine fails to
-evaluate it. The current fallback chain falls through to ChatML and
-silently drops the `<image>\n` placeholder, causing vision embeddings
-to be prepended rather than inserted at the correct token position.
-The model-name LLaVA heuristic at line 123 only applies in the
-`template.is_none()` branch.
+### LLaVA chat template eval-failure fallback path — **CLOSED R148** (2026-07-22)
 
-**Why deferred.** Same class as the ffn finding — needs a real LLaVA
-model with a known-bad-template GGUF to verify the failure mode
-fires, and to validate the fix doesn't regress models with working
-templates. Sweep can't construct that fixture.
+_Closed, and the investigation found a larger bug underneath it._
+
+_The reported gap was real: when a template existed but failed, the fallback
+chain checked only for `start_of_turn` (gemma) before dropping to ChatML — the
+model-name heuristic that picks vicuna for LLaVA lived exclusively in the
+`template.is_none()` branch. Extracted to `fallback_by_model_name` and now
+consulted by both branches, with template-body evidence still taking priority
+over the name since it describes the model that shipped it._
+
+_The larger bug: **that failure path was almost never reached**, because
+`apply_chat_template` rarely returns `None`. Probing the evaluator showed only
+structural token errors fail — an unclosed `{% for %}` or a bare `{{`. An
+unknown filter, an unknown variable, a stray `{% endfor %}` and an unclosed
+`{% if %}` all evaluate quietly to `Some("")`. `build_prompt_with_model`
+treated that as success and returned an **empty prompt**: no system message,
+no user turn, and for a VLM no `<image>` placeholder — the exact
+vision-embeddings-prepended-instead-of-inserted symptom the deferral described,
+arrived at by a different route and with the whole conversation dropped too._
+
+_`apply_chat_template` now reports an empty render from a non-empty message
+list as `None`. Fixed at that level rather than in `build_prompt_with_model`
+because `cli/split_test.rs` is a second caller with the same `unwrap_or_else`
+ChatML fallback and the same exposure. An empty message list may still
+legitimately render empty. 6 unit tests._
 
 ### Python SDK missing R140 pool endpoints — **CLOSED R147** (2026-07-22)
 
@@ -2026,6 +2038,18 @@ causes were investigated:
    step from `key:` to `shared-key:` (which excludes the job id) and adding
    `.github/workflows/cache-warm.yml`, which runs the same builds on `main` so
    the cache lands where tag runs can restore it.
+
+1b. *Cache-warm ran on the wrong runner image* — **fixed R148**
+   (2026-07-22). The `cache-warm.yml` added above hardcoded
+   `runs-on: ubuntu-latest` for every matrix entry, while `release.yml` pins
+   its CUDA job to `ubuntu-22.04`. Two consequences: the job failed outright
+   (the `ubuntu2204` CUDA repo's `nsight-systems` needs `libtinfo5`, which is
+   not installable on 24.04), and even had it succeeded the runner image is
+   part of the `rust-cache` key, so a 24.04 cache could never be restored by a
+   22.04 release build. The matrix now carries a per-entry `runner:` mirroring
+   `release.yml`. Invariant to remember: cache warming must match the release
+   job on runner image, profile, features and env, or it silently warms a
+   cache nothing reads.
 
 2. *llama.cpp compiles a wide CUDA arch spread* — **open, needs a product
    decision.** `CUDA_COMPUTE_CAP: 80` only governs candle's kernels. The `cuda`

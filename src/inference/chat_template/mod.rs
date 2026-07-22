@@ -19,7 +19,17 @@ use parser::tokenize;
 
 /// Apply a Jinja2-style chat template to a list of messages.
 ///
-/// Returns `None` if the template cannot be parsed, so callers can fall back to ChatML.
+/// Returns `None` if the template could not be applied, so callers can fall
+/// back to ChatML.
+///
+/// That includes a template which parses and evaluates but renders *nothing*
+/// from a non-empty message list. Only structural token errors (an unclosed
+/// `{% for %}`, a bare `{{`) actually fail evaluation here; an unknown filter,
+/// an unknown variable, a stray `{% endfor %}` and an unclosed `{% if %}` all
+/// evaluate quietly to the empty string. Reporting those as success handed the
+/// model an empty prompt — no system message, no user turn, and for a VLM no
+/// `<image>` placeholder, so vision embeddings were prepended instead of being
+/// inserted at the right token position.
 pub fn apply_chat_template(
     template: &str,
     messages: &[ChatMessage],
@@ -39,6 +49,9 @@ pub fn apply_chat_template(
     };
     let mut state = EvalState::new(messages);
     eval_block(&ctx, 0, &mut output, &mut state)?;
+    if !messages.is_empty() && output.trim().is_empty() {
+        return None;
+    }
     Some(output)
 }
 
@@ -95,6 +108,26 @@ pub fn build_prompt(
     build_prompt_with_model(messages, template, bos_token, eos_token, None)
 }
 
+/// Pick a fallback prompt format from the model name alone.
+///
+/// Returns the rendered prompt plus the name of the format chosen, or `None`
+/// when the name carries no usable signal and the caller should use ChatML.
+/// Shared by both `build_prompt_with_model` branches: a model with no template
+/// at all and a model whose template failed to evaluate want the same answer.
+fn fallback_by_model_name(
+    messages: &[ChatMessage],
+    model_name: Option<&str>,
+) -> Option<(String, &'static str)> {
+    let name_lower = model_name?.to_lowercase();
+    if name_lower.contains("llava") || name_lower.contains("vicuna") {
+        return Some((vicuna_fallback(messages), "vicuna"));
+    }
+    if name_lower.contains("gemma") {
+        return Some((gemma_fallback(messages), "gemma"));
+    }
+    None
+}
+
 /// Build prompt with optional model name hint for fallback template selection.
 pub fn build_prompt_with_model(
     messages: &[ChatMessage],
@@ -108,7 +141,11 @@ pub fn build_prompt_with_model(
             tracing::debug!(template_matched = true, "DIAG: chat template applied");
             return result;
         }
-        // Template failed — try architecture-specific fallbacks before ChatML
+        // Template failed. Prefer evidence from the template body itself — it
+        // describes the model that shipped it — then fall back to the same
+        // model-name heuristic the no-template branch uses. Reaching ChatML
+        // here would drop LLaVA's `<image>` placeholder, which prepends the
+        // vision embeddings instead of inserting them at the right position.
         if tmpl.contains("start_of_turn") {
             tracing::warn!(
                 fallback = "gemma",
@@ -116,30 +153,27 @@ pub fn build_prompt_with_model(
             );
             return gemma_fallback(messages);
         }
+        if let Some((prompt, fallback)) = fallback_by_model_name(messages, model_name) {
+            tracing::warn!(
+                model_name = model_name,
+                fallback,
+                "DIAG: chat template failed, using model-name fallback"
+            );
+            return prompt;
+        }
         tracing::warn!(
             fallback = "chatml",
             "DIAG: chat template failed, using fallback"
         );
     } else {
         // No template: pick fallback based on model name heuristic
-        if let Some(name) = model_name {
-            let name_lower = name.to_lowercase();
-            if name_lower.contains("llava") || name_lower.contains("vicuna") {
-                tracing::debug!(
-                    model_name = name,
-                    fallback = "vicuna",
-                    "DIAG: no chat template, using vicuna fallback"
-                );
-                return vicuna_fallback(messages);
-            }
-            if name_lower.contains("gemma") {
-                tracing::debug!(
-                    model_name = name,
-                    fallback = "gemma",
-                    "DIAG: no chat template, using gemma fallback"
-                );
-                return gemma_fallback(messages);
-            }
+        if let Some((prompt, fallback)) = fallback_by_model_name(messages, model_name) {
+            tracing::debug!(
+                model_name = model_name,
+                fallback,
+                "DIAG: no chat template, using model-name fallback"
+            );
+            return prompt;
         }
         tracing::debug!(
             template_matched = false,
