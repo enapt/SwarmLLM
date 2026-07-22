@@ -24,7 +24,7 @@
 
 use dashmap::DashMap;
 
-use crate::types::NodeId;
+use crate::types::{unix_now_ms, NodeId};
 
 /// Composite key for per-segment-holder latency tracking. Different
 /// models / segments can have very different latency profiles on the
@@ -86,7 +86,7 @@ impl HedgeStats {
             self.ewma_var = (1.0 - Self::ALPHA) * self.ewma_var + Self::ALPHA * sq;
         }
         self.samples = self.samples.saturating_add(1);
-        self.last_observed_at_ms = now_ms();
+        self.last_observed_at_ms = unix_now_ms();
     }
 
     /// Rough p99 estimate: mean + 3σ. Conservative on heavy-tail
@@ -125,7 +125,7 @@ impl HedgeTracker {
             decisions: 0.into(),
             hedges_fired: 0.into(),
             hedges_won: 0.into(),
-            window_start_ms: now_ms().into(),
+            window_start_ms: unix_now_ms().into(),
         }
     }
 
@@ -194,7 +194,7 @@ impl HedgeTracker {
     }
 
     fn maybe_reset_window(&self) {
-        let now = now_ms();
+        let now = unix_now_ms();
         let start = self
             .window_start_ms
             .load(std::sync::atomic::Ordering::Relaxed);
@@ -302,14 +302,6 @@ pub struct HedgeMetrics {
     pub hedges_fired: u64,
     pub hedges_won: u64,
     pub window_start_ms: u64,
-}
-
-fn now_ms() -> u64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
 }
 
 #[cfg(test)]
@@ -447,7 +439,7 @@ mod tests {
         t.observe(key(2), 100.0);
         // Backdate key(1) to 2h ago — past the 1h eviction horizon used
         // in HealthMonitor.
-        let now = now_ms();
+        let now = unix_now_ms();
         let two_hours_ago = now.saturating_sub(2 * 3_600_000);
         if let Some(mut e) = t.stats.get_mut(&key(1)) {
             e.last_observed_at_ms = two_hours_ago;
@@ -462,7 +454,7 @@ mod tests {
     fn evict_stale_preserves_fresh_observations() {
         let t = HedgeTracker::new();
         t.observe(key(1), 100.0);
-        let now = now_ms();
+        let now = unix_now_ms();
         // Eviction with a long max_age — fresh entry must remain.
         let evicted = t.evict_stale(now, 3_600_000);
         assert_eq!(evicted, 0);
@@ -472,9 +464,9 @@ mod tests {
     #[test]
     fn observe_stamps_last_observed_at_ms() {
         let t = HedgeTracker::new();
-        let before = now_ms();
+        let before = unix_now_ms();
         t.observe(key(1), 100.0);
-        let after = now_ms();
+        let after = unix_now_ms();
         let stats = t.get(&key(1)).unwrap();
         assert!(stats.last_observed_at_ms >= before);
         assert!(stats.last_observed_at_ms <= after.saturating_add(1));

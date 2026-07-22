@@ -34,6 +34,8 @@ use std::sync::Arc;
 
 use dashmap::DashMap;
 
+use crate::types::unix_now_ms;
+
 /// Per-session conversation history used to predict the next
 /// user-turn's first-token candidates.
 #[derive(Clone, Debug, Default)]
@@ -122,7 +124,7 @@ impl PrefetchOrchestrator {
             histories: DashMap::new(),
             dispatched: 0.into(),
             useful: 0.into(),
-            window_start_ms: now_ms().into(),
+            window_start_ms: unix_now_ms().into(),
         }
     }
 
@@ -235,7 +237,7 @@ impl PrefetchOrchestrator {
     }
 
     fn maybe_reset_window(&self) {
-        let now = now_ms();
+        let now = unix_now_ms();
         let start = self
             .window_start_ms
             .load(std::sync::atomic::Ordering::Relaxed);
@@ -309,14 +311,6 @@ pub struct PrefetchMetrics {
     pub dispatched: u64,
     pub useful: u64,
     pub window_start_ms: u64,
-}
-
-fn now_ms() -> u64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
 }
 
 /// Public Arc handle — daemon state holds one, all paths share it.

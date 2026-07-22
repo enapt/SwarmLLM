@@ -291,9 +291,10 @@
           var modelsParts = [];
           var serveable = capacity.serveable_models || [];
           var vramMb = capacity.total_vram_mb || 0;
-          var memText = '';
-          if (vramMb >= 1024 * 1024) memText = (vramMb / (1024 * 1024)).toFixed(2) + ' TB';
-          else if (vramMb >= 1024) memText = (vramMb / 1024).toFixed(1) + ' GB';
+          // Below 1 GB reads as noise on a swarm-wide total, so it stays
+          // blank rather than rendering "< 1 MB" — the empty string is what
+          // the guard below tests. Formatting itself comes from formatSize.
+          var memText = vramMb >= 1024 ? U.formatSize(vramMb) : '';
           if (memText && (peers > 0 || privateMode)) {
             modelsParts.push('<strong>' + memText + '</strong> ' + U.escapeHtml(I18n.t('netstatus.memory_word')));
           }
