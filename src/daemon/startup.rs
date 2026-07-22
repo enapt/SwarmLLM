@@ -206,7 +206,33 @@ pub(super) async fn restore_persistent_state(
                     let manifest_loaded = if let Ok(mut manifest) =
                         crate::types::ModelManifest::load_from_dir(&model_dir)
                     {
-                        if manifest.verify_hash().is_ok() {
+                        // A manifest states its own model id, but shard scanning
+                        // and manifest regeneration both key off the directory
+                        // name. Nothing reconciled the two, so copying a model
+                        // directory — `<model>.FULLBACKUP`, `<model>.old` —
+                        // produced a model the swarm was told about under a name
+                        // that resolves to nothing: peers record shard holders
+                        // for it, replica counts double, and no one can ever
+                        // acquire it because the identity is local invention
+                        // rather than anything upstream.
+                        //
+                        // A model's identity has to come from the model, not from
+                        // whatever a directory happens to be called. Mismatches
+                        // are skipped rather than renamed: the copy is almost
+                        // always a deliberate local backup, and silently
+                        // adopting it under the real id would let a stale copy
+                        // race the live one.
+                        if manifest.id.0 != model_id.0 {
+                            tracing::warn!(
+                                dir = %model_id,
+                                manifest_id = %manifest.id,
+                                "Skipping model: directory name does not match the \
+                                 manifest's own id. Rename the directory to match \
+                                 if this is a real model; a copy kept as a backup \
+                                 is being ignored on purpose."
+                            );
+                            false
+                        } else if manifest.verify_hash().is_ok() {
                             // Claim publisher as ourselves so health monitor
                             // broadcasts this manifest (and its HF source) to peers.
                             manifest.publisher = shared_state.identity.node_id().clone();

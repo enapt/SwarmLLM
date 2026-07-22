@@ -15,8 +15,11 @@ pub fn ed25519_to_libp2p_keypair(signing_key_bytes: [u8; 32]) -> Result<Keypair,
 ///
 /// Both NodeId and PeerId derive from the same Ed25519 key, so the conversion
 /// is deterministic. Returns None if the bytes are not a valid Ed25519 public key.
-#[cfg(test)]
-fn node_id_to_peer_id(node_id: &NodeId) -> Option<PeerId> {
+///
+/// Was test-only until the diagnostics endpoint needed the local PeerId to
+/// filter the peer cache the same way the network manager does — that filter
+/// drops any address routing through our own id, so it needs the id.
+pub fn node_id_to_peer_id(node_id: &NodeId) -> Option<PeerId> {
     let ed_pk = libp2p::identity::ed25519::PublicKey::try_from_bytes(&node_id.0).ok()?;
     let pk = libp2p::identity::PublicKey::from(ed_pk);
     Some(pk.to_peer_id())

@@ -193,9 +193,54 @@ pub async fn diagnostics(State(state): State<AppState>) -> impl axum::response::
         ss.config.auto_manage.enabled, ss.config.model.shard_size_mb
     );
 
+    // How this node is reachable. An anchor advertising only private
+    // addresses looks healthy from every other angle, so this belongs next to
+    // the NAT status rather than behind a separate endpoint.
+    {
+        let addrs = ss.listen_multiaddrs.load();
+        let _ = writeln!(out, "\n-- reachable at ({}) --", addrs.len());
+        for a in addrs.iter().take(10) {
+            let _ = writeln!(out, "  {a}");
+        }
+        if addrs.is_empty() {
+            let _ = writeln!(out, "  (none — no invite code can be minted)");
+        }
+    }
+
     let _ = writeln!(out, "\n-- peers ({}) --", ss.connected_node_ids.len());
     for entry in ss.connected_node_ids.iter().take(20) {
         let _ = writeln!(out, "  {}", entry.key());
+    }
+
+    // Remembered peer addresses, raw vs. what is actually worth dialling.
+    // A gap between the two is the signature of a cache holding entries that
+    // can never connect — other peers' loopback and private addresses, or a
+    // relay circuit through our own id. Reported as both numbers because the
+    // raw count alone cannot distinguish "cache is clean" from "filter is
+    // silently doing nothing".
+    {
+        let cached = crate::network::peer_cache::load_peer_cache(&ss.db);
+        match crate::network::transport::node_id_to_peer_id(ss.identity.node_id()) {
+            Some(me) => {
+                let dialable = crate::network::peer_cache::filter_dialable(&cached, &me);
+                let _ = writeln!(
+                    out,
+                    "\n-- peer cache --\n  {} stored, {} dialable",
+                    cached.len(),
+                    dialable.len()
+                );
+                for a in dialable.iter().take(10) {
+                    let _ = writeln!(out, "  {a}");
+                }
+            }
+            None => {
+                let _ = writeln!(
+                    out,
+                    "\n-- peer cache --\n  {} stored (could not derive local peer id)",
+                    cached.len()
+                );
+            }
+        }
     }
 
     let _ = writeln!(out, "\n-- models --");
