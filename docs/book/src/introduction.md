@@ -52,7 +52,7 @@ Each node simultaneously: connects over TCP and QUIC, serves four HTTP API surfa
 
 ## Status
 
-Alpha — actively developed and moving into broader testing. Distributed inference is stable across multi-node deployments. Windows release binaries reach Linux parity (Round 8, 2026-04-23). 1122 lib tests + 75 integration tests run on every PR; continuous security sweeps. [Report issues](https://github.com/enapt/SwarmLLM/issues).
+Alpha — actively developed and moving into broader testing. Distributed inference is stable across multi-node deployments. Windows release binaries reach Linux parity (Round 8, 2026-04-23). 1124 lib tests + 75 integration tests run on every PR; continuous security sweeps. [Report issues](https://github.com/enapt/SwarmLLM/issues).
 
 ## Platform support
 
