@@ -81,8 +81,8 @@ Pre-built images on GHCR:
 |---|---|
 | `ghcr.io/enapt/swarmllm:latest` | CPU-only |
 | `ghcr.io/enapt/swarmllm:latest-cuda` | NVIDIA GPU (CUDA 12.4) |
-| `ghcr.io/enapt/swarmllm:0.3.4-alpha` | Pinned version (CPU) |
-| `ghcr.io/enapt/swarmllm:0.3.4-alpha-cuda` | Pinned version (GPU) |
+| `ghcr.io/enapt/swarmllm:0.3.5-alpha` | Pinned version (CPU) |
+| `ghcr.io/enapt/swarmllm:0.3.5-alpha-cuda` | Pinned version (GPU) |
 
 Data is persisted in Docker volumes. Model shards are stored in the `swarmllm-models` volume (or bind-mount a host directory via `SWARMLLM_MODELS_DIR` in `.env`).
 
@@ -93,7 +93,7 @@ View logs with `docker compose logs -f`. The API key is printed on first startup
 Requires Rust 1.80+:
 
 ```bash
-cargo install --git https://github.com/enapt/SwarmLLM.git --tag v0.3.4-alpha
+cargo install --git https://github.com/enapt/SwarmLLM.git --tag v0.3.5-alpha
 swarmllm run
 ```
 
