@@ -119,6 +119,12 @@ for entry in client.identity.leaderboard():
 # Device pools
 client.pool.create("my-gpu-pool")
 client.pool.invite("node-id-abc123")
+
+# Adding a second machine that isn't on your swarm yet:
+# generate a code here, paste it on the other machine.
+code = client.pool.generate_code()   # "swarmpool://..."
+# ...on the joining device:
+other.pool.join(code)
 ```
 
 ### Embeddings

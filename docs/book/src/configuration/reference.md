@@ -72,6 +72,71 @@ Every configuration option, organized by section.
 | `tp_max_latency_ms` | integer | `10` | Max peer latency (ms) for tensor parallelism groups (only consulted when `tensor_parallel = true`) |
 | `local_embedding_privacy` | boolean | `false` | Embed tokens locally before sending to first segment. Remote nodes never see raw token IDs |
 | `encrypted_pipeline` | boolean | `false` | Force first+last segment to local node (boomerang topology). No remote sees plaintext. Adds ~1 RTT/token. Per-model override via API. Requires shard 0 + final shard locally |
+| `privacy_mode` | boolean | `false` | Never write user prompts to disk — KV-cache sessions stay in memory only |
+| `parallax_routing` | boolean | `true` | Use Parallax shortest-path DP for segment assignment; falls back to greedy on any failure |
+| `persistent_pipeline_stream` | boolean | `false` | One long-lived libp2p stream per pipeline session instead of per-token request/response |
+| `max_seq_len_override` | integer | none | Cap the GGUF `context_length` when sizing the KV cache, so long-context models fit small VRAM. Unset = use the GGUF value |
+| `draft_gpu_layers` | integer | none | Device placement for the draft model. Unset = inherit `gpu_layers` |
+| `force_standard_attn` | boolean | `false` | Route every attention call through `standard_attention` instead of the fused kernel. Diagnostic; auto-enabled while SWIFT is on |
+| `shard_range` | tuple | none | Advanced/dev: claim only this shard index range for split inference. Normal nodes auto-detect their local shards |
+
+### `[inference]` — batching
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `continuous_batching` | boolean | `true` | Coalesce concurrent decode requests for the same model into one fused worker forward. 1.34–1.55× on GPU at batch 2–8; neutral-to-loss on CPU, where the worker falls back to sequential |
+| `max_concurrent_decode_batch` | integer | `8` | Maximum decode slots fused into one batch |
+| `batch_collection_ms` | integer | `5` | How long the scheduler waits for more arrivals after the first request lands in an empty batch. WSL2 timer resolution is ~15 ms, so smaller values dispatch immediately there |
+| `prefill_chunk_tokens` | integer | `128` | Sarathi-style chunked prefill size. Each `Prefilling` slot advances by this many prompt tokens per decode tick, bounding how long one admission can stall active decodes |
+| `batched_prefill_forward` | boolean | `true` | Fuse concurrent same-shape prefill chunks into one forward. Set `false` to isolate this from continuous batching in A/B benchmarks |
+
+### `[inference]` — prefix cache
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `prefix_cache_enabled` | boolean | `true` | Reuse prefill KV across requests sharing a prompt prefix — covers both multi-turn and the same system prompt from different users |
+| `prefix_cache_max_entries` | integer | `16` | Cached prefix snapshots retained per model |
+| `prefix_cache_max_prompt_tokens` | integer | `8192` | Prompts longer than this are not inserted |
+| `prefix_cache_block_tokens` | integer | `64` | Block alignment for the chained-hash manifest, and the granularity of a partial hit |
+| `prefix_cache_min_tokens` | integer | `32` | Shortest prefix worth caching |
+| `cross_node_prefix_trust_min` | float | `0.5` | Minimum peer trust score before accepting a prefix-KV snapshot fetched from that peer |
+
+### `[inference]` — speculative decoding
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `speculative_distributed` | boolean | `false` | Speculative decoding on the distributed path. Needs `speculative_decoding` + a loaded draft model |
+| `decentralized_spec_decoding` | boolean | `false` | DSD: draft and target split across nodes |
+| `swift_self_speculative` | boolean | `false` | SWIFT ([arXiv 2410.06916](https://arxiv.org/abs/2410.06916)) — draft by skipping layers of the target model, so no separate draft model is needed |
+| `swift_calibration_tokens` | integer | `32` | Warm-up tokens before SWIFT's calibrator pins a skip pattern |
+| `swift_gamma` | integer | `4` | Draft tokens proposed per SWIFT verification round |
+| `swift_skip_ratio` | float | `0.45` | Fraction of layers skipped in the SWIFT draft pass |
+| `ngram_lookup_enabled` | boolean | `true` | SWARM-SPEC Layer 1: draft from n-grams already present in the prompt, no draft model required. Large win on input-grounded workloads (RAG, coding, summarisation) — measured +45% at a 77% hit rate |
+| `ngram_max_size` | integer | `4` | Longest n-gram matched against the prompt |
+| `ngram_num_pred_tokens` | integer | `10` | Tokens proposed per n-gram hit |
+
+### `[inference]` — SWARM-SPEC hedging and prefetch
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `hedge_enabled` | boolean | `false` | Layer 2: race a duplicate forward to an alternate shard holder when the primary looks slow, take the winner, discard the loser. Costs bandwidth to cut tail latency |
+| `hedge_after_factor` | float | `1.5` | Fire the duplicate once elapsed time exceeds this multiple of the estimated p99 for that (model, segment, holder) |
+| `hedge_min_samples` | integer | `20` | Latency samples required before hedging engages. At α=0.2 the variance EWMA only reaches ~90% of its true value by 20 samples; lower values collapse the p99 estimate toward the mean and over-fire after a restart |
+| `hedge_max_rate` | float | `0.05` | Ceiling on the fraction of forwards that may be hedged |
+| `prefetch_enabled` | boolean | `false` | Layer 3: predict the next turn in a conversation and warm state during idle time |
+| `prefetch_min_turns_for_prediction` | integer | `2` | Turns observed before a session is predictable enough to prefetch for |
+| `prefetch_min_idle_ms` | integer | `2000` | Idle time before prefetch may use the device |
+| `prefetch_max_candidates` | integer | `3` | Candidate continuations considered per prediction |
+
+### `[inference]` — activation transfer
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `activation_compression` | boolean | `true` | Quantise intermediate hidden states to Q8_0 before sending to the next peer (~3.76× smaller, group-32 + f16 scale). Receivers auto-dispatch on the dtype tag, so this is safe to toggle per node |
+| `streaming_chunked_send` | boolean | `false` | Split a segment-boundary activation into K chunks sent on one stream, overlapping encrypt with transfer. Off by default: on LAN the send is already sub-millisecond and per-chunk cost dominates. The win is WAN-only (roughly <30 Mbps). Requires `persistent_pipeline_stream` |
+| `streaming_chunk_size_bytes` | integer | `262144` | Chunk size for the above. 256 KiB matches the age STREAM default and the TokenWeave K=2–4 sweet spot |
+| `streaming_min_activation_bytes` | integer | `65536` | Activations below this ship as a single frame regardless of the flag |
+| `streaming_chunk_assembly_ttl_secs` | integer | `30` | Receiver-side TTL for an incomplete chunk assembly before it is swept |
 
 ## `[logging]` — Log Output
 
@@ -109,6 +174,8 @@ Every configuration option, organized by section.
 | `enabled` | boolean | `true` | Auto-download popular shards (only for models at DemandVerified+ or Pinned trust level) |
 | `max_storage_mb` | integer | `0` | Max disk for auto-downloads. `0` = 50% of max_disk_mb |
 | `interval_minutes` | integer | `5` | Check interval for new shards |
+| `interval_seconds` | integer | none | Testing override for `interval_minutes`. Takes precedence when set |
+| `model_policies` | table | `{}` | Per-model overrides keyed by model id, e.g. `[auto_manage.model_policies."llama-3.1-8b"]` |
 | `max_shards` | integer | `0` | Max shards. `0` = unlimited |
 | `max_concurrent_downloads` | integer | `3` | Max parallel downloads |
 | `prune_enabled` | boolean | `true` | Auto-remove over-replicated shards |

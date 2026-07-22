@@ -38,9 +38,58 @@ SwarmLLM uses 5 independent discovery layers:
 
 1. **mDNS** — Discovers LAN peers in seconds. Config: `enable_mdns = true`
 2. **Persistent Peer Cache** — Saves up to 200 peers every 5 min + on shutdown. Fastest reconnect.
-3. **Invite Codes** — Format: `swarm://<base64url(key‖nonce‖encrypted_multiaddr)>`. Encrypted with ChaCha20Poly1305.
+3. **Invite Codes** — two formats, see below.
 4. **Peer Exchange (PEX)** — On each connection, exchanges up to 20 known peers.
 5. **Kademlia DHT** — Bootstrap flag + periodic re-bootstrap every 60s.
+
+### Invite code formats
+
+Two codes exist for two different jobs. Both are ChaCha20-Poly1305 sealed with
+a randomly generated key embedded in the blob itself — that is deliberately
+*not* confidentiality against someone holding the code, only a guard against
+casual harvesting of node addresses from screenshots and chat logs.
+
+**`swarm://...` — network invite.** `base64url(key ‖ nonce ‖ encrypted_multiaddr)`.
+Carries one reachable address for the node that minted it. Used to bring a
+machine onto the swarm.
+
+**`swarmpool://...` — pool invite (v2, R140).** Wraps the 8-character pool code
+with everything a fresh node needs to find the inviter *before* any shared
+discovery exists. Inner payload, JSON-serialised then sealed then base64url'd:
+
+```json
+{
+  "version": 2,
+  "pool_id": "...",
+  "pool_name": "...",
+  "multiaddrs": ["/ip4/…/tcp/8810/p2p/12D3KooW…"],
+  "code": "A3F7K2M9",
+  "expires_at_unix": 1750000000
+}
+```
+
+Roughly 300–500 characters — long, but it fits a copy-paste, which the 8-char
+code could not do for this purpose. `multiaddrs` is the node's live
+`listen_multiaddrs` snapshot: bound sockets **unioned with** confirmed external
+addresses (UPnP-mapped, AutoNAT-confirmed, relay-circuit, or manually declared
+via `network.external_addresses`), each suffixed with `/p2p/<peer_id>` so the
+dialer can verify identity. Without that union a NAT'd node silently minted a
+LAN-only code that worked on the LAN and died over the internet.
+
+The legacy bare 8-character code (`A3F7K2M9`) still works and still means
+"broadcast a join request over the existing swarm". It only ever worked when
+both nodes were already on the same swarm — which is exactly the situation an
+invite code is least needed for. `pool::invite::looks_like_v2` is the prefix
+sniff that routes between the two paths; `decode_invite_code` normalises every
+decode failure to `Validation`, because the overwhelmingly likely cause is a
+truncated paste rather than a daemon bug.
+
+Generation fails with `ServiceUnavailable` when `listen_multiaddrs` is empty
+(the daemon hasn't bound yet). When it has entries but none pass the stricter
+`any_internet_reachable` check — public IP, DNS name, or relay circuit; LAN and
+CGNAT ranges excluded — generation still succeeds but emits an
+`invite_lan_only` warning, so nobody is handed a code that cannot survive the
+trip it was made for.
 
 ## GossipSub Topics
 

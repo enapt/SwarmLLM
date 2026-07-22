@@ -3,75 +3,10 @@
 //! Tests that the /metrics endpoint returns valid Prometheus text-format output
 //! and that the /health/ready endpoint reports subsystem status correctly.
 
-use std::net::SocketAddr;
-use std::sync::Arc;
+#[path = "test_server_common.rs"]
+mod test_server_common;
+use test_server_common::spawn_test_server;
 
-use tokio::sync::Mutex;
-
-use swarmllm::api::server::{build_router, AppState};
-use swarmllm::config::Config;
-use swarmllm::daemon::SharedState;
-use swarmllm::identity::Identity;
-use swarmllm::inference::executor::ModelExecutor;
-use swarmllm::storage::db::Database;
-
-/// Spawn a test API server on a random port. Returns (base_url, api_key).
-async fn spawn_test_server() -> (String, String) {
-    let config = Config::default();
-    let identity = Identity::generate();
-    let db = Database::open_temp().expect("temp db");
-    let executor = Arc::new(Mutex::new(ModelExecutor::new()));
-
-    let (shared_state, _shutdown_rx, _dht_rx) =
-        SharedState::new(config.clone(), identity, db.clone(), executor.clone(), None);
-
-    let api_key = shared_state.api_key.clone();
-
-    let state = AppState {
-        rate_limiter: swarmllm::api::middleware::RateLimiter::new(
-            config.api.rate_limit_rpm.unwrap_or(60),
-            config.api.rate_limit_admin_rpm.unwrap_or(200),
-        ),
-        config,
-        db,
-        executor,
-        router_tx: None,
-        acquisition_tx: None,
-        network_tx: None,
-        shared_state,
-        bootstrap_nonces: std::sync::Arc::new(dashmap::DashMap::new()),
-    };
-
-    let app = build_router(state);
-    let addr = SocketAddr::from(([127, 0, 0, 1], 0));
-    let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
-    let port = listener.local_addr().unwrap().port();
-
-    tokio::spawn(async move {
-        axum::serve(
-            listener,
-            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-        )
-        .await
-        .unwrap();
-    });
-
-    // Probe TCP accept readiness instead of a fixed sleep. Same pattern as
-    // api_test.rs::spawn_test_server — 50ms wasn't always enough on slow CI.
-    let probe_addr = format!("127.0.0.1:{port}");
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-    while std::time::Instant::now() < deadline {
-        match tokio::net::TcpStream::connect(&probe_addr).await {
-            Ok(_) => break,
-            Err(_) => tokio::time::sleep(std::time::Duration::from_millis(1)).await,
-        }
-    }
-
-    (format!("http://127.0.0.1:{port}"), api_key)
-}
-
-/// Test that the Prometheus /metrics endpoint returns valid text-format output
-/// with the expected metric names.
 #[tokio::test]
 async fn test_prometheus_metrics_endpoint() {
     let (base, _key) = spawn_test_server().await;

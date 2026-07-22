@@ -450,13 +450,13 @@ impl UpdateChecker {
         latest_version: &str,
         expected_checksum_sha256: Option<&str>,
     ) -> Result<(), SwarmError> {
-        self.apply_update_with_version(tmp_path, Some(latest_version), expected_checksum_sha256)
+        self.apply_update_with_version(tmp_path, latest_version, expected_checksum_sha256)
     }
 
     fn apply_update_with_version(
         &self,
         tmp_path: &std::path::Path,
-        latest_version: Option<&str>,
+        latest_version: &str,
         expected_checksum_sha256: Option<&str>,
     ) -> Result<(), SwarmError> {
         tracing::debug!(path = %tmp_path.display(), "DIAG: apply_update starting");
@@ -470,13 +470,11 @@ impl UpdateChecker {
         // apply time. The version was checked in `check_for_update`, but the
         // UpdateInfo can sit in shared state for arbitrary time and a downgrade
         // would otherwise bypass the version gate.
-        if let Some(target) = latest_version {
-            let current = env!("CARGO_PKG_VERSION");
-            if !is_newer_version(current, target) {
-                return Err(SwarmError::Validation(format!(
-                    "Refusing to apply update: target version {target} is not newer than running {current}"
-                )));
-            }
+        let current = env!("CARGO_PKG_VERSION");
+        if !is_newer_version(current, latest_version) {
+            return Err(SwarmError::Validation(format!(
+                "Refusing to apply update: target version {latest_version} is not newer than running {current}"
+            )));
         }
 
         // SEC: re-hash the staged file before rename. Closes the TOCTOU

@@ -610,54 +610,48 @@ model with a known-bad-template GGUF to verify the failure mode
 fires, and to validate the fix doesn't regress models with working
 templates. Sweep can't construct that fixture.
 
-### Python SDK missing R140 pool endpoints
+### Python SDK missing R140 pool endpoints — **CLOSED R147** (2026-07-22)
 
-`python/swarmllm_client/admin.py:260` `PoolClient` wraps the pre-
-R140 pool endpoints (`state`, `create`, `invite`, `accept`, `remove`,
-`leave`, `invitations`, `leaderboard`) but has no `generate_code()`
-or `join()` method matching the R140 backend additions. SDK users
-implementing the bootstrap-before-decentralization flow have to
-fall back to raw `_post()` calls.
+_`PoolClient.generate_code()` and `PoolClient.join(code)` added,
+wrapping `POST /api/pool/generate-code` and `POST /api/pool/join`.
+`generate_code` returns the `swarmpool://` blob directly (unwrapping the
+`code` field) since that is the only thing a caller does with the
+response. `python/README.md` gained the two-machine bootstrap example._
 
-**Why deferred.** Public-API surface addition; needs SDK release +
-docs update. Not sweep scope.
+### Test infra: spawn_test_server duplicated across binaries — **CLOSED R147** (2026-07-22)
 
-### Test infra: spawn_test_server duplicated across binaries
+_Extracted to `tests/integration/test_server_common.rs`, pulled into both
+binaries with `#[path = "test_server_common.rs"] mod test_server_common;`.
+Each binary compiles its own copy (that's inherent to the `[[test]]` split)
+but there is now one source of truth. `#![allow(dead_code)]` at module
+level because each binary uses a different subset — `api_test` needs both
+helpers, `test_metrics_health` only `spawn_test_server`. Both binaries pass
+(30 + 30 tests); macOS CI will confirm the path import there._
 
-`tests/integration/api_test.rs` and `test_metrics_health.rs` belong
-to different `[[test]]` binaries (`integration` vs
-`integration_phase10_11`) so they can't share via `mod common`. Both
-files have ~60 lines of byte-identical `spawn_test_server` +
-`auth_client` setup that must be updated in lockstep on every test-
-infra change. The R86 readiness-probe fix was correctly applied to
-both, but future changes risk drift.
+### Configuration-reference doc additions — **CLOSED R147** (2026-07-22)
 
-**Why deferred.** Fix requires a Cargo path-import workaround
-(`#[path = "../common.rs"] mod common;` in each test binary) — small
-but needs verification on Linux + macOS CI.
+_The gap was larger than the 4 streaming knobs originally flagged: a
+field-by-field diff of `InferenceConfig` against the reference table found
+**45 undocumented `[inference]` options**. All are now documented, grouped
+into new subsections (batching, prefix cache, speculative decoding,
+SWARM-SPEC hedging/prefetch, activation transfer) rather than one
+unreadable 60-row table. Defaults were read from the `default_*()`
+functions rather than transcribed from prose, so they match the code.
+Also added the missing `auto_manage.interval_seconds` /
+`model_policies` and `inference.shard_range` rows. 91 → 133 documented
+options._
 
-### Configuration-reference doc additions
+_`swarmpool://` v2 documented in `docs/book/src/architecture/networking.md`
+under a new "Invite code formats" subsection: full payload schema, the
+listeners ∪ external-addresses union and why a NAT'd node needs it, the
+legacy 8-char fallback, and the `ServiceUnavailable` / `invite_lan_only`
+generation outcomes._
 
-`docs/book/src/configuration/reference.md` is missing rows for:
-- 4× R139 streaming knobs: `streaming_chunked_send`,
-  `streaming_chunk_size_bytes`, `streaming_min_activation_bytes`,
-  `streaming_chunk_assembly_ttl_secs`
-- R140 `swarmpool://` v2 invite-code format (the `docs/book/src/
-  architecture/networking.md` Discovery Layer 3 section still only
-  documents the network-only `swarm://` code).
+### `update.rs::apply_update_with_version` dead Option branch — **CLOSED R147** (2026-07-22)
 
-**Why deferred.** Both are doc additions, not corrections — the code
-+ behavior already ships. Sweep ran out of time before composing the
-new rows with the exact same style as existing rows.
-
-### `update.rs::apply_update_with_version` dead Option branch
-
-`Option<&str>` parameter has a `None` arm that bypasses the
-downgrade-prevention check. Currently unreachable (only caller
-always passes `Some`). Simplify signature to `&str` and remove the
-guard to remove a future-refactor footgun.
-
-**Why deferred.** Defensive cleanup, not a live bug.
+_Signature tightened to `latest_version: &str`. The downgrade-prevention
+check is now unconditional — there is no longer a way to call this
+function in a mode that skips it._
 
 ### Worker compute waste on request cancel — **CLOSED R147** (2026-07-22)
 
