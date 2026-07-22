@@ -114,7 +114,19 @@ pub enum WorkerMsg {
         matched_stop_sequence: Option<String>,
     },
     /// Error for a specific request.
-    Error { request_id: Uuid, message: String },
+    ///
+    /// `fatal` marks a failure that corrupted or exhausted the worker's device
+    /// state rather than just this one request — a CUDA OOM, a driver error, an
+    /// illegal memory access. The daemon evicts (and thereby kills) the worker
+    /// on a fatal error so the OS reclaims its VRAM; a non-fatal error leaves
+    /// the loaded model resident for the next request. Defaults to `false` for
+    /// wire-compat with workers that predate the field.
+    Error {
+        request_id: Uuid,
+        message: String,
+        #[serde(default)]
+        fatal: bool,
+    },
     /// Item 8 Phase 1: notify the daemon that the worker just inserted (or
     /// refreshed) prefix-cache entries for `model_id`. The daemon broadcasts
     /// this as a `SwarmMessage::PrefixCacheAnnounce` and updates its own
@@ -396,9 +408,121 @@ async fn recv_framed<R: AsyncReadExt + Unpin, T: for<'de> Deserialize<'de>>(
     Ok((msg, payload))
 }
 
+/// Does this worker-side error message indicate the worker's device state is
+/// no longer trustworthy, rather than just this one request failing?
+///
+/// This is the single source of truth for the classification — the worker uses
+/// it to stamp `WorkerMsg::Error.fatal`, and the daemon re-checks the message
+/// text so a worker built before the `fatal` field still gets recycled.
+///
+/// A `true` verdict means "kill and respawn the worker". Getting it wrong in
+/// the `true` direction costs one model reload; getting it wrong in the `false`
+/// direction strands the worker's entire VRAM allocation for the lifetime of
+/// the daemon, and every retry then competes against memory the leaked worker
+/// is still holding. The asymmetry is why the patterns below lean inclusive.
+///
+/// Deliberately NOT fatal: bad prompts, tokenizer failures, unsupported
+/// sampling params, shape mismatches from a malformed request. Those are
+/// per-request and the loaded model is still perfectly good.
+pub fn worker_error_is_fatal(message: &str) -> bool {
+    // Patterns are matched case-insensitively against the full error chain,
+    // which for candle looks like:
+    //   "Forward: Cuda(DriverError(CUDA_ERROR_OUT_OF_MEMORY, "out of memory"))"
+    const FATAL_PATTERNS: &[&str] = &[
+        "out of memory",
+        "outofmemory",
+        "out_of_memory",
+        "cuda_error",
+        "cuda error",
+        "drivererror",
+        "illegal memory access",
+        "misaligned address",
+        "device-side assert",
+        "no cuda-capable device",
+        "cublas",
+        "cudnn",
+        "not enough memory",
+        "failed to allocate",
+        "allocation failed",
+    ];
+    let lower = message.to_ascii_lowercase();
+    FATAL_PATTERNS.iter().any(|p| lower.contains(p))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cuda_oom_is_fatal() {
+        // The exact shape candle produces on a CUDA OOM, as seen in the
+        // 2026-07-21 bug report where the worker survived and kept 4456MB.
+        assert!(worker_error_is_fatal(
+            "Forward: Cuda(DriverError(CUDA_ERROR_OUT_OF_MEMORY, \"out of memory\"))"
+        ));
+        assert!(worker_error_is_fatal(
+            "Inference error: CUDA_ERROR_OUT_OF_MEMORY"
+        ));
+        assert!(worker_error_is_fatal(
+            "cuda error: an illegal memory access was encountered"
+        ));
+        assert!(worker_error_is_fatal(
+            "cublas error: CUBLAS_STATUS_ALLOC_FAILED"
+        ));
+        assert!(worker_error_is_fatal(
+            "Failed to allocate 4096 MB on device 0"
+        ));
+    }
+
+    #[test]
+    fn per_request_errors_are_not_fatal() {
+        // These leave the loaded model perfectly usable — killing the worker
+        // would throw away a multi-second model load for nothing.
+        assert!(!worker_error_is_fatal("Tokenize: unknown token in prompt"));
+        assert!(!worker_error_is_fatal(
+            "Validation: temperature must be between 0.0 and 2.0"
+        ));
+        assert!(!worker_error_is_fatal("shape mismatch in stop sequence"));
+        assert!(!worker_error_is_fatal("chat template evaluation failed"));
+    }
+
+    #[test]
+    fn fatal_classification_is_case_insensitive() {
+        assert!(worker_error_is_fatal("OUT OF MEMORY"));
+        assert!(worker_error_is_fatal("Out Of Memory"));
+        assert!(worker_error_is_fatal("out of memory"));
+    }
+
+    #[test]
+    fn error_fatal_field_defaults_false_for_older_workers() {
+        // Wire-compat: a worker built before the `fatal` field omits it.
+        // Deserialization must not fail, and must not invent a `true`.
+        let json =
+            r#"{"t":"Error","request_id":"00000000-0000-0000-0000-000000000000","message":"boom"}"#;
+        let msg: WorkerMsg = serde_json::from_str(json).unwrap();
+        match msg {
+            WorkerMsg::Error { fatal, message, .. } => {
+                assert!(!fatal);
+                assert_eq!(message, "boom");
+            }
+            other => panic!("expected Error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn error_fatal_field_round_trips() {
+        let msg = WorkerMsg::Error {
+            request_id: Uuid::nil(),
+            message: "CUDA_ERROR_OUT_OF_MEMORY".into(),
+            fatal: true,
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        let back: WorkerMsg = serde_json::from_str(&json).unwrap();
+        match back {
+            WorkerMsg::Error { fatal, .. } => assert!(fatal),
+            other => panic!("expected Error, got {other:?}"),
+        }
+    }
 
     #[test]
     fn spec_logits_roundtrip_empty() {

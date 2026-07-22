@@ -1441,8 +1441,9 @@ impl ModelProcessPool {
                     WorkerMsg::Error {
                         request_id: rid,
                         message,
+                        fatal,
                     } if rid == request_id => {
-                        return Err(SwarmError::Inference(message));
+                        return Err(self.classify_worker_error(&model_id, message, fatal));
                     }
                     _ => continue,
                 },
@@ -1603,10 +1604,11 @@ impl ModelProcessPool {
                         WorkerMsg::Error {
                             request_id: err_rid,
                             message,
+                            fatal,
                         },
                         _,
                     )) if err_rid == rid => {
-                        return Err(SwarmError::Inference(message));
+                        return Err(self.classify_worker_error(&model_id, message, fatal));
                     }
                     Some(_) => continue,
                     None => {
@@ -1739,8 +1741,9 @@ impl ModelProcessPool {
                 WorkerMsg::Error {
                     request_id: rid,
                     message,
+                    fatal,
                 } if rid == request_id => {
-                    return Err(SwarmError::Inference(message));
+                    return Err(self.classify_worker_error(model_id, message, fatal));
                 }
                 _ => continue,
             }
@@ -1766,6 +1769,42 @@ impl ModelProcessPool {
             token_logprobs,
             matched_stop_sequence,
         })
+    }
+
+    /// Turn a `WorkerMsg::Error` into a `SwarmError`, evicting the worker first
+    /// when the failure was fatal to its device state.
+    ///
+    /// Before this existed, a worker that hit a CUDA OOM mid-forward reported
+    /// the error and stayed resident holding its full VRAM allocation — the
+    /// only two code paths that ever killed a worker were explicit unloads.
+    /// Each retry then had *less* free VRAM than the last, so a single OOM
+    /// reliably cascaded into permanent failure for that model until someone
+    /// killed the process by hand.
+    ///
+    /// Eviction drops the last `Arc<WorkerHandle>` once the caller's clone goes
+    /// out of scope, and `WorkerHandle::Drop` kills the child, which is what
+    /// actually returns the VRAM to the OS.
+    fn classify_worker_error(
+        &self,
+        model_id: &ModelId,
+        message: String,
+        fatal_flag: bool,
+    ) -> SwarmError {
+        // Trust the worker's own verdict, but re-derive it from the message as
+        // well: a worker binary older than the `fatal` field always sends
+        // `false`, and a stranded worker is much worse than a needless respawn.
+        if fatal_flag || crate::inference::worker_ipc::worker_error_is_fatal(&message) {
+            self.workers.remove(model_id);
+            tracing::warn!(
+                model = %model_id,
+                error = %message,
+                "Fatal worker error — killing worker to reclaim its device memory"
+            );
+            // Subprocess lifecycle failure → ServiceUnavailable, not Internal:
+            // this server can't serve right now, but it isn't a code bug.
+            return SwarmError::ServiceUnavailable(format!("worker fatal error: {message}"));
+        }
+        SwarmError::Inference(message)
     }
 
     /// Unload all segments for a model (kills the worker subprocess).

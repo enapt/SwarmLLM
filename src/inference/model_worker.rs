@@ -393,11 +393,24 @@ pub async fn run_worker(
 /// Send a `WorkerMsg::Error` back to the daemon. Used by the `run_worker`
 /// dispatch loop to report handler failures without crashing the subprocess.
 async fn send_worker_error(writer: &mut IpcWriter, request_id: uuid::Uuid, err: SwarmError) {
+    let message = err.to_string();
+    let fatal = crate::inference::worker_ipc::worker_error_is_fatal(&message);
+    if fatal {
+        // The daemon will kill us on receipt. Say so in our own log too — an
+        // operator reading the worker log should not have to infer the
+        // subsequent respawn from the daemon side.
+        tracing::error!(
+            request_id = %request_id,
+            error = %message,
+            "model-worker: fatal device error — daemon will recycle this worker"
+        );
+    }
     let _ = send_worker(
         writer,
         &WorkerMsg::Error {
             request_id,
-            message: err.to_string(),
+            message,
+            fatal,
         },
         &[],
     )
@@ -2684,11 +2697,13 @@ async fn finalize_slot(
     if finish_label == "error" {
         let message = error_message
             .unwrap_or_else(|| "BatchGenerate slot failed without a recorded message".to_string());
+        let fatal = crate::inference::worker_ipc::worker_error_is_fatal(&message);
         send_worker(
             writer,
             &WorkerMsg::Error {
                 request_id,
                 message,
+                fatal,
             },
             &[],
         )
