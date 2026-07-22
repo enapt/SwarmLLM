@@ -643,22 +643,39 @@
             var vramLabel = document.getElementById('vram-label');
             if (hw.gpu_inference) {
               if (vramLabel) vramLabel.textContent = I18n.t('hw.vram');
-              // GPU mode: show model-estimated VRAM for loaded models
+              // ALWAYS show live VRAM (hw.gpu_vram_used_mb, read from
+              // nvidia-smi by the backend) as the primary number and as the
+              // gauge input.
+              //
+              // This used to display the SUM of every loaded model's
+              // estimated_vram_mb instead, whenever any model was "loaded".
+              // That estimate is derived from model size, not from the device,
+              // and it only got a clarifying tooltip when real usage EXCEEDED
+              // it. In the other direction it was silently wrong: the
+              // 2026-07-21 report had 5 loaded models estimating ~5.3 GB
+              // rendering as "5.3 GB / 5.7 GB — 93% VRAM" on a red gauge while
+              // nvidia-smi and the API agreed the real figure was ~1 GB (17%).
+              // An idle machine looked like it was about to OOM, and the
+              // reporter spent time chasing it as a sixth bug.
               var activeVramMb = 0;
               if (App.data.cache.models && App.data.cache.models.length) {
                 App.data.cache.models.forEach(function(m) {
                   if (m.status === 'loaded' && m.estimated_vram_mb) activeVramMb += m.estimated_vram_mb;
                 });
               }
-              var displayUsed = activeVramMb > 0 ? activeVramMb : vramUsed;
-              if (activeVramMb > 0 && vramUsed > activeVramMb + 200) {
-                vramEl.textContent = I18n.t('hw.vram_active', { active: U.formatMB(activeVramMb), total: U.formatMB(vramTotal) });
-                vramEl.title = I18n.t('hw.vram_reserved_tip', { used: U.formatMB(vramUsed) });
+              vramEl.textContent = U.formatMB(vramUsed) + ' / ' + U.formatMB(vramTotal);
+              // The committed estimate is still worth surfacing — it's what
+              // auto-manage budgets against — but only ever as clearly
+              // labelled secondary context, never as the headline figure.
+              if (activeVramMb > 0) {
+                vramEl.title = I18n.t('hw.vram_live_tip', {
+                  used: U.formatMB(vramUsed),
+                  committed: U.formatMB(activeVramMb)
+                });
               } else {
-                vramEl.textContent = U.formatMB(displayUsed) + ' / ' + U.formatMB(vramTotal);
-                vramEl.title = '';
+                vramEl.title = I18n.t('hw.vram_live_only_tip', { used: U.formatMB(vramUsed) });
               }
-              var vramPct = vramTotal > 0 ? (displayUsed / vramTotal * 100) : 0;
+              var vramPct = vramTotal > 0 ? (vramUsed / vramTotal * 100) : 0;
               App.dashboard._setGauge('vram-gauge', vramPct);
               document.getElementById('vram-bar').style.width = vramPct.toFixed(1) + '%';
               document.getElementById('vram-bar').className = U.resourceBarClass(vramPct, 'cyan');
