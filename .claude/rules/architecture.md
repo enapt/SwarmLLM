@@ -304,6 +304,37 @@ silently break at the wire if duplicated:
   via wrappers because the trust delta is a real security event worth
   surfacing in the diff.
 
+## Peer Cache: storable vs dialable
+
+`network/peer_cache.rs` answers two different questions and they must not be
+conflated:
+
+- **`filter_storable(addrs, local_peer_id)`** — what is worth *keeping*. Drops
+  only what is junk under any circumstances: not remotely reachable
+  (`addr_is_remotely_reachable`), or routing through our own peer id in ANY
+  `/p2p/` hop (the relay position of a `/p2p-circuit`, not just the target).
+  **Keeps private addresses regardless of where this node currently is** — a
+  laptop saving its cache on a hotspot must not permanently lose the LAN peers
+  it had at home. Used by `save_peer_cache`.
+- **`filter_dialable(addrs, local_peer_id, local_addrs)`** — what is worth
+  dialling *from here*. Everything `filter_storable` does, plus: a node whose
+  own reachable addresses contain no private address cannot route to anyone
+  else's RFC1918 / CGNAT / IPv6-ULA, so those are dropped. Used by every dial
+  path and by `GET /api/admin/diagnostics`.
+
+**`local_addrs` empty means "not bound yet", NOT "public."** `listen_multiaddrs`
+is empty until the swarm finishes binding; a node seconds into starting that
+concluded it was a public server would discard every LAN peer it had, breaking
+the home two-machine and pool cases the cache exists for. Unknown context keeps
+everything.
+
+Nothing in `src/pool/` reads this cache — pools route through `pool_state` /
+`allowed_node_set` — and mDNS discovers LAN peers independently, so a LAN pool
+has a second route back regardless.
+
+Retraction of a peer's *shard* claims is a different mechanism entirely; see
+`ShardAnnounce.complete_for_models` below.
+
 ## ModelRegistry Holder Counts
 
 `ModelRegistry::shard_holders` caches at most `MAX_HOLDERS_PER_SHARD = 50`

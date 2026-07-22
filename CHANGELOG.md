@@ -2,6 +2,22 @@
 
 All notable changes to SwarmLLM are documented here.
 
+## [0.3.11-alpha] — 2026-07-22
+
+### Fixed
+
+- **Computers on the public internet kept trying to reach home networks.** A
+  machine remembers where it has seen others, and those addresses include the
+  ones only reachable inside someone's house — their home network, and virtual
+  network adapters created by other software. A server on the internet can
+  never reach any of those, but retried all of them every minute regardless. It
+  now only keeps trying addresses it could actually reach from where it is.
+
+  Machines on a home network are unaffected and still remember each other's
+  local addresses, which is how two computers in one house find each other
+  again after a restart. A laptop that moves between networks keeps both sets,
+  so nothing is lost by being on the wrong one when it last saved.
+
 ## [0.3.10-alpha] — 2026-07-22
 
 ### Fixed

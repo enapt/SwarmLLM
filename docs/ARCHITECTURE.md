@@ -149,6 +149,17 @@ SwarmLLM uses a 5-layer zero-config discovery stack. Each layer is independent �
 │    Saves up to 200 peer multiaddrs every 5 min + shutdown   │
 │    Loads on startup → fastest reconnect path                │
 │    File: src/network/peer_cache.rs                          │
+│    Storing and dialling are separate questions (R148):      │
+│      filter_storable — drops only always-junk (loopback,    │
+│        circuits through our own id). Keeps private addrs    │
+│        wherever we are, so a roaming laptop keeps its LAN   │
+│        peers.                                               │
+│      filter_dialable — adds context: a node with no         │
+│        private address of its own cannot reach anyone       │
+│        else's 192.168/10/172.16/CGNAT, so those are         │
+│        dropped on read. Empty listen_multiaddrs means       │
+│        "not bound yet", NOT "public" — unknown context      │
+│        keeps everything.                                    │
 │                                                             │
 │  Layer 3: Encrypted Network + Pool Invite Codes              │
 │    Network-only (single multiaddr):                         │
