@@ -49,7 +49,9 @@ default_model = ""             # Empty = first available
 session_timeout_seconds = 600
 max_concurrent_requests = 10
 # model_path = "/path/to/model.gguf"  # Uncomment and set to load a model
-gpu_layers = 0                 # 0 = CPU only, set higher for GPU offloading
+gpu_layers = -1                # -1 = auto (use the GPU when one is available), 0 = CPU only.
+                               # The split engine places a worker's whole layer window on one device,
+                               # so a positive value means the same as -1; use shard windows to bound VRAM.
 max_batch_size = 1             # 1 = no batching (sequential); >1 enables batching for both local and remote forwards (pipeline bubble filling)
 batch_timeout_ms = 50          # Ms to wait for more requests before dispatching a partial batch (0 = immediate)
 privacy_mode = false           # When true, user prompts are NOT written to disk (KV-cache sessions stay in-memory only)

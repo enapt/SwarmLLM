@@ -14,7 +14,7 @@ pub struct DaemonArgs {
     pub port: Option<u16>,
     pub data_dir: Option<PathBuf>,
     pub model: Option<PathBuf>,
-    pub gpu_layers: Option<u32>,
+    pub gpu_layers: Option<i32>,
     pub bootstrap: Vec<String>,
     pub shards: Option<String>,
     pub no_update_check: bool,

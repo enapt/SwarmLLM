@@ -29,8 +29,19 @@ pub struct InferenceConfig {
     pub max_concurrent_requests: u32,
     #[serde(default)]
     pub model_path: Option<PathBuf>,
+    /// How many transformer layers to run on the GPU.
+    ///
+    /// - `-1` (default) — auto: use the GPU when one is available.
+    /// - `0` — CPU only. Honoured by the shard/worker path since R146; before
+    ///   that this value was read exclusively by the legacy llama.cpp executor
+    ///   (`inference/executor.rs`, `--features llama`) and a CUDA build would
+    ///   silently run on the GPU no matter what was configured here.
+    /// - `> 0` — GPU. SwarmLLM's split engine places a worker's whole layer
+    ///   window on one device, so a fractional value is rounded up to "all of
+    ///   this worker's layers" and logged. Use shard windows
+    ///   (`ModelProcessPool::restart_with_window`) to bound VRAM instead.
     #[serde(default = "default_gpu_layers")]
-    pub gpu_layers: u32,
+    pub gpu_layers: i32,
     /// KV-cache session TTL in seconds (default 600 = 10 minutes).
     #[serde(default = "default_kv_cache_ttl")]
     pub kv_cache_ttl_secs: Option<u64>,
@@ -193,7 +204,7 @@ pub struct InferenceConfig {
     pub draft_model_path: Option<PathBuf>,
     /// GPU layers to offload for the draft model (default: same as main model).
     #[serde(default)]
-    pub draft_gpu_layers: Option<u32>,
+    pub draft_gpu_layers: Option<i32>,
     /// Optional shard range for split inference (e.g. "0-4").
     /// When set, the node only claims these shard indices instead of all shards.
     #[serde(default)]
@@ -636,8 +647,11 @@ fn default_max_concurrent() -> u32 {
     10
 }
 
-fn default_gpu_layers() -> u32 {
-    0
+/// Auto: use the GPU when one is available. Matches llama.cpp's `-1`
+/// convention. NOT `0` — `0` means "CPU only", and defaulting to that would
+/// silently drop every existing CUDA node to CPU inference on upgrade.
+fn default_gpu_layers() -> i32 {
+    -1
 }
 
 fn default_kv_cache_ttl() -> Option<u64> {

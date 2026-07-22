@@ -15,6 +15,25 @@ pub struct ShardLoadParams<'a> {
     pub is_last: bool,
     /// Manifest for this model — provides tensor entries and total size.
     pub manifest: &'a crate::types::ModelManifest,
+    /// Load onto the CPU regardless of GPU availability. Set from the worker's
+    /// `--gpu-layers 0`, which in turn comes from `inference.gpu_layers`.
+    /// Before R146 nothing plumbed this: the loader called
+    /// `Device::cuda_if_available(0)` unconditionally and `gpu_layers` was read
+    /// only by the legacy llama.cpp executor, so a CUDA build ignored the
+    /// setting entirely — configuring `gpu_layers = 0` (the documented
+    /// "CPU only" value, and the shipped default) still ran on the GPU.
+    pub force_cpu: bool,
+}
+
+/// Map an `inference.gpu_layers` value to the loader's `force_cpu` flag.
+///
+/// The split engine places a worker's entire layer window on one device, so
+/// there are only two reachable outcomes. A positive value smaller than the
+/// window is *not* silently honoured as partial offload — it means GPU, and
+/// the caller logs the discrepancy rather than pretending. True per-layer
+/// hybrid placement is tracked in `docs/FUTURE_WORK.md`.
+pub fn force_cpu_for(gpu_layers: i32) -> bool {
+    gpu_layers == 0
 }
 
 /// Try to load a SplitModel from shard files + gguf_header.bin.
@@ -69,8 +88,22 @@ pub fn try_load_from_shards(
         model = %model_id,
         shards = shard_files.len(),
         layers = format!("[{layer_start}..{layer_end})"),
+        force_cpu = params.force_cpu,
         "Loading split model from shard files (no full GGUF)"
     );
+
+    if params.force_cpu {
+        return crate::inference::split::SplitModel::load_from_shards_cpu(
+            model_dir,
+            shard_files,
+            &tensor_entries,
+            params.manifest.total_size_bytes,
+            layer_start,
+            layer_end,
+            is_first,
+            is_last,
+        );
+    }
 
     let result = crate::inference::split::SplitModel::load_from_shards(
         model_dir,
@@ -102,5 +135,36 @@ pub fn try_load_from_shards(
             )
         }
         _ => result,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gpu_layers_zero_forces_cpu() {
+        // The documented meaning of `gpu_layers = 0`, and — until R146 — a
+        // silent no-op for the shard path: the loader called
+        // `Device::cuda_if_available(0)` regardless, so a CUDA build ran on
+        // the GPU no matter what the config said.
+        assert!(force_cpu_for(0));
+    }
+
+    #[test]
+    fn gpu_layers_auto_and_positive_do_not_force_cpu() {
+        assert!(!force_cpu_for(-1), "-1 is auto: use the GPU when present");
+        assert!(!force_cpu_for(8));
+        assert!(!force_cpu_for(999));
+    }
+
+    #[test]
+    fn default_gpu_layers_is_auto_not_cpu_only() {
+        // Defaulting to 0 would read as "CPU only" and silently drop every
+        // existing CUDA node to CPU inference the moment the setting started
+        // being honoured.
+        let cfg = crate::config::Config::default();
+        assert_eq!(cfg.inference.gpu_layers, -1);
+        assert!(!force_cpu_for(cfg.inference.gpu_layers));
     }
 }

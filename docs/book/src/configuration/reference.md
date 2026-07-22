@@ -60,7 +60,7 @@ Every configuration option, organized by section.
 | `session_timeout_seconds` | integer | `600` | Chat session memory lifetime (10 min) |
 | `max_concurrent_requests` | integer | `10` | Max parallel requests |
 | `model_path` | path | none | Path to a GGUF model file |
-| `gpu_layers` | integer | `0` | Layers to offload to GPU. `0` = CPU only |
+| `gpu_layers` | integer | `-1` | Device placement. `-1` = auto (use the GPU when available), `0` = CPU only, `>0` = GPU. The split engine places a worker's whole layer window on one device, so partial offload is not supported — a positive value behaves as `-1` and logs a warning. Use shard windows to bound VRAM |
 | `kv_cache_ttl_secs` | integer | `600` | KV-cache lifetime |
 | `max_batch_size` | integer | `1` | Max request batch size. `1` = no batching. When `> 1`, both local and remote forward requests batch together via `BatchForwarder`, filling pipeline bubbles in distributed inference |
 | `batch_timeout_ms` | integer | `50` | Ms to wait for additional requests before dispatching a partial batch. `0` = dispatch immediately (purely opportunistic batching) |

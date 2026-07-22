@@ -130,8 +130,8 @@ fn gemma2_real_gguf_vs_shards() {
     }
 
     // Load from full GGUF
-    let mut model =
-        SplitModel::load_from_gguf(gguf_path, 0, 26, true, true).expect("Failed to load from GGUF");
+    let mut model = SplitModel::load_from_gguf(gguf_path, 0, 26, true, true, false)
+        .expect("Failed to load from GGUF");
 
     // Use the tokenizer to get the same tokens our API uses
     let prompt_tokens: Vec<u32> = vec![
@@ -201,7 +201,7 @@ fn gemma2_single_token() {
         .unwrap();
 
     let mut model =
-        SplitModel::load_from_gguf(gguf_path, 0, 26, true, true).expect("Failed to load");
+        SplitModel::load_from_gguf(gguf_path, 0, 26, true, true, false).expect("Failed to load");
 
     let kv_store = KvCacheStore::new(std::time::Duration::from_secs(600));
     let logits = model

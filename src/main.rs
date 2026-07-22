@@ -38,7 +38,7 @@ struct Cli {
 
     /// Number of layers to offload to GPU (0 = CPU only)
     #[arg(long, global = true)]
-    gpu_layers: Option<u32>,
+    gpu_layers: Option<i32>,
 
     /// Bootstrap peer multiaddr (e.g. /ip4/127.0.0.1/udp/8800/quic-v1)
     #[arg(long, global = true)]
@@ -114,6 +114,9 @@ enum Commands {
         /// Comma-separated shard indices to load (e.g. "0,1,7"). If omitted, loads all on-disk shards.
         #[arg(long)]
         shard_window: Option<String>,
+        /// Device placement: -1 = auto (GPU when available), 0 = CPU only, >0 = GPU.
+        #[arg(long, default_value = "-1", allow_negative_numbers = true)]
+        gpu_layers: i32,
         /// KV-cache session TTL in seconds (default 600)
         #[arg(long, default_value = "600")]
         kv_cache_ttl: u64,
@@ -319,6 +322,7 @@ async fn async_main(mut cli: Cli) -> anyhow::Result<()> {
             socket,
             data_dir,
             shard_window,
+            gpu_layers,
             kv_cache_ttl,
             prefix_cache_enabled,
             prefix_cache_max_entries,
@@ -368,6 +372,7 @@ async fn async_main(mut cli: Cli) -> anyhow::Result<()> {
                 batch_generate_max_slots,
                 prefill_chunk_tokens,
                 batched_prefill_forward,
+                gpu_layers,
             };
             swarmllm::inference::model_worker::run_worker(
                 socket,

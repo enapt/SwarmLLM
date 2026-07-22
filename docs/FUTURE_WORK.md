@@ -1954,6 +1954,24 @@ extra-cautious — Layer 0 alone is purely upside.
 
 ---
 
+## Inference engine
+
+### True per-layer GPU/CPU hybrid offload (R146, 2026-07-22)
+**Context.** `inference.gpu_layers` now reaches the shard/worker path and is honoured for the two outcomes the split engine can actually express: `0` = CPU only, `-1`/`>0` = GPU. What it still cannot do is llama.cpp-style *partial* offload — "put 8 of these 22 layers on the GPU and the rest on the CPU". A positive value below the worker's layer count logs a warning rather than silently pretending.
+
+**What it would take.** `SplitModel` holds one `Device` for the whole model (`split/loader/mod.rs`, `loader/shards.rs`). Real hybrid placement needs:
+- per-layer `Device` on the layer structs, chosen at load time from a boundary index;
+- a `to_device` transition in the forward loop at the boundary — one PCIe copy per boundary crossing per token, cheap if the split stays contiguous;
+- KV-cache blocks allocated on the same device as their layer (`split/kv_cache.rs` currently takes the model device);
+- the same treatment across every arch path (`model_arch.rs` dispatch, `layers/qwen35.rs`, MoE/MLA, gemma2) — this is where the real risk lives, since a missed path silently mixes devices and fails at runtime, not at compile time;
+- prefix-cache snapshot serialization is device-tagged, so cross-node prefix reuse would need a device-agnostic representation.
+
+**Why deferred.** Not what the reporting bug needed — the user's ask was "reducing gpu_layers should reduce VRAM", and `gpu_layers = 0` now genuinely does that, as does the automatic CPU pin after a GPU OOM. Hybrid offload is a performance feature on top. It touches the latency-critical forward path across every architecture, and validating it requires a CUDA build (~56 min) plus per-arch GPU testing. Worth doing when there's a concrete workload that needs a model slightly too big for available VRAM and where CPU-only is too slow to be acceptable.
+
+**Interim workarounds:** shard windows (`ModelProcessPool::restart_with_window`) bound VRAM by loading fewer shards; `gpu_layers = 0` forces CPU; a GPU OOM auto-pins the model to CPU for the rest of the run.
+
+---
+
 ## How to use this file
 
 When starting a new feature, grep this file for keywords related to the area you're touching. If your feature unblocks a deferred item, either pick it up in the same PR (if scope allows) or move the entry to "completed" with the closing commit reference.

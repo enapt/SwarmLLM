@@ -183,6 +183,18 @@ impl Daemon {
         };
         if let Some(ref gpu) = gpu_info {
             tracing::info!(gpu = %gpu.name, vram_mb = gpu.vram_total_mb, backend = %gpu.backend, "GPU detected");
+            // Loud, because this combination used to be a silent lie: the
+            // shipped default was `gpu_layers = 0` documented as "CPU only",
+            // and a CUDA build ran on the GPU anyway. Now that the setting is
+            // honoured, someone carrying that value forward in their
+            // config.toml would quietly lose GPU inference — so say it.
+            if self.config.inference.gpu_layers == 0 {
+                tracing::warn!(
+                    gpu = %gpu.name,
+                    "inference.gpu_layers = 0 — running CPU-only despite the detected GPU. \
+                     Set gpu_layers = -1 (auto) to use it."
+                );
+            }
         }
 
         let executor = Arc::new(tokio::sync::Mutex::new(executor));

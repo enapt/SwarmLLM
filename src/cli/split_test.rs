@@ -17,7 +17,8 @@ pub async fn test_split_inference(
     println!("Loading full model from: {}", model_path.display());
 
     // Load as a single split covering ALL layers (0..N, is_first=true, is_last=true)
-    let mut model = SplitModel::load_from_gguf(&model_path, 0, 999, true, true)?;
+    // Diagnostic command — always auto-select the device (force_cpu = false).
+    let mut model = SplitModel::load_from_gguf(&model_path, 0, 999, true, true, false)?;
     let total_layers = model.total_layers;
     println!(
         "Model loaded: {} layers, hidden_dim={}",

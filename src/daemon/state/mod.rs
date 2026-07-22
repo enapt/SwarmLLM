@@ -534,6 +534,9 @@ impl SharedState {
         );
         state
             .model_process_pool
+            .set_gpu_layers(state.config.inference.gpu_layers);
+        state
+            .model_process_pool
             .set_force_standard_attn(state.config.inference.force_standard_attn);
         state
             .model_process_pool

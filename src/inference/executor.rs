@@ -79,7 +79,18 @@ impl ModelExecutor {
     ///
     /// With llama-cpp-2: initializes the backend, loads the model with GPU offloading.
     /// Without: validates the path exists and marks as loaded (stub).
-    pub fn load_model(&mut self, path: &Path, gpu_layers: u32) -> Result<(), SwarmError> {
+    /// `gpu_layers` follows the config convention: `-1` = auto/all, `0` = CPU
+    /// only, `n > 0` = offload n layers. llama.cpp's C API takes an unsigned
+    /// count with no "all" sentinel, so auto maps to a value larger than any
+    /// real model's layer count (llama.cpp clamps to `n_layer`), matching what
+    /// the upstream CLI does for `-ngl -1`.
+    pub fn load_model(&mut self, path: &Path, gpu_layers: i32) -> Result<(), SwarmError> {
+        #[cfg_attr(not(feature = "llama"), allow(unused_variables))]
+        let n_gpu_layers: u32 = if gpu_layers < 0 {
+            999
+        } else {
+            gpu_layers as u32
+        };
         if !path.exists() {
             return Err(SwarmError::Inference(format!(
                 "Model file not found: {}",
@@ -135,7 +146,7 @@ impl ModelExecutor {
             );
 
             // Load model with GPU layer offloading
-            let model_params = LlamaModelParams::default().with_n_gpu_layers(gpu_layers);
+            let model_params = LlamaModelParams::default().with_n_gpu_layers(n_gpu_layers);
             let model = LlamaModel::load_from_file(&backend, path, &model_params)
                 .map_err(|e| SwarmError::Inference(format!("Failed to load model: {e}")))?;
 

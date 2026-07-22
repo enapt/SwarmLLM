@@ -170,7 +170,7 @@ impl Config {
         cli_port: Option<u16>,
         cli_data_dir: Option<&Path>,
         cli_model_path: Option<&Path>,
-        cli_gpu_layers: Option<u32>,
+        cli_gpu_layers: Option<i32>,
         cli_bootstrap: Vec<String>,
     ) -> Result<Self, SwarmError> {
         tracing::debug!(

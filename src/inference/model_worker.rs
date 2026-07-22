@@ -76,6 +76,11 @@ pub struct WorkerOptions {
     /// Item 7 Phase 4: fuse concurrent same-shape Prefilling slots into one
     /// `forward_batch` call inside `step_decode_pool`'s Phase A.
     pub batched_prefill_forward: bool,
+    /// Device placement, mirroring `InferenceConfig::gpu_layers`: `-1` auto
+    /// (GPU when available), `0` CPU only, `>0` GPU. The split engine places a
+    /// worker's whole layer window on one device, so any positive value means
+    /// the same thing as auto — see `force_cpu_for` for the mapping.
+    pub gpu_layers: i32,
 }
 
 impl Default for WorkerOptions {
@@ -86,6 +91,7 @@ impl Default for WorkerOptions {
             activation_compression: false,
             batch_generate: false,
             batch_generate_max_slots: 8,
+            gpu_layers: -1,
             prefill_chunk_tokens: 128,
             batched_prefill_forward: true,
         }
@@ -121,7 +127,9 @@ pub async fn run_worker(
         batch_generate_max_slots,
         prefill_chunk_tokens,
         batched_prefill_forward,
+        gpu_layers,
     } = options;
+    set_worker_force_cpu(gpu_layers);
     // Connect to the daemon's IPC socket. The name matches what the daemon
     // bound: a filesystem path on Unix, a namespace name on Windows.
     use interprocess::local_socket::tokio::{prelude::*, Stream};
@@ -417,6 +425,39 @@ async fn send_worker_error(writer: &mut IpcWriter, request_id: uuid::Uuid, err: 
     .await;
 }
 
+/// Device placement for this worker process, decided once at startup from
+/// `--gpu-layers` and never changed.
+///
+/// A process-global rather than another parameter: every model this worker
+/// loads goes on the same device, and the alternative is threading an
+/// immutable `bool` through six call layers alongside `shard_window`. The
+/// daemon respawns the worker to change placement (see
+/// `ModelProcessPool::cpu_pinned_models`), so there is no in-process
+/// transition to reason about.
+static WORKER_FORCE_CPU: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Apply `--gpu-layers` to this process. Called once from `run_worker`.
+fn set_worker_force_cpu(gpu_layers: i32) {
+    let force_cpu = crate::daemon::shard_loader::force_cpu_for(gpu_layers);
+    WORKER_FORCE_CPU.store(force_cpu, std::sync::atomic::Ordering::Relaxed);
+    if force_cpu {
+        tracing::info!("model-worker: gpu_layers = 0 — loading models on CPU");
+    } else if gpu_layers > 0 {
+        // Honest about the limitation instead of silently ignoring the number.
+        tracing::warn!(
+            gpu_layers,
+            "model-worker: partial GPU offload is not supported by the split \
+             engine — this worker's whole layer window goes on the GPU. Use \
+             gpu_layers = 0 for CPU-only, or a shard window to bound VRAM."
+        );
+    }
+}
+
+/// Should models load on the CPU regardless of GPU availability?
+fn worker_force_cpu() -> bool {
+    WORKER_FORCE_CPU.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 #[allow(clippy::too_many_arguments)]
 /// Ensure a SplitModel is loaded for the given model_id, layer range, and TP config.
 /// Non-TP uses (0, 1). TP uses the actual (rank, size).
@@ -481,7 +522,14 @@ fn ensure_model_loaded(
             layers = format!("[{layer_start}..{layer_end})"),
             "model-worker: Loading from reconstructed GGUF"
         );
-        SplitModel::load_from_gguf(&gguf_path, layer_start, layer_end, is_first, is_last)?
+        SplitModel::load_from_gguf(
+            &gguf_path,
+            layer_start,
+            layer_end,
+            is_first,
+            is_last,
+            worker_force_cpu(),
+        )?
     } else if source_path_file.exists() {
         match std::fs::read_to_string(&source_path_file) {
             Ok(p) => {
@@ -500,6 +548,7 @@ fn ensure_model_loaded(
                         layer_end,
                         is_first,
                         is_last,
+                        worker_force_cpu(),
                     )?
                 } else {
                     try_load_from_shards(&ShardLoadParams {
@@ -511,6 +560,7 @@ fn ensure_model_loaded(
                         is_first,
                         is_last,
                         manifest: &manifest,
+                        force_cpu: worker_force_cpu(),
                     })?
                 }
             }
@@ -526,6 +576,7 @@ fn ensure_model_loaded(
             is_first,
             is_last,
             manifest: &manifest,
+            force_cpu: worker_force_cpu(),
         })?
     };
 

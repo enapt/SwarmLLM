@@ -536,6 +536,14 @@ pub struct ModelProcessPool {
     /// Active shard windows: which shards each model worker should load.
     /// If absent, the worker loads all on-disk shards (default behavior).
     active_shard_windows: DashMap<ModelId, Vec<u32>>,
+    /// Device placement passed to future-spawned workers, mirroring
+    /// `InferenceConfig::gpu_layers`: `-1` auto, `0` CPU only, `>0` GPU.
+    gpu_layers: std::sync::atomic::AtomicI32,
+    /// Models forced onto the CPU for the rest of this daemon's life because
+    /// a worker died of a GPU OOM while serving them. Without this, the
+    /// respawned worker makes the identical allocation and dies the same way,
+    /// and the user sees an unbroken run of 500s with no path out.
+    cpu_pinned_models: dashmap::DashSet<ModelId>,
     /// Activity event sender for dashboard notifications.
     activity_tx:
         std::sync::OnceLock<tokio::sync::broadcast::Sender<crate::daemon::state::ActivityEvent>>,
@@ -653,6 +661,8 @@ impl ModelProcessPool {
             spawn_failures: DashMap::new(),
             data_dir,
             active_shard_windows: DashMap::new(),
+            gpu_layers: std::sync::atomic::AtomicI32::new(-1),
+            cpu_pinned_models: dashmap::DashSet::new(),
             activity_tx: std::sync::OnceLock::new(),
             kv_cache_ttl_secs: std::sync::atomic::AtomicU64::new(DEFAULT_KV_CACHE_TTL_SECS),
             prefix_cache_enabled: std::sync::atomic::AtomicBool::new(true),
@@ -850,6 +860,34 @@ impl ModelProcessPool {
     pub fn set_activation_compression(&self, enabled: bool) {
         self.activation_compression
             .store(enabled, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Set the device placement for future-spawned workers.
+    /// `-1` = auto (GPU when available), `0` = CPU only, `>0` = GPU.
+    pub fn set_gpu_layers(&self, gpu_layers: i32) {
+        self.gpu_layers
+            .store(gpu_layers, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// The `--gpu-layers` value a worker for `model_id` should be spawned with.
+    /// A model pinned to the CPU by a previous OOM overrides the config.
+    fn effective_gpu_layers(&self, model_id: &ModelId) -> i32 {
+        if self.cpu_pinned_models.contains(model_id) {
+            return 0;
+        }
+        self.gpu_layers.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Is this model currently forced onto the CPU after a GPU OOM?
+    pub fn is_cpu_pinned(&self, model_id: &ModelId) -> bool {
+        self.cpu_pinned_models.contains(model_id)
+    }
+
+    /// Clear a CPU pin so the next worker spawn may use the GPU again.
+    /// Exposed for the admin "retry on GPU" path — VRAM pressure is usually
+    /// transient (another model unloaded, another process exited).
+    pub fn clear_cpu_pin(&self, model_id: &ModelId) -> bool {
+        self.cpu_pinned_models.remove(model_id).is_some()
     }
 
     /// Force every attention call through `standard_attention` on
@@ -1193,6 +1231,13 @@ impl ModelProcessPool {
                     .to_string(),
             );
         }
+
+        // Device placement. Before R146 this never reached the worker at all:
+        // the split loader called `Device::cuda_if_available(0)` unconditionally
+        // and `inference.gpu_layers` was read only by the legacy llama.cpp
+        // executor, so a CUDA build ignored the setting entirely.
+        args.push("--gpu-layers".to_string());
+        args.push(self.effective_gpu_layers(model_id).to_string());
 
         // If a shard window is set for this model, pass it to the worker
         if let Some(window) = self.active_shard_windows.get(model_id) {
@@ -1800,6 +1845,33 @@ impl ModelProcessPool {
                 error = %message,
                 "Fatal worker error — killing worker to reclaim its device memory"
             );
+
+            // An OOM will repeat verbatim on the respawn — same model, same
+            // device, same allocation — so retrying on the GPU just burns
+            // another load. Pin the model to the CPU: slower, but it answers.
+            let was_on_gpu = self.effective_gpu_layers(model_id) != 0;
+            if was_on_gpu && message.to_ascii_lowercase().contains("out of memory") {
+                self.cpu_pinned_models.insert(model_id.clone());
+                tracing::warn!(
+                    model = %model_id,
+                    "GPU out of memory — pinning this model to CPU for the rest of this run"
+                );
+                if let Some(tx) = self.activity_tx.get() {
+                    let _ = tx.send(
+                        crate::daemon::state::ActivityEvent::new(
+                            "inference",
+                            "model_cpu_fallback",
+                            format!(
+                                "{} ran out of GPU memory — switched to CPU (slower, but working)",
+                                model_id.0
+                            ),
+                        )
+                        .with_model(model_id.0.clone())
+                        .with_toast("warning", 8000),
+                    );
+                }
+            }
+
             // Subprocess lifecycle failure → ServiceUnavailable, not Internal:
             // this server can't serve right now, but it isn't a code bug.
             return SwarmError::ServiceUnavailable(format!("worker fatal error: {message}"));
@@ -1858,5 +1930,88 @@ impl ModelProcessPool {
     /// Get the current shard window for a model, if any.
     pub fn get_shard_window(&self, model_id: &ModelId) -> Option<Vec<u32>> {
         self.active_shard_windows.get(model_id).map(|v| v.clone())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_pool() -> ModelProcessPool {
+        ModelProcessPool::new(std::path::PathBuf::from("/tmp/swarmllm-test-pool"))
+    }
+
+    #[test]
+    fn effective_gpu_layers_defaults_to_auto() {
+        let pool = test_pool();
+        assert_eq!(pool.effective_gpu_layers(&ModelId("m".into())), -1);
+    }
+
+    #[test]
+    fn effective_gpu_layers_follows_config() {
+        let pool = test_pool();
+        pool.set_gpu_layers(0);
+        assert_eq!(pool.effective_gpu_layers(&ModelId("m".into())), 0);
+        pool.set_gpu_layers(20);
+        assert_eq!(pool.effective_gpu_layers(&ModelId("m".into())), 20);
+    }
+
+    #[test]
+    fn cpu_pin_overrides_config_per_model() {
+        // After a GPU OOM the pinned model must respawn on CPU even though the
+        // config says otherwise — otherwise the respawned worker makes the
+        // identical allocation and dies the same way, forever.
+        let pool = test_pool();
+        pool.set_gpu_layers(-1);
+        let pinned = ModelId("oom-model".into());
+        let other = ModelId("healthy-model".into());
+        pool.cpu_pinned_models.insert(pinned.clone());
+
+        assert_eq!(pool.effective_gpu_layers(&pinned), 0);
+        assert_eq!(pool.effective_gpu_layers(&other), -1);
+        assert!(pool.is_cpu_pinned(&pinned));
+        assert!(!pool.is_cpu_pinned(&other));
+
+        assert!(pool.clear_cpu_pin(&pinned));
+        assert_eq!(pool.effective_gpu_layers(&pinned), -1);
+        assert!(!pool.clear_cpu_pin(&pinned), "second clear is a no-op");
+    }
+
+    #[test]
+    fn fatal_error_evicts_worker_and_returns_service_unavailable() {
+        let pool = test_pool();
+        let model = ModelId("m".into());
+        let err = pool.classify_worker_error(
+            &model,
+            "Forward: Cuda(DriverError(CUDA_ERROR_OUT_OF_MEMORY, \"out of memory\"))".into(),
+            true,
+        );
+        assert!(matches!(err, SwarmError::ServiceUnavailable(_)));
+        // OOM on a GPU-eligible model pins it to CPU for the next spawn.
+        assert!(pool.is_cpu_pinned(&model));
+    }
+
+    #[test]
+    fn non_fatal_error_stays_inference_and_leaves_model_gpu_eligible() {
+        let pool = test_pool();
+        let model = ModelId("m".into());
+        let err = pool.classify_worker_error(&model, "Tokenize: bad prompt".into(), false);
+        assert!(matches!(err, SwarmError::Inference(_)));
+        assert!(!pool.is_cpu_pinned(&model));
+    }
+
+    #[test]
+    fn fatal_non_oom_error_does_not_pin_to_cpu() {
+        // An illegal memory access is fatal to the worker but is not evidence
+        // that the GPU is too small — retrying on the GPU is right here.
+        let pool = test_pool();
+        let model = ModelId("m".into());
+        let err = pool.classify_worker_error(
+            &model,
+            "cuda error: an illegal memory access was encountered".into(),
+            true,
+        );
+        assert!(matches!(err, SwarmError::ServiceUnavailable(_)));
+        assert!(!pool.is_cpu_pinned(&model));
     }
 }

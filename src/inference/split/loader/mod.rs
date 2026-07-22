@@ -97,12 +97,14 @@ impl SplitModel {
     /// - `layer_start..layer_end`: the transformer block range this node owns
     /// - `is_first`: if true, also loads the embedding table
     /// - `is_last`: if true, also loads the final norm and LM head
+    /// - `force_cpu`: mirrors `inference.gpu_layers == 0` — skip CUDA entirely
     pub fn load_from_gguf(
         gguf_path: &Path,
         layer_start: usize,
         layer_end: usize,
         is_first: bool,
         is_last: bool,
+        force_cpu: bool,
     ) -> Result<Self, SwarmError> {
         let file = std::fs::File::open(gguf_path).map_err(SwarmError::Io)?;
         // SAFETY: `memmap2::Mmap::map` is unsafe because the OS guarantees the
@@ -129,9 +131,15 @@ impl SplitModel {
         let ct = gguf_file::Content::read(&mut file)
             .map_err(|e| SwarmError::Internal(format!("Failed to read GGUF: {e}")))?;
 
-        let device = Device::cuda_if_available(0).unwrap_or(Device::Cpu);
+        let device = if force_cpu {
+            Device::Cpu
+        } else {
+            Device::cuda_if_available(0).unwrap_or(Device::Cpu)
+        };
         if device.is_cuda() {
             tracing::info!(layers = %(layer_start..=layer_end).count(), layer_start, layer_end, "Split model using CUDA GPU");
+        } else if force_cpu {
+            tracing::info!(layers = %(layer_start..=layer_end).count(), layer_start, layer_end, "Split model using CPU (gpu_layers = 0)");
         } else {
             tracing::info!(layers = %(layer_start..=layer_end).count(), layer_start, layer_end, "Split model using CPU (no CUDA available)");
         }
