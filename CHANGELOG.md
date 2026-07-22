@@ -2,6 +2,44 @@
 
 All notable changes to SwarmLLM are documented here.
 
+## [0.3.8-alpha] — 2026-07-22
+
+### Added
+
+- **A shared test model you can get in one click.** A new machine with no
+  models, on a swarm that has nothing to offer yet, previously had nowhere to
+  go — the chat screen could only list what was already out there. It now
+  offers a small shared model instead, so there is something to actually do.
+
+  The same model answers a request from people testing across several
+  machines: if everyone runs the same one, speed results can be compared.
+  Otherwise each person measures a slightly different version and the numbers
+  were never alike to begin with.
+
+  Three sizes are offered — a tiny one that just checks the network works, a
+  recommended one that runs on almost any computer, and a large one for
+  testing the limits of powerful machines. You can pick one from Settings, from
+  the chat screen when nothing else is available, or tick a box during first-run
+  setup. That box is off by default: it is a real download, and most people
+  setting up want something to chat with rather than a test model. Test models
+  are labelled wherever they appear so they are not mistaken for a
+  recommendation.
+
+  By default you get only the share your machine should hold rather than the
+  whole thing, since the point is for the swarm to serve it together. Getting
+  the whole model is offered separately.
+- **Copy diagnostics.** A button in Settings that copies a short summary of
+  your node — version, connections, models, recent events — ready to paste when
+  reporting a problem. It contains no keys, invite codes or file paths.
+
+### Fixed
+
+- **Release builds were slow again.** The container image build was filling
+  GitHub's shared build-cache allowance and pushing out the cache the Linux GPU
+  build depends on, which took that build from about 10 minutes back to nearly
+  an hour. Image layers are now cached elsewhere, and the two image builds no
+  longer overwrite each other's cache.
+
 ## [0.3.7-alpha] — 2026-07-22
 
 ### Fixed
