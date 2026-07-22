@@ -361,11 +361,50 @@ impl Drop for WorkerHandle {
 struct ResponseGuard {
     responses: ResponseMap,
     request_id: Uuid,
+    /// Worker to notify if this guard drops without being disarmed. `None`
+    /// suppresses the cancel entirely (used where the request is known to have
+    /// already reached the worker's terminal state).
+    worker: Option<Arc<WorkerHandle>>,
+}
+
+impl ResponseGuard {
+    /// Mark the request as completed so dropping this guard does NOT cancel it.
+    /// Every path that returns a terminal result must call this — otherwise a
+    /// normal completion sends a spurious cancel for a request the worker has
+    /// already finished. (Harmless, since the worker treats unmatched cancels
+    /// as no-ops and sweeps them, but it's pure noise on the IPC socket.)
+    fn disarm(&mut self) {
+        self.worker = None;
+    }
 }
 
 impl Drop for ResponseGuard {
     fn drop(&mut self) {
         self.responses.remove(&self.request_id);
+
+        // Still armed → the caller went away before a terminal reply arrived:
+        // client disconnected, `tokio::select!` timeout fired, or a hedge race
+        // resolved and this was the loser. Tell the worker to stop; otherwise
+        // it computes to completion and the reader actor silently discards the
+        // result. For a `Generate` that is the whole remaining token budget of
+        // GPU time spent on output nobody will read.
+        let Some(worker) = self.worker.take() else {
+            return;
+        };
+        // Drop is sync, so the IPC write is handed to a task. `try_current`
+        // rather than `Handle::current` because a guard can be dropped outside
+        // a runtime in tests, where losing a best-effort cancel is fine.
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let request_id = self.request_id;
+        handle.spawn(async move {
+            if worker.dead.load(Ordering::Acquire) {
+                return;
+            }
+            let mut writer = worker.writer.lock().await;
+            let _ = send_daemon(&mut *writer, &DaemonMsg::CancelRequest { request_id }, &[]).await;
+        });
     }
 }
 
@@ -757,6 +796,9 @@ impl ModelProcessPool {
         let _guard = ResponseGuard {
             responses: handle.responses.clone(),
             request_id,
+            // Snapshot export is a cheap metadata read, not a decode loop —
+            // there is no meaningful compute to abandon.
+            worker: None,
         };
         {
             let mut writer = handle.writer.lock().await;
@@ -1436,9 +1478,10 @@ impl ModelProcessPool {
         // route any early error/reply. Unregistered on drop via ResponseGuard.
         let (resp_tx, mut resp_rx) = mpsc::channel(RESPONSE_CHANNEL_CAPACITY);
         handle.responses.insert(request_id, resp_tx);
-        let _guard = ResponseGuard {
+        let mut guard = ResponseGuard {
             responses: handle.responses.clone(),
             request_id,
+            worker: Some(handle.clone()),
         };
 
         let payload_buf: Vec<u8> = if vision_len == 0 {
@@ -1458,6 +1501,8 @@ impl ModelProcessPool {
                 drop(writer);
                 self.workers.remove(&model_id);
                 tracing::warn!(model = %model_id, error = %e, "Worker send failed — evicting dead worker");
+                // The worker never received the request; nothing to cancel.
+                guard.disarm();
                 return Err(SwarmError::ServiceUnavailable(format!("send Forward: {e}")));
             }
         }
@@ -1472,6 +1517,7 @@ impl ModelProcessPool {
                             r.spec_logits_dims,
                             payload,
                         )?;
+                        guard.disarm();
                         return Ok(crate::types::LayerResult {
                             request_id: r.request_id,
                             token_ids: r.token_ids,
@@ -1488,6 +1534,8 @@ impl ModelProcessPool {
                         message,
                         fatal,
                     } if rid == request_id => {
+                        // Worker already reached a terminal state for this id.
+                        guard.disarm();
                         return Err(self.classify_worker_error(&model_id, message, fatal));
                     }
                     _ => continue,
@@ -1497,6 +1545,7 @@ impl ModelProcessPool {
                     // Subprocess lifecycle failure → ServiceUnavailable (per
                     // .claude/rules/completeness.md); Internal is for code bugs.
                     self.workers.remove(&model_id);
+                    guard.disarm();
                     return Err(SwarmError::ServiceUnavailable(
                         "worker closed connection before reply".into(),
                     ));
@@ -1544,6 +1593,10 @@ impl ModelProcessPool {
             guards.push(ResponseGuard {
                 responses: handle.responses.clone(),
                 request_id: f.request_id,
+                // A BatchForward is one fused matmul over N requests; the
+                // worker cannot skip a single member, so cancelling one is
+                // meaningless. Matches `cancelled_request_id`'s exclusion.
+                worker: None,
             });
             receivers.push((f.request_id, rx));
         }
@@ -1701,9 +1754,10 @@ impl ModelProcessPool {
 
         let (resp_tx, mut resp_rx) = mpsc::channel(RESPONSE_CHANNEL_CAPACITY);
         handle.responses.insert(request_id, resp_tx);
-        let _guard = ResponseGuard {
+        let mut guard = ResponseGuard {
             responses: handle.responses.clone(),
             request_id,
+            worker: Some(handle.clone()),
         };
 
         {
@@ -1712,6 +1766,8 @@ impl ModelProcessPool {
                 drop(writer);
                 self.workers.remove(model_id);
                 tracing::warn!(model = %model_id, error = %e, "Worker send failed — evicting dead worker");
+                // The worker never received the request; nothing to cancel.
+                guard.disarm();
                 return Err(SwarmError::ServiceUnavailable(format!(
                     "send Generate: {e}"
                 )));
@@ -1737,6 +1793,7 @@ impl ModelProcessPool {
                     // Was Internal; operators saw 500s here and misattributed
                     // them to code bugs rather than worker crashes.
                     self.workers.remove(model_id);
+                    guard.disarm();
                     return Err(SwarmError::ServiceUnavailable(
                         "worker closed connection mid-generate".into(),
                     ));
@@ -1781,6 +1838,8 @@ impl ModelProcessPool {
                     completion_tokens = ct as u32;
                     finish_reason = fr;
                     matched_stop_sequence = ms;
+                    // GenerateDone is terminal — the worker is finished.
+                    guard.disarm();
                     break;
                 }
                 WorkerMsg::Error {
@@ -1788,6 +1847,7 @@ impl ModelProcessPool {
                     message,
                     fatal,
                 } if rid == request_id => {
+                    guard.disarm();
                     return Err(self.classify_worker_error(model_id, message, fatal));
                 }
                 _ => continue,

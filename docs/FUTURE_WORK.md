@@ -659,19 +659,38 @@ guard to remove a future-refactor footgun.
 
 **Why deferred.** Defensive cleanup, not a live bug.
 
-### Worker compute waste on request cancel
+### Worker compute waste on request cancel — **CLOSED R147** (2026-07-22)
 
-`src/inference/process_pool.rs:1386` — when a `forward_direct` future
-is cancelled mid-IPC (caller dropped via `tokio::select!`), the
-`ResponseGuard` correctly removes the response channel, but the IPC
-message has already been sent to the worker subprocess. The worker
-keeps computing the cancelled request; its eventual reply gets
-silently dropped by the reader actor. Under burst-cancel workloads
-(speculative decode hedge races, request timeouts), worker GPU
-compute is wasted on requests no one wants.
+_`DaemonMsg::CancelRequest { request_id }` shipped. `ResponseGuard` gained
+a `worker: Option<Arc<WorkerHandle>>` field and a `disarm()` method: every
+terminal return in `forward_direct` / `generate` disarms, so only a genuine
+drop-before-completion (client disconnect, `tokio::select!` timeout, hedge
+loser) fires the cancel. `Drop` is sync, so the IPC write is handed to
+`Handle::try_current().spawn(...)` — best-effort, skipped outside a runtime._
 
-**Why deferred.** Needs a new IPC message type (`DaemonMsg::CancelRequest`)
-and worker-side cancel handling. Larger feature, not sweep scope.
+_Worker side: the reader task short-circuits `CancelRequest` into a shared
+`CancelledSet` (`DashMap<Uuid, Instant>`) rather than queueing it on `ipc_rx`,
+for the same reason `PrefixFetchResult` is short-circuited — `handle_generate`
+owns the main loop while it decodes, so a queued cancel would only be seen
+after the work it was meant to stop had finished. Three consumption points:
+`handle_daemon_msg` skips an already-cancelled `Forward`/`Generate` before
+starting it; the sequential generate loop checks per token (bounding waste to
+one forward instead of the full `max_tokens`); the main loop drops cancelled
+decode slots via the new `SlotTable::take_matching` and frees their KV.
+Unconsumed entries are swept after `CANCEL_RETENTION_SECS = 60` — a cancel
+can legitimately arrive for an already-finished request._
+
+_`BatchForward` is deliberately excluded (both in `cancelled_request_id` and
+via `worker: None` on its guards): it is one fused matmul over N requests, so
+one cancelled member cannot be skipped without dropping work the others still
+want. Research note: this matches the explicit-abort design vLLM converged on
+([PR #11190](https://github.com/vllm-project/vllm/pull/11190)) rather than the
+`is_disconnected()` polling approach, which is unreliable behind middleware
+([issue #10087](https://github.com/vllm-project/vllm/issues/10087))._
+
+_Still open: cancelling a hedge loser running on a **remote** peer needs a
+network-level abort (`SwarmMessage`), not just IPC. The local mechanism above
+is the prerequisite._
 
 ### Batch JoinHandle discard (wontfix)
 

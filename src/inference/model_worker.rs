@@ -21,6 +21,24 @@ use crate::daemon::shard_loader::{try_load_from_shards, ShardLoadParams};
 /// `Uuid` and await the daemon's response. The reader task fulfils
 /// matching `DaemonMsg::PrefixFetchResult` arrivals inline.
 type PrefixFetchWaiterMap = Arc<DashMap<Uuid, oneshot::Sender<(u32, Option<Vec<u8>>)>>>;
+
+/// Requests the daemon has abandoned, with the instant each cancel arrived.
+///
+/// Populated by the reader task rather than the main loop, for the same reason
+/// `PrefixFetchResult` is short-circuited there: while `handle_generate` is
+/// running its decode loop it owns the main loop, so nothing drains `ipc_rx`
+/// and a cancel sitting in the channel would not be seen until the generation
+/// it was meant to stop had already finished.
+///
+/// Entries are removed when consumed and swept by age otherwise — a cancel can
+/// legitimately arrive for a request that already finished, and those must not
+/// accumulate for the life of the worker.
+type CancelledSet = Arc<DashMap<Uuid, std::time::Instant>>;
+
+/// How long an unconsumed cancellation is remembered. Covers the window where a
+/// cancel overtakes its own request on the IPC channel; well beyond that a
+/// lingering entry is just an unmatched cancel for a finished request.
+const CANCEL_RETENTION_SECS: u64 = 60;
 use crate::error::SwarmError;
 use crate::inference::slot_table::{Slot, SlotTable};
 use crate::inference::split::{self, BatchItem, KvCacheStore, PrefixCache, SplitModel};
@@ -235,6 +253,7 @@ pub async fn run_worker(
     // the reader task intercepts matching `DaemonMsg::PrefixFetchResult`
     // and fulfils the oneshot inline (short-circuiting the main loop).
     let pending_fetches: PrefixFetchWaiterMap = Arc::new(DashMap::new());
+    let cancelled: CancelledSet = Arc::new(DashMap::new());
 
     // Spawn a reader task that pushes framed IPC messages onto an mpsc.
     // Decoupling read-from-socket from the main select! loop keeps frame
@@ -250,10 +269,21 @@ pub async fn run_worker(
     // backpressure too loosely.
     let (ipc_tx, mut ipc_rx) = mpsc::channel::<(DaemonMsg, Vec<u8>)>(64);
     let reader_pending = pending_fetches.clone();
+    let reader_cancelled = cancelled.clone();
     let reader_task = tokio::spawn(async move {
         loop {
             match recv_daemon(&mut reader).await {
                 Ok((msg, payload)) => {
+                    // Short-circuit cancellations for the same reason as
+                    // prefix-fetch results below: `handle_generate` owns the
+                    // main loop while it decodes, so a cancel queued on
+                    // `ipc_rx` would only be seen after the work it was meant
+                    // to stop had already been done.
+                    if let DaemonMsg::CancelRequest { request_id } = msg {
+                        reader_cancelled.insert(request_id, std::time::Instant::now());
+                        tracing::debug!(%request_id, "model-worker: request cancelled by daemon");
+                        continue;
+                    }
                     // Short-circuit cross-node prefix fetch results so
                     // `handle_generate` can await its oneshot without
                     // relying on the main loop to pump ipc_rx (which it
@@ -315,6 +345,7 @@ pub async fn run_worker(
                 &options,
                 &mut slot_table,
                 &pending_fetches,
+                &cancelled,
             )
             .await;
 
@@ -341,6 +372,7 @@ pub async fn run_worker(
                             &options,
                             &mut slot_table,
                             &pending_fetches,
+                            &cancelled,
                         )
                         .await;
                     }
@@ -353,6 +385,27 @@ pub async fn run_worker(
         }
         if shutdown {
             break;
+        }
+
+        // Drop any decoding slot the daemon has abandoned before spending
+        // another tick on it, and free its KV. No reply is sent: the daemon
+        // already unregistered the response channel, so anything we emit would
+        // be discarded by the reader actor.
+        if !cancelled.is_empty() {
+            if !slot_table.is_empty() {
+                for slot in slot_table.take_matching(|s| cancelled.contains_key(&s.request_id)) {
+                    tracing::debug!(
+                        request_id = %slot.request_id,
+                        generated = slot.generated_count(),
+                        "model-worker: dropping cancelled decode slot"
+                    );
+                    cancelled.remove(&slot.request_id);
+                    kv_store.clear_request(&slot.model_key, &slot.req_id_str);
+                }
+            }
+            // Sweep cancels that never matched a request (the request had
+            // already finished when the cancel arrived).
+            cancelled.retain(|_, at| at.elapsed().as_secs() < CANCEL_RETENTION_SECS);
         }
 
         // Decode tick: per-slot prefill chunk (Phase A) + one batched forward
@@ -456,6 +509,22 @@ fn set_worker_force_cpu(gpu_layers: i32) {
 /// Should models load on the CPU regardless of GPU availability?
 fn worker_force_cpu() -> bool {
     WORKER_FORCE_CPU.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// The request id a cancellation would apply to, for message kinds worth
+/// checking before starting work.
+///
+/// `BatchForward` is deliberately excluded: it carries N request ids and the
+/// batch is dispatched as one fused matmul, so skipping it wholesale on one
+/// cancelled member would drop work the other members still want. The waste
+/// there is bounded by the batch, and the per-slot decode path already handles
+/// cancellation at a finer grain.
+fn cancelled_request_id(msg: &DaemonMsg) -> Option<Uuid> {
+    match msg {
+        DaemonMsg::Forward(f) => Some(f.request_id),
+        DaemonMsg::Generate(g) => Some(g.request_id),
+        _ => None,
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1547,6 +1616,7 @@ async fn handle_generate(
     force_standard_attn: bool,
     max_seq_len_override: Option<usize>,
     pending_fetches: &PrefixFetchWaiterMap,
+    cancelled: &CancelledSet,
 ) -> Result<(), SwarmError> {
     let _ = max_seq_len_override; // applied at worker startup (process-global)
     let request_id = gen.request_id;
@@ -1715,6 +1785,19 @@ async fn handle_generate(
         );
     } else {
         for _ in 0..gen.sampling.max_tokens {
+            // This loop owns the worker's main loop for its whole duration, so
+            // the cancelled set (written by the reader task) is the only way a
+            // daemon-side abandonment reaches us. Checking per token bounds
+            // wasted compute to one forward instead of the full max_tokens.
+            if cancelled.remove(&request_id).is_some() {
+                tracing::debug!(
+                    %request_id,
+                    generated = generated.len(),
+                    "model-worker: generation cancelled by daemon"
+                );
+                finish_reason = "cancelled".to_string();
+                break;
+            }
             if eos.contains(&next_token) {
                 finish_reason = "stop".to_string();
                 break;
@@ -2801,11 +2884,23 @@ async fn handle_daemon_msg(
     options: &WorkerOptions,
     slot_table: &mut SlotTable,
     pending_fetches: &PrefixFetchWaiterMap,
+    cancelled: &CancelledSet,
 ) -> bool {
     let activation_compression = options.activation_compression;
     let force_standard_attn = options.force_standard_attn;
     let max_seq_len_override = options.max_seq_len_override;
     let batch_generate = options.batch_generate;
+
+    // A cancel can overtake the request it cancels — the reader task
+    // short-circuits cancels while requests queue behind `ipc_rx`. Drop the
+    // work before starting it rather than computing a reply nobody reads.
+    if let Some(request_id) = cancelled_request_id(&msg) {
+        if cancelled.remove(&request_id).is_some() {
+            tracing::debug!(%request_id, "model-worker: skipping already-cancelled request");
+            return false;
+        }
+    }
+
     match msg {
         DaemonMsg::Forward(fwd) => {
             let request_id = fwd.request_id;
@@ -2889,12 +2984,20 @@ async fn handle_daemon_msg(
                     force_standard_attn,
                     max_seq_len_override,
                     pending_fetches,
+                    cancelled,
                 )
                 .await
                 {
                     send_worker_error(writer, request_id, e).await;
                 }
             }
+        }
+        DaemonMsg::CancelRequest { request_id } => {
+            // The reader task intercepts these before they reach the main
+            // loop; arriving here means the short-circuit was bypassed
+            // (a direct-dispatch test harness). Record it anyway so the
+            // semantics hold on either path.
+            cancelled.insert(request_id, std::time::Instant::now());
         }
         DaemonMsg::Unload {
             layer_start,

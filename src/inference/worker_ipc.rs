@@ -69,6 +69,18 @@ pub enum DaemonMsg {
         model_id: ModelId,
         block_hash: [u8; 32],
     },
+    /// Abandon a request the daemon no longer wants a reply for.
+    ///
+    /// Sent when a `forward` / `generate` future is dropped before it
+    /// completes: the client disconnected, a `tokio::select!` timeout fired, or
+    /// a hedge race resolved and this is the loser. Without it the worker keeps
+    /// computing — for a `Generate` that means generating hundreds of tokens
+    /// nobody will read, at full GPU cost.
+    ///
+    /// Best-effort and idempotent. A cancel for an unknown or already-finished
+    /// request is dropped; a cancel that arrives before the request does is
+    /// remembered briefly so the request is skipped on arrival.
+    CancelRequest { request_id: Uuid },
     /// Graceful shutdown — worker exits cleanly.
     Shutdown,
 }
@@ -521,6 +533,16 @@ mod tests {
         match back {
             WorkerMsg::Error { fatal, .. } => assert!(fatal),
             other => panic!("expected Error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cancel_request_round_trips() {
+        let id = Uuid::new_v4();
+        let json = serde_json::to_string(&DaemonMsg::CancelRequest { request_id: id }).unwrap();
+        match serde_json::from_str::<DaemonMsg>(&json).unwrap() {
+            DaemonMsg::CancelRequest { request_id } => assert_eq!(request_id, id),
+            other => panic!("expected CancelRequest, got {other:?}"),
         }
     }
 

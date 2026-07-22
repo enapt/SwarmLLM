@@ -284,6 +284,28 @@ impl SlotTable {
         self.slots
     }
 
+    /// Remove and return every slot matching `pred`, leaving the rest active.
+    ///
+    /// Used to evict slots the daemon has cancelled. Unlike `drain_finished`
+    /// these slots never reached a finish state, so the caller is responsible
+    /// for their cleanup (KV release) — no completion message is owed, since a
+    /// cancelled request has no reader left.
+    pub fn take_matching(&mut self, mut pred: impl FnMut(&Slot) -> bool) -> Vec<Slot> {
+        let mut taken: Vec<Slot> = Vec::new();
+        let mut i = 0;
+        while i < self.slots.len() {
+            if pred(&self.slots[i]) {
+                taken.push(self.slots.swap_remove(i));
+            } else {
+                i += 1;
+            }
+        }
+        if self.slots.is_empty() {
+            self.layer_range = None;
+        }
+        taken
+    }
+
     /// Drain finished slots, leaving the table populated with the active
     /// remainder. When the table empties, the pinned layer range clears too
     /// so the next admission can pin a different range.
@@ -548,5 +570,52 @@ mod tests {
         s.finish_stop();
         assert_eq!(s.finish_reason, Some("error"));
         assert_eq!(s.error_message.as_deref(), Some("forward failed: OOM"));
+    }
+
+    #[test]
+    fn take_matching_removes_only_the_predicate_slots() {
+        let mut table = SlotTable::new(4);
+        let a = Uuid::new_v4();
+        let b = Uuid::new_v4();
+        let c = Uuid::new_v4();
+        table.admit(dummy_decoding_slot(a, (0, 8)));
+        table.admit(dummy_decoding_slot(b, (0, 8)));
+        table.admit(dummy_decoding_slot(c, (0, 8)));
+
+        let taken = table.take_matching(|s| s.request_id == b);
+        assert_eq!(taken.len(), 1);
+        assert_eq!(taken[0].request_id, b);
+        assert_eq!(table.len(), 2);
+        let remaining: Vec<Uuid> = table.active().iter().map(|s| s.request_id).collect();
+        assert!(remaining.contains(&a));
+        assert!(remaining.contains(&c));
+    }
+
+    #[test]
+    fn take_matching_clears_pinned_layer_range_when_table_empties() {
+        // Mirrors drain_finished: an emptied table must release its pinned
+        // range so the next admission can pin a different one. A cancelled
+        // last slot would otherwise strand the range.
+        let mut table = SlotTable::new(4);
+        table.admit(dummy_decoding_slot(Uuid::new_v4(), (0, 8)));
+        assert!(table.current_layer_range().is_some());
+
+        let taken = table.take_matching(|_| true);
+        assert_eq!(taken.len(), 1);
+        assert!(table.is_empty());
+        assert_eq!(table.current_layer_range(), None);
+        assert!(
+            table.can_admit((16, 32)),
+            "a different range must be admissible"
+        );
+    }
+
+    #[test]
+    fn take_matching_on_no_match_is_a_noop() {
+        let mut table = SlotTable::new(4);
+        table.admit(dummy_decoding_slot(Uuid::new_v4(), (0, 8)));
+        let taken = table.take_matching(|_| false);
+        assert!(taken.is_empty());
+        assert_eq!(table.len(), 1);
     }
 }
