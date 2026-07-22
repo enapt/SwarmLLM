@@ -2,6 +2,33 @@
 
 All notable changes to SwarmLLM are documented here.
 
+## [0.3.7-alpha] — 2026-07-22
+
+### Fixed
+
+- **A machine could keep being sent work it was no longer able to do.** When a
+  computer stopped hosting part of a model — you deleted it, storage cleanup
+  removed it, or automatic management moved it elsewhere — other machines were
+  never told. They carried on treating it as a place to send that part of the
+  work, and requests routed there timed out or failed with "no standby
+  available". Waiting did not help, because there was no mechanism by which the
+  news could ever arrive. Machines now say which models they are giving you the
+  complete picture for, and anything left out is dropped. This also repairs
+  "remove model", which has always tried to announce that it no longer hosts
+  anything and was never heard.
+
+  Both machines need this version for it to work between them. Mixed versions
+  keep the old behaviour rather than breaking, so there is no need to upgrade
+  everything at once.
+- **Requests were charged for tokens they never used.** A request sets aside
+  credits up front based on the *most* it could generate, and that whole amount
+  was kept even if the answer came back in one word. At the default settings
+  that is 20,480 credits for every request regardless of length — one operator
+  reported a balance of -41,400 after a handful of attempts. Requests are now
+  charged what they actually used, and the difference is returned. This matches
+  how requests below the reservation threshold were always charged, so the two
+  no longer disagree.
+
 ## [0.3.6-alpha] — 2026-07-22
 
 ### Fixed
