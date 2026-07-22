@@ -351,18 +351,19 @@
     return div;
   }
 
-  // Cold-start fallback: the swarm has nothing to suggest, so offer the
-  // standard reference model. Returns null when the pinned list has not
-  // loaded yet, so the empty state degrades to its previous form rather
-  // than rendering a broken block.
+  // Cold-start fallback: the swarm has nothing to suggest.
+  //
+  // "No models available" on its own is a dead end — it tells someone that
+  // something is wrong without saying what, or what to do about it. There are
+  // three genuinely different reasons to be here and they want different
+  // answers, so say which one it is and always leave a way forward.
+  //
+  // Always returns an element. The previous version returned null when the
+  // pinned list had not loaded or the model was already held, which put the
+  // user back at the bare dead end in exactly the cases they most needed help.
   function buildReferenceFallback() {
-    if (!App.referenceModels || !App.referenceModels._cache) return null;
-    var list = App.referenceModels._cache;
-    var std = null;
-    for (var i = 0; i < list.length; i++) {
-      if (list[i].tier === 'standard') { std = list[i]; break; }
-    }
-    if (!std || std.held) return null;
+    var stats = (App.data && App.data.cache && App.data.cache.stats) || null;
+    var peers = stats ? (stats.peers || 0) : 0;
 
     var wrap = document.createElement('div');
     wrap.className = 'chat-empty-catalog';
@@ -372,22 +373,73 @@
     title.textContent = I18n.t('reference.cold_start_title');
     wrap.appendChild(title);
 
-    var hint = document.createElement('div');
-    hint.className = 'chat-empty-hint text-sm';
-    hint.textContent = I18n.t('reference.cold_start_hint', {
-      size: formatSize(std.size_mb),
-    });
-    wrap.appendChild(hint);
+    // Why is this empty? Distinguish "still looking" from "found nobody" from
+    // "found people, nobody is sharing" — the first resolves itself, the other
+    // two do not, and only the user can act on them.
+    var why = document.createElement('div');
+    why.className = 'chat-empty-hint text-sm';
+    if (!stats) {
+      why.textContent = I18n.t('reference.cold_start_connecting');
+    } else if (peers === 0) {
+      why.textContent = I18n.t('reference.cold_start_no_peers');
+    } else {
+      why.textContent = I18n.t('reference.cold_start_peers_no_models', { count: peers });
+    }
+    wrap.appendChild(why);
 
-    var btn = document.createElement('button');
-    btn.type = 'button';
-    btn.className = 'btn btn-sm mt-1';
-    btn.textContent = I18n.t('reference.cold_start_cta');
-    btn.addEventListener('click', function () {
-      App.referenceModels.acquire('standard', true);
-    });
-    wrap.appendChild(btn);
+    var actions = document.createElement('div');
+    actions.className = 'chat-empty-actions mt-1';
 
+    // Offer the pinned model when we know about one and do not have it. It is
+    // the only option guaranteed to exist regardless of what the swarm is
+    // doing, which is the point of it being pinned.
+    var std = null;
+    if (App.referenceModels && App.referenceModels._cache) {
+      var list = App.referenceModels._cache;
+      for (var i = 0; i < list.length; i++) {
+        if (list[i].tier === 'standard') { std = list[i]; break; }
+      }
+    }
+    if (std && !std.held) {
+      var get = document.createElement('button');
+      get.type = 'button';
+      get.className = 'btn btn-sm';
+      get.textContent = I18n.t('reference.cold_start_cta');
+      get.title = I18n.t('reference.cold_start_hint', { size: formatSize(std.size_mb) });
+      get.addEventListener('click', function () {
+        App.referenceModels.acquire('standard', true);
+      });
+      actions.appendChild(get);
+    }
+
+    // Browsing always works, including when the pinned model is already held
+    // or the list has not arrived — so there is never a state with no action.
+    var browse = document.createElement('button');
+    browse.type = 'button';
+    browse.className = 'btn btn-sm btn-ghost';
+    browse.textContent = I18n.t('reference.cold_start_browse');
+    browse.addEventListener('click', function () {
+      if (App.swarmTab && App.swarmTab.openSearch) App.swarmTab.openSearch('');
+      else if (App.ui && App.ui.switchTab) App.ui.switchTab('swarm');
+    });
+    actions.appendChild(browse);
+
+    // No peers is its own problem with its own fix, and no amount of model
+    // browsing solves it.
+    if (peers === 0 && stats) {
+      var invite = document.createElement('button');
+      invite.type = 'button';
+      invite.className = 'btn btn-sm btn-ghost';
+      invite.textContent = I18n.t('reference.cold_start_connect');
+      invite.addEventListener('click', function () {
+        // "devices" is the tab id; the label is "My Devices". Pool has no
+        // modal entry point, so the tab is the way in.
+        if (App.ui && App.ui.switchTab) App.ui.switchTab('devices');
+      });
+      actions.appendChild(invite);
+    }
+
+    wrap.appendChild(actions);
     return wrap;
   }
 

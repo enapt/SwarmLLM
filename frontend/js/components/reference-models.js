@@ -17,17 +17,28 @@
   App.referenceModels = {
     _cache: null,
 
-    /** Fetch the pinned list. Cached — it only changes on daemon upgrade. */
+    /**
+     * Fetch the pinned list. Cached — it only changes on daemon upgrade.
+     *
+     * Only a non-empty result is cached. An empty array is truthy in
+     * JavaScript, so caching a failed fetch would satisfy the guard below
+     * forever and disable the feature until the page was reloaded — a request
+     * that happened to race startup auth would permanently cost the user the
+     * cold-start offer. An empty result stays uncached so the next caller
+     * retries.
+     */
     load: function () {
-      if (App.referenceModels._cache) {
-        return Promise.resolve(App.referenceModels._cache);
+      var c = App.referenceModels._cache;
+      if (c && c.length) {
+        return Promise.resolve(c);
       }
       return App
         .authFetch('/api/admin/reference-models')
         .then(function (r) { return r.json(); })
         .then(function (d) {
-          App.referenceModels._cache = (d && d.models) || [];
-          return App.referenceModels._cache;
+          var models = (d && d.models) || [];
+          if (models.length) App.referenceModels._cache = models;
+          return models;
         })
         .catch(function () { return []; });
     },

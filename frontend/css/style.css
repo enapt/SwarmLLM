@@ -5729,3 +5729,11 @@ textarea.pool-code-input { min-height: 4.5em; }
 }
 .setup-optin input { margin-top: 3px; flex-shrink: 0; }
 .setup-optin .block { display: block; }
+
+/* Cold-start empty state: actions wrap on narrow panes rather than overflow. */
+.chat-empty-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  justify-content: center;
+}

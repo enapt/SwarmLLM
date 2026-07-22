@@ -302,11 +302,23 @@ pub async fn reference_models(State(state): State<AppState>) -> Json<serde_json:
     let entries: Vec<serde_json::Value> = crate::model::reference::REFERENCE_MODELS
         .iter()
         .map(|m| {
+            // "Held" has to mean this node actually hosts shards, not merely
+            // that it has heard of the model. A manifest arrives by gossip the
+            // moment any peer announces the model, so checking for one marked
+            // every reference model as installed on a node holding none of it.
+            let local = state.shared_state.identity.node_id();
             let held = state
                 .shared_state
                 .model_registry
                 .get_manifest(&crate::types::ModelId(m.model_id.to_string()))
-                .is_some();
+                .map(|manifest| {
+                    !state
+                        .shared_state
+                        .model_registry
+                        .local_shard_indices_in(&manifest, local)
+                        .is_empty()
+                })
+                .unwrap_or(false);
             serde_json::json!({
                 "tier": m.tier,
                 "model_id": m.model_id,
