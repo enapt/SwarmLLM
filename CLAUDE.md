@@ -151,7 +151,7 @@ libp2p 0.56, axum 0.8, candle-core/candle-transformers 0.10 (CUDA), redb 4, ed25
 
 ## Testing
 
-- 1118 lib tests passing + 8 ignored (env-var-gated real-model + manual smoke), 75 integration tests in `tests/integration/`, 1 ignored end-to-end (`cargo test --test integration_phase10_11 -- --ignored`), clippy clean. Microbench: `cargo run --release --no-default-features --features dev,claude-subscription --example swarm_spec_bench` (R136 — measures all 4 SWARM-SPEC layer primitives + synthetic cascade hit-rate). Local-cluster bench: `examples/3node_setup.sh` (boots 3 daemons) + `examples/3node_inference_bench.sh` (runs 3 workloads × 3 trials and prints tok/s + swarm_spec metrics). Sharded variant: `examples/3node_sharded_setup.sh` (forced distributed pipeline — requires `auto_manage.enabled = false` in per-node config.toml to preserve sharded state).
+- 1122 lib tests passing + 8 ignored (env-var-gated real-model + manual smoke), 75 integration tests in `tests/integration/`, 1 ignored end-to-end (`cargo test --test integration_phase10_11 -- --ignored`), clippy clean. Microbench: `cargo run --release --no-default-features --features dev,claude-subscription --example swarm_spec_bench` (R136 — measures all 4 SWARM-SPEC layer primitives + synthetic cascade hit-rate). Local-cluster bench: `examples/3node_setup.sh` (boots 3 daemons) + `examples/3node_inference_bench.sh` (runs 3 workloads × 3 trials and prints tok/s + swarm_spec metrics). Sharded variant: `examples/3node_sharded_setup.sh` (forced distributed pipeline — requires `auto_manage.enabled = false` in per-node config.toml to preserve sharded state).
 - Unit tests: in-module `#[cfg(test)]` blocks
 - Integration tests: `tests/integration/` — multi-node simulations with `--test-threads=1`
 - Real-model spawn-and-infer test: set `SWARMLLM_TEST_MODEL_DIR` to a fully-populated model directory (e.g. `~/.local/share/swarmllm/models/tinyllama-1.1b-...`) and run `cargo test --test integration_phase10_11 -- --ignored end_to_end`. No synthetic GGUF fixture is committed; see `docs/ARCHITECTURE.md` § Deferred Items.
@@ -192,9 +192,52 @@ When spawning subagents in this repo, use these model picks (overrides defaults 
 
 ## Status
 
-All 20 build phases complete. All subsystems wired — no stubs. **1118 lib tests + 75 integration tests passing**; 8 lib + 1 e2e ignored (env-var or manual). Clippy clean default + features dev,claude-subscription + `--features llama`.
+All 20 build phases complete. All subsystems wired — no stubs. **1122 lib tests + 75 integration tests passing**; 8 lib + 1 e2e ignored (env-var or manual). Clippy clean default + features dev,claude-subscription + `--features llama`.
 
-### Latest: R146 — External bug report (raw-pc / raw-proxamd5, v0.3.4-alpha) (2026-07-22)
+### Latest: R147 — FUTURE_WORK push (request cancellation + deferral closures) (2026-07-22)
+
+Research-led pass over `docs/FUTURE_WORK.md`. One real feature, four small
+closures, and one item deliberately *not* built.
+
+**Request cancellation (`DaemonMsg::CancelRequest`)** — closes the R142
+"worker compute waste on request cancel" deferral. A dropped `forward` /
+`generate` future (client disconnect, `select!` timeout, hedge loser) removed
+the response channel but left the worker computing; for a `Generate` that is
+the whole remaining token budget spent on output nobody reads. `ResponseGuard`
+gained `worker: Option<Arc<WorkerHandle>>` + `disarm()` — every terminal return
+disarms, so only a genuine drop-before-completion cancels; `Drop` is sync so
+the IPC write goes to `Handle::try_current().spawn`. Worker side, the reader
+task short-circuits cancels into a `CancelledSet` rather than queueing on
+`ipc_rx` — `handle_generate` owns the main loop while decoding, so a queued
+cancel would arrive too late (same reasoning as the existing
+`PrefixFetchResult` short-circuit). Three consumption points: skip-on-arrival
+(a cancel can overtake its request), per-token check in the sequential loop,
+and slot eviction via the new `SlotTable::take_matching`. `BatchForward`
+excluded — one fused matmul over N requests can't skip one member.
+
+**Remote cancellation.** Remote-generate closed for free (inbound
+`CancelInference` → `abort()` → drops `generate` → armed guard → worker).
+Hedge losers needed the explicit send: `hedge_dispatch` now cancels the loser,
+and the inbound handler fans `ModelProcessPool::cancel_request` across workers
+since an in-flight `LayerForward` has no abort handle.
+
+**Closed**: config-reference gaps (found **45** undocumented `[inference]`
+options, not the 4 flagged — now grouped into batching / prefix-cache /
+speculative / SWARM-SPEC / activation-transfer subsections, 91→133 rows);
+`swarmpool://` v2 documented in networking.md; Python SDK
+`PoolClient.generate_code()` + `.join()`; `spawn_test_server` deduped into
+`tests/integration/test_server_common.rs` via `#[path]`;
+`apply_update_with_version` dead `Option` arm removed.
+
+**Not built — KV quantization (Tier 2F).** KIVI 2-bit needs fused
+dequant-matmul + a Triton kernel we don't have (candle, no custom kernels);
+without them dequant cost likely exceeds the memory win. Production converged
+on FP8 KV via FlashAttention-3, not 2-bit. Re-scoped to "Q8_0 via the existing
+`quant.rs` if KV ever dominates — measure first".
+
+1118 → 1122 lib tests.
+
+### Prior: R146 — External bug report (raw-pc / raw-proxamd5, v0.3.4-alpha) (2026-07-22)
 
 Five bugs from the second external user, found while deliberately splitting a
 9-shard 8B model across two home machines. Four were real defects; one was a
