@@ -73,3 +73,7 @@ node_a_*.png
 
 # Working-tree screenshots — review artefacts, not repo content
 .claude/screenshots/
+
+# Inbound user bug reports / private correspondence. These name real people
+# and are working input, not repo content — keep them local.
+user_bug_report_*.txt
