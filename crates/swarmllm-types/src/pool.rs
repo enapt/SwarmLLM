@@ -25,6 +25,22 @@ pub struct PoolMembership {
     pub joined_at: chrono::DateTime<chrono::Utc>,
     pub acceptance_signature: Vec<u8>,
     pub invitation_id: uuid::Uuid,
+    /// Expiry of the invitation this member accepted.
+    ///
+    /// R147: `acceptance_signature` signs over this value, so a third party
+    /// re-verifying the member list from pool-state gossip needs it — it never
+    /// saw the invitation itself. The *owner* deliberately does NOT trust this
+    /// field when validating an inbound `PoolAcceptance`; it uses its own
+    /// stored invitation, so the signer can't choose what the signature is
+    /// checked against. This copy exists only so the gossip path can verify a
+    /// membership the owner already validated.
+    ///
+    /// `#[serde(default)]` keeps deserialization of pre-R147 state working
+    /// (missing → epoch), which surfaces as a signature-verification failure
+    /// rather than a parse error — see the migration note in
+    /// `pool::crypto::acceptance_payload`.
+    #[serde(default)]
+    pub invitation_expires_at: chrono::DateTime<chrono::Utc>,
     /// User-chosen device nickname (e.g., "Gaming PC", "Laptop")
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub device_name: Option<String>,

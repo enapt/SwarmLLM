@@ -172,6 +172,7 @@ impl PoolManager {
                 &member.invitation_id,
                 &state.pool_id,
                 &member.node_id,
+                &member.invitation_expires_at,
             );
             let sig_bytes: &[u8; 64] = match member.acceptance_signature.as_slice().try_into() {
                 Ok(b) => b,
@@ -541,6 +542,7 @@ impl PoolManager {
                 &member.invitation_id,
                 &diff.pool_id,
                 &member.node_id,
+                &member.invitation_expires_at,
             );
             let sig_bytes: &[u8; 64] = match member.acceptance_signature.as_slice().try_into() {
                 Ok(b) => b,

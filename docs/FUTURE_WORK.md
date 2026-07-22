@@ -759,30 +759,41 @@ not actually stop cross-pool routing until daemon restart.
 The R135 review surfaced two signature/security items that touch wire
 formats and require user direction before changing:
 
-### Acceptance signature timestamp omission
-**Context.** `acceptance_payload` in `src/pool/crypto.rs:419` signs
-`(PREFIX_ACCEPTANCE | invitation_id | pool_id | invitee_node_id)`. No
-timestamp, no nonce. The invitation itself has an `expires_at` but the
-acceptance does not bind to it.
+### Acceptance signature timestamp omission — **CLOSED R147** (2026-07-22)
 
-**Risk.** An adversary who captures an acceptance signature in transit
-(or from a compromised node's storage) can in principle replay it.
-Practical exploitability is low — `invitation_id` is UUIDv4 (~2^122
-collision space) and accepted invitations are tracked in member state,
-so double-acceptance is already prevented by the pool registry. The
-finding is real but the attack scenario requires the same
-`(invitation_id, pool_id, invitee_node_id)` triple to be re-used, which
-the inviter controls.
+_Option (a) taken, per maintainer decision: `acceptance_payload` now binds the
+invitation's `expires_at`, so the signature is implicitly time-bounded and
+cannot be transplanted onto a different invitation record._
 
-**What's needed.** Either (a) extend `acceptance_payload` to bind
-`invitation.expires_at` so the sig is implicitly time-bounded, or
-(b) add a per-acceptance nonce to `PoolMembership`. Both are
-wire-format changes; (a) is simpler and matches the existing
-invitation expiry contract.
+_The non-obvious part was the verification topology. There are **two**
+verifiers, not one:_
 
-**Why deferred.** Wire-format change with backward-compat implications
-across all pool members. Want explicit user sign-off on the
-compat strategy (versioned variant vs. flag-day).
+1. _The **pool owner** validating an inbound `PoolAcceptance`. It takes
+   `expires_at` from its own `pending_invitations` entry, never from the
+   acceptance — the whole point is that the signer doesn't choose the value the
+   signature is checked against. `handle_inbound_acceptance` was reordered to
+   look the invitation up *before* verifying (it previously verified first,
+   then looked up), and gained an explicit "invitation has expired" rejection
+   as the enforcement half of the binding._
+2. _**Any gossip receiver** re-verifying `PoolMembership.acceptance_signature`
+   from a `PoolState` broadcast. It never saw the invitation, so the expiry has
+   to travel with the membership: new `PoolMembership.invitation_expires_at`,
+   populated by the owner from the value it verified against. Here the value
+   arriving alongside the signature is fine — a third party is checking "did
+   this node really accept this invitation", and an attacker replaying a real
+   pair is asserting something true. The owner's path is where the adversarial
+   choice mattered, and that one uses local state._
+
+_**Flag day, as accepted.** `invitation_expires_at` is `#[serde(default)]` so
+pre-R147 pool state still deserializes (missing → epoch) rather than failing to
+parse, but it will fail signature verification. Mixed-version pools will reject
+each other's member lists until both sides upgrade. Pools are personal-device
+scale (`max_pool_size` 10) and the project is pre-release, so a versioned
+variant wasn't worth the permanent complexity._
+
+_Tests: signature must not verify against a lengthened or shortened expiry;
+payload must actually change with the expiry (guards against a helper that
+accepts the argument and ignores it)._
 
 ### `apply_pool_model_availability` cap eviction relies on single-task dispatch
 

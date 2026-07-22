@@ -195,6 +195,7 @@ pub fn create_acceptance(identity: &Identity, invitation: &PoolInvitation) -> Po
         &invitation.id,
         &invitation.pool_id,
         &invitation.invitee_node_id,
+        &invitation.expires_at,
     );
     let signature = identity.sign(&payload);
 
@@ -207,15 +208,22 @@ pub fn create_acceptance(identity: &Identity, invitation: &PoolInvitation) -> Po
     }
 }
 
-/// Verify an acceptance's invitee signature.
+/// Verify an acceptance's invitee signature against the invitation the
+/// verifier itself holds.
+///
+/// `invitation_expires_at` MUST come from the verifier's own stored
+/// invitation, never from the acceptance — the point is that the invitee
+/// signed over a value the attacker doesn't get to pick.
 pub fn verify_acceptance(
     acceptance: &PoolAcceptance,
     invitee_key: &VerifyingKey,
+    invitation_expires_at: &chrono::DateTime<chrono::Utc>,
 ) -> Result<(), SwarmError> {
     let payload = acceptance_payload(
         &acceptance.invitation_id,
         &acceptance.pool_id,
         &acceptance.invitee_node_id,
+        invitation_expires_at,
     );
     verify_sig(&acceptance.invitee_signature, &payload, invitee_key)
 }
@@ -416,16 +424,31 @@ fn invitation_payload(
     hasher.finalize().as_bytes().to_vec()
 }
 
+/// Signing payload for a pool acceptance.
+///
+/// `expires_at` is the *invitation's* expiry, carried into the acceptance
+/// signature so the signature is implicitly time-bounded and cannot be
+/// transplanted onto a different invitation record. Before R147 the payload
+/// covered only `(invitation_id, pool_id, invitee)` — a captured acceptance
+/// signature made no statement about when it was valid, and the only thing
+/// preventing reuse was the owner consuming the invitation from
+/// `pending_invitations`.
+///
+/// The verifier gets `expires_at` from its own stored copy of the invitation
+/// rather than from the acceptance, so nothing new travels the wire and an
+/// attacker cannot choose the value the signature is checked against.
 pub(crate) fn acceptance_payload(
     invitation_id: &uuid::Uuid,
     pool_id: &PoolId,
     invitee: &NodeId,
+    expires_at: &chrono::DateTime<chrono::Utc>,
 ) -> Vec<u8> {
     let mut hasher = blake3::Hasher::new();
     hasher.update(PREFIX_ACCEPTANCE);
     hasher.update(invitation_id.as_bytes());
     hasher.update(&pool_id.0);
     hasher.update(&invitee.0);
+    hasher.update(expires_at.to_rfc3339().as_bytes());
     hasher.finalize().as_bytes().to_vec()
 }
 
@@ -494,9 +517,16 @@ mod tests {
         let invitation = create_invitation(&owner, &pool_id, invitee.node_id(), 24);
         let acceptance = create_acceptance(&invitee, &invitation);
 
-        assert!(verify_acceptance(&acceptance, &invitee.verifying_key()).is_ok());
+        assert!(verify_acceptance(
+            &acceptance,
+            &invitee.verifying_key(),
+            &invitation.expires_at
+        )
+        .is_ok());
         // Wrong key should fail
-        assert!(verify_acceptance(&acceptance, &owner.verifying_key()).is_err());
+        assert!(
+            verify_acceptance(&acceptance, &owner.verifying_key(), &invitation.expires_at).is_err()
+        );
     }
 
     #[test]
@@ -614,6 +644,55 @@ mod tests {
         );
 
         assert!(verify_membership(&bad_token, &owner.verifying_key()).is_err());
+    }
+
+    /// R147: the acceptance signature binds the invitation's expiry, so a
+    /// signature produced for one expiry must not verify against another.
+    /// This is what stops a captured acceptance being transplanted onto a
+    /// different invitation record.
+    #[test]
+    fn acceptance_signature_does_not_verify_against_a_different_expiry() {
+        let owner = Identity::generate();
+        let invitee = Identity::generate();
+        let pool_id = owner.node_id().clone();
+        let invitation = create_invitation(&owner, &pool_id, invitee.node_id(), 24);
+        let acceptance = create_acceptance(&invitee, &invitation);
+
+        // Correct expiry verifies.
+        assert!(verify_acceptance(
+            &acceptance,
+            &invitee.verifying_key(),
+            &invitation.expires_at
+        )
+        .is_ok());
+
+        // An attacker-extended expiry does not.
+        let extended = invitation.expires_at + chrono::Duration::hours(24);
+        assert!(
+            verify_acceptance(&acceptance, &invitee.verifying_key(), &extended).is_err(),
+            "signature must not verify against an expiry the invitee never signed"
+        );
+
+        // Nor does an earlier one.
+        let shortened = invitation.expires_at - chrono::Duration::hours(1);
+        assert!(verify_acceptance(&acceptance, &invitee.verifying_key(), &shortened).is_err());
+    }
+
+    /// The payload must actually incorporate `expires_at` — a helper that
+    /// silently ignored the argument would pass the round-trip test above only
+    /// if the caller happened to pass the same value both times.
+    #[test]
+    fn acceptance_payload_changes_with_expiry() {
+        let id = uuid::Uuid::new_v4();
+        let pool_id = NodeId([1u8; 32]);
+        let invitee = NodeId([2u8; 32]);
+        let t1 = chrono::Utc::now();
+        let t2 = t1 + chrono::Duration::seconds(1);
+
+        let p1 = acceptance_payload(&id, &pool_id, &invitee, &t1);
+        let p2 = acceptance_payload(&id, &pool_id, &invitee, &t2);
+        assert_ne!(p1, p2);
+        assert_eq!(p1, acceptance_payload(&id, &pool_id, &invitee, &t1));
     }
 
     #[test]

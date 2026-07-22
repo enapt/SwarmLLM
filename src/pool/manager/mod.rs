@@ -576,6 +576,10 @@ impl PoolManager {
                 joined_at: now,
                 acceptance_signature: sig.clone(),
                 invitation_id: uuid::Uuid::nil(),
+                // The owner's own membership is signed with the pool-creation
+                // signature, not an acceptance — gossip verifiers skip it
+                // (`member.node_id == state.pool_id`), so this is unused.
+                invitation_expires_at: now,
                 device_name: None,
                 last_seen: Some(now),
                 online: true,
@@ -742,6 +746,7 @@ impl PoolManager {
             joined_at: chrono::Utc::now(),
             acceptance_signature: acceptance.invitee_signature.clone(),
             invitation_id: invitation.id,
+            invitation_expires_at: invitation.expires_at,
             device_name,
             last_seen: Some(chrono::Utc::now()),
             online: true,
@@ -1213,36 +1218,60 @@ impl PoolManager {
             return; // Not our pool
         }
 
-        // Verify the acceptance signature
-        let invitee_key =
-            match ed25519_dalek::VerifyingKey::from_bytes(&acceptance.invitee_node_id.0) {
-                Ok(k) => k,
-                Err(_) => return,
-            };
-        if crypto::verify_acceptance(&acceptance, &invitee_key).is_err() {
-            tracing::warn!(invitee = %acceptance.invitee_node_id, "Invalid acceptance signature");
-            return;
-        }
+        // Look the invitation up FIRST. Its `expires_at` is an input to the
+        // signature check below (R147), so we need our own copy of the
+        // invitation before we can verify anything — deliberately ours, not
+        // the acceptance's, so the attacker doesn't choose the value the
+        // signature is verified against.
+        let (expected_invitee, invitation_expires_at) = match self
+            .pending_invitations
+            .get(&acceptance.invitation_id)
+        {
+            Some(inv) => (inv.invitee_node_id.clone(), inv.expires_at),
+            None => {
+                tracing::warn!(invitation_id = %acceptance.invitation_id, invitee = %acceptance.invitee_node_id, "Acceptance for unknown invitation");
+                return;
+            }
+        };
 
         // SEC: Verify the acceptance comes from the invitee we actually invited.
         // Without this, anyone who learns the invitation_id (e.g. via leaked
         // PoolMembership broadcast or log scrape) could craft an acceptance with
         // their own NodeId + own valid signature, consume the slot, and lock out
         // the real invitee.
-        let pending = match self.pending_invitations.get(&acceptance.invitation_id) {
-            Some(inv) => inv,
-            None => {
-                tracing::warn!(invitation_id = %acceptance.invitation_id, invitee = %acceptance.invitee_node_id, "Acceptance for unknown invitation");
-                return;
-            }
-        };
-        if pending.invitee_node_id != acceptance.invitee_node_id {
+        if expected_invitee != acceptance.invitee_node_id {
             tracing::warn!(
                 invitation_id = %acceptance.invitation_id,
-                expected = %pending.invitee_node_id,
+                expected = %expected_invitee,
                 got = %acceptance.invitee_node_id,
                 "Acceptance invitee does not match original invitation — rejecting"
             );
+            return;
+        }
+
+        // SEC: an expired invitation cannot be accepted. The signature binds
+        // `expires_at`, so this is the enforcement half of that binding —
+        // together they mean a captured acceptance stops being useful once the
+        // invitation it names has lapsed, whether or not the owner still holds
+        // it in `pending_invitations`.
+        if chrono::Utc::now() > invitation_expires_at {
+            tracing::warn!(
+                invitation_id = %acceptance.invitation_id,
+                invitee = %acceptance.invitee_node_id,
+                expired_at = %invitation_expires_at,
+                "Acceptance for an expired invitation — rejecting"
+            );
+            return;
+        }
+
+        // Verify the acceptance signature, bound to our invitation's expiry.
+        let invitee_key =
+            match ed25519_dalek::VerifyingKey::from_bytes(&acceptance.invitee_node_id.0) {
+                Ok(k) => k,
+                Err(_) => return,
+            };
+        if crypto::verify_acceptance(&acceptance, &invitee_key, &invitation_expires_at).is_err() {
+            tracing::warn!(invitee = %acceptance.invitee_node_id, "Invalid acceptance signature");
             return;
         }
 
@@ -1288,6 +1317,10 @@ impl PoolManager {
                     joined_at: acceptance.accepted_at,
                     acceptance_signature: acceptance.invitee_signature.clone(),
                     invitation_id: acceptance.invitation_id,
+                    // Our stored invitation's expiry — the same value the
+                    // signature was verified against above, never a value
+                    // taken from the acceptance.
+                    invitation_expires_at,
                     device_name: None,
                     last_seen: Some(chrono::Utc::now()),
                     online: true,
@@ -1970,8 +2003,13 @@ mod tests {
         pool_id: &PoolId,
         invitation_id: uuid::Uuid,
     ) -> PoolMembership {
-        let payload =
-            crate::pool::crypto::acceptance_payload(&invitation_id, pool_id, identity.node_id());
+        let expires_at = chrono::Utc::now() + chrono::Duration::hours(24);
+        let payload = crate::pool::crypto::acceptance_payload(
+            &invitation_id,
+            pool_id,
+            identity.node_id(),
+            &expires_at,
+        );
         let sig = identity.sign(&payload);
         let now = chrono::Utc::now();
         PoolMembership {
@@ -1980,6 +2018,7 @@ mod tests {
             joined_at: now,
             acceptance_signature: sig,
             invitation_id,
+            invitation_expires_at: expires_at,
             device_name: None,
             last_seen: Some(now),
             online: true,
@@ -1998,6 +2037,7 @@ mod tests {
             joined_at: now,
             acceptance_signature: Vec::new(),
             invitation_id: uuid::Uuid::nil(),
+            invitation_expires_at: now,
             device_name: None,
             last_seen: Some(now),
             online: true,
