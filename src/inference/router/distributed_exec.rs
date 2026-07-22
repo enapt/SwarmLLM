@@ -771,6 +771,35 @@ mod tests {
         ));
     }
 
+    /// AllReduce splits by attribution, not by subsystem: a peer that puts
+    /// non-finite floats on the wire is chargeable, a ring that merely stalls
+    /// is not — the slow member could be us, and R146 is the record of what
+    /// charging an ambiguous failure costs an honest node.
+    #[test]
+    fn allreduce_failures_split_by_attribution() {
+        // Peer sent poisoned data — `Inference`, chargeable.
+        assert!(failure_is_penalty_worthy(
+            &SwarmError::Inference(
+                "Ring AllReduce step 2: received non-finite values from peer".into()
+            ),
+            true
+        ));
+        // Ring stalled — `Internal`, charges nobody.
+        assert!(!failure_is_penalty_worthy(
+            &SwarmError::Internal("Ring AllReduce timeout at step 2 for layer 0".into()),
+            true
+        ));
+        // Our own partial was corrupt before it left this node — never a peer's
+        // fault regardless of who else is in the ring.
+        assert!(!failure_is_penalty_worthy(
+            &SwarmError::Internal(
+                "Ring AllReduce: local partial contains NaN/Inf — IPC corruption or hardware fault"
+                    .into()
+            ),
+            true
+        ));
+    }
+
     #[test]
     fn genuine_remote_serve_failures_are_penalised() {
         assert!(failure_is_penalty_worthy(

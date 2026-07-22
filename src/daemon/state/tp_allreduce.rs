@@ -132,7 +132,9 @@ impl TpAllReduceCollector {
 
         // Check for NaN/Inf in reduced result (possible tensor poisoning)
         if sum.iter().any(|v| !v.is_finite()) {
-            return Err(crate::error::SwarmError::Internal(
+            // Attributable to whichever peer contributed the poisoned partial
+            // — see the peer-receive check in `inference/allreduce.rs`.
+            return Err(crate::error::SwarmError::Inference(
                 "AllReduce result contains NaN/Inf — possible tensor poisoning".into(),
             ));
         }

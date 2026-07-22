@@ -224,7 +224,7 @@ impl PipelineExecutor {
                         .chunks_exact(4)
                         .any(|c| !f32::from_le_bytes([c[0], c[1], c[2], c[3]]).is_finite())
                 {
-                    return Err(SwarmError::Internal(
+                    return Err(SwarmError::Inference(
                         "Attn AllReduce result contains NaN/Inf — possible tensor poisoning".into(),
                     ));
                 }
@@ -335,7 +335,7 @@ impl PipelineExecutor {
                         .chunks_exact(4)
                         .any(|c| !f32::from_le_bytes([c[0], c[1], c[2], c[3]]).is_finite())
                 {
-                    return Err(SwarmError::Internal(
+                    return Err(SwarmError::Inference(
                         "Ffn AllReduce result contains NaN/Inf — possible tensor poisoning".into(),
                     ));
                 }

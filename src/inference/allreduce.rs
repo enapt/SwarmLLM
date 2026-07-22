@@ -496,7 +496,17 @@ pub(crate) async fn ring_allreduce_network(
             .await
             .map_err(|e| SwarmError::Internal(format!("Send ring chunk: {e}")))?;
 
-        // Wait for chunk from left neighbor
+        // Wait for chunk from left neighbor.
+        //
+        // Deliberately `Internal`, which `failure_is_penalty_worthy` excludes,
+        // so this charges nobody. A ring stalls for whoever is slowest, and
+        // that can be us — local CPU contention or a busy worker delays our own
+        // send and every downstream peer waits on it. We cannot tell from here
+        // which member was late, and R146 is the record of what happens when an
+        // ambiguous failure is charged anyway: a node hit -470 credits for
+        // faults it did not cause. Peer-attributable AllReduce failures are the
+        // data-corruption checks below, where a specific peer demonstrably put
+        // bad values on the wire.
         let received_data = tokio::time::timeout(ALLREDUCE_TIMEOUT, rx)
             .await
             .map_err(|_| {
@@ -525,7 +535,11 @@ pub(crate) async fn ring_allreduce_network(
         // and corrupts every token of the request output (and any sessions sharing
         // the KV cache).
         if !recv_floats.iter().all(|f| f.is_finite()) {
-            return Err(SwarmError::Internal(format!(
+            // `Inference`, not `Internal`: a peer put non-finite floats on the
+            // wire, so this is attributable to them. `Internal` is excluded by
+            // `failure_is_penalty_worthy`, which meant the peer that poisoned
+            // the ring was never penalised for it.
+            return Err(SwarmError::Inference(format!(
                 "Ring AllReduce step {step_num}: received non-finite values from peer"
             )));
         }
