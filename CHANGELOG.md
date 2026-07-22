@@ -38,6 +38,15 @@ All notable changes to SwarmLLM are documented here.
   detected and fall back to a sensible format for the model.
 - **Vision models with newer image-encoder files failed to load.** Support for
   the two possible layouts is now detected per file instead of assumed.
+- **A machine that corrupted shared calculation data was never marked down for
+  it.** When several machines split one model layer between them, they combine
+  partial results; a machine sending corrupted numbers would spoil the answer
+  for everyone in the group, but the fault was recorded as a local problem, so
+  its reputation was untouched. It now counts against the machine responsible.
+  Cases where the culprit genuinely cannot be identified — a group member
+  simply being slow, which might be your own machine — still count against
+  nobody, deliberately. Only affects setups that split a single layer across
+  machines, which is off by default.
 
 ## [0.3.5-alpha] — 2026-07-22
 
