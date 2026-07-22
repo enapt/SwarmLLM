@@ -141,6 +141,27 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libssl-dev pkg-config
 
+      # The CUDA job is the only one that runs out of room, and it does so
+      # late: v0.3.10 built and uploaded its archive, then died with "No space
+      # left on device" while writing the bare binary. The job carries the CUDA
+      # toolkit (~5 GB), a restored dependency cache, a target/ directory full
+      # of CUDA kernels, and three copies of a large binary — target, staging
+      # and the bare asset.
+      #
+      # Runner images ship several GB of toolchains this build never touches.
+      # Removing them is the standard remedy and costs seconds; `|| true`
+      # throughout because their paths differ between image versions and a
+      # missing directory must not fail the release.
+      - name: Free runner disk space
+        if: matrix.cuda_linux
+        run: |
+          echo "before:"; df -h / | tail -1
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /usr/local/share/boost /usr/local/share/powershell \
+                      /usr/share/swift "$AGENT_TOOLSDIRECTORY" || true
+          sudo docker image prune -af || true
+          echo "after:"; df -h / | tail -1
+
       - name: Install CUDA toolkit (Linux)
         if: matrix.cuda_linux
         run: |
