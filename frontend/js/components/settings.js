@@ -575,50 +575,25 @@
       }
       badge.textContent = I18n.t('settings.badge_testing');
       badge.className = 'badge badge-testing';
-      try {
-        var saveBody = {};
-        saveBody[name + '_key'] = key;
-        await App.authFetch('/api/admin/providers', {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(saveBody),
-        });
-        var testResp;
-        if (name === 'anthropic') {
-          testResp = await App.authFetch('/v1/messages', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ model: 'claude-haiku-4-5-20251001', max_tokens: 1, messages: [{ role: 'user', content: 'hi' }] }),
-          });
-        } else {
-          testResp = await App.authFetch('/v1/chat/completions', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ model: PROVIDER_TEST_MODELS[name] || name + '-test', max_tokens: 1, messages: [{ role: 'user', content: 'hi' }] }),
-          });
-        }
-        if (testResp.ok) {
-          badge.textContent = I18n.t('settings.badge_active');
-          badge.className = 'badge provider-badge-active';
-          App.ui.showBanner('success', I18n.t('settings.key_verified', { name: name }));
-          var testCard = badge.closest('.provider-card');
-          if (testCard) testCard.classList.add('provider-active');
-          App.models.load();
-          App.networkStatus.load();
-        } else {
-          var err = await testResp.text();
-          var friendlyErr = err;
-          try { var ej = JSON.parse(err); friendlyErr = (ej.error && ej.error.message) || err; } catch(pe) {}
-          if (friendlyErr.length > 200) friendlyErr = friendlyErr.substring(0, 200) + '\u2026';
-          badge.textContent = I18n.t('settings.badge_failed');
-          badge.className = 'badge badge-error';
-          App.ui.showBanner('error', I18n.t('settings.key_test_failed', { name: name, error: friendlyErr }));
-        }
+      var result = await saveAndVerifyProviderKey(name, key);
+      if (result.ok) {
+        badge.textContent = I18n.t('settings.badge_active');
+        badge.className = 'badge provider-badge-active';
+        App.ui.showBanner('success', I18n.t('settings.key_verified', { name: name }));
+        var testCard = badge.closest('.provider-card');
+        if (testCard) testCard.classList.add('provider-active');
         input.value = '';
-      } catch (e) {
+        App.models.load();
+        App.networkStatus.load();
+      } else if (result.stage === 'network') {
         badge.textContent = I18n.t('settings.badge_error');
         badge.className = 'badge badge-error';
-        App.ui.showBanner('error', I18n.t('settings.key_test_failed', { name: name, error: e.message }));
+        App.ui.showBanner('error', I18n.t('settings.key_test_failed', { name: name, error: result.message }));
+      } else {
+        badge.textContent = I18n.t('settings.badge_failed');
+        badge.className = 'badge badge-error';
+        App.ui.showBanner('error', I18n.t('settings.key_test_failed', { name: name, error: result.message }));
+        input.value = '';
       }
     },
 

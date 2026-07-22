@@ -135,3 +135,57 @@ function modelIconKey(modelId) {
   if (m.startsWith('vicuna') || m.startsWith('wizardlm')) return 'llama';
   return null;
 }
+
+// Save a provider API key, then verify it with a 1-token request.
+//
+// Shared by the Settings provider cards and the first-run setup wizard, which
+// previously carried ~40 identical lines each: the same PUT, the same
+// anthropic-vs-OpenAI-shape branch, and the same error-body unwrapping. Only
+// their DOM handling genuinely differed, so that stays at the call sites.
+//
+// Returns { ok, stage, message }:
+//   ok:true                      — key saved and verified
+//   ok:false, stage:'save'       — the key could not be stored
+//   ok:false, stage:'test'       — stored, but the provider rejected it
+//   ok:false, stage:'network'    — the request itself threw
+// `message` is already unwrapped from the provider's JSON error envelope and
+// truncated, so callers can display it directly.
+async function saveAndVerifyProviderKey(provider, key) {
+  var MAX_ERR = 200;
+  try {
+    var saveBody = {};
+    saveBody[provider + '_key'] = key;
+    var saveResp = await App.authFetch('/api/admin/providers', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(saveBody),
+    });
+    // Settings used to skip this check, so a failed save fell through to a
+    // test that failed for a completely unrelated-looking reason.
+    if (!saveResp.ok) return { ok: false, stage: 'save', message: '' };
+
+    var testResp;
+    if (provider === 'anthropic') {
+      testResp = await App.authFetch('/v1/messages', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model: 'claude-haiku-4-5-20251001', max_tokens: 1, messages: [{ role: 'user', content: 'hi' }] }),
+      });
+    } else {
+      testResp = await App.authFetch('/v1/chat/completions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model: PROVIDER_TEST_MODELS[provider] || provider + '-test', max_tokens: 1, messages: [{ role: 'user', content: 'hi' }] }),
+      });
+    }
+    if (testResp.ok) return { ok: true, stage: 'test', message: '' };
+
+    var raw = await testResp.text();
+    var friendly = raw;
+    try { var ej = JSON.parse(raw); friendly = (ej.error && ej.error.message) || raw; } catch (pe) {}
+    if (friendly.length > MAX_ERR) friendly = friendly.substring(0, MAX_ERR) + '…';
+    return { ok: false, stage: 'test', message: friendly };
+  } catch (e) {
+    return { ok: false, stage: 'network', message: e.message || '' };
+  }
+}

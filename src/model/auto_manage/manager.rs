@@ -128,16 +128,7 @@ pub(super) fn sweep_stalled_p2p_permits(state: &SharedState) {
 
 /// Compute a position on a u32 consistent hash ring for a node's virtual slot.
 pub(super) fn hash_ring_position(node_bytes: &[u8; 32], virtual_node: u32) -> u32 {
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(node_bytes);
-    hasher.update(&virtual_node.to_le_bytes());
-    let hash = hasher.finalize();
-    u32::from_le_bytes([
-        hash.as_bytes()[0],
-        hash.as_bytes()[1],
-        hash.as_bytes()[2],
-        hash.as_bytes()[3],
-    ])
+    crate::types::hash_parts_to_u32(&[node_bytes, &virtual_node.to_le_bytes()])
 }
 
 /// Auto-manages shard downloads to improve network health.

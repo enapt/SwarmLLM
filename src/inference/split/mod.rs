@@ -44,7 +44,7 @@ pub use self::gguf_meta::{
 pub use self::kv_cache::KvCacheStore;
 pub use self::model::SplitModel;
 pub use self::prefix_cache::{
-    compute_block_hashes, deserialize_snapshot, deserialize_snapshot_full, serialize_snapshot,
+    compute_block_hashes, deserialize_snapshot, deserialize_snapshot_full,
     serialize_snapshot_with_block_size, snapshot_is_finite, verify_token_hash_chain, KvSnapshot,
     PrefixCache, KV_SNAPSHOT_MAGIC, KV_SNAPSHOT_VERSION,
 };

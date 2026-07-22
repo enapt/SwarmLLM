@@ -25,6 +25,32 @@ pub enum PoolAction {
     Leave,
 }
 
+/// POST to a pool endpoint and return the parsed body, exiting with status 1
+/// on an `error` field.
+///
+/// Four of the five subcommands repeated the same shape: send, parse JSON,
+/// check for `error`, print it and `exit(1)`, else print a success message.
+/// Only the path, the optional request body, and the success text differed —
+/// so each arm now supplies just those and keeps its own output.
+async fn pool_post(
+    client: &reqwest::Client,
+    base: &str,
+    auth: &str,
+    path: &str,
+    body: Option<serde_json::Value>,
+) -> anyhow::Result<serde_json::Value> {
+    let mut req = client.post(format!("{base}{path}")).bearer_auth(auth);
+    if let Some(json) = body {
+        req = req.json(&json);
+    }
+    let parsed: serde_json::Value = req.send().await?.json().await?;
+    if let Some(err) = parsed.get("error") {
+        eprintln!("Error: {err}");
+        std::process::exit(1);
+    }
+    Ok(parsed)
+}
+
 pub async fn run_pool_command(
     port: u16,
     data_dir: &std::path::Path,
@@ -38,36 +64,25 @@ pub async fn run_pool_command(
 
     match action {
         PoolAction::Create { name } => {
-            let resp = client
-                .post(format!("{base}/api/pool/create"))
-                .bearer_auth(auth_header)
-                .json(&serde_json::json!({ "name": name }))
-                .send()
-                .await?;
-            let body: serde_json::Value = resp.json().await?;
-            if let Some(err) = body.get("error") {
-                eprintln!("Error: {err}");
-                std::process::exit(1);
-            } else {
-                println!("Pool created: {}", body["name"].as_str().unwrap_or(&name));
-                println!(
-                    "Pool ID: {}",
-                    body.get("pool_id").and_then(|v| v.as_str()).unwrap_or("?")
-                );
-                println!("\nNext: Run 'swarmllm pool invite-code' to generate a code for your other devices.");
-            }
+            let body = pool_post(
+                &client,
+                &base,
+                auth_header,
+                "/api/pool/create",
+                Some(serde_json::json!({ "name": name })),
+            )
+            .await?;
+            println!("Pool created: {}", body["name"].as_str().unwrap_or(&name));
+            println!(
+                "Pool ID: {}",
+                body.get("pool_id").and_then(|v| v.as_str()).unwrap_or("?")
+            );
+            println!("\nNext: Run 'swarmllm pool invite-code' to generate a code for your other devices.");
         }
         PoolAction::InviteCode => {
-            let resp = client
-                .post(format!("{base}/api/pool/generate-code"))
-                .bearer_auth(auth_header)
-                .send()
-                .await?;
-            let body: serde_json::Value = resp.json().await?;
-            if let Some(err) = body.get("error") {
-                eprintln!("Error: {err}");
-                std::process::exit(1);
-            } else if let Some(code) = body.get("code").and_then(|v| v.as_str()) {
+            let body =
+                pool_post(&client, &base, auth_header, "/api/pool/generate-code", None).await?;
+            if let Some(code) = body.get("code").and_then(|v| v.as_str()) {
                 println!("Invite Code: {code}");
                 println!();
                 println!("Share this code with your other devices.");
@@ -77,23 +92,17 @@ pub async fn run_pool_command(
             }
         }
         PoolAction::Join { code } => {
-            let resp = client
-                .post(format!("{base}/api/pool/join"))
-                .bearer_auth(auth_header)
-                .json(&serde_json::json!({ "code": code }))
-                .send()
-                .await?;
-            let body: serde_json::Value = resp.json().await?;
-            if let Some(err) = body.get("error") {
-                eprintln!("Error: {err}");
-                std::process::exit(1);
-            } else {
-                println!("Join request sent! Your device will be added to the pool");
-                println!("once the owner's node processes the request.");
-                println!(
-                    "\nAll credits earned by this device will be forwarded to the pool owner."
-                );
-            }
+            pool_post(
+                &client,
+                &base,
+                auth_header,
+                "/api/pool/join",
+                Some(serde_json::json!({ "code": code })),
+            )
+            .await?;
+            println!("Join request sent! Your device will be added to the pool");
+            println!("once the owner's node processes the request.");
+            println!("\nAll credits earned by this device will be forwarded to the pool owner.");
         }
         PoolAction::Status => {
             let resp = client
@@ -164,18 +173,8 @@ pub async fn run_pool_command(
             }
         }
         PoolAction::Leave => {
-            let resp = client
-                .post(format!("{base}/api/pool/leave"))
-                .bearer_auth(auth_header)
-                .send()
-                .await?;
-            let body: serde_json::Value = resp.json().await?;
-            if let Some(err) = body.get("error") {
-                eprintln!("Error: {err}");
-                std::process::exit(1);
-            } else {
-                println!("Left the device pool. Credits will no longer be forwarded.");
-            }
+            pool_post(&client, &base, auth_header, "/api/pool/leave", None).await?;
+            println!("Left the device pool. Credits will no longer be forwarded.");
         }
     }
 

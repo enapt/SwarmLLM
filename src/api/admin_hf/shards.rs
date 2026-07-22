@@ -223,15 +223,9 @@ pub async fn hf_download_shards(
             let total_shards = info.shard_count() as u32;
 
             // Deterministic shard selection: hash(node_id || model_id) → shard index
-            let mut hasher = blake3::Hasher::new();
-            hasher.update(fair_share_node_id.0.as_ref());
-            hasher.update(model_id_str.as_bytes());
-            let hash = hasher.finalize();
-            let seed_shard = u32::from_le_bytes([
-                hash.as_bytes()[0],
-                hash.as_bytes()[1],
-                hash.as_bytes()[2],
-                hash.as_bytes()[3],
+            let seed_shard = crate::types::hash_parts_to_u32(&[
+                fair_share_node_id.0.as_ref(),
+                model_id_str.as_bytes(),
             ]) % total_shards;
 
             let assigned = vec![seed_shard];

@@ -112,6 +112,16 @@ pub async fn delete_model(
     shared.models.model_request_counts.remove(&mid);
     shared.models.model_trust.remove(&mid);
 
+    // Parallax stability counters are keyed by ShardId, so they need a
+    // predicate rather than a point remove. Without this every shard of every
+    // model the node ever evaluated leaves a permanent entry — the map is
+    // written each auto-manage tick via `entry().or_insert()` and had no
+    // removal path anywhere, so it grew monotonically with model churn.
+    shared
+        .models
+        .parallax_stability
+        .retain(|shard_id, _| shard_id.model_id != mid);
+
     // Remove from gguf_meta
     shared.gguf_meta.remove(&mid);
 

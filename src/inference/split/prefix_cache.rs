@@ -708,16 +708,11 @@ struct SnapshotHeader {
 /// is recorded in the header. Every tensor in `snap.layers` is cast to f32
 /// before encoding so the frame is device-independent.
 ///
-/// For Item 8 Phase 3: pass `block_size: Some(N)` so the receiver can
-/// BLAKE3-verify `tokens[..token_count]` against the requested block
-/// hash without guessing a block size. `None` is tolerated (pre-Phase-3
-/// compatibility) — the verifier falls back to common defaults.
-pub fn serialize_snapshot(snap: &KvSnapshot, tokens: &[u32]) -> Result<Vec<u8>, SwarmError> {
-    serialize_snapshot_with_block_size(snap, tokens, None)
-}
-
-/// Phase 3 variant: serialize + record the sender's `block_size` so
-/// the receiver can verify deterministically.
+/// `block_size: Some(N)` records the sender's block size so the receiver can
+/// BLAKE3-verify `tokens[..token_count]` against the requested block hash
+/// deterministically — every production caller passes it. `None` is tolerated
+/// for pre-Phase-3 compatibility, where the verifier falls back to guessing
+/// common defaults; the round-trip tests still cover that path.
 pub fn serialize_snapshot_with_block_size(
     snap: &KvSnapshot,
     tokens: &[u32],
@@ -1168,7 +1163,7 @@ mod tests {
             max_seq_len: 4096,
         };
         let tokens: Vec<u32> = vec![7, 8, 9, 10];
-        let bytes = serialize_snapshot(&snap, &tokens).expect("serialize");
+        let bytes = serialize_snapshot_with_block_size(&snap, &tokens, None).expect("serialize");
         let (decoded, decoded_tokens) = deserialize_snapshot(&bytes, &device).expect("deserialize");
         assert_eq!(decoded.token_count, 4);
         assert_eq!(decoded.dim, 2);
@@ -1334,7 +1329,7 @@ mod tests {
             max_seq_len: 128,
         };
         let tokens: Vec<u32> = vec![11, 12];
-        let bytes = serialize_snapshot(&snap, &tokens).unwrap();
+        let bytes = serialize_snapshot_with_block_size(&snap, &tokens, None).unwrap();
         let (decoded, _) = deserialize_snapshot(&bytes, &device).unwrap();
         assert_eq!(decoded.layers.len(), 3);
         assert!(decoded.layers[0].is_none());

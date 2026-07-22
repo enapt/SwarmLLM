@@ -226,56 +226,25 @@
       status.className = 'setup-provider-status testing';
       if (saveBtn) saveBtn.disabled = true;
 
-      try {
-        var saveBody = {}; saveBody[provider + '_key'] = key;
-        var saveResp = await App.authFetch('/api/admin/providers', {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(saveBody),
-        });
-        if (!saveResp.ok) {
-          status.textContent = I18n.t('setup.failed_save');
-          status.className = 'setup-provider-status error';
-          return;
-        }
-
-        // Test with a 1-token request — same shape settings.testProvider uses.
-        var testResp;
-        if (provider === 'anthropic') {
-          testResp = await App.authFetch('/v1/messages', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ model: 'claude-haiku-4-5-20251001', max_tokens: 1, messages: [{ role: 'user', content: 'hi' }] }),
-          });
-        } else {
-          var model = PROVIDER_TEST_MODELS[provider] || provider + '-test';
-          testResp = await App.authFetch('/v1/chat/completions', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ model: model, max_tokens: 1, messages: [{ role: 'user', content: 'hi' }] }),
-          });
-        }
-        if (testResp.ok) {
-          status.innerHTML = '<span>✓ ' + U.escapeHtml(I18n.t('setup.key_verified', { name: PROVIDER_NAMES[provider] || provider })) + '</span>';
-          status.className = 'setup-provider-status success';
-          App.setup._savedProvider = provider;
-          var tile = document.querySelector('.setup-provider-tile[data-provider="' + provider + '"]');
-          if (tile) tile.classList.add('configured');
-          if (keyInput) keyInput.value = '';
-        } else {
-          var errText = await testResp.text();
-          var friendlyErr = errText;
-          try { var ej = JSON.parse(errText); friendlyErr = (ej.error && ej.error.message) || errText; } catch(pe) {}
-          if (friendlyErr.length > 200) friendlyErr = friendlyErr.substring(0, 200) + '…';
-          status.textContent = I18n.t('setup.key_test_failed', { error: friendlyErr });
-          status.className = 'setup-provider-status error';
-        }
-      } catch (e) {
-        status.textContent = I18n.t('setup.connection_error', { error: e.message || I18n.t('common.request_failed') });
+      var result = await saveAndVerifyProviderKey(provider, key);
+      if (result.ok) {
+        status.innerHTML = '<span>\u2713 ' + U.escapeHtml(I18n.t('setup.key_verified', { name: PROVIDER_NAMES[provider] || provider })) + '</span>';
+        status.className = 'setup-provider-status success';
+        App.setup._savedProvider = provider;
+        var tile = document.querySelector('.setup-provider-tile[data-provider="' + provider + '"]');
+        if (tile) tile.classList.add('configured');
+        if (keyInput) keyInput.value = '';
+      } else if (result.stage === 'save') {
+        status.textContent = I18n.t('setup.failed_save');
         status.className = 'setup-provider-status error';
-      } finally {
-        if (saveBtn) saveBtn.disabled = false;
+      } else if (result.stage === 'network') {
+        status.textContent = I18n.t('setup.connection_error', { error: result.message || I18n.t('common.request_failed') });
+        status.className = 'setup-provider-status error';
+      } else {
+        status.textContent = I18n.t('setup.key_test_failed', { error: result.message });
+        status.className = 'setup-provider-status error';
       }
+      if (saveBtn) saveBtn.disabled = false;
     },
 
     // Read a key from the clipboard (single click — no Ctrl+V hunt).

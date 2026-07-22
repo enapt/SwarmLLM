@@ -2,6 +2,96 @@
 
 All notable changes to SwarmLLM are documented here.
 
+## [0.3.5-alpha] — 2026-07-22
+
+**Five externally-reported bugs fixed (R146) + request cancellation and
+deferral cleanup (R147).** All five bugs came from a user running 0.3.4-alpha
+on two home machines with an 8B model deliberately split across them. Every fix
+below was verified on real GPU hardware, not just unit-tested.
+
+> ### ⚠️ Breaking change — device pools
+>
+> The pool acceptance signature now covers the invitation's expiry, which is a
+> wire-format change. **A 0.3.5 node and a 0.3.4 node will reject each other's
+> pool member lists.** If you run a pool, upgrade every device in it together.
+> Nodes not using pools are unaffected, and normal inference, discovery and
+> credits interoperate across versions as before.
+
+### Fixed
+
+- **A tiny model replicated on two LAN machines could fail outright.** When the
+  local node already held every layer it still pulled a LAN peer into a
+  tensor-parallel group; if that peer went quiet the whole request died with
+  `AllReduce timeout after 10s for layer 0`, on a node that could have answered
+  alone. Full local coverage now never forms a group, tensor parallelism is
+  opt-in (`inference.tensor_parallel`, default off — over Ethernet the two
+  round trips per layer cost more than the compute they split), and a failed TP
+  segment now falls back to local compute instead of killing the request.
+- **A worker that hit a GPU out-of-memory error kept its VRAM forever.** Only an
+  explicit unload ever killed a worker, so a failed request left the process
+  resident holding its whole allocation — 4.4 GB in the reported case, still
+  there minutes later. Each retry then had less memory than the last, so one
+  OOM reliably became permanent failure for that model. Fatal device errors now
+  recycle the worker. Measured on an RTX 3070: **VRAM 7951 MB → 120 MB in six
+  seconds**, and the retry then succeeds.
+- **`inference.gpu_layers` did nothing for sharded models.** It was read by the
+  legacy llama.cpp path only; the engine that actually serves inference chose
+  its device unconditionally. Setting it to 0, 8 or 20 produced an identical
+  allocation. Worse, the shipped default was `0` documented as "CPU only" while
+  every CUDA build used the GPU regardless. It is now honoured end to end.
+  **The default changes from `0` to `-1` (auto)** so existing GPU nodes keep
+  using their GPU; `0` now genuinely means CPU-only, and a node configured that
+  way with a GPU present says so loudly at startup. Partial offload is not
+  supported by this engine and now warns instead of silently ignoring the value.
+- **A GPU OOM now falls back to CPU** for that model for the rest of the run,
+  rather than repeatedly retrying the allocation that just failed.
+- **Failed requests no longer charge credits for our bugs.** Every failure
+  applied a flat −50 penalty, including failures the local node caused —
+  debugging the three bugs above drove the reporter's own balance from 0 to
+  −470 with no peer ever misbehaving. A penalty now requires that a remote peer
+  was actually involved and that the error is one they could have caused.
+- **Peer credit balances are no longer invented.** With no gossiped balance the
+  leaderboard displayed `trust_score × 5000` — at the default trust of 0.5,
+  exactly "+2500 credits" for every unknown peer. This was reported as a ledger
+  inconsistency; it was never a ledger figure. Unknown balances now render as
+  "—".
+- **The dashboard VRAM gauge showed an estimate as if it were live usage.** It
+  summed each loaded model's estimated footprint and displayed that instead of
+  the real figure, with a clarifying tooltip only when real usage *exceeded* the
+  estimate. An idle machine read "5.3 GB / 5.7 GB — 93%" against a real ~1 GB.
+  Live usage is now always the headline number; the estimate moved to the
+  tooltip.
+- **A client that hangs up mid-response now stops the work.** Closing the tab
+  left the worker generating its full token budget into a channel nobody was
+  reading — measured at 754% CPU thirty seconds after the client died. Now falls
+  to 0%.
+
+### Added
+
+- Request cancellation between daemon and worker, covering client disconnects,
+  timeouts, and hedge losers. Remote peers are told to stop too, so an enabled
+  hedge no longer leaves the losing node computing a result that will be thrown
+  away.
+- `inference.tensor_parallel` (default `false`).
+
+### Security
+
+- Pool acceptance signatures now bind the invitation's expiry, so a captured
+  acceptance is implicitly time-bounded and cannot be transplanted onto a
+  different invitation. Expired invitations are also now rejected outright. See
+  the breaking-change note above.
+
+### Documentation
+
+- The config reference was missing **45** `[inference]` options; all are now
+  documented and grouped (batching, prefix cache, speculative decoding,
+  hedging/prefetch, activation transfer). 91 → 133 documented options.
+- `swarmpool://` invite codes documented, including why a NAT'd node needs its
+  external addresses in the payload.
+- Python SDK gained `pool.generate_code()` and `pool.join()`.
+
+1099 → 1124 lib tests, 75 integration tests.
+
 ## [0.3.4-alpha] — 2026-07-21
 
 **Cloud model & provider currency refresh + audit sweep (R145).** The cloud

@@ -318,16 +318,10 @@ impl AutoShardManager {
 
                     let ring = &hash_ring;
                     let i_am_assigned = (0..replicas_needed).any(|replica_idx| {
-                        let mut hasher = blake3::Hasher::new();
-                        hasher.update(manifest.id.0.as_bytes());
-                        hasher.update(&shard.index.to_le_bytes());
-                        hasher.update(&replica_idx.to_le_bytes());
-                        let hash = hasher.finalize();
-                        let target_pos = u32::from_le_bytes([
-                            hash.as_bytes()[0],
-                            hash.as_bytes()[1],
-                            hash.as_bytes()[2],
-                            hash.as_bytes()[3],
+                        let target_pos = crate::types::hash_parts_to_u32(&[
+                            manifest.id.0.as_bytes(),
+                            &shard.index.to_le_bytes(),
+                            &replica_idx.to_le_bytes(),
                         ]);
                         // Binary search for the nearest node clockwise on the ring
                         let idx = match ring.binary_search_by_key(&target_pos, |(p, _)| *p) {
