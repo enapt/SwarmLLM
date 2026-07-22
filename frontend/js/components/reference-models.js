@@ -22,7 +22,7 @@
       if (App.referenceModels._cache) {
         return Promise.resolve(App.referenceModels._cache);
       }
-      return App.data
+      return App
         .authFetch('/api/admin/reference-models')
         .then(function (r) { return r.json(); })
         .then(function (d) {
@@ -74,14 +74,14 @@
             body: JSON.stringify(body),
           })
           .then(function () {
-            App.ui.showToast(
+            App.notifications.showToast(
               I18n.t('reference.started', { model: m.model_id }),
               'success'
             );
             App.referenceModels.render();
           })
           .catch(function (e) {
-            App.ui.showToast(
+            App.notifications.showToast(
               I18n.t('reference.failed', { error: U.extractErrorMessage(e) }),
               'error'
             );
@@ -156,19 +156,19 @@
      * which is exactly how most people reach this dashboard.
      */
     copyDiagnostics: function () {
-      return App.data
+      return App
         .authFetch('/api/admin/diagnostics')
         .then(function (r) { return r.text(); })
         .then(function (text) {
           if (navigator.clipboard && window.isSecureContext) {
             return navigator.clipboard.writeText(text).then(function () {
-              App.ui.showToast(I18n.t('reference.copied'), 'success');
+              App.notifications.showToast(I18n.t('reference.copied'), 'success');
             });
           }
           App.referenceModels._showFallback(text);
         })
         .catch(function (e) {
-          App.ui.showToast(
+          App.notifications.showToast(
             I18n.t('reference.copy_failed', { error: U.extractErrorMessage(e) }),
             'error'
           );
@@ -215,7 +215,16 @@
       }
       // Warm the cache so isReference() can badge models on the first render
       // of the models list without a race.
-      App.referenceModels.load();
+      //
+      // Guarded because init() runs inside init.js's startup sequence: an
+      // exception here aborts everything after it, which is how a wrong
+      // accessor in this file took the whole dashboard's translations down.
+      // Nothing this component does is worth failing startup over.
+      try {
+        App.referenceModels.load();
+      } catch (e) {
+        /* optional surface — never block startup */
+      }
     },
   };
 })();
