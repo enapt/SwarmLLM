@@ -145,6 +145,137 @@ pub async fn quant_recommendations(State(state): State<AppState>) -> Json<serde_
     Json(serde_json::to_value(&*snap).unwrap_or_else(|_| serde_json::json!({})))
 }
 
+/// GET /api/admin/diagnostics — a pasteable plain-text snapshot for bug reports.
+///
+/// Exists because the two external bug reports this project has received both
+/// required the reporter to dig through `journalctl` by hand and hand-copy the
+/// parts that mattered. The interesting state is already in the daemon; asking
+/// a user to extract it manually loses detail and wastes their time.
+///
+/// **Redaction is the whole design constraint.** This output is meant to be
+/// pasted into a public issue or chat, so it must never carry anything that
+/// grants access: no API key, no invite code, no pool secret, no file paths
+/// (which leak usernames). Node and peer ids are already public on the wire, so
+/// they stay — they are what makes a report traceable. Adding a field here
+/// means checking it against that rule first.
+pub async fn diagnostics(State(state): State<AppState>) -> impl axum::response::IntoResponse {
+    use std::fmt::Write as _;
+    let ss = &state.shared_state;
+    let mut out = String::new();
+
+    let _ = writeln!(out, "SwarmLLM diagnostics");
+    let _ = writeln!(out, "version: {}", env!("CARGO_PKG_VERSION"));
+    let _ = writeln!(out, "node:    {}", ss.identity.node_id());
+
+    {
+        let stats = ss.metrics.node_stats.read().await;
+        let up = (chrono::Utc::now() - stats.uptime_start)
+            .num_seconds()
+            .max(0);
+        let _ = writeln!(out, "uptime:  {}h{}m", up / 3600, (up % 3600) / 60);
+        let _ = writeln!(
+            out,
+            "nat:     {}",
+            stats.nat_status.as_deref().unwrap_or("unknown")
+        );
+        let _ = writeln!(out, "requests: {}", stats.requests_made);
+    }
+
+    let _ = writeln!(out, "anchor_mode: {}", ss.config.node.anchor_mode);
+    let _ = writeln!(
+        out,
+        "tensor_parallel: {}  gpu_layers: {}",
+        ss.config.inference.tensor_parallel, ss.config.inference.gpu_layers
+    );
+    let _ = writeln!(
+        out,
+        "auto_manage: {}  shard_size_mb: {}",
+        ss.config.auto_manage.enabled, ss.config.model.shard_size_mb
+    );
+
+    let _ = writeln!(out, "\n-- peers ({}) --", ss.connected_node_ids.len());
+    for entry in ss.connected_node_ids.iter().take(20) {
+        let _ = writeln!(out, "  {}", entry.key());
+    }
+
+    let _ = writeln!(out, "\n-- models --");
+    let local = ss.identity.node_id().clone();
+    for m in ss.model_registry.models() {
+        let held: Vec<u32> = ss.model_registry.local_shard_indices_in(&m, &local);
+        let tag = if crate::model::reference::is_reference_model(&m.id.0) {
+            " [reference]"
+        } else {
+            ""
+        };
+        let _ = writeln!(
+            out,
+            "  {}{}: {}/{} shards local {:?}, {} layers",
+            m.id.0,
+            tag,
+            held.len(),
+            m.shard_count,
+            held,
+            m.num_layers
+        );
+    }
+
+    {
+        let bal = ss.credits.credit_balance.read().await;
+        let _ = writeln!(out, "\n-- credits --\n  balance: {}", bal.balance);
+    }
+
+    // Recent events carry the failure that prompted the report. English
+    // messages are intentional: a maintainer reading a pasted report should not
+    // have to reverse a translation.
+    let _ = writeln!(out, "\n-- recent activity --");
+    {
+        let history = ss.events.activity_history.lock();
+        for ev in history.iter().rev().take(30) {
+            let _ = writeln!(out, "  [{}/{}] {}", ev.category, ev.kind, ev.message);
+        }
+    }
+
+    (
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/plain; charset=utf-8",
+        )],
+        out,
+    )
+}
+
+/// GET /api/admin/reference-models — the pinned models used for benchmarking
+/// and network testing (`docs/REFERENCE_MODELS.md`).
+///
+/// Read-only. Acquiring one goes through the normal
+/// `POST /api/admin/hf/download-shards` path like any other model — there is
+/// no special fetch, and nothing here is downloaded unless a user asks for it.
+///
+/// `held` reports whether this node already has the model, so the dashboard can
+/// distinguish "offer this" from "you have this" without a second round trip.
+pub async fn reference_models(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let entries: Vec<serde_json::Value> = crate::model::reference::REFERENCE_MODELS
+        .iter()
+        .map(|m| {
+            let held = state
+                .shared_state
+                .model_registry
+                .get_manifest(&crate::types::ModelId(m.model_id.to_string()))
+                .is_some();
+            serde_json::json!({
+                "tier": m.tier,
+                "model_id": m.model_id,
+                "repo_id": m.repo_id,
+                "filename": m.filename,
+                "size_mb": m.size_mb,
+                "shards": m.shards,
+                "held": held,
+            })
+        })
+        .collect();
+    Json(serde_json::json!({ "models": entries }))
+}
+
 /// GET /api/admin/foreign-pool-catalog — R134 — cross-pool model
 /// availability discovery surface. Returns the cached signals from
 /// `PoolModelAvailability` gossip, grouped by pool, with stale entries

@@ -220,6 +220,8 @@ pub fn build_router(state: AppState) -> Router {
             get(admin::swarm_capacity_plan),
         )
         .route("/api/admin/wishlist", get(admin::wishlist))
+        .route("/api/admin/diagnostics", get(admin::diagnostics))
+        .route("/api/admin/reference-models", get(admin::reference_models))
         .route(
             "/api/admin/quant-recommendations",
             get(admin::quant_recommendations),
