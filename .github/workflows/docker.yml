@@ -55,8 +55,20 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          # Cache in the registry, not the Actions cache.
+          #
+          # `type=gha` shares one 10 GB pool with every other cache in the
+          # repo, and these two image builds were consuming 3.33 GB of it —
+          # enough to evict the release job's 1.23 GB CUDA dependency cache
+          # by LRU. When that happens the Linux CUDA release build goes from
+          # ~10 minutes to ~59. The registry backend has no such limit and
+          # lives next to the images it caches for.
+          #
+          # Scoped per variant: an unscoped cache is a single ref, so the CPU
+          # and CUDA builds were overwriting each other's entries and each
+          # rebuilding what the other had just evicted.
+          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:buildcache-cpu
+          cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:buildcache-cpu,mode=max
           platforms: linux/amd64
 
   build-cuda:
@@ -96,6 +108,7 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          # See the CPU build for why this is registry-backed and scoped.
+          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:buildcache-cuda
+          cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:buildcache-cuda,mode=max
           platforms: linux/amd64
