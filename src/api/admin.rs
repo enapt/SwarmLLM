@@ -72,6 +72,16 @@ pub fn serialize_peer_to_json(
                 .map(|ps| ps.members.iter().any(|m| m.node_id == peer.node_id))
         })
         .unwrap_or(false);
+    // Version + uptime are already gossiped in every NodeCapabilityUpdate and
+    // are non-revealing — surfacing them makes cross-node diagnostics far easier
+    // (e.g. spotting a peer still on an older build, or one that keeps
+    // restarting). Absent when the peer hasn't sent a capability update yet.
+    let peer_version = peer
+        .capability
+        .as_ref()
+        .map(|c| c.version.clone())
+        .filter(|v| !v.is_empty());
+    let uptime_seconds = peer.capability.as_ref().map(|c| c.uptime_seconds);
     let mut obj = serde_json::json!({
         "node_id": format!("{}", peer.node_id),
         "nickname": nickname,
@@ -79,6 +89,8 @@ pub fn serialize_peer_to_json(
         "trust_score": peer.trust_score,
         "healthy": healthy,
         "gpu": peer.capability.as_ref().and_then(|c| c.gpu.as_ref().map(|g| &g.name)),
+        "version": peer_version,
+        "uptime_seconds": uptime_seconds,
         "hosted_models": hosted_models,
         "hosted_shards": hosted_shards_count,
         "is_lan_peer": peer.is_lan_peer,

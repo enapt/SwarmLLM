@@ -2,6 +2,25 @@
 
 All notable changes to SwarmLLM are documented here.
 
+## [Unreleased]
+
+### Fixed
+
+- **A leftover backup-copy model no longer keeps coming back after a restart.**
+  When a copied model folder (`…FULLBACKUP`) had been recorded before the fix
+  that rejects such names, it was still being reloaded from the local database
+  on startup — so it lingered in your model list as a phantom (holding nothing).
+  Those stale records are now dropped and cleaned out on load, and such names
+  are filtered from the model list entirely, whatever their source.
+
+### Added
+
+- **You can now see which version each connected computer is running.** The
+  peer list now reports every peer's SwarmLLM version and uptime (both already
+  shared between nodes) — which makes it obvious at a glance when a peer is on an
+  older build, a big help when diagnosing why something behaves differently
+  across machines.
+
 ## [0.3.15-alpha] — 2026-07-23
 
 ### Fixed
