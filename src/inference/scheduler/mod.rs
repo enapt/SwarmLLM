@@ -553,17 +553,12 @@ impl PipelineScheduler {
     /// Compute region proximity score for a remote node relative to us.
     /// Returns 1.0 same, 0.5 adjacent, 0.2 distant, 0.7 unknown.
     fn compute_region_score(&self, node_id: &NodeId, _local_node_id: &NodeId) -> f32 {
-        // Get our region
-        let our_region = if let Ok(guard) = self.shared_state.detected_region.try_read() {
-            guard.as_ref().map(|r| r.to_uppercase())
-        } else {
-            self.shared_state
-                .config
-                .identity
-                .region
-                .as_ref()
-                .map(|r| r.to_uppercase())
-        };
+        // Get our region — canonical resolver (configured wins, else detected),
+        // shared with auto-manage so the two never disagree on a node's region.
+        let our_region = self
+            .shared_state
+            .effective_region_sync()
+            .map(|r| r.to_uppercase());
         let our_region = match our_region {
             Some(r) => r,
             None => return 0.7, // Our region unknown

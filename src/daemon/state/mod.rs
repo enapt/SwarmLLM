@@ -1164,6 +1164,24 @@ impl SharedState {
         self.detected_region.read().await.clone()
     }
 
+    /// Non-blocking sibling of [`effective_region`] for synchronous callers
+    /// (the scheduler's region-score, auto-manage's `our_region`). Uses
+    /// `try_read` so it never blocks; if the `detected_region` lock is
+    /// momentarily held it falls through to `None` rather than stalling a hot
+    /// path. Same precedence as the async version — configured region wins,
+    /// else detected — so the two never disagree on the same node (they used to:
+    /// the scheduler read detected-first with no config fallback while
+    /// auto-manage fell back to config, so one path could score a node's region
+    /// as "unknown" while the other resolved it).
+    pub fn effective_region_sync(&self) -> Option<String> {
+        if let Some(r) = self.config.identity.region.as_ref() {
+            if !r.is_empty() {
+                return Some(r.clone());
+            }
+        }
+        self.detected_region.try_read().ok().and_then(|g| g.clone())
+    }
+
     /// Whether any holder in `holders` can actually serve a shard *right now* —
     /// the local node, or a currently-connected peer.
     ///

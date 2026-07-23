@@ -439,19 +439,12 @@ impl HealthMonitor {
     /// Broadcast compact per-region shard summaries and demand gossip.
     /// Published on every 30s tick to `swarm/regions` topic.
     async fn broadcast_region_summary(&self) {
-        // Determine our region — skip if unknown
-        let our_region = {
-            let detected = self.shared_state.detected_region.read().await;
-            match detected.as_ref() {
-                Some(r) => r.to_uppercase(),
-                None => {
-                    if let Some(ref r) = self.shared_state.config.identity.region {
-                        r.to_uppercase()
-                    } else {
-                        return; // No region — nothing to broadcast
-                    }
-                }
-            }
+        // Determine our region — skip if unknown. Canonical resolver (configured
+        // region wins, else IP-detected) so this gossip agrees with the capacity
+        // announcement and WS region counts.
+        let our_region = match self.shared_state.effective_region().await {
+            Some(r) => r.to_uppercase(),
+            None => return, // No region — nothing to broadcast
         };
 
         let our_id = self.shared_state.identity.node_id().clone();

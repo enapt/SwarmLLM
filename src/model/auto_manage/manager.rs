@@ -751,19 +751,11 @@ impl AutoShardManager {
         }
     }
 
-    /// Get our detected/configured region as uppercase ISO code.
+    /// Get our detected/configured region as uppercase ISO code. Canonical
+    /// resolver (configured wins, else IP-detected), shared with the scheduler.
     pub(super) fn our_region(&self) -> Option<String> {
-        // Try detected_region first (non-blocking try_read)
-        if let Ok(guard) = self.shared_state.detected_region.try_read() {
-            if let Some(ref r) = *guard {
-                return Some(r.to_uppercase());
-            }
-        }
         self.shared_state
-            .config
-            .identity
-            .region
-            .as_ref()
+            .effective_region_sync()
             .map(|r| r.to_uppercase())
     }
 
