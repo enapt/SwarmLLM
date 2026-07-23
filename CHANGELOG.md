@@ -6,6 +6,21 @@ All notable changes to SwarmLLM are documented here.
 
 ### Fixed
 
+- **Docker nodes no longer break routing by advertising an address that means
+  something different on every machine.** A node running in Docker advertises its
+  container's internal gateway (`172.17.0.1`) alongside its real address — but
+  that gateway address isn't unique to one machine, it's whatever the *dialing*
+  machine's Docker uses, so trying to reach a peer there quietly loops back to
+  your own node. Peers are now reached at their real (public) address and these
+  internal addresses are ignored, while a Docker node still connects and
+  contributes normally through the address AutoNAT discovers for it. Nodes that
+  only have a local-network address (the two-machines-at-home case) are
+  unaffected.
+- **The network map now places peers in their real country.** A node's location
+  is detected from its address, but that detected value wasn't being attached to
+  the info shared with other nodes — so the map fell back to showing everyone in
+  the viewer's own country. Each node now reports its detected region, so a peer
+  in Belgium shows in Belgium.
 - **Inference to a slower peer no longer gives up after 10 seconds.** When your
   request ran on another machine that needed a moment to warm up — loading a
   model for the first time, a busy processor-only peer, or a long prompt — the
