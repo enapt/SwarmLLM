@@ -165,6 +165,16 @@ impl NetworkManager {
                     // Clean up tensor outbound tracking (response received = not a failure)
                     self.pending_tensor_outbound.remove(&request_id);
                     self.pending_tensor_result_outbound.remove(&request_id);
+                    // A Response proves the peer received the request — the send was
+                    // NOT silently dropped, so the RR_ACK_TIMEOUT (10s) sweep must no
+                    // longer apply. Without this, a remote-generate whose first token
+                    // legitimately takes longer than 10s (a cold model load, a slow
+                    // CPU peer, a large prompt) has its streaming channel closed at
+                    // 10s and is reported as "peer never acknowledged" — even though
+                    // the peer DID acknowledge and is working. From here the proper
+                    // FIRST_TOKEN_TIMEOUT (120s) governs. streaming_token_txs is left
+                    // intact so tokens keep flowing.
+                    self.pending_rr_observability.remove(&request_id);
                     self.handle_response(peer, request_id, response).await;
                 }
             },
