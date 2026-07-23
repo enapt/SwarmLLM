@@ -480,6 +480,17 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
         ));
     }
 
+    // Final display net: never surface a backup-copy model name in the UI,
+    // whatever path it arrived via. A peer on an older build still gossips
+    // `<model>.FULLBACKUP`; the registry, DB-load and gossip guards should
+    // already keep it out, but this guarantees the models list stays clean.
+    models.retain(|m| {
+        m.get("id")
+            .and_then(|v| v.as_str())
+            .map(|id| !crate::model::manifest::is_backup_artifact_id(id))
+            .unwrap_or(true)
+    });
+
     Json(models)
 }
 

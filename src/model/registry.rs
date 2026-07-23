@@ -408,14 +408,35 @@ impl ModelRegistry {
 
         // Load model manifests from the "model_meta" tree
         let entries = db.iter_raw("model_meta")?;
+        let mut purge_backup_ids: Vec<String> = Vec::new();
         for (_key, value) in entries {
             match serde_json::from_slice::<ModelManifest>(&value) {
                 Ok(manifest) => {
+                    // A backup-copy id (`<model>.FULLBACKUP`, `<model>.old`)
+                    // persisted before the register_manifest guard existed must
+                    // NOT be re-adopted on reload — otherwise the phantom model
+                    // resurrects on every restart. This is the one manifest-entry
+                    // path that bypasses register_manifest, so it needs its own
+                    // guard. Skip it and purge the stale row so it stops coming
+                    // back. See `manifest::is_backup_artifact_id`.
+                    if crate::model::manifest::is_backup_artifact_id(&manifest.id.0) {
+                        tracing::warn!(
+                            model = %manifest.id,
+                            "Dropping backup-copy manifest from DB on load (and purging the row)"
+                        );
+                        purge_backup_ids.push(manifest.id.0.clone());
+                        continue;
+                    }
                     registry.manifests.insert(manifest.id.clone(), manifest);
                 }
                 Err(e) => {
                     tracing::warn!(error = %e, "Failed to deserialize model manifest from DB");
                 }
+            }
+        }
+        for id in purge_backup_ids {
+            if let Err(e) = db.remove("model_meta", &id) {
+                tracing::debug!(model = %id, error = %e, "Failed to purge backup-copy manifest row");
             }
         }
 
