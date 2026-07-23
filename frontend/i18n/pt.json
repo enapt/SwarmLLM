@@ -34,6 +34,7 @@
   "activity.lan_peer_discovered": "{count} par(es) encontrado(s) na rede local",
   "activity.manifest_gen_failed": "Não foi possível preparar {model} para uso: {detail}",
   "activity.manifest_rejected": "Manifesto malformado rejeitado de {node} para {model} (tamanho: {count})",
+  "activity.manifest_rejected_backup": "{model} de {node} rejeitado: parece uma cópia de backup local, não um modelo real",
   "activity.model_acquisition_failed": "Aquisição de {model} falhou: {detail}",
   "activity.model_cpu_fallback": "{model} ficou sem memória de GPU — mudou para CPU (mais lento, mas a funcionar)",
   "activity.model_discovered": "Novo modelo descoberto: {model}",

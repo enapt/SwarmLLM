@@ -34,6 +34,7 @@
   "activity.lan_peer_discovered": "Hittade {count} peer(s) i lokalt nätverk",
   "activity.manifest_gen_failed": "Kunde inte förbereda {model} för användning: {detail}",
   "activity.manifest_rejected": "Avvisade felaktigt manifest från {node} för {model} (storlek: {count})",
+  "activity.manifest_rejected_backup": "{model} från {node} avvisades: ser ut som en lokal säkerhetskopia, inte en riktig modell",
   "activity.model_acquisition_failed": "Hämtning av {model} misslyckades: {detail}",
   "activity.model_cpu_fallback": "{model} fick slut på GPU-minne — växlade till CPU (långsammare, men fungerar)",
   "activity.model_discovered": "Ny modell hittad: {model}",

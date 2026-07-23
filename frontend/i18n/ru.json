@@ -34,6 +34,7 @@
   "activity.lan_peer_discovered": "Найдено {count} пир(ов) в локальной сети",
   "activity.manifest_gen_failed": "Не удалось подготовить {model} к использованию: {detail}",
   "activity.manifest_rejected": "Отклонён повреждённый манифест от {node} для {model} (размер: {count})",
+  "activity.manifest_rejected_backup": "{model} от {node} отклонён: похоже на локальную резервную копию, а не настоящую модель",
   "activity.model_acquisition_failed": "Получение {model} не удалось: {detail}",
   "activity.model_cpu_fallback": "{model}: не хватило памяти GPU — переключено на CPU (медленнее, но работает)",
   "activity.model_discovered": "Обнаружена новая модель: {model}",

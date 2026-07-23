@@ -34,6 +34,7 @@
   "activity.lan_peer_discovered": "Ditemukan {count} peer di jaringan lokal",
   "activity.manifest_gen_failed": "Tidak bisa menyiapkan {model} untuk dipakai: {detail}",
   "activity.manifest_rejected": "Manifest rusak ditolak dari {node} untuk {model} (ukuran: {count})",
+  "activity.manifest_rejected_backup": "Menolak {model} dari {node}: tampak seperti salinan cadangan lokal, bukan model asli",
   "activity.model_acquisition_failed": "Akuisisi {model} gagal: {detail}",
   "activity.model_cpu_fallback": "{model} kehabisan memori GPU — beralih ke CPU (lebih lambat, tetapi berfungsi)",
   "activity.model_discovered": "Model baru ditemukan: {model}",

@@ -34,6 +34,7 @@
   "activity.lan_peer_discovered": "Tìm thấy {count} nút trên mạng nội bộ",
   "activity.manifest_gen_failed": "Không thể chuẩn bị {model} để sử dụng: {detail}",
   "activity.manifest_rejected": "Từ chối tệp kê khai lỗi từ {node} cho {model} (kích thước: {count})",
+  "activity.manifest_rejected_backup": "Đã từ chối {model} từ {node}: trông giống bản sao lưu cục bộ, không phải mô hình thật",
   "activity.model_acquisition_failed": "Tải {model} thất bại: {detail}",
   "activity.model_cpu_fallback": "{model} đã hết bộ nhớ GPU — đã chuyển sang CPU (chậm hơn nhưng vẫn hoạt động)",
   "activity.model_discovered": "Mô hình mới được phát hiện: {model}",

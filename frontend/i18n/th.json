@@ -34,6 +34,7 @@
   "activity.lan_peer_discovered": "พบ {count} เพียร์ในเครือข่ายท้องถิ่น",
   "activity.manifest_gen_failed": "เตรียม {model} ให้พร้อมใช้งานไม่ได้: {detail}",
   "activity.manifest_rejected": "ปฏิเสธรายการที่เสียหายจาก {node} สำหรับ {model} (ขนาด: {count})",
+  "activity.manifest_rejected_backup": "ปฏิเสธ {model} จาก {node}: ดูเหมือนสำเนาสำรองในเครื่อง ไม่ใช่โมเดลจริง",
   "activity.model_acquisition_failed": "การรับ {model} ล้มเหลว: {detail}",
   "activity.model_cpu_fallback": "{model} หน่วยความจำ GPU ไม่พอ — สลับไปใช้ CPU (ช้ากว่าแต่ยังทำงานได้)",
   "activity.model_discovered": "ค้นพบโมเดลใหม่: {model}",

@@ -34,6 +34,7 @@
   "activity.lan_peer_discovered": "Yerel ağda {count} eş bulundu",
   "activity.manifest_gen_failed": "{model} kullanıma hazırlanamadı: {detail}",
   "activity.manifest_rejected": "{node} adlı düğümden {model} için bozuk manifest reddedildi (boyut: {count})",
+  "activity.manifest_rejected_backup": "{node} kaynaklı {model} reddedildi: gerçek bir model değil, yerel bir yedek kopya gibi görünüyor",
   "activity.model_acquisition_failed": "{model} edinme başarısız: {detail}",
   "activity.model_cpu_fallback": "{model} için GPU belleği yetmedi — CPU'ya geçildi (daha yavaş ama çalışıyor)",
   "activity.model_discovered": "Yeni model keşfedildi: {model}",

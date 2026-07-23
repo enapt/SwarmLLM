@@ -34,6 +34,7 @@
   "activity.lan_peer_discovered": "在本地网络上发现了 {count} 个对等节点",
   "activity.manifest_gen_failed": "无法准备 {model} 以供使用：{detail}",
   "activity.manifest_rejected": "已拒绝来自 {node} 的 {model} 损坏清单（大小：{count}）",
+  "activity.manifest_rejected_backup": "已拒绝来自 {node} 的 {model}：看起来是本地备份副本，而非真实模型",
   "activity.model_acquisition_failed": "获取 {model} 失败:{detail}",
   "activity.model_cpu_fallback": "{model} 显存不足，已切换到 CPU（速度较慢，但可正常运行）",
   "activity.model_discovered": "发现新模型：{model}",

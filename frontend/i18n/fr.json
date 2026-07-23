@@ -34,6 +34,7 @@
   "activity.lan_peer_discovered": "{count} pair(s) trouvé(s) sur le réseau local",
   "activity.manifest_gen_failed": "Impossible de préparer {model} : {detail}",
   "activity.manifest_rejected": "Manifeste invalide rejeté de {node} pour {model} (taille : {count})",
+  "activity.manifest_rejected_backup": "{model} de {node} rejeté : ressemble à une copie de sauvegarde locale, pas à un vrai modèle",
   "activity.model_acquisition_failed": "Acquisition de {model} échouée : {detail}",
   "activity.model_cpu_fallback": "{model} a manqué de mémoire GPU — bascule sur le CPU (plus lent, mais fonctionnel)",
   "activity.model_discovered": "Nouveau modèle découvert : {model}",

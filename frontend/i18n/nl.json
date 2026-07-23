@@ -34,6 +34,7 @@
   "activity.lan_peer_discovered": "{count} peer(s) gevonden op lokaal netwerk",
   "activity.manifest_gen_failed": "Kon {model} niet klaarmaken voor gebruik: {detail}",
   "activity.manifest_rejected": "Beschadigd manifest geweigerd van {node} voor {model} (grootte: {count})",
+  "activity.manifest_rejected_backup": "{model} van {node} geweigerd: lijkt een lokale back-upkopie, geen echt model",
   "activity.model_acquisition_failed": "Acquisitie van {model} mislukt: {detail}",
   "activity.model_cpu_fallback": "{model} had onvoldoende GPU-geheugen — overgeschakeld naar CPU (trager, maar werkend)",
   "activity.model_discovered": "Nieuw model ontdekt: {model}",

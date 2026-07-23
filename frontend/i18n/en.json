@@ -34,6 +34,7 @@
   "activity.lan_peer_discovered": "Found {count} peer(s) on local network",
   "activity.manifest_gen_failed": "Couldn't prepare {model} for use: {detail}",
   "activity.manifest_rejected": "Rejected malformed manifest from {node} for {model} (size: {count})",
+  "activity.manifest_rejected_backup": "Rejected {model} from {node}: looks like a local backup copy, not a real model",
   "activity.model_acquisition_failed": "Acquisition of {model} failed: {detail}",
   "activity.model_cpu_fallback": "{model} ran out of GPU memory — switched to CPU (slower, but working)",
   "activity.model_discovered": "New model discovered: {model}",

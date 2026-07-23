@@ -34,6 +34,7 @@
   "activity.lan_peer_discovered": "로컬 네트워크에서 피어 {count}개 발견",
   "activity.manifest_gen_failed": "{model}을(를) 사용할 수 있도록 준비하지 못했습니다: {detail}",
   "activity.manifest_rejected": "{node}의 {model} 잘못된 매니페스트 거부 (크기: {count})",
+  "activity.manifest_rejected_backup": "{node}의 {model} 거부됨: 실제 모델이 아닌 로컬 백업 사본으로 보입니다",
   "activity.model_acquisition_failed": "{model} 획득 실패: {detail}",
   "activity.model_cpu_fallback": "{model}의 GPU 메모리가 부족하여 CPU로 전환했습니다(느리지만 작동합니다)",
   "activity.model_discovered": "새 모델 발견됨: {model}",

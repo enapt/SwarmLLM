@@ -835,9 +835,9 @@ pub(crate) async fn dispatch_network_messages(
                                                 shared_state.emit_activity(
                                                     crate::daemon::state::ActivityEvent::new(
                                                         "security",
-                                                        "manifest_rejected",
+                                                        "manifest_rejected_backup",
                                                         format!(
-                                                            "Rejected model \"{}\" from {}: looks like a local backup copy, not a real model",
+                                                            "Rejected \"{}\" from {}: looks like a local backup copy, not a real model",
                                                             manifest.id.0, sender
                                                         ),
                                                     )

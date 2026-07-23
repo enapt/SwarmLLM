@@ -34,6 +34,7 @@
   "activity.lan_peer_discovered": "Знайдено {count} пір(ів) у локальній мережі",
   "activity.manifest_gen_failed": "Не вдалося підготувати {model} до використання: {detail}",
   "activity.manifest_rejected": "Відхилено пошкоджений маніфест від {node} для {model} (розмір: {count})",
+  "activity.manifest_rejected_backup": "{model} від {node} відхилено: схоже на локальну резервну копію, а не справжню модель",
   "activity.model_acquisition_failed": "Отримання {model} не вдалося: {detail}",
   "activity.model_cpu_fallback": "{model}: забракло пам'яті GPU — перемкнено на CPU (повільніше, але працює)",
   "activity.model_discovered": "Виявлено нову модель: {model}",

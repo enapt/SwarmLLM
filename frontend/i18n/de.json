@@ -34,6 +34,7 @@
   "activity.lan_peer_discovered": "{count} Peer(s) im lokalen Netzwerk gefunden",
   "activity.manifest_gen_failed": "{model} konnte nicht für die Nutzung vorbereitet werden: {detail}",
   "activity.manifest_rejected": "Beschädigtes Manifest von {node} für {model} abgelehnt (Größe: {count})",
+  "activity.manifest_rejected_backup": "{model} von {node} abgelehnt: sieht aus wie eine lokale Sicherungskopie, kein echtes Modell",
   "activity.model_acquisition_failed": "Beschaffung von {model} fehlgeschlagen: {detail}",
   "activity.model_cpu_fallback": "{model} hatte zu wenig GPU-Speicher — auf CPU umgestellt (langsamer, aber funktionsfähig)",
   "activity.model_discovered": "Neues Modell entdeckt: {model}",

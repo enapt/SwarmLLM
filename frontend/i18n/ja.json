@@ -34,6 +34,7 @@
   "activity.lan_peer_discovered": "ローカルネットワーク上に{count}件のピアを発見しました",
   "activity.manifest_gen_failed": "{model} を使用可能な状態にできませんでした：{detail}",
   "activity.manifest_rejected": "{node} からの {model} の不正なマニフェストを拒否しました（サイズ: {count}）",
+  "activity.manifest_rejected_backup": "{node} からの {model} を拒否しました：実際のモデルではなくローカルのバックアップコピーのようです",
   "activity.model_acquisition_failed": "{model} の取得に失敗しました: {detail}",
   "activity.model_cpu_fallback": "{model} のGPUメモリが不足したため、CPUに切り替えました（低速ですが動作します）",
   "activity.model_discovered": "新しいモデルを発見：{model}",

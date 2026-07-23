@@ -34,6 +34,7 @@
   "activity.lan_peer_discovered": "Znaleziono {count} węzeł/węzłów w sieci lokalnej",
   "activity.manifest_gen_failed": "Nie udało się przygotować {model} do użycia: {detail}",
   "activity.manifest_rejected": "Odrzucono uszkodzony manifest od {node} dla {model} (rozmiar: {count})",
+  "activity.manifest_rejected_backup": "Odrzucono {model} od {node}: wygląda na lokalną kopię zapasową, a nie prawdziwy model",
   "activity.model_acquisition_failed": "Pobieranie {model} nie powiodło się: {detail}",
   "activity.model_cpu_fallback": "Modelowi {model} zabrakło pamięci GPU — przełączono na CPU (wolniej, ale działa)",
   "activity.model_discovered": "Odkryto nowy model: {model}",

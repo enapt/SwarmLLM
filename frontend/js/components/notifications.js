@@ -97,6 +97,7 @@
     'download_slow': '\u26A0\uFE0F',    // ⚠️
     'hf_sources_cap_reached': '\u26A0\uFE0F', // ⚠️ R141 (peer-gossip cap drops)
     'manifest_rejected': '\u274C',       // ❌ R126 (bad manifest from peer)
+    'manifest_rejected_backup': '\u274C', // backup-copy model name refused from a peer
   };
 
   // Category CSS class for color coding

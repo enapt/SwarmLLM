@@ -34,6 +34,7 @@
   "activity.lan_peer_discovered": "Nalezen(y) {count} uzel/uzly v lokální síti",
   "activity.manifest_gen_failed": "Nelze připravit {model} k použití: {detail}",
   "activity.manifest_rejected": "Odmítnut poškozený manifest od {node} pro {model} (velikost: {count})",
+  "activity.manifest_rejected_backup": "Odmítnuto {model} od {node}: vypadá jako místní záložní kopie, ne skutečný model",
   "activity.model_acquisition_failed": "Získání {model} selhalo: {detail}",
   "activity.model_cpu_fallback": "Modelu {model} došla paměť GPU — přepnuto na CPU (pomalejší, ale funkční)",
   "activity.model_discovered": "Nový model objeven: {model}",
