@@ -6,6 +6,13 @@ All notable changes to SwarmLLM are documented here.
 
 ### Fixed
 
+- **A machine serving a request for someone who disconnects now stops
+  immediately instead of working for nothing.** When you request inference and
+  then drop off (closed the tab, lost your connection), the machine running it
+  for you had no way to send the answer back and — if you were behind a home
+  router — couldn't reconnect to you either, so it kept generating text nobody
+  would ever receive. It now notices your connection is gone and stops the work
+  (freeing that machine and its graphics card for others) the moment you leave.
 - **Docker nodes no longer break routing by advertising an address that means
   something different on every machine.** A node running in Docker advertises its
   container's internal gateway (`172.17.0.1`) alongside its real address — but

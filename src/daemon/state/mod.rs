@@ -68,11 +68,14 @@ pub struct SharedState {
     pub model_loaded: std::sync::atomic::AtomicBool,
     pub active_pipelines: DashMap<uuid::Uuid, PipelineAssignment>,
     /// Abort handles for in-flight remote-generate decodes serving requests
-    /// from peers. Keyed by `request_id`. When the originator broadcasts a
-    /// `SwarmMessage::CancelInference`, the dispatch handler aborts the
-    /// matching task so the worker stops streaming wasted tokens. Cleared
+    /// from peers. Keyed by `request_id`; the value carries the AbortHandle and
+    /// the originator's peer bytes. When the originator broadcasts a
+    /// `SwarmMessage::CancelInference`, OR when the originator's connection
+    /// drops (a NAT'd coordinator can't be re-dialed to receive tokens, so the
+    /// decode is pure waste — external report 2026-07-23), the matching task is
+    /// aborted so the worker stops streaming tokens nobody will receive. Cleared
     /// when the decode finishes naturally.
-    pub inbound_generate_aborts: DashMap<uuid::Uuid, tokio::task::AbortHandle>,
+    pub inbound_generate_aborts: DashMap<uuid::Uuid, (tokio::task::AbortHandle, Vec<u8>)>,
     /// Per-cancel-token cancel signals. The HTTP entry for `chat_completions`
     /// looks up an `Arc<AtomicBool>` by token (passed via the
     /// `x-swarmllm-cancel-token` header) and attaches it to the

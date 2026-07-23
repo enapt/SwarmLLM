@@ -142,7 +142,7 @@ pub(super) async fn handle_remote_generate_request(
     // naturally (or after abort fires).
     shared_state
         .inbound_generate_aborts
-        .insert(request_id, gen_fut.abort_handle());
+        .insert(request_id, (gen_fut.abort_handle(), sender_bytes.clone()));
 
     // Forward each token back to the coordinator as a `StreamingToken`.
     // Skip the "done" event emitted by `ModelProcessPool::generate` at the

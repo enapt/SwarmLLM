@@ -2064,7 +2064,7 @@ pub(crate) async fn dispatch_network_messages(
                                             tracing::debug!("Dropping unauthenticated CancelInference");
                                             continue;
                                         }
-                                        if let Some((_, abort)) = shared_state
+                                        if let Some((_, (abort, _))) = shared_state
                                             .inbound_generate_aborts
                                             .remove(&cancel.request_id)
                                         {

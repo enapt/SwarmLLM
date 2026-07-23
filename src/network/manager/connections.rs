@@ -105,6 +105,35 @@ impl NetworkManager {
         let closed_addr = self.connection_addrs.remove(&connection_id);
         if num_established == 0 {
             self.peer_remote_addrs.remove(&peer_id);
+            // Abort any inbound remote-generations we were running for this
+            // coordinator. With their last connection gone there is no route to
+            // stream tokens back — a NAT'd coordinator can't be re-dialed (the
+            // reverse token path relies on the existing connection), so
+            // continuing only burns compute and worker time on output nobody
+            // can receive (external report 2026-07-23). Aborting the task drops
+            // the generate future, which cancels the worker via its
+            // ResponseGuard (R147). Explicit CancelInference still handles the
+            // connected-but-cancelled case; this covers the silent disconnect.
+            let peer_bytes = peer_id.to_bytes();
+            let orphaned: Vec<uuid::Uuid> = self
+                .shared_state
+                .inbound_generate_aborts
+                .iter()
+                .filter(|e| e.value().1 == peer_bytes)
+                .map(|e| *e.key())
+                .collect();
+            for rid in orphaned {
+                if let Some((_, (abort, _))) =
+                    self.shared_state.inbound_generate_aborts.remove(&rid)
+                {
+                    abort.abort();
+                    tracing::info!(
+                        request_id = %rid,
+                        %peer_id,
+                        "Coordinator disconnected — aborting inbound remote-generate (no route to return tokens)"
+                    );
+                }
+            }
         }
         // Check if any in-flight tensor forwards are affected
         let affected_tensors: Vec<_> = self
