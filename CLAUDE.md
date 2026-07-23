@@ -31,7 +31,7 @@ The daemon spawns 12 subsystems as Tokio tasks wired together with `mpsc` channe
 Shared state lives in `Arc<SharedState>` with `DashMap` for concurrent access. SharedState is organized into 4 logical sub-structs:
 - `state.events` (`EventBus`) — `activity_tx`, `activity_history`, `dashboard_tx`, `update_state`, `ws_tickets`
 - `state.credits` (`CreditPool`) — `credit_balance`, `pool_state`, `pool_registry`, `pool_tx`, `trust_manager`, `escrow_manager`, `anti_gaming`, `private_mode`, `offline_mode`, etc.
-- `state.models` (`ModelMgmt`) — `acquisition_progress`, `hf_sources`, `auto_manage_*`, `contribution_auto` (R121 — AtomicBool mirror of `config.node.contribution_auto`, read by prune.rs each tick), `model_trust`, `locked_shards`, `prune_history`, `wishlist` (R111), `hf_trending_cache` (R112), etc.
+- `state.models` (`ModelMgmt`) — `acquisition_progress`, `hf_sources`, `auto_manage_*`, `contribution_auto` (R121 — AtomicBool mirror of `config.node.contribution_auto`, read by prune.rs each tick), `model_trust`, `locked_shards`, `prune_history`, `wishlist` (R111), `hf_trending_cache` (R112), `shard_download_backoff` (per-shard exponential download cooldown so one stuck download can't monopolize a slot), etc.
 - `state.metrics` (`MetricsProviders`) — `node_stats`, `inference_requests_total`, `channel_metrics`, `providers_config`, `swarm_capacity` (R110), `hedge_tracker` (R136 Layer 2), `prefetch_orchestrator` (R136 Layer 3), etc.
 
 Cross-cutting fields (config, identity, db, peer_registry, model_registry, executor, split_models, etc.) remain on the root struct.
@@ -151,7 +151,7 @@ libp2p 0.56, axum 0.8, candle-core/candle-transformers 0.10 (CUDA), redb 4, ed25
 
 ## Testing
 
-- 1158 lib tests passing + 8 ignored (env-var-gated real-model + manual smoke), 75 integration tests in `tests/integration/`, 1 ignored end-to-end (`cargo test --test integration_phase10_11 -- --ignored`), clippy clean. Microbench: `cargo run --release --no-default-features --features dev,claude-subscription --example swarm_spec_bench` (R136 — measures all 4 SWARM-SPEC layer primitives + synthetic cascade hit-rate). Local-cluster bench: `examples/3node_setup.sh` (boots 3 daemons) + `examples/3node_inference_bench.sh` (runs 3 workloads × 3 trials and prints tok/s + swarm_spec metrics). Sharded variant: `examples/3node_sharded_setup.sh` (forced distributed pipeline — requires `auto_manage.enabled = false` in per-node config.toml to preserve sharded state; splits any shard count across B/C, not just 2). Both scripts take `SWARM_BENCH_MODEL`. **Pinned reference models for cross-swarm comparison: `docs/REFERENCE_MODELS.md`** (smoke / standard / stress tiers + `examples/fetch_reference_model.sh` to opt in).
+- 1164 lib tests passing + 8 ignored (env-var-gated real-model + manual smoke), 75 integration tests in `tests/integration/`, 1 ignored end-to-end (`cargo test --test integration_phase10_11 -- --ignored`), clippy clean. Microbench: `cargo run --release --no-default-features --features dev,claude-subscription --example swarm_spec_bench` (R136 — measures all 4 SWARM-SPEC layer primitives + synthetic cascade hit-rate). Local-cluster bench: `examples/3node_setup.sh` (boots 3 daemons) + `examples/3node_inference_bench.sh` (runs 3 workloads × 3 trials and prints tok/s + swarm_spec metrics). Sharded variant: `examples/3node_sharded_setup.sh` (forced distributed pipeline — requires `auto_manage.enabled = false` in per-node config.toml to preserve sharded state; splits any shard count across B/C, not just 2). Both scripts take `SWARM_BENCH_MODEL`. **Pinned reference models for cross-swarm comparison: `docs/REFERENCE_MODELS.md`** (smoke / standard / stress tiers + `examples/fetch_reference_model.sh` to opt in).
 - Unit tests: in-module `#[cfg(test)]` blocks
 - Integration tests: `tests/integration/` — multi-node simulations with `--test-threads=1`
 - Real-model spawn-and-infer test: set `SWARMLLM_TEST_MODEL_DIR` to a fully-populated model directory (e.g. `~/.local/share/swarmllm/models/tinyllama-1.1b-...`) and run `cargo test --test integration_phase10_11 -- --ignored end_to_end`. No synthetic GGUF fixture is committed; see `docs/ARCHITECTURE.md` § Deferred Items.
@@ -192,9 +192,42 @@ When spawning subagents in this repo, use these model picks (overrides defaults 
 
 ## Status
 
-All 20 build phases complete. All subsystems wired — no stubs. **1158 lib tests + 75 integration + 2 repo-consistency tests passing**; 8 lib + 1 e2e ignored (env-var or manual). Clippy clean default + features dev,claude-subscription + `--features llama`.
+All 20 build phases complete. All subsystems wired — no stubs. **1164 lib tests + 75 integration + 2 repo-consistency tests passing**; 8 lib + 1 e2e ignored (env-var or manual). Clippy clean default + features dev,claude-subscription + `--features llama`.
 
-### Latest: R148 — VLM deferrals + CI cache-warm fix (2026-07-22)
+### Latest: R149 — AutoShardManager download backoff (external report #3 follow-up) (2026-07-23)
+
+Two follow-up external reports (raw-pc / raw-proxamd5, on v0.3.11-alpha).
+
+**bug1** — mostly confirmations of shipped fixes. Its earlier stale-holder finding
+is already fixed (R148 `complete_for_models` retraction; user saw it fire live) and
+the −41,400 balance is frozen historical debt (escrow already reconciles
+estimate→actual; a negative balance only drops the node to Bronze tier by design).
+The one genuinely open bug: **AutoShardManager retried a single stalled shard every
+cycle with no backoff, monopolising the download slot and starving a fresh
+user-requested model.** Fixed with a per-shard exponential backoff on
+`state.models.shard_download_backoff` (`ShardDownloadBackoff { fail_count,
+retry_after }`, 30→60→120→240→300s cap via pure `shard_backoff_delay_secs`).
+Recorded at every terminal *transient* failure site — HF `download_shard` error +
+GGUF-probe failure (`auto_manage/download.rs`), P2P give-up with no HF source
+(`network/manager/shard_transfer.rs`), and the stall-reconciliation in
+`health/monitor.rs::cleanup_acquisition_progress` (the observed path). Checked by
+`shard_in_backoff` in `scoring.rs::gather_candidates`; cleared on success. Distinct
+from `shard_p2p_failed` (which only *forces* the HF path). Deliberately NOT recorded
+on the P2P→HF fallback branch, which wants an immediate HF retry. Entries self-evict
+once idle past `SHARD_BACKOFF_FORGET_SECS` (1h). +6 lib tests.
+
+**bug2** — not a bug: two distribution/networking proposals, evaluated into
+`docs/FUTURE_WORK.md` (no external code, per user decision). *Pear OTA* — a viable
+opt-in second install/update surface, but the user's actual friction was building on
+old glibc, so the portable-binary fix comes first; SwarmLLM already has a
+SHA256-verified GitHub-release auto-updater. *peeroxide/Hyperswarm transport* —
+deferred: it's not a `libp2p::Transport` (independent DHT/identity, heavy bridging)
+and is a ~3-month single-maintainer dependency for a security-sensitive path; our
+AutoNAT-v2 + relay stack already covers the common NAT cases.
+
+1158 → 1164 lib tests.
+
+### Prior: R148 — VLM deferrals + CI cache-warm fix (2026-07-22)
 
 Two R142 deferrals that had been waiting on a real-LLaVA test rig, both
 resolved from the artefacts instead.

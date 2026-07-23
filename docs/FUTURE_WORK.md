@@ -2173,6 +2173,85 @@ today. Revisit if laptops roaming between networks turn out to reconnect poorly.
 
 ---
 
+## Distribution & networking (external report, 2026-07-23)
+
+Two proposals from the raw-pc / raw-proxamd5 external user. Neither is a bug;
+both are researched below with a recommendation. No code was written for either
+this round — the user asked only for evaluation.
+
+### Pear (Holepunch) as an opt-in P2P over-the-air distribution channel
+
+**Context.** The user's day-to-day friction wasn't SwarmLLM itself — it was
+*rebuilding from source* every time a fix landed (CUDA toolkit mismatches,
+missing `libclang-dev`/`cmake`, stale cargo caches). Note the asymmetry: raw-pc
+ran the **prebuilt CUDA binary** with no trouble; only raw-proxamd5 compiled,
+because Debian 12's older glibc rejected the prebuilt. So the reported pain is a
+**binary-portability** problem, not a distribution-mechanism gap.
+
+**The proposal.** Wrap the *unmodified* `swarmllm` binary in a thin
+[`pear-runtime`](https://github.com/holepunchto/pear-runtime) app (npm v1.1.1,
+Mar 2026 — the embeddable Bare/JS runtime with P2P OTA + `bare-subprocess`). The
+wrapper would (1) check whether the local daemon's HTTP API is reachable, (2)
+spawn it via `bare-subprocess` if not, (3) otherwise get out of the way. It only
+ever talks to `localhost:8800` — it never touches libp2p/QUIC/DHT. The payoff is
+one-click cross-platform install + decentralized OTA updates with **no
+infrastructure on our end** (`pear stage` a build, connected installs pick it up
+via Pear's own updater). The user validated a working prototype (spawn +
+health-check against a real daemon, clean single PID). Caveat they hit: the CLI's
+`pear run` dev loop was removed in v3.0.0; the embeddable `pear-runtime` module is
+the intended path now.
+
+**Relation to what already exists.** SwarmLLM already ships prebuilt binaries via
+GitHub Releases with a SHA256-verified, atomic-apply auto-updater
+(`src/update.rs`, `UpdateChecker`; opt-in `[update] auto_update`). Pear would be a
+*second, opt-in* surface, never a replacement.
+
+**Recommendation.** Viable and low-risk *as an opt-in channel* — the wrapper's
+blast radius is tiny (localhost only). But it adds a JS/Bare app + a Pear staging
+key to maintain, and it does **not** address the actual reported friction, which
+is that the prebuilt binary won't run on an older glibc. **Do the
+portable-binary fix first** — an older-glibc or musl CUDA build (see also the CI
+build-infra items above) so users like raw-proxamd5 never have to compile.
+Reconsider the Pear wrapper only if there's demand for a genuinely
+zero-toolchain, self-updating install beyond what GitHub Releases +
+`UpdateChecker` already give.
+
+### peeroxide / Hyperswarm as an additional libp2p transport
+
+**Context.** For NAT situations our AutoNAT-v2 / relay / DCUtR / UPnP stack (R143)
+can't reach, the user looked at wrapping
+[`peeroxide`](https://github.com/Rightbracket/peeroxide) — a pure-Rust
+implementation of the Hyperswarm stack (HyperDHT + UDX with BBR congestion
+control), wire-compatible with the Node.js Hyperswarm network,
+`#![forbid(unsafe_code)]` on the network/crypto core, with cross-language interop
+tests. Their estimate: 1–2 weeks for a basic wrapper, 3–4 for something to trust
+with real traffic. They explicitly framed it as "your call entirely… not
+something we're asking for."
+
+**Key technical caveat.** peeroxide is **not** a `libp2p::Transport` — it's an
+*independent* P2P stack with its own DHT and its own peer identity. "Wrap it as an
+additional transport" understates the work: a libp2p `Transport` yields
+`AsyncRead + AsyncWrite` streams keyed by libp2p `PeerId`, whereas peeroxide
+speaks the Hyperswarm/UDX handshake and keys on Hyperswarm keypairs. Bridging
+means either a bespoke shim that reconciles two identity/DHT namespaces, or
+running peeroxide side-by-side as a second discovery+dial path and mapping its
+peers back onto our `NodeId` — both materially more than "implement one trait."
+
+**Maturity/trust caveat.** ~3 months old, essentially one maintainer, no external
+audit. That's a heavy dependency to place on the critical path of a
+security-sensitive P2P *inference* network, where a transport bug is an
+activation-exfiltration or DoS vector.
+
+**Recommendation.** **Defer.** Our existing NAT-traversal stack already covers the
+common cases with relay as the CGNAT fallback (R143). The marginal NAT coverage
+peeroxide might add does not, today, justify taking on a young single-maintainer
+crypto/transport dependency plus a non-trivial identity-bridging effort. Revisit
+only with (a) concrete data on NAT scenarios our relay path genuinely cannot
+reach, and (b) peeroxide reaching more maintainers / a stable release / an
+external audit.
+
+---
+
 ## How to use this file
 
 When starting a new feature, grep this file for keywords related to the area you're touching. If your feature unblocks a deferred item, either pick it up in the same PR (if scope allows) or move the entry to "completed" with the closing commit reference.

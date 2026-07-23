@@ -628,6 +628,10 @@ impl NetworkManager {
                         self.shard_last_progress_at.remove(&shard_id);
                         // Allow future P2P attempts for this shard if it gets re-downloaded later.
                         self.shared_state.models.shard_p2p_failed.remove(&shard_id);
+                        // Success clears any accumulated download backoff.
+                        self.shared_state
+                            .models
+                            .clear_shard_download_backoff(&shard_id);
 
                         // Finalize: rename .tmp → .bin atomically
                         if let Err(e) = self

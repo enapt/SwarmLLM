@@ -179,6 +179,21 @@ impl NetworkManager {
             // Wake auto-manage; shard_p2p_failed forces the HF path even if peers are registered.
             self.shared_state.models.auto_manage_notify.notify_one();
         } else {
+            // No HF fallback to hand off to — this is a terminal failure, so
+            // back the shard off. (The HF-fallback branch above deliberately
+            // does NOT back off: it wants an immediate HF retry via
+            // `shard_p2p_failed`.)
+            let (fails, delay) = self
+                .shared_state
+                .models
+                .record_shard_download_failure(&shard_id);
+            tracing::info!(
+                model = %shard_id.model_id,
+                shard = shard_id.index,
+                fails,
+                backoff_secs = delay,
+                "P2P exhausted with no HF source — backing off shard"
+            );
             self.shared_state.emit_activity(
                 crate::daemon::state::ActivityEvent::new(
                     "download",

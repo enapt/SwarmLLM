@@ -358,6 +358,20 @@ impl AutoShardManager {
                     continue;
                 }
 
+                // Skip shards in download backoff. A recently-failed/stalled
+                // download is cooling down (exponential backoff); re-selecting
+                // it immediately is what let one stuck shard monopolize the
+                // download semaphore and starve fresh candidates a user was
+                // waiting on (external report, 2026-07-23).
+                if self.shared_state.models.shard_in_backoff(&shard_id) {
+                    tracing::debug!(
+                        model = %manifest.id,
+                        shard = shard.index,
+                        "Skipping shard — in download backoff after a recent failure"
+                    );
+                    continue;
+                }
+
                 // Regional rarity: prefer shards missing from our region.
                 // Look up regional holder count from gossip summaries, falling back
                 // to counting peers in the registry.

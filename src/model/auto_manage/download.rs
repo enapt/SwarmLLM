@@ -338,11 +338,20 @@ impl AutoShardManager {
                     let info = match probe_result {
                         Ok(info) => info,
                         Err(e) => {
+                            // Transient (network / rate-limit) — back off so we
+                            // don't re-probe the same shard every eval cycle.
+                            let sid = crate::types::ShardId {
+                                model_id: model_id.clone(),
+                                index: shard_idx,
+                            };
+                            let (fails, delay) = shared.models.record_shard_download_failure(&sid);
                             tracing::warn!(
                                 model = %model_id,
                                 shard = shard_idx,
                                 error = %e,
-                                "AutoShardManager: GGUF probe failed"
+                                fails,
+                                backoff_secs = delay,
+                                "AutoShardManager: GGUF probe failed — backing off"
                             );
                             if let Some(mut entry) =
                                 shared.models.acquisition_progress.get_mut(&model_id)
@@ -574,6 +583,8 @@ display
                                 index: shard_idx,
                             };
                             shared.announce_shard_acquired(&net_tx, &sid);
+                            // Success clears any accumulated download backoff.
+                            shared.models.clear_shard_download_backoff(&sid);
 
                             // Broadcast download completion progress
                             let complete_msg = crate::types::SwarmMessage::ShardDownloadProgress(
@@ -677,11 +688,21 @@ display
                             shared.schedule_acquisition_cleanup(model_id.clone());
                         }
                         Err(e) => {
+                            // Back this shard off before logging so the next
+                            // eval cycle skips it and a competing candidate can
+                            // take the freed download slot.
+                            let sid = crate::types::ShardId {
+                                model_id: model_id.clone(),
+                                index: shard_idx,
+                            };
+                            let (fails, delay) = shared.models.record_shard_download_failure(&sid);
                             tracing::warn!(
                                 model = %model_id,
                                 shard = shard_idx,
                                 error = %e,
-                                "AutoShardManager: HF shard download failed"
+                                fails,
+                                backoff_secs = delay,
+                                "AutoShardManager: HF shard download failed — backing off"
                             );
                             {
                                 let mname = shared

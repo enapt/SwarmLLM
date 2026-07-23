@@ -1021,16 +1021,34 @@ impl HealthMonitor {
                 }
                 // Flip in-flight per-shard progress to terminal so the
                 // dashboard's per-shard bars stop rendering.
-                for sp in entry.shard_progress.values_mut() {
+                for (idx, sp) in entry.shard_progress.iter_mut() {
                     if matches!(
                         sp.state,
                         ShardState::Downloading | ShardState::Verifying | ShardState::Pending
                     ) {
-                        sp.state = if all_local {
-                            ShardState::Complete
+                        if all_local {
+                            sp.state = ShardState::Complete;
                         } else {
-                            ShardState::Failed
-                        };
+                            sp.state = ShardState::Failed;
+                            // Back off this shard so the next auto-manage cycle
+                            // doesn't immediately re-select the exact same
+                            // stalled shard and monopolize the download slot
+                            // (external report, 2026-07-23). Touches a distinct
+                            // DashMap, so it's safe while `entry` is held.
+                            let sid = crate::types::ShardId {
+                                model_id: mid.clone(),
+                                index: *idx,
+                            };
+                            let (fails, delay) =
+                                self.shared_state.models.record_shard_download_failure(&sid);
+                            tracing::debug!(
+                                model = %mid,
+                                shard = *idx,
+                                fails,
+                                backoff_secs = delay,
+                                "Backing off stalled shard after reconciliation"
+                            );
+                        }
                     }
                 }
             }

@@ -35,6 +35,17 @@ pub struct ModelMgmt {
     /// Signals auto_manage to force the HF path even when peer holders are registered.
     /// Cleared when a download for the shard successfully completes.
     pub shard_p2p_failed: dashmap::DashSet<crate::types::ShardId>,
+    /// Per-shard download backoff. A shard whose download fails (hard HF error,
+    /// GGUF-probe failure, P2P give-up with no HF fallback, or stall-
+    /// reconciliation in `health/monitor.rs`) records an exponentially-growing
+    /// cooldown here. `gather_candidates` skips a shard while it's in backoff,
+    /// so one persistently-stuck download can't monopolize a
+    /// `max_concurrent_downloads` slot and starve every other candidate —
+    /// including a fresh model a user is actively waiting on (external report,
+    /// 2026-07-23). Distinct from `shard_p2p_failed` (which only *forces* the HF
+    /// path, without throttling re-selection). Cleared on successful completion;
+    /// expired-and-idle entries self-evict on read to keep the map bounded.
+    pub shard_download_backoff: DashMap<crate::types::ShardId, ShardDownloadBackoff>,
     pub model_request_counts: DashMap<crate::types::ModelId, AtomicU64>,
     pub resource_schedule: RwLock<crate::config::ResourceSchedule>,
     pub prune_history: RwLock<VecDeque<crate::types::PruneEvent>>,
@@ -119,6 +130,39 @@ pub const MAX_FOREIGN_WISHLIST_ENTRIES: usize = 10_000;
 /// keeping the boost responsive to opt-out / pool dissolution.
 pub const FOREIGN_WISHLIST_MAX_AGE_MS: u64 = 2 * 60 * 60 * 1000;
 
+/// Per-shard download backoff state. See `ModelMgmt::shard_download_backoff`.
+#[derive(Debug, Clone)]
+pub struct ShardDownloadBackoff {
+    /// Number of consecutive failed download attempts for this shard.
+    pub fail_count: u32,
+    /// The earliest instant the shard becomes eligible for re-download.
+    pub retry_after: std::time::Instant,
+}
+
+/// First-failure cooldown, doubled on each subsequent consecutive failure.
+pub const SHARD_BACKOFF_BASE_SECS: u64 = 30;
+/// Ceiling on the exponential backoff — a chronically-broken shard is retried
+/// at most once per this window rather than every auto-manage tick.
+pub const SHARD_BACKOFF_MAX_SECS: u64 = 300;
+/// Once an entry has been *expired* (past `retry_after`) for longer than this,
+/// forget it entirely. Keeps the escalating `fail_count` alive across an active
+/// failing window while bounding the map for shards that later succeed or stop
+/// being candidates (e.g. a deleted model).
+pub const SHARD_BACKOFF_FORGET_SECS: u64 = 3600;
+
+/// Exponential backoff schedule: 30, 60, 120, 240, 300, 300… (capped).
+/// `fail_count` is 1-based (the first failure yields the base delay).
+pub fn shard_backoff_delay_secs(fail_count: u32) -> u64 {
+    if fail_count == 0 {
+        return SHARD_BACKOFF_BASE_SECS;
+    }
+    // Saturating shift so a large fail_count can't overflow; cap at MAX.
+    let shifted = SHARD_BACKOFF_BASE_SECS.checked_shl(fail_count - 1);
+    shifted
+        .unwrap_or(SHARD_BACKOFF_MAX_SECS)
+        .min(SHARD_BACKOFF_MAX_SECS)
+}
+
 impl ModelMgmt {
     /// Check if a shard is currently being downloaded, pending, or verifying.
     /// Prevents races where multiple subsystems try to download the same shard.
@@ -140,6 +184,52 @@ impl ModelMgmt {
                     .unwrap_or(false)
             })
             .unwrap_or(false)
+    }
+
+    /// Record a failed download attempt for a shard, growing its cooldown
+    /// exponentially. Returns `(fail_count, delay_secs)` for the caller to log.
+    /// Called from every terminal, transient download-failure site (HF error,
+    /// GGUF-probe failure, P2P give-up without an HF fallback, stall
+    /// reconciliation).
+    pub fn record_shard_download_failure(&self, shard_id: &crate::types::ShardId) -> (u32, u64) {
+        let mut entry = self
+            .shard_download_backoff
+            .entry(shard_id.clone())
+            .or_insert(ShardDownloadBackoff {
+                fail_count: 0,
+                retry_after: std::time::Instant::now(),
+            });
+        entry.fail_count = entry.fail_count.saturating_add(1);
+        let delay = shard_backoff_delay_secs(entry.fail_count);
+        entry.retry_after = std::time::Instant::now() + std::time::Duration::from_secs(delay);
+        (entry.fail_count, delay)
+    }
+
+    /// Whether a shard is currently in download backoff (still cooling down).
+    /// Opportunistically forgets an entry that expired long ago
+    /// (`SHARD_BACKOFF_FORGET_SECS`) so the map stays bounded — while keeping
+    /// the escalating `fail_count` for a shard that is still actively failing.
+    pub fn shard_in_backoff(&self, shard_id: &crate::types::ShardId) -> bool {
+        let now = std::time::Instant::now();
+        if let Some(entry) = self.shard_download_backoff.get(shard_id) {
+            if entry.retry_after > now {
+                return true;
+            }
+            // Expired. Forget it only once it's been expired for a good while,
+            // so a shard that keeps failing across successive ticks still
+            // escalates rather than resetting to the base delay each time.
+            let expired_for = now.duration_since(entry.retry_after);
+            drop(entry);
+            if expired_for >= std::time::Duration::from_secs(SHARD_BACKOFF_FORGET_SECS) {
+                self.shard_download_backoff.remove(shard_id);
+            }
+        }
+        false
+    }
+
+    /// Clear a shard's download backoff after a successful completion.
+    pub fn clear_shard_download_backoff(&self, shard_id: &crate::types::ShardId) {
+        self.shard_download_backoff.remove(shard_id);
     }
 
     /// Mutate a model's AcquisitionStatus if present. No-op if the model has
@@ -399,6 +489,7 @@ mod tests {
             loading_models: DashMap::new(),
             locked_shards: DashMap::new(),
             shard_p2p_failed: dashmap::DashSet::new(),
+            shard_download_backoff: DashMap::new(),
             model_request_counts: DashMap::new(),
             resource_schedule: RwLock::new(Default::default()),
             prune_history: RwLock::new(VecDeque::new()),
@@ -696,5 +787,112 @@ mod tests {
             }
         }
         assert!(best.is_none());
+    }
+
+    // --- Shard download backoff (external report, 2026-07-23) ---
+
+    fn sid(model: &str, index: u32) -> crate::types::ShardId {
+        crate::types::ShardId {
+            model_id: ModelId(model.into()),
+            index,
+        }
+    }
+
+    #[test]
+    fn backoff_delay_schedule_doubles_and_caps() {
+        // 1-based fail_count: 30, 60, 120, 240, then capped at 300.
+        assert_eq!(shard_backoff_delay_secs(1), 30);
+        assert_eq!(shard_backoff_delay_secs(2), 60);
+        assert_eq!(shard_backoff_delay_secs(3), 120);
+        assert_eq!(shard_backoff_delay_secs(4), 240);
+        assert_eq!(shard_backoff_delay_secs(5), 300);
+        assert_eq!(shard_backoff_delay_secs(6), 300);
+        // A pathologically large count can't overflow the shift.
+        assert_eq!(shard_backoff_delay_secs(1000), 300);
+    }
+
+    #[test]
+    fn record_failure_escalates_and_marks_in_backoff() {
+        let m = make_mgmt();
+        let s = sid("m1", 6);
+
+        assert!(!m.shard_in_backoff(&s), "clean shard is not in backoff");
+
+        let (fails1, delay1) = m.record_shard_download_failure(&s);
+        assert_eq!(fails1, 1);
+        assert_eq!(delay1, 30);
+        assert!(m.shard_in_backoff(&s), "in backoff right after a failure");
+
+        let (fails2, delay2) = m.record_shard_download_failure(&s);
+        assert_eq!(fails2, 2);
+        assert_eq!(delay2, 60);
+
+        let (fails3, delay3) = m.record_shard_download_failure(&s);
+        assert_eq!(fails3, 3);
+        assert_eq!(delay3, 120);
+    }
+
+    #[test]
+    fn clear_backoff_removes_the_entry() {
+        let m = make_mgmt();
+        let s = sid("m1", 0);
+        m.record_shard_download_failure(&s);
+        assert!(m.shard_in_backoff(&s));
+        m.clear_shard_download_backoff(&s);
+        assert!(!m.shard_in_backoff(&s));
+        assert!(m.shard_download_backoff.get(&s).is_none());
+    }
+
+    #[test]
+    fn backoff_is_per_shard() {
+        let m = make_mgmt();
+        let a = sid("m1", 1);
+        let b = sid("m1", 2);
+        m.record_shard_download_failure(&a);
+        assert!(m.shard_in_backoff(&a));
+        assert!(!m.shard_in_backoff(&b), "sibling shard is unaffected");
+    }
+
+    #[test]
+    fn expired_entry_is_kept_until_forget_window() {
+        let m = make_mgmt();
+        let s = sid("m1", 3);
+        // Simulate an entry that expired 10s ago (well under the forget window):
+        // shard_in_backoff must return false but retain the fail_count so the
+        // next failure escalates rather than resetting to the base delay.
+        m.shard_download_backoff.insert(
+            s.clone(),
+            ShardDownloadBackoff {
+                fail_count: 2,
+                retry_after: std::time::Instant::now() - std::time::Duration::from_secs(10),
+            },
+        );
+        assert!(!m.shard_in_backoff(&s), "expired entry is not blocking");
+        assert!(
+            m.shard_download_backoff.get(&s).is_some(),
+            "entry retained within the forget window"
+        );
+        let (fails, delay) = m.record_shard_download_failure(&s);
+        assert_eq!(fails, 3, "escalates from the retained count");
+        assert_eq!(delay, 120);
+    }
+
+    #[test]
+    fn long_expired_entry_is_forgotten_on_read() {
+        let m = make_mgmt();
+        let s = sid("m1", 4);
+        m.shard_download_backoff.insert(
+            s.clone(),
+            ShardDownloadBackoff {
+                fail_count: 3,
+                retry_after: std::time::Instant::now()
+                    - std::time::Duration::from_secs(SHARD_BACKOFF_FORGET_SECS + 60),
+            },
+        );
+        assert!(!m.shard_in_backoff(&s));
+        assert!(
+            m.shard_download_backoff.get(&s).is_none(),
+            "entry idle past the forget window self-evicts on read"
+        );
     }
 }
