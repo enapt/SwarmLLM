@@ -6,6 +6,20 @@ All notable changes to SwarmLLM are documented here.
 
 ### Fixed
 
+- **The prebuilt Linux download now runs on more systems.** People on Debian 12
+  and other systems with an older core library had to compile SwarmLLM
+  themselves, because the ready-made Linux build was made on a newer system than
+  theirs and refused to start. It's now built against an older baseline, so it
+  runs on Debian 12, Ubuntu 22.04 and later, and most current Linux systems with
+  nothing to compile.
+- **A computer penalised into a deep credit deficit now recovers on its own.**
+  Credits set your priority and how much you can lean on other machines; they
+  never stop your own use. A machine driven far below zero — by heavy borrowing,
+  or by an earlier accounting bug — used to stay there indefinitely, stuck at the
+  lowest priority and unable to share the pool's work. Its balance now drifts
+  back toward zero over time, only ever upward and only while it is negative, so a
+  one-off penalty is no longer permanent. Machines in good standing are
+  unaffected.
 - **A model you asked for could sit unusable behind one stuck download.** Models
   are fetched a piece at a time. When a piece stalled, the software immediately
   tried that exact same piece again, over and over — and while it was stuck, a

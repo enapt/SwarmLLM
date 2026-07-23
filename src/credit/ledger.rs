@@ -41,6 +41,44 @@ const LEDGER_PERSIST_INTERVAL_SECS: u64 = 60;
 const LEDGER_HOSTING_INTERVAL_SECS: u64 = 3600;
 /// Interval between expired-escrow cleanup sweeps.
 const LEDGER_ESCROW_CLEANUP_INTERVAL_SECS: u64 = 300;
+/// Interval between negative-balance decay ticks (walks a negative balance
+/// back toward zero — see `negative_balance_decay_amount`).
+const LEDGER_DECAY_INTERVAL_SECS: u64 = 3600;
+/// Fraction of the outstanding deficit forgiven on each decay tick.
+const NEGATIVE_BALANCE_DECAY_FRACTION: f64 = 0.05;
+/// Minimum credits forgiven per decay tick, so a modest deficit clears in a
+/// bounded number of ticks instead of shrinking asymptotically forever.
+const NEGATIVE_BALANCE_DECAY_FLOOR: i64 = 500;
+
+/// Credits to forgive this tick for a node sitting at a negative `balance`.
+///
+/// Credit balances gate *scaling and priority*, not correctness — a node's own
+/// local inference is always served, and the `MIN_BALANCE_FOR_INFERENCE` floor
+/// only affects requests to/from other nodes. That makes a deeply negative
+/// balance a soft penalty, but a *permanent* one: without any recovery path a
+/// node driven far below zero (e.g. by a framework bug that over-charged it, or
+/// a burst of failed distributed requests) stays stuck at Bronze and below the
+/// pool-participation floor forever, even after the cause is fixed.
+///
+/// This walks a negative balance back toward zero — never past it (decay must
+/// not mint positive credits) and never touching the monotonic
+/// `lifetime_earned`/`lifetime_spent` counters (applied via `CreditDelta::Refund`).
+/// The percentage term makes a huge deficit recover in a bounded number of
+/// ticks; the flat floor clears the long tail. Positive balances are left
+/// entirely alone — good contributors are never decayed.
+///
+/// Returns `0` for a non-negative balance (no-op).
+pub(crate) fn negative_balance_decay_amount(balance: i64) -> i64 {
+    if balance >= 0 {
+        return 0;
+    }
+    // Positive magnitude of the deficit; `saturating_neg` handles `i64::MIN`.
+    let deficit = balance.saturating_neg();
+    let pct = (deficit as f64 * NEGATIVE_BALANCE_DECAY_FRACTION).ceil() as i64;
+    // At least the flat floor, but never more than the deficit itself (so we
+    // land exactly on zero rather than overshooting into positive territory).
+    pct.max(NEGATIVE_BALANCE_DECAY_FLOOR).min(deficit)
+}
 
 /// CreditLedger tracks the local node's credit balance and transaction history.
 ///
@@ -380,6 +418,15 @@ impl CreditLedger {
         ));
         escrow_cleanup_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
+        // Walk a negative balance back toward zero.
+        let mut decay_interval =
+            tokio::time::interval(std::time::Duration::from_secs(LEDGER_DECAY_INTERVAL_SECS));
+        decay_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        // Consume the immediate t=0 tick so decay only applies after a full
+        // interval of uptime — otherwise a node could restart-farm the decay,
+        // clearing its deficit faster than the intended recovery rate.
+        decay_interval.tick().await;
+
         let mut shutdown_rx = self.shutdown_rx.clone();
 
         loop {
@@ -585,6 +632,33 @@ impl CreditLedger {
                                 cleaned,
                                 "Cleaned up expired escrows"
                             );
+                        }
+                    }
+                }
+                _ = decay_interval.tick() => {
+                    // Walk a negative balance back toward zero so a soft credit
+                    // penalty (or bug-induced over-charge) isn't permanent.
+                    // Refund semantics: adjust balance, leave lifetime counters alone.
+                    let balance_now = { self.balance.read().await.balance };
+                    let forgiven = negative_balance_decay_amount(balance_now);
+                    if forgiven > 0 {
+                        match apply_credit_direct(
+                            &self.balance,
+                            &self.db,
+                            forgiven,
+                            CreditDelta::Refund,
+                        ).await {
+                            Ok(()) => tracing::info!(
+                                previous = balance_now,
+                                forgiven,
+                                new_balance = balance_now.saturating_add(forgiven),
+                                "Negative-balance decay applied"
+                            ),
+                            Err(e) => tracing::warn!(
+                                error = %e,
+                                forgiven,
+                                "Negative-balance decay: DB persist failed, balance unchanged"
+                            ),
                         }
                     }
                 }
@@ -1266,5 +1340,62 @@ mod tests {
 
         let balances = peer_balances.load_full();
         assert_eq!(balances.len(), 0);
+    }
+
+    // --- Negative-balance decay (external report follow-up, 2026-07-23) ---
+
+    #[test]
+    fn decay_leaves_non_negative_balances_untouched() {
+        assert_eq!(negative_balance_decay_amount(0), 0);
+        assert_eq!(negative_balance_decay_amount(1), 0);
+        assert_eq!(negative_balance_decay_amount(1_000_000), 0);
+    }
+
+    #[test]
+    fn decay_uses_the_flat_floor_for_small_deficits() {
+        // 5% of these is below the 500 floor, so the floor applies…
+        assert_eq!(
+            negative_balance_decay_amount(-9_000),
+            NEGATIVE_BALANCE_DECAY_FLOOR
+        );
+        assert_eq!(
+            negative_balance_decay_amount(-2_000),
+            NEGATIVE_BALANCE_DECAY_FLOOR
+        );
+        // …but never more than the deficit itself (lands exactly on zero).
+        assert_eq!(negative_balance_decay_amount(-300), 300);
+        assert_eq!(negative_balance_decay_amount(-1), 1);
+    }
+
+    #[test]
+    fn decay_uses_the_percentage_for_large_deficits() {
+        // 5% of 41,400 = 2,070, above the floor.
+        assert_eq!(negative_balance_decay_amount(-41_400), 2_070);
+        // 5% of 100,000 = 5,000.
+        assert_eq!(negative_balance_decay_amount(-100_000), 5_000);
+    }
+
+    #[test]
+    fn decay_never_overshoots_zero() {
+        // Repeatedly applying decay walks toward zero and stops there, never
+        // crossing into a positive (minted) balance.
+        let mut balance: i64 = -41_400;
+        for _ in 0..1_000 {
+            let forgiven = negative_balance_decay_amount(balance);
+            if forgiven == 0 {
+                break;
+            }
+            assert!(forgiven > 0 && forgiven <= -balance);
+            balance += forgiven;
+            assert!(balance <= 0, "decay must never push the balance positive");
+        }
+        assert_eq!(balance, 0, "decay converges exactly to zero");
+    }
+
+    #[test]
+    fn decay_handles_i64_min_without_panicking() {
+        // saturating_neg + f64 path must not overflow on the extreme.
+        let forgiven = negative_balance_decay_amount(i64::MIN);
+        assert!(forgiven > 0);
     }
 }

@@ -151,7 +151,7 @@ libp2p 0.56, axum 0.8, candle-core/candle-transformers 0.10 (CUDA), redb 4, ed25
 
 ## Testing
 
-- 1164 lib tests passing + 8 ignored (env-var-gated real-model + manual smoke), 75 integration tests in `tests/integration/`, 1 ignored end-to-end (`cargo test --test integration_phase10_11 -- --ignored`), clippy clean. Microbench: `cargo run --release --no-default-features --features dev,claude-subscription --example swarm_spec_bench` (R136 — measures all 4 SWARM-SPEC layer primitives + synthetic cascade hit-rate). Local-cluster bench: `examples/3node_setup.sh` (boots 3 daemons) + `examples/3node_inference_bench.sh` (runs 3 workloads × 3 trials and prints tok/s + swarm_spec metrics). Sharded variant: `examples/3node_sharded_setup.sh` (forced distributed pipeline — requires `auto_manage.enabled = false` in per-node config.toml to preserve sharded state; splits any shard count across B/C, not just 2). Both scripts take `SWARM_BENCH_MODEL`. **Pinned reference models for cross-swarm comparison: `docs/REFERENCE_MODELS.md`** (smoke / standard / stress tiers + `examples/fetch_reference_model.sh` to opt in).
+- 1169 lib tests passing + 8 ignored (env-var-gated real-model + manual smoke), 75 integration tests in `tests/integration/`, 1 ignored end-to-end (`cargo test --test integration_phase10_11 -- --ignored`), clippy clean. Microbench: `cargo run --release --no-default-features --features dev,claude-subscription --example swarm_spec_bench` (R136 — measures all 4 SWARM-SPEC layer primitives + synthetic cascade hit-rate). Local-cluster bench: `examples/3node_setup.sh` (boots 3 daemons) + `examples/3node_inference_bench.sh` (runs 3 workloads × 3 trials and prints tok/s + swarm_spec metrics). Sharded variant: `examples/3node_sharded_setup.sh` (forced distributed pipeline — requires `auto_manage.enabled = false` in per-node config.toml to preserve sharded state; splits any shard count across B/C, not just 2). Both scripts take `SWARM_BENCH_MODEL`. **Pinned reference models for cross-swarm comparison: `docs/REFERENCE_MODELS.md`** (smoke / standard / stress tiers + `examples/fetch_reference_model.sh` to opt in).
 - Unit tests: in-module `#[cfg(test)]` blocks
 - Integration tests: `tests/integration/` — multi-node simulations with `--test-threads=1`
 - Real-model spawn-and-infer test: set `SWARMLLM_TEST_MODEL_DIR` to a fully-populated model directory (e.g. `~/.local/share/swarmllm/models/tinyllama-1.1b-...`) and run `cargo test --test integration_phase10_11 -- --ignored end_to_end`. No synthetic GGUF fixture is committed; see `docs/ARCHITECTURE.md` § Deferred Items.
@@ -192,7 +192,7 @@ When spawning subagents in this repo, use these model picks (overrides defaults 
 
 ## Status
 
-All 20 build phases complete. All subsystems wired — no stubs. **1164 lib tests + 75 integration + 2 repo-consistency tests passing**; 8 lib + 1 e2e ignored (env-var or manual). Clippy clean default + features dev,claude-subscription + `--features llama`.
+All 20 build phases complete. All subsystems wired — no stubs. **1169 lib tests + 75 integration + 2 repo-consistency tests passing**; 8 lib + 1 e2e ignored (env-var or manual). Clippy clean default + features dev,claude-subscription + `--features llama`.
 
 ### Latest: R149 — AutoShardManager download backoff (external report #3 follow-up) (2026-07-23)
 
@@ -225,7 +225,28 @@ deferred: it's not a `libp2p::Transport` (independent DHT/identity, heavy bridgi
 and is a ~3-month single-maintainer dependency for a security-sensitive path; our
 AutoNAT-v2 + relay stack already covers the common NAT cases.
 
-1158 → 1164 lib tests.
+**Pre-release follow-ups (same round).**
+- **Portable Linux binary** — the CPU release build ran on `ubuntu-latest`
+  (24.04 / glibc 2.39) while CUDA already pinned `ubuntu-22.04`; a 2.39-linked
+  binary won't start on Debian 12 (glibc 2.36), which is why raw-proxamd5 had to
+  compile from source. Pinned the CPU release + `cache-warm` jobs to
+  `ubuntu-22.04` (glibc 2.35 → runs on Debian 12 / Ubuntu 22.04+; 20.04 is being
+  retired). This is the "portable-binary fix first" the Pear entry defers to.
+- **Negative-balance decay** (`credit/ledger.rs`) — credits gate scaling/priority,
+  not correctness (local inference always served; `MIN_BALANCE_FOR_INFERENCE`
+  only gates non-local), so a node driven deep negative by a bug stayed
+  permanently Bronze + below the pool floor. New hourly decay walks a *negative*
+  balance toward zero (5% of the deficit, min 500/tick, never past zero, never
+  touching lifetime counters — `CreditDelta::Refund`) via pure
+  `negative_balance_decay_amount`; first tick skipped so a restart can't farm it.
+  +5 tests.
+- **CI cache key** — the `dev,claude-subscription` clippy job's rust-cache key
+  contained a comma (GitHub rejects it), so it never cached. Fixed via a
+  comma-free `cache_key` matrix slug.
+- **Verified** the CUDA-release disk-cleanup step (R148 left it "untested"): it
+  ran and succeeded in v0.3.11-alpha's real CUDA build — the note was stale.
+
+1158 → 1169 lib tests.
 
 ### Prior: R148 — VLM deferrals + CI cache-warm fix (2026-07-22)
 
