@@ -82,12 +82,29 @@ pub fn filter_dialable(
                 .unwrap_or(false)
         });
 
+    // If the PEER advertises a publicly-reachable address of its own, its
+    // private addresses are its own LAN/Docker bridge and must not be dialled —
+    // even when we are on a private network too. A Docker node advertises its
+    // container-bridge `172.17.0.1` alongside its real public IP; 172.17.0.1 is
+    // not globally unique — it is the Docker gateway of *whichever* host dials
+    // it, so the dial loops back to the dialer's own node rather than failing
+    // cleanly (confirmed live, 2026-07-23). Reach such a peer via its public
+    // address; drop the private noise. Same-LAN peers still find each other via
+    // mDNS, and a peer with ONLY private addresses (no public) is kept so the
+    // home two-machine / pool case still works.
+    let peer_has_public = addrs.iter().any(|s| {
+        s.parse::<Multiaddr>()
+            .map(|a| is_dialable(&a, local_peer_id) && !addr_is_private(&a))
+            .unwrap_or(false)
+    });
+
     addrs
         .iter()
         .filter(|s| {
             s.parse::<Multiaddr>()
                 .map(|a| {
-                    is_dialable(&a, local_peer_id) && !(local_is_public_only && addr_is_private(&a))
+                    is_dialable(&a, local_peer_id)
+                        && !((local_is_public_only || peer_has_public) && addr_is_private(&a))
                 })
                 .unwrap_or(false)
         })
@@ -226,17 +243,40 @@ mod tests {
         );
     }
 
-    /// The pool / two-machines-in-a-house case must be untouched.
+    /// The pool / two-machines-in-a-house case must be untouched: a peer that
+    /// has NO public address of its own keeps its LAN/CGN addresses, so two
+    /// machines behind the same network still find each other after a reboot.
     #[test]
-    fn lan_node_keeps_private_addresses() {
+    fn lan_only_peer_keeps_private_addresses() {
         let me = pid(1);
         let other = pid(2);
         let addrs = vec![
             format!("/ip4/192.168.129.3/tcp/8810/p2p/{other}"),
             format!("/ip4/100.116.22.41/udp/8800/quic-v1/p2p/{other}"),
+        ];
+        assert_eq!(filter_dialable(&addrs, &me, &lan_local()).len(), 2);
+    }
+
+    /// A Docker peer advertises its container bridge `172.17.0.1` (and its LAN)
+    /// alongside its real public IP. `172.17.0.1` is the *dialer's own* Docker
+    /// gateway, so dialling it loops back rather than reaching the peer. Once a
+    /// peer has a public address it must be reached there and its private noise
+    /// dropped — even when we are on a LAN ourselves (confirmed live 2026-07-23).
+    #[test]
+    fn peer_with_public_drops_its_private_and_docker_addresses() {
+        let me = pid(1);
+        let other = pid(2);
+        let addrs = vec![
+            format!("/ip4/172.17.0.1/tcp/8810/p2p/{other}"),
+            format!("/ip4/192.168.129.18/tcp/8810/p2p/{other}"),
             format!("/ip4/81.241.51.1/tcp/8810/p2p/{other}"),
         ];
-        assert_eq!(filter_dialable(&addrs, &me, &lan_local()).len(), 3);
+        let kept = filter_dialable(&addrs, &me, &lan_local());
+        assert_eq!(
+            kept,
+            vec![format!("/ip4/81.241.51.1/tcp/8810/p2p/{other}")],
+            "reach a public-capable peer at its public address, not its Docker bridge"
+        );
     }
 
     /// A node with both a public and a private address is still on a LAN.
@@ -254,16 +294,14 @@ mod tests {
 
     /// Unknown context must not be read as "public". `listen_multiaddrs` is
     /// empty until the swarm binds, and a node seconds old must not throw away
-    /// every LAN peer it had.
+    /// a LAN-only peer it had. (A peer that also has a public address is still
+    /// reached publicly — that is the Docker case above, not this one.)
     #[test]
-    fn unknown_context_keeps_everything() {
+    fn unknown_context_keeps_lan_only_peer() {
         let me = pid(1);
         let other = pid(2);
-        let addrs = vec![
-            format!("/ip4/192.168.129.3/tcp/8810/p2p/{other}"),
-            format!("/ip4/81.241.51.1/tcp/8810/p2p/{other}"),
-        ];
-        assert_eq!(filter_dialable(&addrs, &me, &[]).len(), 2);
+        let addrs = vec![format!("/ip4/192.168.129.3/tcp/8810/p2p/{other}")];
+        assert_eq!(filter_dialable(&addrs, &me, &[]).len(), 1);
     }
 
     /// Storage keeps private addresses regardless of where we are, so a laptop

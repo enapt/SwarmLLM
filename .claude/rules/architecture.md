@@ -338,16 +338,32 @@ conflated:
   laptop saving its cache on a hotspot must not permanently lose the LAN peers
   it had at home. Used by `save_peer_cache`.
 - **`filter_dialable(addrs, local_peer_id, local_addrs)`** — what is worth
-  dialling *from here*. Everything `filter_storable` does, plus: a node whose
-  own reachable addresses contain no private address cannot route to anyone
-  else's RFC1918 / CGNAT / IPv6-ULA, so those are dropped. Used by every dial
-  path and by `GET /api/admin/diagnostics`.
+  dialling *from here*. Everything `filter_storable` does, plus a peer's
+  RFC1918 / CGNAT / IPv6-ULA addresses are dropped when EITHER: (a) our own
+  reachable addresses contain no private address (`local_is_public_only` — we
+  can't route to anyone else's private network), OR (b) **the peer itself
+  advertises a publicly-reachable address** (`peer_has_public` — then its
+  private addresses are its own LAN/Docker bridge and we reach it publicly
+  instead). Used by every dial path and by `GET /api/admin/diagnostics`.
+
+  The `peer_has_public` clause is the **Docker fix** (2026-07-23): a Docker
+  node advertises its container bridge `172.17.0.1` alongside its real public
+  IP, and `172.17.0.1` is not globally unique — it is the Docker gateway of
+  *whichever* host dials it, so a dial loops back to the dialer's own node
+  rather than failing cleanly (confirmed live). A peer with a public address is
+  reached there; its private noise is dropped even when we are on a LAN too.
+  A peer with ONLY private addresses (no public) is still kept, so the home
+  two-machine / pool case is untouched — those peers are additionally found via
+  mDNS regardless.
 
 **`local_addrs` empty means "not bound yet", NOT "public."** `listen_multiaddrs`
 is empty until the swarm finishes binding; a node seconds into starting that
 concluded it was a public server would discard every LAN peer it had, breaking
-the home two-machine and pool cases the cache exists for. Unknown context keeps
-everything.
+the home two-machine and pool cases the cache exists for. So the
+`local_is_public_only` clause treats empty as unknown → keep. The
+`peer_has_public` clause is independent of local context: it keys on the peer's
+own addresses, so it correctly drops a public-capable peer's Docker/LAN noise
+even at startup.
 
 Nothing in `src/pool/` reads this cache — pools route through `pool_state` /
 `allowed_node_set` — and mDNS discovers LAN peers independently, so a LAN pool
