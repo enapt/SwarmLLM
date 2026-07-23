@@ -2051,27 +2051,57 @@ causes were investigated:
    job on runner image, profile, features and env, or it silently warms a
    cache nothing reads.
 
-2. *llama.cpp compiles a wide CUDA arch spread* — **open, needs a product
-   decision.** `CUDA_COMPUTE_CAP: 80` only governs candle's kernels. The `cuda`
-   feature also builds `llama-cpp-sys-2`, whose CMake build defaults to
-   `-arch=native`; on a GPU-less CI runner nvcc can't detect anything, and per
-   llama.cpp's build docs the fallback "results in a larger binary and longer
-   compilation time". `llama-cpp-sys-2`'s `build.rs` forwards any `CMAKE_*` env
-   var straight to CMake, so this is a one-line env addition:
-   `CMAKE_CUDA_ARCHITECTURES: "61-real;75-real;80-real;86-real;89-real;90-real;90-virtual"`.
+2. *llama.cpp compiles a wide CUDA arch spread* — **PHASE 1 DONE (R150,
+   2026-07-23), Phase 2 open.** `llama-cpp-sys-2`'s `build.rs` forwards any
+   `CMAKE_*` env to CMake (build.rs:531-534, verified), so the `cuda` (Linux)
+   build now pins
+   `CMAKE_CUDA_ARCHITECTURES: "61-real;75-real;80-real;86-real;89-real;90-real;90-virtual"`
+   — native SASS Pascal→Hopper + compute_90 PTX so Blackwell runs via driver
+   JIT. Because that build.rs does NOT `rerun-if-env-changed` on it, the
+   rust-cache `shared-key` carries a `-gpuarch2` discriminator; bump it whenever
+   the arch list changes or a warm cache will silently ship the old set.
+   **Phase 2 (open):** `sm_120` can't be a *native* target on CUDA 12.4 (nvcc
+   predates it) — Blackwell users get the compute_90 PTX-JIT path, which
+   research shows is up to ~5× slower on the llama.cpp/cuBLAS path than native.
+   Closing this means bumping the toolkit 12.4 → **12.8** (first with native
+   Blackwell; `cudarc 0.19` is fine on 12.x — candle #3249 is a CUDA *13.0*
+   rejection, not 12.8) and adding `120-real;120-virtual`. Risks to validate:
+   the `Jimver/cuda-toolkit@v0.2.19` pin may not know `12.8.0` (Windows GPU
+   build), and `llama-cpp-2 0.1`'s bundled llama.cpp must accept a `120` arch.
+   Do it on a PR so `ci.yml`'s feature-check validates the Linux compile before
+   it touches `main`.
 
-**Why deferred.** The arch list is a decision about which GPUs SwarmLLM
-supports, not a build tweak. Getting it wrong is silent for us and fatal for
-the user — an omitted arch surfaces as `no kernel image is available for
-execution on the device` at runtime. Specifically: dropping `61` cuts Pascal
-(GTX 10-series, still widely used); dropping the `-virtual` PTX entry removes
-JIT forward-compatibility for Blackwell/RTX 50-series. And it can only be
-validated on hardware — the maintainer's box is sm_86, so every other
-generation would ship untested.
+**candle side — Phase 1 DONE.** `CUDA_COMPUTE_CAP` lowered `80 → 75`.
+candle-kernels emits PTX, so this is a *floor*: the driver JIT-compiles it to
+any GPU ≥ sm_75, so one binary now covers **RTX 20-series / GTX 16 → Blackwell**
+(the 80 floor silently excluded Turing/Pascal). candle-kernels disables its
+bf16-WMMA kernels below sm_80; harmless for SwarmLLM's quantized GGUF path
+(quantized kernels, not bf16 WMMA).
 
-**If picked up:** decide the supported-GPU floor first, keep at least one
-`-virtual` entry for forward compat, and validate on at least one pre-Ampere
-card before releasing.
+### candle bf16-WMMA recovery via a compute_80 variant (R150, 2026-07-23)
+**Context.** The single `CUDA_COMPUTE_CAP=75` binary above disables candle's
+bf16-WMMA (tensor-core) kernels for *everyone*, including Ampere+ cards that
+have the hardware. For SwarmLLM's quantized workload that's expected to be
+negligible, but a bf16-heavy path would lose throughput on RTX 30/40/50.
+
+**What it would take.** A second CUDA build variant at `CUDA_COMPUTE_CAP=80`
+(bf16 WMMA on) alongside the `75` build, plus **runtime compute-cap selection**:
+today `update.rs::build_variant_suffix` keys purely on `cfg!(feature=…)`
+(`-cuda`/`-gpu`) and `bin/launcher.rs` detects only GPU *presence*
+(`nvcuda.dll` / `nvidia-smi`), neither reads the compute capability. So a
+Turing-vs-Ampere split needs new `nvidia-smi --query-gpu=compute_cap` detection
+in the launcher + a compute-cap-aware asset picker in the updater, plus a
+doubled CUDA build matrix and its own warm cache (watch the 10 GB repo-cache
+ceiling — R148).
+
+**Why deferred.** Needs a real GPU benchmark to prove the bf16 loss is material
+for our quantized path before doubling the build matrix + shipping untestable
+(no local GPU) runtime detection. Measure first.
+
+**Validation gap (both phases).** The maintainer's box is sm_86; arch changes
+ship untested on other gens. Mitigations: PTX/JIT covers newer-than-tested, CI
+compile-checks catch build breaks (not runtime), and Discord testers with
+RTX 20/40/50 should confirm before a *stable* (non-alpha) tag.
 
 ### Node.js-20 GitHub Actions deprecation (R145 sweep, 2026-07-21)
 **Context.** GitHub is deprecating the Node.js 20 runtime on Actions runners; three pinned actions in `.github/workflows/release.yml` still target Node 20 and are currently *force-upgraded* to Node 24 (a warning annotation, not a failure — the v0.3.3-alpha release built and published fine):

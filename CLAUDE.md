@@ -194,7 +194,36 @@ When spawning subagents in this repo, use these model picks (overrides defaults 
 
 All 20 build phases complete. All subsystems wired — no stubs. **1169 lib tests + 75 integration + 2 repo-consistency tests passing**; 8 lib + 1 e2e ignored (env-var or manual). Clippy clean default + features dev,claude-subscription + `--features llama`.
 
-### Latest: R149 — AutoShardManager download backoff (external report #3 follow-up) (2026-07-23)
+### Latest: R150 — GPU coverage: candle floor → sm_75, llama.cpp arch pin (2026-07-23)
+
+Goal: support as many GPUs as possible (home/gamer/enthusiast audience). Research
+(candle `build.rs` + web) established the key facts: **candle-kernels emits PTX**
+(`build_ptx()`), so `CUDA_COMPUTE_CAP` is a *floor* and the driver JIT-compiles to
+any GPU ≥ it at runtime — the build toolkit version is irrelevant to which GPUs it
+*runs* on. So lowering the candle floor is the big lever, and it's a one-liner.
+
+**Phase 1 (shipped, CUDA 12.4, low-risk — CI + cache-warm validate the compile):**
+- **candle `CUDA_COMPUTE_CAP` 80 → 75** across `release.yml` / `cache-warm.yml` /
+  `ci.yml`. One binary now covers **RTX 20-series / GTX 16 → Blackwell** via driver
+  JIT; the old 80 floor silently excluded Turing/Pascal (a huge slice of the
+  audience — was a *current* bite, not future). candle disables bf16-WMMA below
+  sm_80 → negligible for the quantized GGUF path (gotcha #159).
+- **llama.cpp `CMAKE_CUDA_ARCHITECTURES` pinned** `61-real…90-real;90-virtual`
+  (Linux `cuda` build only — Windows GPU uses Vulkan). Native SASS Pascal→Hopper +
+  compute_90 PTX so Blackwell JITs. Bumped the rust-cache `shared-key`
+  (`-gpuarch2`) because `llama-cpp-sys-2` forwards `CMAKE_*` to CMake but doesn't
+  `rerun-if-env-changed` → a warm cache would ship the old arches (gotcha #160).
+
+**Phase 2 (open, riskier — do via a validation PR):** bump CUDA **12.4 → 12.8**
+for *native* sm_120 (llama.cpp/cuBLAS PTX-JIT on Blackwell is up to ~5× slower).
+`cudarc 0.19` is fine on 12.x (candle #3249 is a CUDA *13.0* rejection). Risks:
+`Jimver@v0.2.19` may not know `12.8.0`; old `llama-cpp-2 0.1` must accept arch
+`120`. **Deferred with context:** a compute_80 variant to recover bf16-WMMA for
+Ampere+ (needs a GPU benchmark + runtime compute-cap detection in
+`launcher.rs`/`update.rs`, which today key only on GPU presence / cfg-features).
+Full detail: `docs/FUTURE_WORK.md § CI / build infra`.
+
+### Prior: R149 — AutoShardManager download backoff (external report #3 follow-up) (2026-07-23)
 
 Two follow-up external reports (raw-pc / raw-proxamd5, on v0.3.11-alpha).
 

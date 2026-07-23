@@ -285,9 +285,10 @@ jobs:
       # candle-kernels' build.rs runs `nvidia-smi` to auto-detect the
       # compute capability when CUDA_COMPUTE_CAP is unset. Stock GH
       # runners have no GPU and no nvidia-smi, so we pin the compile
-      # target manually — sm_80 (Ampere) is a safe lower bound that any
-      # cuda-12.4 nvcc accepts. The actual compute target only matters
-      # at runtime; `cargo check` only verifies it compiles.
+      # target manually. 75 (Turing) is the shipped floor (see
+      # release.yml) and validates that candle-kernels still compiles
+      # with its bf16-WMMA kernels disabled below sm_80. `cargo check`
+      # only verifies it compiles; the real arch is chosen at runtime.
       - run: cargo check --locked ${{ matrix.flags }} --all-targets
         env:
-          CUDA_COMPUTE_CAP: "80"
+          CUDA_COMPUTE_CAP: "75"

@@ -142,7 +142,12 @@ jobs:
       - name: Rust cache
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          shared-key: release-${{ matrix.target }}-${{ matrix.features }}
+          # `-gpuarch2`: bumped when the GPU build inputs change in a way cargo
+          # can't see. `llama-cpp-sys-2` forwards `CMAKE_CUDA_ARCHITECTURES` to
+          # CMake but does NOT `rerun-if-env-changed` on it, so without a key
+          # bump a warm cache would silently ship the previous arch set. Keep
+          # this suffix byte-identical to cache-warm.yml.
+          shared-key: release-${{ matrix.target }}-${{ matrix.features }}-gpuarch2
 
       - name: Install system dependencies (Linux)
         if: runner.os == 'Linux'
@@ -327,12 +332,25 @@ jobs:
       - name: Build release binary
         run: cargo build --locked --release ${{ matrix.features }}
         env:
-          # Compute capability passed to candle-kernels / bindgen_cuda for
-          # nvcc `-arch=compute_NN`. Generated PTX is JIT-compiled at runtime
-          # to the user's actual GPU, so 80 (Ampere) is a sensible minimum
-          # targeting RTX 3060+, A100, H100, etc. Set for any CUDA build —
-          # leaving it empty panics bindgen_cuda with `ParseIntError { kind: Empty }`.
-          CUDA_COMPUTE_CAP: ${{ (matrix.cuda_linux || matrix.cuda_windows) && '80' || '' }}
+          # candle floor. candle-kernels emits PTX for `compute_NN`; the driver
+          # JIT-compiles it to the user's actual GPU at runtime, so this is a
+          # *minimum* arch, and every GPU at or above it is covered — including
+          # newer ones (Ada, Hopper, Blackwell/RTX 50) via forward-compatible
+          # JIT. 75 (Turing) is the floor: it brings in RTX 20-series + GTX 16
+          # that 80 (Ampere) silently excluded — a large slice of the home/gamer
+          # audience. candle-kernels disables its bf16-WMMA kernels below sm_80,
+          # which costs nothing for SwarmLLM's quantized GGUF path (that uses the
+          # quantized kernels, not bf16 WMMA); recovering that for Ampere+ would
+          # need a second compute_80 variant + runtime compute-cap selection —
+          # tracked in docs/FUTURE_WORK.md. Must be set for any CUDA build —
+          # empty panics bindgen_cuda with `ParseIntError { kind: Empty }`.
+          CUDA_COMPUTE_CAP: ${{ (matrix.cuda_linux || matrix.cuda_windows) && '75' || '' }}
+          # llama.cpp CUDA backend (Linux `cuda` feature only — Windows GPU uses
+          # the Vulkan backend). Native SASS for Pascal→Hopper plus compute_90
+          # PTX so a newer card (Blackwell) still runs via driver JIT. sm_120 is
+          # NOT a native target here because CUDA 12.4's nvcc predates it; the
+          # 12.8 bump that adds native `120-real` is Phase 2 (docs/FUTURE_WORK.md).
+          CMAKE_CUDA_ARCHITECTURES: ${{ matrix.cuda_linux && '61-real;75-real;80-real;86-real;89-real;90-real;90-virtual' || '' }}
 
       - name: Package archive (Linux/macOS)
         if: runner.os != 'Windows'

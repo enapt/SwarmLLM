@@ -95,7 +95,10 @@ jobs:
       - name: Rust cache
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          shared-key: release-${{ matrix.target }}-${{ matrix.features }}
+          # Byte-identical to release.yml (incl. the `-gpuarch2` bump — see the
+          # comment there): the whole point is that the release restores the key
+          # this job warms.
+          shared-key: release-${{ matrix.target }}-${{ matrix.features }}-gpuarch2
 
       - name: Install system dependencies
         run: |
@@ -128,4 +131,8 @@ jobs:
       - name: Build (populates the dependency cache)
         run: cargo build --locked --release ${{ matrix.features }}
         env:
-          CUDA_COMPUTE_CAP: ${{ matrix.cuda_linux && '80' || '' }}
+          # MUST match release.yml's build env exactly (compute cap AND arch
+          # list), or the warmed cache has a different key than the release
+          # build restores. See release.yml for the rationale behind 75 + list.
+          CUDA_COMPUTE_CAP: ${{ matrix.cuda_linux && '75' || '' }}
+          CMAKE_CUDA_ARCHITECTURES: ${{ matrix.cuda_linux && '61-real;75-real;80-real;86-real;89-real;90-real;90-virtual' || '' }}

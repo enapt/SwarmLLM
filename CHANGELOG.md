@@ -2,6 +2,18 @@
 
 All notable changes to SwarmLLM are documented here.
 
+## [Unreleased]
+
+### Changed
+
+- **GPU acceleration now works on many more NVIDIA cards.** The shared-inference
+  engine previously needed an RTX 30-series or newer; anything older — including
+  the very common **RTX 20-series and GTX 16 cards** — quietly fell back to the
+  (much slower) processor. It now runs on those cards too, and on the new
+  RTX 50-series, so a lot more people get real GPU speed out of the box. Local
+  models also now build for each card generation from GTX 10-series up. (Native,
+  fastest-path support for the RTX 50-series on local models is a follow-up.)
+
 ## [0.3.12-alpha] — 2026-07-23
 
 ### Fixed
