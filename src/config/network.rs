@@ -162,19 +162,51 @@ fn parse_wslinfo_networking_mode(stdout: &str) -> Option<bool> {
 ///    interface, which mirrored mode creates — the same signal Docker uses to
 ///    special-case mirrored mode (moby/moby#48075).
 pub(super) fn wsl_networking_is_mirrored() -> bool {
-    if let Ok(out) = std::process::Command::new("wslinfo")
+    if let Some(mirrored) = wslinfo_networking_mode(std::time::Duration::from_secs(2)) {
+        return mirrored;
+    }
+    // wslinfo missing, errored, or hung past the timeout — fall back to the
+    // interface signal.
+    std::path::Path::new("/sys/class/net/loopback0").exists()
+}
+
+/// Run `wslinfo --networking-mode` with a hard timeout so it can never stall
+/// startup. Config load is synchronous, so an unbounded `Command::output()`
+/// would block the whole boot if `wslinfo` (a symlink to `/init`) ever hung.
+/// On timeout the child is killed and `None` is returned, letting the caller
+/// fall back to the `loopback0` interface check. `wslinfo` normally answers in
+/// well under a millisecond, so the poll loop exits on its first iteration.
+fn wslinfo_networking_mode(timeout: std::time::Duration) -> Option<bool> {
+    use std::io::Read;
+    let mut child = std::process::Command::new("wslinfo")
         .arg("--networking-mode")
-        .output()
-    {
-        if out.status.success() {
-            if let Some(mirrored) =
-                parse_wslinfo_networking_mode(&String::from_utf8_lossy(&out.stdout))
-            {
-                return mirrored;
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()?;
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                if !status.success() {
+                    return None;
+                }
+                let mut out = String::new();
+                child.stdout.take()?.read_to_string(&mut out).ok()?;
+                return parse_wslinfo_networking_mode(&out);
             }
+            Ok(None) => {
+                if std::time::Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return None;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            Err(_) => return None,
         }
     }
-    std::path::Path::new("/sys/class/net/loopback0").exists()
 }
 
 fn default_max_peers() -> u32 {
