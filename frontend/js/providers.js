@@ -53,7 +53,7 @@ var PROVIDER_NAMES = {
 // button to validate an API key with the cheapest credible model.
 var PROVIDER_TEST_MODELS = {
   openai:     'gpt-4o-mini',
-  deepseek:   'deepseek-chat',
+  deepseek:   'deepseek-v4-flash',
   mistral:    'mistral-small-latest',
   groq:       'llama-3.1-8b-instant',
   nvidia_nim: 'meta/llama-3.1-8b-instruct',
@@ -62,7 +62,7 @@ var PROVIDER_TEST_MODELS = {
   fireworks:  'accounts/fireworks/models/llama-v3p3-70b-instruct',
   together:   'together:meta-llama/Llama-3.3-70B-Instruct-Turbo',
   deepinfra:  'deepinfra:meta-llama/Llama-3.3-70B-Instruct',
-  moonshot:   'moonshot-v1-8k',
+  moonshot:   'kimi-k2.5',
 };
 
 // Signup / API-key URLs for each provider. Single source of truth — consumed
@@ -80,7 +80,7 @@ var PROVIDER_SIGNUP_URLS = {
   fireworks:  'https://fireworks.ai/account/api-keys',
   together:   'https://api.together.xyz/settings/api-keys',
   deepinfra:  'https://deepinfra.com/dash/api_keys',
-  moonshot:   'https://platform.moonshot.cn/console/api-keys',
+  moonshot:   'https://platform.moonshot.ai/console/api-keys',
 };
 
 // Ordered list of all supported cloud provider keys.
