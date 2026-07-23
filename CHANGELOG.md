@@ -2,7 +2,7 @@
 
 All notable changes to SwarmLLM are documented here.
 
-## [Unreleased]
+## [0.3.14-alpha] — 2026-07-23
 
 ### Added
 
@@ -13,6 +13,13 @@ All notable changes to SwarmLLM are documented here.
   remote test node — and matches what the dashboard offers. The picker in
   Settings → "Testing & Diagnostics" is also open by default now instead of
   tucked away, so it's easier to find.
+
+### Fixed
+
+- **The Docker GPU image now works on more cards.** The last release widened
+  NVIDIA support (RTX 20-series and up) in the downloadable binaries, but the
+  `swarmllm:latest-cuda` container image was missed and stayed limited to
+  RTX 30-series and newer. It now covers the same range.
 
 ## [0.3.13-alpha] — 2026-07-23
 
