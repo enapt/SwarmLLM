@@ -2,7 +2,17 @@
 
 All notable changes to SwarmLLM are documented here.
 
-## [0.3.14-alpha] — 2026-07-23
+## [Unreleased]
+
+### Fixed
+
+- **A home node behind a router now gets itself back online automatically after
+  its relay drops.** Nodes that can't accept direct connections reach the swarm
+  through a public relay. If that relay restarted (or the reservation simply
+  expired), the node used to sit unreachable until it was restarted by hand —
+  it never tried to re-establish the relay path. It now notices the relay
+  circuit has gone and re-reserves within about a minute, with no intervention.
+  Found live when an anchor restart mid-test stranded a test node.
 
 ### Added
 

@@ -630,11 +630,20 @@ impl NetworkManager {
 
             SwarmEvent::ExpiredListenAddr { address, .. } => {
                 tracing::info!(%address, "Listen address expired");
+                if crate::network::relay::is_relay_circuit_addr(&address) {
+                    self.note_relay_circuit_lost("reservation expired");
+                }
                 self.refresh_listen_multiaddrs();
             }
 
             SwarmEvent::ListenerClosed { addresses, .. } => {
                 tracing::debug!(?addresses, "Listener closed");
+                if addresses
+                    .iter()
+                    .any(crate::network::relay::is_relay_circuit_addr)
+                {
+                    self.note_relay_circuit_lost("listener closed");
+                }
                 self.refresh_listen_multiaddrs();
             }
 
@@ -666,6 +675,28 @@ impl NetworkManager {
                 tracing::trace!(?other, "Unhandled swarm event");
             }
         }
+    }
+
+    /// Drop the `relay_activated` latch after the relay circuit we were reachable
+    /// through is lost (relay peer restarted, connection dropped, or reservation
+    /// expired). This re-arms the recovery paths: the liveness-tick fallback
+    /// (`mod.rs`) re-checks reachability every tick and, seeing the latch clear +
+    /// no internet-reachable address, calls `try_activate_relay` again — which
+    /// re-reserves once a relay peer is reachable (bootstrap re-dial handles the
+    /// reconnect). Without this reset the one-shot latch stays set forever and a
+    /// NAT'd node never regains internet reachability until a manual restart
+    /// (found live 2026-07-23: an anchor restart mid-test stranded the test node).
+    /// `last_relay_attempt` is deliberately left intact so a flapping relay is
+    /// still rate-limited by `RELAY_RETRY_MIN_SECS`.
+    pub(super) fn note_relay_circuit_lost(&mut self, reason: &str) {
+        if !self.relay_activated {
+            return; // we had no relay reservation to lose
+        }
+        self.relay_activated = false;
+        tracing::info!(
+            reason,
+            "Relay circuit lost — will re-reserve on the next liveness tick"
+        );
     }
 
     /// Reserve a relay circuit on a bootstrap peer so a node that isn't directly

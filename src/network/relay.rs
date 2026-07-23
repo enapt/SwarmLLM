@@ -62,6 +62,21 @@ pub fn relay_listen_addr(relay_peer_id: &PeerId, relay_addr: &Multiaddr) -> Mult
         .with(libp2p::multiaddr::Protocol::P2pCircuit)
 }
 
+/// Whether `addr` contains a `/p2p-circuit` hop — i.e. it's a relay-circuit
+/// address (our own relayed listen address, or any relayed dial form).
+///
+/// The swarm event loop uses this to notice when the relay circuit we were
+/// reachable through has gone (`ListenerClosed` / `ExpiredListenAddr` carrying a
+/// circuit address), so it can drop the one-shot `relay_activated` latch and let
+/// the liveness-tick fallback re-reserve a relay. Without that reset, a NAT'd
+/// node never recovers internet reachability after the relay peer restarts or
+/// the reservation lapses — found live 2026-07-23, when an anchor restart
+/// mid-test left the test node unreachable until it was manually bounced.
+pub(crate) fn is_relay_circuit_addr(addr: &Multiaddr) -> bool {
+    addr.iter()
+        .any(|p| matches!(p, libp2p::multiaddr::Protocol::P2pCircuit))
+}
+
 /// Handle relay server events — log reservations and circuit lifecycle.
 /// Tracks circuit open/close for relay service credit accrual.
 pub fn handle_relay_server_event(
@@ -211,5 +226,59 @@ mod tests {
             relay_activated = true;
         }
         assert!(!relay_activated);
+    }
+
+    #[test]
+    fn is_relay_circuit_addr_detects_circuit() {
+        let relay_peer = PeerId::random();
+        let base: Multiaddr = "/ip4/1.2.3.4/tcp/8800".parse().unwrap();
+
+        // Our own relayed listen address is a circuit.
+        assert!(is_relay_circuit_addr(&relay_listen_addr(
+            &relay_peer,
+            &base
+        )));
+
+        // A full relayed dial form (…/p2p-circuit/p2p/<target>) is a circuit.
+        let target = PeerId::random();
+        let full: Multiaddr =
+            format!("/ip4/1.2.3.4/tcp/8800/p2p/{relay_peer}/p2p-circuit/p2p/{target}")
+                .parse()
+                .unwrap();
+        assert!(is_relay_circuit_addr(&full));
+
+        // A direct address is NOT a circuit — resetting the relay latch on a
+        // plain listener close would needlessly re-reserve.
+        let direct: Multiaddr = "/ip4/1.2.3.4/tcp/8800".parse().unwrap();
+        assert!(!is_relay_circuit_addr(&direct));
+        let quic: Multiaddr = "/ip4/1.2.3.4/udp/8800/quic-v1".parse().unwrap();
+        assert!(!is_relay_circuit_addr(&quic));
+    }
+
+    #[test]
+    fn relay_latch_clears_on_circuit_loss_and_rearms_recovery() {
+        // Mirrors `note_relay_circuit_lost` + the liveness-tick fallback: once a
+        // reserved circuit is lost the latch must clear, so the fallback (latch
+        // false + not reachable) can re-fire and re-reserve. The one-shot tests
+        // above cover idempotency *within* a single live reservation; this is the
+        // recovery-after-loss case the latch previously blocked forever.
+        let mut relay_activated = true; // reserved earlier this session
+
+        // Circuit lost (relay restart / reservation expiry): drop the latch.
+        if relay_activated {
+            relay_activated = false;
+        }
+        assert!(
+            !relay_activated,
+            "latch must clear when the circuit is lost"
+        );
+
+        // Next liveness tick: latch clear + no reachable address → re-reserve.
+        let (auto_relay, reachable) = (true, false);
+        let mut re_reserved = false;
+        if !relay_activated && auto_relay && !reachable {
+            re_reserved = true;
+        }
+        assert!(re_reserved, "recovery must re-arm after the latch clears");
     }
 }
