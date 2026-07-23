@@ -54,7 +54,11 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
                 if holders.contains(&local_node_id) {
                     local_count += 1;
                 }
-                if !holders.is_empty() {
+                // A shard only counts toward network-wide "ready" if a holder can
+                // actually serve it now — the local node or a connected peer.
+                // Matching the scheduler's oracle stops a disconnected peer's
+                // stale announce from making a model look ready it can't serve.
+                if state.shared_state.any_holder_reachable(&holders) {
                     global_count += 1;
                 }
             }
@@ -219,7 +223,7 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
             "has_header": has_header,
             "probed": probed,
             "mmproj": {
-                "available": !holders.is_empty(),
+                "available": state.shared_state.any_holder_reachable(&holders),
                 "local": local_has,
                 "holders": holders.len(),
                 "holder_ids": holders

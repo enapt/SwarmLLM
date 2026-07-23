@@ -6,6 +6,13 @@ All notable changes to SwarmLLM are documented here.
 
 ### Fixed
 
+- **The dashboard no longer calls a model "ready" when it can't actually be
+  served.** Readiness was computed from whether *any* node had ever announced
+  holding each shard — including peers that have since disconnected. That
+  disagreed with how inference actually routes (only currently-connected holders
+  count), so a model could show "ready" and then fail with "not enough peers have
+  the shards." Readiness now uses the same reachable-holder test the scheduler
+  does, so what the dashboard reports matches what can really run.
 - **SwarmLLM under WSL2 "mirrored" networking now uses your real network instead
   of hiding on loopback.** On WSL2 the app applies conservative network settings
   because the default WSL networking sits behind an extra layer of address

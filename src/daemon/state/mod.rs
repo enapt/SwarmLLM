@@ -1143,6 +1143,24 @@ impl SharedState {
         false
     }
 
+    /// Whether any holder in `holders` can actually serve a shard *right now* —
+    /// the local node, or a currently-connected peer.
+    ///
+    /// This is the reporting-side mirror of the scheduler's liveness oracle
+    /// (`inference::scheduler::gather_candidates` filters shard holders by
+    /// `connected_node_ids`, skipping the local node which is always available).
+    /// Readiness/availability shown on the dashboard MUST use this rather than
+    /// "the holder set is non-empty": `peer_registry`/`shard_holders` retain a
+    /// peer's announces across disconnects, so a stale announce from a peer that
+    /// has since left would otherwise mark a model "ready" that the scheduler
+    /// can never assemble — the exact "dashboard says ready but it isn't" gap.
+    pub fn any_holder_reachable(&self, holders: &[crate::types::NodeId]) -> bool {
+        let local = self.identity.node_id();
+        holders
+            .iter()
+            .any(|h| h == local || self.connected_node_ids.contains(h))
+    }
+
     /// Check if a local shard is currently loaded in VRAM (process pool, split model, or legacy executor).
     pub fn is_shard_in_vram(&self, model_id: &crate::types::ModelId, shard_index: u32) -> bool {
         let window = self.model_process_pool.get_shard_window(model_id);
