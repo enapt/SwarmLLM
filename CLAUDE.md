@@ -214,11 +214,17 @@ any GPU ≥ it at runtime — the build toolkit version is irrelevant to which G
   (`-gpuarch2`) because `llama-cpp-sys-2` forwards `CMAKE_*` to CMake but doesn't
   `rerun-if-env-changed` → a warm cache would ship the old arches (gotcha #160).
 
-**Phase 2 (open, riskier — do via a validation PR):** bump CUDA **12.4 → 12.8**
-for *native* sm_120 (llama.cpp/cuBLAS PTX-JIT on Blackwell is up to ~5× slower).
-`cudarc 0.19` is fine on 12.x (candle #3249 is a CUDA *13.0* rejection). Risks:
-`Jimver@v0.2.19` may not know `12.8.0`; old `llama-cpp-2 0.1` must accept arch
-`120`. **Deferred with context:** a compute_80 variant to recover bf16-WMMA for
+**Phase 2 (merged, PR #17 → f9356e7c):** Linux CUDA **12.4 → 12.8** for *native*
+sm_120 (llama.cpp/cuBLAS PTX-JIT on Blackwell is up to ~5× slower) + native
+`120-real` in the arch list; cache-key `gpuarch2 → gpuarch3`. **Windows stayed on
+12.4** (candle=PTX/driver-JIT already covers Blackwell, llama.cpp=Vulkan → 12.8
+buys nothing, and it dodges the `Jimver@v0.2.19` risk). PR feature-check confirmed
+**candle compiles clean on 12.8** (`cudarc 0.19` fine on 12.x; candle #3249 is a
+CUDA *13.0* rejection). **Still to land green:** the full native-sm_120 llama.cpp
+build is only exercised by `main`'s cache-warm — revert just the `120` add if the
+old `llama-cpp-2 0.1` rejects it. Runtime correctness on real RTX 50 hardware
+needs a Discord tester before a *stable* tag (maintainer box is sm_86).
+**Deferred with context:** a compute_80 variant to recover candle bf16-WMMA for
 Ampere+ (needs a GPU benchmark + runtime compute-cap detection in
 `launcher.rs`/`update.rs`, which today key only on GPU presence / cfg-features).
 Full detail: `docs/FUTURE_WORK.md § CI / build infra`.

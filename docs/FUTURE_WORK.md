@@ -2051,25 +2051,30 @@ causes were investigated:
    job on runner image, profile, features and env, or it silently warms a
    cache nothing reads.
 
-2. *llama.cpp compiles a wide CUDA arch spread* — **PHASE 1 DONE (R150,
-   2026-07-23), Phase 2 open.** `llama-cpp-sys-2`'s `build.rs` forwards any
-   `CMAKE_*` env to CMake (build.rs:531-534, verified), so the `cuda` (Linux)
-   build now pins
-   `CMAKE_CUDA_ARCHITECTURES: "61-real;75-real;80-real;86-real;89-real;90-real;90-virtual"`
-   — native SASS Pascal→Hopper + compute_90 PTX so Blackwell runs via driver
-   JIT. Because that build.rs does NOT `rerun-if-env-changed` on it, the
-   rust-cache `shared-key` carries a `-gpuarch2` discriminator; bump it whenever
-   the arch list changes or a warm cache will silently ship the old set.
-   **Phase 2 (open):** `sm_120` can't be a *native* target on CUDA 12.4 (nvcc
-   predates it) — Blackwell users get the compute_90 PTX-JIT path, which
-   research shows is up to ~5× slower on the llama.cpp/cuBLAS path than native.
-   Closing this means bumping the toolkit 12.4 → **12.8** (first with native
-   Blackwell; `cudarc 0.19` is fine on 12.x — candle #3249 is a CUDA *13.0*
-   rejection, not 12.8) and adding `120-real;120-virtual`. Risks to validate:
-   the `Jimver/cuda-toolkit@v0.2.19` pin may not know `12.8.0` (Windows GPU
-   build), and `llama-cpp-2 0.1`'s bundled llama.cpp must accept a `120` arch.
-   Do it on a PR so `ci.yml`'s feature-check validates the Linux compile before
-   it touches `main`.
+2. *llama.cpp compiles a wide CUDA arch spread* — **DONE (R150, 2026-07-23).**
+   `llama-cpp-sys-2`'s `build.rs` forwards any `CMAKE_*` env to CMake
+   (build.rs:531-534, verified), so the `cuda` (Linux) build pins
+   `CMAKE_CUDA_ARCHITECTURES: "61-real;75-real;80-real;86-real;89-real;90-real;120-real;120-virtual"`
+   — native SASS Pascal→**Blackwell** + compute_120 PTX for a future
+   post-Blackwell card. Because that build.rs does NOT `rerun-if-env-changed`
+   on it, the rust-cache `shared-key` carries a `-gpuarchN` discriminator; bump
+   it whenever the arch list changes or a warm cache will silently ship the old
+   set (currently `-gpuarch3`).
+   - **Phase 1** (commit 87222c75, main, CI-green): arch pin without `120`, on
+     CUDA 12.4.
+   - **Phase 2** (PR #17 → f9356e7c, merged): Linux toolkit **12.4 → 12.8**
+     (first nvcc that knows sm_120; `cudarc 0.19` compiled clean against 12.8 in
+     the PR's feature-check — candle #3249 is a CUDA *13.0* rejection, not 12.8)
+     + native `120-real`. **Windows deliberately stayed on 12.4** — its only CUDA
+     consumer is candle (PTX/driver-JIT, so Blackwell already works) and its
+     llama.cpp is Vulkan, so 12.8 buys nothing there and it dodges the
+     `Jimver@v0.2.19`-may-not-know-`12.8.0` risk.
+   - **Remaining validation** (not blockers, but not yet green): the full native
+     `sm_120` llama.cpp build is only exercised by `main`'s **cache-warm**
+     (gpuarch3/12.8) post-merge — if the bundled `llama-cpp-2 0.1` rejects arch
+     `120`, revert just the `120` addition (keep 12.8 + the rest). And real
+     runtime correctness on RTX 50 hardware needs a Discord tester before any
+     *stable* (non-alpha) tag — the maintainer's box is sm_86.
 
 **candle side — Phase 1 DONE.** `CUDA_COMPUTE_CAP` lowered `80 → 75`.
 candle-kernels emits PTX, so this is a *floor*: the driver JIT-compiles it to
