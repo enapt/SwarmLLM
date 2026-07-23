@@ -1897,7 +1897,7 @@
           (p.latency_ms || 0) + '|' + (p.hosted_shards || 0) + '|' +
           (p.trust_score || 0) + '|' + (p.is_lan_peer ? 1 : 0) + '|' +
           (p.is_pool_member ? 1 : 0) + '|' +
-          (p.nickname || '') + '|' + (p.gpu || '');
+          (p.nickname || '') + '|' + (p.gpu || '') + '|' + (p.version || '');
       }).sort().join('||') + '#' + App.dashboard._peerSort + ':' + App.dashboard._peerSortDir;
       if (App.dashboard._lastPeerRenderSig === renderSig) return;
       App.dashboard._lastPeerRenderSig = renderSig;
@@ -1989,7 +1989,15 @@
         var shards = p.hosted_shards || 0;
         var trust = p.trust_score !== undefined ? (p.trust_score * 100).toFixed(0) + '%' : '\u2014';
         var status = p.healthy ? I18n.t('dashboard.health_healthy') : I18n.t('dashboard.peer_degraded');
-        var gpu = p.gpu ? '<div class="text-muted" style="font-size:0.62rem">' + U.escapeHtml(p.gpu) + '</div>' : '';
+        // Meta line under the peer name: version + GPU. Version is gossiped by
+        // every node and makes it obvious at a glance when a peer is on an older
+        // build (a real help when a bug behaves differently across machines).
+        var verText = p.version ? 'v' + U.escapeHtml(p.version) : '';
+        var gpuText = p.gpu ? U.escapeHtml(p.gpu) : '';
+        var metaParts = [verText, gpuText].filter(Boolean);
+        var gpu = metaParts.length
+          ? '<div class="text-muted" style="font-size:0.62rem">' + metaParts.join(' · ') + '</div>'
+          : '';
 
         html += '<tr>' +
           '<td><div class="peer-name-cell"><span class="status-dot ' + dotClass + '"></span><span class="peer-nick">' + U.escapeHtml(name) + '</span>' + idSub + lanBadge + '</div>' + gpu + '</td>' +
