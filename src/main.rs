@@ -85,6 +85,15 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
+    /// Download a shared reference / test model (smoke, standard, or stress).
+    /// Run with no tier to see what's available. Needs a running daemon to fetch.
+    GetModel {
+        /// Tier to fetch: smoke, standard, or stress. Omit to list them.
+        tier: Option<String>,
+        /// Download every shard (the whole model), not just this node's fair share.
+        #[arg(long)]
+        all: bool,
+    },
     /// Check for updates and apply if available
     Update {
         /// Only check, do not download or apply
@@ -317,6 +326,11 @@ async fn async_main(mut cli: Cli) -> anyhow::Result<()> {
             let port = resolve_client_port(cli.port);
             let data_dir = resolve_data_dir(&cli.data_dir);
             cli::peers::query_peers(port, &data_dir, json).await
+        }
+        Commands::GetModel { tier, all } => {
+            let port = resolve_client_port(cli.port);
+            let data_dir = resolve_data_dir(&cli.data_dir);
+            cli::get_model::get_model(port, &data_dir, tier, all).await
         }
         Commands::ModelWorker {
             socket,

@@ -2,6 +2,18 @@
 
 All notable changes to SwarmLLM are documented here.
 
+## [Unreleased]
+
+### Added
+
+- **Getting a shared test model is now one command.** `swarmllm get-model` lists
+  the three shared test models (smoke / standard / stress); `swarmllm get-model
+  standard` fetches this node's share of one, and `--all` grabs the whole thing.
+  This works on a headless machine with no browser — handy for setting up a
+  remote test node — and matches what the dashboard offers. The picker in
+  Settings → "Testing & Diagnostics" is also open by default now instead of
+  tucked away, so it's easier to find.
+
 ## [0.3.13-alpha] — 2026-07-23
 
 ### Changed

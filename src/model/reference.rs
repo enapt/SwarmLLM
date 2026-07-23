@@ -6,8 +6,9 @@
 //! belong next to each other. Pinning repo + filename makes a benchmark
 //! reproducible.
 //!
-//! This list is the single source of truth, served to the dashboard by
-//! `GET /api/admin/reference-models` and mirrored in
+//! This list is the single source of truth: served to the dashboard by
+//! `GET /api/admin/reference-models`, read directly by the `swarmllm get-model`
+//! CLI (`src/cli/get_model.rs`), and mirrored in
 //! `examples/fetch_reference_model.sh`. Rationale and tier guidance live in
 //! `docs/REFERENCE_MODELS.md`.
 //!

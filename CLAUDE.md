@@ -53,7 +53,7 @@ swarmllm/
 ├── src/
 │   ├── main.rs, lib.rs, error.rs, http.rs, types.rs, update.rs
 │   ├── bin/       (launcher.rs — Windows GPU/CPU auto-selecting launcher)
-│   ├── cli/       (mod, run, status, chat, bench, peers, pool, split_test, update)
+│   ├── cli/       (mod, run, status, chat, bench, peers, pool, split_test, update, get_model — R150 `swarmllm get-model` reference-model opt-in)
 │   ├── config/    (mod, providers, credit, network, ops, node, inference)
 │   ├── daemon/    (mod, manifest, shard_loader, dispatch/, startup, background, helpers, supervisor)
 │   │   └── state/        (mod, activity, capacity, capacity_plan, credits, events, hf, metrics, models, tp_allreduce)

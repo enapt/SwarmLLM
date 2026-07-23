@@ -1,6 +1,12 @@
 #!/bin/bash
 # Opt in to hosting a reference test model.
 #
+# The built-in CLI does the same thing and is the easier path now:
+#   swarmllm get-model              # list the tiers
+#   swarmllm get-model standard     # fair share
+#   swarmllm get-model standard --all
+# This script stays as a dependency-free curl example.
+#
 #   ./fetch_reference_model.sh smoke              # host your fair share
 #   ./fetch_reference_model.sh standard --all     # host every shard
 #   ./fetch_reference_model.sh --list

@@ -132,6 +132,18 @@ Reference models are never fetched automatically. They exist to test the swarm,
 and quietly spending a user's bandwidth and disk for that is not a reasonable
 default — so acquiring one is always something a person chose to do.
 
+The easiest path is the built-in CLI — works on a headless box (a test VPS, a
+server) with no browser:
+
+```bash
+swarmllm get-model                 # list the tiers (no daemon needed)
+swarmllm get-model standard        # host this node's fair share
+swarmllm get-model standard --all  # host every shard
+```
+
+The dashboard offers the same thing under Settings → "Testing & Diagnostics",
+and there's a dependency-free curl script if you prefer:
+
 ```bash
 examples/fetch_reference_model.sh --list            # what is available
 examples/fetch_reference_model.sh standard          # host your fair share
