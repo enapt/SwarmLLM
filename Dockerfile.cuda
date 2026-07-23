@@ -57,12 +57,15 @@ ENV LIBRARY_PATH=/usr/local/cuda/lib64:${LIBRARY_PATH}
 # devices through to `docker build` (GPUs only attach at `docker run
 # --gpus all`), so the autodetect fails with:
 #   ComputeCapDetectionFailed("Failed to run nvidia-smi: No such file…")
-# Pin compute-cap to 80 (Ampere — RTX 3060+, A100, H100, …) so nvcc
-# emits PTX targeting that arch. Generated PTX is JIT-compiled at
-# runtime to the user's actual GPU, so the only thing 80 affects is
-# the lower-bound: any modern NVIDIA card can JIT this. Matches the
-# release.yml release-binary build for the same reason.
-ENV CUDA_COMPUTE_CAP=80
+# Pin compute-cap to 75 (Turing — RTX 20-series / GTX 16 and up) so nvcc
+# emits PTX targeting that arch. candle-kernels emits PTX, which the driver
+# JIT-compiles at runtime to the user's actual GPU, so this is a *floor*:
+# every card at or above sm_75 is covered, including Blackwell (RTX 50) via
+# forward-compat JIT — the build toolkit version is irrelevant to which GPUs
+# it runs on, which is why this image stays on the 12.4 base. Kept in step
+# with release.yml, which lowered the binary floor 80→75 for the same reason
+# (bf16-WMMA kernels disable below sm_80; harmless for the quantized path).
+ENV CUDA_COMPUTE_CAP=75
 
 # Cache dependency compilation
 COPY Cargo.toml Cargo.lock build.rs ./
