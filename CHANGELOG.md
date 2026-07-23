@@ -6,6 +6,16 @@ All notable changes to SwarmLLM are documented here.
 
 ### Fixed
 
+- **SwarmLLM under WSL2 "mirrored" networking now uses your real network instead
+  of hiding on loopback.** On WSL2 the app applies conservative network settings
+  because the default WSL networking sits behind an extra layer of address
+  translation. But Windows 11's newer **mirrored** networking mode makes the
+  Linux side a normal citizen of your home network — with a real address and
+  working direct connections. The app didn't tell the two apart, so on mirrored
+  mode it needlessly turned off QUIC and bound to loopback, forcing all traffic
+  through a relay and leaving the node hard to reach. It now detects mirrored
+  mode (via `wslinfo`, matching how Docker handles it) and keeps full networking
+  on, so a WSL2 node joins and serves like any other machine.
 - **A backup copy of a model can no longer spread through the swarm.** An earlier
   release stopped a node from *offering* a copied model folder
   (`my-model.FULLBACKUP`, `my-model.old`) to the network. But if another node on

@@ -298,9 +298,19 @@ impl Config {
             config.network.bootstrap_peers = cli_bootstrap;
         }
 
-        // 5. Auto-detect WSL2 and apply safe network defaults.
-        // Only overrides values the user didn't explicitly set in config.toml.
-        if network::is_wsl2() {
+        // 5. Auto-detect WSL2 and apply safe network defaults — but ONLY in the
+        // default NAT networking mode. In mirrored mode the VM shares the host's
+        // interfaces and is a first-class LAN citizen (real IP, working QUIC /
+        // mDNS / UPnP / AutoNAT / DCUtR), so the NAT-mode safe defaults would
+        // strand it on the relay. Only overrides values the user didn't
+        // explicitly set in config.toml.
+        if network::is_wsl2() && network::wsl_networking_is_mirrored() {
+            tracing::info!(
+                "WSL2 mirrored networking detected — node is a first-class LAN citizen; \
+                 keeping full networking (QUIC/mDNS/UPnP/AutoNAT/DCUtR), NAT-mode safe \
+                 defaults NOT applied"
+            );
+        } else if network::is_wsl2() {
             // Parse TOML into a Value to check which keys were explicitly set.
             // Raw string search (e.g., config_text.contains("enable_quic")) would
             // match commented-out keys or keys in string values — false positives.

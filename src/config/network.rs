@@ -132,6 +132,51 @@ pub(super) fn is_wsl2() -> bool {
         .unwrap_or(false)
 }
 
+/// Parse the stdout of `wslinfo --networking-mode`.
+///
+/// `Some(true)` = mirrored, `Some(false)` = any other explicit mode
+/// (`nat` / `none` / `virtioproxy`), `None` = no usable output so the caller
+/// should fall back to the interface signal.
+fn parse_wslinfo_networking_mode(stdout: &str) -> Option<bool> {
+    let mode = stdout.trim();
+    if mode.is_empty() {
+        return None;
+    }
+    Some(mode.eq_ignore_ascii_case("mirrored"))
+}
+
+/// Whether WSL2 networking is running in "mirrored" mode.
+///
+/// In mirrored mode (Windows 11 22H2+, WSL 2.0.0+, opt-in via `.wslconfig`
+/// `networkingMode=mirrored`) the VM shares the Windows host's network
+/// interfaces: it gets a real LAN address, and QUIC / mDNS / UPnP / AutoNAT /
+/// DCUtR all behave as on a native host. The NAT-mode "safe defaults" are then
+/// actively harmful — pinning the node to loopback and disabling QUIC strands
+/// an otherwise-reachable node on the relay (observed live: outbound inference
+/// request_response to a public peer timed out because our only path was the
+/// relay).
+///
+/// Detection, in order of reliability:
+/// 1. `wslinfo --networking-mode` (WSL 2.0.4+) prints `mirrored` or `nat`.
+/// 2. Fallback for older WSL that predates `wslinfo`: the `loopback0`
+///    interface, which mirrored mode creates — the same signal Docker uses to
+///    special-case mirrored mode (moby/moby#48075).
+pub(super) fn wsl_networking_is_mirrored() -> bool {
+    if let Ok(out) = std::process::Command::new("wslinfo")
+        .arg("--networking-mode")
+        .output()
+    {
+        if out.status.success() {
+            if let Some(mirrored) =
+                parse_wslinfo_networking_mode(&String::from_utf8_lossy(&out.stdout))
+            {
+                return mirrored;
+            }
+        }
+    }
+    std::path::Path::new("/sys/class/net/loopback0").exists()
+}
+
 fn default_max_peers() -> u32 {
     200
 }
@@ -208,6 +253,21 @@ impl<'de> Deserialize<'de> for ExternalAddresses {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wslinfo_mode_parsing() {
+        // Mirrored — the only value that must skip the NAT-mode safe defaults.
+        assert_eq!(parse_wslinfo_networking_mode("mirrored\n"), Some(true));
+        assert_eq!(parse_wslinfo_networking_mode("  mirrored  "), Some(true));
+        assert_eq!(parse_wslinfo_networking_mode("MIRRORED"), Some(true));
+        // Any other explicit mode keeps the safe defaults.
+        assert_eq!(parse_wslinfo_networking_mode("nat\n"), Some(false));
+        assert_eq!(parse_wslinfo_networking_mode("none"), Some(false));
+        assert_eq!(parse_wslinfo_networking_mode("virtioproxy"), Some(false));
+        // No usable output → caller falls back to the loopback0 signal.
+        assert_eq!(parse_wslinfo_networking_mode(""), None);
+        assert_eq!(parse_wslinfo_networking_mode("   \n"), None);
+    }
 
     #[test]
     fn upnp_and_external_address_defaults() {
