@@ -357,7 +357,7 @@ impl HealthMonitor {
             max_contribution: self.shared_state.config.node.contribution.clone().into(),
             uptime_seconds,
             version: env!("CARGO_PKG_VERSION").to_string(),
-            region: self.shared_state.config.identity.region.clone(),
+            region: self.shared_state.effective_region().await,
             est_tokens_per_sec_7b,
             observed_latencies,
         };

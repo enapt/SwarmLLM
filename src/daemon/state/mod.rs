@@ -1143,6 +1143,24 @@ impl SharedState {
         false
     }
 
+    /// This node's region for reporting/geo purposes: the explicitly configured
+    /// `identity.region` if set, otherwise the IP-geolocated `detected_region`.
+    ///
+    /// `identity.region` is `None` unless the operator set it in config.toml, and
+    /// the auto-detected value lives in `detected_region` — so any site that reads
+    /// `config.identity.region` directly reports "no region" on the common
+    /// auto-detected node, which is why the network map placed every such node
+    /// nowhere (or defaulted them to the viewer's own country). Reporting paths
+    /// (capacity announcement, WS region counts, region gossip) MUST use this.
+    pub async fn effective_region(&self) -> Option<String> {
+        if let Some(r) = self.config.identity.region.as_ref() {
+            if !r.is_empty() {
+                return Some(r.clone());
+            }
+        }
+        self.detected_region.read().await.clone()
+    }
+
     /// Whether any holder in `holders` can actually serve a shard *right now* —
     /// the local node, or a currently-connected peer.
     ///

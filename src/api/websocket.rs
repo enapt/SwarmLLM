@@ -626,7 +626,7 @@ async fn build_stats_message(state: &SharedState) -> String {
     // Region summary for network map — includes demand rates and coverage gaps
     {
         let mut region_counts: HashMap<String, u64> = HashMap::new();
-        if let Some(ref region) = state.config.identity.region {
+        if let Some(region) = state.effective_region().await {
             *region_counts.entry(region.to_uppercase()).or_insert(0) += 1;
         }
         for peer in state.peer_registry.iter() {
