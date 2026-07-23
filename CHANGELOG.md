@@ -6,6 +6,14 @@ All notable changes to SwarmLLM are documented here.
 
 ### Fixed
 
+- **A backup copy of a model can no longer spread through the swarm.** An earlier
+  release stopped a node from *offering* a copied model folder
+  (`my-model.FULLBACKUP`, `my-model.old`) to the network. But if another node on
+  an older build still had one and gossiped it, everyone else accepted the name,
+  counted it, and even started downloading it — a model no one could ever finish
+  getting, because the name doesn't correspond to any real model. Copied-folder
+  names are now refused wherever they arrive from — a peer, a saved record, or a
+  local folder — so they can't be stored, counted, or passed on.
 - **A home node behind a router now gets itself back online automatically after
   its relay drops.** Nodes that can't accept direct connections reach the swarm
   through a public relay. If that relay restarted (or the reservation simply

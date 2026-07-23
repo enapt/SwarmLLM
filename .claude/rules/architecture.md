@@ -304,6 +304,26 @@ silently break at the wire if duplicated:
   loss of trust) requires the same one-place edit; do not soft-disable
   via wrappers because the trust delta is a real security event worth
   surfacing in the diff.
+- **`model::manifest::is_backup_artifact_id`** — canonical check for a
+  model id that is a copied-folder backup (`<model>.FULLBACKUP`,
+  `<model>.old`, `<model>~`, `… copy`) rather than a real model identity.
+  A model's identity must come from the model, not from whatever a
+  directory was called. `ModelRegistry::register_manifest` nets this at
+  the single point EVERY adoption path funnels through (gossip ingress,
+  DB reload on startup, local disk scan, acquisition) — so a backup name
+  can neither be stored, persisted, nor re-gossiped regardless of how it
+  arrived. Belt-and-suspenders explicit guards also sit at the network
+  boundary (`daemon/dispatch` ModelManifest handler emits a
+  `security`/`manifest_rejected` activity event + skips the auto-manage
+  wake; ShardAnnounce + RegionShardSummary skip backup ids so holder /
+  region counts stay clean without a manifest) and the local disk scan
+  (`daemon/startup.rs`, so an artifact is never persisted). New surfaces
+  that accept a model id from disk or the network MUST reject via this
+  helper rather than re-deriving the keyword list. The keyword list is
+  matched against the LAST dotted segment only, so a legit id carrying
+  dots from its source filename (`tinyllama-1.1b-chat-v1.0.q4-k-m`) is
+  never caught. The v0.3.10 disk-scan-only guard was insufficient because
+  a peer on an older build re-gossips the name straight back in.
 
 ## Peer Cache: storable vs dialable
 

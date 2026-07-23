@@ -73,6 +73,21 @@ impl ModelRegistry {
 
     /// Register a model manifest.
     pub fn register_manifest(&self, manifest: ModelManifest) {
+        // Universal net against copied-folder model names (`<model>.FULLBACKUP`,
+        // `<model>.old`). This is the single point every adoption path funnels
+        // through — gossip ingress, DB reload on startup, local disk scan,
+        // acquisition — so rejecting here keeps a backup-copy identity out of
+        // the registry regardless of how it arrived, and stops it being
+        // persisted and re-gossiped. See `manifest::is_backup_artifact_id`.
+        if crate::model::manifest::is_backup_artifact_id(&manifest.id.0) {
+            tracing::warn!(
+                model = %manifest.id,
+                "Refusing manifest with a backup-copy name — a model's identity \
+                 must come from the model, not a copied directory. Rename it to \
+                 the real model id if this is genuine."
+            );
+            return;
+        }
         tracing::info!(
             model = %manifest.id,
             name = %manifest.name,

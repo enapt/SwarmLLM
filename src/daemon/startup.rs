@@ -232,6 +232,18 @@ pub(super) async fn restore_persistent_state(
                                  is being ignored on purpose."
                             );
                             false
+                        } else if crate::model::manifest::is_backup_artifact_id(&manifest.id.0) {
+                            // The dir name and the manifest id agree — but both
+                            // are a backup-copy name (an older build regenerated
+                            // the manifest from the copied folder). Skip so it is
+                            // neither registered nor persisted and re-gossiped.
+                            tracing::warn!(
+                                dir = %model_id,
+                                "Skipping model: name looks like a local backup copy \
+                                 (`.FULLBACKUP`, `.old`, …), not a real model. Rename \
+                                 to the real model id if this is genuine."
+                            );
+                            false
                         } else if manifest.verify_hash().is_ok() {
                             // Claim publisher as ourselves so health monitor
                             // broadcasts this manifest (and its HF source) to peers.

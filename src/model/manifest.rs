@@ -3,6 +3,58 @@ use std::path::Path;
 use crate::error::SwarmError;
 use crate::types::{Blake3Hash, ModelManifest};
 
+/// Backup-copy artifacts a file manager (or a stray `cp`) leaves on disk.
+/// A model id whose final dotted segment is one of these — or that ends in a
+/// `~` / " copy" marker — is a local copy of a model, not a real upstream
+/// model, and must never be adopted from disk *or* gossip.
+///
+/// A model's identity has to come from the model, not from whatever a directory
+/// happened to be called: a copied folder (`<model>.FULLBACKUP`, `<model>.old`)
+/// used to be announced to the swarm under a name that resolves to nothing, so
+/// peers recorded shard holders for it and replica counts doubled while no one
+/// could ever actually download it. The v0.3.10 fix caught this on the local
+/// disk scan, but nothing filtered the name back out once a peer on an older
+/// build re-gossiped it — see the raw-pc `.FULLBACKUP` report, 2026-07-23.
+const BACKUP_ARTIFACT_SEGMENTS: &[&str] = &[
+    "fullbackup",
+    "backup",
+    "bak",
+    "old",
+    "orig",
+    "copy",
+    "save",
+    "tmp",
+    "temp",
+];
+
+/// True if `id` looks like a local backup/copy of a model rather than a real
+/// model identity. Used at every point a model id enters the registry
+/// (`register_manifest`, gossip ingress) so a copied-folder name can neither be
+/// stored nor propagated. Deliberately conservative: it only matches the LAST
+/// dotted segment against a fixed keyword list, so a legitimate id carrying
+/// dots from its source filename — `tinyllama-1.1b-chat-v1.0.q4-k-m` — is never
+/// caught.
+pub fn is_backup_artifact_id(id: &str) -> bool {
+    let lower = id.trim().to_ascii_lowercase();
+    if lower.is_empty() {
+        return false;
+    }
+    // `model~`, "Model copy", "model - copy", "model (copy)" — desktop copies.
+    if lower.ends_with('~')
+        || lower.ends_with(" copy")
+        || lower.ends_with("-copy")
+        || lower.ends_with("(copy)")
+    {
+        return true;
+    }
+    // Final dotted segment is a known backup keyword: `model.FULLBACKUP`,
+    // `model.old`. Guarded to the last segment only.
+    match lower.rsplit('.').next() {
+        Some(last) => BACKUP_ARTIFACT_SEGMENTS.contains(&last),
+        None => false,
+    }
+}
+
 /// Extension methods for ModelManifest (defined in swarmllm-types crate).
 pub trait ModelManifestExt {
     fn load_from_dir(dir: &Path) -> Result<ModelManifest, SwarmError>;
@@ -237,7 +289,38 @@ pub fn build_shard_infos_from_layouts(
 
 #[cfg(test)]
 mod tests {
+    use super::is_backup_artifact_id;
     use crate::types::*;
+
+    #[test]
+    fn backup_artifact_ids_are_rejected() {
+        // The exact name from the raw-pc report, plus common copy suffixes.
+        assert!(is_backup_artifact_id(
+            "meta-llama-3.1-8b-instruct-q4-k-m.FULLBACKUP"
+        ));
+        assert!(is_backup_artifact_id("some-model.old"));
+        assert!(is_backup_artifact_id("some-model.bak"));
+        assert!(is_backup_artifact_id("some-model.backup"));
+        assert!(is_backup_artifact_id("some-model.orig"));
+        assert!(is_backup_artifact_id("some-model.COPY")); // case-insensitive
+        assert!(is_backup_artifact_id("some-model.tmp"));
+        assert!(is_backup_artifact_id("some-model~"));
+        assert!(is_backup_artifact_id("some model copy"));
+        assert!(is_backup_artifact_id("some-model-copy"));
+        assert!(is_backup_artifact_id("some-model(copy)"));
+    }
+
+    #[test]
+    fn real_model_ids_are_kept() {
+        // Real ids carry dots from their source filename — the last segment is a
+        // quant tag, not a backup keyword — and must never be caught.
+        assert!(!is_backup_artifact_id("tinyllama-1.1b-chat-v1.0.q4-k-m"));
+        assert!(!is_backup_artifact_id("qwen2.5-0.5b-instruct-fp16"));
+        assert!(!is_backup_artifact_id("meta-llama-3.1-8b-instruct-q4-k-m"));
+        assert!(!is_backup_artifact_id("llama-3.2-3b-instruct-q4-k-m"));
+        assert!(!is_backup_artifact_id("gemma-2-2b-it-q4-k-m"));
+        assert!(!is_backup_artifact_id("")); // empty is not an artifact
+    }
 
     fn test_manifest() -> ModelManifest {
         ModelManifest {

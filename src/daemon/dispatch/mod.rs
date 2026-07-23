@@ -750,6 +750,12 @@ pub(crate) async fn dispatch_network_messages(
                                         // Group shards by model for activity logging
                                         let mut models_announced: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
                                         for shard_id in &announce.shards {
+                                            // Don't record holders for a backup-copy model name —
+                                            // it would inflate replica counts for a model that
+                                            // isn't real. Mirrors the manifest-ingress guard.
+                                            if crate::model::manifest::is_backup_artifact_id(&shard_id.model_id.0) {
+                                                continue;
+                                            }
                                             shared_state.model_registry
                                                 .record_shard_holder(shard_id.clone(), announce.node_id.clone());
                                             *models_announced.entry(shard_id.model_id.0.clone()).or_insert(0) += 1;
@@ -810,6 +816,36 @@ pub(crate) async fn dispatch_network_messages(
                                         // Content integrity is guaranteed by verify_hash_strict() below.
                                         if authenticated_sender.is_none() {
                                             tracing::debug!("Dropping unauthenticated ModelManifest");
+                                            continue;
+                                        }
+                                        // Refuse copied-folder model names (`<model>.FULLBACKUP`,
+                                        // `<model>.old`) at the network boundary. A peer on an
+                                        // older build still re-gossips these; accepting one lets
+                                        // a stale local-copy name spread swarm-wide under an id no
+                                        // node can ever resolve to a real download. register_manifest
+                                        // also nets these, but rejecting here skips the auto-manage
+                                        // wake and surfaces *why* to the operator.
+                                        if crate::model::manifest::is_backup_artifact_id(&manifest.id.0) {
+                                            tracing::warn!(
+                                                model = %manifest.id,
+                                                publisher = %manifest.publisher,
+                                                "Rejecting peer manifest: backup-copy name"
+                                            );
+                                            if let Some(ref sender) = authenticated_sender {
+                                                shared_state.emit_activity(
+                                                    crate::daemon::state::ActivityEvent::new(
+                                                        "security",
+                                                        "manifest_rejected",
+                                                        format!(
+                                                            "Rejected model \"{}\" from {}: looks like a local backup copy, not a real model",
+                                                            manifest.id.0, sender
+                                                        ),
+                                                    )
+                                                    .with_model(manifest.id.0.clone())
+                                                    .with_node(format!("{}", sender))
+                                                    .with_toast("warning", 6000),
+                                                );
+                                            }
                                             continue;
                                         }
                                         tracing::info!(
@@ -1675,6 +1711,11 @@ pub(crate) async fn dispatch_network_messages(
                                         if summary.region.len() > 8 || summary.shard_counts.len() > 512
                                             || summary.model_id.0.len() > 256
                                         {
+                                            continue;
+                                        }
+                                        // Don't track region availability for a backup-copy model
+                                        // name (`<model>.FULLBACKUP`) — see manifest ingress guard.
+                                        if crate::model::manifest::is_backup_artifact_id(&summary.model_id.0) {
                                             continue;
                                         }
                                         let now_ms = crate::types::unix_now_ms();
