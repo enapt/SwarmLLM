@@ -757,18 +757,15 @@ impl NetworkManager {
                             .get_manifest(&shard_id.model_id)
                             .map(|m| m.name.clone());
                         let peer_node_id = self.peer_to_node.get(&peer).map(|r| r.clone());
+                        // Nickname-or-short-id via the canonical helper when we know the
+                        // NodeId; fall back to the libp2p peer id only when we don't.
                         let peer_label = peer_node_id
                             .as_ref()
-                            .and_then(|nid| {
-                                self.shared_state
-                                    .nickname_registry
-                                    .get(nid)
-                                    .map(|r| r.nickname.clone())
-                            })
-                            .or_else(|| {
-                                peer_node_id
-                                    .as_ref()
-                                    .map(|nid| format!("{}", nid).chars().take(8).collect())
+                            .map(|nid| {
+                                crate::identity::nickname::short_display_name(
+                                    nid,
+                                    &self.shared_state.nickname_registry,
+                                )
                             })
                             .unwrap_or_else(|| format!("{}", peer).chars().take(12).collect());
                         self.shared_state.emit_activity(

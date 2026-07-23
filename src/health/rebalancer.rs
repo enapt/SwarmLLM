@@ -92,7 +92,10 @@ impl ShardRebalancer {
                         "rebalance_peer_left",
                         format!(
                             "Rebalancing: peer {} departed",
-                            &format!("{}", departed_peer)[..8]
+                            crate::identity::nickname::short_display_name(
+                                &departed_peer,
+                                &self.shared_state.nickname_registry
+                            )
                         ),
                     )
                     .with_node(format!("{}", departed_peer))

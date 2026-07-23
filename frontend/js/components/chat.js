@@ -735,8 +735,8 @@
           // silently dropping the user's chat history. Best-effort only —
           // older sessions are already chronologically last in the JSON, so
           // a follow-up save after the user prunes will succeed.
-          if (typeof App !== 'undefined' && App.notifications && App.notifications.toast) {
-            App.notifications.toast(
+          if (typeof App !== 'undefined' && App.notifications && App.notifications.showToast) {
+            App.notifications.showToast(
               (typeof I18n !== 'undefined' && I18n.t)
                 ? I18n.t('chat.storage_quota_exceeded')
                 : 'Local chat storage is full — older sessions cannot be saved.',

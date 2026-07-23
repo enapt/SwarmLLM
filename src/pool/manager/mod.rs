@@ -849,7 +849,13 @@ impl PoolManager {
             crate::daemon::state::ActivityEvent::new(
                 "pool",
                 "pool_member_removed",
-                format!("Device {} removed from pool", &format!("{}", node_id)[..16]),
+                format!(
+                    "Device {} removed from pool",
+                    crate::identity::nickname::short_display_name(
+                        &node_id,
+                        &self.shared_state.nickname_registry
+                    )
+                ),
             )
             .with_node(format!("{}", node_id))
             .with_toast("info", 5000),

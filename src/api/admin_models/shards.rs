@@ -399,11 +399,8 @@ pub async fn download_shard(
             }
 
             let display = shared.model_registry.display_name(&mid);
-            let peer_label = shared
-                .nickname_registry
-                .get(&target)
-                .map(|r| r.nickname.clone())
-                .unwrap_or_else(|| format!("{}", target).chars().take(8).collect());
+            let peer_label =
+                crate::identity::nickname::short_display_name(&target, &shared.nickname_registry);
             shared.emit_activity(
                 crate::daemon::state::ActivityEvent::new(
                     "download",

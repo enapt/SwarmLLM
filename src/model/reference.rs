@@ -63,11 +63,6 @@ pub const REFERENCE_MODELS: &[ReferenceModel] = &[
     },
 ];
 
-/// Look up a tier by key.
-pub fn by_tier(tier: &str) -> Option<&'static ReferenceModel> {
-    REFERENCE_MODELS.iter().find(|m| m.tier == tier)
-}
-
 /// Whether a model id is one of the pinned reference models.
 pub fn is_reference_model(model_id: &str) -> bool {
     REFERENCE_MODELS.iter().any(|m| m.model_id == model_id)
@@ -78,13 +73,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn tiers_are_unique_and_resolvable() {
+    fn tiers_are_unique() {
         let mut seen = std::collections::HashSet::new();
         for m in REFERENCE_MODELS {
             assert!(seen.insert(m.tier), "duplicate tier {}", m.tier);
-            assert!(by_tier(m.tier).is_some());
         }
-        assert!(by_tier("nonexistent").is_none());
     }
 
     /// `model_id` must match what the daemon derives from the filename —

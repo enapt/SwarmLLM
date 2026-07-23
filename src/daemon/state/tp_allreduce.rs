@@ -56,6 +56,26 @@ impl TpAllReduceCollector {
 
     /// Sum all partial tensors (f32) and return the reduced bytes + shape.
     pub fn reduce_sum(&self) -> Result<(Vec<u8>, Vec<u32>), crate::error::SwarmError> {
+        // A decompress/size failure on a partial is chargeable (`Inference`)
+        // ONLY when that partial arrived from a peer — `sender_peers[rank]` is
+        // `Some`. The local node's own partial (`None`) failing to round-trip is
+        // our bug, not a peer's, so it stays `Internal`. Mirrors the peer/local
+        // split in `inference/allreduce.rs` and completes the R148 attribution
+        // work. Absence of a partial (never arrived) is timeout-like and also
+        // stays `Internal` — only demonstrable corruption of received bytes is
+        // attributed to the sender.
+        let attribute = |rank: usize, msg: String| -> crate::error::SwarmError {
+            if self
+                .sender_peers
+                .get(rank)
+                .map(|s| s.is_some())
+                .unwrap_or(false)
+            {
+                crate::error::SwarmError::Inference(msg)
+            } else {
+                crate::error::SwarmError::Internal(msg)
+            }
+        };
         let first = self.partials[0].as_ref().ok_or_else(|| {
             crate::error::SwarmError::Internal("AllReduce: missing rank 0 partial".into())
         })?;
@@ -77,14 +97,14 @@ impl TpAllReduceCollector {
         let max_decompressed = elem_count * 4 + 1024; // expected size + small margin
         let decompressed = {
             let mut decoder = zstd::Decoder::new(std::io::Cursor::new(&first.partial_data))
-                .map_err(|e| crate::error::SwarmError::Internal(format!("zstd init: {e}")))?;
+                .map_err(|e| attribute(0, format!("zstd init: {e}")))?;
             let mut buf = Vec::with_capacity(elem_count * 4);
             use std::io::Read;
             decoder
                 .by_ref()
                 .take(max_decompressed as u64)
                 .read_to_end(&mut buf)
-                .map_err(|e| crate::error::SwarmError::Internal(format!("zstd decompress: {e}")))?;
+                .map_err(|e| attribute(0, format!("zstd decompress: {e}")))?;
             buf
         };
         let mut sum = vec![0.0f32; elem_count];
@@ -104,16 +124,14 @@ impl TpAllReduceCollector {
             })?;
             let dec = {
                 let mut decoder = zstd::Decoder::new(std::io::Cursor::new(&req.partial_data))
-                    .map_err(|e| crate::error::SwarmError::Internal(format!("zstd init: {e}")))?;
+                    .map_err(|e| attribute(i + 1, format!("zstd init: {e}")))?;
                 let mut buf = Vec::with_capacity(elem_count * 4);
                 use std::io::Read;
                 decoder
                     .by_ref()
                     .take(max_decompressed as u64)
                     .read_to_end(&mut buf)
-                    .map_err(|e| {
-                        crate::error::SwarmError::Internal(format!("zstd decompress: {e}"))
-                    })?;
+                    .map_err(|e| attribute(i + 1, format!("zstd decompress: {e}")))?;
                 buf
             };
             if dec.len() == elem_count * 4 {
@@ -121,12 +139,15 @@ impl TpAllReduceCollector {
                     sum[j] += f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
                 }
             } else {
-                return Err(crate::error::SwarmError::Internal(format!(
-                    "AllReduce: rank {} partial size mismatch ({} != {})",
+                return Err(attribute(
                     i + 1,
-                    dec.len(),
-                    elem_count * 4
-                )));
+                    format!(
+                        "AllReduce: rank {} partial size mismatch ({} != {})",
+                        i + 1,
+                        dec.len(),
+                        elem_count * 4
+                    ),
+                ));
             }
         }
 

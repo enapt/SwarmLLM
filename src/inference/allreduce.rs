@@ -516,11 +516,16 @@ pub(crate) async fn ring_allreduce_network(
             })?
             .map_err(|_| SwarmError::Internal("Ring chunk channel dropped".into()))?;
 
-        // Decompress received chunk
+        // Decompress received chunk. `received_data` came from the left-neighbor
+        // peer's send (the timeout above already resolved successfully), so a
+        // decompress failure or misaligned length is that specific peer putting
+        // bad bytes on the wire — chargeable `Inference`, per the comment above
+        // and matching the NaN/Inf check. (Only the ambiguous timeout stays
+        // `Internal`, since a stall can be our own slowness.)
         let recv_bytes = zstd::decode_all(std::io::Cursor::new(&received_data))
-            .map_err(|e| SwarmError::Internal(format!("Decompress ring recv: {e}")))?;
+            .map_err(|e| SwarmError::Inference(format!("Decompress ring recv: {e}")))?;
         if recv_bytes.len() % 4 != 0 {
-            return Err(SwarmError::Internal(format!(
+            return Err(SwarmError::Inference(format!(
                 "Ring recv data length {} not aligned to 4 bytes",
                 recv_bytes.len()
             )));

@@ -176,15 +176,6 @@ impl PipelineStreamClient {
     pub fn close(&self, request_id: Uuid) {
         self.streams.remove(&request_id);
     }
-
-    /// Number of currently open outbound streams. For diagnostics only.
-    pub fn len(&self) -> usize {
-        self.streams.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.streams.is_empty()
-    }
 }
 
 /// Coordinator-side writer task: pulls encoded payloads from the outbound
