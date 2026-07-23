@@ -1736,6 +1736,72 @@ impl ModelProcessPool {
         session_id: Option<String>,
         token_tx: Option<tokio::sync::mpsc::Sender<StreamingTokenEvent>>,
     ) -> Result<crate::inference::router::InferenceOutput, SwarmError> {
+        // Track whether any token has been streamed to the caller, so a retry
+        // can never duplicate output the client already saw.
+        let emitted = std::sync::atomic::AtomicBool::new(false);
+        let was_pinned = self.is_cpu_pinned(model_id);
+        let first = self
+            .generate_attempt(
+                model_id,
+                layer_range,
+                prompt.clone(),
+                sampling.clone(),
+                request_id,
+                session_id.clone(),
+                token_tx.clone(),
+                &emitted,
+            )
+            .await;
+        match first {
+            Ok(out) => Ok(out),
+            Err(e) => {
+                // A GPU OOM on the first (cold) request kills the worker and pins
+                // the model to CPU. The request that TRIGGERED the OOM used to eat
+                // the failure (0 tokens) while the very next request succeeded on
+                // CPU. Retry that same request once — now it loads on CPU. The OOM
+                // happens at load/prefill, so nothing was streamed yet (guarded by
+                // `emitted`), making the retry duplicate-free (field report,
+                // 2026-07-23, RTX 4050 6 GB).
+                let freshly_pinned = !was_pinned && self.is_cpu_pinned(model_id);
+                if freshly_pinned
+                    && !emitted.load(std::sync::atomic::Ordering::Relaxed)
+                    && matches!(e, SwarmError::ServiceUnavailable(_))
+                {
+                    tracing::warn!(
+                        model = %model_id,
+                        "Retrying request on CPU after a GPU out-of-memory auto-pinned the model"
+                    );
+                    let emitted_retry = std::sync::atomic::AtomicBool::new(false);
+                    self.generate_attempt(
+                        model_id,
+                        layer_range,
+                        prompt,
+                        sampling,
+                        request_id,
+                        session_id,
+                        token_tx,
+                        &emitted_retry,
+                    )
+                    .await
+                } else {
+                    Err(e)
+                }
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn generate_attempt(
+        &self,
+        model_id: &ModelId,
+        layer_range: (u32, u32),
+        prompt: String,
+        sampling: SamplingParams,
+        request_id: uuid::Uuid,
+        session_id: Option<String>,
+        token_tx: Option<tokio::sync::mpsc::Sender<StreamingTokenEvent>>,
+        emitted: &std::sync::atomic::AtomicBool,
+    ) -> Result<crate::inference::router::InferenceOutput, SwarmError> {
         let handle = self.get_or_spawn(model_id).await?;
 
         let gen = IpcGenerate {
@@ -1817,6 +1883,9 @@ impl ModelProcessPool {
                             });
                         }
                         if let Some(ref tx) = token_tx {
+                            // Mark output as delivered so the OOM CPU-retry in the
+                            // `generate` wrapper can't re-run and duplicate tokens.
+                            emitted.store(true, std::sync::atomic::Ordering::Relaxed);
                             let _ = tx
                                 .send(StreamingTokenEvent {
                                     text: text.clone(),
