@@ -142,12 +142,13 @@ jobs:
       - name: Rust cache
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          # `-gpuarch2`: bumped when the GPU build inputs change in a way cargo
+          # `-gpuarchN`: bumped when the GPU build inputs change in a way cargo
           # can't see. `llama-cpp-sys-2` forwards `CMAKE_CUDA_ARCHITECTURES` to
           # CMake but does NOT `rerun-if-env-changed` on it, so without a key
-          # bump a warm cache would silently ship the previous arch set. Keep
-          # this suffix byte-identical to cache-warm.yml.
-          shared-key: release-${{ matrix.target }}-${{ matrix.features }}-gpuarch2
+          # bump a warm cache would silently ship the previous arch set. Also
+          # bumped for the CUDA 12.4→12.8 toolkit move (native sm_120). Keep this
+          # suffix byte-identical to cache-warm.yml.
+          shared-key: release-${{ matrix.target }}-${{ matrix.features }}-gpuarch3
 
       - name: Install system dependencies (Linux)
         if: runner.os == 'Linux'
@@ -189,9 +190,9 @@ jobs:
           echo "${CUDA_KEYRING_SHA256}  cuda-keyring_1.1-1_all.deb" | sha256sum -c -
           sudo dpkg -i cuda-keyring_1.1-1_all.deb
           sudo apt-get update
-          sudo apt-get install -y cuda-toolkit-12-4
-          echo "/usr/local/cuda-12.4/bin" >> "$GITHUB_PATH"
-          echo "CUDA_PATH=/usr/local/cuda-12.4" >> "$GITHUB_ENV"
+          sudo apt-get install -y cuda-toolkit-12-8
+          echo "/usr/local/cuda-12.8/bin" >> "$GITHUB_PATH"
+          echo "CUDA_PATH=/usr/local/cuda-12.8" >> "$GITHUB_ENV"
 
       # Linux CUDA release build links 3000+ object files against heavy
       # libraries (libcuda, libcudart, libllama-cpp, libstdc++, …). The
@@ -220,10 +221,15 @@ jobs:
         if: matrix.cuda_windows
         uses: Jimver/cuda-toolkit@4bd727d5619dc6fa323b1e76c3aa5dca94f5ec6d # v0.2.19
         with:
-          # Pinned to 12.4 — CUDA 13 + RTX 50-series has an open candle bug
-          # (huggingface/candle#3249). Widely-compatible with GeForce drivers
-          # from 2023 onward; the dynamic-loading cudarc features only need
-          # a driver >= the runtime version.
+          # Windows stays on 12.4 while Linux moves to 12.8 — deliberately.
+          # On Windows the only CUDA consumer is candle (llama.cpp uses the
+          # Vulkan backend here), and candle emits PTX that the *driver* JITs to
+          # the actual GPU at runtime, so a Blackwell card already runs on a
+          # 12.4-built candle via its driver — the 12.8 native-sm_120 win is a
+          # llama.cpp/cuBLAS thing that doesn't apply on Windows. Keeping 12.4
+          # also avoids touching the `Jimver@v0.2.19` pin, whose version list may
+          # not include 12.8.0 (and this Windows path isn't PR-validatable — it
+          # only runs on a release tag). Bump both together if that changes.
           cuda: '12.4.0'
           method: 'network'
           # Full set needed for cudarc with `dynamic-loading`: headers for
@@ -346,11 +352,12 @@ jobs:
           # empty panics bindgen_cuda with `ParseIntError { kind: Empty }`.
           CUDA_COMPUTE_CAP: ${{ (matrix.cuda_linux || matrix.cuda_windows) && '75' || '' }}
           # llama.cpp CUDA backend (Linux `cuda` feature only — Windows GPU uses
-          # the Vulkan backend). Native SASS for Pascal→Hopper plus compute_90
-          # PTX so a newer card (Blackwell) still runs via driver JIT. sm_120 is
-          # NOT a native target here because CUDA 12.4's nvcc predates it; the
-          # 12.8 bump that adds native `120-real` is Phase 2 (docs/FUTURE_WORK.md).
-          CMAKE_CUDA_ARCHITECTURES: ${{ matrix.cuda_linux && '61-real;75-real;80-real;86-real;89-real;90-real;90-virtual' || '' }}
+          # the Vulkan backend). Native SASS for Pascal→Blackwell + compute_120
+          # PTX so a future post-Blackwell card still runs via driver JIT. Native
+          # `120-real` needs CUDA 12.8 (nvcc ≥ 12.8 is the first to know sm_120);
+          # research shows the compute_90-PTX-JIT path is up to ~5× slower on the
+          # llama.cpp/cuBLAS Blackwell path, which native SASS avoids.
+          CMAKE_CUDA_ARCHITECTURES: ${{ matrix.cuda_linux && '61-real;75-real;80-real;86-real;89-real;90-real;120-real;120-virtual' || '' }}
 
       - name: Package archive (Linux/macOS)
         if: runner.os != 'Windows'

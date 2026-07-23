@@ -11,8 +11,10 @@ All notable changes to SwarmLLM are documented here.
   the very common **RTX 20-series and GTX 16 cards** — quietly fell back to the
   (much slower) processor. It now runs on those cards too, and on the new
   RTX 50-series, so a lot more people get real GPU speed out of the box. Local
-  models also now build for each card generation from GTX 10-series up. (Native,
-  fastest-path support for the RTX 50-series on local models is a follow-up.)
+  models also now build for each card generation from GTX 10-series up, including
+  the RTX 50-series' fastest native code path (which needs the newer CUDA 12.8
+  toolkit — research found the older compatibility path is up to ~5× slower on
+  those cards).
 
 ## [0.3.12-alpha] — 2026-07-23
 
