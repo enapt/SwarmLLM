@@ -2,6 +2,24 @@
 
 All notable changes to SwarmLLM are documented here.
 
+## [Unreleased]
+
+### Fixed
+
+- **A model you asked for could sit unusable behind one stuck download.** Models
+  are fetched a piece at a time. When a piece stalled, the software immediately
+  tried that exact same piece again, over and over — and while it was stuck, a
+  different model you had just asked for couldn't start downloading at all, so it
+  stayed incomplete and unusable no matter how long you waited. A piece that
+  fails to download now waits before being retried, and waits longer each time it
+  keeps failing, so one stuck download no longer holds up everything else. The
+  model you asked for starts downloading right away.
+- **One automated check kept rebuilding from scratch.** A step in the project's
+  own build pipeline stored its cache under a name GitHub rejects (it contained a
+  comma), so the cache was never reused and that check rebuilt everything every
+  run. It now uses a valid name and reuses its cache. This affects only the
+  project's automated checks, not anything you run.
+
 ## [0.3.11-alpha] — 2026-07-22
 
 ### Fixed
