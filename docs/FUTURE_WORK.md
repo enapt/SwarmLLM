@@ -2210,11 +2210,13 @@ GitHub Releases with a SHA256-verified, atomic-apply auto-updater
 blast radius is tiny (localhost only). But it adds a JS/Bare app + a Pear staging
 key to maintain, and it does **not** address the actual reported friction, which
 is that the prebuilt binary won't run on an older glibc. **Do the
-portable-binary fix first** — an older-glibc or musl CUDA build (see also the CI
-build-infra items above) so users like raw-proxamd5 never have to compile.
-Reconsider the Pear wrapper only if there's demand for a genuinely
-zero-toolchain, self-updating install beyond what GitHub Releases +
-`UpdateChecker` already give.
+portable-binary fix first.** _(Done, 2026-07-23: the Linux CPU release binary is
+now built on `ubuntu-22.04` / glibc 2.35 instead of `ubuntu-latest` / glibc 2.39,
+so it runs on Debian 12 (2.36) and other older-baseline distros without
+compiling — `release.yml` + `cache-warm.yml`, mirrored per the runner-image cache
+invariant. The CUDA binary already pinned 22.04.)_ Reconsider the Pear wrapper
+only if there's demand for a genuinely zero-toolchain, self-updating install
+beyond what GitHub Releases + `UpdateChecker` already give.
 
 ### peeroxide / Hyperswarm as an additional libp2p transport
 

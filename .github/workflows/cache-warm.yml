@@ -73,8 +73,12 @@ jobs:
             features: "--features cuda"
             cuda_linux: true
           # Cheap by comparison, but the same ref-scoping problem applies.
+          # Must mirror release.yml's ubuntu-22.04 pin: the runner image is part
+          # of the rust-cache key, so warming on 24.04 would build a cache the
+          # 22.04 release build can never restore (and 22.04 is what makes the
+          # CPU binary run on Debian 12 — see the release.yml comment).
           - name: Linux x86_64
-            runner: ubuntu-latest
+            runner: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             features: ""
             cuda_linux: false

@@ -62,8 +62,17 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # Pinned to ubuntu-22.04 (glibc 2.35), NOT ubuntu-latest. A glibc
+          # binary requires the runtime glibc to be at least as new as the one
+          # it was built against, and `ubuntu-latest` is now 24.04 (glibc 2.39).
+          # A 2.39-linked binary refuses to start on anything older — Debian 12
+          # ships 2.36, so the prebuilt CPU binary failed there and users had to
+          # compile from source (external report, 2026-07-23). 2.35 runs on
+          # Debian 12, Ubuntu 22.04+, and every current mainstream distro; 20.04
+          # (2.31) would reach further but GitHub is retiring that runner image.
+          # Keep in step with the CUDA entry below, which already pins 22.04.
           - name: Linux x86_64
-            runner: ubuntu-latest
+            runner: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             binary: swarmllm
             archive: swarmllm-linux-x86_64.tar.gz
