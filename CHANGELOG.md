@@ -6,6 +6,25 @@ All notable changes to SwarmLLM are documented here.
 
 ### Fixed
 
+- **Inference to a slower peer no longer gives up after 10 seconds.** When your
+  request ran on another machine that needed a moment to warm up — loading a
+  model for the first time, a busy processor-only peer, or a long prompt — the
+  first word can take longer than 10 seconds to come back. A safety timer meant
+  for genuinely dropped requests was firing anyway, so a peer that had accepted
+  the work and was busy on it looked like it had vanished. The timer now stops
+  once the peer confirms it received the request, giving real work up to two
+  minutes to produce its first word.
+- **A request that runs a graphics card out of memory now finishes on the
+  processor instead of coming back empty.** The first request to a peer whose
+  GPU is too small already switches that model to the (slower) processor for the
+  rest of the run — but the request that triggered it used to come back with
+  nothing while the next one succeeded. That triggering request now retries on
+  the processor automatically, so it returns an answer too.
+- **`swarmllm update` now sees new pre-release builds.** While SwarmLLM is in
+  alpha, every build is published as a pre-release, and a manual update check was
+  filtering all of them out — so it always said "you're on the latest version"
+  even when several versions behind. A check you run yourself now reports the
+  newest build that's actually available.
 - **The dashboard no longer calls a model "ready" when it can't actually be
   served.** Readiness was computed from whether *any* node had ever announced
   holding each shard — including peers that have since disconnected. That
