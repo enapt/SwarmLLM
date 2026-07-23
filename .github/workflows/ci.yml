@@ -84,15 +84,25 @@ jobs:
         # paths are platform-agnostic, so the redundancy across OSes isn't
         # worth doubling the macOS minute spend.
         include:
+          # `cache_key` is a comma-free slug for the rust-cache key below.
+          # `matrix.features` can't be used there directly: the Swatinem
+          # rust-cache action rejects any cache key containing a comma
+          # (`Key Validation Error … cannot contain commas`), and
+          # "dev,claude-subscription" has one — which silently disabled
+          # cache restore + save for that job. GitHub Actions expressions
+          # have no string-replace, so we carry an explicit slug instead.
           - os: ubuntu-latest
             features: "default"
             flags: ""
+            cache_key: "default"
           - os: ubuntu-latest
             features: "dev,claude-subscription"
             flags: "--no-default-features --features dev,claude-subscription"
+            cache_key: "dev-claude-subscription"
           - os: macos-15
             features: "default"
             flags: ""
+            cache_key: "default"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
@@ -113,7 +123,7 @@ jobs:
           # Observed once on macos-15-arm64 image bump 20260427 → 20260511;
           # `cache-bin: false` below prevents recurrence, this suffix
           # invalidates the already-poisoned cache.
-          key: clippy-${{ matrix.os }}-${{ matrix.features }}-v2
+          key: clippy-${{ matrix.os }}-${{ matrix.cache_key }}-v2
           # We don't `cargo install` anything in clippy, so there's nothing
           # to cache in `~/.cargo/bin`. Disabling stops cached proxies from
           # ever overwriting a runtime-installed rustup.
