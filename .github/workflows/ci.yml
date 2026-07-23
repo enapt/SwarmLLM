@@ -199,8 +199,8 @@ jobs:
   # (no full toolkit) because cudarc 0.19.4's build script invokes
   # `nvcc --version` even though dynamic-loading dlopens cuda runtime libs
   # at runtime — without nvcc on PATH, `cargo check` fails with
-  # `failed to run custom build command for cudarc`. cuda-nvcc-12-4 is
-  # ~100 MB; the full toolkit (cuda-toolkit-12-4 used in release.yml) is
+  # `failed to run custom build command for cudarc`. cuda-nvcc-12-8 is
+  # ~100 MB; the full toolkit (cuda-toolkit-12-8 used in release.yml) is
   # ~3 GB, which we don't need for `check`. Catches compile errors in any
   # `cfg(feature = "candle-cuda")` or `cfg(feature = "windows-gpu")` code
   # path before a release tag.
@@ -241,8 +241,8 @@ jobs:
           echo "${CUDA_KEYRING_SHA256}  cuda-keyring_1.1-1_all.deb" | sha256sum -c -
           sudo dpkg -i cuda-keyring_1.1-1_all.deb
           sudo apt-get update
-          sudo apt-get install -y cuda-nvcc-12-4
-          echo "/usr/local/cuda-12.4/bin" >> "$GITHUB_PATH"
+          sudo apt-get install -y cuda-nvcc-12-8
+          echo "/usr/local/cuda-12.8/bin" >> "$GITHUB_PATH"
       # windows-gpu = ["llama-vulkan", "candle-cuda"]; the llama-vulkan
       # half builds llama-cpp-sys-2's CMake project with -DGGML_VULKAN=ON,
       # which needs Vulkan_LIBRARY, Vulkan_INCLUDE_DIR, and glslc on the
