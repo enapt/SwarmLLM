@@ -151,7 +151,7 @@ libp2p 0.56, axum 0.8, candle-core/candle-transformers 0.10 (CUDA), redb 4, ed25
 
 ## Testing
 
-- 1169 lib tests passing + 8 ignored (env-var-gated real-model + manual smoke), 75 integration tests in `tests/integration/`, 1 ignored end-to-end (`cargo test --test integration_phase10_11 -- --ignored`), clippy clean. Microbench: `cargo run --release --no-default-features --features dev,claude-subscription --example swarm_spec_bench` (R136 — measures all 4 SWARM-SPEC layer primitives + synthetic cascade hit-rate). Local-cluster bench: `examples/3node_setup.sh` (boots 3 daemons) + `examples/3node_inference_bench.sh` (runs 3 workloads × 3 trials and prints tok/s + swarm_spec metrics). Sharded variant: `examples/3node_sharded_setup.sh` (forced distributed pipeline — requires `auto_manage.enabled = false` in per-node config.toml to preserve sharded state; splits any shard count across B/C, not just 2). Both scripts take `SWARM_BENCH_MODEL`. **Pinned reference models for cross-swarm comparison: `docs/REFERENCE_MODELS.md`** (smoke / standard / stress tiers + `examples/fetch_reference_model.sh` to opt in).
+- 1173 lib tests passing + 8 ignored (env-var-gated real-model + manual smoke), 75 integration tests in `tests/integration/`, 1 ignored end-to-end (`cargo test --test integration_phase10_11 -- --ignored`), clippy clean. Microbench: `cargo run --release --no-default-features --features dev,claude-subscription --example swarm_spec_bench` (R136 — measures all 4 SWARM-SPEC layer primitives + synthetic cascade hit-rate). Local-cluster bench: `examples/3node_setup.sh` (boots 3 daemons) + `examples/3node_inference_bench.sh` (runs 3 workloads × 3 trials and prints tok/s + swarm_spec metrics). Sharded variant: `examples/3node_sharded_setup.sh` (forced distributed pipeline — requires `auto_manage.enabled = false` in per-node config.toml to preserve sharded state; splits any shard count across B/C, not just 2). Both scripts take `SWARM_BENCH_MODEL`. **Pinned reference models for cross-swarm comparison: `docs/REFERENCE_MODELS.md`** (smoke / standard / stress tiers + `examples/fetch_reference_model.sh` to opt in).
 - Unit tests: in-module `#[cfg(test)]` blocks
 - Integration tests: `tests/integration/` — multi-node simulations with `--test-threads=1`
 - Real-model spawn-and-infer test: set `SWARMLLM_TEST_MODEL_DIR` to a fully-populated model directory (e.g. `~/.local/share/swarmllm/models/tinyllama-1.1b-...`) and run `cargo test --test integration_phase10_11 -- --ignored end_to_end`. No synthetic GGUF fixture is committed; see `docs/ARCHITECTURE.md` § Deferred Items.
@@ -192,7 +192,7 @@ When spawning subagents in this repo, use these model picks (overrides defaults 
 
 ## Status
 
-All 20 build phases complete. All subsystems wired — no stubs. **1169 lib tests + 75 integration + 2 repo-consistency tests passing**; 8 lib + 1 e2e ignored (env-var or manual). Clippy clean default + features dev,claude-subscription + `--features llama`.
+All 20 build phases complete. All subsystems wired — no stubs. **1173 lib tests + 75 integration + 2 repo-consistency tests passing**; 8 lib + 1 e2e ignored (env-var or manual). Clippy clean default + features dev,claude-subscription + `--features llama`.
 
 ### Latest: R150 — GPU coverage: candle floor → sm_75, llama.cpp arch pin (2026-07-23)
 
@@ -281,7 +281,27 @@ AutoNAT-v2 + relay stack already covers the common NAT cases.
 - **Verified** the CUDA-release disk-cleanup step (R148 left it "untested"): it
   ran and succeeded in v0.3.11-alpha's real CUDA build — the note was stale.
 
-1158 → 1169 lib tests.
+**Live-test fixes (same round, found running a real test node against an
+external tester).**
+- **Relay auto-recovery** (`network/relay.rs`, `manager/events.rs`) — the
+  `relay_activated` reservation latch was one-shot and never reset, so a NAT'd
+  node whose relay peer restarted (or whose reservation expired) stayed
+  unreachable until manually bounced. New `is_relay_circuit_addr` +
+  `note_relay_circuit_lost` drop the latch on a lost `/p2p-circuit`
+  listener/expired-addr, letting the 30s liveness-tick fallback re-reserve in
+  ~30-60s. Found when an anchor restart mid-test stranded the test node. +2 tests.
+- **Backup-copy model names refused swarm-wide** (`model/manifest.rs`,
+  `model/registry.rs`, `daemon/dispatch/mod.rs`, `daemon/startup.rs`) — the
+  v0.3.10 fix only stopped a node *announcing* a copied folder
+  (`<model>.FULLBACKUP`); a peer on an older build re-gossips the name and every
+  receiver accepted, counted, and auto-fetched it (a model no id resolves to),
+  and it survived in the receiver's redb across reboots. New
+  `manifest::is_backup_artifact_id` nets these at `register_manifest` (the single
+  point gossip / DB-reload / disk-scan / acquisition all funnel through) plus
+  explicit boundary guards at the ModelManifest / ShardAnnounce /
+  RegionShardSummary handlers and the disk scan. +2 tests.
+
+1158 → 1173 lib tests.
 
 ### Prior: R148 — VLM deferrals + CI cache-warm fix (2026-07-22)
 
