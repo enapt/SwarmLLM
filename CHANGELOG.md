@@ -2,7 +2,7 @@
 
 All notable changes to SwarmLLM are documented here.
 
-## [Unreleased]
+## [0.3.15-alpha] — 2026-07-23
 
 ### Fixed
 
@@ -505,7 +505,7 @@ across the internet, not just the LAN — the biggest gap for real-world use.
 1075 → 1097 lib tests. Known gap: the relay/DCUtR CGNAT path is wired but awaits
 live multi-NAT validation.
 
-## [Unreleased] — post-v0.1.0
+## [0.3.15-alpha] — 2026-07-23 — post-v0.1.0
 
 Working changelog for commits after the v0.1.0 tag. Will roll into the
 next tagged release.
