@@ -2,10 +2,15 @@
 
 All notable changes to SwarmLLM are documented here.
 
-## [Unreleased]
+## [0.3.12-alpha] — 2026-07-23
 
 ### Fixed
 
+- **Testing a Moonshot (Kimi) or DeepSeek API key no longer wrongly fails.** When
+  you pasted one of those keys and pressed "Test", the check tried a model name
+  the provider had retired, so a perfectly good key came back looking invalid.
+  It now tests against the current model, and the Moonshot "get a key" link
+  points at the international site instead of the China-only one.
 - **The prebuilt Linux download now runs on more systems.** People on Debian 12
   and other systems with an older core library had to compile SwarmLLM
   themselves, because the ready-made Linux build was made on a newer system than
@@ -28,6 +33,13 @@ All notable changes to SwarmLLM are documented here.
   fails to download now waits before being retried, and waits longer each time it
   keeps failing, so one stuck download no longer holds up everything else. The
   model you asked for starts downloading right away.
+- **Activity messages now show a device's name, not a code.** Several messages in
+  the activity log (a device leaving, being removed from a pool, or sharing a
+  model piece) showed a raw identifier even when you'd given the device a
+  nickname. They now use the nickname wherever one is set.
+- **The "local storage is full" notice now actually appears.** If your browser's
+  local storage filled up while saving chat history, the warning meant to tell
+  you was quietly dropped. It now shows.
 - **One automated check kept rebuilding from scratch.** A step in the project's
   own build pipeline stored its cache under a name GitHub rejects (it contained a
   comma), so the cache was never reused and that check rebuilt everything every
