@@ -11,7 +11,15 @@ pub async fn run_update_command(check_only: bool) -> anyhow::Result<()> {
         env!("CARGO_PKG_VERSION")
     );
 
-    let config = swarmllm::config::UpdateConfig::default();
+    // A manual `swarmllm update` check must report the newest available build,
+    // including pre-releases. This repo ships alpha/beta tags AS GitHub
+    // pre-releases, so the default `Disabled`/`Stable` filter hides every
+    // release published so far — making the check always answer "you're on the
+    // latest" even when several versions behind (field report, 2026-07-23). The
+    // auto-update MODE only governs auto-APPLYING in the background; an explicit
+    // check the user typed should show whatever is actually out there.
+    let mut config = swarmllm::config::UpdateConfig::default();
+    config.auto_update = swarmllm::config::AutoUpdateMode::All;
     let state = Arc::new(RwLock::new(UpdateState::default()));
     let (dashboard_tx, _) =
         tokio::sync::broadcast::channel::<swarmllm::daemon::state::DashboardSignal>(16);
