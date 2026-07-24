@@ -1,6 +1,38 @@
 # SwarmLLM Networking Plan — Reliable P2P Inference Across NAT (once and for all)
 
-Status: PLAN (2026-07-24). Owner: maintainer. Supersedes ad-hoc NAT fixes in R143–R150.
+Status: **IN PROGRESS (2026-07-24)**. Owner: maintainer. Supersedes ad-hoc NAT
+fixes in R143–R150.
+
+## Implementation status
+
+- ✅ **Phase 1 — application-level inference relay** (`RelayedEnvelope`,
+  end-to-end sealed, single-hop, rate-limited; learned reverse routes; relay
+  fallback in the directed-send path). Plus the load-bearing refinement:
+  **prefer the app-relay over a flaky relay *circuit*** (per-peer direct-vs-circuit
+  connection tracking) — this is what makes the both-NAT'd case actually work,
+  since two circuit-connected peers otherwise looked "connected" and used the
+  fragile circuit RR. Crypto in `crypto/relay_seal.rs`; transport in
+  `network/manager/relay.rs`; state in `daemon/state/relay.rs`.
+- ✅ **Cross-cutting — additive protocol evolution.** Nodes advertise a
+  `PROTOCOL_VERSION` epoch + a `features` bitfield (`swarmllm_types::features`);
+  a sender gates a new/optional message type on the recipient's advertised bit,
+  so older nodes stay on the common subset instead of failing to decode. Rule
+  documented in `.claude/rules/architecture.md`. (Relay is `features::RELAY`.)
+- ✅ **Phase 2 — prefer direct (implicit).** The directed-send path already
+  uses a direct connection whenever one exists (`has_direct_connection`), and
+  learned relay routes TTL-expire, so new work migrates off the relay onto a
+  direct link as soon as one forms. Explicit *mid-stream* migration is a
+  non-goal (a generation is short-lived; ~1 extra hop is cheap).
+- ⏭️ **Phase 3 — follow-ups (scale + incentive, not correctness).** Multi-relay
+  DHT discovery (today `pick_connected_relay` uses any connected relay-capable
+  peer, i.e. the anchor); credit-metered relaying; a mixed-version (vN ↔ vN-1)
+  CI integration test. Tracked in `docs/FUTURE_WORK.md`.
+
+The correctness core (Phases 1–2 + the version handshake) is done and tested;
+what remains is scale/incentive per the plan's own §5 sequencing.
+
+---
+
 
 ## 1. Why this matters (the adoption problem)
 
