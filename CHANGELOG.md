@@ -6,6 +6,20 @@ All notable changes to SwarmLLM are documented here.
 
 ### Fixed
 
+- **A backup-copy model can no longer be re-downloaded, shared, or shown
+  anywhere.** Following on from the fix that stops copied-folder names
+  (`…FULLBACKUP`) being registered: those names could still slip through other
+  paths — a stale record could make the app re-download the copy from its
+  original source, keep announcing itself as a provider for it, and show it in
+  peers' hosted-model lists and the network map. All of those paths now reject
+  the copied-folder name too, so it can't be acquired, served, reported, or
+  displayed — closing the loop end to end.
+- **A machine serving your request now stops the instant you disconnect, not up
+  to ~30 seconds later.** When a request ran on another machine and you dropped
+  off, that machine only noticed on its next attempt to send a word back — which,
+  for a slow (processor-only) generation, could be tens of seconds of wasted
+  work. It now detects the dropped connection immediately and stops right away,
+  freeing that machine (and its graphics card) for others.
 - **A leftover backup-copy model no longer keeps coming back after a restart.**
   When a copied model folder (`…FULLBACKUP`) had been recorded before the fix
   that rejects such names, it was still being reloaded from the local database

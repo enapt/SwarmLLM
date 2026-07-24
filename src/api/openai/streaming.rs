@@ -353,7 +353,29 @@ async fn router_inference_stream(
         // Read tokens from the pipeline as they arrive
         let mut got_finish = false;
         let mut client_disconnected = false;
-        while let Some(event) = token_rx.recv().await {
+        loop {
+            let event = tokio::select! {
+                biased;
+                // Client dropped the connection: the SSE body's receiver is gone.
+                // Catch it the instant it happens rather than only when the next
+                // token's send fails — for a slow (mostly-CPU) generation that gap
+                // can be tens of seconds of wasted worker compute (external report,
+                // v0.3.15: ~27s late). The `client_disconnected` block below drops
+                // token_rx to signal the pipeline to stop.
+                _ = sse_tx.closed() => {
+                    tracing::warn!(
+                        token_count,
+                        elapsed_ms = stream_start.elapsed().as_millis() as u64,
+                        "DIAG: SSE client disconnected (connection closed) — cancelling pipeline"
+                    );
+                    client_disconnected = true;
+                    break;
+                }
+                maybe = token_rx.recv() => match maybe {
+                    Some(e) => e,
+                    None => break,
+                },
+            };
             if let Some(ref reason) = event.finish_reason {
                 got_finish = true;
                 if !event.text.is_empty() {

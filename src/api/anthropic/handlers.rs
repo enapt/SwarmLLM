@@ -118,7 +118,26 @@ pub(super) async fn anthropic_stream(
         let mut streamed_token_count = 0u32;
         let mut finish_stop_reason = String::new();
         let mut finish_matched_stop: Option<String> = None;
-        while let Some(event) = token_rx.recv().await {
+        loop {
+            let event = tokio::select! {
+                biased;
+                // Client dropped the connection — cancel the instant the SSE
+                // body's receiver is gone, not only when the next token's send
+                // fails (a slow, mostly-CPU generation would otherwise keep a
+                // worker busy for tens of seconds after the client left).
+                _ = sse_tx.closed() => {
+                    tracing::warn!(
+                        token_count = streamed_token_count,
+                        "Anthropic SSE client disconnected (connection closed) — cancelling pipeline"
+                    );
+                    client_disconnected = true;
+                    break;
+                }
+                maybe = token_rx.recv() => match maybe {
+                    Some(e) => e,
+                    None => break,
+                },
+            };
             if let Some(ref reason) = event.finish_reason {
                 got_finish = true;
                 if !event.text.is_empty() {
