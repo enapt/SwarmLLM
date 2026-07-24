@@ -22,7 +22,27 @@ originally parked here are now **also done**:
   pursued. Unit coverage also in
   `crates/swarmllm-types/src/node.rs::version_compat_tests`.
 
-Nothing from the networking plan remains deferred.
+Nothing from the original networking plan remains deferred.
+
+### Tensor-relay large-forward chunking (post-plan follow-on, deferred)
+
+The v0.3.18/v0.3.19 **tensor relay** (`SwarmRequest::RelayedTensor`) that routes
+distributed-pipeline activations between two un-connectable NAT'd nodes seals
+each forward/result as a single sealed blob, bounded by
+`crypto::relay_seal::MAX_RELAY_TENSOR_BYTES = 32 MB`. A forward whose encoded
+(and, when `activation_compression` is on, Q8_0/zstd-compressed) size exceeds
+that cap is refused at seal time — `try_relay_tensor` returns false and the
+forward is dropped rather than sent oversized.
+
+In practice this is rarely hit: activation compression keeps even a long-prompt
+prefill for a 7B-class model well under 32 MB. It only bites an **uncompressed**
+forward of a very long prompt over the relay path. The fix is to reuse the
+existing STREAM-chunk machinery (`network/pipeline_stream::chunk_layer_forward`
++ `SharedState.pending_activation_chunks` receiver assembly, already used for the
+direct Tier-4K path) on the relayed path — split a large forward into
+≤32 MB chunks, each ephemeral-sealed, reassembled at the target. Deferred because
+no measured workload has hit the cap yet; revisit if a large-model + long-prompt
+distributed run over pure app-relay reports a dropped forward.
 
 ## Demand-driven resource management — VRAM done, disk contraction deferred (2026-07-24)
 
