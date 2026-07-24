@@ -2,6 +2,28 @@
 
 All notable changes to SwarmLLM are documented here.
 
+## [0.3.19-alpha] — 2026-07-24
+
+### Added
+
+- **Inference across NAT now covers models split across machines.** v0.3.18 made
+  a whole model on one un-reachable machine work through the relay; this extends
+  it to *distributed* inference — where a model's pieces live on different
+  machines behind NAT, none able to connect directly. The tensor traffic between
+  them now flows over the same sealed relay (which never sees it) instead of a
+  fragile fallback path, so two home nodes can jointly serve a model neither holds
+  in full. Only nodes that both understand it use this path, so it changes nothing
+  for older peers.
+
+### Fixed
+
+- **Settings save again.** Changing any setting — nickname, contribution level,
+  bandwidth, anything — silently failed whenever auto-manage was on: the Save
+  button stuck on "Saving…", the panel never closed, and nothing persisted. A
+  leftover reference to a control removed in an earlier release threw an error
+  that aborted the entire save before it started. Removed the dead reference;
+  settings (including the node nickname) save correctly now.
+
 ## [0.3.18-alpha] — 2026-07-24
 
 The networking release: two home machines behind NAT can now actually run
