@@ -2079,6 +2079,34 @@ extra-cautious — Layer 0 alone is purely upside.
 
 ## CI / build infra
 
+### Further cut the Windows CUDA release build (~30 min) (2026-07-24)
+
+The release matrix's Windows GPU job (`swarmllm-windows-x86_64-gpu`, matrix entry
+`cuda_windows: true` in `.github/workflows/release.yml`) is now the release long
+pole at ~30 min. R148's cache-warm (`Swatinem/rust-cache` + a shared key warmed by
+`cache-warm.yml` on `main`) already cut the **Linux** CUDA build 59m→~10m, but
+that cache only covers Rust *dependency* compilation. On Windows GPU the long
+poles are NOT Rust deps:
+
+- **llama.cpp CMake / C++ build (biggest lever).** The `windows-gpu` feature
+  builds `llama-cpp-sys-2` (llama.cpp + Vulkan + CUDA) from C++ via CMake every
+  run; `rust-cache` doesn't cache CMake object files, so it recompiles cold each
+  time. Wire **sccache/ccache** around the CMake build (or cache the CMake
+  build-output dir directly), keyed on the `llama-cpp-sys-2` version + the
+  `CMAKE_*` flags already pinned in the rust-cache key suffix.
+- **CUDA toolkit install + redist download.** The Windows CUDA toolkit is
+  installed and its redist DLLs bundled each run — cache both, keyed on the CUDA
+  version.
+- **Runner speed.** Windows GitHub runners compile slower than Linux; a larger
+  GitHub-hosted runner (more vCPUs) parallelizes the C++/Rust build — weigh cost
+  vs. saving.
+
+Target: toward the ~10-min range the Linux CUDA job now hits. **Keep any new
+Windows cache keys byte-identical to `cache-warm.yml`** and produced on `main` —
+a release runs on a tag push and per GitHub cache scoping "cannot restore caches
+created for different tag names", so a tag-scoped key writes a cache no later
+release can read (the exact bug R148 fixed on the Linux side).
+
 ### CUDA release build: pin `CMAKE_CUDA_ARCHITECTURES`? (R147, 2026-07-22)
 
 **Context.** The Linux CUDA release job is the release long pole (~1 h). Two
