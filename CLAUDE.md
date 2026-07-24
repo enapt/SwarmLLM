@@ -192,11 +192,34 @@ When spawning subagents in this repo, use these model picks (overrides defaults 
 
 ## Status
 
-All 20 build phases complete. All subsystems wired — no stubs. **1175 lib tests + 75 integration + 2 repo-consistency tests passing**; 8 lib + 1 e2e ignored (env-var or manual). Clippy clean default + features dev,claude-subscription + `--features llama`.
+All 20 build phases complete. All subsystems wired — no stubs. **1178 lib tests + 75 integration + 2 repo-consistency tests passing**; 8 lib + 1 e2e ignored (env-var or manual). Clippy clean default + features dev,claude-subscription + `--features llama`.
 
 Per-round history lives in `~/.claude/projects/-home-user-SwarmLLM/memory/round_log_*.md` and the CHANGELOG; `docs/ARCHITECTURE.md` is the canonical architecture. This section keeps only the current release line plus one-line prior-round pointers.
 
-### Latest — v0.3.15 / v0.3.16-alpha (2026-07-23 → 07-24): external-tester-driven networking + robustness
+### Latest — v0.3.17-alpha (2026-07-24): Claude Code backend + API-compat + net race
+
+External testing of v0.3.16 against a real `claude` process + an OpenAI-compat
+client surfaced three API-compatibility gaps + the sweep found one net-race:
+
+- **Claude Code backend unblocked**: its built-in tools carry long safety text
+  (Bash alone ~6 KB), tripping a 4 KB per-tool `MAX_TOOL_DESCRIPTION_LEN` so a
+  stock `claude --model <swarmllm>` failed on its first request (400). Cap
+  raised to 32 KB (under the 64 KB schema cap; Anthropic bounds descriptions by
+  context, not a small per-tool limit). +3 tests.
+- **OpenAI response echoes the requested model id** (`req.model`), not the
+  manifest display name (they diverge, e.g. `…-fp16` vs `…`) — keeps
+  model-routing clients (litellm/LangChain) working, matches Anthropic. Split
+  fast path + direct-executor stream both fixed (`openai/mod.rs`).
+- **Disconnect-cancel siblings** (`split_stream_response` +
+  `anthropic_split_stream`): the local-complete SSE fast path now cancels the
+  instant the client drops (v0.3.16 only fixed the router path) via the same
+  `tx.closed()` / `sse_tx.closed()` biased-select guard.
+- **Net race** (`connections.rs`): the inbound-remote-generate abort fired on a
+  lone `num_established==0` close event without the `!is_connected` guard the
+  rest of the handler uses — a TCP-drops-but-QUIC-survives blip killed a live,
+  still-returnable decode. Same guard applied.
+
+### v0.3.15 / v0.3.16-alpha (2026-07-23 → 07-24): external-tester-driven networking + robustness
 
 Two external testers on real home hardware (RTX 4050/Ada, Docker, WSL2, NAT)
 drove a burst of networking + reliability fixes, shipped across **v0.3.15**

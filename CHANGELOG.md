@@ -2,6 +2,33 @@
 
 All notable changes to SwarmLLM are documented here.
 
+## [0.3.17-alpha] — 2026-07-24
+
+### Fixed
+
+- **Claude Code now connects on the first try.** Pointing a `claude` session at
+  your node (`ANTHROPIC_BASE_URL=http://localhost:8800`) failed immediately with
+  a "tool description too long" error, before any answer could be generated —
+  Claude Code's built-in tools ship long instructions that ran past a size limit
+  that was set too low. The limit has been raised so a standard Claude Code
+  session works out of the box.
+- **The model name in a reply now matches what you asked for.** On the
+  OpenAI-compatible endpoint, a completion's `model` field could come back as a
+  slightly different name than the one you requested (for example missing a
+  `-fp16` suffix), which confused tools that route by that field. It now echoes
+  exactly the model id you sent — the same way the Anthropic-compatible endpoint
+  already did.
+- **Local streaming replies stop the instant you disconnect.** The previous
+  release made this instant for requests handled across the network; this one
+  extends it to replies generated entirely on your own machine. Dropping the
+  connection now stops the work right away instead of finishing a reply nobody
+  is reading.
+- **A brief network hiccup no longer cuts off an answer in progress.** When a
+  machine you were getting an answer from had two network paths (a common
+  setup), one of them closing could make it wrongly conclude you'd left and
+  abandon the reply — even though the other path was still working. It now
+  double-checks that the connection is truly gone before stopping.
+
 ## [0.3.16-alpha] — 2026-07-24
 
 ### Fixed
