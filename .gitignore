@@ -77,3 +77,7 @@ node_a_*.png
 # Inbound user bug reports / private correspondence. These name real people
 # and are working input, not repo content — keep them local.
 user_bug_report_*.txt
+
+# Scratch drop-zone for working files (tester reports, notes) shared with the
+# assistant but never repo content — keep the whole folder local.
+untracked_docs/
