@@ -582,10 +582,13 @@ fn default_max_concurrent_downloads() -> usize {
 }
 
 fn default_idle_unload_secs() -> u64 {
-    // 30 minutes with zero local requests AND low network demand. The demand
-    // gate keeps the cold-start risk low (a quiet region rarely sends a request
-    // right after), while still reclaiming VRAM from genuinely unused models.
-    1800
+    // 5 minutes with zero local requests AND low network demand. Deliberately
+    // aggressive — most operators want idle VRAM reclaimed promptly, and both
+    // gates make thrashing near-impossible: an actively-used model keeps a fresh
+    // `last_request_at` (not idle) and a wanted model keeps a non-trivial region
+    // EMA (not low-demand), so only genuinely unused models are unloaded, and a
+    // cold start almost never lands on a real request.
+    300
 }
 
 fn default_min_replicas() -> u32 {

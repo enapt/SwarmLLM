@@ -85,7 +85,7 @@ start. How much it commits is set by your **contribution** level
 The daemon reclaims VRAM in two ways:
 
 - **Demand-driven (before pressure):** a model with no local requests for
-  `[auto_manage] idle_unload_secs` (default 30 min) **and** low network demand is
+  `[auto_manage] idle_unload_secs` (default 5 min) **and** low network demand is
   unloaded from GPU memory automatically. Its shards stay on disk, so it reloads
   (one cold start) on the next request — your holder status never changes. Set
   `idle_unload_secs = 0` to keep every loaded model resident.

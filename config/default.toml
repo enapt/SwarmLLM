@@ -97,7 +97,7 @@ shard_size_mb = 512            # Shard size in MB (64-2048, power of 2 recommend
 # min_replicas = 2             # Minimum shard replicas to maintain across network
 # prune_cooldown_secs = 300    # Seconds between prune actions on the same model
 # max_holder_load_for_prune = 3 # Block pruning if remaining holders avg load exceeds this
-# idle_unload_secs = 1800      # Free a loaded model's GPU memory after this many seconds with
+# idle_unload_secs = 300       # Free a loaded model's GPU memory after this many seconds with
                                # NO local requests AND low network demand. Shards stay on disk;
                                # the model reloads (cold start) on the next request, and your
                                # holder status is unchanged. So VRAM follows real demand instead

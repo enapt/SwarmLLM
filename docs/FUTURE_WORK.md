@@ -35,17 +35,27 @@ stay on disk, holder status is unchanged, so it reloads (cold start) on the next
 request — **zero availability impact**, VRAM follows real demand. Controls surfaced
 in `config/default.toml` + `docs/book/.../troubleshooting.md`.
 
-**Deferred — demand-driven DISK replica contraction.** The chosen approach also
-mentioned wiring demand into `geo_target_replicas` so a no-demand model sheds to
-FEWER swarm-wide *disk* holders (contract below `min_replicas`). Not implemented:
-(a) it does NOT free VRAM (the worker holds it regardless of disk shards), so it
-doesn't address the reported concern; (b) it DOES reduce swarm redundancy for a
-model that may be wanted again, forcing an HF re-download on demand return — a
-real availability tradeoff, unlike the VRAM unload. Revisit only if disk (not
-VRAM) pressure from no-demand models becomes a measured problem; if so, contract
-`geo_target_replicas` toward a small `IDLE_REPLICA_FLOOR` (≥2 to avoid single
-points) gated on sustained zero demand, and lean on the existing redundancy-prune
-guards (cooldown, active-pipeline, holder-load).
+**Deferred — demand-driven DISK replica contraction (revisit as the network
+matures).** The chosen approach also mentioned wiring demand into
+`geo_target_replicas` so a no-demand model sheds to FEWER swarm-wide *disk*
+holders (contract below `min_replicas`). Not implemented now: (a) it does NOT
+free VRAM (the worker holds it regardless of disk shards), so it doesn't address
+the reported concern; (b) it reduces swarm redundancy for a model that may be
+wanted again, forcing an HF re-download on demand return — a real availability
+tradeoff, unlike the VRAM unload.
+
+**The trigger to build it is adoption/redundancy growth** (maintainer's framing,
+2026-07-24): while the network is small and redundancy is thin, every holder
+matters, so shedding a no-demand shard risks loss. As adoption increases and
+each shard has many holders, holding fewer shards per node becomes both *safe*
+(others cover it) and *desirable* (a node shouldn't pin disk/VRAM for a shard the
+swarm already over-replicates and nobody wants). Concretely: gate the contraction
+on **observed global redundancy** — only let `geo_target_replicas` fall toward a
+small `IDLE_REPLICA_FLOOR` (≥2, never a single point) for a model whose
+`global_holder_count` comfortably exceeds the floor AND whose region demand is
+~0, and lean on the existing redundancy-prune guards (cooldown, active-pipeline,
+holder-load). Until then the demand-driven VRAM unload gives the efficiency win
+with zero redundancy cost.
 
 ## Model management — deliberately out of R110-R115
 
