@@ -28,6 +28,30 @@ SharedState is organized into 4 sub-structs. Always use the correct accessor:
 
 When adding new fields to SharedState, put them in the appropriate sub-struct unless they're accessed by 10+ files across 3+ subsystem boundaries.
 
+## Additive Protocol Evolution (NETWORKING_PLAN cross-cutting)
+
+Version-breaking network changes were a top adoption blocker: a node on vN
+couldn't talk to vN±1 because a new/repurposed `SwarmMessage` variant failed to
+deserialize on the other side. The rule that fixes this:
+
+- **Never repurpose or remove a `SwarmMessage` variant** across a release, and
+  never change an existing variant's wire shape incompatibly. Add a NEW variant
+  instead and keep handling the old one.
+- **Gate every new/optional message type on a negotiated feature.** Each node
+  advertises the features it implements in `NodeCapability::features` (a `u64`
+  bitfield, `swarmllm_types::features`). A sender MUST check the recipient
+  advertises the matching bit before sending the new variant — an older node
+  advertises `0` and is correctly skipped, so it is never handed something it
+  can't decode. `features::supports(advertised, needed)` is the check;
+  `features::ALL` is what this build advertises (set in `health/monitor.rs`).
+  The Phase-1 relay (`features::RELAY`) is the reference example: see
+  `network/manager/relay.rs::target_supports_relay`.
+- **`PROTOCOL_VERSION`** (`swarmllm_types`) is the wire epoch — bump ONLY on a
+  genuinely breaking change (which the first rule forbids without a fallback),
+  NOT for additive feature bits. Adding a `features` bit does not bump it.
+- New `NodeCapability` fields MUST be `#[serde(default)]` so older nodes'
+  announcements still deserialize.
+
 ## Event System
 
 All events flow through `state.events.activity_tx` (ActivityEvent). Use the builder:

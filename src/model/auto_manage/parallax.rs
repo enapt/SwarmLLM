@@ -394,6 +394,8 @@ mod tests {
                     est_tokens_per_sec_7b: 50.0,
                     observed_latencies: vec![],
                     relay_capable: false,
+                    protocol_version: 0,
+                    features: 0,
                 }),
                 last_seen: chrono::Utc::now(),
                 latency_ms: Some(10),

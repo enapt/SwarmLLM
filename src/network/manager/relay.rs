@@ -21,21 +21,6 @@ use crate::types::{NodeId, PeerInfo, RelayedEnvelope, SwarmMessage};
 
 use super::NetworkManager;
 
-/// Minimum peer version that understands `RelayedEnvelope`. We must not wrap
-/// traffic for an older peer — it would fail to deserialize the new variant and
-/// silently drop it. 0.3.18 is the first release to speak relay.
-const RELAY_MIN_VERSION: (u32, u32, u32) = (0, 3, 18);
-
-/// Parse the leading `major.minor.patch` of a version string (ignoring any
-/// `-alpha` / build suffix) and test it against `RELAY_MIN_VERSION`.
-fn version_supports_relay(version: &str) -> bool {
-    let core = version.split(['-', '+']).next().unwrap_or(version);
-    let mut it = core.split('.');
-    let parse = |s: Option<&str>| s.and_then(|x| x.parse::<u32>().ok()).unwrap_or(0);
-    let v = (parse(it.next()), parse(it.next()), parse(it.next()));
-    v >= RELAY_MIN_VERSION
-}
-
 impl NetworkManager {
     /// Whether a `SwarmMessage` is eligible to be routed through a relay. Only
     /// the remote-generate inference fast path — the prompt request, streamed
@@ -102,17 +87,18 @@ impl NetworkManager {
         None
     }
 
-    /// Whether `target` advertises a version new enough to receive relayed
-    /// envelopes. Guards backward-compat: never wrap traffic an older peer
-    /// can't decode.
+    /// Whether `target` advertises the RELAY protocol feature (can receive a
+    /// relayed envelope). Guards backward-compat: never wrap traffic for a peer
+    /// that hasn't negotiated the feature — an older node advertises no features
+    /// (0) and is correctly skipped.
     fn target_supports_relay(&self, target: &NodeId) -> bool {
         self.shared_state
             .peer_registry
             .get(target)
             .and_then(|p| {
-                p.capability
-                    .as_ref()
-                    .map(|c| version_supports_relay(&c.version))
+                p.capability.as_ref().map(|c| {
+                    crate::types::features::supports(c.features, crate::types::features::RELAY)
+                })
             })
             .unwrap_or(false)
     }
@@ -322,21 +308,14 @@ impl NetworkManager {
 
 #[cfg(test)]
 mod tests {
-    use super::version_supports_relay;
+    use crate::types::features;
 
     #[test]
-    fn version_gate_accepts_current_and_newer() {
-        assert!(version_supports_relay("0.3.18-alpha"));
-        assert!(version_supports_relay("0.3.19"));
-        assert!(version_supports_relay("0.4.0-alpha"));
-        assert!(version_supports_relay("1.0.0"));
-    }
-
-    #[test]
-    fn version_gate_rejects_older() {
-        assert!(!version_supports_relay("0.3.17-alpha"));
-        assert!(!version_supports_relay("0.3.16"));
-        assert!(!version_supports_relay("0.2.0"));
-        assert!(!version_supports_relay("garbage"));
+    fn relay_feature_negotiation() {
+        // A node advertising the full feature set (this build) supports relay.
+        assert!(features::supports(features::ALL, features::RELAY));
+        // An older node advertising no features (serde default 0) does not —
+        // so we never wrap traffic it can't decode.
+        assert!(!features::supports(0, features::RELAY));
     }
 }

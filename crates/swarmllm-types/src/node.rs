@@ -5,6 +5,34 @@ use serde::{Deserialize, Serialize};
 use crate::ids::{NodeId, ShardId};
 use crate::pool::ContributionMode;
 
+/// Wire-protocol epoch. Bumped ONLY on a genuinely breaking change to the
+/// `SwarmMessage` wire format (a variant repurposed or removed — which the
+/// project rule forbids without a negotiated fallback). Additive changes (a new
+/// variant behind a `features` bit) do NOT bump this. A receiver that sees a
+/// higher epoch than it knows treats the peer as "newer, some features I don't
+/// speak" and keeps interoperating on the common subset, rather than failing.
+pub const PROTOCOL_VERSION: u16 = 1;
+
+/// Optional, additively-negotiated protocol features. A node advertises the set
+/// it implements in `NodeCapability::features`; a sender gates an optional
+/// message type on the recipient advertising the corresponding bit, so an older
+/// node is never handed a variant it can't decode. This is the mechanism that
+/// makes network evolution backward-compatible — new features are extensions,
+/// never a hard cutover (see `.claude/rules/architecture.md`).
+pub mod features {
+    /// Understands the NETWORKING_PLAN Phase 1 `RelayedEnvelope` (can receive an
+    /// inference message routed through a relay).
+    pub const RELAY: u64 = 1 << 0;
+
+    /// The full feature set THIS build implements. Advertised by every node.
+    pub const ALL: u64 = RELAY;
+
+    /// Does `advertised` include every bit in `needed`?
+    pub fn supports(advertised: u64, needed: u64) -> bool {
+        advertised & needed == needed
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct NodeCapability {
     pub node_id: NodeId,
@@ -39,6 +67,17 @@ pub struct NodeCapability {
     /// means an older node advertising no flag is simply never used as a relay.
     #[serde(default)]
     pub relay_capable: bool,
+    /// Wire-protocol epoch this node speaks (see [`PROTOCOL_VERSION`]).
+    /// `#[serde(default)]` (0) marks a pre-negotiation node.
+    #[serde(default)]
+    pub protocol_version: u16,
+    /// Bitfield of optional protocol features this node implements (see
+    /// [`features`]). A sender gates an optional/new message type on the
+    /// recipient advertising the matching bit, so evolution stays additive and
+    /// an older node is never handed a variant it can't decode. `0` (default)
+    /// means "advertises no optional features" — the safe pre-negotiation base.
+    #[serde(default)]
+    pub features: u64,
 }
 
 /// One entry in `NodeCapability::observed_latencies`: the sender observed

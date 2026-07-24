@@ -374,6 +374,10 @@ impl HealthMonitor {
             // can opt in via `network.relay_forwarding`.
             relay_capable: self.shared_state.config.node.anchor_mode
                 || self.shared_state.config.network.relay_forwarding,
+            // Advertise the protocol epoch + the optional features this build
+            // implements, so peers negotiate new message types additively.
+            protocol_version: swarmllm_types::PROTOCOL_VERSION,
+            features: swarmllm_types::features::ALL,
         };
 
         let msg = NetworkCommand::Broadcast(SwarmMessage::NodeCapabilityUpdate(cap));

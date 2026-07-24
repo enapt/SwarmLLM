@@ -44,8 +44,8 @@ pub use network::{
     WishlistAnnouncement, WishlistAnnouncementEntry,
 };
 pub use node::{
-    ContributionLevel, GpuInfo, LatencyObservation, NodeCapability, NodeStats,
-    PeerExchangeResponse, PeerInfo,
+    features, ContributionLevel, GpuInfo, LatencyObservation, NodeCapability, NodeStats,
+    PeerExchangeResponse, PeerInfo, PROTOCOL_VERSION,
 };
 pub use pool::{
     BlindedPoolInvitation, ContributionMode, PoolAcceptance, PoolCreditForward, PoolDeviceStats,
