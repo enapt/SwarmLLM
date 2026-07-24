@@ -238,6 +238,26 @@ const WIRE_TAG_RELAYED_TENSOR: u8 = 0x06;
 /// before `sealed`): 32 + 32 + 16 + 1 + 32.
 const RELAYED_TENSOR_HEADER_LEN: usize = 32 + 32 + 16 + 1 + 32;
 
+/// Request-codec wire tags whose bodies are large binary payloads and therefore
+/// get the `MAX_MESSAGE_SIZE` frame limit in `read_wire_frame` (everything else
+/// is capped at the small `MAX_JSON_MSG_SIZE`). `WIRE_TAG_RELAYED_TENSOR` MUST
+/// stay here or every large relayed prefill forward would be rejected as
+/// oversized on the receiver. RelayedTensor is request-only.
+const REQUEST_LARGE_TAGS: &[u8] = &[
+    WIRE_TAG_TENSOR,
+    WIRE_TAG_TENSOR_COMPRESSED,
+    WIRE_TAG_RELAYED_TENSOR,
+];
+
+/// Response-codec counterpart of `REQUEST_LARGE_TAGS`. Shard + prefix-KV frames
+/// are response-only, so they belong here rather than in the request set.
+const RESPONSE_LARGE_TAGS: &[u8] = &[
+    WIRE_TAG_TENSOR,
+    WIRE_TAG_TENSOR_COMPRESSED,
+    WIRE_TAG_SHARD,
+    WIRE_TAG_PREFIX_KV,
+];
+
 /// Read a wire frame header (tag byte + 4-byte BE length) and body from a stream.
 /// `large_tags` lists tag values that get the larger `MAX_MESSAGE_SIZE` limit;
 /// all other tags are capped at `MAX_JSON_MSG_SIZE`.
@@ -351,16 +371,7 @@ impl request_response::Codec for SwarmCodec {
     where
         T: AsyncRead + Unpin + Send,
     {
-        let (tag, buf) = read_wire_frame(
-            io,
-            "read_request",
-            &[
-                WIRE_TAG_TENSOR,
-                WIRE_TAG_TENSOR_COMPRESSED,
-                WIRE_TAG_RELAYED_TENSOR,
-            ],
-        )
-        .await?;
+        let (tag, buf) = read_wire_frame(io, "read_request", REQUEST_LARGE_TAGS).await?;
 
         match tag {
             WIRE_TAG_JSON => serde_json::from_slice(&buf)
@@ -387,17 +398,7 @@ impl request_response::Codec for SwarmCodec {
     where
         T: AsyncRead + Unpin + Send,
     {
-        let (tag, buf) = read_wire_frame(
-            io,
-            "read_response",
-            &[
-                WIRE_TAG_TENSOR,
-                WIRE_TAG_TENSOR_COMPRESSED,
-                WIRE_TAG_SHARD,
-                WIRE_TAG_PREFIX_KV,
-            ],
-        )
-        .await?;
+        let (tag, buf) = read_wire_frame(io, "read_response", RESPONSE_LARGE_TAGS).await?;
         tracing::trace!(tag, len = buf.len(), "DIAG: codec read_response done");
 
         match tag {
@@ -786,6 +787,45 @@ mod tests {
     #[test]
     fn relayed_tensor_decode_rejects_short_frame() {
         assert!(decode_relayed_tensor(&[0u8; 10]).is_err());
+    }
+
+    #[test]
+    fn relayed_tensor_is_in_request_large_tag_set() {
+        // A relayed tensor carries a full activation forward — it MUST get the
+        // MAX_MESSAGE_SIZE frame limit, not the small JSON cap, or a large
+        // prefill forward would be rejected as oversized on the receiver.
+        // Guards against a future edit silently dropping the tag.
+        assert!(REQUEST_LARGE_TAGS.contains(&WIRE_TAG_RELAYED_TENSOR));
+        assert!(REQUEST_LARGE_TAGS.contains(&WIRE_TAG_TENSOR));
+        assert!(REQUEST_LARGE_TAGS.contains(&WIRE_TAG_TENSOR_COMPRESSED));
+        // RelayedTensor is only ever a SwarmRequest, never a response.
+        assert!(!RESPONSE_LARGE_TAGS.contains(&WIRE_TAG_RELAYED_TENSOR));
+        // Shard + prefix-KV are the response-only large frames.
+        assert!(RESPONSE_LARGE_TAGS.contains(&WIRE_TAG_SHARD));
+        assert!(RESPONSE_LARGE_TAGS.contains(&WIRE_TAG_PREFIX_KV));
+    }
+
+    #[test]
+    fn build_relayed_tensor_frame_layout() {
+        // The send-side framing counterpart of the codec read path:
+        // [WIRE_TAG_RELAYED_TENSOR][4B BE length][body], and the body decodes
+        // back to the same struct.
+        let rt = RelayedTensor {
+            relay_to: crate::types::NodeId([1u8; 32]),
+            origin: crate::types::NodeId([2u8; 32]),
+            request_id: uuid::Uuid::from_bytes([4u8; 16]),
+            is_result: false,
+            ephemeral_pub: [6u8; 32],
+            sealed: vec![0xCD; 1234],
+        };
+        let frame = build_relayed_tensor_frame(&rt).unwrap();
+        assert_eq!(frame[0], WIRE_TAG_RELAYED_TENSOR);
+        let declared = u32::from_be_bytes(frame[1..5].try_into().unwrap()) as usize;
+        assert_eq!(declared, frame.len() - 5);
+        let decoded = decode_relayed_tensor(&frame[5..]).unwrap();
+        assert_eq!(decoded.sealed, rt.sealed);
+        assert_eq!(decoded.origin.0, rt.origin.0);
+        assert!(!decoded.is_result);
     }
 
     #[test]
