@@ -32,7 +32,13 @@ pub(crate) fn strip_provider_prefix(model: &str) -> &str {
 // Used by both openai.rs and anthropic.rs handlers.
 pub(crate) const MAX_TOOLS: usize = 128;
 pub(crate) const MAX_TOOL_NAME_LEN: usize = 256;
-pub(crate) const MAX_TOOL_DESCRIPTION_LEN: usize = 4096;
+// Claude Code's built-in tools carry long safety/protocol text — its Bash tool
+// alone is ~6 KB — so a 4 KB cap rejected a stock `claude` session on its very
+// first request (external report 2026-07-24), blocking the "Claude Code backend"
+// use case entirely. Anthropic's own API bounds tool descriptions by the context
+// window, not a small per-tool cap; 32 KB comfortably fits real agent toolsets
+// (with headroom) while still bounding abuse, and stays under the 64 KB schema cap.
+pub(crate) const MAX_TOOL_DESCRIPTION_LEN: usize = 32768;
 pub(crate) const MAX_STOP_SEQUENCES: usize = 16;
 pub(crate) const MAX_TOOL_SCHEMA_BYTES: usize = 65536;
 pub(crate) const DEFAULT_TOP_K: u32 = 40;
@@ -372,4 +378,57 @@ pub(crate) fn credit_summary_json(credit: &swarmllm_types::CreditBalance) -> ser
         "lifetime_earned": credit.lifetime_earned,
         "lifetime_spent": credit.lifetime_spent,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Minimal tool shape for exercising validate_tools' field extractors.
+    struct Tool {
+        name: &'static str,
+        desc: String,
+        schema_bytes: usize,
+    }
+
+    fn check(tools: &[Tool]) -> Result<(), crate::error::ApiError> {
+        validate_tools(
+            tools,
+            |t| Some(t.name),
+            |t| Some(t.desc.as_str()),
+            |t| Some(t.schema_bytes),
+        )
+    }
+
+    #[test]
+    fn accepts_claude_code_scale_tool_description() {
+        // Claude Code's built-in Bash tool description is ~6 KB (external report
+        // 2026-07-24). A stock `claude` session must connect on its first request,
+        // so the cap has to clear that comfortably.
+        let tool = Tool {
+            name: "Bash",
+            desc: "x".repeat(6_174),
+            schema_bytes: 512,
+        };
+        assert!(check(&[tool]).is_ok());
+    }
+
+    #[test]
+    fn still_rejects_abusive_tool_description() {
+        // The cap is an abuse guard, not gone — a description past 32 KB is refused.
+        let tool = Tool {
+            name: "Bash",
+            desc: "x".repeat(MAX_TOOL_DESCRIPTION_LEN + 1),
+            schema_bytes: 512,
+        };
+        assert!(check(&[tool]).is_err());
+    }
+
+    #[test]
+    fn tool_description_cap_covers_claude_code_toolset_headroom() {
+        // Compile-time guard against a future re-tightening below Claude Code's
+        // real needs (its Bash tool description is ~6 KB); this build fails if
+        // the cap is ever dropped under 2× that.
+        const { assert!(MAX_TOOL_DESCRIPTION_LEN >= 6_174 * 2) };
+    }
 }

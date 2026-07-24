@@ -420,8 +420,6 @@ pub async fn chat_completions(
         return Err(ApiError(crate::error::SwarmError::NoModelLoaded));
     }
 
-    let model_name =
-        model_name.expect("model_name guaranteed Some — None case returns early above");
     let params = req.to_sampling_params();
 
     // Fast path: if we have a complete local split model (all layers), generate directly.
@@ -436,12 +434,17 @@ pub async fn chat_completions(
     let has_local_split_model = state.shared_state.has_complete_split_model(&requested_mid);
 
     if has_local_split_model {
+        // Echo the model the client actually requested (`req.model`), NOT the
+        // manifest's display name — they can diverge (e.g. id
+        // `qwen2.5-0.5b-instruct-fp16` vs name `qwen2.5-0.5b-instruct`), and an
+        // OpenAI-compatible client/router that re-routes on the response `model`
+        // field must see back what it sent. (Anthropic already echoes verbatim.)
         if req.stream {
             return Ok(split_stream_response(
                 state,
                 request_id,
                 created,
-                model_name,
+                req.model.clone(),
                 internal_messages.clone(),
                 params,
                 requested_mid.clone(),
@@ -453,7 +456,7 @@ pub async fn chat_completions(
                 state,
                 request_id,
                 created,
-                model_name,
+                req.model.clone(),
                 internal_messages.clone(),
                 params,
                 requested_mid.clone(),
@@ -488,12 +491,19 @@ pub async fn chat_completions(
     }
 
     if req.stream {
-        // Streaming: use direct executor path for real token-by-token SSE
-        Ok(
-            stream_response(state, request_id, created, model_name, prompt, params)
-                .await
-                .into_response(),
+        // Streaming: use direct executor path for real token-by-token SSE.
+        // Echo `req.model` (the requested id), not the manifest display name —
+        // consistent with the split fast path and `router_inference` above.
+        Ok(stream_response(
+            state,
+            request_id,
+            created,
+            req.model.clone(),
+            prompt,
+            params,
         )
+        .await
+        .into_response())
     } else if let Some(router_tx) = &state.router_tx {
         // Non-streaming: route through InferenceRouter for priority queueing
         router_inference(

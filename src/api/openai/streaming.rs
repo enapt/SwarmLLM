@@ -631,7 +631,27 @@ pub(super) async fn split_stream_response(
         // generation hit max_tokens. "length" as a default would tell clients
         // the response was truncated even on a clean exit.
         let mut finish = "stop".to_string();
-        while let Some(event) = token_rx.recv().await {
+        loop {
+            let event = tokio::select! {
+                biased;
+                // Local-complete fast path: cancel the instant the client drops,
+                // not only on the next token's failed send (v0.3.16 fixed the
+                // router path; this sibling was missed — a zero-token generation
+                // would otherwise run to its natural end, ~55s, with nobody
+                // listening).
+                _ = tx.closed() => {
+                    tracing::warn!(
+                        token_count,
+                        elapsed_ms = stream_start.elapsed().as_millis() as u64,
+                        "DIAG: split stream client disconnected (connection closed) — cancelling decode"
+                    );
+                    return;
+                }
+                maybe = token_rx.recv() => match maybe {
+                    Some(e) => e,
+                    None => break,
+                },
+            };
             if let Some(fr) = &event.finish_reason {
                 finish = fr.clone();
                 break;

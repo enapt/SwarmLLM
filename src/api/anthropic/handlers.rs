@@ -300,7 +300,25 @@ pub(super) async fn anthropic_split_stream(
         let mut stop_reason = "max_tokens".to_string();
         let mut matched_stop_sequence: Option<String> = None;
 
-        while let Some(event) = token_rx.recv().await {
+        loop {
+            let event = tokio::select! {
+                biased;
+                // Local-complete fast path (Anthropic): cancel the instant the
+                // client drops. v0.3.16 fixed the router path; this sibling was
+                // missed — a zero-token generation would otherwise run to its
+                // natural end with nobody listening.
+                _ = sse_tx.closed() => {
+                    tracing::warn!(
+                        token_count = total_output_tokens,
+                        "Anthropic split stream client disconnected (connection closed) — cancelling decode"
+                    );
+                    return;
+                }
+                maybe = token_rx.recv() => match maybe {
+                    Some(e) => e,
+                    None => break,
+                },
+            };
             if let Some(fr) = &event.finish_reason {
                 stop_reason = super::convert::map_finish_reason_with_match(
                     fr,
