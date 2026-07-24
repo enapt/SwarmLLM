@@ -88,7 +88,9 @@ The daemon reclaims VRAM in two ways:
   `[auto_manage] idle_unload_secs` (default 5 min) **and** low network demand is
   unloaded from GPU memory automatically. Its shards stay on disk, so it reloads
   (one cold start) on the next request — your holder status never changes. Set
-  `idle_unload_secs = 0` to keep every loaded model resident.
+  `idle_unload_secs = 0` to keep every loaded model resident. Deliberately-held
+  models are never idle-unloaded — reference/test models (`swarmllm get-model`),
+  pinned or locked models, and encrypted-pipeline models stay resident.
 - **Pressure-driven (automatic):** above **70%** VRAM the daemon narrows loaded
   models to fewer shards; above **95%** it fully unloads a model. Both keep shards
   on disk.

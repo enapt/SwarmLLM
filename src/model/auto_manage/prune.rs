@@ -1015,9 +1015,56 @@ impl AutoShardManager {
 
         let our_region = self.our_region().unwrap_or_default();
         let now = chrono::Utc::now();
+        let local_id = self.shared_state.identity.node_id().clone();
+        // Pool shard pins snapshot (same source the pressure-prune uses).
+        let shard_pins = super::manager::read_shard_pins_blocking(&self.shared_state).await;
 
         for model_id in loaded {
             if active_models.contains(&model_id) {
+                continue;
+            }
+            // Never idle-unload a DELIBERATELY-held model. Mirror the
+            // pressure-prune protections, plus the swarm-wide reference/test
+            // models: a reference model (the shared cross-swarm benchmark set,
+            // fetched via `swarmllm get-model`) is held ON PURPOSE so a
+            // consistent model stays warm across the swarm — evicting it on idle
+            // would defeat that. Also never touch a user-pinned, pool-pinned,
+            // locked, or encrypted-pipeline model.
+            if crate::model::reference::is_reference_model(&model_id.0) {
+                continue;
+            }
+            if self
+                .shared_state
+                .models
+                .model_trust
+                .get(&model_id)
+                .map(|t| t.pinned_by_user)
+                .unwrap_or(false)
+            {
+                continue;
+            }
+            if self
+                .shared_state
+                .encrypted_pipeline_models
+                .get(&model_id)
+                .map(|v| *v)
+                .unwrap_or(false)
+            {
+                continue;
+            }
+            if self
+                .shared_state
+                .models
+                .locked_shards
+                .iter()
+                .any(|e| e.key().model_id == model_id)
+            {
+                continue;
+            }
+            if shard_pins
+                .iter()
+                .any(|p| p.model_id == model_id.0 && p.target_node_id == local_id)
+            {
                 continue;
             }
             // Idle: no local request within the window (never-requested counts

@@ -102,7 +102,9 @@ shard_size_mb = 512            # Shard size in MB (64-2048, power of 2 recommend
                                # the model reloads (cold start) on the next request, and your
                                # holder status is unchanged. So VRAM follows real demand instead
                                # of staying pinned. 0 = never idle-unload (keep models resident
-                               # until VRAM pressure forces eviction).
+                               # until VRAM pressure forces eviction). Deliberately-held models
+                               # are never idle-unloaded: reference/test models (`get-model`),
+                               # pinned/locked models, and encrypted-pipeline models.
 #
 # VRAM pressure eviction (automatic, not configurable): above 70% VRAM the daemon
 # narrows loaded models to fewer shards to free space; above 95% it fully unloads a
