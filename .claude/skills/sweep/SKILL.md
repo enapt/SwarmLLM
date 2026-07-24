@@ -36,27 +36,27 @@ This ensures each sweep round examines files in a different order.
 
 IMPORTANT: Launch all agents with `isolation: "worktree"` so they get clean context without session history pollution.
 
-### Agent 1: Dead Code + Stale References (model: sonnet, type: code-reviewer)
+### Agent 1: Dead Code + Stale References (model: sonnet, type: feature-dev:code-reviewer)
 - pub functions with zero external callers
 - Unused imports, dead constants, unreachable match arms
 - Stale comments referencing removed code ("NOTE: X removed", "replaced by Y")
 - References to old channel names, old struct fields, removed endpoints
 - `#[allow(dead_code)]` that suppress legitimate warnings
 
-### Agent 2: Duplication + Copy-Paste (model: sonnet, type: code-reviewer)
+### Agent 2: Duplication + Copy-Paste (model: sonnet, type: feature-dev:code-reviewer)
 - Nearly identical code blocks in different files (>5 lines)
 - Same data transformation done in multiple places
 - Duplicate API response shapes for the same data
 - Frontend: duplicate fetch calls, duplicate DOM manipulation patterns
 
-### Agent 3: Consistency + Production Readiness (model: sonnet, type: code-reviewer)
+### Agent 3: Consistency + Production Readiness (model: sonnet, type: feature-dev:code-reviewer)
 - SwarmError type misuse (Config/Internal for validation)
 - Unbounded collections without cleanup
 - Missing input validation on API endpoints
 - Hardcoded magic numbers that should be named constants
 - Bare string tracing calls without structured fields
 
-### Agent 4: Frontend + i18n + Docs (model: sonnet, type: code-reviewer)
+### Agent 4: Frontend + i18n + Docs (model: sonnet, type: feature-dev:code-reviewer)
 - Hardcoded English strings bypassing I18n.t()
 - Dead CSS rules, dead JS functions, broken references
 - Stale doc comments that don't match current code

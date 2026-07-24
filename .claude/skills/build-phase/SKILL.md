@@ -37,7 +37,7 @@ Before writing code, spawn these in parallel:
 
 ### Post-implementation
 1. Run `cargo fmt` to fix formatting
-2. Run `cargo clippy -- -D warnings` and fix any lints
+2. Run `cargo clippy --all-targets -- -D warnings` and fix any lints
 3. Run `cargo test` and fix any failures
 4. Report summary: files created, tests passing, any known issues
 

@@ -25,6 +25,6 @@ Update knowledge artifacts the same commit as the change — not at session end.
 ## Memory hygiene
 
 - `MEMORY.md` under 200 lines (loaded limit). Move details to topic-specific files.
-- `CLAUDE.md` target: keep round-log entries terse. The doc has grown to ~500 lines as build rounds accumulate; prune aggressively when adding new content — the "Latest" section should be a few paragraphs, older rounds compressed to one-line CHANGELOG-style entries pointing at the full round-log in `memory/`.
+- `CLAUDE.md` target: **~200-250 lines** (per Claude Code best practice — it loads every session, so every line costs context). Keep round-log entries terse: the "Latest" section is a few paragraphs on the current release line, and older rounds are compressed to one-line CHANGELOG-style pointers to the full `memory/round_log_*.md`. When it drifts past ~300 lines, prune the round history again (2026-07-24: pruned 1008→259 by collapsing R136-R150 into one-liners).
 - Delete entries verifiably outdated (check code first).
 - Don't duplicate between `CLAUDE.md` and `rules/` — `CLAUDE.md` summarizes, `rules/` has detail.

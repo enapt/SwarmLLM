@@ -17,13 +17,13 @@ Working directory: `.`
 
 1. **Format check**: `cargo fmt --check`
    - If formatting issues found, run `cargo fmt` to fix them and report what changed
-2. **Lint**: `cargo clippy -- -D warnings`
+2. **Lint**: `cargo clippy --all-targets -- -D warnings`
    - Report any warnings/errors with file:line references
    - Do NOT fix anything — just report
 3. **Test**: `cargo test`
    - Report pass/fail counts
    - If failures, report test name and assertion message
-4. **Build**: `cargo build`
+4. **Build**: `cargo build --no-default-features --features dev,claude-subscription`
    - Confirm clean build or report errors
 
 ## Output
