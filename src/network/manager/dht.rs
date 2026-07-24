@@ -135,6 +135,14 @@ impl NetworkManager {
         query_id: libp2p::kad::QueryId,
         providers: &std::collections::HashSet<libp2p::PeerId>,
     ) {
+        // NETWORKING_PLAN Phase 3 — relay-service discovery results: dial the
+        // discovered relays instead of resolving shard holders.
+        if self.pending_relay_provider_query == Some(query_id) {
+            self.pending_relay_provider_query = None;
+            self.handle_relay_providers_found(providers);
+            return;
+        }
+
         let shard_id = match self.pending_provider_queries.get(&query_id) {
             Some(sid) => sid.clone(),
             None => return, // Unknown query, ignore

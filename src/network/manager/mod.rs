@@ -68,6 +68,11 @@ const STALE_TENSOR_CLEANUP_SECS: u64 = 10;
 /// than `P2P_PERMIT_STALL_SECS` so per-peer retries get a chance before the
 /// outer permit gives up.
 const SHARD_STALL_SECS: u64 = 30;
+/// NETWORKING_PLAN Phase 3 — target number of connected relay-capable peers.
+/// While a node has fewer than this, each discovery tick queries the DHT for
+/// more relays to dial, so relaying survives the loss of any single relay
+/// (including the bootstrap anchor). Low, since a couple of relay paths suffice.
+const MIN_RELAY_CONNECTIONS: usize = 2;
 /// Retention cutoff (seconds) for ping_sent_times entries when pruning under pressure.
 const PING_SENT_TIMES_CUTOFF_SECS: u64 = 120;
 /// Staleness threshold for PEX health-ping bookkeeping. Entries older than this
@@ -227,6 +232,14 @@ pub struct NetworkManager {
     dht_query_rx: mpsc::Receiver<crate::types::ModelId>,
     /// S5: Maps Kademlia QueryId → ShardId for routing GetProviders results.
     pending_provider_queries: HashMap<libp2p::kad::QueryId, crate::types::ShardId>,
+    /// NETWORKING_PLAN Phase 3 — set once this node has registered as a DHT
+    /// relay-service provider (only if it forwards relay traffic). Retried each
+    /// discovery tick until Kademlia has peers, then latched.
+    relay_provider_registered: bool,
+    /// NETWORKING_PLAN Phase 3 — the in-flight `get_providers` query for the
+    /// relay-service key, so its `GetProviders` results are recognized as relay
+    /// discovery (dial the peers) rather than shard-holder resolution.
+    pending_relay_provider_query: Option<libp2p::kad::QueryId>,
     /// Aggregate PEX rate limiter: timestamps of recent inbound PEX requests.
     /// Bounded to a sliding window — rejects requests when the budget is exhausted.
     pex_inbound_timestamps: Vec<std::time::Instant>,
@@ -401,6 +414,8 @@ impl NetworkManager {
             pending_redial: Vec::new(),
             dht_query_rx,
             pending_provider_queries: HashMap::new(),
+            relay_provider_registered: false,
+            pending_relay_provider_query: None,
             pending_prefix_kv_outbound: HashMap::new(),
             pending_prefix_kv_inbound: HashMap::new(),
             pending_shard_responses: HashMap::new(),
@@ -747,6 +762,19 @@ impl NetworkManager {
                         let cached = self.dialable_peer_cache();
                         if !cached.is_empty() {
                             let _ = discovery::bootstrap_peers(&mut self.swarm, &cached);
+                        }
+                        // NETWORKING_PLAN Phase 3 — DHT relay discovery.
+                        // Register ourselves as a relay provider (once Kademlia
+                        // has peers), and — when short on relay connections —
+                        // query the DHT for more relays to dial, so the relay
+                        // role decentralizes past the bootstrap anchor.
+                        if self.is_relay_forwarder() && !self.relay_provider_registered {
+                            self.relay_provider_registered =
+                                discovery::start_providing_relay_service(&mut self.swarm);
+                        }
+                        if self.count_connected_relays() < MIN_RELAY_CONNECTIONS {
+                            self.pending_relay_provider_query =
+                                Some(discovery::query_relay_providers(&mut self.swarm));
                         }
                     }
                     self.update_peer_count();

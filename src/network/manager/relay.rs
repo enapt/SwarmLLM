@@ -129,6 +129,62 @@ impl NetworkManager {
             .is_some_and(|s| !s.is_empty())
     }
 
+    /// Whether this node forwards relay traffic (so it should register itself as
+    /// a DHT relay-service provider). NETWORKING_PLAN Phase 3.
+    pub(super) fn is_relay_forwarder(&self) -> bool {
+        self.shared_state.config.node.anchor_mode
+            || self.shared_state.config.network.relay_forwarding
+    }
+
+    /// Count connected relay-capable peers — the redundancy that decides whether
+    /// to seek more relays from the DHT (NETWORKING_PLAN Phase 3).
+    pub(super) fn count_connected_relays(&self) -> usize {
+        let local = self.shared_state.identity.node_id();
+        self.swarm
+            .connected_peers()
+            .filter(|pid| {
+                self.peer_to_node
+                    .get(pid)
+                    .map(|n| n.clone())
+                    .is_some_and(|node| {
+                        &node != local
+                            && self
+                                .shared_state
+                                .peer_registry
+                                .get(&node)
+                                .and_then(|p| p.capability.as_ref().map(|c| c.relay_capable))
+                                .unwrap_or(false)
+                    })
+            })
+            .count()
+    }
+
+    /// Handle relay-provider DHT results (NETWORKING_PLAN Phase 3): dial any
+    /// discovered relay peer we aren't already connected to, so we keep multiple
+    /// relay paths available and survive the loss of the bootstrap anchor.
+    /// Best-effort — Kademlia supplies the addresses it learned during the query.
+    pub(super) fn handle_relay_providers_found(
+        &mut self,
+        providers: &std::collections::HashSet<PeerId>,
+    ) {
+        let local = *self.swarm.local_peer_id();
+        let mut dialed = 0;
+        for peer_id in providers {
+            if peer_id == &local || self.swarm.is_connected(peer_id) {
+                continue;
+            }
+            if self.swarm.dial(*peer_id).is_ok() {
+                dialed += 1;
+            }
+        }
+        if dialed > 0 {
+            tracing::info!(
+                dialed,
+                "NETWORKING_PLAN: dialing DHT-discovered relay(s) for redundancy"
+            );
+        }
+    }
+
     /// Try to deliver `msg` to a target we can't reliably reach directly by
     /// routing it through a relay peer. Takes `&msg` so the caller keeps
     /// ownership and can fall through to a best-effort direct send if no relay

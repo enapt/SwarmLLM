@@ -397,6 +397,44 @@ pub fn query_shard_providers(
     Ok(swarm.behaviour_mut().kademlia.get_providers(key))
 }
 
+/// Fixed Kademlia key under which relay-capable nodes register themselves, so a
+/// node that has lost its relay(s) can discover fresh ones from the DHT —
+/// decentralizing the relay role past the single bootstrap anchor
+/// (NETWORKING_PLAN Phase 3). Versioned so the record namespace can evolve.
+pub fn relay_service_key() -> RecordKey {
+    RecordKey::new(&"/swarm/relay-service/v1")
+}
+
+/// Register this node as a DHT provider of relay service. Kademlia auto-
+/// republishes and expires the record. Idempotent and safe to retry until
+/// Kademlia has peers (returns false, e.g. at cold start with no routing table).
+pub fn start_providing_relay_service(swarm: &mut Swarm<SwarmBehaviour>) -> bool {
+    match swarm
+        .behaviour_mut()
+        .kademlia
+        .start_providing(relay_service_key())
+    {
+        Ok(_qid) => {
+            tracing::info!("Registered as a DHT relay-service provider");
+            true
+        }
+        Err(e) => {
+            tracing::debug!(error = %e, "start_providing relay service failed (no Kademlia peers yet?)");
+            false
+        }
+    }
+}
+
+/// Query the DHT for relay-service providers. Results arrive as a
+/// `GetProviders` event; the caller tracks the returned `QueryId` to recognize
+/// them and dial the discovered relays.
+pub fn query_relay_providers(swarm: &mut Swarm<SwarmBehaviour>) -> kad::QueryId {
+    swarm
+        .behaviour_mut()
+        .kademlia
+        .get_providers(relay_service_key())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -413,6 +451,16 @@ mod tests {
         let key_str = std::str::from_utf8(key_bytes).unwrap();
         assert!(key_str.contains("test-model"));
         assert!(key_str.contains("/3"));
+    }
+
+    #[test]
+    fn relay_service_key_is_stable() {
+        // This key is the network-wide rendezvous point for relay discovery
+        // (NETWORKING_PLAN Phase 3). Changing it silently partitions relay
+        // discovery across versions — pin it, and bump the `/v1` suffix
+        // deliberately if the namespace ever must change.
+        let key = relay_service_key();
+        assert_eq!(key.as_ref(), b"/swarm/relay-service/v1");
     }
 
     #[test]
