@@ -192,7 +192,9 @@ When spawning subagents in this repo, use these model picks (overrides defaults 
 
 ## Status
 
-All 20 build phases complete. All subsystems wired — no stubs. **1178 lib tests + 75 integration + 2 repo-consistency tests passing**; 8 lib + 1 e2e ignored (env-var or manual). Clippy clean default + features dev,claude-subscription + `--features llama`.
+All 20 build phases complete. All subsystems wired — no stubs. **1187 lib tests + 78 integration + 2 repo-consistency tests + 3 swarmllm-types tests passing**; 8 lib + 1 e2e ignored (env-var or manual). Clippy clean default + features dev,claude-subscription + `--features llama`.
+
+**On main, UNRELEASED (as of 2026-07-24):** the entire `docs/NETWORKING_PLAN.md` — app-level inference relay across NAT (`RelayedEnvelope`, e2e-sealed, prefer-over-circuit), additive version/feature handshake, multi-relay + DHT relay discovery, generation-idle cancel guard. Release held per user (next cut = v0.3.18; **anchor must update** — it's a network release). Detail: `memory/round_log_networking_plan.md`.
 
 Per-round history lives in `~/.claude/projects/-home-user-SwarmLLM/memory/round_log_*.md` and the CHANGELOG; `docs/ARCHITECTURE.md` is the canonical architecture. This section keeps only the current release line plus one-line prior-round pointers.
 
