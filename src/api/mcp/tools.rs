@@ -843,6 +843,7 @@ async fn tool_node_info(state: &AppState, id: Option<Value>) -> JsonRpcResponse 
         "requests_made": stats.requests_made,
         "forwards_served": state.shared_state.metrics.forwards_served_atomic.load(std::sync::atomic::Ordering::Relaxed),
         "bytes_uploaded": state.shared_state.shard_bytes_served.load(std::sync::atomic::Ordering::Relaxed),
+        "relay_bytes_forwarded": state.shared_state.relay_inference_bytes.load(std::sync::atomic::Ordering::Relaxed),
         "uptime_seconds": chrono::Utc::now().signed_duration_since(stats.uptime_start).num_seconds(),
     });
     drop(stats);

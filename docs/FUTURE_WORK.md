@@ -2,6 +2,33 @@
 
 Captures items deliberately deferred from the model-management redesign and from prior sweeps. Each entry has enough context that a future implementer (or a future me) can pick it up without re-deriving the rationale.
 
+## NETWORKING_PLAN Phase 3 — deferred sub-items (2026-07-24)
+
+The networking plan's Phases 1–3 shipped (see `docs/NETWORKING_PLAN.md`). Two
+sub-items of Phase 3 were deliberately left out, with rationale:
+
+- **Explicit DHT relay-provider record.** Today a node discovers relay-capable
+  peers via `NodeCapability` gossip (`relay_capable` propagates into
+  `peer_registry`), and connects to them through normal peer discovery
+  (bootstrap/PEX/mDNS/Kademlia). A dedicated Kademlia provider record for "relay
+  service" (relay-capable nodes `StartProviding` a well-known key; others
+  `GetProviders` + dial) would add a second discovery channel — worth it only at
+  large scale, or to let a node that is connected to NOTHING but a dying anchor
+  actively find + dial a fresh relay. Mirror the shard-provider mechanism
+  (`network/discovery.rs::start_providing_shards`) with a fixed key like
+  `blake3("swarmllm-relay-service-v1")`. Not needed while the anchor is the
+  primary relay and gossip already surfaces every relay-capable peer.
+- **Full two-daemon mixed-version integration test.** The wire-compatibility
+  invariant (an older peer parses as feature-less; a newer peer with unknown
+  fields still parses) is covered by unit tests in
+  `crates/swarmllm-types/src/node.rs::version_compat_tests`, which fail the build
+  on a network-breaking change. A heavier `tests/integration/` test that boots a
+  vN daemon and a synthetic vN-1 daemon and asserts they interoperate end-to-end
+  (basic inference works; the vN node never sends the vN-1 node a `RelayedEnvelope`)
+  would exercise the negotiation on the real dispatch path. Disproportionate to
+  the invariant's simplicity for now; revisit if a version-skew bug ever slips
+  past the unit tests.
+
 ## Model management — deliberately out of R110-R115
 
 ### Inter-pool model sharing policy

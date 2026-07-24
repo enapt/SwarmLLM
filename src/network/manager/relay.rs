@@ -62,11 +62,21 @@ impl NetworkManager {
             .map(|e| e.key().clone())
     }
 
-    /// Pick a connected, relay-capable peer to route toward `target` through.
-    /// Skips the target itself and the local node. Returns the relay's peer-id
-    /// bytes.
-    fn pick_connected_relay(&self, target: &NodeId) -> Option<Vec<u8>> {
+    /// Ranked list of connected relay-capable peers to route toward `target`
+    /// through (NETWORKING_PLAN Phase 3). A relay the target ALSO advertises
+    /// being connected to (`relay_reservations`) comes first — the forward is
+    /// then guaranteed to land at the target — followed by any other connected
+    /// relay as a fallback. Skips the target itself and the local node.
+    fn pick_connected_relays(&self, target: &NodeId) -> Vec<Vec<u8>> {
         let local = self.shared_state.identity.node_id();
+        let target_reservations: Vec<NodeId> = self
+            .shared_state
+            .peer_registry
+            .get(target)
+            .and_then(|p| p.capability.as_ref().map(|c| c.relay_reservations.clone()))
+            .unwrap_or_default();
+        let mut preferred: Vec<Vec<u8>> = Vec::new();
+        let mut fallback: Vec<Vec<u8>> = Vec::new();
         for peer_id in self.swarm.connected_peers() {
             let Some(node) = self.peer_to_node.get(peer_id).map(|r| r.clone()) else {
                 continue;
@@ -80,11 +90,17 @@ impl NetworkManager {
                 .get(&node)
                 .and_then(|p| p.capability.as_ref().map(|c| c.relay_capable))
                 .unwrap_or(false);
-            if is_relay {
-                return Some(peer_id.to_bytes());
+            if !is_relay {
+                continue;
+            }
+            if target_reservations.contains(&node) {
+                preferred.push(peer_id.to_bytes());
+            } else {
+                fallback.push(peer_id.to_bytes());
             }
         }
-        None
+        preferred.extend(fallback);
+        preferred
     }
 
     /// Whether `target` advertises the RELAY protocol feature (can receive a
@@ -123,65 +139,81 @@ impl NetworkManager {
         }
         let local_node = self.shared_state.identity.node_id().clone();
 
-        // Resolve the relay peer + the target NodeId (needed to seal e2e).
-        let (relay_peer_bytes, target_node) =
-            match self.shared_state.relay_route_for_peer(target_peer_bytes) {
-                Some(route) => (route.relay_peer_bytes, route.target_node),
-                None => {
-                    // No learned route (first message to this target). Proactively
-                    // pick any connected relay-capable peer.
-                    let Some(target_node) = self.node_id_for_peer_bytes(target_peer_bytes) else {
-                        return false;
-                    };
-                    if !self.target_supports_relay(&target_node) {
-                        return false;
-                    }
-                    let Some(relay_peer_bytes) = self.pick_connected_relay(&target_node) else {
-                        return false;
-                    };
-                    (relay_peer_bytes, target_node)
+        // Resolve the target NodeId (needed to seal e2e): from a learned route
+        // if we have one (proven to speak relay), else reverse-lookup +
+        // feature-gate so we never wrap traffic an older peer can't decode.
+        let learned = self.shared_state.relay_route_for_peer(target_peer_bytes);
+        let target_node = match &learned {
+            Some(route) => route.target_node.clone(),
+            None => {
+                let Some(tn) = self.node_id_for_peer_bytes(target_peer_bytes) else {
+                    return false;
+                };
+                if !self.target_supports_relay(&tn) {
+                    return false;
                 }
-            };
-
-        let Some(relay_peer_id) = Self::resolve_peer_id(&relay_peer_bytes, "relay") else {
-            return false;
+                tn
+            }
         };
-        if !self.swarm.is_connected(&relay_peer_id) {
-            // Learned route went stale — forget it so we stop trying.
-            self.shared_state.relay_routes.remove(target_peer_bytes);
-            return false;
+
+        // Candidate relays: the learned route first (known to reach the target),
+        // then fresh connected relays (mutually-reachable first) as failover if
+        // the learned relay has since dropped.
+        let mut candidates: Vec<Vec<u8>> = Vec::new();
+        if let Some(route) = &learned {
+            candidates.push(route.relay_peer_bytes.clone());
+        }
+        for r in self.pick_connected_relays(&target_node) {
+            if !candidates.contains(&r) {
+                candidates.push(r);
+            }
         }
 
         let request_id = Self::relay_correlation_id(msg);
-        let env = match crate::crypto::relay_seal::seal_relayed_message(
-            local_node,
-            target_node.clone(),
-            request_id,
-            msg,
-        ) {
-            Ok(e) => e,
-            Err(e) => {
-                tracing::warn!(error = %e, "relay seal failed — dropping message");
-                return false;
+        for relay_peer_bytes in candidates {
+            let Some(relay_peer_id) = Self::resolve_peer_id(&relay_peer_bytes, "relay") else {
+                continue;
+            };
+            if !self.swarm.is_connected(&relay_peer_id) {
+                continue;
             }
-        };
-        let req = SwarmRequest::Message(Box::new(SwarmMessage::RelayedEnvelope(env)));
-        let req_id = self
-            .swarm
-            .behaviour_mut()
-            .request_response
-            .send_request(&relay_peer_id, req);
-        self.pending_rr_observability.insert(
-            req_id,
-            ("relayed".to_string(), std::time::Instant::now(), None),
-        );
-        tracing::debug!(
-            %relay_peer_id,
-            target = %target_node,
-            %request_id,
-            "NETWORKING_PLAN: routed inference message via relay"
-        );
-        true
+            let env = match crate::crypto::relay_seal::seal_relayed_message(
+                local_node.clone(),
+                target_node.clone(),
+                request_id,
+                msg,
+            ) {
+                Ok(e) => e,
+                Err(e) => {
+                    tracing::warn!(error = %e, "relay seal failed — dropping message");
+                    return false;
+                }
+            };
+            let req = SwarmRequest::Message(Box::new(SwarmMessage::RelayedEnvelope(env)));
+            let req_id = self
+                .swarm
+                .behaviour_mut()
+                .request_response
+                .send_request(&relay_peer_id, req);
+            self.pending_rr_observability.insert(
+                req_id,
+                ("relayed".to_string(), std::time::Instant::now(), None),
+            );
+            tracing::debug!(
+                %relay_peer_id,
+                target = %target_node,
+                %request_id,
+                "NETWORKING_PLAN: routed inference message via relay"
+            );
+            return true;
+        }
+
+        // No candidate relay is connected. A stale learned route is now known
+        // dead — forget it so we stop trying that relay.
+        if learned.is_some() {
+            self.shared_state.relay_routes.remove(target_peer_bytes);
+        }
+        false
     }
 
     /// Handle an inbound `RelayedEnvelope`. Either we are the final recipient
@@ -255,6 +287,13 @@ impl NetworkManager {
             tracing::debug!(target = %env.relay_to, "relay: target not connected — cannot forward");
             return;
         }
+        // NETWORKING_PLAN Phase 3 — meter forwarded bytes so relaying earns
+        // credit at the seeding rate (informational/priority; see
+        // `earn_relay_forwarding`).
+        self.shared_state.relay_inference_bytes.fetch_add(
+            env.sealed.len() as u64,
+            std::sync::atomic::Ordering::Relaxed,
+        );
         let req = SwarmRequest::Message(Box::new(SwarmMessage::RelayedEnvelope(env)));
         let req_id = self
             .swarm

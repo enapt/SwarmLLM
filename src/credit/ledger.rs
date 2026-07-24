@@ -316,6 +316,26 @@ impl CreditLedger {
         Ok(amount)
     }
 
+    /// Earn credits for forwarding application-level inference relay traffic
+    /// (NETWORKING_PLAN Phase 3). Priced at the same per-byte rate as shard
+    /// seeding — relaying a GB of inference traffic is treated as the same
+    /// contribution as seeding a GB of shard data. Purely informational /
+    /// priority-affecting today (credits are not enforced for correctness); this
+    /// keeps donated relay capacity counting as a contribution so the incentive
+    /// story holds if credits are ever hardened.
+    pub async fn earn_relay_forwarding(&self, bytes_forwarded: u64) -> Result<i64, SwarmError> {
+        let gb = bytes_forwarded as f64 / (1024.0 * 1024.0 * 1024.0);
+        let rates = self.credit_rates();
+        let raw = rates.shard_seeding as f64 * gb;
+        const MAX_RELAY_FWD_PER_CALL: f64 = 1_000_000.0;
+        let amount = Self::safe_f64_credits(raw, MAX_RELAY_FWD_PER_CALL);
+        if amount > 0 {
+            self.apply_credit(amount, true).await?;
+            self.persist_balance().await?;
+        }
+        Ok(amount)
+    }
+
     /// Earn credits for relay service.
     pub async fn earn_relay_service(&self, duration_seconds: u64) -> Result<i64, SwarmError> {
         let hours = duration_seconds as f64 / 3600.0;
@@ -592,6 +612,30 @@ impl CreditLedger {
                                     tracing::warn!(
                                         error = %e,
                                         "Failed to earn shard seeding credit"
+                                    );
+                                }
+                                _ => {}
+                            }
+                        }
+
+                        // NETWORKING_PLAN Phase 3 — drain app-level inference
+                        // relay bytes forwarded and earn at the seeding rate.
+                        let relay_fwd_bytes = ss
+                            .relay_inference_bytes
+                            .swap(0, std::sync::atomic::Ordering::Relaxed);
+                        if relay_fwd_bytes > 0 {
+                            match self.earn_relay_forwarding(relay_fwd_bytes).await {
+                                Ok(earned) if earned > 0 => {
+                                    tracing::info!(
+                                        bytes_forwarded = relay_fwd_bytes,
+                                        credits_earned = earned,
+                                        "Earned inference-relay forwarding credits"
+                                    );
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        error = %e,
+                                        "Failed to earn relay forwarding credit"
                                     );
                                 }
                                 _ => {}

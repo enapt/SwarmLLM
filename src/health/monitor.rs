@@ -378,6 +378,25 @@ impl HealthMonitor {
             // implements, so peers negotiate new message types additively.
             protocol_version: swarmllm_types::PROTOCOL_VERSION,
             features: swarmllm_types::features::ALL,
+            // NETWORKING_PLAN Phase 3 — advertise the relay-capable peers we are
+            // connected to, so a peer that can't reach us directly can pick a
+            // relay we share. Bounded to keep the capability gossip small.
+            relay_reservations: {
+                const MAX_RELAY_RESERVATIONS: usize = 8;
+                self.shared_state
+                    .connected_node_ids
+                    .iter()
+                    .filter(|n| {
+                        self.shared_state
+                            .peer_registry
+                            .get(n.key())
+                            .and_then(|p| p.capability.as_ref().map(|c| c.relay_capable))
+                            .unwrap_or(false)
+                    })
+                    .take(MAX_RELAY_RESERVATIONS)
+                    .map(|n| n.key().clone())
+                    .collect()
+            },
         };
 
         let msg = NetworkCommand::Broadcast(SwarmMessage::NodeCapabilityUpdate(cap));

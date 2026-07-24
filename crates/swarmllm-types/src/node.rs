@@ -78,6 +78,14 @@ pub struct NodeCapability {
     /// means "advertises no optional features" — the safe pre-negotiation base.
     #[serde(default)]
     pub features: u64,
+    /// NETWORKING_PLAN Phase 3 — the relay-capable peers this node is currently
+    /// connected to (bounded). Lets a sender that can't reach this node directly
+    /// pick a relay the node is ALSO connected to, so the forward actually
+    /// lands — the mechanism that makes multiple relays work rather than all
+    /// traffic funnelling through one anchor. Empty (default) → the sender falls
+    /// back to any relay it is connected to.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub relay_reservations: Vec<NodeId>,
 }
 
 /// One entry in `NodeCapability::observed_latencies`: the sender observed
@@ -171,4 +179,86 @@ pub struct PeerInfo {
 pub struct PeerExchangeResponse {
     /// Up to 20 known peer multiaddrs.
     pub peers: Vec<String>,
+}
+
+/// Mixed-version wire-compatibility guard (NETWORKING_PLAN cross-cutting). These
+/// tests fail the build if a change makes a node on one release unable to
+/// interoperate with a node on an adjacent release — the exact adoption blocker
+/// the additive-protocol rule exists to prevent. Both directions of skew:
+///  - an OLDER peer's capability (missing the new fields) must still parse, and
+///    default to "advertises no features" so we never route it new traffic;
+///  - a NEWER peer's capability (with fields we don't know) must still parse,
+///    so we keep interoperating on the common subset.
+#[cfg(test)]
+mod version_compat_tests {
+    use super::*;
+
+    fn base_fields() -> serde_json::Value {
+        serde_json::json!({
+            "node_id": vec![0u8; 32],
+            "gpu": null,
+            "ram_total_mb": 8192u64,
+            "ram_available_mb": 4096u64,
+            "disk_available_mb": 100000u64,
+            "bandwidth_mbps": 100.0f32,
+            "hosted_shards": [],
+            "max_contribution": "Moderate",
+            "uptime_seconds": 100u64,
+            "version": "0.3.16-alpha"
+        })
+    }
+
+    #[test]
+    fn old_capability_parses_as_featureless() {
+        // A pre-negotiation node announces NONE of the new fields.
+        let cap: NodeCapability = serde_json::from_value(base_fields()).unwrap();
+        assert!(!cap.relay_capable);
+        assert_eq!(cap.features, 0);
+        assert_eq!(cap.protocol_version, 0);
+        assert!(cap.relay_reservations.is_empty());
+        // The negotiation gate correctly refuses to send it relay traffic.
+        assert!(!features::supports(cap.features, features::RELAY));
+    }
+
+    #[test]
+    fn future_capability_with_unknown_fields_still_parses() {
+        // A NEWER node announces extra fields we don't know about, and feature
+        // bits beyond the ones we implement.
+        let mut v = base_fields();
+        let obj = v.as_object_mut().unwrap();
+        obj.insert("version".into(), serde_json::json!("9.9.9"));
+        obj.insert("relay_capable".into(), serde_json::json!(true));
+        obj.insert("protocol_version".into(), serde_json::json!(9u16));
+        // RELAY bit set plus higher, unknown bits.
+        obj.insert(
+            "features".into(),
+            serde_json::json!(features::RELAY | (1u64 << 40)),
+        );
+        obj.insert("a_future_field".into(), serde_json::json!({"nested": true}));
+        obj.insert("another_future_list".into(), serde_json::json!([1, 2, 3]));
+
+        let cap: NodeCapability = serde_json::from_value(v).unwrap();
+        assert!(cap.relay_capable);
+        // We act on the common subset: we understand RELAY even though the peer
+        // also advertises bits we don't.
+        assert!(features::supports(cap.features, features::RELAY));
+    }
+
+    #[test]
+    fn current_capability_round_trips() {
+        let mut v = base_fields();
+        let obj = v.as_object_mut().unwrap();
+        obj.insert("relay_capable".into(), serde_json::json!(true));
+        obj.insert(
+            "protocol_version".into(),
+            serde_json::json!(PROTOCOL_VERSION),
+        );
+        obj.insert("features".into(), serde_json::json!(features::ALL));
+        let cap: NodeCapability = serde_json::from_value(v).unwrap();
+        let round: NodeCapability =
+            serde_json::from_str(&serde_json::to_string(&cap).unwrap()).unwrap();
+        assert_eq!(round.features, features::ALL);
+        assert_eq!(round.protocol_version, PROTOCOL_VERSION);
+        assert!(round.relay_capable);
+    }
 }

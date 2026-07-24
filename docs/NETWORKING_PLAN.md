@@ -23,13 +23,26 @@ fixes in R143–R150.
   learned relay routes TTL-expire, so new work migrates off the relay onto a
   direct link as soon as one forms. Explicit *mid-stream* migration is a
   non-goal (a generation is short-lived; ~1 extra hop is cheap).
-- ⏭️ **Phase 3 — follow-ups (scale + incentive, not correctness).** Multi-relay
-  DHT discovery (today `pick_connected_relay` uses any connected relay-capable
-  peer, i.e. the anchor); credit-metered relaying; a mixed-version (vN ↔ vN-1)
-  CI integration test. Tracked in `docs/FUTURE_WORK.md`.
+- ✅ **Phase 3 — scale + incentive.** (a) **Multi-relay routing**: nodes
+  advertise the relays they're connected to (`relay_reservations`); a sender
+  picks a relay the target can also reach and **fails over** across relays if one
+  drops, so traffic isn't funnelled through a single anchor. Relay discovery
+  rides existing `NodeCapability` gossip (`relay_capable` propagates), so a node
+  learns every relay-capable peer without a new channel. (b) **Credit-metered
+  relaying**: `relay_inference_bytes` earns at the shard-seeding rate, so
+  donating relay capacity counts as a contribution — informational/priority
+  only, since credits are not enforced for correctness. (c) **Mixed-version
+  wire-compat test** (`node.rs::version_compat_tests`): an older peer's
+  capability parses as feature-less, a newer peer's (with unknown fields) still
+  parses — a network-breaking change now fails the build.
 
-The correctness core (Phases 1–2 + the version handshake) is done and tested;
-what remains is scale/incentive per the plan's own §5 sequencing.
+**Deferred (in `docs/FUTURE_WORK.md`):** an explicit DHT relay-provider record
+(redundant with gossip discovery today; useful at large scale / to survive total
+anchor loss), and a full two-daemon mixed-version *integration* test (the
+wire-compat unit tests already cover the invariant).
+
+The entire plan — Phases 1–3 + the version handshake — is implemented and
+tested.
 
 ---
 

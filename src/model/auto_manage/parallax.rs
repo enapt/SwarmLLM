@@ -396,6 +396,7 @@ mod tests {
                     relay_capable: false,
                     protocol_version: 0,
                     features: 0,
+                    relay_reservations: vec![],
                 }),
                 last_seen: chrono::Utc::now(),
                 latency_ms: Some(10),

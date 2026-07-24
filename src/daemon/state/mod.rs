@@ -177,6 +177,12 @@ pub struct SharedState {
     pub detected_region: RwLock<Option<String>>,
     pub shard_bytes_served: AtomicU64,
     pub relay_seconds_served: AtomicU64,
+    /// NETWORKING_PLAN Phase 3 — bytes this node has forwarded as an
+    /// application-level inference relay (`RelayedEnvelope`). Drained by the
+    /// CreditLedger tick and converted to credit at the same byte-rate as shard
+    /// seeding, so donating relay capacity earns like serving does — making
+    /// public relay supply economically self-sustaining (incentive-aligned).
+    pub relay_inference_bytes: AtomicU64,
     pub active_relay_circuits: DashMap<(libp2p::PeerId, libp2p::PeerId), std::time::Instant>,
     pub region_shard_summaries:
         DashMap<(String, crate::types::ModelId), crate::types::RegionShardSummary>,
@@ -524,6 +530,7 @@ impl SharedState {
             allreduce_registry: Arc::new(crate::inference::allreduce::AllReduceRegistry::new()),
             ring_chunk_registry: Arc::new(crate::inference::allreduce::RingChunkRegistry::new()),
             shard_bytes_served: AtomicU64::new(0),
+            relay_inference_bytes: AtomicU64::new(0),
             relay_seconds_served: AtomicU64::new(0),
             active_relay_circuits: DashMap::new(),
             model_process_pool: Arc::new(crate::inference::process_pool::ModelProcessPool::new(
