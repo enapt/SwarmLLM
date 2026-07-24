@@ -17,6 +17,12 @@ SERVICE="swarmllm-anchor.service"
 
 log() { echo "[swarmllm-update] $*"; }
 
+# curl with retry. GitHub's release-asset CDN can return a transient 504 while
+# it warms up on a freshly-uploaded binary (the ~minutes right after a release
+# is cut) — a single failure must NOT abort the update. --retry covers 5xx and
+# timeouts (504 included); --retry-max-time bounds the total retry window.
+dl() { curl -fsSL --retry 6 --retry-delay 15 --connect-timeout 30 --retry-max-time 1800 "$@"; }
+
 [[ -x "$BIN" ]] || { log "no binary at $BIN — nothing to update"; exit 0; }
 command -v jq >/dev/null || { log "jq not installed"; exit 1; }
 
@@ -24,7 +30,7 @@ CUR=$("$BIN" --version 2>/dev/null | awk '{print $NF}')   # e.g. 0.3.1-alpha
 [[ -n "$CUR" ]] || { log "could not read current version"; exit 1; }
 
 # Newest non-draft release (pre-release inclusive; GitHub returns newest-first).
-META=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases" | jq '[.[] | select(.draft==false)][0]')
+META=$(dl "https://api.github.com/repos/${REPO}/releases" | jq '[.[] | select(.draft==false)][0]')
 LATEST=$(echo "$META" | jq -r '.tag_name // empty' | sed 's/^v//')
 [[ -n "$LATEST" ]] || { log "no release found"; exit 0; }
 
@@ -42,8 +48,8 @@ SHA=$(echo "$META" | jq -r ".assets[]? | select(.name==\"${ASSET}.sha256\") | .b
 [[ -n "$SHA" && "$SHA" != "null" ]] || { log "no .sha256 sidecar — refusing to install unverified binary"; exit 1; }
 
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
-curl -fsSL "$DL" -o "$tmp/sw"
-curl -fsSL "$SHA" -o "$tmp/sw.sha256"
+dl "$DL" -o "$tmp/sw"
+dl "$SHA" -o "$tmp/sw.sha256"
 ( cd "$tmp" && echo "$(awk '{print $1}' sw.sha256)  sw" | sha256sum -c - ) \
   || { log "CHECKSUM FAILED — aborting, binary untouched"; exit 1; }
 chmod +x "$tmp/sw"

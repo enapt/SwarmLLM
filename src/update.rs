@@ -304,18 +304,39 @@ impl UpdateChecker {
             "Downloading update"
         );
 
-        let resp = client
-            .get(&info.download_url)
-            .send()
-            .await
-            .map_err(|e| SwarmError::Network(format!("Download request failed: {e}")))?;
-
-        if !resp.status().is_success() {
-            return Err(SwarmError::Network(format!(
-                "Download failed with status {}",
-                resp.status()
-            )));
-        }
+        // GitHub's release-asset CDN can return a transient 504 (or 502/503/429)
+        // while it warms up on a freshly-uploaded binary — the minutes right
+        // after a release is cut. Retry a few times on transient failures so an
+        // auto-update doesn't fail just because it ran seconds after the release.
+        const DOWNLOAD_RETRIES: u32 = 5;
+        const DOWNLOAD_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(15);
+        let mut attempt = 0u32;
+        let resp = loop {
+            attempt += 1;
+            match client.get(&info.download_url).send().await {
+                Ok(r) if r.status().is_success() => break r,
+                Ok(r) => {
+                    let status = r.status();
+                    let transient = status.is_server_error() || status.as_u16() == 429;
+                    if transient && attempt < DOWNLOAD_RETRIES {
+                        tracing::warn!(%status, attempt, "update download got a transient status — retrying");
+                        tokio::time::sleep(DOWNLOAD_RETRY_DELAY).await;
+                        continue;
+                    }
+                    return Err(SwarmError::Network(format!(
+                        "Download failed with status {status}"
+                    )));
+                }
+                Err(e) => {
+                    if attempt < DOWNLOAD_RETRIES {
+                        tracing::warn!(error = %e, attempt, "update download request failed — retrying");
+                        tokio::time::sleep(DOWNLOAD_RETRY_DELAY).await;
+                        continue;
+                    }
+                    return Err(SwarmError::Network(format!("Download request failed: {e}")));
+                }
+            }
+        };
 
         // Check Content-Length to reject absurdly large downloads before buffering
         const MAX_UPDATE_SIZE: u64 = 500 * 1024 * 1024; // 500 MB

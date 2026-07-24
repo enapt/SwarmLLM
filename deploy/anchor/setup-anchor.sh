@@ -87,7 +87,7 @@ else
   # NOTE: /releases/latest skips pre-releases. SwarmLLM ships alpha/beta tags as
   # pre-releases, so list all releases and take the newest non-draft one (the
   # API returns them newest-first). This picks the current alpha.
-  META=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases" \
+  META=$(curl -fsSL --retry 6 --retry-delay 15 --connect-timeout 30 --retry-max-time 1800 "https://api.github.com/repos/${REPO}/releases" \
     | jq '[.[] | select(.draft==false)][0]')
   REL_TAG=$(echo "$META" | jq -r '.tag_name // "?"')
   echo ">> Newest release: ${REL_TAG}"
@@ -99,9 +99,9 @@ else
     exit 1
   }
   tmp=$(mktemp -d)
-  curl -fsSL "$DL" -o "$tmp/swarmllm"
+  curl -fsSL --retry 6 --retry-delay 15 --connect-timeout 30 --retry-max-time 1800 "$DL" -o "$tmp/swarmllm"
   if [[ -n "$SHA" && "$SHA" != "null" ]]; then
-    curl -fsSL "$SHA" -o "$tmp/swarmllm.sha256"
+    curl -fsSL --retry 6 --retry-delay 15 --connect-timeout 30 --retry-max-time 1800 "$SHA" -o "$tmp/swarmllm.sha256"
     echo ">> Verifying SHA256..."
     ( cd "$tmp" && echo "$(awk '{print $1}' swarmllm.sha256)  swarmllm" | sha256sum -c - )
   else
