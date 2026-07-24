@@ -24,6 +24,29 @@ originally parked here are now **also done**:
 
 Nothing from the networking plan remains deferred.
 
+## Demand-driven resource management — VRAM done, disk contraction deferred (2026-07-24)
+
+External report (`Rapport_VRAM_Idle`): a contributor node holds models in VRAM
+indefinitely (pressure-only eviction, no demand signal). **Shipped:** demand-driven
+**VRAM unload** — `auto_manage/prune.rs::try_idle_vram_unload` frees a loaded
+model's GPU memory after `idle_unload_secs` (default 1800s) with no local requests
+AND low region demand (`region_demand` EMA < `IDLE_DEMAND_EMA_THRESHOLD`). Shards
+stay on disk, holder status is unchanged, so it reloads (cold start) on the next
+request — **zero availability impact**, VRAM follows real demand. Controls surfaced
+in `config/default.toml` + `docs/book/.../troubleshooting.md`.
+
+**Deferred — demand-driven DISK replica contraction.** The chosen approach also
+mentioned wiring demand into `geo_target_replicas` so a no-demand model sheds to
+FEWER swarm-wide *disk* holders (contract below `min_replicas`). Not implemented:
+(a) it does NOT free VRAM (the worker holds it regardless of disk shards), so it
+doesn't address the reported concern; (b) it DOES reduce swarm redundancy for a
+model that may be wanted again, forcing an HF re-download on demand return — a
+real availability tradeoff, unlike the VRAM unload. Revisit only if disk (not
+VRAM) pressure from no-demand models becomes a measured problem; if so, contract
+`geo_target_replicas` toward a small `IDLE_REPLICA_FLOOR` (≥2 to avoid single
+points) gated on sustained zero demand, and lean on the existing redundancy-prune
+guards (cooldown, active-pipeline, holder-load).
+
 ## Model management — deliberately out of R110-R115
 
 ### Inter-pool model sharing policy

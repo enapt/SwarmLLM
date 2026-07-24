@@ -831,6 +831,7 @@ mod tests {
             prune_enabled: true,
             min_replicas: 2,
             prune_cooldown_secs: 300,
+            idle_unload_secs: 1800,
             max_holder_load_for_prune: 3,
             parallax_auto_rebalance: true,
             hf_watcher_enabled: false,

@@ -478,6 +478,17 @@ pub struct AutoManageConfig {
     /// Cooldown in seconds between prune actions on the same model.
     #[serde(default = "default_prune_cooldown_secs")]
     pub prune_cooldown_secs: u64,
+    /// VRAM efficiency (2026-07): free a loaded model's GPU memory after it has
+    /// had NO local requests for this many seconds AND the wider network shows
+    /// little demand for it (region gossip). The shards stay on disk, so the
+    /// model re-spawns on the next request — this only reclaims VRAM held for a
+    /// model nobody is currently using, so reservation follows real demand
+    /// rather than staying pinned by a static contribution setting. Holding
+    /// status is unchanged (we still serve; a cold start just costs one reload).
+    /// `0` disables idle unload (keep every loaded model resident until memory
+    /// pressure evicts it — the prior behavior).
+    #[serde(default = "default_idle_unload_secs")]
+    pub idle_unload_secs: u64,
     /// Block pruning if remaining holders have avg load above this threshold.
     #[serde(default = "default_max_holder_load_for_prune")]
     pub max_holder_load_for_prune: u32,
@@ -556,6 +567,7 @@ impl Default for AutoManageConfig {
             prune_enabled: true,
             min_replicas: default_min_replicas(),
             prune_cooldown_secs: default_prune_cooldown_secs(),
+            idle_unload_secs: default_idle_unload_secs(),
             max_holder_load_for_prune: default_max_holder_load_for_prune(),
             parallax_auto_rebalance: true,
             hf_watcher_enabled: true,
@@ -567,6 +579,13 @@ impl Default for AutoManageConfig {
 
 fn default_max_concurrent_downloads() -> usize {
     3
+}
+
+fn default_idle_unload_secs() -> u64 {
+    // 30 minutes with zero local requests AND low network demand. The demand
+    // gate keeps the cold-start risk low (a quiet region rarely sends a request
+    // right after), while still reclaiming VRAM from genuinely unused models.
+    1800
 }
 
 fn default_min_replicas() -> u32 {

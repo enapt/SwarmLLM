@@ -34,6 +34,11 @@ const SATURATION_FACTOR_AUTO: f64 = 1.5;
 /// once you average across user-perceived "I just used this".
 const RECENT_REQUEST_PROTECT_SECS: i64 = 3600;
 
+/// Region-demand EMA (requests/10min, decayed) below which a model counts as
+/// "the network isn't asking for this either" for idle VRAM unload. Matches the
+/// `ema_rate < 0.1` "no demand" boundary in `geo_target_replicas`.
+const IDLE_DEMAND_EMA_THRESHOLD: f64 = 0.1;
+
 /// R134.7: penalty applied when a model has a recent swarm request.
 /// Combined with the existing `region_demand` penalty this means a
 /// model that's actively being used by THIS node is much harder to
@@ -79,6 +84,12 @@ impl AutoShardManager {
         if resource_pressure > PRESSURE_SOFT_UNLOAD && !pressure_urgent {
             self.try_vram_soft_unload(resource_pressure).await;
         }
+
+        // VRAM efficiency — free idle, low-demand models from GPU regardless of
+        // memory pressure, so reservation follows real demand rather than a
+        // static contribution setting (shards stay on disk; holder status
+        // unchanged; a cold start just costs one reload).
+        self.try_idle_vram_unload(config.idle_unload_secs).await;
 
         // Check if we're in reduced hours
         let schedule_pressure = self.schedule_pressure_bonus().await;
@@ -973,6 +984,95 @@ impl AutoShardManager {
 
     /// Try to free VRAM by narrowing shard windows on loaded models.
     /// Keeps shards on disk (advertised to the network) but reduces what's in GPU memory.
+    /// VRAM efficiency (2026-07) — free the GPU memory of any loaded model that
+    /// has had no local requests for `idle_unload_secs` AND shows negligible
+    /// network demand. Shards stay on disk (the worker re-spawns on the next
+    /// request) and our holder status is unchanged, so this only reclaims VRAM
+    /// pinned for a model nobody is currently using. Runs every cycle,
+    /// independent of memory pressure. `0` disables it.
+    async fn try_idle_vram_unload(&self, idle_unload_secs: u64) {
+        if idle_unload_secs == 0 {
+            return;
+        }
+        let pool = &self.shared_state.model_process_pool;
+        let loaded = pool.loaded_model_ids();
+        if loaded.is_empty() {
+            return;
+        }
+
+        // Active-pipeline guard: never unload a model with an in-flight request
+        // on this node.
+        let local_node_id = self.shared_state.identity.node_id().clone();
+        let mut active_models: std::collections::HashSet<ModelId> =
+            std::collections::HashSet::new();
+        for entry in self.shared_state.active_pipelines.iter() {
+            for seg in &entry.value().segments {
+                if seg.node_id == local_node_id {
+                    active_models.insert(seg.shard_id.model_id.clone());
+                }
+            }
+        }
+
+        let our_region = self.our_region().unwrap_or_default();
+        let now = chrono::Utc::now();
+
+        for model_id in loaded {
+            if active_models.contains(&model_id) {
+                continue;
+            }
+            // Idle: no local request within the window (never-requested counts
+            // as idle — it was loaded but has served nothing).
+            let last_req = self
+                .shared_state
+                .models
+                .model_trust
+                .get(&model_id)
+                .and_then(|t| t.last_request_at);
+            let idle = match last_req {
+                Some(t) => (now - t).num_seconds() >= idle_unload_secs as i64,
+                None => true,
+            };
+            if !idle {
+                continue;
+            }
+            // Low network demand: the region isn't asking for it either. Keep a
+            // wanted model warm even when THIS node is momentarily quiet.
+            let ema = self
+                .shared_state
+                .region_demand
+                .get(&(model_id.clone(), our_region.clone()))
+                .map(|v| *v)
+                .unwrap_or(0.0);
+            if ema >= IDLE_DEMAND_EMA_THRESHOLD {
+                continue;
+            }
+
+            // Free the VRAM; shards remain on disk for a fast re-spawn.
+            pool.unload_and_clear_window(&model_id).await;
+            let mname = self
+                .shared_state
+                .model_registry
+                .get_manifest(&model_id)
+                .map(|m| m.name.clone())
+                .unwrap_or_else(|| model_id.0.clone());
+            tracing::info!(
+                model = %model_id,
+                idle_unload_secs,
+                "Idle VRAM unload — freed model from GPU (shards kept on disk)"
+            );
+            self.shared_state.emit_activity(
+                crate::daemon::state::ActivityEvent::new(
+                    "auto_manage",
+                    "idle_vram_unload",
+                    format!("Freed idle model {mname} from GPU memory — no recent requests"),
+                )
+                .with_model(&model_id.0),
+            );
+            self.shared_state
+                .signal_dashboard(crate::daemon::state::DashboardSignal::ModelsChanged);
+        }
+    }
+
     async fn try_vram_soft_unload(&self, pressure: f64) {
         let vram_budget_mb = super::vram::compute_vram_budget(&self.shared_state);
         let Some(budget) = vram_budget_mb else {

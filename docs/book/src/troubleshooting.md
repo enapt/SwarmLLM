@@ -75,6 +75,28 @@ CPU inference is 5-20x slower but works for any model size. To avoid OOM:
 - Use a model that fits in VRAM (check model size vs available VRAM in the dashboard)
 - For models too large for one GPU, use distributed inference across multiple nodes
 
+## GPU Memory Stays Full When Idle
+
+Seeing high VRAM use with little activity is usually **expected, not a leak**. Your
+node keeps models loaded in GPU memory so it can serve the swarm without a cold
+start. How much it commits is set by your **contribution** level
+(`[node] contribution` — minimal / moderate / maximum, also on the dashboard).
+
+The daemon reclaims VRAM in two ways:
+
+- **Demand-driven (before pressure):** a model with no local requests for
+  `[auto_manage] idle_unload_secs` (default 30 min) **and** low network demand is
+  unloaded from GPU memory automatically. Its shards stay on disk, so it reloads
+  (one cold start) on the next request — your holder status never changes. Set
+  `idle_unload_secs = 0` to keep every loaded model resident.
+- **Pressure-driven (automatic):** above **70%** VRAM the daemon narrows loaded
+  models to fewer shards; above **95%** it fully unloads a model. Both keep shards
+  on disk.
+
+To free VRAM immediately, restart the daemon, or lower `contribution`. There is no
+leak here — the `model-worker` subprocess holding a model is killed (freeing all
+its GPU memory) whenever the daemon unloads it by either path above.
+
 ## Distributed Inference Issues
 
 **Peers visible but inference fails:**

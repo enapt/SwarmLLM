@@ -1,7 +1,11 @@
 [node]
 # data_dir = "~/.local/share/swarmllm"    # Platform default
 listen_port = 8800
-contribution = "minimal"       # "minimal", "moderate", "maximum" — change in dashboard
+contribution = "minimal"       # "minimal", "moderate", "maximum" — change in dashboard.
+                               # Governs how much of your VRAM/disk this node commits to
+                               # hosting models for the swarm. Higher = more models kept ready
+                               # to serve. Loaded models stay resident in VRAM to serve peers;
+                               # see [auto_manage] idle_unload_secs to reclaim idle VRAM.
 
 [resources]
 max_gpu_vram_mb = 0            # 0 = auto (80% of detected GPU used for inference; rest stays on disk for P2P)
@@ -93,6 +97,17 @@ shard_size_mb = 512            # Shard size in MB (64-2048, power of 2 recommend
 # min_replicas = 2             # Minimum shard replicas to maintain across network
 # prune_cooldown_secs = 300    # Seconds between prune actions on the same model
 # max_holder_load_for_prune = 3 # Block pruning if remaining holders avg load exceeds this
+# idle_unload_secs = 1800      # Free a loaded model's GPU memory after this many seconds with
+                               # NO local requests AND low network demand. Shards stay on disk;
+                               # the model reloads (cold start) on the next request, and your
+                               # holder status is unchanged. So VRAM follows real demand instead
+                               # of staying pinned. 0 = never idle-unload (keep models resident
+                               # until VRAM pressure forces eviction).
+#
+# VRAM pressure eviction (automatic, not configurable): above 70% VRAM the daemon
+# narrows loaded models to fewer shards to free space; above 95% it fully unloads a
+# model. Both keep shards on disk. idle_unload_secs above is the demand-driven path
+# that reclaims VRAM *before* pressure is reached.
 
 [pool]
 # Device Pools ("My Devices"): Link your personal machines so credits combine.
