@@ -393,6 +393,23 @@ impl NetworkManager {
                     }
                 }
             }
+            SwarmRequest::RelayedTensor(rt) => {
+                // NETWORKING_PLAN tensor relay — handled inline (forward to the
+                // target, or open + dispatch if we are the target). The ACK
+                // confirms delivery to this hop; the computed result returns as
+                // a SEPARATE relayed tensor, never on this substream (avoids the
+                // bidirectional-over-relay problem).
+                self.handle_relayed_tensor(peer, rt);
+                if self
+                    .swarm
+                    .behaviour_mut()
+                    .request_response
+                    .send_response(channel, SwarmResponse::Ack)
+                    .is_err()
+                {
+                    tracing::debug!(%peer, "Failed to ACK relayed tensor (channel closed)");
+                }
+            }
         }
     }
 

@@ -138,6 +138,7 @@ impl NetworkManager {
                         SwarmRequest::ShardTransfer(_) => "shard",
                         SwarmRequest::TensorPayload(_) => "tensor",
                         SwarmRequest::PrefixKvFetch(_) => "prefix_kv_fetch",
+                        SwarmRequest::RelayedTensor(_) => "relayed_tensor",
                     };
                     tracing::info!(%peer, kind, "Received request");
                     self.handle_request(peer, request, channel).await;

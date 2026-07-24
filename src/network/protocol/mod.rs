@@ -103,12 +103,75 @@ pub enum SwarmRequest {
     /// Binary tensor data (LayerForward or LayerResult, already encoded).
     /// Sent as raw bytes to avoid JSON overhead on large activation tensors.
     TensorPayload(Vec<u8>),
+    /// NETWORKING_PLAN tensor relay — a tensor forward/result routed through a
+    /// relay because the sender can't reach the target directly. The relay
+    /// forwards `sealed` blindly to `relay_to`; only `relay_to` can open it
+    /// (ephemeral-sealed for its static key). Never JSON-encoded — see the
+    /// `WIRE_TAG_RELAYED_TENSOR` codec path.
+    RelayedTensor(RelayedTensor),
     /// Item 8 Phase 2: cross-node KV-block fetch request. JSON-encoded
     /// because the payload is small (model_id + 32-byte hash). The matching
     /// response is `SwarmResponse::PrefixKvData`, carrying the serialized
     /// `KvSnapshot` as a binary frame so the large reply avoids JSON
     /// inflation.
     PrefixKvFetch(PrefixKvFetchReq),
+}
+
+/// NETWORKING_PLAN tensor relay envelope (`SwarmRequest::RelayedTensor`). Carries
+/// a cleartext routing header the relay forwards on, plus the target-sealed
+/// tensor bytes the relay can't read. `sealed` is an ephemeral-sealed, already-
+/// encoded `LayerForward` (`is_result=false`) or `LayerResult` (`is_result=true`)
+/// — see `crypto::relay_seal::{seal,open}_relayed_tensor`.
+#[derive(Debug, Clone)]
+pub struct RelayedTensor {
+    pub relay_to: crate::types::NodeId,
+    pub origin: crate::types::NodeId,
+    pub request_id: uuid::Uuid,
+    /// false = LayerForward (coordinator→server), true = LayerResult (return).
+    pub is_result: bool,
+    pub ephemeral_pub: [u8; 32],
+    pub sealed: Vec<u8>,
+}
+
+/// Encode a `RelayedTensor` frame BODY (no tag/length header — the codec adds
+/// those). Layout: `[relay_to:32][origin:32][request_id:16][is_result:1][ephemeral_pub:32][sealed…]`.
+pub fn encode_relayed_tensor(rt: &RelayedTensor) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(RELAYED_TENSOR_HEADER_LEN + rt.sealed.len());
+    buf.extend_from_slice(&rt.relay_to.0);
+    buf.extend_from_slice(&rt.origin.0);
+    buf.extend_from_slice(rt.request_id.as_bytes());
+    buf.push(rt.is_result as u8);
+    buf.extend_from_slice(&rt.ephemeral_pub);
+    buf.extend_from_slice(&rt.sealed);
+    buf
+}
+
+/// Decode a `RelayedTensor` frame body. Errors if too short to hold the header.
+pub fn decode_relayed_tensor(buf: &[u8]) -> io::Result<RelayedTensor> {
+    if buf.len() < RELAYED_TENSOR_HEADER_LEN {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "RelayedTensor frame too short",
+        ));
+    }
+    let mut relay_to = [0u8; 32];
+    relay_to.copy_from_slice(&buf[0..32]);
+    let mut origin = [0u8; 32];
+    origin.copy_from_slice(&buf[32..64]);
+    let mut rid = [0u8; 16];
+    rid.copy_from_slice(&buf[64..80]);
+    let is_result = buf[80] != 0;
+    let mut ephemeral_pub = [0u8; 32];
+    ephemeral_pub.copy_from_slice(&buf[81..113]);
+    let sealed = buf[RELAYED_TENSOR_HEADER_LEN..].to_vec();
+    Ok(RelayedTensor {
+        relay_to: crate::types::NodeId(relay_to),
+        origin: crate::types::NodeId(origin),
+        request_id: uuid::Uuid::from_bytes(rid),
+        is_result,
+        ephemeral_pub,
+        sealed,
+    })
 }
 
 /// Response type for the request_response protocol.
@@ -163,6 +226,17 @@ const WIRE_TAG_SHARD: u8 = 0x03;
 ///         always decompresses regardless).
 /// Avoids JSON inflation on multi-MB KV payloads.
 const WIRE_TAG_PREFIX_KV: u8 = 0x04;
+
+/// NETWORKING_PLAN tensor relay — a distributed-pipeline tensor forward/result
+/// routed through a relay. Binary frame (tensors are large + already sealed):
+/// `[relay_to:32][origin:32][request_id:16][is_result:1][ephemeral_pub:32][sealed…]`.
+/// Feature-gated (`features::TENSOR_RELAY`) — only sent to peers that advertise
+/// support, so an older node never receives an unknown tag.
+const WIRE_TAG_RELAYED_TENSOR: u8 = 0x06;
+
+/// Fixed header length of a `WIRE_TAG_RELAYED_TENSOR` frame body (everything
+/// before `sealed`): 32 + 32 + 16 + 1 + 32.
+const RELAYED_TENSOR_HEADER_LEN: usize = 32 + 32 + 16 + 1 + 32;
 
 /// Read a wire frame header (tag byte + 4-byte BE length) and body from a stream.
 /// `large_tags` lists tag values that get the larger `MAX_MESSAGE_SIZE` limit;
@@ -241,6 +315,28 @@ fn build_json_frame<T: serde::Serialize>(msg: &T, label: &str) -> io::Result<Vec
     Ok(frame)
 }
 
+/// Build a relayed-tensor wire frame: [WIRE_TAG_RELAYED_TENSOR][4B BE length][body].
+/// Bounded by `MAX_MESSAGE_SIZE` (the large-tensor limit) since the sealed
+/// activation body can be multi-MB.
+fn build_relayed_tensor_frame(rt: &RelayedTensor) -> io::Result<Vec<u8>> {
+    let body = encode_relayed_tensor(rt);
+    if body.len() > MAX_MESSAGE_SIZE {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "relayed tensor too large: {} bytes (max {MAX_MESSAGE_SIZE})",
+                body.len()
+            ),
+        ));
+    }
+    let len = (body.len() as u32).to_be_bytes();
+    let mut frame = Vec::with_capacity(1 + 4 + body.len());
+    frame.push(WIRE_TAG_RELAYED_TENSOR);
+    frame.extend_from_slice(&len);
+    frame.extend_from_slice(&body);
+    Ok(frame)
+}
+
 #[async_trait]
 impl request_response::Codec for SwarmCodec {
     type Protocol = StreamProtocol;
@@ -258,7 +354,11 @@ impl request_response::Codec for SwarmCodec {
         let (tag, buf) = read_wire_frame(
             io,
             "read_request",
-            &[WIRE_TAG_TENSOR, WIRE_TAG_TENSOR_COMPRESSED],
+            &[
+                WIRE_TAG_TENSOR,
+                WIRE_TAG_TENSOR_COMPRESSED,
+                WIRE_TAG_RELAYED_TENSOR,
+            ],
         )
         .await?;
 
@@ -269,6 +369,9 @@ impl request_response::Codec for SwarmCodec {
             WIRE_TAG_TENSOR_COMPRESSED => Ok(SwarmRequest::TensorPayload(
                 decompress_tensor_payload(buf, "request")?,
             )),
+            WIRE_TAG_RELAYED_TENSOR => {
+                Ok(SwarmRequest::RelayedTensor(decode_relayed_tensor(&buf)?))
+            }
             unknown => Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!("Unknown wire tag: 0x{:02x}", unknown),
@@ -380,6 +483,7 @@ impl request_response::Codec for SwarmCodec {
                 self.compress_level,
                 self.compress_threshold,
             ),
+            SwarmRequest::RelayedTensor(rt) => build_relayed_tensor_frame(&rt)?,
             other => build_json_frame(&other, "message")?,
         };
         let frame_len = frame.len();
@@ -542,6 +646,9 @@ impl serde::Serialize for SwarmRequest {
             SwarmRequest::TensorPayload(_) => Err(serde::ser::Error::custom(
                 "TensorPayload should not be JSON-serialized",
             )),
+            SwarmRequest::RelayedTensor(_) => Err(serde::ser::Error::custom(
+                "RelayedTensor should not be JSON-serialized",
+            )),
         }
     }
 }
@@ -654,6 +761,32 @@ mod compression {
 mod tests {
     use super::compression::{compress_tensor, decompress_tensor};
     use super::*;
+
+    #[test]
+    fn relayed_tensor_encode_decode_roundtrip() {
+        let rt = RelayedTensor {
+            relay_to: crate::types::NodeId([7u8; 32]),
+            origin: crate::types::NodeId([9u8; 32]),
+            request_id: uuid::Uuid::from_bytes([3u8; 16]),
+            is_result: true,
+            ephemeral_pub: [5u8; 32],
+            sealed: vec![0xAB; 5000],
+        };
+        let body = encode_relayed_tensor(&rt);
+        assert_eq!(body.len(), RELAYED_TENSOR_HEADER_LEN + 5000);
+        let got = decode_relayed_tensor(&body).unwrap();
+        assert_eq!(got.relay_to.0, rt.relay_to.0);
+        assert_eq!(got.origin.0, rt.origin.0);
+        assert_eq!(got.request_id, rt.request_id);
+        assert!(got.is_result);
+        assert_eq!(got.ephemeral_pub, rt.ephemeral_pub);
+        assert_eq!(got.sealed, rt.sealed);
+    }
+
+    #[test]
+    fn relayed_tensor_decode_rejects_short_frame() {
+        assert!(decode_relayed_tensor(&[0u8; 10]).is_err());
+    }
 
     #[test]
     fn encode_decode_roundtrip() {

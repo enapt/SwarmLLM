@@ -24,8 +24,14 @@ pub mod features {
     /// inference message routed through a relay).
     pub const RELAY: u64 = 1 << 0;
 
+    /// Understands the NETWORKING_PLAN tensor relay (`SwarmRequest::RelayedTensor`
+    /// / `WIRE_TAG_RELAYED_TENSOR`): a distributed-pipeline tensor forward or
+    /// result routed through a relay, ephemeral-sealed for the recipient's static
+    /// key. A sender only relay-wraps tensors for a peer that advertises this bit.
+    pub const TENSOR_RELAY: u64 = 1 << 1;
+
     /// The full feature set THIS build implements. Advertised by every node.
-    pub const ALL: u64 = RELAY;
+    pub const ALL: u64 = RELAY | TENSOR_RELAY;
 
     /// Does `advertised` include every bit in `needed`?
     pub fn supports(advertised: u64, needed: u64) -> bool {

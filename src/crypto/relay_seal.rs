@@ -77,6 +77,53 @@ pub fn open_relayed_message(
         .map_err(|e| SwarmError::Encryption(format!("deserialize relayed inner: {e}")))
 }
 
+/// Upper bound on a relayed tensor payload (an ephemeral-sealed, already-encoded
+/// `LayerForward`/`LayerResult`). Tensors are large — a single-token decode
+/// forward is tens of KB, a large-prompt prefill can be a few MB — so this is
+/// generous, but still bounds what a relay will forward and a recipient open.
+pub const MAX_RELAY_TENSOR_BYTES: usize = 32 * 1024 * 1024;
+
+/// Seal an already-encoded tensor frame end-to-end for `relay_to` (binary
+/// sibling of [`seal_relayed_message`], for the distributed-pipeline tensor
+/// relay). Returns the ephemeral pubkey + sealed bytes. AAD binds
+/// `origin‖relay_to‖request_id`, so a relay cannot re-address, replay, or
+/// cross-wire it. `request_id` uses the tensor's own request id (+ a role byte
+/// folded into the caller's framing) for correlation.
+pub fn seal_relayed_tensor(
+    origin: &NodeId,
+    relay_to: &NodeId,
+    request_id: &uuid::Uuid,
+    plaintext: &[u8],
+) -> Result<([u8; 32], Vec<u8>), SwarmError> {
+    if plaintext.len() > MAX_RELAY_TENSOR_BYTES {
+        return Err(SwarmError::Encryption(format!(
+            "relayed tensor too large: {} bytes (max {MAX_RELAY_TENSOR_BYTES})",
+            plaintext.len()
+        )));
+    }
+    let target_x = ed25519_pubkey_to_x25519(&relay_to.0)
+        .ok_or_else(|| SwarmError::Encryption("relay target key not convertible".into()))?;
+    let aad = relay_aad(origin, relay_to, request_id);
+    ephemeral_seal(&target_x, plaintext, &aad)
+}
+
+/// Open a relayed tensor addressed to this node (binary sibling of
+/// [`open_relayed_message`]). `local_secret` is this node's X25519 static secret.
+pub fn open_relayed_tensor(
+    local_secret: &StaticSecret,
+    origin: &NodeId,
+    relay_to: &NodeId,
+    request_id: &uuid::Uuid,
+    ephemeral_pub: &[u8; 32],
+    sealed: &[u8],
+) -> Result<Vec<u8>, SwarmError> {
+    if sealed.len() > MAX_RELAY_TENSOR_BYTES + 64 {
+        return Err(SwarmError::Encryption("relayed tensor too large".into()));
+    }
+    let aad = relay_aad(origin, relay_to, request_id);
+    ephemeral_open(local_secret, ephemeral_pub, sealed, &aad)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -169,5 +216,41 @@ mod tests {
             &msg,
         );
         assert!(err.is_err());
+    }
+
+    #[test]
+    fn tensor_seal_open_roundtrip() {
+        let origin = Identity::generate();
+        let target = Identity::generate();
+        let target_secret = ed25519_to_x25519_secret(&target.signing_key_bytes());
+        let rid = uuid::Uuid::new_v4();
+        let tensor = vec![0xABu8; 100_000]; // ~100KB "encoded tensor"
+
+        let (eph, sealed) =
+            seal_relayed_tensor(origin.node_id(), target.node_id(), &rid, &tensor).unwrap();
+        assert!(!sealed.is_empty());
+
+        let opened = open_relayed_tensor(
+            &target_secret,
+            origin.node_id(),
+            target.node_id(),
+            &rid,
+            &eph,
+            &sealed,
+        )
+        .unwrap();
+        assert_eq!(opened, tensor);
+
+        // A relay (wrong key) cannot open it.
+        let eve = ed25519_to_x25519_secret(&Identity::generate().signing_key_bytes());
+        assert!(open_relayed_tensor(
+            &eve,
+            origin.node_id(),
+            target.node_id(),
+            &rid,
+            &eph,
+            &sealed
+        )
+        .is_err());
     }
 }

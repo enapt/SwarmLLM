@@ -360,6 +360,108 @@ impl NetworkManager {
         );
     }
 
+    /// Handle an inbound `RelayedTensor` (NETWORKING_PLAN tensor relay). Either
+    /// we are the final recipient — open the ephemeral-sealed tensor with our
+    /// static key (no session needed), decode it, and inject it into dispatch as
+    /// though `origin` sent it directly — or we are the relay and forward it to
+    /// the target. Called inline from `handle_request`, which sends the ACK.
+    pub(super) fn handle_relayed_tensor(
+        &mut self,
+        immediate_peer: PeerId,
+        rt: crate::network::protocol::RelayedTensor,
+    ) {
+        let local = self.shared_state.identity.node_id().clone();
+
+        if rt.relay_to == local {
+            // We are the target. Open with our static key.
+            let secret = self.shared_state.identity.x25519_secret();
+            let plaintext = match crate::crypto::relay_seal::open_relayed_tensor(
+                &secret,
+                &rt.origin,
+                &rt.relay_to,
+                &rt.request_id,
+                &rt.ephemeral_pub,
+                &rt.sealed,
+            ) {
+                Ok(p) => p,
+                Err(e) => {
+                    tracing::warn!(error = %e, origin = %rt.origin, "failed to open relayed tensor — dropping");
+                    return;
+                }
+            };
+            self.ensure_relayed_origin_known(&rt.origin);
+            self.shared_state
+                .learn_relay_route(&rt.origin, immediate_peer.to_bytes());
+            let msg = if rt.is_result {
+                match crate::network::protocol::decode_layer_result(&plaintext) {
+                    Ok(r) => SwarmMessage::LayerResult(r),
+                    Err(e) => {
+                        tracing::warn!(error = %e, "relayed LayerResult decode failed");
+                        return;
+                    }
+                }
+            } else {
+                match crate::network::protocol::decode_layer_forward(&plaintext) {
+                    Ok(f) => SwarmMessage::LayerForward(f),
+                    Err(e) => {
+                        tracing::warn!(error = %e, "relayed LayerForward decode failed");
+                        return;
+                    }
+                }
+            };
+            if let Err(e) = self.dispatch_authenticated_as(Some(rt.origin.clone()), msg) {
+                tracing::warn!(error = %e, "relayed tensor dropped — dispatch backpressured");
+            }
+            return;
+        }
+
+        // We are the relay. Forward to the target if willing + able (single hop).
+        let relay_enabled = self.shared_state.config.node.anchor_mode
+            || self.shared_state.config.network.relay_forwarding;
+        if !relay_enabled {
+            return;
+        }
+        let Some(sender_node) = self.peer_to_node.get(&immediate_peer).map(|r| r.clone()) else {
+            return;
+        };
+        if sender_node != rt.origin {
+            tracing::debug!(origin = %rt.origin, sender = %sender_node, "refusing to re-relay a relayed tensor (not first hop)");
+            return;
+        }
+        if !self
+            .shared_state
+            .relay_forward_allowed(&immediate_peer.to_bytes())
+        {
+            tracing::debug!(origin = %rt.origin, "relay tensor forward rate limit — dropping");
+            return;
+        }
+        let Some(target_peer_id) = crate::network::transport::node_id_to_peer_id(&rt.relay_to)
+        else {
+            return;
+        };
+        if !self.swarm.is_connected(&target_peer_id) {
+            tracing::debug!(target = %rt.relay_to, "relay: tensor target not connected — cannot forward");
+            return;
+        }
+        self.shared_state
+            .relay_inference_bytes
+            .fetch_add(rt.sealed.len() as u64, std::sync::atomic::Ordering::Relaxed);
+        let req = SwarmRequest::RelayedTensor(rt);
+        let req_id = self
+            .swarm
+            .behaviour_mut()
+            .request_response
+            .send_request(&target_peer_id, req);
+        self.pending_rr_observability.insert(
+            req_id,
+            (
+                "relay_tensor_forward".to_string(),
+                std::time::Instant::now(),
+                None,
+            ),
+        );
+    }
+
     /// Register a relayed message's `origin` as a known peer reachable via
     /// relay. Populates `peer_id_map` (so dispatch can stamp `sender_peer_bytes`
     /// on a relayed `RemoteGenerateRequest`) and a minimal `peer_registry` entry
