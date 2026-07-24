@@ -103,7 +103,13 @@ impl NetworkManager {
         num_established: u32,
     ) {
         let closed_addr = self.connection_addrs.remove(&connection_id);
-        if num_established == 0 {
+        // `num_established == 0` for THIS close event does not mean the peer is
+        // gone — a peer with two transports (TCP + QUIC) or a fast reconnect can
+        // have a fresh connection the swarm already counts. The rest of this
+        // function guards the identical race with `!is_connected` (see the branch
+        // below); the abort path must too, or a benign TCP blip kills a live
+        // remote-generate that is still returnable over the surviving connection.
+        if num_established == 0 && !self.swarm.is_connected(&peer_id) {
             self.peer_remote_addrs.remove(&peer_id);
             // Abort any inbound remote-generations we were running for this
             // coordinator. With their last connection gone there is no route to
