@@ -86,6 +86,14 @@ impl AutoShardManager {
         };
 
         for manifest in registry.models() {
+            // Never acquire a backup-copy model (`<model>.FULLBACKUP`). Even if a
+            // stale manifest reached the registry (e.g. an old redb record from
+            // before the register_manifest guard existed), auto-manage must not
+            // re-download it from a peer OR its hf_source — the exact live re-fetch
+            // reported on v0.3.15. Defense-in-depth beyond load_from_db's purge.
+            if crate::model::manifest::is_backup_artifact_id(&manifest.id.0) {
+                continue;
+            }
             // -- Policy gate: skip models excluded from auto-manage --
             if let Some(policy) = self
                 .shared_state

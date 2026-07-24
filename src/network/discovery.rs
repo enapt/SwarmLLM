@@ -343,6 +343,13 @@ pub fn start_providing_shards(
 ) -> Result<(), SwarmError> {
     let mut provided = 0;
     for shard_id in shards {
+        // Never announce ourselves as a DHT provider for a backup-copy model
+        // (`<model>.FULLBACKUP`) — the callers filter these out too, but this is
+        // the single choke point every StartProviding flows through, so it can't
+        // leak a copied-folder name into the swarm's provider records.
+        if crate::model::manifest::is_backup_artifact_id(&shard_id.model_id.0) {
+            continue;
+        }
         let key = shard_provider_key(shard_id);
         match swarm.behaviour_mut().kademlia.start_providing(key) {
             Ok(_query_id) => {

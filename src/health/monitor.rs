@@ -228,6 +228,11 @@ impl HealthMonitor {
 
         // Gather hosted shards using the reverse-index for O(1) lookup.
         let mut hosted_shards = self.shared_state.model_registry.shards_for_node(&node_id);
+        // Never report a backup-copy model as hosted — it drives DHT provider
+        // announcements (StartProviding) and shows up in peers' hosted_models
+        // lists under a name no one can resolve. Both were reported still
+        // leaking on v0.3.15 despite the manifest guard.
+        hosted_shards.retain(|s| !crate::model::manifest::is_backup_artifact_id(&s.model_id.0));
 
         // If no shards from registry but we have a loaded model (and no shard_range),
         // represent the full model as shard index 0.

@@ -48,6 +48,9 @@ pub fn serialize_peer_to_json(
                 .hosted_shards
                 .iter()
                 .map(|s| s.model_id.0.clone())
+                // A peer on an older build still gossips a backup-copy name in
+                // its capability; never surface it in this peer's hosted_models.
+                .filter(|id| !crate::model::manifest::is_backup_artifact_id(id))
                 .collect();
             models.sort_unstable();
             models.dedup();
@@ -1078,10 +1081,12 @@ pub async fn network_map(State(state): State<AppState>) -> Json<serde_json::Valu
             .to_uppercase();
         let entry = regions.entry(code).or_insert_with(|| (0, HashMap::new()));
         entry.0 += 1;
-        // Add our hosted models
+        // Add our hosted models (never a backup-copy name).
         let node_id = state.shared_state.identity.node_id();
         for (shard_id, holders) in state.shared_state.model_registry.all_shard_entries() {
-            if holders.contains(node_id) {
+            if holders.contains(node_id)
+                && !crate::model::manifest::is_backup_artifact_id(&shard_id.model_id.0)
+            {
                 *entry.1.entry(shard_id.model_id.0.clone()).or_insert(0) += 1;
             }
         }
@@ -1108,10 +1113,14 @@ pub async fn network_map(State(state): State<AppState>) -> Json<serde_json::Valu
             .entry(region_code)
             .or_insert_with(|| (0, HashMap::new()));
         entry.0 += 1;
-        // Count distinct models this peer hosts
+        // Count distinct models this peer hosts (a peer on an older build still
+        // gossips a backup-copy name in its capability — keep it out of the
+        // swarm-wide region aggregation too).
         let mut peer_models = std::collections::HashSet::new();
         for shard in hosted_shards {
-            peer_models.insert(shard.model_id.0.clone());
+            if !crate::model::manifest::is_backup_artifact_id(&shard.model_id.0) {
+                peer_models.insert(shard.model_id.0.clone());
+            }
         }
         for model_id in peer_models {
             *entry.1.entry(model_id).or_insert(0) += 1;
