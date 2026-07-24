@@ -50,18 +50,39 @@ impl NetworkManager {
             return;
         };
 
-        // Fast-fail on disconnected peer BEFORE doing any encrypt work — avoids
-        // wasted CPU on the spawn task when the peer is gone. The
-        // post-spawn handler re-checks connectivity in case the peer
-        // disconnects during the brief encrypt window.
-        if !self.swarm.is_connected(&peer_id) {
-            tracing::warn!(
-                %peer_id,
-                request_id = %forward.request_id,
-                "Peer not connected — failing tensor forward immediately"
-            );
-            self.fail_tensor_forward(forward.request_id, &peer_id, "Peer not connected".into());
-            return;
+        // NETWORKING_PLAN tensor relay — when the target is unreachable OR
+        // reachable only via a flaky relay *circuit*, route the forward through
+        // a relay (ephemeral-sealed for the target) instead of the circuit RR.
+        // Encode the plaintext forward here; `try_relay_tensor` seals it. Only
+        // fall through to the direct send when there is no relay path.
+        let connected = self.swarm.is_connected(&peer_id);
+        if !connected || !self.has_direct_connection(&peer_id) {
+            match protocol::encode_layer_forward(&forward) {
+                Ok(encoded) => {
+                    if self.try_relay_tensor(
+                        &target_peer_bytes,
+                        &encoded,
+                        /*is_result*/ false,
+                        forward.request_id,
+                    ) {
+                        return;
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "Failed to encode forward for relay — will try direct");
+                }
+            }
+            if !connected {
+                tracing::warn!(
+                    %peer_id,
+                    request_id = %forward.request_id,
+                    "Peer not connected and no relay path — failing tensor forward"
+                );
+                self.fail_tensor_forward(forward.request_id, &peer_id, "Peer not connected".into());
+                return;
+            }
+            // Circuit-only but no relay path — fall through to a best-effort
+            // direct send over the circuit.
         }
 
         // Try to find the peer's NodeId for encryption
@@ -398,13 +419,36 @@ impl NetworkManager {
         result: &crate::types::LayerResult,
         is_connected: bool,
     ) {
-        if !is_connected {
-            tracing::warn!(
-                %peer_id,
-                request_id = %result.request_id,
-                "Dropping tensor result fallback — peer not connected"
-            );
-            return;
+        // NETWORKING_PLAN tensor relay — the return path. When the coordinator
+        // (origin) is unreachable OR reachable only via a circuit — the common
+        // case for a forward we received THROUGH a relay — route the result back
+        // via a relay instead of dropping it. Uses the reverse route we learned
+        // when the forward arrived.
+        if !is_connected || !self.has_direct_connection(peer_id) {
+            match protocol::encode_layer_result(result) {
+                Ok(encoded) => {
+                    if self.try_relay_tensor(
+                        &peer_id.to_bytes(),
+                        &encoded,
+                        /*is_result*/ true,
+                        result.request_id,
+                    ) {
+                        return;
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, request_id = %result.request_id, "Failed to encode result for relay");
+                }
+            }
+            if !is_connected {
+                tracing::warn!(
+                    %peer_id,
+                    request_id = %result.request_id,
+                    "Dropping tensor result fallback — peer not connected and no relay path"
+                );
+                return;
+            }
+            // Circuit-only but no relay path — fall through to best-effort direct.
         }
         match protocol::encode_layer_result(result) {
             Ok(payload) => {

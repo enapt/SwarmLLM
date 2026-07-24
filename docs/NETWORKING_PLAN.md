@@ -13,6 +13,21 @@ fixes in R143–R150.
   since two circuit-connected peers otherwise looked "connected" and used the
   fragile circuit RR. Crypto in `crypto/relay_seal.rs`; transport in
   `network/manager/relay.rs`; state in `daemon/state/relay.rs`.
+- ✅ **Tensor relay — distributed inference across NAT.** Extends the relay to
+  the *distributed-pipeline* tensor path (`LayerForward`/`LayerResult`), so a
+  multi-shard inference between two un-connectable nodes runs over the sealed
+  app-relay instead of the flaky libp2p circuit. A new `SwarmRequest::RelayedTensor`
+  + `WIRE_TAG_RELAYED_TENSOR` binary frame (tensors are large + already-encoded,
+  so out of JSON), negotiated via `features::TENSOR_RELAY`. The tensor is
+  **ephemeral-sealed for the target's STATIC key** (`crypto::relay_seal::
+  seal_relayed_tensor`), NOT the session — sidestepping the "decrypt by transport
+  sender" problem that made naive relaying of session-sealed tensors impossible.
+  Forward and result each travel as a SEPARATE relayed request (never the RR
+  response substream), which avoids the bidirectional-over-relay problem; the
+  coordinator's existing `pending_layer_results` oneshot resolves on the
+  relayed-back `LayerResult`. Send fallback wired into `handle_send_tensor` +
+  `send_tensor_result_as_request`; the relay-unwrap stamps the origin's peer
+  bytes so the result routes home.
 - ✅ **Cross-cutting — additive protocol evolution.** Nodes advertise a
   `PROTOCOL_VERSION` epoch + a `features` bitfield (`swarmllm_types::features`);
   a sender gates a new/optional message type on the recipient's advertised bit,

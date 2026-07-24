@@ -119,6 +119,24 @@ impl NetworkManager {
             .unwrap_or(false)
     }
 
+    /// Whether `target` advertises the TENSOR_RELAY feature (can receive a
+    /// relayed distributed-pipeline tensor). Distinct from `RELAY`; a learned
+    /// route does NOT prove it, so tensor sends always gate on this.
+    fn target_supports_tensor_relay(&self, target: &NodeId) -> bool {
+        self.shared_state
+            .peer_registry
+            .get(target)
+            .and_then(|p| {
+                p.capability.as_ref().map(|c| {
+                    crate::types::features::supports(
+                        c.features,
+                        crate::types::features::TENSOR_RELAY,
+                    )
+                })
+            })
+            .unwrap_or(false)
+    }
+
     /// Whether we hold at least one DIRECT (non-relay-circuit) connection to a
     /// peer. A peer reachable only via a relay circuit can't reliably round-trip
     /// request_response, so the relay send path prefers the app-level relay for
@@ -272,6 +290,102 @@ impl NetworkManager {
         false
     }
 
+    /// Try to deliver an already-encoded tensor frame (`encoded` = the plaintext
+    /// wire bytes of a `LayerForward` when `is_result=false`, or a `LayerResult`
+    /// when `is_result=true`) to `target_peer_bytes` through a relay. The tensor
+    /// is ephemeral-sealed for the target's static key, so the relay stays blind
+    /// and the target opens it without a session. Returns true if dispatched to
+    /// a relay; the caller then skips its direct send. NETWORKING_PLAN.
+    pub(super) fn try_relay_tensor(
+        &mut self,
+        target_peer_bytes: &[u8],
+        encoded: &[u8],
+        is_result: bool,
+        request_id: uuid::Uuid,
+    ) -> bool {
+        let local_node = self.shared_state.identity.node_id().clone();
+        let learned = self.shared_state.relay_route_for_peer(target_peer_bytes);
+        let target_node = match &learned {
+            Some(route) => route.target_node.clone(),
+            None => match self.node_id_for_peer_bytes(target_peer_bytes) {
+                Some(tn) => tn,
+                None => return false,
+            },
+        };
+        // TENSOR_RELAY is a distinct capability from RELAY, and a learned route
+        // (which may have come from a message relay) does not prove it — always
+        // gate so we never send a tensor an older peer can't decode.
+        if !self.target_supports_tensor_relay(&target_node) {
+            return false;
+        }
+
+        let mut candidates: Vec<Vec<u8>> = Vec::new();
+        if let Some(route) = &learned {
+            candidates.push(route.relay_peer_bytes.clone());
+        }
+        for r in self.pick_connected_relays(&target_node) {
+            if !candidates.contains(&r) {
+                candidates.push(r);
+            }
+        }
+
+        for relay_peer_bytes in candidates {
+            let Some(relay_peer_id) = Self::resolve_peer_id(&relay_peer_bytes, "relay") else {
+                continue;
+            };
+            if !self.swarm.is_connected(&relay_peer_id) {
+                continue;
+            }
+            let (ephemeral_pub, sealed) = match crate::crypto::relay_seal::seal_relayed_tensor(
+                &local_node,
+                &target_node,
+                &request_id,
+                encoded,
+            ) {
+                Ok(x) => x,
+                Err(e) => {
+                    tracing::warn!(error = %e, "relay tensor seal failed — dropping");
+                    return false;
+                }
+            };
+            let rt = crate::network::protocol::RelayedTensor {
+                relay_to: target_node.clone(),
+                origin: local_node.clone(),
+                request_id,
+                is_result,
+                ephemeral_pub,
+                sealed,
+            };
+            let req = SwarmRequest::RelayedTensor(rt);
+            let req_id = self
+                .swarm
+                .behaviour_mut()
+                .request_response
+                .send_request(&relay_peer_id, req);
+            self.pending_rr_observability.insert(
+                req_id,
+                (
+                    "relayed_tensor".to_string(),
+                    std::time::Instant::now(),
+                    None,
+                ),
+            );
+            tracing::debug!(
+                %relay_peer_id,
+                target = %target_node,
+                %request_id,
+                is_result,
+                "NETWORKING_PLAN: routed tensor via relay"
+            );
+            return true;
+        }
+
+        if learned.is_some() {
+            self.shared_state.relay_routes.remove(target_peer_bytes);
+        }
+        false
+    }
+
     /// Handle an inbound `RelayedEnvelope`. Either we are the final recipient
     /// (open + inject the inner message) or the relay (forward to the target).
     /// Called inline from `handle_request`, which sends the ACK.
@@ -402,7 +516,18 @@ impl NetworkManager {
                 }
             } else {
                 match crate::network::protocol::decode_layer_forward(&plaintext) {
-                    Ok(f) => SwarmMessage::LayerForward(f),
+                    Ok(mut f) => {
+                        // Stamp the origin's peer bytes so `handle_layer_forward`
+                        // routes the computed result back to the origin — where
+                        // the return relay picks it up. (The origin builds the
+                        // forward with `None`; the direct receive path stamps
+                        // the RR sender, so the relay path must stamp the origin.)
+                        if let Some(pid) = crate::network::transport::node_id_to_peer_id(&rt.origin)
+                        {
+                            f.sender_peer_bytes = Some(pid.to_bytes());
+                        }
+                        SwarmMessage::LayerForward(f)
+                    }
                     Err(e) => {
                         tracing::warn!(error = %e, "relayed LayerForward decode failed");
                         return;

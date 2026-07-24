@@ -125,4 +125,67 @@ fn mixed_version_gate_skips_feature_less_peer() {
         !features::supports(0, features::RELAY),
         "an older, feature-less peer must be skipped"
     );
+    // The tensor relay is a distinct, separately-negotiated capability.
+    assert!(features::supports(features::ALL, features::TENSOR_RELAY));
+    assert!(!features::supports(features::RELAY, features::TENSOR_RELAY));
+}
+
+#[test]
+fn tensor_relay_round_trip_relay_blind_target_recovers() {
+    use swarmllm::crypto::relay_seal::{open_relayed_tensor, seal_relayed_tensor};
+    use swarmllm::network::protocol::{
+        decode_relayed_tensor, encode_relayed_tensor, RelayedTensor,
+    };
+
+    let a = Identity::generate(); // origin (coordinator)
+    let r = Identity::generate(); // relay
+    let b = Identity::generate(); // target (server holding a pipeline segment)
+
+    // Opaque "encoded LayerForward" bytes — the tensor relay carries these blind
+    // (the LayerForward encode/decode itself is tested in the protocol module).
+    let encoded_tensor: Vec<u8> = (0..50_000u32).map(|i| (i % 251) as u8).collect();
+    let rid = uuid::Uuid::new_v4();
+
+    // A seals the encoded tensor for B and builds the relay envelope.
+    let (eph, sealed) =
+        seal_relayed_tensor(a.node_id(), b.node_id(), &rid, &encoded_tensor).unwrap();
+    let rt = RelayedTensor {
+        relay_to: b.node_id().clone(),
+        origin: a.node_id().clone(),
+        request_id: rid,
+        is_result: false,
+        ephemeral_pub: eph,
+        sealed,
+    };
+
+    // Wire hop A -> R.
+    let at_relay = decode_relayed_tensor(&encode_relayed_tensor(&rt)).unwrap();
+    // The relay is a blind pipe — it cannot open the sealed tensor.
+    assert!(open_relayed_tensor(
+        &r.x25519_secret(),
+        &at_relay.origin,
+        &at_relay.relay_to,
+        &at_relay.request_id,
+        &at_relay.ephemeral_pub,
+        &at_relay.sealed,
+    )
+    .is_err());
+
+    // Wire hop R -> B (relay forwards verbatim); B opens with its static key.
+    let at_target = decode_relayed_tensor(&encode_relayed_tensor(&at_relay)).unwrap();
+    let recovered = open_relayed_tensor(
+        &b.x25519_secret(),
+        &at_target.origin,
+        &at_target.relay_to,
+        &at_target.request_id,
+        &at_target.ephemeral_pub,
+        &at_target.sealed,
+    )
+    .unwrap();
+    assert_eq!(recovered, encoded_tensor);
+    // The plaintext tensor must never appear in the sealed bytes.
+    assert!(!at_target
+        .sealed
+        .windows(8)
+        .any(|w| w == &encoded_tensor[0..8]));
 }
