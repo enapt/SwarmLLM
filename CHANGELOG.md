@@ -2,6 +2,46 @@
 
 All notable changes to SwarmLLM are documented here.
 
+## [0.3.18-alpha] — 2026-07-24
+
+The networking release: two home machines behind NAT can now actually run
+inference through each other, and the network won't break across versions again.
+
+### Added
+
+- **Inference completes between two machines that can't connect directly.** When
+  two nodes are both behind NAT (home routers, mobile, CGNAT) and can't form a
+  direct link, a request now routes through a mutually-reachable relay — usually
+  the anchor, or any node that opts in. The relay is a blind pipe: it passes the
+  traffic along but the request and the reply are sealed end-to-end, so it never
+  sees your prompt or the generated tokens. This is the fix for "the two nodes
+  connect and chat but inference never completes."
+- **The relay survives losing any single middle-man.** Relay-capable nodes
+  announce themselves on the network, and a node short on relay paths finds and
+  connects to more on its own — so relaying keeps working even if the bootstrap
+  anchor goes down, and spreads out as the network grows its own public relays.
+- **Idle GPU memory is reclaimed automatically.** A model that's had no requests
+  for 5 minutes, and that the wider network isn't asking for either, is unloaded
+  from your GPU. Its files stay on disk and it reloads on the next request, so
+  nothing is lost — your VRAM just stops being pinned by models nobody is using.
+  Tunable (or disable) via `[auto_manage] idle_unload_secs`.
+
+### Changed
+
+- **The network no longer breaks across versions.** Nodes now negotiate which
+  features they each speak, so a newer node never sends an older one something it
+  can't understand — a node on one release keeps working with its neighbours on
+  the next. New network features are additions from here on, never a hard cutover.
+
+### Fixed
+
+- **A machine you're getting an answer from stops the moment you walk away —
+  even if you don't close the connection.** The previous release stopped work
+  when a client disconnected; this one also handles a client that keeps the
+  connection open but stops reading (a crash, a client-side timeout-and-retry, a
+  closed laptop). Instead of a processor pegged for many minutes generating a
+  reply nobody reads, the work now stops within a minute.
+
 ## [0.3.17-alpha] — 2026-07-24
 
 ### Fixed

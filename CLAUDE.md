@@ -194,11 +194,21 @@ When spawning subagents in this repo, use these model picks (overrides defaults 
 
 All 20 build phases complete. All subsystems wired — no stubs. **1187 lib tests + 78 integration + 2 repo-consistency tests + 3 swarmllm-types tests passing**; 8 lib + 1 e2e ignored (env-var or manual). Clippy clean default + features dev,claude-subscription + `--features llama`.
 
-**On main, UNRELEASED (as of 2026-07-24):** the entire `docs/NETWORKING_PLAN.md` — app-level inference relay across NAT (`RelayedEnvelope`, e2e-sealed, prefer-over-circuit), additive version/feature handshake, multi-relay + DHT relay discovery, generation-idle cancel guard. Release held per user (next cut = v0.3.18; **anchor must update** — it's a network release). Detail: `memory/round_log_networking_plan.md`.
-
 Per-round history lives in `~/.claude/projects/-home-user-SwarmLLM/memory/round_log_*.md` and the CHANGELOG; `docs/ARCHITECTURE.md` is the canonical architecture. This section keeps only the current release line plus one-line prior-round pointers.
 
-### Latest — v0.3.17-alpha (2026-07-24): Claude Code backend + API-compat + net race
+### Latest — v0.3.18-alpha (2026-07-24): the networking release — inference across NAT
+
+Ships the entire `docs/NETWORKING_PLAN.md`. **The anchor MUST update to v0.3.18** — this is a real network release (adds the relay role), unlike v0.3.17.
+
+- **App-level inference relay across NAT** (`RelayedEnvelope`, e2e-sealed dumb-pipe, single-hop, rate-limited; `crypto/relay_seal.rs`, `network/manager/relay.rs`, `daemon/state/relay.rs`). Prefer the app-relay over a flaky libp2p relay *circuit* (per-peer direct-vs-circuit tracking) — the load-bearing fix for two NAT'd nodes. Learned reverse routes; ZERO inference-code changes (relay logic all in the transport layer).
+- **Additive protocol/feature handshake** (`NodeCapability.{protocol_version, features}`, `swarmllm_types::features`) — new message types gated on a negotiated feature bit, so a node on one release never breaks its neighbour on the next. Rule in `.claude/rules/architecture.md`.
+- **Multi-relay + DHT relay discovery** (`relay_reservations`, `pick_connected_relays` failover; `discovery::{relay_service_key, start_providing_relay_service, query_relay_providers}`) — survives losing the anchor.
+- **Generation-idle guard** (`api::sse_send_live`) — a client that stops reading (not just disconnects) now cancels the worker within 60s (closed external Finding 2).
+- **Demand-driven VRAM reclaim** (`auto_manage/prune.rs::try_idle_vram_unload`) — free an idle (5min), low-demand loaded model from GPU; shards stay on disk, cold-reload on request, zero availability impact. Exempts reference/pinned/locked/encrypted models. Controls surfaced in config + troubleshooting docs.
+
+Detail: `memory/round_log_networking_plan.md`.
+
+### v0.3.17-alpha (2026-07-24): Claude Code backend + API-compat + net race
 
 External testing of v0.3.16 against a real `claude` process + an OpenAI-compat
 client surfaced three API-compatibility gaps + the sweep found one net-race:
