@@ -31,6 +31,17 @@ pub struct NetworkConfig {
     /// Automatically activate relay listener when NAT is detected as Private.
     #[serde(default = "default_true")]
     pub auto_relay: bool,
+    /// NETWORKING_PLAN Phase 1 — forward *inference* messages between two peers
+    /// that cannot reach each other directly (application-level relay). This is
+    /// distinct from libp2p circuit-relay (`enable_relay`): that carries the
+    /// connection + gossip, this carries the end-to-end-sealed inference payload
+    /// as a dumb pipe so two NAT'd nodes can actually complete a request. A
+    /// forwarding node advertises `relay_capable` so peers only route through it
+    /// deliberately. Auto-enabled in `--anchor` mode; a publicly-reachable
+    /// non-anchor node can opt in to donate relay capacity. Default off for
+    /// ordinary NAT'd nodes (they can't forward anyway).
+    #[serde(default)]
+    pub relay_forwarding: bool,
     /// Enable mDNS for automatic LAN peer discovery (default: true).
     #[serde(default = "default_true")]
     pub enable_mdns: bool,
@@ -240,6 +251,7 @@ impl Default for NetworkConfig {
             relay_max_circuit_duration_secs: default_relay_circuit_duration(),
             relay_max_circuits: default_relay_max_circuits(),
             auto_relay: true,
+            relay_forwarding: false,
             enable_mdns: true,
             enable_autonat: true,
             enable_dcutr: true,

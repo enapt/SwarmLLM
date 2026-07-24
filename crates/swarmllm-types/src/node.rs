@@ -31,6 +31,14 @@ pub struct NodeCapability {
     /// discount so low-trust senders can't poison routing.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub observed_latencies: Vec<LatencyObservation>,
+    /// NETWORKING_PLAN Phase 1 — this node will forward inference messages
+    /// between two peers that cannot reach each other directly (it is
+    /// publicly reachable and opted into relaying, e.g. an `--anchor`). Peers
+    /// gate relay use on this flag before wrapping traffic for it, so the
+    /// capability is negotiated, never assumed. `#[serde(default)]` (false)
+    /// means an older node advertising no flag is simply never used as a relay.
+    #[serde(default)]
+    pub relay_capable: bool,
 }
 
 /// One entry in `NodeCapability::observed_latencies`: the sender observed

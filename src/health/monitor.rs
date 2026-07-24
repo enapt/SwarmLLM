@@ -160,6 +160,10 @@ impl HealthMonitor {
                             "Swept stale chunk assemblies"
                         );
                     }
+                    // NETWORKING_PLAN Phase 1 — bound the learned relay-route
+                    // table + relay-forward rate counters so they can't grow
+                    // unbounded under peer churn.
+                    self.shared_state.sweep_stale_relay_state();
                     // R142 — bound SWARM-SPEC Layer 2/3 in-memory state.
                     // `HedgeTracker.stats` accumulates one entry per
                     // (model × segment × holder) triple ever observed; peers
@@ -365,6 +369,11 @@ impl HealthMonitor {
             region: self.shared_state.effective_region().await,
             est_tokens_per_sec_7b,
             observed_latencies,
+            // Advertise willingness to relay inference for un-connectable peer
+            // pairs (NETWORKING_PLAN Phase 1). `--anchor` implies it; any node
+            // can opt in via `network.relay_forwarding`.
+            relay_capable: self.shared_state.config.node.anchor_mode
+                || self.shared_state.config.network.relay_forwarding,
         };
 
         let msg = NetworkCommand::Broadcast(SwarmMessage::NodeCapabilityUpdate(cap));

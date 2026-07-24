@@ -135,6 +135,48 @@ pub enum SwarmMessage {
     // admin UI as "Pool X also serves Y". Wire format ONLY; cross-pool
     // routing is a separate design decision still pending discussion.
     PoolModelAvailability(PoolModelAvailability),
+
+    // NETWORKING_PLAN Phase 1 — application-level inference relay. When two
+    // nodes cannot form a direct connection (both NAT'd, no hole-punch), an
+    // inference message is routed through a mutually-reachable relay peer
+    // (typically the anchor). The relay routes on the cleartext `relay_to`
+    // header but never sees the plaintext inner message (end-to-end sealed
+    // for `relay_to`). Additive: an older node that can't deserialize this
+    // variant simply never receives one — the sender gates on the peer's
+    // advertised capability before wrapping.
+    RelayedEnvelope(RelayedEnvelope),
+}
+
+/// NETWORKING_PLAN Phase 1 — application-level inference relay envelope.
+///
+/// Routed through a mutually-reachable relay peer (usually the anchor) when a
+/// direct connection between two NAT'd nodes cannot be formed. The relay is a
+/// DUMB PIPE: it forwards based on the cleartext `relay_to` header, but the
+/// `sealed` inner `SwarmMessage` is ephemeral-sealed end-to-end for
+/// `relay_to`'s X25519 key (derived from its NodeId), so a middle relay never
+/// sees the prompt or the streamed tokens — preserving the Layer-1 encryption
+/// invariant that only the request's true endpoints read cleartext.
+///
+/// The seal AAD binds `origin || relay_to || request_id`, so a relay cannot
+/// re-address, replay, or cross-wire an envelope without failing Poly1305.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RelayedEnvelope {
+    /// Final recipient. The relay forwards to this node; only this node holds
+    /// the X25519 secret that opens `sealed`.
+    pub relay_to: NodeId,
+    /// Original author of the inner message. The recipient derives the
+    /// decryption key from it and learns a reverse route ("reach `origin` via
+    /// the peer this arrived from"). A relay MUST refuse to forward unless the
+    /// transport-authenticated sender equals `origin` — this bounds relaying
+    /// to a single hop and blocks loops / traffic amplification.
+    pub origin: NodeId,
+    /// Correlation id (the inner message's request_id where one exists), bound
+    /// into the seal AAD. Lets the relay rate-limit and endpoints correlate.
+    pub request_id: uuid::Uuid,
+    /// Ephemeral X25519 public key for the per-message ECDH (`ephemeral_seal`).
+    pub ephemeral_pub: [u8; 32],
+    /// ChaCha20-Poly1305-sealed inner `SwarmMessage` (serde_json bytes).
+    pub sealed: Vec<u8>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

@@ -393,6 +393,7 @@ mod tests {
                     region: None,
                     est_tokens_per_sec_7b: 50.0,
                     observed_latencies: vec![],
+                    relay_capable: false,
                 }),
                 last_seen: chrono::Utc::now(),
                 latency_ms: Some(10),

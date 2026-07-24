@@ -2,6 +2,7 @@ pub mod gossip_seal;
 pub mod key_rotation;
 pub mod pipeline_seal;
 pub mod provider_keys;
+pub mod relay_seal;
 pub mod session;
 
 use crate::error::SwarmError;

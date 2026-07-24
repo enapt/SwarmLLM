@@ -95,6 +95,19 @@ impl NetworkManager {
                             .send_response(channel, SwarmResponse::Ack);
                         return;
                     }
+                    SwarmMessage::RelayedEnvelope(env) => {
+                        // NETWORKING_PLAN Phase 1 — handled inline like PEX (in
+                        // the NetworkManager, not the dispatch loop): either
+                        // forward to the target or open + inject the inner
+                        // message. ACK below confirms delivery to this hop.
+                        self.handle_relayed_envelope(peer, env);
+                        let _ = self
+                            .swarm
+                            .behaviour_mut()
+                            .request_response
+                            .send_response(channel, SwarmResponse::Ack);
+                        return;
+                    }
                     _ => {
                         // Attach sender peer identity for messages that need it
                         match &mut *msg {

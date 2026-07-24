@@ -687,9 +687,15 @@ impl NetworkManager {
         };
 
         if !self.swarm.is_connected(&peer_id) {
+            // NETWORKING_PLAN Phase 1 — the originator is often a NAT'd node we
+            // can't reach directly; try routing the token back through a relay
+            // before giving up (usually the same relay the request arrived on).
+            if self.try_relay_send(&target_peer_bytes, SwarmMessage::StreamingToken(token)) {
+                return;
+            }
             tracing::warn!(
                 %peer_id,
-                "Dropping streaming token — peer not connected"
+                "Dropping streaming token — peer not connected and no relay path"
             );
             return;
         }
@@ -736,10 +742,16 @@ impl NetworkManager {
         };
 
         if !self.swarm.is_connected(&peer_id) {
+            // NETWORKING_PLAN Phase 1 — try a relay before dropping. Only the
+            // remote-generate inference fast path is relay-eligible; anything
+            // else returns false immediately and falls through to the drop.
+            if self.try_relay_send(&target_peer_bytes, msg) {
+                return;
+            }
             tracing::warn!(
                 %peer_id,
                 label,
-                "Dropping rr message — peer not connected"
+                "Dropping rr message — peer not connected and no relay path"
             );
             if let Some(uuid) = delivery_request_id {
                 self.shared_state.streaming_token_txs.remove(&uuid);

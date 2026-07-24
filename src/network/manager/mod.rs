@@ -28,6 +28,7 @@ mod events;
 /// apply one reachability predicate rather than two that can drift.
 pub(crate) use events::addr_is_remotely_reachable;
 mod identify;
+mod relay;
 mod requests;
 mod shard_transfer;
 mod tensors;
@@ -429,6 +430,21 @@ impl NetworkManager {
         msg: SwarmMessage,
     ) -> Result<(), mpsc::error::TrySendError<crate::types::AuthenticatedMessage>> {
         let sender = sender_peer.and_then(|p| self.peer_to_node_id(p));
+        self.dispatch_authenticated_as(sender, msg)
+    }
+
+    /// Inject a message into the dispatch feed with an EXPLICIT logical sender.
+    /// Used by the relay-unwrap path (NETWORKING_PLAN Phase 1): an inner message
+    /// extracted from a `RelayedEnvelope` is dispatched as though `origin` sent
+    /// it directly, even though the transport-authenticated sender was the
+    /// relay. All the dispatch handlers' "requires authenticated sender" gates
+    /// then see `origin`, exactly as a direct send would.
+    #[allow(clippy::result_large_err)]
+    fn dispatch_authenticated_as(
+        &self,
+        sender: Option<crate::types::NodeId>,
+        msg: SwarmMessage,
+    ) -> Result<(), mpsc::error::TrySendError<crate::types::AuthenticatedMessage>> {
         self.outbound_tx
             .try_send(crate::types::AuthenticatedMessage {
                 sender,

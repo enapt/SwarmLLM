@@ -22,6 +22,7 @@ mod events;
 mod hf;
 mod metrics;
 mod models;
+mod relay;
 mod tp_allreduce;
 
 pub use activity::{ActivityEvent, DashboardSignal, LoadedModelInfo};
@@ -34,6 +35,7 @@ pub use events::EventBus;
 pub use hf::{HfProbeInfo, HfSource};
 pub use metrics::{ChannelCounters, ChannelMetricsSet, MetricsProviders};
 pub use models::{ModelMgmt, FOREIGN_WISHLIST_MAX_AGE_MS, MAX_FOREIGN_WISHLIST_ENTRIES};
+pub use relay::{RelayForwardCounter, RelayRoute};
 pub use tp_allreduce::TpAllReduceCollector;
 
 // ---- Main SharedState ----
@@ -59,6 +61,21 @@ pub struct SharedState {
     /// to avoid evicting peer_registry entries for peers that are still connected but
     /// momentarily silent (e.g. slow WSL2 QUIC substream negotiation, no recent gossip).
     pub connected_node_ids: dashmap::DashSet<NodeId>,
+    /// NETWORKING_PLAN Phase 1 — learned reverse relay routes, keyed by the
+    /// TARGET's libp2p peer-id bytes. When an inference message for us arrives
+    /// wrapped in a `RelayedEnvelope` via relay R, we record "to reach the
+    /// envelope's `origin`, send through R". The directed-send path in
+    /// `network/manager/commands.rs` consults this whenever a target peer is not
+    /// directly connected, so replies and subsequent turns flow back the same
+    /// way without any routing decision leaking into daemon code. Bounded by
+    /// distinct target peers; entries expire after `RELAY_ROUTE_TTL_SECS` and
+    /// are swept on the HealthMonitor tick via `sweep_stale_relay_state`.
+    pub relay_routes: DashMap<Vec<u8>, RelayRoute>,
+    /// NETWORKING_PLAN Phase 1 — per-origin relay-forward rate counters (relay
+    /// side only), keyed by the origin's peer-id bytes. Bounds how fast one peer
+    /// can push traffic through us as a relay so the role can't be abused to
+    /// exhaust our uplink. Swept alongside `relay_routes`.
+    pub relay_forward_counters: DashMap<Vec<u8>, RelayForwardCounter>,
 
     // Inference engine
     pub executor: SharedExecutor,
@@ -469,6 +486,8 @@ impl SharedState {
             nickname_registry,
             peer_id_map: DashMap::new(),
             connected_node_ids: dashmap::DashSet::new(),
+            relay_routes: DashMap::new(),
+            relay_forward_counters: DashMap::new(),
             session_manager,
             gossip_sealer,
             api_key,
