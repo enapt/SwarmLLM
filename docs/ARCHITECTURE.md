@@ -292,6 +292,43 @@ doesn't depend on AutoNAT producing a conclusive answer. The relay path
 (reservation → circuit dial → DCUtR upgrade) is wired but still needs live
 multi-NAT validation. See `docs/NETWORKING.md` for the operator guide.
 
+**Application-level relay (post-R150, `docs/NETWORKING_PLAN.md`).** The libp2p
+circuit relay above establishes a *connection* between two NAT'd peers, but a
+`/p2p-circuit` cannot reliably round-trip a request_response substream under
+load — so two NAT'd nodes can be `is_connected == true` yet unable to run
+inference. A second, application-owned relay closes that gap the way Tailscale's
+DERP does: a mutually-reachable third node forwards **already-sealed** payloads
+without ever being able to read them.
+
+- **Two message classes.** `SwarmMessage::RelayedEnvelope` carries a sealed
+  *control* message (JSON, ≤256 KB); `SwarmRequest::RelayedTensor` carries a
+  sealed *activation forward or its result* (binary, ≤32 MB, wire tag `0x06`).
+  Both are opaque to the relay — it matches `relay_to` against its connected
+  peers and re-sends; it holds no key.
+- **Ephemeral-seal, not session-seal.** Session-sealed tensors are decrypted by
+  the *transport sender's* key, so a relay-forwarded session tensor would fail to
+  open at the target. Relayed payloads are instead sealed to the target's
+  **static** X25519 key (derived from its Ed25519 identity via
+  `ed25519_pubkey_to_x25519`) using a fresh ephemeral keypair per message
+  (`crypto/relay_seal.rs`). AAD binds `origin ‖ relay_to ‖ request_id`, so a
+  relay cannot redirect, replay across requests, or swap a payload between
+  transfers without Poly1305 rejection.
+- **Separate-request return path.** A relayed forward and its result are two
+  independent relayed requests, never an RR response substream (which the relay
+  cannot proxy). The coordinator's `pending_layer_results` oneshot resolves when
+  the relayed-back `LayerResult` arrives; the relay-unwrap path stamps
+  `sender_peer_bytes = origin` so the result routes home rather than being
+  dropped as unattributed.
+- **Feature-gated + prefer-direct.** `NodeCapability` advertises
+  `protocol_version: u16` and a `features: u64` bitset
+  (`features::{RELAY, TENSOR_RELAY}`); a node only attempts a relayed send when
+  the *recipient* advertises the matching bit, so the protocol evolves additively
+  with no flag-day. The relay is chosen only when there is no usable direct
+  connection (`has_direct_connection` false — the circuit-only case); a real
+  direct/QUIC path always wins. Learned relay routes live in
+  `state.relay_routes` (`daemon/state/relay.rs`, 5-min TTL, swept on the
+  HealthMonitor tick); selection + forwarding live in `network/manager/relay.rs`.
+
 ## Inference Pipeline
 
 ### Split Inference Engine
