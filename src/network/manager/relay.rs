@@ -117,11 +117,22 @@ impl NetworkManager {
             .unwrap_or(false)
     }
 
-    /// Try to deliver `msg` to an un-connectable target by routing it through a
-    /// relay peer. Returns true if an envelope was dispatched to a relay (caller
-    /// is done), false if no relay path exists (caller then drops as before).
-    pub(super) fn try_relay_send(&mut self, target_peer_bytes: &[u8], msg: SwarmMessage) -> bool {
-        if !Self::is_relay_eligible(&msg) {
+    /// Whether we hold at least one DIRECT (non-relay-circuit) connection to a
+    /// peer. A peer reachable only via a relay circuit can't reliably round-trip
+    /// request_response, so the relay send path prefers the app-level relay for
+    /// it (NETWORKING_PLAN Phase 1).
+    pub(super) fn has_direct_connection(&self, peer: &PeerId) -> bool {
+        self.peer_direct_conns
+            .get(peer)
+            .is_some_and(|s| !s.is_empty())
+    }
+
+    /// Try to deliver `msg` to a target we can't reliably reach directly by
+    /// routing it through a relay peer. Takes `&msg` so the caller keeps
+    /// ownership and can fall through to a best-effort direct send if no relay
+    /// path exists. Returns true if an envelope was dispatched to a relay.
+    pub(super) fn try_relay_send(&mut self, target_peer_bytes: &[u8], msg: &SwarmMessage) -> bool {
+        if !Self::is_relay_eligible(msg) {
             return false;
         }
         let local_node = self.shared_state.identity.node_id().clone();
@@ -155,12 +166,12 @@ impl NetworkManager {
             return false;
         }
 
-        let request_id = Self::relay_correlation_id(&msg);
+        let request_id = Self::relay_correlation_id(msg);
         let env = match crate::crypto::relay_seal::seal_relayed_message(
             local_node,
             target_node.clone(),
             request_id,
-            &msg,
+            msg,
         ) {
             Ok(e) => e,
             Err(e) => {

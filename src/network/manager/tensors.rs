@@ -686,20 +686,25 @@ impl NetworkManager {
             return;
         };
 
-        if !self.swarm.is_connected(&peer_id) {
-            // NETWORKING_PLAN Phase 1 — the originator is often a NAT'd node we
-            // can't reach directly; try routing the token back through a relay
-            // before giving up (usually the same relay the request arrived on).
-            if self.try_relay_send(&target_peer_bytes, SwarmMessage::StreamingToken(token)) {
+        let msg = SwarmMessage::StreamingToken(token);
+        let connected = self.swarm.is_connected(&peer_id);
+        // NETWORKING_PLAN Phase 1 — prefer the app-level relay when the
+        // originator is unreachable OR reachable only via a flaky relay circuit
+        // (a NAT'd coordinator we can't round-trip request_response to).
+        if !connected || !self.has_direct_connection(&peer_id) {
+            if self.try_relay_send(&target_peer_bytes, &msg) {
                 return;
             }
-            tracing::warn!(
-                %peer_id,
-                "Dropping streaming token — peer not connected and no relay path"
-            );
-            return;
+            if !connected {
+                tracing::warn!(
+                    %peer_id,
+                    "Dropping streaming token — peer not connected and no relay path"
+                );
+                return;
+            }
+            // Circuit-only but no relay path — fall through to a best-effort
+            // send over the circuit.
         }
-        let msg = SwarmMessage::StreamingToken(token);
         let req = SwarmRequest::Message(Box::new(msg));
         let req_id = self
             .swarm
@@ -741,22 +746,28 @@ impl NetworkManager {
             return;
         };
 
-        if !self.swarm.is_connected(&peer_id) {
-            // NETWORKING_PLAN Phase 1 — try a relay before dropping. Only the
-            // remote-generate inference fast path is relay-eligible; anything
-            // else returns false immediately and falls through to the drop.
-            if self.try_relay_send(&target_peer_bytes, msg) {
+        let connected = self.swarm.is_connected(&peer_id);
+        // NETWORKING_PLAN Phase 1 — prefer the app-level relay when the target is
+        // unreachable OR reachable only via a flaky relay circuit. Only the
+        // remote-generate inference fast path is relay-eligible; anything else
+        // (TP AllReduce) returns false and falls through.
+        if !connected || !self.has_direct_connection(&peer_id) {
+            if self.try_relay_send(&target_peer_bytes, &msg) {
                 return;
             }
-            tracing::warn!(
-                %peer_id,
-                label,
-                "Dropping rr message — peer not connected and no relay path"
-            );
-            if let Some(uuid) = delivery_request_id {
-                self.shared_state.streaming_token_txs.remove(&uuid);
+            if !connected {
+                tracing::warn!(
+                    %peer_id,
+                    label,
+                    "Dropping rr message — peer not connected and no relay path"
+                );
+                if let Some(uuid) = delivery_request_id {
+                    self.shared_state.streaming_token_txs.remove(&uuid);
+                }
+                return;
             }
-            return;
+            // Circuit-only but no relay path — fall through to a best-effort
+            // send over the circuit.
         }
         let req = SwarmRequest::Message(Box::new(msg));
         let req_id = self

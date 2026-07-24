@@ -203,6 +203,14 @@ pub struct NetworkManager {
     /// not all listen_addrs (which causes redundant connections to the same peer on
     /// different addresses, leading to request_response round-robin routing failures).
     connection_addrs: HashMap<libp2p::swarm::ConnectionId, Multiaddr>,
+    /// PeerId → set of DIRECT (non-relay-circuit) connection ids. Populated on
+    /// ConnectionEstablished when the remote address is not a `/p2p-circuit`,
+    /// cleared on ConnectionClosed. Lets the relay send path (NETWORKING_PLAN
+    /// Phase 1) prefer the application-level relay over a flaky relay *circuit*
+    /// when the circuit is the only path to a peer — a peer "connected" only via
+    /// a circuit still can't reliably round-trip request_response.
+    peer_direct_conns:
+        HashMap<libp2p::PeerId, std::collections::HashSet<libp2p::swarm::ConnectionId>>,
     /// Maps PeerId → most recent connected remote Multiaddr. Used by the Identify
     /// handler to mark peers as LAN when their connected address is loopback/private,
     /// even if their advertised listen_addrs are empty or public.
@@ -386,6 +394,7 @@ impl NetworkManager {
             pending_rr_observability: HashMap::new(),
             pending_tensor_channels: HashMap::new(),
             connection_addrs: HashMap::new(),
+            peer_direct_conns: HashMap::new(),
             peer_remote_addrs: HashMap::new(),
             ping_sent_times: HashMap::new(),
             shutdown_rx,

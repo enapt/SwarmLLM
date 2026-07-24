@@ -53,6 +53,27 @@ impl NetworkManager {
         }
         self.connection_addrs
             .insert(connection_id, remote_addr.clone());
+        // NETWORKING_PLAN Phase 1 — record DIRECT (non-relay-circuit)
+        // connections so the relay send path can prefer the app-level relay over
+        // a peer reachable only via a flaky relay circuit. Bounded alongside
+        // connection_addrs (evict arbitrarily if a missed close leaked entries).
+        if !crate::network::relay::is_relay_circuit_addr(remote_addr) {
+            if self.peer_direct_conns.len() >= MAX_CONNECTION_ADDRS {
+                let stale: Vec<_> = self
+                    .peer_direct_conns
+                    .keys()
+                    .take(MAX_CONNECTION_ADDRS / 2)
+                    .copied()
+                    .collect();
+                for p in stale {
+                    self.peer_direct_conns.remove(&p);
+                }
+            }
+            self.peer_direct_conns
+                .entry(peer_id)
+                .or_default()
+                .insert(connection_id);
+        }
         // Cap peer_remote_addrs at MAX_PEER_REMOTE_ADDRS — disconnected peers'
         // entries are removed in handle_connection_closed, but a cap defends
         // against missed close events leaking entries indefinitely. Drop a
@@ -103,6 +124,14 @@ impl NetworkManager {
         num_established: u32,
     ) {
         let closed_addr = self.connection_addrs.remove(&connection_id);
+        // NETWORKING_PLAN Phase 1 — drop this connection from the peer's direct
+        // set (no-op if it was a relay circuit, which was never inserted).
+        if let Some(set) = self.peer_direct_conns.get_mut(&peer_id) {
+            set.remove(&connection_id);
+            if set.is_empty() {
+                self.peer_direct_conns.remove(&peer_id);
+            }
+        }
         // `num_established == 0` for THIS close event does not mean the peer is
         // gone — a peer with two transports (TCP + QUIC) or a fast reconnect can
         // have a fresh connection the swarm already counts. The rest of this
