@@ -281,9 +281,7 @@ impl NetworkManager {
         if env.relay_to == local {
             // We are the target. Open the sealed inner message and dispatch it
             // as though `origin` sent it directly.
-            let local_secret = crate::crypto::session::ed25519_to_x25519_secret(
-                &self.shared_state.identity.signing_key_bytes(),
-            );
+            let local_secret = self.shared_state.identity.x25519_secret();
             let inner = match crate::crypto::relay_seal::open_relayed_message(&local_secret, &env) {
                 Ok(m) => m,
                 Err(e) => {

@@ -314,9 +314,7 @@ impl PipelineExecutor {
         if let Some(ref sealed_bytes) = result.sealed_token_ids {
             match serde_json::from_slice::<crate::types::SealedPrompt>(sealed_bytes) {
                 Ok(sealed) => {
-                    let local_secret = crate::crypto::session::ed25519_to_x25519_secret(
-                        &self.shared_state.identity.signing_key_bytes(),
-                    );
+                    let local_secret = self.shared_state.identity.x25519_secret();
                     match crate::crypto::pipeline_seal::open_prompt(&sealed, &local_secret) {
                         Ok(plaintext) => {
                             // Deserialize token IDs from the decrypted payload

@@ -36,13 +36,22 @@ fixes in R143–R150.
   capability parses as feature-less, a newer peer's (with unknown fields) still
   parses — a network-breaking change now fails the build.
 
-**Deferred (in `docs/FUTURE_WORK.md`):** an explicit DHT relay-provider record
-(redundant with gossip discovery today; useful at large scale / to survive total
-anchor loss), and a full two-daemon mixed-version *integration* test (the
-wire-compat unit tests already cover the invariant).
+- ✅ **DHT relay discovery** (`network/discovery.rs::{start_providing_relay_service,
+  query_relay_providers}`, `relay_service_key`): a relay-forwarding node registers
+  under a well-known Kademlia key; a node short on relay connections
+  (`MIN_RELAY_CONNECTIONS`) queries that key each discovery tick and dials the
+  relays it finds — so the relay role survives losing the bootstrap anchor and
+  decentralizes as the swarm grows its own public relays.
+- ✅ **Mixed-version integration test** (`tests/integration/test_relay_mixed_version.rs`):
+  the full A → relay → B round-trip at the wire + crypto level — the relay can't
+  open the payload, the target recovers it exactly across two hops, a tampered
+  header is rejected, and a feature-less (older) peer is gated out. Deterministic
+  (no libp2p timing), so it's a reliable CI guard.
 
-The entire plan — Phases 1–3 + the version handshake — is implemented and
-tested.
+The **entire plan is implemented and tested** — Phases 1–3, the version
+handshake, DHT relay discovery, and the mixed-version guard. Nothing remains
+deferred. (A heavier full-daemon two-node libp2p test would add little over the
+deterministic wire+crypto one and risks flakiness; not pursued.)
 
 ---
 

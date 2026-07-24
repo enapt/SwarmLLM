@@ -137,6 +137,15 @@ impl Identity {
     pub(crate) fn signing_key_bytes(&self) -> [u8; 32] {
         self.signing_key.to_bytes()
     }
+
+    /// This node's X25519 static secret, derived from its Ed25519 signing key
+    /// (RFC 7748). The single source of truth for opening anything sealed to
+    /// this node's key — pipeline prompts and relay envelopes both need it.
+    /// Returning the secret is no greater exposure than holding the `Identity`
+    /// itself (which already holds the root signing key).
+    pub fn x25519_secret(&self) -> x25519_dalek::StaticSecret {
+        crate::crypto::session::ed25519_to_x25519_secret(&self.signing_key_bytes())
+    }
 }
 
 impl std::fmt::Debug for Identity {
