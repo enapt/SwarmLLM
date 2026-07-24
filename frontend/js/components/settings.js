@@ -136,7 +136,6 @@
       if (autoSelect) {
         autoSelect.addEventListener('change', function() {
           var isOn = this.value === 'on';
-          document.getElementById('settings-auto-manage-storage-group').style.display = isOn ? '' : 'none';
           document.getElementById('settings-storage-info').classList.toggle('hidden', !isOn);
           if (isOn) App.settings.loadStorageInfo();
         });
@@ -305,9 +304,7 @@
         document.getElementById('settings-disk').value = data.max_disk_mb || 50000;
         var autoManage = data.auto_manage_shards ? 'on' : 'off';
         document.getElementById('settings-auto-shards').value = autoManage;
-        document.getElementById('settings-auto-manage-storage').value = data.auto_manage_max_storage_mb || 0;
         var isOn = autoManage === 'on';
-        document.getElementById('settings-auto-manage-storage-group').style.display = isOn ? '' : 'none';
         document.getElementById('settings-storage-info').classList.toggle('hidden', !isOn);
         if (isOn) App.settings.loadStorageInfo();
         if (App.autoManageStatus) App.autoManageStatus.setEnabled(isOn);
@@ -610,7 +607,11 @@
         max_bandwidth_mbps: parseInt(document.getElementById('settings-bandwidth').value, 10),
         max_disk_mb: parseInt(document.getElementById('settings-disk').value, 10),
         auto_manage_shards: autoManageOn,
-        auto_manage_max_storage_mb: autoManageOn ? parseInt(document.getElementById('settings-auto-manage-storage').value, 10) || 0 : 0,
+        // R110 removed the standalone max-storage slider — the auto-manage budget
+        // is derived from Max Disk + contribution mode, so this field is no longer
+        // sent (omitting it leaves the derived value untouched server-side). The
+        // dead `settings-auto-manage-storage` read here was throwing a TypeError
+        // whenever auto-manage was on, silently killing the entire settings save.
       };
 
       try {
