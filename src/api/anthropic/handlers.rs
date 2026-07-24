@@ -159,17 +159,19 @@ pub(super) async fn anthropic_stream(
             }
             if !event.text.is_empty() {
                 streamed_token_count += 1;
-                if sse_tx
-                    .send(AnthropicSseEvent::ContentBlockDelta {
+                // Closed OR stalled (non-reading) consumer → cancel the pipeline.
+                if !crate::api::sse_send_live(
+                    &sse_tx,
+                    AnthropicSseEvent::ContentBlockDelta {
                         index: 0,
                         text: event.text,
-                    })
-                    .await
-                    .is_err()
+                    },
+                )
+                .await
                 {
                     tracing::warn!(
                         token_count = streamed_token_count,
-                        "Anthropic SSE client disconnected mid-stream — cancelling pipeline"
+                        "Anthropic SSE consumer gone mid-stream (closed or not reading) — cancelling pipeline"
                     );
                     client_disconnected = true;
                     break;
@@ -329,15 +331,23 @@ pub(super) async fn anthropic_split_stream(
                 break;
             }
             total_output_tokens += 1;
-            if sse_tx
-                .send(AnthropicSseEvent::ContentBlockDelta {
+            // Stop on a closed OR stalled (non-reading) consumer — returning
+            // drops the token receiver, cancelling the worker instead of
+            // generating into a buffer nobody drains (Finding 2).
+            if !crate::api::sse_send_live(
+                &sse_tx,
+                AnthropicSseEvent::ContentBlockDelta {
                     index: 0,
                     text: event.text,
-                })
-                .await
-                .is_err()
+                },
+            )
+            .await
             {
-                return; // Client disconnected
+                tracing::warn!(
+                    token_count = total_output_tokens,
+                    "Anthropic split stream consumer gone (closed or not reading) — cancelling decode"
+                );
+                return;
             }
         }
 

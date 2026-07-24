@@ -45,6 +45,33 @@ pub(crate) const DEFAULT_TOP_K: u32 = 40;
 pub(crate) const DEFAULT_MAX_TOKENS: u32 = 32768;
 pub(crate) const SSE_KEEPALIVE_INTERVAL_SECS: u64 = 15;
 
+/// A generation streaming to a client must stop if the consumer stops reading
+/// for this long. `tx.closed()` catches a client that CLOSES the connection;
+/// this catches one that holds the connection open but stops reading (crash,
+/// client-side timeout-and-retry, closed laptop): the SSE buffer fills, the
+/// next `send` blocks on backpressure, and a stall past this bound means the
+/// consumer is gone. Returning then drops the token receiver, which cancels the
+/// worker — bounding runaway compute on a shared/public node to this window
+/// instead of the whole token budget (external report 2026-07-24, Finding 2).
+///
+/// Generous enough never to truncate a live client: `send` unblocks the instant
+/// the client accepts a single token, so even a ~0.1 tok/s consumer clears the
+/// buffer far inside this window; only a fully-stopped reader trips it.
+pub(crate) const SSE_CONSUMER_STALL_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(60);
+
+/// Send an event to the SSE bridge channel, treating BOTH a dropped receiver
+/// (client closed the connection) AND a prolonged backpressure stall (client
+/// stopped reading but held the connection open) as "consumer gone". Returns
+/// `false` when the caller should stop generating. See
+/// [`SSE_CONSUMER_STALL_TIMEOUT`].
+pub(crate) async fn sse_send_live<T>(tx: &tokio::sync::mpsc::Sender<T>, ev: T) -> bool {
+    matches!(
+        tokio::time::timeout(SSE_CONSUMER_STALL_TIMEOUT, tx.send(ev)).await,
+        Ok(Ok(()))
+    )
+}
+
 /// Build SamplingParams with standard clamping applied across all API handlers.
 /// All fields are pre-clamped to safe ranges:
 /// - temperature: [0.0, 2.0]
@@ -430,5 +457,20 @@ mod tests {
         // real needs (its Bash tool description is ~6 KB); this build fails if
         // the cap is ever dropped under 2× that.
         const { assert!(MAX_TOOL_DESCRIPTION_LEN >= 6_174 * 2) };
+    }
+
+    #[tokio::test]
+    async fn sse_send_live_true_when_consumer_reads() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<u8>(4);
+        assert!(sse_send_live(&tx, 7u8).await);
+        assert_eq!(rx.recv().await, Some(7));
+    }
+
+    #[tokio::test]
+    async fn sse_send_live_false_when_consumer_closed() {
+        // A dropped receiver (client closed the connection) → "consumer gone".
+        let (tx, rx) = tokio::sync::mpsc::channel::<u8>(4);
+        drop(rx);
+        assert!(!sse_send_live(&tx, 7u8).await);
     }
 }

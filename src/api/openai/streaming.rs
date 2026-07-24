@@ -410,19 +410,21 @@ async fn router_inference_stream(
             }
             if !event.text.is_empty() {
                 token_count += 1;
-                if sse_tx
-                    .send(StreamEvent::Delta {
+                // Closed OR stalled (non-reading) consumer → cancel the pipeline.
+                if !crate::api::sse_send_live(
+                    &sse_tx,
+                    StreamEvent::Delta {
                         content: Some(event.text),
                         role: None,
                         finish_reason: None,
-                    })
-                    .await
-                    .is_err()
+                    },
+                )
+                .await
                 {
                     tracing::warn!(
                         token_count,
                         elapsed_ms = stream_start.elapsed().as_millis() as u64,
-                        "DIAG: SSE client disconnected mid-stream — cancelling pipeline"
+                        "DIAG: SSE consumer gone mid-stream (closed or not reading) — cancelling pipeline"
                     );
                     client_disconnected = true;
                     break;
@@ -657,19 +659,24 @@ pub(super) async fn split_stream_response(
                 break;
             }
             token_count += 1;
-            if tx
-                .send(StreamEvent::Delta {
+            // Stop the instant the consumer closes OR stops reading (a stalled
+            // send past SSE_CONSUMER_STALL_TIMEOUT). Returning drops token_rx →
+            // cancels the worker, bounding runaway compute for a client that
+            // walked away without closing the connection (Finding 2).
+            if !crate::api::sse_send_live(
+                &tx,
+                StreamEvent::Delta {
                     content: Some(event.text),
                     role: None,
                     finish_reason: None,
-                })
-                .await
-                .is_err()
+                },
+            )
+            .await
             {
                 tracing::warn!(
                     token_count,
                     elapsed_ms = stream_start.elapsed().as_millis() as u64,
-                    "DIAG: split stream client disconnected mid-decode"
+                    "DIAG: split stream consumer gone (closed or not reading) — cancelling decode"
                 );
                 return;
             }
@@ -682,19 +689,21 @@ pub(super) async fn split_stream_response(
             "DIAG: split stream decode loop complete (subprocess)"
         );
 
-        // Send finish
-        if tx
-            .send(StreamEvent::Delta {
+        // Send finish (guarded so a stalled consumer can't hang this task after
+        // the worker has already finished).
+        if !crate::api::sse_send_live(
+            &tx,
+            StreamEvent::Delta {
                 content: None,
                 role: None,
                 finish_reason: Some(finish),
-            })
-            .await
-            .is_err()
+            },
+        )
+        .await
         {
             tracing::debug!(token_count, "DIAG: split stream finish delta send failed");
         }
-        if tx.send(StreamEvent::Done).await.is_err() {
+        if !crate::api::sse_send_live(&tx, StreamEvent::Done).await {
             tracing::debug!("DIAG: split stream Done send failed — client disconnected");
         }
         let elapsed = stream_start.elapsed();
