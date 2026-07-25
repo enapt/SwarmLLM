@@ -11,7 +11,7 @@ A peer-to-peer LLM inference network in a single Rust binary. Pool hardware with
 
 **Join the swarm. Run AI together — for free.**
 
-> **Status — alpha**, actively developed. Distributed inference is stable across multi-node deployments. 1211 lib tests + 79 integration tests run on every PR; continuous security sweeps. [Report issues](https://github.com/enapt/SwarmLLM/issues).
+> **Status — alpha**, actively developed. Distributed inference is stable across multi-node deployments. 1218 lib tests + 79 integration tests run on every PR; continuous security sweeps. [Report issues](https://github.com/enapt/SwarmLLM/issues).
 >
 > **Recent work (July 2026) — inference across NAT.** Two machines behind ordinary home routers can now run a model together: a sealed application-level relay carries the tensor traffic when no direct path exists, and direct connections are established opportunistically on top. Verified end-to-end by an external tester — a real three-segment pipeline split across two home machines on different continents. Local models also gained working **tool calling** on both API surfaces, streaming included.
 >

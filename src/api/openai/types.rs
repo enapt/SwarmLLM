@@ -339,27 +339,26 @@ impl ChatCompletionRequest {
     }
 }
 
-/// Format tool definitions into a system prompt that instructs the model
-/// to output tool calls in a structured JSON format.
+/// Format tool definitions into the system prompt that tells a local model how
+/// to request a tool call.
+///
+/// Thin adapter over [`crate::api::tool_parse::format_tool_prompt`], which is
+/// shared with the Anthropic surface. The wording must stay identical across
+/// both: [`crate::api::tool_parse::parse_tool_calls`] tries the requested shape
+/// first, so two wordings would mean two formats to parse. This was a
+/// byte-identical copy until 2026-07-26.
 pub(super) fn format_tool_system_prompt(tools: &[ToolDefinition]) -> String {
-    let mut prompt = String::from(
-        "You have access to the following tools. To call a tool, respond with a JSON object \
-         in the following format:\n\
-         {\"tool_calls\": [{\"id\": \"call_<unique_id>\", \"type\": \"function\", \
-         \"function\": {\"name\": \"<function_name>\", \"arguments\": \"<json_args>\"}}]}\n\n\
-         Available tools:\n",
-    );
-    for tool in tools {
-        prompt.push_str(&format!("- {}", tool.function.name));
-        if let Some(ref desc) = tool.function.description {
-            prompt.push_str(&format!(": {desc}"));
-        }
-        prompt.push('\n');
-        if let Some(ref params) = tool.function.parameters {
-            prompt.push_str(&format!("  Parameters: {params}\n"));
-        }
-    }
-    prompt
+    let specs: Vec<(String, Option<String>, Option<String>)> = tools
+        .iter()
+        .map(|t| {
+            (
+                t.function.name.clone(),
+                t.function.description.clone(),
+                t.function.parameters.as_ref().map(|p| p.to_string()),
+            )
+        })
+        .collect();
+    crate::api::tool_parse::format_tool_prompt(&specs)
 }
 
 /// Decode a base64 data URI image to raw RGB pixels.
