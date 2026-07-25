@@ -75,6 +75,14 @@ pub async fn run_streaming(
     // 200 with response.failed inside.
     let mut chat_req = translate::request_to_chat(&req, prior.as_ref())?;
     chat_req.stream = true;
+    // Ask the internal chat call to emit its terminal usage chunk. Without this
+    // the streamed response object reported {0,0,0} while the equivalent
+    // non-streaming call reported real counts (external report 2026-07-25) —
+    // the numbers were always available, we simply never requested them.
+    chat_req.extras.insert(
+        "stream_options".to_string(),
+        serde_json::json!({ "include_usage": true }),
+    );
 
     let response_id = crate::api::openai::responses::new_response_id();
     let item_id = crate::api::openai::responses::new_message_id();
@@ -222,6 +230,9 @@ where
         let mut tool_calls: HashMap<u64, StreamingToolCall> = HashMap::new();
         let mut tool_call_order: Vec<u64> = Vec::new();
         let mut model_from_chunk: Option<String> = None;
+        // Filled from the chat stream's terminal usage chunk (see the
+        // `include_usage` opt-in above); stays zero if none ever arrives.
+        let mut final_usage = ResponsesUsage::default();
 
         // ---- response.created (V1: emitted before chat_future is awaited) ----
         yield BufferedEvent {
@@ -390,6 +401,21 @@ where
                 if model_from_chunk.is_none() {
                     if let Some(m) = chunk.get("model").and_then(|v| v.as_str()) {
                         model_from_chunk = Some(m.to_string());
+                    }
+                }
+
+                // The terminal usage chunk carries `choices: []`, so read it
+                // before the choices guard below skips the chunk entirely.
+                if let Some(u) = chunk.get("usage") {
+                    let get = |k: &str| u.get(k).and_then(serde_json::Value::as_u64).unwrap_or(0);
+                    let (input, output) = (get("prompt_tokens"), get("completion_tokens"));
+                    if input > 0 || output > 0 {
+                        final_usage = ResponsesUsage {
+                            input_tokens: input as u32,
+                            output_tokens: output as u32,
+                            total_tokens: get("total_tokens").max(input + output) as u32,
+                            ..Default::default()
+                        };
                     }
                 }
 
@@ -728,10 +754,10 @@ where
             model: final_model,
             output,
             output_text: Some(accumulated_text.clone()),
-            // Streaming paths don't have final usage counts without a
-            // provider echoing them. Leave zero; upstream callers that
-            // need totals can use the non-streaming path.
-            usage: ResponsesUsage::default(),
+            // Populated from the chat stream's terminal usage chunk, which we
+            // opt into via `stream_options.include_usage` above. Falls back to
+            // zero only when the upstream genuinely never sent one.
+            usage: final_usage.clone(),
             error: None,
             incomplete_details,
             previous_response_id: original.previous_response_id.clone(),

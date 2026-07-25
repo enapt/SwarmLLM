@@ -109,6 +109,36 @@ fn validate_responses_ingress(req: &ResponsesRequest) -> Result<(), ApiError> {
     // deserialisation. The Axum DefaultBodyLimit caps the wire bytes; this
     // caps the post-deserialisation cardinality and per-value size that
     // gets forwarded on the cloud-proxy path.
+    // Cap the tool list, as Chat Completions and the Anthropic surface already
+    // do. This was the one API surface with no bound at all: OpenAI enforces 128
+    // tools per request, and each definition is injected into the prompt and
+    // billed as input tokens, so an unbounded list is both a spec divergence and
+    // a way to inflate a request without limit. Flagged by an external tester who
+    // sent 33 tools expecting a rejection — 33 is under the cap so it correctly
+    // passed, but nothing would have stopped 10,000.
+    if let Some(ref tools) = req.tools {
+        use super::responses::types::{ToolDef, TypedToolDef};
+        crate::api::validate_tools(
+            tools,
+            |t| match t {
+                ToolDef::Typed(TypedToolDef::Function { name, .. }) => Some(name.as_str()),
+                ToolDef::Raw(v) => v.get("name").and_then(|x| x.as_str()),
+            },
+            |t| match t {
+                ToolDef::Typed(TypedToolDef::Function { description, .. }) => {
+                    description.as_deref()
+                }
+                ToolDef::Raw(v) => v.get("description").and_then(|x| x.as_str()),
+            },
+            |t| match t {
+                ToolDef::Typed(TypedToolDef::Function { parameters, .. }) => {
+                    parameters.as_ref().map(|p| p.to_string().len())
+                }
+                ToolDef::Raw(v) => v.get("parameters").map(|p| p.to_string().len()),
+            },
+        )?;
+    }
+
     if req.extras.len() > MAX_RESPONSES_EXTRAS_COUNT {
         return Err(ApiError(SwarmError::Validation(format!(
             "too many unknown request fields ({} present, max {MAX_RESPONSES_EXTRAS_COUNT})",

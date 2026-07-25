@@ -612,7 +612,7 @@
         var cleared = false;
         var thinkingEl = null;
 
-        await U.readSseStream(resp.body.getReader(), function(chunk) {
+        var onChunk = function(chunk) {
           if (chunk.usage) streamUsage = chunk.usage;
           if (chunk.choices && chunk.choices[0] && chunk.choices[0].delta) {
             var delta = chunk.choices[0].delta;
@@ -646,7 +646,33 @@
               App.chat.scrollToBottom();
             }
           }
-        });
+        };
+
+        await U.readSseStream(resp.body.getReader(), onChunk);
+
+        // Nothing came back at all. By far the most common cause is a model
+        // that wasn't loaded yet: the first message after switching models
+        // arrives while the worker is still starting, and simply sending it
+        // again works. Retry once, silently, instead of showing an error and
+        // making the user do that by hand.
+        //
+        // Deliberately ONE retry with no delay — the first attempt has already
+        // waited out the load, and looping would turn a genuinely broken model
+        // into an invisible request storm.
+        if (!cleared && !fullContent && !reasoningContent) {
+          try {
+            var retryResp = await App.authFetch('/v1/chat/completions', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(body),
+            });
+            if (retryResp.ok && retryResp.body) {
+              await U.readSseStream(retryResp.body.getReader(), onChunk);
+            }
+          } catch (retryErr) {
+            // Fall through to the error message below.
+          }
+        }
 
         if (!cleared && !fullContent && !reasoningContent) {
           contentEl.textContent = I18n.t('chat.no_response');
