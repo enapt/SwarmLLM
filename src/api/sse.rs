@@ -59,6 +59,21 @@ pub enum StreamEvent {
     Error {
         message: String,
     },
+    /// A complete set of tool calls recovered from a local model's output.
+    ///
+    /// Additive variant rather than a field on `Delta`, which has a dozen
+    /// construction sites that have nothing to do with tools.
+    ///
+    /// Emitted as ONE event carrying whole calls rather than the fragment
+    /// sequence a cloud provider streams. A local model's tool call can only be
+    /// recognised once its text is complete — mid-stream we cannot tell a tool
+    /// call from prose that happens to start with a brace — so fragments would
+    /// mean emitting text we might have to retract. Clients that concatenate
+    /// streamed `tool_calls` deltas handle a single complete delta correctly,
+    /// since the index/id/name/arguments fields are all present at once.
+    ToolCalls {
+        calls: Vec<crate::api::openai::StreamToolCall>,
+    },
     /// OpenAI 2024+ spec: when the request includes
     /// `stream_options: {"include_usage": true}`, an extra terminal chunk
     /// is emitted right before `[DONE]` with `choices: []` and the usage

@@ -185,6 +185,7 @@ pub async fn messages(
                 sampling_params,
                 request_id,
                 model,
+                req.tools.as_ref().is_some_and(|t| !t.is_empty()),
             )
             .await;
         } else {
@@ -218,6 +219,7 @@ pub async fn messages(
                     sampling_params,
                     request_id,
                     model,
+                    req.tools.as_ref().is_some_and(|t| !t.is_empty()),
                 )
                 .await;
             } else {

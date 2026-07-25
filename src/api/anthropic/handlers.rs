@@ -105,6 +105,51 @@ fn is_anthropic_server_tool(kind: &str) -> bool {
         || kind.starts_with("tool_search_")
 }
 
+/// Emit recovered tool calls as Anthropic `tool_use` content blocks.
+///
+/// Returns true if any call was emitted, so the caller can set
+/// `stop_reason: "tool_use"`. Shared by both streaming paths — the router one
+/// and the local split fast path — because a wire format implemented twice is
+/// a wire format that will diverge (this release fixed exactly that class of
+/// bug in the stop-string handling).
+///
+/// Blocks are indexed from 1: the prologue already opened a text block at 0 and
+/// the epilogue closes it, so starting at 0 would emit two starts and two stops
+/// for one index — malformed, and a strict client would reject the stream.
+async fn emit_anthropic_tool_blocks(
+    sse_tx: &tokio::sync::mpsc::Sender<AnthropicSseEvent>,
+    buffered: &str,
+) -> bool {
+    let Some(parsed) = crate::api::tool_parse::parse_tool_calls(buffered) else {
+        return false;
+    };
+    let mut emitted = false;
+    for (i, call) in parsed.into_iter().enumerate() {
+        let index = i as u32 + 1;
+        let _ = crate::api::sse_send_live(
+            sse_tx,
+            AnthropicSseEvent::ContentBlockStartToolUse {
+                index,
+                id: call.id,
+                name: call.name,
+            },
+        )
+        .await;
+        let _ = crate::api::sse_send_live(
+            sse_tx,
+            AnthropicSseEvent::ContentBlockInputJsonDelta {
+                index,
+                partial_json: call.arguments,
+            },
+        )
+        .await;
+        let _ =
+            crate::api::sse_send_live(sse_tx, AnthropicSseEvent::ContentBlockStop { index }).await;
+        emitted = true;
+    }
+    emitted
+}
+
 pub(super) async fn anthropic_non_stream(
     router_tx: tokio::sync::mpsc::Sender<RouterCommand>,
     messages: Vec<ChatMessage>,
@@ -128,6 +173,7 @@ pub(super) async fn anthropic_stream(
     params: SamplingParams,
     request_id: String,
     model: String,
+    tools_requested: bool,
 ) -> Result<axum::response::Response, ApiError> {
     let (result_rx, mut token_rx) = crate::api::openai::submit_stream_to_router(
         &router_tx,
@@ -154,6 +200,9 @@ pub(super) async fn anthropic_stream(
         let mut streamed_token_count = 0u32;
         let mut finish_stop_reason = String::new();
         let mut finish_matched_stop: Option<String> = None;
+        // See the split-path sibling: with tools requested, text is withheld
+        // until complete because a tool call is only recognisable in full.
+        let mut buffered = String::new();
         loop {
             let event = tokio::select! {
                 biased;
@@ -178,12 +227,16 @@ pub(super) async fn anthropic_stream(
                 got_finish = true;
                 if !event.text.is_empty() {
                     streamed_token_count += 1;
-                    let _ = sse_tx
-                        .send(AnthropicSseEvent::ContentBlockDelta {
-                            index: 0,
-                            text: event.text,
-                        })
-                        .await;
+                    if tools_requested {
+                        buffered.push_str(&event.text);
+                    } else {
+                        let _ = sse_tx
+                            .send(AnthropicSseEvent::ContentBlockDelta {
+                                index: 0,
+                                text: event.text,
+                            })
+                            .await;
+                    }
                 }
                 finish_matched_stop = event.matched_stop_sequence.clone();
                 finish_stop_reason = super::convert::map_finish_reason_with_match(
@@ -195,6 +248,10 @@ pub(super) async fn anthropic_stream(
             }
             if !event.text.is_empty() {
                 streamed_token_count += 1;
+                if tools_requested {
+                    buffered.push_str(&event.text);
+                    continue;
+                }
                 // Closed OR stalled (non-reading) consumer → cancel the pipeline.
                 if !crate::api::sse_send_live(
                     &sse_tx,
@@ -237,6 +294,21 @@ pub(super) async fn anthropic_stream(
             // the authoritative fallback when the token stream didn't carry
             // it (e.g. distributed pipeline with no stop-string plumbing).
             let matched = finish_matched_stop.or(matched_from_result);
+            let mut finish_stop_reason = finish_stop_reason;
+            if tools_requested && !buffered.is_empty() {
+                if emit_anthropic_tool_blocks(&sse_tx, &buffered).await {
+                    finish_stop_reason = "tool_use".to_string();
+                } else {
+                    let _ = crate::api::sse_send_live(
+                        &sse_tx,
+                        AnthropicSseEvent::ContentBlockDelta {
+                            index: 0,
+                            text: buffered.clone(),
+                        },
+                    )
+                    .await;
+                }
+            }
             send_sse_epilogue_with_stop(&sse_tx, finish_stop_reason, matched, output_tokens).await;
         } else {
             // Fallback: pipeline finished without streaming events
@@ -309,6 +381,7 @@ pub(super) async fn anthropic_split_stream(
     params: SamplingParams,
     request_id: String,
     model: String,
+    tools_requested: bool,
 ) -> Result<axum::response::Response, ApiError> {
     let (sse_tx, sse_rx) = tokio::sync::mpsc::channel::<AnthropicSseEvent>(64);
 
@@ -338,6 +411,7 @@ pub(super) async fn anthropic_split_stream(
         let mut total_output_tokens = 0u32;
         let mut stop_reason = "max_tokens".to_string();
         let mut matched_stop_sequence: Option<String> = None;
+        let mut buffered = String::new();
 
         loop {
             let event = tokio::select! {
@@ -368,6 +442,12 @@ pub(super) async fn anthropic_split_stream(
                 break;
             }
             total_output_tokens += 1;
+            if tools_requested {
+                // Withheld until complete — a tool call is only recognisable
+                // once the whole text is in (see the OpenAI sibling).
+                buffered.push_str(&event.text);
+                continue;
+            }
             // Stop on a closed OR stalled (non-reading) consumer — returning
             // drops the token receiver, cancelling the worker instead of
             // generating into a buffer nobody drains (Finding 2).
@@ -385,6 +465,26 @@ pub(super) async fn anthropic_split_stream(
                     "Anthropic split stream consumer gone (closed or not reading) — cancelling decode"
                 );
                 return;
+            }
+        }
+
+        // Flush what was withheld for tool inspection, in Anthropic's streaming
+        // shape: open a tool_use block, stream its arguments as one
+        // input_json_delta, close it. A client concatenating input_json_delta
+        // fragments handles a single complete fragment correctly.
+        if tools_requested && !buffered.is_empty() {
+            if emit_anthropic_tool_blocks(&sse_tx, &buffered).await {
+                stop_reason = "tool_use".to_string();
+            } else {
+                // Not a tool call after all — deliver it as the text it is.
+                let _ = crate::api::sse_send_live(
+                    &sse_tx,
+                    AnthropicSseEvent::ContentBlockDelta {
+                        index: 0,
+                        text: buffered.clone(),
+                    },
+                )
+                .await;
             }
         }
 

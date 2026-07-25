@@ -151,7 +151,7 @@ libp2p 0.56, axum 0.8, candle-core/candle-transformers 0.10 (CUDA), redb 4, ed25
 
 ## Testing
 
-- 1188 lib tests passing + 8 ignored (env-var-gated real-model + manual smoke), 79 integration tests in `tests/integration/` + 2 ignored end-to-end (`cargo test --test integration_phase10_11 -- --ignored`), 2 repo-consistency, 26 in `swarmllm-types` (`cargo test -p swarmllm-types` — NOT covered by a bare `cargo test` from the root), clippy clean. Microbench: `cargo run --release --no-default-features --features dev,claude-subscription --example swarm_spec_bench` (R136 — measures all 4 SWARM-SPEC layer primitives + synthetic cascade hit-rate). Local-cluster bench: `examples/3node_setup.sh` (boots 3 daemons) + `examples/3node_inference_bench.sh` (runs 3 workloads × 3 trials and prints tok/s + swarm_spec metrics). Sharded variant: `examples/3node_sharded_setup.sh` (forced distributed pipeline — requires `auto_manage.enabled = false` in per-node config.toml to preserve sharded state; splits any shard count across B/C, not just 2). Both scripts take `SWARM_BENCH_MODEL`. **Pinned reference models for cross-swarm comparison: `docs/REFERENCE_MODELS.md`** (smoke / standard / stress tiers + `examples/fetch_reference_model.sh` to opt in).
+- 1205 lib tests passing + 8 ignored (env-var-gated real-model + manual smoke), 79 integration tests in `tests/integration/` + 2 ignored end-to-end (`cargo test --test integration_phase10_11 -- --ignored`), 2 repo-consistency, 26 in `swarmllm-types` (`cargo test -p swarmllm-types` — NOT covered by a bare `cargo test` from the root), clippy clean. Microbench: `cargo run --release --no-default-features --features dev,claude-subscription --example swarm_spec_bench` (R136 — measures all 4 SWARM-SPEC layer primitives + synthetic cascade hit-rate). Local-cluster bench: `examples/3node_setup.sh` (boots 3 daemons) + `examples/3node_inference_bench.sh` (runs 3 workloads × 3 trials and prints tok/s + swarm_spec metrics). Sharded variant: `examples/3node_sharded_setup.sh` (forced distributed pipeline — requires `auto_manage.enabled = false` in per-node config.toml to preserve sharded state; splits any shard count across B/C, not just 2). Both scripts take `SWARM_BENCH_MODEL`. **Pinned reference models for cross-swarm comparison: `docs/REFERENCE_MODELS.md`** (smoke / standard / stress tiers + `examples/fetch_reference_model.sh` to opt in).
 - Unit tests: in-module `#[cfg(test)]` blocks
 - Integration tests: `tests/integration/` — multi-node simulations with `--test-threads=1`
 - Real-model spawn-and-infer test: set `SWARMLLM_TEST_MODEL_DIR` to a fully-populated model directory (e.g. `~/.local/share/swarmllm/models/tinyllama-1.1b-...`) and run `cargo test --test integration_phase10_11 -- --ignored end_to_end`. No synthetic GGUF fixture is committed; see `docs/ARCHITECTURE.md` § Deferred Items.
@@ -192,11 +192,45 @@ When spawning subagents in this repo, use these model picks (overrides defaults 
 
 ## Status
 
-All 20 build phases complete. All subsystems wired — no stubs. **1188 lib + 79 integration + 2 repo-consistency + 26 swarmllm-types tests passing**; 8 lib + 2 e2e ignored (env-var or manual). Clippy clean default + features dev,claude-subscription + `--features llama`.
+All 20 build phases complete. All subsystems wired — no stubs. **1205 lib + 79 integration + 2 repo-consistency + 26 swarmllm-types tests passing**; 8 lib + 2 e2e ignored (env-var or manual). Clippy clean default + features dev,claude-subscription + `--features llama`.
 
 Per-round history lives in `~/.claude/projects/-home-user-SwarmLLM/memory/round_log_*.md` and the CHANGELOG; `docs/ARCHITECTURE.md` is the canonical architecture. This section keeps only the current release line plus one-line prior-round pointers.
 
-### Latest — v0.3.21-alpha (2026-07-25): networking audit — NAT traversal actually works
+### Latest — v0.3.22-alpha (2026-07-25): local tool calling + failures that explain themselves
+
+External checklist report (5 bugs) + the diagnostic gap under three of them.
+
+- **Local tool calling implemented** (`src/api/tool_parse.rs`). It was half-built:
+  OpenAI injected a tool prompt but nothing parsed the reply (came back as text
+  with `finish_reason: "length"`); Anthropic never injected at all
+  (`to_internal_messages` dropped `req.tools` for local models). Now: shared
+  `format_tool_prompt` + a 4-format parser (generic / Hermes-Qwen `<tool_call>` /
+  Mistral `[TOOL_CALLS]` / Llama-3 `parameters`+`<|python_tag|>`), following
+  llama.cpp's native-plus-generic-fallback design. Adding a family = one `try_*`
+  fn + one line. **Truncated output stays text — never repaired** (acting on
+  half-stated arguments is worse than raw output). Gated on `req.tools` non-empty
+  so a JSON answer isn't hijacked. **All FOUR streaming paths** covered
+  (`split_stream_response`, `router_inference_stream`, `anthropic_split_stream`,
+  `anthropic_stream`) via shared `emit_openai_tool_calls` /
+  `emit_anthropic_tool_blocks`; with tools present text is **buffered** (a tool
+  call is only recognisable complete) then flushed as calls or as text. Anthropic
+  tool blocks index from **1** — the prologue owns index 0.
+- **`extract_stop_strings` marker list was missing what models emit** — had
+  `<|eot_id|>` but not `<|eom_id|>` (Llama 3.1+ tool-call marker),
+  `<|start_header_id|>`, `<end_of_turn>`, `</s>`, `<|endoftext|>`. Found by live
+  test, not reasoning. Shared helper → fixes all 3 inference paths.
+- **Swallowed errors**: a failed `pool.generate` closed the stream silently
+  (dashboard *guessed* "still loading") → `SplitStreamFailure` slot + proper
+  `StreamEvent::Error`. And the serving side's `let _ = network_tx.send(...)`
+  discarded its reply result — the requester saw a timeout while the server
+  logged success, which is why a tester's serving defect was undiagnosable.
+- **`get-model` idempotency** — skips a shard already at the expected size.
+- **Diagnostics: recent-failures ring** (`state.recent_failures`, cap 20) with
+  model / elapsed / **which peer served it**, plus a repeated-peer note. NAT
+  summary no longer claims "stuck on relay" when direct connections exist.
+- Deferred: per-request holder blacklist (`docs/FUTURE_WORK.md`). Gotchas #163-164.
+
+### v0.3.21-alpha (2026-07-25): networking audit — NAT traversal actually works
 
 Audit of the whole networking stack (`docs/NETWORKING_PLAN.md` claimed "entire
 plan implemented, nothing deferred" — **it wasn't**). The relay transport was

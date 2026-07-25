@@ -596,3 +596,57 @@ fn failed_template_with_unknown_model_name_still_uses_chatml() {
         "expected ChatML for an unrecognised name, got: {result:?}"
     );
 }
+
+/// A model's own turn markers must be stop strings, or they reach the user as
+/// visible text. Observed live 2026-07-25: a Llama-3.2 model emitted
+/// `<|eom_id|><|start_header_id|>assistant<|end_header_id|>` into its reply
+/// because only `<|eot_id|>` was recognised.
+#[test]
+fn extract_stop_strings_covers_llama3_message_and_header_markers() {
+    // Representative Llama-3.x template fragment.
+    let llama3 = "<|start_header_id|>user<|end_header_id|>\n\n{{ content }}<|eot_id|>\
+                  <|start_header_id|>assistant<|end_header_id|>";
+    let stops = super::extract_stop_strings(Some(llama3));
+
+    assert!(stops.contains(&"<|eot_id|>".to_string()), "got {stops:?}");
+    assert!(
+        stops.contains(&"<|start_header_id|>".to_string()),
+        "a header marker mid-generation means a hallucinated turn: {stops:?}"
+    );
+
+    // `<|eom_id|>` is what Llama 3.1+ emits when it thinks it is calling a
+    // tool. Only picked up when the template mentions it.
+    let with_eom = format!("{llama3}<|eom_id|>");
+    let stops = super::extract_stop_strings(Some(&with_eom));
+    assert!(stops.contains(&"<|eom_id|>".to_string()), "got {stops:?}");
+}
+
+/// Other families' boundary markers, so one model's fix doesn't regress others.
+#[test]
+fn extract_stop_strings_covers_other_families() {
+    let cases: &[(&str, &str)] = &[
+        ("<|im_start|>user\n{{ c }}<|im_end|>", "<|im_end|>"),
+        ("<start_of_turn>user\n{{ c }}<end_of_turn>", "<end_of_turn>"),
+        ("[INST] {{ c }} [/INST]", "[INST]"),
+        ("{{ bos }}{{ c }}</s>", "</s>"),
+        ("{{ c }}<|endoftext|>", "<|endoftext|>"),
+    ];
+    for (template, expected) in cases {
+        let stops = super::extract_stop_strings(Some(template));
+        assert!(
+            stops.contains(&expected.to_string()),
+            "template {template:?} should yield {expected:?}, got {stops:?}"
+        );
+    }
+}
+
+/// A marker absent from the template must NOT become a stop string — stopping on
+/// a string the model legitimately emits would truncate real answers.
+#[test]
+fn extract_stop_strings_does_not_invent_markers() {
+    let chatml_only = "<|im_start|>user\n{{ c }}<|im_end|>";
+    let stops = super::extract_stop_strings(Some(chatml_only));
+    assert!(!stops.contains(&"<|eot_id|>".to_string()), "got {stops:?}");
+    assert!(!stops.contains(&"</s>".to_string()), "got {stops:?}");
+    assert!(!stops.contains(&"[INST]".to_string()), "got {stops:?}");
+}

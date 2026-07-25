@@ -70,14 +70,37 @@ pub fn extract_stop_strings(template: Option<&str>) -> Vec<String> {
 
     let mut stops = Vec::new();
 
-    // Scan template for known role marker patterns
+    // Scan the template for turn-boundary markers. Anything present here is a
+    // marker this model's own template uses, so seeing it mid-generation means
+    // the model has ended its turn (or started hallucinating another one) and we
+    // should stop rather than pass the marker through as visible text.
+    //
+    // This list must cover what models actually EMIT, which is not always the
+    // token the tokenizer declares as EOS. Observed live 2026-07-25: a
+    // Llama-3.2 model emitted `<|eom_id|><|start_header_id|>assistant<|end_header_id|>`
+    // into user-visible content because only `<|eot_id|>` was listed —
+    // Llama 3.1+ uses `<|eom_id|>` ("end of message") when it believes it is
+    // making a tool call, and neither the header markers nor `<|eom_id|>` were
+    // being caught.
     for marker in &[
-        "<|user|>",
-        "<|system|>",
+        // ChatML (Qwen, Hermes, many finetunes)
         "<|im_end|>",
         "<|im_start|>",
+        // Zephyr / TinyLlama style
+        "<|user|>",
+        "<|system|>",
+        // Llama 2 / Mistral
         "[INST]",
+        "</s>",
+        // Llama 3.x — `eot` ends a turn, `eom` ends a message (tool calls), and
+        // a header marker mid-stream is the model opening a turn it shouldn't.
         "<|eot_id|>",
+        "<|eom_id|>",
+        "<|start_header_id|>",
+        // Gemma
+        "<end_of_turn>",
+        // GPT-2 style vocabularies (Qwen base, several small models)
+        "<|endoftext|>",
     ] {
         if tmpl.contains(marker) {
             stops.push(marker.to_string());

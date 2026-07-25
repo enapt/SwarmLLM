@@ -2,6 +2,54 @@
 
 All notable changes to SwarmLLM are documented here.
 
+## [0.3.22-alpha] — 2026-07-25
+
+### Fixed
+
+- **Tools now work with models running on your own machine.** Asking a local
+  model to use a tool did nothing useful: on the OpenAI-compatible endpoint the
+  model was told how to request one, did so correctly, and the request came back
+  as ordinary chat text that no client could act on. On the Anthropic endpoint
+  the tools were never mentioned to the model at all, so it replied that it had
+  no way to call them. Both halves now work, including the formats different
+  model families use natively rather than the one we ask for, and including
+  streaming requests — which matters for agent tools like Claude Code, since
+  those stream by default.
+- **Chat-template markers no longer appear in replies.** Some models returned
+  raw markers such as `<|im_end|>` or `<|eom_id|>` as visible text. Two causes:
+  one of the three routes a request can take wasn't applying the stop markers a
+  model's own template defines, and the list of markers we recognised was missing
+  several that current models actually emit — including the one Llama 3.1+ uses
+  when it believes it is calling a tool.
+- **A failed reply now says why it failed.** When generation couldn't start —
+  most often not enough GPU memory after switching models — the response ended
+  empty and the dashboard could only guess, showing "the model might still be
+  loading". The actual reason is now reported.
+- **Downloading a model you already have no longer re-fetches it.** `get-model`
+  on a fully-downloaded model re-downloaded every shard — around 353 MB of
+  identical data in one report — because nothing checked what was already on
+  disk.
+- **A machine that fails to serve a request can no longer fail silently.** Such
+  a machine was already careful to send back a reason, but if that reply was
+  lost it went unrecorded: the requester saw only a timeout, while the server's
+  own log showed a completed request. From the outside this was indistinguishable
+  from a fault on the requesting side, and it made one tester's problem
+  undiagnosable for several rounds.
+
+### Added
+
+- **Diagnostics now lists recent failed requests** — the model, how long it
+  took, and which machine served it. That last detail separates "my node has a
+  problem" from "one peer has a problem". When several failures share a peer, it
+  says so directly. `GET /api/admin/diagnostics`.
+
+### Changed
+
+- The NAT traversal summary no longer reports a node as stuck on a relay when it
+  has working direct connections and simply never needed to punch through one.
+  It also notes that both machines need v0.3.21 or newer before a direct
+  connection can form.
+
 ## [0.3.21-alpha] — 2026-07-25
 
 ### Fixed

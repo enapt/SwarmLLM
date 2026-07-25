@@ -373,6 +373,39 @@ pub(super) async fn router_inference(
 /// Submits the request via `StreamSubmit` so the pipeline executor sends decoded
 /// tokens incrementally. Each token is forwarded as an SSE chunk, providing true
 /// token-by-token streaming for distributed inference.
+/// Emit recovered tool calls as one OpenAI streaming `tool_calls` delta.
+///
+/// Returns true if any call was emitted, so the caller can set
+/// `finish_reason: "tool_calls"`. Shared by the router path and the local
+/// split-model fast path: a wire format written twice diverges, which is
+/// precisely the class of bug this release fixed in stop-string handling.
+async fn emit_openai_tool_calls(
+    tx: &tokio::sync::mpsc::Sender<StreamEvent>,
+    buffered: &str,
+) -> bool {
+    let Some(parsed) = crate::api::tool_parse::parse_tool_calls(buffered) else {
+        return false;
+    };
+    let calls: Vec<crate::api::openai::StreamToolCall> = parsed
+        .into_iter()
+        .enumerate()
+        .map(|(i, c)| crate::api::openai::StreamToolCall {
+            index: i as u32,
+            id: Some(c.id),
+            tool_type: Some("function".into()),
+            function: Some(crate::api::openai::StreamFunctionCall {
+                name: Some(c.name),
+                arguments: Some(c.arguments),
+            }),
+        })
+        .collect();
+    if calls.is_empty() {
+        return false;
+    }
+    let _ = crate::api::sse_send_live(tx, StreamEvent::ToolCalls { calls }).await;
+    true
+}
+
 async fn router_inference_stream(
     router_tx: tokio::sync::mpsc::Sender<RouterCommand>,
     req: &ChatCompletionRequest,
@@ -406,6 +439,11 @@ async fn router_inference_stream(
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
 
+    // Captured before the spawn: `req` is borrowed and cannot cross into the
+    // task. A local model expresses tool calls as text, so this decides whether
+    // the token stream is forwarded live or withheld for inspection.
+    let tools_requested = req.tools.as_ref().is_some_and(|t| !t.is_empty());
+
     // Bridge the streaming token channel into SSE events
     let (sse_tx, sse_rx) = tokio::sync::mpsc::channel::<StreamEvent>(64);
 
@@ -426,6 +464,8 @@ async fn router_inference_stream(
 
         // Read tokens from the pipeline as they arrive
         let mut got_finish = false;
+        // Withheld text when tools are in play — see `emit_openai_tool_calls`.
+        let mut buffered = String::new();
         let mut client_disconnected = false;
         loop {
             let event = tokio::select! {
@@ -454,7 +494,9 @@ async fn router_inference_stream(
                 got_finish = true;
                 if !event.text.is_empty() {
                     token_count += 1;
-                    if sse_tx
+                    if tools_requested {
+                        buffered.push_str(&event.text);
+                    } else if sse_tx
                         .send(StreamEvent::Delta {
                             content: Some(event.text),
                             role: None,
@@ -467,6 +509,24 @@ async fn router_inference_stream(
                             token_count,
                             "DIAG: SSE final text delta send failed — client disconnected"
                         );
+                    }
+                }
+                // Flush what tool inspection withheld before the finish delta,
+                // so finish_reason can reflect a tool call.
+                let mut reason = reason.clone();
+                if tools_requested && !buffered.is_empty() {
+                    if emit_openai_tool_calls(&sse_tx, &buffered).await {
+                        reason = "tool_calls".to_string();
+                    } else {
+                        let _ = crate::api::sse_send_live(
+                            &sse_tx,
+                            StreamEvent::Delta {
+                                content: Some(buffered.clone()),
+                                role: None,
+                                finish_reason: None,
+                            },
+                        )
+                        .await;
                     }
                 }
                 if sse_tx
@@ -484,6 +544,10 @@ async fn router_inference_stream(
             }
             if !event.text.is_empty() {
                 token_count += 1;
+                if tools_requested {
+                    buffered.push_str(&event.text);
+                    continue;
+                }
                 // Closed OR stalled (non-reading) consumer → cancel the pipeline.
                 if !crate::api::sse_send_live(
                     &sse_tx,
@@ -671,6 +735,7 @@ pub(super) async fn split_non_stream_response(
 ///
 /// Same fast path as split_non_stream_response but streams tokens via SSE.
 /// Builds the prompt from the model's own chat template to avoid template mismatch.
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn split_stream_response(
     state: AppState,
     request_id: String,
@@ -679,6 +744,7 @@ pub(super) async fn split_stream_response(
     messages: Vec<ChatMessage>,
     params: SamplingParams,
     model_id: crate::types::ModelId,
+    tools_requested: bool,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     let (tx, rx) = tokio::sync::mpsc::channel::<StreamEvent>(64);
     let request_id_inner = request_id.clone();
@@ -710,6 +776,12 @@ pub(super) async fn split_stream_response(
         // generation hit max_tokens. "length" as a default would tell clients
         // the response was truncated even on a clean exit.
         let mut finish = "stop".to_string();
+        // With tools in play we cannot forward text as it arrives: whether the
+        // output is a tool call is only knowable once it is complete, and having
+        // streamed the raw JSON we could not retract it. So buffer, then emit
+        // either tool_calls or the text at the end. Matches OpenAI, which does
+        // not stream partial text for a tool call either.
+        let mut buffered = String::new();
         loop {
             let event = tokio::select! {
                 biased;
@@ -736,6 +808,11 @@ pub(super) async fn split_stream_response(
                 break;
             }
             token_count += 1;
+            if tools_requested {
+                // Hold it back until we know whether this is a tool call.
+                buffered.push_str(&event.text);
+                continue;
+            }
             // Stop the instant the consumer closes OR stops reading (a stalled
             // send past SSE_CONSUMER_STALL_TIMEOUT). Returning drops token_rx →
             // cancels the worker, bounding runaway compute for a client that
@@ -759,21 +836,36 @@ pub(super) async fn split_stream_response(
             }
         }
 
+        // Flush what we withheld for tool inspection: either structured calls,
+        // or the text unchanged if it turned out to be an ordinary answer (a
+        // model given tools is free to just reply).
+        if tools_requested && !buffered.is_empty() {
+            if emit_openai_tool_calls(&tx, &buffered).await {
+                finish = "tool_calls".to_string();
+            } else {
+                let _ = crate::api::sse_send_live(
+                    &tx,
+                    StreamEvent::Delta {
+                        content: Some(buffered.clone()),
+                        role: None,
+                        finish_reason: None,
+                    },
+                )
+                .await;
+            }
+        }
+
         // Zero tokens plus a recorded failure means generation never started —
         // tell the client why rather than closing a successful-looking empty
         // stream and leaving it to guess (external report 2026-07-25).
         if token_count == 0 {
             let reason = failure.lock().ok().and_then(|s| s.clone());
             if let Some(reason) = reason {
-                let _ = crate::api::sse_send_live(
-                    &tx,
-                    StreamEvent::Delta {
-                        content: Some(format!("[inference failed: {reason}]")),
-                        role: None,
-                        finish_reason: None,
-                    },
-                )
-                .await;
+                // A proper SSE error frame, not text smuggled into content:
+                // clients can distinguish a failure from a model that chose to
+                // reply with that string.
+                let _ =
+                    crate::api::sse_send_live(&tx, StreamEvent::Error { message: reason }).await;
                 finish = "error".to_string();
             }
         }
@@ -939,6 +1031,31 @@ fn stream_events_to_sse(
                 String::new()
             };
             Ok::<_, Infallible>(Event::default().data(json))
+        }
+        StreamEvent::ToolCalls { calls } => {
+            // One chunk carrying the whole tool-call set, with content null —
+            // the shape a client expects alongside finish_reason "tool_calls".
+            let chunk = ChatCompletionChunk {
+                id: request_id.clone(),
+                object: "chat.completion.chunk",
+                created,
+                model: model_name.clone(),
+                choices: vec![ChunkChoice {
+                    index: 0,
+                    delta: Delta {
+                        role: None,
+                        content: None,
+                        tool_calls: Some(calls),
+                    },
+                    finish_reason: None,
+                    logprobs: None,
+                }],
+                session_id: None,
+                usage: None,
+            };
+            Ok::<_, Infallible>(
+                Event::default().data(serde_json::to_string(&chunk).unwrap_or_default()),
+            )
         }
         StreamEvent::Error { message } => {
             let error_json = serde_json::json!({
