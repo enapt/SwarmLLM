@@ -284,14 +284,14 @@ pub(super) async fn anthropic_split_stream(
         send_sse_preamble(&sse_tx, &rid, &model).await;
 
         let requested_mid = crate::types::ModelId(model_for_lookup);
-        let mut token_rx = match crate::api::openai::spawn_split_stream(
+        let (mut token_rx, failure) = match crate::api::openai::spawn_split_stream(
             &state,
             &requested_mid,
             &messages,
             params,
             &rid,
         ) {
-            Some(rx) => rx,
+            Some(pair) => pair,
             None => {
                 send_sse_epilogue(&sse_tx, "end_turn".into(), 0).await;
                 return;
@@ -348,6 +348,23 @@ pub(super) async fn anthropic_split_stream(
                     "Anthropic split stream consumer gone (closed or not reading) — cancelling decode"
                 );
                 return;
+            }
+        }
+
+        // Nothing generated + a recorded failure: say why instead of emitting a
+        // clean-looking empty message (external report 2026-07-25).
+        if total_output_tokens == 0 {
+            let reason = failure.lock().ok().and_then(|s| s.clone());
+            if let Some(reason) = reason {
+                let _ = crate::api::sse_send_live(
+                    &sse_tx,
+                    AnthropicSseEvent::ContentBlockDelta {
+                        index: 0,
+                        text: format!("[inference failed: {reason}]"),
+                    },
+                )
+                .await;
+                stop_reason = "error".to_string();
             }
         }
 

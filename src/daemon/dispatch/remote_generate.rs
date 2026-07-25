@@ -94,7 +94,7 @@ pub(super) async fn handle_remote_generate_request(
             model = %model_id,
             "RemoteGenerateRequest for model not hosted here — sending error"
         );
-        let _ = network_tx
+        if let Err(e) = network_tx
             .send(NetworkCommand::SendStreamingToken {
                 target_peer_bytes: sender_bytes,
                 token: StreamingToken {
@@ -109,7 +109,14 @@ pub(super) async fn handle_remote_generate_request(
                     logprob: None,
                 },
             })
-            .await;
+            .await
+        {
+            tracing::error!(
+                %request_id,
+                error = %e,
+                "DIAG: could not queue the rejection back to the coordinator —                  it will see a silent timeout instead of a reason"
+            );
+        }
         return;
     }
 
@@ -235,12 +242,31 @@ pub(super) async fn handle_remote_generate_request(
             }
         }
     };
-    let _ = network_tx
+    // Do NOT discard this result. Everything above is careful to send a reason
+    // back for every failure mode, but that is worthless if the reply itself is
+    // dropped: the coordinator then sees "peer never acknowledged" and the
+    // serving node's log shows a completed request. That asymmetry is what made
+    // an external tester's serving-side failures undiagnosable across several
+    // rounds — from the outside it was indistinguishable from a routing bug on
+    // the requester.
+    let was_error = matches!(
+        final_token.finish_reason,
+        Some(NetworkFinishReason::Error(_))
+    );
+    if let Err(e) = network_tx
         .send(NetworkCommand::SendStreamingToken {
             target_peer_bytes: sender_bytes,
             token: final_token,
         })
-        .await;
+        .await
+    {
+        tracing::error!(
+            %request_id,
+            error = %e,
+            was_error_reply = was_error,
+            "DIAG: could not queue the final token back to the coordinator —              it will time out with no reason. This node served the request; the              reply is what was lost"
+        );
+    }
 }
 
 fn has_model_locally(shared_state: &SharedState, model_id: &ModelId) -> bool {

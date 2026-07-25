@@ -234,23 +234,30 @@ pub async fn diagnostics(State(state): State<AppState>) -> impl axum::response::
         use std::sync::atomic::Ordering;
         let ok = ss.hole_punch_successes.load(Ordering::Relaxed);
         let failed = ss.hole_punch_failures.load(Ordering::Relaxed);
+        let public = ss.publicly_reachable.load(Ordering::Relaxed);
         let _ = writeln!(out, "\n-- NAT traversal --");
-        let _ = writeln!(
-            out,
-            "  publicly reachable: {}",
-            ss.publicly_reachable.load(Ordering::Relaxed)
-        );
+        let _ = writeln!(out, "  publicly reachable: {public}");
         let _ = writeln!(
             out,
             "  donating relay capacity: {}",
             ss.relay_forwarding_enabled()
         );
         let _ = writeln!(out, "  hole punches: {ok} succeeded / {failed} failed");
-        if ok == 0 && failed == 0 {
+        // The reading of "0 attempts" depends entirely on whether this node is
+        // public, so say which case applies rather than listing possibilities.
+        // A public node NEVER needs to hole-punch — peers dial it directly — so
+        // 0/0 there is the healthy steady state, not a pending result.
+        if public && ok == 0 && failed == 0 {
             let _ = writeln!(
                 out,
-                "  (no attempts yet — normal on a LAN-only node, or before any \
-                 relayed peer is seen)"
+                "  (none needed — this node is reachable directly, so peers dial \
+                 it without hole punching)"
+            );
+        } else if ok == 0 && failed == 0 {
+            let _ = writeln!(
+                out,
+                "  (no attempts yet — nothing to punch until a peer is seen that \
+                 can only be reached through a relay)"
             );
         } else if ok == 0 {
             let _ = writeln!(

@@ -87,13 +87,24 @@ fn build_chat_completion_response(
 ///
 /// Resolves model metadata, builds the prompt, and spawns the worker subprocess.
 /// Returns None if the model is not loaded as a split model.
+/// Records why a local split-model stream produced nothing, so the SSE layer can
+/// tell the client instead of closing the stream silently.
+pub type SplitStreamFailure = std::sync::Arc<std::sync::Mutex<Option<String>>>;
+
+/// A local split-model stream: the token receiver plus the failure slot to
+/// consult if the stream ends without producing any tokens.
+pub type SplitStream = (
+    tokio::sync::mpsc::Receiver<crate::inference::router::StreamingTokenEvent>,
+    SplitStreamFailure,
+);
+
 pub fn spawn_split_stream(
     state: &AppState,
     model_id: &crate::types::ModelId,
     messages: &[crate::types::ChatMessage],
-    params: crate::types::SamplingParams,
+    mut params: crate::types::SamplingParams,
     request_id: &str,
-) -> Option<tokio::sync::mpsc::Receiver<crate::inference::router::StreamingTokenEvent>> {
+) -> Option<SplitStream> {
     let meta = get_split_model_meta(state, model_id)?;
     let prompt = crate::inference::chat_template::build_prompt(
         messages,
@@ -101,9 +112,36 @@ pub fn spawn_split_stream(
         &meta.bos_token,
         &meta.eos_token_str,
     );
+
+    // Add the stop strings implied by the chat template to whatever the caller
+    // asked for (external report 2026-07-25: a model returned raw
+    // `<|im_end|>` / `<|im_start|>assistant` markers as visible content).
+    //
+    // The template tells us how a turn ends, which is not always the same as
+    // the tokenizer's declared EOS id — a GGUF carrying a ChatML template but a
+    // Llama-style `eos_token_id` will emit `<|im_end|>`, which is not an EOS
+    // token, so generation runs on and the markers reach the user verbatim.
+    //
+    // `local_exec.rs` and `distributed.rs` both already did this; this fast path
+    // (used by BOTH the OpenAI and Anthropic local-complete routes, and so by
+    // the dashboard compare page) was the one place that didn't, which is why
+    // the leak only showed up on some models via some endpoints.
+    for stop in crate::inference::chat_template::extract_stop_strings(meta.chat_template.as_deref())
+    {
+        if !params.stop.contains(&stop) {
+            params.stop.push(stop);
+        }
+    }
     let rid = uuid::Uuid::parse_str(request_id).unwrap_or_else(|_| uuid::Uuid::new_v4());
     let (token_tx, token_rx) =
         tokio::sync::mpsc::channel::<crate::inference::router::StreamingTokenEvent>(64);
+    // Records why generation stopped when it produced nothing. Without this the
+    // channel simply closes and the client sees an empty-but-successful stream,
+    // so the dashboard had to *guess* a reason ("the model might still be
+    // loading") — which is what an out-of-VRAM model switch looked like in the
+    // external report of 2026-07-25.
+    let failure: SplitStreamFailure = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let failure_sink = failure.clone();
     let pool = state.shared_state.model_process_pool.clone();
     let model_id = model_id.clone();
     let layer_range = meta.layer_range;
@@ -134,6 +172,11 @@ pub fn spawn_split_stream(
                         request_id = %rid,
                         "DIAG: local streaming generate failed",
                     );
+                    // Also hand the reason to the SSE layer so the client is
+                    // told what happened instead of receiving silence.
+                    if let Ok(mut slot) = failure_sink.lock() {
+                        *slot = Some(e.to_string());
+                    }
                 }
             }
             // Nobody is reading any more. Selecting this branch DROPS the
@@ -153,7 +196,7 @@ pub fn spawn_split_stream(
             }
         }
     });
-    Some(token_rx)
+    Some((token_rx, failure))
 }
 
 /// Submit a streaming inference request to the router.
@@ -618,9 +661,9 @@ pub(super) async fn split_stream_response(
         }
 
         // Spawn split-model generation and get token receiver
-        let mut token_rx =
+        let (mut token_rx, failure) =
             match spawn_split_stream(&state, &model_id, &messages, params, &request_id) {
-                Some(rx) => rx,
+                Some(pair) => pair,
                 None => {
                     tracing::debug!(model_id = %model_id, "DIAG: split stream model not found");
                     let _ = tx.send(StreamEvent::Done).await;
@@ -679,6 +722,25 @@ pub(super) async fn split_stream_response(
                     "DIAG: split stream consumer gone (closed or not reading) — cancelling decode"
                 );
                 return;
+            }
+        }
+
+        // Zero tokens plus a recorded failure means generation never started —
+        // tell the client why rather than closing a successful-looking empty
+        // stream and leaving it to guess (external report 2026-07-25).
+        if token_count == 0 {
+            let reason = failure.lock().ok().and_then(|s| s.clone());
+            if let Some(reason) = reason {
+                let _ = crate::api::sse_send_live(
+                    &tx,
+                    StreamEvent::Delta {
+                        content: Some(format!("[inference failed: {reason}]")),
+                        role: None,
+                        finish_reason: None,
+                    },
+                )
+                .await;
+                finish = "error".to_string();
             }
         }
 

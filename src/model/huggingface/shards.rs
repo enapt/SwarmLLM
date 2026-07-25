@@ -527,6 +527,35 @@ pub async fn download_shards(
             )
         })?;
 
+        // Idempotency: a shard already on disk at exactly the expected size is
+        // the shard we would download, so skip it (external report 2026-07-25:
+        // `swarmllm get-model` on an already-complete model re-fetched ~353MB
+        // byte-for-byte). Size is the right check here — the layout's
+        // `size_bytes` comes from the same remote GGUF we would fetch from, and
+        // a truncated/interrupted download lands in `<shard>.tmp` rather than at
+        // `dest_path`, so a full-size file at the final path was completed. The
+        // content is verified by BLAKE3 on every load regardless, so a corrupt
+        // same-size file is caught there rather than by re-downloading blind.
+        let dest_path = dest_dir.join(crate::model::shard::shard_filename(shard_idx));
+        if std::fs::metadata(&dest_path).is_ok_and(|m| m.len() == layout.size_bytes) {
+            tracing::info!(
+                shard = shard_idx,
+                size_bytes = layout.size_bytes,
+                path = %dest_path.display(),
+                "Shard already present at the expected size — skipping download"
+            );
+            cumulative_downloaded += layout.size_bytes;
+            // Keep the progress stream monotonic so the dashboard doesn't stall
+            // at 0% for a run where every shard is skipped.
+            if let Some(ref tx) = progress_tx {
+                let _ = tx.try_send(DownloadProgress {
+                    downloaded_bytes: cumulative_downloaded,
+                    total_bytes: total_shard_bytes,
+                });
+            }
+            continue;
+        }
+
         // Per-shard progress mapping to cumulative
         let (shard_tx, mut shard_rx) = tokio::sync::mpsc::channel::<DownloadProgress>(64);
         let progress_tx = progress_tx.clone();
