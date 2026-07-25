@@ -181,6 +181,21 @@ pub struct SharedState {
     /// the pool invite-code generator so a freshly-minted code carries every
     /// address a remote peer might reach this node on.
     pub listen_multiaddrs: arc_swap::ArcSwap<Vec<String>>,
+    /// NETWORKING_PLAN Phase 3 — whether this node has been observed to be
+    /// reachable from the open internet, and may therefore donate itself as an
+    /// application-level inference relay.
+    ///
+    /// `state.config` is startup-frozen, but public reachability is only learned
+    /// at runtime (UPnP mapping, AutoNAT confirmation, a manually declared
+    /// external address), so this atomic is the runtime signal. Written by
+    /// `NetworkManager::refresh_listen_multiaddrs` alongside `listen_multiaddrs`;
+    /// read via `SharedState::relay_forwarding_enabled()`.
+    ///
+    /// Deliberately NOT derived from `listen_multiaddrs` at read time: that list
+    /// counts a `/p2p-circuit` address as reachable (correct for invite codes),
+    /// but a node reachable only *through* a relay is itself NAT'd and must
+    /// never advertise itself as one.
+    pub publicly_reachable: std::sync::atomic::AtomicBool,
     pub detected_region: RwLock<Option<String>>,
     pub shard_bytes_served: AtomicU64,
     pub relay_seconds_served: AtomicU64,
@@ -521,6 +536,7 @@ impl SharedState {
             )),
             lan_peer_count: std::sync::atomic::AtomicUsize::new(0),
             listen_multiaddrs: arc_swap::ArcSwap::from_pointee(Vec::new()),
+            publicly_reachable: std::sync::atomic::AtomicBool::new(false),
             vision_modules: DashMap::new(),
             encrypted_pipeline_models: {
                 let map = DashMap::new();

@@ -26,7 +26,19 @@ impl Default for RelayServerConfig {
     fn default() -> Self {
         Self {
             max_reservations: 128,
-            max_circuits: 16,
+            // libp2p's own default is 16, but that is tuned for its intended
+            // use — a *brief* bootstrap circuit (upstream defaults:
+            // `max_circuit_duration` 2 min, `max_circuit_bytes` 128 KiB) held
+            // only until DCUtR upgrades to direct. We use the circuit as a
+            // real data path and already raised those to 1 hour / 1 GB below,
+            // so each slot is occupied ~30x longer than upstream assumes.
+            // Keeping 16 alongside a 1-hour duration means a relay serving
+            // more than 16 concurrent NAT'd pairs starts refusing circuits —
+            // and a refused circuit doesn't degrade gracefully, it removes the
+            // peer from `connected_node_ids` and therefore from scheduling
+            // entirely. 128 matches `max_reservations` so a node that was
+            // granted a reservation can actually open a circuit.
+            max_circuits: 128,
             max_circuit_duration: Duration::from_secs(RELAY_CIRCUIT_DURATION_SECS),
             reservation_duration: Duration::from_secs(RELAY_RESERVATION_DURATION_SECS),
             max_circuit_bytes: 1 << 30, // 1 GB
@@ -171,8 +183,32 @@ mod tests {
     fn default_relay_config() {
         let config = RelayServerConfig::default();
         assert_eq!(config.max_reservations, 128);
-        assert_eq!(config.max_circuits, 16);
         assert_eq!(config.max_circuit_bytes, 1 << 30);
+
+        // A granted reservation must be able to become an actual circuit.
+        // libp2p's upstream default pairs 128 reservations with only 16
+        // circuits, which is coherent for its intended 2-minute bootstrap
+        // circuit but not for ours: we hold circuits for an hour as a data
+        // path, so a 16-circuit ceiling is reached by a small swarm and every
+        // peer past it is dropped from scheduling rather than degraded.
+        assert!(
+            config.max_circuits >= config.max_reservations,
+            "max_circuits ({}) must not be below max_reservations ({}) — \
+             a peer granted a reservation could not open a circuit",
+            config.max_circuits,
+            config.max_reservations
+        );
+    }
+
+    /// The long circuit duration is exactly why the circuit count had to rise;
+    /// pin the relationship so lowering one without the other is caught.
+    #[test]
+    fn circuit_duration_is_data_path_length_not_bootstrap() {
+        let config = RelayServerConfig::default();
+        assert!(
+            config.max_circuit_duration >= Duration::from_secs(600),
+            "circuits are a data path here, not a brief bootstrap hop"
+        );
     }
 
     #[test]

@@ -254,15 +254,36 @@ pub fn build_behaviour(
     let relay_server = relay::Behaviour::new(local_peer_id, relay_config);
 
     // NET-I5: Connection limits to prevent resource exhaustion.
-    // max_established_per_peer=1: MUST be 1. With >1, libp2p request_response
-    // round-robins requests across connections via `request_id % connections.len()`.
-    // On multi-interface hosts (WSL2, Docker, dual-NIC), mDNS discovers the peer
-    // on multiple addresses, creating parallel connections. Some connections go
-    // through unreachable routes (e.g. 10.255.255.254 on WSL2) and silently fail:
-    // the connection closes immediately (ApplicationClosed error_code=0) but the
-    // behaviour's `connected` map retains a stale entry, causing every other
-    // send_request to be routed to a dead connection and silently dropped.
-    let max_per_peer = 1u32;
+    //
+    // This was `1` for a long time, because upstream request_response
+    // round-robins over every connection to a peer
+    // (`request_id % connections.len()`), so a half-open parallel connection on
+    // a multi-interface host (WSL2/Docker) silently ate every other request.
+    //
+    // But `1` also **structurally disabled DCUtR hole punching**, which is the
+    // whole point of NETWORKING_PLAN Phase 2. DCUtR upgrades a relayed
+    // connection by dialling a DIRECT one *while the relayed one is still open*
+    // (`libp2p-dcutr`: `PeerCondition::Always` + `direct_to_relayed_connections`
+    // maps the new connection to the existing relayed one). With a cap of 1,
+    // `connection_limits` denied that second connection with
+    // `Exceeded { kind: EstablishedPerPeer }` before the punch could complete —
+    // so no node ever upgraded off a circuit, circuit slots were never released,
+    // and the relay ran out of them. libp2p's own default here is `None`
+    // (unlimited); `1` was our deviation.
+    //
+    // Two changes make a higher cap safe:
+    //  - `vendor/libp2p-request-response` now prefers DIRECT connections over
+    //    relayed ones instead of blind round-robin, so a coexisting circuit is
+    //    never used once a direct path exists.
+    //  - The deterministic mDNS dialer (only the smaller PeerId dials) removes
+    //    the simultaneous-dial race that produced the half-open connections in
+    //    the first place — and which a cap of 1 made *worse*, by denying one
+    //    side inconsistently and sometimes keeping the broken survivor.
+    //
+    // 3 leaves room for relayed + direct during an upgrade, plus one transport
+    // variant (a peer reachable over both TCP and QUIC), while still bounding
+    // runaway parallel connections.
+    let max_per_peer = 3u32;
     let conn_limits = connection_limits::ConnectionLimits::default()
         .with_max_established_per_peer(Some(max_per_peer))
         .with_max_established(Some(500));

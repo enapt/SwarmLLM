@@ -42,6 +42,22 @@ pub struct NetworkConfig {
     /// ordinary NAT'd nodes (they can't forward anyway).
     #[serde(default)]
     pub relay_forwarding: bool,
+    /// NETWORKING_PLAN Phase 3 — automatically donate relay capacity once this
+    /// node is confirmed reachable from the open internet (UPnP-mapped,
+    /// AutoNAT-confirmed, or a declared external address).
+    ///
+    /// Phase 3 says "any public node can opt in as a relay", but `relay_forwarding`
+    /// is a flag nothing ever sets, so in practice the swarm's whole relay
+    /// capacity was the handful of `--anchor` nodes — a single point of failure
+    /// and a throughput ceiling for every NAT'd pair. Defaulting this on makes
+    /// relay capacity grow with the swarm's public membership, which is the
+    /// property Phase 3 depends on.
+    ///
+    /// Only ever true for genuinely public nodes: a NAT'd node can't forward,
+    /// and reachability *through a relay circuit* does not count. Set to false
+    /// to keep a public node from donating upload bandwidth.
+    #[serde(default = "default_true")]
+    pub relay_forwarding_auto: bool,
     /// Enable mDNS for automatic LAN peer discovery (default: true).
     #[serde(default = "default_true")]
     pub enable_mdns: bool,
@@ -237,7 +253,10 @@ fn default_relay_circuit_duration() -> u64 {
 }
 
 fn default_relay_max_circuits() -> usize {
-    16
+    // See `network::relay::RelayServerConfig::default` — libp2p's 16 assumes a
+    // 2-minute bootstrap circuit; ours are a 1-hour data path, so a slot is
+    // held ~30x longer and 16 is exhausted by a small swarm.
+    128
 }
 
 impl Default for NetworkConfig {
@@ -252,6 +271,7 @@ impl Default for NetworkConfig {
             relay_max_circuits: default_relay_max_circuits(),
             auto_relay: true,
             relay_forwarding: false,
+            relay_forwarding_auto: true,
             enable_mdns: true,
             enable_autonat: true,
             enable_dcutr: true,

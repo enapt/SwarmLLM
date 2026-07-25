@@ -51,6 +51,17 @@ struct NodeCandidate {
 /// per-token sync on a single switch.
 const MAX_TP_GROUP_SIZE: usize = 4;
 
+/// Latency charged to a holder reachable only through an application-level
+/// relay (NETWORKING_PLAN §4 "reachable-via-relay" tier).
+///
+/// A relayed forward is us → relay → target instead of us → target, so it costs
+/// roughly one extra RTT each way. 150ms is deliberately pessimistic: it must
+/// exceed a plausible direct-peer latency so a directly-connected holder always
+/// outranks a relayed one, while staying far below the point where a relayed
+/// holder looks worse than no holder — the tier exists so a NAT'd holder is
+/// *usable*, not merely visible.
+const RELAY_HOP_LATENCY_PENALTY_MS: u32 = 150;
+
 /// Static adjacency table for adjacent regions (0.5 score).
 /// These pairs represent geographically close countries where cross-region
 /// latency is typically acceptable for inference.
@@ -362,8 +373,19 @@ impl PipelineScheduler {
                 // Without this filter, the scheduler picks a dead peer,
                 // remote-generate sends to it, and the request hangs until
                 // the 120s first-token timeout.
+                // NETWORKING_PLAN §4 Phase 1 "reachable-via-relay" tier: a peer
+                // we hold no libp2p connection to is still usable if a relay we
+                // share can carry the inference to it. Without this the
+                // app-level relay could only substitute the data path for an
+                // already-connected peer — the both-NAT'd case it exists for
+                // never reached the scheduler at all. Ranked below direct peers
+                // via a latency penalty in `get_peer_metrics`, so direct is
+                // always preferred when both are available.
                 let is_local = node_id == *local_node_id;
-                if !is_local && !self.shared_state.connected_node_ids.contains(&node_id) {
+                if !is_local
+                    && !self.shared_state.connected_node_ids.contains(&node_id)
+                    && !self.shared_state.peer_reachable_via_relay(&node_id)
+                {
                     continue;
                 }
                 node_shards.entry(node_id).or_default().push(shard.index);
@@ -585,11 +607,23 @@ impl PipelineScheduler {
             return (0, 1.0);
         }
 
-        self.shared_state
+        let (latency, trust) = self
+            .shared_state
             .peer_registry
             .get(node_id)
             .map(|peer| (peer.latency_ms.unwrap_or(100), peer.trust_score))
-            .unwrap_or((200, 0.3))
+            .unwrap_or((200, 0.3));
+
+        // NETWORKING_PLAN §4: prefer direct, then relayed. A peer we can only
+        // reach through a relay pays an extra hop each way, so charge it the
+        // penalty rather than letting it outrank a directly-connected holder on
+        // a stale latency sample. This keeps "direct → relayed → fail" ordering
+        // without a separate sort key: relayed candidates still win over having
+        // no candidate at all, which is the whole point of the tier.
+        if !self.shared_state.connected_node_ids.contains(node_id) {
+            return (latency.saturating_add(RELAY_HOP_LATENCY_PENALTY_MS), trust);
+        }
+        (latency, trust)
     }
 
     /// Greedy layer assignment: cover all layers 0..num_layers using sorted candidates.

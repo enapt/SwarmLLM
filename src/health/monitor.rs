@@ -372,8 +372,7 @@ impl HealthMonitor {
             // Advertise willingness to relay inference for un-connectable peer
             // pairs (NETWORKING_PLAN Phase 1). `--anchor` implies it; any node
             // can opt in via `network.relay_forwarding`.
-            relay_capable: self.shared_state.config.node.anchor_mode
-                || self.shared_state.config.network.relay_forwarding,
+            relay_capable: self.shared_state.relay_forwarding_enabled(),
             // Advertise the protocol epoch + the optional features this build
             // implements, so peers negotiate new message types additively.
             protocol_version: swarmllm_types::PROTOCOL_VERSION,

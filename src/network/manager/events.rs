@@ -830,10 +830,85 @@ impl NetworkManager {
             .cloned()
             .chain(self.swarm.external_addresses().cloned());
         let addrs = build_reachable_multiaddr_list(candidates, local_peer_id);
+
+        // NETWORKING_PLAN Phase 3 — re-evaluate whether we can donate relay
+        // capacity. Derived from the swarm's CONFIRMED external addresses only
+        // (UPnP-mapped / AutoNAT-confirmed / manually declared), never from a
+        // bound listener: binding a socket says nothing about whether anyone
+        // outside can reach it.
+        let publicly_reachable = self
+            .swarm
+            .external_addresses()
+            .any(multiaddr_is_public_relay_candidate);
+        let was = self
+            .shared_state
+            .publicly_reachable
+            .swap(publicly_reachable, std::sync::atomic::Ordering::Relaxed);
+        if was != publicly_reachable {
+            tracing::info!(
+                publicly_reachable,
+                relay_forwarding = self.shared_state.relay_forwarding_enabled(),
+                "NETWORKING_PLAN: public reachability changed — relay-donation status updated"
+            );
+        }
+
         self.shared_state
             .listen_multiaddrs
             .store(std::sync::Arc::new(addrs));
     }
+}
+
+/// Whether an address makes this node a viable **relay for others**.
+///
+/// Stricter than `addr_is_remotely_reachable` (which keeps LAN + CGNAT so peers
+/// on the same overlay can connect) and stricter than
+/// `pool::invite::any_internet_reachable` (which counts `/p2p-circuit`, correct
+/// for an invite code but wrong here). To forward for others a node needs an
+/// address strangers can dial directly:
+///
+/// - a **global** IPv4/IPv6 address, or a DNS name — yes;
+/// - `/p2p-circuit` — no: reachable only *through* someone else's relay means
+///   this node is itself NAT'd and cannot forward;
+/// - RFC1918 / CGNAT / ULA / loopback / link-local — no.
+fn multiaddr_is_public_relay_candidate(addr: &libp2p::Multiaddr) -> bool {
+    use libp2p::multiaddr::Protocol;
+    let mut public = false;
+    for proto in addr.iter() {
+        match proto {
+            Protocol::P2pCircuit => return false,
+            Protocol::Ip4(ip) => {
+                if !ip.is_private()
+                    && !ip.is_loopback()
+                    && !ip.is_link_local()
+                    && !ip.is_broadcast()
+                    && !ip.is_documentation()
+                    && !ip.is_unspecified()
+                    // CGNAT 100.64.0.0/10 — a carrier-NAT address is not
+                    // dialable from outside the carrier's network.
+                    && !(ip.octets()[0] == 100 && (64..128).contains(&ip.octets()[1]))
+                {
+                    public = true;
+                }
+            }
+            Protocol::Ip6(ip) => {
+                // Unique-local (fc00::/7) and link-local (fe80::/10) are not
+                // globally dialable.
+                let seg = ip.segments()[0];
+                if !ip.is_loopback()
+                    && !ip.is_unspecified()
+                    && (seg & 0xfe00) != 0xfc00
+                    && (seg & 0xffc0) != 0xfe80
+                {
+                    public = true;
+                }
+            }
+            Protocol::Dns(_) | Protocol::Dns4(_) | Protocol::Dns6(_) | Protocol::Dnsaddr(_) => {
+                public = true;
+            }
+            _ => {}
+        }
+    }
+    public
 }
 
 /// Build the deduped, `/p2p`-suffixed, remotely-reachable multiaddr string list
@@ -982,6 +1057,72 @@ mod listen_filter_tests {
         let out = ensure_p2p_suffix(already.clone(), pid);
         assert_eq!(out, already);
         assert_eq!(out.to_string().matches("/p2p/").count(), 1);
+    }
+
+    /// A node may only donate itself as a relay when strangers can dial it
+    /// directly. The permissive direction is the dangerous one: a NAT'd node
+    /// that advertised `relay_capable` would attract forwards it then drops.
+    #[test]
+    fn only_genuinely_public_addresses_qualify_as_relay_candidates() {
+        for a in [
+            // Real globally-routable addresses. Deliberately NOT the RFC 5737
+            // documentation ranges (192.0.2/198.51.100/203.0.113): those are
+            // excluded by `is_documentation()` and would make this vacuous.
+            "/ip4/93.184.216.34/tcp/8810",
+            "/ip4/8.8.8.8/tcp/8810",
+            "/ip6/2606:4700:4700::1111/tcp/8810",
+            "/dns4/anchor.example.org/tcp/8810",
+            "/dnsaddr/bootstrap.example.org",
+        ] {
+            let parsed: libp2p::Multiaddr = a.parse().unwrap();
+            assert!(
+                super::multiaddr_is_public_relay_candidate(&parsed),
+                "{a} should qualify as a relay candidate"
+            );
+        }
+
+        for a in [
+            // RFC1918 LAN + Docker bridge.
+            "/ip4/192.168.1.10/tcp/8810",
+            "/ip4/10.0.0.5/tcp/8810",
+            "/ip4/172.17.0.1/tcp/8810",
+            // CGNAT / Tailscale — reachable on the overlay, not from outside.
+            "/ip4/100.64.12.9/tcp/8810",
+            "/ip4/100.127.255.1/tcp/8810",
+            // Loopback + link-local.
+            "/ip4/127.0.0.1/tcp/8810",
+            "/ip4/169.254.1.1/tcp/8810",
+            // IPv6 ULA + link-local.
+            "/ip6/fd00::1/tcp/8810",
+            "/ip6/fe80::1/tcp/8810",
+            // RFC 5737 documentation ranges are not globally routable.
+            "/ip4/203.0.113.7/tcp/8810",
+            "/ip4/192.0.2.1/tcp/8810",
+        ] {
+            let parsed: libp2p::Multiaddr = a.parse().unwrap();
+            assert!(
+                !super::multiaddr_is_public_relay_candidate(&parsed),
+                "{a} must NOT qualify as a relay candidate"
+            );
+        }
+    }
+
+    /// Reachability *through* someone else's relay means this node is itself
+    /// NAT'd — it cannot forward for others regardless of what the address
+    /// looks like before the circuit hop.
+    #[test]
+    fn circuit_addresses_never_qualify_as_relay_candidates() {
+        let relay = libp2p::PeerId::random();
+        for a in [
+            format!("/ip4/93.184.216.34/tcp/8810/p2p/{relay}/p2p-circuit"),
+            format!("/dns4/anchor.example.org/tcp/8810/p2p/{relay}/p2p-circuit"),
+        ] {
+            let parsed: libp2p::Multiaddr = a.parse().unwrap();
+            assert!(
+                !super::multiaddr_is_public_relay_candidate(&parsed),
+                "a /p2p-circuit address must never make us a relay: {a}"
+            );
+        }
     }
 
     #[test]

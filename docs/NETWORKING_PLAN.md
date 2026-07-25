@@ -63,10 +63,55 @@ fixes in R143–R150.
   header is rejected, and a feature-less (older) peer is gated out. Deterministic
   (no libp2p timing), so it's a reliable CI guard.
 
-The **entire plan is implemented and tested** — Phases 1–3, the version
-handshake, DHT relay discovery, and the mixed-version guard. Nothing remains
-deferred. (A heavier full-daemon two-node libp2p test would add little over the
-deterministic wire+crypto one and risks flakiness; not pursued.)
+Phases 1–3, the version handshake, DHT relay discovery, and the mixed-version
+guard are implemented and tested. (A heavier full-daemon two-node libp2p test
+would add little over the deterministic wire+crypto one and risks flakiness; not
+pursued.)
+
+### Audit 2026-07-25 — four gaps found and closed
+
+An end-to-end audit found that the claim "the entire plan is implemented" was
+**not** accurate: the transport existed but three of its consumers didn't use
+it, and one unrelated setting silently disabled Phase 2 entirely. All four are
+now fixed; recording them here because each was invisible in isolation and only
+compounded at scale.
+
+1. **DCUtR was structurally disabled by our own connection limit.**
+   `max_established_per_peer = 1` (added to stop stale-connection silent drops)
+   denied the *second* connection a hole punch requires — `libp2p-dcutr` dials
+   the direct connection with `PeerCondition::Always` while the relayed one is
+   still open, then maps one to the other. So no node ever upgraded off a
+   circuit, circuit slots were never released, and the relay exhausted them.
+   Raised to 3, made safe by patching the vendored request-response to prefer
+   direct connections (below). libp2p's own default here is unlimited.
+2. **The "reachable-via-relay" scheduler tier from §4 Phase 1 was never built.**
+   `gather_candidates` filtered purely on `connected_node_ids` (populated only
+   by a libp2p Identify), so the app-relay could only ever *substitute* the data
+   path for an already-connected peer — it could never make an unconnectable
+   peer usable, which is the case it exists for. Both directed-send paths
+   already fell back to `try_relay_send` when not connected, so the transport
+   was ready and only candidate selection was missing. Added
+   `SharedState::peer_reachable_via_relay` + a latency penalty so ranking is
+   direct → relayed → fail.
+3. **Relay capacity was whatever ran `--anchor`.** `relay_capable` was
+   `anchor_mode || relay_forwarding`, and `relay_forwarding` was a flag nothing
+   ever set — so Phase 3's "any public node can opt in" never happened and every
+   NAT'd pair funnelled through one VPS. Added `relay_forwarding_auto`
+   (default on): a node confirmed reachable from the open internet donates relay
+   capacity automatically. Reachability *through a circuit* deliberately does
+   not count.
+4. **Circuit ceiling inherited from a different use case.** `max_circuits` was
+   libp2p's default 16, which assumes its 2-minute bootstrap circuit; ours run
+   for an hour as a data path, so each slot is held ~30× longer. Raised to 128
+   to match `max_reservations`, so a peer granted a reservation can actually
+   open a circuit.
+
+**Still open** (deliberate, not oversights):
+
+- Shard transfers remain relay-ineligible (`is_relay_eligible`), so a NAT'd node
+  cannot acquire shards from another NAT'd node and falls back to HuggingFace.
+  For a swarm-native model with no HF source this dead-ends. Sizing the relay
+  for bulk transfer is a separate design question from sizing it for inference.
 
 ---
 

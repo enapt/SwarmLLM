@@ -171,8 +171,7 @@ impl NetworkManager {
     /// Whether this node forwards relay traffic (so it should register itself as
     /// a DHT relay-service provider). NETWORKING_PLAN Phase 3.
     pub(super) fn is_relay_forwarder(&self) -> bool {
-        self.shared_state.config.node.anchor_mode
-            || self.shared_state.config.network.relay_forwarding
+        self.shared_state.relay_forwarding_enabled()
     }
 
     /// Count connected relay-capable peers — the redundancy that decides whether
@@ -449,8 +448,7 @@ impl NetworkManager {
         }
 
         // We are the relay. Forward to the target if we can and are willing.
-        let relay_enabled = self.shared_state.config.node.anchor_mode
-            || self.shared_state.config.network.relay_forwarding;
+        let relay_enabled = self.shared_state.relay_forwarding_enabled();
         if !relay_enabled {
             return;
         }
@@ -573,8 +571,7 @@ impl NetworkManager {
         }
 
         // We are the relay. Forward to the target if willing + able (single hop).
-        let relay_enabled = self.shared_state.config.node.anchor_mode
-            || self.shared_state.config.network.relay_forwarding;
+        let relay_enabled = self.shared_state.relay_forwarding_enabled();
         if !relay_enabled {
             return;
         }

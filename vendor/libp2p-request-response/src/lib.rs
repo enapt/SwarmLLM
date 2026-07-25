@@ -572,7 +572,40 @@ where
             if connections.is_empty() {
                 return Some(request);
             }
-            let ix = (request.request_id.0 as usize) % connections.len();
+            // SwarmLLM patch: prefer a DIRECT connection over a relayed
+            // (`/p2p-circuit`) one.
+            //
+            // Upstream round-robins blindly over every connection to the peer
+            // (`request_id % connections.len()`). That is wrong for us in two
+            // ways once a peer can have more than one connection:
+            //
+            //  1. A relay circuit and a direct connection routinely coexist —
+            //     that is exactly how DCUtR upgrades work (it dials the direct
+            //     connection while the relayed one is still open). Blind
+            //     round-robin would keep sending half of all requests over the
+            //     circuit even after a direct path exists, inheriting the
+            //     circuit's unreliability (and its byte/duration caps) for no
+            //     reason.
+            //  2. Relayed substreams are the flaky path for request_response in
+            //     the first place (libp2p/rust-libp2p#3034): the responder can
+            //     close the stream before the response traverses the relay.
+            //
+            // So: if any direct connection exists, round-robin only within the
+            // direct set; otherwise fall back to the full set unchanged. Within
+            // a set the upstream modulo is preserved, so load still spreads
+            // across equivalent connections and behaviour is identical whenever
+            // a peer has exactly one connection.
+            let direct: Vec<usize> = connections
+                .iter()
+                .enumerate()
+                .filter(|(_, c)| !connection_is_relayed(c))
+                .map(|(i, _)| i)
+                .collect();
+            let ix = if direct.is_empty() {
+                (request.request_id.0 as usize) % connections.len()
+            } else {
+                direct[(request.request_id.0 as usize) % direct.len()]
+            };
             let conn = &mut connections[ix];
             conn.pending_outbound_responses.insert(request.request_id);
             self.pending_events.push_back(ToSwarm::NotifyHandler {
@@ -1047,6 +1080,19 @@ struct Connection {
     pending_inbound_responses: HashSet<InboundRequestId>,
 }
 
+/// SwarmLLM patch: whether a connection is carried over a relay circuit.
+///
+/// A relayed connection's remote address contains a `/p2p-circuit` hop. When
+/// the address is unknown (`None`) we treat the connection as direct: that is
+/// the pre-existing default for inbound connections, and mis-classifying a
+/// direct connection as relayed would wrongly exclude it from selection.
+fn connection_is_relayed(conn: &Connection) -> bool {
+    conn.remote_address.as_ref().is_some_and(|addr| {
+        addr.iter()
+            .any(|p| matches!(p, libp2p_core::multiaddr::Protocol::P2pCircuit))
+    })
+}
+
 impl Connection {
     fn new(id: ConnectionId, remote_address: Option<Multiaddr>) -> Self {
         Self {
@@ -1057,3 +1103,4 @@ impl Connection {
         }
     }
 }
+

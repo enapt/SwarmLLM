@@ -82,6 +82,102 @@ impl super::SharedState {
         );
     }
 
+    /// Whether this node should act as an application-level inference relay.
+    ///
+    /// The single source of truth for the relay-forwarder decision — the DHT
+    /// relay-service registration, the `relay_capable` capability advertisement,
+    /// and the inbound forward gates must all agree, or peers route through a
+    /// node that then refuses to forward.
+    ///
+    /// Three ways to qualify:
+    ///  - `--anchor` mode (a dedicated bootstrap/relay node),
+    ///  - explicit `network.relay_forwarding = true` opt-in, or
+    ///  - NETWORKING_PLAN Phase 3 auto-donation: the node is confirmed reachable
+    ///    from the open internet AND has not opted out via
+    ///    `network.relay_forwarding_auto = false`.
+    ///
+    /// The auto path exists because Phase 3's "any public node can opt in as a
+    /// relay" was previously only a config flag that nothing ever set, so the
+    /// swarm's entire relay capacity was whichever nodes ran `--anchor` — a
+    /// single point of failure and a hard throughput ceiling for every NAT'd
+    /// pair.
+    pub fn relay_forwarding_enabled(&self) -> bool {
+        if self.config.node.anchor_mode || self.config.network.relay_forwarding {
+            return true;
+        }
+        self.config.network.relay_forwarding_auto
+            && self
+                .publicly_reachable
+                .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Whether inference for `node` can be routed through an application-level
+    /// relay, even though we hold no libp2p connection to it.
+    ///
+    /// NETWORKING_PLAN §4 Phase 1 calls for the router to prefer
+    /// `direct → relayed-through-a-relay → fail`, via a "reachable-via-relay"
+    /// tier in the scheduler "so a NAT'd holder is still usable". Without it the
+    /// scheduler filtered purely on `connected_node_ids` (populated only by a
+    /// libp2p Identify), so the app-relay could only ever *substitute* the data
+    /// path for a peer we were already connected to — it could never make an
+    /// unconnectable peer usable, which is the case it exists for.
+    ///
+    /// A peer qualifies when it speaks the relay protocol AND we can name a
+    /// relay that reaches it:
+    ///  - a **fresh learned route** (it has already relayed to us — definitive,
+    ///    since the route was observed working), or
+    ///  - a relay it advertises a reservation with (`relay_reservations`) that
+    ///    we are also connected to — the forward is then guaranteed to land.
+    ///
+    /// Conservative by construction: an unknown peer, a peer with no relay
+    /// feature, or one sharing no relay with us returns false, so this only ever
+    /// *adds* candidates that have a concrete path.
+    pub fn peer_reachable_via_relay(&self, node: &NodeId) -> bool {
+        use crate::types::features;
+
+        let Some(info) = self.peer_registry.get(node) else {
+            return false;
+        };
+
+        // Must be able to decode a relayed envelope. Gossiped capability first,
+        // then the proof recorded when it actually relayed something to us
+        // (covers the cold-start window before capability gossip lands).
+        let advertises = info
+            .capability
+            .as_ref()
+            .is_some_and(|c| features::supports(c.features, features::RELAY));
+        if !advertises && !self.relay_feature_proven(node, features::RELAY) {
+            return false;
+        }
+
+        // A route we have already seen work.
+        if let Some(bytes) = info.peer_id_bytes.as_deref() {
+            if self.relay_route_for_peer(bytes).is_some() {
+                return true;
+            }
+        }
+
+        // Otherwise: does the target share a relay with us? Its advertised
+        // reservations, intersected with the relays we are connected to.
+        let Some(reservations) = info
+            .capability
+            .as_ref()
+            .map(|c| c.relay_reservations.clone())
+        else {
+            return false;
+        };
+        drop(info);
+
+        reservations.iter().any(|relay| {
+            self.connected_node_ids.contains(relay)
+                && self
+                    .peer_registry
+                    .get(relay)
+                    .and_then(|p| p.capability.as_ref().map(|c| c.relay_capable))
+                    .unwrap_or(false)
+        })
+    }
+
     /// Fresh learned relay route for a target peer (by peer-id bytes), or None
     /// if unknown or expired.
     pub fn relay_route_for_peer(&self, target_peer_bytes: &[u8]) -> Option<RelayRoute> {
@@ -164,6 +260,232 @@ impl super::SharedState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Build a SharedState for relay-tier tests.
+    #[cfg(test)]
+    fn test_state(config: crate::config::Config) -> std::sync::Arc<crate::daemon::SharedState> {
+        use crate::identity::Identity;
+        use crate::inference::executor::ModelExecutor;
+        use crate::storage::db::Database;
+        use tokio::sync::Mutex;
+
+        let identity = Identity::generate();
+        let temp = tempfile::tempdir().unwrap();
+        let db = Database::open(temp.path()).unwrap();
+        let executor = std::sync::Arc::new(Mutex::new(ModelExecutor::new()));
+        let (state, _, _) = crate::daemon::SharedState::new(config, identity, db, executor, None);
+        state
+    }
+
+    /// Insert a peer with the given capability into the registry.
+    #[cfg(test)]
+    fn insert_peer(
+        state: &crate::daemon::SharedState,
+        node: &crate::types::NodeId,
+        capability: Option<crate::types::NodeCapability>,
+    ) {
+        use crate::types::PeerInfo;
+        state.peer_registry.insert(
+            node.clone(),
+            PeerInfo {
+                node_id: node.clone(),
+                addresses: vec![],
+                capability,
+                last_seen: chrono::Utc::now(),
+                latency_ms: Some(50),
+                trust_score: 0.5,
+                peer_id_bytes: None,
+                active_request_count: 0,
+                first_seen: 0,
+                verified_transaction_count: 0,
+                is_lan_peer: false,
+            },
+        );
+    }
+
+    #[cfg(test)]
+    fn capability_with(
+        features: u64,
+        relay_capable: bool,
+        reservations: Vec<crate::types::NodeId>,
+    ) -> crate::types::NodeCapability {
+        crate::types::NodeCapability {
+            node_id: crate::types::NodeId([0u8; 32]),
+            gpu: None,
+            ram_total_mb: 0,
+            ram_available_mb: 0,
+            disk_available_mb: 0,
+            bandwidth_mbps: 0.0,
+            hosted_shards: vec![],
+            max_contribution: crate::types::ContributionLevel::Moderate,
+            uptime_seconds: 0,
+            version: String::new(),
+            region: None,
+            est_tokens_per_sec_7b: 0.0,
+            observed_latencies: vec![],
+            relay_capable,
+            protocol_version: 0,
+            features,
+            relay_reservations: reservations,
+        }
+    }
+
+    /// The relay-donation decision must come out the same everywhere it is
+    /// consulted, so all three qualifying paths are pinned here.
+    #[test]
+    fn relay_forwarding_enabled_covers_anchor_explicit_and_auto() {
+        use std::sync::atomic::Ordering;
+
+        // Plain NAT'd node: not an anchor, no opt-in, not publicly reachable.
+        let mut config = crate::config::Config::default();
+        config.node.anchor_mode = false;
+        config.network.relay_forwarding = false;
+        let state = test_state(config);
+        assert!(
+            !state.relay_forwarding_enabled(),
+            "a NAT'd node must never advertise itself as a relay"
+        );
+
+        // Becoming publicly reachable auto-enables donation (Phase 3).
+        state.publicly_reachable.store(true, Ordering::Relaxed);
+        assert!(state.relay_forwarding_enabled());
+
+        // ...unless the operator opted out of auto-donation.
+        let mut config = crate::config::Config::default();
+        config.network.relay_forwarding_auto = false;
+        let state = test_state(config);
+        state.publicly_reachable.store(true, Ordering::Relaxed);
+        assert!(
+            !state.relay_forwarding_enabled(),
+            "relay_forwarding_auto = false must stop a public node donating"
+        );
+
+        // Explicit opt-in wins even without confirmed reachability.
+        let mut config = crate::config::Config::default();
+        config.network.relay_forwarding = true;
+        config.network.relay_forwarding_auto = false;
+        let state = test_state(config);
+        assert!(state.relay_forwarding_enabled());
+
+        // Anchor mode always forwards.
+        let mut config = crate::config::Config::default();
+        config.node.anchor_mode = true;
+        config.network.relay_forwarding_auto = false;
+        let state = test_state(config);
+        assert!(state.relay_forwarding_enabled());
+    }
+
+    /// The scheduler's relay tier must only admit peers with a concrete path,
+    /// or it re-introduces the dead-peer hang the liveness filter prevents.
+    #[test]
+    fn peer_reachable_via_relay_requires_a_real_path() {
+        use crate::types::{features, NodeId};
+
+        let state = test_state(crate::config::Config::default());
+        let target = NodeId([7u8; 32]);
+        let relay = NodeId([8u8; 32]);
+
+        // Completely unknown peer.
+        assert!(!state.peer_reachable_via_relay(&target));
+
+        // Known, but advertises no relay support → cannot decode an envelope.
+        insert_peer(
+            &state,
+            &target,
+            Some(capability_with(0, false, vec![relay.clone()])),
+        );
+        assert!(
+            !state.peer_reachable_via_relay(&target),
+            "a peer without the RELAY feature must not be offered a relayed request"
+        );
+
+        // Speaks relay, names a relay — but we aren't connected to that relay,
+        // so there is no path and it must stay unschedulable.
+        insert_peer(
+            &state,
+            &target,
+            Some(capability_with(features::RELAY, false, vec![relay.clone()])),
+        );
+        assert!(!state.peer_reachable_via_relay(&target));
+
+        // Connecting to the shared relay completes the path.
+        insert_peer(
+            &state,
+            &relay,
+            Some(capability_with(features::RELAY, true, vec![])),
+        );
+        state.connected_node_ids.insert(relay.clone());
+        assert!(
+            state.peer_reachable_via_relay(&target),
+            "a shared, connected, relay-capable node makes the target reachable"
+        );
+
+        // A connected node that is NOT relay-capable does not count.
+        let bystander = NodeId([9u8; 32]);
+        insert_peer(
+            &state,
+            &target,
+            Some(capability_with(
+                features::RELAY,
+                false,
+                vec![bystander.clone()],
+            )),
+        );
+        insert_peer(
+            &state,
+            &bystander,
+            Some(capability_with(features::RELAY, false, vec![])),
+        );
+        state.connected_node_ids.insert(bystander);
+        assert!(!state.peer_reachable_via_relay(&target));
+    }
+
+    /// Cold start: a peer that has actually relayed to us is reachable even
+    /// before its capability gossip lands (which is when `capability` is None).
+    #[test]
+    fn peer_reachable_via_relay_accepts_a_proven_route() {
+        use crate::types::{features, NodeId};
+
+        let state = test_state(crate::config::Config::default());
+        let target = NodeId([4u8; 32]);
+        let peer_bytes = vec![1u8, 2, 3, 4];
+
+        // Registry entry with no capability at all — the cold-start shape
+        // created by `ensure_relayed_origin_known`.
+        use crate::types::PeerInfo;
+        state.peer_registry.insert(
+            target.clone(),
+            PeerInfo {
+                node_id: target.clone(),
+                addresses: vec![],
+                capability: None,
+                last_seen: chrono::Utc::now(),
+                latency_ms: None,
+                trust_score: 0.5,
+                peer_id_bytes: Some(peer_bytes.clone()),
+                active_request_count: 0,
+                first_seen: 0,
+                verified_transaction_count: 0,
+                is_lan_peer: false,
+            },
+        );
+        assert!(!state.peer_reachable_via_relay(&target));
+
+        // It relayed to us (proving RELAY) and we learned the route back.
+        state.record_relay_proven_features(&target, features::RELAY);
+        state.relay_routes.insert(
+            peer_bytes,
+            RelayRoute {
+                relay_peer_bytes: vec![9u8; 8],
+                target_node: target.clone(),
+                learned_at: Instant::now(),
+            },
+        );
+        assert!(
+            state.peer_reachable_via_relay(&target),
+            "a proven, freshly-learned route is the strongest reachability signal"
+        );
+    }
 
     #[test]
     fn relay_proven_features_record_check_and_isolate() {
