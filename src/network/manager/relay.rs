@@ -108,6 +108,15 @@ impl NetworkManager {
     /// that hasn't negotiated the feature — an older node advertises no features
     /// (0) and is correctly skipped.
     fn target_supports_relay(&self, target: &NodeId) -> bool {
+        // Direct proof first: a peer that just relayed a message to us
+        // demonstrably speaks RELAY, even if its capability gossip hasn't
+        // populated our registry entry yet (the cold-start return-path case).
+        if self
+            .shared_state
+            .relay_feature_proven(target, crate::types::features::RELAY)
+        {
+            return true;
+        }
         self.shared_state
             .peer_registry
             .get(target)
@@ -123,6 +132,18 @@ impl NetworkManager {
     /// relayed distributed-pipeline tensor). Distinct from `RELAY`; a learned
     /// route does NOT prove it, so tensor sends always gate on this.
     fn target_supports_tensor_relay(&self, target: &NodeId) -> bool {
+        // Direct proof first: a peer that just relayed a tensor to us
+        // demonstrably speaks TENSOR_RELAY, even if its capability gossip hasn't
+        // populated our registry entry yet. This is the cold-start return-path
+        // fix — otherwise a computed result can't be relayed back to a
+        // coordinator known only via `ensure_relayed_origin_known` (capability
+        // None) until a capability-gossip round lands.
+        if self
+            .shared_state
+            .relay_feature_proven(target, crate::types::features::TENSOR_RELAY)
+        {
+            return true;
+        }
         self.shared_state
             .peer_registry
             .get(target)
@@ -416,6 +437,11 @@ impl NetworkManager {
             self.ensure_relayed_origin_known(&env.origin);
             self.shared_state
                 .learn_relay_route(&env.origin, immediate_peer.to_bytes());
+            // The origin just used the message relay, so it demonstrably speaks
+            // RELAY — record that proof so a reply back to it is never refused by
+            // the feature gate before its capability gossip arrives.
+            self.shared_state
+                .record_relay_proven_features(&env.origin, crate::types::features::RELAY);
             if let Err(e) = self.dispatch_authenticated_as(Some(env.origin.clone()), inner) {
                 tracing::warn!(error = %e, "relayed inner message dropped — dispatch backpressured");
             }
@@ -506,6 +532,12 @@ impl NetworkManager {
             self.ensure_relayed_origin_known(&rt.origin);
             self.shared_state
                 .learn_relay_route(&rt.origin, immediate_peer.to_bytes());
+            // The origin just used the tensor relay, so it demonstrably speaks
+            // TENSOR_RELAY — record that proof so the return relay of the
+            // computed result is never refused by the feature gate before the
+            // origin's capability gossip arrives (the cold-start return-path fix).
+            self.shared_state
+                .record_relay_proven_features(&rt.origin, crate::types::features::TENSOR_RELAY);
             let msg = if rt.is_result {
                 match crate::network::protocol::decode_layer_result(&plaintext) {
                     Ok(r) => SwarmMessage::LayerResult(r),

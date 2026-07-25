@@ -35,7 +35,7 @@ pub use events::EventBus;
 pub use hf::{HfProbeInfo, HfSource};
 pub use metrics::{ChannelCounters, ChannelMetricsSet, MetricsProviders};
 pub use models::{ModelMgmt, FOREIGN_WISHLIST_MAX_AGE_MS, MAX_FOREIGN_WISHLIST_ENTRIES};
-pub use relay::{RelayForwardCounter, RelayRoute};
+pub use relay::{RelayForwardCounter, RelayProvenFeatures, RelayRoute};
 pub use tp_allreduce::TpAllReduceCollector;
 
 // ---- Main SharedState ----
@@ -76,6 +76,13 @@ pub struct SharedState {
     /// can push traffic through us as a relay so the role can't be abused to
     /// exhaust our uplink. Swept alongside `relay_routes`.
     pub relay_forward_counters: DashMap<Vec<u8>, RelayForwardCounter>,
+    /// NETWORKING_PLAN — relay features a peer has demonstrably used by relaying
+    /// to us (keyed by NodeId). Direct proof that sidesteps the capability-gossip
+    /// cold-start window on the relay send path's feature gates, so a computed
+    /// result is never refused a return relay to a coordinator that just relayed
+    /// a forward to us. Bounded by distinct relay peers; swept on the
+    /// HealthMonitor tick alongside `relay_routes` (`RELAY_ROUTE_TTL_SECS`).
+    pub relay_proven_features: DashMap<NodeId, RelayProvenFeatures>,
 
     // Inference engine
     pub executor: SharedExecutor,
@@ -494,6 +501,7 @@ impl SharedState {
             connected_node_ids: dashmap::DashSet::new(),
             relay_routes: DashMap::new(),
             relay_forward_counters: DashMap::new(),
+            relay_proven_features: DashMap::new(),
             session_manager,
             gossip_sealer,
             api_key,

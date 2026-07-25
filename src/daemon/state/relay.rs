@@ -42,6 +42,22 @@ pub struct RelayForwardCounter {
     pub window_start: Instant,
 }
 
+/// Relay features a peer has *demonstrably* used by sending us a relayed message
+/// addressed to us: a `RelayedTensor` proves `features::TENSOR_RELAY`, a
+/// `RelayedEnvelope` proves `features::RELAY`. This is direct, first-hand proof
+/// the peer speaks the protocol — stronger and fresher than the gossiped
+/// `NodeCapability.features`, which has a cold-start window where our entry for
+/// a relay-only peer is still `capability: None` (the capability-gossip handler
+/// is update-only, so it can't populate an entry that didn't exist yet). Without
+/// this proof the return path would refuse to relay a computed result back to a
+/// coordinator that JUST relayed a forward to us, dropping the first result and
+/// timing the request out until a capability-gossip round lands.
+#[derive(Debug, Clone)]
+pub struct RelayProvenFeatures {
+    pub features: u64,
+    pub proven_at: Instant,
+}
+
 impl super::SharedState {
     /// Record that `origin` is reachable via the relay peer a `RelayedEnvelope`
     /// just arrived from. Keyed by `origin`'s peer-id bytes so the send path can
@@ -99,8 +115,40 @@ impl super::SharedState {
         true
     }
 
-    /// Sweep expired relay routes + idle forward counters. Wired to the
-    /// HealthMonitor tick so both maps stay bounded under peer churn.
+    /// Record that `peer` has demonstrably used relay `features` (it sent us a
+    /// relayed message addressed to us). ORs the newly-proven bits into any
+    /// existing proof and refreshes the timestamp, so an active relay session
+    /// keeps the proof warm. Cheap direct proof that sidesteps the capability-
+    /// gossip cold-start window on the relay send path's feature gates.
+    pub fn record_relay_proven_features(&self, peer: &NodeId, features: u64) {
+        let now = Instant::now();
+        self.relay_proven_features
+            .entry(peer.clone())
+            .and_modify(|e| {
+                e.features |= features;
+                e.proven_at = now;
+            })
+            .or_insert(RelayProvenFeatures {
+                features,
+                proven_at: now,
+            });
+    }
+
+    /// Whether `peer` has proven support for ALL of `needed` within the freshness
+    /// window (same TTL as a learned route — an active relay session re-proves it
+    /// on every inbound message, so it never goes stale mid-session). Lets the
+    /// relay send path trust a peer that just relayed to us even before its
+    /// capability gossip arrives.
+    pub fn relay_feature_proven(&self, peer: &NodeId, needed: u64) -> bool {
+        self.relay_proven_features
+            .get(peer)
+            .filter(|e| e.proven_at.elapsed() <= Duration::from_secs(RELAY_ROUTE_TTL_SECS))
+            .is_some_and(|e| crate::types::features::supports(e.features, needed))
+    }
+
+    /// Sweep expired relay routes + idle forward counters + stale proven-feature
+    /// proofs. Wired to the HealthMonitor tick so all three maps stay bounded
+    /// under peer churn.
     pub fn sweep_stale_relay_state(&self) {
         let route_ttl = Duration::from_secs(RELAY_ROUTE_TTL_SECS);
         self.relay_routes
@@ -108,12 +156,68 @@ impl super::SharedState {
         let counter_ttl = Duration::from_secs(RELAY_FORWARD_WINDOW_SECS * 2);
         self.relay_forward_counters
             .retain(|_, c| c.window_start.elapsed() <= counter_ttl);
+        self.relay_proven_features
+            .retain(|_, e| e.proven_at.elapsed() <= route_ttl);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn relay_proven_features_record_check_and_isolate() {
+        use crate::config::Config;
+        use crate::identity::Identity;
+        use crate::inference::executor::ModelExecutor;
+        use crate::storage::db::Database;
+        use crate::types::{features, NodeId};
+        use std::sync::Arc;
+        use tokio::sync::Mutex;
+
+        let config = Config::default();
+        let identity = Identity::generate();
+        let temp = tempfile::tempdir().unwrap();
+        let db = Database::open(temp.path()).unwrap();
+        let executor = Arc::new(Mutex::new(ModelExecutor::new()));
+        let (state, _, _) = crate::daemon::SharedState::new(config, identity, db, executor, None);
+
+        let peer = NodeId([9u8; 32]);
+        // Unknown peer → nothing proven.
+        assert!(!state.relay_feature_proven(&peer, features::TENSOR_RELAY));
+
+        // Receiving a relayed tensor proves TENSOR_RELAY...
+        state.record_relay_proven_features(&peer, features::TENSOR_RELAY);
+        assert!(state.relay_feature_proven(&peer, features::TENSOR_RELAY));
+        // ...but a TENSOR_RELAY proof does NOT imply RELAY (distinct bits).
+        assert!(!state.relay_feature_proven(&peer, features::RELAY));
+
+        // Recording RELAY too ORs the bits — both now proven for that peer.
+        state.record_relay_proven_features(&peer, features::RELAY);
+        assert!(state.relay_feature_proven(&peer, features::RELAY));
+        assert!(state.relay_feature_proven(&peer, features::TENSOR_RELAY));
+
+        // A different peer is unaffected by another's proof.
+        assert!(!state.relay_feature_proven(&NodeId([1u8; 32]), features::TENSOR_RELAY));
+
+        // A stale proof (older than the route TTL) no longer counts, and the
+        // sweep drops it. Guarded because a just-booted host's monotonic clock
+        // may not be able to represent an instant that far in the past.
+        if let Some(old) =
+            Instant::now().checked_sub(Duration::from_secs(RELAY_ROUTE_TTL_SECS + 30))
+        {
+            state.relay_proven_features.insert(
+                peer.clone(),
+                RelayProvenFeatures {
+                    features: features::TENSOR_RELAY,
+                    proven_at: old,
+                },
+            );
+            assert!(!state.relay_feature_proven(&peer, features::TENSOR_RELAY));
+            state.sweep_stale_relay_state();
+            assert!(!state.relay_proven_features.contains_key(&peer));
+        }
+    }
 
     #[test]
     fn forward_rate_limit_trips_and_resets() {
