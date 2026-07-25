@@ -2099,33 +2099,43 @@ extra-cautious — Layer 0 alone is purely upside.
 
 ## CI / build infra
 
-### Further cut the Windows CUDA release build (~30 min) (2026-07-24)
+### Further cut the Windows CUDA release build (~30 min) — PRIMARY FIX APPLIED 2026-07-25
 
-The release matrix's Windows GPU job (`swarmllm-windows-x86_64-gpu`, matrix entry
-`cuda_windows: true` in `.github/workflows/release.yml`) is now the release long
-pole at ~30 min. R148's cache-warm (`Swatinem/rust-cache` + a shared key warmed by
-`cache-warm.yml` on `main`) already cut the **Linux** CUDA build 59m→~10m, but
-that cache only covers Rust *dependency* compilation. On Windows GPU the long
-poles are NOT Rust deps:
+**Primary fix shipped (commit `1e65a9c7`):** `cache-warm.yml` now warms the
+**Windows-GPU** rust-cache shared-key too, not just Linux CUDA + Linux CPU. That
+was the actual gap: the Windows-GPU release rebuilt llama.cpp-Vulkan +
+candle-kernels cold *because its cache was never warmed on `main`* — a tag-scoped
+release cache can't be restored by a later tag (GitHub cache ref-scoping), so
+without a `main`-warmed key every release started cold. The new cell mirrors
+release.yml's Windows setup byte-for-byte (CUDA 12.4, Vulkan SDK, MSVC, Ninja,
+nvcc /MD, build env) so the key matches.
 
-- **llama.cpp CMake / C++ build (biggest lever).** The `windows-gpu` feature
-  builds `llama-cpp-sys-2` (llama.cpp + Vulkan + CUDA) from C++ via CMake every
-  run; `rust-cache` doesn't cache CMake object files, so it recompiles cold each
-  time. Wire **sccache/ccache** around the CMake build (or cache the CMake
-  build-output dir directly), keyed on the `llama-cpp-sys-2` version + the
-  `CMAKE_*` flags already pinned in the rust-cache key suffix.
-- **CUDA toolkit install + redist download.** The Windows CUDA toolkit is
-  installed and its redist DLLs bundled each run — cache both, keyed on the CUDA
-  version.
-- **Runner speed.** Windows GitHub runners compile slower than Linux; a larger
-  GitHub-hosted runner (more vCPUs) parallelizes the C++/Rust build — weigh cost
-  vs. saving.
+This corrects the earlier assumption in this entry that "`rust-cache` doesn't
+cache CMake object files." It does — `Swatinem/rust-cache` caches `target/`
+including dependency **build-script output** (`target/release/build/
+llama-cpp-sys-2-*/out/`, the compiled llama.cpp objects). The proof is the Linux
+CUDA job, which *also* builds llama.cpp via CMake and dropped 59m→~10m purely
+from the warm cache. The Windows problem was never "CMake isn't cacheable" — it
+was "Windows GPU was never in `cache-warm.yml`."
 
-Target: toward the ~10-min range the Linux CUDA job now hits. **Keep any new
-Windows cache keys byte-identical to `cache-warm.yml`** and produced on `main` —
-a release runs on a tag push and per GitHub cache scoping "cannot restore caches
-created for different tag names", so a tag-scoped key writes a cache no later
-release can read (the exact bug R148 fixed on the Linux side).
+**Measure the next Windows-GPU release** against the Linux ~10-min figure. If a
+large CMake-rebuild cost remains after the warm cache lands (e.g. rust-cache's
+`target/` cleanup evicts the llama.cpp `out/` dir on Windows for some reason), the
+remaining levers, in order:
+
+- **sccache/ccache around the CMake build (heavier).** Wire
+  `-DCMAKE_C_COMPILER_LAUNCHER=sccache -DCMAKE_CXX_COMPILER_LAUNCHER=sccache`
+  (and `RUSTC_WRAPPER=sccache` / `NVCC` support) via the GHA sccache backend.
+  sccache caches nvcc + MSVC compilation even on a cold rust-cache miss. Notably
+  finicky on Windows+MSVC+CUDA — only worth it if the warm-cache route leaves a
+  real gap.
+- **Cache the CUDA toolkit install + redist download**, keyed on the CUDA version.
+- **Larger GitHub-hosted runner** (more vCPUs) — weigh cost vs. saving.
+
+**Keep any new Windows cache keys byte-identical to `cache-warm.yml`** and
+produced on `main` — a release runs on a tag push and per GitHub cache scoping
+"cannot restore caches created for different tag names", so a tag-scoped key
+writes a cache no later release can read (the exact bug R148 fixed on Linux).
 
 ### CUDA release build: pin `CMAKE_CUDA_ARCHITECTURES`? (R147, 2026-07-22)
 
