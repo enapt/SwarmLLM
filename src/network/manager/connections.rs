@@ -51,8 +51,24 @@ impl NetworkManager {
                 self.connection_addrs.remove(id);
             }
         }
-        self.connection_addrs
-            .insert(connection_id, remote_addr.clone());
+        // Only record the address for a connection WE dialled. For an outbound
+        // connection the remote address is the peer's real listen address, so it
+        // is dialable. For an INBOUND connection it is the peer's ephemeral
+        // source port — recording it makes Kademlia hand out an address nothing
+        // is listening on, and every later dial to that peer gets
+        // "Connection refused".
+        //
+        // Confirmed live 2026-07-25: an external tester could not dial us back
+        // even though our gossip reached them. Their node had learned four
+        // ephemeral TCP ports for us (36986/37384/39802/39846) from OUR outbound
+        // connections to THEM, and was dialling those instead of a real address.
+        // Shared code, so both ends did it to each other; only the NAT'd side
+        // shows the symptom, because the reachable side can always be dialled on
+        // its real port anyway.
+        if matches!(endpoint, libp2p::core::ConnectedPoint::Dialer { .. }) {
+            self.connection_addrs
+                .insert(connection_id, remote_addr.clone());
+        }
         // NETWORKING_PLAN Phase 1 — record DIRECT (non-relay-circuit)
         // connections so the relay send path can prefer the app-level relay over
         // a peer reachable only via a flaky relay circuit. Bounded alongside

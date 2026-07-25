@@ -47,16 +47,45 @@ impl NetworkManager {
                 "Added connected address to Kademlia (skipped {} other listen_addrs)",
                 info.listen_addrs.len().saturating_sub(1)
             );
-        } else if let Some(addr) = info.listen_addrs.first() {
-            // Fallback: connection_id not tracked (shouldn't happen)
-            self.swarm
-                .behaviour_mut()
-                .kademlia
-                .add_address(&peer_id, addr.clone());
-            tracing::warn!(
-                %peer_id,
-                "No tracked connection address for Identify, used first listen_addr"
-            );
+        } else {
+            // No tracked connection address. This is the NORMAL case for an
+            // INBOUND connection: we deliberately do not record the remote
+            // address of a connection we didn't dial, because it is the peer's
+            // ephemeral source port rather than anything it listens on
+            // (see `handle_connection_established`).
+            //
+            // So fall back to what the peer ADVERTISES, filtered for addresses
+            // worth dialling — `first()` alone could hand Kademlia the peer's
+            // loopback or a private address from a network we aren't on, which
+            // then fails every dial.
+            let dialable = info.listen_addrs.iter().find(|a| {
+                super::events::addr_is_remotely_reachable(a)
+                    && !crate::network::relay::is_relay_circuit_addr(a)
+            });
+            match dialable {
+                Some(addr) => {
+                    self.swarm
+                        .behaviour_mut()
+                        .kademlia
+                        .add_address(&peer_id, addr.clone());
+                    tracing::debug!(
+                        %peer_id,
+                        addr = %addr,
+                        "Inbound connection — used the peer's advertised address for Kademlia"
+                    );
+                }
+                None => {
+                    // Nothing dialable advertised: a fully NAT'd peer reachable
+                    // only via a relay. Adding nothing is correct — a bogus entry
+                    // would make every future dial to it fail with a refusal.
+                    tracing::debug!(
+                        %peer_id,
+                        advertised = info.listen_addrs.len(),
+                        "Inbound connection with no directly dialable advertised \
+                         address — leaving Kademlia untouched (relay-only peer)"
+                    );
+                }
+            }
         }
         // Verify announced key matches the authenticated PeerId from Noise handshake
         // to prevent NodeId spoofing via forged Identify messages.

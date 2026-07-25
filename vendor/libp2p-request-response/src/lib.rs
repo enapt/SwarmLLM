@@ -590,22 +590,28 @@ where
             //     the first place (libp2p/rust-libp2p#3034): the responder can
             //     close the stream before the response traverses the relay.
             //
-            // So: if any direct connection exists, round-robin only within the
-            // direct set; otherwise fall back to the full set unchanged. Within
-            // a set the upstream modulo is preserved, so load still spreads
-            // across equivalent connections and behaviour is identical whenever
-            // a peer has exactly one connection.
-            let direct: Vec<usize> = connections
+            //  3. Round-robin is wrong even among EQUIVALENT connections.
+            //     Observed live 2026-07-25: raising the per-peer connection cap
+            //     (needed so DCUtR can hold a relayed and a direct connection at
+            //     once) also permits redundant connections to the SAME endpoint —
+            //     up to the cap, routinely. Spreading requests across those means
+            //     a single half-open one silently eats its share, which is the
+            //     original bug the cap of 1 was hiding rather than fixing.
+            //
+            // So: pick the NEWEST direct connection, falling back to the newest
+            // connection of any kind. Newest is the right choice on every axis
+            // here — a half-open connection is almost always an older one that
+            // died quietly, and DCUtR's upgraded direct connection is by
+            // definition the newest, so it wins automatically. Load-spreading
+            // across connections to a single peer was never a real benefit;
+            // they share a path and usually an endpoint.
+            //
+            // `connected` is append-ordered (`push` on establish), so the last
+            // matching index is the most recently established.
+            let newest_direct = connections
                 .iter()
-                .enumerate()
-                .filter(|(_, c)| !connection_is_relayed(c))
-                .map(|(i, _)| i)
-                .collect();
-            let ix = if direct.is_empty() {
-                (request.request_id.0 as usize) % connections.len()
-            } else {
-                direct[(request.request_id.0 as usize) % direct.len()]
-            };
+                .rposition(|c| !connection_is_relayed(c));
+            let ix = newest_direct.unwrap_or(connections.len() - 1);
             let conn = &mut connections[ix];
             conn.pending_outbound_responses.insert(request.request_id);
             self.pending_events.push_back(ToSwarm::NotifyHandler {
