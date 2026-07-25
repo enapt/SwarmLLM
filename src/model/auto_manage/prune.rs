@@ -1345,6 +1345,37 @@ mod tests {
         assert_eq!(effective_prune_target(4, 0.0, 5, true, 1), 5);
     }
 
+    /// Demand-driven DISK contraction at the default config (FUTURE_WORK
+    /// "disk replica contraction"). An idle model (`target` collapses to
+    /// `min_replicas` when demand is ~0, since `geo_target_replicas` uses
+    /// demand_factor=1.0) that is over-replicated across the swarm sheds its
+    /// slack down to `min_replicas` with zero local pressure — and at the
+    /// DEFAULT `min_replicas = 2` that floor IS the `IDLE_REPLICA_FLOOR (≥2,
+    /// never a single point)` the deferred design specified. So the substance
+    /// of demand-driven disk contraction is already realized for the default
+    /// deployment; the only unbuilt piece is contracting BELOW a higher
+    /// operator-set `min_replicas`, which is intentionally left alone (it would
+    /// override the operator's explicit redundancy floor).
+    #[test]
+    fn idle_over_replicated_contracts_to_floor_never_below() {
+        const DEFAULT_MIN_REPLICAS: u32 = 2; // = config::inference::default_min_replicas()
+                                             // Idle model: geo_target_replicas collapses target to min_replicas.
+        let idle_target = DEFAULT_MIN_REPLICAS;
+        // 3, 8, 50 swarm-wide holders with zero local pressure, auto mode:
+        // each sheds down to the floor of 2 — never to a single point.
+        for holders in [3usize, 8, 50] {
+            let eff = effective_prune_target(idle_target, 0.0, holders, true, DEFAULT_MIN_REPLICAS);
+            assert_eq!(
+                eff, DEFAULT_MIN_REPLICAS,
+                "idle over-replicated ({holders} holders) contracts to the 2-holder floor"
+            );
+        }
+        // A higher operator-set floor is respected — an idle target collapses
+        // to min_replicas (=4 here), and contraction never dips below the
+        // redundancy floor the operator explicitly chose.
+        assert_eq!(effective_prune_target(4, 0.0, 50, true, 4), 4);
+    }
+
     /// R134.7: predictive-eviction constants stay consistent.
     /// `RECENT_REQUEST_PENALTY` must out-weigh the largest regional
     /// demand bonus (1.0) so a single recent request beats even high

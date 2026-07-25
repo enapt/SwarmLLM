@@ -55,27 +55,35 @@ stay on disk, holder status is unchanged, so it reloads (cold start) on the next
 request — **zero availability impact**, VRAM follows real demand. Controls surfaced
 in `config/default.toml` + `docs/book/.../troubleshooting.md`.
 
-**Deferred — demand-driven DISK replica contraction (revisit as the network
-matures).** The chosen approach also mentioned wiring demand into
-`geo_target_replicas` so a no-demand model sheds to FEWER swarm-wide *disk*
-holders (contract below `min_replicas`). Not implemented now: (a) it does NOT
-free VRAM (the worker holds it regardless of disk shards), so it doesn't address
-the reported concern; (b) it reduces swarm redundancy for a model that may be
-wanted again, forcing an HF re-download on demand return — a real availability
-tradeoff, unlike the VRAM unload.
+**Demand-driven DISK replica contraction — SUBSTANTIALLY ALREADY REALIZED at the
+default config (re-assessed 2026-07-25).** On closer reading, the existing
+redundancy-prune already does this down to the floor the design specified. The
+saturation-bypass in `prune.rs::effective_prune_target` — for a
+`contribution_auto` node, a shard held by ≥`SATURATION_FACTOR_AUTO`×target — uses
+the *raw* target instead of the pressure-relaxed nudge, so **a node with zero
+local pressure already sheds an idle, over-replicated shard**. For an idle model
+`geo_target_replicas` collapses `target` to `min_replicas` (demand_factor=1.0),
+and `effective_prune_target` floors at `min_replicas`. At the **default
+`min_replicas = 2`, that floor IS the `IDLE_REPLICA_FLOOR (≥2, never a single
+point)`** the deferred design called for. All the guards the design wanted are
+already applied per-shard in `evaluate_and_prune`: active-pipeline, region-last-
+holder (`would_eliminate_region`), holder-load (`remaining_holders_busy`),
+reacquire (`can_reacquire`), recent-request protection, cooldown, and
+pinned/locked/reference/encrypted exemptions. Regression-guarded by
+`prune.rs::idle_over_replicated_contracts_to_floor_never_below`.
 
-**The trigger to build it is adoption/redundancy growth** (maintainer's framing,
-2026-07-24): while the network is small and redundancy is thin, every holder
-matters, so shedding a no-demand shard risks loss. As adoption increases and
-each shard has many holders, holding fewer shards per node becomes both *safe*
-(others cover it) and *desirable* (a node shouldn't pin disk/VRAM for a shard the
-swarm already over-replicates and nobody wants). Concretely: gate the contraction
-on **observed global redundancy** — only let `geo_target_replicas` fall toward a
-small `IDLE_REPLICA_FLOOR` (≥2, never a single point) for a model whose
-`global_holder_count` comfortably exceeds the floor AND whose region demand is
-~0, and lean on the existing redundancy-prune guards (cooldown, active-pipeline,
-holder-load). Until then the demand-driven VRAM unload gives the efficiency win
-with zero redundancy cost.
+**Only unbuilt piece — contracting BELOW a *higher operator-set* `min_replicas`
+(intentionally left alone).** The design's "contract below `min_replicas`" only
+differs from today's behaviour when an operator has raised `min_replicas` above
+2. Letting idle contraction dip under that would override the operator's explicit
+redundancy floor — a deliberate configuration choice — so it is *not* done. If
+ever wanted, add an opt-in `auto_manage.idle_replica_floor` (default =
+`min_replicas`, i.e. off) with a hard ≥2 clamp, gated on
+`global_holder_count` comfortably exceeding it. Rationale unchanged: (a) it frees
+disk, not VRAM (the VRAM unload above already covers the reported concern); (b)
+it trades swarm redundancy for a model that may be wanted again — acceptable only
+once adoption makes each shard richly held, which the `min_replicas=2` floor
+already respects by never going to a single point.
 
 ## Model management — deliberately out of R110-R115
 
