@@ -99,7 +99,10 @@ pub fn parse_tool_calls(text: &str) -> Option<Vec<ParsedToolCall>> {
     let looks_like_tool_call = trimmed.contains("tool_call")
         || trimmed.contains("[TOOL_CALLS]")
         || trimmed.contains("<|python_tag|>")
-        || (trimmed.starts_with('{') && trimmed.contains("\"name\""));
+        // Not `starts_with('{')`: a model often prefixes prose before the
+        // object, and requiring the object to be first re-introduces the bug
+        // `parse_embedded_json` exists to fix.
+        || (trimmed.contains('{') && trimmed.contains("\"name\""));
     if !looks_like_tool_call {
         return None;
     }
@@ -129,12 +132,57 @@ fn strip_code_fences(text: &str) -> &str {
     rest.trim_end().strip_suffix("```").unwrap_or(rest).trim()
 }
 
+/// Parse the first complete JSON object embedded in `text`.
+///
+/// Models rarely emit a bare JSON object. They wrap it in prose ("Here is the
+/// tool call:"), append an explanation after it, or both — and requiring the
+/// WHOLE string to parse means all of those are reported as ordinary text with
+/// the JSON visible to the user. Reported live 2026-07-25 against
+/// qwen2.5-coder-7b, which produced a correct tool call the parser then
+/// rejected.
+///
+/// Scans for the first `{` and returns the substring up to its balanced close,
+/// tracking string literals and escapes so a brace inside a string value does
+/// not end the object early. Returns `None` if no balanced object exists, which
+/// is also what a truncated generation produces — deliberately left as text
+/// rather than repaired.
+fn parse_embedded_json(text: &str) -> Option<Value> {
+    // Fast path: the whole thing is already JSON.
+    if let Ok(v) = serde_json::from_str::<Value>(text) {
+        return Some(v);
+    }
+    let bytes = text.as_bytes();
+    let start = bytes.iter().position(|&b| b == b'{')?;
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+    for (i, &b) in bytes.iter().enumerate().skip(start) {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match b {
+            b'\\' if in_string => escaped = true,
+            b'"' => in_string = !in_string,
+            b'{' if !in_string => depth += 1,
+            b'}' if !in_string => {
+                depth -= 1;
+                if depth == 0 {
+                    return serde_json::from_str(text.get(start..=i)?).ok();
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 /// `{"tool_calls": [{"id"?, "function": {"name", "arguments"}}]}` — the shape
 /// `format_tool_system_prompt` asks for. Also accepts a flattened
 /// `{"name", "arguments"}` entry, which models produce about as often as the
 /// nested form even when shown the nested one.
 fn try_generic(text: &str) -> Option<Vec<ParsedToolCall>> {
-    let v: Value = serde_json::from_str(text).ok()?;
+    let v: Value = parse_embedded_json(text)?;
     let arr = v.get("tool_calls")?.as_array()?;
     let calls: Vec<ParsedToolCall> = arr
         .iter()
@@ -351,6 +399,53 @@ mod tests {
         // Hermes block with no closing tag.
         let unclosed = "<tool_call>{\"name\": \"get_weather\", \"arguments\": {\"city\"";
         assert_eq!(parse_tool_calls(unclosed), None);
+    }
+
+    /// A model rarely emits a bare object — it explains itself first, or adds a
+    /// note after. Requiring the WHOLE string to parse meant a correct tool call
+    /// was reported as text with the JSON visible to the user (reported live
+    /// 2026-07-25 against qwen2.5-coder-7b).
+    #[test]
+    fn finds_a_tool_call_wrapped_in_prose() {
+        let prefixed = "Sure! Here is the tool call:\n\
+            {\"tool_calls\": [{\"id\": \"call_1\", \"function\": \
+            {\"name\": \"get_weather\", \"arguments\": {\"city\": \"Paris\"}}}]}";
+        let calls = parse_tool_calls(prefixed).expect("prose-prefixed call should parse");
+        assert_eq!(calls[0].name, "get_weather");
+
+        let suffixed = "{\"tool_calls\": [{\"function\": {\"name\": \"ping\", \
+            \"arguments\": {}}}]}\n\nI'll call that for you.";
+        assert_eq!(parse_tool_calls(suffixed).unwrap()[0].name, "ping");
+    }
+
+    /// A brace inside a string value must not end the object early, or the
+    /// extracted substring is invalid JSON and a correct call is dropped.
+    #[test]
+    fn braces_inside_strings_do_not_end_the_object() {
+        let tricky = "Here you go: {\"tool_calls\": [{\"function\": \
+            {\"name\": \"echo\", \"arguments\": {\"text\": \"a } brace\"}}}]} done";
+        let calls = parse_tool_calls(tricky).expect("should parse past the inner brace");
+        assert_eq!(calls[0].name, "echo");
+        assert!(calls[0].arguments.contains("a } brace"));
+    }
+
+    /// Truncation must still be refused even with the looser extraction — an
+    /// unbalanced object has no close, so there is nothing safe to act on.
+    #[test]
+    fn prose_wrapped_but_truncated_is_still_refused() {
+        let truncated = "Here is the call: {\"tool_calls\": [{\"function\": \
+            {\"name\": \"get_weather\", \"argum";
+        assert_eq!(parse_tool_calls(truncated), None);
+    }
+
+    /// A GPU-heavy caller path could pass megabytes of prose; make sure a
+    /// no-brace input exits immediately rather than scanning.
+    #[test]
+    fn text_without_any_object_is_rejected_cheaply() {
+        assert_eq!(
+            parse_tool_calls("I will use the tool_call soon, promise"),
+            None
+        );
     }
 
     /// A zero-argument tool is legitimate and must not be dropped.

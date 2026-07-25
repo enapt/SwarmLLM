@@ -2,6 +2,25 @@
 
 All notable changes to SwarmLLM are documented here.
 
+## [0.3.24-alpha] — 2026-07-25
+
+### Fixed
+
+- **Tool calls are recognised even when the model explains itself first.** A
+  model rarely replies with nothing but the tool call — it usually adds a line
+  before or after it. We required the whole reply to be the call and nothing
+  else, so a perfectly good tool call came back as raw text the client couldn't
+  act on. The call is now found wherever it sits in the reply. Output that was
+  cut off partway is still left as text rather than guessed at.
+- **Template markers no longer leak from models whose template disagrees with
+  their training.** Some model files carry a chat template from one model family
+  while the weights were tuned on another, so the model emits the *other*
+  family's markers — which our previous fix couldn't catch, because it only
+  looked at what the template itself contained. Markers that no model ever emits
+  as real text now always end a reply. Markers that could legitimately appear in
+  an answer, such as `[INST]` or `</s>`, still only apply when the model's own
+  template uses them, so genuine replies about code or XML aren't cut short.
+
 ## [0.3.23-alpha] — 2026-07-25
 
 ### Fixed

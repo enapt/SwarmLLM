@@ -151,7 +151,7 @@ libp2p 0.56, axum 0.8, candle-core/candle-transformers 0.10 (CUDA), redb 4, ed25
 
 ## Testing
 
-- 1205 lib tests passing + 8 ignored (env-var-gated real-model + manual smoke), 79 integration tests in `tests/integration/` + 2 ignored end-to-end (`cargo test --test integration_phase10_11 -- --ignored`), 2 repo-consistency, 26 in `swarmllm-types` (`cargo test -p swarmllm-types` — NOT covered by a bare `cargo test` from the root), clippy clean. Microbench: `cargo run --release --no-default-features --features dev,claude-subscription --example swarm_spec_bench` (R136 — measures all 4 SWARM-SPEC layer primitives + synthetic cascade hit-rate). Local-cluster bench: `examples/3node_setup.sh` (boots 3 daemons) + `examples/3node_inference_bench.sh` (runs 3 workloads × 3 trials and prints tok/s + swarm_spec metrics). Sharded variant: `examples/3node_sharded_setup.sh` (forced distributed pipeline — requires `auto_manage.enabled = false` in per-node config.toml to preserve sharded state; splits any shard count across B/C, not just 2). Both scripts take `SWARM_BENCH_MODEL`. **Pinned reference models for cross-swarm comparison: `docs/REFERENCE_MODELS.md`** (smoke / standard / stress tiers + `examples/fetch_reference_model.sh` to opt in).
+- 1211 lib tests passing + 8 ignored (env-var-gated real-model + manual smoke), 79 integration tests in `tests/integration/` + 2 ignored end-to-end (`cargo test --test integration_phase10_11 -- --ignored`), 2 repo-consistency, 26 in `swarmllm-types` (`cargo test -p swarmllm-types` — NOT covered by a bare `cargo test` from the root), clippy clean. Microbench: `cargo run --release --no-default-features --features dev,claude-subscription --example swarm_spec_bench` (R136 — measures all 4 SWARM-SPEC layer primitives + synthetic cascade hit-rate). Local-cluster bench: `examples/3node_setup.sh` (boots 3 daemons) + `examples/3node_inference_bench.sh` (runs 3 workloads × 3 trials and prints tok/s + swarm_spec metrics). Sharded variant: `examples/3node_sharded_setup.sh` (forced distributed pipeline — requires `auto_manage.enabled = false` in per-node config.toml to preserve sharded state; splits any shard count across B/C, not just 2). Both scripts take `SWARM_BENCH_MODEL`. **Pinned reference models for cross-swarm comparison: `docs/REFERENCE_MODELS.md`** (smoke / standard / stress tiers + `examples/fetch_reference_model.sh` to opt in).
 - Unit tests: in-module `#[cfg(test)]` blocks
 - Integration tests: `tests/integration/` — multi-node simulations with `--test-threads=1`
 - Real-model spawn-and-infer test: set `SWARMLLM_TEST_MODEL_DIR` to a fully-populated model directory (e.g. `~/.local/share/swarmllm/models/tinyllama-1.1b-...`) and run `cargo test --test integration_phase10_11 -- --ignored end_to_end`. No synthetic GGUF fixture is committed; see `docs/ARCHITECTURE.md` § Deferred Items.
@@ -192,11 +192,29 @@ When spawning subagents in this repo, use these model picks (overrides defaults 
 
 ## Status
 
-All 20 build phases complete. All subsystems wired — no stubs. **1205 lib + 79 integration + 2 repo-consistency + 26 swarmllm-types tests passing**; 8 lib + 2 e2e ignored (env-var or manual). Clippy clean default + features dev,claude-subscription + `--features llama`.
+All 20 build phases complete. All subsystems wired — no stubs. **1211 lib + 79 integration + 2 repo-consistency + 26 swarmllm-types tests passing**; 8 lib + 2 e2e ignored (env-var or manual). Clippy clean default + features dev,claude-subscription + `--features llama`.
 
 Per-round history lives in `~/.claude/projects/-home-user-SwarmLLM/memory/round_log_*.md` and the CHANGELOG; `docs/ARCHITECTURE.md` is the canonical architecture. This section keeps only the current release line plus one-line prior-round pointers.
 
-### Latest — v0.3.23-alpha (2026-07-25): peers could not dial us back
+### Latest — v0.3.24-alpha (2026-07-25): tester retest — two half-fixes closed
+
+External retest of v0.3.22 found `/v1/messages` tools fully fixed but two gaps:
+
+- **`try_generic` required the WHOLE reply to be the JSON object** — a model that
+  adds prose before/after its tool call had it rejected and returned as raw text
+  (`finish_reason: "stop"`, no `tool_calls`). Now `parse_embedded_json` extracts
+  the first BALANCED object, tracking string literals + escapes so a `}` inside a
+  string value doesn't end it early. Pre-filter also relaxed (`contains('{')`,
+  not `starts_with`). Truncated output still refused.
+- **`extract_stop_strings` only added markers PRESENT in the template** — useless
+  for a GGUF whose template is one family but whose weights emit another's
+  (reported: llama-3.2-1b-q8_0 returning `<|im_end|>hello</im_start>`). Now a
+  UNIVERSAL set of `<|...|>`-style special tokens always stops, since no model
+  emits those as content; `[INST]` / `</s>` stay template-gated because they
+  plausibly appear in real prose (code/XML). Deliberate split — one test pins
+  each half.
+
+### v0.3.23-alpha (2026-07-25): peers could not dial us back
 
 Found by a live joint test with an external tester — a complete causal chain
 from one bug.

@@ -70,6 +70,28 @@ pub fn extract_stop_strings(template: Option<&str>) -> Vec<String> {
 
     let mut stops = Vec::new();
 
+    // Special tokens that are NEVER legitimate assistant output, regardless of
+    // what this model's template contains. A GGUF whose chat template says one
+    // family but whose weights were tuned on another will emit the other
+    // family's markers — reported live 2026-07-25: a Llama-3.2 q8_0 returned
+    // `<|im_end|>hello\n</im_start>` even though its template is not ChatML, so
+    // scanning the template alone could never catch it.
+    //
+    // Only the `<|...|>` / `<...>` special-token forms are listed. `[INST]` and
+    // `</s>` stay template-gated below because they can plausibly appear in real
+    // prose (code, XML), whereas these cannot.
+    for marker in &[
+        "<|im_end|>",
+        "<|im_start|>",
+        "<|eot_id|>",
+        "<|eom_id|>",
+        "<|start_header_id|>",
+        "<|endoftext|>",
+        "<end_of_turn>",
+    ] {
+        stops.push(marker.to_string());
+    }
+
     // Scan the template for turn-boundary markers. Anything present here is a
     // marker this model's own template uses, so seeing it mid-generation means
     // the model has ended its turn (or started hallucinating another one) and we
@@ -102,7 +124,7 @@ pub fn extract_stop_strings(template: Option<&str>) -> Vec<String> {
         // GPT-2 style vocabularies (Qwen base, several small models)
         "<|endoftext|>",
     ] {
-        if tmpl.contains(marker) {
+        if tmpl.contains(marker) && !stops.iter().any(|s| s == marker) {
             stops.push(marker.to_string());
         }
     }

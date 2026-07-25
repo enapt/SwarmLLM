@@ -640,13 +640,60 @@ fn extract_stop_strings_covers_other_families() {
     }
 }
 
-/// A marker absent from the template must NOT become a stop string — stopping on
-/// a string the model legitimately emits would truncate real answers.
+/// A marker that could appear in genuine prose must not become a stop string
+/// unless this model's template uses it — stopping on one the model legitimately
+/// emits would truncate real answers.
+///
+/// Note the deliberate split: `<|...|>`-style SPECIAL TOKENS are stop strings
+/// universally (see `universal_special_tokens_stop_even_when_absent_from_the_template`)
+/// because no model emits them as content. `[INST]` and `</s>` are not, because
+/// a reply about code or XML plausibly contains them.
 #[test]
-fn extract_stop_strings_does_not_invent_markers() {
+fn extract_stop_strings_does_not_invent_ambiguous_markers() {
     let chatml_only = "<|im_start|>user\n{{ c }}<|im_end|>";
     let stops = super::extract_stop_strings(Some(chatml_only));
-    assert!(!stops.contains(&"<|eot_id|>".to_string()), "got {stops:?}");
     assert!(!stops.contains(&"</s>".to_string()), "got {stops:?}");
     assert!(!stops.contains(&"[INST]".to_string()), "got {stops:?}");
+    assert!(!stops.contains(&"<|user|>".to_string()), "got {stops:?}");
+}
+
+/// Special tokens are never legitimate assistant output, so they must be stop
+/// strings even when this model's template doesn't mention them. Reported live
+/// 2026-07-25: a Llama-3.2 q8_0 returned `<|im_end|>hello</im_start>` — ChatML
+/// markers from a model whose template is not ChatML, which scanning the
+/// template alone could never catch.
+#[test]
+fn universal_special_tokens_stop_even_when_absent_from_the_template() {
+    let llama3_only = "<|start_header_id|>user<|end_header_id|>{{ c }}<|eot_id|>";
+    let stops = super::extract_stop_strings(Some(llama3_only));
+    for expected in [
+        "<|im_end|>",
+        "<|im_start|>",
+        "<|eot_id|>",
+        "<|eom_id|>",
+        "<end_of_turn>",
+        "<|endoftext|>",
+    ] {
+        assert!(
+            stops.contains(&expected.to_string()),
+            "{expected} must stop regardless of template, got {stops:?}"
+        );
+    }
+    // No duplicates: the template scan must not re-add a universal marker.
+    let mut sorted = stops.clone();
+    sorted.sort();
+    let before = sorted.len();
+    sorted.dedup();
+    assert_eq!(before, sorted.len(), "duplicate stop strings: {stops:?}");
+}
+
+/// Markers that CAN appear in real prose stay template-gated — stopping on
+/// `[INST]` or `</s>` in a model that never emits them would truncate genuine
+/// answers about code or XML.
+#[test]
+fn ambiguous_markers_remain_template_gated() {
+    let chatml = "<|im_start|>user\n{{ c }}<|im_end|>";
+    let stops = super::extract_stop_strings(Some(chatml));
+    assert!(!stops.contains(&"[INST]".to_string()), "got {stops:?}");
+    assert!(!stops.contains(&"</s>".to_string()), "got {stops:?}");
 }
