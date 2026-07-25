@@ -282,8 +282,25 @@ pub fn build_behaviour(
     //
     // 3 leaves room for relayed + direct during an upgrade, plus one transport
     // variant (a peer reachable over both TCP and QUIC), while still bounding
-    // runaway parallel connections.
-    let max_per_peer = 3u32;
+    // runaway parallel connections. Configurable as an escape hatch (see
+    // `network.max_connections_per_peer`) so a multi-NIC host that somehow still
+    // sees silent drops can restore the old behaviour without a rebuild.
+    let configured_max_per_peer = network_config
+        .map(|c| c.max_connections_per_peer)
+        .unwrap_or(3);
+    // A value of 1 is not a valid tuning choice — it silently disables hole
+    // punching entirely, which is exactly the failure this audit found. Warn
+    // loudly rather than obey quietly, but still honour it: someone setting
+    // this is deliberately bisecting a suspected regression.
+    if configured_max_per_peer < 2 {
+        tracing::warn!(
+            configured = configured_max_per_peer,
+            "network.max_connections_per_peer < 2 disables NAT hole punching — \
+             this node will never upgrade off a relay circuit. Only set this \
+             while diagnosing dropped requests on a multi-interface host."
+        );
+    }
+    let max_per_peer = configured_max_per_peer.max(1);
     let conn_limits = connection_limits::ConnectionLimits::default()
         .with_max_established_per_peer(Some(max_per_peer))
         .with_max_established(Some(500));

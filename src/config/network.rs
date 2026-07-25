@@ -58,6 +58,23 @@ pub struct NetworkConfig {
     /// to keep a public node from donating upload bandwidth.
     #[serde(default = "default_true")]
     pub relay_forwarding_auto: bool,
+    /// Maximum simultaneous libp2p connections to a single peer.
+    ///
+    /// **Must be at least 2 for NAT hole punching to work.** DCUtR upgrades a
+    /// relayed connection by dialling a direct one *while the relayed one is
+    /// still open*, so a value of 1 causes `connection_limits` to deny the
+    /// upgrade and the node never escapes the relay.
+    ///
+    /// This is exposed as an escape hatch, not a tuning knob. It was `1` before
+    /// the 2026-07-25 networking audit, to work around upstream
+    /// request_response round-robining across a half-open parallel connection on
+    /// multi-interface hosts. Two changes address that properly (a vendored
+    /// patch preferring direct connections, and the deterministic mDNS dialer),
+    /// but if silent request drops ever reappear on a multi-NIC host, setting
+    /// this to 1 restores the old behaviour without a rebuild — and confirms or
+    /// rules out that cause in one step.
+    #[serde(default = "default_max_connections_per_peer")]
+    pub max_connections_per_peer: u32,
     /// Enable mDNS for automatic LAN peer discovery (default: true).
     #[serde(default = "default_true")]
     pub enable_mdns: bool,
@@ -252,6 +269,14 @@ fn default_relay_circuit_duration() -> u64 {
     3600
 }
 
+/// 3 leaves room for a relayed + direct connection during a DCUtR upgrade, plus
+/// one transport variant (a peer reachable over both TCP and QUIC), while still
+/// bounding runaway parallel connections. Never set below 2 — see
+/// `max_connections_per_peer`.
+fn default_max_connections_per_peer() -> u32 {
+    3
+}
+
 fn default_relay_max_circuits() -> usize {
     // See `network::relay::RelayServerConfig::default` — libp2p's 16 assumes a
     // 2-minute bootstrap circuit; ours are a 1-hour data path, so a slot is
@@ -272,6 +297,7 @@ impl Default for NetworkConfig {
             auto_relay: true,
             relay_forwarding: false,
             relay_forwarding_auto: true,
+            max_connections_per_peer: default_max_connections_per_peer(),
             enable_mdns: true,
             enable_autonat: true,
             enable_dcutr: true,
