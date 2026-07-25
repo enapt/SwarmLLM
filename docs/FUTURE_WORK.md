@@ -2387,6 +2387,36 @@ on the wrong end are exactly the modest-hardware users the project is for.
 loses them, and this is a network whose value grows with participation. The
 incentive design and the adoption goal are the same problem.
 
+**Evidence from the closest comparable system (researched 2026-07-26).**
+[Petals](https://github.com/bigscience-workshop/petals) is the nearest analogue
+— BitTorrent-style distributed LLM inference across volunteer consumer GPUs. It
+has **no incentive layer at all**, and that turns out to be the more instructive
+data point:
+
+- The [Petals paper](https://arxiv.org/pdf/2209.01188) names the absence as a
+  design problem in its own right: without incentives there is "an imbalance
+  between supply (peers who dedicate GPUs to serve model layers) and demand
+  (peers using the servers)".
+- Its proposed remedy is almost exactly what SwarmLLM already implements —
+  *"peers running servers would earn special points, which can be spent on
+  high-priority inference"*. Note **priority**, not access. That is the same
+  distinction our tiering makes, and it is the thing that separates this from
+  pay-to-play.
+- Petals peaked around 800 contributor nodes and did not sustain it. Pure
+  volunteerism is not the safe default it appears to be; it fails on the supply
+  side, which hurts exactly the users who own no capable hardware.
+
+So the honest framing for the discussion is not "contribution-weighting versus
+fairness". It is: **an unincentivised network stops having capacity to share,
+and the users who lose most are the ones with the least hardware.** The design
+question is where the floor sits and how the spread is shaped, not whether to
+reward contribution at all.
+
+That reframes the four options above: (1) documenting the floor becomes more
+valuable, not less, because the floor *is* the fairness guarantee; and (4) the
+demand-weighted floor is the most interesting, since it gives low-tier nodes
+more when the network is idle — precisely when generosity costs nothing.
+
 ### Node.js-20 GitHub Actions deprecation (R145 sweep, 2026-07-21)
 **Context.** GitHub is deprecating the Node.js 20 runtime on Actions runners; three pinned actions in `.github/workflows/release.yml` still target Node 20 and are currently *force-upgraded* to Node 24 (a warning annotation, not a failure — the v0.3.3-alpha release built and published fine):
 
