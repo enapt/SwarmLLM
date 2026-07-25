@@ -527,6 +527,11 @@ impl PipelineExecutor {
 
         // Strip trailing partial stop strings (e.g. "<|user" when stop is "<|user|>").
         crate::inference::trim_trailing_partial_stop(&mut generated_text, &stop_strings);
+        // Same defence as the split path: a model whose file metadata
+        // disagrees with its weights emits another family's control tokens in
+        // spellings no stop string matches. Kept beside the partial-stop trim
+        // so the two are maintained together.
+        crate::inference::strip_control_token_artifacts(&mut generated_text);
 
         // Batch credit write — one DB persist for the entire request instead of per-token.
         // Formula: rate * tokens (no layer multiplier — balanced with consume side).

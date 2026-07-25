@@ -194,6 +194,8 @@ pub(super) async fn execute_local_batch(
                             &mut content,
                             &local_stop_strings,
                         );
+                        // Same defence as the split path — see `strip_control_token_artifacts`.
+                        crate::inference::strip_control_token_artifacts(&mut content);
                         Ok(InferenceOutput::from_gen_result(
                             request.id,
                             request.session_id.clone(),

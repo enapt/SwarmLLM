@@ -176,6 +176,16 @@ pub async fn start_background_stream(
     // not a 202 + empty buffer. Matches V1's discipline.
     let mut chat_req = super::translate::request_to_chat(&req, prior.as_ref())?;
     chat_req.stream = true;
+    // Ask for the terminal usage chunk, exactly as the foreground streaming
+    // path does. The shared event loop knows how to read it; without the opt-in
+    // there is simply nothing to read, so a background+stream response reported
+    // {0,0,0} while the same request non-streamed reported real counts
+    // (external report 2026-07-25, second occurrence — the first fix set this
+    // on the foreground path only).
+    chat_req.extras.insert(
+        "stream_options".to_string(),
+        serde_json::json!({ "include_usage": true }),
+    );
 
     let response_id = crate::api::openai::responses::new_response_id();
     let created_at = chrono::Utc::now().timestamp();
