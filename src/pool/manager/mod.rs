@@ -2052,6 +2052,72 @@ mod tests {
         }
     }
 
+    /// A pool gossip containing one member whose acceptance signature cannot be
+    /// verified (e.g. a stale pre-R147 record) must NOT be rejected wholesale:
+    /// the unverifiable member is dropped, the owner + verified members are kept,
+    /// and the pool still lands in the registry.
+    #[tokio::test]
+    async fn pool_gossip_drops_unverifiable_member_keeps_valid_ones() {
+        // Receiver C — neither the owner nor a member of this pool.
+        let (mut recv_pm, recv_state, _c) = build_test_pool_manager().await;
+
+        let owner = Identity::generate();
+        let pool_id = owner.node_id().clone();
+        let name = "cross-version-pool".to_string();
+        let now = chrono::Utc::now();
+        let owner_sig = owner.sign(&crate::pool::crypto::pool_create_payload(
+            &pool_id, &name, &now,
+        ));
+
+        // Verified member M1 (real acceptance signature).
+        let m1 = Identity::generate();
+        let m1_membership = signed_membership_for(&m1, &pool_id, uuid::Uuid::new_v4());
+        // Unverifiable member M2 — empty acceptance signature (stale/legacy record).
+        let m2 = Identity::generate();
+        let m2_membership = membership_for(m2.node_id().clone());
+
+        let owner_membership = PoolMembership {
+            node_id: pool_id.clone(),
+            credits_contributed: 0,
+            joined_at: now,
+            acceptance_signature: owner_sig.clone(),
+            invitation_id: uuid::Uuid::nil(),
+            invitation_expires_at: now,
+            device_name: None,
+            last_seen: Some(now),
+            online: true,
+            device_stats: None,
+            contribution_level: 100,
+        };
+
+        let state = PoolState {
+            pool_id: pool_id.clone(),
+            name,
+            members: vec![owner_membership, m1_membership, m2_membership],
+            created_at: now,
+            owner_signature: owner_sig,
+            total_lifetime_credits: 0,
+            member_credit_split_pct: 0,
+            shard_pins: Vec::new(),
+            generation: 0,
+        };
+
+        recv_pm.handle_pool_state_gossip(state).await;
+
+        // Not rejected wholesale — the pool is stored...
+        let stored = recv_state
+            .credits
+            .pool_registry
+            .get(&pool_id)
+            .expect("pool should be stored, not dropped on one unverifiable member");
+        // ...with the unverifiable member removed and the rest kept.
+        let ids: Vec<_> = stored.members.iter().map(|m| m.node_id.clone()).collect();
+        assert!(ids.contains(&pool_id), "owner kept");
+        assert!(ids.contains(m1.node_id()), "verified member kept");
+        assert!(!ids.contains(m2.node_id()), "unverifiable member dropped");
+        assert_eq!(stored.members.len(), 2);
+    }
+
     #[tokio::test]
     async fn member_left_replay_protection_blocks_second_remove() {
         let (mut pm, state, owner) = build_test_pool_manager().await;

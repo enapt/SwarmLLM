@@ -99,7 +99,7 @@ const MAX_MODELS_HOSTED: usize = 64;
 const MAX_MODEL_NAME_LEN: usize = 256;
 
 impl PoolManager {
-    pub(super) async fn handle_pool_state_gossip(&mut self, state: PoolState) {
+    pub(super) async fn handle_pool_state_gossip(&mut self, mut state: PoolState) {
         // Verify owner signature before inserting into registry
         let owner_key = match ed25519_dalek::VerifyingKey::from_bytes(&state.pool_id.0) {
             Ok(k) => k,
@@ -154,20 +154,38 @@ impl PoolManager {
             }
         }
 
-        // SEC-C7: Verify acceptance_signature of each member
-        for member in &state.members {
-            // The pool owner's own membership uses the pool creation signature, skip it
+        // SEC-C7: Verify each member's acceptance_signature. A member we cannot
+        // verify — a malformed key/signature, or (the common benign case) a
+        // signature computed over an older acceptance-payload format by a peer
+        // that joined on a pre-R147 build — is DROPPED from the accepted set
+        // rather than rejecting the entire pool gossip. One unverifiable member
+        // must not poison an otherwise-valid pool's state for every node
+        // (previously a single legacy member's gossip was discarded whole,
+        // stalling all updates — new members, credit splits — for that pool).
+        //
+        // This is safe: the owner signature (verified above) covers only the
+        // pool identity, not the member list, so each member is independently
+        // authenticated by its own acceptance signature. We therefore accept
+        // exactly the members we can cryptographically verify and drop the rest
+        // — never accepting an unverified membership claim. Mirrors the
+        // per-record IGNORE (vs. whole-message REJECT) decision that gossipsub
+        // v1.1 / eth2 consensus gossip validation use for benign-invalid records.
+        let members = std::mem::take(&mut state.members);
+        let mut verified_members = Vec::with_capacity(members.len());
+        for member in members {
+            // The pool owner's own membership is covered by the pool-creation
+            // signature (verified above), not a per-member acceptance signature.
             if member.node_id == state.pool_id {
+                verified_members.push(member);
                 continue;
             }
             let member_key = match ed25519_dalek::VerifyingKey::from_bytes(&member.node_id.0) {
                 Ok(k) => k,
                 Err(_) => {
-                    tracing::warn!(member = %member.node_id, "Invalid member key in pool state gossip");
-                    return;
+                    tracing::debug!(member = %member.node_id, pool_id = %state.pool_id, "Dropping pool member with invalid node key from gossip");
+                    continue;
                 }
             };
-            // Verify the acceptance signature using the acceptance payload
             let acceptance_payload = crate::pool::crypto::acceptance_payload(
                 &member.invitation_id,
                 &state.pool_id,
@@ -177,16 +195,18 @@ impl PoolManager {
             let sig_bytes: &[u8; 64] = match member.acceptance_signature.as_slice().try_into() {
                 Ok(b) => b,
                 Err(_) => {
-                    tracing::warn!(member = %member.node_id, "Invalid acceptance signature length in pool state gossip");
-                    return;
+                    tracing::debug!(member = %member.node_id, pool_id = %state.pool_id, "Dropping pool member with invalid acceptance-signature length from gossip");
+                    continue;
                 }
             };
             let sig = ed25519_dalek::Signature::from_bytes(sig_bytes);
             if member_key.verify(&acceptance_payload, &sig).is_err() {
-                tracing::warn!(member = %member.node_id, "Invalid acceptance signature in pool state gossip");
-                return;
+                tracing::debug!(member = %member.node_id, pool_id = %state.pool_id, "Dropping pool member with unverifiable acceptance signature from gossip (e.g. pre-R147 acceptance-payload format)");
+                continue;
             }
+            verified_members.push(member);
         }
+        state.members = verified_members;
 
         // If this gossip is for our own pool, update local pool_state with full member list
         // (preserving our locally-set device_name and device_stats)
