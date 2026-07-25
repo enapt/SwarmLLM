@@ -230,6 +230,13 @@ jobs:
           # also avoids touching the `Jimver@v0.2.19` pin, whose version list may
           # not include 12.8.0 (and this Windows path isn't PR-validatable — it
           # only runs on a release tag). Bump both together if that changes.
+          #
+          # BEFORE bumping this across a CUDA *major*: auto-update replaces only
+          # the bare .exe, so the redist DLLs staged below (cudart64_* etc.)
+          # stay at the version the user's original zip shipped. Within 12.x
+          # that is fine; 12->13 would leave every auto-updated GPU node calling
+          # LoadLibraryW on a DLL it doesn't have. See docs/FUTURE_WORK.md
+          # "Windows-GPU auto-update carries stale CUDA redist DLLs".
           cuda: '12.4.0'
           method: 'network'
           # Full set needed for cudarc with `dynamic-loading`: headers for

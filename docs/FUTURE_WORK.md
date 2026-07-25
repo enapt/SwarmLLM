@@ -2267,6 +2267,47 @@ ship untested on other gens. Mitigations: PTX/JIT covers newer-than-tested, CI
 compile-checks catch build breaks (not runtime), and Discord testers with
 RTX 20/40/50 should confirm before a *stable* (non-alpha) tag.
 
+### Windows-GPU auto-update carries stale CUDA redist DLLs (v0.3.20 asset audit, 2026-07-25)
+
+**Context.** The Windows GPU **archive** bundles NVIDIA redist DLLs
+(`cudart64_*`, `cublas64_*`, `cublasLt64_*`, `curand64_*`, `nvrtc64_*`,
+`nvrtc-builtins64_*`) next to `swarmllm.exe`, because cudarc resolves them with
+`LoadLibraryW` at runtime and end users are not expected to have the CUDA
+Toolkit installed. That is why `swarmllm-windows-x86_64-gpu.zip` is ~490MB
+while the bare `swarmllm-windows-x86_64-gpu.exe` is ~119MB.
+
+**The gap.** `update.rs` downloads the *bare* variant asset and does an atomic
+single-file swap. The DLLs sitting beside the binary are whatever the user's
+original zip install shipped, and are never refreshed by an auto-update.
+
+- **Safe within a CUDA major.** `cudart64_12.dll` serves all 12.x and Windows
+  is pinned to 12.4 (`Jimver/cuda-toolkit` `cuda: '12.4.0'`), so today every
+  auto-updated Windows GPU node keeps working.
+- **Silently fatal across a major.** A 12→13 bump produces an exe that
+  `LoadLibraryW`s `cudart64_13.dll` into a directory holding only
+  `cudart64_12.dll`. Every auto-updated Windows GPU node then fails at CUDA
+  init, with no CPU fallback and no obvious cause for the user.
+
+**Linux CUDA is not affected** — its staging dir is binary + config + licenses
+only, and cudarc dlopens `libcuda.so.1` from the user's *driver*, so the 933MB
+bare binary is self-contained. This is Windows-specific precisely because we
+ship the toolkit runtime rather than relying on one being installed.
+
+**Options when the Windows toolkit pin is next touched** (do this *before*
+bumping it, not after):
+1. Teach `update.rs` to fetch the `.zip` for the `-gpu` variant and unpack the
+   DLLs alongside the exe. Most correct; makes the GPU update path a
+   multi-file apply, so the atomic-swap + rollback logic needs extending.
+2. Ship the CUDA major in the asset name (e.g. `-gpu-cu12`) and refuse to
+   auto-update across a major, directing those users to a fresh installer.
+   Cheapest, and reuses the existing "no exact variant match → skip" behaviour.
+3. Statically link / bundle the runtime into the exe, as the Linux build
+   effectively does. Largest binary, simplest update story.
+
+Cross-referenced from gotcha #162. Note the Windows/Linux CUDA versions are
+already deliberately split (12.4 vs 12.8) with a "bump both together" comment in
+`release.yml` — that comment should point here too when either moves.
+
 ### Node.js-20 GitHub Actions deprecation (R145 sweep, 2026-07-21)
 **Context.** GitHub is deprecating the Node.js 20 runtime on Actions runners; three pinned actions in `.github/workflows/release.yml` still target Node 20 and are currently *force-upgraded* to Node 24 (a warning annotation, not a failure — the v0.3.3-alpha release built and published fine):
 
