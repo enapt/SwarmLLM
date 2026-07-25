@@ -196,6 +196,12 @@ pub struct SharedState {
     /// but a node reachable only *through* a relay is itself NAT'd and must
     /// never advertise itself as one.
     pub publicly_reachable: std::sync::atomic::AtomicBool,
+    /// DCUtR hole-punch outcomes since start. Surfaced by
+    /// `GET /api/admin/diagnostics` so "did this node ever get off the relay?"
+    /// is answerable without scraping logs — the question that matters most
+    /// when a user reports slow or failing remote inference.
+    pub hole_punch_successes: AtomicU64,
+    pub hole_punch_failures: AtomicU64,
     pub detected_region: RwLock<Option<String>>,
     pub shard_bytes_served: AtomicU64,
     pub relay_seconds_served: AtomicU64,
@@ -537,6 +543,8 @@ impl SharedState {
             lan_peer_count: std::sync::atomic::AtomicUsize::new(0),
             listen_multiaddrs: arc_swap::ArcSwap::from_pointee(Vec::new()),
             publicly_reachable: std::sync::atomic::AtomicBool::new(false),
+            hole_punch_successes: AtomicU64::new(0),
+            hole_punch_failures: AtomicU64::new(0),
             vision_modules: DashMap::new(),
             encrypted_pipeline_models: {
                 let map = DashMap::new();

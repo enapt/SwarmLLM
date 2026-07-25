@@ -362,6 +362,45 @@ impl NetworkManager {
                 crate::network::relay::handle_relay_server_event(event, &self.shared_state);
             }
 
+            // ── DCUtR — hole-punch outcomes ──
+            //
+            // These were previously swallowed by the catch-all arm, which is
+            // how a *structurally disabled* DCUtR (the per-peer connection cap
+            // denied the direct connection a hole punch needs) went unnoticed
+            // through several releases: NAT traversal is the load-bearing
+            // mechanism of this project and it emitted nothing either way.
+            // Success/failure is logged at INFO so a support log shows whether a
+            // node ever escapes the relay, and counted so
+            // `GET /api/admin/diagnostics` can report it without log scraping.
+            SwarmEvent::Behaviour(SwarmBehaviourEvent::Dcutr(event)) => {
+                use std::sync::atomic::Ordering;
+                match &event.result {
+                    Ok(connection_id) => {
+                        self.shared_state
+                            .hole_punch_successes
+                            .fetch_add(1, Ordering::Relaxed);
+                        tracing::info!(
+                            peer = %event.remote_peer_id,
+                            ?connection_id,
+                            "DIAG: hole punch succeeded — upgraded to a direct connection"
+                        );
+                    }
+                    Err(e) => {
+                        self.shared_state
+                            .hole_punch_failures
+                            .fetch_add(1, Ordering::Relaxed);
+                        // Expected against symmetric NAT / CGNAT, where hole
+                        // punching cannot work at all — the relay carries the
+                        // traffic instead. Not an error condition on its own.
+                        tracing::info!(
+                            peer = %event.remote_peer_id,
+                            error = %e,
+                            "DIAG: hole punch failed — staying on the relay path"
+                        );
+                    }
+                }
+            }
+
             // ── AutoNAT v2 client — reachability test results for OUR addresses ──
             SwarmEvent::Behaviour(SwarmBehaviourEvent::AutonatClient(event)) => {
                 let tested_addr = event.tested_addr;

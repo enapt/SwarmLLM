@@ -227,6 +227,40 @@ pub async fn diagnostics(State(state): State<AppState>) -> impl axum::response::
         let _ = writeln!(out, "  {}", entry.key());
     }
 
+    // NAT traversal. "Is this node stuck behind the relay?" is the first
+    // question worth asking when remote inference is slow or failing, and it
+    // used to be unanswerable — DCUtR emitted no logs at all.
+    {
+        use std::sync::atomic::Ordering;
+        let ok = ss.hole_punch_successes.load(Ordering::Relaxed);
+        let failed = ss.hole_punch_failures.load(Ordering::Relaxed);
+        let _ = writeln!(out, "\n-- NAT traversal --");
+        let _ = writeln!(
+            out,
+            "  publicly reachable: {}",
+            ss.publicly_reachable.load(Ordering::Relaxed)
+        );
+        let _ = writeln!(
+            out,
+            "  donating relay capacity: {}",
+            ss.relay_forwarding_enabled()
+        );
+        let _ = writeln!(out, "  hole punches: {ok} succeeded / {failed} failed");
+        if ok == 0 && failed == 0 {
+            let _ = writeln!(
+                out,
+                "  (no attempts yet — normal on a LAN-only node, or before any \
+                 relayed peer is seen)"
+            );
+        } else if ok == 0 {
+            let _ = writeln!(
+                out,
+                "  (never escaped the relay — expected behind symmetric NAT/CGNAT; \
+                 traffic still flows, with one extra hop)"
+            );
+        }
+    }
+
     // Remembered peer addresses, raw vs. what is actually worth dialling.
     // A gap between the two is the signature of a cache holding entries that
     // can never connect — other peers' loopback and private addresses, or a
