@@ -308,11 +308,32 @@ pub async fn diagnostics(State(state): State<AppState>) -> impl axum::response::
                 "  (no attempts yet — nothing to punch until a peer is seen that \
                  can only be reached through a relay)"
             );
-        } else if ok == 0 {
+        } else if ok == 0 && !ss.relay_routes.is_empty() {
             let _ = writeln!(
                 out,
                 "  (never escaped the relay — expected behind symmetric NAT/CGNAT; \
                  traffic still flows, with one extra hop)"
+            );
+        } else if ok == 0 {
+            // Attempts failed, but nothing is currently being routed through a
+            // relay — so the failures are historical, not the present state.
+            // Reporting "never escaped the relay" here would be actively
+            // misleading: the peer in question is very likely reachable
+            // directly now, which is the outcome we wanted.
+            let _ = writeln!(
+                out,
+                "  ({failed} attempt(s) failed, but nothing is currently routed \
+                 through a relay — those peers are reachable directly now)"
+            );
+        }
+        // A peer needs this same version for a hole punch to complete, since the
+        // connection limit that used to block it applies to both ends. Say so,
+        // because "0 succeeded" against older peers is expected, not a fault.
+        if failed > 0 && ok == 0 {
+            let _ = writeln!(
+                out,
+                "  note: both ends need v0.3.21 or newer for a direct connection \
+                 to form"
             );
         }
     }
