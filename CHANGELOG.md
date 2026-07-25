@@ -2,6 +2,42 @@
 
 All notable changes to SwarmLLM are documented here.
 
+## [0.3.23-alpha] — 2026-07-25
+
+### Fixed
+
+- **Machines can reach each other again after one of them makes contact.**
+  When another machine connected to you, it learned an address for you from the
+  connection itself — but for an incoming connection that address is the far
+  end's *temporary outgoing port*, which nothing listens on and which stops
+  existing when that connection closes. We recorded those and published them, so
+  every machine we contacted came away with several dead addresses for us and got
+  "connection refused" on every later attempt to reach us.
+
+  The knock-on effect was much larger than a failed dial. With no usable address,
+  the two machines never form the relayed connection that NAT hole punching is
+  coordinated over — so hole punching was never even attempted, the machine
+  quietly vanished from the other's peer list, and requests that should have
+  routed to it reported that no node had the data. An external tester hit exactly
+  this: our announcements reached them, four dial attempts to four dead ports of
+  ours all failed, and no session could ever form back.
+
+  Only the address of a connection we started is recorded now. For an incoming
+  connection we use what the peer advertises, filtered to addresses actually
+  worth trying — and if it advertises none, we record nothing rather than a
+  guess, because a wrong address fails every future attempt.
+
+  **After updating, restart both machines** — addresses learned before this fix
+  are still cached and still wrong.
+
+### Changed
+
+- Requests to a machine now use its newest direct connection rather than
+  rotating across every connection to it. Permitting several connections per
+  machine — which NAT hole punching requires — also allowed redundant ones to the
+  same place, and rotating across those let a single half-dead connection swallow
+  its share of requests.
+
 ## [0.3.22-alpha] — 2026-07-25
 
 ### Fixed

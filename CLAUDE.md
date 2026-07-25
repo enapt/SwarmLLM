@@ -196,7 +196,40 @@ All 20 build phases complete. All subsystems wired — no stubs. **1205 lib + 79
 
 Per-round history lives in `~/.claude/projects/-home-user-SwarmLLM/memory/round_log_*.md` and the CHANGELOG; `docs/ARCHITECTURE.md` is the canonical architecture. This section keeps only the current release line plus one-line prior-round pointers.
 
-### Latest — v0.3.22-alpha (2026-07-25): local tool calling + failures that explain themselves
+### Latest — v0.3.23-alpha (2026-07-25): peers could not dial us back
+
+Found by a live joint test with an external tester — a complete causal chain
+from one bug.
+
+- **We published undialable addresses.** `handle_connection_established` stored
+  `endpoint.get_remote_address()` into `connection_addrs` for EVERY connection,
+  and `identify.rs` fed it to Kademlia as dialable. For an OUTBOUND connection
+  that is the peer's real listen address (fine); for an INBOUND one it is the
+  peer's **ephemeral source port** — nothing listens there, and it dies with the
+  connection. So every peer we dialled learned dead addresses for us.
+- **The cascade** (this is why it looked like several unrelated faults): dead
+  addresses → all dials refused → the peer never dials our `/p2p-circuit`
+  address → no relayed connection → **DCUtR never even attempts** (it coordinates
+  over an existing relayed connection, so `0 attempts` was correct behaviour,
+  not a failure) → we are absent from their `connected_node_ids` → the scheduler
+  reports "No node available for layer N".
+- **Fix**: record only `ConnectedPoint::Dialer` addresses. Inbound falls back to
+  the peer's advertised `listen_addrs` filtered by `addr_is_remotely_reachable`
+  + non-circuit; advertises nothing dialable → add nothing (a bogus entry fails
+  every future dial). The old `warn!("shouldn't happen")` fallback fires
+  routinely for inbound now and was downgraded.
+- **RR selection → newest direct connection** (vendored crate), replacing
+  round-robin-within-direct. Raising `max_established_per_peer` for DCUtR also
+  permits REDUNDANT connections to the same endpoint (observed live: count=2 and
+  count=3 routinely), and round-robin across those lets one half-open connection
+  eat its share — the original silent-drop shape. Newest wins on both axes: a
+  half-open connection is an older one, and DCUtR's upgrade is by definition
+  newest.
+- Diagnostic gap noted: `/api/admin/peers` does not serialize
+  `relay_capable` / `features` / `relay_reservations`, which made
+  `peer_reachable_via_relay` unverifiable from outside during the investigation.
+
+### v0.3.22-alpha (2026-07-25): local tool calling + failures that explain themselves
 
 External checklist report (5 bugs) + the diagnostic gap under three of them.
 
