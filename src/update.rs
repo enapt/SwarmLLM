@@ -413,15 +413,10 @@ impl UpdateChecker {
         match info.checksum_sha256 {
             Some(ref expected_hash) => {
                 let actual_hash = hex::encode(hasher.finalize());
-                // The .sha256 file may contain "hash  filename" format
-                let expected_trimmed = expected_hash
-                    .split_whitespace()
-                    .next()
-                    .unwrap_or(expected_hash);
-                if actual_hash != expected_trimmed {
+                if !checksum_matches(expected_hash, &actual_hash) {
                     let _ = tokio::fs::remove_file(&tmp_path).await;
                     return Err(SwarmError::ShardIntegrity {
-                        expected: expected_trimmed.to_string(),
+                        expected: sidecar_hash(expected_hash).to_string(),
                         actual: actual_hash,
                     });
                 }
@@ -513,10 +508,8 @@ impl UpdateChecker {
             let bytes = std::fs::read(tmp_path)
                 .map_err(|e| SwarmError::ServiceUnavailable(format!("read staged file: {e}")))?;
             let actual = hex::encode(Sha256::digest(&bytes));
-            // Sidecar files often have the form "<hash>  <filename>"; take
-            // only the first whitespace-delimited token.
-            let expected_trimmed = expected.split_whitespace().next().unwrap_or(expected);
-            if !actual.eq_ignore_ascii_case(expected_trimmed) {
+            let expected_trimmed = sidecar_hash(expected);
+            if !checksum_matches(expected, &actual) {
                 let _ = std::fs::remove_file(tmp_path);
                 return Err(SwarmError::Validation(format!(
                     "Staged update file SHA256 mismatch (expected {expected_trimmed}, got {actual}) — staging file rejected"
@@ -722,6 +715,33 @@ fn platform_strings() -> (&'static str, &'static str) {
     (os, arch)
 }
 
+/// Extract the bare hash from a `.sha256` sidecar body.
+///
+/// Sidecars are written as `"<hash>  <filename>"` by both `shasum -a 256`
+/// (Linux/macOS) and the PowerShell step in `release.yml` (Windows), so take
+/// only the first whitespace-delimited token.
+fn sidecar_hash(sidecar_body: &str) -> &str {
+    sidecar_body
+        .split_whitespace()
+        .next()
+        .unwrap_or(sidecar_body)
+}
+
+/// Whether a freshly computed hex digest matches a `.sha256` sidecar body.
+///
+/// Single source of truth for the checksum contract, shared by the download
+/// path and the pre-rename re-verification. Two things it must get right:
+///
+/// - **Sidecar format**: `"<hash>  <filename>"`, not a bare hash.
+/// - **Case**: hex is case-insensitive, and the sidecars are produced by a
+///   different tool per platform (`shasum` lowercases; PowerShell's
+///   `Get-FileHash` uppercases and `release.yml` re-lowercases it). Comparing
+///   case-sensitively would make every Windows update fail with a
+///   tamper-looking integrity error the day that `.ToLower()` is dropped.
+fn checksum_matches(sidecar_body: &str, actual_hash: &str) -> bool {
+    actual_hash.eq_ignore_ascii_case(sidecar_hash(sidecar_body))
+}
+
 /// Build-variant suffix for release asset names (`""` for a CPU build).
 ///
 /// The OS/arch pair alone does not identify a release binary: a GPU build and a
@@ -891,6 +911,57 @@ mod tests {
         ] {
             assert_eq!(asset_name_for(os, arch, variant, windows), expected);
         }
+    }
+
+    /// Sidecars ship as `"<hash>  <filename>"`, so a bare-hash assumption
+    /// would compare the digest against the whole line and reject every
+    /// update. Body text is the real v0.3.20-alpha Linux CUDA sidecar.
+    #[test]
+    fn sidecar_hash_ignores_the_trailing_filename() {
+        let real = "284cf42ebb952c76d41c083de26bf247fe919ca39e727593b198ee892da987bd  swarmllm-linux-x86_64-cuda";
+        assert_eq!(
+            sidecar_hash(real),
+            "284cf42ebb952c76d41c083de26bf247fe919ca39e727593b198ee892da987bd"
+        );
+        // A bare hash with no filename must survive unchanged.
+        let bare = "284cf42ebb952c76d41c083de26bf247fe919ca39e727593b198ee892da987bd";
+        assert_eq!(sidecar_hash(bare), bare);
+        // Trailing newline is normal for `shasum > file`.
+        assert_eq!(sidecar_hash("abc123  name\n"), "abc123");
+    }
+
+    /// Hex is case-insensitive. `shasum` lowercases and PowerShell's
+    /// `Get-FileHash` uppercases (release.yml re-lowercases it) — a
+    /// case-sensitive compare would fail every Windows update with a
+    /// tamper-looking integrity error if that `.ToLower()` were dropped.
+    #[test]
+    fn checksum_comparison_is_case_insensitive_both_ways() {
+        let lower = "284cf42ebb952c76d41c083de26bf247fe919ca39e727593b198ee892da987bd";
+        let upper = lower.to_ascii_uppercase();
+
+        // Sidecar and computed digest, in every case combination.
+        assert!(checksum_matches(lower, lower));
+        assert!(checksum_matches(&upper, lower));
+        assert!(checksum_matches(lower, &upper));
+        // …and with the filename suffix the real sidecars carry.
+        assert!(checksum_matches(
+            &format!("{upper}  swarmllm-windows-x86_64-gpu.exe"),
+            lower
+        ));
+    }
+
+    /// The security property that matters more than any of the above: a
+    /// genuinely different binary must still be rejected.
+    #[test]
+    fn checksum_mismatch_is_still_rejected() {
+        let expected =
+            "284cf42ebb952c76d41c083de26bf247fe919ca39e727593b198ee892da987bd  swarmllm-linux-x86_64-cuda";
+        // One nibble different.
+        let tampered = "284cf42ebb952c76d41c083de26bf247fe919ca39e727593b198ee892da987be";
+        assert!(!checksum_matches(expected, tampered));
+        // Truncated digest must not pass as a prefix match.
+        assert!(!checksum_matches(expected, "284cf42e"));
+        assert!(!checksum_matches(expected, ""));
     }
 
     /// A GPU build must never resolve to the CPU asset: same os/arch, no GPU.
