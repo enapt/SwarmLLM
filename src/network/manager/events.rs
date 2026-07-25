@@ -529,15 +529,44 @@ impl NetworkManager {
             SwarmEvent::Behaviour(SwarmBehaviourEvent::Mdns(libp2p::mdns::Event::Discovered(
                 peers,
             ))) => {
+                // Group the batch by peer so a peer advertising several
+                // interfaces — the norm on WSL2/Docker: loopback + LAN +
+                // NAT-gateway (`10.255.255.254`) + link-local (`169.254/16`) —
+                // gets ONE dial carrying all of its addresses, not a separate
+                // concurrent dial per address. libp2p tries the addresses within
+                // a single dial and keeps exactly one connection, aborting the
+                // rest. The previous per-address loop fired N concurrent dials
+                // to the same peer; under `max_established_per_peer = 1` the
+                // extras are denied inconsistently, leaving a stale connection
+                // entry that silently breaks request_response routing — a lost
+                // tensor forward, and the residual of the NET-I5 churn bug.
+                //
+                // Do NOT add mDNS addresses to Kademlia (its periodic refresh
+                // would re-dial them all every 30s, recreating the churn);
+                // identify handles address exchange once connected.
+                let mut by_peer: std::collections::HashMap<libp2p::PeerId, Vec<libp2p::Multiaddr>> =
+                    std::collections::HashMap::new();
                 for (peer_id, addr) in peers {
-                    // Do NOT add mDNS addresses to Kademlia. Kademlia's periodic
-                    // routing table refresh dials all known addresses, creating
-                    // duplicate connections every 30s that corrupt request_response
-                    // routing. The identify protocol handles address exchange after
-                    // connection is established.
-                    if !self.swarm.is_connected(&peer_id) {
+                    by_peer.entry(peer_id).or_default().push(addr);
+                }
+                // Deterministic dialer: only the node with the smaller PeerId
+                // initiates the mDNS auto-dial; the larger-PeerId node waits to
+                // be dialed. Both sides run this rule, so exactly ONE of the pair
+                // dials — eliminating the bidirectional simultaneous-dial race
+                // where A→B and B→A both connect, `max_established_per_peer = 1`
+                // denies one on each side inconsistently, and the survivor can be
+                // a half-open connection that silently breaks request_response
+                // routing (a lost tensor forward; the core of the NET-I5 churn).
+                // Only affects LAN mDNS auto-discovery — bootstrap/DHT/relay dials
+                // are unchanged. The larger-PeerId side is still reached: the
+                // smaller side dials it, and the redial-with-jitter tick recovers
+                // if that dial is lost.
+                let local_bytes = self.swarm.local_peer_id().to_bytes();
+                for (peer_id, addrs) in by_peer {
+                    let we_dial = local_bytes < peer_id.to_bytes();
+                    if !self.swarm.is_connected(&peer_id) && we_dial {
                         tracing::info!(
-                            %peer_id, %addr,
+                            %peer_id, addr_count = addrs.len(),
                             "LAN peer discovered automatically — no configuration needed"
                         );
                         // Use Disconnected (not DisconnectedAndNotDialing) so mDNS
@@ -546,13 +575,13 @@ impl NetworkManager {
                         // because the stale bootstrap dial blocks mDNS.
                         let opts = libp2p::swarm::dial_opts::DialOpts::peer_id(peer_id)
                             .condition(libp2p::swarm::dial_opts::PeerCondition::Disconnected)
-                            .addresses(vec![addr])
+                            .addresses(addrs)
                             .build();
                         if let Err(e) = self.swarm.dial(opts) {
                             tracing::debug!(%peer_id, error = %e, "mDNS: dial skipped");
                         }
                     } else {
-                        tracing::debug!(%peer_id, "mDNS: already connected, skipping");
+                        tracing::debug!(%peer_id, we_dial, "mDNS: not dialing (already connected or peer is designated dialer)");
                     }
                     // Mark as LAN peer if we can derive their NodeId
                     if let Some(node_id) = self.peer_to_node.get(&peer_id) {
