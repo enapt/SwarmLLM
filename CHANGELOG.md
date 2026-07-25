@@ -2,6 +2,36 @@
 
 All notable changes to SwarmLLM are documented here.
 
+## [0.3.20-alpha] — 2026-07-25
+
+### Fixed
+
+- **The auto-updater works on NVIDIA/GPU builds again.** `swarmllm update` was
+  refusing to install the GPU binary — the download hit a size limit (500 MB)
+  that was set before the CUDA binary grew to about 1 GB, so the update aborted
+  with "binary too large" and every NVIDIA user was stuck updating by hand. The
+  limit is now 2 GB, with room to spare for future growth.
+- **More reliable connections between machines on the same network.** On hosts
+  with several network interfaces (common on WSL2 and Docker), two machines that
+  discovered each other could each open several connections at once; the wrong
+  one could quietly swallow distributed-inference traffic and stall a request.
+  Now exactly one connection forms per peer, so split-across-machines inference
+  on a LAN is steadier. Only affects local-network discovery.
+- **The first relayed distributed request no longer needs a retry.** When two
+  machines behind NAT jointly serve a model through the relay, the very first
+  computed result could be dropped and the request retried; the node now trusts
+  a peer that has just relayed to it, so the first request goes through.
+- **One out-of-date pool member no longer freezes a whole pool.** If a single
+  member's membership signature couldn't be verified (for example, they joined
+  on an older build), the entire pool's state updates were discarded for
+  everyone. Now that one member is skipped and the rest of the pool stays in
+  sync.
+
+### Changed
+
+- Faster GPU release builds — the Windows GPU build cache is now kept warm, so
+  releases stop rebuilding it from scratch each time.
+
 ## [0.3.19-alpha] — 2026-07-24
 
 ### Added
