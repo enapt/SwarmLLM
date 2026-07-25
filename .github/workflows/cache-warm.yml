@@ -82,6 +82,21 @@ jobs:
             target: x86_64-unknown-linux-gnu
             features: ""
             cuda_linux: false
+          # Windows GPU — the SECOND long pole. Before this cell existed, the
+          # Windows-GPU release rebuilt llama.cpp's Vulkan backend AND
+          # candle-kernels' CUDA PTX cold every single release (~30 min), while
+          # the Linux CUDA build already restored a warm cache from this
+          # workflow. This cell warms the identical `shared-key` the release
+          # restores. Every setup step + build env below mirrors release.yml's
+          # Windows-GPU cell byte-for-byte, or the key diverges and the release
+          # gets no hit. Runner image (windows-2022) is part of the key too.
+          - name: Windows x86_64 GPU
+            runner: windows-2022
+            target: x86_64-pc-windows-msvc
+            features: "--features windows-gpu"
+            cuda_linux: false
+            cuda_windows: true
+            vulkan: true
 
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
@@ -101,6 +116,7 @@ jobs:
           shared-key: release-${{ matrix.target }}-${{ matrix.features }}-gpuarch3
 
       - name: Install system dependencies
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y libssl-dev pkg-config
@@ -124,6 +140,56 @@ jobs:
           sudo apt-get install -y mold
           echo "RUSTFLAGS=-C link-arg=-fuse-ld=mold" >> "$GITHUB_ENV"
 
+      # ---- Windows GPU setup — mirrors release.yml's Windows-GPU cell so the
+      # warmed artefacts match what a release restores. See release.yml for the
+      # full rationale behind each step. ----
+
+      # Windows stays on CUDA 12.4 (Linux is on 12.8) — deliberate; see
+      # release.yml. Full sub-package set for cudarc dynamic-loading.
+      - name: Install CUDA toolkit (Windows)
+        if: matrix.cuda_windows
+        uses: Jimver/cuda-toolkit@4bd727d5619dc6fa323b1e76c3aa5dca94f5ec6d # v0.2.19
+        with:
+          cuda: '12.4.0'
+          method: 'network'
+          sub-packages: '["nvcc", "cudart", "cublas", "cublas_dev", "curand", "curand_dev", "nvrtc", "nvrtc_dev", "visual_studio_integration"]'
+
+      - name: Install Vulkan SDK
+        if: matrix.vulkan
+        uses: jakoch/install-vulkan-sdk-action@85a045da72257cc52d4b11e0d4125ab8a7b768e4 # v1
+        with:
+          vulkan_version: latest
+          install_runtime: true
+          cache: true
+
+      # nvcc shells out to cl.exe (MSVC) for candle-kernels host code.
+      - name: Setup MSVC (Windows GPU — nvcc needs cl.exe)
+        if: matrix.cuda_windows
+        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1
+        with:
+          arch: x64
+
+      # Make CUDA import libs (cudart.lib etc.) findable by the MSVC linker.
+      - name: Extend LIB with CUDA lib dir (Windows GPU)
+        if: matrix.cuda_windows
+        shell: pwsh
+        run: |
+          "LIB=$env:CUDA_PATH\lib\x64;$env:LIB" | Out-File -Append -FilePath $env:GITHUB_ENV -Encoding utf8
+
+      # Ninja avoids the vulkan-shaders-gen ExternalProject race the VS
+      # generator hits (see release.yml).
+      - name: Use Ninja generator (Windows GPU vulkan-shaders-gen race)
+        if: matrix.cuda_windows
+        shell: bash
+        run: echo "CMAKE_GENERATOR=Ninja" >> "$GITHUB_ENV"
+
+      # nvcc defaults to /MT; llama-cpp-sys-2 compiles /MD — force nvcc to /MD so
+      # the final link's CRT matches (see release.yml LNK2038 note).
+      - name: Force nvcc /MD on Windows GPU (CRT match with llama-cpp-sys-2)
+        if: matrix.cuda_windows
+        shell: bash
+        run: echo "NVCC_PREPEND_FLAGS=-Xcompiler /MD" >> "$GITHUB_ENV"
+
       # Same profile, features and env as the release build, so the cached
       # dependency artefacts are the ones a release will actually reuse.
       # A different profile or feature set would populate a cache the
@@ -134,5 +200,8 @@ jobs:
           # MUST match release.yml's build env exactly (compute cap AND arch
           # list), or the warmed cache has a different key than the release
           # build restores. See release.yml for the rationale behind 75 + list.
-          CUDA_COMPUTE_CAP: ${{ matrix.cuda_linux && '75' || '' }}
+          # CUDA_COMPUTE_CAP applies to BOTH CUDA builds (candle floor); the
+          # CMAKE arch list is llama.cpp-CUDA (Linux `cuda` only — Windows GPU
+          # uses the Vulkan backend, so it stays empty there).
+          CUDA_COMPUTE_CAP: ${{ (matrix.cuda_linux || matrix.cuda_windows) && '75' || '' }}
           CMAKE_CUDA_ARCHITECTURES: ${{ matrix.cuda_linux && '61-real;75-real;80-real;86-real;89-real;90-real;120-real;120-virtual' || '' }}
