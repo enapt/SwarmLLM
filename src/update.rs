@@ -338,8 +338,13 @@ impl UpdateChecker {
             }
         };
 
-        // Check Content-Length to reject absurdly large downloads before buffering
-        const MAX_UPDATE_SIZE: u64 = 500 * 1024 * 1024; // 500 MB
+        // Check Content-Length to reject absurdly large downloads before buffering.
+        // The CUDA/GPU release binary bundles candle + llama.cpp CUDA kernels and
+        // is ~1 GB (978 MB as of v0.3.19); the old 500 MB cap silently broke
+        // `swarmllm update` for every CUDA user (external report 2026-07-25).
+        // 2 GB leaves headroom for further kernel/arch growth while still
+        // rejecting a runaway download.
+        const MAX_UPDATE_SIZE: u64 = 2 * 1024 * 1024 * 1024; // 2 GB
         if let Some(content_length) = resp.content_length() {
             if content_length > MAX_UPDATE_SIZE {
                 return Err(SwarmError::Validation(format!(
