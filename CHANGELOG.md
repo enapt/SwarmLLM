@@ -2,6 +2,36 @@
 
 All notable changes to SwarmLLM are documented here.
 
+## [0.3.26-alpha] — 2026-07-26
+
+### Fixed
+
+- **Stray control tokens no longer appear in replies.** Some model files emit
+  their own end-of-turn markers into the answer text — sometimes malformed, with
+  characters transposed or missing, and sometimes before the real answer rather
+  than after it. Three previous releases each tried to fix this by adding more
+  markers to a list of exact text to look for, which could never work: the marker
+  arrives split across several pieces, and a mangled one matches nothing.
+
+  Replies are now scrubbed of known control tokens in any spelling — complete,
+  cut short, transposed, or with extra characters — and the scrubbing happens
+  where replies are produced rather than where they are read, so it applies
+  however a request is routed. A marker appearing *before* the answer no longer
+  discards the answer with it, which had turned the leak into an empty reply.
+
+  Only known control tokens are removed, so a reply containing your own
+  angle-bracket construct is left alone.
+- **Token counts on background responses.** A response created with
+  `background: true` reported zero tokens used even after completing, while the
+  same request run normally reported real numbers. The foreground path was fixed
+  in the previous release; this one had the same gap.
+
+### Changed
+
+- The two API surfaces now share a single definition of the text that tells a
+  local model how to request a tool. They previously held identical copies, and
+  the wording has to match for tool calls to be recognised on both.
+
 ## [0.3.25-alpha] — 2026-07-25
 
 ### Fixed

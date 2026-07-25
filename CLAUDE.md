@@ -196,7 +196,35 @@ All 20 build phases complete. All subsystems wired — no stubs. **1218 lib + 79
 
 Per-round history lives in `~/.claude/projects/-home-user-SwarmLLM/memory/round_log_*.md` and the CHANGELOG; `docs/ARCHITECTURE.md` is the canonical architecture. This section keeps only the current release line plus one-line prior-round pointers.
 
-### Latest — v0.3.25-alpha (2026-07-25): the "one invariant, N paths" release
+### Latest — v0.3.26-alpha (2026-07-26): control-token scrubbing at the SOURCE
+
+Closes the template-leak reported across .22/.24/.25 — **the 4th attempt, and the
+first made after downloading the tester's exact GGUF and reproducing it.**
+
+- **Why 3 fixes failed**: each only edited the LIST of exact stop strings. Actual
+  mechanics: (a) a marker decodes across SEVERAL tokens and `model_worker.rs`
+  checks `find_stop_sequence` after pushing each one, so earlier pieces were
+  already emitted; (b) the model produced `<|im_end>|` — last two chars
+  TRANSPOSED, not a prefix of anything, and appearing mid-string.
+- **Fix**: `inference::strip_control_token_artifacts` removes spans naming a
+  known control token (`CONTROL_TOKEN_NAMES`) in ANY spelling. Name-based, so a
+  user's own `<|custom|>` survives. **ORDER MATTERS** — strip BEFORE
+  stop-truncation, since some models emit a marker BEFORE the answer and
+  truncating threw the answer away (leak → empty reply).
+- **Applied at the THREE text SOURCES, not at consumers**: `executor.rs`,
+  `process_pool.rs`, `pipeline/distributed.rs`. I first assumed two sources and
+  removed the distributed one — the leak returned instantly on the cold-start
+  path, which is the request that takes it. Consumers are many; sources are
+  three.
+- **Diagnostic that cracked it**: compare streaming vs non-streaming. Streaming
+  was perfectly clean, proving model + decode were healthy and the corruption
+  was ours. Also ruled out a mismatched-template file (header is well-formed
+  Llama-3, `eos=128009`) and a q8_0 dequant bug (long prompts → coherent prose).
+- Background-response usage: same `include_usage` gap as .25's foreground fix.
+- Gotchas #167-168. Credit-fairness question now carries Petals evidence
+  (`docs/FUTURE_WORK.md`).
+
+### v0.3.25-alpha (2026-07-25): the "one invariant, N paths" release
 
 Everything here is the SAME structural bug found in four different places, all
 surfaced by live testing rather than code review. **When a shared invariant is
