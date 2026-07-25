@@ -196,7 +196,16 @@ All 20 build phases complete. All subsystems wired — no stubs. **1195 lib test
 
 Per-round history lives in `~/.claude/projects/-home-user-SwarmLLM/memory/round_log_*.md` and the CHANGELOG; `docs/ARCHITECTURE.md` is the canonical architecture. This section keeps only the current release line plus one-line prior-round pointers.
 
-### Latest — v0.3.19-alpha (2026-07-24): distributed inference across NAT + settings-save fix
+### Latest — v0.3.20-alpha (2026-07-25): auto-updater unblocked for GPU + LAN/relay/pool fixes
+
+- **Auto-updater size cap 500MB→2GB** (`update.rs::MAX_UPDATE_SIZE`) — the ~1GB CUDA binary was rejected as "too large", so `swarmllm update` failed for EVERY NVIDIA user (tester report). Old build still has the 500MB cap → GPU users need ONE manual update to v0.3.20, then auto-update works.
+- **Deterministic LAN dialer** (`network/manager/events.rs` mDNS Discovered handler) — group a peer's addresses into ONE dial + only the smaller-PeerId node dials, so no bidirectional simultaneous-dial race → one connection/peer. Fixes duplicate-connection churn on multi-interface hosts (WSL2/Docker) that could silently swallow a distributed-inference forward. LAN/mDNS only.
+- **Relay cold-start fix** (`state.relay_proven_features`) — a serving node no longer drops the FIRST relayed `LayerResult` to a coordinator it knows only via the relay (records proven TENSOR_RELAY/RELAY from the inbound relayed msg instead of waiting for capability gossip).
+- **Pool skip-member** (`pool/manager/gossip.rs`) — one unverifiable member (e.g. pre-R147 signature) no longer discards the whole pool's state gossip; the bad member is skipped, the rest syncs.
+- **CI: Windows-GPU cache-warm** — was never warmed → cold ~30min rebuild each release; now warmed like Linux CUDA.
+- **Cross-network inference VALIDATED** via a native-Windows-node test (WSL→Windows interop): a clean native node served a model from our node over the real internet, proving the remote-generate path + networking work end-to-end. The intermittent silent-drops seen with one external tester node were **that node's serving side**, NOT our code. The same-host 4-interface churn (partly addressed by the deterministic dialer) is a separate LAN edge — see `docs/FUTURE_WORK.md` + `memory/round_log_distributed_conn_bug.md`.
+
+### v0.3.19-alpha (2026-07-24): distributed inference across NAT + settings-save fix
 
 - **Tensor relay** — distributed (multi-shard) inference between two un-connectable NAT'd nodes now runs over the sealed app-relay instead of the flaky libp2p circuit (`SwarmRequest::RelayedTensor` / `WIRE_TAG_RELAYED_TENSOR`, ephemeral-seal for the target's static key, `features::TENSOR_RELAY`; forward + result each a separate relayed request; `try_relay_tensor` + relay-unwrap stamps origin `sender_peer_bytes`). Completes `docs/NETWORKING_PLAN.md`. Detail: `memory/round_log_networking_plan.md`.
 - **Settings-save UI fix** — a dead R110 element (`settings-auto-manage-storage`) threw before the try/catch, aborting *every* settings save (nickname, contribution, etc.) when auto-manage was on.

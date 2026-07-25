@@ -44,6 +44,44 @@ direct Tier-4K path) on the relayed path — split a large forward into
 no measured workload has hit the cap yet; revisit if a large-model + long-prompt
 distributed run over pure app-relay reports a dropped forward.
 
+### Connection churn on multi-interface hosts — deterministic dialer partial (2026-07-25)
+
+**Shipped (v0.3.20, `network/manager/events.rs`):** the mDNS `Discovered`
+handler now groups a peer's addresses into ONE dial and only the smaller-PeerId
+node dials, eliminating the *bidirectional* simultaneous-dial race so exactly one
+connection forms per peer. This is the LAN/mDNS fix for the multi-connection
+churn that (on hosts advertising several interfaces — WSL2's `10.255.255.254`
+NAT-gateway + `169.254` link-local + Docker bridge + LAN) let libp2p route a
+tensor forward to a stale/half-open connection and silently drop it (upstream
+"keeps all connections, uses an arbitrary one": go-libp2p #634 / rust-libp2p
+#912).
+
+**What it does NOT cover, and what was ruled out:**
+- **Only the mDNS (LAN) dial path is gated.** Internet peers discovered via
+  bootstrap/DHT/PEX go through a different dial path that this rule does not
+  touch. If the same multi-connection churn is ever confirmed for internet
+  peers, extend the deterministic-dialer discipline (and grouped dialing) to
+  those paths too — that is the remaining connection-management work.
+- **Same-host 4-interface worst case is not 100% eliminated.** On a single
+  loopback host with 4 mutually-reachable interfaces + zero holder redundancy,
+  a residual stale connection can still form (reconnect/PEX paths aren't gated).
+  Real deployments (distinct hosts + `min_replicas ≥ 2`) tolerate this via
+  failover; the pathological same-host repro does not.
+- **NOT our bug — the cross-NAT failure was tester-side.** A native-Windows-node
+  test (WSL→Windows interop) proved cross-network inference works end-to-end: a
+  clean native node served a model from our node over the real internet. The
+  intermittent silent-drops seen against one external tester node were **that
+  node's serving side** (it never acknowledged inference requests from *any*
+  requester, while ours served fine), not a routing/connection bug in shipped
+  code. Ping (liveness) and the persistent-stream path were both tried and are
+  the wrong tool — the connection is alive, it's connection *selection*. Full
+  investigation: `memory/round_log_distributed_conn_bug.md`.
+
+**Trigger to build the internet-peer extension:** a reproduction on distinct
+hosts (not same-host loopback, not a tester-side serving failure) showing the
+multi-connection stale-route drop. Until then the LAN fix + failover cover the
+observed cases.
+
 ## Demand-driven resource management — VRAM done, disk contraction deferred (2026-07-24)
 
 External report (`Rapport_VRAM_Idle`): a contributor node holds models in VRAM
