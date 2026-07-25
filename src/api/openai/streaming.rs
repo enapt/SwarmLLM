@@ -39,6 +39,7 @@ fn build_chat_completion_response(
     completion_tokens: u32,
     session_id: Option<String>,
     token_logprobs: &[crate::inference::router::TokenLogProbEntry],
+    tools_requested: bool,
 ) -> ChatCompletionResponse {
     let logprobs = if token_logprobs.is_empty() {
         None
@@ -63,6 +64,35 @@ fn build_chat_completion_response(
                 .collect(),
         })
     };
+    // A local model can only express a tool call as text, so recover it here.
+    // Gated on the request actually carrying tools: otherwise a model asked to
+    // "reply in JSON" could have a legitimate answer reinterpreted as a call.
+    // Truncated output deliberately stays text (see `api::tool_parse`).
+    let (content, tool_calls, finish_reason) = if tools_requested {
+        match crate::api::tool_parse::parse_tool_calls(&content) {
+            Some(parsed) => {
+                let calls: Vec<crate::api::openai::types::ToolCall> = parsed
+                    .into_iter()
+                    .map(|c| crate::api::openai::types::ToolCall {
+                        id: c.id,
+                        tool_type: "function".into(),
+                        function: crate::api::openai::types::FunctionCall {
+                            name: c.name,
+                            arguments: c.arguments,
+                        },
+                    })
+                    .collect();
+                // OpenAI sends content: null alongside tool_calls, and
+                // finish_reason must be "tool_calls" or clients never dispatch
+                // them (the reported response said "length").
+                (None, Some(calls), "tool_calls".to_string())
+            }
+            None => (Some(content), None, finish_reason),
+        }
+    } else {
+        (Some(content), None, finish_reason)
+    };
+
     ChatCompletionResponse {
         id: request_id,
         object: "chat.completion",
@@ -72,8 +102,8 @@ fn build_chat_completion_response(
             index: 0,
             message: ChatMessageResponse {
                 role: "assistant".into(),
-                content: Some(content),
-                tool_calls: None,
+                content,
+                tool_calls,
             },
             finish_reason,
             logprobs,
@@ -332,6 +362,7 @@ pub(super) async fn router_inference(
         output.completion_tokens,
         output.session_id,
         &output.token_logprobs,
+        req.tools.as_ref().is_some_and(|t| !t.is_empty()),
     );
 
     Ok(Json(response).into_response())
@@ -606,6 +637,7 @@ async fn router_inference_stream(
 /// the locally loaded SplitModel. Much faster for single-node inference
 /// because it avoids per-token pipeline coordination overhead.
 /// Builds the prompt from the model's own chat template to avoid template mismatch.
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn split_non_stream_response(
     state: AppState,
     request_id: String,
@@ -614,6 +646,7 @@ pub(super) async fn split_non_stream_response(
     messages: Vec<ChatMessage>,
     params: SamplingParams,
     model_id: crate::types::ModelId,
+    tools_requested: bool,
 ) -> Result<axum::response::Response, ApiError> {
     let output =
         run_split_generate(&state, &model_id, &messages, params.clone(), &request_id).await?;
@@ -628,6 +661,7 @@ pub(super) async fn split_non_stream_response(
         output.completion_tokens,
         None,
         &[],
+        tools_requested,
     );
 
     Ok(Json(response).into_response())

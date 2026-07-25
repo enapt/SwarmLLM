@@ -27,11 +27,46 @@ fn build_messages_response(
     request_id: String,
     model: String,
     output: InferenceOutput,
+    tools_requested: bool,
 ) -> MessagesResponse {
     let stop_reason = super::convert::map_finish_reason_with_match(
         &output.finish_reason,
         output.matched_stop_sequence.as_deref(),
     );
+
+    // A local model expresses a tool call as text, so recover it into proper
+    // `tool_use` blocks. Gated on the request carrying tools so a model asked
+    // to reply in JSON keeps its answer as text. Truncated output stays text
+    // (see `api::tool_parse`).
+    if tools_requested {
+        if let Some(parsed) = crate::api::tool_parse::parse_tool_calls(&output.content) {
+            let blocks: Vec<super::types::ResponseContentBlock> = parsed
+                .into_iter()
+                .map(|c| super::types::ResponseContentBlock::ToolUse {
+                    id: c.id,
+                    name: c.name,
+                    // Anthropic wants `input` as an object, not a string.
+                    // A tool with no arguments becomes `{}` rather than being
+                    // dropped.
+                    input: serde_json::from_str(&c.arguments)
+                        .unwrap_or_else(|_| serde_json::json!({})),
+                })
+                .collect();
+            if !blocks.is_empty() {
+                return MessagesResponse::with_content(
+                    request_id,
+                    model,
+                    blocks,
+                    // Per the Anthropic spec a response containing tool_use
+                    // reports "tool_use"; clients route on this to dispatch.
+                    "tool_use",
+                    output.prompt_tokens,
+                    output.completion_tokens,
+                );
+            }
+        }
+    }
+
     MessagesResponse::text_with_stop(
         request_id,
         model,
@@ -76,12 +111,13 @@ pub(super) async fn anthropic_non_stream(
     params: SamplingParams,
     request_id: String,
     model: String,
+    tools_requested: bool,
 ) -> Result<axum::response::Response, ApiError> {
     let inference_req =
         InferenceRequest::local(ModelId(model.clone()), messages, params, false, None, None);
 
     let output = crate::api::submit_to_router(&router_tx, inference_req).await?;
-    let response = build_messages_response(request_id, model, output);
+    let response = build_messages_response(request_id, model, output, tools_requested);
     Ok(Json(response).into_response())
 }
 
@@ -247,6 +283,7 @@ pub(super) async fn anthropic_split_non_stream(
     params: SamplingParams,
     request_id: String,
     model: String,
+    tools_requested: bool,
 ) -> Result<axum::response::Response, ApiError> {
     let requested_mid = crate::types::ModelId(model.clone());
     let output = crate::api::openai::run_split_generate(
@@ -258,7 +295,7 @@ pub(super) async fn anthropic_split_non_stream(
     )
     .await?;
 
-    let response = build_messages_response(request_id, model, output);
+    let response = build_messages_response(request_id, model, output, tools_requested);
     Ok(Json(response).into_response())
 }
 

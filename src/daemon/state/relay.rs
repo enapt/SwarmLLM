@@ -82,6 +82,28 @@ impl super::SharedState {
         );
     }
 
+    /// Record a failed inference for the diagnostics ring buffer.
+    ///
+    /// Oldest-first eviction at [`super::MAX_RECENT_FAILURES`]. Best-effort: a
+    /// poisoned lock is skipped rather than propagated, because losing a
+    /// diagnostic record must never affect the request path.
+    pub fn record_request_failure(&self, failure: super::RequestFailure) {
+        if let Ok(mut buf) = self.recent_failures.lock() {
+            if buf.len() >= super::MAX_RECENT_FAILURES {
+                buf.pop_front();
+            }
+            buf.push_back(failure);
+        }
+    }
+
+    /// Snapshot of recent failures, oldest first.
+    pub fn recent_failures_snapshot(&self) -> Vec<super::RequestFailure> {
+        self.recent_failures
+            .lock()
+            .map(|b| b.iter().cloned().collect())
+            .unwrap_or_default()
+    }
+
     /// Whether this node should act as an application-level inference relay.
     ///
     /// The single source of truth for the relay-forwarder decision — the DHT

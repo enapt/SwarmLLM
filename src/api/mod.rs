@@ -216,6 +216,7 @@ pub mod pool;
 pub mod providers;
 pub mod server;
 pub mod sse;
+pub mod tool_parse;
 pub mod websocket;
 
 /// Increment the requests_made counter (best-effort, non-blocking).

@@ -460,6 +460,7 @@ pub async fn chat_completions(
                 internal_messages.clone(),
                 params,
                 requested_mid.clone(),
+                req.tools.as_ref().is_some_and(|t| !t.is_empty()),
             )
             .await;
         }

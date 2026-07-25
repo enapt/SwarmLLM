@@ -40,6 +40,25 @@ pub use tp_allreduce::TpAllReduceCollector;
 
 // ---- Main SharedState ----
 
+/// How many recent inference failures to retain for diagnostics. Enough to show
+/// a pattern (one flaky peer, one bad model) without turning into a log.
+pub const MAX_RECENT_FAILURES: usize = 20;
+
+/// One failed inference, retained for `GET /api/admin/diagnostics`.
+#[derive(Debug, Clone)]
+pub struct RequestFailure {
+    pub at: chrono::DateTime<chrono::Utc>,
+    pub request_id: String,
+    pub model: String,
+    /// Where it ran: `None` for local, else the peer that served the first
+    /// segment. This is the field that distinguishes "this node is broken" from
+    /// "one peer is broken", which is the distinction we have repeatedly had to
+    /// reconstruct by hand from two sides' logs.
+    pub served_by: Option<String>,
+    pub error: String,
+    pub elapsed_ms: u64,
+}
+
 pub struct SharedState {
     // Core infrastructure (accessed by nearly every subsystem)
     pub config: Config,
@@ -202,6 +221,15 @@ pub struct SharedState {
     /// when a user reports slow or failing remote inference.
     pub hole_punch_successes: AtomicU64,
     pub hole_punch_failures: AtomicU64,
+    /// The most recent inference failures, newest last, capped at
+    /// [`MAX_RECENT_FAILURES`].
+    ///
+    /// Exists so "why did my request fail?" is answerable from a single
+    /// diagnostics paste. Previously it required the user to have been running
+    /// with `-v`, reproduce the failure, and send logs — a multi-round exchange
+    /// that usually lost the original occurrence. A bounded in-memory ring costs
+    /// nothing and turns most reports into one command.
+    pub recent_failures: std::sync::Mutex<std::collections::VecDeque<RequestFailure>>,
     pub detected_region: RwLock<Option<String>>,
     pub shard_bytes_served: AtomicU64,
     pub relay_seconds_served: AtomicU64,
@@ -545,6 +573,7 @@ impl SharedState {
             publicly_reachable: std::sync::atomic::AtomicBool::new(false),
             hole_punch_successes: AtomicU64::new(0),
             hole_punch_failures: AtomicU64::new(0),
+            recent_failures: std::sync::Mutex::new(std::collections::VecDeque::new()),
             vision_modules: DashMap::new(),
             encrypted_pipeline_models: {
                 let map = DashMap::new();

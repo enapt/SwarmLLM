@@ -40,6 +40,39 @@ pub(super) fn to_internal_messages(req: &MessagesRequest) -> Vec<ChatMessage> {
         }
     }
 
+    // Tell a local model about its tools. Previously this path validated
+    // `req.tools` and forwarded them to the cloud proxy but never put them in
+    // the prompt, so a local model was never informed they existed and would
+    // reply "I'm unable to access external tools" (external report
+    // 2026-07-25). A cloud model gets tools natively via the proxy and is
+    // unaffected by this — the prompt injection only matters when we are the
+    // one running the model.
+    if let Some(ref tools) = req.tools {
+        if !tools.is_empty() {
+            let specs: Vec<(String, Option<String>, Option<String>)> = tools
+                .iter()
+                .filter_map(|t| {
+                    let name = t.get("name")?.as_str()?.to_string();
+                    let desc = t
+                        .get("description")
+                        .and_then(|d| d.as_str())
+                        .map(str::to_string);
+                    // Anthropic calls it `input_schema`; OpenAI calls the same
+                    // thing `parameters`.
+                    let schema = t.get("input_schema").map(|s| s.to_string());
+                    Some((name, desc, schema))
+                })
+                .collect();
+            if !specs.is_empty() {
+                messages.push(ChatMessage {
+                    role: Role::System,
+                    content: crate::api::tool_parse::format_tool_prompt(&specs),
+                    images: vec![],
+                });
+            }
+        }
+    }
+
     for msg in &req.messages {
         let role = match msg.role.as_str() {
             "user" => Role::User,

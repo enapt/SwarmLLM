@@ -226,6 +226,33 @@ impl MessagesResponse {
         )
     }
 
+    /// Build a response from explicit content blocks — used when the model
+    /// produced `tool_use` rather than plain text, which needs a block list
+    /// instead of a single string.
+    pub(super) fn with_content(
+        id: String,
+        model: String,
+        content: Vec<ResponseContentBlock>,
+        stop_reason: &str,
+        input_tokens: u32,
+        output_tokens: u32,
+    ) -> Self {
+        Self {
+            id,
+            response_type: "message",
+            role: "assistant",
+            content,
+            model,
+            stop_reason: Some(stop_reason.into()),
+            stop_sequence: None,
+            usage: AnthropicUsage {
+                input_tokens,
+                output_tokens,
+                ..Default::default()
+            },
+        }
+    }
+
     /// Like `text` but also fills the `stop_sequence` field per Anthropic
     /// spec. When `stop_reason == "stop_sequence"` the matched custom stop
     /// string MUST be reported here; clients route on it for multi-stop

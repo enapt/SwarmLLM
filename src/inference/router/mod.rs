@@ -934,6 +934,30 @@ impl InferenceRouter {
                         error = %e,
                         "DIAG: inference FAILED"
                     );
+                    // Retain it for `GET /api/admin/diagnostics`. A user
+                    // reporting "inference doesn't work" can then paste one
+                    // command instead of being asked to enable -v, reproduce,
+                    // and send logs — by which point the original failure is
+                    // usually gone.
+                    //
+                    // The serving peer is the single most useful field: it is
+                    // what separates "this node is broken" from "one peer is
+                    // broken", a distinction we have repeatedly had to
+                    // reconstruct by correlating two machines' logs. Read from
+                    // `active_pipelines` before `finalize_request` clears it;
+                    // absent means the request ran locally.
+                    let served_by = shared_state
+                        .active_pipelines
+                        .get(&request.id)
+                        .and_then(|a| a.segments.first().map(|s| s.node_id.to_string()));
+                    shared_state.record_request_failure(crate::daemon::state::RequestFailure {
+                        at: chrono::Utc::now(),
+                        request_id: request.id.to_string(),
+                        model: request.model_id.0.clone(),
+                        served_by,
+                        error: e.to_string(),
+                        elapsed_ms: elapsed.as_millis() as u64,
+                    });
                 }
             }
 

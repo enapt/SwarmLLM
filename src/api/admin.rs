@@ -227,6 +227,55 @@ pub async fn diagnostics(State(state): State<AppState>) -> impl axum::response::
         let _ = writeln!(out, "  {}", entry.key());
     }
 
+    // Recent inference failures. The first thing to look at when a user says
+    // "inference doesn't work", and previously unavailable without asking them
+    // to re-run with -v and reproduce.
+    {
+        let failures = ss.recent_failures_snapshot();
+        let _ = writeln!(
+            out,
+            "\n-- recent inference failures ({}) --",
+            failures.len()
+        );
+        if failures.is_empty() {
+            let _ = writeln!(out, "  (none since start)");
+        }
+        // Newest first — that is what someone debugging just-now wants.
+        for f in failures.iter().rev() {
+            let where_ = match &f.served_by {
+                Some(peer) => format!("peer {}", &peer[..peer.len().min(16)]),
+                None => "locally".to_string(),
+            };
+            let _ = writeln!(
+                out,
+                "  {} {} [{}] served {} after {}ms\n      {}",
+                f.at.format("%H:%M:%SZ"),
+                &f.request_id[..f.request_id.len().min(8)],
+                f.model,
+                where_,
+                f.elapsed_ms,
+                f.error
+            );
+        }
+        // Repeated failures against one peer is the signature we have
+        // historically taken rounds to spot; count it explicitly.
+        let mut per_peer: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+        for f in &failures {
+            if let Some(p) = &f.served_by {
+                *per_peer.entry(p.as_str()).or_default() += 1;
+            }
+        }
+        let mut worst: Vec<_> = per_peer.into_iter().filter(|(_, n)| *n >= 2).collect();
+        worst.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
+        for (peer, n) in worst {
+            let _ = writeln!(
+                out,
+                "  NOTE: {n} of these were served by peer {} — suspect that peer, not this node",
+                &peer[..peer.len().min(16)]
+            );
+        }
+    }
+
     // NAT traversal. "Is this node stuck behind the relay?" is the first
     // question worth asking when remote inference is slow or failing, and it
     // used to be unanswerable — DCUtR emitted no logs at all.
