@@ -527,10 +527,12 @@ impl PipelineExecutor {
 
         // Strip trailing partial stop strings (e.g. "<|user" when stop is "<|user|>").
         crate::inference::trim_trailing_partial_stop(&mut generated_text, &stop_strings);
-        // Same defence as the split path: a model whose file metadata
-        // disagrees with its weights emits another family's control tokens in
-        // spellings no stop string matches. Kept beside the partial-stop trim
-        // so the two are maintained together.
+        // THIRD source of generated text, alongside `ModelExecutor` and
+        // `ModelProcessPool`: this path assembles the reply from remote
+        // pipeline segments, so neither of those strips applies to it. Removing
+        // this on the assumption there were only two sources let a control
+        // token leak straight back into the first request after a restart —
+        // which is the request that takes this path.
         crate::inference::strip_control_token_artifacts(&mut generated_text);
 
         // Batch credit write — one DB persist for the entire request instead of per-token.
