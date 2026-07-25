@@ -394,7 +394,7 @@ pub(super) async fn anthropic_split_stream(
         send_sse_preamble(&sse_tx, &rid, &model).await;
 
         let requested_mid = crate::types::ModelId(model_for_lookup);
-        let (mut token_rx, failure) = match crate::api::openai::spawn_split_stream(
+        let (mut token_rx, failure, _usage) = match crate::api::openai::spawn_split_stream(
             &state,
             &requested_mid,
             &messages,

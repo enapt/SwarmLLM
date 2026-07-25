@@ -449,6 +449,11 @@ pub async fn chat_completions(
                 params,
                 requested_mid.clone(),
                 req.tools.as_ref().is_some_and(|t| !t.is_empty()),
+                req.extras
+                    .get("stream_options")
+                    .and_then(|v| v.get("include_usage"))
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false),
             )
             .await
             .into_response());

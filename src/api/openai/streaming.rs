@@ -121,11 +121,19 @@ fn build_chat_completion_response(
 /// tell the client instead of closing the stream silently.
 pub type SplitStreamFailure = std::sync::Arc<std::sync::Mutex<Option<String>>>;
 
-/// A local split-model stream: the token receiver plus the failure slot to
-/// consult if the stream ends without producing any tokens.
+/// Token counts from a completed local split-model generation.
+///
+/// The counts come back on the `generate` future, not on the token stream, so
+/// they have to be carried out of the spawned task separately — the same shape
+/// as [`SplitStreamFailure`].
+pub type SplitStreamUsage = std::sync::Arc<std::sync::Mutex<Option<(u32, u32)>>>;
+
+/// A local split-model stream: the token receiver, the failure slot to consult
+/// if the stream ends without producing tokens, and the final token counts.
 pub type SplitStream = (
     tokio::sync::mpsc::Receiver<crate::inference::router::StreamingTokenEvent>,
     SplitStreamFailure,
+    SplitStreamUsage,
 );
 
 pub fn spawn_split_stream(
@@ -167,6 +175,12 @@ pub fn spawn_split_stream(
     // external report of 2026-07-25.
     let failure: SplitStreamFailure = std::sync::Arc::new(std::sync::Mutex::new(None));
     let failure_sink = failure.clone();
+    // `stream_options.include_usage` asks for real token counts on a streamed
+    // response. They arrive on the generate future rather than the token
+    // stream, so capture them here (external report 2026-07-25: streamed
+    // responses reported {0,0,0} while the non-streaming equivalent did not).
+    let usage: SplitStreamUsage = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let usage_sink = usage.clone();
     let pool = state.shared_state.model_process_pool.clone();
     let model_id = model_id.clone();
     let layer_range = meta.layer_range;
@@ -186,6 +200,11 @@ pub fn spawn_split_stream(
         );
         tokio::select! {
             result = generate => {
+                if let Ok(ref out) = result {
+                    if let Ok(mut slot) = usage_sink.lock() {
+                        *slot = Some((out.prompt_tokens, out.completion_tokens));
+                    }
+                }
                 if let Err(e) = result {
                     // Streaming channel closes when this scope ends. Without the
                     // log the SSE stream silently truncates with no operator-
@@ -221,7 +240,7 @@ pub fn spawn_split_stream(
             }
         }
     });
-    Some((token_rx, failure))
+    Some((token_rx, failure, usage))
 }
 
 /// Submit a streaming inference request to the router.
@@ -765,6 +784,7 @@ pub(super) async fn split_stream_response(
     params: SamplingParams,
     model_id: crate::types::ModelId,
     tools_requested: bool,
+    include_usage: bool,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     let (tx, rx) = tokio::sync::mpsc::channel::<StreamEvent>(64);
     let request_id_inner = request_id.clone();
@@ -781,7 +801,7 @@ pub(super) async fn split_stream_response(
         }
 
         // Spawn split-model generation and get token receiver
-        let (mut token_rx, failure) =
+        let (mut token_rx, failure, usage_slot) =
             match spawn_split_stream(&state, &model_id, &messages, params, &request_id) {
                 Some(pair) => pair,
                 None => {
@@ -887,6 +907,23 @@ pub(super) async fn split_stream_response(
                 let _ =
                     crate::api::sse_send_live(&tx, StreamEvent::Error { message: reason }).await;
                 finish = "error".to_string();
+            }
+        }
+
+        // Terminal usage chunk, matching what the router path already emits when
+        // `stream_options.include_usage` is set. Without this the local
+        // fast path reported {0,0,0} on an otherwise identical request.
+        if include_usage {
+            let counts = usage_slot.lock().ok().and_then(|s| *s);
+            if let Some((prompt_tokens, completion_tokens)) = counts {
+                let _ = crate::api::sse_send_live(
+                    &tx,
+                    StreamEvent::Usage {
+                        prompt_tokens,
+                        completion_tokens,
+                    },
+                )
+                .await;
             }
         }
 

@@ -196,7 +196,37 @@ All 20 build phases complete. All subsystems wired — no stubs. **1211 lib + 79
 
 Per-round history lives in `~/.claude/projects/-home-user-SwarmLLM/memory/round_log_*.md` and the CHANGELOG; `docs/ARCHITECTURE.md` is the canonical architecture. This section keeps only the current release line plus one-line prior-round pointers.
 
-### Latest — v0.3.24-alpha (2026-07-25): tester retest — two half-fixes closed
+### Latest — v0.3.25-alpha (2026-07-25): the "one invariant, N paths" release
+
+Everything here is the SAME structural bug found in four different places, all
+surfaced by live testing rather than code review. **When a shared invariant is
+implemented per-path, fixing the path you can see is not fixing the bug.**
+
+- **Template stop markers** — `run_split_generate` (NON-streaming split path)
+  never applied them; only the streaming sibling did. Now both route through
+  `with_template_stops(params, chat_template)`, whose doc comment states that
+  forgetting it is the recurring bug. Verified live: trailing
+  `<|eom_id|><|start_header_id|>assistant<|end_header_id|>` gone.
+- **`include_usage` / `StreamEvent::Usage`** — existed ONLY in
+  `router_inference_stream`; `split_stream_response` never emitted it, so a
+  locally-held model always reported `{0,0,0}`. Added `SplitStreamUsage` slot
+  (same pattern as `SplitStreamFailure` — counts arrive on the `generate`
+  future, not the token stream). **My first fix here was wrong**: I opted into
+  usage on the Responses side but the serving path didn't implement it. Only
+  running the request caught it.
+- **Responses API had NO tool cap** while chat + Anthropic both enforce
+  `MAX_TOOLS = 128` (matches OpenAI's documented limit). Tester sent 33
+  expecting rejection — under the cap either way, so their test couldn't have
+  found it; the gap was real regardless.
+- **Dashboard chat**: one silent retry when a reply comes back empty (cold
+  model). Refactored the inline SSE closure to a named `onChunk` so the retry
+  can reuse it — verified in-browser, chat replies normally, zero console errors.
+
+Prior 4 instances this session: `spawn_split_stream` stop-strings,
+`anthropic_stream` (router) tool buffering, `split_stream_response` tool
+buffering. Gotchas #165-166.
+
+### v0.3.24-alpha (2026-07-25): tester retest — two half-fixes closed
 
 External retest of v0.3.22 found `/v1/messages` tools fully fixed but two gaps:
 

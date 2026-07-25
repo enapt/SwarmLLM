@@ -2,6 +2,32 @@
 
 All notable changes to SwarmLLM are documented here.
 
+## [0.3.25-alpha] — 2026-07-25
+
+### Fixed
+
+- **Template markers no longer appear in replies from non-streamed requests.**
+  The previous fix only covered streaming; the non-streaming path never applied
+  the stop markers a model's own template defines, so a reply could run to the
+  token limit emitting `<|im_end|>` and similar as visible text. Both paths now
+  share one implementation.
+- **Streamed responses report real token counts.** `/v1/responses` with
+  `stream:true` returned zeros while the identical non-streaming request
+  reported real numbers. The counts were always available; they simply were
+  never requested, and the path serving locally-held models never sent them at
+  all.
+- **The chat page recovers on its own when a model is still loading.** The first
+  message after switching models could arrive before the model finished
+  starting, showing an error. Sending the same message again always worked, so
+  the page now does that for you — once, so a genuinely broken model still
+  reports a problem instead of retrying forever.
+
+### Changed
+
+- The responses API now caps the number of tools per request at 128, matching
+  the other two API surfaces and what OpenAI allows. It previously had no limit
+  at all, and every tool definition is added to the prompt and counted as input.
+
 ## [0.3.24-alpha] — 2026-07-25
 
 ### Fixed
