@@ -2,6 +2,54 @@
 
 All notable changes to SwarmLLM are documented here.
 
+## [0.3.21-alpha] — 2026-07-25
+
+### Fixed
+
+- **Two machines behind home routers can now connect directly to each other.**
+  Establishing a direct link between two such machines needs both of them to
+  briefly hold two connections at once, but a limit set elsewhere in the code
+  refused the second one — so the link was never completed and traffic kept
+  going the long way round, through a middleman machine. Those middleman slots
+  were then never released either, and once they ran out, a machine could drop
+  out of reach entirely rather than simply falling back to the slower path.
+  **Both machines need this version for a direct link to form.**
+- **A machine reachable only through a middleman can now serve inference at
+  all.** Until now it was skipped when choosing where to send work, so the
+  relay could rescue a connection that was already working but could never
+  make an out-of-reach machine usable — the situation it exists for. Such
+  machines are now used, ranked behind directly reachable ones.
+- **Requests no longer keep taking the slow path once a fast one exists.**
+  Traffic to a machine was spread evenly across every connection to it,
+  including the slower relayed one, so even after a direct link was available
+  half the requests ignored it.
+
+### Added
+
+- **Publicly reachable machines now help relay traffic automatically.** Relay
+  capacity previously came only from machines started with `--anchor`, which
+  meant every pair of home users depended on a handful of them. Any machine
+  confirmed reachable from the internet now contributes, so capacity grows with
+  the network. Set `network.relay_forwarding_auto = false` to opt out.
+- **Diagnostics now report NAT traversal.** `GET /api/admin/diagnostics` shows
+  whether this machine is reachable from the internet, whether it is donating
+  relay capacity, and how many direct-connection attempts have succeeded or
+  failed. Previously none of this was reported anywhere, which is why the
+  problem above went unnoticed for several releases. A machine that never
+  escapes the relay now says so, and notes that this is expected on some home
+  connections and that traffic still flows, one hop slower.
+- **`network.max_connections_per_peer`** — an escape hatch, not a tuning knob.
+  If dropped requests ever appear on a machine with several network interfaces,
+  setting this to 1 restores the previous behaviour without a rebuild, which
+  confirms or rules out that cause in one step. A node set below 2 warns that
+  direct connections are disabled.
+
+### Changed
+
+- A relay now carries up to 128 simultaneous connections instead of 16. The old
+  figure came from a default meant for connections lasting two minutes; ours
+  last up to an hour, so slots were held far longer than that number assumed.
+
 ## [0.3.20-alpha] — 2026-07-25
 
 ### Fixed

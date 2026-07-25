@@ -196,7 +196,46 @@ All 20 build phases complete. All subsystems wired — no stubs. **1188 lib + 79
 
 Per-round history lives in `~/.claude/projects/-home-user-SwarmLLM/memory/round_log_*.md` and the CHANGELOG; `docs/ARCHITECTURE.md` is the canonical architecture. This section keeps only the current release line plus one-line prior-round pointers.
 
-### Latest — v0.3.20-alpha (2026-07-25): auto-updater unblocked for GPU + LAN/relay/pool fixes
+### Latest — v0.3.21-alpha (2026-07-25): networking audit — NAT traversal actually works
+
+Audit of the whole networking stack (`docs/NETWORKING_PLAN.md` claimed "entire
+plan implemented, nothing deferred" — **it wasn't**). The relay transport was
+sound; three consumers never used it and one unrelated setting silently disabled
+Phase 2. Full detail: `memory/round_log_networking_audit.md`.
+
+- **DCUtR was structurally disabled by our own connection limit.** A hole punch
+  dials a DIRECT connection *while the relayed one is open* (`libp2p-dcutr` uses
+  `PeerCondition::Always` + tracks `direct_to_relayed_connections`), but
+  `max_established_per_peer = 1` made `connection_limits` deny it — its
+  `bypass_peer_id` set is manual and we never populated it. Cascade: nothing left
+  a circuit → slots never released → `max_circuits` filled → a pair got no
+  libp2p connection → absent from `connected_node_ids` → **the scheduler skipped
+  it** → the app-relay was never attempted. Cap → 3 (libp2p's own default is
+  unlimited); configurable via `network.max_connections_per_peer` as a
+  no-rebuild escape hatch. **Both ends need v0.3.21 for a punch to succeed** —
+  the cap is enforced on inbound AND outbound.
+- **Vendored `libp2p-request-response` now prefers DIRECT over `/p2p-circuit`.**
+  Upstream round-robins blindly (`ix = request_id % connections.len()`), so
+  post-upgrade half the traffic still used the circuit. NOTE: `vendor/` is in
+  `workspace.exclude` → `cargo test` does NOT run tests placed there.
+- **`gather_candidates` relay tier** (NETWORKING_PLAN §4 Phase 1, never built):
+  `SharedState::peer_reachable_via_relay` + `RELAY_HOP_LATENCY_PENALTY_MS` (150).
+  Both send paths in `tensors.rs` ALREADY fell back to `try_relay_send` — only
+  candidate selection was missing. The Parallax allocator stays stricter on
+  purpose (planning ≠ on-demand routing).
+- **`network.relay_forwarding_auto`** (default true) + `state.publicly_reachable`
+  (from `swarm.external_addresses()` only; `/p2p-circuit` must NOT count).
+  Relay capacity was previously whatever ran `--anchor`. All four gate sites now
+  share `SharedState::relay_forwarding_enabled()`.
+- **`max_circuits` 16 → 128** — 16 is libp2p's default for its *2-min* bootstrap
+  circuit; ours run 1 hour as a data path.
+- **`SwarmBehaviourEvent::Dcutr` was never matched** (fell into `_ => {}`) — why
+  this hid for releases. Now logged + counted, with a NAT-traversal section in
+  `GET /api/admin/diagnostics`.
+- Deferred: shard transfers stay relay-ineligible; per-request holder blacklist
+  (`docs/FUTURE_WORK.md`). Gotchas #163-164.
+
+### v0.3.20-alpha (2026-07-25): auto-updater unblocked for GPU + LAN/relay/pool fixes
 
 - **Auto-updater size cap 500MB→2GB** (`update.rs::MAX_UPDATE_SIZE`) — the ~1GB CUDA binary was rejected as "too large", so `swarmllm update` failed for EVERY NVIDIA user (tester report). Old build still has the 500MB cap → GPU users need ONE manual update to v0.3.20, then auto-update works.
 - **Deterministic LAN dialer** (`network/manager/events.rs` mDNS Discovered handler) — group a peer's addresses into ONE dial + only the smaller-PeerId node dials, so no bidirectional simultaneous-dial race → one connection/peer. Fixes duplicate-connection churn on multi-interface hosts (WSL2/Docker) that could silently swallow a distributed-inference forward. LAN/mDNS only.
