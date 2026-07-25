@@ -11,9 +11,11 @@ A peer-to-peer LLM inference network in a single Rust binary. Pool hardware with
 
 **Join the swarm. Run AI together — for free.**
 
-> **Status — alpha**, actively developed. Distributed inference is stable across multi-node deployments. 1169 lib tests + 75 integration tests run on every PR; continuous security sweeps. [Report issues](https://github.com/enapt/SwarmLLM/issues).
+> **Status — alpha**, actively developed. Distributed inference is stable across multi-node deployments. 1211 lib tests + 79 integration tests run on every PR; continuous security sweeps. [Report issues](https://github.com/enapt/SwarmLLM/issues).
 >
-> **Recent benchmarks:** cross-node prefix-KV sharing delivers a **12.9× iter-1 TTFT speedup** on 7B prompts when a peer has the same prefix cached (measured 2026-04-20). Windows release binaries reach Linux parity on single-node and split inference (validated 2026-04-23).
+> **Recent work (July 2026) — inference across NAT.** Two machines behind ordinary home routers can now run a model together: a sealed application-level relay carries the tensor traffic when no direct path exists, and direct connections are established opportunistically on top. Verified end-to-end by an external tester — a real three-segment pipeline split across two home machines on different continents. Local models also gained working **tool calling** on both API surfaces, streaming included.
+>
+> **Benchmarks:** cross-node prefix-KV sharing delivers a **12.9× iter-1 TTFT speedup** on 7B prompts when a peer has the same prefix cached (measured 2026-04-20). Windows release binaries reach Linux parity on single-node and split inference (validated 2026-04-23).
 
 For long-form documentation see the [SwarmLLM book](https://enapt.github.io/SwarmLLM/).
 
@@ -136,7 +138,9 @@ Two laptops on the same Wi-Fi find each other in seconds. A brand-new install au
 
 - **UPnP (default on)** asks your router to open the P2P port and learns your public address automatically.
 - **AutoNAT v2** probes your real reachability per-address and tells you (on the dashboard) whether you're publicly reachable or need a relay — no guesswork.
-- **Circuit Relay v2 + DCUtR hole-punching** keep you connected even behind CGNAT, where port-forwarding is impossible: you reserve a slot on a public relay, then upgrade to a direct connection when hole-punching succeeds.
+- **A relay that carries real traffic, not just introductions.** When two machines genuinely cannot reach each other — symmetric NAT, CGNAT, strict firewalls — inference runs *through* a mutually-reachable peer over an end-to-end sealed channel. The relay is a dumb pipe: it forwards bytes it cannot read. This is the guarantee; hole punching is an optimisation layered on top, never a requirement.
+- **Circuit Relay v2 + DCUtR hole-punching** upgrade a relayed pair to a direct connection when the network allows it, moving traffic off the relay. Requires both machines on v0.3.21 or newer.
+- **Any publicly reachable node contributes relay capacity automatically**, so capacity grows with the network rather than resting on a handful of dedicated machines. Opt out with `network.relay_forwarding_auto = false`.
 - **Built-in bootstrap anchor** means there's a reachable node to find on day one, before the network is dense enough for DHT discovery alone.
 
 If you want to run your own publicly-reachable **anchor node** to help bootstrap the network — or your invite code says *"only works on your local network"* — see the **[Networking guide](docs/NETWORKING.md)** (CGNAT check, port-forwarding, dynamic DNS, anchor setup) and the turnkey installer in **[`deploy/anchor/`](deploy/anchor/)**.
@@ -168,6 +172,7 @@ Private mode is one-way: your data stays private, but your nodes still serve the
 ### APIs
 
 - **OpenAI-compatible** — `POST /v1/chat/completions` with streaming, tool calling, logprobs, embeddings.
+- **Tool calling with local models** — not just cloud ones. A locally-run GGUF is told about your tools and its reply is parsed back into proper `tool_calls` / `tool_use` blocks, covering the formats different model families emit natively (Hermes/Qwen, Mistral, Llama 3.x) as well as the generic one. Works streaming and non-streaming on both API surfaces. Output cut off mid-call is reported as text rather than guessed at.
 - **Anthropic Messages API** — `POST /v1/messages` with full Claude Code compatibility (tools, `tool_choice`, thinking blocks, `cache_control`, streaming SSE). Non-Claude models auto-translated and routed to cloud providers.
 - **MCP server** — native Model Context Protocol with 7 tools.
 - **Cloud fallback** — route to 12 providers (OpenAI, Anthropic, DeepSeek, Mistral, Groq, NVIDIA NIM, Cerebras, SambaNova, Fireworks, Together, DeepInfra, Moonshot/Kimi). Keys via dashboard, config, env vars, or `.env`.
@@ -191,6 +196,7 @@ Private mode is one-way: your data stays private, but your nodes still serve the
 - **Web UI** — chat, model browser, shard visualization, first-run wizard, network map, leaderboard, compare page; mobile-responsive; 21 languages; light/dark/system theme.
 - **Fault tolerance** — JoinSet-based supervisor with restart-on-crash for all 12 subsystems; hot-standby failover; shard replication; atomic shard writes.
 - **Observability** — Prometheus `/metrics`, readiness probe `/health/ready`, structured tracing with request-ID correlation.
+- **Self-service diagnostics** — `GET /api/admin/diagnostics` reports whether your machine is reachable from the internet, whether it has managed direct connections, and the most recent failed requests including *which machine served each one*. That last detail is what separates "my node has a problem" from "one peer has a problem", and it is the single most useful thing to include in a bug report.
 - **Config hot-reload** — change parameters without restarting via SIGHUP or `/api/admin/config/reload`.
 - **Auto-updater** — checks GitHub releases, downloads & replaces binary with restart prompt.
 - **SDKs** — Python (`pip install swarmllm-client`), JS/TS (zero-dep), LangChain, LlamaIndex.

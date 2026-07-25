@@ -2334,6 +2334,59 @@ them. Bounded by the single retry, so it needs no eviction policy. Worth doing
 alongside any move to more than one retry, where the current behaviour would
 degrade from "one wasted timeout" to "N wasted timeouts".
 
+### Does contribution-weighted credit recreate the hierarchy it exists to avoid? (raised 2026-07-25)
+
+**Not a bug — an open design question**, raised by an external contributor and
+worth a deliberate answer rather than a default.
+
+**The question.** SwarmLLM's stated point is keeping inference out of a handful
+of corporate hands, and the fixes that matter most are the ones lowering the
+barrier to participate — modest hardware, home NAT, mobile. But credit is earned
+by contribution (VRAM, uptime, bandwidth, shards served). If contribution sets
+your access rate, does that structurally favour whoever already owns the best
+hardware — the same imbalance, denominated in tokens instead of dollars?
+
+**What the design already does, which is half an answer.** Access is *tiered*,
+never gated:
+
+- `credit::priority::calculate_tier` — Bronze is zero **or negative** balance.
+  There is no "blocked" tier.
+- `max_concurrent_for_tier` — Bronze gets `(base_max / 4).max(1)`. The `.max(1)`
+  is the floor: a node with a permanently negative balance still gets at least
+  one concurrent request, forever.
+- Project rule (`.claude/rules/completeness.md`): *"Credit errors: degrade
+  priority tier, never block."*
+- Negative balances decay hourly back toward zero (R149), so a deficit is not
+  permanent.
+
+So a zero-contribution node is slower, not excluded. That is a meaningful
+difference from pay-to-play, and it should be stated explicitly somewhere
+user-facing — right now it is an emergent property of three separate mechanisms
+rather than a documented guarantee.
+
+**What is genuinely unresolved.** Under contention the ratio still scales with
+hardware: Platinum gets `base_max * 2`, Bronze `base_max / 4` — an 8x spread. On
+a busy network that is the difference between usable and painful, and the people
+on the wrong end are exactly the modest-hardware users the project is for.
+
+**Directions worth weighing** (none chosen):
+
+1. **Document the floor as a guarantee.** Cheapest, and possibly sufficient:
+   state that participation is never required for access, only for speed.
+2. **Contribution measured as effort, not capacity.** Credit uptime and
+   availability rather than throughput, so a Raspberry Pi seeding shards
+   reliably earns comparably to a 4090 serving occasionally. Changes what the
+   system rewards without changing that it rewards.
+3. **Raise the Bronze floor / compress the spread.** An 8x range is a choice, not
+   a constant.
+4. **Demand-weighted floor.** Guarantee a share of *idle* capacity to low-tier
+   nodes, so the floor rises when the network is quiet and only tightens under
+   real contention.
+
+**Why it matters beyond fairness:** a network that feels unusable to newcomers
+loses them, and this is a network whose value grows with participation. The
+incentive design and the adoption goal are the same problem.
+
 ### Node.js-20 GitHub Actions deprecation (R145 sweep, 2026-07-21)
 **Context.** GitHub is deprecating the Node.js 20 runtime on Actions runners; three pinned actions in `.github/workflows/release.yml` still target Node 20 and are currently *force-upgraded* to Node 24 (a warning annotation, not a failure — the v0.3.3-alpha release built and published fine):
 
