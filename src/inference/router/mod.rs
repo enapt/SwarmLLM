@@ -42,8 +42,18 @@ pub use types::{
 /// - "remote-generate timed out" — first-token wait exceeded.
 /// - "OutboundFailure" — explicit libp2p delivery failure.
 ///
-/// On retry the scheduler re-runs and picks a different holder via the
-/// `connected_node_ids` filter, so a dead peer is not selected again.
+/// On retry the scheduler re-runs from scratch. A peer that actually *died*
+/// leaves `connected_node_ids` and so is not selected again.
+///
+/// That guarantee is weaker for a holder reachable only through a relay
+/// (NETWORKING_PLAN §4 Phase 1 tier): it was never in `connected_node_ids` to
+/// begin with, so a stale-but-unexpired relay route can see the same holder
+/// re-picked. Acceptable as it stands — a relayed holder carries a latency
+/// penalty so any directly-connected holder outranks it, and when it is the
+/// *only* holder of a shard, retrying it is better than failing outright. What
+/// is missing is a per-request holder blacklist, which would also help the
+/// pre-existing case of a connected peer that fails without disconnecting; see
+/// `docs/FUTURE_WORK.md`.
 fn is_transient_remote_failure(err: &SwarmError) -> bool {
     let msg = err.to_string();
     msg.contains("never acknowledged")

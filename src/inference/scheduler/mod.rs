@@ -1002,8 +1002,16 @@ impl PipelineScheduler {
             }
             // Scheduler Liveness Oracle: peer_registry retains disconnected
             // peers (for reconnect attempts); allocate against currently
-            // connected nodes only. Mirrors gather_candidates and the R142
-            // fixes for the routing paths.
+            // connected nodes only.
+            //
+            // Deliberately STRICTER than `gather_candidates`, which also admits
+            // relay-reachable holders (NETWORKING_PLAN §4 Phase 1 tier). The two
+            // answer different questions: this plans a capacity allocation we
+            // intend to hold, and a plan built around an extra relay hop per
+            // layer is a bad plan — whereas routing a single request through a
+            // relay to the only holder of a shard is strictly better than
+            // failing. So a relay-only peer is usable on demand but is not
+            // allocated pipeline capacity.
             if !self.shared_state.connected_node_ids.contains(&node_id) {
                 continue;
             }

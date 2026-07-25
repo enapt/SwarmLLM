@@ -2308,6 +2308,32 @@ Cross-referenced from gotcha #162. Note the Windows/Linux CUDA versions are
 already deliberately split (12.4 vs 12.8) with a "bump both together" comment in
 `release.yml` — that comment should point here too when either moves.
 
+### Per-request holder blacklist on retry (networking audit, 2026-07-25)
+
+**Context.** `router::is_transient_remote_failure` triggers exactly one retry
+with a fresh pipeline assembly. The retry avoids a *dead* peer only as a side
+effect: a peer that dropped its connection leaves `connected_node_ids` and so
+stops being a candidate.
+
+**The gap.** Nothing records "this holder just failed *this* request", so a peer
+that fails **without** disconnecting can be re-picked immediately. Two cases:
+
+- Pre-existing: a connected peer that accepts the request and then stalls (GPU
+  wedged, worker crash-looping) stays in `connected_node_ids` throughout.
+- Widened by the §4 Phase 1 relay tier: a relay-reachable holder was never in
+  `connected_node_ids` at all, so a stale-but-unexpired relay route can see the
+  same holder selected on the retry.
+
+Neither is a correctness bug — the request still terminates, and re-picking the
+sole holder of a shard is the right call. It costs a wasted timeout when a
+better alternative existed.
+
+**Shape of the fix.** Thread a small `HashSet<NodeId>` of holders that already
+failed this request through `execute_request` into `gather_candidates`, and skip
+them. Bounded by the single retry, so it needs no eviction policy. Worth doing
+alongside any move to more than one retry, where the current behaviour would
+degrade from "one wasted timeout" to "N wasted timeouts".
+
 ### Node.js-20 GitHub Actions deprecation (R145 sweep, 2026-07-21)
 **Context.** GitHub is deprecating the Node.js 20 runtime on Actions runners; three pinned actions in `.github/workflows/release.yml` still target Node 20 and are currently *force-upgraded* to Node 24 (a warning annotation, not a failure — the v0.3.3-alpha release built and published fine):
 
