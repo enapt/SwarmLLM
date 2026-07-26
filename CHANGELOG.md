@@ -2,6 +2,30 @@
 
 All notable changes to SwarmLLM are documented here.
 
+## [0.3.32-alpha] — 2026-07-26
+
+### Fixed
+
+- **The first question you ask after starting a node no longer fails.** A node
+  learns which peers hold which pieces of a model by listening for their
+  announcements, and a full round of those only comes by every forty minutes or
+  so. On a quiet network that left a freshly started node knowing of no one to
+  ask, and the direct lookup that would have answered was started and then not
+  waited for. The result was an error on the very first question, with the same
+  question working seconds later. It now waits briefly for that answer.
+
+  Reported by a tester who saw it after removing a model piece mid-session, and
+  reproduced here after an ordinary restart. Anyone who tried SwarmLLM, hit an
+  error on their first question and concluded it was broken was most likely
+  seeing this.
+
+### Notes
+
+- Only the "nobody known to serve this" case waits. Every other scheduling
+  problem still fails immediately, because waiting would add delay without
+  changing the answer. If the wait finds nothing either, the original message is
+  kept, since it names the part of the model that had no host.
+
 ## [0.3.31-alpha] — 2026-07-26
 
 ### Fixed

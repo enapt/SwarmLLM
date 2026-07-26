@@ -196,60 +196,75 @@ All 20 build phases complete. All subsystems wired — no stubs. **1310 lib + 79
 
 Per-round history lives in `~/.claude/projects/-home-user-SwarmLLM/memory/round_log_*.md` and the CHANGELOG; `docs/ARCHITECTURE.md` is the canonical architecture. This section keeps only the current release line plus one-line prior-round pointers.
 
-### Latest — v0.3.31-alpha (2026-07-26): stale shard-holder claims self-correct
+### Latest — v0.3.32-alpha (2026-07-26): first request after a restart works
 
-Follow-up to .30, both items found by *running* the code (one by a tester).
+**Reproduced independently twice**, which is what made it worth chasing: a
+tester deleted a shard mid-session and saw the next request fail instantly with
+`No node available` and the one after it succeed; I hit the same after a plain
+restart.
 
-- **Stale holder claims now retract on first failure.** Holder claims are
-  gossiped, so a requester's registry outlives the truth after a peer prunes or
-  deletes a shard — and every request routed there fails until the retraction
-  announcement lands. `pipeline::remote_error_means_missing_shard` recognises the
-  ShardReader missing-region error, the holder's claim over that layer span is
-  dropped, and `is_transient_remote_failure` retries with a fresh assembly, so
-  the routing input is corrected before the retry runs. Usually invisible now.
-- **Retraction is scoped by LAYER RANGE, not `segment.shard_id`.** First attempt
-  used the segment's shard id — but a segment spans several shards and that field
-  is only the first. Live, a whole-model segment failing on `blk.10` (shard 2)
-  retracted **shard 0**, which the holder genuinely had: the exact
-  "pushes work off a healthy peer" outcome the mechanism exists to avoid. Now
-  every shard overlapping the failed span loses its claim. Over-broad on purpose
-  — the holder's own next announce re-asserts the truth, so the cost is one
-  announce interval, whereas retracting the wrong shard keeps failing forever.
-- **`route=relayed` on a directly-connected peer.** `peer_reachable_via_relay` is
-  an *eligibility* check, true for any relay-capable peer, so LAN hops were
-  labelled relayed. Now keyed on `connected_node_ids`. Wrong in the costly
-  direction: it sends a reader hunting a network fault that isn't there.
-- **Long-standing kv_cache flake resolved** (MEMORY.md had it as "seen 2x,
-  unresolved"): `save_to_db` also skips expired sessions, so with `ttl=1s` a >1s
-  stall made the SAVE return 0 and the *first* assert fail. Rewritten with a
-  back-dated record — no wall-clock race — plus a negative control.
+Holder claims are rebuilt from gossip and a full re-announce is only every ~40
+min (`shard_announce_counter % 10` × ~240s), so a freshly started node on a quiet
+swarm knows no holders. `distributed_exec` fired the DHT provider query
+**fire-and-forget** — the comment on that line already said "first request for a
+model may miss the cache" — so assembly failed before the answer landed.
+`assemble_awaiting_dht` now gives it `DHT_ASSEMBLY_GRACE` (1.5s, polled at 250ms).
 
-Retraction fires correctly end-to-end (verified live: retract → retry → reroute).
-The *scope* fix is pinned by unit test rather than re-verified live, because the
-stale window closed when the holder's own rescan corrected it.
+Gated on `assembly_failed_for_lack_of_holders` — **only** the "nothing known to
+serve this" failure waits; every other scheduling error returns immediately
+because waiting cannot change the verdict. Unit test asserts both directions. On
+timeout the ORIGINAL error is returned (it names the layer with no holder).
+
+**Anyone who tried SwarmLLM, got an error on their first question and concluded
+it was broken was most likely hitting this.**
+
+Verified live on a node started with an empty holder registry: logged
+`Pipeline assembled after waiting for DHT provider results` where it previously
+failed outright.
+
+### v0.3.31-alpha (2026-07-26): stale shard-holder claims self-correct
+
+Holder claims are gossiped, so a requester's registry outlives the truth after a
+peer prunes a shard — and every request routed there failed until the retraction
+announcement landed. `pipeline::remote_error_means_missing_shard` recognises the
+ShardReader missing-region error, the holder's claims over the failed **layer
+span** are dropped, and `is_transient_remote_failure` retries with a fresh
+assembly so the routing input is corrected before the retry runs.
+
+**The scoping is the part to not undo.** First attempt used
+`segment.shard_id` — but a segment spans several shards and that field is only
+the first. Live, a whole-model segment failing on `blk.10` (shard 2) retracted
+**shard 0**, which the holder genuinely had: exactly the "pushes work off a
+healthy peer" outcome the mechanism exists to prevent. Now every shard
+overlapping the failed span loses its claim — over-broad on purpose, because the
+holder's own next announce re-asserts the truth (cost: one announce interval),
+whereas retracting the wrong shard keeps failing forever.
+
+Also: `route=relayed` on a directly-connected peer —
+`peer_reachable_via_relay` is an *eligibility* check, true for any relay-capable
+peer, so LAN hops were mislabelled. Now keyed on `connected_node_ids`. And the
+long-standing `kv_cache::restore_skips_expired_sessions` flake resolved
+(`save_to_db` also skips expired sessions, so a >1s stall vs the 1s TTL made the
+SAVE return 0 and the *first* assert fail; rewritten with a back-dated record).
 
 ### v0.3.30-alpha (2026-07-26): observability, and a weight-tied serving bug
 
-**The finding: nearly everything asked for was already measured and thrown away**
-— per-segment timings went into a DEBUG log line and were dropped; `hedge_tracker`
-has held per-(model, segment, holder) EWMA latency **with variance** since R136
-with **zero readers**. Genuinely missing: **server-side TTFT** (existed only in
-`cli/bench.rs`, client-side), TPOT, and any record of a *successful* request.
-
-Shipped: one `RequestTrace` (`inference/trace.rs`) feeding every surface — the
-`DIAG: request complete` line, `x-swarm-*` + W3C `Server-Timing` headers,
+One `RequestTrace` (`inference/trace.rs`) feeds every surface — `DIAG: request
+complete`, `x-swarm-*` + W3C `Server-Timing` headers,
 `/api/admin/{diagnostics,performance}`, OTel-named Prometheus histograms,
 serving-side counters, chat route line + Models→Performance panel, hourly redb
-rollups. **TTFT is stamped by the token CHANNEL** (`StreamingTokenTx` newtype)
-because tokens leave from seven sites. Also fixed: **weight-tied models were
-unservable from a node lacking shard 0** — `tied_output_weight.bin` had three
-writers and zero readers (gotcha #178), found by the first genuine two-machine
-zero-redundancy split and independently reproduced by a tester.
+rollups. **The finding**: nearly all of it was already measured and thrown away —
+`hedge_tracker` had held per-(model, segment, holder) EWMA latency *with variance*
+since R136 with **zero readers**. Genuinely missing was server-side **TTFT**
+(existed only in `cli/bench.rs`, client-side). **TTFT is stamped by the token
+CHANNEL** (`StreamingTokenTx` newtype) because tokens leave from seven sites.
+Also: **weight-tied models were unservable from a node lacking shard 0** —
+`tied_output_weight.bin` had three writers and zero readers (gotcha #178).
 
-**Three decisions not to undo** (full reasoning in `docs/FUTURE_WORK.md`
+**Three decisions not to undo** (reasoning in `docs/FUTURE_WORK.md`
 § Observability, marked SHIPPED):
 1. **Prometheus carries `(route, outcome)` ONLY** — 20 series, fixed. Per-peer is
-   50×10×10 = 5 000 series *per node*; it lives in the pulled JSON endpoint.
+   ~5 000 series *per node*; it lives in the pulled JSON endpoint.
 2. **Headers flush before the body**, so SSE cannot carry TTFT/decode. Omitted,
    not zeroed — asserted by a test.
 3. **"Tok/s per node per shard" is NOT measurable in a pipeline.** Segments are
