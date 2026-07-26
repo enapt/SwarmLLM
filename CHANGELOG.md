@@ -25,6 +25,19 @@ All notable changes to SwarmLLM are documented here.
   timed exactly as before, and faster machines were never affected; this mainly
   decides whether modest CPU-only machines can answer long questions at all.
 
+- **Two machines could stop seeing each other and never recover.** Both stayed
+  running and both stayed connected to the same bootstrap node, yet neither made
+  a single attempt to reach the other — observed lasting 17 minutes, and only
+  cleared by restarting one of them. While it lasted, questions failed with "No
+  node available", because the machine holding the rest of the model had become
+  invisible.
+
+  A dropped connection scheduled a reconnect only if the peer was mid-request, or
+  had dropped before it was ever identified. A machine that was known and simply
+  idle matched neither, so it was forgotten with nothing to bring it back —
+  rediscovery relies on the other side announcing itself, which it only does when
+  it restarts. A reconnect is now scheduled for that case too.
+
 - **A retried request could take down both attempts and the model with it.**
   When a request was retried while the original was still running, the two
   attempts shared an identity that was assumed to be unique. The retry
