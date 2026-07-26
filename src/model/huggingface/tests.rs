@@ -1,4 +1,4 @@
-use super::shards::{coalesce_byte_ranges, parse_http_date};
+use super::shards::{coalesce_byte_ranges, parse_http_date, tensor_slices_in_chunk};
 use super::*;
 use std::time::SystemTime;
 
@@ -153,4 +153,94 @@ fn parse_http_date_invalid() {
     assert!(parse_http_date("Fri, 28 Xxx 2026 04:00:00 GMT").is_none());
     // Wrong timezone
     assert!(parse_http_date("Fri, 28 Feb 2026 04:00:00 EST").is_none());
+}
+
+// ── Streaming tensor extraction ─────────────────────────────────────────────
+//
+// A coalesced range carries gap bytes between tensors, and only the tensor bytes
+// belong in the shard. Getting this wrong writes a subtly corrupt shard that
+// BLAKE3 only catches after the whole download. Every boundary is pinned.
+
+/// Reference implementation: what the old buffer-the-whole-range code produced.
+/// The streaming version must agree with it for any chunking.
+fn extract_whole(tensors: &[(u64, u64)], range_start: u64, buf: &[u8]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for &(off, size) in tensors {
+        let a = (off - range_start) as usize;
+        out.extend_from_slice(&buf[a..a + size as usize]);
+    }
+    out
+}
+
+/// Feed `buf` through the streaming extractor in fixed-size chunks.
+fn extract_streamed(tensors: &[(u64, u64)], range_start: u64, buf: &[u8], chunk: usize) -> Vec<u8> {
+    let mut out = Vec::new();
+    let mut abs = range_start;
+    for c in buf.chunks(chunk) {
+        for (s, l) in tensor_slices_in_chunk(tensors, abs, c.len()) {
+            out.extend_from_slice(&c[s..s + l]);
+        }
+        abs += c.len() as u64;
+    }
+    out
+}
+
+#[test]
+fn streaming_extraction_matches_buffering_at_every_chunk_size() {
+    // Two tensors with a gap between them, inside one coalesced range.
+    let range_start = 1000u64;
+    let buf: Vec<u8> = (0..200u32).map(|i| (i % 251) as u8).collect();
+    // tensor A: 1010..1050, gap, tensor B: 1080..1180
+    let tensors = [(1010u64, 40u64), (1080u64, 100u64)];
+
+    let expected = extract_whole(&tensors, range_start, &buf);
+    assert_eq!(expected.len(), 140);
+
+    // Chunk boundaries must not matter — including sizes that split a tensor,
+    // land exactly on a boundary, or fall entirely inside the gap.
+    for chunk in [1usize, 3, 7, 16, 39, 40, 41, 100, 199, 200, 512] {
+        assert_eq!(
+            extract_streamed(&tensors, range_start, &buf, chunk),
+            expected,
+            "mismatch at chunk size {chunk}"
+        );
+    }
+}
+
+#[test]
+fn a_chunk_entirely_inside_a_gap_writes_nothing() {
+    let tensors = [(100u64, 10u64), (200u64, 10u64)];
+    // Chunk covering 130..160 — wholly between the two tensors.
+    assert!(tensor_slices_in_chunk(&tensors, 130, 30).is_empty());
+}
+
+#[test]
+fn a_tensor_spanning_several_chunks_is_reassembled_in_order() {
+    let tensors = [(0u64, 100u64)];
+    let mut got = Vec::new();
+    for (i, start) in [0u64, 30, 60, 90].iter().enumerate() {
+        let len = if i == 3 { 10 } else { 30 };
+        got.extend(tensor_slices_in_chunk(&tensors, *start, len));
+    }
+    // Every chunk is fully inside the tensor, so each contributes all its bytes.
+    assert_eq!(got, vec![(0, 30), (0, 30), (0, 30), (0, 10)]);
+}
+
+#[test]
+fn tensors_touching_the_chunk_edges_are_included_whole() {
+    let tensors = [(10u64, 5u64), (20u64, 5u64)];
+    // Chunk exactly spans 10..25, so both tensors are fully covered.
+    assert_eq!(
+        tensor_slices_in_chunk(&tensors, 10, 15),
+        vec![(0, 5), (10, 5)]
+    );
+    // A chunk ending exactly where a tensor starts must not include it.
+    assert!(tensor_slices_in_chunk(&tensors, 0, 10).is_empty());
+    // A chunk starting exactly where a tensor ends must not include it.
+    assert!(tensor_slices_in_chunk(&tensors, 15, 5).is_empty());
+}
+
+#[test]
+fn no_tensors_means_no_writes() {
+    assert!(tensor_slices_in_chunk(&[], 0, 4096).is_empty());
 }

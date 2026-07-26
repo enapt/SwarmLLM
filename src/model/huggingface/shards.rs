@@ -69,6 +69,51 @@ pub(super) fn parse_http_date(s: &str) -> Option<SystemTime> {
 /// Coalesce nearby byte ranges (within `max_gap` bytes) into fewer requests.
 ///
 /// Input: sorted list of (offset, size) pairs.
+/// Which parts of an incoming chunk are real tensor data?
+///
+/// A coalesced range merges nearby tensors and carries the gap bytes between
+/// them; only the tensor bytes belong in the shard file. Given the tensor spans
+/// that fall in this range (sorted by offset, non-overlapping) and the absolute
+/// file offset the chunk starts at, this returns the `(start_in_chunk, len)`
+/// slices to write, in order.
+///
+/// Exists so the download can write as bytes arrive instead of buffering the
+/// whole range. The previous approach held an entire coalesced range in memory —
+/// measured live at **159 MB for a single 353 MB shard** — and wrote it in one
+/// go, which is both a memory risk on small nodes and the reason a download sat
+/// at zero bytes for tens of seconds before anything appeared on disk.
+///
+/// Pure and separately tested: an off-by-one here would silently corrupt every
+/// shard it touches, and the BLAKE3 manifest check would only catch it after a
+/// full download.
+pub(super) fn tensor_slices_in_chunk(
+    tensors: &[(u64, u64)],
+    chunk_start: u64,
+    chunk_len: usize,
+) -> Vec<(usize, usize)> {
+    let chunk_end = chunk_start + chunk_len as u64;
+    let mut out = Vec::new();
+    for &(t_off, t_size) in tensors {
+        let t_end = t_off + t_size;
+        // Sorted by offset, so once a tensor starts past this chunk we are done.
+        if t_off >= chunk_end {
+            break;
+        }
+        if t_end <= chunk_start {
+            continue;
+        }
+        let overlap_start = t_off.max(chunk_start);
+        let overlap_end = t_end.min(chunk_end);
+        if overlap_end > overlap_start {
+            out.push((
+                (overlap_start - chunk_start) as usize,
+                (overlap_end - overlap_start) as usize,
+            ));
+        }
+    }
+    out
+}
+
 pub(super) fn coalesce_byte_ranges(ranges: &[(u64, u64)], max_gap: u64) -> Vec<(u64, u64)> {
     if ranges.is_empty() {
         return vec![];
@@ -333,12 +378,38 @@ pub async fn download_shard(
             return Err(format!("Shard download returned {}", resp.status()));
         }
 
-        // Buffer the coalesced range so we can extract only tensor data (skip gap bytes).
-        // Coalesced ranges merge nearby tensors with up to 4MB gaps between them.
-        // Writing the raw HTTP response would include those gap bytes, causing shard_offset
-        // mismatches in ShardReader.
+        // Write tensor data straight to disk as it arrives, skipping the gap
+        // bytes a coalesced range carries between tensors. (Writing the raw HTTP
+        // response would include those gaps and break `ShardReader`'s
+        // shard_offset arithmetic.)
+        //
+        // Streamed rather than buffered: holding a whole coalesced range in
+        // memory was measured live at 159 MB for one 353 MB shard, which is both
+        // an OOM risk on a small node downloading several shards and the reason
+        // the file sat at zero bytes for tens of seconds before anything landed.
+        // Now memory is one chunk and the file grows continuously.
         use futures::StreamExt;
-        let mut range_buf: Vec<u8> = Vec::new();
+        // Tensor spans inside this range, in file order — the order they must be
+        // written in. Same membership test as the old extract loop.
+        let range_tensors: Vec<(u64, u64)> = {
+            let mut v: Vec<(u64, u64)> = layout
+                .tensors
+                .iter()
+                .filter(|(_, off, size)| *off >= *range_start && *off + *size <= *range_end)
+                .map(|(_, off, size)| (*off, *size))
+                .collect();
+            v.sort_unstable_by_key(|(off, _)| *off);
+            v
+        };
+        // Where to rewind to if this range fails: buffering used to give
+        // per-range atomicity for free, streaming has to restore it explicitly.
+        let file_len_before_range = file
+            .metadata()
+            .await
+            .map(|m| m.len())
+            .map_err(|e| format!("Failed to stat tmp file: {e}"))?;
+        let mut range_pos = *range_start;
+        let mut range_bytes_written = 0u64;
         let mut stream = resp.bytes_stream();
         while let Some(chunk) = stream.next().await {
             // Check cancel flag every chunk
@@ -356,7 +427,13 @@ pub async fn download_shard(
                 }
             }
             let data = chunk.map_err(|e| format!("Stream error: {e}"))?;
-            range_buf.extend_from_slice(&data);
+            for (s, l) in tensor_slices_in_chunk(&range_tensors, range_pos, data.len()) {
+                file.write_all(&data[s..s + l])
+                    .await
+                    .map_err(|e| format!("Write error: {e}"))?;
+                range_bytes_written += l as u64;
+            }
+            range_pos += data.len() as u64;
             downloaded += data.len() as u64;
 
             if let Some(ref tx) = progress_tx {
@@ -369,18 +446,36 @@ pub async fn download_shard(
 
         // Verify we received the expected number of bytes for this range
         let expected_range_bytes = *range_end - *range_start;
-        if range_buf.len() as u64 != expected_range_bytes {
+        let received = range_pos - *range_start;
+        if received != expected_range_bytes {
             tracing::warn!(
                 shard = shard_index,
                 expected = expected_range_bytes,
-                received = range_buf.len(),
+                received,
                 range_start = range_start,
                 range_end = range_end,
                 "Coalesced range received incomplete data, retrying"
             );
-            // Retry this range once — adjust progress counter for the failed bytes
-            downloaded = downloaded.saturating_sub(range_buf.len() as u64);
-            range_buf.clear();
+            // Rewind the partial writes. Buffering used to make a failed range a
+            // no-op on disk; streaming has to undo it explicitly or the retry
+            // would append a second copy of the bytes it already wrote.
+            file.flush()
+                .await
+                .map_err(|e| format!("Flush before rewind failed: {e}"))?;
+            file.set_len(file_len_before_range)
+                .await
+                .map_err(|e| format!("Failed to rewind partial range: {e}"))?;
+            {
+                use tokio::io::AsyncSeekExt as _;
+                file.seek(std::io::SeekFrom::End(0))
+                    .await
+                    .map_err(|e| format!("Failed to seek after rewind: {e}"))?;
+            }
+            // Adjust progress for the discarded bytes
+            downloaded = downloaded.saturating_sub(received);
+            range_bytes_written = 0;
+            range_pos = *range_start;
+
             let retry_resp = hf_headers(client.get(&url))
                 .header("Range", format!("bytes={}-{}", range_start, range_end - 1))
                 .send()
@@ -396,45 +491,29 @@ pub async fn download_shard(
             let mut stream = retry_resp.bytes_stream();
             while let Some(chunk) = stream.next().await {
                 let data = chunk.map_err(|e| format!("Stream error on retry: {e}"))?;
-                range_buf.extend_from_slice(&data);
+                for (s, l) in tensor_slices_in_chunk(&range_tensors, range_pos, data.len()) {
+                    file.write_all(&data[s..s + l])
+                        .await
+                        .map_err(|e| format!("Write error on retry: {e}"))?;
+                    range_bytes_written += l as u64;
+                }
+                range_pos += data.len() as u64;
                 downloaded += data.len() as u64;
             }
-            if range_buf.len() as u64 != expected_range_bytes {
+            if range_pos - *range_start != expected_range_bytes {
                 return Err(format!(
                     "Shard {} range {}-{}: expected {} bytes but got {} after retry",
                     shard_index,
                     range_start,
                     range_end,
                     expected_range_bytes,
-                    range_buf.len()
+                    range_pos - *range_start
                 ));
             }
         }
 
-        // Extract only tensor data from the buffered range, skipping inter-tensor gaps
-        let mut tensors_extracted = 0u32;
-        let mut bytes_written = 0u64;
-        for (name, tensor_offset, tensor_size) in &layout.tensors {
-            if *tensor_offset >= *range_start && *tensor_offset + *tensor_size <= *range_end {
-                let buf_offset = (*tensor_offset - *range_start) as usize;
-                let buf_end = buf_offset + *tensor_size as usize;
-                if buf_end <= range_buf.len() {
-                    file.write_all(&range_buf[buf_offset..buf_end])
-                        .await
-                        .map_err(|e| format!("Write error: {e}"))?;
-                    tensors_extracted += 1;
-                    bytes_written += *tensor_size;
-                } else {
-                    return Err(format!(
-                        "Shard {}: tensor {} buffer overflow (need {} bytes, have {})",
-                        shard_index,
-                        name,
-                        buf_end,
-                        range_buf.len()
-                    ));
-                }
-            }
-        }
+        let tensors_extracted = range_tensors.len() as u32;
+        let bytes_written = range_bytes_written;
         tracing::debug!(
             shard = shard_index,
             tensors_extracted,
