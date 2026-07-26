@@ -371,9 +371,8 @@ pub(super) fn extract_tied_output_weight(
     meta: &crate::inference::split::GgufTensorMeta,
 ) -> Result<(), String> {
     let embd_loc = meta
-        .tensors
-        .get("token_embd.weight")
-        .ok_or("token_embd.weight not found in tensor metadata")?;
+        .tied_output_location()
+        .ok_or("model is not weight-tied — it has a separate output.weight")?;
 
     // token_embd.weight is in shard_000 — its offset in the GGUF is tensor_data_offset + embd_loc.offset.
     // In shard_000.bin, the header is preserved so the absolute offset is the same.
@@ -411,7 +410,7 @@ pub(super) fn extract_tied_output_weight(
     file.read_exact(&mut tensor_bytes)
         .map_err(|e| format!("Failed to read tensor from shard_000.bin: {e}"))?;
 
-    let dest_path = model_dir.join("tied_output_weight.bin");
+    let dest_path = model_dir.join(crate::inference::split::TIED_OUTPUT_FILENAME);
     std::fs::write(&dest_path, &tensor_bytes)
         .map_err(|e| format!("Failed to write tied_output_weight.bin: {e}"))?;
 

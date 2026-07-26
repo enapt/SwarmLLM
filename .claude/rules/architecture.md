@@ -329,6 +329,27 @@ silently break at the wire if duplicated:
   loss of trust) requires the same one-place edit; do not soft-disable
   via wrappers because the trust delta is a real security event worth
   surfacing in the diff.
+- **`inference::split::GgufTensorMeta::tied_output_location`** — the single
+  definition of "is this model weight-tied", i.e. does it reuse
+  `token_embd.weight` as the LM head instead of shipping an `output.weight`.
+  Consumed by BOTH sidecar writers (`daemon::manifest::extract_tied_output_weight`,
+  `huggingface::probe::download_tied_output_weight`) AND the reader
+  (`inference::split::resolve_tied_output` → `ShardReader`). Producer and
+  consumer MUST agree on which tensor the sidecar holds; a new surface that
+  needs the predicate goes through this method rather than re-deriving
+  `contains_key("output.weight")`. The sidecar filename is
+  `inference::split::TIED_OUTPUT_FILENAME`, never a literal.
+  **Why this exists**: a node serving the LAST pipeline segment needs the output
+  head, but on a weight-tied model that tensor physically lives in shard 0 —
+  which that node frequently does not hold. The sidecar carries the raw bytes;
+  `ShardReader::new` maps them over the tensor's gguf byte range so
+  `ct.tensor(&mut reader, "token_embd.weight", …)` resolves unchanged. It maps
+  the sidecar ONLY when no local shard already covers that offset, since a
+  duplicate `gguf_offset` would make `find_shard`'s binary search ambiguous.
+  `tied_output` is a REQUIRED parameter on `ShardReader::new` with no
+  convenience wrapper — for three releases the sidecar had three writers and
+  zero readers, and every weight-tied model was unservable on any node lacking
+  shard 0 (gotcha #178).
 - **`model::manifest::is_backup_artifact_id`** — canonical check for a
   model id that is a copied-folder backup (`<model>.FULLBACKUP`,
   `<model>.old`, `<model>~`, `… copy`) rather than a real model identity.

@@ -23,6 +23,25 @@ struct ShardFile {
     file_len: u64,
 }
 
+/// The `tied_output_weight.bin` sidecar, mapped into the virtual GGUF.
+///
+/// On a weight-tied model the LM head *is* `token_embd.weight`, which lives in
+/// shard 0. A node serving the last segment needs that tensor but frequently
+/// does not hold shard 0 — so without this the output head is unreachable and
+/// the whole pipeline fails. Backing the tensor's gguf byte range with the
+/// sidecar makes `ct.tensor(&mut reader, "token_embd.weight", …)` resolve with
+/// no change at the call site.
+pub struct TiedOutputSource {
+    /// Path to the sidecar. Holds the raw tensor bytes at offset 0, nothing else.
+    pub path: PathBuf,
+    /// Absolute offset of the tensor in the virtual GGUF
+    /// (`tensor_data_offset + location.offset`).
+    pub gguf_offset: u64,
+    /// Tensor size in bytes, from the GGUF header — never the file length, so a
+    /// truncated sidecar is caught rather than silently mapped short.
+    pub size: u64,
+}
+
 /// A reader that presents a GGUF header + layer-aligned shard files as a
 /// single contiguous seekable file.  This allows candle's `Content::read()`
 /// and `ct.tensor()` to work transparently over shard files.
@@ -45,17 +64,47 @@ pub struct ShardReader {
     current_shard: Option<(usize, std::fs::File)>,
 }
 
+/// Resolve the tied-output sidecar for a model directory.
+///
+/// `Some` only when the model is weight-tied AND the sidecar is on disk. A
+/// model with a real `output.weight` returns `None` — it has no tied head to
+/// map. A weight-tied model whose sidecar is missing also returns `None`: if
+/// this node holds shard 0 the load still succeeds from the shard, and if it
+/// doesn't, the load fails with the missing-region error naming the offset.
+pub fn resolve_tied_output(
+    model_dir: &Path,
+    meta: &crate::inference::split::GgufTensorMeta,
+) -> Option<TiedOutputSource> {
+    let loc = meta.tied_output_location()?;
+    let path = model_dir.join(crate::inference::split::TIED_OUTPUT_FILENAME);
+    if !path.exists() {
+        return None;
+    }
+    Some(TiedOutputSource {
+        path,
+        gguf_offset: meta.tensor_data_offset + loc.offset,
+        size: loc.size,
+    })
+}
+
 impl ShardReader {
     /// Create a ShardReader from a GGUF header and shard files with tensor maps.
     ///
     /// `shard_files` must be ordered by shard index.  Each shard's tensor entries
     /// describe which virtual-GGUF-offset ranges map to which shard-local offsets.
+    ///
+    /// `tied_output` is REQUIRED rather than defaulted behind a convenience
+    /// wrapper: a caller that silently passes nothing is exactly how a
+    /// weight-tied model becomes unservable on any node lacking shard 0. Pass
+    /// `None` only when the model ships a real `output.weight`. Resolve it with
+    /// [`resolve_tied_output`] rather than assembling one by hand.
     pub fn new(
         header_path: &Path,
         shard_files: Vec<(u32, PathBuf)>,
         tensor_entries: &[Vec<crate::types::ShardTensorEntry>],
         total_gguf_size: u64,
         tensor_data_offset: u64,
+        tied_output: Option<TiedOutputSource>,
     ) -> Result<Self, SwarmError> {
         let header = std::fs::read(header_path).map_err(SwarmError::Io)?;
         // SEC: Cap padding to prevent OOM from malicious tensor_data_offset
@@ -94,6 +143,50 @@ impl ShardReader {
                         size: te.size,
                     });
                 }
+            }
+        }
+
+        // Map the tied output head from its sidecar, but ONLY where the shards
+        // present don't already cover it. A node holding shard 0 reads the
+        // tensor from the shard as before; adding a second entry at the same
+        // gguf_offset would make the binary search in `find_shard` ambiguous.
+        if let Some(tied) = tied_output {
+            let already_covered = tensor_map.iter().any(|e| {
+                tied.gguf_offset >= e.gguf_offset && tied.gguf_offset < e.gguf_offset + e.size
+            });
+            if already_covered {
+                tracing::debug!(
+                    gguf_offset = tied.gguf_offset,
+                    "Tied output weight already covered by a local shard — using the shard"
+                );
+            } else {
+                let file_len = std::fs::metadata(&tied.path).map_err(SwarmError::Io)?.len();
+                if file_len < tied.size {
+                    return Err(SwarmError::Internal(format!(
+                        "tied_output_weight.bin is short: {} bytes on disk, header says the tensor is {} \
+                         bytes. Delete {} so it can be re-fetched.",
+                        file_len,
+                        tied.size,
+                        tied.path.display()
+                    )));
+                }
+                shards.push(ShardFile {
+                    path: tied.path.clone(),
+                    file_len,
+                });
+                tensor_map.push(TensorMapEntry {
+                    gguf_offset: tied.gguf_offset,
+                    shard_idx: shards.len() - 1,
+                    // The sidecar holds this tensor and nothing else.
+                    shard_local_offset: 0,
+                    size: tied.size,
+                });
+                tracing::info!(
+                    path = %tied.path.display(),
+                    gguf_offset = tied.gguf_offset,
+                    size = tied.size,
+                    "Mapped tied output head from sidecar — shard 0 is not held locally"
+                );
             }
         }
 
@@ -251,5 +344,201 @@ impl Seek for ShardReader {
         }
         self.position = new_pos as u64;
         Ok(self.position)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::inference::split::{GgufTensorMeta, TIED_OUTPUT_FILENAME};
+    use std::io::Read;
+
+    const HEADER_LEN: u64 = 64;
+    const EMBD_SIZE: u64 = 32;
+    /// Where `token_embd.weight` sits in the virtual GGUF. Matches the real
+    /// layout: the embedding is the first sizeable tensor after the header.
+    const EMBD_GGUF_OFFSET: u64 = HEADER_LEN;
+
+    /// A model dir holding a header and a `tied_output_weight.bin` full of `0xAA`.
+    fn model_dir_with_sidecar(sidecar_len: u64) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("gguf_header.bin"),
+            vec![0u8; HEADER_LEN as usize],
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join(TIED_OUTPUT_FILENAME),
+            vec![0xAAu8; sidecar_len as usize],
+        )
+        .unwrap();
+        dir
+    }
+
+    fn tied_source(dir: &tempfile::TempDir, size: u64) -> TiedOutputSource {
+        TiedOutputSource {
+            path: dir.path().join(TIED_OUTPUT_FILENAME),
+            gguf_offset: EMBD_GGUF_OFFSET,
+            size,
+        }
+    }
+
+    fn meta(tied: bool) -> GgufTensorMeta {
+        let mut tensors = serde_json::json!({
+            "token_embd.weight": { "offset": 0, "size": EMBD_SIZE },
+        });
+        if !tied {
+            tensors["output.weight"] = serde_json::json!({ "offset": 512, "size": EMBD_SIZE });
+        }
+        serde_json::from_value(serde_json::json!({
+            "tensors": tensors,
+            "tensor_data_offset": HEADER_LEN,
+            "model_name": null,
+            "head_count": 8,
+            "head_count_kv": 8,
+            "block_count": 4,
+            "embedding_length": 64,
+            "rope_dim": 8,
+            "rope_freq_base": 10000.0,
+            "rms_norm_eps": 1e-5,
+        }))
+        .unwrap()
+    }
+
+    fn read_at(reader: &mut ShardReader, pos: u64, len: usize) -> std::io::Result<Vec<u8>> {
+        reader.seek(SeekFrom::Start(pos))?;
+        let mut buf = vec![0u8; len];
+        reader.read_exact(&mut buf)?;
+        Ok(buf)
+    }
+
+    /// The regression this whole change exists for: a node holding only the LAST
+    /// shard must still be able to read the tied output head.
+    #[test]
+    fn tied_output_readable_when_shard_zero_is_absent() {
+        let dir = model_dir_with_sidecar(EMBD_SIZE);
+        // This node holds only a late shard, which covers a *different* range.
+        let late_shard = dir.path().join("shard_002.bin");
+        std::fs::write(&late_shard, vec![0x11u8; 16]).unwrap();
+        let entries = vec![vec![crate::types::ShardTensorEntry {
+            name: "blk.3.attn_norm.weight".to_string(),
+            gguf_offset: 4096,
+            shard_offset: 0,
+            size: 16,
+        }]];
+
+        let mut reader = ShardReader::new(
+            &dir.path().join("gguf_header.bin"),
+            vec![(2, late_shard)],
+            &entries,
+            8192,
+            HEADER_LEN,
+            Some(tied_source(&dir, EMBD_SIZE)),
+        )
+        .unwrap();
+
+        let got = read_at(&mut reader, EMBD_GGUF_OFFSET, EMBD_SIZE as usize)
+            .expect("tied output head must be readable without shard 0");
+        assert_eq!(got, vec![0xAAu8; EMBD_SIZE as usize]);
+    }
+
+    /// Without the sidecar the read still fails — proving the test above passes
+    /// because of the mapping and not because the range was reachable anyway.
+    #[test]
+    fn tied_output_unreadable_without_sidecar() {
+        let dir = model_dir_with_sidecar(EMBD_SIZE);
+        let late_shard = dir.path().join("shard_002.bin");
+        std::fs::write(&late_shard, vec![0x11u8; 16]).unwrap();
+        let entries = vec![vec![crate::types::ShardTensorEntry {
+            name: "blk.3.attn_norm.weight".to_string(),
+            gguf_offset: 4096,
+            shard_offset: 0,
+            size: 16,
+        }]];
+
+        let mut reader = ShardReader::new(
+            &dir.path().join("gguf_header.bin"),
+            vec![(2, late_shard)],
+            &entries,
+            8192,
+            HEADER_LEN,
+            None,
+        )
+        .unwrap();
+
+        assert!(read_at(&mut reader, EMBD_GGUF_OFFSET, EMBD_SIZE as usize).is_err());
+    }
+
+    /// A node that DOES hold shard 0 keeps reading from the shard. The sidecar
+    /// must not shadow it, or a duplicate gguf_offset would make the binary
+    /// search in `find_shard` ambiguous.
+    #[test]
+    fn local_shard_wins_over_sidecar() {
+        let dir = model_dir_with_sidecar(EMBD_SIZE);
+        let shard0 = dir.path().join("shard_000.bin");
+        std::fs::write(&shard0, vec![0x77u8; EMBD_SIZE as usize]).unwrap();
+        let entries = vec![vec![crate::types::ShardTensorEntry {
+            name: "token_embd.weight".to_string(),
+            gguf_offset: EMBD_GGUF_OFFSET,
+            shard_offset: 0,
+            size: EMBD_SIZE,
+        }]];
+
+        let mut reader = ShardReader::new(
+            &dir.path().join("gguf_header.bin"),
+            vec![(0, shard0)],
+            &entries,
+            8192,
+            HEADER_LEN,
+            Some(tied_source(&dir, EMBD_SIZE)),
+        )
+        .unwrap();
+
+        let got = read_at(&mut reader, EMBD_GGUF_OFFSET, EMBD_SIZE as usize).unwrap();
+        assert_eq!(
+            got,
+            vec![0x77u8; EMBD_SIZE as usize],
+            "shard bytes, not sidecar"
+        );
+    }
+
+    /// A short sidecar is a corrupt download. Fail loudly at construction rather
+    /// than mapping a truncated range and producing garbage logits.
+    #[test]
+    fn truncated_sidecar_is_rejected() {
+        let dir = model_dir_with_sidecar(EMBD_SIZE - 8);
+        let result = ShardReader::new(
+            &dir.path().join("gguf_header.bin"),
+            vec![],
+            &[],
+            8192,
+            HEADER_LEN,
+            Some(tied_source(&dir, EMBD_SIZE)),
+        );
+        let err = match result {
+            Ok(_) => panic!("a short sidecar must not be accepted"),
+            Err(e) => e,
+        };
+        assert!(err.to_string().contains("short"), "got: {err}");
+    }
+
+    #[test]
+    fn resolve_skips_models_with_a_real_output_weight() {
+        let dir = model_dir_with_sidecar(EMBD_SIZE);
+        assert!(resolve_tied_output(dir.path(), &meta(false)).is_none());
+    }
+
+    #[test]
+    fn resolve_finds_offset_and_size_for_a_tied_model() {
+        let dir = model_dir_with_sidecar(EMBD_SIZE);
+        let got = resolve_tied_output(dir.path(), &meta(true)).expect("tied model with sidecar");
+        assert_eq!(got.gguf_offset, EMBD_GGUF_OFFSET);
+        assert_eq!(got.size, EMBD_SIZE);
+    }
+
+    #[test]
+    fn resolve_returns_none_when_sidecar_is_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(resolve_tied_output(dir.path(), &meta(true)).is_none());
     }
 }

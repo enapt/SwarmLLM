@@ -7,6 +7,15 @@ use candle_core::quantized::gguf_file;
 use crate::error::SwarmError;
 use crate::inference::tokenizer::SplitTokenizer;
 
+/// Sidecar file carrying `token_embd.weight` for weight-tied models.
+///
+/// A node serving the LAST pipeline segment needs the output head, but for a
+/// weight-tied model that tensor physically lives in shard 0 — which that node
+/// often does not hold. This file carries the raw tensor bytes so the head can
+/// be loaded without shard 0. Written by `extract_tied_output_weight` and
+/// `download_tied_output_weight`; read back by `ShardReader`.
+pub const TIED_OUTPUT_FILENAME: &str = "tied_output_weight.bin";
+
 /// Extract the GGUF `general.architecture` string, defaulting to `"llama"` when absent.
 pub fn gguf_arch_str(ct: &gguf_file::Content) -> String {
     ct.metadata
@@ -54,6 +63,22 @@ pub struct TensorLocation {
 }
 
 impl GgufTensorMeta {
+    /// Location of the tensor doubling as the output head on a weight-tied
+    /// model, or `None` when the model ships a separate `output.weight`.
+    ///
+    /// Weight tying means reusing `token_embd.weight` as the LM head, so the
+    /// GGUF carries no `output.weight` at all. This is the single definition of
+    /// "is this model weight-tied" — the two sidecar writers
+    /// (`extract_tied_output_weight`, `download_tied_output_weight`) and the
+    /// reader (`ShardReader`) all consult it, so a producer can never disagree
+    /// with the consumer about which tensor the sidecar holds.
+    pub fn tied_output_location(&self) -> Option<&TensorLocation> {
+        if self.tensors.contains_key("output.weight") {
+            return None;
+        }
+        self.tensors.get("token_embd.weight")
+    }
+
     /// Extract tensor metadata from a GGUF file header on disk.
     /// Only needs to read the header, not the full file.
     pub fn from_gguf_file(path: &Path) -> Result<Self, SwarmError> {

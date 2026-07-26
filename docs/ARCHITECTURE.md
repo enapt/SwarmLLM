@@ -1422,11 +1422,32 @@ without needing the full multi-GB GGUF file:
 ├── gguf_header.bin      # First ~6MB of GGUF (metadata + tensor index)
 ├── shard_000.bin        # 512MB shard
 ├── shard_001.bin
+├── tied_output_weight.bin   # weight-tied models only — see below
 └── ...
 ```
 
 `ShardReader` in `split/shard_reader.rs` constructs a virtual GGUF from header + shard files,
 allowing candle to parse the full tensor index while only loading assigned layers.
+
+### Weight-tied models and the output head
+
+A weight-tied model (the Llama-3.2 family, Gemma-2, and most small models) reuses
+`token_embd.weight` as its LM head and ships no separate `output.weight`. That
+tensor physically lives in **shard 0**, but the node serving the **last** pipeline
+segment is the one that needs it — and in a real swarm that node frequently does
+not hold shard 0.
+
+`tied_output_weight.bin` carries the raw tensor bytes so the head can be loaded
+without shard 0. It is produced by `extract_tied_output_weight` (local GGUF) and
+`download_tied_output_weight` (HF byte-range), and consumed by
+`resolve_tied_output` → `ShardReader::new`, which maps it over the tensor's gguf
+byte range. Reads resolve through the ordinary tensor map, so
+`ct.tensor(&mut reader, "token_embd.weight", …)` works unchanged. When the node
+*does* hold shard 0 the sidecar is ignored and the shard is used.
+
+`GgufTensorMeta::tied_output_location()` is the single definition of "weight-tied",
+shared by both writers and the reader so they cannot disagree about which tensor
+the sidecar holds.
 
 ## HTTP API Routes
 

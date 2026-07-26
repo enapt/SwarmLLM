@@ -223,16 +223,10 @@ pub async fn download_tied_output_weight(
     dest_dir: &std::path::Path,
     tensor_meta: &crate::inference::split::GgufTensorMeta,
 ) -> Result<Option<std::path::PathBuf>, String> {
-    // Check if model is weight-tied: has token_embd.weight but no output.weight
-    let has_output = tensor_meta.tensors.contains_key("output.weight");
-    let embd = tensor_meta.tensors.get("token_embd.weight");
-
-    if has_output || embd.is_none() {
-        return Ok(None); // Not weight-tied, or no embedding — nothing to do
-    }
-
-    // Safety: guarded by `embd.is_none()` return above
-    let embd_loc = embd.expect("embd checked non-None above");
+    // Not weight-tied (or no embedding at all) — nothing to carry.
+    let Some(embd_loc) = tensor_meta.tied_output_location() else {
+        return Ok(None);
+    };
     let abs_offset = tensor_meta.tensor_data_offset + embd_loc.offset;
     let size = embd_loc.size;
 
@@ -270,7 +264,7 @@ pub async fn download_tied_output_weight(
 
     let dest_path = atomic_write_blocking(
         dest_dir.to_path_buf(),
-        "tied_output_weight.bin",
+        crate::inference::split::TIED_OUTPUT_FILENAME,
         data.to_vec(),
     )
     .await?;

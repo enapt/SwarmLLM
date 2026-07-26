@@ -1144,3 +1144,74 @@ fn forward_prefill_batch_timing() {
     }
     eprintln!();
 }
+
+// ── Tail-segment load without shard 0 (real model on disk; #[ignore] by default) ──
+
+/// A node serving the LAST pipeline segment of a weight-tied model must be able
+/// to load its output head from `tied_output_weight.bin`, because the tensor the
+/// head aliases (`token_embd.weight`) physically lives in shard 0 — which such a
+/// node has no reason to hold.
+///
+/// Point `SWARMLLM_TAIL_MODEL_DIR` at a model directory containing ONLY a late
+/// shard plus `gguf_header.bin`, `manifest.json` and `tied_output_weight.bin`.
+/// That is the exact on-disk state of a real swarm node serving the tail. Before
+/// the sidecar was wired into `ShardReader` this failed with "Failed to load
+/// output head: ShardReader: position N is in a missing region".
+///
+/// Negative control: move the sidecar aside and re-run — the load must fail.
+#[test]
+#[ignore] // SWARMLLM_TAIL_MODEL_DIR=... cargo test tail_segment_loads -- --ignored --nocapture
+fn tail_segment_loads_without_shard_zero() {
+    let Ok(dir) = std::env::var("SWARMLLM_TAIL_MODEL_DIR") else {
+        eprintln!("Skipping: set SWARMLLM_TAIL_MODEL_DIR to a tail-only model dir");
+        return;
+    };
+    let model_dir = std::path::Path::new(&dir);
+    let manifest: serde_json::Value =
+        serde_json::from_reader(std::fs::File::open(model_dir.join("manifest.json")).unwrap())
+            .unwrap();
+    let total_size = manifest["total_size_bytes"].as_u64().unwrap();
+
+    // Use the highest-indexed shard actually present — the tail.
+    let mut chosen = None;
+    for s in manifest["shards"].as_array().unwrap() {
+        let idx = s["index"].as_u64().unwrap() as u32;
+        let path = model_dir.join(format!("shard_{idx:03}.bin"));
+        if !path.exists() {
+            continue;
+        }
+        let entries: Vec<crate::types::ShardTensorEntry> =
+            serde_json::from_value(s["tensors"].clone()).unwrap();
+        let lr = s["layer_range"].as_array().unwrap();
+        let range = (
+            lr[0].as_u64().unwrap() as usize,
+            lr[1].as_u64().unwrap() as usize,
+        );
+        chosen = Some((idx, path, entries, range));
+    }
+    let (idx, path, entries, (layer_start, layer_end)) =
+        chosen.expect("no shard_NNN.bin present in SWARMLLM_TAIL_MODEL_DIR");
+    assert!(
+        layer_start > 0,
+        "dir must NOT contain shard 0 or the test proves nothing — got layers {layer_start}..{layer_end}"
+    );
+    eprintln!("Loading tail: shard {idx}, layers {layer_start}..{layer_end}, no shard 0 present");
+
+    let model = SplitModel::load_from_shards(
+        model_dir,
+        vec![(idx, path)],
+        &[entries],
+        total_size,
+        layer_start,
+        layer_end,
+        false, // is_first — embeddings live in shard 0, which we don't have
+        true,  // is_last  — so the output head IS needed
+    )
+    .expect("tail segment must load its output head from tied_output_weight.bin");
+
+    assert_eq!(
+        model.total_layers,
+        manifest["num_layers"].as_u64().unwrap() as usize
+    );
+    eprintln!("OK — output head loaded without shard 0");
+}

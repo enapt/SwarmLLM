@@ -296,7 +296,7 @@ pub(super) async fn restore_persistent_state(
                     }
 
                     // Auto-extract tied_output_weight.bin for weight-tied models.
-                    let tied_path = model_dir.join("tied_output_weight.bin");
+                    let tied_path = model_dir.join(crate::inference::split::TIED_OUTPUT_FILENAME);
                     if !tied_path.exists() {
                         if let Some(meta) = shared_state.gguf_meta.get(model_id) {
                             let has_output = meta.tensors.contains_key("output.weight");
@@ -517,7 +517,8 @@ pub(super) async fn restore_persistent_state(
                                                 &mid, &model_dir, &meta, config,
                                             );
                                         }
-                                        let tied_path = model_dir.join("tied_output_weight.bin");
+                                        let tied_path = model_dir
+                                            .join(crate::inference::split::TIED_OUTPUT_FILENAME);
                                         if !tied_path.exists() {
                                             let has_output =
                                                 meta.tensors.contains_key("output.weight");

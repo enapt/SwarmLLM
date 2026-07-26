@@ -1,5 +1,6 @@
 # Rust build artifacts
 /target/
+/target-docker/
 **/*.rs.bk
 *.orig
 

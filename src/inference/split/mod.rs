@@ -39,7 +39,7 @@ pub use self::entry::BatchItem;
 pub use self::entry::{evict_split_models_lru, SplitModelEntry, SplitModelKey};
 pub use self::gguf_meta::{
     ensure_gguf_header, gguf_arch_str, save_gguf_header, GgufTensorMeta, GgufTokenizerMeta,
-    TensorLocation,
+    TensorLocation, TIED_OUTPUT_FILENAME,
 };
 pub use self::kv_cache::KvCacheStore;
 pub use self::model::SplitModel;
@@ -48,6 +48,7 @@ pub use self::prefix_cache::{
     serialize_snapshot_with_block_size, snapshot_is_finite, verify_token_hash_chain, KvSnapshot,
     PrefixCache, KV_SNAPSHOT_MAGIC, KV_SNAPSHOT_VERSION,
 };
+pub use self::shard_reader::{resolve_tied_output, TiedOutputSource};
 
 pub(crate) const DEFAULT_MAX_SEQ_LEN: usize = 4096;
 
