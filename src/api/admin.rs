@@ -200,8 +200,28 @@ pub async fn performance(State(state): State<AppState>) -> impl axum::response::
     let layers = m.layers_served.load(Ordering::Relaxed);
     let micros = m.segment_serve_micros.load(Ordering::Relaxed);
 
+    // Hourly trend, oldest first. Aggregates only, and the series is capped at
+    // a week, so this stays a few KB regardless of traffic.
+    let hourly: Vec<serde_json::Value> = ss
+        .perf_history
+        .snapshot()
+        .into_iter()
+        .map(|b| {
+            serde_json::json!({
+                "hour_start_ms": b.hour_start_ms,
+                "requests": b.requests,
+                "errors": b.errors,
+                "avg_total_ms": b.avg_total_ms(),
+                "avg_ttft_ms": b.avg_ttft_ms(),
+                "avg_tok_per_sec": b.avg_tok_per_sec(),
+                "by_route": b.by_route,
+            })
+        })
+        .collect();
+
     axum::Json(serde_json::json!({
         "recent": recent,
+        "hourly": hourly,
         "peers": ss.peer_performance_rows(),
         "served": {
             "segments": m.segments_served.load(Ordering::Relaxed),

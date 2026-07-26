@@ -22,6 +22,7 @@ mod events;
 mod hf;
 mod metrics;
 mod models;
+mod perf_history;
 mod relay;
 mod tp_allreduce;
 
@@ -268,6 +269,9 @@ pub struct SharedState {
     /// inherits that mechanism's already-correct cleanup, including the panic
     /// path via `ActivePipelineGuard::drop`.
     pub active_traces: DashMap<uuid::Uuid, std::sync::Arc<crate::inference::trace::RequestTrace>>,
+    /// Hourly performance rollups, persisted so a trend survives a restart.
+    /// Aggregates only — per-request detail stays in `recent_traces`, in memory.
+    pub perf_history: perf_history::PerfHistory,
     pub detected_region: RwLock<Option<String>>,
     pub shard_bytes_served: AtomicU64,
     pub relay_seconds_served: AtomicU64,
@@ -625,6 +629,7 @@ impl SharedState {
             recent_failures: std::sync::Mutex::new(std::collections::VecDeque::new()),
             recent_traces: std::sync::Mutex::new(std::collections::VecDeque::new()),
             active_traces: DashMap::new(),
+            perf_history: perf_history::PerfHistory::load(&db),
             vision_modules: DashMap::new(),
             encrypted_pipeline_models: {
                 let map = DashMap::new();

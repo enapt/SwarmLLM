@@ -139,6 +139,13 @@ impl super::SharedState {
             );
         }
 
+        // Hourly rollup. Persisted only when the hour rolls over — a redb
+        // transaction per request would put disk I/O on the completion path.
+        let now_ms = chrono::Utc::now().timestamp_millis().max(0) as u64;
+        if self.perf_history.record(&snap, now_ms) {
+            self.perf_history.persist(&self.db);
+        }
+
         if let Ok(mut buf) = self.recent_traces.lock() {
             if buf.len() >= super::MAX_RECENT_TRACES {
                 buf.pop_front();
