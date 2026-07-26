@@ -429,6 +429,10 @@ impl SharedState {
                 tpot_total_count: AtomicU64::new(0),
                 tpot_total_micros: AtomicU64::new(0),
                 requests_by_route: DashMap::new(),
+                segments_served: AtomicU64::new(0),
+                layers_served: AtomicU64::new(0),
+                segment_serve_micros: AtomicU64::new(0),
+                segment_bytes_out: AtomicU64::new(0),
                 channel_metrics: ChannelMetricsSet::new(),
                 ws_connection_count: std::sync::atomic::AtomicUsize::new(0),
                 providers_config: RwLock::new({

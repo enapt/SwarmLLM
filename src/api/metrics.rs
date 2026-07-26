@@ -89,6 +89,36 @@ pub async fn metrics(State(state): State<AppState>) -> Response {
     // Both labels are closed sets, so this cannot grow with the swarm.
     write_route_counter(&mut buf, shared);
 
+    // Serving side: work this node did for other peers. Everything above is
+    // requester-side, so these are what answer "is my node contributing".
+    {
+        let m = &shared.metrics;
+        write_counter(
+            &mut buf,
+            "swarmllm_segments_served_total",
+            "Pipeline segments computed for other peers",
+            m.segments_served.load(Ordering::Relaxed) as f64,
+        );
+        write_counter(
+            &mut buf,
+            "swarmllm_layers_served_total",
+            "Transformer layers computed for other peers",
+            m.layers_served.load(Ordering::Relaxed) as f64,
+        );
+        write_counter(
+            &mut buf,
+            "swarmllm_segment_serve_seconds_total",
+            "Cumulative compute time spent serving segments for other peers",
+            m.segment_serve_micros.load(Ordering::Relaxed) as f64 / 1_000_000.0,
+        );
+        write_counter(
+            &mut buf,
+            "swarmllm_segment_activation_bytes_total",
+            "Activation bytes returned to peers after serving a segment",
+            m.segment_bytes_out.load(Ordering::Relaxed) as f64,
+        );
+    }
+
     // Channel backpressure metrics
     write_channel_metrics(&mut buf, shared);
 

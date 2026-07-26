@@ -155,6 +155,15 @@ pub(super) async fn handle_layer_forward(
         tp = tp_meta.is_some(),
         "DIAG: LayerForward processed via worker subprocess"
     );
+    // Serving-side accounting. Everything else in the observability stack is
+    // requester-side, so without this an operator cannot answer "is my node
+    // actually contributing, and how well" — nor can we distinguish a
+    // well-behaved peer from one whose segments everyone times out on.
+    shared_state.record_segment_served(
+        layer_end.saturating_sub(layer_start) as u32,
+        forward_elapsed.as_millis() as u64,
+        result.activations.len() as u64,
+    );
 
     // TP path: send partial as AllReduceRequest to the coordinator (sender) instead of LayerResult
     if let Some(ref tp) = tp_meta {

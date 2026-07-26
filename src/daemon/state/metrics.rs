@@ -66,6 +66,18 @@ pub struct MetricsProviders {
     /// demand and never retained — see `docs/FUTURE_WORK.md` § Observability on
     /// why an unbounded label set takes down the scrape.
     pub requests_by_route: DashMap<(&'static str, &'static str), u64>,
+    /// Serving-side totals: segments this node computed FOR OTHER PEERS.
+    ///
+    /// Every other counter here is requester-side. Without these an operator
+    /// cannot answer "is my node actually contributing, and how well", and a
+    /// node whose segments everyone times out on looks identical to a healthy
+    /// one. Plain atomics rather than a labelled map — the useful question is
+    /// the node's own throughput, and per-requester breakdown would be
+    /// unbounded.
+    pub segments_served: AtomicU64,
+    pub layers_served: AtomicU64,
+    pub segment_serve_micros: AtomicU64,
+    pub segment_bytes_out: AtomicU64,
     pub channel_metrics: ChannelMetricsSet,
     pub ws_connection_count: std::sync::atomic::AtomicUsize,
     pub node_stats: RwLock<NodeStats>,

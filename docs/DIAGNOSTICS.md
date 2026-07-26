@@ -4,6 +4,70 @@
 
 All diagnostic log lines are prefixed with `DIAG:` for easy filtering.
 
+## Start here: one line per request
+
+Before tracing anything through the 26 lifecycle points below, read the
+completion summary. Every finished inference emits **one** line carrying the
+whole route and where the time went:
+
+```bash
+grep "DIAG: request complete" node.log
+```
+
+```
+DIAG: request complete request_id=1ddd2912-… route=distributed segments=2
+  model=llama-3.2-1b-instruct-q8-0 nodes=0718d8b9,96842635 regions=TH,TH
+  queue_ms=3 sched_ms=1 ttft_ms=180 decode_ms=1420 total_ms=1604
+  prompt_tokens=22 tokens=48 tok_per_sec=33.8 tpot_ms=30.2
+  seg0_ms=520 seg1_ms=900 activation_bytes=39188 outcome=ok
+```
+
+This answers most questions on its own:
+
+| Symptom in the line | Where to look next |
+|---|---|
+| `queue_ms` large | node is saturated — tier caps in `router/mod.rs`, or `max_concurrent_requests` |
+| `sched_ms` large | scheduler struggling to find holders — check `-- peer serving performance --` |
+| `ttft_ms` large, `decode_ms` small | prefill or a cold model load, not the network |
+| `decode_ms` large, `tpot_ms` high | per-token cost — find the slow hop via `segN_ms` |
+| one `segN_ms` dominates | that peer is the bottleneck; cross-check its row in the peer table |
+| `route=relayed` | no direct path to a holder; ~1 extra RTT each way, see NAT section |
+| `outcome=error error_type=…` | the variant name points at the subsystem |
+
+Absent fields mean "not measured", never zero. `ttft_ms` and `decode_ms` are
+omitted on a path that never emitted an incremental token, because there is no
+honest way to split decode out of the total there.
+
+## No log file? Use the endpoint
+
+`GET /api/admin/diagnostics` renders plain text for a shell, and includes the
+last 50 completed requests, the failure ring, per-peer serving performance
+(round-trip time, ms/layer, EWMA latency, sample count, region) and what this
+node has served for others. One command instead of a log excerpt:
+
+```bash
+curl -s -H "Authorization: Bearer $(cat ~/.local/share/swarmllm/api_key)" \
+  localhost:8800/api/admin/diagnostics
+```
+
+Per-request routing is also on **every response**, so a failing client can be
+diagnosed without server access at all:
+
+```bash
+curl -i -X POST localhost:8800/v1/chat/completions -H '…' -d '…' | grep -i '^x-swarm-\|^server-timing'
+```
+
+```
+x-swarm-route: distributed
+x-swarm-segments: 2
+x-swarm-nodes: 0718d8b9,96842635
+server-timing: queue;dur=3, sched;dur=1, ttft;dur=180, decode;dur=1420
+```
+
+On a streaming response the `Server-Timing` header carries only what is known
+before the body flushes (queue, schedule); the token-level figures arrive in the
+final SSE usage event.
+
 ## Quick Start — Filtering Diagnostic Logs
 
 ```bash
@@ -60,7 +124,11 @@ cargo run -- run -vv 2>&1 | grep "request_id=<UUID>"
 23. **Segment result** → `DIAG: segment result received` with `elapsed_ms` (pipeline/local.rs)
 24. **Pipeline complete** → `DIAG: forward_through_segments completed` with `pipeline_ms` (pipeline/distributed.rs)
 25. **Execute complete** → `DIAG: execute_request completed successfully` with `schedule_ms`, `execute_ms`, `total_ms` (router/distributed_exec.rs)
-26. **Completion** → `DIAG: inference completed` with `elapsed_ms`, `prompt_tokens`, `completion_tokens` (router/mod.rs)
+26. **Completion** → `DIAG: request complete` — the single summary line described at the top of this guide, carrying route, nodes, regions, per-phase timings, per-segment timings, tok/s and outcome (`daemon/state/relay.rs::publish_request_trace`, called from router/mod.rs)
+
+All 26 points are built from one `RequestTrace` (`inference/trace.rs`), which is
+also what feeds the response headers, the diagnostics ring and the Prometheus
+histograms. Adding a field means adding it there once, not at each surface.
 
 ### Network Event Diagnostics
 

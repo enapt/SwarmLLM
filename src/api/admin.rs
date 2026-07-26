@@ -350,6 +350,35 @@ pub async fn diagnostics(State(state): State<AppState>) -> impl axum::response::
         }
     }
 
+    // What this node did FOR the swarm. Distinct from everything above, which
+    // is all about requests this node made.
+    {
+        use std::sync::atomic::Ordering;
+        let m = &ss.metrics;
+        let segments = m.segments_served.load(Ordering::Relaxed);
+        let layers = m.layers_served.load(Ordering::Relaxed);
+        let micros = m.segment_serve_micros.load(Ordering::Relaxed);
+        let bytes = m.segment_bytes_out.load(Ordering::Relaxed);
+        let _ = writeln!(out, "\n-- served for others --");
+        if segments == 0 {
+            let _ = writeln!(out, "  (no segments served yet)");
+        } else {
+            let _ = writeln!(
+                out,
+                "  segments={segments} layers={layers} compute={:.1}s activations_out={:.1}MB",
+                micros as f64 / 1_000_000.0,
+                bytes as f64 / (1024.0 * 1024.0),
+            );
+            // Per-layer cost is the comparable figure: it is what a peer's
+            // scheduler uses to rank us, so it is the number to watch.
+            let _ = writeln!(
+                out,
+                "  {:.1} ms per layer served",
+                (micros as f64 / 1000.0) / layers.max(1) as f64
+            );
+        }
+    }
+
     // Per-peer serving performance. `hedge_tracker` has carried EWMA latency
     // with variance per (model, segment, holder) since R136 and nothing could
     // read it; this is the first surface that does. Answers "which peer is

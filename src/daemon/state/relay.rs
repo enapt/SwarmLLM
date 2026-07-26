@@ -446,6 +446,22 @@ fn record_duration_sample(
     }
 }
 
+impl super::SharedState {
+    /// Record one segment computed on behalf of another peer.
+    ///
+    /// Called from the serving side of a `LayerForward`. Relaxed atomics: these
+    /// are counters read by a scrape, and this sits on the per-decode-step hot
+    /// path of a serving node, so ordering costs are not worth paying.
+    pub fn record_segment_served(&self, layers: u32, elapsed_ms: u64, activation_bytes: u64) {
+        use std::sync::atomic::Ordering::Relaxed;
+        let m = &self.metrics;
+        m.segments_served.fetch_add(1, Relaxed);
+        m.layers_served.fetch_add(layers as u64, Relaxed);
+        m.segment_serve_micros.fetch_add(elapsed_ms * 1000, Relaxed);
+        m.segment_bytes_out.fetch_add(activation_bytes, Relaxed);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
