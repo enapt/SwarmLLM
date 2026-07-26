@@ -645,7 +645,11 @@ pub(super) async fn execute_request(
                     .and_then(|p| p.capability.as_ref().and_then(|c| c.region.clone()))
             },
         );
-        trace.mark_assembled(crate::inference::trace::classify_route(&segs), segs);
+        trace.mark_assembled(
+            crate::inference::trace::classify_route(&segs),
+            segs,
+            schedule_ms,
+        );
     }
 
     // Store assignment in shared state for monitoring. `active_traces` is

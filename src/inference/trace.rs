@@ -133,8 +133,11 @@ impl SegmentTrace {
 #[derive(Default)]
 struct TraceInner {
     t_dequeued: Option<Instant>,
-    t_assembled: Option<Instant>,
     t_finished: Option<Instant>,
+    /// Summed assembly time across attempts, ms.
+    sched_ms_total: u64,
+    /// How many times a pipeline was assembled. >1 means the request retried.
+    assemblies: u32,
     route: Route,
     segments: Vec<SegmentTrace>,
     prompt_tokens: u32,
@@ -183,9 +186,22 @@ impl RequestTrace {
 
     /// Pipeline assembled. Records the route and the segment layout in one
     /// call so the two can never disagree.
-    pub fn mark_assembled(&self, route: Route, segments: Vec<SegmentTrace>) {
+    ///
+    /// `sched_ms` is the caller's own measurement of how long assembly took, and
+    /// is ACCUMULATED across calls. It is not derived from the dequeue timestamp:
+    /// a request that fails and retries assembles twice, and deriving from
+    /// dequeue would charge the first attempt's whole execution to "scheduling".
+    /// Observed live 2026-07-26 reporting `sched_ms=13033` for two assemblies
+    /// that each took ~0ms — actively misleading, since the symptom table in
+    /// `docs/DIAGNOSTICS.md` reads a large value as "the scheduler is struggling
+    /// to find holders".
+    ///
+    /// Route and segments are OVERWRITTEN, not accumulated: the last assembly is
+    /// the one that actually served.
+    pub fn mark_assembled(&self, route: Route, segments: Vec<SegmentTrace>, sched_ms: u64) {
         let mut g = self.lock();
-        g.t_assembled = Some(Instant::now());
+        g.sched_ms_total += sched_ms;
+        g.assemblies += 1;
         g.route = route;
         g.segments = segments;
     }
@@ -261,10 +277,8 @@ impl RequestTrace {
             queue_ms: g
                 .t_dequeued
                 .map(|t| t.duration_since(self.t_admitted).as_millis() as u64),
-            sched_ms: match (g.t_dequeued, g.t_assembled) {
-                (Some(a), Some(b)) => Some(b.duration_since(a).as_millis() as u64),
-                _ => None,
-            },
+            sched_ms: (g.assemblies > 0).then_some(g.sched_ms_total),
+            assemblies: g.assemblies,
             ttft_ms,
             decode_ms,
             tpot_ms,
@@ -289,6 +303,10 @@ pub struct TraceSnapshot {
     pub queue_ms: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sched_ms: Option<u64>,
+    /// Pipeline assemblies performed. >1 means the request was retried, which is
+    /// worth seeing next to the timings — a slow request that retried is a
+    /// different problem from one that was simply slow.
+    pub assemblies: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ttft_ms: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -363,6 +381,12 @@ impl TraceSnapshot {
             if let Some(v) = v {
                 let _ = write!(s, " {k}={v}");
             }
+        }
+        // >1 assembly means the request retried. A slow request that retried is
+        // a different problem from one that was simply slow, so surface it rather
+        // than leaving the reader to infer it from an inflated duration.
+        if self.assemblies > 1 {
+            let _ = write!(s, " assemblies={}", self.assemblies);
         }
         let _ = write!(
             s,
@@ -701,7 +725,11 @@ mod tests {
     fn streaming_server_timing_omits_post_body_durations() {
         let t = RequestTrace::new(uuid::Uuid::nil(), "m", "chat");
         t.mark_dequeued();
-        t.mark_assembled(Route::Local, vec![seg(0, "aaaa", true, Transport::Local)]);
+        t.mark_assembled(
+            Route::Local,
+            vec![seg(0, "aaaa", true, Transport::Local)],
+            0,
+        );
         t.mark_first_token();
         t.mark_finished(Outcome::Ok, 4, 9);
         let s = t.snapshot();
@@ -729,6 +757,7 @@ mod tests {
                 seg(0, "0718d8b987a4975a", true, Transport::Local),
                 seg(1, "9684263580c6660f", false, Transport::Direct),
             ],
+            0,
         );
         t.mark_first_token();
         t.mark_finished(Outcome::Ok, 4, 9);
@@ -757,6 +786,7 @@ mod tests {
         t.mark_assembled(
             Route::Distributed,
             vec![seg(0, "9684263580c6660f", false, Transport::Direct)],
+            0,
         );
         t.record_segment_timing(0, 900, 1234);
         t.mark_finished(Outcome::Ok, 4, 9);
@@ -766,6 +796,57 @@ mod tests {
                 "{name}: {value:?} is not a valid header value"
             );
         }
+    }
+
+    /// `sched_ms` must be assembly time, not time-since-dequeue. Deriving it
+    /// from the dequeue timestamp charged a failed attempt's whole execution to
+    /// "scheduling" — observed live reporting 13s for two ~0ms assemblies.
+    #[test]
+    fn sched_ms_sums_assembly_time_and_ignores_the_gap_between_attempts() {
+        let t = RequestTrace::new(uuid::Uuid::nil(), "m", "chat");
+        t.mark_dequeued();
+        // First assembly: 4ms. Then a long failed attempt elapses.
+        t.mark_assembled(
+            Route::Distributed,
+            vec![seg(0, "bbbb", false, Transport::Direct)],
+            4,
+        );
+        std::thread::sleep(std::time::Duration::from_millis(40));
+        // Retry assembles again: 6ms.
+        t.mark_assembled(
+            Route::Distributed,
+            vec![seg(0, "cccc", false, Transport::Direct)],
+            6,
+        );
+        t.mark_finished(Outcome::Ok, 1, 2);
+
+        let s = t.snapshot();
+        assert_eq!(s.sched_ms, Some(10), "must sum 4+6, not span the 40ms gap");
+        assert_eq!(s.assemblies, 2);
+        // Route reflects the assembly that actually served.
+        assert_eq!(s.nodes_csv(), "cccc");
+        let line = s.log_line();
+        assert!(
+            line.contains("assemblies=2"),
+            "retries must be visible: {line}"
+        );
+    }
+
+    #[test]
+    fn a_single_assembly_reports_no_retry_count() {
+        let t = RequestTrace::new(uuid::Uuid::nil(), "m", "chat");
+        t.mark_assembled(
+            Route::Local,
+            vec![seg(0, "aaaa", true, Transport::Local)],
+            3,
+        );
+        t.mark_finished(Outcome::Ok, 1, 2);
+        let s = t.snapshot();
+        assert_eq!(s.sched_ms, Some(3));
+        assert!(
+            !s.log_line().contains("assemblies="),
+            "no noise on the happy path"
+        );
     }
 
     #[test]
@@ -778,6 +859,7 @@ mod tests {
                 seg(0, "0718d8b987a4975a", true, Transport::Local),
                 seg(1, "9684263580c6660f", false, Transport::Direct),
             ],
+            0,
         );
         t.record_segment_timing(1, 900, 39188);
         t.mark_finished(Outcome::Ok, 22, 3);
@@ -797,6 +879,7 @@ mod tests {
         t.mark_assembled(
             Route::Distributed,
             vec![seg(0, "bbbb", false, Transport::Direct)],
+            0,
         );
         assert_eq!(t.snapshot().regions_csv(), "");
         assert!(!t.snapshot().log_line().contains("regions="));

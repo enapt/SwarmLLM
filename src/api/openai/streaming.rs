@@ -365,6 +365,9 @@ pub async fn run_split_generate(
             state.shared_state.identity.node_id(),
             meta.layer_range,
         ),
+        // No scheduling happens on the local-complete fast path — it bypasses
+        // the scheduler entirely, so reporting 0 is accurate, not a placeholder.
+        0,
     );
 
     let mut output = state

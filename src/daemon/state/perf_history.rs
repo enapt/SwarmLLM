@@ -154,7 +154,7 @@ mod tests {
 
     fn snap(total_ms: u64, tokens: u32, ok: bool) -> crate::inference::trace::TraceSnapshot {
         let t = RequestTrace::new(uuid::Uuid::nil(), "m", "chat");
-        t.mark_assembled(Route::Distributed, vec![]);
+        t.mark_assembled(Route::Distributed, vec![], 0);
         t.mark_first_token();
         t.mark_finished(
             if ok {

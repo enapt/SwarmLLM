@@ -28,11 +28,16 @@ This answers most questions on its own:
 |---|---|
 | `queue_ms` large | node is saturated — tier caps in `router/mod.rs`, or `max_concurrent_requests` |
 | `sched_ms` large | scheduler struggling to find holders — check `-- peer serving performance --` |
+| `assemblies=2` present | the request FAILED once and retried. Whatever else the line says, start here: the first attempt's cause is in the log just above |
 | `ttft_ms` large, `decode_ms` small | prefill or a cold model load, not the network |
 | `decode_ms` large, `tpot_ms` high | per-token cost — find the slow hop via `segN_ms` |
 | one `segN_ms` dominates | that peer is the bottleneck; cross-check its row in the peer table |
 | `route=relayed` | no direct path to a holder; ~1 extra RTT each way, see NAT section |
 | `outcome=error error_type=…` | the variant name points at the subsystem |
+
+`sched_ms` is time spent *assembling*, summed across attempts — not
+time-since-dequeue, which would charge a failed attempt's whole execution to
+"scheduling". `assemblies` appears only when it is >1.
 
 Absent fields mean "not measured", never zero. `ttft_ms` and `decode_ms` are
 omitted on a path that never emitted an incremental token, because there is no
