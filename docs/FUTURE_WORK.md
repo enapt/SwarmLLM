@@ -2596,6 +2596,45 @@ only with (a) concrete data on NAT scenarios our relay path genuinely cannot
 reach, and (b) peeroxide reaching more maintainers / a stable release / an
 external audit.
 
+## Collapse the parallel response paths behind one core loop (2026-07-26)
+
+**The single most expensive recurring defect in this codebase is a shared rule
+implemented per path.** It appeared seven times on 2026-07-25/26 (stop strings,
+tool-call buffering ×2, `include_usage` ×2, control-token scrubbing,
+`strip_provider_prefix`) and four more times on 2026-07-26 alone (the Anthropic
+prefix, `build_prompt`'s model name, the reply-text ordering divergence, the
+direct `chatml_fallback` calls). Every instance had a correct helper that one
+consumer didn't call.
+
+Two structural fixes have shipped, and they work — see `.claude/rules/
+architecture.md` § "One invariant, N paths" for the escalation ladder:
+
+- **Choke point over convention.** `inference::finalize_reply_text` now owns the
+  whole ordered reply-text sequence, and `providers::strip_prefix_in_body` runs
+  inside the three functions that actually send. A new caller is correct with no
+  author action.
+- **Required over optional.** `build_prompt` takes the model name as a required
+  argument rather than an `Option` behind a wrapper that passed `None`.
+
+**What remains** is the duplication those fixes route around rather than remove:
+`api/openai/streaming.rs` (1155 lines), `api/anthropic/handlers.rs` (1457) and
+`api/openai/responses/stream.rs` (1067) each implement their own
+streaming/non-streaming pair over the same router output. That is why there are
+so many places for a rule to be forgotten in the first place.
+
+**Proposed**: one core generator loop producing a neutral event stream
+(`TextDelta`, `ToolCall`, `Usage`, `Finish`), with three thin per-surface
+adapters that only serialise those events into OpenAI SSE, Anthropic SSE, or
+Responses events. Every cross-cutting rule then has exactly one home: applied to
+the event stream, not to each transcription of it. Estimated to remove
+substantially more than half of those 3,679 lines.
+
+**Why not now**: it rewrites every response path at once, so it needs its own
+release and a live A/B on all four surfaces (OpenAI stream/non-stream, Anthropic
+stream/non-stream, Responses foreground/background, MCP). The choke-point fixes
+above are the correct interim: they make the current duplication safe without
+pretending it isn't there.
+
 ## Replace the hand-rolled chat-template evaluator with minijinja (2026-07-26)
 
 `src/inference/chat_template/` is a hand-written mini-Jinja subset (~600 lines
