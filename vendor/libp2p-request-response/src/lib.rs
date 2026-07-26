@@ -1088,15 +1088,57 @@ struct Connection {
 
 /// SwarmLLM patch: whether a connection is carried over a relay circuit.
 ///
-/// A relayed connection's remote address contains a `/p2p-circuit` hop. When
-/// the address is unknown (`None`) we treat the connection as direct: that is
-/// the pre-existing default for inbound connections, and mis-classifying a
-/// direct connection as relayed would wrongly exclude it from selection.
+/// Two signatures, because a relayed connection looks different depending on
+/// which end dialled:
+///
+///  1. **We dialled through a relay** — the address carries an explicit
+///     `/p2p-circuit` hop, e.g.
+///     `/dns4/relay/tcp/8810/p2p/<relay>/p2p-circuit/p2p/<target>`.
+///  2. **The peer dialled us through a relay** — the address is just
+///     `/p2p/<peer>` with NO transport component at all. There is no `ip4`,
+///     `udp` or `tcp` hop because there is no direct socket to describe.
+///
+/// Case 2 was missed originally, and the consequence was severe: selection below
+/// picks the newest *direct* connection, and a relayed inbound connection is
+/// typically the newest of the three a peer accumulates. So every request to
+/// that peer went over a relay circuit that had already failed to negotiate,
+/// producing a silent drop — no response, no `OutboundFailure` — until the
+/// ACK-timeout sweep fired 10s later. Reproduced live 2026-07-26 between two
+/// nodes on the same LAN that had a perfectly good direct QUIC connection
+/// sitting unused.
+///
+/// When the address is unknown (`None`) we still treat the connection as direct.
+/// That is the pre-existing default, and it is the safe direction: wrongly
+/// calling a direct connection relayed would exclude it from selection.
 fn connection_is_relayed(conn: &Connection) -> bool {
-    conn.remote_address.as_ref().is_some_and(|addr| {
-        addr.iter()
-            .any(|p| matches!(p, libp2p_core::multiaddr::Protocol::P2pCircuit))
-    })
+    conn.remote_address
+        .as_ref()
+        .is_some_and(|addr| !multiaddr_is_direct_transport(addr))
+}
+
+/// Does this multiaddr describe a real, direct transport path?
+///
+/// True only when it has a concrete network hop and no relay circuit. An address
+/// consisting solely of `/p2p/<peer>` describes no path at all, which is what a
+/// relay-carried inbound connection looks like.
+fn multiaddr_is_direct_transport(addr: &Multiaddr) -> bool {
+    use libp2p_core::multiaddr::Protocol;
+    let mut has_transport = false;
+    for p in addr.iter() {
+        match p {
+            Protocol::P2pCircuit => return false,
+            Protocol::Ip4(_)
+            | Protocol::Ip6(_)
+            | Protocol::Dns(_)
+            | Protocol::Dns4(_)
+            | Protocol::Dns6(_)
+            | Protocol::Dnsaddr(_)
+            | Protocol::Tcp(_)
+            | Protocol::Udp(_) => has_transport = true,
+            _ => {}
+        }
+    }
+    has_transport
 }
 
 impl Connection {
@@ -1110,3 +1152,106 @@ impl Connection {
     }
 }
 
+
+#[cfg(test)]
+mod swarmllm_relay_selection_tests {
+    use super::*;
+    use std::str::FromStr;
+
+    fn direct(addr: &str) -> bool {
+        multiaddr_is_direct_transport(&Multiaddr::from_str(addr).unwrap())
+    }
+
+    /// Getting this wrong is expensive in BOTH directions: calling a relayed
+    /// connection direct sends every request over a circuit that may be dead
+    /// (silent drop, no OutboundFailure, 10s ACK timeout); calling a direct
+    /// connection relayed excludes a good path from selection.
+    #[test]
+    fn direct_transports_are_recognised() {
+        assert!(direct("/ip4/192.168.1.60/udp/8800/quic-v1"));
+        assert!(direct(
+            "/ip4/192.168.1.60/udp/8800/quic-v1/p2p/12D3KooWKwvCNmumN89DftJbEC1yRcnP1YxVFKEXMLCo7EzifsaY"
+        ));
+        assert!(direct("/ip4/212.132.104.177/tcp/8810"));
+        assert!(direct("/dns4/swarmllm.duckdns.org/tcp/8810"));
+        assert!(direct("/ip6/::1/udp/8800/quic-v1"));
+    }
+
+    #[test]
+    fn explicit_circuit_hops_are_relayed() {
+        assert!(!direct(
+            "/dns4/swarmllm.duckdns.org/tcp/8810/p2p/12D3KooWNisnVha2jYj1gqqY5WP82vNQbRhFtBcKzj4XrYmGEn8G/p2p-circuit/p2p/12D3KooWKwvCNmumN89DftJbEC1yRcnP1YxVFKEXMLCo7EzifsaY"
+        ));
+        assert!(!direct(
+            "/ip4/212.132.104.177/udp/8800/quic-v1/p2p/12D3KooWNisnVha2jYj1gqqY5WP82vNQbRhFtBcKzj4XrYmGEn8G/p2p-circuit"
+        ));
+    }
+
+    /// The case originally missed. A peer that dialled us through a relay shows
+    /// up with no transport component at all — there is no socket to describe.
+    /// Observed live 2026-07-26 as connection_id=117 to a LAN peer, selected in
+    /// preference to two working direct QUIC connections because it was newest.
+    #[test]
+    fn a_bare_peer_address_is_relayed_not_direct() {
+        assert!(!direct(
+            "/p2p/12D3KooWKwvCNmumN89DftJbEC1yRcnP1YxVFKEXMLCo7EzifsaY"
+        ));
+    }
+
+    #[test]
+    fn an_unknown_address_stays_direct() {
+        // `None` keeps the pre-existing default: excluding a possibly-good
+        // connection is the worse error.
+        let conn = Connection::new(ConnectionId::new_unchecked(1), None);
+        assert!(!connection_is_relayed(&conn));
+    }
+
+    #[test]
+    fn selection_prefers_a_direct_connection_over_a_newer_relayed_one() {
+        // Mirrors the live inventory: two direct QUIC connections, then a
+        // relay-carried inbound one established last.
+        let conns = vec![
+            Connection::new(
+                ConnectionId::new_unchecked(1),
+                Some(Multiaddr::from_str("/ip4/192.168.1.60/udp/8800/quic-v1").unwrap()),
+            ),
+            Connection::new(
+                ConnectionId::new_unchecked(2),
+                Some(
+                    Multiaddr::from_str(
+                        "/ip4/192.168.1.60/udp/8800/quic-v1/p2p/12D3KooWKwvCNmumN89DftJbEC1yRcnP1YxVFKEXMLCo7EzifsaY",
+                    )
+                    .unwrap(),
+                ),
+            ),
+            Connection::new(
+                ConnectionId::new_unchecked(117),
+                Some(
+                    Multiaddr::from_str(
+                        "/p2p/12D3KooWKwvCNmumN89DftJbEC1yRcnP1YxVFKEXMLCo7EzifsaY",
+                    )
+                    .unwrap(),
+                ),
+            ),
+        ];
+        let newest_direct = conns.iter().rposition(|c| !connection_is_relayed(c));
+        let ix = newest_direct.unwrap_or(conns.len() - 1);
+        assert_eq!(
+            conns[ix].id,
+            ConnectionId::new_unchecked(2),
+            "must pick the newest DIRECT connection, not the newer relayed one"
+        );
+    }
+
+    #[test]
+    fn falls_back_to_a_relayed_connection_when_that_is_all_there_is() {
+        // A NAT'd holder reachable only via relay must stay usable.
+        let conns = vec![Connection::new(
+            ConnectionId::new_unchecked(9),
+            Some(Multiaddr::from_str("/p2p/12D3KooWKwvCNmumN89DftJbEC1yRcnP1YxVFKEXMLCo7EzifsaY").unwrap()),
+        )];
+        let newest_direct = conns.iter().rposition(|c| !connection_is_relayed(c));
+        let ix = newest_direct.unwrap_or(conns.len() - 1);
+        assert_eq!(conns[ix].id, ConnectionId::new_unchecked(9));
+    }
+}

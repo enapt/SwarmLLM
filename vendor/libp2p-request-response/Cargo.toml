@@ -9,6 +9,11 @@
 # will likely look very different (and much more reasonable).
 # See Cargo.toml.orig for the original contents.
 
+# SwarmLLM: standalone workspace so our patch in src/lib.rs can be unit-tested.
+# The root Cargo.toml `exclude`s this path, which otherwise makes `cargo test`
+# here fail on unresolvable dev-dependencies.
+[workspace]
+
 [package]
 edition = "2021"
 rust-version = "1.83.0"
