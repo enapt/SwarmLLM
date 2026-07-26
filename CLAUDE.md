@@ -215,264 +215,44 @@ shape as the rest of this week — a rule applied on one path but not another.
   only the last segment (`"0"`). Both fixed — `trailing_tag` now tries the last
   1–3 segments, longest first.
 
-### v0.3.26-alpha (2026-07-26): control-token scrubbing at the SOURCE
+### Recent releases (one line each; full detail in CHANGELOG.md + `memory/round_log_*.md`)
 
-Closes the template-leak reported across .22/.24/.25 — **the 4th attempt, and the
-first made after downloading the tester's exact GGUF and reproducing it.**
+**This week was dominated by one recurring defect — a shared invariant
+implemented per-path — documented as a rule in `.claude/rules/architecture.md`.
+Read that before touching any request/response path.**
 
-- **Why 3 fixes failed**: each only edited the LIST of exact stop strings. Actual
-  mechanics: (a) a marker decodes across SEVERAL tokens and `model_worker.rs`
-  checks `find_stop_sequence` after pushing each one, so earlier pieces were
-  already emitted; (b) the model produced `<|im_end>|` — last two chars
-  TRANSPOSED, not a prefix of anything, and appearing mid-string.
-- **Fix**: `inference::strip_control_token_artifacts` removes spans naming a
-  known control token (`CONTROL_TOKEN_NAMES`) in ANY spelling. Name-based, so a
-  user's own `<|custom|>` survives. **ORDER MATTERS** — strip BEFORE
-  stop-truncation, since some models emit a marker BEFORE the answer and
-  truncating threw the answer away (leak → empty reply).
-- **Applied at the THREE text SOURCES, not at consumers**: `executor.rs`,
-  `process_pool.rs`, `pipeline/distributed.rs`. I first assumed two sources and
-  removed the distributed one — the leak returned instantly on the cold-start
-  path, which is the request that takes it. Consumers are many; sources are
-  three.
-- **Diagnostic that cracked it**: compare streaming vs non-streaming. Streaming
-  was perfectly clean, proving model + decode were healthy and the corruption
-  was ours. Also ruled out a mismatched-template file (header is well-formed
-  Llama-3, `eos=128009`) and a q8_0 dequant bug (long prompts → coherent prose).
-- Background-response usage: same `include_usage` gap as .25's foreground fix.
-- Gotchas #167-168. Credit-fairness question now carries Petals evidence
-  (`docs/FUTURE_WORK.md`).
+- **v0.3.26** (07-26): control-token scrubbing at the THREE text sources
+  (`executor.rs` / `process_pool.rs` / `pipeline/distributed.rs`) — closed a
+  template leak reported across .22/.24/.25; strip BEFORE stop-truncation.
+  Gotchas #167-168. Detail: `round_log_overnight_0726.md`.
+- **v0.3.25** (07-25): template stop-markers on the non-streaming split path;
+  `include_usage` on `split_stream_response`; Responses API tool cap (128);
+  dashboard chat single silent retry on a cold model.
+- **v0.3.24** (07-25): tool-call parser accepts prose around the JSON
+  (`parse_embedded_json`, balanced-brace scan); universal `<|...|>` stop markers.
+- **v0.3.23** (07-25): **the big networking fix** — we recorded an INBOUND
+  connection's ephemeral source port as a dialable address and published it, so
+  peers learned dead addresses for us. One bug, four symptoms (all dials refused
+  → no circuit → DCUtR 0 attempts → absent from `connected_node_ids` → "no node
+  available"). Gotcha #165. Poisoned entries persist in caches — nodes must
+  RESTART, not just swap binaries.
+- **v0.3.22** (07-25): local tool calling implemented (`src/api/tool_parse.rs`,
+  4 formats, all four streaming paths); recent-failures diagnostics ring;
+  serving-side lost-reply logging.
+- **v0.3.21** (07-25): networking audit — `max_established_per_peer = 1` was
+  structurally disabling DCUtR (gotcha #163); scheduler relay tier;
+  `relay_forwarding_auto`; `max_circuits` 16→128. **Hole punching verified live
+  07-25 16:15Z.** Detail: `round_log_networking_audit.md`.
+- **v0.3.18-v0.3.20** (07-24→25): the networking release line — app-level
+  inference relay + tensor relay across NAT, additive protocol/feature
+  handshake, multi-relay + DHT relay discovery, auto-updater size cap
+  500MB→2GB (GPU builds), deterministic LAN dialer. Detail:
+  `round_log_networking_plan.md`.
+- **v0.3.15-v0.3.17** (07-23→24): external-tester arc — WSL2 mirrored-mode
+  detection, Docker bridge filtering, FULLBACKUP lockdown, Claude Code
+  tool-description cap 4096→32768, OpenAI model-echo. Detail:
+  `round_log_v0315_livetest.md`.
 
-### v0.3.25-alpha (2026-07-25): the "one invariant, N paths" release
-
-Everything here is the SAME structural bug found in four different places, all
-surfaced by live testing rather than code review. **When a shared invariant is
-implemented per-path, fixing the path you can see is not fixing the bug.**
-
-- **Template stop markers** — `run_split_generate` (NON-streaming split path)
-  never applied them; only the streaming sibling did. Now both route through
-  `with_template_stops(params, chat_template)`, whose doc comment states that
-  forgetting it is the recurring bug. Verified live: trailing
-  `<|eom_id|><|start_header_id|>assistant<|end_header_id|>` gone.
-- **`include_usage` / `StreamEvent::Usage`** — existed ONLY in
-  `router_inference_stream`; `split_stream_response` never emitted it, so a
-  locally-held model always reported `{0,0,0}`. Added `SplitStreamUsage` slot
-  (same pattern as `SplitStreamFailure` — counts arrive on the `generate`
-  future, not the token stream). **My first fix here was wrong**: I opted into
-  usage on the Responses side but the serving path didn't implement it. Only
-  running the request caught it.
-- **Responses API had NO tool cap** while chat + Anthropic both enforce
-  `MAX_TOOLS = 128` (matches OpenAI's documented limit). Tester sent 33
-  expecting rejection — under the cap either way, so their test couldn't have
-  found it; the gap was real regardless.
-- **Dashboard chat**: one silent retry when a reply comes back empty (cold
-  model). Refactored the inline SSE closure to a named `onChunk` so the retry
-  can reuse it — verified in-browser, chat replies normally, zero console errors.
-
-Prior 4 instances this session: `spawn_split_stream` stop-strings,
-`anthropic_stream` (router) tool buffering, `split_stream_response` tool
-buffering. Gotchas #165-166.
-
-### v0.3.24-alpha (2026-07-25): tester retest — two half-fixes closed
-
-External retest of v0.3.22 found `/v1/messages` tools fully fixed but two gaps:
-
-- **`try_generic` required the WHOLE reply to be the JSON object** — a model that
-  adds prose before/after its tool call had it rejected and returned as raw text
-  (`finish_reason: "stop"`, no `tool_calls`). Now `parse_embedded_json` extracts
-  the first BALANCED object, tracking string literals + escapes so a `}` inside a
-  string value doesn't end it early. Pre-filter also relaxed (`contains('{')`,
-  not `starts_with`). Truncated output still refused.
-- **`extract_stop_strings` only added markers PRESENT in the template** — useless
-  for a GGUF whose template is one family but whose weights emit another's
-  (reported: llama-3.2-1b-q8_0 returning `<|im_end|>hello</im_start>`). Now a
-  UNIVERSAL set of `<|...|>`-style special tokens always stops, since no model
-  emits those as content; `[INST]` / `</s>` stay template-gated because they
-  plausibly appear in real prose (code/XML). Deliberate split — one test pins
-  each half.
-
-### v0.3.23-alpha (2026-07-25): peers could not dial us back
-
-Found by a live joint test with an external tester — a complete causal chain
-from one bug.
-
-- **We published undialable addresses.** `handle_connection_established` stored
-  `endpoint.get_remote_address()` into `connection_addrs` for EVERY connection,
-  and `identify.rs` fed it to Kademlia as dialable. For an OUTBOUND connection
-  that is the peer's real listen address (fine); for an INBOUND one it is the
-  peer's **ephemeral source port** — nothing listens there, and it dies with the
-  connection. So every peer we dialled learned dead addresses for us.
-- **The cascade** (this is why it looked like several unrelated faults): dead
-  addresses → all dials refused → the peer never dials our `/p2p-circuit`
-  address → no relayed connection → **DCUtR never even attempts** (it coordinates
-  over an existing relayed connection, so `0 attempts` was correct behaviour,
-  not a failure) → we are absent from their `connected_node_ids` → the scheduler
-  reports "No node available for layer N".
-- **Fix**: record only `ConnectedPoint::Dialer` addresses. Inbound falls back to
-  the peer's advertised `listen_addrs` filtered by `addr_is_remotely_reachable`
-  + non-circuit; advertises nothing dialable → add nothing (a bogus entry fails
-  every future dial). The old `warn!("shouldn't happen")` fallback fires
-  routinely for inbound now and was downgraded.
-- **RR selection → newest direct connection** (vendored crate), replacing
-  round-robin-within-direct. Raising `max_established_per_peer` for DCUtR also
-  permits REDUNDANT connections to the same endpoint (observed live: count=2 and
-  count=3 routinely), and round-robin across those lets one half-open connection
-  eat its share — the original silent-drop shape. Newest wins on both axes: a
-  half-open connection is an older one, and DCUtR's upgrade is by definition
-  newest.
-- Diagnostic gap noted: `/api/admin/peers` does not serialize
-  `relay_capable` / `features` / `relay_reservations`, which made
-  `peer_reachable_via_relay` unverifiable from outside during the investigation.
-
-### v0.3.22-alpha (2026-07-25): local tool calling + failures that explain themselves
-
-External checklist report (5 bugs) + the diagnostic gap under three of them.
-
-- **Local tool calling implemented** (`src/api/tool_parse.rs`). It was half-built:
-  OpenAI injected a tool prompt but nothing parsed the reply (came back as text
-  with `finish_reason: "length"`); Anthropic never injected at all
-  (`to_internal_messages` dropped `req.tools` for local models). Now: shared
-  `format_tool_prompt` + a 4-format parser (generic / Hermes-Qwen `<tool_call>` /
-  Mistral `[TOOL_CALLS]` / Llama-3 `parameters`+`<|python_tag|>`), following
-  llama.cpp's native-plus-generic-fallback design. Adding a family = one `try_*`
-  fn + one line. **Truncated output stays text — never repaired** (acting on
-  half-stated arguments is worse than raw output). Gated on `req.tools` non-empty
-  so a JSON answer isn't hijacked. **All FOUR streaming paths** covered
-  (`split_stream_response`, `router_inference_stream`, `anthropic_split_stream`,
-  `anthropic_stream`) via shared `emit_openai_tool_calls` /
-  `emit_anthropic_tool_blocks`; with tools present text is **buffered** (a tool
-  call is only recognisable complete) then flushed as calls or as text. Anthropic
-  tool blocks index from **1** — the prologue owns index 0.
-- **`extract_stop_strings` marker list was missing what models emit** — had
-  `<|eot_id|>` but not `<|eom_id|>` (Llama 3.1+ tool-call marker),
-  `<|start_header_id|>`, `<end_of_turn>`, `</s>`, `<|endoftext|>`. Found by live
-  test, not reasoning. Shared helper → fixes all 3 inference paths.
-- **Swallowed errors**: a failed `pool.generate` closed the stream silently
-  (dashboard *guessed* "still loading") → `SplitStreamFailure` slot + proper
-  `StreamEvent::Error`. And the serving side's `let _ = network_tx.send(...)`
-  discarded its reply result — the requester saw a timeout while the server
-  logged success, which is why a tester's serving defect was undiagnosable.
-- **`get-model` idempotency** — skips a shard already at the expected size.
-- **Diagnostics: recent-failures ring** (`state.recent_failures`, cap 20) with
-  model / elapsed / **which peer served it**, plus a repeated-peer note. NAT
-  summary no longer claims "stuck on relay" when direct connections exist.
-- Deferred: per-request holder blacklist (`docs/FUTURE_WORK.md`). Gotchas #163-164.
-
-### v0.3.21-alpha (2026-07-25): networking audit — NAT traversal actually works
-
-Audit of the whole networking stack (`docs/NETWORKING_PLAN.md` claimed "entire
-plan implemented, nothing deferred" — **it wasn't**). The relay transport was
-sound; three consumers never used it and one unrelated setting silently disabled
-Phase 2. Full detail: `memory/round_log_networking_audit.md`.
-
-- **DCUtR was structurally disabled by our own connection limit.** A hole punch
-  dials a DIRECT connection *while the relayed one is open* (`libp2p-dcutr` uses
-  `PeerCondition::Always` + tracks `direct_to_relayed_connections`), but
-  `max_established_per_peer = 1` made `connection_limits` deny it — its
-  `bypass_peer_id` set is manual and we never populated it. Cascade: nothing left
-  a circuit → slots never released → `max_circuits` filled → a pair got no
-  libp2p connection → absent from `connected_node_ids` → **the scheduler skipped
-  it** → the app-relay was never attempted. Cap → 3 (libp2p's own default is
-  unlimited); configurable via `network.max_connections_per_peer` as a
-  no-rebuild escape hatch. **Both ends need v0.3.21 for a punch to succeed** —
-  the cap is enforced on inbound AND outbound.
-- **Vendored `libp2p-request-response` now prefers DIRECT over `/p2p-circuit`.**
-  Upstream round-robins blindly (`ix = request_id % connections.len()`), so
-  post-upgrade half the traffic still used the circuit. NOTE: `vendor/` is in
-  `workspace.exclude` → `cargo test` does NOT run tests placed there.
-- **`gather_candidates` relay tier** (NETWORKING_PLAN §4 Phase 1, never built):
-  `SharedState::peer_reachable_via_relay` + `RELAY_HOP_LATENCY_PENALTY_MS` (150).
-  Both send paths in `tensors.rs` ALREADY fell back to `try_relay_send` — only
-  candidate selection was missing. The Parallax allocator stays stricter on
-  purpose (planning ≠ on-demand routing).
-- **`network.relay_forwarding_auto`** (default true) + `state.publicly_reachable`
-  (from `swarm.external_addresses()` only; `/p2p-circuit` must NOT count).
-  Relay capacity was previously whatever ran `--anchor`. All four gate sites now
-  share `SharedState::relay_forwarding_enabled()`.
-- **`max_circuits` 16 → 128** — 16 is libp2p's default for its *2-min* bootstrap
-  circuit; ours run 1 hour as a data path.
-- **`SwarmBehaviourEvent::Dcutr` was never matched** (fell into `_ => {}`) — why
-  this hid for releases. Now logged + counted, with a NAT-traversal section in
-  `GET /api/admin/diagnostics`.
-- Deferred: shard transfers stay relay-ineligible; per-request holder blacklist
-  (`docs/FUTURE_WORK.md`). Gotchas #163-164.
-
-### v0.3.20-alpha (2026-07-25): auto-updater unblocked for GPU + LAN/relay/pool fixes
-
-- **Auto-updater size cap 500MB→2GB** (`update.rs::MAX_UPDATE_SIZE`) — the ~1GB CUDA binary was rejected as "too large", so `swarmllm update` failed for EVERY NVIDIA user (tester report). Old build still has the 500MB cap → GPU users need ONE manual update to v0.3.20, then auto-update works.
-- **Deterministic LAN dialer** (`network/manager/events.rs` mDNS Discovered handler) — group a peer's addresses into ONE dial + only the smaller-PeerId node dials, so no bidirectional simultaneous-dial race → one connection/peer. Fixes duplicate-connection churn on multi-interface hosts (WSL2/Docker) that could silently swallow a distributed-inference forward. LAN/mDNS only.
-- **Relay cold-start fix** (`state.relay_proven_features`) — a serving node no longer drops the FIRST relayed `LayerResult` to a coordinator it knows only via the relay (records proven TENSOR_RELAY/RELAY from the inbound relayed msg instead of waiting for capability gossip).
-- **Pool skip-member** (`pool/manager/gossip.rs`) — one unverifiable member (e.g. pre-R147 signature) no longer discards the whole pool's state gossip; the bad member is skipped, the rest syncs.
-- **CI: Windows-GPU cache-warm** — was never warmed → cold ~30min rebuild each release; now warmed like Linux CUDA.
-- **Cross-network inference VALIDATED** via a native-Windows-node test (WSL→Windows interop): a clean native node served a model from our node over the real internet, proving the remote-generate path + networking work end-to-end. The intermittent silent-drops seen with one external tester node were **that node's serving side**, NOT our code. The same-host 4-interface churn (partly addressed by the deterministic dialer) is a separate LAN edge — see `docs/FUTURE_WORK.md` + `memory/round_log_distributed_conn_bug.md`.
-
-### v0.3.19-alpha (2026-07-24): distributed inference across NAT + settings-save fix
-
-- **Tensor relay** — distributed (multi-shard) inference between two un-connectable NAT'd nodes now runs over the sealed app-relay instead of the flaky libp2p circuit (`SwarmRequest::RelayedTensor` / `WIRE_TAG_RELAYED_TENSOR`, ephemeral-seal for the target's static key, `features::TENSOR_RELAY`; forward + result each a separate relayed request; `try_relay_tensor` + relay-unwrap stamps origin `sender_peer_bytes`). Completes `docs/NETWORKING_PLAN.md`. Detail: `memory/round_log_networking_plan.md`.
-- **Settings-save UI fix** — a dead R110 element (`settings-auto-manage-storage`) threw before the try/catch, aborting *every* settings save (nickname, contribution, etc.) when auto-manage was on.
-
-### v0.3.18-alpha (2026-07-24): the networking release — inference across NAT
-
-Shipped the entire `docs/NETWORKING_PLAN.md` app-relay stack. **The anchor MUST be on v0.3.18+** — real network release (adds the relay role), unlike v0.3.17.
-
-- **App-level inference relay across NAT** (`RelayedEnvelope`, e2e-sealed dumb-pipe, single-hop, rate-limited; `crypto/relay_seal.rs`, `network/manager/relay.rs`, `daemon/state/relay.rs`). Prefer the app-relay over a flaky libp2p relay *circuit* (per-peer direct-vs-circuit tracking) — the load-bearing fix for two NAT'd nodes. Learned reverse routes; ZERO inference-code changes (relay logic all in the transport layer).
-- **Additive protocol/feature handshake** (`NodeCapability.{protocol_version, features}`, `swarmllm_types::features`) — new message types gated on a negotiated feature bit, so a node on one release never breaks its neighbour on the next. Rule in `.claude/rules/architecture.md`.
-- **Multi-relay + DHT relay discovery** (`relay_reservations`, `pick_connected_relays` failover; `discovery::{relay_service_key, start_providing_relay_service, query_relay_providers}`) — survives losing the anchor.
-- **Generation-idle guard** (`api::sse_send_live`) — a client that stops reading (not just disconnects) now cancels the worker within 60s (closed external Finding 2).
-- **Demand-driven VRAM reclaim** (`auto_manage/prune.rs::try_idle_vram_unload`) — free an idle (5min), low-demand loaded model from GPU; shards stay on disk, cold-reload on request, zero availability impact. Exempts reference/pinned/locked/encrypted models. Controls surfaced in config + troubleshooting docs.
-
-Detail: `memory/round_log_networking_plan.md`.
-
-### v0.3.17-alpha (2026-07-24): Claude Code backend + API-compat + net race
-
-External testing of v0.3.16 against a real `claude` process + an OpenAI-compat
-client surfaced three API-compatibility gaps + the sweep found one net-race:
-
-- **Claude Code backend unblocked**: its built-in tools carry long safety text
-  (Bash alone ~6 KB), tripping a 4 KB per-tool `MAX_TOOL_DESCRIPTION_LEN` so a
-  stock `claude --model <swarmllm>` failed on its first request (400). Cap
-  raised to 32 KB (under the 64 KB schema cap; Anthropic bounds descriptions by
-  context, not a small per-tool limit). +3 tests.
-- **OpenAI response echoes the requested model id** (`req.model`), not the
-  manifest display name (they diverge, e.g. `…-fp16` vs `…`) — keeps
-  model-routing clients (litellm/LangChain) working, matches Anthropic. Split
-  fast path + direct-executor stream both fixed (`openai/mod.rs`).
-- **Disconnect-cancel siblings** (`split_stream_response` +
-  `anthropic_split_stream`): the local-complete SSE fast path now cancels the
-  instant the client drops (v0.3.16 only fixed the router path) via the same
-  `tx.closed()` / `sse_tx.closed()` biased-select guard.
-- **Net race** (`connections.rs`): the inbound-remote-generate abort fired on a
-  lone `num_established==0` close event without the `!is_connected` guard the
-  rest of the handler uses — a TCP-drops-but-QUIC-survives blip killed a live,
-  still-returnable decode. Same guard applied.
-
-### v0.3.15 / v0.3.16-alpha (2026-07-23 → 07-24): external-tester-driven networking + robustness
-
-Two external testers on real home hardware (RTX 4050/Ada, Docker, WSL2, NAT)
-drove a burst of networking + reliability fixes, shipped across **v0.3.15**
-(networking) and **v0.3.16** (robustness):
-
-- **Reachability / NAT**: WSL2 *mirrored*-mode auto-detection
-  (`config/network.rs::wsl_networking_is_mirrored`, via `wslinfo` — keeps full
-  networking instead of the NAT safe-defaults); Docker `172.17.0.1` bridge
-  addresses no longer dialled/advertised (`peer_cache::filter_dialable` drops a
-  peer's private addrs when it also advertises a public one); relay
-  auto-recovery (latch reset on a lost `/p2p-circuit`); network-map real-country
-  (`effective_region` / `effective_region_sync`).
-- **Reliable remote inference**: the 10s ACK-timeout sweep no longer kills a
-  slow-but-working peer (clear `pending_rr_observability` on the RR Response); a
-  GPU-OOM request retries on CPU instead of returning empty
-  (`process_pool::generate` wrapper); a server aborts an inbound generation when
-  its coordinator disconnects (`inbound_generate_aborts` keyed by peer).
-- **Backup-copy model lockdown** (`<model>.FULLBACKUP`): central helper
-  `model::manifest::is_backup_artifact_id` now gates every path — register /
-  DB-load (skip+purge) / gossip ingress / auto-manage acquire / DHT provide /
-  capability report / peer + model-list display / network-map region. Caught
-  live re-fetching during an overnight watch.
-- **v0.3.16 also**: streaming requests cancel the instant the client
-  disconnects (race `sse_tx.closed()` in the OpenAI + Anthropic SSE loops — was
-  ~27s late); each peer's **version + uptime** surfaced in the peers API +
-  dashboard.
 
 ### Prior rounds (one line each; full detail in `memory/round_log_*.md`)
 
