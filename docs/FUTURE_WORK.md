@@ -2596,7 +2596,20 @@ only with (a) concrete data on NAT scenarios our relay path genuinely cannot
 reach, and (b) peeroxide reaching more maintainers / a stable release / an
 external audit.
 
-## Observability: routing, performance and per-node attribution (2026-07-26)
+## Observability: routing, performance and per-node attribution (2026-07-26) — SHIPPED
+
+> **Implemented 2026-07-26** across `inference/trace.rs` (the single
+> `RequestTrace`), response headers + `Server-Timing`, the `DIAG: request
+> complete` line, `GET /api/admin/{diagnostics,performance}`, OTel-named
+> Prometheus histograms, serving-side counters, the dashboard chat route line
+> and Models → Performance panel, and hourly redb rollups. Kept here as the
+> design record — the reasoning about cardinality, about why "tok/s per node"
+> needs care, and about headers flushing before the body is what a future
+> change needs to not undo. **Still open**: streaming responses carry route
+> identity in headers but token-level timings only in the final SSE usage
+> event for the dashboard's own consumption; exposing TTFT/TPOT to third-party
+> streaming API clients is not done. K-layer prefetch and multi-segment
+> hedging remain separately deferred.
 
 **Asked for**: "when using a model over inference, on the chat for example, I
 know it times the result but does it also give performance status, routing info
