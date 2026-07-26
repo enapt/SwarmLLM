@@ -542,6 +542,7 @@ impl PipelineExecutor {
             token_logprobs: vec![],
             // Speculative path: matched stop string isn't tracked here today.
             matched_stop_sequence: None,
+            trace: None,
         }
     }
 }

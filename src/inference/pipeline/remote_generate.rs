@@ -289,6 +289,7 @@ impl PipelineExecutor {
             // final token so the API layer can surface it to Anthropic
             // clients.
             matched_stop_sequence: matched_stop_seq,
+            trace: None,
         }))
     }
 }

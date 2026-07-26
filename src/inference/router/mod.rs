@@ -921,6 +921,12 @@ impl InferenceRouter {
                 ),
             }
             shared_state.publish_request_trace(&trace);
+            // Hand the finished route to the API layer for response headers.
+            // Done here, at the one completion arm, rather than in each of the
+            // four response paths.
+            if let Ok(ref mut result) = output {
+                result.trace = Some(trace.snapshot());
+            }
 
             // Record latency for Prometheus histogram
             match &output {

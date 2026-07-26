@@ -171,8 +171,13 @@ pub(super) async fn anthropic_non_stream(
         InferenceRequest::local(ModelId(model.clone()), messages, params, false, None, None);
 
     let output = crate::api::submit_to_router(&router_tx, inference_req).await?;
+    let trace = output.trace.clone();
     let response = build_messages_response(request_id, model, output, tools_requested);
-    Ok(Json(response).into_response())
+    Ok(crate::api::attach_route_headers(
+        Json(response).into_response(),
+        trace.as_ref(),
+        false,
+    ))
 }
 
 /// Streaming inference via router, returning Anthropic SSE format.
@@ -386,8 +391,13 @@ pub(super) async fn anthropic_split_non_stream(
     )
     .await?;
 
+    let trace = output.trace.clone();
     let response = build_messages_response(request_id, model, output, tools_requested);
-    Ok(Json(response).into_response())
+    Ok(crate::api::attach_route_headers(
+        Json(response).into_response(),
+        trace.as_ref(),
+        false,
+    ))
 }
 
 /// Direct split-model streaming generation for Anthropic Messages API.

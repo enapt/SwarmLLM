@@ -37,6 +37,7 @@ impl PipelineExecutor {
                 session_id: self.request.session_id.clone(),
                 token_logprobs: vec![],
                 matched_stop_sequence: None,
+                trace: None,
             });
         }
 
@@ -578,6 +579,7 @@ impl PipelineExecutor {
             // fired on the accumulated decoded text; honest source of the
             // user-provided string that triggered termination.
             matched_stop_sequence: matched_stop_seq,
+            trace: None,
         })
     }
 

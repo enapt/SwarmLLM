@@ -106,6 +106,39 @@ pub(crate) fn build_sampling_params(
     }
 }
 
+/// Attach routing + timing headers to a response.
+///
+/// The single place any response path adds them, so all four (OpenAI,
+/// Anthropic, Responses, MCP) stay identical by construction rather than by
+/// four authors remembering. A `None` trace leaves the response untouched —
+/// cloud-proxied and pre-dispatch-rejected requests have no swarm route, and an
+/// absent header is honest where `x-swarm-route: local` would not be.
+///
+/// Pass `streaming: true` for SSE: headers flush before the body, so TTFT and
+/// decode are not yet known and are omitted rather than reported as zero.
+pub(crate) fn attach_route_headers(
+    mut response: axum::response::Response,
+    trace: Option<&crate::inference::trace::TraceSnapshot>,
+    streaming: bool,
+) -> axum::response::Response {
+    let Some(snap) = trace else {
+        return response;
+    };
+    let headers = response.headers_mut();
+    for (name, value) in crate::inference::trace::response_headers(snap, streaming) {
+        // Values are node-id hex, ISO region codes, integers and Server-Timing
+        // tokens, so a parse failure means we built something malformed — skip
+        // rather than fail the user's request over a diagnostic header.
+        match axum::http::HeaderValue::from_str(&value) {
+            Ok(v) => {
+                headers.insert(name, v);
+            }
+            Err(e) => tracing::debug!(name, value, error = %e, "skipping malformed route header"),
+        }
+    }
+    response
+}
+
 /// Submit a non-streaming inference request to the router and await the result.
 pub(crate) async fn submit_to_router(
     router_tx: &tokio::sync::mpsc::Sender<crate::inference::router::RouterCommand>,

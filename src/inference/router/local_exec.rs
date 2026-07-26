@@ -94,6 +94,7 @@ pub(super) async fn execute_local_batch(
                 session_id: request.session_id.clone(),
                 token_logprobs: vec![],
                 matched_stop_sequence: None,
+                trace: None,
             })
         } else if executor.is_loaded() {
             // Hold the loaded_model_info read lock once and derive both the

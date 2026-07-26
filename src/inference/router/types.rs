@@ -140,6 +140,13 @@ pub struct InferenceOutput {
     /// `stop_sequence` field; OpenAI doesn't expose it but it's harmless
     /// extra metadata for compatible clients.
     pub matched_stop_sequence: Option<String>,
+    /// Route and timing, attached at the router's completion arm so the API
+    /// layer can render response headers.
+    ///
+    /// `None` on paths that never reached the router — the cloud proxy, and the
+    /// rejections that fail before dispatch. Those have no swarm route to
+    /// report, so the headers are omitted rather than guessed at.
+    pub trace: Option<crate::inference::trace::TraceSnapshot>,
 }
 
 impl InferenceOutput {
@@ -165,6 +172,7 @@ impl InferenceOutput {
             session_id,
             token_logprobs: vec![],
             matched_stop_sequence: gen_result.matched_stop_sequence.clone(),
+            trace: None,
         }
     }
 }

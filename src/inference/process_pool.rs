@@ -1966,6 +1966,7 @@ impl ModelProcessPool {
             session_id: None,
             token_logprobs,
             matched_stop_sequence,
+            trace: None,
         })
     }
 

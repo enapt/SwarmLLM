@@ -475,6 +475,38 @@ where
         .collect()
 }
 
+/// Response headers describing how a request was served.
+///
+/// Returned as name/value pairs rather than written into a specific response
+/// type so the OpenAI, Anthropic, Responses and MCP paths all attach the same
+/// set through one function — the alternative is four hand-built header blocks
+/// that drift, which is the defect `.claude/rules/architecture.md` documents.
+///
+/// Routing identity goes in `x-swarm-*`; durations go in the W3C
+/// `Server-Timing` header, which browser devtools renders natively and
+/// `PerformanceServerTiming` exposes to JS.
+///
+/// `streaming` MUST be true for SSE responses: headers flush before the body,
+/// so time-to-first-token and decode time are not yet known and are omitted
+/// rather than sent as zeros. Those ride the final SSE usage event instead.
+pub fn response_headers(snap: &TraceSnapshot, streaming: bool) -> Vec<(&'static str, String)> {
+    let mut out = Vec::with_capacity(5);
+    out.push(("x-swarm-route", snap.route.as_str().to_string()));
+    out.push(("x-swarm-segments", snap.segments.len().to_string()));
+    if !snap.segments.is_empty() {
+        out.push(("x-swarm-nodes", snap.nodes_csv()));
+    }
+    let regions = snap.regions_csv();
+    if !regions.is_empty() {
+        out.push(("x-swarm-regions", regions));
+    }
+    let timing = snap.server_timing(streaming);
+    if !timing.is_empty() {
+        out.push(("server-timing", timing));
+    }
+    out
+}
+
 /// OTel `error.type` for a failure — the variant name, never the message.
 ///
 /// Messages carry request ids, peer ids, offsets and file paths, so using one
@@ -516,6 +548,24 @@ pub fn error_kind(err: &crate::error::SwarmError) -> &'static str {
         E::Validation(_) => "Validation",
         E::VisionEncoderUnavailable(_) => "VisionEncoderUnavailable",
     }
+}
+
+/// The one-segment, all-local layout, for paths that never build a pipeline
+/// assignment (the local-complete fast path). Keeps those traces the same shape
+/// as routed ones so every surface renders them identically.
+pub fn local_segment(node_id: &NodeId, layer_range: (u32, u32)) -> Vec<SegmentTrace> {
+    vec![SegmentTrace {
+        index: 0,
+        node_id: node_id.to_string(),
+        is_local: true,
+        region: None,
+        layer_start: layer_range.0,
+        layer_end: layer_range.1,
+        shard_indices: Vec::new(),
+        transport: Transport::Local,
+        elapsed_ms: None,
+        activation_bytes: None,
+    }]
 }
 
 /// Classify a route from its segments. Single definition so the log line, the
@@ -656,6 +706,55 @@ mod tests {
         let complete = s.server_timing(false);
         assert!(complete.contains("ttft;dur="));
         assert!(complete.contains("total;dur="));
+    }
+
+    #[test]
+    fn headers_omit_post_body_timings_on_a_streaming_response() {
+        let t = RequestTrace::new(uuid::Uuid::nil(), "m", "chat");
+        t.mark_dequeued();
+        t.mark_assembled(
+            Route::Distributed,
+            vec![
+                seg(0, "0718d8b987a4975a", true, Transport::Local),
+                seg(1, "9684263580c6660f", false, Transport::Direct),
+            ],
+        );
+        t.mark_first_token();
+        t.mark_finished(Outcome::Ok, 4, 9);
+        let s = t.snapshot();
+
+        let h: std::collections::HashMap<_, _> = response_headers(&s, true).into_iter().collect();
+        assert_eq!(h["x-swarm-route"], "distributed");
+        assert_eq!(h["x-swarm-segments"], "2");
+        assert_eq!(h["x-swarm-nodes"], "0718d8b9,96842635");
+        // Headers flush before the body — TTFT is not known yet.
+        assert!(
+            !h["server-timing"].contains("ttft"),
+            "{:?}",
+            h["server-timing"]
+        );
+
+        let h2: std::collections::HashMap<_, _> = response_headers(&s, false).into_iter().collect();
+        assert!(h2["server-timing"].contains("ttft;dur="));
+    }
+
+    #[test]
+    fn header_values_are_valid_http_header_values() {
+        // Guards the Server-Timing desc quoting: an invalid value would be
+        // silently dropped at the axum boundary and the header would vanish.
+        let t = RequestTrace::new(uuid::Uuid::nil(), "m", "chat");
+        t.mark_assembled(
+            Route::Distributed,
+            vec![seg(0, "9684263580c6660f", false, Transport::Direct)],
+        );
+        t.record_segment_timing(0, 900, 1234);
+        t.mark_finished(Outcome::Ok, 4, 9);
+        for (name, value) in response_headers(&t.snapshot(), false) {
+            assert!(
+                axum::http::HeaderValue::from_str(&value).is_ok(),
+                "{name}: {value:?} is not a valid header value"
+            );
+        }
     }
 
     #[test]

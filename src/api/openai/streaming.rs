@@ -347,12 +347,41 @@ pub async fn run_split_generate(
     let params = with_template_stops(params, meta.chat_template.as_deref());
 
     let rid = uuid::Uuid::parse_str(request_id).unwrap_or_else(|_| uuid::Uuid::new_v4());
-    state
+
+    // This path deliberately bypasses the router, so it must build its own
+    // trace — it is the local-complete fast path the dashboard chat uses, i.e.
+    // the most-seen surface, and leaving it untraced would show no route
+    // exactly where a user is most likely to look. Route is genuinely Local:
+    // one node, whole model, no wire.
+    let trace = std::sync::Arc::new(crate::inference::trace::RequestTrace::new(
+        rid,
+        model_id.0.clone(),
+        "chat",
+    ));
+    trace.mark_dequeued();
+    trace.mark_assembled(
+        crate::inference::trace::Route::Local,
+        crate::inference::trace::local_segment(
+            state.shared_state.identity.node_id(),
+            meta.layer_range,
+        ),
+    );
+
+    let mut output = state
         .shared_state
         .model_process_pool
         .generate(model_id, meta.layer_range, prompt, params, rid, None, None)
         .await
-        .map_err(ApiError)
+        .map_err(ApiError)?;
+
+    trace.mark_finished(
+        crate::inference::trace::Outcome::Ok,
+        output.prompt_tokens,
+        output.completion_tokens,
+    );
+    state.shared_state.publish_request_trace(&trace);
+    output.trace = Some(trace.snapshot());
+    Ok(output)
 }
 
 /// Dispatch to `router_inference` or `router_inference_stream` based on `req.stream`.
@@ -391,6 +420,7 @@ pub(super) async fn router_inference(
     inference_req.cancel = cancel;
 
     let output = crate::api::submit_to_router(&router_tx, inference_req).await?;
+    let trace = output.trace.clone();
 
     let response = build_chat_completion_response(
         request_id,
@@ -405,7 +435,11 @@ pub(super) async fn router_inference(
         req.tools.as_ref().is_some_and(|t| !t.is_empty()),
     );
 
-    Ok(Json(response).into_response())
+    Ok(crate::api::attach_route_headers(
+        Json(response).into_response(),
+        trace.as_ref(),
+        false,
+    ))
 }
 
 /// Route streaming inference through the InferenceRouter.
@@ -754,6 +788,7 @@ pub(super) async fn split_non_stream_response(
 ) -> Result<axum::response::Response, ApiError> {
     let output =
         run_split_generate(&state, &model_id, &messages, params.clone(), &request_id).await?;
+    let trace = output.trace.clone();
 
     let response = build_chat_completion_response(
         request_id,
@@ -768,7 +803,11 @@ pub(super) async fn split_non_stream_response(
         tools_requested,
     );
 
-    Ok(Json(response).into_response())
+    Ok(crate::api::attach_route_headers(
+        Json(response).into_response(),
+        trace.as_ref(),
+        false,
+    ))
 }
 
 /// Direct split-model streaming generation.
