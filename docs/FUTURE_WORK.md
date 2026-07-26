@@ -2596,57 +2596,264 @@ only with (a) concrete data on NAT scenarios our relay path genuinely cannot
 reach, and (b) peeroxide reaching more maintainers / a stable release / an
 external audit.
 
-## Surface routing and performance per request (requested 2026-07-26)
+## Observability: routing, performance and per-node attribution (2026-07-26)
 
-**Asked for directly**: "when using a model over inference, on the chat for
-example, I know it times the result but does it also give performance status,
-routing info (how many peers it routed through etc)" — and, separately, "these
-sorts of things should be included in diagnostics also so logfiles etc are
-analysable".
+**Asked for**: "when using a model over inference, on the chat for example, I
+know it times the result but does it also give performance status, routing info
+(how many peers it routed through etc)", "these sorts of things should be
+included in diagnostics also so logfiles etc are analysable", and then, after
+two days where every bug cost hours of cross-machine log-grepping: "we need to
+add the diagnostics, statistics, routing info … so we can move forward faster.
+It should also help with performance, scaling, regional routing, peer latency,
+token per second per node per shard".
 
-**What exists today.** Wall-clock elapsed time in the chat, and (as of
-v0.3.29) tokens per second, computed client-side from the `usage` the stream
-already carries. Nothing else. The router *knows* the whole route — the DIAG
-lines carry `segment=N node=<id> layer_start=.. layer_end=..` per segment — but
-no response, header or endpoint ever surfaces it, so a user cannot tell whether
-an answer came from their own GPU, one peer, or a three-segment pipeline across
-the internet. That is also the first question anyone asks when a reply is slow.
+### 1. The finding: we measure nearly all of this already and expose almost none of it
 
-**Proposed — response headers, not body fields.** The OpenAI and Anthropic
-response bodies are wire formats other people's clients parse; adding
-non-standard members risks strict clients rejecting them. Headers are ignored by
-anything that does not look for them:
+An audit of the request path (2026-07-26) against the 26-point lifecycle in
+`docs/DIAGNOSTICS.md`:
 
-- `x-swarm-route: local | split | distributed | relayed | cloud`
-- `x-swarm-segments: <n>` — 0 for local
-- `x-swarm-nodes: <short-id>,<short-id>` — 8-char ids, already what the peer
-  list shows, so nothing newly identifying is exposed
-- `x-swarm-queue-ms`, `x-swarm-prefill-ms`, `x-swarm-decode-ms` — where the
-  time actually went, which elapsed time alone cannot answer
+| Signal | Computed today | Reachable by a user or a script? |
+|---|---|---|
+| `schedule_ms`, `execute_ms`, `total_ms` | `router/distributed_exec.rs` | log line only |
+| per-segment `segment_ms`, `activation_bytes` | `pipeline/distributed.rs` | **DEBUG** log only |
+| route (segment count, node ids, layer ranges) | scheduler assignment | `/pipeline-plan` — the *plan*, not what actually ran |
+| peer RTT | `PeerInfo.latency_ms` | `/api/admin/peers` |
+| per-peer ms/layer EMA | `state.metrics.peer_segment_latency_ms_per_layer` | scheduler-internal |
+| per-(model × segment × holder) latency EWMA **+ variance + sample count** | `state.metrics.hedge_tracker` | scheduler-internal |
+| peer region (ISO-3166) | `NodeCapability.region` | `/pipeline-plan` only |
+| estimated tok/s | `NodeCapability.est_tokens_per_sec_7b` | scheduler-internal |
+| failures (ring buffer) | `recent_failures` | `/api/admin/diagnostics` |
 
-Headers are emitted before the body, and the route is fixed at pipeline-assembly
-time, so this works for streaming as well as non-streaming.
+So the gap is **exposure and retention, not measurement**. `HedgeStats` alone
+already carries per-(model, segment, holder) EWMA latency *with variance* — most
+of "peer latency per node per shard" — and nothing can read it.
 
-**Diagnostics + logs.** Add ONE greppable summary line per request at completion,
-carrying the same fields plus the outcome, so a log file can be analysed without
-reconstructing a route from a dozen interleaved DIAG lines:
+Genuinely absent:
+
+- **Time to first token, server-side.** The single most important LLM serving
+  number. It exists only in `cli/bench.rs`, measured client-side. OpenTelemetry
+  makes `gen_ai.server.time_to_first_token` a first-class server metric.
+- **Time per output token** (`gen_ai.server.time_per_output_token`) — the decode
+  phase. Wall-clock total cannot distinguish a slow queue from a slow decode.
+- **Queue wait** as distinct from scheduling.
+- **A success record.** `recent_failures` has no sibling ring, so "why was that
+  one slow" is unanswerable after the fact — only "why did that one break".
+- **Serving-side telemetry.** Every counter is requester-side. A node that
+  serves segments for others records nothing about it, so an operator cannot
+  answer "is my node actually contributing, and how well?"
+- **Any persistence.** All of it is in-memory and lost on restart. No trend, no
+  before/after for a release.
+
+### 2. Name it the way the industry already names it
+
+Do not invent a vocabulary. OpenTelemetry's GenAI semantic conventions define
+exactly this shape, and matching them means Grafana dashboards and OTel
+collectors work with no translation layer:
+
+- `gen_ai.server.request.duration` (histogram, seconds)
+- `gen_ai.server.time_to_first_token` (histogram, seconds)
+- `gen_ai.server.time_per_output_token` (histogram, seconds)
+- `gen_ai.client.token.usage` (histogram, `{token}`, attribute `gen_ai.token.type` = input|output)
+- attributes: `gen_ai.operation.name`, `gen_ai.request.model`, `gen_ai.response.model`, `error.type`
+
+Our existing `swarmllm_inference_latency_seconds` is `gen_ai.server.request.duration`
+under a local name. Keep the old series for one release, emit both, then retire.
+
+The swarm-specific dimensions (route shape, segment count, peer, shard, region)
+have no OTel equivalent and stay under `swarmllm_*`.
+
+### 3. One record, built once — `RequestTrace`
+
+The recurring defect in this codebase is a shared rule implemented per path
+(`.claude/rules/architecture.md`). Observability is the worst possible place to
+repeat it: four response paths each assembling their own timing struct would
+drift immediately, and the drift is invisible because nothing fails.
+
+So: **one `RequestTrace`, threaded through the request, written once at
+completion, and the sole input to every surface.** Headers, the log line, the
+diagnostics ring, Prometheus and the dashboard all render *from it*. Adding a
+field means adding it once.
+
+```rust
+pub struct RequestTrace {
+    request_id: Uuid,
+    model: ModelId,
+    operation: &'static str,        // chat | completion | embedding | responses
+    route: Route,                   // Local | Split | Distributed | Relayed | Cloud
+    // timeline — monotonic Instants, resolved to ms at emit
+    t_admitted: Instant,
+    t_dequeued: Option<Instant>,    // → queue_ms
+    t_assembled: Option<Instant>,   // → schedule_ms
+    t_first_token: Option<Instant>, // → ttft_ms      ← new
+    t_finished: Option<Instant>,    // → decode_ms, tpot_ms
+    segments: Vec<SegmentTrace>,
+    prompt_tokens: u32,
+    completion_tokens: u32,
+    outcome: Outcome,               // Ok | Error(kind) | Cancelled
+}
+
+pub struct SegmentTrace {
+    index: u16,
+    node_id: NodeId,                // local node for a local segment
+    is_local: bool,
+    region: Option<String>,
+    shard_indices: Vec<u32>,
+    layer_range: (u32, u32),
+    elapsed_ms: u32,                // already logged, currently discarded
+    activation_bytes: u32,          // already logged, currently discarded
+    transport: Transport,           // Direct | Relayed | Loopback
+    hedged: bool,
+    failed_over_from: Option<NodeId>,
+}
+```
+
+`Route` must be derived from the assignment, never guessed from segment count —
+a 1-segment remote pipeline and a 1-segment local one are different routes and
+that distinction is exactly what a confused user needs.
+
+### 4. Where and when to capture
+
+Phase boundaries only. Never per token, with the single exception of a
+`t_first_token.get_or_insert(Instant::now())` on the emit path — one predictable
+branch, no allocation. `.claude/rules` forbids hot-path overhead in
+`pipeline.rs`, `split/executor.rs::forward` and `forward_through_segments`; a
+`Vec<SegmentTrace>` with capacity 4 allocated once per *request* is well inside
+budget, per-token work is not.
+
+| # | When | Where | Field |
+|---|---|---|---|
+| 1 | request admitted | `api/openai.rs`, `anthropic/*`, `mcp`, `responses` | `t_admitted`, `model`, `operation` |
+| 2 | enqueued | `router/mod.rs` "Queued inference request" | trace created, tier recorded |
+| 3 | dequeued | `router/mod.rs::dispatch_single` | `t_dequeued` → **queue_ms** |
+| 4 | pipeline assembled | `router/distributed_exec.rs` | `t_assembled` → **schedule_ms**, `segments[]`, `route` |
+| 5 | per-segment done | `pipeline/distributed.rs` (both local + remote arms) | `elapsed_ms`, `activation_bytes`, `transport` |
+| 6 | **first token emitted** | the three text sources — `executor.rs`, `process_pool.rs`, `pipeline/distributed.rs` | `t_first_token` → **TTFT** |
+| 7 | completion | `router/mod.rs` "inference completed" | `t_finished`, tokens, outcome → **TPOT** |
+| 8 | failure / cancel | existing `recent_failures` site | `outcome` |
+
+Point 6 is the one that needs care: TTFT must be stamped at all three text
+sources or it is silently wrong on one path — the exact failure mode of gotchas
+#167/#173. Stamp it inside `finalize_reply_text`'s streaming sibling (the single
+emit choke point) rather than at three call sites.
+
+Point 5 already logs everything needed; the values are formatted into a string
+and dropped. Capturing them is nearly free.
+
+### 5. "Tokens per second per node per shard" — the honest version
+
+This needs restating before it is built, because the obvious reading is not
+measurable and would produce a confidently wrong number.
+
+In a pipeline the segments are **serialised**: every token traverses node A's
+layers, then node B's. There is no independent "tok/s of node A" — A and B
+produce the *same* token stream. Reporting `tokens / A_time` would show two
+nodes each "doing" the full token rate, and the numbers would not compose.
+
+What is real and useful:
+
+- **Per-segment share of inter-token latency** — `segment_ms` per token, per
+  (node, layer_range). These *do* sum to the total, so they identify the
+  bottleneck hop, which is the actual question.
+- **Normalised throughput: ms per layer per token.** Comparable across nodes
+  serving different-sized segments, and already approximated by
+  `peer_segment_latency_ms_per_layer`.
+- **Derived node capacity**: `1000 / (ms_per_layer × layers_served)` = the tok/s
+  that node *would* sustain if it served the whole model. Useful for scheduling
+  and leaderboards; must be labelled as derived, not measured.
+
+For a **non**-pipelined route (one node serves all layers) tok/s per node is
+exactly the request's tok/s, and should be reported plainly.
+
+### 6. The missing half: serving-side telemetry
+
+Everything today is requester-side. Add, on the node that *serves* a segment
+(`daemon/dispatch/layer_forward.rs`, which already computes `elapsed_ms`):
+
+- segments served, by `(model, layer_range, requester)` — counter
+- forward compute time — histogram
+- activation bytes in/out — counter (this is the bandwidth cost of contributing)
+- rejections by reason (queue full, shard missing, refused)
+
+Without this an operator cannot tell a well-behaved node from one whose
+segments everyone times out on, and neither can trust scoring.
+
+### 7. Surfaces — and what belongs on each
+
+**Response headers** (route identity, known at assembly time, so streaming-safe):
+
+```
+x-swarm-route: distributed
+x-swarm-segments: 2
+x-swarm-nodes: 0718d8b9,96842635
+x-swarm-regions: TH,TH
+```
+
+**`Server-Timing`** for the durations, rather than bespoke `x-swarm-*-ms`
+headers — it is a W3C standard that browser devtools renders natively and
+`PerformanceServerTiming` exposes to JS:
+
+```
+Server-Timing: queue;dur=3, sched;dur=1, ttft;dur=180, decode;dur=1420,
+               seg0;dur=520;desc="0718d8b9 L0-10", seg1;dur=900;desc="96842635 L10-16"
+```
+
+Cross-origin callers need `Timing-Allow-Origin`; the dashboard is same-origin so
+it needs nothing. **Header caveat that the earlier draft got wrong**: headers
+flush *before* the body, so on a streaming response only pre-body facts (route,
+nodes, queue, schedule) can go there. TTFT/decode/tok-s must ride in the final
+SSE event — the `usage` chunk `include_usage` already emits is the natural
+carrier. HTTP trailers are the "correct" answer and have poor client support;
+not worth it.
+
+**One greppable log line** at completion — this is what makes a logfile
+analysable without reconstructing a route from a dozen interleaved DIAG lines:
 
 ```
 DIAG: request complete request_id=… route=distributed segments=2
-      nodes=016784c8,cf9551cd queue_ms=3 prefill_ms=180 decode_ms=1420
-      tokens=48 tok_per_sec=33.8 outcome=ok
+      nodes=0718d8b9,96842635 regions=TH,TH queue_ms=3 sched_ms=1 ttft_ms=180
+      decode_ms=1420 tokens=48 tok_per_sec=33.8 seg0_ms=520 seg1_ms=900
+      bytes=39188 outcome=ok
 ```
 
-Extend `GET /api/admin/diagnostics` with the last N of these (the
-`recent_failures` ring already proves the pattern — this is its successful
-sibling), so a tester can paste one block instead of a log excerpt.
+**`GET /api/admin/diagnostics`** — add a `recent requests` ring (the successful
+sibling of `recent_failures`, same size), so a tester pastes one block instead of
+a log excerpt. Add a per-peer table: RTT, ms/layer, EWMA + variance + samples
+from `hedge_tracker`, region, segments served, last-seen.
 
-**UI.** In chat, a small line beside the timer: "answered by 2 peers · 33.8
-tok/s", with the route detail on hover. Needs i18n across 21 locales.
+**Prometheus** — low cardinality ONLY. `route`, `model`, `outcome`, `error.type`
+are bounded; `peer × model × shard` is not (50 peers × 10 models × 10 shards =
+5 000 series from one node, and it grows with the swarm). Per-peer detail belongs
+in the JSON endpoint, which is pulled on demand and never retained. This
+distinction is the single most important thing to get right — an unbounded label
+set will take down the scrape long before anyone notices the dashboard is useful.
 
-**Why it is not in v0.3.29**: it is a backend addition touching every response
-path, and that release was cut urgently to get a tester onto the same build. The
-tok/s half shipped because it needed no backend change.
+**Dashboard** — chat shows "answered by 2 peers · 33.8 tok/s" with the route on
+hover (needs i18n across 21 locales). A swarm-tab panel renders the per-peer
+table. Both read the same trace.
+
+### 8. Retention
+
+Do not build a time-series database. `monitoring/` already ships Prometheus +
+Grafana; that is the trend store. In-process, keep:
+
+- last N `RequestTrace` (N ≈ 50, same as the failures ring) — in memory, for the
+  "what just happened" view
+- hourly rollups (count, p50/p95 TTFT, p50/p95 tok/s, bytes, per route) persisted
+  to redb — small, bounded, survives restart, enough for "is this release slower
+  than the last one" without a scrape target
+
+### 9. Sequencing
+
+1. `RequestTrace` + capture points 1-8 + the one log line. Behind nothing — it is
+   strictly additive and immediately makes logs analysable.
+2. TTFT/TPOT at the emit choke point; OTel-named Prometheus histograms.
+3. Response headers + `Server-Timing`; final-SSE-event metrics for streaming.
+4. Diagnostics ring + per-peer table.
+5. Serving-side counters.
+6. Dashboard + i18n.
+7. redb hourly rollups.
+
+Steps 1-2 pay for themselves the first time a tester reports something slow.
 
 ## Collapse the parallel response paths behind one core loop (2026-07-26)
 
