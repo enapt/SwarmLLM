@@ -347,6 +347,36 @@ impl NetworkManager {
                         .with_node(format!("{}", node_id)),
                     );
                     tracing::debug!(%peer_id, "Removed disconnected peer from registry");
+
+                    // Schedule one re-dial. Dropping the peer from the registry
+                    // above is correct — a disconnected peer must not stay
+                    // schedulable — but on its own it also meant we simply
+                    // forgot a peer that is still running, and nothing brought
+                    // it back: re-discovery relies on the peer ANNOUNCING
+                    // itself, which only happens when it restarts. Two healthy
+                    // LAN nodes were observed staying mutually invisible for
+                    // 17+ minutes after transient `io_err` churn, both still
+                    // connected to the same anchor, with zero dial attempts
+                    // between them; restarting either one reconnected the pair
+                    // in 6 seconds, which is what pinned it here rather than on
+                    // addresses or discovery.
+                    //
+                    // Jittered like the unregistered-peer path below so both
+                    // ends re-dialling at once don't recreate the
+                    // simultaneous-dial race. `try_enqueue_redial` dedups and
+                    // caps, so a peer that has genuinely left costs one attempt.
+                    if let Some(addr) = closed_addr.clone() {
+                        use std::hash::{Hash, Hasher};
+                        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                        peer_id.hash(&mut hasher);
+                        let jitter_ms =
+                            REDIAL_JITTER_MIN_MS + (hasher.finish() % REDIAL_JITTER_RANGE_MS);
+                        tracing::info!(
+                            %peer_id, %addr, jitter_ms,
+                            "Scheduling re-dial for disconnected peer"
+                        );
+                        self.try_enqueue_redial(peer_id, addr, jitter_ms);
+                    }
                 } else {
                     tracing::info!(%peer_id, "Keeping peer in registry (active pipeline) — scheduling reconnect");
                     // Active pipeline needs this peer — reconnect immediately.

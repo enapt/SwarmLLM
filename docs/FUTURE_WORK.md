@@ -72,6 +72,25 @@ User-visible effect: requests failed with `Pipeline assembly failed: No node
 available for layer 10` — the local node held layers 0-10 and the only holder of
 10-16 had become invisible.
 
+**Root-caused and partially fixed (2026-07-27).** `handle_connection_closed` had
+exactly two re-dial triggers — "active pipeline needs this peer" and "peer was
+never registered (died before Identify)". A peer that was registered AND idle at
+the moment it dropped matched neither, so it was removed from the registry with
+no re-dial scheduled, and re-discovery depends on the peer ANNOUNCING itself,
+which only happens when it restarts. Measured: killing the peer daemon and
+restarting it reconnected in 13s (it re-announced), while a peer that stayed up
+after a connection drop was never re-dialled at all. A jittered single re-dial is
+now scheduled on that path too.
+
+**Still open**: that is ONE attempt. If the peer is unreachable for longer than
+the jitter delay the dial fails and nothing re-enqueues it, since a failed dial
+raises `OutgoingConnectionError` rather than `ConnectionClosed`. A bounded
+backoff schedule for a peer we have previously identified would close the
+remaining gap; it was left out deliberately to avoid re-dial storms against peers
+that have genuinely left.
+
+Original evidence:
+
 **Restarting one side reconnected the pair in 6 seconds.** That is the decisive
 datapoint: it rules out unreachable addresses, a poisoned address cache, mDNS
 being blocked by the LXC bridge, and the peer actually being gone — a fresh
