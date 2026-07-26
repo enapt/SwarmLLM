@@ -346,7 +346,15 @@ pub(super) async fn execute_request(
                     &i.eos_token,
                     Some(i.name.as_str()),
                 ),
-                None => chat_template::chatml_fallback(&request.messages),
+                // See local_exec: the model id alone is enough for the family
+                // fallback, so don't collapse to ChatML.
+                None => chat_template::build_prompt(
+                    &request.messages,
+                    None,
+                    "",
+                    "",
+                    Some(request.model_id.0.as_str()),
+                ),
             }
         };
 

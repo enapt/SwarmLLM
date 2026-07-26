@@ -65,6 +65,56 @@ const CONTROL_TOKEN_NAMES: &[&str] = &[
     "start_of_turn",
 ];
 
+/// Put generated text into its final, user-facing form.
+///
+/// **Every source of reply text must end by calling this, and must not perform
+/// these steps itself.** There are three sources — the in-process
+/// [`executor`](crate::inference::executor), the worker subprocess
+/// ([`process_pool`](crate::inference::process_pool)), and the reply assembled
+/// from remote segments ([`pipeline::distributed`]) — and a control token
+/// reached users across four releases because each was fixed separately.
+///
+/// The steps are ordered, and the order is the part that keeps being got
+/// wrong, so it lives here rather than in three comment blocks:
+///
+/// 1. **Scrub control-token artifacts.** Before anything truncates, because
+///    some models emit a stray end-of-turn marker *before* their answer
+///    (`<|im_end|>hello`) — truncating at that match first would discard the
+///    answer, turning a visible leak into an empty reply.
+/// 2. **Truncate at the first genuine stop sequence.** Only caller-supplied
+///    stops, on what survived step 1.
+/// 3. **Trim a trailing partial stop.** A marker decodes across several tokens
+///    and the leading pieces match nothing, so they are already emitted.
+/// 4. **Drop newlines stranded at the front** by a marker removed in step 1.
+///
+/// Before this existed the three sources ran different subsets in different
+/// orders: the distributed path trimmed before scrubbing and never did step 4,
+/// so it could still return an answer-less reply after the scrub was
+/// "everywhere". Pass an empty `stops` slice when the caller has none — steps
+/// 2 and 3 then do nothing and the rest still applies.
+///
+/// Returns the stop sequence that truncated the text, if any, so a caller can
+/// set `finish_reason` from it. It is safe to call more than once: every step
+/// is idempotent, which lets a caller run it again with a different stop set
+/// (the router applies template-derived stops that the executor never sees).
+pub(crate) fn finalize_reply_text(text: &mut String, stops: &[String]) -> Option<String> {
+    strip_control_token_artifacts(text);
+    let mut matched = None;
+    for stop in stops {
+        if let Some(pos) = text.find(stop.as_str()) {
+            text.truncate(pos);
+            matched = Some(stop.clone());
+            break;
+        }
+    }
+    trim_trailing_partial_stop(text, stops);
+    let start = text.len() - text.trim_start_matches(['\n', '\r']).len();
+    if start > 0 {
+        text.drain(..start);
+    }
+    matched
+}
+
 /// Remove control-token artifacts from generated text, in whatever spelling
 /// they arrive in.
 ///
@@ -243,5 +293,75 @@ mod control_token_strip_tests {
         let mut mixed = "日本<|im_end|>語".to_string();
         strip_control_token_artifacts(&mut mixed);
         assert_eq!(mixed, "日本語");
+    }
+}
+
+#[cfg(test)]
+mod finalize_reply_text_tests {
+    use super::finalize_reply_text;
+
+    fn stops() -> Vec<String> {
+        vec!["<|im_end|>".to_string()]
+    }
+
+    /// The ordering rule, asserted once. A marker emitted BEFORE the answer
+    /// must be removed without taking the answer with it — scrubbing has to
+    /// happen before truncation. Getting this backwards turned a visible leak
+    /// into an empty reply, and the distributed path was still doing it in
+    /// that order after the scrub was added "everywhere".
+    #[test]
+    fn marker_before_the_answer_keeps_the_answer() {
+        let mut t = "<|im_end|>Red, blue and yellow.".to_string();
+        let matched = finalize_reply_text(&mut t, &stops());
+        assert_eq!(t, "Red, blue and yellow.");
+        assert_eq!(matched, None, "a scrubbed artifact is not a stop match");
+    }
+
+    /// A genuine stop still ends the reply, and is reported so the caller can
+    /// set finish_reason.
+    #[test]
+    fn genuine_stop_truncates_and_is_reported() {
+        let mut t = "Answer.<|im_end|>trailing".to_string();
+        // Not a scrubbable artifact case: prove truncation via a stop the
+        // scrubber does not know about.
+        let s = vec!["\nUser:".to_string()];
+        let mut t2 = "Answer.\nUser: next question".to_string();
+        assert_eq!(
+            finalize_reply_text(&mut t2, &s),
+            Some("\nUser:".to_string())
+        );
+        assert_eq!(t2, "Answer.");
+        // The control-token form is scrubbed rather than truncated.
+        finalize_reply_text(&mut t, &stops());
+        assert_eq!(t, "Answer.trailing");
+    }
+
+    /// Newlines stranded by a removed marker are dropped — a step the
+    /// distributed path never had.
+    #[test]
+    fn strands_no_leading_newlines() {
+        let mut t = "<|im_end|>\n\nHello".to_string();
+        finalize_reply_text(&mut t, &stops());
+        assert_eq!(t, "Hello");
+    }
+
+    /// Safe to run twice with different stop sets — the router applies
+    /// template-derived stops after the executor has applied the caller's.
+    #[test]
+    fn is_idempotent_across_repeated_calls() {
+        let mut once = "<|im_end|>\nHi there".to_string();
+        finalize_reply_text(&mut once, &[]);
+        let mut twice = once.clone();
+        finalize_reply_text(&mut twice, &stops());
+        assert_eq!(once, twice);
+        assert_eq!(twice, "Hi there");
+    }
+
+    /// No stops configured still scrubs and cleans up.
+    #[test]
+    fn empty_stops_still_scrubs() {
+        let mut t = "<|eot_id|>\nAnswer".to_string();
+        assert_eq!(finalize_reply_text(&mut t, &[]), None);
+        assert_eq!(t, "Answer");
     }
 }

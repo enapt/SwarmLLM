@@ -768,6 +768,9 @@ pub async fn proxy_via_subprocess_anthropic(
     config: &ClaudeSubscriptionConfig,
     req: &serde_json::Value,
 ) -> Result<axum::response::Response, ApiError> {
+    // Boundary defence — see `providers::strip_prefix_in_body`. The Claude CLI
+    // is as unaware of `anthropic:` as any cloud provider.
+    let req = &*crate::api::providers::strip_prefix_in_body(req);
     let ProxySetup {
         mut child,
         mut lines,

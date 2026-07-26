@@ -109,7 +109,18 @@ pub(super) async fn execute_local_batch(
                         &i.eos_token,
                         Some(i.name.as_str()),
                     ),
-                    None => chat_template::chatml_fallback(&request.messages),
+                    // No loaded-model metadata, but we still know WHICH model
+                    // was asked for — enough for the family fallback to pick a
+                    // format. Going straight to ChatML here would prompt a
+                    // Llama-3 or Mistral model in a foreign format, which is the
+                    // failure this release is about.
+                    None => chat_template::build_prompt(
+                        &request.messages,
+                        None,
+                        "",
+                        "",
+                        Some(request.model_id.0.as_str()),
+                    ),
                 };
                 let stops = chat_template::extract_stop_strings(
                     info.as_ref().and_then(|i| i.chat_template.as_deref()),
@@ -181,20 +192,16 @@ pub(super) async fn execute_local_batch(
             } else {
                 match executor.generate(&prompt, &request.sampling_params) {
                     Ok((mut content, gen_result)) => {
-                        // Check for chat template stop strings in generated content
+                        // Second pass with the TEMPLATE-derived stops, which the
+                        // executor never sees (it only knows the caller's own
+                        // `params.stop`). Same finaliser, so the ordering rule
+                        // cannot drift from the other reply paths.
                         let mut finish = gen_result.finish_reason.as_str().to_string();
-                        for stop in &local_stop_strings {
-                            if let Some(pos) = content.find(stop.as_str()) {
-                                content.truncate(pos);
-                                finish = "stop".to_string();
-                                break;
-                            }
+                        if crate::inference::finalize_reply_text(&mut content, &local_stop_strings)
+                            .is_some()
+                        {
+                            finish = "stop".to_string();
                         }
-                        // Strip trailing partial stop strings
-                        crate::inference::trim_trailing_partial_stop(
-                            &mut content,
-                            &local_stop_strings,
-                        );
                         Ok(InferenceOutput::from_gen_result(
                             request.id,
                             request.session_id.clone(),

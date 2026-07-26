@@ -454,14 +454,9 @@ impl ModelExecutor {
             output.push_str(token);
             true
         })?;
-        // Applied at the SOURCE of generated text rather than at each consumer.
-        // There are three such sources — this in-process executor,
-        // `ModelProcessPool` (worker subprocess), and `pipeline/distributed.rs`
-        // (assembled from remote segments) — whereas there are many consumers,
-        // and chasing them one at a time is exactly how a control token kept
-        // reaching users across several releases. See
-        // `strip_control_token_artifacts`.
-        crate::inference::strip_control_token_artifacts(&mut output);
+        // Reply text is finalised in exactly one place — see
+        // `finalize_reply_text`.
+        crate::inference::finalize_reply_text(&mut output, &params.stop);
         Ok((output, result))
     }
 

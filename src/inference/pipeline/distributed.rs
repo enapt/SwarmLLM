@@ -525,15 +525,11 @@ impl PipelineExecutor {
             }
         };
 
-        // Strip trailing partial stop strings (e.g. "<|user" when stop is "<|user|>").
-        crate::inference::trim_trailing_partial_stop(&mut generated_text, &stop_strings);
-        // THIRD source of generated text, alongside `ModelExecutor` and
-        // `ModelProcessPool`: this path assembles the reply from remote
-        // pipeline segments, so neither of those strips applies to it. Removing
-        // this on the assumption there were only two sources let a control
-        // token leak straight back into the first request after a restart —
-        // which is the request that takes this path.
-        crate::inference::strip_control_token_artifacts(&mut generated_text);
+        // Reply text is finalised in exactly one place — see
+        // `finalize_reply_text`. This path previously trimmed before scrubbing
+        // and skipped the leading-newline cleanup, so it could still return an
+        // answer-less reply after the scrub was supposedly everywhere.
+        crate::inference::finalize_reply_text(&mut generated_text, &stop_strings);
 
         // Batch credit write — one DB persist for the entire request instead of per-token.
         // Formula: rate * tokens (no layer multiplier — balanced with consume side).

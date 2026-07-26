@@ -1955,26 +1955,7 @@ impl ModelProcessPool {
         // Also trims a COMPLETE marker: `find_stop_sequence` uses `contains`,
         // so a match can sit anywhere in the accumulated text, and the token
         // that completed it is withheld rather than the marker being removed.
-        // ORDER MATTERS. Remove control-token artifacts FIRST, then apply
-        // stop-sequence truncation to what remains.
-        //
-        // Some models emit a stray end-of-turn marker BEFORE their actual
-        // answer (`<|im_end|>hello`). Truncating at the first stop match would
-        // cut from the marker onwards and throw the answer away — which is why
-        // this model returned empty replies once the markers stopped leaking.
-        // Stripping the artifact keeps the text around it; only a genuine
-        // user-supplied stop sequence should end the response.
-        crate::inference::strip_control_token_artifacts(&mut content);
-        for stop in &stop_sequences {
-            if let Some(pos) = content.find(stop.as_str()) {
-                content.truncate(pos);
-                break;
-            }
-        }
-        crate::inference::trim_trailing_partial_stop(&mut content, &stop_sequences);
-        // Newlines left stranded at the front by a removed marker.
-        let trimmed = content.trim_start_matches(['\n', '\r']).to_string();
-        content = trimmed;
+        crate::inference::finalize_reply_text(&mut content, &stop_sequences);
 
         Ok(crate::inference::router::InferenceOutput {
             request_id,

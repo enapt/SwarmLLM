@@ -441,9 +441,18 @@ pub async fn try_proxy_openai(
 
 /// Return `body` with any `provider:` prefix removed from its `model` field.
 ///
+/// **Applied at every send boundary, not by callers.** `provider:model` selects
+/// the provider locally; the provider has never heard of the prefix and rejects
+/// it. Doing this in the handlers instead meant each new proxy path had to
+/// remember — and the Anthropic surface did not, so `/v1/messages` shipped the
+/// prefix upstream for a release after the OpenAI path was fixed. Stripping
+/// here makes a forgetful caller harmless.
+///
 /// Clones only when a prefix is actually present, so the common path is a cheap
 /// reference-preserving passthrough.
-fn strip_prefix_in_body(body: &serde_json::Value) -> std::borrow::Cow<'_, serde_json::Value> {
+pub(crate) fn strip_prefix_in_body(
+    body: &serde_json::Value,
+) -> std::borrow::Cow<'_, serde_json::Value> {
     let Some(model) = body.get("model").and_then(|m| m.as_str()) else {
         return std::borrow::Cow::Borrowed(body);
     };
@@ -705,6 +714,8 @@ pub async fn proxy_to_anthropic(
     beta_header: Option<&str>,
     version_header: Option<&str>,
 ) -> Result<axum::response::Response, ApiError> {
+    // Boundary defence — see `strip_prefix_in_body`.
+    let body = &*strip_prefix_in_body(body);
     let client = get_provider_client();
     let url = "https://api.anthropic.com/v1/messages";
 
@@ -1070,5 +1081,44 @@ mod tests {
         // moonshot- prefix (legacy IDs still route)
         let p3 = resolve_provider("moonshot-v1-8k", &config).unwrap();
         assert_eq!(p3.name, "moonshot");
+    }
+
+    /// The prefix must be removed by the SEND BOUNDARY, so a handler that
+    /// forgets cannot leak it. Asserted on the shared helper every boundary
+    /// calls, rather than per-path — chasing this per-path is how the
+    /// Anthropic surface shipped the prefix upstream for a release after the
+    /// OpenAI path was fixed.
+    #[test]
+    fn send_boundary_strips_provider_prefix_from_body() {
+        let cases = [
+            ("deepseek:deepseek-v4-flash", "deepseek-v4-flash"),
+            ("anthropic:claude-opus-4-8", "claude-opus-4-8"),
+            ("openai:gpt-5", "gpt-5"),
+        ];
+        for (sent, want) in cases {
+            let body = serde_json::json!({ "model": sent, "messages": [] });
+            let out = strip_prefix_in_body(&body);
+            assert_eq!(out["model"], want, "input {sent:?}");
+        }
+    }
+
+    /// A bare name is passed through untouched and without cloning.
+    #[test]
+    fn send_boundary_leaves_bare_model_names_alone() {
+        let body = serde_json::json!({ "model": "gpt-5", "messages": [] });
+        let out = strip_prefix_in_body(&body);
+        assert!(
+            matches!(out, std::borrow::Cow::Borrowed(_)),
+            "should not clone"
+        );
+        assert_eq!(out["model"], "gpt-5");
+    }
+
+    /// A body with no model field must not panic or invent one.
+    #[test]
+    fn send_boundary_tolerates_a_missing_model_field() {
+        let body = serde_json::json!({ "messages": [] });
+        let out = strip_prefix_in_body(&body);
+        assert!(out.get("model").is_none());
     }
 }

@@ -463,10 +463,31 @@ There are more than you expect:
   chat request in `responses/background.rs`. They share the event loop but build
   their chat requests separately, so an opt-in set on one is absent on the other.
 
-**Prefer a shared helper with a doc comment that says forgetting it is the
-bug** — `with_template_stops`, `emit_openai_tool_calls`,
-`emit_anthropic_tool_blocks`, `strip_control_token_artifacts`. A helper nobody is
-obliged to call will eventually not be called.
+**A shared helper is not enough — put it where the caller cannot skip it.**
+This was the standing advice here, and it kept failing: `with_template_stops`,
+`emit_openai_tool_calls`, `emit_anthropic_tool_blocks` and
+`strip_control_token_artifacts` all existed, were documented, and were still
+missed by a sibling path. A helper nobody is *obliged* to call will eventually
+not be called. Three escalating ways to make it obligatory, best first:
+
+1. **Do it at the choke point, not in the callers.** Find the single place the
+   value crosses the boundary and transform it there.
+   `providers::strip_prefix_in_body` now runs inside `try_proxy_openai`,
+   `proxy_to_anthropic` and `proxy_via_subprocess_anthropic` — the three
+   functions that actually send — so a new proxy path is correct with no
+   author action. Same shape for `inference::finalize_reply_text`: the three
+   reply-text sources call one finaliser that owns the whole ordered sequence
+   (scrub → truncate → trim → newline cleanup), instead of each composing those
+   steps itself, which is how they silently diverged.
+2. **Make the wrong call unrepresentable.** If context is needed to be correct,
+   make it a required parameter rather than an `Option` with a convenience
+   wrapper that passes `None` — that wrapper is how `build_prompt` disabled the
+   template fallback on 6 of 7 paths (gotcha #171).
+3. **Assert the property on the shared helper**, not once per path, so a new
+   path inherits the coverage instead of needing its own test.
+
+Only when none of those fit should you fall back to a doc comment saying
+forgetting it is the bug.
 
 **Verify by running the request, not by reading the diff.** Every one of the
 seven passed review. The ones caught early were caught by executing the actual

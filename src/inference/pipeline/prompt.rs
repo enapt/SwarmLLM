@@ -110,7 +110,11 @@ impl PipelineExecutor {
                 &i.eos_token,
                 Some(&model_id.0),
             ),
-            None => chat_template::chatml_fallback(&self.request.messages),
+            // See local_exec: the model id alone is enough for the family
+            // fallback, so don't collapse to ChatML.
+            None => {
+                chat_template::build_prompt(&self.request.messages, None, "", "", Some(&model_id.0))
+            }
         }
     }
 
