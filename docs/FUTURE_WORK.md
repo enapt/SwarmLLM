@@ -2883,7 +2883,17 @@ or layer-shard layout computation on a large file. If it is the probe, the fix i
 progress reporting rather than speed — say "checking the file on HuggingFace"
 instead of showing a 0-byte file.
 
-## "Newest direct connection" can select a dead one (observed 2026-07-26)
+## "Newest direct connection" can select a dead one (observed 2026-07-26) — FIXED v0.3.34
+
+> **Fixed by option 1 below, adapted.** Rather than plumbing the application's
+> ACK timeout back into the behaviour, selection now uses a signal the crate
+> already tracks: `pending_outbound_responses` is inserted on send and removed
+> when the response arrives, so a connection that is answering drains it while a
+> half-open one only accumulates. Selection prefers the direct connection with
+> the FEWEST un-answered requests, breaking ties toward the newest — which
+> preserves the DCUtR behaviour the newest-wins rule existed for. No new state,
+> no API change, no extra round trip. The notes below are kept as the record of
+> what was observed.
 
 The vendored `libp2p-request-response` patch picks the **newest direct**
 connection to a peer, on the reasoning that "a half-open connection is almost

@@ -151,7 +151,7 @@ libp2p 0.56, axum 0.8, candle-core/candle-transformers 0.10 (CUDA), redb 4, ed25
 
 ## Testing
 
-- 1312 lib tests passing + 9 ignored (env-var-gated real-model + manual smoke), 79 integration tests in `tests/integration/` + 2 ignored end-to-end (`cargo test --test integration_phase10_11 -- --ignored`), 2 repo-consistency, 26 in `swarmllm-types` (`cargo test -p swarmllm-types` — NOT covered by a bare `cargo test` from the root), 6 in the vendored request-response patch (`cargo test --manifest-path vendor/libp2p-request-response/Cargo.toml --lib` — the crate is workspace-`exclude`d, and its own integration tests need `libp2p-swarm-test` so use `--lib`), clippy clean. Microbench: `cargo run --release --no-default-features --features dev,claude-subscription --example swarm_spec_bench` (R136 — measures all 4 SWARM-SPEC layer primitives + synthetic cascade hit-rate). Local-cluster bench: `examples/3node_setup.sh` (boots 3 daemons) + `examples/3node_inference_bench.sh` (runs 3 workloads × 3 trials and prints tok/s + swarm_spec metrics). Sharded variant: `examples/3node_sharded_setup.sh` (forced distributed pipeline; writes its own per-node config disabling auto-manage and bootstrap so the split survives). **Its inference step is EXPECTED to fail on a single multi-interface host** — that is the zero-redundancy same-host case documented in `docs/FUTURE_WORK.md` § "Connection churn on multi-interface hosts", not a distributed-inference regression (confirmed on released v0.3.28, 2026-07-26). Validate the forward path on two real machines. Both scripts take `SWARM_BENCH_MODEL`. **Pinned reference models for cross-swarm comparison: `docs/REFERENCE_MODELS.md`** (smoke / standard / stress tiers + `examples/fetch_reference_model.sh` to opt in).
+- 1313 lib tests passing + 9 ignored (env-var-gated real-model + manual smoke), 79 integration tests in `tests/integration/` + 2 ignored end-to-end (`cargo test --test integration_phase10_11 -- --ignored`), 2 repo-consistency, 26 in `swarmllm-types` (`cargo test -p swarmllm-types` — NOT covered by a bare `cargo test` from the root), 6 in the vendored request-response patch (`cargo test --manifest-path vendor/libp2p-request-response/Cargo.toml --lib` — the crate is workspace-`exclude`d, and its own integration tests need `libp2p-swarm-test` so use `--lib`), clippy clean. Microbench: `cargo run --release --no-default-features --features dev,claude-subscription --example swarm_spec_bench` (R136 — measures all 4 SWARM-SPEC layer primitives + synthetic cascade hit-rate). Local-cluster bench: `examples/3node_setup.sh` (boots 3 daemons) + `examples/3node_inference_bench.sh` (runs 3 workloads × 3 trials and prints tok/s + swarm_spec metrics). Sharded variant: `examples/3node_sharded_setup.sh` (forced distributed pipeline; writes its own per-node config disabling auto-manage and bootstrap so the split survives). **Its inference step is EXPECTED to fail on a single multi-interface host** — that is the zero-redundancy same-host case documented in `docs/FUTURE_WORK.md` § "Connection churn on multi-interface hosts", not a distributed-inference regression (confirmed on released v0.3.28, 2026-07-26). Validate the forward path on two real machines. Both scripts take `SWARM_BENCH_MODEL`. **Pinned reference models for cross-swarm comparison: `docs/REFERENCE_MODELS.md`** (smoke / standard / stress tiers + `examples/fetch_reference_model.sh` to opt in).
 - Unit tests: in-module `#[cfg(test)]` blocks
 - Integration tests: `tests/integration/` — multi-node simulations with `--test-threads=1`
 - Real-model spawn-and-infer test: set `SWARMLLM_TEST_MODEL_DIR` to a fully-populated model directory (e.g. `~/.local/share/swarmllm/models/tinyllama-1.1b-...`) and run `cargo test --test integration_phase10_11 -- --ignored end_to_end`. No synthetic GGUF fixture is committed; see `docs/ARCHITECTURE.md` § Deferred Items.
@@ -192,43 +192,57 @@ When spawning subagents in this repo, use these model picks (overrides defaults 
 
 ## Status
 
-All 20 build phases complete. All subsystems wired — no stubs. **1312 lib + 79 integration + 2 repo-consistency + 26 swarmllm-types tests passing**; 9 lib + 2 e2e ignored (env-var or manual). Clippy clean default + features dev,claude-subscription + `--features llama`.
+All 20 build phases complete. All subsystems wired — no stubs. **1313 lib + 79 integration + 2 repo-consistency + 26 swarmllm-types tests passing**; 9 lib + 2 e2e ignored (env-var or manual). Clippy clean default + features dev,claude-subscription + `--features llama`.
 
 Per-round history lives in `~/.claude/projects/-home-user-SwarmLLM/memory/round_log_*.md` and the CHANGELOG; `docs/ARCHITECTURE.md` is the canonical architecture. This section keeps only the current release line plus one-line prior-round pointers.
 
-### Latest — v0.3.33-alpha (2026-07-26): a relay that looked direct won every send
+### Latest — v0.3.34-alpha (2026-07-26): pick the connection that is answering
+
+Completes the connection-selection work. Both items came out of *running* the
+retraction test, not from reading code.
+
+- **"Newest direct" can be the dead one.** The patch preferred the newest direct
+  connection because "a half-open connection is almost always an older one".
+  Observed live contradicting that: a connection that had just served 3
+  consecutive requests was passed over for a newer one that silently swallowed
+  every send. Fix uses a signal the crate ALREADY tracks —
+  `pending_outbound_responses` is inserted on send and removed on response, so an
+  answering connection drains it and a half-open one only accumulates. Selection
+  is now *fewest un-answered, tie-break newest*, which preserves the DCUtR
+  newest-wins behaviour the old rule existed for. No new state, no API change.
+- **Retraction alone is futile — the blacklist is REQUIRED.** Retracting a stale
+  holder claim does not survive the retry: the DHT still advertises the holder,
+  so the retry's assembly (especially one waiting on DHT results, per .32)
+  re-learns the claim and picks the same dead peer. Live: 6 retractions per
+  request, failing twice identically. Now a holder reporting missing data is
+  blacklisted for that request id (`request_holder_blacklist`, same lifetime as
+  `active_traces`), so the retry MUST choose otherwise. After: 3 retractions, one
+  round, accurate "No node available" instead of a repeated peer-specific error.
+
+**The .31 retraction scope fix was also confirmed live** — `shard=0,1,2` all
+retracted for a 0..16 span, including shard 2 (the actually-missing one). The
+buggy version logged only `shard=0`.
+
+### v0.3.33-alpha (2026-07-26): a relay that looked direct won every send
 
 **Read gotcha #179 before touching connection selection.** Two nodes on the SAME
 subnet reproducibly failed `remote-generate: peer never acknowledged` while a
-healthy direct QUIC connection sat unused.
+healthy direct QUIC connection sat unused. `connection_is_relayed` tested for
+`Protocol::P2pCircuit`, which catches an OUTBOUND relay dial but NOT the inbound
+one: when a peer dials *us* through a relay the remote address is a bare
+`/p2p/<peer>` with **no transport component at all**. Counted as direct, and
+being newest it won outright → every send crossed a failing circuit → **silent
+drop** (no response, no `OutboundFailure`) until the 10s ACK sweep. Fix: direct
+requires a real transport (`Ip4|Ip6|Dns*|Tcp|Udp`) AND no circuit hop; `None`
+stays direct. **Affects any NAT'd user.** 31s timeout → 8.6s.
 
-The vendored `libp2p-request-response` patch (gotcha #164) picks
-`rposition(|c| !connection_is_relayed(c))` — the newest *direct* connection — and
-`connection_is_relayed` tested for `Protocol::P2pCircuit`. That catches an
-OUTBOUND relay dial. It misses the INBOUND one: when a peer dials *us* through a
-relay there is no socket to describe, so the remote address is a bare
-`/p2p/<peer>` with **no transport component at all**. No circuit hop → counted as
-direct → and a relayed inbound connection is typically the NEWEST of the three a
-peer accumulates under `max_established_per_peer = 3`, so it won outright. Every
-send then crossed a circuit whose dials were failing negotiation → **silent drop**
-(no response, no `OutboundFailure`) until the 10s `RR_ACK_TIMEOUT_SECS` sweep.
+**Diagnostic worth reusing**: `grep "connection established peer_id=<peer>"
+node.log | grep -oE "remote_addr=[^ ]+" | sort | uniq -c`
 
-Fix: direct requires a real transport (`Ip4|Ip6|Dns*|Tcp|Udp`) AND no circuit
-hop. `None` stays direct — excluding a possibly-good connection is the worse
-error, and a relay-only peer must remain reachable. **Affects any NAT'd user**,
-since that is exactly when peers reach you through a relay.
-
-**The diagnostic that cracked it** (worth reusing):
-`grep "connection established peer_id=<peer>" node.log | grep -oE "remote_addr=[^ ]+" | sort | uniq -c`
-
-Also: **`sched_ms` charged a failed attempt to scheduling** — it was derived from
-the dequeue timestamp, so a retry reported 13s of "scheduling" for two ~0ms
-assemblies, pointing the DIAGNOSTICS symptom table in the wrong direction. Now
-the caller's measured assembly time, summed, with `assemblies=N` shown on retry.
-
-31s timeout → 8.6s, then 3/3 at ~4.5s. The vendored crate now carries its own
-`[workspace]` table so the patch is unit-testable (6 tests; `--lib` only, its
-integration tests need `libp2p-swarm-test`).
+Also: `sched_ms` charged a failed attempt to scheduling (derived from dequeue, so
+a retry reported 13s for two ~0ms assemblies — pointing the DIAGNOSTICS symptom
+table the wrong way). Now the caller's measured assembly time, summed, with
+`assemblies=N` on retry.
 
 ### v0.3.31 / v0.3.32-alpha (2026-07-26)
 

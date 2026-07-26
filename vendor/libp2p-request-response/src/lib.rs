@@ -606,12 +606,37 @@ where
             // across connections to a single peer was never a real benefit;
             // they share a path and usually an endpoint.
             //
-            // `connected` is append-ordered (`push` on establish), so the last
-            // matching index is the most recently established.
-            let newest_direct = connections
+            //  4. Newest is NOT sufficient on its own. Observed live 2026-07-26:
+            //     a connection that had just served three consecutive requests
+            //     was passed over for a NEWER direct connection that silently
+            //     swallowed every send — no response, no `OutboundFailure` —
+            //     until the application's own 10s acknowledgement timeout gave
+            //     up. Age is a heuristic, and this is the case where it points
+            //     the wrong way.
+            //
+            //     `pending_outbound_responses` is the liveness signal already to
+            //     hand: it is inserted on send and removed when the response
+            //     arrives, so a connection that is answering drains it while a
+            //     half-open one only accumulates. Preferring the direct
+            //     connection with the FEWEST un-answered requests therefore
+            //     steers away from a dead path after the first failure, instead
+            //     of re-picking it every time. Ties break toward the newest,
+            //     which preserves the DCUtR behaviour above.
+            //
+            // `connected` is append-ordered (`push` on establish), so a larger
+            // index is more recently established.
+            let best_direct = connections
                 .iter()
-                .rposition(|c| !connection_is_relayed(c));
-            let ix = newest_direct.unwrap_or(connections.len() - 1);
+                .enumerate()
+                .filter(|(_, c)| !connection_is_relayed(c))
+                .min_by_key(|(i, c)| {
+                    (
+                        c.pending_outbound_responses.len(),
+                        std::cmp::Reverse(*i),
+                    )
+                })
+                .map(|(i, _)| i);
+            let ix = best_direct.unwrap_or(connections.len() - 1);
             let conn = &mut connections[ix];
             conn.pending_outbound_responses.insert(request.request_id);
             self.pending_events.push_back(ToSwarm::NotifyHandler {
@@ -1241,6 +1266,64 @@ mod swarmllm_relay_selection_tests {
             ConnectionId::new_unchecked(2),
             "must pick the newest DIRECT connection, not the newer relayed one"
         );
+    }
+
+    fn pick(conns: &[Connection]) -> ConnectionId {
+        let best_direct = conns
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| !connection_is_relayed(c))
+            .min_by_key(|(i, c)| (c.pending_outbound_responses.len(), std::cmp::Reverse(*i)))
+            .map(|(i, _)| i);
+        conns[best_direct.unwrap_or(conns.len() - 1)].id
+    }
+
+    fn direct_conn(id: u64, addr: &str, pending: &[u64]) -> Connection {
+        let mut c = Connection::new(
+            ConnectionId::new_unchecked(id as usize),
+            Some(Multiaddr::from_str(addr).unwrap()),
+        );
+        for r in pending {
+            c.pending_outbound_responses
+                .insert(OutboundRequestId(*r as u64));
+        }
+        c
+    }
+
+    const A: &str = "/ip4/192.168.1.60/udp/8800/quic-v1";
+    const B: &str = "/ip4/192.168.1.60/udp/8800/quic-v1/p2p/12D3KooWKwvCNmumN89DftJbEC1yRcnP1YxVFKEXMLCo7EzifsaY";
+
+    /// Age alone picked a newer connection that silently swallowed every send
+    /// while an older, demonstrably working one sat unused. Un-answered
+    /// requests are the signal that distinguishes them.
+    #[test]
+    fn a_direct_connection_that_is_answering_beats_a_newer_silent_one() {
+        let conns = vec![
+            direct_conn(1, A, &[]),           // older, answering
+            direct_conn(2, B, &[10, 11, 12]), // newer, nothing coming back
+        ];
+        assert_eq!(pick(&conns), ConnectionId::new_unchecked(1));
+    }
+
+    #[test]
+    fn among_equally_idle_connections_the_newest_still_wins() {
+        // Preserves the DCUtR behaviour: an upgraded direct connection is the
+        // newest and must win when nothing distinguishes them.
+        let conns = vec![direct_conn(1, A, &[]), direct_conn(2, B, &[])];
+        assert_eq!(pick(&conns), ConnectionId::new_unchecked(2));
+    }
+
+    #[test]
+    fn a_busy_but_healthy_connection_is_not_abandoned_for_a_relay() {
+        // Relayed is excluded regardless of how many requests are in flight on
+        // the direct path — a circuit is the worse route even when busy.
+        let mut relayed = Connection::new(
+            ConnectionId::new_unchecked(3),
+            Some(Multiaddr::from_str("/p2p/12D3KooWKwvCNmumN89DftJbEC1yRcnP1YxVFKEXMLCo7EzifsaY").unwrap()),
+        );
+        relayed.pending_outbound_responses.clear();
+        let conns = vec![direct_conn(1, A, &[10, 11]), relayed];
+        assert_eq!(pick(&conns), ConnectionId::new_unchecked(1));
     }
 
     #[test]

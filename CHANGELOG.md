@@ -2,6 +2,38 @@
 
 All notable changes to SwarmLLM are documented here.
 
+## [0.3.34-alpha] — 2026-07-26
+
+### Fixed
+
+- **A connection that had stopped working kept being chosen over one that
+  worked.** Where several connections to the same machine exist, the most recent
+  was preferred, on the reasoning that a connection which has quietly died is
+  usually an old one. Observed to be wrong: a connection that had just carried
+  three successful requests was passed over for a newer one that swallowed
+  everything sent to it, with no error either way, until a ten-second timeout
+  gave up.
+
+  Selection now prefers the connection with the fewest requests still awaiting a
+  reply. A connection that is answering clears them; one that has died only
+  accumulates them, so the choice moves away from a dead path after the first
+  failure instead of returning to it every time. Where nothing distinguishes two
+  connections the newer is still preferred, which is what the previous rule
+  existed for.
+
+- **A retry could pick the same machine that had just failed.** Dropping a
+  machine's stale claim to hold part of a model does not survive the retry,
+  because the wider network still advertises it, so scheduling re-learns the
+  claim and chooses it again. A machine that reports missing data is now barred
+  from serving that request outright. The bar covers one request and is cleared
+  with it — a single failure is not grounds for refusing a machine everywhere.
+
+### Notes
+
+- Verified against a machine whose claim was deliberately left stale: the request
+  previously failed twice with the same error, and now fails once, with the retry
+  correctly reporting that nobody can serve that part of the model.
+
 ## [0.3.33-alpha] — 2026-07-26
 
 ### Fixed
