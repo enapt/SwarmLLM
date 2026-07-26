@@ -2,7 +2,7 @@
 
 All notable changes to SwarmLLM are documented here.
 
-## [Unreleased]
+## [0.3.28-alpha] — 2026-07-26
 
 ### Fixed
 
@@ -39,6 +39,22 @@ All notable changes to SwarmLLM are documented here.
   updates — so those kept reporting "slow down" for as long as the tab stayed
   open, and could not recover on their own. Reconnection now backs off, and
   resets once it succeeds.
+- **Replies name the model that answered.** Asking the Anthropic-compatible
+  endpoint for `provider:model` got a reply claiming to come from a model no
+  provider offers, disagreeing with the OpenAI-compatible endpoint for the same
+  request.
+
+### Changed
+
+- **Replies are finished in one place instead of three.** The in-process
+  engine, the worker subprocess, and replies assembled from remote machines each
+  cleaned up generated text themselves, in different orders and with different
+  steps. That is why a stray control marker kept returning after each fix — the
+  fix landed on one of them and the next reply came from another. They now share
+  one finishing step, which also closed two gaps: the assembled-reply path
+  cleaned up in the wrong order, so it could still return an empty answer when a
+  model emitted a marker before its reply, and it never removed the blank lines
+  a stripped marker leaves behind.
 
 ## [0.3.27-alpha] — 2026-07-26
 

@@ -196,24 +196,39 @@ All 20 build phases complete. All subsystems wired — no stubs. **1251 lib + 79
 
 Per-round history lives in `~/.claude/projects/-home-user-SwarmLLM/memory/round_log_*.md` and the CHANGELOG; `docs/ARCHITECTURE.md` is the canonical architecture. This section keeps only the current release line plus one-line prior-round pointers.
 
-### Latest — v0.3.27-alpha (2026-07-26): provider routing + metadata fixes
+### Latest — v0.3.28-alpha (2026-07-26): the Llama-3 prompt-format root cause
 
-Three findings from tester checklist sections 11/12. All three are the same
-shape as the rest of this week — a rule applied on one path but not another.
+Live-testing v0.3.27 found the ACTUAL cause of the control-token leak that
+.22/.24/.25/.26 each chased through the output scrubber. **Read gotcha #169
+before touching reply text again.**
 
-- **`provider:model` prefix forwarded upstream.** The prefix selects the
-  provider; the provider has never heard of it. `strip_provider_prefix` existed
-  and ONLY `anthropic/convert.rs` called it, so the OpenAI-compatible proxy sent
-  the body verbatim and DeepSeek rejected `deepseek:deepseek-v4-flash`. Stripped
-  at the proxy boundary (`providers.rs::strip_prefix_in_body`, Cow — clones only
-  when a prefix is present).
-- **`PUT /api/admin/providers` silent no-op.** Fields are `<provider>_key`; no
-  `deny_unknown_fields`, so a wrong name → all `None` → nothing written → still
-  `status: "ok"`. Now returns Validation naming the expected shape.
-- **Quantization mislabelled `Q4KM`.** Ids carry `q8-0` (sanitiser rewrites
-  `_`→`-`) but `Quantization::parse` stripped only `_`, AND `trailing_tag` took
-  only the last segment (`"0"`). Both fixed — `trailing_tag` now tries the last
-  1–3 segments, longest first.
+- **Llama-3 templates never parsed → every Llama-3 model was prompted in
+  ChatML.** `eval_block` detected a message loop via `content.contains(" in
+  messages")`; every official Llama-3.x GGUF writes `{% set loop_messages =
+  messages %}{% for message in loop_messages %}`. No match → unknown tag →
+  empty render → `apply_chat_template` returns `None` → fallback chain has no
+  Llama-3 entry → **ChatML**. A Llama-3 model asked in ChatML replies in ChatML.
+  Fixed via `parse_for_iterable` + `EvalState::msg_aliases`. The `grep "chat
+  template failed" node.log` WARN had been firing on every request for
+  releases.
+- **The fallback chain was unreachable on 6 of 7 paths** — `build_prompt` was a
+  4-arg wrapper hardcoding `model_name: None`. Wrapper deleted, argument now
+  mandatory. Gotcha #171. Added real `mistral_fallback` / `llama3_fallback`.
+- **Two v0.3.27 fixes were inert or partial**: quantization parsed
+  `manifest.name` (a display name, never carries a tag) instead of
+  `manifest.id` (#170); the `provider:` prefix was stripped on the OpenAI proxy
+  only, so `/v1/messages` still shipped it and `anthropic:claude-*` misrouted.
+- **Consolidation** (the week's meta-fix): `inference::finalize_reply_text` now
+  owns the whole ordered scrub→truncate→trim→newline sequence for all THREE
+  text sources — they had diverged, with `distributed.rs` in the wrong order
+  and missing a step. `strip_prefix_in_body` moved inside the three functions
+  that actually send. Escalation ladder (choke point > required arg > assert on
+  the helper) in `.claude/rules/architecture.md`; gotcha #173.
+
+Known limitation: Mistral's official template still can't be *rendered*
+(needs `namespace()`, `selectattr`, slice-binding) — it degrades to Mistral
+formatting via the fallback. `minijinja` replacement proposed in
+`docs/FUTURE_WORK.md`.
 
 ### Recent releases (one line each; full detail in CHANGELOG.md + `memory/round_log_*.md`)
 
@@ -221,6 +236,10 @@ shape as the rest of this week — a rule applied on one path but not another.
 implemented per-path — documented as a rule in `.claude/rules/architecture.md`.
 Read that before touching any request/response path.**
 
+- **v0.3.27** (07-26): `provider:model` prefix stripped at the OpenAI proxy
+  boundary; `PUT /api/admin/providers` no longer a silent no-op on a wrong
+  field name; `Quantization::parse` + `trailing_tag` handle hyphenated
+  multi-part tags. All three needed follow-up in .28 — see above.
 - **v0.3.26** (07-26): control-token scrubbing at the THREE text sources
   (`executor.rs` / `process_pool.rs` / `pipeline/distributed.rs`) — closed a
   template leak reported across .22/.24/.25; strip BEFORE stop-truncation.
@@ -236,22 +255,17 @@ Read that before touching any request/response path.**
   → no circuit → DCUtR 0 attempts → absent from `connected_node_ids` → "no node
   available"). Gotcha #165. Poisoned entries persist in caches — nodes must
   RESTART, not just swap binaries.
-- **v0.3.22** (07-25): local tool calling implemented (`src/api/tool_parse.rs`,
-  4 formats, all four streaming paths); recent-failures diagnostics ring;
-  serving-side lost-reply logging.
+- **v0.3.22** (07-25): local tool calling (`src/api/tool_parse.rs`, 4 formats,
+  all four streaming paths); recent-failures diagnostics ring.
 - **v0.3.21** (07-25): networking audit — `max_established_per_peer = 1` was
   structurally disabling DCUtR (gotcha #163); scheduler relay tier;
-  `relay_forwarding_auto`; `max_circuits` 16→128. **Hole punching verified live
-  07-25 16:15Z.** Detail: `round_log_networking_audit.md`.
-- **v0.3.18-v0.3.20** (07-24→25): the networking release line — app-level
-  inference relay + tensor relay across NAT, additive protocol/feature
-  handshake, multi-relay + DHT relay discovery, auto-updater size cap
-  500MB→2GB (GPU builds), deterministic LAN dialer. Detail:
-  `round_log_networking_plan.md`.
-- **v0.3.15-v0.3.17** (07-23→24): external-tester arc — WSL2 mirrored-mode
-  detection, Docker bridge filtering, FULLBACKUP lockdown, Claude Code
-  tool-description cap 4096→32768, OpenAI model-echo. Detail:
-  `round_log_v0315_livetest.md`.
+  `max_circuits` 16→128. **Hole punching verified live 07-25.** Detail:
+  `round_log_networking_audit.md`.
+- **v0.3.15-v0.3.20** (07-23→25): the networking release line — app-level
+  inference + tensor relay across NAT, additive protocol/feature handshake,
+  multi-relay + DHT discovery, auto-updater cap 500MB→2GB, deterministic LAN
+  dialer; WSL2 mirrored-mode detection, Docker bridge filtering, FULLBACKUP
+  lockdown. Detail: `round_log_networking_plan.md`, `round_log_v0315_livetest.md`.
 
 
 ### Prior rounds (one line each; full detail in `memory/round_log_*.md`)
