@@ -69,22 +69,34 @@ const PREFILL_ALLOWANCE_PER_TOKEN: Duration = Duration::from_millis(500);
 /// Ceiling on the first-token budget, so a genuinely dead peer is still
 /// detected in bounded time no matter how long the prompt is.
 const FIRST_TOKEN_TIMEOUT_MAX: Duration = Duration::from_secs(600);
-/// Characters per token, used to size the prefill allowance from the prompt
-/// before we know the real token count (the count only comes back with usage,
-/// long after the deadline must be set). Deliberately low: overestimating the
-/// token count only lengthens the wait, while underestimating reintroduces the
-/// premature timeout this allowance exists to prevent.
-const PROMPT_CHARS_PER_TOKEN: usize = 3;
+/// Fallback characters-per-token divisor, used only when the model's tokenizer
+/// isn't available locally (the coordinator of a remote generate often holds no
+/// shard of the model, so it has no header to load one from).
+///
+/// Deliberately pessimistic. Latin prose runs about 4 characters per token, but
+/// this must not under-budget the scripts this project ships locales for —
+/// Chinese and Japanese are close to 1 character per token, so a divisor tuned
+/// for English would silently reintroduce the premature timeout for exactly
+/// those users. Overestimating only lengthens the wait, and the ceiling bounds
+/// the damage.
+const PROMPT_CHARS_PER_TOKEN: usize = 2;
 
-/// First-token budget for a prompt of `prompt_chars` characters.
+/// First-token budget for a prompt of `prompt_tokens` tokens.
 ///
 /// Only ever extends the base budget, never shortens it, so short prompts keep
 /// exactly the previous behaviour.
-fn first_token_timeout(prompt_chars: usize) -> Duration {
-    let est_tokens = u32::try_from(prompt_chars / PROMPT_CHARS_PER_TOKEN).unwrap_or(u32::MAX);
+fn first_token_timeout(prompt_tokens: usize) -> Duration {
+    let tokens = u32::try_from(prompt_tokens).unwrap_or(u32::MAX);
     FIRST_TOKEN_TIMEOUT
-        .saturating_add(PREFILL_ALLOWANCE_PER_TOKEN.saturating_mul(est_tokens))
+        .saturating_add(PREFILL_ALLOWANCE_PER_TOKEN.saturating_mul(tokens))
         .min(FIRST_TOKEN_TIMEOUT_MAX)
+}
+
+/// Estimate the prompt's token count from characters, for when the tokenizer
+/// isn't loadable. Counts `chars()`, not bytes — a byte-length divisor would
+/// under-count multi-byte scripts by the very factor that makes them expensive.
+fn estimate_prompt_tokens(prompt: &str) -> usize {
+    prompt.chars().count().div_ceil(PROMPT_CHARS_PER_TOKEN)
 }
 /// Between-token timeout once generation has started. Generous to accommodate
 /// slow prefill-then-decode transitions on big models.
@@ -114,7 +126,16 @@ impl PipelineExecutor {
         // Build the chat-templated prompt (same as the standard path).
         let prompt = self.build_prompt().await;
         // Sized from the prompt we are about to send, before it is moved.
-        let first_token_budget = first_token_timeout(prompt.len());
+        // Prefer the model's own tokenizer: a character heuristic mis-sizes the
+        // budget by several-fold across scripts. It is often unavailable here —
+        // this path exists precisely because the model runs elsewhere — so fall
+        // back to the estimate.
+        let prompt_tokens_est = self
+            .shared_state
+            .standalone_tokenizer(&self.request.model_id)
+            .map(|tk| tk.encode(&prompt).len())
+            .unwrap_or_else(|| estimate_prompt_tokens(&prompt));
+        let first_token_budget = first_token_timeout(prompt_tokens_est);
 
         // Register an inbound StreamingToken channel before sending the
         // request so we never miss an early token.
@@ -348,38 +369,72 @@ mod first_token_budget_tests {
 
     #[test]
     fn short_prompt_keeps_the_original_budget() {
-        // A handful of characters must not shift the long-standing default.
+        // A handful of tokens must not shift the long-standing default.
         assert_eq!(first_token_timeout(0), FIRST_TOKEN_TIMEOUT);
-        assert!(first_token_timeout(30) < FIRST_TOKEN_TIMEOUT + Duration::from_secs(6));
+        assert!(first_token_timeout(10) < FIRST_TOKEN_TIMEOUT + Duration::from_secs(6));
+    }
+
+    /// CJK sits near one token per character, so a divisor tuned for Latin
+    /// prose would under-budget it — the case this fallback must not get wrong.
+    #[test]
+    fn fallback_estimate_does_not_undercount_multibyte_scripts() {
+        let cjk = "\u{4f60}\u{597d}\u{4e16}\u{754c}".repeat(50); // 200 chars, ~200 tokens
+        assert_eq!(cjk.chars().count(), 200);
+        assert!(
+            estimate_prompt_tokens(&cjk) >= 100,
+            "multi-byte prompt under-counted: {}",
+            estimate_prompt_tokens(&cjk)
+        );
+        // Byte length would have inflated this to ~600; chars keeps it honest.
+        assert!(estimate_prompt_tokens(&cjk) <= 200);
+    }
+
+    #[test]
+    fn fallback_estimate_never_returns_zero_for_a_nonempty_prompt() {
+        assert_eq!(estimate_prompt_tokens(""), 0);
+        assert!(
+            estimate_prompt_tokens("a") >= 1,
+            "a prompt must cost >= 1 token"
+        );
     }
 
     #[test]
     fn budget_never_shrinks_below_the_base() {
-        for chars in [0, 1, 10, 100, 1_000, 100_000] {
+        for tokens in [0, 1, 10, 100, 1_000, 100_000] {
             assert!(
-                first_token_timeout(chars) >= FIRST_TOKEN_TIMEOUT,
-                "prompt of {chars} chars shortened the budget"
+                first_token_timeout(tokens) >= FIRST_TOKEN_TIMEOUT,
+                "prompt of {tokens} tokens shortened the budget"
             );
         }
     }
 
-    /// The measured live failure: a 1473-char prompt needed 285s on a 6-core
-    /// CPU node and was cut off at the flat 120s budget.
+    /// The measured live failure: a 613-token prompt needed 285s of prefill on
+    /// a 6-core CPU node and was cut off by the flat 120s budget.
     #[test]
     fn covers_the_prompt_that_timed_out_live() {
-        let budget = first_token_timeout(1473);
+        let budget = first_token_timeout(613);
         assert!(
             budget > Duration::from_secs(285),
             "budget {budget:?} still cuts off the prompt that measured 285s"
         );
     }
 
+    /// A second live measurement, on a longer prompt: 1322 tokens took 319s.
+    #[test]
+    fn covers_the_longer_measured_prompt() {
+        let budget = first_token_timeout(1322);
+        assert!(
+            budget > Duration::from_secs(319),
+            "budget {budget:?} cuts off a prompt measured at 319s"
+        );
+    }
+
     #[test]
     fn budget_is_monotonic_in_prompt_length() {
         let mut prev = Duration::ZERO;
-        for chars in [0, 100, 500, 1_000, 5_000, 50_000] {
-            let b = first_token_timeout(chars);
-            assert!(b >= prev, "budget went backwards at {chars} chars");
+        for tokens in [0, 100, 500, 1_000, 5_000, 50_000] {
+            let b = first_token_timeout(tokens);
+            assert!(b >= prev, "budget went backwards at {tokens} tokens");
             prev = b;
         }
     }
