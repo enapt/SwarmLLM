@@ -72,14 +72,26 @@ User-visible effect: requests failed with `Pipeline assembly failed: No node
 available for layer 10` — the local node held layers 0-10 and the only holder of
 10-16 had become invisible.
 
-Not root-caused, and not obviously the same defect as the dialer race above (this
-is a *failure to re-dial at all*, not a race between dials). Candidates worth
-checking first: whether a peer dropped under churn lands in a backoff or negative
-cache that nothing expires; whether PEX re-offers a peer already known-but-
-disconnected; and whether the LXC bridge passes mDNS multicast at all (if not,
-mDNS was never the mechanism here and the pair depended entirely on DHT/PEX).
-Reproduction is load-dependent, so capture `/api/admin/peers` from BOTH sides
-plus dial attempts before restarting — a restart clears it.
+**Restarting one side reconnected the pair in 6 seconds.** That is the decisive
+datapoint: it rules out unreachable addresses, a poisoned address cache, mDNS
+being blocked by the LXC bridge, and the peer actually being gone — a fresh
+process dialled it immediately using the same discovery paths. The fault is
+therefore **in-process reconnect state on a node that has been running through
+churn**, not in what the node knows about the peer.
+
+That narrows the search considerably. Likely candidates, in order: a peer dropped
+under repeated `io_err` closes landing in a backoff / negative-dial entry that
+nothing ever expires; `pending_redial` dedup (`try_enqueue_redial`) retaining an
+entry that was never drained, so subsequent enqueues are suppressed as duplicates;
+or the reconnect path being reachable only from `handle_connection_closed`'s
+`in_active_pipeline` branch, which would not fire once the pipeline had already
+failed. Note `peer_registry` is deliberately preserved across disconnects for
+exactly this reconnect case, so the peer was almost certainly still *known* while
+not being *dialled*.
+
+Reproduction is load-dependent. Capture `/api/admin/peers` from BOTH sides plus
+dial attempts before restarting, because a restart clears it — and the fact that
+it clears is itself the main clue.
 
 **What it does NOT cover, and what was ruled out:**
 - **Only the mDNS (LAN) dial path is gated.** Internet peers discovered via
