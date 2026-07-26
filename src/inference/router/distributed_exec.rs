@@ -553,10 +553,17 @@ pub(super) async fn execute_request(
     }
 
     // Record the route while the assignment is in hand. Region comes from the
-    // peer's voluntarily-declared `NodeCapability.region`; transport reflects
-    // whether the holder is reachable only through an application-level relay,
-    // which costs roughly an extra RTT each way and is worth seeing in the
-    // trace when a hop looks slow.
+    // peer's voluntarily-declared `NodeCapability.region`.
+    //
+    // Transport is decided by whether we hold a DIRECT connection, not by
+    // whether the peer is relay-*capable*: `peer_reachable_via_relay` is an
+    // eligibility check that is true for any relay-capable peer, so using it
+    // here labelled directly-connected LAN peers as `relayed` (observed live
+    // 2026-07-26 — a forward that demonstrably went straight out over LAN QUIC
+    // was reported as a relay hop). `connected_node_ids` is the authoritative
+    // direct-connection oracle and is what the scheduler itself filters on; a
+    // holder that got a segment without being in it is only reachable through
+    // the relay tier.
     {
         let segs = crate::inference::trace::segments_from_assignment(
             assignment.segments.iter(),
@@ -567,7 +574,7 @@ pub(super) async fn execute_request(
                     seg.layer_range.0,
                     seg.layer_range.1,
                     vec![seg.shard_id.index],
-                    shared_state.peer_reachable_via_relay(&seg.node_id),
+                    !shared_state.connected_node_ids.contains(&seg.node_id),
                 )
             },
             |node| {

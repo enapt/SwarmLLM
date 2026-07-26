@@ -875,22 +875,62 @@ mod tests {
 
     #[test]
     fn restore_skips_expired_sessions() {
+        // Writes the persisted record directly with a back-dated
+        // `last_accessed` instead of saving with a short TTL and sleeping past
+        // it. The sleep version was intermittently flaky under parallel-test
+        // load: `save_to_db` ALSO skips already-expired sessions, so a >1s stall
+        // between `register_multi_turn` and `save_to_db` made the save itself
+        // return 0 and the first assertion fail — a scheduling artefact, not a
+        // cache bug. Back-dating removes the wall-clock race entirely and tests
+        // the same thing: restore drops a record older than its own stored TTL.
         let db = Database::open_temp().unwrap();
-
-        let mut mgr = KvCacheManager::new(Duration::from_secs(1));
         let id = uuid::Uuid::new_v4();
-        let pipeline = make_pipeline(id);
-        mgr.register_multi_turn("user-sess-1", id, pipeline, 50, "Hello".to_string());
 
-        let saved = mgr.save_to_db(&db, false).unwrap();
-        assert_eq!(saved, 1);
+        let expired = PersistedSession {
+            user_session_id: "user-sess-1".to_string(),
+            internal_id: id,
+            pipeline: make_pipeline(id),
+            cached_tokens: 50,
+            cache_holders: vec![],
+            cached_prompt: "Hello".to_string(),
+            last_accessed: SystemTime::now() - Duration::from_secs(3600),
+            ttl_secs: 60,
+        };
+        db.put_json("kv_sessions", "user-sess-1", &expired).unwrap();
 
-        std::thread::sleep(Duration::from_millis(1500));
+        let mut mgr = KvCacheManager::new(Duration::from_secs(600));
+        let restored = mgr.restore_from_db(&db).unwrap();
+        assert_eq!(
+            restored, 0,
+            "a record older than its stored TTL must be dropped"
+        );
+        assert_eq!(mgr.active_sessions(), 0);
+    }
 
-        let mut mgr2 = KvCacheManager::new(Duration::from_secs(600));
-        let restored = mgr2.restore_from_db(&db).unwrap();
-        assert_eq!(restored, 0);
-        assert_eq!(mgr2.active_sessions(), 0);
+    #[test]
+    fn restore_keeps_sessions_inside_their_ttl() {
+        // Negative control for the test above: same path, same shape, but the
+        // record is comfortably within its TTL and must survive. Without this,
+        // `restore_skips_expired_sessions` would still pass if restore dropped
+        // everything unconditionally.
+        let db = Database::open_temp().unwrap();
+        let id = uuid::Uuid::new_v4();
+
+        let fresh = PersistedSession {
+            user_session_id: "user-sess-2".to_string(),
+            internal_id: id,
+            pipeline: make_pipeline(id),
+            cached_tokens: 50,
+            cache_holders: vec![],
+            cached_prompt: "Hello".to_string(),
+            last_accessed: SystemTime::now() - Duration::from_secs(5),
+            ttl_secs: 3600,
+        };
+        db.put_json("kv_sessions", "user-sess-2", &fresh).unwrap();
+
+        let mut mgr = KvCacheManager::new(Duration::from_secs(600));
+        assert_eq!(mgr.restore_from_db(&db).unwrap(), 1);
+        assert_eq!(mgr.active_sessions(), 1);
     }
 
     #[test]

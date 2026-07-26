@@ -2868,6 +2868,46 @@ Grafana; that is the trend store. In-process, keep:
 
 Steps 1-2 pay for themselves the first time a tester reports something slow.
 
+## Shard-holder retraction depends on gossip reaching the peer (observed 2026-07-26)
+
+**Observed live**, by an external tester, during the v0.3.30 split testing.
+
+`DELETE /api/admin/models/{id}/shards/{index}` correctly re-announces
+immediately, with `complete_for_models: vec![model_id]` so peers know that
+whatever is absent from the announcement was deliberately removed rather than
+merely unmentioned (R146/R147). The design is right.
+
+But the announcement is a **GossipSub broadcast**, and a NAT'd internet peer may
+not receive it promptly. Until it does, that peer's registry still lists us as a
+holder of the deleted shard, and it will route requests we cannot serve. The
+tester saw exactly this: after two shards were deleted from a node mid-session,
+their node routed a *whole-model* remote-generate to it and got
+
+```
+Inference error: Internal error: blk.0.attn_q: ShardReader: position 345977248
+is in a missing region
+```
+
+which is the honest failure — the node was asked for layer 0 and genuinely does
+not hold shard 0.
+
+**Cost today**: one failed request per stale router, self-healing on the next
+periodic `ShardAnnounce` from `health/monitor.rs`. Not silent — the error names
+the missing tensor — and `failure_is_penalty_worthy` correctly declines to
+penalise anyone for it.
+
+**Worth doing if this bites in practice**: on receiving a `ShardNotFound` /
+missing-region error from a holder, drop that holder's claim for the shard
+locally rather than waiting for the next announcement. That converts a repeated
+failure into a single one and needs no protocol change. A per-request holder
+blacklist (already wanted for the `is_transient_remote_failure` retry path) would
+subsume it.
+
+**Note the negative result that came with it**: the same test confirmed the
+weight-tied output-head fix is *narrow*. A node missing shard 0 still fails
+correctly when asked for layer 0 — the sidecar only stands in for the tied LM
+head, and does not paper over genuinely absent shards.
+
 ## Collapse the parallel response paths behind one core loop (2026-07-26)
 
 **The single most expensive recurring defect in this codebase is a shared rule

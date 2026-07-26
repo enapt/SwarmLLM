@@ -440,6 +440,11 @@ impl TraceSnapshot {
 /// Lives here rather than in the router so the mapping from "what the scheduler
 /// decided" to "what we report" exists once. `local_node_id` decides `is_local`;
 /// `region_of` resolves a peer's declared region (voluntary, so `None` is normal).
+///
+/// The `relayed` flag returned by `to_parts` must mean **this hop actually goes
+/// through a relay**, not "this peer supports relaying". Passing an eligibility
+/// check labelled directly-connected LAN peers as relayed — see the call site in
+/// `router/distributed_exec.rs`.
 pub fn segments_from_assignment<'a, S, F>(
     segments: impl Iterator<Item = &'a S>,
     local_node_id: &NodeId,
