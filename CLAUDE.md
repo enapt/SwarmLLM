@@ -196,7 +196,26 @@ All 20 build phases complete. All subsystems wired — no stubs. **1221 lib + 79
 
 Per-round history lives in `~/.claude/projects/-home-user-SwarmLLM/memory/round_log_*.md` and the CHANGELOG; `docs/ARCHITECTURE.md` is the canonical architecture. This section keeps only the current release line plus one-line prior-round pointers.
 
-### Latest — v0.3.26-alpha (2026-07-26): control-token scrubbing at the SOURCE
+### Latest — v0.3.27-alpha (2026-07-26): provider routing + metadata fixes
+
+Three findings from tester checklist sections 11/12. All three are the same
+shape as the rest of this week — a rule applied on one path but not another.
+
+- **`provider:model` prefix forwarded upstream.** The prefix selects the
+  provider; the provider has never heard of it. `strip_provider_prefix` existed
+  and ONLY `anthropic/convert.rs` called it, so the OpenAI-compatible proxy sent
+  the body verbatim and DeepSeek rejected `deepseek:deepseek-v4-flash`. Stripped
+  at the proxy boundary (`providers.rs::strip_prefix_in_body`, Cow — clones only
+  when a prefix is present).
+- **`PUT /api/admin/providers` silent no-op.** Fields are `<provider>_key`; no
+  `deny_unknown_fields`, so a wrong name → all `None` → nothing written → still
+  `status: "ok"`. Now returns Validation naming the expected shape.
+- **Quantization mislabelled `Q4KM`.** Ids carry `q8-0` (sanitiser rewrites
+  `_`→`-`) but `Quantization::parse` stripped only `_`, AND `trailing_tag` took
+  only the last segment (`"0"`). Both fixed — `trailing_tag` now tries the last
+  1–3 segments, longest first.
+
+### v0.3.26-alpha (2026-07-26): control-token scrubbing at the SOURCE
 
 Closes the template-leak reported across .22/.24/.25 — **the 4th attempt, and the
 first made after downloading the tester's exact GGUF and reproducing it.**

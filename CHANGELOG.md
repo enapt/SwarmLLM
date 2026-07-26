@@ -2,6 +2,24 @@
 
 All notable changes to SwarmLLM are documented here.
 
+## [0.3.27-alpha] — 2026-07-26
+
+### Fixed
+
+- **Naming a provider explicitly now works.** Asking for a model as
+  `deepseek:deepseek-v4-flash` failed: the prefix chooses which provider to use,
+  but it was being passed along to the provider as part of the model name, and
+  they rightly rejected it. It is now removed once it has done its job.
+- **Saving provider keys can no longer fail quietly.** The fields are named
+  `<provider>_key`, and anything unrecognised was discarded while parsing — so a
+  request naming the field `mistral` instead of `mistral_key` saved nothing and
+  still reported success. A request that would change nothing now says so and
+  names the fields it expects.
+- **Quantization is reported correctly.** Any model whose id carries a
+  multi-part tag — `q8-0`, `q4-k-m` — was misreported as `Q4KM`, because ids use
+  hyphens where filenames use underscores and only the last piece of the name
+  was being read. A `Q8_0` model now says `Q8_0`.
+
 ## [0.3.26-alpha] — 2026-07-26
 
 ### Fixed
