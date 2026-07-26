@@ -263,19 +263,46 @@ pub async fn messages(
         }
     }
 
-    // No local model — try proxying to cloud providers
-    let lower_model = req.model.to_lowercase();
+    // No local model — try proxying to cloud providers.
+    //
+    // `provider:model` selects the provider HERE; the provider itself has never
+    // heard of the prefix, so it must not travel upstream — DeepSeek rejects
+    // `deepseek:deepseek-v4-flash` outright. v0.3.27 stripped it on the
+    // OpenAI-compatible proxy but not here, so every cloud path below still
+    // forwarded it (live-confirmed 2026-07-26).
+    //
+    // Routing reads the STRIPPED name: `anthropic:claude-opus-4-8` does not
+    // start with "claude", so the prefixed form skipped both the subscription
+    // and Anthropic-cloud branches and fell through to the OpenAI translation
+    // path — an Anthropic request reshaped into OpenAI form. The explicit
+    // prefix still wins over the name heuristic, so `openai:claude-x` is not
+    // hijacked by the Anthropic branch below.
+    let (upstream_model, anthropic_allowed) = route_model(&req.model);
+    let lower_model = upstream_model.to_lowercase();
 
     // Claude subscription: proxy through local CLI subprocess (higher priority than API key).
     // SEC: pass `is_forwarded` so peer-forwarded requests don't burn the
     // local operator's personal Claude subscription quota (gotcha #115).
     #[cfg(feature = "claude-subscription")]
     let is_forwarded = headers.get("x-swarm-forwarded").is_some();
+    // An explicit non-Anthropic prefix must not be captured by the subscription
+    // path: `openai:claude-x` names OpenAI, whatever the model is called. The
+    // empty name matches no provider, so the lookup declines.
     #[cfg(feature = "claude-subscription")]
-    if let Some(sub_config) =
-        crate::api::claude_sub::try_get_claude_subscription(&state, &req.model, is_forwarded).await
+    let subscription_candidate = if anthropic_allowed {
+        upstream_model
+    } else {
+        ""
+    };
+    #[cfg(feature = "claude-subscription")]
+    if let Some(sub_config) = crate::api::claude_sub::try_get_claude_subscription(
+        &state,
+        subscription_candidate,
+        is_forwarded,
+    )
+    .await
     {
-        tracing::info!(model = %req.model, "DIAG: anthropic proxying via claude subscription subprocess");
+        tracing::info!(model = %upstream_model, "DIAG: anthropic proxying via claude subscription subprocess");
         // Use the same ProxyMessagesRequest serializer as the cloud path so
         // tool_use / tool_result / thinking blocks survive the subprocess
         // hop. The previous hand-serialization replaced every non-text
@@ -284,7 +311,7 @@ pub async fn messages(
         // tool_use blocks (and the user's tool_result blocks) were stripped
         // before the subprocess ever saw them.
         let body = serde_json::to_value(&proxy::ProxyMessagesRequest {
-            model: &req.model,
+            model: upstream_model,
             max_tokens: req.max_tokens,
             messages: &req.messages,
             system: &req.system,
@@ -308,15 +335,15 @@ pub async fn messages(
     }
 
     // Claude models → Anthropic cloud API (full pass-through, preserves tools/thinking)
-    if lower_model.starts_with("claude") {
+    if anthropic_allowed && lower_model.starts_with("claude") {
         let config = state.shared_state.metrics.providers_config.read().await;
         if let Some(ref entry) = config.anthropic {
             let api_key = entry.api_key.clone();
             drop(config);
 
-            tracing::debug!(model = %req.model, "DIAG: anthropic proxying to cloud API");
+            tracing::debug!(model = %upstream_model, "DIAG: anthropic proxying to cloud API");
             let body = serde_json::to_value(&proxy::ProxyMessagesRequest {
-                model: &req.model,
+                model: upstream_model,
                 max_tokens: req.max_tokens,
                 messages: &req.messages,
                 system: &req.system,
@@ -357,16 +384,51 @@ pub async fn messages(
             let provider_key = provider.api_key.clone();
             drop(config);
             tracing::info!(
-                model = %req.model,
+                model = %upstream_model,
                 provider = %provider_name,
                 "DIAG: anthropic→openai translation proxy to cloud provider"
             );
-            return handlers::anthropic_to_openai_proxy(&req, &provider_url, &provider_key).await;
+            return handlers::anthropic_to_openai_proxy(
+                &req,
+                upstream_model,
+                &provider_url,
+                &provider_key,
+            )
+            .await;
         }
     }
 
     // No local model, no cloud provider configured
     Err(ApiError(crate::error::SwarmError::NoModelLoaded))
+}
+
+/// Split a requested model name into the name to send upstream and whether an
+/// Anthropic-shaped route is still permitted.
+///
+/// Two separate things go wrong if the `provider:` prefix is treated as part of
+/// the model name, and both were live on `/v1/messages` until 2026-07-26:
+///
+/// - It travels upstream, where the provider has never heard of it and rejects
+///   the request (`deepseek:deepseek-v4-flash`).
+/// - It defeats the `starts_with("claude")` routing test, so
+///   `anthropic:claude-opus-4-8` skipped the Anthropic branches and fell
+///   through to the OpenAI translation path.
+///
+/// An explicit prefix outranks the name heuristic, so `openai:claude-x` names
+/// OpenAI and is not captured by the Anthropic branch.
+///
+/// The upstream name comes from [`resolve_model`], so bare family aliases are
+/// expanded here too. The cloud paths previously read `req.model` directly and
+/// so never saw that expansion, despite `resolve_model`'s own documentation
+/// citing this routing test as the reason it exists — meaning Claude Code
+/// 2.1's default bare `sonnet` was neither routed to Anthropic nor sent as a
+/// name any provider recognises.
+fn route_model(model: &str) -> (&str, bool) {
+    let anthropic_allowed = match model.split_once(':') {
+        Some((provider, _)) => provider.eq_ignore_ascii_case("anthropic"),
+        None => true,
+    };
+    (resolve_model(model), anthropic_allowed)
 }
 
 #[cfg(test)]
@@ -828,5 +890,38 @@ mod tests {
         assert_eq!(v["service_tier"], "standard_only");
         assert_eq!(v["container"], "container_abc123");
         assert_eq!(v["extra_future_field"]["nested"], true);
+    }
+
+    /// `provider:model` picks the provider locally and must not travel
+    /// upstream, and the prefix must not defeat Anthropic routing.
+    #[test]
+    fn route_model_strips_prefix_and_keeps_anthropic_routable() {
+        // Bare names are unchanged and stay eligible for the Claude branch.
+        assert_eq!(route_model("claude-opus-4-8"), ("claude-opus-4-8", true));
+        assert_eq!(
+            route_model("deepseek-v4-flash"),
+            ("deepseek-v4-flash", true)
+        );
+
+        // An `anthropic:` prefix is stripped and still routes to Anthropic —
+        // previously it failed `starts_with("claude")` and fell through to the
+        // OpenAI translation path.
+        assert_eq!(
+            route_model("anthropic:claude-opus-4-8"),
+            ("claude-opus-4-8", true)
+        );
+
+        // A non-Anthropic prefix is stripped and blocks the Anthropic branch,
+        // so an explicit provider choice outranks the model-name heuristic.
+        assert_eq!(
+            route_model("deepseek:deepseek-v4-flash"),
+            ("deepseek-v4-flash", false)
+        );
+        assert_eq!(route_model("openai:claude-x"), ("claude-x", false));
+
+        // Bare family aliases expand — Claude Code 2.1 sends `sonnet` by
+        // default, and the cloud paths used to forward it verbatim.
+        assert_eq!(route_model("sonnet"), ("claude-sonnet-5", true));
+        assert_eq!(route_model("anthropic:opus"), ("claude-opus-4-8", true));
     }
 }

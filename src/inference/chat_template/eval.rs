@@ -58,6 +58,14 @@ pub(super) struct EvalState<'a> {
     messages: &'a [ChatMessage],
     loop_index: Option<usize>,
     vars: std::collections::HashMap<String, String>,
+    /// Names bound to the message list itself via `{% set x = messages %}`.
+    ///
+    /// These can't live in `vars`, which holds strings — the message list has
+    /// no string value, so `eval_expr("messages")` returns `None` and the
+    /// binding would simply be dropped. Tracking the NAME is enough: every
+    /// use is `{% for message in <name> %}`, which needs to know the name
+    /// refers to the message list, not what it evaluates to.
+    msg_aliases: std::collections::HashSet<String>,
 }
 
 impl<'a> EvalState<'a> {
@@ -66,6 +74,7 @@ impl<'a> EvalState<'a> {
             messages,
             loop_index: None,
             vars: std::collections::HashMap::new(),
+            msg_aliases: std::collections::HashSet::new(),
         }
     }
 
@@ -74,7 +83,14 @@ impl<'a> EvalState<'a> {
             messages,
             loop_index: Some(index),
             vars: std::collections::HashMap::new(),
+            msg_aliases: std::collections::HashSet::new(),
         }
+    }
+
+    /// Whether `name` refers to the message list — either literally, or via
+    /// an alias bound by `{% set %}`.
+    fn iterates_messages(&self, name: &str) -> bool {
+        name == "messages" || self.msg_aliases.contains(name)
     }
 
     fn current_msg(&self) -> Option<&'a ChatMessage> {
@@ -129,7 +145,7 @@ pub(super) fn eval_block(
             tok if tok.tag_content().is_some() => {
                 let content = tok.tag_content().unwrap();
 
-                if content.starts_with("for ") && content.contains(" in messages") {
+                if parse_for_iterable(content).is_some_and(|it| state.iterates_messages(it)) {
                     let body_start = i + 1;
                     let end = find_endfor(ctx.tokens, body_start)?;
 
@@ -141,7 +157,13 @@ pub(super) fn eval_block(
                 } else if content.starts_with("set ") {
                     // {% set var = expr %}
                     if let Some((var, val_expr)) = parse_set_tag(content) {
-                        if let Some(val) = eval_expr(val_expr, state, ctx) {
+                        // `{% set x = messages %}` binds a name to the message
+                        // list, which has no string value — record the alias so
+                        // a later `{% for message in x %}` is recognised as a
+                        // message loop.
+                        if state.iterates_messages(val_expr) {
+                            state.msg_aliases.insert(var.to_string());
+                        } else if let Some(val) = eval_expr(val_expr, state, ctx) {
                             state.vars.insert(var.to_string(), val);
                         }
                     }
@@ -165,6 +187,38 @@ pub(super) fn eval_block(
         }
     }
     Some(i)
+}
+
+/// Extract the iterable name from a `{% for <var> in <iterable> %}` tag.
+///
+/// Returns the leading identifier only, so a slice or filter (`messages[1:]`,
+/// `messages | reverse`) still resolves to `messages` and drives the loop as it
+/// did before this helper existed. Neither is honoured — the loop always walks
+/// every message — but that is pre-existing behaviour, and iterating all
+/// messages beats emitting nothing.
+///
+/// This exists because matching the iterable by substring (`content.contains(
+/// " in messages")`) silently failed on the aliased form every official
+/// Llama-3.x GGUF ships:
+///
+/// ```jinja
+/// {% set loop_messages = messages %}{% for message in loop_messages %}
+/// ```
+///
+/// `" in loop_messages"` does not contain `" in messages"`, so the loop was
+/// treated as an unknown tag, the body evaluated once with no current message,
+/// and `apply_chat_template` returned `None`. Callers then fell back to
+/// ChatML — the wrong prompt format for Llama-3 — which is why those models
+/// emitted `<|im_end|>` and other ChatML markers into replies
+/// (external report 2026-07-25, live-confirmed 2026-07-26).
+fn parse_for_iterable(content: &str) -> Option<&str> {
+    let rest = content.strip_prefix("for ")?;
+    let (_var, iterable) = rest.split_once(" in ")?;
+    let iterable = iterable.trim();
+    let base = iterable
+        .find(|c: char| !c.is_alphanumeric() && c != '_')
+        .map_or(iterable, |end| &iterable[..end]);
+    (!base.is_empty()).then_some(base)
 }
 
 /// Parse `set var = expr` from a {% set %} tag.

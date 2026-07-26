@@ -2,6 +2,30 @@
 
 All notable changes to SwarmLLM are documented here.
 
+## [Unreleased]
+
+### Fixed
+
+- **Llama 3 models now get the prompt format they were trained on.** Their
+  chat template was failing to load, and the fallback used a different family's
+  format. The model would go along with it and answer in that other format —
+  which is where the stray `<|im_end|>` markers in replies were coming from, and
+  why an answer was sometimes short or empty. Earlier releases removed those
+  markers from the reply; this fixes the reason they were there. Affects every
+  official Llama 3.x Instruct model file.
+- **Naming a provider explicitly now works on the Anthropic API too.** v0.3.27
+  fixed this for the OpenAI-compatible endpoint only, so `/v1/messages` with
+  `deepseek:deepseek-v4-flash` was still rejected by the provider. The same
+  gap also meant `anthropic:claude-...` was not recognised as an Anthropic
+  request at all and took the wrong route.
+- **Quantization is now actually reported correctly.** v0.3.27 fixed the
+  reading of the tag but read it from the model's display name, which never
+  contains one — so every model still reported `Q4KM`. It now reads the model
+  id, where the tag lives.
+- **Models no longer all report as unserveable.** The "can this be served right
+  now" flag on the quantization view was never filled in and always read false,
+  including for models the node was hosting itself.
+
 ## [0.3.27-alpha] — 2026-07-26
 
 ### Fixed

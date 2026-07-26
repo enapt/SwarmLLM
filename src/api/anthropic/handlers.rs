@@ -522,8 +522,12 @@ pub(super) async fn anthropic_split_stream(
 /// tool_result, images, and system messages survive the round-trip; the
 /// upstream's `tool_calls` come back as `tool_use` content blocks (and
 /// `stop_reason: "tool_use"`) so multi-turn function-calling flows work.
+/// `upstream_model` is the model name to send on — the caller has already
+/// stripped any `provider:` prefix, which selects the provider locally and is
+/// meaningless (and rejected) upstream.
 pub(super) async fn anthropic_to_openai_proxy(
     req: &MessagesRequest,
+    upstream_model: &str,
     base_url: &str,
     api_key: &str,
 ) -> Result<axum::response::Response, ApiError> {
@@ -540,7 +544,7 @@ pub(super) async fn anthropic_to_openai_proxy(
         }
     }
 
-    let body = build_openai_request_body(req)?;
+    let body = build_openai_request_body(req, upstream_model)?;
 
     let url = format!("{}/chat/completions", base_url.trim_end_matches('/'));
     let client = providers::get_provider_client();
@@ -595,10 +599,13 @@ pub(super) async fn anthropic_to_openai_proxy(
 /// Build the OpenAI Chat Completions request body from an Anthropic
 /// Messages request, preserving tool_use / tool_result / image blocks
 /// and translating tool definitions + tool_choice.
-fn build_openai_request_body(req: &MessagesRequest) -> Result<Value, ApiError> {
+fn build_openai_request_body(
+    req: &MessagesRequest,
+    upstream_model: &str,
+) -> Result<Value, ApiError> {
     let messages = anthropic_messages_to_openai(req)?;
     let mut body = json!({
-        "model": req.model,
+        "model": upstream_model,
         "messages": messages,
         "max_tokens": req.max_tokens,
         "stream": req.stream,
@@ -1121,7 +1128,8 @@ mod tests {
             role: "user".into(),
             content: AnthropicContent::Text("hi".into()),
         }];
-        let body = build_openai_request_body(&req).unwrap_or_else(|_| panic!("translation failed"));
+        let body = build_openai_request_body(&req, &req.model)
+            .unwrap_or_else(|_| panic!("translation failed"));
         let messages = body["messages"].as_array().unwrap();
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[0]["role"], "system");
@@ -1152,7 +1160,8 @@ mod tests {
                 ]),
             },
         ];
-        let body = build_openai_request_body(&req).unwrap_or_else(|_| panic!("translation failed"));
+        let body = build_openai_request_body(&req, &req.model)
+            .unwrap_or_else(|_| panic!("translation failed"));
         let messages = body["messages"].as_array().unwrap();
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[1]["role"], "assistant");
@@ -1179,7 +1188,8 @@ mod tests {
                 input: json!({}),
             }]),
         }];
-        let body = build_openai_request_body(&req).unwrap_or_else(|_| panic!("translation failed"));
+        let body = build_openai_request_body(&req, &req.model)
+            .unwrap_or_else(|_| panic!("translation failed"));
         let messages = body["messages"].as_array().unwrap();
         assert_eq!(messages[0]["content"], Value::Null);
         assert_eq!(messages[0]["tool_calls"].as_array().unwrap().len(), 1);
@@ -1201,7 +1211,8 @@ mod tests {
                 },
             ]),
         }];
-        let body = build_openai_request_body(&req).unwrap_or_else(|_| panic!("translation failed"));
+        let body = build_openai_request_body(&req, &req.model)
+            .unwrap_or_else(|_| panic!("translation failed"));
         let messages = body["messages"].as_array().unwrap();
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[0]["role"], "tool");
@@ -1225,7 +1236,8 @@ mod tests {
                 is_error: None,
             }]),
         }];
-        let body = build_openai_request_body(&req).unwrap_or_else(|_| panic!("translation failed"));
+        let body = build_openai_request_body(&req, &req.model)
+            .unwrap_or_else(|_| panic!("translation failed"));
         let messages = body["messages"].as_array().unwrap();
         assert_eq!(messages[0]["content"], "line1\nline2");
     }
@@ -1248,7 +1260,8 @@ mod tests {
                 },
             ]),
         }];
-        let body = build_openai_request_body(&req).unwrap_or_else(|_| panic!("translation failed"));
+        let body = build_openai_request_body(&req, &req.model)
+            .unwrap_or_else(|_| panic!("translation failed"));
         let parts = body["messages"][0]["content"].as_array().unwrap();
         assert_eq!(parts.len(), 2);
         assert_eq!(parts[0]["type"], "text");
@@ -1271,7 +1284,8 @@ mod tests {
             role: "user".into(),
             content: AnthropicContent::Text("hi".into()),
         }];
-        let body = build_openai_request_body(&req).unwrap_or_else(|_| panic!("translation failed"));
+        let body = build_openai_request_body(&req, &req.model)
+            .unwrap_or_else(|_| panic!("translation failed"));
         let tools = body["tools"].as_array().unwrap();
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0]["type"], "function");
@@ -1288,7 +1302,8 @@ mod tests {
             role: "user".into(),
             content: AnthropicContent::Text("hi".into()),
         }];
-        let body = build_openai_request_body(&req).unwrap_or_else(|_| panic!("translation failed"));
+        let body = build_openai_request_body(&req, &req.model)
+            .unwrap_or_else(|_| panic!("translation failed"));
         assert_eq!(body["tool_choice"], "required");
     }
 
@@ -1300,7 +1315,8 @@ mod tests {
             role: "user".into(),
             content: AnthropicContent::Text("hi".into()),
         }];
-        let body = build_openai_request_body(&req).unwrap_or_else(|_| panic!("translation failed"));
+        let body = build_openai_request_body(&req, &req.model)
+            .unwrap_or_else(|_| panic!("translation failed"));
         assert_eq!(body["tool_choice"]["type"], "function");
         assert_eq!(body["tool_choice"]["function"]["name"], "lookup");
     }
@@ -1412,5 +1428,24 @@ mod tests {
         assert!(!is_anthropic_server_tool("custom"));
         assert!(!is_anthropic_server_tool(""));
         assert!(!is_anthropic_server_tool("my_tool"));
+    }
+
+    /// The `provider:` prefix selects the provider locally; upstream has never
+    /// heard of it. v0.3.27 stripped it on the OpenAI-compatible proxy but not
+    /// on this surface, so `/v1/messages` with `deepseek:deepseek-v4-flash`
+    /// was rejected by DeepSeek as an unknown model (live-confirmed
+    /// 2026-07-26). The body must carry the bare name.
+    #[test]
+    fn translated_body_carries_the_bare_model_name() {
+        let mut req = base_req();
+        req.model = "deepseek:deepseek-v4-flash".into();
+        req.messages = vec![AnthropicMessage {
+            role: "user".into(),
+            content: AnthropicContent::Text("hi".into()),
+        }];
+        let upstream = crate::api::strip_provider_prefix(&req.model);
+        let body = build_openai_request_body(&req, upstream)
+            .unwrap_or_else(|_| panic!("translation failed"));
+        assert_eq!(body["model"], "deepseek-v4-flash");
     }
 }

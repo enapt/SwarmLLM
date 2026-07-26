@@ -697,3 +697,51 @@ fn ambiguous_markers_remain_template_gated() {
     assert!(!stops.contains(&"[INST]".to_string()), "got {stops:?}");
     assert!(!stops.contains(&"</s>".to_string()), "got {stops:?}");
 }
+
+/// The chat template every official Llama-3.x Instruct GGUF ships, verbatim
+/// from `gguf_header.bin` on a live node (2026-07-26).
+///
+/// It binds the message list to a name first (`{% set loop_messages = messages
+/// %}`) and iterates that. Matching the iterable by substring missed the
+/// aliased form, so this template evaluated to nothing and callers fell back to
+/// ChatML — the wrong format for Llama-3, which is why these models emitted
+/// `<|im_end|>` into replies.
+#[test]
+fn llama3_aliased_message_loop_renders() {
+    let tmpl = "{% set loop_messages = messages %}{% for message in loop_messages %}{% set content = '<|start_header_id|>' + message['role'] + '<|end_header_id|>\n\n'+ message['content'] | trim + '<|eot_id|>' %}{% if loop.index0 == 0 %}{% set content = bos_token + content %}{% endif %}{{ content }}{% endfor %}{{ '<|start_header_id|>assistant<|end_header_id|>\n\n' }}";
+    let msgs = user_only_messages();
+    let out = apply_chat_template(tmpl, &msgs, "<|begin_of_text|>", "<|eot_id|>", true)
+        .expect("aliased message loop must render, not fall back to ChatML");
+
+    assert_eq!(
+        out,
+        "<|begin_of_text|><|start_header_id|>user<|end_header_id|>\n\nHello<|eot_id|>\
+         <|start_header_id|>assistant<|end_header_id|>\n\n"
+    );
+    // The ChatML fallback is what this template used to produce by failing.
+    assert!(!out.contains("<|im_start|>"));
+}
+
+/// An alias is only a message list when it was bound to one. An unrelated
+/// `{% set %}` must not turn a foreign loop into a message loop.
+///
+/// An unrecognised loop has always rendered its body once, inline — that is
+/// unchanged here. What must not happen is the body repeating once per
+/// message, which is what treating `tools` as a message list would do.
+#[test]
+fn unrelated_set_does_not_alias_messages() {
+    let tmpl = "{% set tools = 'x' %}{% for t in tools %}BODY;{% endfor %}";
+    let msgs = test_messages(); // two messages
+    let out = apply_chat_template(tmpl, &msgs, "", "", true).unwrap();
+    assert_eq!(out, "BODY;", "must not repeat per message");
+}
+
+/// A slice or filter on the iterable still drives the message loop, as it did
+/// before iterable parsing was introduced.
+#[test]
+fn sliced_message_loop_still_iterates() {
+    let tmpl = "{% for message in messages[1:] %}{{ message['content'] }};{% endfor %}";
+    let msgs = test_messages();
+    let out = apply_chat_template(tmpl, &msgs, "", "", true).unwrap();
+    assert_eq!(out, "You are helpful.;Hello;");
+}

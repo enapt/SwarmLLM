@@ -183,6 +183,26 @@ pub fn apply_quant_auto_action(state: &SharedState) -> usize {
     promotions
 }
 
+/// Whether some node in the swarm holds every shard of `manifest` — i.e. the
+/// model can actually be served right now.
+///
+/// This backs `QuantVariantInfo::serveable`, which was constructed as `false`
+/// with a "filled below" comment describing code that was never written, so the
+/// field read `false` for every variant on every response, including models the
+/// asking node was hosting itself.
+fn every_shard_has_a_holder(state: &SharedState, manifest: &ModelManifest) -> bool {
+    !manifest.shards.is_empty()
+        && manifest.shards.iter().all(|s| {
+            !state
+                .model_registry
+                .shard_holders(&crate::types::ShardId {
+                    model_id: manifest.id.clone(),
+                    index: s.index,
+                })
+                .is_empty()
+        })
+}
+
 fn hosts_any_shard(
     state: &SharedState,
     model_id: &crate::types::ModelId,
@@ -228,7 +248,7 @@ pub fn compute_quant_recommendations(state: &SharedState) -> QuantRecommendation
         .into_iter()
         .filter(|(_, variants)| !variants.is_empty())
         .map(|(base_name, variants)| {
-            build_family(&base_name, variants, pool_vram_mb, local_vram_mb)
+            build_family(state, &base_name, variants, pool_vram_mb, local_vram_mb)
         })
         .collect();
 
@@ -276,6 +296,7 @@ pub fn inferred_base_name(name: &str) -> String {
 }
 
 fn build_family(
+    state: &SharedState,
     base_name: &str,
     variants: Vec<ModelManifest>,
     pool_vram_mb: u64,
@@ -305,7 +326,7 @@ fn build_family(
                 quality_score: q.quality_score(),
                 size_mb,
                 vram_required_mb,
-                serveable: false, // filled below
+                serveable: every_shard_has_a_holder(state, manifest),
             }
         })
         .collect();
@@ -394,20 +415,34 @@ fn build_family(
 fn parse_quant_from_manifest(manifest: &ModelManifest) -> Quantization {
     // Prefer the manifest's own quantization field. Today it's almost
     // always `Q4KM` (placeholder); when it's not, trust it. Otherwise
-    // fall back to parsing the model name.
+    // fall back to parsing the model identity.
     match manifest.quantization {
-        Quantization::Unknown => Quantization::parse(&trailing_tag(&manifest.name)),
+        Quantization::Unknown => parse_quant_from_identity(manifest),
         // Q4KM is also used as a defaulted placeholder in older code
-        // paths; if the model NAME parses to something different, prefer
-        // the name. Belt-and-braces — costs ~30 ns.
-        Quantization::Q4KM => {
-            let parsed = Quantization::parse(&trailing_tag(&manifest.name));
-            if parsed == Quantization::Unknown {
-                Quantization::Q4KM
-            } else {
-                parsed
-            }
-        }
+        // paths; if the model identity parses to something different, prefer
+        // that. Belt-and-braces — costs ~30 ns.
+        Quantization::Q4KM => match parse_quant_from_identity(manifest) {
+            Quantization::Unknown => Quantization::Q4KM,
+            parsed => parsed,
+        },
+        q => q,
+    }
+}
+
+/// Parse a quantization tag out of a manifest's id, then its name.
+///
+/// The id is tried FIRST because that is where the tag actually lives:
+/// `llama-3.2-1b-instruct-q8-0`. `name` is a human display name — "Llama 3.2 1B
+/// Instruct" — and carries no tag at all, so parsing it alone meant every model
+/// fell through to the `Q4KM` placeholder no matter how good the parser was.
+/// v0.3.27 fixed the parser and left this reading the wrong field, so a Q8_0
+/// model was still reported as Q4KM (live-confirmed 2026-07-26).
+///
+/// `name` is still tried as a fallback: some acquisition paths set it from the
+/// source filename (`model-q4_k_m.gguf`), which does carry the tag.
+fn parse_quant_from_identity(manifest: &ModelManifest) -> Quantization {
+    match Quantization::parse(&trailing_tag(&manifest.id.0)) {
+        Quantization::Unknown => Quantization::parse(&trailing_tag(&manifest.name)),
         q => q,
     }
 }
@@ -681,5 +716,96 @@ mod tests {
         // recommends the smallest. Either way recommended_index must
         // be Some.
         assert!(fam.recommended_index.is_some());
+    }
+
+    /// The parser fix in v0.3.27 was correct but read the wrong field: quant
+    /// tags live in the model ID (`llama-3.2-1b-instruct-q8-0`), while `name`
+    /// is a human display name ("Llama 3.2 1B Instruct") that carries no tag.
+    /// Every model therefore still reported the `Q4KM` placeholder
+    /// (live-confirmed on a running node 2026-07-26).
+    #[test]
+    fn quant_is_read_from_the_id_not_the_display_name() {
+        use crate::types::{ModelArchitecture, ModelId, ModelManifest, NodeId, ShardInfo};
+
+        let mk = |id: &str, name: &str| ModelManifest {
+            id: ModelId(id.into()),
+            name: name.into(),
+            architecture: ModelArchitecture::Llama,
+            num_layers: 16,
+            num_params_billions: 1.0,
+            // The placeholder every real manifest on disk carries.
+            quantization: Quantization::Q4KM,
+            total_size_bytes: 1_000_000,
+            shard_count: 1,
+            shards: vec![ShardInfo {
+                index: 0,
+                layer_range: (0, 16),
+                size_bytes: 1_000_000,
+                hash: [0u8; 32],
+                tensors: vec![],
+            }],
+            tokenizer_hash: [0u8; 32],
+            manifest_hash: [0u8; 32],
+            publisher: NodeId([0u8; 32]),
+            publish_date: chrono::Utc::now(),
+            license: "MIT".into(),
+            mmproj: None,
+        };
+
+        for (id, name, want) in [
+            (
+                "llama-3.2-1b-instruct-q8-0",
+                "Llama 3.2 1B Instruct",
+                Quantization::Q8_0,
+            ),
+            (
+                "qwen2.5-0.5b-instruct-fp16",
+                "qwen2.5-0.5b-instruct",
+                Quantization::FP16,
+            ),
+            (
+                "llama-3.2-3b-instruct-q4-k-m",
+                "Llama 3.2 3B Instruct",
+                Quantization::Q4KM,
+            ),
+        ] {
+            assert_eq!(
+                parse_quant_from_manifest(&mk(id, name)),
+                want,
+                "id {id:?} / name {name:?}"
+            );
+        }
+    }
+
+    /// A name that carries the tag is still honoured when the id does not —
+    /// some acquisition paths set `name` from the source filename.
+    #[test]
+    fn quant_falls_back_to_name_when_id_has_no_tag() {
+        use crate::types::{ModelArchitecture, ModelId, ModelManifest, NodeId, ShardInfo};
+
+        let m = ModelManifest {
+            id: ModelId("some-opaque-id".into()),
+            name: "model-q5_k_s.gguf".into(),
+            architecture: ModelArchitecture::Llama,
+            num_layers: 16,
+            num_params_billions: 1.0,
+            quantization: Quantization::Unknown,
+            total_size_bytes: 1_000_000,
+            shard_count: 1,
+            shards: vec![ShardInfo {
+                index: 0,
+                layer_range: (0, 16),
+                size_bytes: 1_000_000,
+                hash: [0u8; 32],
+                tensors: vec![],
+            }],
+            tokenizer_hash: [0u8; 32],
+            manifest_hash: [0u8; 32],
+            publisher: NodeId([0u8; 32]),
+            publish_date: chrono::Utc::now(),
+            license: "MIT".into(),
+            mmproj: None,
+        };
+        assert_eq!(parse_quant_from_manifest(&m), Quantization::Q5KS);
     }
 }

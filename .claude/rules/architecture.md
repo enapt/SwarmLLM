@@ -472,3 +472,15 @@ obliged to call will eventually not be called.
 seven passed review. The ones caught early were caught by executing the actual
 path — and where a report names a specific model, that model is part of the
 reproduction (gotcha #168).
+
+**Bad reply content is evidence about the PROMPT first, the output second.**
+The `<|im_end|>` leak was chased across four releases as an output-scrubbing
+problem. It was a prompt problem: `apply_chat_template` returned `None` for
+every official Llama-3.x template, and the fallback chain reached ChatML, so a
+Llama-3 model was asked a ChatML question and answered in ChatML (gotcha #169).
+Before touching `strip_control_token_artifacts` or the stop-string list, check
+`grep "chat template failed" node.log` — that WARN names the real fault and had
+been firing on every request for several releases. `build_prompt_with_model`
+falling back at all is a bug report, not a safety net: the fallbacks
+(gemma/vicuna/llava/ChatML) exist for models that ship no template, and any
+model that DOES ship one should be rendering it.
