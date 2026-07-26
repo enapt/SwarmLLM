@@ -2596,6 +2596,58 @@ only with (a) concrete data on NAT scenarios our relay path genuinely cannot
 reach, and (b) peeroxide reaching more maintainers / a stable release / an
 external audit.
 
+## Surface routing and performance per request (requested 2026-07-26)
+
+**Asked for directly**: "when using a model over inference, on the chat for
+example, I know it times the result but does it also give performance status,
+routing info (how many peers it routed through etc)" — and, separately, "these
+sorts of things should be included in diagnostics also so logfiles etc are
+analysable".
+
+**What exists today.** Wall-clock elapsed time in the chat, and (as of
+v0.3.29) tokens per second, computed client-side from the `usage` the stream
+already carries. Nothing else. The router *knows* the whole route — the DIAG
+lines carry `segment=N node=<id> layer_start=.. layer_end=..` per segment — but
+no response, header or endpoint ever surfaces it, so a user cannot tell whether
+an answer came from their own GPU, one peer, or a three-segment pipeline across
+the internet. That is also the first question anyone asks when a reply is slow.
+
+**Proposed — response headers, not body fields.** The OpenAI and Anthropic
+response bodies are wire formats other people's clients parse; adding
+non-standard members risks strict clients rejecting them. Headers are ignored by
+anything that does not look for them:
+
+- `x-swarm-route: local | split | distributed | relayed | cloud`
+- `x-swarm-segments: <n>` — 0 for local
+- `x-swarm-nodes: <short-id>,<short-id>` — 8-char ids, already what the peer
+  list shows, so nothing newly identifying is exposed
+- `x-swarm-queue-ms`, `x-swarm-prefill-ms`, `x-swarm-decode-ms` — where the
+  time actually went, which elapsed time alone cannot answer
+
+Headers are emitted before the body, and the route is fixed at pipeline-assembly
+time, so this works for streaming as well as non-streaming.
+
+**Diagnostics + logs.** Add ONE greppable summary line per request at completion,
+carrying the same fields plus the outcome, so a log file can be analysed without
+reconstructing a route from a dozen interleaved DIAG lines:
+
+```
+DIAG: request complete request_id=… route=distributed segments=2
+      nodes=016784c8,cf9551cd queue_ms=3 prefill_ms=180 decode_ms=1420
+      tokens=48 tok_per_sec=33.8 outcome=ok
+```
+
+Extend `GET /api/admin/diagnostics` with the last N of these (the
+`recent_failures` ring already proves the pattern — this is its successful
+sibling), so a tester can paste one block instead of a log excerpt.
+
+**UI.** In chat, a small line beside the timer: "answered by 2 peers · 33.8
+tok/s", with the route detail on hover. Needs i18n across 21 locales.
+
+**Why it is not in v0.3.29**: it is a backend addition touching every response
+path, and that release was cut urgently to get a tester onto the same build. The
+tok/s half shipped because it needed no backend change.
+
 ## Collapse the parallel response paths behind one core loop (2026-07-26)
 
 **The single most expensive recurring defect in this codebase is a shared rule
