@@ -14,6 +14,11 @@ All notable changes to SwarmLLM are documented here.
   raised an error — the program on the other end simply found the argument
   missing. Tools are now described by the shape of the arguments to send, and a
   reply that wraps its arguments in a schema is unwrapped when read.
+- **Streaming replies containing a tool call now follow the Anthropic event
+  order.** The reply's text section was left open while the tool section was
+  opened and closed inside it, then closed afterwards. The specification is that
+  each section is opened, filled and closed before the next begins, and a client
+  tracking the current section could lose its place.
 - **A tool call written without its outer wrapper is now understood.** Models
   often reply with the call on its own rather than inside the list we asked
   for. That was returned to the caller as raw text, so a perfectly good tool

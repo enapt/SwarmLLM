@@ -11,7 +11,7 @@ use crate::types::{ChatMessage, InferenceRequest, ModelId, SamplingParams};
 use super::convert::map_finish_reason;
 use super::sse::{
     build_anthropic_sse_response, send_sse_epilogue, send_sse_epilogue_with_stop,
-    send_sse_preamble, AnthropicSseEvent,
+    send_sse_preamble, AnthropicSseEvent, TextBlock,
 };
 use super::types::{
     AnthropicContent, AnthropicUsage, ContentBlock, MessagesRequest, MessagesResponse,
@@ -113,9 +113,14 @@ fn is_anthropic_server_tool(kind: &str) -> bool {
 /// a wire format that will diverge (this release fixed exactly that class of
 /// bug in the stop-string handling).
 ///
-/// Blocks are indexed from 1: the prologue already opened a text block at 0 and
-/// the epilogue closes it, so starting at 0 would emit two starts and two stops
-/// for one index — malformed, and a strict client would reject the stream.
+/// Blocks are indexed from 1: the prologue already opened a text block at 0, so
+/// starting at 0 would emit two starts and two stops for one index.
+///
+/// Closes block 0 FIRST, because Anthropic's contract is that content blocks are
+/// sequential — block N stops before block N+1 starts. Leaving it open produced
+/// start(0) → start(1) → stop(1) → stop(0), which nests them (live 2026-07-26).
+/// Callers must therefore pass `TextBlock::AlreadyClosed` to the epilogue when
+/// this returns true.
 async fn emit_anthropic_tool_blocks(
     sse_tx: &tokio::sync::mpsc::Sender<AnthropicSseEvent>,
     buffered: &str,
@@ -123,6 +128,10 @@ async fn emit_anthropic_tool_blocks(
     let Some(parsed) = crate::api::tool_parse::parse_tool_calls(buffered) else {
         return false;
     };
+    // Sequential, not nested: close the opening text block before the first
+    // tool block opens.
+    let _ =
+        crate::api::sse_send_live(sse_tx, AnthropicSseEvent::ContentBlockStop { index: 0 }).await;
     let mut emitted = false;
     for (i, call) in parsed.into_iter().enumerate() {
         let index = i as u32 + 1;
@@ -295,9 +304,11 @@ pub(super) async fn anthropic_stream(
             // it (e.g. distributed pipeline with no stop-string plumbing).
             let matched = finish_matched_stop.or(matched_from_result);
             let mut finish_stop_reason = finish_stop_reason;
+            let mut text_block = TextBlock::Open;
             if tools_requested && !buffered.is_empty() {
                 if emit_anthropic_tool_blocks(&sse_tx, &buffered).await {
                     finish_stop_reason = "tool_use".to_string();
+                    text_block = TextBlock::AlreadyClosed;
                 } else {
                     let _ = crate::api::sse_send_live(
                         &sse_tx,
@@ -309,7 +320,14 @@ pub(super) async fn anthropic_stream(
                     .await;
                 }
             }
-            send_sse_epilogue_with_stop(&sse_tx, finish_stop_reason, matched, output_tokens).await;
+            send_sse_epilogue_with_stop(
+                &sse_tx,
+                finish_stop_reason,
+                matched,
+                output_tokens,
+                text_block,
+            )
+            .await;
         } else {
             // Fallback: pipeline finished without streaming events
             match result {
@@ -332,6 +350,7 @@ pub(super) async fn anthropic_stream(
                         stop_reason,
                         output.matched_stop_sequence,
                         output.completion_tokens,
+                        TextBlock::Open,
                     )
                     .await;
                 }
@@ -410,6 +429,7 @@ pub(super) async fn anthropic_split_stream(
 
         let mut total_output_tokens = 0u32;
         let mut stop_reason = "max_tokens".to_string();
+        let mut text_block = TextBlock::Open;
         let mut matched_stop_sequence: Option<String> = None;
         let mut buffered = String::new();
 
@@ -475,6 +495,7 @@ pub(super) async fn anthropic_split_stream(
         if tools_requested && !buffered.is_empty() {
             if emit_anthropic_tool_blocks(&sse_tx, &buffered).await {
                 stop_reason = "tool_use".to_string();
+                text_block = TextBlock::AlreadyClosed;
             } else {
                 // Not a tool call after all — deliver it as the text it is.
                 let _ = crate::api::sse_send_live(
@@ -510,6 +531,7 @@ pub(super) async fn anthropic_split_stream(
             stop_reason,
             matched_stop_sequence,
             total_output_tokens,
+            text_block,
         )
         .await;
     });

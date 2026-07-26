@@ -173,12 +173,35 @@ pub(super) async fn send_sse_preamble(
 }
 
 /// Send SSE epilogue: content_block_stop + message_delta + message_stop.
+///
+/// For a response with no tool blocks, so the opening text block is still open.
 pub(super) async fn send_sse_epilogue(
     sse_tx: &tokio::sync::mpsc::Sender<AnthropicSseEvent>,
     stop_reason: String,
     output_tokens: u32,
 ) {
-    send_sse_epilogue_with_stop(sse_tx, stop_reason, None, output_tokens).await
+    send_sse_epilogue_with_stop(sse_tx, stop_reason, None, output_tokens, TextBlock::Open).await
+}
+
+/// Whether the opening text block (index 0) is still open when the epilogue
+/// runs.
+///
+/// Anthropic's streaming contract is that content blocks are SEQUENTIAL: each
+/// has a start, its deltas, and a stop, and block N is closed before block N+1
+/// opens. Emitting tool blocks while block 0 was still open produced
+/// start(0) → start(1) → stop(1) → stop(0), which is nested rather than
+/// sequential and can desynchronise a client that tracks a current block
+/// instead of indexing into a map (live 2026-07-26).
+///
+/// An explicit argument rather than a default, so each call site has to say
+/// which shape it produced — the compiler then catches a new streaming path
+/// that forgets.
+#[derive(Clone, Copy, PartialEq)]
+pub(super) enum TextBlock {
+    /// Block 0 still open — the epilogue closes it.
+    Open,
+    /// Block 0 already closed, by the code that opened a later block.
+    AlreadyClosed,
 }
 
 /// Variant that carries the matched `stop_sequence` string in the
@@ -188,10 +211,13 @@ pub(super) async fn send_sse_epilogue_with_stop(
     stop_reason: String,
     stop_sequence: Option<String>,
     output_tokens: u32,
+    text_block: TextBlock,
 ) {
-    let _ = sse_tx
-        .send(AnthropicSseEvent::ContentBlockStop { index: 0 })
-        .await;
+    if text_block == TextBlock::Open {
+        let _ = sse_tx
+            .send(AnthropicSseEvent::ContentBlockStop { index: 0 })
+            .await;
+    }
     let _ = sse_tx
         .send(AnthropicSseEvent::MessageDelta {
             stop_reason,
@@ -200,4 +226,111 @@ pub(super) async fn send_sse_epilogue_with_stop(
         })
         .await;
     let _ = sse_tx.send(AnthropicSseEvent::MessageStop).await;
+}
+
+#[cfg(test)]
+mod block_sequencing_tests {
+    use super::*;
+
+    /// Collect the (event name, index) pairs a stream would put on the wire.
+    fn seq(events: &[AnthropicSseEvent]) -> Vec<(String, Option<i64>)> {
+        events
+            .iter()
+            .map(|e| {
+                let (name, data) = serialize_anthropic_event(e);
+                let idx = serde_json::from_str::<serde_json::Value>(&data)
+                    .ok()
+                    .and_then(|v| v.get("index").and_then(|i| i.as_i64()));
+                (name.to_string(), idx)
+            })
+            .collect()
+    }
+
+    /// Anthropic's contract: content blocks are SEQUENTIAL. Block N must stop
+    /// before block N+1 starts. We previously emitted
+    /// start(0) → start(1) → stop(1) → stop(0), nesting the tool block inside
+    /// the still-open text block (live 2026-07-26), which can desynchronise a
+    /// client that tracks a current block rather than indexing into a map.
+    #[test]
+    fn tool_stream_blocks_are_sequential_not_nested() {
+        // The order the handler now produces: preamble, close text, tool block,
+        // then an epilogue told the text block is already closed.
+        let events = vec![
+            AnthropicSseEvent::MessageStart {
+                id: "m".into(),
+                model: "x".into(),
+            },
+            AnthropicSseEvent::ContentBlockStart { index: 0 },
+            AnthropicSseEvent::ContentBlockStop { index: 0 },
+            AnthropicSseEvent::ContentBlockStartToolUse {
+                index: 1,
+                id: "call_1".into(),
+                name: "get_weather".into(),
+            },
+            AnthropicSseEvent::ContentBlockInputJsonDelta {
+                index: 1,
+                partial_json: "{\"city\":\"Paris\"}".into(),
+            },
+            AnthropicSseEvent::ContentBlockStop { index: 1 },
+        ];
+
+        let mut open: Option<i64> = None;
+        for (name, idx) in seq(&events) {
+            match name.as_str() {
+                "content_block_start" => {
+                    assert!(
+                        open.is_none(),
+                        "block {idx:?} started while {open:?} was still open — blocks must be sequential"
+                    );
+                    open = idx;
+                }
+                "content_block_delta" => {
+                    assert_eq!(open, idx, "delta for a block that is not the open one");
+                }
+                "content_block_stop" => {
+                    assert_eq!(open, idx, "stop for a block that is not the open one");
+                    open = None;
+                }
+                _ => {}
+            }
+        }
+        assert!(open.is_none(), "a content block was left open: {open:?}");
+    }
+
+    /// The epilogue must not close block 0 a second time once the tool path has
+    /// closed it — a duplicate stop is as malformed as a missing one.
+    #[tokio::test]
+    async fn epilogue_skips_the_text_block_when_already_closed() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<AnthropicSseEvent>(8);
+        send_sse_epilogue_with_stop(&tx, "tool_use".into(), None, 5, TextBlock::AlreadyClosed)
+            .await;
+        drop(tx);
+
+        let mut names = Vec::new();
+        while let Some(e) = rx.recv().await {
+            names.push(serialize_anthropic_event(&e).0);
+        }
+        assert!(
+            !names.contains(&"content_block_stop"),
+            "epilogue closed an already-closed block: {names:?}"
+        );
+        assert_eq!(names, vec!["message_delta", "message_stop"]);
+    }
+
+    /// A plain text response still gets its block closed by the epilogue.
+    #[tokio::test]
+    async fn epilogue_closes_the_text_block_when_still_open() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<AnthropicSseEvent>(8);
+        send_sse_epilogue_with_stop(&tx, "end_turn".into(), None, 5, TextBlock::Open).await;
+        drop(tx);
+
+        let mut names = Vec::new();
+        while let Some(e) = rx.recv().await {
+            names.push(serialize_anthropic_event(&e).0);
+        }
+        assert_eq!(
+            names,
+            vec!["content_block_stop", "message_delta", "message_stop"]
+        );
+    }
 }
