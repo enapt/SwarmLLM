@@ -433,3 +433,42 @@ path. Visibility-tightening or cross-file refactors that touch
 `cargo check --features llama` before push. Pre-push hook only runs
 default-features `cargo check`. R91 caught a regression introduced
 in R90 that default-features had silently let through.
+
+## One invariant, N paths — the recurring bug of this codebase
+
+The single most repeated defect here is a **shared invariant implemented per
+path**, where fixing the path in the bug report leaves the others broken. It
+recurred *seven times* on 2026-07-25/26 alone: stop-string application, tool-call
+buffering (twice), `include_usage` emission (twice), control-token scrubbing, and
+`strip_provider_prefix`. In every case a correct helper already existed and one
+consumer didn't call it.
+
+**Before fixing anything in the request/response path, enumerate the paths.**
+There are more than you expect:
+
+- **Inference text sources (THREE)** — `inference/executor.rs` (in-process),
+  `inference/process_pool.rs` (worker subprocess), `inference/pipeline/
+  distributed.rs` (assembled from remote segments). A reply-content rule belongs
+  at all three. Note the cold-start request takes the *distributed* path while
+  later ones take the split path, so a per-path bug can look fixed five times
+  and leak on the sixth.
+- **OpenAI response paths** — `router_inference` + `split_non_stream_response`
+  (non-streaming), `router_inference_stream` + `split_stream_response`
+  (streaming).
+- **Anthropic response paths** — `anthropic_non_stream` +
+  `anthropic_split_non_stream`, `anthropic_stream` + `anthropic_split_stream`.
+  The `_split_` variants are the local-complete fast path; the others go via the
+  router.
+- **Responses API** — `run_streaming` (foreground) and the background task's own
+  chat request in `responses/background.rs`. They share the event loop but build
+  their chat requests separately, so an opt-in set on one is absent on the other.
+
+**Prefer a shared helper with a doc comment that says forgetting it is the
+bug** — `with_template_stops`, `emit_openai_tool_calls`,
+`emit_anthropic_tool_blocks`, `strip_control_token_artifacts`. A helper nobody is
+obliged to call will eventually not be called.
+
+**Verify by running the request, not by reading the diff.** Every one of the
+seven passed review. The ones caught early were caught by executing the actual
+path — and where a report names a specific model, that model is part of the
+reproduction (gotcha #168).
