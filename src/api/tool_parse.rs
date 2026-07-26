@@ -243,7 +243,21 @@ fn parse_embedded_json(text: &str) -> Option<Value> {
 /// nested form even when shown the nested one.
 fn try_generic(text: &str) -> Option<Vec<ParsedToolCall>> {
     let v: Value = parse_embedded_json(text)?;
-    let arr = v.get("tool_calls")?.as_array()?;
+    // A model often drops the wrapper and emits the ARRAY ELEMENT on its own:
+    // `{"id": …, "type": "function", "function": {"name": …, "arguments": …}}`.
+    // That is unambiguous, and refusing it returned a perfectly good call to the
+    // user as raw JSON text (observed live on qwen2.5-0.5b, 2026-07-26). Only a
+    // `function` object carrying a string `name` qualifies, so ordinary prose
+    // containing JSON is not swept up.
+    let single = v
+        .get("function")
+        .and_then(|f| f.get("name"))
+        .and_then(Value::as_str)
+        .map(|_| std::slice::from_ref(&v));
+    let arr = match v.get("tool_calls").and_then(Value::as_array) {
+        Some(a) => a.as_slice(),
+        None => single?,
+    };
     let calls: Vec<ParsedToolCall> = arr
         .iter()
         .enumerate()
@@ -647,5 +661,54 @@ mod schema_echo_tests {
         )];
         let p = format_tool_prompt(&tools);
         assert!(p.contains("Parameters: {\"$ref\""), "got:\n{p}");
+    }
+}
+
+#[cfg(test)]
+mod bare_call_tests {
+    use super::*;
+
+    /// Models frequently drop the `tool_calls` wrapper and emit the array
+    /// element on its own. Refusing it handed the user raw JSON instead of a
+    /// tool call (observed live on qwen2.5-0.5b, 2026-07-26).
+    #[test]
+    fn bare_single_call_object_is_accepted() {
+        let text = r#"{"id":"call_weather","type":"function","function":{"name":"get_weather","arguments":{"city":"Paris"}}}"#;
+        let calls = parse_tool_calls(text).expect("bare call should parse");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].id, "call_weather");
+        assert_eq!(calls[0].name, "get_weather");
+        assert_eq!(calls[0].arguments, r#"{"city":"Paris"}"#);
+    }
+
+    /// The wrapper form still works and still wins.
+    #[test]
+    fn wrapped_form_still_parses() {
+        let text = r#"{"tool_calls":[{"function":{"name":"a","arguments":{"x":1}}},{"function":{"name":"b","arguments":{}}}]}"#;
+        let calls = parse_tool_calls(text).expect("wrapped should parse");
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].name, "a");
+        assert_eq!(calls[1].name, "b");
+    }
+
+    /// Truncation stays text — we never invent arguments the user did not
+    /// approve. This is the boundary the bare-object support must not cross.
+    #[test]
+    fn truncated_call_is_still_refused() {
+        let text =
+            r#"{"tool_calls": [{"id": "c", "type": "function", "function": {"name": "get_weat"#;
+        assert!(parse_tool_calls(text).is_none());
+    }
+
+    /// Prose that merely mentions a function must not become a tool call.
+    #[test]
+    fn prose_with_a_function_word_is_not_a_call() {
+        for s in [
+            "The function name is stored in the registry.",
+            r#"Here is some config: {"function": "enabled"}"#,
+            r#"{"function": {"description": "no name field here"}}"#,
+        ] {
+            assert!(parse_tool_calls(s).is_none(), "false positive on: {s}");
+        }
     }
 }

@@ -2,6 +2,24 @@
 
 All notable changes to SwarmLLM are documented here.
 
+## [Unreleased]
+
+### Fixed
+
+- **A tool call from a local model now carries the arguments the caller asked
+  for.** Models were shown a tool's raw parameter schema and asked to fill in
+  the arguments; some copied the schema's structure instead of the values,
+  sending `{"properties": {"city": "Paris"}}` where `{"city": "Paris"}` was
+  expected. The call looked entirely valid and reported success, so nothing
+  raised an error — the program on the other end simply found the argument
+  missing. Tools are now described by the shape of the arguments to send, and a
+  reply that wraps its arguments in a schema is unwrapped when read.
+- **A tool call written without its outer wrapper is now understood.** Models
+  often reply with the call on its own rather than inside the list we asked
+  for. That was returned to the caller as raw text, so a perfectly good tool
+  call looked like the model had ignored its tools. Output cut short by a
+  length limit is still refused rather than guessed at.
+
 ## [0.3.28-alpha] — 2026-07-26
 
 ### Fixed
