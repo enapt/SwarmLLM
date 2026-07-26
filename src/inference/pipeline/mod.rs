@@ -108,6 +108,32 @@ impl<'a> Drop for PendingLayerResultGuard<'a> {
 pub(crate) const LLAMA_FALLBACK_EOS_TOKEN: u32 = 2;
 pub(crate) const PREFILL_ACTIVATION_THRESHOLD_BYTES: usize = 100_000;
 
+/// Does this remote error mean the holder does not have the shard data it
+/// advertised?
+///
+/// A holder's claim is gossiped, so our registry can be stale — a peer that has
+/// deleted or pruned a shard keeps receiving requests for it until its retraction
+/// announcement reaches us (`delete_shard` re-announces immediately with
+/// `complete_for_models`, but that is a GossipSub broadcast and a NAT'd peer may
+/// not get it promptly). Recognising the failure lets us drop the stale claim
+/// locally and re-route on the spot, instead of failing every request until the
+/// next announcement lands.
+///
+/// Deliberately narrow. This must match ONLY "you asked me for bytes I do not
+/// have", never a transient or compute failure — dropping a healthy holder's
+/// claim would push work off a good peer and, at worst, empty the holder set for
+/// a shard nobody else has. `ShardReader`'s missing-region error is the
+/// authoritative signal: it is raised when a byte range maps to a shard file the
+/// node does not hold. Observed live 2026-07-26 as
+/// `blk.0.attn_q: ShardReader: position 345977248 is in a missing region`.
+pub(crate) fn remote_error_means_missing_shard(msg: &str) -> bool {
+    // Both spellings appear: the reader's own message, and `ShardNotFound`
+    // rendered through `Display` when a load never got as far as reading.
+    msg.contains("is in a missing region")
+        || msg.contains("missing shard region")
+        || msg.contains("Shard not found")
+}
+
 /// Pack a slice of u32 token IDs as i64 little-endian bytes — the
 /// activation byte format the worker expects for first-segment
 /// multi-token decode (DSD Phase 4 / Item 12). Shared by
@@ -713,6 +739,46 @@ mod tests {
     /// `forward_verify_through_segments` orchestration still needs worker
     /// subprocess infrastructure, but the building blocks now have direct
     /// coverage so a wire-format drift fails a fast test before integration.
+    /// Retracting a holder's shard claim pushes work off that peer and can empty
+    /// a shard's holder set, so this classifier must fire on "I don't have that
+    /// data" and on nothing else. Both directions are pinned.
+    #[test]
+    fn missing_shard_classifier_matches_the_real_reader_errors() {
+        // Observed live 2026-07-26 on a node deliberately holding only the tail.
+        assert!(remote_error_means_missing_shard(
+            "Inference error: Internal error: blk.0.attn_q: ShardReader: position 345977248 is in a missing region"
+        ));
+        // The output-head spelling from the same reader.
+        assert!(remote_error_means_missing_shard(
+            "Worker: Inference error: Internal error: Failed to load output head: ShardReader: position 7827872 is in a missing region (total_size=1321079200)"
+        ));
+        assert!(remote_error_means_missing_shard(
+            "ShardReader: position is in a missing shard region"
+        ));
+        assert!(remote_error_means_missing_shard("Shard not found: model/2"));
+    }
+
+    #[test]
+    fn missing_shard_classifier_ignores_everything_else() {
+        // A healthy holder must never lose its claim over a transient or
+        // compute failure — that would move work off a good peer.
+        for msg in [
+            "peer never acknowledged the request",
+            "remote-generate timed out after 120s",
+            "OutboundFailure: DialFailure",
+            "Worker: Inference error: CUDA out of memory",
+            "Pipeline assembly failed: Segment 1 failed with no standby available",
+            "Timed out waiting for segment result (30s, 6 layers)",
+            "decrypt FAILED — possible AAD mismatch",
+            "",
+        ] {
+            assert!(
+                !remote_error_means_missing_shard(msg),
+                "must not retract a holder for: {msg}"
+            );
+        }
+    }
+
     #[test]
     fn pack_verify_tokens_to_le_bytes_packs_i64_le() {
         // Empty input → empty output (no allocator panic).

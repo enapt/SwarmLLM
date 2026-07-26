@@ -204,6 +204,19 @@ impl PipelineExecutor {
                     NetworkFinishReason::Stop => "stop".to_string(),
                     NetworkFinishReason::MaxTokens => "length".to_string(),
                     NetworkFinishReason::Error(e) => {
+                        // Same stale-claim retraction as the multi-segment path.
+                        // This fast path has no failover, so without it a peer
+                        // whose shard set shrank keeps being chosen and every
+                        // request fails until its retraction gossip arrives —
+                        // which is exactly the case reported on 2026-07-26.
+                        if super::remote_error_means_missing_shard(e) {
+                            self.shared_state.retract_shard_holder_claims_for_range(
+                                &segment.shard_id.model_id,
+                                &segment.node_id,
+                                segment.layer_range,
+                                "remote reported the shard data as missing",
+                            );
+                        }
                         self.shared_state.streaming_token_txs.remove(&request_id);
                         return Err(SwarmError::Inference(e.clone()));
                     }

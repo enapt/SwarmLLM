@@ -154,6 +154,98 @@ impl super::SharedState {
         }
     }
 
+    /// Retract a holder's claims over the layer span it was asked to serve.
+    ///
+    /// A segment can cover SEVERAL shards, and `PipelineSegment::shard_id` names
+    /// only the first of them — so retracting that one id is wrong whenever the
+    /// failure was in a later shard. Observed live 2026-07-26: a whole-model
+    /// segment (layers 0..16) failed on `blk.10`, i.e. shard 2, and the
+    /// single-id version retracted shard 0, which the holder genuinely had. That
+    /// is the "pushes work off a healthy peer" failure this whole mechanism has
+    /// to avoid.
+    ///
+    /// The honest scope is "you were asked for this span and reported missing
+    /// data", so every shard of the model overlapping `layer_range` loses its
+    /// claim. That is broader than strictly necessary — the holder may well have
+    /// some of them — but it is safe in the direction that matters: the holder's
+    /// own next `ShardAnnounce` re-asserts whatever it really has, so an
+    /// over-broad retraction costs at most one announce interval of not routing
+    /// there, whereas retracting the wrong shard leaves the bad claim in place
+    /// and keeps failing.
+    pub fn retract_shard_holder_claims_for_range(
+        &self,
+        model_id: &crate::types::ModelId,
+        holder: &NodeId,
+        layer_range: (u32, u32),
+        reason: &str,
+    ) {
+        let Some(manifest) = self.model_registry.get_manifest(model_id) else {
+            return;
+        };
+        let overlapping: Vec<crate::types::ShardId> = manifest
+            .shards
+            .iter()
+            .filter(|s| {
+                // Half-open ranges: [a,b) overlaps [c,d) iff a < d && c < b.
+                s.layer_range.0 < layer_range.1 && layer_range.0 < s.layer_range.1
+            })
+            .map(|s| crate::types::ShardId {
+                model_id: model_id.clone(),
+                index: s.index,
+            })
+            .collect();
+        for shard_id in overlapping {
+            self.retract_shard_holder_claim(&shard_id, holder, reason);
+        }
+    }
+
+    /// Drop ONE holder's claim on ONE shard.
+    ///
+    /// Prefer [`Self::retract_shard_holder_claims_for_range`] from a failure
+    /// path: a segment usually covers several shards and the failing one is not
+    /// necessarily the segment's first.
+    ///
+    /// Holder claims arrive by gossip, so our registry can outlive the truth. The
+    /// claim is re-established the moment that peer announces the shard again, so
+    /// an over-eager retraction is self-correcting, while a missed one keeps
+    /// failing every request routed there until the next announcement.
+    pub fn retract_shard_holder_claim(
+        &self,
+        shard_id: &crate::types::ShardId,
+        holder: &NodeId,
+        reason: &str,
+    ) {
+        // Never retract our own claim from a remote error: our local shard
+        // inventory is ground truth, not something a peer's message can revise.
+        if holder == self.identity.node_id() {
+            return;
+        }
+        self.model_registry.remove_shard_holder(shard_id, holder);
+        let remaining = self.model_registry.shard_holders(shard_id).len();
+        tracing::info!(
+            model = %shard_id.model_id,
+            shard = shard_id.index,
+            holder = %holder,
+            remaining_holders = remaining,
+            reason,
+            "Retracted stale shard-holder claim after a missing-shard error"
+        );
+        self.emit_activity(
+            crate::daemon::state::ActivityEvent::new(
+                "network",
+                "shard_holder_retracted",
+                format!(
+                    "{} no longer has shard {} of {} — re-routing",
+                    &holder.to_string()[..8.min(holder.to_string().len())],
+                    shard_id.index,
+                    self.model_registry.display_name(&shard_id.model_id),
+                ),
+            )
+            .with_model(shard_id.model_id.0.clone())
+            .with_node(holder.to_string()),
+        );
+    }
+
     /// Attribute a segment's wall time and activation size to the in-flight
     /// trace, if one is registered. A no-op when the request has already
     /// finished or was never traced, so pipeline code can call it
@@ -487,6 +579,94 @@ mod tests {
         let executor = std::sync::Arc::new(Mutex::new(ModelExecutor::new()));
         let (state, _, _) = crate::daemon::SharedState::new(config, identity, db, executor, None);
         state
+    }
+
+    /// A retraction must scope to the shards the holder was actually asked to
+    /// serve. Retracting `segment.shard_id` alone dropped shard 0 for a failure
+    /// in shard 2 (observed live 2026-07-26) — the wrong claim, leaving the bad
+    /// one in place while penalising a shard the holder really had.
+    #[test]
+    fn retraction_scopes_to_the_shards_overlapping_the_failed_span() {
+        let state = test_state(crate::config::Config::default());
+        let model_id = crate::types::ModelId("m".to_string());
+        let holder = crate::types::NodeId([9u8; 32]);
+
+        // Three shards: 0..10, 10..16, 16..24.
+        let shards: Vec<crate::types::ShardInfo> = [(0u32, 0u32, 10u32), (1, 10, 16), (2, 16, 24)]
+            .iter()
+            .map(|&(index, a, b)| crate::types::ShardInfo {
+                index,
+                layer_range: (a, b),
+                size_bytes: 1u64,
+                hash: [0u8; 32],
+                tensors: vec![],
+            })
+            .collect();
+        let manifest = crate::types::ModelManifest {
+            id: model_id.clone(),
+            name: "m".into(),
+            architecture: crate::types::ModelArchitecture::Llama,
+            num_layers: 24,
+            num_params_billions: 1.0,
+            quantization: crate::types::Quantization::Q4KM,
+            total_size_bytes: 3,
+            shard_count: 3,
+            shards: shards.clone(),
+            tokenizer_hash: [0u8; 32],
+            manifest_hash: [0u8; 32],
+            publisher: holder.clone(),
+            publish_date: chrono::Utc::now(),
+            license: String::new(),
+            mmproj: None,
+        };
+        state.model_registry.register_manifest(manifest);
+        for s in &shards {
+            state.model_registry.record_shard_holder(
+                crate::types::ShardId {
+                    model_id: model_id.clone(),
+                    index: s.index,
+                },
+                holder.clone(),
+            );
+        }
+
+        // Failure serving layers 10..16 → only shard 1 overlaps.
+        state.retract_shard_holder_claims_for_range(&model_id, &holder, (10, 16), "test");
+
+        let held = |idx: u32| {
+            state
+                .model_registry
+                .shard_holders(&crate::types::ShardId {
+                    model_id: model_id.clone(),
+                    index: idx,
+                })
+                .contains(&holder)
+        };
+        assert!(held(0), "shard 0 does not overlap 10..16 — must be kept");
+        assert!(!held(1), "shard 1 overlaps 10..16 — must be retracted");
+        assert!(held(2), "shard 2 does not overlap 10..16 — must be kept");
+    }
+
+    /// Our own inventory is ground truth; a peer's error must never revise it.
+    #[test]
+    fn retraction_never_drops_our_own_claim() {
+        let state = test_state(crate::config::Config::default());
+        let model_id = crate::types::ModelId("m".to_string());
+        let me = state.identity.node_id().clone();
+        let shard_id = crate::types::ShardId {
+            model_id: model_id.clone(),
+            index: 0,
+        };
+        state
+            .model_registry
+            .record_shard_holder(shard_id.clone(), me.clone());
+
+        state.retract_shard_holder_claim(&shard_id, &me, "test");
+
+        assert!(
+            state.model_registry.shard_holders(&shard_id).contains(&me),
+            "a remote error must not retract our own local shard claim"
+        );
     }
 
     /// Insert a peer with the given capability into the registry.

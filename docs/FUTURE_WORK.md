@@ -2868,7 +2868,17 @@ Grafana; that is the trend store. In-process, keep:
 
 Steps 1-2 pay for themselves the first time a tester reports something slow.
 
-## Shard-holder retraction depends on gossip reaching the peer (observed 2026-07-26)
+## Shard-holder retraction depends on gossip reaching the peer (observed 2026-07-26) — MITIGATED v0.3.31
+
+> **Requester-side mitigation shipped in v0.3.31.** A holder that reports missing
+> shard data now loses its claim over the layer span it was asked to serve
+> (`pipeline::remote_error_means_missing_shard` →
+> `retract_shard_holder_claims_for_range`), and the request retries against a
+> fresh assembly, so the stale claim costs one internal retry rather than every
+> request until the announcement lands. The underlying gossip dependence is
+> unchanged and the note below still describes it. **Still open**: a per-request
+> holder blacklist, which would also cover a connected peer that fails without
+> disconnecting.
 
 **Observed live**, by an external tester, during the v0.3.30 split testing.
 

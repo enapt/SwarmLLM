@@ -2,6 +2,36 @@
 
 All notable changes to SwarmLLM are documented here.
 
+## [0.3.31-alpha] — 2026-07-26
+
+### Fixed
+
+- **A peer that no longer has a model piece is no longer asked for it again.**
+  Which peers hold which pieces is shared by gossip, so a node's picture can
+  briefly outlive the truth — a peer that deleted or pruned a piece keeps being
+  chosen until its correction arrives, and every request sent to it fails
+  meanwhile. Now the first such failure drops that peer's claim locally and the
+  request is retried immediately against someone else, so what used to be a
+  string of failures is usually invisible. Reported by a tester who saw it while
+  helping verify the previous release.
+- **A reply served over the local network is no longer reported as relayed.**
+  The route shown in the chat, the response headers and the logs treated any
+  relay-*capable* peer as relayed, so answers that went straight out over the
+  local network were labelled as taking the slower path — sending anyone reading
+  it looking for a network problem that wasn't there.
+
+### Notes
+
+- Dropping a peer's claim is scoped to the pieces it was actually asked for. A
+  request can span several pieces, and the earlier attempt at this dropped the
+  wrong one — penalising a piece the peer genuinely had while leaving the bad
+  claim in place. Caught by running it rather than reading it.
+- A peer's own next announcement re-establishes whatever it really holds, so an
+  over-cautious drop costs at most one announcement interval and never loses
+  data.
+- Also removes a rare test failure that could fail a CI run for reasons unrelated
+  to the code under test.
+
 ## [0.3.30-alpha] — 2026-07-26
 
 ### Added

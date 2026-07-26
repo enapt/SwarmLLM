@@ -54,12 +54,23 @@ pub use types::{
 /// is missing is a per-request holder blacklist, which would also help the
 /// pre-existing case of a connected peer that fails without disconnecting; see
 /// `docs/FUTURE_WORK.md`.
+///
+/// A **missing-shard** error also qualifies, for a different reason. It is not
+/// transient in itself — that holder really does not have the data. But the
+/// pipeline path retracts the stale holder claim before returning
+/// (`retract_shard_holder_claim`), so by the time we retry, the input that caused
+/// the bad routing decision has been corrected and the scheduler will choose a
+/// different holder. Retrying turns what the user would otherwise see as a hard
+/// failure into a slightly slower answer. If the retraction leaves no holder at
+/// all, the retry fails cleanly with "no node available", which is the accurate
+/// message.
 fn is_transient_remote_failure(err: &SwarmError) -> bool {
     let msg = err.to_string();
     msg.contains("never acknowledged")
         || msg.contains("silent drop")
         || msg.contains("remote-generate timed out")
         || msg.contains("OutboundFailure")
+        || crate::inference::pipeline::remote_error_means_missing_shard(&msg)
 }
 
 const KV_CACHE_CLEANUP_INTERVAL_SECS: u64 = 30;

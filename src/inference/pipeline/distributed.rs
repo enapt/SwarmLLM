@@ -1031,6 +1031,18 @@ impl PipelineExecutor {
                                 error = %err_msg,
                                 "Remote segment returned error, attempting failover"
                             );
+                            // If the holder said it doesn't have the shard, its
+                            // gossiped claim is stale — drop it now so failover
+                            // and every later request skip it, rather than
+                            // re-picking it until the next ShardAnnounce lands.
+                            if super::remote_error_means_missing_shard(err_msg) {
+                                self.shared_state.retract_shard_holder_claims_for_range(
+                                    &segment.shard_id.model_id,
+                                    &segment.node_id,
+                                    segment.layer_range,
+                                    "remote reported the shard data as missing",
+                                );
+                            }
                             // Remove stale pending entry before failover inserts a new one
                             self.shared_state.pending_layer_results.remove(&request_id);
                             let failover_result = self

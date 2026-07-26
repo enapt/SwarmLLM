@@ -151,7 +151,7 @@ libp2p 0.56, axum 0.8, candle-core/candle-transformers 0.10 (CUDA), redb 4, ed25
 
 ## Testing
 
-- 1305 lib tests passing + 9 ignored (env-var-gated real-model + manual smoke), 79 integration tests in `tests/integration/` + 2 ignored end-to-end (`cargo test --test integration_phase10_11 -- --ignored`), 2 repo-consistency, 26 in `swarmllm-types` (`cargo test -p swarmllm-types` — NOT covered by a bare `cargo test` from the root), clippy clean. Microbench: `cargo run --release --no-default-features --features dev,claude-subscription --example swarm_spec_bench` (R136 — measures all 4 SWARM-SPEC layer primitives + synthetic cascade hit-rate). Local-cluster bench: `examples/3node_setup.sh` (boots 3 daemons) + `examples/3node_inference_bench.sh` (runs 3 workloads × 3 trials and prints tok/s + swarm_spec metrics). Sharded variant: `examples/3node_sharded_setup.sh` (forced distributed pipeline; writes its own per-node config disabling auto-manage and bootstrap so the split survives). **Its inference step is EXPECTED to fail on a single multi-interface host** — that is the zero-redundancy same-host case documented in `docs/FUTURE_WORK.md` § "Connection churn on multi-interface hosts", not a distributed-inference regression (confirmed on released v0.3.28, 2026-07-26). Validate the forward path on two real machines. Both scripts take `SWARM_BENCH_MODEL`. **Pinned reference models for cross-swarm comparison: `docs/REFERENCE_MODELS.md`** (smoke / standard / stress tiers + `examples/fetch_reference_model.sh` to opt in).
+- 1309 lib tests passing + 9 ignored (env-var-gated real-model + manual smoke), 79 integration tests in `tests/integration/` + 2 ignored end-to-end (`cargo test --test integration_phase10_11 -- --ignored`), 2 repo-consistency, 26 in `swarmllm-types` (`cargo test -p swarmllm-types` — NOT covered by a bare `cargo test` from the root), clippy clean. Microbench: `cargo run --release --no-default-features --features dev,claude-subscription --example swarm_spec_bench` (R136 — measures all 4 SWARM-SPEC layer primitives + synthetic cascade hit-rate). Local-cluster bench: `examples/3node_setup.sh` (boots 3 daemons) + `examples/3node_inference_bench.sh` (runs 3 workloads × 3 trials and prints tok/s + swarm_spec metrics). Sharded variant: `examples/3node_sharded_setup.sh` (forced distributed pipeline; writes its own per-node config disabling auto-manage and bootstrap so the split survives). **Its inference step is EXPECTED to fail on a single multi-interface host** — that is the zero-redundancy same-host case documented in `docs/FUTURE_WORK.md` § "Connection churn on multi-interface hosts", not a distributed-inference regression (confirmed on released v0.3.28, 2026-07-26). Validate the forward path on two real machines. Both scripts take `SWARM_BENCH_MODEL`. **Pinned reference models for cross-swarm comparison: `docs/REFERENCE_MODELS.md`** (smoke / standard / stress tiers + `examples/fetch_reference_model.sh` to opt in).
 - Unit tests: in-module `#[cfg(test)]` blocks
 - Integration tests: `tests/integration/` — multi-node simulations with `--test-threads=1`
 - Real-model spawn-and-infer test: set `SWARMLLM_TEST_MODEL_DIR` to a fully-populated model directory (e.g. `~/.local/share/swarmllm/models/tinyllama-1.1b-...`) and run `cargo test --test integration_phase10_11 -- --ignored end_to_end`. No synthetic GGUF fixture is committed; see `docs/ARCHITECTURE.md` § Deferred Items.
@@ -192,52 +192,69 @@ When spawning subagents in this repo, use these model picks (overrides defaults 
 
 ## Status
 
-All 20 build phases complete. All subsystems wired — no stubs. **1305 lib + 79 integration + 2 repo-consistency + 26 swarmllm-types tests passing**; 9 lib + 2 e2e ignored (env-var or manual). Clippy clean default + features dev,claude-subscription + `--features llama`.
+All 20 build phases complete. All subsystems wired — no stubs. **1309 lib + 79 integration + 2 repo-consistency + 26 swarmllm-types tests passing**; 9 lib + 2 e2e ignored (env-var or manual). Clippy clean default + features dev,claude-subscription + `--features llama`.
 
 Per-round history lives in `~/.claude/projects/-home-user-SwarmLLM/memory/round_log_*.md` and the CHANGELOG; `docs/ARCHITECTURE.md` is the canonical architecture. This section keeps only the current release line plus one-line prior-round pointers.
 
-### Latest — v0.3.30-alpha (2026-07-26): observability, and a weight-tied serving bug
+### Latest — v0.3.31-alpha (2026-07-26): stale shard-holder claims self-correct
 
-**The finding that shaped the round: nearly everything asked for was already
-measured and thrown away.** Per-segment timings + activation sizes went into a
-DEBUG log line and were dropped; `hedge_tracker` has held per-(model, segment,
-holder) EWMA latency **with variance and sample counts** since R136 with **zero
-readers**. Genuinely missing: **server-side TTFT** (existed only in
-`cli/bench.rs`, client-side), TPOT, queue-vs-schedule split, any record of a
-*successful* request, all serving-side telemetry, any persistence.
+Follow-up to .30, both items found by *running* the code (one by a tester).
 
-- **One `RequestTrace`** (`inference/trace.rs`) is the sole input to every
-  surface: the `DIAG: request complete` line, `x-swarm-*` + W3C `Server-Timing`
-  headers, `/api/admin/{diagnostics,performance}`, Prometheus, and the UI.
-  Four response paths each building their own timing struct is the recurring
-  N-paths defect, and observability is its worst home — the drift is invisible.
-- **TTFT is stamped by the token CHANNEL**, not the emit sites. Tokens leave from
-  seven places; `StreamingTokenTx` became a newtype mirroring `mpsc::Sender`, so
-  a new emit site inherits the stamp with no author action.
-- **Weight-tied models were unservable from a node lacking shard 0.** Llama-3.2
-  reuses `token_embd.weight` as its LM head; that tensor lives in shard 0, but
-  the node that needs it serves the LAST segment. `tied_output_weight.bin` exists
-  for exactly this, had **three writers and zero readers**, and
-  `ShardReader::new` had no parameter for it. Gotcha #178. Found by the first
-  genuine two-machine zero-redundancy split; independently reproduced by a
-  tester on different hardware.
-- **Serving-side counters** — segments/layers served for others, compute time,
-  bytes out. Everything before this measured requests we *made*.
-- **Dashboard** — chat route line, Models → Performance panel, 26 keys × 21
-  locales. **Hourly redb rollups** so a trend survives a restart.
+- **Stale holder claims now retract on first failure.** Holder claims are
+  gossiped, so a requester's registry outlives the truth after a peer prunes or
+  deletes a shard — and every request routed there fails until the retraction
+  announcement lands. `pipeline::remote_error_means_missing_shard` recognises the
+  ShardReader missing-region error, the holder's claim over that layer span is
+  dropped, and `is_transient_remote_failure` retries with a fresh assembly, so
+  the routing input is corrected before the retry runs. Usually invisible now.
+- **Retraction is scoped by LAYER RANGE, not `segment.shard_id`.** First attempt
+  used the segment's shard id — but a segment spans several shards and that field
+  is only the first. Live, a whole-model segment failing on `blk.10` (shard 2)
+  retracted **shard 0**, which the holder genuinely had: the exact
+  "pushes work off a healthy peer" outcome the mechanism exists to avoid. Now
+  every shard overlapping the failed span loses its claim. Over-broad on purpose
+  — the holder's own next announce re-asserts the truth, so the cost is one
+  announce interval, whereas retracting the wrong shard keeps failing forever.
+- **`route=relayed` on a directly-connected peer.** `peer_reachable_via_relay` is
+  an *eligibility* check, true for any relay-capable peer, so LAN hops were
+  labelled relayed. Now keyed on `connected_node_ids`. Wrong in the costly
+  direction: it sends a reader hunting a network fault that isn't there.
+- **Long-standing kv_cache flake resolved** (MEMORY.md had it as "seen 2x,
+  unresolved"): `save_to_db` also skips expired sessions, so with `ttl=1s` a >1s
+  stall made the SAVE return 0 and the *first* assert fail. Rewritten with a
+  back-dated record — no wall-clock race — plus a negative control.
+
+Retraction fires correctly end-to-end (verified live: retract → retry → reroute).
+The *scope* fix is pinned by unit test rather than re-verified live, because the
+stale window closed when the holder's own rescan corrected it.
+
+### v0.3.30-alpha (2026-07-26): observability, and a weight-tied serving bug
+
+**The finding: nearly everything asked for was already measured and thrown away**
+— per-segment timings went into a DEBUG log line and were dropped; `hedge_tracker`
+has held per-(model, segment, holder) EWMA latency **with variance** since R136
+with **zero readers**. Genuinely missing: **server-side TTFT** (existed only in
+`cli/bench.rs`, client-side), TPOT, and any record of a *successful* request.
+
+Shipped: one `RequestTrace` (`inference/trace.rs`) feeding every surface — the
+`DIAG: request complete` line, `x-swarm-*` + W3C `Server-Timing` headers,
+`/api/admin/{diagnostics,performance}`, OTel-named Prometheus histograms,
+serving-side counters, chat route line + Models→Performance panel, hourly redb
+rollups. **TTFT is stamped by the token CHANNEL** (`StreamingTokenTx` newtype)
+because tokens leave from seven sites. Also fixed: **weight-tied models were
+unservable from a node lacking shard 0** — `tied_output_weight.bin` had three
+writers and zero readers (gotcha #178), found by the first genuine two-machine
+zero-redundancy split and independently reproduced by a tester.
 
 **Three decisions not to undo** (full reasoning in `docs/FUTURE_WORK.md`
 § Observability, marked SHIPPED):
 1. **Prometheus carries `(route, outcome)` ONLY** — 20 series, fixed. Per-peer is
-   50×10×10 = 5 000 series *per node* and grows with the swarm; it lives in the
-   pulled JSON endpoint, never retained.
+   50×10×10 = 5 000 series *per node*; it lives in the pulled JSON endpoint.
 2. **Headers flush before the body**, so SSE cannot carry TTFT/decode. Omitted,
    not zeroed — asserted by a test.
 3. **"Tok/s per node per shard" is NOT measurable in a pipeline.** Segments are
-   serialised on the *same* token stream, so `tokens / A_time` shows both nodes
-   doing the full rate and the figures don't compose. Use each segment's *share
-   of inter-token latency* (these sum → finds the bottleneck) and
-   *ms per layer per token*.
+   serialised on the *same* token stream. Use each segment's *share of inter-token
+   latency* (these sum → finds the bottleneck) and *ms per layer per token*.
 
 Detail: `memory/round_log_observability_0726.md`.
 
