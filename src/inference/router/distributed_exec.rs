@@ -308,6 +308,67 @@ pub(super) async fn execute_distributed_batch(
 }
 
 /// Execute a single inference request — either locally or via distributed pipeline.
+/// How long to wait for the DHT provider results we just asked for before
+/// giving up on assembling a pipeline.
+///
+/// The query fired a few lines earlier is fire-and-forget, so on the FIRST
+/// request for a model — including every request after a restart, since holder
+/// claims are rebuilt from gossip — the holder cache is still empty and assembly
+/// fails with "No node available". The user sees a hard error and a manual retry
+/// seconds later succeeds. Reproduced independently twice on 2026-07-26.
+///
+/// Kept short: a model that genuinely has no holder should still fail quickly.
+const DHT_ASSEMBLY_GRACE: std::time::Duration = std::time::Duration::from_millis(1500);
+const DHT_ASSEMBLY_POLL: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// Assemble a pipeline, giving in-flight DHT provider results a brief chance to
+/// land if the first attempt finds no holder.
+///
+/// Only retries the "nothing known to serve this" case. Any other scheduling
+/// error is returned immediately — waiting would add latency without changing
+/// the outcome.
+async fn assemble_awaiting_dht(
+    scheduler: &PipelineScheduler,
+    model_id: &crate::types::ModelId,
+    local_node_id: &crate::types::NodeId,
+    request_id: uuid::Uuid,
+) -> Result<PipelineAssignment, SwarmError> {
+    let first = scheduler.assemble_pipeline_for(model_id, local_node_id, request_id);
+    let Err(err) = first else {
+        return first;
+    };
+    if !assembly_failed_for_lack_of_holders(&err) {
+        return Err(err);
+    }
+
+    let deadline = std::time::Instant::now() + DHT_ASSEMBLY_GRACE;
+    while std::time::Instant::now() < deadline {
+        tokio::time::sleep(DHT_ASSEMBLY_POLL).await;
+        if let Ok(assignment) = scheduler.assemble_pipeline_for(model_id, local_node_id, request_id)
+        {
+            tracing::info!(
+                %request_id,
+                model = %model_id,
+                "Pipeline assembled after waiting for DHT provider results"
+            );
+            return Ok(assignment);
+        }
+    }
+    // Report the ORIGINAL error: it names the layer that had no holder, which is
+    // more useful than "we also failed 1.5s later".
+    Err(err)
+}
+
+/// Did assembly fail because no node is known to hold what we need, as opposed
+/// to a real scheduling constraint?
+///
+/// Only this case benefits from waiting — the holder cache may simply not have
+/// been populated yet.
+fn assembly_failed_for_lack_of_holders(err: &SwarmError) -> bool {
+    let msg = err.to_string();
+    msg.contains("No node available") || msg.contains("No shard holders")
+}
+
 pub(super) async fn execute_request(
     shared_state: Arc<SharedState>,
     network_tx: mpsc::Sender<NetworkCommand>,
@@ -527,10 +588,10 @@ pub(super) async fn execute_request(
                 ..prev
             }
         } else {
-            scheduler.assemble_pipeline_for(model_id, &local_node_id, request.id)?
+            assemble_awaiting_dht(&scheduler, model_id, &local_node_id, request.id).await?
         }
     } else {
-        scheduler.assemble_pipeline_for(model_id, &local_node_id, request.id)?
+        assemble_awaiting_dht(&scheduler, model_id, &local_node_id, request.id).await?
     };
     let schedule_ms = schedule_start.elapsed().as_millis() as u64;
 
@@ -801,6 +862,34 @@ fn failure_is_penalty_worthy(err: &SwarmError, had_remote_segment: bool) -> bool
 mod tests {
     use super::*;
     use crate::types::ModelId;
+
+    /// Only the "nothing known to serve this" failure benefits from waiting for
+    /// DHT results. Waiting on anything else just adds latency to a verdict that
+    /// will not change.
+    #[test]
+    fn only_missing_holder_failures_wait_for_dht() {
+        assert!(assembly_failed_for_lack_of_holders(
+            &SwarmError::PipelineError("No node available for layer 10".into())
+        ));
+        assert!(assembly_failed_for_lack_of_holders(
+            &SwarmError::PipelineError("No shard holders for model".into())
+        ));
+
+        for e in [
+            SwarmError::PipelineError("Segment 1 failed with no standby available".into()),
+            SwarmError::PipelineError(
+                "Timed out waiting for segment result (30s, 6 layers)".into(),
+            ),
+            SwarmError::ModelNotAvailable(ModelId("m".to_string())),
+            SwarmError::ServiceUnavailable("worker spawn failed".into()),
+            SwarmError::InsufficientCapacity(ModelId("m".to_string())),
+        ] {
+            assert!(
+                !assembly_failed_for_lack_of_holders(&e),
+                "must not wait on: {e}"
+            );
+        }
+    }
 
     #[test]
     fn local_only_pipeline_is_never_penalised() {
