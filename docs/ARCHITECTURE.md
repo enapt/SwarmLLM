@@ -1541,8 +1541,15 @@ Routes Claude model requests through a locally-authenticated `claude` CLI subpro
   "one peer is broken", plus a repeated-peer note), **NAT traversal**
   (`publicly reachable`, `donating relay capacity`, hole-punch success/failure
   counts with a reading of what zero means in context), peer cache (stored vs
-  dialable), and models. This is the single most useful thing to include in a
-  bug report.
+  dialable), models, **recent completed requests** (last 50: route, per-phase
+  timings, per-segment attribution), **per-peer serving performance** (RTT,
+  ms/layer, EWMA latency, samples, region — slowest first), and **served for
+  others** (segments/layers computed for peers, compute time, bytes out). This is
+  the single most useful thing to include in a bug report.
+- `GET     /api/admin/performance` — The JSON sibling of `diagnostics`, for the
+  dashboard's Performance panel: `recent` (up to 50 traces), `peers`, `served`,
+  and `hourly` (one bucket per hour for a week, persisted). Pulled on demand, not
+  pushed on the WS stats tick — see § Request Tracing, cardinality rule.
 - `GET     /api/admin/credits` — Credit balance and tier info
 - `GET     /api/admin/shard-storage` — Per-model storage breakdown, disk/VRAM usage
 - `GET     /api/admin/api-key` — Retrieve API key (Bearer auth required)
@@ -1655,6 +1662,110 @@ Routes Claude model requests through a locally-authenticated `claude` CLI subpro
 - **i18n**: 1250 translation keys (1252 entries per locale incl. `_lang` + `_dir`) across 21 languages (en, es, fr, de, pt, it, nl, ru, zh, ja, ko, ar, tr, pl, sv, th, hi, vi, id, uk, cs). Auto-detects browser language. `I18n.t()` + `data-i18n` DOM attributes. Interpolation via `{variable}` placeholders. Fallback chain: current language → English → raw key. "Continue in English" UX for non-English users who prefer English.
 - **Theme**: Light / Dark / System toggle. `[data-theme="light"]` CSS overrides. Persisted in localStorage.
 - **Neural network background**: Animated canvas particle network behind dashboard tiles (`frontend/js/neural-bg.js`). ~60 nodes with connecting edges, gentle drift, mouse repulsion/glow. State-reactive coloring: blue (idle) → cyan (active inference) → red-orange (unhealthy/disconnected). Peer count boosts vibrancy, active requests trigger node firing pulses. Pauses when tab hidden; reduced opacity in light theme.
+
+## Request Tracing & Performance Observability
+
+Every inference request carries one `RequestTrace` (`src/inference/trace.rs`),
+and that record is the **sole** input to every observability surface. Four
+response paths each assembling their own timing struct is the recurring
+"one invariant, N paths" defect in `.claude/rules/architecture.md`, and
+observability is its worst home: the drift is invisible because nothing fails —
+the numbers are just quietly wrong.
+
+**Lifecycle.** Created at admission in `router/mod.rs::handle_submit` so
+`queue_ms` measures real user-visible wait; `mark_dequeued` at dispatch;
+`mark_assembled` in `distributed_exec::execute_request` with the route and
+segment layout recorded together so they cannot disagree; `mark_first_token`
+from the token channel; `mark_finished` + `publish_request_trace` at the single
+completion arm.
+
+**Route** (`trace::Route`) is classified from the pipeline assignment by
+`classify_route`, never inferred from segment count — a one-segment *remote*
+pipeline and a one-segment local one are different routes, and that distinction
+is exactly what a user asking "why was that slow" needs. `Relayed` outranks
+`Distributed` when any hop goes through an application-level relay.
+
+**Time to first token** is stamped by the token *channel*, not by the emit
+sites. Tokens leave from seven places (`local_exec`, `process_pool`, `dsd`,
+`speculative`, `ngram_only_spec`, `pipeline/mod`), so `StreamingTokenTx` is a
+newtype around `mpsc::Sender` that mirrors `send`/`try_send`/`clone`/
+`is_closed`/`closed` — call sites read unchanged, and a **new** emit site
+inherits the stamp with no author action. Only events carrying non-empty text
+count, so a zero-token response reports no TTFT.
+
+**Cost.** Phase boundaries only, plus one relaxed atomic load per token.
+`.claude/rules` forbids hot-path overhead in `pipeline.rs`,
+`split/executor.rs::forward` and `forward_through_segments`; a `Vec<SegmentTrace>`
+allocated once per *request* is inside budget, per-token work is not.
+
+**Per-segment attribution.** `state.active_traces` maps request id → in-flight
+trace and has **exactly** the same lifetime as `active_pipelines` — inserted and
+removed at the same sites — so it inherits that mechanism's already-correct
+cleanup including the panic path via `ActivePipelineGuard::drop`. Deep pipeline
+code calls `state.record_segment_timing(...)` unconditionally; it is a no-op when
+no trace is registered.
+
+### Surfaces
+
+| Surface | Contents |
+|---|---|
+| `DIAG: request complete` log line | The whole route and timing set on one greppable line |
+| Response headers | `x-swarm-route`, `x-swarm-segments`, `x-swarm-peers`, `x-swarm-nodes`, `x-swarm-regions` + W3C `Server-Timing`, attached by `api::attach_route_headers` |
+| `GET /api/admin/diagnostics` | Plain text for a shell: recent requests, per-peer performance, served-for-others, failures |
+| `GET /api/admin/performance` | Same as JSON, plus the hourly trend |
+| `/metrics` | OTel-named TTFT/TPOT histograms + `requests_by_route{route,outcome}` + serving-side counters |
+| Dashboard | Chat route line; Models → Performance panel |
+
+**Headers flush before the body**, so on a streaming response only pre-body
+facts (route, nodes, queue, schedule) can be sent. TTFT and decode are omitted
+rather than reported as zero — a plausible-looking zero is worse than an absent
+header — and a test asserts it.
+
+### Cardinality rule
+
+Prometheus carries `(route, outcome)` and nothing else: both are closed sets, so
+that metric is 20 series regardless of swarm size. Per-peer, per-model and
+per-shard dimensions are **unbounded** (50 peers × 10 models × 10 shards = 5 000
+series from a single node, growing with the swarm) and live only in
+`/api/admin/performance`, which is pulled on demand and retains nothing beyond
+the bounded rings. Getting this wrong takes down the scrape long before anyone
+benefits from the extra detail.
+
+### Peer performance join
+
+`SharedState::peer_performance_rows` joins the three places peer speed was
+already known and none of which was readable from outside the scheduler: the
+health-ping round trip (`PeerInfo.latency_ms`), the per-layer EMA the Parallax
+router uses (`peer_segment_latency_ms_per_layer`), and `hedge_tracker`'s
+per-(model, segment, holder) EWMA with variance and sample counts — collected
+since R136 with zero consumers until this. Sorted slowest first; only peers that
+have actually served something appear.
+
+### "Tokens per second per node" is not directly measurable
+
+In a pipeline the segments are **serialised**: every token traverses node A's
+layers, then node B's. There is no independent per-node token rate —
+`tokens / A_time` would show both nodes producing the full stream and the figures
+would not compose. What is real and exported:
+
+- **per-segment share of inter-token latency** (`SegmentTrace.elapsed_ms`) — these
+  sum toward the total, so they identify the bottleneck hop
+- **ms per layer per token** — comparable across peers serving differently-sized
+  segments
+- **derived node capacity** = `1000 / (ms_per_layer × layers_served)`, useful for
+  scheduling and leaderboards but labelled derived, not measured
+
+For a non-pipelined route the request's tok/s *is* that node's tok/s and is
+reported plainly.
+
+### Retention
+
+Not a time-series database — `monitoring/` ships Prometheus + Grafana for that.
+`PerfHistory` (`daemon/state/perf_history.rs`) keeps one bucket per hour capped
+at a week (168), holding **sums** rather than averages so buckets can be merged
+without averaging averages, persisted to redb only when the hour rolls over. Only
+aggregates are persisted; per-request and per-peer rows stay in the in-memory
+rings and are intentionally lost on restart.
 
 ## Activity Event System
 
