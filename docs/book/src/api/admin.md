@@ -13,6 +13,28 @@ Connected peers with latency, trust scores, and hosted models.
 ### GET /api/admin/credits
 Credit balance and tier info.
 
+### GET /api/admin/diagnostics
+Plain-text health report, meant to be read in a terminal or pasted into a bug
+report. Covers internet reachability and NAT status, hole-punching counts, the
+last 50 completed requests with their routes and per-segment timings, per-peer
+serving performance, what this node has served for others, and recent failures
+including which peer served each one. See
+[Troubleshooting](../troubleshooting.md) for how to read it.
+
+### GET /api/admin/performance
+The JSON sibling of `diagnostics`, used by the dashboard's Performance view.
+
+| Field | Contents |
+|---|---|
+| `recent` | Up to 50 completed requests, newest first: route, per-phase timings, per-segment attribution (node, layer range, elapsed, transport, region), tokens, outcome |
+| `peers` | Every peer that has served part of a request: round-trip time, ms per layer, latency EWMA, sample count, region — slowest first |
+| `served` | Segments and layers this node computed for others, compute time, activation bytes returned, and ms per layer |
+| `hourly` | One bucket per hour for the past week: request and error counts, average total time, average time-to-first-token, average throughput, and counts by route. Persisted, so it survives a restart |
+
+Fetched on demand rather than pushed over the WebSocket. The per-peer and
+per-request detail here is high-cardinality by nature; it is served when asked
+for and never retained beyond the bounded rings above.
+
 ### GET /api/admin/network-map
 Geographic distribution of peers and shards across regions. Each entry includes the total peer count for that region, per-model shard-holder counts, per-model request demand rates, coverage gaps (models with zero holders in the region), and per-model replication targets derived from pool size and demand. Includes the local node in its auto-detected or configured region.
 

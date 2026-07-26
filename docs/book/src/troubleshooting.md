@@ -1,5 +1,71 @@
 # Troubleshooting
 
+## Start here: why was that request slow, or where did it fail?
+
+Every completed request writes **one** summary line. Read it before anything
+else — it usually identifies the problem on its own:
+
+```bash
+grep "DIAG: request complete" node.log | tail -5
+```
+
+```
+DIAG: request complete request_id=1ddd2912-… route=distributed segments=2
+  nodes=0718d8b9,96842635 regions=TH,TH queue_ms=3 sched_ms=1 ttft_ms=180
+  decode_ms=1420 total_ms=1604 tokens=48 tok_per_sec=33.8
+  seg0_ms=520 seg1_ms=900 outcome=ok
+```
+
+| What you see | What it means |
+|---|---|
+| `queue_ms` large | this node is saturated — raise `max_concurrent_requests`, or your credit tier is capping you |
+| `sched_ms` large | the scheduler is struggling to find holders — check the peer table below |
+| `ttft_ms` large, `decode_ms` small | prefill or a cold model load. Not the network |
+| `decode_ms` large | per-token cost — find the slow hop in the `segN_ms` values |
+| one `segN_ms` dominates | that peer is the bottleneck |
+| `route=relayed` | no direct path to a holder, so traffic takes an extra hop each way |
+| `outcome=error error_type=…` | the name points at the subsystem that failed |
+
+A missing field means "not measured", never zero. `ttft_ms` and `decode_ms` are
+absent on requests that did not stream, because there is no honest way to split
+decode out of the total there.
+
+### No log file to hand?
+
+```bash
+curl -s -H "Authorization: Bearer $(cat ~/.local/share/swarmllm/api_key)" \
+  localhost:8800/api/admin/diagnostics
+```
+
+This is the single most useful thing to attach to a bug report. It includes
+whether your machine is reachable from the internet, the last 50 requests with
+their routes, **per-peer serving performance** (ping, ms per layer, latency,
+region — slowest first), what your node has served for others, and recent
+failures with *which machine served each one*. That last detail is what separates
+"my node has a problem" from "one peer has a problem".
+
+### Diagnosing from the client side
+
+You do not need server access. Every response carries its route:
+
+```bash
+curl -i -X POST localhost:8800/v1/chat/completions \
+  -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
+  -d '{"model":"…","messages":[{"role":"user","content":"hi"}]}' \
+  | grep -i '^x-swarm-\|^server-timing'
+```
+
+```
+x-swarm-route: distributed
+x-swarm-peers: 1
+x-swarm-nodes: 0718d8b9,96842635
+server-timing: queue;dur=3, sched;dur=1, ttft;dur=180, decode;dur=1420
+```
+
+On a **streaming** response `Server-Timing` carries only what is known before the
+body starts — queue and scheduling. Token-level figures arrive at the end of the
+stream, because a header cannot be revised once sent.
+
 ## Can't Connect to Peers
 
 **Check the bootstrap address format:**
