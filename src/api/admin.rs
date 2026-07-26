@@ -284,6 +284,108 @@ pub async fn diagnostics(State(state): State<AppState>) -> impl axum::response::
         }
     }
 
+    // Completed requests. The successful sibling of the failure ring above:
+    // "why was that slow" needs the route and the per-phase split, and
+    // reconstructing those from interleaved DIAG lines across two machines is
+    // what has repeatedly cost hours.
+    {
+        let traces = ss.recent_traces_snapshot();
+        let _ = writeln!(out, "\n-- recent requests ({}) --", traces.len());
+        if traces.is_empty() {
+            let _ = writeln!(out, "  (none since start)");
+        }
+        // Newest first — the request someone is asking about just now.
+        for t in traces.iter().rev().take(15) {
+            let ttft = t
+                .ttft_ms
+                .map(|v| format!("{v}ms"))
+                .unwrap_or_else(|| "-".into());
+            let rate = t
+                .tok_per_sec
+                .map(|v| format!("{v:.1} tok/s"))
+                .unwrap_or_else(|| "-".into());
+            let _ = writeln!(
+                out,
+                "  {} [{}] {} {}  total={}ms ttft={} {}  {}",
+                &t.request_id.to_string()[..8],
+                t.model,
+                t.route.as_str(),
+                if t.segments.len() > 1 {
+                    format!("x{}", t.segments.len())
+                } else {
+                    String::new()
+                },
+                t.total_ms,
+                ttft,
+                rate,
+                t.outcome.as_str(),
+            );
+            // Only worth a second line when the work actually left this node.
+            if t.remote_segments() > 0 {
+                for s in &t.segments {
+                    let ms = s
+                        .elapsed_ms
+                        .map(|v| format!("{v}ms"))
+                        .unwrap_or_else(|| "-".into());
+                    let _ = writeln!(
+                        out,
+                        "      seg{} {} L{}-{} {} {}{}",
+                        s.index,
+                        if s.is_local { "local" } else { s.short_node() },
+                        s.layer_start,
+                        s.layer_end,
+                        ms,
+                        match s.transport {
+                            crate::inference::trace::Transport::Relayed => "relayed",
+                            crate::inference::trace::Transport::Direct => "direct",
+                            crate::inference::trace::Transport::Local => "",
+                        },
+                        s.region
+                            .as_deref()
+                            .map(|r| format!(" {r}"))
+                            .unwrap_or_default(),
+                    );
+                }
+            }
+        }
+    }
+
+    // Per-peer serving performance. `hedge_tracker` has carried EWMA latency
+    // with variance per (model, segment, holder) since R136 and nothing could
+    // read it; this is the first surface that does. Answers "which peer is
+    // dragging the pipeline" directly instead of by inference from failures.
+    {
+        let rows = ss.peer_performance_rows();
+        let _ = writeln!(out, "\n-- peer serving performance ({}) --", rows.len());
+        if rows.is_empty() {
+            let _ = writeln!(out, "  (no remote segments served yet)");
+        } else {
+            let _ = writeln!(
+                out,
+                "  {:<18} {:>6} {:>9} {:>9} {:>7}  region",
+                "peer", "rtt", "ms/layer", "ewma", "samples"
+            );
+        }
+        for r in rows {
+            let _ = writeln!(
+                out,
+                "  {:<18} {:>6} {:>9} {:>9} {:>7}  {}",
+                &r.node_id[..r.node_id.len().min(16)],
+                r.rtt_ms
+                    .map(|v| format!("{v}ms"))
+                    .unwrap_or_else(|| "-".into()),
+                r.ms_per_layer
+                    .map(|v| format!("{v:.1}"))
+                    .unwrap_or_else(|| "-".into()),
+                r.ewma_ms
+                    .map(|v| format!("{v:.0}ms"))
+                    .unwrap_or_else(|| "-".into()),
+                r.samples,
+                r.region.as_deref().unwrap_or("-"),
+            );
+        }
+    }
+
     // NAT traversal. "Is this node stuck behind the relay?" is the first
     // question worth asking when remote inference is slow or failing, and it
     // used to be unanswerable — DCUtR emitted no logs at all.

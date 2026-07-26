@@ -788,12 +788,19 @@ impl PipelineExecutor {
                         generated_ids,
                     )
                     .await?;
+                let segment_ms = segment_start.elapsed().as_millis() as u64;
                 tracing::debug!(
                     request_id = %request_id,
                     segment = idx,
-                    segment_ms = segment_start.elapsed().as_millis() as u64,
+                    segment_ms,
                     activation_bytes = result.activations.len(),
                     "DIAG: local segment complete"
+                );
+                self.shared_state.record_segment_timing(
+                    request_id,
+                    idx as u16,
+                    segment_ms as u32,
+                    result.activations.len() as u32,
                 );
                 if is_last {
                     tracing::info!(
@@ -1062,6 +1069,12 @@ impl PipelineExecutor {
                                 segment_ms = seg_elapsed_ms,
                                 activation_bytes = result.activations.len(),
                                 "DIAG: remote segment complete"
+                            );
+                            self.shared_state.record_segment_timing(
+                                request_id,
+                                idx as u16,
+                                seg_elapsed_ms as u32,
+                                result.activations.len() as u32,
                             );
                             if is_last {
                                 tracing::info!(

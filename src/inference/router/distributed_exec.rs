@@ -271,6 +271,7 @@ pub(super) async fn execute_distributed_batch(
 
                 finalize_request(&shared_state, &request, &output, None).await;
                 shared_state.active_pipelines.remove(&request.id);
+                shared_state.active_traces.remove(&request.id);
                 // Decrement active_count and wake drain_queue so the next queued
                 // request can dispatch (without notify, the queue stalls until a
                 // new Submit arrives).
@@ -298,6 +299,7 @@ pub(super) async fn execute_distributed_batch(
                 // normal-exit path. Without this, the entry stays
                 // forever and blocks shard pruning (gotcha #85).
                 shared_state.active_pipelines.remove(&request_id);
+                shared_state.active_traces.remove(&request_id);
                 active_count.fetch_sub(1, Ordering::Relaxed);
                 queue_notify.notify_one();
             }
@@ -578,11 +580,14 @@ pub(super) async fn execute_request(
         trace.mark_assembled(crate::inference::trace::classify_route(&segs), segs);
     }
 
-    // Store assignment in shared state for monitoring
+    // Store assignment in shared state for monitoring. `active_traces` is
+    // inserted here and removed at every site that removes `active_pipelines`,
+    // so the two share one lifetime and one cleanup path.
     let assignment_ref = assignment.clone();
     shared_state
         .active_pipelines
         .insert(request.id, assignment.clone());
+    shared_state.active_traces.insert(request.id, trace.clone());
 
     // Execute the distributed pipeline
     let execute_start = std::time::Instant::now();

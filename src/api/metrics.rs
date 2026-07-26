@@ -78,6 +78,17 @@ pub async fn metrics(State(state): State<AppState>) -> Response {
     // swarmllm_inference_latency_seconds (histogram)
     write_latency_histogram(&mut buf, shared);
 
+    // OpenTelemetry GenAI server metrics. Named to the semantic conventions so
+    // an OTel collector and the community Grafana dashboards work with no
+    // translation layer. `swarmllm_inference_latency_seconds` above is the same
+    // measurement as `gen_ai_server_request_duration_seconds` under a local
+    // name; both are emitted while dashboards migrate.
+    write_genai_histograms(&mut buf, shared);
+
+    // Requests by route and outcome — the ONLY labelled request counter.
+    // Both labels are closed sets, so this cannot grow with the swarm.
+    write_route_counter(&mut buf, shared);
+
     // Channel backpressure metrics
     write_channel_metrics(&mut buf, shared);
 
@@ -330,6 +341,99 @@ fn write_channel_metrics(buf: &mut String, shared: &crate::daemon::SharedState) 
             "swarmllm_channel_dropped_total{{channel=\"{name}\"}} {}",
             counters.dropped.load(Relaxed)
         );
+    }
+}
+
+/// OpenTelemetry GenAI bucket boundaries for time-to-first-token, in seconds.
+/// Taken verbatim from the semantic conventions rather than chosen locally, so
+/// our buckets line up with every other GenAI server a collector scrapes.
+const GENAI_BUCKETS: &[f64] = &[
+    0.001, 0.005, 0.01, 0.02, 0.04, 0.06, 0.08, 0.1, 0.25, 0.5, 0.75, 1.0, 2.5, 5.0, 7.5, 10.0,
+];
+
+/// Emit `gen_ai_server_time_to_first_token_seconds` and
+/// `gen_ai_server_time_per_output_token_seconds`.
+///
+/// These are the two numbers that separate a backed-up queue from slow decode,
+/// and neither was measured server-side before — TTFT existed only in the bench
+/// CLI, computed client-side.
+fn write_genai_histograms(buf: &mut String, shared: &crate::daemon::SharedState) {
+    let m = &shared.metrics;
+    write_genai_histogram(
+        buf,
+        "gen_ai_server_time_to_first_token_seconds",
+        "Time to first token in seconds",
+        &m.ttft_samples,
+        m.ttft_total_count.load(Ordering::Relaxed),
+        m.ttft_total_micros.load(Ordering::Relaxed),
+    );
+    write_genai_histogram(
+        buf,
+        "gen_ai_server_time_per_output_token_seconds",
+        "Time per output token after the first, in seconds",
+        &m.tpot_samples,
+        m.tpot_total_count.load(Ordering::Relaxed),
+        m.tpot_total_micros.load(Ordering::Relaxed),
+    );
+}
+
+fn write_genai_histogram(
+    buf: &mut String,
+    name: &str,
+    help: &str,
+    samples: &std::sync::RwLock<std::collections::VecDeque<(std::time::Instant, f64)>>,
+    total_count: u64,
+    total_micros: u64,
+) {
+    let cutoff = std::time::Instant::now() - LATENCY_SAMPLE_MAX_AGE;
+    let fresh: Vec<f64> = match samples.read() {
+        Ok(g) => g
+            .iter()
+            .filter(|(t, _)| *t >= cutoff)
+            .map(|(_, v)| *v)
+            .collect(),
+        Err(_) => {
+            tracing::warn!(module = "metrics", name, "sample lock poisoned — skipping");
+            return;
+        }
+    };
+    let _ = writeln!(buf, "# HELP {name} {help}");
+    let _ = writeln!(buf, "# TYPE {name} histogram");
+    for &bound in GENAI_BUCKETS {
+        let n = fresh.iter().filter(|&&s| s <= bound).count();
+        let _ = writeln!(buf, "{name}_bucket{{le=\"{bound}\"}} {n}");
+    }
+    // `_count`/`_sum` come from the monotonic atomics, never the ring — the
+    // ring is capped and age-bounded, so its length falls and would break
+    // rate()/increase() (R105).
+    let _ = writeln!(buf, "{name}_bucket{{le=\"+Inf\"}} {total_count}");
+    let _ = writeln!(buf, "{name}_count {total_count}");
+    let _ = writeln!(buf, "{name}_sum {}", total_micros as f64 / 1_000_000.0);
+}
+
+/// Emit `swarmllm_inference_requests_by_route_total{route,outcome}`.
+///
+/// Cardinality is 5 routes × 4 outcomes = 20 series, fixed regardless of swarm
+/// size, model count or peer count. Anything per-peer or per-model is
+/// deliberately NOT here.
+fn write_route_counter(buf: &mut String, shared: &crate::daemon::SharedState) {
+    let name = "swarmllm_inference_requests_by_route_total";
+    let _ = writeln!(
+        buf,
+        "# HELP {name} Completed inference requests by route and outcome"
+    );
+    let _ = writeln!(buf, "# TYPE {name} counter");
+    // Sorted so scrape output is stable between calls — makes diffing two
+    // scrapes by hand actually workable.
+    let mut rows: Vec<((&str, &str), u64)> = shared
+        .metrics
+        .requests_by_route
+        .iter()
+        .map(|e| (*e.key(), *e.value()))
+        .collect();
+    rows.sort_unstable();
+    for ((route, outcome), n) in rows {
+        let _ = writeln!(buf, "{name}{{route=\"{route}\",outcome=\"{outcome}\"}} {n}");
     }
 }
 

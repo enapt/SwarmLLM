@@ -247,6 +247,31 @@ impl HedgeTracker {
         before - self.stats.len()
     }
 
+    /// Sample-weighted latency per holder, collapsed across (model, segment).
+    ///
+    /// The tracker keys on the triple because that is what hedging needs to
+    /// decide. Operators ask a coarser question — "which peer is dragging the
+    /// pipeline" — so aggregate here rather than making every caller
+    /// re-implement the weighting. Returns `(holder, ewma_ms, samples)` with
+    /// entries carrying no samples omitted, since a zero-sample EWMA is a
+    /// default value rather than a measurement.
+    pub fn latency_by_holder(&self) -> Vec<(NodeId, f32, u32)> {
+        let mut acc: std::collections::HashMap<NodeId, (f64, u64)> =
+            std::collections::HashMap::new();
+        for e in self.stats.iter() {
+            let s = e.value();
+            if s.samples == 0 {
+                continue;
+            }
+            let slot = acc.entry(e.key().holder.clone()).or_insert((0.0, 0));
+            slot.0 += s.ewma_ms as f64 * s.samples as f64;
+            slot.1 += s.samples as u64;
+        }
+        acc.into_iter()
+            .map(|(holder, (weighted, n))| (holder, (weighted / n as f64) as f32, n as u32))
+            .collect()
+    }
+
     /// Current snapshot of hedge metrics — exposed via /api/admin/stats
     /// for operator visibility.
     pub fn metrics(&self) -> HedgeMetrics {

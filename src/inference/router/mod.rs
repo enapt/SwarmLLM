@@ -798,6 +798,7 @@ impl InferenceRouter {
                 fn drop(&mut self) {
                     if self.armed {
                         self.shared_state.active_pipelines.remove(&self.request_id);
+                        self.shared_state.active_traces.remove(&self.request_id);
                         self.count
                             .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
                         // Wake drain_queue so the next queued request can dispatch.
@@ -1114,6 +1115,7 @@ impl InferenceRouter {
             active_guard.disarm();
             // Remove from active pipelines
             shared_state.active_pipelines.remove(&request.id);
+            shared_state.active_traces.remove(&request.id);
 
             // Decrement active count so new requests can be dispatched, then
             // wake drain_queue so the next queued request actually starts.

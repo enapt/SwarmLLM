@@ -40,6 +40,32 @@ pub struct MetricsProviders {
     /// Monotonic total sum of latency samples (ms × 1000 to keep an
     /// integer; divide by 1e6 when emitting as seconds).
     pub inference_latency_total_micros: AtomicU64,
+    /// Time-to-first-token and time-per-output-token samples, seconds.
+    ///
+    /// OTel's `gen_ai.server.time_to_first_token` and
+    /// `gen_ai.server.time_per_output_token`. Neither existed server-side
+    /// before — TTFT lived only in the bench CLI, measured client-side — and
+    /// they are the two numbers that separate "the queue is backed up" from
+    /// "decode is slow", which wall-clock total cannot.
+    ///
+    /// Same ring + monotonic-counter shape as `inference_latency_samples`: the
+    /// ring gives the bucket distribution, the atomics give a `_count`/`_sum`
+    /// that never falls when the ring wraps (R105).
+    pub ttft_samples: std::sync::RwLock<std::collections::VecDeque<(std::time::Instant, f64)>>,
+    pub ttft_total_count: AtomicU64,
+    pub ttft_total_micros: AtomicU64,
+    pub tpot_samples: std::sync::RwLock<std::collections::VecDeque<(std::time::Instant, f64)>>,
+    pub tpot_total_count: AtomicU64,
+    pub tpot_total_micros: AtomicU64,
+    /// Completed requests by `(route, outcome)`.
+    ///
+    /// Deliberately the ONLY labelled request counter. Both label values come
+    /// from closed sets (5 routes × 4 outcomes = 20 series max), so this cannot
+    /// grow with the swarm. Per-peer, per-model and per-shard breakdowns are
+    /// unbounded and live in `GET /api/admin/diagnostics`, which is pulled on
+    /// demand and never retained — see `docs/FUTURE_WORK.md` § Observability on
+    /// why an unbounded label set takes down the scrape.
+    pub requests_by_route: DashMap<(&'static str, &'static str), u64>,
     pub channel_metrics: ChannelMetricsSet,
     pub ws_connection_count: std::sync::atomic::AtomicUsize,
     pub node_stats: RwLock<NodeStats>,

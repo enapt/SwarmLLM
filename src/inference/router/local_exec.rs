@@ -219,6 +219,7 @@ pub(super) async fn execute_local_batch(
 
         finalize_request(&shared_state, &request, &output, None).await;
         shared_state.active_pipelines.remove(&request.id);
+        shared_state.active_traces.remove(&request.id);
         cleanup.complete_one();
         if result_tx.send(output).is_err() {
             tracing::warn!(

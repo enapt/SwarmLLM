@@ -114,11 +114,52 @@ impl super::SharedState {
     pub fn publish_request_trace(&self, trace: &crate::inference::trace::RequestTrace) {
         let snap = trace.snapshot();
         tracing::info!("DIAG: request complete {}", snap.log_line());
+
+        // Prometheus. Fed from the same snapshot as the log line so a metric
+        // can never disagree with what the logs say happened.
+        *self
+            .metrics
+            .requests_by_route
+            .entry((snap.route.as_str(), outcome_label(&snap.outcome)))
+            .or_insert(0) += 1;
+        if let Some(ms) = snap.ttft_ms {
+            record_duration_sample(
+                &self.metrics.ttft_samples,
+                &self.metrics.ttft_total_count,
+                &self.metrics.ttft_total_micros,
+                ms as f64 / 1000.0,
+            );
+        }
+        if let Some(ms) = snap.tpot_ms {
+            record_duration_sample(
+                &self.metrics.tpot_samples,
+                &self.metrics.tpot_total_count,
+                &self.metrics.tpot_total_micros,
+                ms / 1000.0,
+            );
+        }
+
         if let Ok(mut buf) = self.recent_traces.lock() {
             if buf.len() >= super::MAX_RECENT_TRACES {
                 buf.pop_front();
             }
             buf.push_back(snap);
+        }
+    }
+
+    /// Attribute a segment's wall time and activation size to the in-flight
+    /// trace, if one is registered. A no-op when the request has already
+    /// finished or was never traced, so pipeline code can call it
+    /// unconditionally without knowing whether tracing is active.
+    pub fn record_segment_timing(
+        &self,
+        request_id: uuid::Uuid,
+        segment_index: u16,
+        elapsed_ms: u32,
+        activation_bytes: u32,
+    ) {
+        if let Some(t) = self.active_traces.get(&request_id) {
+            t.record_segment_timing(segment_index, elapsed_ms, activation_bytes);
         }
     }
 
@@ -128,6 +169,67 @@ impl super::SharedState {
             .lock()
             .map(|b| b.iter().cloned().collect())
             .unwrap_or_default()
+    }
+
+    /// Per-peer serving performance, worst first.
+    ///
+    /// Joins the three places peer speed is already known — the health-ping
+    /// round trip, the per-layer EMA the Parallax router uses, and the hedge
+    /// tracker's EWMA — into the single table an operator actually wants. Each
+    /// existed before this; none was readable from outside the scheduler.
+    ///
+    /// Only peers that have actually served something appear: a row of dashes
+    /// for every peer in the registry would bury the handful that matter.
+    pub fn peer_performance_rows(&self) -> Vec<super::PeerPerformanceRow> {
+        let hedge: std::collections::HashMap<crate::types::NodeId, (f32, u32)> = self
+            .metrics
+            .hedge_tracker
+            .latency_by_holder()
+            .into_iter()
+            .map(|(n, ewma, samples)| (n, (ewma, samples)))
+            .collect();
+
+        let mut ids: std::collections::HashSet<crate::types::NodeId> =
+            hedge.keys().cloned().collect();
+        ids.extend(
+            self.metrics
+                .peer_segment_latency_ms_per_layer
+                .iter()
+                .map(|e| e.key().clone()),
+        );
+
+        let mut rows: Vec<super::PeerPerformanceRow> = ids
+            .into_iter()
+            .map(|node| {
+                let peer = self.peer_registry.get(&node);
+                let (ewma_ms, samples) = hedge
+                    .get(&node)
+                    .map(|(e, s)| (Some(*e), *s))
+                    .unwrap_or((None, 0));
+                super::PeerPerformanceRow {
+                    node_id: node.to_string(),
+                    rtt_ms: peer.as_ref().and_then(|p| p.latency_ms),
+                    ms_per_layer: self
+                        .metrics
+                        .peer_segment_latency_ms_per_layer
+                        .get(&node)
+                        .map(|v| *v),
+                    ewma_ms,
+                    samples,
+                    region: peer
+                        .as_ref()
+                        .and_then(|p| p.capability.as_ref().and_then(|c| c.region.clone())),
+                }
+            })
+            .collect();
+
+        // Slowest first: the reason to open this table is to find the drag.
+        rows.sort_by(|a, b| {
+            b.ewma_ms
+                .unwrap_or(0.0)
+                .total_cmp(&a.ewma_ms.unwrap_or(0.0))
+        });
+        rows
     }
 
     /// Whether this node should act as an application-level inference relay.
@@ -302,6 +404,45 @@ impl super::SharedState {
             .retain(|_, c| c.window_start.elapsed() <= counter_ttl);
         self.relay_proven_features
             .retain(|_, e| e.proven_at.elapsed() <= route_ttl);
+    }
+}
+
+/// Static label for an outcome. Keeps the Prometheus label set closed —
+/// `Outcome::Error` carries a variant name that is bounded, but the label
+/// itself collapses to "error" so the series count stays at routes × 4.
+fn outcome_label(outcome: &crate::inference::trace::Outcome) -> &'static str {
+    use crate::inference::trace::Outcome as O;
+    match outcome {
+        O::Pending => "pending",
+        O::Ok => "ok",
+        O::Error(_) => "error",
+        O::Cancelled => "cancelled",
+    }
+}
+
+/// Push a duration into a bounded ring plus its monotonic counters.
+///
+/// The ring is age- and size-bounded and supplies the bucket distribution; the
+/// atomics supply `_count`/`_sum`, which MUST never fall or Prometheus'
+/// `rate()`/`increase()` break when the ring wraps (R105).
+fn record_duration_sample(
+    ring: &std::sync::RwLock<std::collections::VecDeque<(Instant, f64)>>,
+    count: &std::sync::atomic::AtomicU64,
+    micros: &std::sync::atomic::AtomicU64,
+    secs: f64,
+) {
+    use std::sync::atomic::Ordering;
+    count.fetch_add(1, Ordering::Relaxed);
+    micros.fetch_add((secs * 1_000_000.0).round() as u64, Ordering::Relaxed);
+    if let Ok(mut ring) = ring.write() {
+        let cutoff = Instant::now() - crate::api::metrics::LATENCY_SAMPLE_MAX_AGE;
+        while ring.front().is_some_and(|(t, _)| *t < cutoff) {
+            ring.pop_front();
+        }
+        if ring.len() >= 1000 {
+            ring.pop_front();
+        }
+        ring.push_back((Instant::now(), secs));
     }
 }
 

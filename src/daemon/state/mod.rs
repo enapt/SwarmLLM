@@ -64,6 +64,25 @@ pub struct RequestFailure {
     pub elapsed_ms: u64,
 }
 
+/// One peer's serving performance, joined from the health-ping RTT, the
+/// per-layer EMA and the hedge tracker's EWMA. Rendered by
+/// `GET /api/admin/diagnostics` and the swarm dashboard.
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct PeerPerformanceRow {
+    pub node_id: String,
+    /// Health-ping round trip.
+    pub rtt_ms: Option<u32>,
+    /// Observed per-layer forward cost — comparable across peers serving
+    /// differently-sized segments, unlike raw segment time.
+    pub ms_per_layer: Option<f32>,
+    /// Sample-weighted EWMA of segment latency across all (model, segment)
+    /// pairs this peer served for us.
+    pub ewma_ms: Option<f32>,
+    /// Observations behind `ewma_ms`. A one-sample average is not evidence.
+    pub samples: u32,
+    pub region: Option<String>,
+}
+
 pub struct SharedState {
     // Core infrastructure (accessed by nearly every subsystem)
     pub config: Config,
@@ -240,6 +259,15 @@ pub struct SharedState {
     /// "why did that break" and "why was that slow" without a log excerpt.
     pub recent_traces:
         std::sync::Mutex<std::collections::VecDeque<crate::inference::trace::TraceSnapshot>>,
+    /// In-flight traces, keyed by request id.
+    ///
+    /// Deep pipeline code (`pipeline/distributed.rs`) knows a segment's elapsed
+    /// time but has no trace handle, and threading one through every executor
+    /// signature would be invasive. This map has **exactly the same lifetime as
+    /// `active_pipelines`** — inserted and removed at the same sites — so it
+    /// inherits that mechanism's already-correct cleanup, including the panic
+    /// path via `ActivePipelineGuard::drop`.
+    pub active_traces: DashMap<uuid::Uuid, std::sync::Arc<crate::inference::trace::RequestTrace>>,
     pub detected_region: RwLock<Option<String>>,
     pub shard_bytes_served: AtomicU64,
     pub relay_seconds_served: AtomicU64,
@@ -394,6 +422,13 @@ impl SharedState {
                 inference_latency_samples: std::sync::RwLock::new(std::collections::VecDeque::new()),
                 inference_latency_total_count: AtomicU64::new(0),
                 inference_latency_total_micros: AtomicU64::new(0),
+                ttft_samples: std::sync::RwLock::new(std::collections::VecDeque::new()),
+                ttft_total_count: AtomicU64::new(0),
+                ttft_total_micros: AtomicU64::new(0),
+                tpot_samples: std::sync::RwLock::new(std::collections::VecDeque::new()),
+                tpot_total_count: AtomicU64::new(0),
+                tpot_total_micros: AtomicU64::new(0),
+                requests_by_route: DashMap::new(),
                 channel_metrics: ChannelMetricsSet::new(),
                 ws_connection_count: std::sync::atomic::AtomicUsize::new(0),
                 providers_config: RwLock::new({
@@ -585,6 +620,7 @@ impl SharedState {
             hole_punch_failures: AtomicU64::new(0),
             recent_failures: std::sync::Mutex::new(std::collections::VecDeque::new()),
             recent_traces: std::sync::Mutex::new(std::collections::VecDeque::new()),
+            active_traces: DashMap::new(),
             vision_modules: DashMap::new(),
             encrypted_pipeline_models: {
                 let map = DashMap::new();
