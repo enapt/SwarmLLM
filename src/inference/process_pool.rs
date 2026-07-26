@@ -75,9 +75,20 @@ const RESPONSE_CHANNEL_CAPACITY: usize = 256;
 /// Response channel entry: a bounded mpsc sender carrying `(WorkerMsg, payload_bytes)`.
 type ResponseTx = mpsc::Sender<(WorkerMsg, Vec<u8>)>;
 
-/// Shared map from `request_id` to the caller's response channel. The reader
-/// actor looks up each inbound message's `request_id` here to route the reply.
-type ResponseMap = Arc<DashMap<Uuid, ResponseTx>>;
+/// Shared map from `request_id` to the caller's response channel, tagged with
+/// a unique per-attempt token. The reader actor looks up each inbound message's
+/// `request_id` here to route the reply.
+///
+/// The token exists because a `request_id` is NOT unique across concurrent
+/// attempts: a router retry (and a hedge race) re-sends the *same* id while the
+/// original is still in flight. Keyed by id alone, the retry's insert silently
+/// dropped the original's sender and the original's cleanup then removed the
+/// retry's — killing both. See `WorkerHandle::register_response`.
+type ResponseMap = Arc<DashMap<Uuid, (u64, ResponseTx)>>;
+
+/// Source of per-attempt tokens for `ResponseMap`. Process-wide; only equality
+/// matters, never ordering.
+static RESPONSE_ATTEMPT_TOKEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 /// A handle to a running model worker subprocess.
 ///
@@ -217,7 +228,7 @@ async fn reader_actor(
                     // Sender and drop the Ref *before* awaiting `send` so we
                     // don't hold a DashMap shard across an await point (that
                     // would risk deadlock on a concurrent insert/remove).
-                    if let Some(tx) = responses.get(&rid).map(|r| r.value().clone()) {
+                    if let Some(tx) = responses.get(&rid).map(|r| r.value().1.clone()) {
                         // Send best-effort; if the caller has already hung up
                         // we just drop the message.
                         let _ = tx.send((msg, payload)).await;
@@ -330,7 +341,7 @@ async fn dispatch_batch_result(
         };
         cursor = cursor.saturating_add(advance);
         let rid = r.request_id;
-        let tx_opt = responses.get(&rid).map(|e| e.value().clone());
+        let tx_opt = responses.get(&rid).map(|e| e.value().1.clone());
         if let Some(tx) = tx_opt {
             let _ = tx.send((WorkerMsg::LayerResult(r), slot_payload)).await;
         } else {
@@ -361,10 +372,74 @@ impl Drop for WorkerHandle {
 struct ResponseGuard {
     responses: ResponseMap,
     request_id: Uuid,
+    /// Identifies THIS attempt's entry. `Drop` removes the map entry only when
+    /// it still carries this token, so a superseded attempt's cleanup cannot
+    /// tear down the attempt that displaced it.
+    token: u64,
     /// Worker to notify if this guard drops without being disarmed. `None`
     /// suppresses the cancel entirely (used where the request is known to have
     /// already reached the worker's terminal state).
     worker: Option<Arc<WorkerHandle>>,
+}
+
+/// Claim `request_id` in `map` for a fresh attempt. Returns the new attempt's
+/// token plus the token it displaced, if another attempt was already
+/// registered under the same id.
+fn claim_response_slot(map: &ResponseMap, request_id: Uuid, tx: ResponseTx) -> (u64, Option<u64>) {
+    let token = RESPONSE_ATTEMPT_TOKEN.fetch_add(1, Ordering::Relaxed);
+    let displaced = map.insert(request_id, (token, tx)).map(|(prev, _)| prev);
+    (token, displaced)
+}
+
+/// True when `request_id` is registered to an attempt other than `token` —
+/// i.e. a later attempt has taken the slot over.
+fn response_slot_superseded(map: &ResponseMap, request_id: Uuid, token: u64) -> bool {
+    map.get(&request_id).is_some_and(|e| e.value().0 != token)
+}
+
+impl WorkerHandle {
+    /// Register `tx` as the response channel for `request_id` and return the
+    /// guard that owns the entry. This is the ONLY supported way to populate
+    /// `responses`: inserting directly cannot produce a correctly-tokened
+    /// guard, so a superseded attempt would tear down its successor.
+    ///
+    /// `cancel_on_drop` sends the worker a cancel if the guard drops while
+    /// still armed; pass `false` where there is no compute worth abandoning.
+    ///
+    /// Returns the guard plus the token displaced from the map, if any. A
+    /// `Some` displaced token means another attempt is in flight under the
+    /// same `request_id` — the caller has superseded it.
+    fn register_response(
+        self: &Arc<Self>,
+        request_id: Uuid,
+        tx: ResponseTx,
+        cancel_on_drop: bool,
+    ) -> (ResponseGuard, Option<u64>) {
+        let (token, displaced) = claim_response_slot(&self.responses, request_id, tx);
+        if displaced.is_some() {
+            tracing::warn!(
+                %request_id,
+                "Second in-flight generate for this request_id — superseding \
+                 the earlier attempt (router retry or hedge race)"
+            );
+        }
+        (
+            ResponseGuard {
+                responses: self.responses.clone(),
+                request_id,
+                token,
+                worker: cancel_on_drop.then(|| self.clone()),
+            },
+            displaced,
+        )
+    }
+
+    /// True when `request_id`'s entry has been taken over by a later attempt.
+    /// Distinguishes "a retry displaced me" from "the worker really died",
+    /// which present identically as a closed response channel.
+    fn response_superseded(&self, request_id: Uuid, token: u64) -> bool {
+        response_slot_superseded(&self.responses, request_id, token)
+    }
 }
 
 impl ResponseGuard {
@@ -380,7 +455,11 @@ impl ResponseGuard {
 
 impl Drop for ResponseGuard {
     fn drop(&mut self) {
-        self.responses.remove(&self.request_id);
+        // Identity-checked: if a retry with the same request_id has already
+        // replaced our entry, that entry belongs to the retry and removing it
+        // would fail a request that is still perfectly healthy.
+        self.responses
+            .remove_if(&self.request_id, |_, (tok, _)| *tok == self.token);
 
         // Still armed → the caller went away before a terminal reply arrived:
         // client disconnected, `tokio::select!` timeout fired, or a hedge race
@@ -792,14 +871,9 @@ impl ModelProcessPool {
         }
         let request_id = Uuid::new_v4();
         let (tx, mut rx) = mpsc::channel::<(WorkerMsg, Vec<u8>)>(2);
-        handle.responses.insert(request_id, tx);
-        let _guard = ResponseGuard {
-            responses: handle.responses.clone(),
-            request_id,
-            // Snapshot export is a cheap metadata read, not a decode loop —
-            // there is no meaningful compute to abandon.
-            worker: None,
-        };
+        // Snapshot export is a cheap metadata read, not a decode loop — there
+        // is no meaningful compute to abandon.
+        let (_guard, _) = handle.register_response(request_id, tx, false);
         {
             let mut writer = handle.writer.lock().await;
             let msg = DaemonMsg::ExportPrefixSnapshot {
@@ -1477,12 +1551,7 @@ impl ModelProcessPool {
         // Register a response channel BEFORE sending so the reader actor can
         // route any early error/reply. Unregistered on drop via ResponseGuard.
         let (resp_tx, mut resp_rx) = mpsc::channel(RESPONSE_CHANNEL_CAPACITY);
-        handle.responses.insert(request_id, resp_tx);
-        let mut guard = ResponseGuard {
-            responses: handle.responses.clone(),
-            request_id,
-            worker: Some(handle.clone()),
-        };
+        let (mut guard, _) = handle.register_response(request_id, resp_tx, true);
 
         let payload_buf: Vec<u8> = if vision_len == 0 {
             activations
@@ -1589,15 +1658,11 @@ impl ModelProcessPool {
         let mut guards: Vec<ResponseGuard> = Vec::with_capacity(n);
         for f in &forwards {
             let (tx, rx) = mpsc::channel(RESPONSE_CHANNEL_CAPACITY);
-            handle.responses.insert(f.request_id, tx);
-            guards.push(ResponseGuard {
-                responses: handle.responses.clone(),
-                request_id: f.request_id,
-                // A BatchForward is one fused matmul over N requests; the
-                // worker cannot skip a single member, so cancelling one is
-                // meaningless. Matches `cancelled_request_id`'s exclusion.
-                worker: None,
-            });
+            // A BatchForward is one fused matmul over N requests; the worker
+            // cannot skip a single member, so cancelling one is meaningless.
+            // Matches `cancelled_request_id`'s exclusion.
+            let (g, _) = handle.register_response(f.request_id, tx, false);
+            guards.push(g);
             receivers.push((f.request_id, rx));
         }
 
@@ -1823,12 +1888,8 @@ impl ModelProcessPool {
         }
 
         let (resp_tx, mut resp_rx) = mpsc::channel(RESPONSE_CHANNEL_CAPACITY);
-        handle.responses.insert(request_id, resp_tx);
-        let mut guard = ResponseGuard {
-            responses: handle.responses.clone(),
-            request_id,
-            worker: Some(handle.clone()),
-        };
+        let (mut guard, _) = handle.register_response(request_id, resp_tx, true);
+        let attempt_token = guard.token;
 
         {
             let mut writer = handle.writer.lock().await;
@@ -1859,11 +1920,22 @@ impl ModelProcessPool {
             let (msg, _) = match resp_rx.recv().await {
                 Some(v) => v,
                 None => {
+                    guard.disarm();
+                    // A closed channel has two very different causes. If a
+                    // later attempt has taken over this request_id, the worker
+                    // is fine and is still computing for that attempt —
+                    // evicting it here would destroy a healthy worker (forcing
+                    // a full model reload) and abort the attempt that replaced
+                    // us.
+                    if handle.response_superseded(request_id, attempt_token) {
+                        return Err(SwarmError::ServiceUnavailable(
+                            "superseded by a retry of the same request".into(),
+                        ));
+                    }
                     // Subprocess lifecycle failure → ServiceUnavailable.
                     // Was Internal; operators saw 500s here and misattributed
                     // them to code bugs rather than worker crashes.
                     self.workers.remove(model_id);
-                    guard.disarm();
                     return Err(SwarmError::ServiceUnavailable(
                         "worker closed connection mid-generate".into(),
                     ));
@@ -2118,6 +2190,83 @@ impl ModelProcessPool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Builds a guard the way `register_response` does, for map-level tests.
+    fn guard_for(map: &ResponseMap, request_id: Uuid, token: u64) -> ResponseGuard {
+        ResponseGuard {
+            responses: map.clone(),
+            request_id,
+            token,
+            worker: None,
+        }
+    }
+
+    fn dummy_tx() -> ResponseTx {
+        mpsc::channel(1).0
+    }
+
+    #[test]
+    fn second_attempt_on_same_request_id_displaces_the_first() {
+        let map: ResponseMap = Arc::new(DashMap::new());
+        let rid = Uuid::new_v4();
+        let (t1, d1) = claim_response_slot(&map, rid, dummy_tx());
+        assert_eq!(d1, None, "first claim displaces nothing");
+        let (t2, d2) = claim_response_slot(&map, rid, dummy_tx());
+        assert_eq!(d2, Some(t1), "retry reports the attempt it superseded");
+        assert_ne!(t1, t2, "attempts get distinct tokens");
+    }
+
+    #[test]
+    fn superseded_attempt_is_distinguishable_from_a_dead_worker() {
+        let map: ResponseMap = Arc::new(DashMap::new());
+        let rid = Uuid::new_v4();
+        let (t1, _) = claim_response_slot(&map, rid, dummy_tx());
+        // Nobody has taken over yet: a closed channel here really is a dead worker.
+        assert!(!response_slot_superseded(&map, rid, t1));
+        let (t2, _) = claim_response_slot(&map, rid, dummy_tx());
+        // Now attempt 1 is superseded, attempt 2 is not.
+        assert!(response_slot_superseded(&map, rid, t1));
+        assert!(!response_slot_superseded(&map, rid, t2));
+    }
+
+    /// The live failure: a retry displaced the original, then the original's
+    /// cleanup removed the *retry's* channel, so both attempts died and a
+    /// healthy worker was evicted.
+    #[test]
+    fn superseded_attempt_cleanup_does_not_evict_its_successor() {
+        let map: ResponseMap = Arc::new(DashMap::new());
+        let rid = Uuid::new_v4();
+        let (t1, _) = claim_response_slot(&map, rid, dummy_tx());
+        let g1 = guard_for(&map, rid, t1);
+        let (t2, _) = claim_response_slot(&map, rid, dummy_tx());
+
+        drop(g1); // attempt 1 gives up after being displaced
+
+        let held = map.get(&rid).map(|e| e.value().0);
+        assert_eq!(held, Some(t2), "the retry's channel must survive");
+    }
+
+    #[test]
+    fn last_attempt_cleanup_clears_the_slot() {
+        let map: ResponseMap = Arc::new(DashMap::new());
+        let rid = Uuid::new_v4();
+        let (t1, _) = claim_response_slot(&map, rid, dummy_tx());
+        let (t2, _) = claim_response_slot(&map, rid, dummy_tx());
+        drop(guard_for(&map, rid, t1));
+        drop(guard_for(&map, rid, t2));
+        assert!(map.get(&rid).is_none(), "no entry may be leaked");
+    }
+
+    #[test]
+    fn unrelated_request_ids_are_untouched() {
+        let map: ResponseMap = Arc::new(DashMap::new());
+        let (a, b) = (Uuid::new_v4(), Uuid::new_v4());
+        let (ta, _) = claim_response_slot(&map, a, dummy_tx());
+        let (tb, _) = claim_response_slot(&map, b, dummy_tx());
+        drop(guard_for(&map, a, ta));
+        assert!(map.get(&a).is_none());
+        assert_eq!(map.get(&b).map(|e| e.value().0), Some(tb));
+    }
 
     fn test_pool() -> ModelProcessPool {
         ModelProcessPool::new(std::path::PathBuf::from("/tmp/swarmllm-test-pool"))
