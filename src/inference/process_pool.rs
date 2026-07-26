@@ -1734,7 +1734,7 @@ impl ModelProcessPool {
         sampling: SamplingParams,
         request_id: uuid::Uuid,
         session_id: Option<String>,
-        token_tx: Option<tokio::sync::mpsc::Sender<StreamingTokenEvent>>,
+        token_tx: Option<crate::inference::router::StreamingTokenTx>,
     ) -> Result<crate::inference::router::InferenceOutput, SwarmError> {
         // Track whether any token has been streamed to the caller, so a retry
         // can never duplicate output the client already saw.
@@ -1799,7 +1799,7 @@ impl ModelProcessPool {
         sampling: SamplingParams,
         request_id: uuid::Uuid,
         session_id: Option<String>,
-        token_tx: Option<tokio::sync::mpsc::Sender<StreamingTokenEvent>>,
+        token_tx: Option<crate::inference::router::StreamingTokenTx>,
         emitted: &std::sync::atomic::AtomicBool,
     ) -> Result<crate::inference::router::InferenceOutput, SwarmError> {
         let handle = self.get_or_spawn(model_id).await?;

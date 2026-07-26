@@ -104,6 +104,32 @@ impl super::SharedState {
             .unwrap_or_default()
     }
 
+    /// Emit a completed request's trace to every observability surface.
+    ///
+    /// Called once, from the router's completion arm. Writes the single
+    /// greppable `DIAG: request complete` line and pushes the snapshot into the
+    /// ring that `GET /api/admin/diagnostics` renders — the successful sibling
+    /// of [`Self::record_request_failure`], which is what made "why did that
+    /// break" answerable but left "why was that slow" unanswerable.
+    pub fn publish_request_trace(&self, trace: &crate::inference::trace::RequestTrace) {
+        let snap = trace.snapshot();
+        tracing::info!("DIAG: request complete {}", snap.log_line());
+        if let Ok(mut buf) = self.recent_traces.lock() {
+            if buf.len() >= super::MAX_RECENT_TRACES {
+                buf.pop_front();
+            }
+            buf.push_back(snap);
+        }
+    }
+
+    /// Snapshot of recent request traces, oldest first.
+    pub fn recent_traces_snapshot(&self) -> Vec<crate::inference::trace::TraceSnapshot> {
+        self.recent_traces
+            .lock()
+            .map(|b| b.iter().cloned().collect())
+            .unwrap_or_default()
+    }
+
     /// Whether this node should act as an application-level inference relay.
     ///
     /// The single source of truth for the relay-forwarder decision — the DHT

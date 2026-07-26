@@ -123,8 +123,7 @@ pub(super) async fn handle_remote_generate_request(
     // Channel from the worker (via ModelProcessPool::generate) → the network
     // forwarding task below. Must be bounded to apply back-pressure if the
     // network can't keep up.
-    let (token_tx, mut token_rx) =
-        mpsc::channel::<crate::inference::router::StreamingTokenEvent>(64);
+    let (token_tx, mut token_rx) = crate::inference::router::StreamingTokenTx::channel(64);
 
     // Spawn the generate call. It holds the model worker's socket lock for
     // the entire decode, which is fine — other requests for the same model

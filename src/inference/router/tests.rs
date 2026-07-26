@@ -93,16 +93,31 @@ fn priority_ordering() {
         request: make_request(PriorityTier::Bronze),
         result_tx: tx_a,
         token_tx: None,
+        trace: std::sync::Arc::new(crate::inference::trace::RequestTrace::new(
+            uuid::Uuid::new_v4(),
+            "test-model",
+            "chat",
+        )),
     });
     queue.push(QueuedRequest {
         request: make_request(PriorityTier::Platinum),
         result_tx: tx_b,
         token_tx: None,
+        trace: std::sync::Arc::new(crate::inference::trace::RequestTrace::new(
+            uuid::Uuid::new_v4(),
+            "test-model",
+            "chat",
+        )),
     });
     queue.push(QueuedRequest {
         request: make_request(PriorityTier::Silver),
         result_tx: tx_c,
         token_tx: None,
+        trace: std::sync::Arc::new(crate::inference::trace::RequestTrace::new(
+            uuid::Uuid::new_v4(),
+            "test-model",
+            "chat",
+        )),
     });
 
     // Highest priority should come out first
@@ -127,6 +142,11 @@ fn collect_batch_groups_same_model() {
             request: make_request_with_model(PriorityTier::Silver, "alpha"),
             result_tx: tx,
             token_tx: None,
+            trace: std::sync::Arc::new(crate::inference::trace::RequestTrace::new(
+                uuid::Uuid::new_v4(),
+                "test-model",
+                "chat",
+            )),
         });
     }
     for _ in 0..2 {
@@ -135,6 +155,11 @@ fn collect_batch_groups_same_model() {
             request: make_request_with_model(PriorityTier::Silver, "beta"),
             result_tx: tx,
             token_tx: None,
+            trace: std::sync::Arc::new(crate::inference::trace::RequestTrace::new(
+                uuid::Uuid::new_v4(),
+                "test-model",
+                "chat",
+            )),
         });
     }
 
@@ -159,6 +184,11 @@ fn collect_batch_single_returns_one() {
             request: make_request(PriorityTier::Silver),
             result_tx: tx,
             token_tx: None,
+            trace: std::sync::Arc::new(crate::inference::trace::RequestTrace::new(
+                uuid::Uuid::new_v4(),
+                "test-model",
+                "chat",
+            )),
         });
     }
 
@@ -181,6 +211,11 @@ fn collect_batch_respects_max_size() {
             request: make_request(PriorityTier::Silver),
             result_tx: tx,
             token_tx: None,
+            trace: std::sync::Arc::new(crate::inference::trace::RequestTrace::new(
+                uuid::Uuid::new_v4(),
+                "test-model",
+                "chat",
+            )),
         });
     }
 

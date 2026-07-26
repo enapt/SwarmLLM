@@ -44,6 +44,11 @@ pub use tp_allreduce::TpAllReduceCollector;
 /// a pattern (one flaky peer, one bad model) without turning into a log.
 pub const MAX_RECENT_FAILURES: usize = 20;
 
+/// Completed traces kept for `GET /api/admin/diagnostics`. Larger than the
+/// failure ring because successful requests are the baseline you compare a
+/// slow one against, and they are cheap (no strings beyond node ids).
+pub const MAX_RECENT_TRACES: usize = 50;
+
 /// One failed inference, retained for `GET /api/admin/diagnostics`.
 #[derive(Debug, Clone)]
 pub struct RequestFailure {
@@ -230,6 +235,11 @@ pub struct SharedState {
     /// that usually lost the original occurrence. A bounded in-memory ring costs
     /// nothing and turns most reports into one command.
     pub recent_failures: std::sync::Mutex<std::collections::VecDeque<RequestFailure>>,
+    /// Completed request traces — route, timings and per-segment attribution.
+    /// The successful sibling of `recent_failures`: together they answer both
+    /// "why did that break" and "why was that slow" without a log excerpt.
+    pub recent_traces:
+        std::sync::Mutex<std::collections::VecDeque<crate::inference::trace::TraceSnapshot>>,
     pub detected_region: RwLock<Option<String>>,
     pub shard_bytes_served: AtomicU64,
     pub relay_seconds_served: AtomicU64,
@@ -574,6 +584,7 @@ impl SharedState {
             hole_punch_successes: AtomicU64::new(0),
             hole_punch_failures: AtomicU64::new(0),
             recent_failures: std::sync::Mutex::new(std::collections::VecDeque::new()),
+            recent_traces: std::sync::Mutex::new(std::collections::VecDeque::new()),
             vision_modules: DashMap::new(),
             encrypted_pipeline_models: {
                 let map = DashMap::new();

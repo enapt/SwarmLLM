@@ -24,6 +24,7 @@ pub mod split;
 pub mod swift;
 pub(crate) mod tensor_util;
 pub(crate) mod tokenizer;
+pub mod trace;
 pub mod vision;
 pub mod worker_ipc;
 

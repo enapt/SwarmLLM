@@ -167,8 +167,7 @@ pub fn spawn_split_stream(
     // the leak only showed up on some models via some endpoints.
     let params = with_template_stops(params, meta.chat_template.as_deref());
     let rid = uuid::Uuid::parse_str(request_id).unwrap_or_else(|_| uuid::Uuid::new_v4());
-    let (token_tx, token_rx) =
-        tokio::sync::mpsc::channel::<crate::inference::router::StreamingTokenEvent>(64);
+    let (token_tx, token_rx) = crate::inference::router::StreamingTokenTx::channel(64);
     // Records why generation stopped when it produced nothing. Without this the
     // channel simply closes and the client sees an empty-but-successful stream,
     // so the dashboard had to *guess* a reason ("the model might still be
@@ -266,7 +265,7 @@ pub async fn submit_stream_to_router(
     ApiError,
 > {
     let (result_tx, result_rx) = tokio::sync::oneshot::channel();
-    let (token_tx, token_rx) = tokio::sync::mpsc::channel::<StreamingTokenEvent>(64);
+    let (token_tx, token_rx) = crate::inference::router::StreamingTokenTx::channel(64);
 
     let mut inference_req = InferenceRequest::local(
         model_id,

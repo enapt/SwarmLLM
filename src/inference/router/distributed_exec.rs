@@ -240,6 +240,8 @@ pub(super) async fn execute_distributed_batch(
                 let request = queued.request;
                 let result_tx = queued.result_tx;
                 let token_tx = queued.token_tx;
+                let trace = queued.trace;
+                trace.mark_dequeued();
 
                 let output = execute_request(
                     shared_state.clone(),
@@ -248,8 +250,24 @@ pub(super) async fn execute_distributed_batch(
                     request.clone(),
                     token_tx,
                     None, // No pipeline affinity for batched requests
+                    trace.clone(),
                 )
                 .await;
+                match &output {
+                    Ok(r) => trace.mark_finished(
+                        crate::inference::trace::Outcome::Ok,
+                        r.prompt_tokens,
+                        r.completion_tokens,
+                    ),
+                    Err(e) => trace.mark_finished(
+                        crate::inference::trace::Outcome::Error(
+                            crate::inference::trace::error_kind(e).to_string(),
+                        ),
+                        0,
+                        0,
+                    ),
+                }
+                shared_state.publish_request_trace(&trace);
 
                 finalize_request(&shared_state, &request, &output, None).await;
                 shared_state.active_pipelines.remove(&request.id);
@@ -295,6 +313,10 @@ pub(super) async fn execute_request(
     request: InferenceRequest,
     token_tx: Option<StreamingTokenTx>,
     preferred_pipeline: Option<PipelineAssignment>,
+    // `trace` is required, not optional: a path that quietly passes nothing
+    // produces a trace with no route, which is indistinguishable from a local
+    // request in every surface that renders it.
+    trace: Arc<crate::inference::trace::RequestTrace>,
 ) -> Result<InferenceOutput, SwarmError> {
     let model_id = &request.model_id;
 
@@ -526,6 +548,34 @@ pub(super) async fn execute_request(
             layer_end = seg.layer_range.1,
             "Pipeline segment"
         );
+    }
+
+    // Record the route while the assignment is in hand. Region comes from the
+    // peer's voluntarily-declared `NodeCapability.region`; transport reflects
+    // whether the holder is reachable only through an application-level relay,
+    // which costs roughly an extra RTT each way and is worth seeing in the
+    // trace when a hop looks slow.
+    {
+        let segs = crate::inference::trace::segments_from_assignment(
+            assignment.segments.iter(),
+            &local_node_id,
+            |seg| {
+                (
+                    seg.node_id.clone(),
+                    seg.layer_range.0,
+                    seg.layer_range.1,
+                    vec![seg.shard_id.index],
+                    shared_state.peer_reachable_via_relay(&seg.node_id),
+                )
+            },
+            |node| {
+                shared_state
+                    .peer_registry
+                    .get(node)
+                    .and_then(|p| p.capability.as_ref().and_then(|c| c.region.clone()))
+            },
+        );
+        trace.mark_assembled(crate::inference::trace::classify_route(&segs), segs);
     }
 
     // Store assignment in shared state for monitoring

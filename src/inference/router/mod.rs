@@ -430,10 +430,21 @@ impl InferenceRouter {
             "Queued inference request"
         );
 
+        // Trace starts at admission, so `queue_ms` measures real user-visible
+        // wait rather than time since dispatch. Attaching it to the token
+        // channel is what stamps TTFT — every emit path funnels through there.
+        let trace = std::sync::Arc::new(crate::inference::trace::RequestTrace::new(
+            adjusted_request.id,
+            adjusted_request.model_id.to_string(),
+            "chat",
+        ));
+        let token_tx = token_tx.map(|tx| tx.with_trace(trace.clone()));
+
         self.queue.push(QueuedRequest {
             request: adjusted_request,
             result_tx,
             token_tx,
+            trace,
         });
 
         // Wake the drain loop immediately instead of waiting for 50ms poll.
@@ -657,6 +668,9 @@ impl InferenceRouter {
     /// hit, the tensor-level KV-cache is preserved and `start_pos` is set
     /// to skip redundant prefill.
     fn dispatch_single(&mut self, queued: QueuedRequest) {
+        // Closes out `queue_ms`. Everything from here is scheduling or work.
+        queued.trace.mark_dequeued();
+
         // Pipeline affinity: get previous pipeline assignment for KV cache locality
         let preferred_pipeline = if let Some(ref session_id) = queued.request.session_id {
             if let Some(internal_id) = self.kv_cache.get_internal_id(session_id) {
@@ -760,6 +774,7 @@ impl InferenceRouter {
         let request = queued.request;
         let result_tx = queued.result_tx;
         let token_tx = queued.token_tx;
+        let trace = queued.trace;
 
         tokio::spawn(async move {
             // RAII guard so a panic anywhere inside the spawned closure
@@ -864,6 +879,7 @@ impl InferenceRouter {
                 request.clone(),
                 token_tx.clone(),
                 preferred_pipeline,
+                trace.clone(),
             )
             .await;
             if matches!(&output, Err(e) if is_transient_remote_failure(e)) {
@@ -879,23 +895,36 @@ impl InferenceRouter {
                     request.clone(),
                     token_tx,
                     None,
+                    trace.clone(),
                 )
                 .await;
             }
 
             let elapsed = request_start.elapsed();
+
+            // Close the trace, then emit the one greppable completion line and
+            // publish it. Every observability surface renders from this single
+            // record — see `inference::trace`.
+            match &output {
+                Ok(ref result) => trace.mark_finished(
+                    crate::inference::trace::Outcome::Ok,
+                    result.prompt_tokens,
+                    result.completion_tokens,
+                ),
+                Err(ref e) => trace.mark_finished(
+                    crate::inference::trace::Outcome::Error(
+                        crate::inference::trace::error_kind(e).to_string(),
+                    ),
+                    0,
+                    0,
+                ),
+            }
+            shared_state.publish_request_trace(&trace);
+
             // Record latency for Prometheus histogram
             match &output {
-                Ok(ref result) => {
+                Ok(_) => {
                     let latency_secs = elapsed.as_secs_f64();
-                    tracing::info!(
-                        request_id = %request.id,
-                        model = %request.model_id,
-                        elapsed_ms = elapsed.as_millis() as u64,
-                        prompt_tokens = result.prompt_tokens,
-                        completion_tokens = result.completion_tokens,
-                        "DIAG: inference completed"
-                    );
                     if let Ok(mut samples) = shared_state.metrics.inference_latency_samples.write()
                     {
                         // R137: drop entries older than the freshness window

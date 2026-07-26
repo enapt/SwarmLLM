@@ -11,7 +11,79 @@ use crate::types::{InferenceRequest, SwarmMessage};
 pub type InferenceResultTx = oneshot::Sender<Result<InferenceOutput, SwarmError>>;
 
 /// Sender for incremental streaming tokens from distributed inference.
-pub type StreamingTokenTx = mpsc::Sender<StreamingTokenEvent>;
+///
+/// A newtype around the channel rather than a bare `mpsc::Sender` so that
+/// **time-to-first-token is stamped at the one place every path funnels
+/// through**. Tokens are emitted from seven sites across `local_exec`,
+/// `process_pool`, `dsd`, `speculative`, `ngram_only_spec` and
+/// `pipeline/mod`; stamping TTFT at each is exactly the "one invariant, N
+/// paths" defect in `.claude/rules/architecture.md` — a new emit site would
+/// silently report no TTFT. Here a new site inherits it for free.
+///
+/// The API surface mirrors `mpsc::Sender` (`send`, `try_send`, `is_closed`,
+/// `closed`, `Clone`) so call sites read unchanged.
+#[derive(Clone)]
+pub struct StreamingTokenTx {
+    inner: mpsc::Sender<StreamingTokenEvent>,
+    /// `None` on paths with no trace (tests, internal fan-out). The wrapper
+    /// still forwards; it just records nothing.
+    trace: Option<std::sync::Arc<crate::inference::trace::RequestTrace>>,
+}
+
+impl StreamingTokenTx {
+    /// Create the channel. Preferred over building an `mpsc::channel` by hand
+    /// so the sender is always the traced wrapper.
+    pub fn channel(capacity: usize) -> (Self, mpsc::Receiver<StreamingTokenEvent>) {
+        let (inner, rx) = mpsc::channel(capacity);
+        (Self { inner, trace: None }, rx)
+    }
+
+    /// Attach the trace whose TTFT this channel should stamp.
+    pub fn with_trace(
+        mut self,
+        trace: std::sync::Arc<crate::inference::trace::RequestTrace>,
+    ) -> Self {
+        self.trace = Some(trace);
+        self
+    }
+
+    /// Stamp on the first event that carries actual text. The terminal
+    /// `finish_reason` event has an empty `text` and must not count as the
+    /// first token — otherwise a zero-token response would report a TTFT.
+    #[inline]
+    fn stamp(&self, event: &StreamingTokenEvent) {
+        if !event.text.is_empty() {
+            if let Some(ref t) = self.trace {
+                t.mark_first_token();
+            }
+        }
+    }
+
+    pub async fn send(
+        &self,
+        event: StreamingTokenEvent,
+    ) -> Result<(), mpsc::error::SendError<StreamingTokenEvent>> {
+        self.stamp(&event);
+        self.inner.send(event).await
+    }
+
+    pub fn try_send(
+        &self,
+        event: StreamingTokenEvent,
+    ) -> Result<(), mpsc::error::TrySendError<StreamingTokenEvent>> {
+        self.stamp(&event);
+        self.inner.try_send(event)
+    }
+
+    pub fn is_closed(&self) -> bool {
+        self.inner.is_closed()
+    }
+
+    /// Resolves when the RECEIVER is dropped — consumer-liveness watch.
+    pub async fn closed(&self) {
+        self.inner.closed().await
+    }
+}
 
 /// A queued inference request with its result channel and priority ordering.
 pub(super) struct QueuedRequest {
@@ -19,6 +91,9 @@ pub(super) struct QueuedRequest {
     pub(super) result_tx: InferenceResultTx,
     /// If set, tokens are sent incrementally for SSE streaming.
     pub(super) token_tx: Option<StreamingTokenTx>,
+    /// Routing + performance record. Created at enqueue so queue wait is
+    /// measured from admission rather than from dispatch.
+    pub(super) trace: std::sync::Arc<crate::inference::trace::RequestTrace>,
 }
 
 impl Eq for QueuedRequest {}
