@@ -982,7 +982,65 @@ attention if either cap grows materially.
 > - Tier 4J (pre-emptive layer dispatch) — speculative novelty.
 > - Tier 5L (FP8 activation) — needs Hopper+ hardware.
 >
-> See `## R136 local 3-node benchmark — measured results` below for
+> See `## CPU prefill throughput is the dominant cost for modest nodes (measured 2026-07-27)
+
+**Status: measured, not addressed.** Recorded because it sets the ceiling on
+what a CPU-only volunteer node can usefully serve, and because the numbers make
+the trade-offs concrete.
+
+Measured on a Dell OptiPlex 3090 Micro (Intel i5-10500T, 6 cores @ 2.3GHz, no
+GPU) serving `llama-3.2-1b-instruct-q8-0`, via the request tracing added in
+v0.3.30:
+
+| Prompt | Prefill (time to first token) | Notes |
+|---|---|---|
+| 13 tokens | ~4.0s | of a 4.6s total request |
+| 613 tokens | ~285s | fresh prompt, prefix cache cold |
+| 1322 tokens | ~319s | `ttft_ms=319470`, `total_ms=321539` |
+
+Two things follow.
+
+**Prefill dominates completely.** On the 1322-token request, time-to-first-token
+was 99.4% of the total. Decode measured ~230ms/token; prompt processing measured
+~267ms/token. Any optimisation aimed at decode is close to irrelevant for these
+nodes — the lever is prompt processing.
+
+**It is not an algorithmic bug, and that was checked.** Doubling the prompt
+doubled the time (2.02×), so it is linear, not quadratic. `model.forward()` does
+receive the whole prompt tensor in one pass, so prefill is batched as intended.
+The cost is candle's CPU quantized matmul: roughly 9 GFLOPS against a chip whose
+FP32 peak is on the order of 100-200 GFLOPS, i.e. ~5-9% of peak. llama.cpp's
+hand-written quantized CPU kernels are the reference point for what this could
+be; candle is not competitive with them on CPU.
+
+The per-token ratio is misleading on its own and shouldn't be used as evidence
+of a batching bug — a batched prefill *should* be much cheaper per token than
+decode, and here it isn't, but only because the CPU is compute-starved rather
+than bandwidth-starved. See gotcha #181 for the full reasoning, including the
+prefix-cache trap that made an early measurement read 10s instead of 285s.
+
+Options, roughly in order of effort:
+
+1. **Route long prompts away from slow nodes.** The scheduler already has
+   `ms_per_layer` per peer (`/api/admin/performance`). A node that cannot
+   plausibly prefill the prompt inside the budget could be skipped when a
+   faster holder exists. Cheapest real win; does nothing when the slow node is
+   the only holder.
+2. **Report prefill progress from the serving node.** Today a long prefill is
+   indistinguishable from a dead peer — the remote sends nothing for minutes,
+   which is why the timeout had to be lengthened rather than made adaptive. A
+   feature-gated progress signal would let the coordinator hold the connection
+   open on evidence rather than on a guess, and fail fast on genuine silence.
+   Must be additive and feature-gated per `.claude/rules/architecture.md`.
+3. **Faster CPU quantized matmul.** Either an optional llama.cpp-backed CPU
+   path or improved kernels. Largest effort, largest payoff, and the only
+   option that changes the ceiling rather than routing around it.
+
+Until one of these lands, the practical guidance for operators is that a
+CPU-only node is well suited to short prompts and poorly suited to long-context
+work, and that this scales with the machine rather than being a fixed limit.
+
+## R136 local 3-node benchmark — measured results` below for
 > the actual numbers, and the per-Tier sections below for full
 > context on what's open.
 

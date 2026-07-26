@@ -2,6 +2,51 @@
 
 All notable changes to SwarmLLM are documented here.
 
+## [Unreleased]
+
+### Fixed
+
+- **Long questions no longer fail after two minutes.** Asking something with a
+  few paragraphs of context could come back as an inference error, even though
+  the machine answering it was working normally and would have finished.
+
+  The wait for the first word was a fixed budget, sized against how long
+  *writing* an answer takes. It never accounted for *reading* the question,
+  which grows with the question's length. On a six-core CPU machine a
+  ~600-word question needs around five minutes just to read; the two-minute
+  budget expired part-way through, the request retried, and hit the same wall.
+  Short questions stayed inside the budget, which is why this only showed up
+  once a question got long.
+
+  The budget now grows with the question, and is sized using the model's own
+  tokenizer where possible — a character-count rule of thumb tuned for English
+  under-budgets Chinese and Japanese by more than half. There is still a
+  ceiling, so an unresponsive machine is detected promptly. Short questions are
+  timed exactly as before, and faster machines were never affected; this mainly
+  decides whether modest CPU-only machines can answer long questions at all.
+
+- **A retried request could take down both attempts and the model with it.**
+  When a request was retried while the original was still running, the two
+  attempts shared an identity that was assumed to be unique. The retry
+  displaced the original's reply channel, and the original's cleanup then
+  removed the retry's, so both failed. The path also discarded the running
+  model, which was healthy throughout — so the next request paid a full model
+  reload for no reason.
+
+  It was reported as the model process closing the connection, which pointed at
+  the wrong thing entirely. Attempts are now tracked individually: cleanup can
+  only remove its own, a displaced attempt says it was superseded rather than
+  blaming the model, and the model is left running.
+
+### Changed
+
+- **Downloading a shard now writes as data arrives.** A download showed an
+  empty file for around twenty-five seconds before anything appeared, then
+  landed all at once, because each range was collected in memory first and
+  written at the end. Progress now moves continuously and a large shard no
+  longer has to fit in memory on the way through. The downloaded file is
+  unchanged, byte for byte.
+
 ## [0.3.34-alpha] — 2026-07-26
 
 ### Fixed
