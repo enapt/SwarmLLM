@@ -163,6 +163,29 @@ pub async fn update_providers(
     State(state): State<AppState>,
     Json(body): Json<ProvidersUpdate>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    // Reject a request that would change nothing, rather than reporting success.
+    //
+    // The key fields are named `<provider>_key` (`mistral_key`, not `mistral`),
+    // and unknown fields deserialize away silently — so a wrong field name meant
+    // every key was `None`, nothing was written, and the response still said
+    // `status: "ok"`. A tester reasonably read that as persisted and was then
+    // puzzled when a follow-up GET showed `configured: false` (external report
+    // 2026-07-26). Naming the expected shape is the difference between a
+    // dead end and a one-line fix on the caller's side.
+    let nothing_to_do = body.keyed_entries().iter().all(|(_, k)| k.is_none())
+        && body.key_source.is_none()
+        && cfg!(not(feature = "claude-subscription"));
+    #[cfg(feature = "claude-subscription")]
+    let nothing_to_do = nothing_to_do && body.claude_subscription_enabled.is_none();
+    if nothing_to_do {
+        return Err(ApiError(crate::error::SwarmError::Validation(
+            "no recognised fields in request — API keys use `<provider>_key` \
+             (e.g. `mistral_key`, `openai_key`), optionally with `key_source` \
+             set to auto/env/dashboard"
+                .into(),
+        )));
+    }
+
     // Validate all keys before applying any changes
     let all_keys = body.keyed_entries();
     for (name, key) in &all_keys {

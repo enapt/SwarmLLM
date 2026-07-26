@@ -412,15 +412,30 @@ fn parse_quant_from_manifest(manifest: &ModelManifest) -> Quantization {
     }
 }
 
+/// Best-effort quantization tag from the end of a model name.
+///
+/// Quant tags are multi-part (`q8-0`, `q4-k-m`), so taking only the text after
+/// the LAST separator yields `0` or `m` and parses as Unknown. Tries the last
+/// three separator-delimited segments, longest first, and returns the first
+/// that parses to a real quantization — falling back to the final segment so
+/// existing single-part behaviour is unchanged.
 fn trailing_tag(name: &str) -> String {
     let lower = name.to_ascii_lowercase();
     let core = lower.trim_end_matches(".gguf");
-    for delim in &['-', '.', '_'][..] {
-        if let Some(pos) = core.rfind(*delim) {
-            return core[pos + 1..].to_string();
+    let parts: Vec<&str> = core
+        .split(['-', '.', '_'])
+        .filter(|p| !p.is_empty())
+        .collect();
+    if parts.is_empty() {
+        return core.to_string();
+    }
+    for take in (1..=3.min(parts.len())).rev() {
+        let candidate = parts[parts.len() - take..].join("-");
+        if Quantization::parse(&candidate) != Quantization::Unknown {
+            return candidate;
         }
     }
-    core.to_string()
+    parts[parts.len() - 1].to_string()
 }
 
 fn base_name_to_display(base: &str, fallback: &str) -> String {
@@ -465,6 +480,53 @@ fn strip_trailing_quant(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Model IDs carry hyphenated quant tags (`q8-0`, `q4-k-m`) because id
+    /// sanitisation rewrites `_` to `-`. Taking only the text after the last
+    /// separator gave `0` / `m`, which parsed as Unknown and fell back to the
+    /// `Q4KM` placeholder — so a Q8_0 model was reported as Q4KM
+    /// (external report 2026-07-26).
+    #[test]
+    fn hyphenated_quant_tags_in_model_ids_parse_correctly() {
+        for (name, want) in [
+            ("llama-3.2-1b-instruct-q8-0", Quantization::Q8_0),
+            ("qwen2.5-coder-7b-instruct-q4-k-m", Quantization::Q4KM),
+            ("tinyllama-1.1b-chat-v1.0.q4-k-m", Quantization::Q4KM),
+            ("meta-llama-3.1-8b-instruct-q5-k-s", Quantization::Q5KS),
+            ("some-model-q6-k", Quantization::Q6K),
+            ("qwen2.5-0.5b-instruct-fp16", Quantization::FP16),
+        ] {
+            let tag = trailing_tag(name);
+            assert_eq!(
+                Quantization::parse(&tag),
+                want,
+                "name {name:?} produced tag {tag:?}"
+            );
+        }
+    }
+
+    /// Underscore filenames must keep working alongside the hyphen form.
+    #[test]
+    fn underscore_quant_tags_still_parse() {
+        for (name, want) in [
+            ("llama-3.2-1b-instruct-q8_0.gguf", Quantization::Q8_0),
+            ("model-q4_k_m.gguf", Quantization::Q4KM),
+        ] {
+            assert_eq!(Quantization::parse(&trailing_tag(name)), want, "{name}");
+        }
+    }
+
+    /// A name with no recognisable quant must not be coerced into one.
+    #[test]
+    fn names_without_a_quant_tag_stay_unknown() {
+        for name in ["llama-3.2-1b-instruct", "some-model", "plainname"] {
+            assert_eq!(
+                Quantization::parse(&trailing_tag(name)),
+                Quantization::Unknown,
+                "{name} should not resolve to a quantization"
+            );
+        }
+    }
 
     #[test]
     fn parse_canonical_quants() {

@@ -426,9 +426,36 @@ pub async fn try_proxy_openai(
         "Proxying OpenAI-compatible request to cloud provider"
     );
 
+    // `provider:model` selects the provider HERE; the provider itself has never
+    // heard of the prefix, so it must not travel upstream. DeepSeek rejects
+    // `deepseek:deepseek-v4-flash` with "the supported API model names are
+    // deepseek-v4-pro or deepseek-v4-flash" (external report 2026-07-26).
+    // The Anthropic surface already stripped it via `strip_provider_prefix`;
+    // this one forwarded the body verbatim.
+    let body = strip_prefix_in_body(body);
+
     let response =
-        proxy_openai_compatible(&provider.base_url, &provider.api_key, body, stream).await?;
+        proxy_openai_compatible(&provider.base_url, &provider.api_key, &body, stream).await?;
     Ok(Some(response))
+}
+
+/// Return `body` with any `provider:` prefix removed from its `model` field.
+///
+/// Clones only when a prefix is actually present, so the common path is a cheap
+/// reference-preserving passthrough.
+fn strip_prefix_in_body(body: &serde_json::Value) -> std::borrow::Cow<'_, serde_json::Value> {
+    let Some(model) = body.get("model").and_then(|m| m.as_str()) else {
+        return std::borrow::Cow::Borrowed(body);
+    };
+    let bare = crate::api::strip_provider_prefix(model);
+    if bare == model {
+        return std::borrow::Cow::Borrowed(body);
+    }
+    let mut owned = body.clone();
+    if let Some(obj) = owned.as_object_mut() {
+        obj.insert("model".into(), serde_json::Value::String(bare.to_string()));
+    }
+    std::borrow::Cow::Owned(owned)
 }
 
 /// Validate that a provider base_url uses an allowed scheme and does not target

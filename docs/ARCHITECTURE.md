@@ -67,7 +67,10 @@ Single Rust binary, three simultaneous functions:
 │  │    routes, pending_prefix_kv_fetches,               │  │
 │  │    pending_activation_chunks (R139 Tier 4K),        │  │
 │  │    standalone_tokenizers (R136 L1/L3 follow-on),    │  │
-│  │    listen_multiaddrs (R140 pool invite v2)          │  │
+│  │    listen_multiaddrs (R140 pool invite v2),         │  │
+│  │    publicly_reachable + hole_punch_successes /      │  │
+│  │      hole_punch_failures (v0.3.21 NAT diagnostics), │  │
+│  │    recent_failures (v0.3.22 diagnostics ring, 20)   │  │
 │  └────────────────────────────────────────────────────┘  │
 └──────────────────────────────────────────────────────────┘
 ```
@@ -1511,6 +1514,14 @@ Routes Claude model requests through a locally-authenticated `claude` CLI subpro
 - `POST    /api/admin/models/{id}/add` — Trigger model acquisition
 - `GET     /api/admin/models/{id}/status` — Model acquisition progress
 - `GET     /api/admin/peers` — Connected peers with latency/trust
+- `GET     /api/admin/diagnostics` — Plain-text support dump. Sections: reachable
+  addresses, peers, **recent inference failures** (last 20: model, elapsed, and
+  *which peer served each* — the field that separates "this node is broken" from
+  "one peer is broken", plus a repeated-peer note), **NAT traversal**
+  (`publicly reachable`, `donating relay capacity`, hole-punch success/failure
+  counts with a reading of what zero means in context), peer cache (stored vs
+  dialable), and models. This is the single most useful thing to include in a
+  bug report.
 - `GET     /api/admin/credits` — Credit balance and tier info
 - `GET     /api/admin/shard-storage` — Per-model storage breakdown, disk/VRAM usage
 - `GET     /api/admin/api-key` — Retrieve API key (Bearer auth required)

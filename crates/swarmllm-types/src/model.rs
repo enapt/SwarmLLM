@@ -147,7 +147,13 @@ impl Quantization {
     /// no-underscore forms (`Q4_K_M` and `Q4KM`).
     pub fn parse(tag: &str) -> Self {
         let up = tag.to_uppercase();
-        let stripped: String = up.chars().filter(|c| *c != '_').collect();
+        // Strip BOTH separators. A quant tag reaches us as `q8_0` from a
+        // filename but as `q8-0` from a model id, because id sanitisation
+        // rewrites `_` to `-`. Only stripping `_` meant every hyphenated id
+        // parsed as Unknown and fell back to the `Q4KM` placeholder — so
+        // `llama-3.2-1b-instruct-q8-0` was reported as Q4KM (external report
+        // 2026-07-26).
+        let stripped: String = up.chars().filter(|c| *c != '_' && *c != '-').collect();
         match stripped.as_str() {
             "Q2K" => Self::Q2K,
             "Q3KS" => Self::Q3KS,
