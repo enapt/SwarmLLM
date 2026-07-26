@@ -982,7 +982,75 @@ attention if either cap grows materially.
 > - Tier 4J (pre-emptive layer dispatch) — speculative novelty.
 > - Tier 5L (FP8 activation) — needs Hopper+ hardware.
 >
-> See `## CPU prefill throughput is the dominant cost for modest nodes (measured 2026-07-27)
+> See `## A node holding every shard monopolises the model (measured 2026-07-27)
+
+**Status: root-caused, not fixed.** Deliberately left for a deliberate change —
+this is core routing, and it should not be altered without an A/B across a real
+swarm.
+
+### Symptom
+
+A GPU node holding shards 0 and 1 of `llama-3.2-1b-instruct-q8-0` **in VRAM**
+sent every request, in full, to a CPU-only node that happened to hold all three
+shards — including the 10 of 16 layers it could have run locally on the GPU.
+Given the measured prefill cost of that CPU node (§ "CPU prefill throughput"),
+this is the difference between minutes and seconds on a long prompt.
+
+### Root cause
+
+`scheduler/parallax.rs::route_shortest_path` builds **one DP vertex per
+(candidate, available_range)**, and treats each range as indivisible. Edges
+require an exact boundary match:
+
+```rust
+if vertices[w_idx].range.0 != v_end { continue; }
+```
+
+For the live case the candidate set was:
+
+```
+Pipeline candidate node=9684263580c6660f ranges=[(0, 16)]  can_be_first=true can_be_last=true
+Pipeline candidate node=0718d8b987a4975a ranges=[(0, 10)]  can_be_first=true can_be_last=false  <- local, GPU
+DIAG: parallax routing selected chain segments=1
+```
+
+The local vertex `(0,10)` needs a successor starting at layer 10. The remote
+node's only vertex is `(0,16)`, which starts at 0. **No vertex starts at layer
+10**, so the two-segment chain is not representable at all — the DP is not
+choosing the single-segment route over a split, it is the only path that exists.
+
+The cost model is therefore never consulted on the question. Note that it would
+have chosen correctly if asked: with the observed `ms_per_layer=107` for that
+peer, splitting costs ~643ms against ~1715ms for all-remote.
+
+### Consequences
+
+- Any node holding a complete model monopolises every request for it, however
+  slow that node is, and no other node's shards can contribute.
+- The effect is strongest exactly where it hurts most: a small model that fits
+  entirely on one modest node is also the model most likely to be fully held.
+- Load cannot be spread across holders of a fully-held model.
+- It is self-concealing: the pipeline reports `segments=1` and succeeds, so it
+  reads as a healthy fast path rather than a missed opportunity.
+
+### Fix sketch
+
+Allow a candidate's range to be sub-divided at the boundaries that actually
+matter, rather than splitting everywhere (which would make the vertex set
+O(L²) per candidate for no benefit). The useful split points are the union of
+every candidate's range starts and ends: emit a vertex for each sub-range of
+`available_ranges` delimited by those points. In the live case that adds the
+vertex `(10,16)` for the remote node, making the split representable, and the
+existing cost model then picks it on merit.
+
+Then verify against the cost model's blind spot: the local node is
+deliberately given `observed_latency_ms_per_layer = None`
+(`scheduler/mod.rs`), so it costs ~0 and will look attractive for any range it
+can serve. That is fine while local really is the fastest option, and wrong on
+a slow local machine paired with a fast peer — worth measuring once splits are
+representable, since today the question never arises.
+
+## CPU prefill throughput is the dominant cost for modest nodes (measured 2026-07-27)
 
 **Status: measured, not addressed.** Recorded because it sets the ceiling on
 what a CPU-only volunteer node can usefully serve, and because the numbers make
@@ -1025,7 +1093,9 @@ Options, roughly in order of effort:
    `ms_per_layer` per peer (`/api/admin/performance`). A node that cannot
    plausibly prefill the prompt inside the budget could be skipped when a
    faster holder exists. Cheapest real win; does nothing when the slow node is
-   the only holder.
+   the only holder. **Blocked on the section above** — today a node holding
+   every shard is the only representable route, so there is no alternative for
+   the cost model to prefer.
 2. **Report prefill progress from the serving node.** Today a long prefill is
    indistinguishable from a dead peer — the remote sends nothing for minutes,
    which is why the timeout had to be lengthened rather than made adaptive. A
