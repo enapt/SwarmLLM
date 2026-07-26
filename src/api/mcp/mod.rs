@@ -29,6 +29,14 @@ use tools_list::handle_tools_list;
 use types::{JsonRpcRequest, JsonRpcResponse, METHOD_NOT_FOUND, PARSE_ERROR};
 
 const MCP_PROTOCOL_VERSION: &str = "2025-11-25";
+
+/// Revisions this server can speak, newest first.
+///
+/// The features we implement — `tools/list`, `tools/call`, `resources/list`,
+/// `resources/read` — are identical across these revisions, so a client pinned
+/// to an older one is fully served.
+const SUPPORTED_PROTOCOL_VERSIONS: &[&str] =
+    &["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
 const SERVER_NAME: &str = "swarmllm";
 const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -77,7 +85,7 @@ pub async fn handle_mcp(
     let is_notification = req.id.is_none();
 
     let response = match req.method.as_str() {
-        "initialize" => handle_initialize(req.id),
+        "initialize" => handle_initialize(req.id, &req.params),
         "notifications/initialized" | "notifications/cancelled" => {
             if is_notification {
                 return (StatusCode::ACCEPTED, Json(None));
@@ -146,11 +154,26 @@ pub async fn handle_mcp_delete() -> impl IntoResponse {
 
 // ---- Protocol handlers ----
 
-fn handle_initialize(id: Option<Value>) -> JsonRpcResponse {
+/// Answer `initialize`, echoing the client's protocol revision when we speak it.
+///
+/// The spec is a MUST: "If the server supports the requested protocol version,
+/// it MUST respond with the same version. Otherwise, the server MUST respond
+/// with another protocol version it supports" — and a client that receives a
+/// version it does not support SHOULD DISCONNECT. Answering with our own
+/// newest revision unconditionally therefore turned away every client pinned to
+/// an older one, even though our tool surface is identical across all of them
+/// (live 2026-07-26).
+fn handle_initialize(id: Option<Value>, params: &Value) -> JsonRpcResponse {
+    let requested = params.get("protocolVersion").and_then(Value::as_str);
+    let version = match requested {
+        Some(v) if SUPPORTED_PROTOCOL_VERSIONS.contains(&v) => v,
+        // Unknown or absent: answer with our newest, as the spec directs.
+        _ => MCP_PROTOCOL_VERSION,
+    };
     JsonRpcResponse::success(
         id,
         json!({
-            "protocolVersion": MCP_PROTOCOL_VERSION,
+            "protocolVersion": version,
             "serverInfo": {
                 "name": SERVER_NAME,
                 "version": SERVER_VERSION,
@@ -211,7 +234,7 @@ mod tests {
 
     #[test]
     fn initialize_response_structure() {
-        let resp = handle_initialize(Some(Value::Number(1.into())));
+        let resp = handle_initialize(Some(Value::Number(1.into())), &Value::Null);
         let result = resp.result.unwrap();
         assert_eq!(result["protocolVersion"], MCP_PROTOCOL_VERSION);
         assert_eq!(result["serverInfo"]["name"], SERVER_NAME);
@@ -270,5 +293,57 @@ mod tests {
         assert_eq!(resources[0]["uri"], "swarmllm://status");
         assert_eq!(resources[1]["uri"], "swarmllm://models");
         assert_eq!(resources[2]["uri"], "swarmllm://peers");
+    }
+}
+
+#[cfg(test)]
+mod version_negotiation_tests {
+    use super::*;
+
+    fn init_with(version: Option<&str>) -> String {
+        let params = match version {
+            Some(v) => json!({ "protocolVersion": v, "capabilities": {} }),
+            None => json!({ "capabilities": {} }),
+        };
+        let resp = handle_initialize(Some(json!(1)), &params);
+        serde_json::to_value(&resp).unwrap()["result"]["protocolVersion"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    }
+
+    /// The spec is a MUST: a supported version is echoed back verbatim.
+    /// Answering with our own newest instead makes a client pinned to an older
+    /// revision disconnect, per the same section.
+    #[test]
+    fn supported_client_version_is_echoed() {
+        for v in SUPPORTED_PROTOCOL_VERSIONS {
+            assert_eq!(&init_with(Some(v)), v, "must echo supported version {v}");
+        }
+    }
+
+    /// An unknown version gets our newest, which the spec directs and which
+    /// lets the client decide whether to proceed.
+    #[test]
+    fn unknown_client_version_gets_our_newest() {
+        assert_eq!(init_with(Some("1.0.0")), MCP_PROTOCOL_VERSION);
+        assert_eq!(init_with(Some("2099-01-01")), MCP_PROTOCOL_VERSION);
+    }
+
+    /// A missing protocolVersion must not panic — answer with our newest.
+    #[test]
+    fn absent_client_version_gets_our_newest() {
+        assert_eq!(init_with(None), MCP_PROTOCOL_VERSION);
+    }
+
+    /// Our advertised newest must itself be in the supported set, or the echo
+    /// logic and the fallback disagree.
+    #[test]
+    fn advertised_version_is_in_the_supported_set() {
+        assert!(SUPPORTED_PROTOCOL_VERSIONS.contains(&MCP_PROTOCOL_VERSION));
+        assert_eq!(
+            SUPPORTED_PROTOCOL_VERSIONS[0], MCP_PROTOCOL_VERSION,
+            "supported list must be newest-first"
+        );
     }
 }
