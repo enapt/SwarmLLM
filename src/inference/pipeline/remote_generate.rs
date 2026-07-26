@@ -55,9 +55,37 @@ fn eligible(exec: &PipelineExecutor) -> bool {
     true
 }
 
-/// How long to wait for tokens before declaring the remote dead. Ample for
-/// 2048-token generations on CPU with a 7B model; conservative on purpose.
+/// Base budget for the first token: connection, model load, and the decode of
+/// a short prompt. Ample for 2048-token generations on CPU with a 7B model.
 const FIRST_TOKEN_TIMEOUT: Duration = Duration::from_secs(120);
+/// Extra first-token budget per estimated prompt token.
+///
+/// This budget was originally flat, sized against how long *generation* takes.
+/// It ignored prefill, which is linear in prompt length: a ~600-token prompt
+/// measured 285s on a 6-core CPU node that was working perfectly normally, so
+/// the flat 120s budget expired mid-prefill, the request retried, and failed
+/// again — a long prompt could not succeed on a modest node at all.
+const PREFILL_ALLOWANCE_PER_TOKEN: Duration = Duration::from_millis(500);
+/// Ceiling on the first-token budget, so a genuinely dead peer is still
+/// detected in bounded time no matter how long the prompt is.
+const FIRST_TOKEN_TIMEOUT_MAX: Duration = Duration::from_secs(600);
+/// Characters per token, used to size the prefill allowance from the prompt
+/// before we know the real token count (the count only comes back with usage,
+/// long after the deadline must be set). Deliberately low: overestimating the
+/// token count only lengthens the wait, while underestimating reintroduces the
+/// premature timeout this allowance exists to prevent.
+const PROMPT_CHARS_PER_TOKEN: usize = 3;
+
+/// First-token budget for a prompt of `prompt_chars` characters.
+///
+/// Only ever extends the base budget, never shortens it, so short prompts keep
+/// exactly the previous behaviour.
+fn first_token_timeout(prompt_chars: usize) -> Duration {
+    let est_tokens = u32::try_from(prompt_chars / PROMPT_CHARS_PER_TOKEN).unwrap_or(u32::MAX);
+    FIRST_TOKEN_TIMEOUT
+        .saturating_add(PREFILL_ALLOWANCE_PER_TOKEN.saturating_mul(est_tokens))
+        .min(FIRST_TOKEN_TIMEOUT_MAX)
+}
 /// Between-token timeout once generation has started. Generous to accommodate
 /// slow prefill-then-decode transitions on big models.
 const INTER_TOKEN_TIMEOUT: Duration = Duration::from_secs(60);
@@ -85,6 +113,8 @@ impl PipelineExecutor {
 
         // Build the chat-templated prompt (same as the standard path).
         let prompt = self.build_prompt().await;
+        // Sized from the prompt we are about to send, before it is moved.
+        let first_token_budget = first_token_timeout(prompt.len());
 
         // Register an inbound StreamingToken channel before sending the
         // request so we never miss an early token.
@@ -168,7 +198,7 @@ impl PipelineExecutor {
                 break;
             }
             let timeout_dur = if first {
-                FIRST_TOKEN_TIMEOUT
+                first_token_budget
             } else {
                 INTER_TOKEN_TIMEOUT
             };
@@ -309,5 +339,55 @@ impl PipelineExecutor {
             matched_stop_sequence: matched_stop_seq,
             trace: None,
         }))
+    }
+}
+
+#[cfg(test)]
+mod first_token_budget_tests {
+    use super::*;
+
+    #[test]
+    fn short_prompt_keeps_the_original_budget() {
+        // A handful of characters must not shift the long-standing default.
+        assert_eq!(first_token_timeout(0), FIRST_TOKEN_TIMEOUT);
+        assert!(first_token_timeout(30) < FIRST_TOKEN_TIMEOUT + Duration::from_secs(6));
+    }
+
+    #[test]
+    fn budget_never_shrinks_below_the_base() {
+        for chars in [0, 1, 10, 100, 1_000, 100_000] {
+            assert!(
+                first_token_timeout(chars) >= FIRST_TOKEN_TIMEOUT,
+                "prompt of {chars} chars shortened the budget"
+            );
+        }
+    }
+
+    /// The measured live failure: a 1473-char prompt needed 285s on a 6-core
+    /// CPU node and was cut off at the flat 120s budget.
+    #[test]
+    fn covers_the_prompt_that_timed_out_live() {
+        let budget = first_token_timeout(1473);
+        assert!(
+            budget > Duration::from_secs(285),
+            "budget {budget:?} still cuts off the prompt that measured 285s"
+        );
+    }
+
+    #[test]
+    fn budget_is_monotonic_in_prompt_length() {
+        let mut prev = Duration::ZERO;
+        for chars in [0, 100, 500, 1_000, 5_000, 50_000] {
+            let b = first_token_timeout(chars);
+            assert!(b >= prev, "budget went backwards at {chars} chars");
+            prev = b;
+        }
+    }
+
+    #[test]
+    fn absurd_prompt_is_capped_not_overflowed() {
+        // A dead peer must still be detected in bounded time.
+        assert_eq!(first_token_timeout(usize::MAX), FIRST_TOKEN_TIMEOUT_MAX);
+        assert_eq!(first_token_timeout(10_000_000), FIRST_TOKEN_TIMEOUT_MAX);
     }
 }

@@ -82,3 +82,6 @@ user_bug_report_*.txt
 # Scratch drop-zone for working files (tester reports, notes) shared with the
 # assistant but never repo content — keep the whole folder local.
 untracked_docs/
+
+# Out-of-tree target dir for portable (docker/glibc-compat) builds
+/target-deb/
