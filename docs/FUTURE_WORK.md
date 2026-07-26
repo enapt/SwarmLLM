@@ -2596,6 +2596,57 @@ only with (a) concrete data on NAT scenarios our relay path genuinely cannot
 reach, and (b) peeroxide reaching more maintainers / a stable release / an
 external audit.
 
+## Replace the hand-rolled chat-template evaluator with minijinja (2026-07-26)
+
+`src/inference/chat_template/` is a hand-written mini-Jinja subset (~600 lines
+across `parser.rs` + `eval.rs`). It is the single highest-consequence component
+per line in the codebase: when it cannot render a template, the caller silently
+falls back to a *different model family's* prompt format, and the model answers
+in that format. That is the root cause of the `<|im_end|>` leak four releases
+chased through the output scrubber (gotcha #169).
+
+**Measured state as of 2026-07-26** (survey test over real templates pulled from
+GGUF headers on disk + HuggingFace `tokenizer_config.json`):
+
+| Template (real, not simplified) | Renders? |
+|---|---|
+| Llama-3.2-1B / 3B, Llama-3.1-8B | ✅ (after the alias fix) |
+| Qwen2.5 (0.5B, Coder-7B) | ✅ |
+| Phi-3.5-mini | ✅ |
+| TinyLlama / Zephyr | ✅ |
+| DeepSeek-R1-Distill-Qwen | ✅ |
+| **Mistral-7B-Instruct-v0.3** | **❌ with a system message**, ✅ user-only |
+
+Mistral's official template needs `namespace()`, `selectattr(...) | list`,
+`messages[1:]` slice-binding, `is defined` / `is not none`, and dict iteration
+(`for key, val in tool.items()`). Implementing those is not a bug fix, it is
+writing a Jinja interpreter — and templates keep getting more complex, because
+tool-calling and reasoning blocks live in them now.
+
+**The ecosystem has already converged on not doing this by hand.** llama.cpp,
+Jan, GPT4All and Docker Model Runner all use [google/minja](https://github.com/google/minja),
+a dedicated C++ Jinja subset whose stated goal is "each and every major LLM
+found on HuggingFace". The Rust equivalent is
+[`minijinja`](https://docs.rs/minijinja/) (mitsuhiko), which is what
+[mistral.rs](https://github.com/EricLBuehler/mistral.rs) uses for exactly this
+job, alongside HuggingFace and BAML. Core deps are just `memo-map` + `serde`,
+with `builtins` covering `namespace()`, `selectattr`, slicing, `is defined` and
+`loop.index0`; the rest of the surface is feature-gated, so the footprint is
+controllable.
+
+**Proposed**: swap `apply_chat_template`'s internals for `minijinja`, keeping
+the current signature and the fallback chain as the safety net for genuinely
+broken templates. Keep the real-template survey test as the acceptance gate —
+extend it to pull the top ~20 families' `tokenizer_config.json` and assert every
+one renders, so the next Mistral-shaped gap fails CI rather than a user's chat.
+
+**Why it is not in this release**: it changes prompt construction for every
+model at once, which wants its own release and a careful A/B against the current
+renderer on the models we hold locally. The interim mitigation (shipped
+2026-07-26) is that `build_prompt` now *requires* a model name and every family
+we can name has a real fallback, so a template failure degrades to the right
+format instead of ChatML.
+
 ---
 
 ## How to use this file

@@ -344,6 +344,7 @@ pub(super) async fn execute_request(
                     i.chat_template.as_deref(),
                     &i.bos_token,
                     &i.eos_token,
+                    Some(i.name.as_str()),
                 ),
                 None => chat_template::chatml_fallback(&request.messages),
             }

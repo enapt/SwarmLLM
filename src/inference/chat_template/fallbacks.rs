@@ -22,6 +22,64 @@ pub fn chatml_fallback(messages: &[ChatMessage]) -> String {
     prompt
 }
 
+/// Build a Llama-3 formatted prompt.
+///
+/// `<|start_header_id|>role<|end_header_id|>\n\ncontent<|eot_id|>`, with a
+/// leading `<|begin_of_text|>`. System messages are their own turn, unlike
+/// Mistral.
+pub(super) fn llama3_fallback(messages: &[ChatMessage]) -> String {
+    let mut prompt = String::from("<|begin_of_text|>");
+    for msg in messages {
+        prompt.push_str(&format!(
+            "<|start_header_id|>{}<|end_header_id|>\n\n{}<|eot_id|>",
+            role_str(&msg.role),
+            msg.content.trim()
+        ));
+    }
+    prompt.push_str("<|start_header_id|>assistant<|end_header_id|>\n\n");
+    prompt
+}
+
+/// Build a Mistral-Instruct formatted prompt.
+///
+/// Mistral has no system turn: the system message is folded into the LAST user
+/// message, separated by a blank line, inside that message's `[INST]` block —
+/// which is what the official template does (`loop.last and system_message is
+/// defined`). Emitting it as its own `[INST]` block instead would break the
+/// strict user/assistant alternation the model was trained on.
+pub(super) fn mistral_fallback(messages: &[ChatMessage]) -> String {
+    let system = messages
+        .iter()
+        .find(|m| matches!(m.role, Role::System))
+        .map(|m| m.content.trim());
+    let last_user = messages
+        .iter()
+        .rposition(|m| matches!(m.role, Role::User))
+        .unwrap_or(usize::MAX);
+
+    let mut prompt = String::from("<s>");
+    for (i, msg) in messages.iter().enumerate() {
+        match msg.role {
+            Role::System => {}
+            Role::User | Role::Tool => {
+                prompt.push_str("[INST] ");
+                if let (Some(sys), true) = (system, i == last_user) {
+                    prompt.push_str(sys);
+                    prompt.push_str("\n\n");
+                }
+                prompt.push_str(msg.content.trim());
+                prompt.push_str("[/INST]");
+            }
+            Role::Assistant => {
+                prompt.push(' ');
+                prompt.push_str(msg.content.trim());
+                prompt.push_str("</s>");
+            }
+        }
+    }
+    prompt
+}
+
 /// Build a Gemma-formatted prompt (for Gemma 1/2 models).
 ///
 /// Gemma uses `<start_of_turn>role\ncontent<end_of_turn>` format.

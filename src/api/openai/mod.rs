@@ -477,7 +477,13 @@ pub async fn chat_completions(
     // distributed-only nodes that have no local model but do have the probe.
     let prompt = {
         let (tmpl, bos, eos) = super::resolve_chat_template(&state, &req.model).await;
-        chat_template::build_prompt(&internal_messages, tmpl.as_deref(), &bos, &eos)
+        chat_template::build_prompt(
+            &internal_messages,
+            tmpl.as_deref(),
+            &bos,
+            &eos,
+            Some(req.model.as_str()),
+        )
     };
 
     // Distributed inference: network covers all layers across multiple nodes.

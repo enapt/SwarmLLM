@@ -14,7 +14,7 @@ mod parser;
 pub use fallbacks::chatml_fallback;
 
 use eval::{eval_block, EvalCtx, EvalState};
-use fallbacks::{gemma_fallback, vicuna_fallback};
+use fallbacks::{gemma_fallback, llama3_fallback, mistral_fallback, vicuna_fallback};
 use parser::tokenize;
 
 /// Apply a Jinja2-style chat template to a list of messages.
@@ -144,13 +144,24 @@ pub fn extract_stop_strings(template: Option<&str>) -> Vec<String> {
 /// Build a chat prompt using the given template, falling back to ChatML.
 ///
 /// This is the main entry point for chat prompt construction.
+///
+/// `model_name` is REQUIRED, not optional, and passing `None` is a real choice
+/// with a real cost: it is the only thing that lets a failed template degrade
+/// to the right family format instead of ChatML. This used to be a
+/// four-argument convenience wrapper that hardcoded `None`, and six of the
+/// seven production call sites used it — so the gemma / LLaVA fallbacks could
+/// never fire on the OpenAI, Anthropic, streaming, or router paths, and a
+/// Llama-3 model whose template failed was asked to speak ChatML (which is
+/// where the stray `<|im_end|>` markers came from). Pass the model id unless
+/// you genuinely do not have one.
 pub fn build_prompt(
     messages: &[ChatMessage],
     template: Option<&str>,
     bos_token: &str,
     eos_token: &str,
+    model_name: Option<&str>,
 ) -> String {
-    build_prompt_with_model(messages, template, bos_token, eos_token, None)
+    build_prompt_with_model(messages, template, bos_token, eos_token, model_name)
 }
 
 /// Pick a fallback prompt format from the model name alone.
@@ -159,6 +170,15 @@ pub fn build_prompt(
 /// when the name carries no usable signal and the caller should use ChatML.
 /// Shared by both `build_prompt_with_model` branches: a model with no template
 /// at all and a model whose template failed to evaluate want the same answer.
+/// Reaching ChatML for a model that is not a ChatML model is the failure mode
+/// that produced stray `<|im_end|>` markers in Llama-3 replies for several
+/// releases: the model answers in whatever format it was asked in. Every family
+/// we can recognise by name gets its own format here, so a template we cannot
+/// evaluate degrades to the right shape instead of a foreign one.
+///
+/// Checked before the generic families because a name can match more than one
+/// substring — `llava-v1.6-mistral-7b` is a LLaVA model that must use the
+/// vicuna/LLaVA prompt, not Mistral's.
 fn fallback_by_model_name(
     messages: &[ChatMessage],
     model_name: Option<&str>,
@@ -169,6 +189,20 @@ fn fallback_by_model_name(
     }
     if name_lower.contains("gemma") {
         return Some((gemma_fallback(messages), "gemma"));
+    }
+    if name_lower.contains("llama-3")
+        || name_lower.contains("llama3")
+        || name_lower.contains("llama_3")
+    {
+        return Some((llama3_fallback(messages), "llama3"));
+    }
+    // `mixtral` and `ministral`/`magistral` share the [INST] convention.
+    if name_lower.contains("mistral")
+        || name_lower.contains("mixtral")
+        || name_lower.contains("ministral")
+        || name_lower.contains("magistral")
+    {
+        return Some((mistral_fallback(messages), "mistral"));
     }
     None
 }

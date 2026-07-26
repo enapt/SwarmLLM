@@ -25,6 +25,14 @@ All notable changes to SwarmLLM are documented here.
 - **Models no longer all report as unserveable.** The "can this be served right
   now" flag on the quantization view was never filled in and always read false,
   including for models the node was hosting itself.
+- **A model whose chat template can't be read now falls back to its own
+  family's format.** The fallback needs to know which model it is dealing with,
+  and six of the seven places that build a prompt never passed that along — so
+  the fallback had no choice but to assume a single format for everything, and
+  models from other families were asked to reply in a format they were not
+  trained on. Mistral models with a system prompt were hitting this, and any
+  model whose template we cannot read would have. They now get Mistral, Llama 3,
+  Gemma or LLaVA formatting as appropriate.
 
 ## [0.3.27-alpha] — 2026-07-26
 

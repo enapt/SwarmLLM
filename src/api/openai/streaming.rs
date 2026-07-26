@@ -149,6 +149,7 @@ pub fn spawn_split_stream(
         meta.chat_template.as_deref(),
         &meta.bos_token,
         &meta.eos_token_str,
+        Some(model_id.0.as_str()),
     );
 
     // Add the stop strings implied by the chat template to whatever the caller
@@ -335,6 +336,7 @@ pub async fn run_split_generate(
         meta.chat_template.as_deref(),
         &meta.bos_token,
         &meta.eos_token_str,
+        Some(model_id.0.as_str()),
     );
 
     tracing::debug!(

@@ -238,8 +238,13 @@ pub async fn messages(
         // Direct executor fallback (single-node, no router)
         if model_locally_available {
             let (tmpl, bos, eos) = super::resolve_chat_template(&state, &model).await;
-            let prompt =
-                chat_template::build_prompt(&internal_messages, tmpl.as_deref(), &bos, &eos);
+            let prompt = chat_template::build_prompt(
+                &internal_messages,
+                tmpl.as_deref(),
+                &bos,
+                &eos,
+                Some(model.as_str()),
+            );
 
             let mut executor = state.executor.lock().await;
             let (content, result) = executor

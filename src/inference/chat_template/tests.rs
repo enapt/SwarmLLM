@@ -71,7 +71,7 @@ fn mistral_style_template() {
 fn build_prompt_with_template() {
     let template = "{% for message in messages %}{{'<|im_start|>' + message['role'] + '\n' + message['content'] + '<|im_end|>' + '\n'}}{% endfor %}{% if add_generation_prompt %}{{ '<|im_start|>assistant\n' }}{% endif %}";
     let msgs = test_messages();
-    let result = build_prompt(&msgs, Some(template), "", "");
+    let result = build_prompt(&msgs, Some(template), "", "", None);
     assert!(result.contains("<|im_start|>system\nYou are helpful.<|im_end|>"));
     assert!(result.ends_with("<|im_start|>assistant\n"));
 }
@@ -79,7 +79,7 @@ fn build_prompt_with_template() {
 #[test]
 fn build_prompt_without_template_falls_back() {
     let msgs = test_messages();
-    let result = build_prompt(&msgs, None, "", "");
+    let result = build_prompt(&msgs, None, "", "", None);
     assert!(result.contains("<|im_start|>system\nYou are helpful.<|im_end|>"));
     assert!(result.ends_with("<|im_start|>assistant\n"));
 }
@@ -744,4 +744,103 @@ fn sliced_message_loop_still_iterates() {
     let msgs = test_messages();
     let out = apply_chat_template(tmpl, &msgs, "", "", true).unwrap();
     assert_eq!(out, "You are helpful.;Hello;");
+}
+
+/// Mistral's official template uses `namespace()`, `selectattr`, and slicing
+/// that our evaluator does not implement, so it fails whenever a system message
+/// is present. Falling through to ChatML would ask a Mistral model to speak
+/// ChatML — the exact failure that leaked `<|im_end|>` markers from Llama-3.
+/// It must degrade to Mistral's own format instead.
+#[test]
+fn mistral_name_fallback_uses_inst_format_not_chatml() {
+    let msgs = test_messages(); // system + user
+    let (prompt, kind) = super::fallback_by_model_name(&msgs, Some("Mistral-7B-Instruct-v0.3"))
+        .expect("mistral must be recognised by name");
+    assert_eq!(kind, "mistral");
+    // System text folds into the last user turn, as the official template does.
+    assert_eq!(prompt, "<s>[INST] You are helpful.\n\nHello[/INST]");
+    assert!(!prompt.contains("<|im_start|>"));
+}
+
+/// A LLaVA build named after its Mistral base is still a LLaVA model — the
+/// vicuna check must win, or vision prompts lose their `<image>` placement.
+#[test]
+fn llava_mistral_build_still_uses_vicuna() {
+    let msgs = user_only_messages();
+    let (_, kind) = super::fallback_by_model_name(&msgs, Some("llava-v1.6-mistral-7b"))
+        .expect("llava must be recognised");
+    assert_eq!(kind, "vicuna");
+}
+
+/// Llama-3 gets its own header format rather than ChatML if its template ever
+/// fails to evaluate again.
+#[test]
+fn llama3_name_fallback_uses_header_format() {
+    let msgs = test_messages();
+    let (prompt, kind) = super::fallback_by_model_name(&msgs, Some("Llama-3.2-1B-Instruct"))
+        .expect("llama3 must be recognised by name");
+    assert_eq!(kind, "llama3");
+    assert!(prompt.starts_with("<|begin_of_text|><|start_header_id|>system<|end_header_id|>"));
+    assert!(prompt.ends_with("<|start_header_id|>assistant<|end_header_id|>\n\n"));
+    assert!(!prompt.contains("<|im_start|>"));
+}
+
+/// Mistral alternation: an assistant turn closes with `</s>` and the next user
+/// turn opens a fresh `[INST]`.
+#[test]
+fn mistral_fallback_multi_turn_alternates() {
+    let msgs = vec![
+        ChatMessage {
+            role: Role::User,
+            content: "one".into(),
+            images: vec![],
+        },
+        ChatMessage {
+            role: Role::Assistant,
+            content: "two".into(),
+            images: vec![],
+        },
+        ChatMessage {
+            role: Role::User,
+            content: "three".into(),
+            images: vec![],
+        },
+    ];
+    let (prompt, _) = super::fallback_by_model_name(&msgs, Some("mistral-7b")).unwrap();
+    assert_eq!(prompt, "<s>[INST] one[/INST] two</s>[INST] three[/INST]");
+}
+
+/// End-to-end through the real entry point: a Mistral model whose official
+/// template our evaluator cannot run must still be prompted in Mistral format.
+///
+/// This is the assertion that was impossible before the model name was plumbed
+/// through — `build_prompt` hardcoded `None`, so every fallback decision on the
+/// OpenAI, Anthropic, streaming and router paths collapsed to ChatML.
+#[test]
+fn real_mistral_template_failure_degrades_to_mistral_not_chatml() {
+    // The construct our evaluator does not implement, taken from the official
+    // Mistral-7B-Instruct-v0.3 template: bind a SLICE of messages, then loop it.
+    let tmpl = "{%- if messages[0][\"role\"] == \"system\" %}\
+                {%- set loop_messages = messages[1:] %}{%- endif %}\
+                {%- for message in loop_messages %}{{ message['content'] }}{%- endfor %}";
+    let msgs = test_messages();
+
+    // Confirm the premise: this really does fail to render.
+    assert!(
+        apply_chat_template(tmpl, &msgs, "<s>", "</s>", true).is_none(),
+        "premise changed — template now renders, revisit this test"
+    );
+
+    let prompt = build_prompt(
+        &msgs,
+        Some(tmpl),
+        "<s>",
+        "</s>",
+        Some("Mistral-7B-Instruct-v0.3"),
+    );
+    assert_eq!(prompt, "<s>[INST] You are helpful.\n\nHello[/INST]");
+    assert!(
+        !prompt.contains("<|im_start|>"),
+        "must not fall through to ChatML"
+    );
 }
