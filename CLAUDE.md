@@ -151,7 +151,7 @@ libp2p 0.56, axum 0.8, candle-core/candle-transformers 0.10 (CUDA), redb 4, ed25
 
 ## Testing
 
-- 1251 lib tests passing + 8 ignored (env-var-gated real-model + manual smoke), 79 integration tests in `tests/integration/` + 2 ignored end-to-end (`cargo test --test integration_phase10_11 -- --ignored`), 2 repo-consistency, 26 in `swarmllm-types` (`cargo test -p swarmllm-types` — NOT covered by a bare `cargo test` from the root), clippy clean. Microbench: `cargo run --release --no-default-features --features dev,claude-subscription --example swarm_spec_bench` (R136 — measures all 4 SWARM-SPEC layer primitives + synthetic cascade hit-rate). Local-cluster bench: `examples/3node_setup.sh` (boots 3 daemons) + `examples/3node_inference_bench.sh` (runs 3 workloads × 3 trials and prints tok/s + swarm_spec metrics). Sharded variant: `examples/3node_sharded_setup.sh` (forced distributed pipeline; writes its own per-node config disabling auto-manage and bootstrap so the split survives). **Its inference step is EXPECTED to fail on a single multi-interface host** — that is the zero-redundancy same-host case documented in `docs/FUTURE_WORK.md` § "Connection churn on multi-interface hosts", not a distributed-inference regression (confirmed on released v0.3.28, 2026-07-26). Validate the forward path on two real machines. Both scripts take `SWARM_BENCH_MODEL`. **Pinned reference models for cross-swarm comparison: `docs/REFERENCE_MODELS.md`** (smoke / standard / stress tiers + `examples/fetch_reference_model.sh` to opt in).
+- 1277 lib tests passing + 8 ignored (env-var-gated real-model + manual smoke), 79 integration tests in `tests/integration/` + 2 ignored end-to-end (`cargo test --test integration_phase10_11 -- --ignored`), 2 repo-consistency, 26 in `swarmllm-types` (`cargo test -p swarmllm-types` — NOT covered by a bare `cargo test` from the root), clippy clean. Microbench: `cargo run --release --no-default-features --features dev,claude-subscription --example swarm_spec_bench` (R136 — measures all 4 SWARM-SPEC layer primitives + synthetic cascade hit-rate). Local-cluster bench: `examples/3node_setup.sh` (boots 3 daemons) + `examples/3node_inference_bench.sh` (runs 3 workloads × 3 trials and prints tok/s + swarm_spec metrics). Sharded variant: `examples/3node_sharded_setup.sh` (forced distributed pipeline; writes its own per-node config disabling auto-manage and bootstrap so the split survives). **Its inference step is EXPECTED to fail on a single multi-interface host** — that is the zero-redundancy same-host case documented in `docs/FUTURE_WORK.md` § "Connection churn on multi-interface hosts", not a distributed-inference regression (confirmed on released v0.3.28, 2026-07-26). Validate the forward path on two real machines. Both scripts take `SWARM_BENCH_MODEL`. **Pinned reference models for cross-swarm comparison: `docs/REFERENCE_MODELS.md`** (smoke / standard / stress tiers + `examples/fetch_reference_model.sh` to opt in).
 - Unit tests: in-module `#[cfg(test)]` blocks
 - Integration tests: `tests/integration/` — multi-node simulations with `--test-threads=1`
 - Real-model spawn-and-infer test: set `SWARMLLM_TEST_MODEL_DIR` to a fully-populated model directory (e.g. `~/.local/share/swarmllm/models/tinyllama-1.1b-...`) and run `cargo test --test integration_phase10_11 -- --ignored end_to_end`. No synthetic GGUF fixture is committed; see `docs/ARCHITECTURE.md` § Deferred Items.
@@ -192,11 +192,47 @@ When spawning subagents in this repo, use these model picks (overrides defaults 
 
 ## Status
 
-All 20 build phases complete. All subsystems wired — no stubs. **1251 lib + 79 integration + 2 repo-consistency + 26 swarmllm-types tests passing**; 8 lib + 2 e2e ignored (env-var or manual). Clippy clean default + features dev,claude-subscription + `--features llama`.
+All 20 build phases complete. All subsystems wired — no stubs. **1277 lib + 79 integration + 2 repo-consistency + 26 swarmllm-types tests passing**; 8 lib + 2 e2e ignored (env-var or manual). Clippy clean default + features dev,claude-subscription + `--features llama`.
 
 Per-round history lives in `~/.claude/projects/-home-user-SwarmLLM/memory/round_log_*.md` and the CHANGELOG; `docs/ARCHITECTURE.md` is the canonical architecture. This section keeps only the current release line plus one-line prior-round pointers.
 
-### Latest — v0.3.28-alpha (2026-07-26): the Llama-3 prompt-format root cause
+### Latest — v0.3.29-alpha (2026-07-26): tool calling, wire conformance, first-run UX
+
+Post-.28 live testing. **Nothing here was a regression** — every item was
+pre-existing and found by exercising a surface nobody had run this cycle.
+
+- **Tool calls carried unusable arguments.** Shown the raw JSON Schema and asked
+  for arguments, `llama-3.2-3b` reproducibly answered `{"properties":{"city":
+  "Paris"}}`. It parsed, validated and reported success while `args.city` was
+  undefined — the worst failure shape. `describe_arguments` now renders the
+  ARGUMENT shape (never the word `properties`); `unwrap_schema_echo` is the
+  narrow backstop. Gotcha #174. Also: a bare call object with no `tool_calls`
+  wrapper was discarded as text.
+- **Anthropic streaming violated the spec.** We emitted `start(0) → start(1) →
+  stop(1) → stop(0)` — nested, where the published event flow requires
+  sequential blocks. SDKs accumulate by index and tolerate it; a client tracking
+  a *current* block does not, and Claude Code is a first-class consumer. The
+  epilogue now takes a REQUIRED `TextBlock::{Open,AlreadyClosed}` so the
+  compiler asks at every streaming path. Gotcha #175.
+- **MCP ignored the client's protocol revision**, always answering `2025-11-25`;
+  the spec says a supported version MUST be echoed and a client receiving an
+  unknown one SHOULD disconnect. Also: a malformed body got plain text instead
+  of a `-32700` error object, and a bad `jsonrpc` value returned -32700 where
+  the JSON was fine (-32600).
+- **First-run UX**: a new user is at a negative balance after their first
+  question with no explanation (all credit copy is about *earning*) — now
+  explained in 21 locales. Peer list labels the anchor and shows GPU-vendor /
+  CPU-only. Chat reports tok/s. Network map summarises the swarm.
+- **Startup**: a taken port printed `Failed to listen on QUIC: ` with nothing
+  after the colon. Gotcha #177.
+
+**`examples/3node_sharded_setup.sh` inference is EXPECTED to fail on one
+multi-interface host** — the zero-redundancy same-host case in FUTURE_WORK,
+confirmed identical on released .28, NOT a regression. Gotcha #176. Two script
+defects fixed while diagnosing (killall missed released binary names; the
+auto-manage config it documented was never written).
+
+### v0.3.28-alpha (2026-07-26): the Llama-3 prompt-format root cause
 
 Live-testing v0.3.27 found the ACTUAL cause of the control-token leak that
 .22/.24/.25/.26 each chased through the output scrubber. **Read gotcha #169
@@ -268,18 +304,13 @@ Read that before touching any request/response path.**
   lockdown. Detail: `round_log_networking_plan.md`, `round_log_v0315_livetest.md`.
 
 
-### Prior rounds (one line each; full detail in `memory/round_log_*.md`)
+### Prior rounds (pre-v0.3.15)
 
-- **R150** (07-23): GPU coverage — candle `CUDA_COMPUTE_CAP` 80→75 (PTX floor: RTX 20-series → Blackwell), llama.cpp `CMAKE_CUDA_ARCHITECTURES` pin + CUDA 12.8 native sm_120. Gotchas #159-160.
-- **R149** (07-23): AutoShardManager per-shard exponential download backoff (`shard_download_backoff` 30→300s); hourly negative-balance decay; portable Linux binary (ubuntu-22.04 / glibc 2.35).
-- **R148** (07-22): stale shard-holder retraction (`complete_for_models`); escrow estimate→actual; VLM chat-template empty-prompt + CLIP `ffn` per-file (`clip_ffn_is_swapped`); updater CUDA-variant match. v0.3.6 → v0.3.11.
-- **R147** (07-22): request cancellation end-to-end (`DaemonMsg::CancelRequest`, `ResponseGuard.disarm`); FUTURE_WORK closures. GPU-verified on RTX 3070.
-- **R146** (07-22): TP-group-on-local-model hard-fail → `inference.tensor_parallel` default false + graceful degrade; worker VRAM leak → `worker_error_is_fatal`; `gpu_layers` plumbed (default 0→-1); `failure_is_penalty_worthy`.
-- **R145** (07-21): cloud model refresh — Opus 4.8 / Sonnet 5 / +Fable 5, Kimi K3, Moonshot `.ai`, DeepSeek v4.
-- **R143-R144** (07-20→21): internet reachability / NAT — UPnP default-on, external-address invite codes, AutoNAT v1→v2, `--anchor` mode + `deploy/anchor/` kit; dashboard peer taxonomy (`multiaddr_is_local`, Pool > LAN > Remote).
-- **R140-R142** (05-22→07-19): `swarmpool://` invite codes v2; auto-manage cold-start UX; autonomous 8h sweep (3 silent frontend↔backend wire-format prod bugs).
-- **R136-R139** (05): SWARM-SPEC v0.1 acceleration cascade (L0 Q8_0, L1 n-gram, L2 hedge, L3 prefetch); Tier 4K comm-compute overlap; FUTURE_WORK deferral batches. See `round_log_R126_R137.md`, `round_log_R139.md`.
-- **Pre-R136**: 20 build phases (P2P/libp2p, split + distributed inference, credits, pools, OpenAI+Anthropic+MCP API, frontend, VLM, Claude Code integration). See `docs/ARCHITECTURE.md` § phase history + `round_log_R126_R135.md`.
+- **R143-R150** (07-20→23): NAT/internet reachability (UPnP default-on, AutoNAT v1→v2, `--anchor` + `deploy/anchor/`), request cancellation, `worker_error_is_fatal`, `gpu_layers` plumbing, per-shard download backoff, GPU coverage (`CUDA_COMPUTE_CAP` 80→75). Gotchas #150-160.
+- **R136-R142** (05→07-19): SWARM-SPEC v0.1 acceleration cascade (L0 Q8_0, L1 n-gram, L2 hedge, L3 prefetch); `swarmpool://` invite codes v2; cross-pool gossip/routing; autonomous 8h sweep.
+- **Pre-R136**: the 20 build phases (P2P/libp2p, split + distributed inference, credits, pools, OpenAI+Anthropic+MCP API, frontend, VLM, Claude Code integration).
+
+Full detail for any round: `memory/round_log_*.md` + `docs/ARCHITECTURE.md` § phase history.
 
 ## Public-Facing Repo (2026-07-22)
 
