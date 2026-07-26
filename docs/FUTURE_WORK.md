@@ -2868,6 +2868,21 @@ Grafana; that is the trend store. In-process, keep:
 
 Steps 1-2 pay for themselves the first time a tester reports something slow.
 
+## `download-shards` takes ~25s to start writing (reported 2026-07-26)
+
+A tester exercising `POST /api/admin/hf/download-shards` for the first time
+reported it works, but sits on a zero-byte `.tmp` for roughly 25 seconds before
+data starts flowing. Not a failure, and not urgent — but it is the *first* thing
+a new user does after picking a model, and 25 seconds of an apparently stalled
+download is exactly when someone concludes it is broken and kills it.
+
+Worth finding out where the time goes before deciding anything: the HEAD probe
+and range-probe both retry with a 5/30/120s backoff (`retry_hf`), so a single
+slow or rate-limited HF response would explain it, as would GGUF-header parsing
+or layer-shard layout computation on a large file. If it is the probe, the fix is
+progress reporting rather than speed — say "checking the file on HuggingFace"
+instead of showing a 0-byte file.
+
 ## Shard-holder retraction depends on gossip reaching the peer (observed 2026-07-26) — MITIGATED v0.3.31
 
 > **Requester-side mitigation shipped in v0.3.31.** A holder that reports missing
