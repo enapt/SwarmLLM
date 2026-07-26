@@ -26,7 +26,7 @@ mod types;
 use resources::{handle_resources_list, handle_resources_read};
 use tools::handle_tools_call;
 use tools_list::handle_tools_list;
-use types::{JsonRpcRequest, JsonRpcResponse, METHOD_NOT_FOUND, PARSE_ERROR};
+use types::{JsonRpcRequest, JsonRpcResponse, INVALID_REQUEST, METHOD_NOT_FOUND, PARSE_ERROR};
 
 const MCP_PROTOCOL_VERSION: &str = "2025-11-25";
 
@@ -68,18 +68,20 @@ pub(crate) const MCP_MAX_TASK_ID_BYTES: usize = 256;
 /// Per Streamable HTTP spec: notifications (no `id`) get HTTP 202 with no body.
 pub async fn handle_mcp(
     State(state): State<AppState>,
-    Json(req): Json<JsonRpcRequest>,
+    body: axum::body::Bytes,
 ) -> impl IntoResponse {
-    if req.jsonrpc != "2.0" {
-        return (
-            StatusCode::OK,
-            Json(Some(JsonRpcResponse::error(
-                req.id,
-                PARSE_ERROR,
-                "Invalid JSON-RPC version",
-            ))),
-        );
-    }
+    // Parse the body here rather than via the `Json` extractor. The extractor
+    // rejects malformed JSON with a plain-text 400 before any of this runs, but
+    // JSON-RPC requires the reply to a bad body to be an error OBJECT carrying
+    // -32700 — a client parsing our reply as JSON-RPC got text instead, and no
+    // code (live 2026-07-26).
+    let req = match parse_jsonrpc_body(&body) {
+        Ok(r) => r,
+        Err(boxed) => {
+            let (status, resp) = *boxed;
+            return (status, Json(Some(resp)));
+        }
+    };
 
     // JSON-RPC notifications have no `id` — per MCP spec, return HTTP 202 with no body
     let is_notification = req.id.is_none();
@@ -150,6 +152,35 @@ pub async fn handle_mcp_get() -> impl IntoResponse {
 /// We're stateless per-request, so just acknowledge.
 pub async fn handle_mcp_delete() -> impl IntoResponse {
     StatusCode::OK
+}
+
+/// Parse an MCP request body into a `JsonRpcRequest`, or the JSON-RPC error to
+/// return instead.
+///
+/// Separate from the handler so the protocol-level failures are testable
+/// without an `AppState`, and because both of them were wrong:
+///
+/// - Malformed JSON never reached the handler at all — axum's `Json` extractor
+///   rejected it with a plain-text 400, so a client parsing our reply as
+///   JSON-RPC found neither an error code nor a machine-readable message.
+///   JSON-RPC requires an error object with -32700 and a null `id`.
+/// - A wrong `jsonrpc` value returned -32700 ("invalid JSON"), but the JSON
+///   parsed fine; an unusable Request object is -32600.
+fn parse_jsonrpc_body(body: &[u8]) -> Result<JsonRpcRequest, Box<(StatusCode, JsonRpcResponse)>> {
+    let req: JsonRpcRequest = serde_json::from_slice(body).map_err(|e| {
+        Box::new((
+            StatusCode::BAD_REQUEST,
+            // `id` is unknowable when the body did not parse; JSON-RPC says null.
+            JsonRpcResponse::error(None, PARSE_ERROR, format!("Parse error: {e}")),
+        ))
+    })?;
+    if req.jsonrpc != "2.0" {
+        return Err(Box::new((
+            StatusCode::OK,
+            JsonRpcResponse::error(req.id, INVALID_REQUEST, "Invalid JSON-RPC version"),
+        )));
+    }
+    Ok(req)
 }
 
 // ---- Protocol handlers ----
@@ -345,5 +376,59 @@ mod version_negotiation_tests {
             SUPPORTED_PROTOCOL_VERSIONS[0], MCP_PROTOCOL_VERSION,
             "supported list must be newest-first"
         );
+    }
+}
+
+#[cfg(test)]
+mod jsonrpc_error_tests {
+    use super::*;
+
+    /// JSON-RPC requires the reply to an unparseable body to be an error OBJECT
+    /// with -32700 and a null id.
+    #[test]
+    fn malformed_json_returns_a_parse_error_object() {
+        let (status, resp) = *parse_jsonrpc_body(br#"{"jsonrpc":"#).unwrap_err();
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let v = serde_json::to_value(&resp).unwrap();
+        assert_eq!(v["jsonrpc"], "2.0");
+        assert_eq!(v["error"]["code"], PARSE_ERROR);
+        assert!(
+            v.get("id").is_none() || v["id"].is_null(),
+            "id must be null: {v}"
+        );
+        assert!(v["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("Parse error"));
+    }
+
+    /// A wrong `jsonrpc` value is an invalid Request, not unreadable JSON.
+    #[test]
+    fn wrong_jsonrpc_version_is_invalid_request_not_parse_error() {
+        let (status, resp) =
+            *parse_jsonrpc_body(br#"{"jsonrpc":"1.0","id":1,"method":"initialize"}"#).unwrap_err();
+        assert_eq!(status, StatusCode::OK);
+        let v = serde_json::to_value(&resp).unwrap();
+        assert_eq!(v["error"]["code"], INVALID_REQUEST);
+        assert_ne!(v["error"]["code"], PARSE_ERROR);
+    }
+
+    /// A well-formed request parses through unchanged.
+    #[test]
+    fn well_formed_request_parses() {
+        let req = parse_jsonrpc_body(
+            br#"{"jsonrpc":"2.0","id":7,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}"#,
+        )
+        .expect("should parse");
+        assert_eq!(req.method, "initialize");
+        assert_eq!(req.id, Some(json!(7)));
+    }
+
+    /// A notification (no id) parses — the handler decides the 202, not this.
+    #[test]
+    fn notification_without_id_parses() {
+        let req = parse_jsonrpc_body(br#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#)
+            .unwrap();
+        assert!(req.id.is_none());
     }
 }

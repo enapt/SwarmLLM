@@ -14,6 +14,11 @@ All notable changes to SwarmLLM are documented here.
   raised an error — the program on the other end simply found the argument
   missing. Tools are now described by the shape of the arguments to send, and a
   reply that wraps its arguments in a schema is unwrapped when read.
+- **A malformed request to the tool endpoint gets a proper error reply.** An
+  unreadable request was answered with plain text instead of the structured
+  error the protocol defines, so a client saw neither an error code nor a
+  message it could act on. Sending a wrong protocol version was also reported
+  as unreadable JSON when the JSON was fine.
 - **Tool servers that expect an older protocol revision can connect again.**
   The MCP endpoint answered every connection with its own newest revision
   whatever the client asked for, and a client that receives a revision it does

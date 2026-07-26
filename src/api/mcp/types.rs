@@ -56,7 +56,12 @@ impl JsonRpcResponse {
 }
 
 // JSON-RPC error codes
+/// Invalid JSON was received — the body could not be parsed at all.
 pub(super) const PARSE_ERROR: i64 = -32700;
+/// The JSON parsed, but is not a valid Request object (e.g. wrong `jsonrpc`).
+/// Distinct from [`PARSE_ERROR`], which the version check used to return even
+/// though the JSON itself was fine.
+pub(super) const INVALID_REQUEST: i64 = -32600;
 pub(super) const METHOD_NOT_FOUND: i64 = -32601;
 pub(super) const INVALID_PARAMS: i64 = -32602;
 pub(super) const INTERNAL_ERROR: i64 = -32603;
