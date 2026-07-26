@@ -195,8 +195,9 @@ Private mode is one-way: your data stays private, but your nodes still serve the
 - **Auto-shard management** — VRAM-aware acquisition from HuggingFace and peers with popularity/rarity scoring; smart pruning auto-removes over-replicated shards.
 - **Web UI** — chat, model browser, shard visualization, first-run wizard, network map, leaderboard, compare page; mobile-responsive; 21 languages; light/dark/system theme.
 - **Fault tolerance** — JoinSet-based supervisor with restart-on-crash for all 12 subsystems; hot-standby failover; shard replication; atomic shard writes.
-- **Observability** — Prometheus `/metrics`, readiness probe `/health/ready`, structured tracing with request-ID correlation.
-- **Self-service diagnostics** — `GET /api/admin/diagnostics` reports whether your machine is reachable from the internet, whether it has managed direct connections, and the most recent failed requests including *which machine served each one*. That last detail is what separates "my node has a problem" from "one peer has a problem", and it is the single most useful thing to include in a bug report.
+- **Every answer says where it came from** — chat shows "1.25s · 33.8 tok/s · via 2 peers", and every API response carries the route in headers (`x-swarm-route`, `x-swarm-nodes`, plus standard [`Server-Timing`](https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Server-Timing) durations your browser's devtools renders natively). "Why was that slow" is the first question anyone asks, and it is now answerable without server access.
+- **Observability** — Prometheus `/metrics` with time-to-first-token and time-per-output-token named to the [OpenTelemetry GenAI conventions](https://github.com/open-telemetry/semantic-conventions-genai), so collectors and community Grafana dashboards work without a translation layer. Readiness probe `/health/ready`, structured tracing with request-ID correlation, and one greppable summary line per request carrying the whole route and where the time went.
+- **Self-service diagnostics** — `GET /api/admin/diagnostics` reports whether your machine is reachable from the internet, whether it has managed direct connections, recent requests with per-segment timings, per-peer serving performance (ping, ms/layer, latency, region — slowest first), what your node has served for others, and the most recent failures including *which machine served each one*. That last detail is what separates "my node has a problem" from "one peer has a problem", and it is the single most useful thing to include in a bug report.
 - **Config hot-reload** — change parameters without restarting via SIGHUP or `/api/admin/config/reload`.
 - **Auto-updater** — checks GitHub releases, downloads & replaces binary with restart prompt.
 - **SDKs** — Python (`pip install swarmllm-client`), JS/TS (zero-dep), LangChain, LlamaIndex.
@@ -397,6 +398,8 @@ Full list: [Configuration Reference](https://enapt.github.io/SwarmLLM/configurat
 | GET | `/api/admin/models` | Model list with shard status |
 | GET | `/api/admin/peers` | Connected peers with latency / trust |
 | GET | `/api/admin/credits` | Credit balance and tier info |
+| GET | `/api/admin/diagnostics` | Plain-text health report for a shell or a bug report |
+| GET | `/api/admin/performance` | Routes, per-segment timings, per-peer performance, hourly trend (JSON) |
 | GET | `/api/admin/ws` | WebSocket for live updates |
 | GET | `/api/pool/state` | Pool membership, stats, private-mode status |
 | GET / PUT | `/api/pool/private-mode` | Toggle private mode |

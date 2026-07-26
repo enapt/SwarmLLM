@@ -2,6 +2,71 @@
 
 All notable changes to SwarmLLM are documented here.
 
+## [0.3.30-alpha] — 2026-07-26
+
+### Added
+
+- **Every answer now says where it came from.** Chat shows "1.25s · 33.8 tok/s ·
+  via 2 peers", with the peers and route on hover. Until now the dashboard could
+  not tell you whether a reply came from your own machine, one peer, or a
+  pipeline spanning the internet — which is the first thing anyone wants to know
+  when a reply is slow.
+- **A Performance view under Models.** Shows what your node has served for the
+  swarm, every peer that has answered part of a request — ping, speed per layer,
+  latency, region, slowest first — and your recent answers broken down by which
+  machine did which layers. Available in all 21 languages.
+- **Routing and timing on every API response.** Responses carry `x-swarm-route`,
+  `x-swarm-peers`, `x-swarm-nodes` and `x-swarm-regions`, plus timings in the
+  standard `Server-Timing` header that browser developer tools display natively.
+  A misbehaving client can now be diagnosed with no access to the server at all.
+- **One line per request in the log.** Every completed request writes a single
+  `DIAG: request complete` line carrying the route, the peers, the queue and
+  scheduling time, time to first token, per-segment timings, throughput and the
+  outcome. Previously this had to be reconstructed from a dozen interleaved log
+  lines across two machines, which is exactly what made recent bugs expensive.
+  `docs/DIAGNOSTICS.md` now opens with that line and a table mapping each
+  symptom in it to where to look next.
+- **Diagnostics answers "why was that slow", not just "why did that break".**
+  `GET /api/admin/diagnostics` gained recent requests, a per-peer performance
+  table and what this node has served for others. A new
+  `GET /api/admin/performance` returns the same data as JSON, plus an hourly
+  trend that survives a restart.
+- **Time to first token and time per output token are now measured.** They are
+  the two figures that distinguish a backed-up queue from slow generation, and
+  wall-clock time alone cannot separate them. Exposed on `/metrics` under the
+  OpenTelemetry GenAI names, so collectors and community Grafana dashboards work
+  without any translation layer.
+- **Your node now counts what it contributes.** Segments and layers served for
+  other people, time spent computing them and bytes returned. Every existing
+  counter measured requests this node *made*; nothing measured what it *gave*,
+  so "is my node actually helping?" had no answer.
+
+### Fixed
+
+- **Small models could not be served by a node holding only their last layers.**
+  Llama-3.2 and most small models reuse their input word table as the final
+  output layer, and that table lives in the model's first piece. A node holding
+  only the last piece — the common case in a real swarm — failed while loading
+  it, and with only one holder per piece the whole request failed. The file that
+  exists precisely to carry that table was being written by three different code
+  paths and read by none. Found by running a genuine two-machine split, and
+  independently reproduced on different hardware. Models that ship a separate
+  output layer, such as Llama-3.1-8B and Qwen2.5, were never affected.
+
+### Changed
+
+- Prometheus request counts are now labelled by route and outcome only. Both are
+  fixed sets, so the number of series stays constant no matter how large the
+  swarm grows; per-peer and per-model detail is served on request from the JSON
+  endpoint instead, where it cannot accumulate.
+
+### Notes
+
+- On a streaming response the `Server-Timing` header carries only what is known
+  before the first byte of the body — queue and scheduling time. Token-level
+  figures arrive at the end of the stream. Headers cannot be revised once sent,
+  and reporting a zero would be worse than reporting nothing.
+
 ## [0.3.29-alpha] — 2026-07-26
 
 ### Added

@@ -196,75 +196,50 @@ All 20 build phases complete. All subsystems wired — no stubs. **1304 lib + 79
 
 Per-round history lives in `~/.claude/projects/-home-user-SwarmLLM/memory/round_log_*.md` and the CHANGELOG; `docs/ARCHITECTURE.md` is the canonical architecture. This section keeps only the current release line plus one-line prior-round pointers.
 
-### Latest — v0.3.29-alpha (2026-07-26): tool calling, wire conformance, first-run UX
+### Latest — v0.3.30-alpha (2026-07-26): observability, and a weight-tied serving bug
 
-Post-.28 live testing. **Nothing here was a regression** — every item was
-pre-existing and found by exercising a surface nobody had run this cycle.
+**The finding that shaped the round: nearly everything asked for was already
+measured and thrown away.** Per-segment timings + activation sizes went into a
+DEBUG log line and were dropped; `hedge_tracker` has held per-(model, segment,
+holder) EWMA latency **with variance and sample counts** since R136 with **zero
+readers**. Genuinely missing: **server-side TTFT** (existed only in
+`cli/bench.rs`, client-side), TPOT, queue-vs-schedule split, any record of a
+*successful* request, all serving-side telemetry, any persistence.
 
-- **Tool calls carried unusable arguments.** Shown the raw JSON Schema and asked
-  for arguments, `llama-3.2-3b` reproducibly answered `{"properties":{"city":
-  "Paris"}}`. It parsed, validated and reported success while `args.city` was
-  undefined — the worst failure shape. `describe_arguments` now renders the
-  ARGUMENT shape (never the word `properties`); `unwrap_schema_echo` is the
-  narrow backstop. Gotcha #174. Also: a bare call object with no `tool_calls`
-  wrapper was discarded as text.
-- **Anthropic streaming violated the spec.** We emitted `start(0) → start(1) →
-  stop(1) → stop(0)` — nested, where the published event flow requires
-  sequential blocks. SDKs accumulate by index and tolerate it; a client tracking
-  a *current* block does not, and Claude Code is a first-class consumer. The
-  epilogue now takes a REQUIRED `TextBlock::{Open,AlreadyClosed}` so the
-  compiler asks at every streaming path. Gotcha #175.
-- **MCP ignored the client's protocol revision**, always answering `2025-11-25`;
-  the spec says a supported version MUST be echoed and a client receiving an
-  unknown one SHOULD disconnect. Also: a malformed body got plain text instead
-  of a `-32700` error object, and a bad `jsonrpc` value returned -32700 where
-  the JSON was fine (-32600).
-- **First-run UX**: a new user is at a negative balance after their first
-  question with no explanation (all credit copy is about *earning*) — now
-  explained in 21 locales. Peer list labels the anchor and shows GPU-vendor /
-  CPU-only. Chat reports tok/s. Network map summarises the swarm.
-- **Startup**: a taken port printed `Failed to listen on QUIC: ` with nothing
-  after the colon. Gotcha #177.
+- **One `RequestTrace`** (`inference/trace.rs`) is the sole input to every
+  surface: the `DIAG: request complete` line, `x-swarm-*` + W3C `Server-Timing`
+  headers, `/api/admin/{diagnostics,performance}`, Prometheus, and the UI.
+  Four response paths each building their own timing struct is the recurring
+  N-paths defect, and observability is its worst home — the drift is invisible.
+- **TTFT is stamped by the token CHANNEL**, not the emit sites. Tokens leave from
+  seven places; `StreamingTokenTx` became a newtype mirroring `mpsc::Sender`, so
+  a new emit site inherits the stamp with no author action.
+- **Weight-tied models were unservable from a node lacking shard 0.** Llama-3.2
+  reuses `token_embd.weight` as its LM head; that tensor lives in shard 0, but
+  the node that needs it serves the LAST segment. `tied_output_weight.bin` exists
+  for exactly this, had **three writers and zero readers**, and
+  `ShardReader::new` had no parameter for it. Gotcha #178. Found by the first
+  genuine two-machine zero-redundancy split; independently reproduced by a
+  tester on different hardware.
+- **Serving-side counters** — segments/layers served for others, compute time,
+  bytes out. Everything before this measured requests we *made*.
+- **Dashboard** — chat route line, Models → Performance panel, 26 keys × 21
+  locales. **Hourly redb rollups** so a trend survives a restart.
 
-**`examples/3node_sharded_setup.sh` inference is EXPECTED to fail on one
-multi-interface host** — the zero-redundancy same-host case in FUTURE_WORK,
-confirmed identical on released .28, NOT a regression. Gotcha #176. Two script
-defects fixed while diagnosing (killall missed released binary names; the
-auto-manage config it documented was never written).
+**Three decisions not to undo** (full reasoning in `docs/FUTURE_WORK.md`
+§ Observability, marked SHIPPED):
+1. **Prometheus carries `(route, outcome)` ONLY** — 20 series, fixed. Per-peer is
+   50×10×10 = 5 000 series *per node* and grows with the swarm; it lives in the
+   pulled JSON endpoint, never retained.
+2. **Headers flush before the body**, so SSE cannot carry TTFT/decode. Omitted,
+   not zeroed — asserted by a test.
+3. **"Tok/s per node per shard" is NOT measurable in a pipeline.** Segments are
+   serialised on the *same* token stream, so `tokens / A_time` shows both nodes
+   doing the full rate and the figures don't compose. Use each segment's *share
+   of inter-token latency* (these sum → finds the bottleneck) and
+   *ms per layer per token*.
 
-### v0.3.28-alpha (2026-07-26): the Llama-3 prompt-format root cause
-
-Live-testing v0.3.27 found the ACTUAL cause of the control-token leak that
-.22/.24/.25/.26 each chased through the output scrubber. **Read gotcha #169
-before touching reply text again.**
-
-- **Llama-3 templates never parsed → every Llama-3 model was prompted in
-  ChatML.** `eval_block` detected a message loop via `content.contains(" in
-  messages")`; every official Llama-3.x GGUF writes `{% set loop_messages =
-  messages %}{% for message in loop_messages %}`. No match → unknown tag →
-  empty render → `apply_chat_template` returns `None` → fallback chain has no
-  Llama-3 entry → **ChatML**. A Llama-3 model asked in ChatML replies in ChatML.
-  Fixed via `parse_for_iterable` + `EvalState::msg_aliases`. The `grep "chat
-  template failed" node.log` WARN had been firing on every request for
-  releases.
-- **The fallback chain was unreachable on 6 of 7 paths** — `build_prompt` was a
-  4-arg wrapper hardcoding `model_name: None`. Wrapper deleted, argument now
-  mandatory. Gotcha #171. Added real `mistral_fallback` / `llama3_fallback`.
-- **Two v0.3.27 fixes were inert or partial**: quantization parsed
-  `manifest.name` (a display name, never carries a tag) instead of
-  `manifest.id` (#170); the `provider:` prefix was stripped on the OpenAI proxy
-  only, so `/v1/messages` still shipped it and `anthropic:claude-*` misrouted.
-- **Consolidation** (the week's meta-fix): `inference::finalize_reply_text` now
-  owns the whole ordered scrub→truncate→trim→newline sequence for all THREE
-  text sources — they had diverged, with `distributed.rs` in the wrong order
-  and missing a step. `strip_prefix_in_body` moved inside the three functions
-  that actually send. Escalation ladder (choke point > required arg > assert on
-  the helper) in `.claude/rules/architecture.md`; gotcha #173.
-
-Known limitation: Mistral's official template still can't be *rendered*
-(needs `namespace()`, `selectattr`, slice-binding) — it degrades to Mistral
-formatting via the fallback. `minijinja` replacement proposed in
-`docs/FUTURE_WORK.md`.
+Detail: `memory/round_log_observability_0726.md`.
 
 ### Recent releases (one line each; full detail in CHANGELOG.md + `memory/round_log_*.md`)
 
@@ -276,33 +251,43 @@ Read that before touching any request/response path.**
   boundary; `PUT /api/admin/providers` no longer a silent no-op on a wrong
   field name; `Quantization::parse` + `trailing_tag` handle hyphenated
   multi-part tags. All three needed follow-up in .28 — see above.
-- **v0.3.26** (07-26): control-token scrubbing at the THREE text sources
-  (`executor.rs` / `process_pool.rs` / `pipeline/distributed.rs`) — closed a
-  template leak reported across .22/.24/.25; strip BEFORE stop-truncation.
-  Gotchas #167-168. Detail: `round_log_overnight_0726.md`.
-- **v0.3.25** (07-25): template stop-markers on the non-streaming split path;
-  `include_usage` on `split_stream_response`; Responses API tool cap (128);
-  dashboard chat single silent retry on a cold model.
-- **v0.3.24** (07-25): tool-call parser accepts prose around the JSON
-  (`parse_embedded_json`, balanced-brace scan); universal `<|...|>` stop markers.
+- **v0.3.29** (07-26): tool calls carried schema-shaped arguments that parsed
+  and validated while being wrong (#174); Anthropic streaming emitted nested
+  rather than sequential content blocks (#175); MCP ignored the client's protocol
+  revision; a taken port printed `Failed to listen on QUIC: ` with nothing after
+  the colon (#177). First-run UX in 21 locales. **`3node_sharded_setup.sh`
+  inference is EXPECTED to fail on one multi-interface host** (#176) — confirmed
+  identical on released .28. Detail: `round_log_v0329_livetest.md`.
+- **v0.3.28** (07-26): **read gotcha #169 before touching reply text.** The
+  control-token leak that .22/.24/.25/.26 chased through the output *scrubber*
+  was a **prompt** bug — `eval_block` missed `{% set loop_messages = messages %}`
+  so every Llama-3 model was prompted in ChatML and replied in ChatML. The `grep
+  "chat template failed" node.log` WARN had fired on every request for releases.
+  The fallback chain was also unreachable on 6 of 7 paths (`build_prompt`
+  hardcoded `model_name: None`, #171). **Meta-fix**:
+  `inference::finalize_reply_text` owns the ordered scrub→truncate→trim sequence
+  for all three text sources; escalation ladder in
+  `.claude/rules/architecture.md` (#173). Mistral's template still can't be
+  *rendered* and degrades via fallback; `minijinja` proposed in FUTURE_WORK.
+- **v0.3.22-v0.3.26** (07-25→26): control-token scrubbing at the THREE text
+  sources, strip BEFORE stop-truncation (#167-168); template stop-markers on the
+  non-streaming split path; `include_usage` on `split_stream_response`; Responses
+  API tool cap; local tool calling (`src/api/tool_parse.rs`, 4 formats, all four
+  streaming paths); recent-failures diagnostics ring. Detail:
+  `round_log_overnight_0726.md`.
 - **v0.3.23** (07-25): **the big networking fix** — we recorded an INBOUND
   connection's ephemeral source port as a dialable address and published it, so
-  peers learned dead addresses for us. One bug, four symptoms (all dials refused
-  → no circuit → DCUtR 0 attempts → absent from `connected_node_ids` → "no node
-  available"). Gotcha #165. Poisoned entries persist in caches — nodes must
-  RESTART, not just swap binaries.
-- **v0.3.22** (07-25): local tool calling (`src/api/tool_parse.rs`, 4 formats,
-  all four streaming paths); recent-failures diagnostics ring.
-- **v0.3.21** (07-25): networking audit — `max_established_per_peer = 1` was
-  structurally disabling DCUtR (gotcha #163); scheduler relay tier;
-  `max_circuits` 16→128. **Hole punching verified live 07-25.** Detail:
-  `round_log_networking_audit.md`.
-- **v0.3.15-v0.3.20** (07-23→25): the networking release line — app-level
+  peers learned dead addresses for us. One bug, four symptoms. Gotcha #165.
+  Poisoned entries persist in caches — nodes must RESTART, not just swap
+  binaries.
+- **v0.3.15-v0.3.21** (07-23→25): the networking release line — app-level
   inference + tensor relay across NAT, additive protocol/feature handshake,
   multi-relay + DHT discovery, auto-updater cap 500MB→2GB, deterministic LAN
-  dialer; WSL2 mirrored-mode detection, Docker bridge filtering, FULLBACKUP
-  lockdown. Detail: `round_log_networking_plan.md`, `round_log_v0315_livetest.md`.
-
+  dialer, WSL2 mirrored-mode detection, Docker bridge filtering. Audit found
+  `max_established_per_peer = 1` was structurally disabling DCUtR (#163);
+  `max_circuits` 16→128. **Hole punching verified live 07-25.** Detail:
+  `round_log_networking_audit.md`, `round_log_networking_plan.md`,
+  `round_log_v0315_livetest.md`.
 
 ### Prior rounds (pre-v0.3.15)
 
