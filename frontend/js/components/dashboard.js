@@ -827,8 +827,29 @@
         _trackStat('credits', bal, 'stat-credits');
         var balEl = document.getElementById('credit-balance');
         if (balEl) balEl.textContent = bal.toLocaleString();
+        // A negative balance needs its own explanation. Every other credit
+        // string talks about EARNING, so a new user — who goes negative on
+        // their first question, having consumed inference before sharing
+        // anything — sees a minus number next to BRONZE with nothing saying
+        // it is normal or that nothing is restricted. It is not: Bronze is
+        // the zero-or-negative tier, access is never gated, and the balance
+        // decays back toward zero on its own.
         var headerCredits = document.querySelector('.header-credits');
-        if (headerCredits) headerCredits.title = I18n.t('dashboard.credits_header_tip', { earned: earned.toLocaleString(), spent: spent.toLocaleString() });
+        if (headerCredits) {
+          var tip = I18n.t('dashboard.credits_header_tip', {
+            earned: earned.toLocaleString(),
+            spent: spent.toLocaleString()
+          });
+          if (bal < 0) tip += '\n\n' + I18n.t('dashboard.credits_negative_tip');
+          headerCredits.title = tip;
+        }
+        var creditCard = document.getElementById('stat-credits');
+        creditCard = creditCard && creditCard.closest('.stat-card');
+        if (creditCard) {
+          creditCard.title = bal < 0
+            ? I18n.t('dashboard.credits_negative_tip')
+            : I18n.t('dashboard.stat_credits_tip');
+        }
         var prevBal = S.creditHistory.length > 0 ? S.creditHistory[S.creditHistory.length - 1]._bal : bal;
         var delta = bal - prevBal;
         var deltaEl = document.getElementById('credit-delta');
@@ -1984,6 +2005,15 @@
           : (p.is_lan_peer
               ? ' <span class="badge badge-purple lan-badge">' + U.escapeHtml(I18n.t('dashboard.peer_type_lan')) + '</span>'
               : ' <span class="badge badge-blue">' + U.escapeHtml(I18n.t('dashboard.peer_type_remote')) + '</span>');
+        // An anchor holds no shards and serves no inference by design, so
+        // without a label it reads as a broken peer. Shown in ADDITION to the
+        // location tag rather than replacing it — where the anchor lives still
+        // matters for latency.
+        if (p.is_anchor) {
+          lanBadge += ' <span class="badge badge-amber" title="' +
+            U.escapeHtml(I18n.t('dashboard.peer_anchor_tip')) + '">' +
+            U.escapeHtml(I18n.t('dashboard.peer_type_anchor')) + '</span>';
+        }
         var dotClass = p.healthy ? 'online' : 'degraded';
         var latency = p.latency_ms ? p.latency_ms + 'ms' : '\u2014';
         var shards = p.hosted_shards || 0;
@@ -1993,8 +2023,29 @@
         // every node and makes it obvious at a glance when a peer is on an older
         // build (a real help when a bug behaves differently across machines).
         var verText = p.version ? 'v' + U.escapeHtml(p.version) : '';
-        var gpuText = p.gpu ? U.escapeHtml(p.gpu) : '';
-        var metaParts = [verText, gpuText].filter(Boolean);
+        var hwText = '';
+        if (p.gpu) {
+          // Vendor marker from the reported adapter name. Purely cosmetic, and
+          // the full name stays in the text, so an unrecognised vendor just
+          // gets the neutral mark rather than a wrong one.
+          var g = String(p.gpu).toLowerCase();
+          var vendor = g.indexOf('nvidia') >= 0 || g.indexOf('geforce') >= 0 || g.indexOf('rtx') >= 0 || g.indexOf('quadro') >= 0 || g.indexOf('tesla') >= 0
+            ? '\u25B2'
+            : (g.indexOf('amd') >= 0 || g.indexOf('radeon') >= 0
+                ? '\u25CF'
+                : (g.indexOf('intel') >= 0 || g.indexOf('arc') >= 0
+                    ? '\u25A0'
+                    : (g.indexOf('apple') >= 0 ? '\u25C6' : '\u25AB')));
+          hwText = '<span title="' + U.escapeHtml(I18n.t('dashboard.gpu_label')) + ': ' + U.escapeHtml(p.gpu) + '">' +
+            vendor + ' ' + U.escapeHtml(p.gpu) + '</span>';
+        } else if (p.version) {
+          // Only claim "CPU" once the peer has actually reported a capability
+          // (version is part of it) — otherwise we would label a peer we simply
+          // have not heard from yet.
+          hwText = '<span title="' + U.escapeHtml(I18n.t('dashboard.peer_cpu_only_tip')) + '">\u2699 ' +
+            U.escapeHtml(I18n.t('dashboard.cpu_label')) + '</span>';
+        }
+        var metaParts = [verText, hwText].filter(Boolean);
         var gpu = metaParts.length
           ? '<div class="text-muted" style="font-size:0.62rem">' + metaParts.join(' · ') + '</div>'
           : '';

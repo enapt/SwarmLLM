@@ -693,6 +693,18 @@
       var timerEl = document.createElement('div');
       timerEl.className = 'msg-timer';
       timerEl.textContent = I18n.t('chat.response_time', { seconds: elapsed });
+      // Throughput alongside wall-clock. Elapsed time alone cannot be compared
+      // between a one-word reply and a long one, so it says little about how
+      // the swarm is performing; tokens per second can. Uses the usage figures
+      // the stream already carries, and is simply omitted when a provider
+      // sends none rather than showing a made-up number.
+      var outTokens = streamUsage
+        ? (streamUsage.completion_tokens || streamUsage.output_tokens || 0)
+        : 0;
+      if (outTokens > 0 && parseFloat(elapsed) > 0) {
+        var tps = (outTokens / parseFloat(elapsed)).toFixed(1);
+        timerEl.textContent += ' · ' + tps + ' ' + I18n.t('compare.tok_per_sec');
+      }
       var timerTarget = assistantEl.querySelector('.msg-bubble') || assistantEl;
       timerTarget.appendChild(timerEl);
 

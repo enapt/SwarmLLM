@@ -349,6 +349,7 @@ mod tests {
             protocol_version: 0,
             features,
             relay_reservations: reservations,
+            anchor_mode: false,
         }
     }
 

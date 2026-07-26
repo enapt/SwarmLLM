@@ -92,6 +92,20 @@ pub struct NodeCapability {
     /// back to any relay it is connected to.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub relay_reservations: Vec<NodeId>,
+    /// This node runs in `--anchor` mode: a dedicated bootstrap/relay node that
+    /// never serves inference and hosts no shards.
+    ///
+    /// Advertised so the dashboard can label it, because an anchor is otherwise
+    /// indistinguishable from an ordinary peer that happens to hold nothing —
+    /// which is exactly what a struggling node looks like. Deliberately NOT
+    /// inferred from `relay_capable && hosted_shards.is_empty()`: an ordinary
+    /// node that has relaying on and has not acquired a shard yet matches that
+    /// too, and mislabelling it "anchor" would be worse than no label.
+    ///
+    /// `#[serde(default)]` (false) so a node on an older build simply carries
+    /// no label, per the additive-evolution rule.
+    #[serde(default)]
+    pub anchor_mode: bool,
 }
 
 /// One entry in `NodeCapability::observed_latencies`: the sender observed

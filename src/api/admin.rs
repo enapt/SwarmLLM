@@ -98,6 +98,14 @@ pub fn serialize_peer_to_json(
         "hosted_shards": hosted_shards_count,
         "is_lan_peer": peer.is_lan_peer,
         "is_pool_member": is_pool_member,
+        // A dedicated bootstrap/relay node. Surfaced so the dashboard can label
+        // it — an anchor holds no shards and serves no inference by design, so
+        // in a peer list it is otherwise indistinguishable from a broken node.
+        "is_anchor": peer
+            .capability
+            .as_ref()
+            .map(|c| c.anchor_mode)
+            .unwrap_or(false),
     });
     if include_addresses {
         if let Some(o) = obj.as_object_mut() {

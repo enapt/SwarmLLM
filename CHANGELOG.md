@@ -4,7 +4,33 @@ All notable changes to SwarmLLM are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- **The bootstrap node is now labelled in the peer list.** It hosts no models
+  and answers no questions by design, so it previously looked identical to a
+  peer that was failing. Hovering explains what it does and why holding nothing
+  is normal for it.
+- **Peers show what they run on.** Each peer now carries a mark for its
+  graphics card make, or a CPU tag when it has none — so it is clear at a glance
+  whether a peer is fast hardware or a machine helping out with its processor.
+  Previously a processor-only peer showed nothing at all, which looked the same
+  as a peer we had not heard from yet.
+- **Replies show speed, not just elapsed time.** Chat now reports tokens per
+  second beside the response time. Elapsed time alone cannot be compared between
+  a one-word answer and a long one, so it said little about how the swarm was
+  performing.
+- **The network map summarises the swarm.** Under the map you now see how many
+  computers are taking part, how many have graphics cards, the combined memory
+  and storage, and which models the swarm can actually run right now.
+
 ### Fixed
+
+- **A negative credit balance now explains itself.** A new user goes below zero
+  on their first question — they used the network before sharing anything — and
+  saw a minus figure next to their tier with nothing to say what it meant. Every
+  other credit message talks about earning, so it read as a debt or a penalty.
+  It now says that this is normal, that nothing is restricted, and that the
+  balance recovers on its own.
 
 - **A tool call from a local model now carries the arguments the caller asked
   for.** Models were shown a tool's raw parameter schema and asked to fill in

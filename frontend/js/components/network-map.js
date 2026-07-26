@@ -425,6 +425,62 @@
       }
       var legendEl = document.getElementById('map-legend-max');
       if (legendEl) legendEl.textContent = maxCount;
+      App.networkMap._renderSwarmSummary();
+    },
+
+    /// Summarise what the swarm can actually DO, under the map.
+    ///
+    /// The map answers "where are the nodes"; on its own that leaves "so what
+    /// can this network run?" unanswered, which is the question a new user
+    /// actually has. Reuses the capacity snapshot the dashboard banner already
+    /// renders (and its existing strings) rather than inventing a second
+    /// vocabulary for the same numbers.
+    _renderSwarmSummary: function() {
+      var el = document.getElementById('map-swarm-summary');
+      if (!el) return;
+      var cap = App.data && App.data.cache && App.data.cache.stats
+        ? App.data.cache.stats.swarm_capacity
+        : null;
+      if (!cap) { el.style.display = 'none'; return; }
+
+      var nodes = cap.online_nodes || 0;
+      var gpus = cap.gpu_nodes || 0;
+      var vram = cap.total_vram_mb || 0;
+      var disk = cap.total_disk_mb || 0;
+      var serveable = (cap.serveable_models || []).length;
+
+      var parts = [];
+      parts.push('<strong>' + nodes + '</strong> ' +
+        U.escapeHtml(I18n.t(nodes === 1 ? 'netstatus.res_computers_one' : 'netstatus.res_computers_other')));
+      parts.push('<strong>' + gpus + '</strong> ' +
+        U.escapeHtml(I18n.t(gpus === 1 ? 'netstatus.res_gpu_one' : 'netstatus.res_gpu_other')));
+      if (vram > 0) {
+        parts.push('<strong>' + U.escapeHtml(U.formatMB(vram)) + '</strong> ' +
+          U.escapeHtml(I18n.t('pool.combined_vram')));
+      }
+      if (disk > 0) {
+        parts.push('<strong>' + U.escapeHtml(U.formatMB(disk)) + '</strong> ' +
+          U.escapeHtml(I18n.t('netstatus.res_disk')));
+      }
+      el.innerHTML = parts.join(' \u00b7 ');
+      el.style.display = '';
+
+      // Which models the swarm can actually serve right now — the payoff line.
+      var modelsEl = document.getElementById('map-swarm-models');
+      if (!modelsEl) return;
+      if (serveable === 0) { modelsEl.style.display = 'none'; return; }
+      // Same display-name cleanup the dashboard banner uses, so a raw id like
+      // `qwen2_5_0_5b` is not shown here after being tidied there.
+      var names = (cap.serveable_models || []).slice(0, 4).map(function (m) {
+        var d = m.display_name || '';
+        var looksRaw = d && d === d.toLowerCase() && /_/.test(d);
+        if (d && !looksRaw) return U.escapeHtml(d);
+        var src = d || m.model_id || '';
+        return U.escapeHtml(U.formatModelDisplayName ? U.formatModelDisplayName(src) : src);
+      }).join(', ');
+      var more = serveable > 4 ? ' +' + (serveable - 4) : '';
+      modelsEl.innerHTML = U.escapeHtml(I18n.t('netstatus.runs')) + ' ' + names + more;
+      modelsEl.style.display = '';
     },
 
     // Per-locale display name for an ISO 3166-1 alpha-2 code. Intl.DisplayNames

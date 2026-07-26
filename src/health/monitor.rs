@@ -373,6 +373,10 @@ impl HealthMonitor {
             // pairs (NETWORKING_PLAN Phase 1). `--anchor` implies it; any node
             // can opt in via `network.relay_forwarding`.
             relay_capable: self.shared_state.relay_forwarding_enabled(),
+            // Label ourselves an anchor so peers can show it. An anchor holds
+            // nothing and serves nothing by design, which looks identical to a
+            // broken node in a peer list.
+            anchor_mode: self.shared_state.config.node.anchor_mode,
             // Advertise the protocol epoch + the optional features this build
             // implements, so peers negotiate new message types additively.
             protocol_version: swarmllm_types::PROTOCOL_VERSION,
