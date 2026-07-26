@@ -33,6 +33,12 @@ All notable changes to SwarmLLM are documented here.
   trained on. Mistral models with a system prompt were hitting this, and any
   model whose template we cannot read would have. They now get Mistral, Llama 3,
   Gemma or LLaVA formatting as appropriate.
+- **Saving a provider key after a daemon restart no longer fails.** With the
+  dashboard left open, reconnection attempts ran every three seconds forever,
+  which used up the request budget shared with saving API keys and checking for
+  updates — so those kept reporting "slow down" for as long as the tab stayed
+  open, and could not recover on their own. Reconnection now backs off, and
+  resets once it succeeds.
 
 ## [0.3.27-alpha] — 2026-07-26
 

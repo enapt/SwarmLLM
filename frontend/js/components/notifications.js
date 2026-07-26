@@ -362,6 +362,23 @@
     }
   }
 
+  // Reconnect backoff. A fixed 3s retry is ~20 attempts/minute, and
+  // /api/admin/ws-ticket is deliberately bucketed with the other sensitive
+  // endpoints at 5 requests/minute — so a dashboard left open across a daemon
+  // restart burned that budget continuously and starved the endpoints sharing
+  // it: saving a provider key, rotating the API key, and the auto-updater all
+  // returned 429 for as long as the tab stayed open, and could never recover
+  // because the retry rate exceeded the refill rate.
+  var WS_RETRY_MIN_MS = 3000;
+  var WS_RETRY_MAX_MS = 30000;
+  var _wsRetryMs = WS_RETRY_MIN_MS;
+
+  function scheduleReconnect() {
+    var delay = _wsRetryMs;
+    _wsRetryMs = Math.min(_wsRetryMs * 2, WS_RETRY_MAX_MS);
+    setTimeout(connectWebSocket, delay);
+  }
+
   async function connectWebSocket() {
     // Guard against stacking parallel reconnects
     if (S.ws && (S.ws.readyState === WebSocket.CONNECTING || S.ws.readyState === WebSocket.OPEN)) return;
@@ -386,7 +403,7 @@
     if (!ticket) {
       // Reconnect path will try again after backoff. Don't hard-error the
       // dashboard — stats_update + activity_event just won't arrive.
-      setTimeout(function() { connectWebSocket(); }, 3000);
+      scheduleReconnect();
       return;
     }
     var protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -416,6 +433,7 @@
         _renderNetworkLog();
       }
       S.wsWasConnected = true;
+      _wsRetryMs = WS_RETRY_MIN_MS;
       logActivity('\u{1F4E1}', I18n.t('activity.connected'), 'system');
     };
 
@@ -491,7 +509,7 @@
         App.dashboard.renderPeers([]);
       }
       startPolling();
-      setTimeout(connectWebSocket, 3000);
+      scheduleReconnect();
     };
     S.ws.onerror = function() { S.ws.close(); };
   }
