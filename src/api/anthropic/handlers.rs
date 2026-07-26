@@ -575,7 +575,9 @@ pub(super) async fn anthropic_to_openai_proxy(
 
     if req.stream {
         let (sse_tx, sse_rx) = tokio::sync::mpsc::channel::<AnthropicSseEvent>(64);
-        let model_clone = req.model.clone();
+        // Same as the non-streaming arm below: name the model that served the
+        // request, not the caller's routing syntax.
+        let model_clone = upstream_model.to_string();
 
         tokio::spawn(async move {
             stream_openai_to_anthropic(resp, sse_tx, model_clone).await;
@@ -592,7 +594,11 @@ pub(super) async fn anthropic_to_openai_proxy(
         })
     })?;
 
-    let response = openai_response_to_anthropic(&openai_resp, &req.model);
+    // Report the model that actually served the request, not the routing
+    // syntax the caller typed. Echoing `deepseek:deepseek-v4-flash` back would
+    // name a model no provider has, and disagrees with the OpenAI-compatible
+    // endpoint, which reports the bare name for the same request.
+    let response = openai_response_to_anthropic(&openai_resp, upstream_model);
     Ok(Json(response).into_response())
 }
 
