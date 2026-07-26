@@ -1060,6 +1060,36 @@ can serve. That is fine while local really is the fastest option, and wrong on
 a slow local machine paired with a fast peer — worth measuring once splits are
 representable, since today the question never arises.
 
+### Greedy decoding is far more load-sensitive than sampling (observed 2026-07-27)
+
+Not a bug, but worth knowing before reading a report about it. `temperature = 0`
+makes a request eligible for the SWARM-SPEC L1 n-gram-only speculative path,
+which drives the pipeline with **per-token `LayerForward` round trips**. Normal
+sampling takes the `remote_generate` fast path instead, which delegates the whole
+generation in one message.
+
+Consequence: greedy decoding is far more exposed to a busy remote. Observed
+while deliberately saturating the CPU node — single-token forwards that normally
+cost ~1.7s (16 layers at the measured 107ms/layer) sat in the queue for 113s and
+196s, blowing `compute_segment_timeout`'s 32s decode budget. With only one holder
+of the model there is no standby, so the request failed outright with
+`Segment 0 failed with no standby available`, while sampling requests to the same
+node in the same window succeeded. On an idle node the same greedy request
+completes normally.
+
+The timeout itself is fine — it already scales with layer count and
+prefill-vs-decode, and 32s is generous against 1.7s of real compute. Two things
+would genuinely help, both listed above: making the split representable so a
+saturated single holder is no longer a single point of failure, and feeding the
+observed per-layer latency (which already includes peer-side queuing) into the
+timeout instead of the fixed 2s/layer guess. Note this compounds with the
+monopolisation bug — a fully-held model has exactly one candidate, so it can
+never have a standby.
+
+Relevant because greedy decoding is what tool calling, benchmarks and
+reproducible runs use, so it is over-represented in exactly the traffic testers
+generate.
+
 ## CPU prefill throughput is the dominant cost for modest nodes (measured 2026-07-27)
 
 **Status: measured, not addressed.** Recorded because it sets the ceiling on
