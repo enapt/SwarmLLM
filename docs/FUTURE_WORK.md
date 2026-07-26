@@ -1043,6 +1043,16 @@ every candidate's range starts and ends: emit a vertex for each sub-range of
 vertex `(10,16)` for the remote node, making the split representable, and the
 existing cost model then picks it on merit.
 
+**Implementation hazard to resolve first.** `PipelineSegment.shard_id` is set
+to the candidate's *first* shard regardless of the segment's layer range, so a
+sub-range segment covering layers 10-16 would be labelled with shard 0. That
+mismatch already exists today — it is why `retract_shard_holder_claims_for_range`
+had to be added, after a `blk.10` (shard 2) failure retracted shard 0 — but
+making sub-ranges routable turns it from an edge case into the normal path.
+Every consumer of `segment.shard_id` needs auditing against `layer_range`
+before this lands, and the field should probably carry the shards the range
+actually spans rather than a single id.
+
 Then verify against the cost model's blind spot: the local node is
 deliberately given `observed_latency_ms_per_layer = None`
 (`scheduler/mod.rs`), so it costs ~0 and will look attractive for any range it
