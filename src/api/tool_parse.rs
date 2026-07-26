@@ -59,6 +59,8 @@ pub fn format_tool_prompt(tools: &[(String, Option<String>, Option<String>)]) ->
          in the following format:\n\
          {\"tool_calls\": [{\"id\": \"call_<unique_id>\", \"type\": \"function\", \
          \"function\": {\"name\": \"<function_name>\", \"arguments\": \"<json_args>\"}}]}\n\n\
+         `arguments` is a JSON object whose keys are the argument names listed below. \
+         Do not wrap it in `properties`, `parameters`, or a type declaration.\n\n\
          Available tools:\n",
     );
     for (name, description, schema) in tools {
@@ -68,10 +70,68 @@ pub fn format_tool_prompt(tools: &[(String, Option<String>, Option<String>)]) ->
         }
         prompt.push('\n');
         if let Some(schema) = schema {
-            prompt.push_str(&format!("  Parameters: {schema}\n"));
+            match describe_arguments(schema) {
+                Some(rendered) => prompt.push_str(&rendered),
+                // Unrecognised schema shape — fall back to the raw text rather
+                // than describing it wrongly.
+                None => prompt.push_str(&format!("  Parameters: {schema}\n")),
+            }
         }
     }
     prompt
+}
+
+/// Render a JSON-Schema parameter object as the ARGUMENT shape a model should
+/// produce, rather than as the schema itself.
+///
+/// Handing a model the raw schema and asking it for `<json_args>` invites it to
+/// copy the schema's own structure: `llama-3.2-3b` reproducibly answered
+/// `{"properties":{"city":"Paris"}}` instead of `{"city":"Paris"}` (live
+/// 2026-07-26, 2/2 runs). That is the worst kind of failure — a tool call that
+/// parses cleanly and passes validation while carrying arguments the caller
+/// cannot read, so `args.city` is silently undefined.
+///
+/// Emits a concrete example object plus one line per argument, and never uses
+/// the word `properties`. Returns `None` for anything that is not a plain
+/// object-with-properties schema (nested objects, `$ref`, unusual shapes), so
+/// the caller keeps the raw schema instead of a lossy paraphrase.
+fn describe_arguments(schema: &str) -> Option<String> {
+    let v: Value = serde_json::from_str(schema).ok()?;
+    let props = v.get("properties")?.as_object()?;
+    if props.is_empty() {
+        return None;
+    }
+    let required: Vec<&str> = v
+        .get("required")
+        .and_then(|r| r.as_array())
+        .map(|a| a.iter().filter_map(|x| x.as_str()).collect())
+        .unwrap_or_default();
+
+    // Example object: {"city": <string>} — shows the exact key placement.
+    let example = props
+        .iter()
+        .map(|(k, spec)| {
+            let ty = spec.get("type").and_then(|t| t.as_str()).unwrap_or("value");
+            format!("\"{k}\": <{ty}>")
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut out = format!("  arguments: {{{example}}}\n");
+
+    for (k, spec) in props {
+        let ty = spec.get("type").and_then(|t| t.as_str()).unwrap_or("value");
+        let req = if required.contains(&k.as_str()) {
+            ", required"
+        } else {
+            ", optional"
+        };
+        out.push_str(&format!("    {k} ({ty}{req})"));
+        if let Some(d) = spec.get("description").and_then(|d| d.as_str()) {
+            out.push_str(&format!(": {d}"));
+        }
+        out.push('\n');
+    }
+    Some(out)
 }
 
 /// One tool call recovered from model output, in the shape both API layers need.
@@ -299,10 +359,42 @@ fn arguments_to_string(v: &Value) -> String {
         .or_else(|| v.get("input"));
     match raw {
         // Already a string: the model serialised it itself. Pass through so we
-        // don't double-encode.
-        Some(Value::String(s)) => s.clone(),
-        Some(other) => other.to_string(),
+        // don't double-encode — but re-parse first so a schema-echoed wrapper
+        // is unwrapped here too (models serialise arguments both ways).
+        Some(Value::String(s)) => match serde_json::from_str::<Value>(s) {
+            Ok(parsed) => unwrap_schema_echo(&parsed).to_string(),
+            Err(_) => s.clone(),
+        },
+        Some(other) => unwrap_schema_echo(other).to_string(),
         None => "{}".to_string(),
+    }
+}
+
+/// Undo a model copying the JSON-Schema wrapper into its arguments.
+///
+/// Asked for arguments while being shown a schema, a small model may answer
+/// `{"properties":{"city":"Paris"}}` instead of `{"city":"Paris"}` —
+/// `llama-3.2-3b` did so reproducibly (live 2026-07-26). The call parses, looks
+/// valid, and passes straight to the caller, who reads `args.city` and gets
+/// nothing. A silently-wrong tool call is worse than a rejected one, and the
+/// caller has no way to tell.
+///
+/// `format_tool_prompt` no longer shows the raw schema, which removes most of
+/// the temptation; this is the backstop for models that do it anyway.
+///
+/// Deliberately narrow: unwraps ONLY an object whose single key is `properties`
+/// or `parameters` and whose value is itself an object. A tool whose one and
+/// only argument is an object literally named `properties` would be unwrapped
+/// wrongly — accepted, because that shape is vanishingly rare next to the
+/// schema echo, which is reproducible on a current model.
+fn unwrap_schema_echo(v: &Value) -> &Value {
+    let Some(obj) = v.as_object() else { return v };
+    if obj.len() != 1 {
+        return v;
+    }
+    match obj.iter().next() {
+        Some((k, inner)) if (k == "properties" || k == "parameters") && inner.is_object() => inner,
+        _ => v,
     }
 }
 
@@ -465,5 +557,95 @@ mod tests {
         let calls = parse_tool_calls(text).unwrap();
         assert_eq!(calls[0].name, "get_weather");
         assert_eq!(calls[0].arguments, r#"{"city":"Paris"}"#);
+    }
+}
+
+#[cfg(test)]
+mod schema_echo_tests {
+    use super::*;
+
+    /// The live failure: `llama-3.2-3b` answered with the schema's own wrapper
+    /// around its arguments. The call parsed and looked valid, but the caller
+    /// reading `args.city` got nothing.
+    #[test]
+    fn schema_echo_is_unwrapped() {
+        let text = r#"{"tool_calls":[{"id":"call_1","type":"function","function":{"name":"get_weather","arguments":{"properties":{"city":"Paris"}}}}]}"#;
+        let calls = parse_tool_calls(text).expect("should parse");
+        assert_eq!(calls[0].name, "get_weather");
+        assert_eq!(calls[0].arguments, r#"{"city":"Paris"}"#);
+    }
+
+    /// Same echo, but the model serialised the arguments as a string.
+    #[test]
+    fn schema_echo_is_unwrapped_when_stringified() {
+        let text = r#"{"tool_calls":[{"function":{"name":"f","arguments":"{\"properties\":{\"city\":\"Paris\"}}"}}]}"#;
+        let calls = parse_tool_calls(text).expect("should parse");
+        assert_eq!(calls[0].arguments, r#"{"city":"Paris"}"#);
+    }
+
+    /// Correct arguments must pass through untouched.
+    #[test]
+    fn correct_arguments_are_left_alone() {
+        let text = r#"{"tool_calls":[{"function":{"name":"f","arguments":{"city":"Paris","units":"c"}}}]}"#;
+        let calls = parse_tool_calls(text).expect("should parse");
+        let v: serde_json::Value = serde_json::from_str(&calls[0].arguments).unwrap();
+        assert_eq!(v["city"], "Paris");
+        assert_eq!(v["units"], "c");
+    }
+
+    /// Only a LONE wrapper key is unwrapped — an argument that happens to be
+    /// called `properties` alongside others is real data.
+    #[test]
+    fn properties_alongside_other_arguments_is_not_unwrapped() {
+        let text = r#"{"tool_calls":[{"function":{"name":"f","arguments":{"properties":{"a":1},"name":"x"}}}]}"#;
+        let calls = parse_tool_calls(text).expect("should parse");
+        let v: serde_json::Value = serde_json::from_str(&calls[0].arguments).unwrap();
+        assert!(v.get("properties").is_some(), "must not unwrap");
+        assert_eq!(v["name"], "x");
+    }
+
+    /// A non-object value under `properties` is not a schema echo.
+    #[test]
+    fn scalar_properties_value_is_not_unwrapped() {
+        let text =
+            r#"{"tool_calls":[{"function":{"name":"f","arguments":{"properties":"blue"}}}]}"#;
+        let calls = parse_tool_calls(text).expect("should parse");
+        assert_eq!(calls[0].arguments, r#"{"properties":"blue"}"#);
+    }
+
+    /// The prompt must describe the ARGUMENT shape, and must not hand the model
+    /// the word it was copying.
+    #[test]
+    fn prompt_describes_arguments_not_schema() {
+        let tools = vec![(
+            "get_weather".to_string(),
+            Some("Get current weather".to_string()),
+            Some(
+                r#"{"type":"object","properties":{"city":{"type":"string","description":"City name"}},"required":["city"]}"#
+                    .to_string(),
+            ),
+        )];
+        let p = format_tool_prompt(&tools);
+        assert!(p.contains(r#"arguments: {"city": <string>}"#), "got:\n{p}");
+        assert!(
+            p.contains("city (string, required): City name"),
+            "got:\n{p}"
+        );
+        assert!(
+            !p.contains(r#""properties":{"city""#),
+            "raw schema must not be shown:\n{p}"
+        );
+    }
+
+    /// An exotic schema keeps its raw form rather than a lossy paraphrase.
+    #[test]
+    fn unrenderable_schema_falls_back_to_raw() {
+        let tools = vec![(
+            "f".to_string(),
+            None,
+            Some(r##"{"$ref":"#/defs/Thing"}"##.to_string()),
+        )];
+        let p = format_tool_prompt(&tools);
+        assert!(p.contains("Parameters: {\"$ref\""), "got:\n{p}");
     }
 }
