@@ -2,6 +2,43 @@
 
 All notable changes to SwarmLLM are documented here.
 
+## [0.3.33-alpha] — 2026-07-26
+
+### Fixed
+
+- **Two machines could stop being able to reach each other while appearing
+  perfectly connected.** Requests left one side and never arrived at the other —
+  no error, no delivery failure — until a ten-second timeout gave up, while a
+  working direct connection sat unused the whole time.
+
+  Connections are chosen by preferring a direct path over one that goes through
+  a relay, and a relayed connection was recognised by a relay marker in its
+  address. That only catches the case where *you* dialled out through the relay.
+  When the other machine dials *you* through one, the address has no relay marker
+  and no network address at all, just the machine's identity, because there is no
+  direct connection to describe. Those were treated as direct, and being the most
+  recent connection, they won every time.
+
+  Most likely to affect anyone whose home router does not allow incoming
+  connections, which is most people — that is exactly when peers reach you
+  through a relay.
+
+- **Diagnostics reported scheduling time that included a failed attempt.** A
+  request that failed and retried charged the whole first attempt to
+  "scheduling", so the logs showed thirteen seconds of scheduling for work that
+  took under a millisecond. Since the troubleshooting guide reads a large
+  scheduling time as "struggling to find a machine to serve the model", this
+  pointed diagnosis in the wrong direction. The number is now the real assembly
+  time, and the log says when a request was retried.
+
+### Notes
+
+- Verified between two machines on one network: the same request went from
+  timing out after thirty-one seconds to answering in eight, with three
+  consecutive runs averaging four and a half seconds.
+- A machine reachable only through a relay stays reachable — the preference is
+  for a direct path when one exists, never a refusal to use a relay.
+
 ## [0.3.32-alpha] — 2026-07-26
 
 ### Fixed

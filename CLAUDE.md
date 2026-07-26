@@ -196,56 +196,66 @@ All 20 build phases complete. All subsystems wired — no stubs. **1312 lib + 79
 
 Per-round history lives in `~/.claude/projects/-home-user-SwarmLLM/memory/round_log_*.md` and the CHANGELOG; `docs/ARCHITECTURE.md` is the canonical architecture. This section keeps only the current release line plus one-line prior-round pointers.
 
-### Latest — v0.3.32-alpha (2026-07-26): first request after a restart works
+### Latest — v0.3.33-alpha (2026-07-26): a relay that looked direct won every send
 
-**Reproduced independently twice**, which is what made it worth chasing: a
-tester deleted a shard mid-session and saw the next request fail instantly with
-`No node available` and the one after it succeed; I hit the same after a plain
-restart.
+**Read gotcha #179 before touching connection selection.** Two nodes on the SAME
+subnet reproducibly failed `remote-generate: peer never acknowledged` while a
+healthy direct QUIC connection sat unused.
 
-Holder claims are rebuilt from gossip and a full re-announce is only every ~40
-min (`shard_announce_counter % 10` × ~240s), so a freshly started node on a quiet
-swarm knows no holders. `distributed_exec` fired the DHT provider query
-**fire-and-forget** — the comment on that line already said "first request for a
-model may miss the cache" — so assembly failed before the answer landed.
-`assemble_awaiting_dht` now gives it `DHT_ASSEMBLY_GRACE` (1.5s, polled at 250ms).
+The vendored `libp2p-request-response` patch (gotcha #164) picks
+`rposition(|c| !connection_is_relayed(c))` — the newest *direct* connection — and
+`connection_is_relayed` tested for `Protocol::P2pCircuit`. That catches an
+OUTBOUND relay dial. It misses the INBOUND one: when a peer dials *us* through a
+relay there is no socket to describe, so the remote address is a bare
+`/p2p/<peer>` with **no transport component at all**. No circuit hop → counted as
+direct → and a relayed inbound connection is typically the NEWEST of the three a
+peer accumulates under `max_established_per_peer = 3`, so it won outright. Every
+send then crossed a circuit whose dials were failing negotiation → **silent drop**
+(no response, no `OutboundFailure`) until the 10s `RR_ACK_TIMEOUT_SECS` sweep.
 
-Gated on `assembly_failed_for_lack_of_holders` — **only** the "nothing known to
-serve this" failure waits; every other scheduling error returns immediately
-because waiting cannot change the verdict. Unit test asserts both directions. On
-timeout the ORIGINAL error is returned (it names the layer with no holder).
+Fix: direct requires a real transport (`Ip4|Ip6|Dns*|Tcp|Udp`) AND no circuit
+hop. `None` stays direct — excluding a possibly-good connection is the worse
+error, and a relay-only peer must remain reachable. **Affects any NAT'd user**,
+since that is exactly when peers reach you through a relay.
 
-**Anyone who tried SwarmLLM, got an error on their first question and concluded
-it was broken was most likely hitting this.**
+**The diagnostic that cracked it** (worth reusing):
+`grep "connection established peer_id=<peer>" node.log | grep -oE "remote_addr=[^ ]+" | sort | uniq -c`
 
-Verified live on a node started with an empty holder registry: logged
-`Pipeline assembled after waiting for DHT provider results` where it previously
-failed outright.
+Also: **`sched_ms` charged a failed attempt to scheduling** — it was derived from
+the dequeue timestamp, so a retry reported 13s of "scheduling" for two ~0ms
+assemblies, pointing the DIAGNOSTICS symptom table in the wrong direction. Now
+the caller's measured assembly time, summed, with `assemblies=N` shown on retry.
 
-### v0.3.31-alpha (2026-07-26): stale shard-holder claims self-correct
+31s timeout → 8.6s, then 3/3 at ~4.5s. The vendored crate now carries its own
+`[workspace]` table so the patch is unit-testable (6 tests; `--lib` only, its
+integration tests need `libp2p-swarm-test`).
 
-Holder claims are gossiped, so a requester's registry outlives the truth after a
-peer prunes a shard — and every request routed there failed until the retraction
-announcement landed. `pipeline::remote_error_means_missing_shard` recognises the
-ShardReader missing-region error, the holder's claims over the failed **layer
-span** are dropped, and `is_transient_remote_failure` retries with a fresh
-assembly so the routing input is corrected before the retry runs.
+### v0.3.31 / v0.3.32-alpha (2026-07-26)
 
-**The scoping is the part to not undo.** First attempt used
-`segment.shard_id` — but a segment spans several shards and that field is only
-the first. Live, a whole-model segment failing on `blk.10` (shard 2) retracted
-**shard 0**, which the holder genuinely had: exactly the "pushes work off a
-healthy peer" outcome the mechanism exists to prevent. Now every shard
-overlapping the failed span loses its claim — over-broad on purpose, because the
-holder's own next announce re-asserts the truth (cost: one announce interval),
-whereas retracting the wrong shard keeps failing forever.
+**.32 — first request after a restart failed outright.** Holder claims are
+rebuilt from gossip and a full re-announce is only every ~40 min
+(`shard_announce_counter % 10` × ~240s), so a freshly started node on a quiet
+swarm knew no holders; the DHT provider query was fire-and-forget (its own
+comment said "first request for a model may miss the cache"). `assemble_awaiting_dht`
+now grants `DHT_ASSEMBLY_GRACE` (1.5s / 250ms polls), gated on
+`assembly_failed_for_lack_of_holders` so ONLY that failure waits. Reproduced
+independently twice. Anyone who tried SwarmLLM, errored on their first question
+and concluded it was broken was likely hitting this.
 
-Also: `route=relayed` on a directly-connected peer —
-`peer_reachable_via_relay` is an *eligibility* check, true for any relay-capable
-peer, so LAN hops were mislabelled. Now keyed on `connected_node_ids`. And the
-long-standing `kv_cache::restore_skips_expired_sessions` flake resolved
-(`save_to_db` also skips expired sessions, so a >1s stall vs the 1s TTL made the
-SAVE return 0 and the *first* assert fail; rewritten with a back-dated record).
+**.31 — stale shard-holder claims now self-correct.**
+`pipeline::remote_error_means_missing_shard` recognises the ShardReader
+missing-region error, the holder's claims over the failed **layer span** are
+dropped, and `is_transient_remote_failure` retries with a fresh assembly.
+**Scoping is the part not to undo**: the first version used `segment.shard_id`,
+but a segment spans several shards and that field is only the first — live, a
+whole-model segment failing on `blk.10` (shard 2) retracted **shard 0**, which
+the holder genuinely had. Now every shard overlapping the failed span loses its
+claim; over-broad on purpose, since the holder's next announce re-asserts truth.
+Also fixed `route=relayed` on a directly-connected peer
+(`peer_reachable_via_relay` is an *eligibility* check; now keyed on
+`connected_node_ids`) and the long-standing `kv_cache::restore_skips_expired_sessions`
+flake (`save_to_db` also skips expired sessions, so a >1s stall vs the 1s TTL made
+the SAVE return 0 and the *first* assert fail).
 
 ### v0.3.30-alpha (2026-07-26): observability, and a weight-tied serving bug
 
