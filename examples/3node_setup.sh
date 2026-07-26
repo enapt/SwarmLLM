@@ -9,6 +9,11 @@ SRC_MODEL=~/.local/share/swarmllm/models/tinyllama-1.1b-chat-v1.0.q4-k-m
 # point at a different build (e.g. CUDA, llama feature).
 BINARY="${BINARY:-$(cd "$(dirname "$0")/.." && pwd)/target/release/swarmllm}"
 
+# Match any swarmllm binary, not just one literally named `swarmllm`.
+# Release downloads are named e.g. `swarmllm-linux-x86_64-cuda`, so the
+# old `killall -9 swarmllm` left a released node holding the ports and the
+# cluster then failed to bind with a bare transport error.
+pkill -9 -f '[s]warmllm(-[a-z0-9_.-]+)? run' 2>/dev/null || true
 killall -9 swarmllm 2>/dev/null || true
 sleep 1
 
@@ -56,4 +61,4 @@ for label_port in a:8800 b:8801 c:8802; do
 done
 
 echo
-echo "Done. To stop: killall -9 swarmllm"
+echo "Done. To stop: pkill -9 -f '[s]warmllm.* run'"

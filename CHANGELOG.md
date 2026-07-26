@@ -14,6 +14,10 @@ All notable changes to SwarmLLM are documented here.
   raised an error — the program on the other end simply found the argument
   missing. Tools are now described by the shape of the arguments to send, and a
   reply that wraps its arguments in a schema is unwrapped when read.
+- **A node that cannot start now says why.** Starting on a port another
+  program is already using — the most common way a first run fails — printed a
+  message that stopped at the colon with no explanation after it. It now names
+  the port, says what is likely holding it, and suggests choosing another.
 - **A malformed request to the tool endpoint gets a proper error reply.** An
   unreadable request was answered with plain text instead of the structured
   error the protocol defines, so a client saw neither an error code nor a

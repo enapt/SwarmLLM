@@ -289,6 +289,69 @@ pub struct NetworkManager {
     internal_cmd_rx: mpsc::Receiver<NetworkCommand>,
 }
 
+/// Build the startup error for a failed `listen_on`.
+///
+/// Two things made the original message useless in the most common case.
+/// libp2p's `TransportError::Other` renders its inner error, and for the QUIC
+/// transport that can be EMPTY — a node whose port was taken exited with the
+/// bare text "Failed to listen on QUIC: " and nothing after the colon
+/// (reproduced 2026-07-26 by starting a second node on a port already in use,
+/// which is the single most likely way a first-time user fails to start).
+///
+/// So: never emit an empty detail, and when the port really is occupied, say
+/// so in terms the user can act on rather than making them interpret a
+/// transport error.
+fn listen_failure_message<E: std::fmt::Display + std::fmt::Debug>(
+    transport: &str,
+    listen_ip: &str,
+    port: u16,
+    err: &E,
+) -> String {
+    let detail = {
+        let shown = format!("{err}");
+        if shown.trim().is_empty() {
+            format!("{err:?}")
+        } else {
+            shown
+        }
+    };
+    if port_is_taken(transport, listen_ip, port) {
+        format!(
+            "Port {port} is already in use, so this node cannot start. \
+             Another SwarmLLM node is most likely already running — stop it first, \
+             or start this one on a different port with `--port <number>`. \
+             ({transport} listen failed: {detail})"
+        )
+    } else {
+        format!("Failed to listen on {transport} port {port}: {detail}")
+    }
+}
+
+/// Whether `port` is already bound for the transport that just failed.
+///
+/// Probes the protocol that actually failed: QUIC runs over UDP, so a QUIC
+/// failure must test a UDP bind. Testing both and requiring both to fail —
+/// the obvious-looking version — reports nothing in the common case where UDP
+/// is taken but TCP is free, which is precisely the QUIC failure this exists
+/// to explain.
+///
+/// Only used to phrase an error that has already occurred, so a false negative
+/// costs nothing beyond a less specific message.
+fn port_is_taken(transport: &str, listen_ip: &str, port: u16) -> bool {
+    use std::net::{TcpListener, UdpSocket};
+    let host = if listen_ip.is_empty() {
+        "0.0.0.0"
+    } else {
+        listen_ip
+    };
+    let addr = format!("{host}:{port}");
+    if transport.eq_ignore_ascii_case("quic") {
+        UdpSocket::bind(&addr).is_err()
+    } else {
+        TcpListener::bind(&addr).is_err()
+    }
+}
+
 impl NetworkManager {
     /// Create a new NetworkManager and initialize the libp2p Swarm.
     #[allow(clippy::too_many_arguments)]
@@ -528,9 +591,9 @@ impl NetworkManager {
             let quic_addr: Multiaddr = format!("/ip4/{listen_ip}/udp/{port}/quic-v1")
                 .parse()
                 .map_err(|e| SwarmError::Network(format!("Invalid QUIC address: {e}")))?;
-            self.swarm
-                .listen_on(quic_addr.clone())
-                .map_err(|e| SwarmError::Network(format!("Failed to listen on QUIC: {e}")))?;
+            self.swarm.listen_on(quic_addr.clone()).map_err(|e| {
+                SwarmError::Network(listen_failure_message("QUIC", listen_ip, port, &e))
+            })?;
 
             match self.swarm.listen_on(tcp_addr.clone()) {
                 Ok(_) => tracing::info!(%quic_addr, %tcp_addr, "Listening for P2P connections"),
@@ -539,9 +602,9 @@ impl NetworkManager {
                 }
             }
         } else {
-            self.swarm
-                .listen_on(tcp_addr.clone())
-                .map_err(|e| SwarmError::Network(format!("Failed to listen on TCP: {e}")))?;
+            self.swarm.listen_on(tcp_addr.clone()).map_err(|e| {
+                SwarmError::Network(listen_failure_message("TCP", listen_ip, tcp_port, &e))
+            })?;
             tracing::info!(%tcp_addr, "Listening for P2P connections (QUIC disabled)");
         }
 
@@ -1280,5 +1343,65 @@ mod tests {
 
         let empty: [u8; 0] = [];
         assert!(NetworkManager::resolve_peer_id(&empty, "test").is_none());
+    }
+}
+
+#[cfg(test)]
+mod listen_failure_tests {
+    use super::*;
+
+    /// libp2p's QUIC transport error can render as an empty string, which
+    /// produced the bare "Failed to listen on QUIC: " a user actually saw. A
+    /// message must never end at the colon.
+    #[test]
+    fn empty_transport_error_still_produces_a_detail() {
+        #[derive(Debug)]
+        struct Blank;
+        impl std::fmt::Display for Blank {
+            fn fmt(&self, _f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                Ok(())
+            }
+        }
+        // Port 0 is never bound, so this takes the non-occupied branch.
+        let msg = listen_failure_message("QUIC", "127.0.0.1", 0, &Blank);
+        assert!(msg.contains("Blank"), "must fall back to Debug: {msg}");
+        assert!(
+            !msg.trim_end().ends_with(':'),
+            "message ends at the colon: {msg}"
+        );
+    }
+
+    /// When the port really is taken, say that in terms the user can act on —
+    /// this is the most common way a first run fails.
+    #[test]
+    fn occupied_tcp_port_is_reported_as_such() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let msg = listen_failure_message("TCP", "127.0.0.1", port, &"whatever");
+        assert!(msg.contains("already in use"), "got {msg}");
+        assert!(msg.contains("--port"), "must suggest the fix: {msg}");
+        assert!(msg.contains(&port.to_string()), "must name the port: {msg}");
+    }
+
+    /// A QUIC failure must probe UDP, not TCP. Requiring both to be unbindable
+    /// would stay silent here — a UDP port taken while TCP is free is exactly
+    /// how the live failure presented.
+    #[test]
+    fn occupied_udp_port_is_reported_for_quic() {
+        let sock = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let port = sock.local_addr().unwrap().port();
+        // TCP on the same number is deliberately left free.
+        let msg = listen_failure_message("QUIC", "127.0.0.1", port, &"whatever");
+        assert!(msg.contains("already in use"), "got {msg}");
+        assert!(msg.contains(&port.to_string()), "got {msg}");
+    }
+
+    /// A free port keeps the plain message — no misleading "in use" claim.
+    #[test]
+    fn free_port_keeps_the_plain_message() {
+        let msg = listen_failure_message("QUIC", "127.0.0.1", 0, &"some cause");
+        assert!(msg.contains("some cause"));
+        assert!(!msg.contains("already in use"), "got {msg}");
     }
 }

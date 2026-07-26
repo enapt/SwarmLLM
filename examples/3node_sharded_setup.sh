@@ -9,6 +9,22 @@
 # Inference requests to A force a 2-segment distributed pipeline
 # (B → C → result). This exercises Layer 0 (Q8_0 activation
 # compression on the wire) and the full distributed forward path.
+#
+# KNOWN LIMITATION — read before believing a failure here.
+#
+# This layout is the same-host, zero-redundancy case that
+# docs/FUTURE_WORK.md § "Connection churn on multi-interface hosts" documents
+# as NOT covered: one loopback host advertising several interfaces (WSL2's
+# NAT gateway, link-local, Docker bridge, LAN) can still form a stale
+# connection, and with exactly one holder per shard there is no standby to
+# fail over to. Inference then fails with "Segment N failed with no standby
+# available" — reproduced on v0.3.28, 2026-07-26.
+#
+# Real deployments do not hit this: distinct hosts with min_replicas >= 2
+# have somewhere to fail over. So a failure HERE is not evidence that
+# distributed inference is broken — confirm on two machines before concluding
+# that. Use this script for shard-splitting and scheduling behaviour; use two
+# real hosts to validate the forward path end to end.
 
 set -e
 
@@ -29,6 +45,11 @@ fi
 # point at a different build (e.g. CUDA, llama feature).
 BINARY="${BINARY:-$(cd "$(dirname "$0")/.." && pwd)/target/release/swarmllm}"
 
+# Match any swarmllm binary, not just one literally named `swarmllm`.
+# Release downloads are named e.g. `swarmllm-linux-x86_64-cuda`, so the
+# old `killall -9 swarmllm` left a released node holding the ports and the
+# cluster then failed to bind with a bare transport error.
+pkill -9 -f '[s]warmllm(-[a-z0-9_.-]+)? run' 2>/dev/null || true
 killall -9 swarmllm 2>/dev/null || true
 sleep 1
 
@@ -74,6 +95,29 @@ for label in a b c; do
     ls -la "$DIR/models/$MODEL_NAME/" | grep -E "shard|manifest|gguf" | awk '{print "    " $9 " (" $5 " bytes)"}'
 done
 
+# Per-node config. Two settings are what make this a *sharded* test rather
+# than three nodes that quietly converge on holding everything:
+#
+#   auto_manage.enabled = false — otherwise each node downloads the shards it
+#   is missing from its peers within a minute or two, every node ends up with
+#   the whole model, and inference runs locally. The split is then gone and the
+#   run silently measures the wrong thing. (This was documented as a manual
+#   prerequisite and not actually applied, so the script did not do what it
+#   claimed — observed 2026-07-26: node B had both shards within 30s.)
+#
+#   bootstrap_peers = [] — keeps the cluster to itself. With the defaults these
+#   nodes join the public swarm, learn shard holders from it, and can schedule
+#   a segment onto a node that is not part of the test.
+for label in a b c; do
+    cat > /tmp/swarm_bench_$label/config.toml <<'CFG'
+[auto_manage]
+enabled = false
+
+[network]
+bootstrap_peers = []
+CFG
+done
+
 # Spawn nodes
 for label_port in a:8800 b:8801 c:8802; do
     label=${label_port%:*}
@@ -81,7 +125,7 @@ for label_port in a:8800 b:8801 c:8802; do
     DIR=/tmp/swarm_bench_$label
     LOG=$DIR/log.txt
     echo "Starting node $label on port $port..."
-    nohup $BINARY run --port $port --data-dir $DIR > $LOG 2>&1 &
+    nohup $BINARY run --port $port --data-dir $DIR --config $DIR/config.toml > $LOG 2>&1 &
 done
 
 sleep 3
@@ -100,4 +144,4 @@ for label_port in a:8800 b:8801 c:8802; do
 done
 
 echo
-echo "Done. To stop: killall -9 swarmllm"
+echo "Done. To stop: pkill -9 -f '[s]warmllm.* run'"
