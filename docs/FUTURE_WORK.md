@@ -2883,6 +2883,47 @@ or layer-shard layout computation on a large file. If it is the probe, the fix i
 progress reporting rather than speed — say "checking the file on HuggingFace"
 instead of showing a 0-byte file.
 
+## "Newest direct connection" can select a dead one (observed 2026-07-26)
+
+The vendored `libp2p-request-response` patch picks the **newest direct**
+connection to a peer, on the reasoning that "a half-open connection is almost
+always an older one that died quietly, and DCUtR's upgraded direct connection is
+by definition the newest".
+
+Observed live contradicting that. Local held three connections to a LAN peer:
+
+```
+1  15:07:46  /ip4/192.168.1.60/udp/8800/quic-v1/p2p/…   direct, outbound
+2  15:27:10  /ip4/192.168.1.60/udp/8800/quic-v1          direct, inbound
+3  15:27:12  /p2p/…                                      relayed, inbound
+```
+
+Connection 1 had just served three consecutive successful requests. Connections 2
+and 3 appeared during a pool join. With the v0.3.33 fix, 3 is correctly excluded
+as relayed — and selection then lands on **2**, which silently swallows every
+send (no response, no `OutboundFailure`, 10s ACK timeout), while the known-good
+connection 1 sits unused. Restarting both ends clears it.
+
+**Why this is hard**: a half-open QUIC connection is indistinguishable from a
+live idle one without probing. Age is a heuristic and this is the case where it
+points the wrong way.
+
+**Candidate fixes, cheapest first:**
+
+1. **Feed the ACK timeout back into selection.** `RR_ACK_TIMEOUT_SECS` already
+   detects the silent drop; today it only fails the request. Recording the
+   connection id as suspect and skipping it on the retry would make the existing
+   retry actually change the outcome instead of re-picking the same dead path.
+   Small, local, and needs no protocol change — this is the one to do.
+2. Prefer the connection that most recently carried a **successful** response,
+   falling back to newest. Turns age into a tiebreaker rather than the rule.
+3. Probe liveness before selecting. Correct but adds a round trip to every send.
+
+Note the interaction with `max_established_per_peer = 3` (raised so DCUtR can
+hold a relayed and a direct connection at once, gotcha #163): the higher cap is
+what makes several connections routine, so it is also what makes mis-selection
+routine.
+
 ## Shard-holder retraction depends on gossip reaching the peer (observed 2026-07-26) — MITIGATED v0.3.31
 
 > **Requester-side mitigation shipped in v0.3.31.** A holder that reports missing
