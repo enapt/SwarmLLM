@@ -181,6 +181,43 @@ pub async fn quant_recommendations(State(state): State<AppState>) -> Json<serde_
 /// (which leak usernames). Node and peer ids are already public on the wire, so
 /// they stay — they are what makes a report traceable. Adding a field here
 /// means checking it against that rule first.
+/// GET /api/admin/performance — routing and performance data as JSON.
+///
+/// The machine-readable sibling of `diagnostics`, for the dashboard. Pulled on
+/// demand rather than pushed on the 2s WebSocket stats tick: the per-peer and
+/// per-request detail here is exactly the high-cardinality data that must NOT
+/// go anywhere retained (see `docs/FUTURE_WORK.md` § Observability), and a
+/// panel nobody has open should cost nothing.
+pub async fn performance(State(state): State<AppState>) -> impl axum::response::IntoResponse {
+    use std::sync::atomic::Ordering;
+    let ss = &state.shared_state;
+    let m = &ss.metrics;
+
+    // Newest first — matches the text rendering and what a reader expects.
+    let mut recent = ss.recent_traces_snapshot();
+    recent.reverse();
+
+    let layers = m.layers_served.load(Ordering::Relaxed);
+    let micros = m.segment_serve_micros.load(Ordering::Relaxed);
+
+    axum::Json(serde_json::json!({
+        "recent": recent,
+        "peers": ss.peer_performance_rows(),
+        "served": {
+            "segments": m.segments_served.load(Ordering::Relaxed),
+            "layers": layers,
+            "compute_secs": micros as f64 / 1_000_000.0,
+            "activation_bytes_out": m.segment_bytes_out.load(Ordering::Relaxed),
+            // The comparable figure: what a peer's scheduler ranks us on.
+            "ms_per_layer": if layers > 0 {
+                Some((micros as f64 / 1000.0) / layers as f64)
+            } else {
+                None
+            },
+        },
+    }))
+}
+
 pub async fn diagnostics(State(state): State<AppState>) -> impl axum::response::IntoResponse {
     use std::fmt::Write as _;
     let ss = &state.shared_state;

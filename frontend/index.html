@@ -1372,6 +1372,7 @@
                 <button class="swarm-subtab" data-swarm-subtab="running" data-i18n="swarm.tab_running">Running now</button>
                 <button class="swarm-subtab" data-swarm-subtab="search" data-i18n="swarm.tab_search">Search HuggingFace</button>
                 <button class="swarm-subtab" data-swarm-subtab="capacity" data-i18n="swarm.tab_capacity">Capacity plan</button>
+                <button class="swarm-subtab" data-swarm-subtab="performance" data-i18n="swarm.tab_performance">Performance</button>
               </div>
             </div>
 
@@ -1491,6 +1492,17 @@
               <div class="text-muted text-sm mb-2" data-i18n="swarm.capacity_intro">See what the swarm could run if more contributors joined.</div>
               <div id="capacity-plan-content">
                 <div class="text-muted" data-i18n="swarm.capacity_pending">Capacity-plan view is being prepared in a follow-up update.</div>
+              </div>
+            </div>
+
+            <!-- Performance subtab — where requests went and how peers performed.
+                 Pulled from /api/admin/performance on demand rather than pushed
+                 on the stats tick: this is the high-cardinality detail that must
+                 not be retained, and a panel nobody opens should cost nothing. -->
+            <div class="swarm-subview" id="swarm-subview-performance" style="display:none">
+              <div class="text-muted text-sm mb-2" data-i18n="perf.intro">Where your recent answers came from, and how the peers serving them are performing.</div>
+              <div id="perf-content">
+                <div class="text-muted" data-i18n="perf.loading">Loading…</div>
               </div>
             </div>
           </div>

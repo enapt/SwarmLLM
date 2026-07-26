@@ -581,6 +581,7 @@
       var fullContent = '';
       var reasoningContent = '';
       var streamUsage = null;
+      var routeInfo = null;
 
       try {
         var resp = await App.authFetch('/v1/chat/completions', {
@@ -588,6 +589,10 @@
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(body),
         });
+
+        // Capture the route before consuming the body — the headers are gone
+        // once the stream is drained and the reader is released.
+        routeInfo = U.readRouteHeaders(resp);
 
         if (!resp.ok) {
           var errText = await resp.text();
@@ -667,6 +672,9 @@
               body: JSON.stringify(body),
             });
             if (retryResp.ok && retryResp.body) {
+              // The retry is the request that actually produced the answer, so
+              // its route is the one to report.
+              routeInfo = U.readRouteHeaders(retryResp);
               await U.readSseStream(retryResp.body.getReader(), onChunk);
             }
           } catch (retryErr) {
@@ -704,6 +712,20 @@
       if (outTokens > 0 && parseFloat(elapsed) > 0) {
         var tps = (outTokens / parseFloat(elapsed)).toFixed(1);
         timerEl.textContent += ' · ' + tps + ' ' + I18n.t('compare.tok_per_sec');
+      }
+      // Who answered. "Why was that slow" is the first thing anyone asks, and
+      // until now the dashboard could not say whether a reply came from this
+      // machine, one peer, or a pipeline across the internet. Read off the
+      // x-swarm-* response headers, so this needs no extra request.
+      var routeLabel = U.routeSummary(routeInfo);
+      if (routeLabel) {
+        timerEl.textContent += ' · ' + routeLabel;
+        if (routeInfo && routeInfo.nodes) {
+          timerEl.setAttribute(
+            'data-tooltip',
+            I18n.t('chat.route_detail', { route: routeInfo.route, nodes: routeInfo.nodes })
+          );
+        }
       }
       var timerTarget = assistantEl.querySelector('.msg-bubble') || assistantEl;
       timerTarget.appendChild(timerEl);

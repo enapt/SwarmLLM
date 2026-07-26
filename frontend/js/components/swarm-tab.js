@@ -357,11 +357,13 @@
     document.querySelectorAll('.swarm-subtab').forEach(function (b) {
       b.classList.toggle('active', b.dataset.swarmSubtab === name);
     });
-    ['wishlist', 'running', 'search', 'capacity'].forEach(function (n) {
+    ['wishlist', 'running', 'search', 'capacity', 'performance'].forEach(function (n) {
       var pane = document.getElementById('swarm-subview-' + n);
       if (pane) pane.style.display = n === name ? '' : 'none';
     });
     if (name === 'search') _browseEnsureTrending();
+    // Fetch on open, not on the stats tick — see the panel comment in index.html.
+    if (name === 'performance') _loadPerformance();
   }
 
   // -------------------------------------------------------------------------
@@ -757,6 +759,122 @@
         _browseSearch();
       });
     });
+  }
+
+  // -------------------------------------------------------------------------
+  // Performance subtab — recent request routes + per-peer serving performance.
+  //
+  // Reads GET /api/admin/performance, which is the JSON sibling of the plain-text
+  // /api/admin/diagnostics. Everything here comes from one RequestTrace per
+  // request (see src/inference/trace.rs), the same record that feeds the response
+  // headers, the DIAG completion line and the Prometheus histograms.
+  // -------------------------------------------------------------------------
+
+  function _fmtMs(v) {
+    if (v === null || v === undefined) return '—';
+    return v >= 1000 ? (v / 1000).toFixed(1) + 's' : Math.round(v) + 'ms';
+  }
+
+  function _routeBadge(route) {
+    // Colour tracks "how far did this go": local is free and instant, relayed
+    // is the slowest path we have.
+    var cls = { local: 'ok', split: 'ok', distributed: 'info', relayed: 'warning', cloud: 'info' }[route] || 'info';
+    return '<span class="badge badge-' + cls + '">' + U.escapeHtml(route) + '</span>';
+  }
+
+  function _renderPerformance(data) {
+    var el = document.getElementById('perf-content');
+    if (!el) return;
+    var html = '';
+
+    // What this node has contributed. Distinct from everything below, which is
+    // about requests this node made.
+    var served = data.served || {};
+    html += '<h3 class="text-sm mb-1">' + I18n.t('perf.served_title') + '</h3>';
+    if (!served.segments) {
+      html += '<div class="text-muted text-sm mb-3">' + I18n.t('perf.served_none') + '</div>';
+    } else {
+      html += '<div class="text-sm mb-3">' + I18n.t('perf.served_summary', {
+        segments: served.segments,
+        layers: served.layers,
+        seconds: (served.compute_secs || 0).toFixed(1),
+        per_layer: served.ms_per_layer ? served.ms_per_layer.toFixed(1) : '—',
+      }) + '</div>';
+    }
+
+    // Peers, slowest first — the reason to open this panel is to find the drag.
+    html += '<h3 class="text-sm mb-1">' + I18n.t('perf.peers_title') + '</h3>';
+    var peers = data.peers || [];
+    if (!peers.length) {
+      html += '<div class="text-muted text-sm mb-3">' + I18n.t('perf.peers_none') + '</div>';
+    } else {
+      html += '<table class="table table-sm mb-3"><thead><tr>'
+        + '<th>' + I18n.t('perf.th_peer') + '</th>'
+        + '<th>' + I18n.t('perf.th_rtt') + '</th>'
+        + '<th>' + I18n.t('perf.th_per_layer') + '</th>'
+        + '<th>' + I18n.t('perf.th_latency') + '</th>'
+        + '<th>' + I18n.t('perf.th_samples') + '</th>'
+        + '<th>' + I18n.t('perf.th_region') + '</th>'
+        + '</tr></thead><tbody>';
+      peers.forEach(function (p) {
+        html += '<tr><td><code>' + U.escapeHtml((p.node_id || '').slice(0, 16)) + '</code></td>'
+          + '<td>' + (p.rtt_ms != null ? _fmtMs(p.rtt_ms) : '—') + '</td>'
+          + '<td>' + (p.ms_per_layer != null ? p.ms_per_layer.toFixed(1) : '—') + '</td>'
+          + '<td>' + (p.ewma_ms != null ? _fmtMs(p.ewma_ms) : '—') + '</td>'
+          + '<td>' + (p.samples || 0) + '</td>'
+          + '<td>' + U.escapeHtml(p.region || '—') + '</td></tr>';
+      });
+      html += '</tbody></table>';
+    }
+
+    // Recent requests, newest first.
+    html += '<h3 class="text-sm mb-1">' + I18n.t('perf.recent_title') + '</h3>';
+    var recent = data.recent || [];
+    if (!recent.length) {
+      html += '<div class="text-muted text-sm">' + I18n.t('perf.recent_none') + '</div>';
+      el.innerHTML = html;
+      return;
+    }
+    html += '<table class="table table-sm"><tbody>';
+    recent.forEach(function (t) {
+      var rate = t.tok_per_sec ? t.tok_per_sec.toFixed(1) + ' ' + I18n.t('compare.tok_per_sec') : '';
+      html += '<tr><td>' + _routeBadge(t.route) + '</td>'
+        + '<td><span class="text-sm">' + U.escapeHtml(U.formatModelDisplayName(t.model || '')) + '</span></td>'
+        + '<td class="text-sm">' + _fmtMs(t.total_ms) + '</td>'
+        + '<td class="text-sm text-muted">' + (t.ttft_ms != null ? I18n.t('perf.ttft_label', { value: _fmtMs(t.ttft_ms) }) : '') + '</td>'
+        + '<td class="text-sm text-muted">' + rate + '</td>'
+        // `Outcome::Error` serialises as {"error": "<SwarmError variant>"}, and
+        // the variant name is the useful half — it says which subsystem failed.
+        + '<td class="text-sm">' + (t.outcome === 'ok' ? ''
+          : '<span class="badge badge-warning">'
+            + U.escapeHtml(t.outcome && t.outcome.error ? t.outcome.error : String(t.outcome))
+            + '</span>') + '</td>'
+        + '</tr>';
+      // Per-segment breakdown only where the work actually left this machine.
+      if ((t.segments || []).some(function (s) { return !s.is_local; })) {
+        t.segments.forEach(function (s) {
+          html += '<tr class="text-muted text-sm"><td></td><td colspan="5">'
+            + 'seg' + s.index + ' · '
+            + (s.is_local ? I18n.t('perf.seg_local') : '<code>' + U.escapeHtml((s.node_id || '').slice(0, 8)) + '</code>')
+            + ' · L' + s.layer_start + '–' + s.layer_end
+            + (s.elapsed_ms != null ? ' · ' + _fmtMs(s.elapsed_ms) : '')
+            + (s.region ? ' · ' + U.escapeHtml(s.region) : '')
+            + '</td></tr>';
+        });
+      }
+    });
+    html += '</tbody></table>';
+    el.innerHTML = html;
+  }
+
+  function _loadPerformance() {
+    var el = document.getElementById('perf-content');
+    App.authFetch('/api/admin/performance')
+      .then(function (r) { return r.json(); })
+      .then(_renderPerformance)
+      .catch(function () {
+        if (el) el.innerHTML = '<div class="text-muted">' + I18n.t('perf.load_failed') + '</div>';
+      });
   }
 
   App.swarmTab = {

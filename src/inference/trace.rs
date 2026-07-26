@@ -493,6 +493,12 @@ pub fn response_headers(snap: &TraceSnapshot, streaming: bool) -> Vec<(&'static 
     let mut out = Vec::with_capacity(5);
     out.push(("x-swarm-route", snap.route.as_str().to_string()));
     out.push(("x-swarm-segments", snap.segments.len().to_string()));
+    // Remote segments, i.e. how many OTHER machines were involved. Distinct
+    // from `segments`: a two-segment pipeline with one local segment used one
+    // peer, and reporting "2 peers" would be wrong. Sent explicitly rather than
+    // left for a client to derive, since the local/remote split is not
+    // recoverable from the node list.
+    out.push(("x-swarm-peers", snap.remote_segments().to_string()));
     if !snap.segments.is_empty() {
         out.push(("x-swarm-nodes", snap.nodes_csv()));
     }

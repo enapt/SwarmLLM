@@ -896,8 +896,43 @@
     return 'hsl(' + hue + ', 60%, 55%)';
   }
 
+  // Read the x-swarm-* routing headers off a fetch Response.
+  //
+  // Must be called BEFORE the body is consumed on a streaming response. Returns
+  // null when the response carries no route at all — a cloud-proxied request or
+  // one rejected before dispatch — so callers can distinguish "served locally"
+  // from "we don't know", which a default of 'local' would erase.
+  function readRouteHeaders(resp) {
+    if (!resp || !resp.headers) return null;
+    var route = resp.headers.get('x-swarm-route');
+    if (!route) return null;
+    return {
+      route: route,
+      segments: parseInt(resp.headers.get('x-swarm-segments') || '0', 10) || 0,
+      peers: parseInt(resp.headers.get('x-swarm-peers') || '0', 10) || 0,
+      nodes: resp.headers.get('x-swarm-nodes') || '',
+      regions: resp.headers.get('x-swarm-regions') || '',
+      serverTiming: resp.headers.get('server-timing') || '',
+    };
+  }
+
+  // Short human phrase for a route: "on this device", "via 1 peer", "relayed
+  // via 2 peers". Uses the peer count the server sends rather than counting
+  // node ids, because the node list includes this machine when a local segment
+  // took part.
+  function routeSummary(info) {
+    if (!info || !info.route) return '';
+    if (info.route === 'local' || info.route === 'split') return I18n.t('chat.route_local');
+    if (info.route === 'cloud') return I18n.t('chat.route_cloud');
+    var remote = Math.max(info.peers, 1);
+    var key = info.route === 'relayed' ? 'chat.route_relayed' : 'chat.route_distributed';
+    return I18n.t(remote === 1 ? key + '_one' : key + '_other', { count: remote });
+  }
+
   // Export utilities
   App.utils = {
+    readRouteHeaders: readRouteHeaders,
+    routeSummary: routeSummary,
     escapeHtml: escapeHtml,
     cssSafeAttr: cssSafeAttr,
     safeId: safeId,

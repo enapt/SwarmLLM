@@ -221,6 +221,7 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route("/api/admin/wishlist", get(admin::wishlist))
         .route("/api/admin/diagnostics", get(admin::diagnostics))
+        .route("/api/admin/performance", get(admin::performance))
         .route("/api/admin/reference-models", get(admin::reference_models))
         .route(
             "/api/admin/quant-recommendations",
