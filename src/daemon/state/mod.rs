@@ -272,6 +272,17 @@ pub struct SharedState {
     /// Hourly performance rollups, persisted so a trend survives a restart.
     /// Aggregates only — per-request detail stays in `recent_traces`, in memory.
     pub perf_history: perf_history::PerfHistory,
+    /// Holders this request must not be routed to again, keyed by request id.
+    ///
+    /// Retracting a holder's claim locally is not enough on its own: the DHT
+    /// still advertises it as a provider, so the very next assembly — especially
+    /// one that waits for DHT results — re-learns the claim and picks the same
+    /// dead holder. Observed live 2026-07-26: retraction fired correctly, the
+    /// retry re-added the holder from the DHT and failed identically.
+    ///
+    /// Scoped to one request so a peer that fails once is not banned globally on
+    /// a single data point. Same lifetime as `active_traces`.
+    pub request_holder_blacklist: DashMap<uuid::Uuid, std::collections::HashSet<NodeId>>,
     pub detected_region: RwLock<Option<String>>,
     pub shard_bytes_served: AtomicU64,
     pub relay_seconds_served: AtomicU64,
@@ -630,6 +641,7 @@ impl SharedState {
             recent_traces: std::sync::Mutex::new(std::collections::VecDeque::new()),
             active_traces: DashMap::new(),
             perf_history: perf_history::PerfHistory::load(&db),
+            request_holder_blacklist: DashMap::new(),
             vision_modules: DashMap::new(),
             encrypted_pipeline_models: {
                 let map = DashMap::new();

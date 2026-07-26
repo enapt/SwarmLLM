@@ -50,20 +50,20 @@ pub use types::{
 /// begin with, so a stale-but-unexpired relay route can see the same holder
 /// re-picked. Acceptable as it stands — a relayed holder carries a latency
 /// penalty so any directly-connected holder outranks it, and when it is the
-/// *only* holder of a shard, retrying it is better than failing outright. What
-/// is missing is a per-request holder blacklist, which would also help the
-/// pre-existing case of a connected peer that fails without disconnecting; see
-/// `docs/FUTURE_WORK.md`.
+/// *only* holder of a shard, retrying it is better than failing outright.
 ///
 /// A **missing-shard** error also qualifies, for a different reason. It is not
-/// transient in itself — that holder really does not have the data. But the
-/// pipeline path retracts the stale holder claim before returning
-/// (`retract_shard_holder_claim`), so by the time we retry, the input that caused
-/// the bad routing decision has been corrected and the scheduler will choose a
-/// different holder. Retrying turns what the user would otherwise see as a hard
-/// failure into a slightly slower answer. If the retraction leaves no holder at
-/// all, the retry fails cleanly with "no node available", which is the accurate
-/// message.
+/// transient in itself — that holder really does not have the data — but the
+/// pipeline path both retracts the stale claim AND blacklists the holder for
+/// this request id before returning, so by the time we retry the routing input
+/// has been corrected and the scheduler must pick someone else.
+///
+/// The blacklist is what makes the retry actually work. Retraction alone is
+/// futile: the DHT still advertises the holder, so the retry's assembly —
+/// especially one that waits for DHT results — re-learns the claim and picks
+/// the same dead peer. Observed live 2026-07-26 doing exactly that, failing
+/// twice with the identical error. If nothing else can serve the shard the
+/// retry fails with "no node available", which is the accurate message.
 fn is_transient_remote_failure(err: &SwarmError) -> bool {
     let msg = err.to_string();
     msg.contains("never acknowledged")
@@ -810,6 +810,9 @@ impl InferenceRouter {
                     if self.armed {
                         self.shared_state.active_pipelines.remove(&self.request_id);
                         self.shared_state.active_traces.remove(&self.request_id);
+                        self.shared_state
+                            .request_holder_blacklist
+                            .remove(&self.request_id);
                         self.count
                             .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
                         // Wake drain_queue so the next queued request can dispatch.
@@ -1133,6 +1136,7 @@ impl InferenceRouter {
             // Remove from active pipelines
             shared_state.active_pipelines.remove(&request.id);
             shared_state.active_traces.remove(&request.id);
+            shared_state.request_holder_blacklist.remove(&request.id);
 
             // Decrement active count so new requests can be dispatched, then
             // wake drain_queue so the next queued request actually starts.

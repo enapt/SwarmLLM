@@ -2924,7 +2924,7 @@ hold a relayed and a direct connection at once, gotcha #163): the higher cap is
 what makes several connections routine, so it is also what makes mis-selection
 routine.
 
-## Shard-holder retraction depends on gossip reaching the peer (observed 2026-07-26) — MITIGATED v0.3.31
+## Shard-holder retraction depends on gossip reaching the peer (observed 2026-07-26) — MITIGATED v0.3.31, completed post-.33
 
 > **Requester-side mitigation shipped in v0.3.31.** A holder that reports missing
 > shard data now loses its claim over the layer span it was asked to serve
@@ -2932,9 +2932,16 @@ routine.
 > `retract_shard_holder_claims_for_range`), and the request retries against a
 > fresh assembly, so the stale claim costs one internal retry rather than every
 > request until the announcement lands. The underlying gossip dependence is
-> unchanged and the note below still describes it. **Still open**: a per-request
-> holder blacklist, which would also cover a connected peer that fails without
-> disconnecting.
+> unchanged and the note below still describes it.
+>
+> **The per-request holder blacklist is now implemented too, and it turned out to
+> be required, not optional.** Live testing showed retraction alone is futile: the
+> DHT still advertises the holder, so the retry's assembly re-learns the claim and
+> picks the same dead peer, failing identically. Before: 6 retractions per request
+> (two rounds). After: 3, and the retry excludes the holder outright. The
+> blacklist is keyed by request id and cleaned up alongside `active_traces`, so one
+> bad data point cannot ban a peer globally. It also covers the pre-existing case
+> of a connected peer that fails without disconnecting.
 
 **Observed live**, by an external tester, during the v0.3.30 split testing.
 

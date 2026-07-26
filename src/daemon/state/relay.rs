@@ -154,6 +154,25 @@ impl super::SharedState {
         }
     }
 
+    /// Bar a holder from serving THIS request again.
+    ///
+    /// Pairs with [`Self::retract_shard_holder_claims_for_range`]: the retraction
+    /// corrects our registry, this makes the correction stick for the retry even
+    /// if the DHT re-advertises the holder in the meantime.
+    pub fn blacklist_holder_for_request(&self, request_id: uuid::Uuid, holder: &NodeId) {
+        self.request_holder_blacklist
+            .entry(request_id)
+            .or_default()
+            .insert(holder.clone());
+    }
+
+    /// Is this holder barred from serving `request_id`?
+    pub fn holder_blacklisted_for_request(&self, request_id: uuid::Uuid, holder: &NodeId) -> bool {
+        self.request_holder_blacklist
+            .get(&request_id)
+            .is_some_and(|s| s.contains(holder))
+    }
+
     /// Retract a holder's claims over the layer span it was asked to serve.
     ///
     /// A segment can cover SEVERAL shards, and `PipelineSegment::shard_id` names
@@ -645,6 +664,35 @@ mod tests {
         assert!(held(0), "shard 0 does not overlap 10..16 — must be kept");
         assert!(!held(1), "shard 1 overlaps 10..16 — must be retracted");
         assert!(held(2), "shard 2 does not overlap 10..16 — must be kept");
+    }
+
+    /// Retraction alone is futile — the DHT re-advertises the holder and the
+    /// retry picks it again. The blacklist is what makes a retry change the
+    /// outcome, and it is scoped per request so one bad data point cannot ban a
+    /// peer globally.
+    #[test]
+    fn blacklist_is_scoped_to_one_request() {
+        let state = test_state(crate::config::Config::default());
+        let holder = crate::types::NodeId([7u8; 32]);
+        let a = uuid::Uuid::new_v4();
+        let b = uuid::Uuid::new_v4();
+
+        state.blacklist_holder_for_request(a, &holder);
+
+        assert!(state.holder_blacklisted_for_request(a, &holder));
+        assert!(
+            !state.holder_blacklisted_for_request(b, &holder),
+            "a different request must not inherit the ban"
+        );
+        let other = crate::types::NodeId([8u8; 32]);
+        assert!(
+            !state.holder_blacklisted_for_request(a, &other),
+            "only the failing holder is barred"
+        );
+
+        // Cleanup mirrors active_traces; after removal the peer is usable again.
+        state.request_holder_blacklist.remove(&a);
+        assert!(!state.holder_blacklisted_for_request(a, &holder));
     }
 
     /// Our own inventory is ground truth; a peer's error must never revise it.

@@ -161,7 +161,7 @@ impl PipelineScheduler {
         }
 
         // Gather all candidates: nodes that have shards for this model
-        let candidates = self.gather_candidates(&manifest, local_node_id);
+        let candidates = self.gather_candidates(&manifest, local_node_id, request_id);
         if candidates.is_empty() {
             // In private mode, give a specific error showing which shards are missing
             if self
@@ -308,10 +308,16 @@ impl PipelineScheduler {
     ///
     /// Groups shards by node and computes combined layer ranges using actual GGUF
     /// tensor metadata when available, falling back to manifest layer_range otherwise.
+    /// `request_id` is used only to honour the per-request holder blacklist —
+    /// holders that already told us, during THIS request, that they do not have
+    /// the data they advertise. Without it, retracting a stale claim is futile:
+    /// the DHT still lists the holder, so the retry re-learns it and picks the
+    /// same dead peer (observed live 2026-07-26).
     fn gather_candidates(
         &self,
         manifest: &ModelManifest,
         local_node_id: &NodeId,
+        request_id: uuid::Uuid,
     ) -> Vec<NodeCandidate> {
         // Private mode: compute allowed node set (None = unrestricted).
         // R134.7: when `allow_cross_pool_inference` is on and the local pool
@@ -382,6 +388,15 @@ impl PipelineScheduler {
                 // via a latency penalty in `get_peer_metrics`, so direct is
                 // always preferred when both are available.
                 let is_local = node_id == *local_node_id;
+                // Already failed us on this request with "I don't have that
+                // data" — skip regardless of what the registry or DHT says.
+                if !is_local
+                    && self
+                        .shared_state
+                        .holder_blacklisted_for_request(request_id, &node_id)
+                {
+                    continue;
+                }
                 if !is_local
                     && !self.shared_state.connected_node_ids.contains(&node_id)
                     && !self.shared_state.peer_reachable_via_relay(&node_id)

@@ -1042,6 +1042,11 @@ impl PipelineExecutor {
                                     segment.layer_range,
                                     "remote reported the shard data as missing",
                                 );
+                                // Make the retraction stick for the retry: the DHT still
+                                // advertises this holder, so the next assembly would
+                                // otherwise re-learn the claim and pick it again.
+                                self.shared_state
+                                    .blacklist_holder_for_request(request_id, &segment.node_id);
                             }
                             // Remove stale pending entry before failover inserts a new one
                             self.shared_state.pending_layer_results.remove(&request_id);
