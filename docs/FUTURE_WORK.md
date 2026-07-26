@@ -56,6 +56,31 @@ tensor forward to a stale/half-open connection and silently drop it (upstream
 "keeps all connections, uses an arbitrary one": go-libp2p #634 / rust-libp2p
 #912).
 
+
+**Observed 2026-07-27 — two LAN peers mutually forgot each other and did not
+retry.** After a deliberate load test (12 concurrent requests + several
+multi-minute prefills) produced repeated `connection closed reason="io_err…"`
+churn, the WSL2 node and the Proxmox LXC node ended up in a symmetric state:
+each listed the anchor and a remote tester as peers, neither listed the other,
+and this persisted for 17+ minutes. Both daemons were healthy the whole time
+(`NRestarts=0`, both serving requests), and both remained connected to the same
+anchor — so DHT/PEX had a path to rediscover the pair and did not take it. The
+local node made **zero** dial attempts to `192.168.1.60` in that window, and
+mDNS logged one event at startup and none afterwards.
+
+User-visible effect: requests failed with `Pipeline assembly failed: No node
+available for layer 10` — the local node held layers 0-10 and the only holder of
+10-16 had become invisible.
+
+Not root-caused, and not obviously the same defect as the dialer race above (this
+is a *failure to re-dial at all*, not a race between dials). Candidates worth
+checking first: whether a peer dropped under churn lands in a backoff or negative
+cache that nothing expires; whether PEX re-offers a peer already known-but-
+disconnected; and whether the LXC bridge passes mDNS multicast at all (if not,
+mDNS was never the mechanism here and the pair depended entirely on DHT/PEX).
+Reproduction is load-dependent, so capture `/api/admin/peers` from BOTH sides
+plus dial attempts before restarting — a restart clears it.
+
 **What it does NOT cover, and what was ruled out:**
 - **Only the mDNS (LAN) dial path is gated.** Internet peers discovered via
   bootstrap/DHT/PEX go through a different dial path that this rule does not
