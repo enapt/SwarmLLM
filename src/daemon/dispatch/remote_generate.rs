@@ -41,6 +41,11 @@ pub(super) async fn handle_remote_generate_request(
     let request_id = req.request_id;
     let model_id = req.model_id.clone();
     let layer_range = req.layer_range;
+    // Serving-side accounting starts here. This path — not `layer_forward` — is
+    // how a single-segment request is served, i.e. the common case, so without
+    // it a node doing all its work through the fast path reports contributing
+    // nothing at all.
+    let serve_start = std::time::Instant::now();
 
     // SEC: clamp peer-supplied sampling params before they reach the worker.
     // The local API path runs `build_sampling_params` which clamps everything;
@@ -199,6 +204,17 @@ pub(super) async fn handle_remote_generate_request(
     // Drop the abort handle now that the decode has exited. A late
     // CancelInference for this request_id becomes a no-op (the entry is gone).
     shared_state.inbound_generate_aborts.remove(&request_id);
+    // Count the work regardless of outcome: time and layers were spent either
+    // way, and an operator asking "is my node contributing" wants the truth
+    // about effort, not only about successes.
+    shared_state.record_segment_served(
+        layer_range.1.saturating_sub(layer_range.0),
+        serve_start.elapsed().as_millis() as u64,
+        // The fast path streams tokens rather than returning activations, so
+        // there are no activation bytes to attribute.
+        0,
+    );
+
     let final_token = match gen_result {
         Ok(Ok(out)) => StreamingToken {
             request_id,
