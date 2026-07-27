@@ -33,6 +33,17 @@ All notable changes to SwarmLLM are documented here.
   it to be complete. Reported as two separate crashes, which turned out to be
   this one cause seen from either end.
 
+- **Long questions no longer fail after five minutes.** Asking something with a
+  long prompt could come back with nothing at all, even though the machine was
+  working normally and would have answered. Reading a long prompt is most of the
+  wait and gets slower the longer it is, so a few thousand words could exceed
+  the five-minute cap every request was held to. Running a model now sits
+  outside that cap — the limits that bound it already scale with the prompt,
+  stop when you close the connection, and notice a client that vanished. The
+  same flat cap was removed from two other places it did harm: passing a
+  question to another machine to answer, and streaming a reply from a cloud
+  provider, where a long answer was cut off mid-flow.
+
 - **A broken node no longer takes your request down with it.** If the node
   chosen to run part of a request could not start its model, the request failed
   there — even with other nodes holding the same model and ready to serve. Such
