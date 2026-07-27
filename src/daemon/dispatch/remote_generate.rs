@@ -93,11 +93,11 @@ pub(super) async fn handle_remote_generate_request(
     // Verify the model is hosted here. The coordinator is responsible for
     // picking a valid holder, but double-check to avoid spawning a worker
     // for a model we don't have shards for.
-    if !has_model_locally(&shared_state, &model_id) {
+    if !can_serve_layer_range(&shared_state, &model_id, layer_range) {
         tracing::warn!(
             %request_id,
             model = %model_id,
-            "RemoteGenerateRequest for model not hosted here — sending error"
+            "RemoteGenerateRequest for a layer range this node cannot serve — sending error"
         );
         if let Err(e) = network_tx
             .send(NetworkCommand::SendStreamingToken {
@@ -284,13 +284,139 @@ pub(super) async fn handle_remote_generate_request(
     }
 }
 
-fn has_model_locally(shared_state: &SharedState, model_id: &ModelId) -> bool {
-    // Check for local split-model entries (the on-demand loaded path).
-    if shared_state.split_model_index.contains_key(model_id) {
-        return true;
+/// Can this node run `layer_range` of `model_id` on its own?
+///
+/// **Knowing about a model is not the same as being able to run it.** This
+/// previously answered "is there a manifest on disk", which is true for a node
+/// holding a SINGLE shard — every holder needs the manifest. A peer's
+/// whole-model `RemoteGenerateRequest` was then accepted by a node holding only
+/// part of the model, and the worker was asked for a full decode over a shard
+/// window that does not start at layer 0. Nothing embeds in that case (the
+/// embedding table is only loaded for a first segment), so raw token ids reach
+/// the first attention block and it fails with a shape mismatch —
+/// `attn_norm: shape mismatch in rms-norm [1, 128] [3072]`, where 128 is the
+/// prefill chunk size and 3072 the hidden size. Reported externally 2026-07-27.
+///
+/// Refusing here is the right answer: the caller already handles the rejection
+/// by sending an error back, and will pick another holder.
+fn can_serve_layer_range(
+    shared_state: &SharedState,
+    model_id: &ModelId,
+    layer_range: (u32, u32),
+) -> bool {
+    let Some(manifest) = shared_state.model_registry.get_manifest(model_id) else {
+        // No manifest at all — we genuinely do not know this model.
+        return false;
+    };
+
+    // An empty or inverted range is not something we can satisfy.
+    if layer_range.0 >= layer_range.1 {
+        return false;
     }
-    // Check for shards on disk — the worker will load them on first use.
-    let model_dir = shared_state.model_dir(&model_id.0);
-    let manifest_path = model_dir.join("manifest.json");
-    manifest_path.exists()
+
+    let local_node_id = shared_state.identity.node_id().clone();
+    let shard_store = shared_state.shard_store();
+    let mut local_shard_indices: Vec<u32> = manifest
+        .shards
+        .iter()
+        .filter(|s| {
+            let sid = crate::types::ShardId {
+                model_id: model_id.clone(),
+                index: s.index,
+            };
+            if !shared_state
+                .model_registry
+                .shard_holders(&sid)
+                .contains(&local_node_id)
+            {
+                return false;
+            }
+            let path = shard_store.shard_path(model_id, s.index);
+            path.exists() && crate::model::auto_manage::shard_size_ok(&path, s.size_bytes)
+        })
+        .map(|s| s.index)
+        .collect();
+    local_shard_indices.sort_unstable();
+    if local_shard_indices.is_empty() {
+        return false;
+    }
+
+    // Whole model present — any range within it is servable.
+    if local_shard_indices.len() == manifest.shard_count as usize {
+        return layer_range.1 as usize <= manifest.num_layers as usize;
+    }
+
+    // Otherwise the requested span must sit entirely inside one contiguous
+    // range we actually hold.
+    let covered = crate::inference::split::available_layer_ranges_from_manifest(
+        &manifest,
+        &local_shard_indices,
+    );
+    range_is_covered(&covered, (layer_range.0 as usize, layer_range.1 as usize))
+}
+
+/// Is `want` contained in ONE of the contiguous ranges in `covered`?
+///
+/// Split out from [`can_serve_layer_range`] so the decision can be tested
+/// without standing up a node. Containment must be within a single range —
+/// holding layers 0-4 and 8-12 does not mean we can serve 0-12, because the
+/// middle is missing and a decode cannot skip it.
+fn range_is_covered(covered: &[(usize, usize)], want: (usize, usize)) -> bool {
+    if want.0 >= want.1 {
+        return false;
+    }
+    covered
+        .iter()
+        .any(|&(start, end)| start <= want.0 && want.1 <= end)
+}
+
+#[cfg(test)]
+mod serve_range_tests {
+    use super::range_is_covered;
+
+    /// The reported case: this node holds only the tail, a peer asks it to run
+    /// the whole model. Accepting fed raw token ids into layer 21 and failed
+    /// with `attn_norm: shape mismatch in rms-norm [1, 128] [3072]`.
+    #[test]
+    fn a_tail_only_node_refuses_a_whole_model_request() {
+        let covered = [(21usize, 28usize)];
+        assert!(!range_is_covered(&covered, (0, 28)), "must refuse");
+        // But it can still serve the tail segment it actually holds.
+        assert!(range_is_covered(&covered, (21, 28)));
+        assert!(range_is_covered(&covered, (22, 27)), "a sub-span is fine");
+    }
+
+    #[test]
+    fn a_whole_model_holder_serves_anything_inside_it() {
+        let covered = [(0usize, 28usize)];
+        assert!(range_is_covered(&covered, (0, 28)));
+        assert!(range_is_covered(&covered, (12, 21)));
+    }
+
+    /// Containment must be within ONE range. Holding both ends but not the
+    /// middle cannot serve a span crossing the gap — a decode cannot skip
+    /// layers. This is the prompt-privacy shard layout, so it matters.
+    #[test]
+    fn a_gap_between_two_held_ranges_is_not_coverage() {
+        let covered = [(0usize, 3usize), (21, 28)];
+        assert!(
+            !range_is_covered(&covered, (0, 28)),
+            "must not span the gap"
+        );
+        assert!(!range_is_covered(&covered, (2, 22)));
+        assert!(range_is_covered(&covered, (0, 3)));
+        assert!(range_is_covered(&covered, (21, 28)));
+    }
+
+    #[test]
+    fn holding_nothing_serves_nothing() {
+        assert!(!range_is_covered(&[], (0, 28)));
+    }
+
+    #[test]
+    fn an_empty_or_inverted_span_is_refused() {
+        let covered = [(0usize, 28usize)];
+        assert!(!range_is_covered(&covered, (5, 5)));
+        assert!(!range_is_covered(&covered, (9, 4)));
+    }
 }
