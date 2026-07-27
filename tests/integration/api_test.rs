@@ -635,3 +635,27 @@ async fn tool_role_multi_turn_request() {
     // 503 = no model, not 400/422 = parsing worked
     assert_eq!(resp.status(), 503);
 }
+
+/// The routes that can run a model are merged into the router separately, so
+/// they can escape the blanket request timeout — generation has no bounded
+/// duration. That merge happens before the auth layer, and this pins it: if
+/// someone moves it after, these endpoints would answer without a key.
+#[tokio::test]
+async fn generation_routes_still_require_a_key() {
+    let (base, _key) = spawn_test_server().await;
+    let client = reqwest::Client::new();
+
+    for path in ["/v1/chat/completions", "/v1/responses", "/v1/messages"] {
+        let resp = client
+            .post(format!("{base}{path}"))
+            .json(&serde_json::json!({"model": "x", "messages": []}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            401,
+            "{path} answered without a key — the timeout-exempt routes lost the auth layer"
+        );
+    }
+}

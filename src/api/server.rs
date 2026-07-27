@@ -21,8 +21,13 @@ use crate::storage::db::Database;
 use crate::types::NetworkCommand;
 use swarmllm_frontend as assets;
 
-/// HTTP request processing timeout (kills stalled connections).
+/// HTTP request processing timeout for everything EXCEPT running a model.
+///
+/// Generation has no bounded duration — see `generation_routes` in
+/// [`build_router`], which is deliberately excluded from this.
 const REQUEST_TIMEOUT_SECS: u64 = 300;
+/// Maximum request body. VLM image payloads run to 20MB+.
+const MAX_REQUEST_BODY_BYTES: usize = 32 * 1024 * 1024;
 /// Rate-limiter cleanup interval.
 const RATE_LIMIT_CLEANUP_INTERVAL_SECS: u64 = 300;
 /// Rate-limiter bucket TTL — entries older than this are evicted.
@@ -186,13 +191,39 @@ async fn serve_dashboard_catchall_with_nonce(
 
 /// Build the Axum router with all routes.
 pub fn build_router(state: AppState) -> Router {
+    // Routes that can run a model, and therefore have no bounded duration.
+    //
+    // These are deliberately kept out of `REQUEST_TIMEOUT_SECS`. How long a
+    // generation legitimately takes is set by the prompt and the answer, not by
+    // the clock: reading a long prompt (prefill) is ~99% of the wait and scales
+    // with its length, so on a modest CPU node a few thousand prompt tokens can
+    // exceed five minutes before the first token is even produced. A blanket
+    // timeout cut those requests off mid-prefill while the node was working
+    // perfectly — the same mistake as the flat first-token budget, one layer up,
+    // and it silently capped that fix at 300s no matter what the node could do.
+    //
+    // What actually bounds these requests is better suited to the job: the
+    // first-token budget scales with the prompt, the client going away is
+    // detected and cancels the work, and TCP keepalive notices a client that
+    // vanished without saying so. Every other layer — auth, rate limiting, CORS,
+    // security headers — still applies, because the merge happens before them.
+    let generation_routes = Router::new()
+        .route("/v1/chat/completions", post(openai::chat_completions))
+        .route("/v1/responses", post(openai::responses::create_response))
+        .route("/v1/messages", post(anthropic::messages))
+        .route(
+            "/mcp",
+            post(mcp::handle_mcp)
+                .get(mcp::handle_mcp_get)
+                .delete(mcp::handle_mcp_delete),
+        )
+        .layer(DefaultBodyLimit::max(MAX_REQUEST_BODY_BYTES));
+
     Router::new()
         // OpenAI-compatible API
-        .route("/v1/chat/completions", post(openai::chat_completions))
         .route("/v1/embeddings", post(openai::embeddings))
         .route("/v1/models", get(openai::list_models))
         // OpenAI Responses API (gpt-5 / o-series default)
-        .route("/v1/responses", post(openai::responses::create_response))
         .route(
             "/v1/responses/{id}",
             get(openai::responses::background::get_response_maybe_stream)
@@ -207,7 +238,6 @@ pub fn build_router(state: AppState) -> Router {
             get(openai::responses::list_input_items),
         )
         // Anthropic Messages API
-        .route("/v1/messages", post(anthropic::messages))
         // Provider listing
         .route("/v1/providers", get(providers::list_providers))
         // SwarmLLM extensions
@@ -473,24 +503,20 @@ pub fn build_router(state: AppState) -> Router {
         .route("/health", get(health))
         .route("/health/ready", get(metrics::health_ready))
         // MCP (Model Context Protocol) server — Streamable HTTP transport
-        .route(
-            "/mcp",
-            post(mcp::handle_mcp)
-                .get(mcp::handle_mcp_get)
-                .delete(mcp::handle_mcp_delete),
-        )
         // Prometheus metrics
         .route("/metrics", get(metrics::metrics))
         // Middleware (layers run bottom-to-top: timeout, CORS, security headers, rate limit, auth, body limit, handler)
-        .layer(DefaultBodyLimit::max(32 * 1024 * 1024)) // 32MB request body limit (VLM images can be 20MB+)
-        // Request timeout: kill idle/stalled connections after 5 minutes.
-        // Streaming responses (SSE) are not affected — the timeout applies to the
-        // initial request processing, not the response stream. Long inference
-        // requests complete within this window; the 30s inference timeout fires first.
+        .layer(DefaultBodyLimit::max(MAX_REQUEST_BODY_BYTES))
+        // Request timeout: kill stalled connections after 5 minutes. Applies to
+        // everything that is NOT running a model — those routes are merged in
+        // below, outside this layer, for the reasons given at `generation_routes`.
         .layer(tower_http::timeout::TimeoutLayer::with_status_code(
             axum::http::StatusCode::REQUEST_TIMEOUT,
             std::time::Duration::from_secs(REQUEST_TIMEOUT_SECS),
         ))
+        // Merged here, after the timeout and before auth, so generation keeps
+        // every other protection while escaping the clock.
+        .merge(generation_routes)
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             middleware::auth_middleware,
