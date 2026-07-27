@@ -277,10 +277,22 @@ impl PrefixCache {
         kv_store: &KvCacheStore,
         prompt_tokens: &[u32],
     ) -> Vec<PrefixBlockEntry> {
+        // Each bail-out below says why. They were silent, and that made a
+        // cross-node prefix-KV measurement undiagnosable: the producing node
+        // simply never announced any blocks, with nothing in the log to say
+        // which condition stopped it.
         if !self.enabled
             || prompt_tokens.len() < self.min_tokens
             || prompt_tokens.len() > self.max_prompt_tokens
         {
+            tracing::debug!(
+                model_key,
+                enabled = self.enabled,
+                prompt_tokens = prompt_tokens.len(),
+                min_tokens = self.min_tokens,
+                max_prompt_tokens = self.max_prompt_tokens,
+                "prefix-cache: not snapshotting — disabled or prompt outside size bounds"
+            );
             return Vec::new();
         }
         let key = KvCacheStore::cache_key(model_key, request_id);
@@ -305,6 +317,10 @@ impl PrefixCache {
 
         // Figure out the seq dim / max_seq_len from the first populated layer.
         let Some(first_kv) = entry.layers.iter().flatten().next() else {
+            tracing::debug!(
+                model_key,
+                "prefix-cache: not snapshotting — KV entry has no populated layers"
+            );
             return Vec::new();
         };
         let dim = first_kv.k_cache().dim();
@@ -313,15 +329,29 @@ impl PrefixCache {
         // Bound insertion points by what the KV actually holds.
         let available = available.min(prompt_tokens.len());
         if available < self.min_tokens {
+            tracing::debug!(
+                model_key,
+                available,
+                min_tokens = self.min_tokens,
+                "prefix-cache: not snapshotting — fewer KV positions than the floor"
+            );
             return Vec::new();
         }
 
         let insert_points = self.compute_insert_points(available);
         if insert_points.is_empty() {
+            tracing::debug!(
+                model_key,
+                available,
+                block_tokens = self.block_tokens,
+                min_tokens = self.min_tokens,
+                "prefix-cache: not snapshotting — no block boundary at or above the floor"
+            );
             return Vec::new();
         }
 
-        let mut snapshots: Vec<(usize, Arc<KvSnapshot>)> = Vec::with_capacity(insert_points.len());
+        let insert_points_len = insert_points.len();
+        let mut snapshots: Vec<(usize, Arc<KvSnapshot>)> = Vec::with_capacity(insert_points_len);
         for pos in insert_points {
             match snapshot_at(&entry.layers, pos, dim, max_seq_len) {
                 Ok(snap) => snapshots.push((pos, Arc::new(snap))),
@@ -338,6 +368,11 @@ impl PrefixCache {
         drop(entry);
 
         if snapshots.is_empty() {
+            tracing::debug!(
+                model_key,
+                attempted = insert_points_len,
+                "prefix-cache: not snapshotting — every snapshot attempt failed"
+            );
             return Vec::new();
         }
 

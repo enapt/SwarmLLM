@@ -1305,9 +1305,31 @@ information is enough to produce it, which fits both reports arriving after
 repeated restarts and role changes. The receiving-side guard is the right place
 to fix it regardless of how the sender got it wrong.
 
-**Still genuinely open**: cross-node prefix-KV sharing is unmeasured. The README's
-12.9x TTFT claim is neither confirmed nor refuted — the run that would have
-measured it hit the crash above. Worth retrying now that the crash is fixed.
+**Cross-node prefix-KV: measured and CONFIRMED (2026-07-27).** Retried once the
+crash above was fixed. Two real machines (GPU node + 6-core CPU node), tinyllama
+Q4_K_M, 709-token prompt:
+
+| | |
+|---|---|
+| CPU node, prompt never seen anywhere | **182s** |
+| CPU node, same prompt already cached on the peer | **11s** |
+| | **16.5x** |
+
+`DIAG: cross-node prefix HIT — hydrated KV matched_tokens=1536` on the consumer.
+The README's 12.9x (2026-04-20, loopback) therefore holds and is if anything
+conservative — this is 16.5x across a real network.
+
+**But the producer side is intermittent, and that is the open item.** The first
+attempt at this measurement showed no speedup at all (180s vs 182s cold) and zero
+fetches, because the producing node never snapshotted its prefix: a `route=local`
+request with `prompt_tokens=709` — comfortably inside `min_tokens=32` and
+`max_prompt_tokens=8192` — logged no insert. A later identical-shaped request on
+the same node inserted 24 blocks and the fetch then worked.
+
+`insert_from_kv` had five silent early returns, so there was nothing in the log to
+say which condition stopped it. All five now log at debug with the values that
+decided them. The next occurrence should name itself; until then, treat the
+speedup as real but not reliably available.
 
 ### Idle VRAM unload: the region-demand reprieve had no ceiling (fixed 2026-07-27)
 
