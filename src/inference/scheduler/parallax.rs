@@ -7,6 +7,12 @@
 //! per-vertex cost: `2 * rtt_local_to_peer + compute_time + load_compensator`
 //! (local node: just compute_time).
 //!
+//! Two departures from the paper, both because it targets GPU clusters where
+//! compute dominates rather than heterogeneous nodes on home connections:
+//! communication is charged **per token** for a segment entered mid-chain (the
+//! paper sums it once per layer transition), and an unmeasured candidate gets a
+//! non-zero compute prior (the paper does not discuss cold start at all).
+//!
 //! DAG: vertex = (candidate_idx, range_idx). Edge v → w iff
 //! `ranges[v].end == ranges[w].start`. Sources have `start == 0` (and may have
 //! first-segment constraints). Sinks have `end == num_layers` (and may have
@@ -27,9 +33,11 @@ use super::NodeCandidate;
 /// Per-vertex cost components. All in milliseconds.
 #[derive(Debug, Clone, Copy)]
 struct VertexCost {
-    /// 2 * latency_ms for remote peers, 0 for local.
+    /// `2 * latency_ms` for remote peers, 0 for local — multiplied by
+    /// `ASSUMED_FORWARD_PASSES` when the segment is entered mid-chain, since the
+    /// coordinator round-trips into it per token.
     network_ms: f32,
-    /// (layers_in_range / tokens_per_sec) * 1000; 0 when tokens_per_sec unknown.
+    /// Per-layer cost × layers × `ASSUMED_FORWARD_PASSES`.
     compute_ms: f32,
     /// active_request_count * LOAD_COMPENSATOR_MS.
     load_ms: f32,
@@ -46,14 +54,40 @@ impl VertexCost {
 /// we use a fixed ms penalty so it's tunable independently of a baseline estimate.
 const LOAD_COMPENSATOR_MS: f32 = 25.0;
 
-/// Compute-cost contribution when a candidate has neither an observed
-/// per-layer latency nor a gossiped throughput estimate. Set to 0 so the DP
-/// falls back to pure latency + load — the alternative (a positive default)
-/// would silently penalise newly-discovered peers we have no data on.
+/// Per-layer compute cost assumed for a candidate we have neither observed nor
+/// received a throughput estimate for.
 ///
-/// Despite the unit, this is *milliseconds*, not tokens/sec — see the
-/// fallback branch in `vertex_cost`.
-pub(super) const UNKNOWN_COMPUTE_MS: f32 = 0.0;
+/// **This used to be 0, and zero is the one value guaranteed to be wrong.** It
+/// made every unmeasured candidate free, so on a freshly started node — where
+/// nothing has been observed yet — competing chains tied at their network term
+/// alone and the winner was decided by vertex iteration order rather than by
+/// merit. Routing quality silently depended on how long the node had been up.
+///
+/// A single shared constant does not discriminate between candidates, which is
+/// the honest position when we know nothing about them: it makes cost scale
+/// with the number of layers a candidate would take on, so wide segments on
+/// unknown nodes are no longer free, while measured candidates still win or
+/// lose on their real numbers. Roughly a mid-range CPU node's per-layer decode
+/// cost, deliberately nearer the pessimistic end so an unmeasured node does not
+/// outrank a measured good one.
+pub(super) const UNKNOWN_COMPUTE_MS: f32 = 25.0;
+
+/// Forward passes assumed per request when charging per-token costs.
+///
+/// A pipeline split across nodes exchanges activations **once per token**,
+/// whereas a single remote segment covering the whole model is delegated in one
+/// message and decodes remotely with no per-token network at all. Charging a
+/// remote hop once per *segment* — as this model did — cannot see that
+/// difference, and measured it wrong: on a LAN pair the split was chosen and
+/// ran 11.2s → 17.8s (16-token replies), because the per-token round trips cost
+/// more than the faster node saved.
+///
+/// A fixed estimate rather than the request's `max_tokens`, which is a loose
+/// upper bound (commonly 2048 for a reply of 50) and would over-penalise
+/// splitting. Order of magnitude is what matters: the term must be large enough
+/// that a boundary is not free, and it scales with the same units as the rest of
+/// the model.
+pub(super) const ASSUMED_FORWARD_PASSES: f32 = 64.0;
 
 /// Cap on how many partial-range vertices the DP will consider, summed across
 /// candidates. Keeps vertex generation bounded when a popular model has many
@@ -76,37 +110,61 @@ pub(super) const BASELINE_LAYER_COUNT: f32 = 32.0;
 ///    compute and any peer-side queuing/load) into the DP objective, so the
 ///    `network_ms` term doesn't double-count load here.
 /// 2. Static `est_tokens_per_sec` capability estimate when no observations exist.
-/// 3. Zero (pure latency + load objective) when neither is available.
+/// 3. `UNKNOWN_COMPUTE_MS` when neither is available — deliberately non-zero,
+///    because a free unmeasured candidate outranks every measured one.
 fn vertex_cost(c: &NodeCandidate, range: (u32, u32), local: &NodeId) -> VertexCost {
     let is_local = &c.node_id == local;
     let layers = (range.1 - range.0) as f32;
+    // A segment that does not start at layer 0 is entered from the previous
+    // segment, so the coordinator round-trips into it for EVERY token. A
+    // segment starting at 0 is either local, or the delegated whole-model case
+    // that pays its network once for the entire request.
+    let entered_per_token = range.0 != 0;
     // When we have an observed per-layer latency, it already includes the peer's
     // segment wall-clock round-trip (compute + peer-side load). Fold the whole
     // `segment_ms` into `compute_ms` and skip the static `2 * latency_ms` network
     // term to avoid double-counting. When we don't have an observation yet, use
     // the traditional two-part cost (network + static compute estimate).
-    let (network_ms, compute_ms) = if let Some(obs_per_layer) = c.observed_latency_ms_per_layer {
-        (0.0, obs_per_layer * layers)
+    let (base_network_ms, per_layer_ms) =
+        if let Some(obs_per_layer) = c.observed_latency_ms_per_layer {
+            (0.0, obs_per_layer)
+        } else {
+            let network = if is_local {
+                0.0
+            } else {
+                2.0 * c.latency_ms as f32
+            };
+            let per_layer = if c.est_tokens_per_sec > 0.0 {
+                // Very rough: layer_compute_ms ≈ layers / (est_tokens_per_sec * some_constant).
+                // est_tokens_per_sec is a whole-model throughput estimate for a 7B Q4 model;
+                // per-layer contribution is 1/num_layers of that. We conservatively use
+                // `1000.0 / est_tokens_per_sec` as the per-token-whole-model compute cost,
+                // then scale by the fraction of layers this segment owns. Assumes 32 layers
+                // as the baseline; adjust here if we want arch-aware scaling later.
+                let whole_model_ms = 1000.0 / c.est_tokens_per_sec;
+                whole_model_ms / BASELINE_LAYER_COUNT
+            } else {
+                UNKNOWN_COMPUTE_MS
+            };
+            (network, per_layer)
+        };
+
+    // Compute is per forward pass, and a request is many passes. Scaling every
+    // candidate by the same factor leaves their relative order untouched, but it
+    // puts compute in the same units as the per-token network term below, so the
+    // two can be compared at all.
+    let compute_ms = per_layer_ms * layers * ASSUMED_FORWARD_PASSES;
+
+    // The asymmetry the model was missing. A segment entered mid-chain is
+    // round-tripped into for every token; a segment starting at layer 0 pays its
+    // network once, because it is either local or the delegated whole-model case
+    // that decodes remotely on its own.
+    let network_ms = if entered_per_token {
+        base_network_ms * ASSUMED_FORWARD_PASSES
     } else {
-        let network = if is_local {
-            0.0
-        } else {
-            2.0 * c.latency_ms as f32
-        };
-        let compute = if c.est_tokens_per_sec > 0.0 {
-            // Very rough: layer_compute_ms ≈ layers / (est_tokens_per_sec * some_constant).
-            // est_tokens_per_sec is a whole-model throughput estimate for a 7B Q4 model;
-            // per-layer contribution is 1/num_layers of that. We conservatively use
-            // `1000.0 / est_tokens_per_sec` as the per-token-whole-model compute cost,
-            // then scale by the fraction of layers this segment owns. Assumes 32 layers
-            // as the baseline; adjust here if we want arch-aware scaling later.
-            let whole_model_ms = 1000.0 / c.est_tokens_per_sec;
-            whole_model_ms * (layers / BASELINE_LAYER_COUNT)
-        } else {
-            UNKNOWN_COMPUTE_MS
-        };
-        (network, compute)
+        base_network_ms
     };
+
     let load_ms = c.load * LOAD_COMPENSATOR_MS;
     VertexCost {
         network_ms,
@@ -441,6 +499,91 @@ mod tests {
             "remote must serve the suffix"
         );
         assert_ne!(segs[1].node_id, local);
+    }
+
+    /// An unmeasured candidate used to cost nothing, so on a freshly started
+    /// node every chain tied on its network term and the winner was decided by
+    /// vertex iteration order. A wider unmeasured segment must now cost more
+    /// than a narrower one.
+    #[test]
+    fn unmeasured_candidates_are_not_free() {
+        let local = NodeId([9u8; 32]);
+        let wide = cand(1, vec![(0, 16)], 0, 0.0, true, true, 0.0);
+        let narrow = cand(2, vec![(0, 4)], 0, 0.0, true, true, 0.0);
+        let cw = vertex_cost(&wide, (0, 16), &local).total();
+        let cn = vertex_cost(&narrow, (0, 4), &local).total();
+        assert!(cw > 0.0, "an unmeasured candidate must not be free");
+        assert!(
+            cw > cn,
+            "cost must scale with layers taken on: {cw} vs {cn}"
+        );
+    }
+
+    /// A measured-fast candidate must beat an unmeasured one. Previously the
+    /// unmeasured node looked free and won every time, so the router preferred
+    /// nodes it knew nothing about over nodes it had measured and liked.
+    #[test]
+    fn a_measured_fast_node_beats_an_unmeasured_one() {
+        let local = NodeId([9u8; 32]);
+        let measured_fast = cand_with_obs(cand(1, vec![(0, 16)], 0, 0.0, true, true, 0.0), 1.0);
+        let unmeasured = cand(2, vec![(0, 16)], 0, 0.0, true, true, 0.0);
+        let cm = vertex_cost(&measured_fast, (0, 16), &local).total();
+        let cu = vertex_cost(&unmeasured, (0, 16), &local).total();
+        assert!(cm < cu, "measured-fast {cm} should beat unmeasured {cu}");
+    }
+
+    /// A segment entered mid-chain is round-tripped into once per token, while a
+    /// segment starting at layer 0 pays its network once for the whole request.
+    /// Charging both the same is what made the router pick a split that measured
+    /// 11.2s -> 17.8s on a real LAN pair.
+    #[test]
+    fn a_mid_chain_segment_pays_network_per_token() {
+        let local = NodeId([9u8; 32]);
+        let remote = cand(2, vec![(0, 16)], 20, 0.0, true, true, 0.0);
+        // Same candidate, same width, differing only in whether it starts the chain.
+        let as_source = vertex_cost(&remote, (0, 8), &local);
+        let as_mid_chain = vertex_cost(&remote, (8, 16), &local);
+        assert!(
+            as_mid_chain.network_ms > as_source.network_ms,
+            "mid-chain network {} must exceed delegated {}",
+            as_mid_chain.network_ms,
+            as_source.network_ms
+        );
+        assert_eq!(
+            as_mid_chain.network_ms,
+            as_source.network_ms * ASSUMED_FORWARD_PASSES,
+            "mid-chain network should scale by the assumed pass count"
+        );
+    }
+
+    /// The local node carries no network term wherever it sits in the chain.
+    #[test]
+    fn the_local_node_never_pays_network() {
+        let local = NodeId([1u8; 32]);
+        let mut c = cand(1, vec![(0, 16)], 50, 0.0, true, true, 0.0);
+        c.node_id = local.clone();
+        assert_eq!(vertex_cost(&c, (0, 8), &local).network_ms, 0.0);
+        assert_eq!(vertex_cost(&c, (8, 16), &local).network_ms, 0.0);
+    }
+
+    /// With the per-token term in place, a split onto a peer that is only
+    /// slightly faster must NOT be chosen — the round trips outweigh it. This is
+    /// the regression the live measurement exposed.
+    #[test]
+    fn a_marginal_speedup_does_not_justify_per_token_round_trips() {
+        let local = NodeId([1u8; 32]);
+        // Remote is somewhat faster per layer but sits behind a real RTT.
+        let remote = cand_with_obs(cand(2, vec![(0, 16)], 20, 0.0, true, true, 0.0), 8.0);
+        let mut local_node = cand_with_obs(cand(1, vec![(0, 10)], 0, 0.0, true, false, 0.0), 10.0);
+        local_node.node_id = local.clone();
+
+        let segs =
+            route_shortest_path(16, &[remote, local_node], &local, false, true).expect("route");
+        assert_eq!(
+            segs.len(),
+            1,
+            "a marginal per-layer gain must not buy a per-token boundary: {segs:?}"
+        );
     }
 
     /// With partial ranges OFF — the shipped default — routing must be exactly

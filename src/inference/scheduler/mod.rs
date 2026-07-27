@@ -536,11 +536,13 @@ impl PipelineScheduler {
             };
 
             let is_pool = pool_member_ids.contains(&node_id);
-            let observed_latency_ms_per_layer = if &node_id == local_node_id {
-                None
-            } else {
-                self.shared_state.observed_latency_ms_per_layer(&node_id)
-            };
+            // Includes the local node. It used to be excluded, which combined
+            // with `UNKNOWN_COMPUTE_MS = 0` meant local compute was free at any
+            // width — so the router would happily pile every layer onto a slow
+            // local CPU rather than hand work to a faster peer. A local sample
+            // carries no network component, which is correct: there isn't one.
+            let observed_latency_ms_per_layer =
+                self.shared_state.observed_latency_ms_per_layer(&node_id);
             candidates.push(NodeCandidate {
                 node_id,
                 shard_id: first_shard_id,

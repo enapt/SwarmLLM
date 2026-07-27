@@ -804,6 +804,15 @@ impl PipelineExecutor {
                     segment_ms as u32,
                     result.activations.len() as u32,
                 );
+                // Measure ourselves too. Without this the scheduler had no idea
+                // what our own hardware costs, so the local node was free by
+                // construction and could never lose a comparison against a peer
+                // — even a peer that was genuinely faster.
+                self.shared_state.record_peer_segment_latency(
+                    &segment.node_id,
+                    segment_ms,
+                    segment.layer_range.1 - segment.layer_range.0,
+                );
                 if is_last {
                     tracing::info!(
                         request_id = %request_id,
