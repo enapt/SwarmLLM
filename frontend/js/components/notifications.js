@@ -524,12 +524,27 @@
     try { var v = parseInt(localStorage.getItem(App.HEALTH_INTERVAL_KEY)); return v > 0 ? v : 30; } catch(e) { return 30; }
   }
 
+  /// Resolves true once the dashboard holds an API key. Waits on the bootstrap
+  /// exchange started in init.js rather than sampling it, so a caller running
+  /// during page load is not mistaken for an unauthenticated one.
+  async function hasCredentials() {
+    if (!App.settings) return false;
+    if (!App.settings._apiKeyFull && App.settings._apiKeyPromise) {
+      try { await App.settings._apiKeyPromise; } catch (e) {}
+    }
+    return !!App.settings._apiKeyFull;
+  }
+
   async function fetchProviderHealth() {
-    // Before the user has entered their key there is nothing to fetch, and every
-    // attempt costs a 401. This runs on each WebSocket reconnect, and an
-    // unauthenticated page reconnects continuously — which turned a first visit
-    // into a request storm that rate-limited the endpoint against itself.
-    if (!App.settings || !App.settings._apiKeyFull) return;
+    // Without credentials there is nothing to fetch and every attempt costs a
+    // 401. This runs on each WebSocket reconnect, and a page that cannot
+    // authenticate reconnects continuously — which turned such a visit into a
+    // request storm that rate-limited the endpoint against itself.
+    //
+    // Await the bootstrap exchange first, exactly as `authFetch` does. Reading
+    // `_apiKeyFull` synchronously would skip this call on every NORMAL load too,
+    // because on page load the key is still in flight.
+    if (!await hasCredentials()) return;
     try {
       var resp = await App.authFetch('/api/admin/provider-health');
       if (!resp.ok) return;
@@ -702,8 +717,8 @@
       }, 400);
     },
 
-    _probeNow: function(modelIds) {
-      if (!App.settings || !App.settings._apiKeyFull) return;
+    _probeNow: async function(modelIds) {
+      if (!await hasCredentials()) return;
       var now = Date.now();
       var toProbe = modelIds.filter(function(id) {
         if (S._modelStatusPending[id]) return false;
