@@ -1099,7 +1099,66 @@ every candidate's range starts and ends: emit a vertex for each sub-range of
 vertex `(10,16)` for the remote node, making the split representable, and the
 existing cost model then picks it on merit.
 
-**Implementation hazard to resolve first.** `PipelineSegment.shard_id` is set
+### Update 2026-07-27: capability built and gated OFF; the cost model is the real blocker
+
+Partial ranges are now implemented (`config.inference.parallax_partial_ranges`,
+**default off**) and the split routes correctly — verified live as
+`LOCAL(0-10, shards [0,1]) + remote(10-16, shard [2])`, with the shard span
+reported accurately for the first time. The `shard_id` hazard below is resolved:
+segments are re-pointed at the first shard their range covers, and every consumer
+needing the full span goes through `ModelRegistry::shards_spanned_by_segment`.
+
+**It is off because measurement contradicted the prediction in this section.**
+The claim above — that the cost model "would have chosen correctly if asked"
+(~643ms split vs ~1715ms whole) — was wrong, because it compared the cost of ONE
+forward pass. A request is many forward passes, and the two options do not scale
+the same way:
+
+| | route | measured |
+|---|---|---|
+| `llama-3.2-1b-instruct-q8-0`, 16 tokens | whole on CPU node | **11.2s** |
+| same | split GPU 0-10 / CPU 10-16 | **17.8s** |
+| `tinyllama-1.1b`, 16 tokens | whole on CPU node | **3.2s** |
+| same | split GPU 0-12 / CPU 12-22 | **5.9s** |
+
+A single remote segment covering every layer is delegated in ONE message and
+decodes remotely with no per-token network. Any multi-segment chain exchanges
+activations **once per token**. `vertex_cost` charges a remote hop's
+`2 * latency_ms` once per *segment*, so it cannot see that difference and will
+keep choosing the split. On this LAN pair the per-token cost of the extra
+boundary exceeded everything the GPU saved.
+
+**Second, larger problem found while measuring: without observations the DP is
+blind.** `compute_ms` falls back to `UNKNOWN_COMPUTE_MS = 0` when a candidate has
+neither an observed per-layer latency nor a gossiped throughput estimate, and the
+local node is deliberately given `observed_latency_ms_per_layer = None`. On a
+freshly restarted node every candidate therefore costs only its network term, and
+whole-vs-split **ties at ~10ms** — the outcome then depends on vertex iteration
+order, not on merit. This is why the same configuration split consistently in one
+session and not at all after a restart. It also means the routing quality of a
+node silently depends on how long it has been up.
+
+Two things must land before this can be enabled by default:
+
+1. **A per-token network term.** The chain's network cost must scale with the
+   expected number of decode tokens for multi-segment chains, while a single
+   whole-model remote segment keeps its O(1) cost. This is chain-shaped, not
+   vertex-shaped, so it likely means comparing the best multi-segment chain
+   against the single-delegation option explicitly, with `max_tokens` (or a
+   learned reply-length estimate) passed into the router.
+2. **A compute prior for unobserved candidates.** Zero is the one value
+   guaranteed to be wrong, and it makes ties the normal case. A prior from the
+   peer's advertised capability, or the model's layer count times a default
+   per-layer cost, would at least order candidates sensibly on a cold node.
+
+Worth noting the shape of request that should favour splitting and was not
+isolated here: a **prefill-dominated** one, where the prompt is a single large
+forward pass and per-token round trips apply only to the few decode steps. A
+585-token prompt measured 129.8s whole; the comparable split run could not be
+attributed cleanly because the DP had by then reverted to a single segment for the
+tie reason above. That experiment is worth redoing once (1) and (2) exist.
+
+**Implementation hazard (RESOLVED 2026-07-27 — kept for context).** `PipelineSegment.shard_id` is set
 to the candidate's *first* shard regardless of the segment's layer range, so a
 sub-range segment covering layers 10-16 would be labelled with shard 0. That
 mismatch already exists today — it is why `retract_shard_holder_claims_for_range`
