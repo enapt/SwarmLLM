@@ -1266,6 +1266,32 @@ Relevant because greedy decoding is what tool calling, benchmarks and
 reproducible runs use, so it is over-represented in exactly the traffic testers
 generate.
 
+### Observed once, not reproduced: SentencePiece markers in reply text (2026-07-27)
+
+Recording because it is output corruption and a literal capture exists, not
+because it is understood. On the first request after starting a v0.3.37 node,
+`tinyllama-1.1b-chat-v1.0.q4-k-m` returned:
+
+```
+Sure.▁What▁are▁the▁key▁ingredes▁for▁this
+```
+
+`▁` (U+2581) is SentencePiece's word-boundary marker; it should have become a
+space during detokenization. Note "ingredes" is also not a word, so the whole
+span looks like raw pieces rather than one stray character.
+
+**Not reproduced in ~8 further attempts**: five repeats of the identical prompt,
+two other models (including a BPE-tokenizer one for contrast), and a deliberate
+cold start with the model freshly loaded — the exact condition it first appeared
+under. All returned `markers=0`.
+
+Ruled out: it was NOT served by a peer on an older build — the trace shows
+`route=local segments=1`, so our own path produced it.
+
+If a tester reports garbled spacing, this is the first thing to check, and the
+detokenization path for SPM models is where to look. A reproduction would make it
+actionable; without one there is nothing to fix against.
+
 ## Continuous batching engages but yields almost nothing (diagnosed 2026-07-27)
 
 **Status: root-caused, not fixed — the fix is feature-scale.** Reported externally
