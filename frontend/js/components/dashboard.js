@@ -1276,13 +1276,24 @@
               icon: '\uD83D\uDD13', label: I18n.t('enc.unavailable'),
               detail: I18n.t('enc.unprotected_detail', { missing: missingText }) + ' ' + I18n.t('enc.cost_detail'),
               tip: I18n.t('enc.unprotected_tip'),
-              action: ''
+              // Previously a dead end: it told you which pieces you lacked and
+              // left you to find and download them yourself.
+              action: '',
+              fetchMissing: true
             };
           }
           var toggleAttrs = canToggle
             ? ' data-enc-toggle="' + U.escapeHtml(m.id) + '" data-enc-ready="1" role="switch" aria-checked="' + (encActive ? 'true' : 'false') + '"'
             : '';
           var toggleCls = canToggle ? ' mce-section-toggleable' : '';
+          if (encState.fetchMissing) {
+            encState.action = '';
+          }
+          var fetchHtml2 = encState.fetchMissing
+            ? '<button class="btn btn-xs enc-banner-btn enc-banner-btn-enable" data-enc-fetch="' + U.escapeHtml(m.id) + '" title="' + U.escapeHtml(I18n.t('enc.cost_detail')) + '">' +
+              U.escapeHtml(I18n.t('enc.fetch_missing')) +
+              ' <span class="enc-recommended-badge">' + U.escapeHtml(I18n.t('enc.recommended')) + '</span></button>'
+            : '';
           var actionHtml2 = canToggle && encState.action
             ? '<span class="mce-section-action">' + U.escapeHtml(encState.action) +
               (encState.recommended ? ' <span class="enc-recommended-badge">' + U.escapeHtml(I18n.t('enc.recommended')) + '</span>' : '') + '</span>'
@@ -1291,7 +1302,7 @@
             '<div class="mce-section mce-section-privacy ' + encState.stateMod + toggleCls + '"' + toggleAttrs + ' title="' + U.escapeHtml(encState.tip) + '">' +
               '<div class="mce-section-header">' +
                 '<div class="mce-section-title">' + U.escapeHtml(I18n.t('dashboard.section_privacy')) + '</div>' +
-                actionHtml2 +
+                actionHtml2 + fetchHtml2 +
               '</div>' +
               '<div class="mce-section-body">' +
                 '<span class="composite-badge ' + encState.badgeCls + '">' +

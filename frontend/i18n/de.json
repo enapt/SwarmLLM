@@ -469,6 +469,8 @@
   "enc.cost_detail": "Ihr Rechner führt den ersten und letzten Schritt selbst aus, benötigt daher beide Modellteile auf der Festplatte und tauscht pro Wort einmal Daten mit den Helfern aus — längere Antworten kosten entsprechend mehr Zeit.",
   "enc.disable": "Deaktivieren",
   "enc.enable_privacy": "Ende-zu-Ende-Verschlüsselung einschalten",
+  "enc.fetch_missing": "Fehlende Teile holen",
+  "enc.fetch_started": "Die für die Vertraulichkeit Ihrer Eingaben benötigten Teile werden heruntergeladen. Der Schutz aktiviert sich von selbst, sobald sie da sind.",
   "enc.full_e2e": "Ende-zu-Ende-verschlüsselt – deine Eingaben und Antworten verlassen dieses Gerät nie unverschlüsselt",
   "enc.full_e2e_overhead": "~2–5s zusätzliche Latenz",
   "enc.gain_speed": "Geschwindigkeit gewinnen, etwas Privatsphäre verlieren",

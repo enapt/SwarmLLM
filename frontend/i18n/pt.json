@@ -469,6 +469,8 @@
   "enc.cost_detail": "A sua máquina executa a primeira e a última etapa, por isso precisa dessas duas partes do modelo em disco, e troca dados com os pares uma vez por palavra — respostas longas custam proporcionalmente mais tempo.",
   "enc.disable": "Desativar",
   "enc.enable_privacy": "Ativar criptografia de ponta a ponta",
+  "enc.fetch_missing": "Obter as partes que faltam",
+  "enc.fetch_started": "A baixar as partes necessárias para manter as suas mensagens privadas. A privacidade ativa-se sozinha quando chegarem.",
   "enc.full_e2e": "Criptografado de ponta a ponta — suas mensagens e respostas nunca saem deste dispositivo sem criptografia",
   "enc.full_e2e_overhead": "~2–5s de latência extra",
   "enc.gain_speed": "ganhe velocidade, perca alguma privacidade",

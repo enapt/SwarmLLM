@@ -469,6 +469,8 @@
   "enc.cost_detail": "Din dator utför det första och sista steget själv, behöver därför båda dessa modelldelar på disken och utbyter data med hjälparna en gång per ord — längre svar tar proportionellt längre tid.",
   "enc.disable": "Inaktivera",
   "enc.enable_privacy": "Slå på kryptering hela vägen",
+  "enc.fetch_missing": "Hämta saknade delar",
+  "enc.fetch_started": "Hämtar de delar som behövs för att hålla dina frågor privata. Skyddet slås på av sig själv när de kommit.",
   "enc.full_e2e": "Krypterad hela vägen — dina frågor och svar lämnar aldrig den här enheten okrypterade",
   "enc.full_e2e_overhead": "~2–5s extra latens",
   "enc.gain_speed": "vinn hastighet, förlora lite integritet",

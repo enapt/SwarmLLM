@@ -469,6 +469,8 @@
   "enc.cost_detail": "Váš počítač provádí první a poslední krok sám, proto potřebuje obě tyto části modelu na disku a jednou za slovo si vyměňuje data s pomocníky — delší odpovědi zaberou proporcionálně více času.",
   "enc.disable": "Zakázat",
   "enc.enable_privacy": "Zapnout end-to-end šifrování",
+  "enc.fetch_missing": "Získat chybějící části",
+  "enc.fetch_started": "Stahují se části potřebné k zachování soukromí vašich dotazů. Ochrana se zapne sama, až budou k dispozici.",
   "enc.full_e2e": "Šifrováno end-to-end — vaše dotazy a odpovědi nikdy neopouštějí toto zařízení v nezašifrované podobě",
   "enc.full_e2e_overhead": "~2–5s extra latence",
   "enc.gain_speed": "získejte rychlost, ztratíte trochu soukromí",

@@ -469,6 +469,8 @@
   "enc.cost_detail": "Your machine does the first and last steps itself, so it needs both those pieces of the model on disk, and it exchanges data with helpers once per word — longer answers cost proportionally more time.",
   "enc.disable": "Disable",
   "enc.enable_privacy": "Turn on end-to-end encryption",
+  "enc.fetch_missing": "Get the missing pieces",
+  "enc.fetch_started": "Downloading the pieces needed to keep your prompts private. Privacy turns on by itself once they arrive.",
   "enc.full_e2e": "End-to-end encrypted — your prompts and outputs never leave this device unencrypted",
   "enc.full_e2e_overhead": "~2–5s extra latency",
   "enc.gain_speed": "gain speed, lose some privacy",

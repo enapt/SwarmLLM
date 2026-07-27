@@ -469,6 +469,8 @@
   "enc.cost_detail": "Tu equipo realiza el primer y el último paso, por lo que necesita esas dos partes del modelo en disco, e intercambia datos con los colaboradores una vez por palabra: las respuestas largas cuestan proporcionalmente más tiempo.",
   "enc.disable": "Desactivar",
   "enc.enable_privacy": "Activar cifrado de extremo a extremo",
+  "enc.fetch_missing": "Obtener las partes que faltan",
+  "enc.fetch_started": "Descargando las partes necesarias para mantener tus mensajes privados. La privacidad se activará por sí sola cuando lleguen.",
   "enc.full_e2e": "Cifrado de extremo a extremo: tus mensajes y respuestas nunca salen de este dispositivo sin cifrar",
   "enc.full_e2e_overhead": "~2–5s de latencia extra",
   "enc.gain_speed": "ganar velocidad, perder algo de privacidad",

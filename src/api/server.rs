@@ -301,6 +301,12 @@ pub fn build_router(state: AppState) -> Router {
             "/api/admin/models/{id}/encrypted-pipeline",
             get(admin::get_model_encrypted_pipeline).put(admin::set_model_encrypted_pipeline),
         )
+        // One action to make prompt privacy possible: fetch the first and last
+        // pieces of a model. Privacy then engages on its own.
+        .route(
+            "/api/admin/models/{id}/enable-privacy",
+            post(admin::enable_model_privacy),
+        )
         // Resource schedule
         .route(
             "/api/admin/schedule",

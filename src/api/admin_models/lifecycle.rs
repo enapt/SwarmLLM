@@ -335,6 +335,134 @@ pub async fn set_model_auto_manage(
 
 // ---- Encrypted Pipeline API ----
 
+/// POST /api/admin/models/{id}/enable-privacy — one action to make prompt
+/// privacy possible for a model.
+///
+/// Prompt privacy needs the first and last piece of a model on this machine,
+/// which previously meant reading which pieces were missing and downloading them
+/// by hand. This fetches exactly those pieces and nothing else.
+///
+/// It deliberately does NOT set a per-model flag. Privacy turns itself on once
+/// both ends are present (`encrypted_pipeline_for`), so there is no window where
+/// a flag is on but the shards have not arrived — which would fail every request
+/// for the model with "No node available" until the download finished. It does
+/// clear an explicit OFF, since that would otherwise keep suppressing it.
+pub async fn enable_model_privacy(
+    State(state): State<AppState>,
+    Path(model_id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let mid = crate::types::ModelId(model_id.clone());
+    let manifest = state
+        .shared_state
+        .model_registry
+        .get_manifest(&mid)
+        .ok_or_else(|| ApiError(crate::error::SwarmError::ModelNotAvailable(mid.clone())))?;
+
+    // A previous explicit "off" would keep overriding the automatic behaviour
+    // even once the shards land, so asking for privacy clears it.
+    let had_explicit_off = state
+        .shared_state
+        .encrypted_pipeline_models
+        .get(&mid)
+        .map(|r| !*r.value())
+        .unwrap_or(false);
+    if had_explicit_off {
+        state.shared_state.encrypted_pipeline_models.remove(&mid);
+        let _ = state
+            .shared_state
+            .db
+            .remove("encrypted_pipeline_models", &model_id);
+    }
+
+    let last_index = manifest.shard_count.saturating_sub(1);
+    let me = state.shared_state.identity.node_id();
+    let holds = |index: u32| {
+        state
+            .shared_state
+            .model_registry
+            .shard_holders(&crate::types::ShardId {
+                model_id: mid.clone(),
+                index,
+            })
+            .contains(me)
+    };
+    let mut needed: Vec<u32> = Vec::new();
+    for index in [0u32, last_index] {
+        if !holds(index) && !needed.contains(&index) {
+            needed.push(index);
+        }
+    }
+
+    if needed.is_empty() {
+        return Ok(Json(serde_json::json!({
+            "model_id": model_id,
+            "status": "already_available",
+            "encrypted_pipeline": state.shared_state.encrypted_pipeline_for(&mid),
+            "cleared_explicit_off": had_explicit_off,
+            "downloading": [],
+        })));
+    }
+
+    // Needs a HuggingFace source to fetch from. Without one the shards can still
+    // arrive over the network from peers, so say so rather than failing.
+    let source = state
+        .shared_state
+        .models
+        .hf_sources
+        .get(&mid)
+        .map(|r| r.value().clone());
+    let Some(source) = source else {
+        return Ok(Json(serde_json::json!({
+            "model_id": model_id,
+            "status": "no_download_source",
+            "message": "No HuggingFace source recorded for this model, so the missing pieces \
+                        cannot be fetched directly. They may still arrive from peers; privacy \
+                        turns on by itself once both ends are present.",
+            "needed_shards": needed,
+            "cleared_explicit_off": had_explicit_off,
+        })));
+    };
+
+    let resp = crate::api::admin_hf::hf_download_shards(
+        State(state.clone()),
+        Json(crate::api::admin_hf::HfShardDownloadRequest {
+            repo_id: source.repo_id.clone(),
+            filename: source.filename.clone(),
+            shards: needed.clone(),
+            // Merge into the existing model directory rather than deriving a new
+            // model id from the filename — these are pieces of a model we already
+            // have, not a new download.
+            model_id: Some(model_id.clone()),
+            peer_fair_share: false,
+        }),
+    )
+    .await?;
+
+    state.shared_state.emit_activity(
+        crate::daemon::state::ActivityEvent::new(
+            "models",
+            "privacy_shards_requested",
+            format!(
+                "Fetching the pieces needed to keep prompts private for {} ({} of {})",
+                model_id,
+                needed.len(),
+                manifest.shard_count
+            ),
+        )
+        .with_model(model_id.clone())
+        .with_toast("info", 6000),
+    );
+
+    Ok(Json(serde_json::json!({
+        "model_id": model_id,
+        "status": "downloading",
+        "needed_shards": needed,
+        "cleared_explicit_off": had_explicit_off,
+        "note": "Prompt privacy turns on by itself once both ends are present.",
+        "download": resp.0,
+    })))
+}
+
 /// GET /api/admin/models/:model_id/encrypted-pipeline — Get encrypted pipeline status.
 pub async fn get_model_encrypted_pipeline(
     State(state): State<AppState>,

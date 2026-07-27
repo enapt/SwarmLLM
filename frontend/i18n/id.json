@@ -469,6 +469,8 @@
   "enc.cost_detail": "Perangkat Anda menjalankan langkah pertama dan terakhir sendiri, jadi memerlukan kedua bagian model itu di disk, dan bertukar data dengan node pembantu sekali per kata — jawaban yang lebih panjang memerlukan waktu yang proporsional lebih lama.",
   "enc.disable": "Nonaktifkan",
   "enc.enable_privacy": "Aktifkan enkripsi ujung ke ujung",
+  "enc.fetch_missing": "Ambil bagian yang kurang",
+  "enc.fetch_started": "Mengunduh bagian yang diperlukan agar prompt Anda tetap privat. Privasi akan aktif sendiri setelah tersedia.",
   "enc.full_e2e": "Terenkripsi ujung ke ujung — pertanyaan dan jawaban Anda tidak pernah keluar dari perangkat ini dalam bentuk tidak terenkripsi",
   "enc.full_e2e_overhead": "~2–5d latensi tambahan",
   "enc.gain_speed": "dapatkan kecepatan, sedikit privasi hilang",

@@ -33,8 +33,16 @@ struct Cli {
     verbose: u8,
 
     /// Path to a GGUF model file to load
-    #[arg(short, long, global = true)]
-    model: Option<PathBuf>,
+    //
+    // String, not PathBuf, deliberately. This is a GLOBAL `--model`, and
+    // subcommands (`chat`, `privacy`) also take a `--model`/`MODEL` holding a
+    // String. clap compares the INNER value type of same-named args and panics
+    // when they differ — `swarmllm chat --model X` crashed with "Mismatch
+    // between definition and access of `model`" for exactly this reason. Keeping
+    // one inner type across all of them is what fixes it; converted to a path at
+    // the two places that consume it.
+    #[arg(short, long, global = true, value_name = "PATH")]
+    model: Option<String>,
 
     /// Number of layers to offload to GPU (0 = CPU only)
     #[arg(long, global = true)]
@@ -93,6 +101,15 @@ enum Commands {
         /// Download every shard (the whole model), not just this node's fair share.
         #[arg(long)]
         all: bool,
+    },
+    /// Make prompt privacy possible for a model by fetching the pieces it needs.
+    ///
+    /// Prompt privacy keeps prompts and answers on this machine, which requires
+    /// holding the first and last piece of the model. This downloads exactly
+    /// those; privacy then turns on by itself. Needs a running daemon.
+    Privacy {
+        /// Model id to make private, e.g. llama-3.2-3b-instruct-q4-k-m.
+        model: String,
     },
     /// Check for updates and apply if available
     Update {
@@ -295,7 +312,7 @@ async fn async_main(mut cli: Cli) -> anyhow::Result<()> {
                 config: cli.config,
                 port: cli.port,
                 data_dir: cli.data_dir,
-                model: cli.model,
+                model: cli.model.map(PathBuf::from),
                 gpu_layers: cli.gpu_layers,
                 bootstrap: cli.bootstrap,
                 shards: cli.shards,
@@ -331,6 +348,11 @@ async fn async_main(mut cli: Cli) -> anyhow::Result<()> {
             let port = resolve_client_port(cli.port);
             let data_dir = resolve_data_dir(&cli.data_dir);
             cli::get_model::get_model(port, &data_dir, tier, all).await
+        }
+        Commands::Privacy { model } => {
+            let port = resolve_client_port(cli.port);
+            let data_dir = resolve_data_dir(&cli.data_dir);
+            cli::privacy::enable_privacy(port, &data_dir, &model).await
         }
         Commands::ModelWorker {
             socket,
@@ -407,7 +429,12 @@ async fn async_main(mut cli: Cli) -> anyhow::Result<()> {
         }
         Commands::Update { check_only } => cli::update::run_update_command(check_only).await,
         Commands::TestSplit { max_tokens, prompt } => {
-            cli::split_test::test_split_inference(cli.model.clone(), max_tokens, &prompt).await
+            cli::split_test::test_split_inference(
+                cli.model.clone().map(PathBuf::from),
+                max_tokens,
+                &prompt,
+            )
+            .await
         }
         Commands::Bench {
             max_tokens,

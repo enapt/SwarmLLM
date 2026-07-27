@@ -469,6 +469,8 @@
   "enc.cost_detail": "Votre machine effectue elle-même la première et la dernière étape : elle a donc besoin de ces deux parties du modèle sur le disque, et échange des données avec les pairs une fois par mot — les réponses longues coûtent proportionnellement plus de temps.",
   "enc.disable": "Désactiver",
   "enc.enable_privacy": "Activer le chiffrement de bout en bout",
+  "enc.fetch_missing": "Obtenir les parties manquantes",
+  "enc.fetch_started": "Téléchargement des parties nécessaires pour garder vos requêtes privées. La confidentialité s'activera d'elle-même à leur arrivée.",
   "enc.full_e2e": "Chiffré de bout en bout — vos messages et réponses ne quittent jamais cet appareil en clair",
   "enc.full_e2e_overhead": "~2–5s de latence supplémentaire",
   "enc.gain_speed": "gagner en vitesse, perdre un peu de confidentialité",

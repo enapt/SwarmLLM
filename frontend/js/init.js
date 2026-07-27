@@ -482,6 +482,32 @@
         return;
       }
 
+      // One action to make prompt privacy possible: fetch the first and last
+      // pieces of the model. Privacy then turns on by itself, so there is no
+      // separate toggle step and no window where a flag is set but the pieces
+      // have not arrived.
+      var encFetchEl = target.closest('[data-enc-fetch]');
+      if (encFetchEl) {
+        var encFetchId = encFetchEl.getAttribute('data-enc-fetch');
+        encFetchEl.disabled = true;
+        App.authFetch(U.modelApiUrl(encFetchId, 'enable-privacy'), { method: 'POST' })
+          .then(function(r) { return r.json().then(function(d) { return { ok: r.ok, d: d }; }); })
+          .then(function(res) {
+            if (!res.ok) {
+              App.ui.showBanner('error', U.getApiErrorMessage(res.d));
+              encFetchEl.disabled = false;
+              return;
+            }
+            App.ui.showBanner('success', I18n.t('enc.fetch_started'));
+            App.models.load();
+          })
+          .catch(function() {
+            App.ui.showBanner('error', I18n.t('enc.fetch_started'));
+            encFetchEl.disabled = false;
+          });
+        return;
+      }
+
       // Encrypted pipeline toggle
       var encToggle = target.getAttribute('data-enc-toggle') || (target.closest('[data-enc-toggle]') || {}).getAttribute && (target.closest('[data-enc-toggle]') || {}).getAttribute('data-enc-toggle');
       if (encToggle) {

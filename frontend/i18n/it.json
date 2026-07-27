@@ -469,6 +469,8 @@
   "enc.cost_detail": "Il tuo computer esegue il primo e l'ultimo passaggio, quindi ha bisogno di entrambe quelle parti del modello su disco e scambia dati con i peer una volta per parola: le risposte lunghe costano proporzionalmente più tempo.",
   "enc.disable": "Disabilita",
   "enc.enable_privacy": "Attiva la crittografia end-to-end",
+  "enc.fetch_missing": "Scarica le parti mancanti",
+  "enc.fetch_started": "Download delle parti necessarie per mantenere privati i tuoi messaggi. La privacy si attiverà da sola all'arrivo.",
   "enc.full_e2e": "Crittografato end-to-end: i tuoi messaggi e le risposte non escono mai da questo dispositivo in chiaro",
   "enc.full_e2e_overhead": "~2–5s di latenza extra",
   "enc.gain_speed": "guadagna velocità, perdi un po' di privacy",

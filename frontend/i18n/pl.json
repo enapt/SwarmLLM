@@ -469,6 +469,8 @@
   "enc.cost_detail": "Twój komputer sam wykonuje pierwszy i ostatni krok, więc potrzebuje obu tych części modelu na dysku i wymienia dane z pomocnikami raz na słowo — dłuższe odpowiedzi zajmują proporcjonalnie więcej czasu.",
   "enc.disable": "Wyłącz",
   "enc.enable_privacy": "Włącz szyfrowanie end-to-end",
+  "enc.fetch_missing": "Pobierz brakujące części",
+  "enc.fetch_started": "Trwa pobieranie części potrzebnych do zachowania prywatności zapytań. Ochrona włączy się sama, gdy będą gotowe.",
   "enc.full_e2e": "Szyfrowane end-to-end — Twoje pytania i odpowiedzi nigdy nie opuszczają tego urządzenia bez szyfrowania",
   "enc.full_e2e_overhead": "~2–5s dodatkowego opóźnienia",
   "enc.gain_speed": "zyskujesz szybkość, tracisz trochę prywatności",

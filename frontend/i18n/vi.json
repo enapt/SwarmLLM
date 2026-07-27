@@ -469,6 +469,8 @@
   "enc.cost_detail": "Máy của bạn tự thực hiện bước đầu và bước cuối, nên cần cả hai phần đó của mô hình trên đĩa, và trao đổi dữ liệu với các nút hỗ trợ một lần cho mỗi từ — câu trả lời dài hơn sẽ mất nhiều thời gian hơn theo tỷ lệ.",
   "enc.disable": "Tắt",
   "enc.enable_privacy": "Bật mã hoá đầu cuối",
+  "enc.fetch_missing": "Tải các phần còn thiếu",
+  "enc.fetch_started": "Đang tải các phần cần thiết để giữ câu hỏi của bạn ở chế độ riêng tư. Tính năng sẽ tự bật khi tải xong.",
   "enc.full_e2e": "Mã hoá đầu cuối — câu hỏi và câu trả lời của bạn không bao giờ rời khỏi thiết bị này ở dạng chưa mã hoá",
   "enc.full_e2e_overhead": "~2–5s độ trễ thêm",
   "enc.gain_speed": "tăng tốc độ, mất một chút quyền riêng tư",

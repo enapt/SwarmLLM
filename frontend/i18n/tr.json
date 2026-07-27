@@ -469,6 +469,8 @@
   "enc.cost_detail": "Cihazınız ilk ve son adımı kendisi yapar; bu nedenle modelin bu iki parçasına diskte ihtiyaç duyar ve her kelime için bir kez diğer düğümlerle veri alışverişi yapar — uzun yanıtlar oransal olarak daha fazla zaman alır.",
   "enc.disable": "Devre Dışı Bırak",
   "enc.enable_privacy": "Uçtan uca şifrelemeyi aç",
+  "enc.fetch_missing": "Eksik parçaları indir",
+  "enc.fetch_started": "İsteklerinizi gizli tutmak için gereken parçalar indiriliyor. Geldiklerinde gizlilik kendiliğinden açılacak.",
   "enc.full_e2e": "Uçtan uca şifreli — sorularınız ve yanıtlarınız bu cihazdan şifresiz olarak hiç çıkmaz",
   "enc.full_e2e_overhead": "~2–5sn ek gecikme",
   "enc.gain_speed": "hız kazanın, biraz gizlilik kaybedilir",

@@ -469,6 +469,8 @@
   "enc.cost_detail": "Je computer voert de eerste en laatste stap zelf uit, heeft daarom beide modeldelen op schijf nodig en wisselt één keer per woord gegevens uit met helpers — langere antwoorden kosten evenredig meer tijd.",
   "enc.disable": "Uitschakelen",
   "enc.enable_privacy": "End-to-end-versleuteling inschakelen",
+  "enc.fetch_missing": "Ontbrekende delen ophalen",
+  "enc.fetch_started": "De delen die nodig zijn om je prompts privé te houden worden gedownload. De beveiliging gaat automatisch aan zodra ze binnen zijn.",
   "enc.full_e2e": "End-to-end versleuteld — je berichten en antwoorden verlaten dit apparaat nooit onversleuteld",
   "enc.full_e2e_overhead": "~2–5s extra latentie",
   "enc.gain_speed": "meer snelheid, minder privacy",

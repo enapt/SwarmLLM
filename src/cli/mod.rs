@@ -9,6 +9,7 @@ pub mod chat;
 pub mod get_model;
 pub mod peers;
 pub mod pool;
+pub mod privacy;
 pub mod run;
 pub mod split_test;
 pub mod status;

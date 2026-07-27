@@ -9,8 +9,9 @@ mod shards;
 pub use adapters::{delete_adapter, list_adapters, register_adapter, RegisterAdapterRequest};
 pub use helpers::serialize_acquisition_to_json;
 pub use lifecycle::{
-    delete_model, get_model_auto_manage, get_model_encrypted_pipeline, set_model_auto_manage,
-    set_model_encrypted_pipeline, unload_model, EncryptedPipelineUpdate, ModelAutoManageUpdate,
+    delete_model, enable_model_privacy, get_model_auto_manage, get_model_encrypted_pipeline,
+    set_model_auto_manage, set_model_encrypted_pipeline, unload_model, EncryptedPipelineUpdate,
+    ModelAutoManageUpdate,
 };
 pub use listing::{
     add_model_interest, download_queue, list_models, model_acquisition_status, model_metadata,
