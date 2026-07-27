@@ -1299,8 +1299,9 @@ Measured on tinyllama Q4_K_M, CPU, 4×16 tokens:
 | 4 concurrent, varied prompt lengths | 27.6s | **2.30 tok/s** |
 | 4 concurrent, same prompt length | 21.2s | **3.02 tok/s** |
 
-The same-length row is the confirmation: aligning `seq_len` recovers ~24%, so the
-gate is real. It is also well short of the near-linear scaling batching implies,
+The same-length row indicated the gate is real, though note the later GPU run
+found that repeating identical prompts across trials inflates such numbers via
+prefix-cache hits — treat it as directional rather than exact. It is also well short of the near-linear scaling batching implies,
 which suggests alignment additionally breaks during decode, not only at
 admission.
 
@@ -1339,6 +1340,44 @@ costs N times the arithmetic and returns nothing.
 So ragged batching is a **GPU-path feature**, not a CPU one. Building it to fix
 the reported CPU result would be building the wrong thing. Re-run the table above
 on a GPU node before starting; if it scales there, the spec below applies.
+
+#### GPU research run (RTX 3070 Laptop, 2026-07-27) — the answer is NO
+
+The spec above said to re-run the scaling table on a GPU before building
+anything, because batching only pays when decode is memory-bandwidth-bound.
+Done, on `llama-3.2-3b-instruct-q4-k-m`, all 28 layers on CUDA (verified:
+`Split model using CUDA GPU layer_start=0 layer_end=28`, 7.8 GB of 8 GB VRAM):
+
+| batch | median | vs batch=1 |
+|---|---|---|
+| 1 | 24.6 tok/s | — |
+| 2 | 27.0 tok/s | 1.10x |
+| 4 | 30.2 tok/s | **1.23x** |
+
+**Four times the work for 23% more throughput — the same near-flat result as
+CPU.** On this evidence ragged batching is not worth building. The staged design
+above stands if someone wants it, but nothing in these numbers justifies the
+work.
+
+**Getting a trustworthy number took three attempts, and the first two were
+wrong in opposite directions.** Recording them because each is an easy trap:
+
+1. **Repeated identical prompts** across trials produced 1.77x at batch=2 on
+   tinyllama — prefix-cache hits, not batching. Use fresh content per trial.
+2. **Unique prompts of varying length** produced 1.02x on the 3B — but varying
+   length fails `forward_batch`'s homogeneity check, so that measured the
+   *sequential fallback*, not batching. The control needs unique content at
+   **identical token length**: same prompt shape with a different one-token word.
+3. Background load (a CUDA build, the soak, and browser tabs at ~190% CPU)
+   produced 3x variance within a single configuration. Check `uptime` first.
+
+**Caveats on the conclusion.** One consumer laptop GPU, and the 3B nearly fills
+its 8 GB, so there is little headroom for the larger activations a batch needs —
+a datacentre card with room to spare could behave differently. If anyone wants to
+revisit this, the measurement to take first is not batching at all: establish
+where the time actually goes at batch=1 (HTTP → router → worker IPC → compute),
+because a fixed per-request overhead would cap the achievable gain no matter how
+good the batching is.
 
 #### What actually blocks it today
 
