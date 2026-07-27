@@ -1,6 +1,6 @@
 # SwarmLLM
 
-> **Run AI together — for free.** A single Rust binary that turns your computer into a node in a peer-to-peer LLM inference network. Pool hardware with others to run models too large for any single machine, with no API tokens, no cloud fees, and end-to-end encryption between every peer.
+> **Run AI together — for free.** A single Rust binary that turns your computer into a node in a peer-to-peer LLM inference network. Pool hardware with others to run models too large for any single machine, with no API tokens, no cloud fees, and encrypted traffic between every peer.
 
 This site is the long-form reference. For source code, releases, and issues, head to [`enapt/SwarmLLM`](https://github.com/enapt/SwarmLLM).
 

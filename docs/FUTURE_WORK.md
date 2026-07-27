@@ -1317,6 +1317,77 @@ throughput, and on this path it does not. Worth either documenting the
 homogeneity condition on those settings or gating the claim until ragged
 batching lands.
 
+### Ragged batching — spec, and the measurement that says don't build it yet
+
+**Research run first, because it decides whether the feature is worth building.**
+Aligned prompts (same length, so they pass the homogeneity check and genuinely
+batch), tinyllama Q4_K_M on CPU, 16 tokens each:
+
+| batch | wall | aggregate | vs batch=1 |
+|---|---|---|---|
+| 1 | 6.9s | 2.31 tok/s | — |
+| 2 | 11.7s | 2.73 tok/s | +18% |
+| 4 | 22.2s | 2.88 tok/s | **+25%** |
+
+**Four times the work for 25% more throughput.** That is nearly flat, and it is
+the answer: batching amortises *weight loading*, which only pays when decode is
+memory-bandwidth-bound. On this path it is **compute-bound** — the same finding
+as the prefill section above, where candle's CPU quantized matmul runs at roughly
+5-9% of the chip's FP32 peak. When you are compute-limited, batching N sequences
+costs N times the arithmetic and returns nothing.
+
+So ragged batching is a **GPU-path feature**, not a CPU one. Building it to fix
+the reported CPU result would be building the wrong thing. Re-run the table above
+on a GPU node before starting; if it scales there, the spec below applies.
+
+#### What actually blocks it today
+
+`split/executor.rs::forward_batch` requires every item to share
+`(seq_len, index_pos)` and otherwise falls back to sequential forwards. Two
+distinct halves to that:
+
+1. **`seq_len` is already uniform during decode** — every sequence contributes
+   exactly one token, so this half is satisfied for free. It only bites during
+   prefill, where chunked prefill already exists to even lengths out.
+2. **`index_pos` diverges immediately**, because sequences sit at different
+   lengths. This is the whole of the decode blocker.
+
+Encouragingly, `mask_with_offset(query_len, kv_len)` already exists and builds a
+causal mask at an arbitrary offset — it was added for the prefix-cache path. The
+masking primitive is therefore not missing.
+
+The real structural obstacle is the KV cache: `split/kv_cache.rs` keys per
+`(model_key, request_id)`, so each sequence owns **separate** K/V tensors. A
+single batched attention wants them gathered. That is what paged attention exists
+to solve, and a full paged rewrite is the expensive reading of this work.
+
+#### Staged design that avoids the paged rewrite
+
+The insight that makes a first version cheap: at decode, per-sequence attention
+is over a few hundred KV entries and is *tiny*, while the projections and MLP are
+where the weight-bound cost lives. So split the layer rather than the cache:
+
+- **Batch the position-independent parts.** Embedding lookup, layer norms, QKV
+  projections, MLP, and the output head all take `[N, 1, hidden]` and need no
+  knowledge of sequence position. This is where the amortisation win is, and it
+  needs no KV changes at all.
+- **Loop attention per sequence**, using each one's own KV tensors and its own
+  `index_pos` via the existing `mask_with_offset`. N small attention calls, no
+  gathering, no padding, no block tables.
+- **Keep the homogeneity fallback** for prefill, where `seq_len` genuinely
+  differs and chunked prefill is the right tool.
+
+That captures most of the theoretical gain for a fraction of the work, and it is
+measurable against the table above before committing to anything larger. Only if
+attention itself becomes the bottleneck does paged KV become worth it.
+
+#### Also fix the promise, regardless
+
+`continuous_batching = true` and `max_concurrent_decode_batch = 8` read as though
+concurrency scales throughput. On the CPU path it does not, and the settings do
+not say so. Either document the homogeneity condition and the compute-bound
+caveat on those options, or stop defaulting them on where they cannot deliver.
+
 ### Prerequisite fixed along the way: the worker was undebuggable
 
 `model-worker` subprocesses were spawned with no verbosity flag, so they fell
