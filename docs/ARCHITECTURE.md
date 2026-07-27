@@ -1403,7 +1403,14 @@ shared key that any node can overwrite. Each node publishes only its own shard h
 - WebSocket Origin validation (prevents cross-site WebSocket hijacking)
 - Input validation: model name 256 chars, tools max 128, stop sequences max 16
 - HuggingFace inputs validated (repo_id format, filename .gguf extension, no path traversal)
-- HTTP timeout: 5 minutes (tower-http TimeoutLayer, Slowloris protection)
+- HTTP timeout: 5 minutes (tower-http TimeoutLayer, Slowloris protection).
+  Routes that can run a model (`/v1/chat/completions`, `/v1/responses`,
+  `/v1/messages`, `/mcp`) are merged OUTSIDE this layer — generation has no
+  bounded duration, and prefill alone can exceed five minutes on a long prompt.
+  They are bounded instead by the prompt-scaled first-token budget,
+  client-disconnect cancellation and TCP keepalive. The merge sits before the
+  auth layer, so they still require a key (pinned by
+  `generation_routes_still_require_a_key`).
 - Per-IP rate limiter with periodic 5-minute cleanup of stale entries
 - Inference queue depth cap: 512 requests
 - **CORS**: `OPTIONS` preflight requests explicitly allowed (required for cross-origin browser clients)

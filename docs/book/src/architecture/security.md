@@ -132,7 +132,9 @@ Scores decay toward 0.5 over time (1% per health cycle, default 30 seconds). Tru
 
 - Per-IP rate limiter with periodic cleanup (5 min intervals)
 - Inference queue depth cap: 512 requests
-- HTTP timeout: 5 minutes (Slowloris protection via tower-http TimeoutLayer)
+- HTTP timeout: 5 minutes (Slowloris protection via tower-http TimeoutLayer).
+  Model-running routes sit outside it (generation is unbounded in time) but
+  still inside authentication and rate limiting.
 - Credit transaction signature verification before ledger apply
 
 ## Pipeline Privacy Model
