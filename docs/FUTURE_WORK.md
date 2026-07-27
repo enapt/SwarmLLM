@@ -1266,68 +1266,48 @@ Relevant because greedy decoding is what tool calling, benchmarks and
 reproducible runs use, so it is over-represented in exactly the traffic testers
 generate.
 
-## Two crashes from the cross-node prefix-KV attempt (external report 2026-07-27)
+## Two reported crashes, one cause — a partial holder accepting whole-model work (FIXED 2026-07-27)
 
-Both reported mid-sequence rather than from a clean start, so neither is isolated
-yet. Recording the analysis because the error shapes narrow them considerably.
+Reported as two separate crashes while chasing cross-node prefix-KV. They are the
+same bug seen from opposite ends, and **neither is a prefix-KV fault**.
 
-### A — `attn_norm: shape mismatch in rms-norm [1, 128] [3072]`
+`daemon/dispatch/remote_generate.rs::has_model_locally` answered "is this model
+known here" by checking that `manifest.json` exists. Every holder of a *single*
+shard keeps the manifest, so a node holding any part of a model accepted a peer's
+request to run **all** of it. The worker then ran a full decode over a shard
+window that does not cover the whole model, and failed in one of two places
+depending on which end was missing:
 
-Seen after the scheduler moved this node's local role from layers [0,12) to
-[21,28) — tail-only — and the worker reloaded on CPU following a GPU OOM.
+| missing end | what happens | reported error |
+|---|---|---|
+| the **head** | the embedding table is only loaded for a first segment, so raw token ids reach the first attention block | `attn_norm: shape mismatch in rms-norm [1, 128] [3072]` — 128 is `prefill_chunk_tokens`, 3072 the hidden size |
+| the **tail** | `executor.rs` returns `Ok(layer_in)` — hidden states — for a non-last segment, and that reaches the sampler | `unexpected rank, expected: 1, got: 2 ([20, 3072])` |
 
-**The shapes name the fault.** 3072 is llama-3.2-3b's hidden size; 128 is
-`prefill_chunk_tokens`. So the tensor entering `attn_norm` is `[batch=1,
-seq=128]` — **token ids**, not hidden states, which would be `[1, 128, 3072]`.
-A segment that does not start at layer 0 correctly skips embedding
-(`is_first = self.tok_embeddings.is_some()`, and the loader only loads the
-embedding table when `is_first`), so raw ids went straight into layer 21.
+**The prefix-KV fetch in the second report was incidental.** It shortened the
+final prefill chunk to 20 tokens, which is the only reason 20 appears in the
+message; without a cache hit the same crash would report the full prompt length.
+Cross-node prefix-KV transfer was confirmed working in that same run
+(`kind="prefix_kv_data"`), and nothing here implicates it.
 
-It also came from `BatchGenerate`, i.e. a **full generate**, not a layer-forward.
-A generate hands the worker a prompt and expects it to run the whole model — but
-this worker held only the tail. That should be impossible.
+**Fix**: the guard now asks whether this node can serve the *requested layer
+range*, and the range must sit inside ONE contiguous run of locally-held layers —
+holding both ends of a model is not the same as holding the middle, and a decode
+cannot skip a gap. Refusal was already handled by the caller, which reports the
+error and picks another holder. Decision extracted as `range_is_covered` and unit
+tested, including the prompt-privacy layout (both ends, no middle) which must
+NOT count as coverage.
 
-**Where to look first.** `router/batch.rs` chooses local vs distributed on:
+**Why it did not reproduce from a clean start** (attempted: tail-only node,
+`gpu_layers = 0`, single request, no OOM or reschedule in the history — 3-segment
+pipeline ran clean 3/3, then 6/6). It needs the *sender* to ask for a range wider
+than the receiver holds, which a correct scheduler does not do. Stale holder
+information is enough to produce it, which fits both reports arriving after
+repeated restarts and role changes. The receiving-side guard is the right place
+to fix it regardless of how the sender got it wrong.
 
-```rust
-let is_split_mode = shared_state.config.inference.shard_range.is_some();
-let model_loaded = shared_state.model_loaded.load(Ordering::Acquire);
-if model_loaded && !is_split_mode { execute_local_batch(..) } else { .. }
-```
-
-Neither term establishes that **this model** is fully held locally.
-`is_split_mode` reads a CONFIG option, and `model_loaded` is a single global
-`AtomicBool` — not per-model. A node holding a partial shard set for a model, with
-no `shard_range` configured and some model loaded, can therefore take the local
-path and dispatch a whole-model generate to a partial worker.
-
-**Repro to confirm**: configure a local segment of last-only (e.g. layers
-[21,28)) with `gpu_layers = 0` from a clean start, no OOM or reschedule in the
-history, and send one request.
-
-### B — `unexpected rank, expected: 1, got: 2 ([20, 3072])` at first-token sampling
-
-Occurred on the second of two identical ~1600-token prompts, immediately after a
-confirmed cross-node prefix-KV fetch (`kind="prefix_kv_data"`). So the transfer
-mechanism works; consumption is what breaks.
-
-3072 is again the hidden size, so `[20, 3072]` is **20 positions of hidden state**
-reaching a sampler that wants a single vector. That is the "logits at every
-position" shape not being reduced to the last position. The likely site is the
-path that prefills only the *suffix* after a cache hit — when the prefill covers
-fewer positions than the full prompt, whatever selects "the last row" has to be
-indexed against the suffix, not the whole sequence. 20 matches neither
-`block_tokens=64` nor `min_tokens=32`, which is consistent with it being a
-suffix length rather than a configured size.
-
-**Repro to confirm**: send a prompt once to a node that already holds prefix-KV
-for it from a *separate earlier run*, so the crash is reached on a first request
-with no prior state in the same process.
-
-### Consequence for the checklist
-
-Cross-node prefix-KV sharing (the README's 12.9x TTFT claim) moves from
-"not tested" to "tested, blocked by B". Neither confirmed nor refuted.
+**Still genuinely open**: cross-node prefix-KV sharing is unmeasured. The README's
+12.9x TTFT claim is neither confirmed nor refuted — the run that would have
+measured it hit the crash above. Worth retrying now that the crash is fixed.
 
 ### Idle VRAM unload: the region-demand reprieve had no ceiling (fixed 2026-07-27)
 
@@ -1397,6 +1377,17 @@ Ruled out: it was NOT served by a peer on an older build — the trace shows
 If a tester reports garbled spacing, this is the first thing to check, and the
 detokenization path for SPM models is where to look. A reproduction would make it
 actionable; without one there is nothing to fix against.
+
+**A second, similar one-off the same day**, recorded because two rare
+text-assembly corruptions may share a cause. A 3-segment distributed reply began
+`" waterThe cycle, also known as the hydrologic"` — the first two tokens
+transposed, where every other run of the identical prompt gave
+`"The water cycle, ..."`. Six immediate repeats were clean, as were six repeats
+in the marker case. Both are reply text arriving wrong rather than the model
+choosing badly, both appeared once in heavy use, and neither reproduces on
+demand. If either is ever caught reliably, check whether the other goes with it —
+a shared ordering or buffering fault in how token text is accumulated would
+explain both, and would be a single fix rather than two.
 
 ## Continuous batching engages but yields almost nothing (diagnosed 2026-07-27)
 
