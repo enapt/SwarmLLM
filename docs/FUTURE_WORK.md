@@ -1138,18 +1138,66 @@ order, not on merit. This is why the same configuration split consistently in on
 session and not at all after a restart. It also means the routing quality of a
 node silently depends on how long it has been up.
 
-Two things must land before this can be enabled by default:
+### Cost-model work done 2026-07-27, and the ONE piece still missing
 
-1. **A per-token network term.** The chain's network cost must scale with the
-   expected number of decode tokens for multi-segment chains, while a single
-   whole-model remote segment keeps its O(1) cost. This is chain-shaped, not
-   vertex-shaped, so it likely means comparing the best multi-segment chain
-   against the single-delegation option explicitly, with `max_tokens` (or a
-   learned reply-length estimate) passed into the router.
-2. **A compute prior for unobserved candidates.** Zero is the one value
-   guaranteed to be wrong, and it makes ties the normal case. A prior from the
-   peer's advertised capability, or the model's layer count times a default
-   per-layer cost, would at least order candidates sensibly on a cold node.
+Three of the four gaps are fixed and shipped (all default-on, they improve
+routing generally, not only partial ranges):
+
+1. **`UNKNOWN_COMPUTE_MS` 0 → 25.** An unmeasured candidate was free, so cold
+   nodes tied on network alone and iteration order decided; an unknown node also
+   outranked a measured-good one. Now scales with layers taken on.
+2. **The local node is measured.** `record_peer_segment_latency` was called only
+   for remote segments, and `gather_candidates` hardcoded the local node's
+   observation to `None` — so local compute was free at any width and the router
+   would pile every layer onto a slow local CPU rather than use a faster peer.
+   Local segments are now timed and used.
+3. **Per-token network for mid-chain segments.** A vertex whose range does not
+   start at layer 0 is entered from the previous segment, so the coordinator
+   round-trips into it per token; it is charged
+   `2 * latency * ASSUMED_FORWARD_PASSES`. A segment starting at 0 (local, or the
+   delegated whole-model case) pays network once. This is expressible per-vertex
+   after all — `range.0 != 0` is exactly the predicate — so no chain-shaped
+   comparison was needed.
+
+**Still missing, and it is why partial ranges remain off:** the per-token term
+only bites in the *unobserved* branch. Once a peer has an observed
+`ms_per_layer`, `vertex_cost` sets `network_ms = 0` and folds everything into
+compute, on the (correct) grounds that the observation already includes the
+round trip. The problem is that the SAME per-layer figure is then used for the
+whole-model delegated alternative, which does **not** pay a round trip per pass.
+An observation taken while serving a 6-layer mid-chain segment carries that
+segment's RTT amortised over 6 layers; reusing it for a 16-layer delegated
+segment charges the RTT ~2.7 times over. The delegated option is systematically
+overcharged, so the router keeps preferring the split.
+
+Verified after the three fixes above, with the flag forced on (LAN pair, GPU +
+6-core CPU, 16-token replies, warm, `segments=` confirmed in the log both ways):
+
+| route | runs (ms) | median |
+|---|---|---|
+| single segment (default) | 8057, 8093, 10242, 10464, 11786 | **~10.2s** |
+| split GPU 0-10 / CPU 10-16 | 11469, 11817, 12155, 12422 | **~12.0s** |
+
+**The fix is to record two distinct figures rather than one.** A peer needs
+`observed_midchain_ms_per_layer` (includes per-pass network — what
+`record_peer_segment_latency` already produces from `forward_through_segments`)
+and `observed_delegated_ms_per_layer` (pure remote compute). The second has no
+source today because **the `remote_generate` fast path never records anything** —
+`record_peer_segment_latency` has exactly one production caller, in the
+multi-segment path. That is also a self-reinforcing blindness worth fixing on its
+own: a node whose requests all take the fast path never learns a thing about its
+peers, and only ever gets numbers second-hand via `merge_peer_segment_latency`
+gossip. Deriving a per-pass figure from the fast path needs care about units —
+the segment wall-clock there covers prefill plus every decode step, so the usable
+quantity is `(total_ms - ttft_ms) / max(1, completion_tokens - 1) / layers`, both
+of which the trace already carries.
+
+A caution for whoever picks this up: two A/B runs during this work were invalid
+and nearly produced the wrong conclusion. One measured the prefix cache rather
+than the router (repeat prompts collapse to ~1.5s), and one measured a stale
+process because a restart silently failed to rebind port 8800 and the health
+check passed against the *old* daemon. Confirm the PID changed and confirm
+`segments=` in the log before trusting any number here.
 
 Worth noting the shape of request that should favour splitting and was not
 isolated here: a **prefill-dominated** one, where the prompt is a single large
