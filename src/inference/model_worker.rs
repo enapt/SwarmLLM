@@ -527,6 +527,43 @@ fn cancelled_request_id(msg: &DaemonMsg) -> Option<Uuid> {
     }
 }
 
+/// A `Generate` is a WHOLE-model operation: the worker is handed the raw prompt
+/// and must return sampled tokens, so it needs the embedding table at the front
+/// and the output head at the back. A partial layer range has neither, and the
+/// failure it produces is unreadable — without the embedding table the prompt's
+/// token ids are fed straight into the first block
+/// (`attn_norm: shape mismatch in rms-norm [1, 128] [3072]`, i.e.
+/// `[batch, seq_len]` ids where hidden states belong), and without the output
+/// head the sampler is handed hidden states
+/// (`unexpected rank, expected: 1, got: 2 ([20, 3072])`). Both were reported as
+/// separate crashes before they were recognised as one caller mistake.
+///
+/// `Forward` is the operation for a partial range; this guard is deliberately
+/// NOT in `ensure_model_loaded`, which both kinds share.
+fn ensure_whole_model_for_generate(
+    models: &HashMap<(usize, usize, usize, usize), SplitModel>,
+    key: (usize, usize, usize, usize),
+    model_id: &crate::types::ModelId,
+) -> Result<(), SwarmError> {
+    let Some(model) = models.get(&key) else {
+        return Ok(()); // caller reports the missing model itself
+    };
+    if model.is_first() && model.is_last() {
+        return Ok(());
+    }
+    let missing = match (model.is_first(), model.is_last()) {
+        (false, false) => "neither the start nor the end",
+        (false, true) => "not the start",
+        (true, false) => "not the end",
+        (true, true) => unreachable!("returned above"),
+    };
+    Err(SwarmError::ServiceUnavailable(format!(
+        "this node holds layers {}..{} of {model_id}, which is {missing} of the model — \
+         a full generation needs every layer, so this request must go through the pipeline",
+        key.0, key.1
+    )))
+}
+
 #[allow(clippy::too_many_arguments)]
 /// Ensure a SplitModel is loaded for the given model_id, layer range, and TP config.
 /// Non-TP uses (0, 1). TP uses the actual (rank, size).
@@ -1635,6 +1672,8 @@ async fn handle_generate(
         shard_window,
     )?;
 
+    ensure_whole_model_for_generate(models, (layer_start, layer_end, 0, 1), &model_id)?;
+
     let model = models
         .get_mut(&(layer_start, layer_end, 0, 1))
         .ok_or_else(|| SwarmError::Internal("Model vanished after load".into()))?;
@@ -2262,6 +2301,12 @@ async fn try_register_generate_slot(
         1,
         shard_window,
     ) {
+        return Err(SlotAdmitError::Fatal(e));
+    }
+
+    if let Err(e) =
+        ensure_whole_model_for_generate(models, (layer_start, layer_end, 0, 1), &model_id)
+    {
         return Err(SlotAdmitError::Fatal(e));
     }
 
