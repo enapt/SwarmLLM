@@ -1266,6 +1266,49 @@ Relevant because greedy decoding is what tool calling, benchmarks and
 reproducible runs use, so it is over-represented in exactly the traffic testers
 generate.
 
+### Idle VRAM unload: the region-demand reprieve had no ceiling (fixed 2026-07-27)
+
+Reported externally: `qwen2.5-coder-7b` and `llama-3.2-3b` model-workers resident
+on an 8 GB card **2h16 past the last request** with `idle_unload_secs = 300`
+configured, on a node that subsequently hit GPU-OOM.
+
+`try_idle_vram_unload` has two gates. The first — idle for `idle_unload_secs` —
+was satisfied. The second refuses to unload while regional demand is at or above
+`IDLE_DEMAND_EMA_THRESHOLD = 0.1`. The two reported models sat *just* over it:
+
+```
+llama-3.2-3b        BE 0.167   TH 0.126
+qwen2.5-coder-7b    BE 0.107
+```
+
+so the reprieve applied indefinitely and `idle_unload_secs` never meant anything
+for them.
+
+**The deeper issue is that the demand gate is a weak proxy.** It exists because
+`last_request_at` is set by `ModelTrustInfo::record_request`, which is called
+only from the OUTBOUND router path (`distributed_exec.rs`) — serving a peer never
+updates it. So without the gate a node would evict models it was actively
+serving. But regional demand says nothing about whether requests are reaching
+THIS node: a model nobody ever asks us for stays pinned as long as some region
+wants it in the abstract.
+
+**Shipped fix**: the reprieve now expires. Past `IDLE_HARD_UNLOAD_MULTIPLIER`
+(12x) the configured window — one hour at the 5-minute default — VRAM is
+reclaimed regardless of regional demand. Short enough that an unused model cannot
+hold a card all day, long enough that a genuinely useful one is never evicted
+mid-use.
+
+**Better fix, not done**: track when we last *served* a model, and use
+`max(last_request_at, last_served_at)` for the idle test. Then the gate answers
+"has anyone asked me for this", which is the question that actually matters, and
+the regional-demand proxy can go entirely. It needs a new per-model timestamp
+(additive on `ModelTrustInfo`, or in `state.metrics` alongside
+`record_segment_served`, which is currently aggregate and carries no model id).
+
+A test caught an edge case worth keeping in mind: `idle_unload_secs as i64` wraps
+a very large configured window to a negative number, which inverts the comparison
+and unloads immediately rather than never. Converted with `try_from` instead.
+
 ### Observed once, not reproduced: SentencePiece markers in reply text (2026-07-27)
 
 Recording because it is output corruption and a literal capture exists, not

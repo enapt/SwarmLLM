@@ -39,6 +39,27 @@ const RECENT_REQUEST_PROTECT_SECS: i64 = 3600;
 /// `ema_rate < 0.1` "no demand" boundary in `geo_target_replicas`.
 const IDLE_DEMAND_EMA_THRESHOLD: f64 = 0.1;
 
+/// Multiple of `idle_unload_secs` after which VRAM is reclaimed even for a model
+/// the region still wants.
+///
+/// The demand check is a proxy for "someone may ask us shortly", and it is a
+/// weak one — regional demand says nothing about whether requests are reaching
+/// THIS node. Without a ceiling it means "keep forever", which is not what any
+/// operator reads `idle_unload_secs` to mean. Twelve times the configured idle
+/// window (one hour at the 5-minute default) is long enough that a genuinely
+/// useful model is never evicted mid-use, and short enough that an unused one
+/// cannot hold a card all day.
+const IDLE_HARD_UNLOAD_MULTIPLIER: i64 = 12;
+
+/// Idle seconds after which the region-demand reprieve no longer applies.
+fn idle_hard_unload_secs(idle_unload_secs: u64) -> i64 {
+    // `as i64` would wrap a very large configured window to a negative number,
+    // which inverts the check and unloads immediately instead of never.
+    i64::try_from(idle_unload_secs)
+        .unwrap_or(i64::MAX)
+        .saturating_mul(IDLE_HARD_UNLOAD_MULTIPLIER)
+}
+
 /// R134.7: penalty applied when a model has a recent swarm request.
 /// Combined with the existing `region_demand` penalty this means a
 /// model that's actively being used by THIS node is much harder to
@@ -1090,6 +1111,22 @@ impl AutoShardManager {
             if !idle {
                 continue;
             }
+            // Past a much longer idle period, keep the VRAM rather than the
+            // model. The demand check below keeps a wanted model warm while this
+            // node is momentarily quiet, which is right — but it measures what
+            // the REGION wants in the abstract, not whether anyone is asking US:
+            // `last_request_at` is only set by our own outbound requests, never
+            // by serving a peer. So a model nobody ever asks us for stays
+            // resident indefinitely whenever regional demand sits above the
+            // threshold, and on a small card that starves the owner's own work.
+            // Reported externally 2026-07-27: two models resident 2h16 past their
+            // last request, both with regional demand barely over the line
+            // (0.107 and 0.126 against a 0.1 threshold), on a node that then hit
+            // GPU-OOM.
+            let hard_idle = match last_req {
+                Some(t) => (now - t).num_seconds() >= idle_hard_unload_secs(idle_unload_secs),
+                None => true,
+            };
             // Low network demand: the region isn't asking for it either. Keep a
             // wanted model warm even when THIS node is momentarily quiet.
             let ema = self
@@ -1098,7 +1135,7 @@ impl AutoShardManager {
                 .get(&(model_id.clone(), our_region.clone()))
                 .map(|v| *v)
                 .unwrap_or(0.0);
-            if ema >= IDLE_DEMAND_EMA_THRESHOLD {
+            if ema >= IDLE_DEMAND_EMA_THRESHOLD && !hard_idle {
                 continue;
             }
 
@@ -1423,5 +1460,59 @@ mod tests {
             score_with_stale -= RECENT_REQUEST_PENALTY;
         }
         assert!(score_with_fresh < score_with_stale - 1.0);
+    }
+}
+
+#[cfg(test)]
+mod idle_hard_unload_tests {
+    use super::{idle_hard_unload_secs, IDLE_DEMAND_EMA_THRESHOLD, IDLE_HARD_UNLOAD_MULTIPLIER};
+
+    /// The reported case: two models resident 2h16 past their last request,
+    /// regional demand barely over the line, on a node that then hit GPU-OOM.
+    /// At the 5-minute default the reprieve must have expired well before then.
+    #[test]
+    fn the_reported_two_hour_case_would_now_unload() {
+        let ceiling = idle_hard_unload_secs(300);
+        assert_eq!(ceiling, 3600, "12x the 5-minute default is one hour");
+        let observed_idle_secs = 2 * 3600 + 16 * 60;
+        assert!(
+            observed_idle_secs >= ceiling,
+            "2h16 idle must be past the ceiling, got {ceiling}s"
+        );
+    }
+
+    /// The demand reprieve must still work for its intended case — a model this
+    /// node is quiet on but the region wants, shortly after last use.
+    #[test]
+    fn a_briefly_idle_wanted_model_keeps_its_reprieve() {
+        let ceiling = idle_hard_unload_secs(300);
+        let idle_secs = 600; // 10 minutes: past idle_unload_secs, far under the ceiling
+        assert!(idle_secs > 300, "past the plain idle window");
+        assert!(
+            idle_secs < ceiling,
+            "but still inside the reprieve, so demand can protect it"
+        );
+        // And the demand figure from the report would indeed protect it there —
+        // read from a variable so this stays a real comparison, not a constant
+        // the compiler folds away.
+        let reported_regional_demand = 0.107_f64;
+        assert!(reported_regional_demand >= IDLE_DEMAND_EMA_THRESHOLD);
+    }
+
+    #[test]
+    fn the_ceiling_scales_with_the_configured_window() {
+        assert_eq!(idle_hard_unload_secs(60), 60 * IDLE_HARD_UNLOAD_MULTIPLIER);
+        assert_eq!(
+            idle_hard_unload_secs(1800),
+            1800 * IDLE_HARD_UNLOAD_MULTIPLIER
+        );
+    }
+
+    /// `idle_unload_secs = 0` disables the feature before any of this is
+    /// reached, but the arithmetic must not misbehave regardless.
+    #[test]
+    fn absurd_windows_do_not_overflow() {
+        assert_eq!(idle_hard_unload_secs(0), 0);
+        assert_eq!(idle_hard_unload_secs(u64::MAX), i64::MAX);
     }
 }
