@@ -2200,17 +2200,31 @@ fn slot_admission_eligible(
     slot_table: &SlotTable,
 ) -> bool {
     if gen.sampling.max_tokens == 0 {
+        tracing::debug!(request_id = %gen.request_id, "slot admission refused: max_tokens=0");
         return false;
     }
     // Layer range must match if anything is already in the table.
     let lr = (gen.layer_range.0 as usize, gen.layer_range.1 as usize);
     if !slot_table.can_admit(lr) {
+        tracing::debug!(
+            request_id = %gen.request_id,
+            requested = ?lr,
+            table_range = ?slot_table.layer_range(),
+            occupied = slot_table.len(),
+            "slot admission refused: layer range mismatch or table full"
+        );
         return false;
     }
     // SWIFT decoding has its own self-speculative loop; not batchable v1.
     if swift_cfg.enabled && gen.sampling.temperature == 0.0 {
+        tracing::debug!(request_id = %gen.request_id, "slot admission refused: SWIFT-eligible");
         return false;
     }
+    tracing::debug!(
+        request_id = %gen.request_id,
+        occupied = slot_table.len(),
+        "slot admission accepted — request will decode in a shared batch"
+    );
     true
 }
 

@@ -1266,6 +1266,67 @@ Relevant because greedy decoding is what tool calling, benchmarks and
 reproducible runs use, so it is over-represented in exactly the traffic testers
 generate.
 
+## Continuous batching engages but yields almost nothing (diagnosed 2026-07-27)
+
+**Status: root-caused, not fixed — the fix is feature-scale.** Reported externally
+as "zero aggregate throughput gain on CPU" with `continuous_batching = true` and
+`max_slots=8`. Reproduced and traced.
+
+The report's framing — "requests are being processed one at a time regardless of
+the batching config" — is close but not quite right, and the difference matters.
+Batching **is** engaging. With worker debug logging finally visible (see below),
+all four concurrent requests were admitted to the slot table:
+
+```
+slot admission accepted — request will decode in a shared batch occupied=0
+slot admission accepted — request will decode in a shared batch occupied=1
+slot admission accepted — request will decode in a shared batch occupied=2
+slot admission accepted — request will decode in a shared batch occupied=3
+```
+
+The loss is one level down, in `split/executor.rs::forward_batch`, which requires
+**homogeneity**: every item must share the same `(seq_len, index_pos)`, and a
+mixed batch "falls back to sequential forwards so a slow slot doesn't block the
+fast ones". Independent requests almost never align — different prompt lengths
+give different `index_pos` immediately — so the admitted batch decodes
+sequentially anyway.
+
+Measured on tinyllama Q4_K_M, CPU, 4×16 tokens:
+
+| workload | wall | aggregate |
+|---|---|---|
+| sequential, one at a time | — | ~2.5 tok/s |
+| 4 concurrent, varied prompt lengths | 27.6s | **2.30 tok/s** |
+| 4 concurrent, same prompt length | 21.2s | **3.02 tok/s** |
+
+The same-length row is the confirmation: aligning `seq_len` recovers ~24%, so the
+gate is real. It is also well short of the near-linear scaling batching implies,
+which suggests alignment additionally breaks during decode, not only at
+admission.
+
+**Fixing it properly is ragged batching**, i.e. one batched forward over
+sequences at *different* positions, which needs per-sequence KV offsets and
+attention masks rather than a single shared `index_pos` — the problem paged
+attention exists to solve. That is a feature, not a patch, and it should be
+measured against the CPU prefill work above since both target the same
+bottleneck.
+
+**Meanwhile the config over-promises.** `continuous_batching = true` and
+`max_concurrent_decode_batch = 8` read as though concurrency will scale
+throughput, and on this path it does not. Worth either documenting the
+homogeneity condition on those settings or gating the claim until ragged
+batching lands.
+
+### Prerequisite fixed along the way: the worker was undebuggable
+
+`model-worker` subprocesses were spawned with no verbosity flag, so they fell
+back to the config file's `logging.level` and emitted INFO only. Running the
+daemon with `-v` produced nothing extra from the process where inference actually
+happens, and a `debug!` added there while chasing this silently never appeared —
+which nearly produced the wrong conclusion (that batching never engaged, when the
+admission logs simply could not be seen). The daemon's `-v` count is now passed
+through to the worker.
+
 ## CPU prefill throughput is the dominant cost for modest nodes (measured 2026-07-27)
 
 **Status: measured, not addressed.** Recorded because it sets the ceiling on

@@ -437,6 +437,7 @@ async fn async_main(mut cli: Cli) -> anyhow::Result<()> {
 }
 
 fn init_tracing(verbose: u8) {
+    swarmllm::DAEMON_VERBOSITY.store(verbose, std::sync::atomic::Ordering::Relaxed);
     // CLI verbose flags override any config file setting
     let filter = if verbose > 0 {
         match verbose {

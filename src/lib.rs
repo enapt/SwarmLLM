@@ -47,3 +47,13 @@ pub mod pool;
 pub mod storage;
 pub mod types;
 pub mod update;
+
+/// Verbosity the daemon was started with (`-v` count), so spawned
+/// `model-worker` subprocesses can be given the same.
+///
+/// Without this a worker fell back to the config file's `logging.level` and
+/// emitted INFO only — so running the daemon with `-v` produced no extra output
+/// from the process where inference actually happens, and a `debug!` added there
+/// while chasing a problem never appeared at all. That is a bad place to be
+/// blind: it is the hot path.
+pub static DAEMON_VERBOSITY: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);

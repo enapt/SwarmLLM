@@ -1254,6 +1254,14 @@ impl ModelProcessPool {
             data_dir_str.to_string(),
         ];
 
+        // Give the worker the verbosity the daemon was started with. Inference
+        // happens in here, so a daemon run with `-v` that leaves this process at
+        // INFO is blind exactly where it matters most.
+        let verbosity = crate::DAEMON_VERBOSITY.load(Ordering::Relaxed);
+        for _ in 0..verbosity {
+            args.push("-v".to_string());
+        }
+
         // Pass KV-cache TTL from config
         let ttl = self
             .kv_cache_ttl_secs
