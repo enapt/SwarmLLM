@@ -2,6 +2,39 @@
 
 All notable changes to SwarmLLM are documented here.
 
+## [0.3.36-alpha] — 2026-07-27
+
+### Fixed
+
+- **Opening the dashboard could stop its own live updates.** The ticket that
+  authorises the dashboard's live connection shared a strict request budget with
+  the checks that ask cloud providers whether they are reachable. A single page
+  load spent that budget between them, and when the live connection lost the
+  race it was refused — so the page stopped updating until it retried. Measured
+  on 0.3.35, an ordinary authenticated page load had its live connection
+  refused three times.
+
+  Four causes, each of them the page working against itself:
+
+  - The live-connection ticket is now budgeted separately. It is limited for a
+    different reason from the provider checks — it costs nothing outside this
+    machine — so sharing one budget was never right.
+  - Provider health checks are budgeted separately too, sized to the
+    every-30-seconds rate the page actually polls at. The page's own default
+    behaviour previously exceeded the shared limit on its own.
+  - Model availability was requested once per provider card, so nine providers
+    meant nine separate requests. They are now collected and sent as one.
+  - Neither is requested before the page has its access key. Both ran on every
+    reconnection attempt, and a page that cannot connect retries continuously,
+    which turned such a visit into a request storm.
+
+  A page load now makes one provider request instead of a burst, and the
+  server records no rate limiting at all.
+
+- **A duplicated security policy in the page itself logged an error on every
+  load.** One directive in it is ignored by browsers when written that way. The
+  real policy is sent as a header and is unchanged; the ignored copy is gone.
+
 ## [0.3.35-alpha] — 2026-07-27
 
 ### Fixed

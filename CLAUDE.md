@@ -151,7 +151,7 @@ libp2p 0.56, axum 0.8, candle-core/candle-transformers 0.10 (CUDA), redb 4, ed25
 
 ## Testing
 
-- 1344 lib tests passing + 9 ignored (env-var-gated real-model + manual smoke), 79 integration tests in `tests/integration/` + 2 ignored end-to-end (`cargo test --test integration_phase10_11 -- --ignored`), 2 repo-consistency, 26 in `swarmllm-types` (`cargo test -p swarmllm-types` — NOT covered by a bare `cargo test` from the root), 6 in the vendored request-response patch (`cargo test --manifest-path vendor/libp2p-request-response/Cargo.toml --lib` — the crate is workspace-`exclude`d, and its own integration tests need `libp2p-swarm-test` so use `--lib`), clippy clean. Microbench: `cargo run --release --no-default-features --features dev,claude-subscription --example swarm_spec_bench` (R136 — measures all 4 SWARM-SPEC layer primitives + synthetic cascade hit-rate). Local-cluster bench: `examples/3node_setup.sh` (boots 3 daemons) + `examples/3node_inference_bench.sh` (runs 3 workloads × 3 trials and prints tok/s + swarm_spec metrics). Sharded variant: `examples/3node_sharded_setup.sh` (forced distributed pipeline; writes its own per-node config disabling auto-manage and bootstrap so the split survives). **Its inference step is EXPECTED to fail on a single multi-interface host** — that is the zero-redundancy same-host case documented in `docs/FUTURE_WORK.md` § "Connection churn on multi-interface hosts", not a distributed-inference regression (confirmed on released v0.3.28, 2026-07-26). Validate the forward path on two real machines. Both scripts take `SWARM_BENCH_MODEL`. **Pinned reference models for cross-swarm comparison: `docs/REFERENCE_MODELS.md`** (smoke / standard / stress tiers + `examples/fetch_reference_model.sh` to opt in).
+- 1349 lib tests passing + 9 ignored (env-var-gated real-model + manual smoke), 79 integration tests in `tests/integration/` + 2 ignored end-to-end (`cargo test --test integration_phase10_11 -- --ignored`), 2 repo-consistency, 26 in `swarmllm-types` (`cargo test -p swarmllm-types` — NOT covered by a bare `cargo test` from the root), 6 in the vendored request-response patch (`cargo test --manifest-path vendor/libp2p-request-response/Cargo.toml --lib` — the crate is workspace-`exclude`d, and its own integration tests need `libp2p-swarm-test` so use `--lib`), clippy clean. Microbench: `cargo run --release --no-default-features --features dev,claude-subscription --example swarm_spec_bench` (R136 — measures all 4 SWARM-SPEC layer primitives + synthetic cascade hit-rate). Local-cluster bench: `examples/3node_setup.sh` (boots 3 daemons) + `examples/3node_inference_bench.sh` (runs 3 workloads × 3 trials and prints tok/s + swarm_spec metrics). Sharded variant: `examples/3node_sharded_setup.sh` (forced distributed pipeline; writes its own per-node config disabling auto-manage and bootstrap so the split survives). **Its inference step is EXPECTED to fail on a single multi-interface host** — that is the zero-redundancy same-host case documented in `docs/FUTURE_WORK.md` § "Connection churn on multi-interface hosts", not a distributed-inference regression (confirmed on released v0.3.28, 2026-07-26). Validate the forward path on two real machines. Both scripts take `SWARM_BENCH_MODEL`. **Pinned reference models for cross-swarm comparison: `docs/REFERENCE_MODELS.md`** (smoke / standard / stress tiers + `examples/fetch_reference_model.sh` to opt in).
 - Unit tests: in-module `#[cfg(test)]` blocks
 - Integration tests: `tests/integration/` — multi-node simulations with `--test-threads=1`
 - Real-model spawn-and-infer test: set `SWARMLLM_TEST_MODEL_DIR` to a fully-populated model directory (e.g. `~/.local/share/swarmllm/models/tinyllama-1.1b-...`) and run `cargo test --test integration_phase10_11 -- --ignored end_to_end`. No synthetic GGUF fixture is committed; see `docs/ARCHITECTURE.md` § Deferred Items.
@@ -192,57 +192,58 @@ When spawning subagents in this repo, use these model picks (overrides defaults 
 
 ## Status
 
-All 20 build phases complete. All subsystems wired — no stubs. **1344 lib + 79 integration + 2 repo-consistency + 26 swarmllm-types tests passing**; 9 lib + 2 e2e ignored (env-var or manual). Clippy clean default + features dev,claude-subscription + `--features llama`.
+All 20 build phases complete. All subsystems wired — no stubs. **1349 lib + 79 integration + 2 repo-consistency + 26 swarmllm-types tests passing**; 9 lib + 2 e2e ignored (env-var or manual). Clippy clean default + features dev,claude-subscription + `--features llama`.
 
 Per-round history lives in `~/.claude/projects/-home-user-SwarmLLM/memory/round_log_*.md` and the CHANGELOG; `docs/ARCHITECTURE.md` is the canonical architecture. This section keeps only the current release line plus one-line prior-round pointers.
 
-### Latest — v0.3.35-alpha (2026-07-27): things that were measured and thrown away
+### Latest — v0.3.36-alpha (2026-07-27): the dashboard rate-limited itself
 
-Overnight + morning round. **Every fix started from a trace field, not a diff** —
-the v0.3.30 observability work paid for itself five times. Detail:
-`memory/round_log_overnight_0727.md`.
+Found by loading `/admin` in a real browser against the RELEASED artifact and
+reading the console — which no test does. Gotcha **#182**.
 
-- **A retried request killed BOTH attempts and evicted a healthy worker.**
-  `responses` was keyed by `request_id`, which is NOT unique across *attempts*
-  (retry, hedge). The retry's insert dropped the original's channel; the
-  original's cleanup then removed the retry's. Reported as `worker closed
-  connection mid-generate` while the subprocess was fine. Gotcha **#180**.
-- **Long prompts could not succeed on modest nodes at all.**
-  `FIRST_TOKEN_TIMEOUT` was flat 120s, sized for *generation*, ignoring
-  *prefill* — which scales with the prompt. Measured 285s for 613 tokens on a
-  6-core CPU. Live: `122s→error` became `306s→ok`. Now sized by the real
-  tokenizer (a chars/token guess under-budgets CJK ~2.5x and we ship 21
-  locales). Gotcha **#181**.
-- **Two LAN peers could mutually forget each other permanently.** Re-dial fired
-  only for a mid-pipeline or never-identified peer; a *registered but idle* peer
-  was dropped with nothing to bring it back, and re-discovery needs the peer to
-  ANNOUNCE itself (restart-only). Restarting the peer → 13s; leaving it up →
-  never; restarting the local node → 6s, which is what localised it to
-  in-process state. **ONE attempt only** — backoff still open in FUTURE_WORK.
-- **Shard downloads stream** instead of buffering a whole range in RAM (closes
-  the tester-confirmed "0-byte .tmp for ~25s"; byte-identical output verified).
-- **Delete/prune guards protected only the FIRST shard of a segment.** A segment
-  spans several, so the rest could be yanked mid-request.
-  `ModelRegistry::shards_spanned_by_segment` is now the one answer to "which
-  shards does this segment read", used by both guards, the retraction path and
-  diagnostics.
-- **Scheduler priced routes on the wrong signals** (three defects): an
-  unmeasured candidate cost **zero**, so on a cold node routes tied and vertex
-  iteration order decided — and an unknown node outranked a measured-good one;
-  the **local node was never measured** (`observed_latency_ms_per_layer`
-  hardcoded `None`), so local compute was free at any width; and network was
-  charged once per *segment* when a split pays it once per *token*.
+`SENSITIVE_ADMIN_RPM = 5` exists to stop a runaway caller burning external
+cloud/HF quota. `/api/admin/ws-ticket` had been put in the same bucket for an
+unrelated reason (each issuance writes to `ws_tickets`), and the bucket is keyed
+`(ip, BucketKind)` — so a page load spent the budget between provider probes and
+the WebSocket ticket, and when the ticket lost, **live updates died for the whole
+page**. Measured on released .35: an authenticated load had ws-ticket refused
+**3x**. The loopback exemption didn't help — it only covers admin GETs, and all
+three paths are POSTs.
 
-**Partial-range routing exists but is OFF** (`inference.parallax_partial_ranges`).
-A node holding every shard is otherwise the only representable route, so a local
-GPU holding the head can't contribute — but the split measured **slower**
-(~12.0s vs ~10.2s median). One gap remains: the observed-latency branch reuses a
-mid-chain `ms_per_layer` (which includes per-pass RTT) for the delegated
-whole-model alternative, overcharging it ~2.7x. Needs two distinct recorded
-figures; the `remote_generate` fast path records nothing today. Full reasoning +
-the two invalid-A/B traps in `docs/FUTURE_WORK.md`.
+Fixes: separate buckets sized to what each protects (`WsTicket` 30/min,
+`ProviderHealth` 6/min ≥ the client's own 2/min cadence); the per-provider-card
+probes coalesced into one batched call at the choke point; and neither provider
+call issued before the key exchange resolves. Also dropped a `<meta>` CSP
+`frame-ancestors`, which browsers ignore and log an error for on every load (the
+real policy is an HTTP header and unchanged).
 
-### v0.3.30 – v0.3.34 (07-26) — one line each; detail in the round logs
+**The first version of the auth guard was wrong** and is worth not repeating: it
+read `App.settings._apiKeyFull` *synchronously*, but the dashboard fetches its
+key asynchronously via a bootstrap nonce, so on every NORMAL load the key had not
+arrived and legitimate calls were skipped. `authFetch` already awaits
+`_apiKeyPromise`; any new caller that gates on credentials must await it too, not
+sample it.
+
+Result: 6 rate-limit rejections + a request storm on a first visit → 1 request,
+zero server-side rate limiting on an authenticated load.
+
+### v0.3.30 – v0.3.35 (07-26→27) — one line each; detail in the round logs
+
+- **v0.3.35**: six fixes, all traced not diffed — retry killed BOTH attempts and
+  evicted a healthy worker (`responses` keyed by `request_id`, which is not unique
+  across *attempts*, gotcha #180); `FIRST_TOKEN_TIMEOUT` was flat 120s sized for
+  *generation* and ignored *prefill*, so long prompts could not succeed on modest
+  nodes at all (gotcha #181, now sized by the real tokenizer since a chars/token
+  guess under-budgets CJK ~2.5x); two LAN peers could mutually forget each other
+  permanently (re-dial fired only for mid-pipeline or never-identified peers);
+  shard downloads stream instead of buffering a range in RAM; delete/prune guards
+  protected only the FIRST shard of a segment (`shards_spanned_by_segment` is now
+  the one answer); and the scheduler priced routes on wrong signals — unmeasured
+  candidates cost **zero** so cold-node routing was decided by vertex iteration
+  order, and the local node was never measured at all. **`parallax_partial_ranges`
+  ships OFF**: a node holding every shard is otherwise the only representable
+  route, but the split measured slower (~12.0s vs ~10.2s). Remaining gap and the
+  two invalid-A/B traps are in `docs/FUTURE_WORK.md`.
 
 - **v0.3.34**: connection selection is now *fewest un-answered, tie-break newest*
   (`pending_outbound_responses` was a signal the crate already tracked). And
