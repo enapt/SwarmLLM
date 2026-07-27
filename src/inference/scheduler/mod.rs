@@ -245,7 +245,16 @@ impl PipelineScheduler {
                 &candidates,
                 local_node_id,
                 encrypted,
-                self.shared_state.config.inference.parallax_partial_ranges,
+                // Encryption forces the first and last segments onto this node,
+                // so an encrypted distributed pipeline is multi-segment by
+                // construction — there is no single-delegation alternative to
+                // lose. The per-token cost that keeps partial ranges off by
+                // default therefore does not apply, and without them a peer
+                // holding a SUPERSET of the middle (very commonly the whole
+                // model) offers only one indivisible range, which can be neither
+                // a middle segment nor a remote encrypted end. That produced a
+                // hard "No node available" for a perfectly valid boomerang.
+                self.shared_state.config.inference.parallax_partial_ranges || encrypted,
             ) {
                 Ok(segs) => {
                     tracing::debug!(

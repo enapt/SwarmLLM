@@ -628,6 +628,65 @@ mod tests {
         assert_eq!(segs[2].layer_range, (21, 28));
     }
 
+    /// Does encrypted_pipeline work when a peer holds EXACTLY the middle range?
+    #[test]
+    fn encrypted_boomerang_routes_when_a_peer_holds_exactly_the_middle() {
+        let local = NodeId([1u8; 32]);
+        let mut head = cand(1, vec![(0, 3)], 0, 0.0, true, false, 0.0);
+        head.node_id = local.clone();
+        let mut tail = cand(1, vec![(21, 28)], 0, 0.0, false, true, 0.0);
+        tail.node_id = local.clone();
+        // Peer holds ONLY the middle — the aligned case.
+        let peer = cand(2, vec![(3, 21)], 5, 0.0, false, false, 0.0);
+
+        let segs = route_shortest_path(28, &[head, tail, peer], &local, true, false)
+            .expect("aligned middle must route with partial ranges OFF");
+        assert_eq!(segs.len(), 3, "{segs:?}");
+        assert_eq!(segs[0].layer_range, (0, 3));
+        assert_eq!(segs[1].layer_range, (3, 21));
+        assert_ne!(segs[1].node_id, local);
+        assert_eq!(segs[2].layer_range, (21, 28));
+    }
+
+    /// The tester's Topology B, which is what the scheduler now enables partial
+    /// ranges for automatically: a valid boomerang where the only peer holds a
+    /// SUPERSET of the middle. Encrypted pipelines are multi-segment by
+    /// construction, so allowing a partial range costs nothing they were not
+    /// already paying.
+    #[test]
+    fn encrypted_boomerang_routes_against_a_whole_model_peer() {
+        let local = NodeId([1u8; 32]);
+        let mut head = cand(1, vec![(0, 3)], 0, 0.0, true, false, 0.0);
+        head.node_id = local.clone();
+        let mut tail = cand(1, vec![(21, 28)], 0, 0.0, false, true, 0.0);
+        tail.node_id = local.clone();
+        let whole_model_peer = cand(2, vec![(0, 28)], 5, 0.0, true, true, 0.0);
+
+        let segs = route_shortest_path(28, &[head, tail, whole_model_peer], &local, true, true)
+            .expect("must route: this is the topology encryption is designed for");
+        assert_eq!(segs.len(), 3, "{segs:?}");
+        assert_eq!(segs[0].node_id, local, "first segment must stay local");
+        assert_ne!(segs[1].node_id, local, "middle must be the peer");
+        assert_eq!(segs[2].node_id, local, "last segment must stay local");
+        // The privacy guarantee: the peer never sees layer 0 or the final layer.
+        assert!(segs[1].layer_range.0 > 0 && segs[1].layer_range.1 < 28);
+    }
+
+    /// Encryption must still refuse a topology it cannot make private — local
+    /// not holding the tail means the sink would have to be remote, which would
+    /// expose the sampled tokens. The tester's Topology A.
+    #[test]
+    fn encrypted_refuses_when_this_node_cannot_hold_the_tail() {
+        let local = NodeId([1u8; 32]);
+        let mut head = cand(1, vec![(0, 12)], 0, 0.0, true, false, 0.0);
+        head.node_id = local.clone();
+        let peer = cand(2, vec![(0, 28)], 5, 0.0, true, true, 0.0);
+        assert!(
+            route_shortest_path(28, &[head, peer], &local, true, true).is_err(),
+            "must refuse rather than leak the tail to a peer"
+        );
+    }
+
     /// With partial ranges OFF — the shipped default — routing must be exactly
     /// what it was before they existed: the whole-model holder takes everything.
     /// This is the behaviour the default protects, because a multi-segment chain
