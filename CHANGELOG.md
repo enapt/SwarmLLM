@@ -2,6 +2,81 @@
 
 All notable changes to SwarmLLM are documented here.
 
+## [0.3.37-alpha] — 2026-07-27
+
+### Fixed
+
+- **Choosing a model on the command line crashed.** `swarmllm chat --model <name>`
+  ended in a panic instead of starting a chat, and had been doing so in released
+  builds. The top-level `--model` takes a file path while the chat one takes a
+  model name, and the argument parser objects when two options of the same name
+  hold different kinds of value. Nothing about how you type the commands has
+  changed.
+
+- **A shard file of the wrong size hid forever.** If a piece of a model on disk
+  disagreed with what the model said it should be, everything that loads models
+  rejected it — but it still counted as a piece this machine held. So the model
+  reported something missing on every check, nothing said why, and because the
+  file kept the name it was never downloaded again. One such file was tracked
+  across sixteen releases.
+
+  The size is now reported alongside what was expected, the file is moved aside
+  so the name is free, and the machine stops claiming it. The usual download then
+  repairs it. The file is renamed rather than deleted.
+
+- **Requests kept running after the client had gone.** Noticing a client had left
+  relied on the connection closing properly, which does not happen if a machine
+  loses power, a network drops, or a firewall quietly discards the connection. In
+  those cases the work continued for nobody — measured at about six minutes of a
+  machine's time. Connections now carry liveness probes, so a vanished client is
+  noticed in about ninety seconds while a healthy one is never disturbed.
+
+- **The strongest privacy mode could not start.** Prompt privacy keeps the first
+  and last parts of a model on your own machine so no helper ever sees your
+  prompt or the words chosen from it. It refused to run whenever the only
+  available helper held a whole model, because a helper offers what it holds as
+  one indivisible piece. It now uses part of what a helper holds, which privacy
+  mode was always going to need — it splits the work by definition, so there is
+  no faster single-machine route being given up.
+
+- **Opening several dashboards at once broke provider status.** The allowance was
+  counted per machine rather than per tab and was sized for one, so a third tab
+  started being refused.
+
+### Added
+
+- **Prompt privacy is now on by default wherever it can work** — any model where
+  this machine already holds the first and last piece. It cannot be on
+  unconditionally, because without both pieces there is no route at all, so it
+  applies only where the condition already holds. An explicit choice still wins,
+  and `inference.encrypted_pipeline_auto = false` opts out.
+
+- **One step to make prompt privacy possible.** A button on the privacy notice
+  and `swarmllm privacy <model>` fetch exactly the pieces needed. Neither sets a
+  switch: privacy turns on by itself once the pieces arrive, so there is no
+  window where it is on but cannot run.
+
+- **Log detail now reaches the model process.** Running with `-v` produced no
+  extra detail from the process where models actually run, which made problems
+  there hard to see.
+
+### Changed
+
+- **Clearer language about what encryption protects.** Traffic between machines
+  is always encrypted; that does not mean the machine running the model cannot
+  read your prompt — it has to, in order to answer, like any provider. The
+  documentation said "end-to-end encrypted" for both that and the stronger
+  prompt-privacy mode, so the same phrase meant two different things. Prompt
+  privacy is now recommended where available, with its costs stated: disk for
+  two pieces of the model, more work on your machine, and time that grows with
+  the length of the answer.
+
+- **The router prices routes on better information.** A machine it had never
+  measured used to cost nothing, so on a freshly started node routes tied and
+  the winner came down to internal ordering; it also never measured its own
+  hardware, so local work looked free at any size. Both are fixed, and network
+  cost is now counted per word for split routes rather than once.
+
 ## [0.3.36-alpha] — 2026-07-27
 
 ### Fixed

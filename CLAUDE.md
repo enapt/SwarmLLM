@@ -151,7 +151,7 @@ libp2p 0.56, axum 0.8, candle-core/candle-transformers 0.10 (CUDA), redb 4, ed25
 
 ## Testing
 
-- 1349 lib tests passing + 9 ignored (env-var-gated real-model + manual smoke), 79 integration tests in `tests/integration/` + 2 ignored end-to-end (`cargo test --test integration_phase10_11 -- --ignored`), 2 repo-consistency, 26 in `swarmllm-types` (`cargo test -p swarmllm-types` — NOT covered by a bare `cargo test` from the root), 6 in the vendored request-response patch (`cargo test --manifest-path vendor/libp2p-request-response/Cargo.toml --lib` — the crate is workspace-`exclude`d, and its own integration tests need `libp2p-swarm-test` so use `--lib`), clippy clean. Microbench: `cargo run --release --no-default-features --features dev,claude-subscription --example swarm_spec_bench` (R136 — measures all 4 SWARM-SPEC layer primitives + synthetic cascade hit-rate). Local-cluster bench: `examples/3node_setup.sh` (boots 3 daemons) + `examples/3node_inference_bench.sh` (runs 3 workloads × 3 trials and prints tok/s + swarm_spec metrics). Sharded variant: `examples/3node_sharded_setup.sh` (forced distributed pipeline; writes its own per-node config disabling auto-manage and bootstrap so the split survives). **Its inference step is EXPECTED to fail on a single multi-interface host** — that is the zero-redundancy same-host case documented in `docs/FUTURE_WORK.md` § "Connection churn on multi-interface hosts", not a distributed-inference regression (confirmed on released v0.3.28, 2026-07-26). Validate the forward path on two real machines. Both scripts take `SWARM_BENCH_MODEL`. **Pinned reference models for cross-swarm comparison: `docs/REFERENCE_MODELS.md`** (smoke / standard / stress tiers + `examples/fetch_reference_model.sh` to opt in).
+- 1365 lib tests passing + 9 ignored (env-var-gated real-model + manual smoke), 79 integration tests in `tests/integration/` + 2 ignored end-to-end (`cargo test --test integration_phase10_11 -- --ignored`), 2 repo-consistency, 26 in `swarmllm-types` (`cargo test -p swarmllm-types` — NOT covered by a bare `cargo test` from the root), 6 in the vendored request-response patch (`cargo test --manifest-path vendor/libp2p-request-response/Cargo.toml --lib` — the crate is workspace-`exclude`d, and its own integration tests need `libp2p-swarm-test` so use `--lib`), clippy clean. Microbench: `cargo run --release --no-default-features --features dev,claude-subscription --example swarm_spec_bench` (R136 — measures all 4 SWARM-SPEC layer primitives + synthetic cascade hit-rate). Local-cluster bench: `examples/3node_setup.sh` (boots 3 daemons) + `examples/3node_inference_bench.sh` (runs 3 workloads × 3 trials and prints tok/s + swarm_spec metrics). Sharded variant: `examples/3node_sharded_setup.sh` (forced distributed pipeline; writes its own per-node config disabling auto-manage and bootstrap so the split survives). **Its inference step is EXPECTED to fail on a single multi-interface host** — that is the zero-redundancy same-host case documented in `docs/FUTURE_WORK.md` § "Connection churn on multi-interface hosts", not a distributed-inference regression (confirmed on released v0.3.28, 2026-07-26). Validate the forward path on two real machines. Both scripts take `SWARM_BENCH_MODEL`. **Pinned reference models for cross-swarm comparison: `docs/REFERENCE_MODELS.md`** (smoke / standard / stress tiers + `examples/fetch_reference_model.sh` to opt in).
 - Unit tests: in-module `#[cfg(test)]` blocks
 - Integration tests: `tests/integration/` — multi-node simulations with `--test-threads=1`
 - Real-model spawn-and-infer test: set `SWARMLLM_TEST_MODEL_DIR` to a fully-populated model directory (e.g. `~/.local/share/swarmllm/models/tinyllama-1.1b-...`) and run `cargo test --test integration_phase10_11 -- --ignored end_to_end`. No synthetic GGUF fixture is committed; see `docs/ARCHITECTURE.md` § Deferred Items.
@@ -192,42 +192,68 @@ When spawning subagents in this repo, use these model picks (overrides defaults 
 
 ## Status
 
-All 20 build phases complete. All subsystems wired — no stubs. **1349 lib + 79 integration + 2 repo-consistency + 26 swarmllm-types tests passing**; 9 lib + 2 e2e ignored (env-var or manual). Clippy clean default + features dev,claude-subscription + `--features llama`.
+All 20 build phases complete. All subsystems wired — no stubs. **1365 lib + 79 integration + 2 repo-consistency + 26 swarmllm-types tests passing**; 9 lib + 2 e2e ignored (env-var or manual). Clippy clean default + features dev,claude-subscription + `--features llama`.
 
 Per-round history lives in `~/.claude/projects/-home-user-SwarmLLM/memory/round_log_*.md` and the CHANGELOG; `docs/ARCHITECTURE.md` is the canonical architecture. This section keeps only the current release line plus one-line prior-round pointers.
 
-### Latest — v0.3.36-alpha (2026-07-27): the dashboard rate-limited itself
+### Latest — v0.3.37-alpha (2026-07-27): privacy on by default, and three shipped crashes
 
-Found by loading `/admin` in a real browser against the RELEASED artifact and
-reading the console — which no test does. Gotcha **#182**.
+Driven by an external report plus follow-on investigation. Detail:
+`memory/round_log_overnight_0727.md`, `docs/FUTURE_WORK.md`.
 
-`SENSITIVE_ADMIN_RPM = 5` exists to stop a runaway caller burning external
-cloud/HF quota. `/api/admin/ws-ticket` had been put in the same bucket for an
-unrelated reason (each issuance writes to `ws_tickets`), and the bucket is keyed
-`(ip, BucketKind)` — so a page load spent the budget between provider probes and
-the WebSocket ticket, and when the ticket lost, **live updates died for the whole
-page**. Measured on released .35: an authenticated load had ws-ticket refused
-**3x**. The loopback exemption didn't help — it only covers admin GETs, and all
-three paths are POSTs.
+- **`swarmllm chat --model X` panicked** — confirmed in the RELEASED .36 binary.
+  clap compares the INNER value type of same-named args; the global `--model` is
+  `Option<PathBuf>` and subcommand ones are `String`. Renaming the clap *id* does
+  NOT fix it — the types must agree. `data_dir`/`gpu_layers` share names too but
+  same inner type, so they were never affected.
+- **A wrong-sized shard hid forever** — `daemon/startup.rs` recorded us as a
+  HOLDER on `shard_path.exists()` alone, no size check, while every loader
+  rejected the file. The node saw no gap, so nothing re-downloaded, and peers
+  could be routed to us for a shard we could not serve.
+  `quarantine_shard_if_size_mismatch` moves it aside; the usual path repairs it.
+- **Requests outlived their clients** — detection relied on the transport
+  reporting a close, which never happens if a machine dies or a firewall drops
+  the flow. TCP keepalive added (60s idle, ~90s detection); the platform default
+  is 2h. Cannot time-bound instead — that would undo the .35 prefill budget.
+- **Encrypted pipeline could not route against a whole-model peer.** Not broken
+  in general (it works when a peer's range aligns with the gap) — but a peer
+  holding a SUPERSET offers one indivisible range that can be neither a middle
+  segment nor a remote encrypted end. Partial ranges now auto-enable under
+  encryption: it is multi-segment BY CONSTRUCTION, so there is no
+  single-delegation alternative being sacrificed.
+- **Prompt privacy is ON by default where the node holds both ends**
+  (`encrypted_pipeline_auto`). Cannot be unconditional — without both ends there
+  is no legal route. `SharedState::encrypted_pipeline_for` is now the ONE answer
+  to "is privacy on for this model" (router + both admin endpoints).
+- **One-step enable**: button + `swarmllm privacy <model>` fetch the needed
+  shards. Deliberately sets NO flag — auto-on handles it, avoiding a window where
+  the flag is on but shards have not landed.
+- **Worker verbosity**: `-v` never reached the model-worker subprocess, so the
+  inference hot path was undebuggable and a `debug!` added there was invisible.
 
-Fixes: separate buckets sized to what each protects (`WsTicket` 30/min,
-`ProviderHealth` 6/min ≥ the client's own 2/min cadence); the per-provider-card
-probes coalesced into one batched call at the choke point; and neither provider
-call issued before the key exchange resolves. Also dropped a `<meta>` CSP
-`frame-ancestors`, which browsers ignore and log an error for on every load (the
-real policy is an HTTP header and unchanged).
+**Encryption naming was genuinely confusing** and is now corrected in docs:
+`enable_encryption` protects the WIRE (the peer decrypts and reads
+`RemoteGenerateRequest { prompt: String }` — your actual text);
+`encrypted_pipeline` protects the COMPUTE boundary. The dashboard already
+reserved "end-to-end" for the latter while README/docs used it for the former.
 
-**The first version of the auth guard was wrong** and is worth not repeating: it
-read `App.settings._apiKeyFull` *synchronously*, but the dashboard fetches its
-key asynchronously via a bootstrap nonce, so on every NORMAL load the key had not
-arrived and legitimate calls were skipped. `authFetch` already awaits
-`_apiKeyPromise`; any new caller that gates on credentials must await it too, not
-sample it.
+**Ragged batching: measured on GPU, NOT worth building.** RTX 3070, 3B fully on
+CUDA: batch 1/2/4 → 24.6 / 27.0 / 30.2 tok/s. 4x work, 23% throughput — same as
+CPU. Three measurement traps recorded in FUTURE_WORK (prefix cache inflates,
+varying prompt length measures the sequential fallback, background load gives 3x
+variance).
 
-Result: 6 rate-limit rejections + a request storm on a first visit → 1 request,
-zero server-side rate limiting on an authenticated load.
+### v0.3.30 – v0.3.36 (07-26→27) — one line each; detail in the round logs
 
-### v0.3.30 – v0.3.35 (07-26→27) — one line each; detail in the round logs
+- **v0.3.36**: the dashboard rate-limited ITSELF on load — `ws-ticket` shared a
+  5/min bucket (keyed `(ip, BucketKind)`) with cloud-provider probes, so the
+  WebSocket got refused and live updates died; probes fired once per provider
+  card. Separate buckets + coalesced probes + skip-before-auth. Gotcha **#182** —
+  found by loading the page in a real browser, which no test does. **The auth
+  guard's first version was wrong**: it read `_apiKeyFull` synchronously, but the
+  key arrives asynchronously via a bootstrap nonce, so it skipped legitimate
+  calls on every NORMAL load. `authFetch` awaits `_apiKeyPromise`; any new
+  credential gate must await it too, not sample it.
 
 - **v0.3.35**: six fixes, all traced not diffed — retry killed BOTH attempts and
   evicted a healthy worker (`responses` keyed by `request_id`, which is not unique
