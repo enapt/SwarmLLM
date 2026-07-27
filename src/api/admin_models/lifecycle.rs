@@ -347,7 +347,10 @@ pub async fn get_model_encrypted_pipeline(
         .encrypted_pipeline_models
         .get(&mid)
         .map(|r| *r.value());
-    let effective = per_model.unwrap_or(global_default);
+    // The effective answer the scheduler will act on, so the UI reflects reality
+    // rather than only what was explicitly stored — the automatic-on case has no
+    // stored flag at all.
+    let effective = state.shared_state.encrypted_pipeline_for(&mid);
 
     // Check if the local node has the required shards (first + last)
     let manifest = state.shared_state.model_registry.get_manifest(&mid);

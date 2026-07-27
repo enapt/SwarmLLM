@@ -98,12 +98,8 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
     // effective_flag is true only when the DB flag is set AND node holds first+last.
     let encrypted_pipeline_info = |model_id: &str| -> (bool, bool, bool) {
         let mid = crate::types::ModelId(model_id.to_string());
-        let flag = state
-            .shared_state
-            .encrypted_pipeline_models
-            .get(&mid)
-            .map(|r| *r.value())
-            .unwrap_or(state.shared_state.config.inference.encrypted_pipeline);
+        // Same answer the scheduler acts on, including the automatic-on case.
+        let flag = state.shared_state.encrypted_pipeline_for(&mid);
         let local_node_id = state.shared_state.identity.node_id();
         let has_first = state
             .shared_state

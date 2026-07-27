@@ -933,6 +933,78 @@ impl SharedState {
     /// model hasn't been registered locally OR auto-manage's catalog
     /// has the manifest but no header yet). Read-side is lock-free
     /// (DashMap shard); load happens at most once per model.
+    /// Pure precedence rule behind [`SharedState::encrypted_pipeline_for`], split
+    /// out so it can be tested without building a whole node.
+    ///
+    /// `holds_both_ends` is a closure because it costs a registry lookup and is
+    /// only needed when nothing explicit has decided the question.
+    #[allow(clippy::needless_pass_by_value)]
+    fn resolve_encrypted_pipeline_inner(
+        explicit_per_model: Option<bool>,
+        global_explicit_on: bool,
+        auto_enabled: bool,
+        holds_both_ends: impl FnOnce() -> bool,
+    ) -> bool {
+        if let Some(explicit) = explicit_per_model {
+            return explicit;
+        }
+        if global_explicit_on {
+            return true;
+        }
+        auto_enabled && holds_both_ends()
+    }
+
+    /// Whether this node holds BOTH the first and last shard of a model — the
+    /// precondition for prompt privacy (`encrypted_pipeline`), which forces the
+    /// first and last pipeline segments to run locally so no peer ever sees the
+    /// prompt or the sampled tokens.
+    pub fn holds_both_model_ends(&self, model_id: &crate::types::ModelId) -> bool {
+        let Some(manifest) = self.model_registry.get_manifest(model_id) else {
+            return false;
+        };
+        let me = self.identity.node_id();
+        let holds = |index: u32| {
+            self.model_registry
+                .shard_holders(&crate::types::ShardId {
+                    model_id: model_id.clone(),
+                    index,
+                })
+                .contains(me)
+        };
+        // A single-shard model has one piece that is both ends at once.
+        holds(0) && holds(manifest.shard_count.saturating_sub(1))
+    }
+
+    /// Effective prompt-privacy setting for a model.
+    ///
+    /// Precedence, most explicit first:
+    /// 1. A per-model choice the user made — always respected, including OFF.
+    /// 2. An explicit global `encrypted_pipeline = true`.
+    /// 3. Otherwise ON when this node holds both ends of the model, unless
+    ///    `encrypted_pipeline_auto` has been turned off.
+    ///
+    /// Step 3 exists because prompt privacy is the only thing stopping the
+    /// machine that answers you from reading your prompt, and it was previously
+    /// off unless a user knew to look for it. It is safe to default on ONLY where
+    /// both ends are already local, because otherwise the pipeline has no legal
+    /// route and the request fails outright.
+    ///
+    /// **This is the single answer to "is prompt privacy on for this model".**
+    /// The scheduler and the admin API both read it here; computing it separately
+    /// is how they would drift.
+    pub fn encrypted_pipeline_for(&self, model_id: &crate::types::ModelId) -> bool {
+        Self::resolve_encrypted_pipeline_inner(
+            self.encrypted_pipeline_models
+                .get(model_id)
+                .map(|r| *r.value()),
+            self.config.inference.encrypted_pipeline,
+            self.config.inference.encrypted_pipeline_auto,
+            // Only consulted when nothing explicit decides it, so the registry
+            // lookup is skipped in the common explicit cases.
+            || self.holds_both_model_ends(model_id),
+        )
+    }
+
     pub fn standalone_tokenizer(
         &self,
         model_id: &crate::types::ModelId,
@@ -1628,5 +1700,60 @@ impl SharedState {
                     .get(node_id)
                     .and_then(|p| p.peer_id_bytes.clone())
             })
+    }
+}
+
+#[cfg(test)]
+mod encrypted_pipeline_precedence_tests {
+    use super::SharedState;
+
+    fn resolve(explicit: Option<bool>, global: bool, auto: bool, ends: bool) -> bool {
+        SharedState::resolve_encrypted_pipeline_inner(explicit, global, auto, || ends)
+    }
+
+    /// The point of the change: privacy applies automatically wherever it can,
+    /// because it is the only thing stopping the machine answering you from
+    /// reading your prompt, and it was off unless a user knew to look.
+    #[test]
+    fn on_automatically_when_this_node_holds_both_ends() {
+        assert!(resolve(None, false, true, true));
+    }
+
+    /// And never where it would break: without both ends an encrypted pipeline
+    /// has no legal route, so turning it on would fail the request outright.
+    #[test]
+    fn off_when_the_node_cannot_hold_both_ends() {
+        assert!(!resolve(None, false, true, false));
+    }
+
+    /// A user who turned it OFF for a model must keep it off — even though the
+    /// node could support it. This is the case a naive "default on" breaks.
+    #[test]
+    fn an_explicit_per_model_off_is_respected() {
+        assert!(!resolve(Some(false), false, true, true));
+        assert!(
+            !resolve(Some(false), true, true, true),
+            "even against a global on"
+        );
+    }
+
+    /// And an explicit per-model ON survives everything.
+    #[test]
+    fn an_explicit_per_model_on_is_respected() {
+        assert!(resolve(Some(true), false, false, false));
+    }
+
+    /// Opting out of the automatic behaviour restores off-unless-asked.
+    #[test]
+    fn auto_can_be_turned_off_entirely() {
+        assert!(!resolve(None, false, false, true));
+    }
+
+    /// The pre-existing global switch keeps working regardless of shard layout;
+    /// the scheduler still refuses the route if it cannot be honoured.
+    #[test]
+    fn explicit_global_on_still_applies() {
+        assert!(resolve(None, true, false, false));
+        assert!(resolve(None, true, true, false));
     }
 }

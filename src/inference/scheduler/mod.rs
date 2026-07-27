@@ -146,13 +146,9 @@ impl PipelineScheduler {
 
         let start = std::time::Instant::now();
 
-        // Check if encrypted pipeline is enabled for this model (per-model → global fallback)
-        let encrypted = self
-            .shared_state
-            .encrypted_pipeline_models
-            .get(model_id)
-            .map(|r| *r.value())
-            .unwrap_or(self.shared_state.config.inference.encrypted_pipeline);
+        // Per-model choice, then explicit global, then on automatically when this
+        // node holds both ends — see `encrypted_pipeline_for`.
+        let encrypted = self.shared_state.encrypted_pipeline_for(model_id);
         if encrypted {
             tracing::info!(
                 model = %model_id,

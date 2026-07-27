@@ -399,6 +399,23 @@ pub struct InferenceConfig {
     /// remotely with no per-token network. Measured on a LAN pair (local GPU +
     /// 6-core CPU, 16-token replies): 11.2s → 17.8s and 3.2s → 5.9s.
     ///
+    /// Turn prompt privacy on automatically for any model where this node holds
+    /// both the first and last shard — the condition under which it can work at
+    /// all. Default TRUE, so the strongest privacy applies wherever it is
+    /// available without the user having to know it exists.
+    ///
+    /// It cannot simply be the default for `encrypted_pipeline` itself: without
+    /// both ends locally an encrypted pipeline has no legal route, so defaulting
+    /// that on unconditionally turns working setups into "No node available".
+    /// This flag is the safe half of that — it only ever engages where the
+    /// precondition already holds.
+    ///
+    /// An explicit choice always wins: a per-model setting first, then an
+    /// explicit `encrypted_pipeline = true`. Set this to false to opt out of the
+    /// automatic behaviour entirely and go back to off-unless-asked.
+    #[serde(default = "default_encrypted_pipeline_auto")]
+    pub encrypted_pipeline_auto: bool,
+
     /// **Recommended on** wherever the node holds both ends of a model: it is
     /// the only setting that stops the machine serving you from reading your
     /// prompt. Default off solely because it cannot route without both ends
@@ -421,6 +438,10 @@ pub struct InferenceConfig {
     /// prefill-dominated request, where prefill is one large forward pass.
     #[serde(default)]
     pub parallax_partial_ranges: bool,
+}
+
+fn default_encrypted_pipeline_auto() -> bool {
+    true
 }
 
 fn default_parallax_routing() -> bool {
@@ -861,6 +882,7 @@ impl Default for InferenceConfig {
             activation_compression: default_activation_compression(),
             parallax_routing: default_parallax_routing(),
             parallax_partial_ranges: false,
+            encrypted_pipeline_auto: default_encrypted_pipeline_auto(),
         }
     }
 }
