@@ -104,10 +104,31 @@ enum BucketKind {
     Admin,
     /// Stricter rate limit for sensitive key-management endpoints.
     SensitiveAdmin,
+    /// Provider health polling. Makes external calls like the probes, so it is
+    /// still capped — but in its own bucket, sized to the cadence the dashboard
+    /// actually polls at (30s by default, i.e. 2/min). Sharing the probe bucket
+    /// meant the dashboard's own default polling plus ordinary interaction
+    /// exceeded the limit and the page 429'd itself.
+    ProviderHealth,
+    /// WebSocket ticket issuance. Bounded for its own reason — every ticket
+    /// writes an entry to `state.events.ws_tickets` — which is unrelated to the
+    /// external-API cost that sets `SENSITIVE_ADMIN_RPM`. Sharing one bucket
+    /// meant a normal dashboard load, which issues a ticket and probes provider
+    /// status at the same time, exhausted the budget between them and had its
+    /// WebSocket refused; live updates then stop for the whole page.
+    WsTicket,
 }
 
 /// Requests per minute for sensitive key-management endpoints.
 const SENSITIVE_ADMIN_RPM: u64 = 5;
+/// Requests per minute for provider health polling. Covers the dashboard's
+/// 30s default cadence with headroom for a user who shortens it, while still
+/// bounding how fast we can be made to call out to cloud providers.
+const PROVIDER_HEALTH_RPM: u64 = 6;
+/// Requests per minute for WebSocket ticket issuance. Generous enough for a
+/// dashboard that reconnects a few times (each reconnect needs a fresh ticket),
+/// tight enough that a token holder cannot flood the ticket map.
+const WS_TICKET_RPM: u64 = 30;
 /// Maximum rate-limiter buckets to prevent memory exhaustion from IP spoofing.
 const MAX_RATE_BUCKETS: usize = 50_000;
 
@@ -150,20 +171,22 @@ impl RateLimiter {
         // Sensitive endpoints: external-API probes always restricted; key/provider
         // mutations restricted but reads use the normal admin bucket (page loads
         // call these on every refresh and hitting 5/min breaks the dashboard).
-        let (kind, limit) = if path == "/api/admin/provider-model-status"
-            || path == "/api/admin/provider-health"
+        let (kind, limit) = if path == "/api/admin/provider-health" {
+            (BucketKind::ProviderHealth, PROVIDER_HEALTH_RPM)
+        } else if path == "/api/admin/provider-model-status"
             || ((path == "/api/admin/providers" || path == "/api/admin/api-key") && is_mutating)
             // Auto-update endpoints: download + SHA256 verify + atomic
             // rename. Strict cap so a runaway caller can't trigger
             // repeated update downloads (each is a heavy GitHub fetch).
             || path == "/api/admin/update/check"
             || path == "/api/admin/update/apply"
-            // SEC: each ws-ticket issuance writes a fresh entry to
-            // `state.events.ws_tickets`; bucket under SensitiveAdmin so a
-            // bearer-token holder can't burn 200 rpm of ticket issuance.
-            || path == "/api/admin/ws-ticket"
         {
             (BucketKind::SensitiveAdmin, SENSITIVE_ADMIN_RPM)
+        } else if path == "/api/admin/ws-ticket" {
+            // SEC: each issuance writes a fresh entry to
+            // `state.events.ws_tickets`, so this stays bounded — but in its own
+            // bucket, not shared with the external-API probes.
+            (BucketKind::WsTicket, WS_TICKET_RPM)
         } else if path.starts_with("/api/admin/") || path.starts_with("/api/claude-code/") {
             (BucketKind::Admin, self.admin_rpm)
         } else if path.starts_with("/v1/") || path.starts_with("/api/chat") || path == "/mcp" {
@@ -892,5 +915,87 @@ mod tests {
         let get = Method::GET;
         assert!(is_exempt_request("/metrics", &get, true));
         assert!(!is_exempt_request("/metrics", &get, false));
+    }
+
+    /// A dashboard load issues a WebSocket ticket AND probes provider status.
+    /// These used to share one 5/min bucket, so the probes could exhaust it and
+    /// the WebSocket was refused — live updates then stop for the whole page.
+    #[test]
+    fn provider_probes_cannot_starve_websocket_tickets() {
+        let limiter = RateLimiter::new(200, 200);
+        let ip: IpAddr = "127.0.0.1".parse().unwrap();
+
+        // Burn the sensitive budget entirely on external-API probes.
+        for _ in 0..SENSITIVE_ADMIN_RPM + 5 {
+            let _ = limiter.try_acquire(ip, "/api/admin/provider-model-status", false);
+        }
+        assert!(
+            !limiter.try_acquire(ip, "/api/admin/provider-model-status", false),
+            "probe budget should be exhausted for this test to mean anything"
+        );
+
+        // The WebSocket must still be able to connect.
+        assert!(
+            limiter.try_acquire(ip, "/api/admin/ws-ticket", false),
+            "ws-ticket must not be starved by provider probes"
+        );
+    }
+
+    /// The dashboard polls provider health every 30s by default. That cadence
+    /// must not be able to exhaust the budget the model probes need, nor the
+    /// reverse — the page was 429'ing itself on its own default behaviour.
+    #[test]
+    fn health_polling_and_model_probes_do_not_share_a_budget() {
+        let limiter = RateLimiter::new(200, 200);
+        let ip: IpAddr = "127.0.0.1".parse().unwrap();
+        for _ in 0..PROVIDER_HEALTH_RPM + 3 {
+            let _ = limiter.try_acquire(ip, "/api/admin/provider-health", false);
+        }
+        assert!(
+            !limiter.try_acquire(ip, "/api/admin/provider-health", false),
+            "health budget should be spent for this test to mean anything"
+        );
+        assert!(
+            limiter.try_acquire(ip, "/api/admin/provider-model-status", false),
+            "model probes must survive health polling"
+        );
+    }
+
+    /// Health polling still calls out to cloud providers, so it stays bounded.
+    #[test]
+    fn provider_health_polling_is_still_capped() {
+        let limiter = RateLimiter::new(200, 200);
+        let ip: IpAddr = "10.9.9.9".parse().unwrap();
+        for _ in 0..PROVIDER_HEALTH_RPM {
+            assert!(limiter.try_acquire(ip, "/api/admin/provider-health", false));
+        }
+        assert!(!limiter.try_acquire(ip, "/api/admin/provider-health", false));
+    }
+
+    /// Ticket issuance is still bounded — it writes to `ws_tickets` on every call.
+    #[test]
+    fn websocket_tickets_are_still_capped() {
+        let limiter = RateLimiter::new(200, 200);
+        let ip: IpAddr = "10.1.2.3".parse().unwrap();
+        for _ in 0..WS_TICKET_RPM {
+            assert!(limiter.try_acquire(ip, "/api/admin/ws-ticket", false));
+        }
+        assert!(
+            !limiter.try_acquire(ip, "/api/admin/ws-ticket", false),
+            "ticket issuance must remain bounded"
+        );
+    }
+
+    /// A handful of reconnects, which is what a real dashboard does, must fit.
+    #[test]
+    fn a_reconnecting_dashboard_fits_in_the_ticket_budget() {
+        let limiter = RateLimiter::new(200, 200);
+        let ip: IpAddr = "127.0.0.1".parse().unwrap();
+        for i in 0..8 {
+            assert!(
+                limiter.try_acquire(ip, "/api/admin/ws-ticket", false),
+                "reconnect {i} should be allowed"
+            );
+        }
     }
 }

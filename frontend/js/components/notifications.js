@@ -525,6 +525,11 @@
   }
 
   async function fetchProviderHealth() {
+    // Before the user has entered their key there is nothing to fetch, and every
+    // attempt costs a 401. This runs on each WebSocket reconnect, and an
+    // unauthenticated page reconnects continuously — which turned a first visit
+    // into a request storm that rate-limited the endpoint against itself.
+    if (!App.settings || !App.settings._apiKeyFull) return;
     try {
       var resp = await App.authFetch('/api/admin/provider-health');
       if (!resp.ok) return;
@@ -676,7 +681,29 @@
       });
     },
 
+    // Callers ask per provider card, so a dashboard load fires one of these per
+    // cloud provider — nine providers meant nine POSTs, and the endpoint is
+    // deliberately capped tightly because each one makes external API calls. The
+    // result was that most of a page load's probes were rejected with 429.
+    // Requests are collected for a moment and sent as one batch; every caller
+    // benefits without having to know to do this itself.
+    _probeQueue: {},
+    _probeTimer: null,
+
     probe: function(modelIds) {
+      var self = this;
+      modelIds.forEach(function(id) { self._probeQueue[id] = true; });
+      if (this._probeTimer) return;
+      this._probeTimer = setTimeout(function() {
+        self._probeTimer = null;
+        var queued = Object.keys(self._probeQueue);
+        self._probeQueue = {};
+        if (queued.length) self._probeNow(queued);
+      }, 400);
+    },
+
+    _probeNow: function(modelIds) {
+      if (!App.settings || !App.settings._apiKeyFull) return;
       var now = Date.now();
       var toProbe = modelIds.filter(function(id) {
         if (S._modelStatusPending[id]) return false;

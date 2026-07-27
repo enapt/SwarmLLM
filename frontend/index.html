@@ -4,7 +4,12 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <!-- Keep in sync with server-side CSP in src/api/middleware.rs:77. The server header takes precedence in browsers when both are present, but this meta covers the file-open / static-server / cached-page paths where the daemon's header isn't applied. -->
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data: blob:; font-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self';">
+  <!-- Mirrors the Content-Security-Policy header set in api/middleware.rs, as
+       defence in depth if this page is ever served without it. `frame-ancestors`
+       is deliberately NOT repeated here: it is ignored when delivered via <meta>
+       and browsers log an error for it on every page load. Framing is refused by
+       the header's own `frame-ancestors` plus `X-Frame-Options: DENY`. -->
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data: blob:; font-src 'self'; base-uri 'self'; form-action 'self';">
   <!-- Per-page bootstrap nonce. The daemon substitutes the placeholder with a
        fresh single-use 32-byte random value (60s TTL) on every dashboard load
        (`api/server.rs::serve_dashboard_with_nonce`). The client sends this
