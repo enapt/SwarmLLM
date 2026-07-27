@@ -94,6 +94,31 @@ pub async fn rescan_local_shards(
                 super::shard_size_ok(&path, shard_info.size_bytes)
             };
             if !size_ok {
+                // Previously a bare `continue`: the model reported a missing
+                // shard on every scan with nothing anywhere explaining why, and
+                // the stale file kept the name so it never repaired itself.
+                if let Some((actual, expected)) =
+                    crate::model::shard::quarantine_shard_if_size_mismatch(
+                        &path,
+                        shard_info.size_bytes,
+                    )
+                {
+                    shared.emit_activity(
+                        crate::daemon::state::ActivityEvent::new(
+                            "models",
+                            "shard_size_mismatch",
+                            format!(
+                                "Shard {} of {} was {} MB but should be {} MB — set aside, it will be downloaded again",
+                                shard_info.index,
+                                model_id,
+                                actual / (1024 * 1024),
+                                expected / (1024 * 1024),
+                            ),
+                        )
+                        .with_model(model_id.0.clone())
+                        .with_toast("warning", 8000),
+                    );
+                }
                 continue;
             }
 

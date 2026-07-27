@@ -93,6 +93,60 @@ pub struct ShardStore {
     data_dir: PathBuf,
 }
 
+/// Move a shard file aside when its size contradicts the manifest.
+///
+/// A shard whose size disagrees with the manifest is unusable — every load path
+/// rejects it — but leaving it on disk is worse than useless. The model reports
+/// a missing shard on every scan, nothing says why, and because the name is
+/// taken the situation never repairs itself. An external report on 2026-07-27
+/// found exactly this surviving 16 releases: a shard 39% larger than the
+/// manifest expected, `missing_shards=1` forever, and no explanation anywhere
+/// except a silent internal skip.
+///
+/// Renaming frees the name so the ordinary acquisition path re-downloads it,
+/// while keeping the evidence rather than deleting a user's file.
+///
+/// Returns `Some((actual, expected))` when a mismatch was found and quarantined.
+/// `expected == 0` means the manifest carries no size, which is the documented
+/// "unknown" escape hatch and is never treated as a mismatch.
+pub fn quarantine_shard_if_size_mismatch(
+    shard_path: &std::path::Path,
+    expected_size: u64,
+) -> Option<(u64, u64)> {
+    if expected_size == 0 {
+        return None;
+    }
+    let actual = std::fs::metadata(shard_path).ok()?.len();
+    if actual == expected_size {
+        return None;
+    }
+    let quarantined = shard_path.with_extension("bin.mismatched");
+    match std::fs::rename(shard_path, &quarantined) {
+        Ok(()) => {
+            tracing::warn!(
+                path = %shard_path.display(),
+                actual_bytes = actual,
+                expected_bytes = expected_size,
+                moved_to = %quarantined.display(),
+                "Shard size does not match the manifest — moved aside so it can be re-downloaded"
+            );
+            Some((actual, expected_size))
+        }
+        Err(e) => {
+            // Report it even if we cannot move it; silence is what made the
+            // original report take two days to surface.
+            tracing::warn!(
+                path = %shard_path.display(),
+                actual_bytes = actual,
+                expected_bytes = expected_size,
+                error = %e,
+                "Shard size does not match the manifest and it could not be moved aside"
+            );
+            None
+        }
+    }
+}
+
 impl ShardStore {
     pub fn new(data_dir: &Path) -> Self {
         Self {
@@ -279,11 +333,28 @@ impl ShardStore {
                         if size_ok {
                             shards.push((model_id.clone(), shard_info.clone()));
                         } else {
-                            tracing::warn!(
-                                model = %model_id,
-                                shard = shard_info.index,
-                                "Shard file too small — skipping registration"
-                            );
+                            // Says what is actually wrong. The old message
+                            // claimed "too small", which is wrong half the time
+                            // — the reported case was 39% too LARGE — and sent
+                            // anyone reading it looking for a truncated download.
+                            if let Some((actual, expected)) = quarantine_shard_if_size_mismatch(
+                                &shard_path,
+                                shard_info.size_bytes,
+                            ) {
+                                tracing::warn!(
+                                    model = %model_id,
+                                    shard = shard_info.index,
+                                    actual_bytes = actual,
+                                    expected_bytes = expected,
+                                    "Shard rejected: size disagrees with the manifest"
+                                );
+                            } else {
+                                tracing::warn!(
+                                    model = %model_id,
+                                    shard = shard_info.index,
+                                    "Shard rejected: unreadable or size unknown"
+                                );
+                            }
                             rejected += 1;
                         }
                     }
@@ -582,5 +653,87 @@ mod tests {
         // "../../etc" → replace / → "_.._etc" wait no: ".._._etc" no.
         // "../../etc" → replace / → ".._.._etc" → replace .. → "____etc"
         assert_eq!(path.to_string_lossy(), "/data/models/____etc/shard_000.bin");
+    }
+}
+
+#[cfg(test)]
+mod size_mismatch_tests {
+    use super::quarantine_shard_if_size_mismatch;
+
+    fn tmpdir(name: &str) -> std::path::PathBuf {
+        let d =
+            std::env::temp_dir().join(format!("swarmllm-mismatch-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn write(path: &std::path::Path, len: usize) {
+        std::fs::write(path, vec![0u8; len]).unwrap();
+    }
+
+    /// The reported case: shard 5 of meta-llama-3.1-8b was 728,334,336 bytes
+    /// where the manifest said 523,304,960. It survived 16 releases reporting
+    /// `missing_shards=1` with no explanation and no recovery.
+    #[test]
+    fn the_reported_oversized_shard_is_moved_aside() {
+        let d = tmpdir("oversize");
+        let p = d.join("shard_005.bin");
+        // Scaled down by 1000x to keep the test cheap; the ratio is what matters.
+        write(&p, 728_334);
+        let got = quarantine_shard_if_size_mismatch(&p, 523_304);
+        assert_eq!(got, Some((728_334, 523_304)));
+        assert!(
+            !p.exists(),
+            "the bad file must free its name for a re-download"
+        );
+        assert!(
+            d.join("shard_005.bin.mismatched").exists(),
+            "evidence must be kept, not deleted"
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// Truncated downloads are the other direction and must behave the same.
+    #[test]
+    fn an_undersized_shard_is_also_moved_aside() {
+        let d = tmpdir("undersize");
+        let p = d.join("shard_000.bin");
+        write(&p, 100);
+        assert_eq!(quarantine_shard_if_size_mismatch(&p, 500), Some((100, 500)));
+        assert!(!p.exists());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_correct_shard_is_left_alone() {
+        let d = tmpdir("exact");
+        let p = d.join("shard_000.bin");
+        write(&p, 4096);
+        assert_eq!(quarantine_shard_if_size_mismatch(&p, 4096), None);
+        assert!(p.exists(), "a valid shard must never be touched");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// `size_bytes == 0` is the documented "manifest carries no size" escape
+    /// hatch. Quarantining on it would delete every shard of a legacy manifest.
+    #[test]
+    fn unknown_expected_size_never_quarantines() {
+        let d = tmpdir("unknown");
+        let p = d.join("shard_000.bin");
+        write(&p, 4096);
+        assert_eq!(quarantine_shard_if_size_mismatch(&p, 0), None);
+        assert!(p.exists());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_missing_file_is_not_an_error() {
+        let d = tmpdir("absent");
+        assert_eq!(
+            quarantine_shard_if_size_mismatch(&d.join("nope.bin"), 123),
+            None
+        );
+        let _ = std::fs::remove_dir_all(&d);
     }
 }

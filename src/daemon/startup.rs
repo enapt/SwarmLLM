@@ -71,6 +71,23 @@ pub(super) async fn restore_persistent_state(
                             );
                             continue;
                         }
+                        // Existence alone is not enough, and this was the path
+                        // that mattered: it is what records us as a HOLDER.
+                        // Registering on existence while every loader rejects
+                        // the file on size left the node believing it held a
+                        // shard it could not serve — so nothing ever
+                        // re-downloaded it, and peers could still be routed to
+                        // us for it. An external report tracked exactly that for
+                        // 16 releases. Quarantine frees the name so the ordinary
+                        // acquisition path repairs it.
+                        if crate::model::shard::quarantine_shard_if_size_mismatch(
+                            &shard_path,
+                            shard_info.size_bytes,
+                        )
+                        .is_some()
+                        {
+                            continue;
+                        }
                         let shard_id = crate::types::ShardId {
                             model_id: model_id.clone(),
                             index: shard_info.index,
