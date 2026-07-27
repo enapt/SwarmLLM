@@ -193,16 +193,35 @@ pub struct SplitModelMeta {
     pub layer_range: (u32, u32),
 }
 
-/// Look up split model metadata by model ID. Used by openai and anthropic handlers.
+/// Look up the metadata of a locally-held split model that covers the WHOLE
+/// model. Used by the OpenAI and Anthropic local-complete fast paths.
+///
+/// **`is_complete` is load-bearing, not a nicety.** The fast path hands
+/// `layer_range` straight to the worker and then feeds it the raw PROMPT, so
+/// the entry must own both the embedding table and the output head. A node can
+/// hold SEVERAL entries for one model — `split_models` is keyed by
+/// `(model, layer_start, layer_end)` — for instance a whole-model entry plus a
+/// tail-only `[21,28)` one it serves as a pipeline segment for peers.
+///
+/// This used to take the first entry matching the model id, while the caller
+/// decided whether to use the fast path via `has_complete_split_model`, which
+/// asks whether ANY entry is complete. Two questions, two answers, and
+/// `split_models` is a `DashMap` whose iteration order is arbitrary — so the
+/// fast path could be entered on the strength of the whole-model entry and then
+/// run against the tail-only one. The worker dutifully loaded layers 21..28,
+/// found no embedding table, and pushed the token ids into the first block:
+/// `attn_norm: shape mismatch in rms-norm [1, 128] [3072]` — `[batch, seq_len]`
+/// token ids where hidden states were expected. It reproduced only after a node
+/// had picked up a second role for a model, which is why it looked like a
+/// tail-segment bug rather than a selection bug (external report, 2026-07-27).
 pub fn get_split_model_meta(
-    state: &AppState,
+    shared_state: &crate::daemon::SharedState,
     model_id: &crate::types::ModelId,
 ) -> Option<SplitModelMeta> {
-    state
-        .shared_state
+    shared_state
         .split_models
         .iter()
-        .find(|e| e.key().0 == *model_id)
+        .find(|e| e.key().0 == *model_id && e.value().is_complete)
         .map(|entry| {
             let e = entry.value();
             SplitModelMeta {
@@ -212,4 +231,88 @@ pub fn get_split_model_meta(
                 layer_range: (e.layer_start as u32, e.layer_end as u32),
             }
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::inference::split::SplitModelEntry;
+
+    fn make_shared_state() -> std::sync::Arc<crate::daemon::SharedState> {
+        let config = crate::config::Config::default();
+        let identity = crate::identity::Identity::generate();
+        let temp = tempfile::tempdir().unwrap();
+        let db = crate::storage::db::Database::open(temp.path()).unwrap();
+        let executor = std::sync::Arc::new(tokio::sync::Mutex::new(
+            crate::inference::executor::ModelExecutor::new(),
+        ));
+        let (state, _, _) = crate::daemon::SharedState::new(config, identity, db, executor, None);
+        state
+    }
+
+    fn entry(layer_start: usize, layer_end: usize, is_complete: bool) -> SplitModelEntry {
+        SplitModelEntry {
+            last_used: std::sync::atomic::AtomicU64::new(0),
+            estimated_vram_mb: 0,
+            is_complete,
+            eos_tokens: vec![],
+            eos_token_str: String::new(),
+            bos_token: String::new(),
+            cached_chat_template: None,
+            vocab: None,
+            layer_start,
+            layer_end,
+        }
+    }
+
+    /// A node serving a tail segment for peers ALSO holds the whole model. The
+    /// local fast path must run against the whole-model entry — picking the
+    /// tail-only one feeds prompt token ids to a block that expects hidden
+    /// states. Both insertion orders, because `split_models` is a `DashMap` and
+    /// the original bug was hidden by its arbitrary iteration order.
+    #[test]
+    fn fast_path_meta_never_returns_a_partial_entry() {
+        for tail_first in [true, false] {
+            let state = make_shared_state();
+            let mid = ModelId("llama-3.2-3b-instruct-q4-k-m".into());
+            let complete = (mid.clone(), 0, 28);
+            let tail = (mid.clone(), 21, 28);
+            if tail_first {
+                state
+                    .split_models
+                    .insert(tail.clone(), entry(21, 28, false));
+                state
+                    .split_models
+                    .insert(complete.clone(), entry(0, 28, true));
+            } else {
+                state
+                    .split_models
+                    .insert(complete.clone(), entry(0, 28, true));
+                state
+                    .split_models
+                    .insert(tail.clone(), entry(21, 28, false));
+            }
+
+            let meta = get_split_model_meta(&state, &mid).expect("whole-model entry is present");
+            assert_eq!(
+                meta.layer_range,
+                (0, 28),
+                "fast path picked a partial entry (tail inserted first: {tail_first})"
+            );
+        }
+    }
+
+    /// Holding ONLY a tail segment must not qualify for the local fast path at
+    /// all — the caller has to route the request through the pipeline instead.
+    #[test]
+    fn a_tail_only_node_has_no_fast_path_meta() {
+        let state = make_shared_state();
+        let mid = ModelId("llama-3.2-3b-instruct-q4-k-m".into());
+        state
+            .split_models
+            .insert((mid.clone(), 21, 28), entry(21, 28, false));
+
+        assert!(get_split_model_meta(&state, &mid).is_none());
+        assert!(!state.has_complete_split_model(&mid));
+    }
 }

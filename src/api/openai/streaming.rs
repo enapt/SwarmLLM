@@ -143,7 +143,7 @@ pub fn spawn_split_stream(
     params: crate::types::SamplingParams,
     request_id: &str,
 ) -> Option<SplitStream> {
-    let meta = get_split_model_meta(state, model_id)?;
+    let meta = get_split_model_meta(&state.shared_state, model_id)?;
     let prompt = crate::inference::chat_template::build_prompt(
         messages,
         meta.chat_template.as_deref(),
@@ -327,7 +327,7 @@ pub async fn run_split_generate(
     params: SamplingParams,
     request_id: &str,
 ) -> Result<crate::inference::router::InferenceOutput, ApiError> {
-    let meta = get_split_model_meta(state, model_id)
+    let meta = get_split_model_meta(&state.shared_state, model_id)
         .ok_or(ApiError(crate::error::SwarmError::NoModelLoaded))?;
 
     let prompt = chat_template::build_prompt(
