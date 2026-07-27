@@ -2034,6 +2034,22 @@ input[type="range"]::-webkit-slider-thumb {
 }
 .enc-banner-btn:hover { opacity: 1; background: rgba(255,255,255,0.15); }
 .enc-banner-btn-enable { color: var(--purple, #a78bfa); border-color: rgba(167,139,250,0.5); }
+/* Marks prompt privacy as the recommended choice. Without it the machine
+   answering you reads your prompt in the clear, which a neutral toggle
+   understates. */
+.enc-recommended-badge {
+  display: inline-block;
+  margin-left: 0.35em;
+  padding: 0 0.4em;
+  border-radius: 3px;
+  font-size: 0.85em;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: #0a0e14;
+  background: var(--purple, #a78bfa);
+  vertical-align: baseline;
+}
 
 .chat-session-title {
   font-size: 0.85rem;

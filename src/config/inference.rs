@@ -399,6 +399,11 @@ pub struct InferenceConfig {
     /// remotely with no per-token network. Measured on a LAN pair (local GPU +
     /// 6-core CPU, 16-token replies): 11.2s → 17.8s and 3.2s → 5.9s.
     ///
+    /// **Recommended on** wherever the node holds both ends of a model: it is
+    /// the only setting that stops the machine serving you from reading your
+    /// prompt. Default off solely because it cannot route without both ends
+    /// locally — see `encrypted_pipeline`.
+    ///
     /// **`encrypted_pipeline` does not work without this.** Encryption forces the
     /// first and last segments onto the local node, so the middle must come from
     /// a peer — but a peer holding the whole model has only one indivisible

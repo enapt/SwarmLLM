@@ -5,13 +5,25 @@ SwarmLLM lets you combine your hardware with others to run AI models too large f
 > **On privacy, precisely.** Encrypted traffic means nobody *between* two
 > machines can read what passes between them. It does not mean the machine
 > running the model cannot read your prompt — it has to, in order to answer
-> you, in the same way any AI provider does. If you want your prompts and
-> answers to stay on your own machine, turn on **prompt privacy** (the
-> "Enable prompt privacy" button above the chat box, or
-> `inference.encrypted_pipeline`). Your machine then does the reading and the
-> writing itself, and helpers only ever see partly-processed numbers. It costs
-> a few seconds per answer and needs you to hold the first and last part of the
-> model.
+> you, in the same way any AI provider does.
+>
+> **Turning on prompt privacy is recommended** — it is the only setting that
+> stops other machines reading your prompts. Use the "Enable prompt privacy"
+> button above the chat box, or `inference.encrypted_pipeline` in your config.
+> Your machine then does the first and last steps itself, and helpers only ever
+> see partly-processed numbers.
+>
+> What it costs, so you can decide:
+>
+> | | |
+> |---|---|
+> | **Disk** | you need the first *and* last piece of the model on this machine |
+> | **Speed** | your machine swaps data with helpers once per word, so a long answer costs proportionally more time — a few seconds extra on a short reply |
+> | **Your hardware** | does more of the work, since the first and last steps run here |
+> | **Scope** | set per model, so you can have it on where it matters and off elsewhere |
+>
+> It is off by default only because it cannot route unless you hold both ends of
+> the model. If you do, turn it on.
 
 This guide walks you through installation, downloading your first model, and chatting.
 

@@ -1259,8 +1259,10 @@
             encState = {
               stateMod: 'mce-section-state-blue', badgeCls: 'cb-downloading',
               icon: '\uD83D\uDD0F', label: I18n.t('enc.available'),
-              detail: I18n.t('enc.ready_detail'), tip: I18n.t('enc.ready_tip'),
-              action: I18n.t('enc.enable_privacy')
+              detail: I18n.t('enc.ready_detail') + ' ' + I18n.t('enc.cost_detail'),
+              tip: I18n.t('enc.ready_tip'),
+              action: I18n.t('enc.enable_privacy'),
+              recommended: true
             };
           } else {
             var missingParts2 = [];
@@ -1272,7 +1274,7 @@
             encState = {
               stateMod: 'mce-section-state-amber', badgeCls: 'cb-fragile',
               icon: '\uD83D\uDD13', label: I18n.t('enc.unavailable'),
-              detail: I18n.t('enc.unprotected_detail', { missing: missingText }),
+              detail: I18n.t('enc.unprotected_detail', { missing: missingText }) + ' ' + I18n.t('enc.cost_detail'),
               tip: I18n.t('enc.unprotected_tip'),
               action: ''
             };
@@ -1282,7 +1284,8 @@
             : '';
           var toggleCls = canToggle ? ' mce-section-toggleable' : '';
           var actionHtml2 = canToggle && encState.action
-            ? '<span class="mce-section-action">' + U.escapeHtml(encState.action) + '</span>'
+            ? '<span class="mce-section-action">' + U.escapeHtml(encState.action) +
+              (encState.recommended ? ' <span class="enc-recommended-badge">' + U.escapeHtml(I18n.t('enc.recommended')) + '</span>' : '') + '</span>'
             : '';
           privacySectionHtml =
             '<div class="mce-section mce-section-privacy ' + encState.stateMod + toggleCls + '"' + toggleAttrs + ' title="' + U.escapeHtml(encState.tip) + '">' +

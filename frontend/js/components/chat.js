@@ -348,7 +348,12 @@
         var isAllLocal = modelData && modelData.hosted_shards === modelData.shard_count && modelData.shard_count > 0;
         var canBoomerang = modelData && modelData.has_first_shard && modelData.has_last_shard && isDistributed && !isAllLocal;
         var disableBtn = '<button class="btn btn-xs enc-banner-btn" data-enc-toggle="' + safeModelId + '" data-enc-ready="1">' + U.escapeHtml(I18n.t('enc.disable')) + '</button>';
-        var enableBtn = '<button class="btn btn-xs enc-banner-btn enc-banner-btn-enable" data-enc-toggle="' + safeModelId + '" data-enc-ready="1">' + U.escapeHtml(I18n.t('enc.enable_privacy')) + '</button>';
+        // Marked as recommended, and the cost stated on the control itself.
+        // Without prompt privacy the machine answering you reads your prompt in
+        // the clear, which a neutral-looking toggle does not convey.
+        var enableBtn = '<button class="btn btn-xs enc-banner-btn enc-banner-btn-enable" data-enc-toggle="' + safeModelId + '" data-enc-ready="1" title="' + U.escapeHtml(I18n.t('enc.cost_detail')) + '">' +
+          U.escapeHtml(I18n.t('enc.enable_privacy')) +
+          ' <span class="enc-recommended-badge">' + U.escapeHtml(I18n.t('enc.recommended')) + '</span></button>';
         if (headerSource === 'cloud') {
           var providerName = (headerModelItem && headerModelItem.group) ? (PROVIDER_NAMES[headerModelItem.group] || headerModelItem.group) : I18n.t('chat.unknown_provider');
           var providerIcon = (headerModelItem && headerModelItem.group) ? providerIconHtml(headerModelItem.group, 12) : '';
