@@ -502,6 +502,21 @@ async fn health() -> Json<serde_json::Value> {
     Json(serde_json::json!({"status": "ok"}))
 }
 
+/// Idle time before the OS starts probing whether an HTTP client is still there.
+///
+/// The platform default is two hours, which makes keepalive useless for this:
+/// the cost being avoided is a CPU node computing a long answer for a client
+/// that no longer exists. Detection lands at roughly
+/// `IDLE + INTERVAL * RETRIES` (~90s with these values), which is short enough
+/// to stop wasting a worker and long enough never to interrupt a healthy client
+/// mid-prefill — SSE keep-alive comments go out far more often than this.
+const HTTP_KEEPALIVE_IDLE_SECS: u64 = 60;
+/// Gap between probes once the connection has gone quiet.
+const HTTP_KEEPALIVE_INTERVAL_SECS: u64 = 10;
+/// Unanswered probes before the connection is declared dead.
+#[cfg(not(target_os = "windows"))]
+const HTTP_KEEPALIVE_RETRIES: u32 = 3;
+
 /// Start the Axum HTTP server using SharedState from the daemon.
 pub async fn run_server_with_state(
     shared_state: Arc<SharedState>,
@@ -559,6 +574,37 @@ pub async fn run_server_with_state(
             "Failed to bind API server to port {port}: {e}\n  Is another SwarmLLM instance already running? Try: swarmllm status\n  Or start on a different port: swarmllm run --port <N>"
         )
     })?;
+    // Ask the OS to tell us when a client has silently gone away.
+    //
+    // Disconnect detection previously relied entirely on the transport
+    // reporting a closed connection — `sse_tx.closed()` fires when hyper drops
+    // the response body. That covers a client that closes cleanly, but NOT one
+    // that vanishes without a FIN or RST: a killed process whose socket is held
+    // by something else, a machine losing power, a network partition, or a
+    // firewall silently dropping the flow. In those cases the request kept
+    // computing for nobody. An external report measured a decode running about
+    // six minutes past the point its client had died.
+    //
+    // Time-bounding the request is not an option — a long prompt on a CPU node
+    // legitimately takes minutes, which is the whole point of the prefill
+    // budget. Liveness has to be answered by the transport instead, so probes
+    // are enabled explicitly: the platform default idle time is two hours,
+    // which is far too long to be useful here.
+    let keepalive = socket2::TcpKeepalive::new()
+        .with_time(std::time::Duration::from_secs(HTTP_KEEPALIVE_IDLE_SECS))
+        .with_interval(std::time::Duration::from_secs(HTTP_KEEPALIVE_INTERVAL_SECS));
+    #[cfg(not(target_os = "windows"))]
+    let keepalive = keepalive.with_retries(HTTP_KEEPALIVE_RETRIES);
+    let listener = {
+        use axum::serve::ListenerExt;
+        listener.tap_io(move |stream| {
+            if let Err(e) = socket2::SockRef::from(&*stream).set_tcp_keepalive(&keepalive) {
+                // Not fatal: without probes we simply fall back to the previous
+                // behaviour of noticing only clean disconnects.
+                tracing::debug!(error = %e, "could not enable TCP keepalive on connection");
+            }
+        })
+    };
     axum::serve(
         listener,
         app.into_make_service_with_connect_info::<std::net::SocketAddr>(),

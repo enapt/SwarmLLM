@@ -61,6 +61,7 @@ libp2p = { version = "0.56", features = [
 libp2p-stream = "0.4.0-alpha"
 
 # HTTP server
+socket2 = "0.5"
 axum = { version = "0.8", features = ["ws"] }
 tower-http = { version = "0.6", features = ["cors", "timeout"] }
 
