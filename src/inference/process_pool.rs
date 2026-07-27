@@ -1239,7 +1239,7 @@ impl ModelProcessPool {
         }
 
         // Spawn the worker subprocess (same binary, model-worker subcommand)
-        let exe = std::env::current_exe()
+        let exe = crate::current_exe_path()
             .map_err(|e| SwarmError::ServiceUnavailable(format!("current_exe: {e}")))?;
         let socket_str = socket_name.as_str();
         let data_dir_str = self

@@ -120,7 +120,7 @@ impl UpdateChecker {
         // container runtimes, missing /proc/self/exe). The "swarmllm" fallback
         // resolves against CWD at apply-time, which is almost never the install
         // dir — log loudly so operators know auto-update will fail.
-        let binary_path = std::env::current_exe().unwrap_or_else(|e| {
+        let binary_path = crate::current_exe_path().unwrap_or_else(|e| {
             tracing::warn!(
                 error = %e,
                 "current_exe() failed — auto-update disabled (binary path unknown)"

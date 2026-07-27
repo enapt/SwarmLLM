@@ -1042,7 +1042,7 @@ pub async fn apply_update(
         tx,
     );
 
-    let binary_path = std::env::current_exe().map_err(|e| {
+    let binary_path = crate::current_exe_path().map_err(|e| {
         ApiError(crate::error::SwarmError::ServiceUnavailable(format!(
             "Cannot determine binary path: {e}"
         )))
