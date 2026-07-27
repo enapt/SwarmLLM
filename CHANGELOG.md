@@ -44,6 +44,14 @@ All notable changes to SwarmLLM are documented here.
   question to another machine to answer, and streaming a reply from a cloud
   provider, where a long answer was cut off mid-flow.
 
+- **A slow connection can now finish an update or a model download.** Both gave
+  up after a fixed stretch of time regardless of file size, which quietly set a
+  minimum connection speed for using them at all — the graphics build is around
+  933MB, so updating needed roughly 3MB a second sustained or it could never
+  finish, failing at the same point every attempt with nothing to suggest speed
+  was the reason. Both now watch for a download going quiet instead of counting
+  total time.
+
 - **A broken node no longer takes your request down with it.** If the node
   chosen to run part of a request could not start its model, the request failed
   there — even with other nodes holding the same model and ready to serve. Such
