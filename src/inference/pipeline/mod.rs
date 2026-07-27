@@ -11,7 +11,7 @@ mod hedge_dispatch;
 mod local;
 mod ngram_only_spec;
 mod prompt;
-mod remote_generate;
+pub(crate) mod remote_generate;
 mod speculative;
 mod tensor_parallel;
 mod vision;

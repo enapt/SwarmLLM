@@ -4,8 +4,11 @@ use crate::error::ApiError;
 
 use super::types::ChatCompletionRequest;
 
-/// Timeout for peer-forwarded inference requests (seconds).
-const INFERENCE_FORWARD_TIMEOUT_SECS: u64 = 120;
+/// Fallback ceiling for peer-forwarded inference requests (seconds).
+///
+/// Overridden per request by a prompt-scaled budget — see [`forward_to_peer`].
+/// This only bounds a request whose prompt we could not measure at all.
+const INFERENCE_FORWARD_TIMEOUT_SECS: u64 = 600;
 
 /// TCP connect timeout for peer HTTP forwarding (seconds).
 const PEER_FORWARD_CONNECT_TIMEOUT_SECS: u64 = 10;
@@ -106,9 +109,24 @@ pub(super) async fn forward_to_peer(
     let client = get_peer_client();
     let url = format!("{}/v1/chat/completions", peer_url);
 
+    // Reading the prompt (prefill) dominates the wait and grows with the prompt,
+    // so a flat timeout here fails long prompts against a peer that is working
+    // perfectly — the same defect that had to be fixed for the first-token
+    // budget and again for the HTTP request timeout. Share that budget rather
+    // than inventing a third rule. Bounded by its own ceiling, so a peer that
+    // has genuinely gone away is still given up on.
+    // Serialized length stands in for prompt size: it covers text and image
+    // parts alike without another shape-matching helper, and it over-estimates
+    // (JSON punctuation, base64) — the safe direction here, since the budget is
+    // capped anyway and an image prompt genuinely is the expensive kind.
+    let prompt_chars = serde_json::to_string(req).map(|s| s.len()).unwrap_or(0);
+    let budget =
+        crate::inference::pipeline::remote_generate::first_token_timeout(prompt_chars.div_ceil(2));
+
     let mut builder = client
         .post(&url)
         .header("x-swarm-forwarded", "true")
+        .timeout(budget)
         .json(req);
     if let Some(auth) = auth_header {
         builder = builder.header(reqwest::header::AUTHORIZATION, auth);

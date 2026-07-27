@@ -85,7 +85,7 @@ const PROMPT_CHARS_PER_TOKEN: usize = 2;
 ///
 /// Only ever extends the base budget, never shortens it, so short prompts keep
 /// exactly the previous behaviour.
-fn first_token_timeout(prompt_tokens: usize) -> Duration {
+pub(crate) fn first_token_timeout(prompt_tokens: usize) -> Duration {
     let tokens = u32::try_from(prompt_tokens).unwrap_or(u32::MAX);
     FIRST_TOKEN_TIMEOUT
         .saturating_add(PREFILL_ALLOWANCE_PER_TOKEN.saturating_mul(tokens))
@@ -95,7 +95,7 @@ fn first_token_timeout(prompt_tokens: usize) -> Duration {
 /// Estimate the prompt's token count from characters, for when the tokenizer
 /// isn't loadable. Counts `chars()`, not bytes — a byte-length divisor would
 /// under-count multi-byte scripts by the very factor that makes them expensive.
-fn estimate_prompt_tokens(prompt: &str) -> usize {
+pub(crate) fn estimate_prompt_tokens(prompt: &str) -> usize {
     prompt.chars().count().div_ceil(PROMPT_CHARS_PER_TOKEN)
 }
 /// Between-token timeout once generation has started. Generous to accommodate
