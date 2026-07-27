@@ -2,7 +2,7 @@
 
 All notable changes to SwarmLLM are documented here.
 
-## [Unreleased]
+## [0.3.35-alpha] — 2026-07-27
 
 ### Fixed
 
@@ -50,6 +50,39 @@ All notable changes to SwarmLLM are documented here.
   the wrong thing entirely. Attempts are now tracked individually: cleanup can
   only remove its own, a displaced attempt says it was superseded rather than
   blaming the model, and the model is left running.
+
+- **Deleting or automatically pruning a shard could disrupt a request that was
+  reading it.** Both checks asked whether one shard matched, but a machine's
+  share of a model usually spans several, so every shard after the first was
+  unprotected — and pulling one away mid-answer surfaces as an unrecoverable
+  error. There is now a single place that answers which shards a running request
+  actually reads, and all three paths use it. Diagnostics report the real span
+  too, instead of always naming the first shard.
+
+- **The router priced routing choices on the wrong signals.** Three separate
+  problems, all of which meant it could pick on something other than merit:
+  a machine it had never measured cost nothing, so on a freshly started node
+  competing routes tied and the winner came down to internal ordering — and a
+  machine nothing was known about outranked one already measured and liked;
+  the node's *own* hardware was never measured at all, so its own work looked
+  free at any size and it would keep layers locally rather than hand them to a
+  faster peer; and network cost was counted once per hop, when a model split
+  across machines actually exchanges data once per word generated.
+
+  On the pair of machines this was measured on, routing is unchanged to slightly
+  faster. It mainly affects swarms with several machines holding overlapping
+  parts of a model, so that is where any change in behaviour will show up.
+
+### Added
+
+- **Router option to use part of a machine's share of a model**
+  (`inference.parallax_partial_ranges`, **off by default**). Without it, a
+  machine holding a complete model is the only route the router can express for
+  it, so your own GPU cannot take the first layers while a peer takes the rest.
+  It is off because it measured slower where it was tested — the per-word
+  exchanges cost more than the faster hardware saved — and the reasoning, the
+  numbers, and the one remaining fix are recorded on the option itself and in
+  `docs/FUTURE_WORK.md`.
 
 ### Changed
 

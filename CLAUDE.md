@@ -151,7 +151,7 @@ libp2p 0.56, axum 0.8, candle-core/candle-transformers 0.10 (CUDA), redb 4, ed25
 
 ## Testing
 
-- 1313 lib tests passing + 9 ignored (env-var-gated real-model + manual smoke), 79 integration tests in `tests/integration/` + 2 ignored end-to-end (`cargo test --test integration_phase10_11 -- --ignored`), 2 repo-consistency, 26 in `swarmllm-types` (`cargo test -p swarmllm-types` — NOT covered by a bare `cargo test` from the root), 6 in the vendored request-response patch (`cargo test --manifest-path vendor/libp2p-request-response/Cargo.toml --lib` — the crate is workspace-`exclude`d, and its own integration tests need `libp2p-swarm-test` so use `--lib`), clippy clean. Microbench: `cargo run --release --no-default-features --features dev,claude-subscription --example swarm_spec_bench` (R136 — measures all 4 SWARM-SPEC layer primitives + synthetic cascade hit-rate). Local-cluster bench: `examples/3node_setup.sh` (boots 3 daemons) + `examples/3node_inference_bench.sh` (runs 3 workloads × 3 trials and prints tok/s + swarm_spec metrics). Sharded variant: `examples/3node_sharded_setup.sh` (forced distributed pipeline; writes its own per-node config disabling auto-manage and bootstrap so the split survives). **Its inference step is EXPECTED to fail on a single multi-interface host** — that is the zero-redundancy same-host case documented in `docs/FUTURE_WORK.md` § "Connection churn on multi-interface hosts", not a distributed-inference regression (confirmed on released v0.3.28, 2026-07-26). Validate the forward path on two real machines. Both scripts take `SWARM_BENCH_MODEL`. **Pinned reference models for cross-swarm comparison: `docs/REFERENCE_MODELS.md`** (smoke / standard / stress tiers + `examples/fetch_reference_model.sh` to opt in).
+- 1344 lib tests passing + 9 ignored (env-var-gated real-model + manual smoke), 79 integration tests in `tests/integration/` + 2 ignored end-to-end (`cargo test --test integration_phase10_11 -- --ignored`), 2 repo-consistency, 26 in `swarmllm-types` (`cargo test -p swarmllm-types` — NOT covered by a bare `cargo test` from the root), 6 in the vendored request-response patch (`cargo test --manifest-path vendor/libp2p-request-response/Cargo.toml --lib` — the crate is workspace-`exclude`d, and its own integration tests need `libp2p-swarm-test` so use `--lib`), clippy clean. Microbench: `cargo run --release --no-default-features --features dev,claude-subscription --example swarm_spec_bench` (R136 — measures all 4 SWARM-SPEC layer primitives + synthetic cascade hit-rate). Local-cluster bench: `examples/3node_setup.sh` (boots 3 daemons) + `examples/3node_inference_bench.sh` (runs 3 workloads × 3 trials and prints tok/s + swarm_spec metrics). Sharded variant: `examples/3node_sharded_setup.sh` (forced distributed pipeline; writes its own per-node config disabling auto-manage and bootstrap so the split survives). **Its inference step is EXPECTED to fail on a single multi-interface host** — that is the zero-redundancy same-host case documented in `docs/FUTURE_WORK.md` § "Connection churn on multi-interface hosts", not a distributed-inference regression (confirmed on released v0.3.28, 2026-07-26). Validate the forward path on two real machines. Both scripts take `SWARM_BENCH_MODEL`. **Pinned reference models for cross-swarm comparison: `docs/REFERENCE_MODELS.md`** (smoke / standard / stress tiers + `examples/fetch_reference_model.sh` to opt in).
 - Unit tests: in-module `#[cfg(test)]` blocks
 - Integration tests: `tests/integration/` — multi-node simulations with `--test-threads=1`
 - Real-model spawn-and-infer test: set `SWARMLLM_TEST_MODEL_DIR` to a fully-populated model directory (e.g. `~/.local/share/swarmllm/models/tinyllama-1.1b-...`) and run `cargo test --test integration_phase10_11 -- --ignored end_to_end`. No synthetic GGUF fixture is committed; see `docs/ARCHITECTURE.md` § Deferred Items.
@@ -192,110 +192,85 @@ When spawning subagents in this repo, use these model picks (overrides defaults 
 
 ## Status
 
-All 20 build phases complete. All subsystems wired — no stubs. **1313 lib + 79 integration + 2 repo-consistency + 26 swarmllm-types tests passing**; 9 lib + 2 e2e ignored (env-var or manual). Clippy clean default + features dev,claude-subscription + `--features llama`.
+All 20 build phases complete. All subsystems wired — no stubs. **1344 lib + 79 integration + 2 repo-consistency + 26 swarmllm-types tests passing**; 9 lib + 2 e2e ignored (env-var or manual). Clippy clean default + features dev,claude-subscription + `--features llama`.
 
 Per-round history lives in `~/.claude/projects/-home-user-SwarmLLM/memory/round_log_*.md` and the CHANGELOG; `docs/ARCHITECTURE.md` is the canonical architecture. This section keeps only the current release line plus one-line prior-round pointers.
 
-### Latest — v0.3.34-alpha (2026-07-26): pick the connection that is answering
+### Latest — v0.3.35-alpha (2026-07-27): things that were measured and thrown away
 
-Completes the connection-selection work. Both items came out of *running* the
-retraction test, not from reading code.
+Overnight + morning round. **Every fix started from a trace field, not a diff** —
+the v0.3.30 observability work paid for itself five times. Detail:
+`memory/round_log_overnight_0727.md`.
 
-- **"Newest direct" can be the dead one.** The patch preferred the newest direct
-  connection because "a half-open connection is almost always an older one".
-  Observed live contradicting that: a connection that had just served 3
-  consecutive requests was passed over for a newer one that silently swallowed
-  every send. Fix uses a signal the crate ALREADY tracks —
-  `pending_outbound_responses` is inserted on send and removed on response, so an
-  answering connection drains it and a half-open one only accumulates. Selection
-  is now *fewest un-answered, tie-break newest*, which preserves the DCUtR
-  newest-wins behaviour the old rule existed for. No new state, no API change.
-- **Retraction alone is futile — the blacklist is REQUIRED.** Retracting a stale
-  holder claim does not survive the retry: the DHT still advertises the holder,
-  so the retry's assembly (especially one waiting on DHT results, per .32)
-  re-learns the claim and picks the same dead peer. Live: 6 retractions per
-  request, failing twice identically. Now a holder reporting missing data is
-  blacklisted for that request id (`request_holder_blacklist`, same lifetime as
-  `active_traces`), so the retry MUST choose otherwise. After: 3 retractions, one
-  round, accurate "No node available" instead of a repeated peer-specific error.
+- **A retried request killed BOTH attempts and evicted a healthy worker.**
+  `responses` was keyed by `request_id`, which is NOT unique across *attempts*
+  (retry, hedge). The retry's insert dropped the original's channel; the
+  original's cleanup then removed the retry's. Reported as `worker closed
+  connection mid-generate` while the subprocess was fine. Gotcha **#180**.
+- **Long prompts could not succeed on modest nodes at all.**
+  `FIRST_TOKEN_TIMEOUT` was flat 120s, sized for *generation*, ignoring
+  *prefill* — which scales with the prompt. Measured 285s for 613 tokens on a
+  6-core CPU. Live: `122s→error` became `306s→ok`. Now sized by the real
+  tokenizer (a chars/token guess under-budgets CJK ~2.5x and we ship 21
+  locales). Gotcha **#181**.
+- **Two LAN peers could mutually forget each other permanently.** Re-dial fired
+  only for a mid-pipeline or never-identified peer; a *registered but idle* peer
+  was dropped with nothing to bring it back, and re-discovery needs the peer to
+  ANNOUNCE itself (restart-only). Restarting the peer → 13s; leaving it up →
+  never; restarting the local node → 6s, which is what localised it to
+  in-process state. **ONE attempt only** — backoff still open in FUTURE_WORK.
+- **Shard downloads stream** instead of buffering a whole range in RAM (closes
+  the tester-confirmed "0-byte .tmp for ~25s"; byte-identical output verified).
+- **Delete/prune guards protected only the FIRST shard of a segment.** A segment
+  spans several, so the rest could be yanked mid-request.
+  `ModelRegistry::shards_spanned_by_segment` is now the one answer to "which
+  shards does this segment read", used by both guards, the retraction path and
+  diagnostics.
+- **Scheduler priced routes on the wrong signals** (three defects): an
+  unmeasured candidate cost **zero**, so on a cold node routes tied and vertex
+  iteration order decided — and an unknown node outranked a measured-good one;
+  the **local node was never measured** (`observed_latency_ms_per_layer`
+  hardcoded `None`), so local compute was free at any width; and network was
+  charged once per *segment* when a split pays it once per *token*.
 
-**The .31 retraction scope fix was also confirmed live** — `shard=0,1,2` all
-retracted for a 0..16 span, including shard 2 (the actually-missing one). The
-buggy version logged only `shard=0`.
+**Partial-range routing exists but is OFF** (`inference.parallax_partial_ranges`).
+A node holding every shard is otherwise the only representable route, so a local
+GPU holding the head can't contribute — but the split measured **slower**
+(~12.0s vs ~10.2s median). One gap remains: the observed-latency branch reuses a
+mid-chain `ms_per_layer` (which includes per-pass RTT) for the delegated
+whole-model alternative, overcharging it ~2.7x. Needs two distinct recorded
+figures; the `remote_generate` fast path records nothing today. Full reasoning +
+the two invalid-A/B traps in `docs/FUTURE_WORK.md`.
 
-### v0.3.33-alpha (2026-07-26): a relay that looked direct won every send
+### v0.3.30 – v0.3.34 (07-26) — one line each; detail in the round logs
 
-**Read gotcha #179 before touching connection selection.** Two nodes on the SAME
-subnet reproducibly failed `remote-generate: peer never acknowledged` while a
-healthy direct QUIC connection sat unused. `connection_is_relayed` tested for
-`Protocol::P2pCircuit`, which catches an OUTBOUND relay dial but NOT the inbound
-one: when a peer dials *us* through a relay the remote address is a bare
-`/p2p/<peer>` with **no transport component at all**. Counted as direct, and
-being newest it won outright → every send crossed a failing circuit → **silent
-drop** (no response, no `OutboundFailure`) until the 10s ACK sweep. Fix: direct
-requires a real transport (`Ip4|Ip6|Dns*|Tcp|Udp`) AND no circuit hop; `None`
-stays direct. **Affects any NAT'd user.** 31s timeout → 8.6s.
-
-**Diagnostic worth reusing**: `grep "connection established peer_id=<peer>"
-node.log | grep -oE "remote_addr=[^ ]+" | sort | uniq -c`
-
-Also: `sched_ms` charged a failed attempt to scheduling (derived from dequeue, so
-a retry reported 13s for two ~0ms assemblies — pointing the DIAGNOSTICS symptom
-table the wrong way). Now the caller's measured assembly time, summed, with
-`assemblies=N` on retry.
-
-### v0.3.31 / v0.3.32-alpha (2026-07-26)
-
-**.32 — first request after a restart failed outright.** Holder claims are
-rebuilt from gossip and a full re-announce is only every ~40 min
-(`shard_announce_counter % 10` × ~240s), so a freshly started node on a quiet
-swarm knew no holders; the DHT provider query was fire-and-forget (its own
-comment said "first request for a model may miss the cache"). `assemble_awaiting_dht`
-now grants `DHT_ASSEMBLY_GRACE` (1.5s / 250ms polls), gated on
-`assembly_failed_for_lack_of_holders` so ONLY that failure waits. Reproduced
-independently twice. Anyone who tried SwarmLLM, errored on their first question
-and concluded it was broken was likely hitting this.
-
-**.31 — stale shard-holder claims now self-correct.**
-`pipeline::remote_error_means_missing_shard` recognises the ShardReader
-missing-region error, the holder's claims over the failed **layer span** are
-dropped, and `is_transient_remote_failure` retries with a fresh assembly.
-**Scoping is the part not to undo**: the first version used `segment.shard_id`,
-but a segment spans several shards and that field is only the first — live, a
-whole-model segment failing on `blk.10` (shard 2) retracted **shard 0**, which
-the holder genuinely had. Now every shard overlapping the failed span loses its
-claim; over-broad on purpose, since the holder's next announce re-asserts truth.
-Also fixed `route=relayed` on a directly-connected peer
-(`peer_reachable_via_relay` is an *eligibility* check; now keyed on
-`connected_node_ids`) and the long-standing `kv_cache::restore_skips_expired_sessions`
-flake (`save_to_db` also skips expired sessions, so a >1s stall vs the 1s TTL made
-the SAVE return 0 and the *first* assert fail).
-
-### v0.3.30-alpha (2026-07-26): observability, and a weight-tied serving bug
-
-One `RequestTrace` (`inference/trace.rs`) feeds every surface — `DIAG: request
-complete`, `x-swarm-*` + W3C `Server-Timing` headers,
-`/api/admin/{diagnostics,performance}`, OTel-named Prometheus histograms,
-serving-side counters, chat route line + Models→Performance panel, hourly redb
-rollups. **The finding**: nearly all of it was already measured and thrown away —
-`hedge_tracker` had held per-(model, segment, holder) EWMA latency *with variance*
-since R136 with **zero readers**. Genuinely missing was server-side **TTFT**
-(existed only in `cli/bench.rs`, client-side). **TTFT is stamped by the token
-CHANNEL** (`StreamingTokenTx` newtype) because tokens leave from seven sites.
-Also: **weight-tied models were unservable from a node lacking shard 0** —
-`tied_output_weight.bin` had three writers and zero readers (gotcha #178).
-
-**Three decisions not to undo** (reasoning in `docs/FUTURE_WORK.md`
-§ Observability, marked SHIPPED):
-1. **Prometheus carries `(route, outcome)` ONLY** — 20 series, fixed. Per-peer is
-   ~5 000 series *per node*; it lives in the pulled JSON endpoint.
-2. **Headers flush before the body**, so SSE cannot carry TTFT/decode. Omitted,
-   not zeroed — asserted by a test.
-3. **"Tok/s per node per shard" is NOT measurable in a pipeline.** Segments are
-   serialised on the *same* token stream. Use each segment's *share of inter-token
-   latency* (these sum → finds the bottleneck) and *ms per layer per token*.
-
-Detail: `memory/round_log_observability_0726.md`.
+- **v0.3.34**: connection selection is now *fewest un-answered, tie-break newest*
+  (`pending_outbound_responses` was a signal the crate already tracked). And
+  **retraction alone is futile — the blacklist is REQUIRED**: the DHT re-advertises
+  a retracted holder, so a retry re-learns the claim and picks the same dead peer.
+- **v0.3.33**: **read gotcha #179 before touching connection selection.** A relay
+  carrying an INBOUND connection is a bare `/p2p/<peer>` with **no transport
+  component at all**, so `connection_is_relayed` counted it as direct and — being
+  newest — it won every send, silently dropping them. Affects any NAT'd user;
+  31s→8.6s. Diagnostic worth reusing: `grep "connection established peer_id=<peer>"
+  node.log | grep -oE "remote_addr=[^ ]+" | sort | uniq -c`.
+- **v0.3.32**: first request after a restart failed outright — holder claims come
+  from gossip and a full re-announce is ~40min, so a fresh node knew no holders
+  while the DHT query was fire-and-forget. `assemble_awaiting_dht` grants a 1.5s
+  grace, gated so ONLY that failure waits.
+- **v0.3.31**: stale shard-holder claims self-correct. **Scoping is the part not
+  to undo** — a segment spans several shards and `segment.shard_id` is only the
+  first, so retraction must cover every shard overlapping the failed *span*
+  (v0.3.35 generalised this into `shards_spanned_by_segment`).
+- **v0.3.30**: one `RequestTrace` (`inference/trace.rs`) feeds every surface —
+  DIAG line, `x-swarm-*` + `Server-Timing` headers, admin endpoints, Prometheus,
+  hourly redb rollups. **The finding was that nearly all of it was already
+  measured and thrown away.** TTFT is stamped by the token CHANNEL
+  (`StreamingTokenTx`) because tokens leave from seven sites. Three decisions not
+  to undo: Prometheus carries `(route, outcome)` ONLY; headers flush before the
+  body so SSE cannot carry TTFT; **"tok/s per node per shard" is NOT measurable
+  in a pipeline** — use each segment's share of inter-token latency. Also fixed:
+  weight-tied models were unservable from a node lacking shard 0 (gotcha #178).
 
 ### Recent releases (one line each; full detail in CHANGELOG.md + `memory/round_log_*.md`)
 
