@@ -151,7 +151,7 @@ libp2p 0.56, axum 0.8, candle-core/candle-transformers 0.10 (CUDA), redb 4, ed25
 
 ## Testing
 
-- 1365 lib tests passing + 9 ignored (env-var-gated real-model + manual smoke), 79 integration tests in `tests/integration/` + 2 ignored end-to-end (`cargo test --test integration_phase10_11 -- --ignored`), 2 repo-consistency, 26 in `swarmllm-types` (`cargo test -p swarmllm-types` — NOT covered by a bare `cargo test` from the root), 6 in the vendored request-response patch (`cargo test --manifest-path vendor/libp2p-request-response/Cargo.toml --lib` — the crate is workspace-`exclude`d, and its own integration tests need `libp2p-swarm-test` so use `--lib`), clippy clean. Microbench: `cargo run --release --no-default-features --features dev,claude-subscription --example swarm_spec_bench` (R136 — measures all 4 SWARM-SPEC layer primitives + synthetic cascade hit-rate). Local-cluster bench: `examples/3node_setup.sh` (boots 3 daemons) + `examples/3node_inference_bench.sh` (runs 3 workloads × 3 trials and prints tok/s + swarm_spec metrics). Sharded variant: `examples/3node_sharded_setup.sh` (forced distributed pipeline; writes its own per-node config disabling auto-manage and bootstrap so the split survives). **Its inference step is EXPECTED to fail on a single multi-interface host** — that is the zero-redundancy same-host case documented in `docs/FUTURE_WORK.md` § "Connection churn on multi-interface hosts", not a distributed-inference regression (confirmed on released v0.3.28, 2026-07-26). Validate the forward path on two real machines. Both scripts take `SWARM_BENCH_MODEL`. **Pinned reference models for cross-swarm comparison: `docs/REFERENCE_MODELS.md`** (smoke / standard / stress tiers + `examples/fetch_reference_model.sh` to opt in).
+- 1369 lib tests passing + 9 ignored (env-var-gated real-model + manual smoke), 79 integration tests in `tests/integration/` + 2 ignored end-to-end (`cargo test --test integration_phase10_11 -- --ignored`), 2 repo-consistency, 26 in `swarmllm-types` (`cargo test -p swarmllm-types` — NOT covered by a bare `cargo test` from the root), 6 in the vendored request-response patch (`cargo test --manifest-path vendor/libp2p-request-response/Cargo.toml --lib` — the crate is workspace-`exclude`d, and its own integration tests need `libp2p-swarm-test` so use `--lib`), clippy clean. Microbench: `cargo run --release --no-default-features --features dev,claude-subscription --example swarm_spec_bench` (R136 — measures all 4 SWARM-SPEC layer primitives + synthetic cascade hit-rate). Local-cluster bench: `examples/3node_setup.sh` (boots 3 daemons) + `examples/3node_inference_bench.sh` (runs 3 workloads × 3 trials and prints tok/s + swarm_spec metrics). Sharded variant: `examples/3node_sharded_setup.sh` (forced distributed pipeline; writes its own per-node config disabling auto-manage and bootstrap so the split survives). **Its inference step is EXPECTED to fail on a single multi-interface host** — that is the zero-redundancy same-host case documented in `docs/FUTURE_WORK.md` § "Connection churn on multi-interface hosts", not a distributed-inference regression (confirmed on released v0.3.28, 2026-07-26). Validate the forward path on two real machines. Both scripts take `SWARM_BENCH_MODEL`. **Pinned reference models for cross-swarm comparison: `docs/REFERENCE_MODELS.md`** (smoke / standard / stress tiers + `examples/fetch_reference_model.sh` to opt in).
 - Unit tests: in-module `#[cfg(test)]` blocks
 - Integration tests: `tests/integration/` — multi-node simulations with `--test-threads=1`
 - Real-model spawn-and-infer test: set `SWARMLLM_TEST_MODEL_DIR` to a fully-populated model directory (e.g. `~/.local/share/swarmllm/models/tinyllama-1.1b-...`) and run `cargo test --test integration_phase10_11 -- --ignored end_to_end`. No synthetic GGUF fixture is committed; see `docs/ARCHITECTURE.md` § Deferred Items.
@@ -192,58 +192,64 @@ When spawning subagents in this repo, use these model picks (overrides defaults 
 
 ## Status
 
-All 20 build phases complete. All subsystems wired — no stubs. **1365 lib + 79 integration + 2 repo-consistency + 26 swarmllm-types tests passing**; 9 lib + 2 e2e ignored (env-var or manual). Clippy clean default + features dev,claude-subscription + `--features llama`.
+All 20 build phases complete. All subsystems wired — no stubs. **1369 lib + 79 integration + 2 repo-consistency + 26 swarmllm-types tests passing**; 9 lib + 2 e2e ignored (env-var or manual). Clippy clean default + features dev,claude-subscription + `--features llama`.
 
 Per-round history lives in `~/.claude/projects/-home-user-SwarmLLM/memory/round_log_*.md` and the CHANGELOG; `docs/ARCHITECTURE.md` is the canonical architecture. This section keeps only the current release line plus one-line prior-round pointers.
 
-### Latest — v0.3.37-alpha (2026-07-27): privacy on by default, and three shipped crashes
+### Latest — v0.3.38-alpha (2026-07-27): idle VRAM was never actually reclaimed
 
-Driven by an external report plus follow-on investigation. Detail:
-`memory/round_log_overnight_0727.md`, `docs/FUTURE_WORK.md`.
+External report: two model-workers resident on an 8GB card **2h16 past the last
+request** with `idle_unload_secs = 300`, on a node that then hit GPU-OOM.
 
-- **`swarmllm chat --model X` panicked** — confirmed in the RELEASED .36 binary.
-  clap compares the INNER value type of same-named args; the global `--model` is
-  `Option<PathBuf>` and subcommand ones are `String`. Renaming the clap *id* does
-  NOT fix it — the types must agree. `data_dir`/`gpu_layers` share names too but
-  same inner type, so they were never affected.
-- **A wrong-sized shard hid forever** — `daemon/startup.rs` recorded us as a
-  HOLDER on `shard_path.exists()` alone, no size check, while every loader
-  rejected the file. The node saw no gap, so nothing re-downloaded, and peers
-  could be routed to us for a shard we could not serve.
-  `quarantine_shard_if_size_mismatch` moves it aside; the usual path repairs it.
-- **Requests outlived their clients** — detection relied on the transport
-  reporting a close, which never happens if a machine dies or a firewall drops
-  the flow. TCP keepalive added (60s idle, ~90s detection); the platform default
-  is 2h. Cannot time-bound instead — that would undo the .35 prefill budget.
-- **Encrypted pipeline could not route against a whole-model peer.** Not broken
-  in general (it works when a peer's range aligns with the gap) — but a peer
-  holding a SUPERSET offers one indivisible range that can be neither a middle
-  segment nor a remote encrypted end. Partial ranges now auto-enable under
-  encryption: it is multi-segment BY CONSTRUCTION, so there is no
-  single-delegation alternative being sacrificed.
-- **Prompt privacy is ON by default where the node holds both ends**
-  (`encrypted_pipeline_auto`). Cannot be unconditional — without both ends there
-  is no legal route. `SharedState::encrypted_pipeline_for` is now the ONE answer
-  to "is privacy on for this model" (router + both admin endpoints).
-- **One-step enable**: button + `swarmllm privacy <model>` fetch the needed
-  shards. Deliberately sets NO flag — auto-on handles it, avoiding a window where
-  the flag is on but shards have not landed.
-- **Worker verbosity**: `-v` never reached the model-worker subprocess, so the
-  inference hot path was undebuggable and a `debug!` added there was invisible.
+`try_idle_vram_unload` has TWO gates. The idle one passed; the second refuses to
+unload while regional demand >= `IDLE_DEMAND_EMA_THRESHOLD = 0.1`, and the two
+reported models sat *just* over it (`llama-3.2-3b` BE 0.167 / TH 0.126,
+`qwen2.5-coder-7b` BE 0.107). So the reprieve applied indefinitely and
+`idle_unload_secs` never meant anything for them.
 
-**Encryption naming was genuinely confusing** and is now corrected in docs:
-`enable_encryption` protects the WIRE (the peer decrypts and reads
-`RemoteGenerateRequest { prompt: String }` — your actual text);
-`encrypted_pipeline` protects the COMPUTE boundary. The dashboard already
-reserved "end-to-end" for the latter while README/docs used it for the former.
+**Why the gate exists** — `ModelTrustInfo::record_request` (which sets
+`last_request_at`) is called ONLY from the outbound router path
+(`distributed_exec.rs`); serving a peer never updates it. Without the gate a node
+would evict models it was actively serving. But regional demand says nothing
+about whether requests reach THIS node.
 
-**Ragged batching: measured on GPU, NOT worth building.** RTX 3070, 3B fully on
-CUDA: batch 1/2/4 → 24.6 / 27.0 / 30.2 tok/s. 4x work, 23% throughput — same as
-CPU. Three measurement traps recorded in FUTURE_WORK (prefix cache inflates,
-varying prompt length measures the sequential fallback, background load gives 3x
-variance).
+Fix: the reprieve expires at `IDLE_HARD_UNLOAD_MULTIPLIER` (12x) the configured
+window — 1h at the 5-min default. **Better fix, not done**: track last-served-at
+and use `max(last_request_at, last_served_at)`, which lets the demand proxy go
+entirely — needs a per-model timestamp (`record_segment_served` is aggregate and
+carries no model id). In `docs/FUTURE_WORK.md`.
 
-### v0.3.30 – v0.3.36 (07-26→27) — one line each; detail in the round logs
+Gotcha caught by its own test: `idle_unload_secs as i64` wraps a huge configured
+window NEGATIVE, inverting the check so it unloads immediately rather than never.
+Use `try_from`.
+
+**v0.3.37 verified live by the external tester** — orphaned shard quarantined
+with exact byte counts; zombie decode cancelled in ~3s (was 5-6 min); encrypted
+pipeline assembling `local(0,3) -> peer(3,21) -> local(21,28)`, the exact chain
+the unit test predicted, and the same boomerang confirmed running across the
+internet with `was_tensor_forward=true` per response.
+
+**Private mode left ON from an earlier A/B skewed candidate sets** (mine — see
+`round_log_overnight_0727.md`). It restricts OUTBOUND inference to pool+LAN, and
+lives in the DB via `/api/pool/private-mode`, NOT config.toml or the logs — so
+grepping those finds nothing. With it off, `candidates_count` went 2 -> 3 and the
+scheduler baseline for `llama-3.2-1b` is ~6.1s (a fast internet peer), not the
+~10.2s measured against the LAN CPU alone. **Re-measured**: with partial ranges
+ON the router now DECLINES to split (`segs=1`), which is the per-token network
+term working as intended.
+
+### v0.3.30 – v0.3.37 (07-26→27) — one line each; detail in the round logs
+
+- **v0.3.37**: three shipped bugs from an external report — `swarmllm chat
+  --model X` panicked (clap compares INNER value types of same-named args;
+  renaming the id does NOT fix it, gotcha **#183**); a wrong-sized shard was
+  registered as HELD because `daemon/startup.rs` checks only `exists()`, so
+  nothing re-downloaded it (**#184**); requests outlived dead clients (TCP
+  keepalive, ~90s). **Privacy**: on by default where the node holds both ends;
+  `encrypted_pipeline_for` is the ONE answer; one-step enable via button +
+  `swarmllm privacy <model>`. **"End-to-end encrypted" named two different
+  guarantees** — wire vs compute boundary (**#185**). **Ragged batching measured
+  on GPU: NOT worth building** — 4x work, 23% throughput.
 
 - **v0.3.36**: the dashboard rate-limited ITSELF on load — `ws-ticket` shared a
   5/min bucket (keyed `(ip, BucketKind)`) with cloud-provider probes, so the

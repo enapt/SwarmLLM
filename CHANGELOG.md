@@ -2,6 +2,31 @@
 
 All notable changes to SwarmLLM are documented here.
 
+## [0.3.38-alpha] — 2026-07-27
+
+### Fixed
+
+- **Graphics memory is now actually reclaimed when a model goes idle.** A model
+  left loaded on the card could stay there indefinitely despite the idle
+  timeout — reported with two models still resident two hours and sixteen
+  minutes after their last request, on a machine that then ran out of graphics
+  memory.
+
+  Unloading requires two things: no recent request, and no sign the wider
+  network wants the model. The second had no upper bound, so any model the
+  network was even mildly interested in was kept forever and the idle timeout
+  never meant anything for it. Both reported models sat only just over that
+  line.
+
+  That second check exists for a reason — work done for a peer does not count as
+  a request, only ones this machine makes do, so without it a machine could drop
+  a model it was busy serving. But interest measured across the network says
+  nothing about whether anyone is asking *this* machine. The reprieve now
+  expires: past twelve times the configured idle window — one hour at the
+  default — memory is reclaimed regardless. Long enough that a model in real use
+  is never dropped mid-use, short enough that an unused one cannot hold a card
+  all day.
+
 ## [0.3.37-alpha] — 2026-07-27
 
 ### Fixed
