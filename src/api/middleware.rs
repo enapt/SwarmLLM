@@ -121,10 +121,14 @@ enum BucketKind {
 
 /// Requests per minute for sensitive key-management endpoints.
 const SENSITIVE_ADMIN_RPM: u64 = 5;
-/// Requests per minute for provider health polling. Covers the dashboard's
-/// 30s default cadence with headroom for a user who shortens it, while still
-/// bounding how fast we can be made to call out to cloud providers.
-const PROVIDER_HEALTH_RPM: u64 = 6;
+/// Requests per minute for provider health polling.
+///
+/// Budgets are keyed by client IP, not by browser tab, so this has to cover
+/// **every dashboard open on one machine at once** — which is ordinary usage.
+/// At the 30s default cadence each tab costs 2/min, so a value of 6 was exactly
+/// three tabs and started refusing at the third. 20 leaves room for around ten
+/// while still bounding how fast we can be made to call out to cloud providers.
+const PROVIDER_HEALTH_RPM: u64 = 20;
 /// Requests per minute for WebSocket ticket issuance. Generous enough for a
 /// dashboard that reconnects a few times (each reconnect needs a fresh ticket),
 /// tight enough that a token holder cannot flood the ticket map.
@@ -959,6 +963,21 @@ mod tests {
             limiter.try_acquire(ip, "/api/admin/provider-model-status", false),
             "model probes must survive health polling"
         );
+    }
+
+    /// Budgets are per IP, not per tab, and having several dashboards open on
+    /// one machine is ordinary. Each costs 2/min at the default cadence.
+    #[test]
+    fn several_dashboard_tabs_on_one_machine_all_poll_successfully() {
+        let limiter = RateLimiter::new(200, 200);
+        let ip: IpAddr = "127.0.0.1".parse().unwrap();
+        // Six tabs, one poll each within the same minute.
+        for tab in 0..6 {
+            assert!(
+                limiter.try_acquire(ip, "/api/admin/provider-health", false),
+                "tab {tab} should be able to poll"
+            );
+        }
     }
 
     /// Health polling still calls out to cloud providers, so it stays bounded.
