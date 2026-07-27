@@ -272,6 +272,19 @@ impl PipelineExecutor {
                             // otherwise re-learn the claim and pick it again.
                             self.shared_state
                                 .blacklist_holder_for_request(request_id, &segment.node_id);
+                        } else if crate::inference::router::message_means_peer_cannot_serve(e) {
+                            // The peer holds the shards but cannot run them — its
+                            // worker failed to start, died, or dropped the
+                            // connection. Retracting its claims would be wrong,
+                            // the data really is there; but the retry must not
+                            // come straight back to it. Without this the retry
+                            // re-picked the same broken peer and the request
+                            // failed twice: observed 2026-07-27 as `assemblies=2`
+                            // with the same node id on both attempts, after a
+                            // node whose binary had been replaced underneath it
+                            // lost the ability to start any worker at all.
+                            self.shared_state
+                                .blacklist_holder_for_request(request_id, &segment.node_id);
                         }
                         self.shared_state.streaming_token_txs.remove(&request_id);
                         return Err(SwarmError::Inference(e.clone()));

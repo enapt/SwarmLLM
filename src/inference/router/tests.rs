@@ -292,3 +292,24 @@ fn peer_unavailable_is_kept_out_of_the_transient_classifier() {
         "peer never acknowledged the request".into()
     )));
 }
+
+/// The coordinator matches a peer's failure as TEXT off the wire, while the
+/// retry decision matches a typed error. Both go through one predicate, so a
+/// message that triggers the retry must also bar the peer from it — otherwise
+/// the retry re-picks the node that just failed, which is what happened live
+/// (`assemblies=2`, same node id both times).
+#[test]
+fn the_retry_and_the_blacklist_agree_on_what_counts() {
+    use crate::error::SwarmError;
+    let wire_message = "Service unavailable: worker closed connection mid-generate";
+    assert!(super::message_means_peer_cannot_serve(wire_message));
+    assert!(super::remote_peer_could_not_serve(&SwarmError::Inference(
+        wire_message.to_string()
+    )));
+
+    // A peer failing for a reason of its own is not barred: retrying elsewhere
+    // would not have helped and the node is still good for later segments.
+    assert!(!super::message_means_peer_cannot_serve(
+        "Validation error: max_tokens must be positive"
+    ));
+}

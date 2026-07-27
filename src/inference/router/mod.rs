@@ -78,7 +78,17 @@ pub use types::{
 /// caller pairs this with evidence that a remote segment was actually involved.
 fn remote_peer_could_not_serve(err: &SwarmError) -> bool {
     matches!(err, SwarmError::ServiceUnavailable(_))
-        || err.to_string().contains("Service unavailable")
+        || message_means_peer_cannot_serve(&err.to_string())
+}
+
+/// String-level half of [`remote_peer_could_not_serve`].
+///
+/// A peer's failure reaches us as text on the wire, not as a typed error, so
+/// the coordinator matches on the message when deciding to bar that peer from
+/// the retry. Both sides go through this one predicate so the retry decision
+/// and the blacklist cannot disagree about what counts.
+pub(crate) fn message_means_peer_cannot_serve(msg: &str) -> bool {
+    msg.contains("Service unavailable")
 }
 
 fn is_transient_remote_failure(err: &SwarmError) -> bool {
