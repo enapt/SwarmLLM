@@ -1266,6 +1266,69 @@ Relevant because greedy decoding is what tool calling, benchmarks and
 reproducible runs use, so it is over-represented in exactly the traffic testers
 generate.
 
+## Two crashes from the cross-node prefix-KV attempt (external report 2026-07-27)
+
+Both reported mid-sequence rather than from a clean start, so neither is isolated
+yet. Recording the analysis because the error shapes narrow them considerably.
+
+### A — `attn_norm: shape mismatch in rms-norm [1, 128] [3072]`
+
+Seen after the scheduler moved this node's local role from layers [0,12) to
+[21,28) — tail-only — and the worker reloaded on CPU following a GPU OOM.
+
+**The shapes name the fault.** 3072 is llama-3.2-3b's hidden size; 128 is
+`prefill_chunk_tokens`. So the tensor entering `attn_norm` is `[batch=1,
+seq=128]` — **token ids**, not hidden states, which would be `[1, 128, 3072]`.
+A segment that does not start at layer 0 correctly skips embedding
+(`is_first = self.tok_embeddings.is_some()`, and the loader only loads the
+embedding table when `is_first`), so raw ids went straight into layer 21.
+
+It also came from `BatchGenerate`, i.e. a **full generate**, not a layer-forward.
+A generate hands the worker a prompt and expects it to run the whole model — but
+this worker held only the tail. That should be impossible.
+
+**Where to look first.** `router/batch.rs` chooses local vs distributed on:
+
+```rust
+let is_split_mode = shared_state.config.inference.shard_range.is_some();
+let model_loaded = shared_state.model_loaded.load(Ordering::Acquire);
+if model_loaded && !is_split_mode { execute_local_batch(..) } else { .. }
+```
+
+Neither term establishes that **this model** is fully held locally.
+`is_split_mode` reads a CONFIG option, and `model_loaded` is a single global
+`AtomicBool` — not per-model. A node holding a partial shard set for a model, with
+no `shard_range` configured and some model loaded, can therefore take the local
+path and dispatch a whole-model generate to a partial worker.
+
+**Repro to confirm**: configure a local segment of last-only (e.g. layers
+[21,28)) with `gpu_layers = 0` from a clean start, no OOM or reschedule in the
+history, and send one request.
+
+### B — `unexpected rank, expected: 1, got: 2 ([20, 3072])` at first-token sampling
+
+Occurred on the second of two identical ~1600-token prompts, immediately after a
+confirmed cross-node prefix-KV fetch (`kind="prefix_kv_data"`). So the transfer
+mechanism works; consumption is what breaks.
+
+3072 is again the hidden size, so `[20, 3072]` is **20 positions of hidden state**
+reaching a sampler that wants a single vector. That is the "logits at every
+position" shape not being reduced to the last position. The likely site is the
+path that prefills only the *suffix* after a cache hit — when the prefill covers
+fewer positions than the full prompt, whatever selects "the last row" has to be
+indexed against the suffix, not the whole sequence. 20 matches neither
+`block_tokens=64` nor `min_tokens=32`, which is consistent with it being a
+suffix length rather than a configured size.
+
+**Repro to confirm**: send a prompt once to a node that already holds prefix-KV
+for it from a *separate earlier run*, so the crash is reached on a first request
+with no prior state in the same process.
+
+### Consequence for the checklist
+
+Cross-node prefix-KV sharing (the README's 12.9x TTFT claim) moves from
+"not tested" to "tested, blocked by B". Neither confirmed nor refuted.
+
 ### Idle VRAM unload: the region-demand reprieve had no ceiling (fixed 2026-07-27)
 
 Reported externally: `qwen2.5-coder-7b` and `llama-3.2-3b` model-workers resident
