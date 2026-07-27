@@ -526,3 +526,46 @@ been firing on every request for several releases. `build_prompt_with_model`
 falling back at all is a bug report, not a safety net: the fallbacks
 (gemma/vicuna/llava/ChatML) exist for models that ship no template, and any
 model that DOES ship one should be rendering it.
+
+## Timeouts: bound what actually varies
+
+A fixed deadline is only correct when the work behind it has a fixed size.
+Where it does not, the constant silently becomes a **minimum-capability
+requirement for the user** that nobody chose deliberately. Five instances were
+found in one night (2026-07-27, gotcha #190):
+
+- `UPDATE_DOWNLOAD_TIMEOUT_SECS = 300` against a ~933 MB GPU build required a
+  sustained ~3.1 MB/s. Anyone slower could **never** complete an update.
+- `HF_DOWNLOAD_TIMEOUT_SECS = 3600` required ~145 KB/s for a 512 MB shard.
+- `INFERENCE_FORWARD_TIMEOUT_SECS = 120` capped a question forwarded to a peer
+  regardless of prompt length.
+- `PROVIDER_PROXY_TIMEOUT_SECS = 300` was documented as being about time to the
+  first token but enforced on the whole exchange, cutting off cloud replies that
+  were still streaming.
+- `REQUEST_TIMEOUT_SECS = 300` capped every HTTP request, generation included —
+  and so silently capped the prompt-scaled first-token budget at 300s no matter
+  what it was raised to.
+
+Rules that follow:
+
+1. **Prefer an inactivity timeout to a total one.** `reqwest`'s `read_timeout`
+   (0.12+) catches a stalled transfer just as fast while leaving a slow healthy
+   one alone, and requires no guess about size or bandwidth. Use it for every
+   download and every streamed proxy response.
+2. **Where inactivity does not apply, scale the budget by the input and cap it** —
+   `pipeline::remote_generate::first_token_timeout(prompt_tokens)` is the shared
+   helper; call it rather than inventing another rule. Prefill is linear in
+   prompt length and is ~99% of a long request.
+3. **Generation gets no blanket deadline.** Routes that can run a model are
+   merged into the router OUTSIDE the `TimeoutLayer` (`generation_routes` in
+   `api/server.rs`). The merge MUST stay before the auth layer or those
+   endpoints answer without a key — pinned by
+   `generation_routes_still_require_a_key`.
+4. **When you change a limit, grep the whole path for other limits.** A budget
+   is only as generous as the tightest ceiling above it, and that ceiling is
+   usually in another file, in middleware, behind a comment that went stale
+   before the code did.
+5. **Read the comment against the code.** In four of the five, the comment
+   reasoned about one quantity ("before the first token") while the constant
+   bounded another (the total). A stale comment asserting an invariant reads as
+   verification and stops anyone re-deriving it.
