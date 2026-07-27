@@ -1108,6 +1108,19 @@ reported accurately for the first time. The `shard_id` hazard below is resolved:
 segments are re-pointed at the first shard their range covers, and every consumer
 needing the full span goes through `ModelRegistry::shards_spanned_by_segment`.
 
+**Consequence found 2026-07-27 (external report):** `inference.encrypted_pipeline`
+is **non-functional while this is off**. Encryption forces first and last segments
+local, so the middle must come from a peer — and a peer holding the whole model
+has one indivisible range that can be neither a middle segment nor a remote
+encrypted source/sink. A tester found `encrypted_pipeline = true` unable to
+assemble in either topology tried, including the nominal boomerang (local holds
+head + tail, peer holds the middle). Proven to be this and not a separate defect
+by `encrypted_boomerang_is_unroutable_without_partial_ranges`, which fails to
+route with partial ranges off and produces the correct
+local(0,3) → peer(3,21) → local(21,28) chain with them on. So this option is not
+only a throughput question — it gates a shipped privacy feature, which raises the
+priority of closing the cost-model gap below.
+
 **It is off because measurement contradicted the prediction in this section.**
 The claim above — that the cost model "would have chosen correctly if asked"
 (~643ms split vs ~1715ms whole) — was wrong, because it compared the cost of ONE

@@ -399,6 +399,15 @@ pub struct InferenceConfig {
     /// remotely with no per-token network. Measured on a LAN pair (local GPU +
     /// 6-core CPU, 16-token replies): 11.2s → 17.8s and 3.2s → 5.9s.
     ///
+    /// **`encrypted_pipeline` does not work without this.** Encryption forces the
+    /// first and last segments onto the local node, so the middle must come from
+    /// a peer — but a peer holding the whole model has only one indivisible
+    /// range covering everything, which can be neither a middle segment nor (being
+    /// remote) an encrypted source or sink. An external report on 2026-07-27 found
+    /// `encrypted_pipeline = true` unable to assemble a pipeline in either topology
+    /// tested, including the nominal boomerang; that is this, not a separate bug.
+    /// Pinned by `encrypted_boomerang_is_unroutable_without_partial_ranges`.
+    ///
     /// The cost model in `scheduler/parallax.rs` charges a remote hop's network
     /// cost ONCE per segment, so it cannot see that penalty and will keep
     /// choosing the split. Enabling this is only sensible once that per-token

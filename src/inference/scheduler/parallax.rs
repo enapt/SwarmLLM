@@ -586,6 +586,48 @@ mod tests {
         );
     }
 
+    /// External report 2026-07-27, Finding 4: `encrypted_pipeline = true` could
+    /// not assemble a pipeline in EITHER tested topology, including the nominal
+    /// boomerang (local holds first and last, peer holds the middle).
+    ///
+    /// It is the same root cause as the whole-model monopolisation above.
+    /// Encryption forces source and sink to be local, so the middle must come
+    /// from a peer — but a peer holding the ENTIRE model has only the vertex
+    /// (0, N), which can be neither a middle segment nor (being remote) a source
+    /// or sink. With ranges indivisible there is no chain at all.
+    #[test]
+    fn encrypted_boomerang_is_unroutable_without_partial_ranges() {
+        let local = NodeId([1u8; 32]);
+        // Local holds the head and the tail, not the middle.
+        let mut head = cand(1, vec![(0, 3)], 0, 0.0, true, false, 0.0);
+        head.node_id = local.clone();
+        let mut tail = cand(1, vec![(21, 28)], 0, 0.0, false, true, 0.0);
+        tail.node_id = local.clone();
+        // A peer holds the whole model.
+        let peer = cand(2, vec![(0, 28)], 5, 0.0, true, true, 0.0);
+
+        let cands = vec![head, tail, peer];
+        assert!(
+            route_shortest_path(28, &cands, &local, true, false).is_err(),
+            "reproduces the reported failure: no route with ranges indivisible"
+        );
+
+        // And the fix: let the peer serve part of its range.
+        let segs = route_shortest_path(28, &cands, &local, true, true)
+            .expect("partial ranges must make the boomerang routable");
+        assert_eq!(
+            segs.len(),
+            3,
+            "expected local head, peer middle, local tail: {segs:?}"
+        );
+        assert_eq!(segs[0].node_id, local);
+        assert_eq!(segs[0].layer_range, (0, 3));
+        assert_ne!(segs[1].node_id, local, "the middle must be the peer");
+        assert_eq!(segs[1].layer_range, (3, 21));
+        assert_eq!(segs[2].node_id, local);
+        assert_eq!(segs[2].layer_range, (21, 28));
+    }
+
     /// With partial ranges OFF — the shipped default — routing must be exactly
     /// what it was before they existed: the whole-model holder takes everything.
     /// This is the behaviour the default protects, because a multi-segment chain
