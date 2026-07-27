@@ -310,9 +310,18 @@ pub fn resolve_by_name(name: &str, config: &ProvidersConfig) -> Option<ProviderI
     }
 }
 
-/// Total HTTP timeout for proxied provider requests. Tuned for reasoning
-/// models (DeepSeek R1, etc.) that can take 60-120s before the first token.
-const PROVIDER_PROXY_TIMEOUT_SECS: u64 = 300;
+/// How long a proxied provider request may go SILENT before we give up.
+///
+/// This was a *total* request timeout of 300s, while its reasoning was about
+/// time to the first token ("reasoning models can take 60-120s before the first
+/// token"). Those are different quantities, and the total is the one that
+/// breaks: a streamed answer that keeps arriving normally was cut off at five
+/// minutes, which a long agentic turn with extended thinking reaches easily.
+///
+/// An inactivity timeout is the right shape — an upstream that has stopped
+/// responding is caught just as fast, while an upstream still sending tokens is
+/// left alone however long the answer runs.
+const PROVIDER_PROXY_READ_TIMEOUT_SECS: u64 = 300;
 /// TCP connect timeout for proxied provider requests.
 const PROVIDER_PROXY_CONNECT_SECS: u64 = 30;
 
@@ -371,9 +380,11 @@ impl reqwest::dns::Resolve for PrivateIpBlockingResolver {
 /// Lazily-initialized shared reqwest client for provider proxying.
 static PROVIDER_CLIENT: std::sync::LazyLock<reqwest::Client> = std::sync::LazyLock::new(|| {
     crate::http::build_client(|b| {
-        b.timeout(std::time::Duration::from_secs(PROVIDER_PROXY_TIMEOUT_SECS))
-            .connect_timeout(std::time::Duration::from_secs(PROVIDER_PROXY_CONNECT_SECS))
-            .dns_resolver(std::sync::Arc::new(PrivateIpBlockingResolver))
+        b.read_timeout(std::time::Duration::from_secs(
+            PROVIDER_PROXY_READ_TIMEOUT_SECS,
+        ))
+        .connect_timeout(std::time::Duration::from_secs(PROVIDER_PROXY_CONNECT_SECS))
+        .dns_resolver(std::sync::Arc::new(PrivateIpBlockingResolver))
     })
 });
 
