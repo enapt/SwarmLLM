@@ -2,6 +2,46 @@
 
 All notable changes to SwarmLLM are documented here.
 
+## [Unreleased]
+
+### Fixed
+
+- **A node no longer stays broken after being updated.** Replacing the program
+  file while a node is running left it unable to start any inference at all —
+  every request failed with "spawn worker: No such file or directory". Because
+  the node kept offering its model pieces to the network, other people's
+  requests were still routed to it, so it failed those too. A node updated in
+  place could sit failing everything until somebody restarted it.
+
+  Linux marks a running program whose file has been replaced, and that marked
+  name was being used as a real path. Installing an update and upgrading the
+  package both replace the file this way. The self-update was affected too: it
+  would have downloaded to a file named after the marker and left the real
+  program untouched. The node now recognises the marker, keeps working, and
+  says once that it should be restarted to finish switching over.
+
+- **A node that shares part of a model no longer breaks its own chat.** A node
+  holding a whole model *and* also serving a slice of that same model to peers
+  could answer its own requests using the slice by mistake, failing with an
+  internal error instead of a reply. Which copy got used came down to internal
+  ordering, so a node could work for hours and begin failing only after it took
+  on a second role — reported as a crash when serving a tail slice, and not
+  reproducible from a clean start.
+
+  Two checks disagreed: one asked whether any complete copy was present, the
+  other then fetched whichever copy came first. Looking up the copy now requires
+  it to be complete. Reported as two separate crashes, which turned out to be
+  this one cause seen from either end.
+
+- **A broken node no longer takes your request down with it.** If the node
+  chosen to run part of a request could not start its model, the request failed
+  there — even with other nodes holding the same model and ready to serve. Such
+  a failure is now retried against a different node.
+
+- **A clearer message when a node is asked for work it only holds part of a
+  model for.** This used to fail deep in the maths with an unreadable error
+  about tensor shapes. It now says plainly that the request needs the pipeline.
+
 ## [0.3.38-alpha] — 2026-07-27
 
 ### Fixed
