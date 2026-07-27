@@ -64,6 +64,23 @@ pub use types::{
 /// the same dead peer. Observed live 2026-07-26 doing exactly that, failing
 /// twice with the identical error. If nothing else can serve the shard the
 /// retry fails with "no node available", which is the accurate message.
+/// Did a REMOTE peer tell us it could not serve the request?
+///
+/// A peer whose model worker is dead, cannot be spawned, or dropped the
+/// connection reports `ServiceUnavailable` — "this server cannot serve" — which
+/// is exactly the case where another holder should be tried. It was treated as
+/// terminal, so a single peer with a broken worker failed every request routed
+/// to it. Observed live: `Service unavailable: spawn worker: No such file or
+/// directory` from a third-party node, `assemblies=1`, no second attempt.
+///
+/// Deliberately NOT part of [`is_transient_remote_failure`]: the same wording
+/// arises when OUR OWN worker fails, and retrying that just fails twice. The
+/// caller pairs this with evidence that a remote segment was actually involved.
+fn remote_peer_could_not_serve(err: &SwarmError) -> bool {
+    matches!(err, SwarmError::ServiceUnavailable(_))
+        || err.to_string().contains("Service unavailable")
+}
+
 fn is_transient_remote_failure(err: &SwarmError) -> bool {
     let msg = err.to_string();
     msg.contains("never acknowledged")
@@ -897,7 +914,13 @@ impl InferenceRouter {
                 trace.clone(),
             )
             .await;
-            if matches!(&output, Err(e) if is_transient_remote_failure(e)) {
+            // A peer reporting it cannot serve is retryable too, but only when
+            // a remote segment was actually part of this attempt — otherwise the
+            // identical message from our own worker would retry pointlessly.
+            let used_remote_segment = trace.snapshot().remote_segments() > 0;
+            if matches!(&output, Err(e) if is_transient_remote_failure(e)
+                || (used_remote_segment && remote_peer_could_not_serve(e)))
+            {
                 tracing::warn!(
                     request_id = %request.id,
                     error = %output.as_ref().err().unwrap(),

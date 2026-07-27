@@ -239,3 +239,56 @@ fn default_batch_config() {
     assert_eq!(config.inference.max_batch_size, 1);
     assert_eq!(config.inference.batch_timeout_ms, 50);
 }
+
+// --- retry classification -------------------------------------------------
+//
+// A peer whose worker is broken reports `ServiceUnavailable`. That must be
+// retryable against a different holder, but ONLY when a remote segment was
+// actually involved — the identical wording from our own worker is terminal.
+
+#[test]
+fn peer_service_unavailable_is_retryable() {
+    use crate::error::SwarmError;
+    // Observed live from a third-party node: a worker binary that could not be
+    // spawned. `assemblies=1` — the request failed with no second attempt.
+    let err = SwarmError::ServiceUnavailable("spawn worker: No such file or directory".into());
+    assert!(super::remote_peer_could_not_serve(&err));
+
+    // Also matches when the peer's message arrives already stringified through
+    // the network layer rather than as a typed variant.
+    let relayed =
+        SwarmError::Inference("Service unavailable: worker closed connection mid-generate".into());
+    assert!(super::remote_peer_could_not_serve(&relayed));
+}
+
+#[test]
+fn ordinary_failures_are_not_treated_as_peer_unavailable() {
+    use crate::error::SwarmError;
+    // Our own bug: retrying cannot help, and charging a peer would be wrong.
+    assert!(!super::remote_peer_could_not_serve(&SwarmError::Internal(
+        "shape mismatch in rms-norm".into()
+    )));
+    // Bad input: identical on every retry.
+    assert!(!super::remote_peer_could_not_serve(
+        &SwarmError::Validation("max_tokens must be positive".into())
+    ));
+    assert!(!super::remote_peer_could_not_serve(
+        &SwarmError::ModelNotAvailable(ModelId("llama-3.2-1b".into()))
+    ));
+}
+
+#[test]
+fn peer_unavailable_is_kept_out_of_the_transient_classifier() {
+    use crate::error::SwarmError;
+    // `is_transient_remote_failure` is consulted without knowing whether the
+    // attempt used a remote segment, so it must NOT match on wording our own
+    // worker also produces. The remote-only case is gated separately by the
+    // caller on `trace.remote_segments() > 0`.
+    let err = SwarmError::ServiceUnavailable("spawn worker: No such file or directory".into());
+    assert!(!super::is_transient_remote_failure(&err));
+
+    // The genuinely remote-only signals stay matched.
+    assert!(super::is_transient_remote_failure(&SwarmError::Inference(
+        "peer never acknowledged the request".into()
+    )));
+}
