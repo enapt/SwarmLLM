@@ -15,8 +15,18 @@ pub const SWARMLLM_GITHUB_REPO: &str = "enapt/SwarmLLM";
 
 /// HTTP timeout for update-check requests (small GitHub API call).
 const UPDATE_CHECK_TIMEOUT_SECS: u64 = 15;
-/// HTTP timeout for the update-download request (binary transfer).
-const UPDATE_DOWNLOAD_TIMEOUT_SECS: u64 = 300;
+/// How long the update download may go SILENT before we give up.
+///
+/// This was a *total* timeout of 300s, which quietly decided the minimum
+/// connection speed a user needs to update at all: the GPU build is ~933 MB, so
+/// finishing inside five minutes takes a sustained ~3.1 MB/s. Anyone slower
+/// than that could never complete an update — it would fail at the same point
+/// every time, with no indication that speed was the reason. The size cap was
+/// raised to 2 GB for exactly these binaries without revisiting the clock.
+///
+/// Measuring silence instead bounds a download that has genuinely stalled while
+/// letting a slow but healthy one finish, however long it takes.
+const UPDATE_DOWNLOAD_STALL_SECS: u64 = 120;
 /// Delay between daemon start and the first update check — lets the rest of
 /// the node finish initializing before we touch the network.
 const UPDATE_STARTUP_DELAY_SECS: u64 = 30;
@@ -32,7 +42,7 @@ static UPDATE_DOWNLOAD_CLIENT: std::sync::LazyLock<reqwest::Client> =
     std::sync::LazyLock::new(|| {
         crate::http::build_client(|b| {
             b.user_agent(concat!("SwarmLLM/", env!("CARGO_PKG_VERSION")))
-                .timeout(std::time::Duration::from_secs(UPDATE_DOWNLOAD_TIMEOUT_SECS))
+                .read_timeout(std::time::Duration::from_secs(UPDATE_DOWNLOAD_STALL_SECS))
         })
     });
 

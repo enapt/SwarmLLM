@@ -22,8 +22,14 @@ const BYTE_RANGE_COALESCE_GAP: u64 = 4 * 1024 * 1024;
 const HF_CONNECT_TIMEOUT_SECS: u64 = 15;
 /// HTTP total timeout for metadata/probe requests.
 const HF_METADATA_TIMEOUT_SECS: u64 = 120;
-/// HTTP total timeout for large shard downloads (up to 1 hour).
-const HF_DOWNLOAD_TIMEOUT_SECS: u64 = 3600;
+/// How long a shard download may go SILENT before we give up.
+///
+/// Was a *total* one-hour timeout, which sets an implicit minimum connection
+/// speed: a 512 MB shard has to average ~145 KB/s to finish inside it, and a
+/// user below that could never complete the download no matter how many times
+/// they retried. Measuring silence bounds a stalled transfer without punishing
+/// a slow one. Per-shard backoff already handles a source that keeps failing.
+const HF_DOWNLOAD_STALL_SECS: u64 = 120;
 
 /// Shared HTTP client for metadata/search/probe requests (short timeout).
 static HF_META_CLIENT: std::sync::LazyLock<reqwest::Client> = std::sync::LazyLock::new(|| {
@@ -37,7 +43,7 @@ static HF_META_CLIENT: std::sync::LazyLock<reqwest::Client> = std::sync::LazyLoc
 static HF_DOWNLOAD_CLIENT: std::sync::LazyLock<reqwest::Client> = std::sync::LazyLock::new(|| {
     crate::http::build_client(|b| {
         b.connect_timeout(std::time::Duration::from_secs(HF_CONNECT_TIMEOUT_SECS))
-            .timeout(std::time::Duration::from_secs(HF_DOWNLOAD_TIMEOUT_SECS))
+            .read_timeout(std::time::Duration::from_secs(HF_DOWNLOAD_STALL_SECS))
     })
 });
 
