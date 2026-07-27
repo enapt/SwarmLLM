@@ -386,6 +386,27 @@ pub struct InferenceConfig {
     /// revert to pure greedy.
     #[serde(default = "default_parallax_routing")]
     pub parallax_routing: bool,
+
+    /// Let the router use PART of a node's shard range, so a node holding the
+    /// whole model can serve just the tail while another node serves the head.
+    ///
+    /// **Default off, because it is currently a net loss on the topology it was
+    /// measured on.** Without it, a node holding every shard is the only
+    /// representable route for that model, so a local GPU holding the first
+    /// shards cannot contribute at all. With it the split happens correctly —
+    /// but a multi-segment chain exchanges activations once **per token**,
+    /// whereas a single remote segment is delegated in one message and decodes
+    /// remotely with no per-token network. Measured on a LAN pair (local GPU +
+    /// 6-core CPU, 16-token replies): 11.2s → 17.8s and 3.2s → 5.9s.
+    ///
+    /// The cost model in `scheduler/parallax.rs` charges a remote hop's network
+    /// cost ONCE per segment, so it cannot see that penalty and will keep
+    /// choosing the split. Enabling this is only sensible once that per-token
+    /// term exists, or for measuring a topology where the compute saving is
+    /// large enough to pay for the round trips — a very slow sole holder, or a
+    /// prefill-dominated request, where prefill is one large forward pass.
+    #[serde(default)]
+    pub parallax_partial_ranges: bool,
 }
 
 fn default_parallax_routing() -> bool {
@@ -825,6 +846,7 @@ impl Default for InferenceConfig {
             decentralized_spec_decoding: false,
             activation_compression: default_activation_compression(),
             parallax_routing: default_parallax_routing(),
+            parallax_partial_ranges: false,
         }
     }
 }

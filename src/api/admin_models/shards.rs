@@ -167,7 +167,17 @@ pub async fn delete_shard(
             .value()
             .segments
             .iter()
-            .any(|seg| seg.shard_id.model_id == mid && seg.shard_id.index == shard_index)
+            // `seg.shard_id` names only the FIRST shard of the segment; a
+            // segment spanning several would leave the others unguarded and let
+            // this delete pull a file out from under a live token loop.
+            .any(|seg| {
+                seg.shard_id.model_id == mid
+                    && shared
+                        .model_registry
+                        .shards_spanned_by_segment(seg)
+                        .iter()
+                        .any(|s| s.index == shard_index)
+            })
     });
     if in_use {
         return Err(ApiError(crate::error::SwarmError::ServiceUnavailable(

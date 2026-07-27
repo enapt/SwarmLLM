@@ -636,7 +636,12 @@ pub(super) async fn execute_request(
                     seg.node_id.clone(),
                     seg.layer_range.0,
                     seg.layer_range.1,
-                    vec![seg.shard_id.index],
+                    shared_state
+                        .model_registry
+                        .shards_spanned_by_segment(seg)
+                        .into_iter()
+                        .map(|s| s.index)
+                        .collect(),
                     !shared_state.connected_node_ids.contains(&seg.node_id),
                 )
             },

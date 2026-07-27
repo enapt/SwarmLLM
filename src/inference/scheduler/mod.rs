@@ -240,7 +240,13 @@ impl PipelineScheduler {
         // enabled; fall back to greedy on any failure (disjoint ranges, no
         // valid source/sink, etc.) so routing never regresses below greedy.
         let raw_segments = if self.shared_state.config.inference.parallax_routing {
-            match parallax::route_shortest_path(num_layers, &candidates, local_node_id, encrypted) {
+            match parallax::route_shortest_path(
+                num_layers,
+                &candidates,
+                local_node_id,
+                encrypted,
+                self.shared_state.config.inference.parallax_partial_ranges,
+            ) {
                 Ok(segs) => {
                     tracing::debug!(
                         model = %model_id,
@@ -265,7 +271,26 @@ impl PipelineScheduler {
         // Merge contiguous segments on the same node into a single segment.
         // This avoids sending multiple LayerForward messages to the same node
         // when it handles its full layer range in one forward pass.
-        let segments = Self::merge_contiguous(raw_segments);
+        let mut segments = Self::merge_contiguous(raw_segments);
+
+        // Re-point each segment's `shard_id` at the first shard its layer range
+        // actually covers. Candidates carry only their FIRST shard id, so a
+        // segment serving a later part of a range would otherwise be labelled
+        // with shard 0 — which it may not even hold. Applied here, after both
+        // the parallax and greedy paths have converged, so neither can skip it.
+        // Consumers needing the full span still go through
+        // `ModelRegistry::shards_spanned_by_segment`.
+        for seg in &mut segments {
+            if let Some(first) = self
+                .shared_state
+                .model_registry
+                .shards_overlapping_layers(&seg.shard_id.model_id, seg.layer_range)
+                .into_iter()
+                .min_by_key(|s| s.index)
+            {
+                seg.shard_id = first;
+            }
+        }
 
         // Identify standby nodes for each segment
         let standbys = self.find_standbys(&segments, &candidates);

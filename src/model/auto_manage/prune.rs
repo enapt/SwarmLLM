@@ -127,7 +127,15 @@ impl AutoShardManager {
         for entry in self.shared_state.active_pipelines.iter() {
             for seg in &entry.value().segments {
                 if seg.node_id == local_node_id {
-                    active_pipeline_shards.insert(seg.shard_id.clone());
+                    // Every shard the segment reads, not just its first —
+                    // otherwise prune can evict a shard mid-inference.
+                    for shard_id in self
+                        .shared_state
+                        .model_registry
+                        .shards_spanned_by_segment(seg)
+                    {
+                        active_pipeline_shards.insert(shard_id);
+                    }
                 }
             }
         }

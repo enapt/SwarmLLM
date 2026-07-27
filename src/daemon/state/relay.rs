@@ -198,22 +198,10 @@ impl super::SharedState {
         layer_range: (u32, u32),
         reason: &str,
     ) {
-        let Some(manifest) = self.model_registry.get_manifest(model_id) else {
-            return;
-        };
-        let overlapping: Vec<crate::types::ShardId> = manifest
-            .shards
-            .iter()
-            .filter(|s| {
-                // Half-open ranges: [a,b) overlaps [c,d) iff a < d && c < b.
-                s.layer_range.0 < layer_range.1 && layer_range.0 < s.layer_range.1
-            })
-            .map(|s| crate::types::ShardId {
-                model_id: model_id.clone(),
-                index: s.index,
-            })
-            .collect();
-        for shard_id in overlapping {
+        for shard_id in self
+            .model_registry
+            .shards_overlapping_layers(model_id, layer_range)
+        {
             self.retract_shard_holder_claim(&shard_id, holder, reason);
         }
     }

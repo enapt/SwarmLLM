@@ -291,6 +291,56 @@ impl ModelRegistry {
         self.manifests.get(model_id).map(|v| v.clone())
     }
 
+    /// Shard ids whose layer ranges overlap `layer_range`.
+    ///
+    /// **This is the answer to "which shards does a pipeline segment actually
+    /// touch?", and it is not `segment.shard_id`.** That field holds a single
+    /// shard — the first one of the candidate that served the segment — while a
+    /// segment routinely spans several. Reading it as though it named the whole
+    /// span has already caused one bug: a segment failing on `blk.10` (shard 2)
+    /// retracted shard 0, which the holder genuinely had. Sub-range routing
+    /// makes multi-shard segments the normal case rather than an edge case, so
+    /// every consumer that needs the span must come through here.
+    ///
+    /// Returns an empty Vec when the manifest is unknown; callers guarding a
+    /// destructive operation must treat that as "cannot prove it is unused"
+    /// rather than as "unused".
+    pub fn shards_overlapping_layers(
+        &self,
+        model_id: &ModelId,
+        layer_range: (u32, u32),
+    ) -> Vec<crate::types::ShardId> {
+        let Some(manifest) = self.get_manifest(model_id) else {
+            return Vec::new();
+        };
+        manifest
+            .shards
+            .iter()
+            // Half-open ranges: [a,b) overlaps [c,d) iff a < d && c < b.
+            .filter(|s| s.layer_range.0 < layer_range.1 && layer_range.0 < s.layer_range.1)
+            .map(|s| crate::types::ShardId {
+                model_id: model_id.clone(),
+                index: s.index,
+            })
+            .collect()
+    }
+
+    /// Shards a pipeline segment actually reads. Falls back to the segment's own
+    /// `shard_id` when the manifest is unknown, so a caller never sees an empty
+    /// span for a segment that is demonstrably executing.
+    pub fn shards_spanned_by_segment(
+        &self,
+        segment: &swarmllm_types::PipelineSegment,
+    ) -> Vec<crate::types::ShardId> {
+        let spanned =
+            self.shards_overlapping_layers(&segment.shard_id.model_id, segment.layer_range);
+        if spanned.is_empty() {
+            vec![segment.shard_id.clone()]
+        } else {
+            spanned
+        }
+    }
+
     /// Resolve a manifest for a loaded model by trying slug, display name, and manifest name field.
     pub fn resolve_manifest_by_name(&self, display_name: &str) -> Option<ModelManifest> {
         let slug = crate::types::slugify_model_name(display_name);
