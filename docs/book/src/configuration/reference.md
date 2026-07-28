@@ -34,7 +34,8 @@ Every configuration option, organized by section.
 
 | Option | Type | Default | Description |
 |---|---|---|---|
-| `bootstrap_peers` | list | `[]` | Peer addresses to connect on startup |
+| `bootstrap_peers` | list | built-in anchor | Peer addresses to dial on startup. An empty list means "not configured" and falls back to the built-in anchors |
+| `disable_default_bootstrap` | boolean | `false` | Genuinely start with no bootstrap peers (private / air-gapped swarm). Implied by `node.anchor_mode` |
 | `enable_mdns` | boolean | `true` | LAN peer discovery |
 | `gossip_network_id` | string | none | Custom network ID for private networks |
 | `peer_exchange` | boolean | `true` | Share peer lists with connected nodes |

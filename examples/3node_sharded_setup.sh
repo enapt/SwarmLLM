@@ -105,9 +105,12 @@ done
 #   prerequisite and not actually applied, so the script did not do what it
 #   claimed — observed 2026-07-26: node B had both shards within 30s.)
 #
-#   bootstrap_peers = [] — keeps the cluster to itself. With the defaults these
-#   nodes join the public swarm, learn shard holders from it, and can schedule
-#   a segment onto a node that is not part of the test.
+#   bootstrap_peers = [] + disable_default_bootstrap = true — keeps the cluster
+#   to itself. With the defaults these nodes join the public swarm, learn shard
+#   holders from it, and can schedule a segment onto a node that is not part of
+#   the test. The second line is load-bearing: an empty list on its own falls
+#   back to the built-in anchors, because that is what a pre-2026-07-21 config
+#   looks like and those nodes must not be stranded.
 for label in a b c; do
     cat > /tmp/swarm_bench_$label/config.toml <<'CFG'
 [auto_manage]
@@ -115,6 +118,7 @@ enabled = false
 
 [network]
 bootstrap_peers = []
+disable_default_bootstrap = true
 CFG
 done
 

@@ -11,6 +11,10 @@ anchor_mode = true          # no inference; no models; dashboard bound to loopba
 
 [network]
 bootstrap_peers = []        # the anchor IS the bootstrap — don't dial itself
+disable_default_bootstrap = true  # and mean it: an empty list alone falls back
+                            # to the built-in anchors (see network.rs). Implied
+                            # by anchor_mode above; stated here so this file
+                            # still does the right thing if that is ever unset.
 enable_relay = true         # serve as a relay for NAT'd peers — the anchor's main job
 # Max simultaneous relay circuits. Default 16 is fine for bootstrapping; raise it
 # if this anchor should serve many CGNAT peers at once (each open circuit uses

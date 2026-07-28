@@ -16,11 +16,13 @@ max_bandwidth_mbps = 0         # 0 = unlimited
 [network]
 # Bootstrap peers: one or more publicly-reachable "anchor" nodes new nodes
 # dial on startup to join the network before decentralized discovery kicks in.
-# Empty by default — LAN nodes find each other via mDNS, and once enough
-# publicly-reachable nodes exist the DHT self-bootstraps. To seed a public
-# network, add your anchor's multiaddr(s), e.g. (see docs/NETWORKING.md):
+# Defaults to the project's built-in anchor, so a fresh install joins the public
+# swarm with no configuration. To seed your own network instead, list your
+# anchor's multiaddr(s) (see docs/NETWORKING.md):
 #   bootstrap_peers = ["/dns4/anchor.example.net/tcp/8810/p2p/12D3KooW...your-anchor-peer-id..."]
-bootstrap_peers = []
+# An empty list is treated as "not configured" and falls back to the built-ins.
+# To genuinely run with none — a private or air-gapped swarm — say so:
+#   disable_default_bootstrap = true
 enable_relay = true
 enable_relay_client = true
 max_peers = 200

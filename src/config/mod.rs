@@ -298,6 +298,29 @@ impl Config {
             config.network.bootstrap_peers = cli_bootstrap;
         }
 
+        // An empty bootstrap list means "not configured", not "no peers".
+        //
+        // Every config written before 2026-07-21 contains `bootstrap_peers = []`
+        // because the daemon serialised it there when an empty list WAS the
+        // default. Those users did not opt out of anything — and once the
+        // built-in anchor landed, an explicit `[]` silently outranked it
+        // (a serde default only fills a MISSING key), so the node started with
+        // no bootstrap peers, no way to reach the DHT, and an empty peer list
+        // with nothing saying why. Reads as "the update broke my networking".
+        //
+        // Runs after the env/CLI overrides so an explicitly supplied list still
+        // wins; both of those already ignore an empty value, so reaching here
+        // with an empty list means nothing anywhere asked for one.
+        let opted_out = config.network.disable_default_bootstrap || config.node.anchor_mode;
+        if config.network.bootstrap_peers.is_empty() && !opted_out {
+            config.network.bootstrap_peers = network::default_bootstrap_peers();
+            tracing::info!(
+                count = config.network.bootstrap_peers.len(),
+                "No bootstrap peers configured — using the built-in anchors. \
+                 Set network.disable_default_bootstrap = true to run without any."
+            );
+        }
+
         // 5. Auto-detect WSL2 and apply safe network defaults — but ONLY in the
         // default NAT networking mode. In mirrored mode the VM shares the host's
         // interfaces and is a first-class LAN citizen (real IP, working QUIC /
@@ -596,6 +619,93 @@ api_key = "test-key-abc"
 "#;
         let config: Config = toml::from_str(toml_str).unwrap();
         assert_eq!(config.api.api_key.as_deref(), Some("test-key-abc"));
+    }
+
+    /// The legacy-config case this normalisation exists for. Every config the
+    /// daemon wrote before 2026-07-21 carries `bootstrap_peers = []`, which an
+    /// explicit-value-beats-serde-default rule made outrank the built-in
+    /// anchors — stranding the node with no way to find the swarm.
+    #[test]
+    fn empty_bootstrap_list_falls_back_to_the_built_in_anchors() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[network]\nbootstrap_peers = []\n").unwrap();
+
+        let config = Config::load_or_create(Some(&path), None, None, None, None, vec![]).unwrap();
+        assert!(
+            !config.network.bootstrap_peers.is_empty(),
+            "an empty list must be treated as unconfigured, not as opting out"
+        );
+        assert!(config
+            .network
+            .bootstrap_peers
+            .iter()
+            .any(|p| p.contains("swarmllm.duckdns.org")));
+    }
+
+    /// ...but saying so explicitly must still work, or a private/air-gapped
+    /// swarm silently starts dialling the public anchors.
+    #[test]
+    fn disable_default_bootstrap_really_means_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "[network]\nbootstrap_peers = []\ndisable_default_bootstrap = true\n",
+        )
+        .unwrap();
+
+        let config = Config::load_or_create(Some(&path), None, None, None, None, vec![]).unwrap();
+        assert!(config.network.bootstrap_peers.is_empty());
+    }
+
+    /// An anchor IS the bootstrap; making it dial itself is the one case the
+    /// shipped `deploy/anchor/config.toml` was guarding against with `[]`.
+    #[test]
+    fn anchor_mode_does_not_get_the_default_anchors() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "[node]\nanchor_mode = true\n\n[network]\nbootstrap_peers = []\n",
+        )
+        .unwrap();
+
+        let config = Config::load_or_create(Some(&path), None, None, None, None, vec![]).unwrap();
+        assert!(config.network.bootstrap_peers.is_empty());
+    }
+
+    /// An explicitly configured list must survive untouched — the normalisation
+    /// runs after the env/CLI overrides precisely so it cannot clobber one.
+    #[test]
+    fn an_explicit_bootstrap_list_is_left_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "[network]\nbootstrap_peers = [\"/ip4/10.0.0.1/tcp/8810\"]\n",
+        )
+        .unwrap();
+
+        let config = Config::load_or_create(Some(&path), None, None, None, None, vec![]).unwrap();
+        assert_eq!(
+            config.network.bootstrap_peers,
+            vec!["/ip4/10.0.0.1/tcp/8810"]
+        );
+
+        // And a CLI list still wins over a file that had none.
+        let path2 = dir.path().join("empty.toml");
+        std::fs::write(&path2, "[network]\nbootstrap_peers = []\n").unwrap();
+        let cli = Config::load_or_create(
+            Some(&path2),
+            None,
+            None,
+            None,
+            None,
+            vec!["/ip4/10.0.0.2/tcp/8810".to_string()],
+        )
+        .unwrap();
+        assert_eq!(cli.network.bootstrap_peers, vec!["/ip4/10.0.0.2/tcp/8810"]);
     }
 
     #[test]

@@ -14,6 +14,23 @@ use serde::{Deserialize, Serialize};
 pub struct NetworkConfig {
     #[serde(default = "default_bootstrap_peers")]
     pub bootstrap_peers: Vec<String>,
+    /// Genuinely run with NO bootstrap peers, rather than falling back to the
+    /// built-in anchors.
+    ///
+    /// This exists because `bootstrap_peers = []` cannot mean "no peers": every
+    /// config written before 2026-07-21 has that line, put there by the daemon
+    /// itself when an empty list WAS the default. Those nodes are not opting
+    /// out of anything — they were saved that way — and after the built-in
+    /// anchor landed they became permanently unable to find the swarm, with an
+    /// empty peer list and nothing explaining why. An empty list is therefore
+    /// treated as "not configured" and falls back to the built-ins; say so here
+    /// to actually mean it.
+    ///
+    /// Implied by `node.anchor_mode` — an anchor IS the bootstrap and must not
+    /// dial itself. Set it for a private or air-gapped swarm that must never
+    /// contact the public anchors.
+    #[serde(default)]
+    pub disable_default_bootstrap: bool,
     #[serde(default = "default_true")]
     pub peer_exchange: bool,
     #[serde(default = "default_true")]
@@ -153,8 +170,10 @@ fn default_listen_address() -> String {
 /// takes over. DNS form so the entry survives a host IP change (the anchor keeps
 /// its DuckDNS record pointed at its current IP). A dead anchor is harmless — the
 /// dial just fails and the node falls back to mDNS/DHT. Override with an explicit
-/// `bootstrap_peers` in config (an empty list opts out entirely).
-fn default_bootstrap_peers() -> Vec<String> {
+/// `bootstrap_peers` in config; to run with none at all set
+/// `disable_default_bootstrap = true`, because an empty list means "not
+/// configured" (see that field for why).
+pub(super) fn default_bootstrap_peers() -> Vec<String> {
     vec![
         // DNS form (primary, portable across a host IP change — requires the
         // swarm's DNS transport, wired via `.with_dns()` in the manager).
@@ -288,6 +307,7 @@ impl Default for NetworkConfig {
     fn default() -> Self {
         Self {
             bootstrap_peers: default_bootstrap_peers(),
+            disable_default_bootstrap: false,
             peer_exchange: true,
             enable_relay: true,
             enable_relay_client: true,
