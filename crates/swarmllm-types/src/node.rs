@@ -58,6 +58,19 @@ pub struct NodeCapability {
     /// Used by the scheduler as a speed tie-breaker.
     #[serde(default)]
     pub est_tokens_per_sec_7b: f32,
+    /// Operating-system family this node runs on — `linux` | `windows` |
+    /// `macos` | other `std::env::consts::OS` value.
+    ///
+    /// Display and filtering only; nothing routes on it. Deliberately the OS
+    /// *family* and not a version or build string: the leaderboard wants "what
+    /// kind of machines make up this network", and a precise OS build is
+    /// fingerprinting material that would be gossiped to every peer forever
+    /// for no functional gain.
+    ///
+    /// `#[serde(default)]` → `None` from a node predating the field, which
+    /// renders as "unknown" rather than being guessed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub os: Option<String>,
     /// Snapshot of the sender's observed per-layer latency EMA for other
     /// peers. Lets newly-joining nodes bootstrap Parallax routing from
     /// gossiped foreign observations instead of waiting for their own

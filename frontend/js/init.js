@@ -354,6 +354,11 @@
 
     // Leaderboard
     on('btn-refresh-leaderboard', 'click', function() { App.identity.loadLeaderboard(); });
+    // Filters re-render from the cached entries — no refetch, so switching is
+    // instant and does not hammer the endpoint.
+    ['lb-filter-accel', 'lb-filter-os', 'lb-filter-region'].forEach(function(id) {
+      on(id, 'change', function() { App.identity.renderLeaderboard(); });
+    });
 
     // Escape key + Tab focus trap
     document.addEventListener('keydown', function(e) {

@@ -356,6 +356,8 @@ impl HealthMonitor {
         };
 
         let cap = crate::types::NodeCapability {
+            // OS family only — see the field docs on why not a version string.
+            os: Some(std::env::consts::OS.to_string()),
             node_id: node_id.clone(),
             gpu: gpu_info,
             ram_total_mb,
@@ -402,6 +404,11 @@ impl HealthMonitor {
             },
         };
 
+        // Keep a copy before it goes on the wire, so local surfaces can show
+        // this node using exactly what peers are told about it.
+        self.shared_state
+            .local_capability
+            .store(Some(std::sync::Arc::new(cap.clone())));
         let msg = NetworkCommand::Broadcast(SwarmMessage::NodeCapabilityUpdate(cap));
         if let Err(e) = self.network_tx.send(msg).await {
             tracing::debug!(error = %e, "DIAG: failed to broadcast capability update");

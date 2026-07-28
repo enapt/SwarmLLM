@@ -149,6 +149,41 @@ fn is_leaderboard_eligible(first_seen: u64, verified_tx_count: u32, peer_count: 
     age_days >= MIN_LIFETIME_DAYS && verified_tx_count >= MIN_VERIFIED_TRANSACTIONS
 }
 
+/// Public, display-only summary of a node's hardware and standing.
+///
+/// Everything here is already broadcast to the whole network in
+/// `NodeCapability` — this surfaces what peers are told anyway, it does not
+/// widen what is shared. Deliberately omits anything that would narrow a node
+/// to a person or machine: no addresses, no OS build strings, no disk layout.
+///
+/// Every field is optional and renders as "unknown" when absent rather than
+/// being guessed, because a node that predates a field must not be shown a
+/// fabricated value (the 2026-07-21 report chased an invented `+2500` balance
+/// that was never a ledger figure).
+fn capability_summary(cap: Option<&crate::types::NodeCapability>) -> serde_json::Value {
+    let Some(c) = cap else {
+        return serde_json::json!({ "known": false });
+    };
+    serde_json::json!({
+        "known": true,
+        "gpu": c.gpu.as_ref().map(|g| serde_json::json!({
+            "name": g.name,
+            "vram_mb": g.vram_total_mb,
+        })),
+        // The single field a "GPU or CPU?" filter keys on, so the frontend
+        // never has to re-derive it from a nullable nested object.
+        "accelerator": if c.gpu.is_some() { "gpu" } else { "cpu" },
+        "os": c.os.clone(),
+        "region": c.region.clone(),
+        "ram_total_mb": c.ram_total_mb,
+        "est_tokens_per_sec_7b": c.est_tokens_per_sec_7b,
+        "uptime_seconds": c.uptime_seconds,
+        "version": c.version,
+        "shards_hosted": c.hosted_shards.len(),
+        "relay_capable": c.relay_capable,
+    })
+}
+
 /// GET /api/identity/leaderboard?limit=50 — top N peers by credits.
 ///
 /// Shows all peers on small networks. On large networks (20+), applies anti-spoofing
@@ -182,6 +217,8 @@ pub async fn leaderboard(
         "tier": self_tier,
         "trust_score": 1.0,
         "eligible": true,
+        "is_self": true,
+        "capability": capability_summary(state.shared_state.local_capability.load().as_deref()),
     }));
 
     // Add known peers — use gossiped credit balances when available
@@ -218,6 +255,8 @@ pub async fn leaderboard(
             "tier": balance.map(crate::credit::priority::PriorityCalculator::tier_name),
             "trust_score": peer.trust_score,
             "eligible": true,
+            "is_self": false,
+            "capability": capability_summary(peer.capability.as_ref()),
         }));
     }
 

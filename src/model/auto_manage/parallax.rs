@@ -392,6 +392,7 @@ mod tests {
                     version: "0.1.0".into(),
                     region: None,
                     est_tokens_per_sec_7b: 50.0,
+                    os: None,
                     observed_latencies: vec![],
                     relay_capable: false,
                     protocol_version: 0,

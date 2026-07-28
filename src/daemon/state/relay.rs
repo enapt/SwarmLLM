@@ -784,6 +784,7 @@ mod tests {
             version: String::new(),
             region: None,
             est_tokens_per_sec_7b: 0.0,
+            os: None,
             observed_latencies: vec![],
             relay_capable,
             protocol_version: 0,

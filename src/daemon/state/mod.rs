@@ -337,6 +337,14 @@ pub struct SharedState {
     /// Anything asking "is this model in use?" MUST consult this as well as
     /// `active_pipelines`, or it is only asking about half the node's work.
     pub serving_models: DashMap<crate::types::ModelId, ServingState>,
+    /// The most recent `NodeCapability` this node broadcast about itself.
+    ///
+    /// The HealthMonitor builds one every tick and sends it straight to the
+    /// network, so nothing local could answer "what do we advertise about
+    /// ourselves?" — the leaderboard could describe every peer's hardware but
+    /// not our own. Retained here purely so this node can be rendered on the
+    /// same footing as everyone else.
+    pub local_capability: arc_swap::ArcSwapOption<crate::types::NodeCapability>,
     /// Hourly performance rollups, persisted so a trend survives a restart.
     /// Aggregates only — per-request detail stays in `recent_traces`, in memory.
     pub perf_history: perf_history::PerfHistory,
@@ -709,6 +717,7 @@ impl SharedState {
             recent_traces: std::sync::Mutex::new(std::collections::VecDeque::new()),
             active_traces: DashMap::new(),
             serving_models: DashMap::new(),
+            local_capability: arc_swap::ArcSwapOption::empty(),
             perf_history: perf_history::PerfHistory::load(&db),
             request_holder_blacklist: DashMap::new(),
             vision_modules: DashMap::new(),
