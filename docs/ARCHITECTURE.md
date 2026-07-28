@@ -1400,7 +1400,33 @@ shared key that any node can overwrite. Each node publishes only its own shard h
   read-only admin dashboard endpoints (GET `/api/admin/stats`, `/api/admin/models`, etc.)
 - Request body size limit: 32MB (configurable via `DefaultBodyLimit`, raised from 2MB for VLM image payloads)
 - Content-Security-Policy: `default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self' ws: wss:; img-src 'self' data: blob:; frame-ancestors 'none'; base-uri 'self'; form-action 'self'`
-- WebSocket Origin validation (prevents cross-site WebSocket hijacking)
+- **Dashboard key bootstrap** (`src/api/dashboard_trust.rs`) — the dashboard has
+  no Bearer token on page load and fetches one from `GET /api/admin/api-key`.
+  That handout requires BOTH a trusted source network AND a valid single-use
+  `X-Dashboard-Nonce`. `classify()` is the single decision point:
+  `Loopback` always; `Overlay` for `100.64.0.0/10` / `fd7a:115c:a1e0::/48` when
+  `api.dashboard_trust_overlay` (default true) AND this node itself holds such an
+  address (the IPv4 range is shared CGNAT space, so the peer's address alone
+  proves nothing); `LocalNetwork` for RFC1918/ULA only when the
+  `state.dashboard_trust_lan` runtime atomic is set (default false, toggled live
+  via `PUT /api/admin/config`). Untrusted origins are not blocked — the page
+  prompts for the key and stores it per-origin.
+  **Do NOT re-derive this with `addr.ip().is_loopback()`**: that predicate means
+  "the last TCP hop began in this daemon's netns", which a same-host reverse
+  proxy satisfies on a remote client's behalf and a container publish / Tailscale
+  subnet router never satisfies even from the host's own localhost (subnet
+  routers SNAT by default). Threat model: on a trusted network, reachability of
+  the API port is equivalent to admin access — the nonce only stops a
+  non-browser local process that cannot read the served HTML, since `/admin` is
+  unauthenticated and a nonce can simply be scraped.
+- WebSocket Origin validation (prevents cross-site WebSocket hijacking) —
+  `websocket.rs::ws_origin_allowed` compares `Origin` against the request's own
+  `Host`, plus the loopback forms for proxies that rewrite `Host`. It is
+  deliberately NOT a fixed localhost allowlist: that refused the legitimate
+  same-origin `Origin` of any dashboard served at a LAN or Tailscale address, so
+  remote dashboards silently lost every live update and fell back to polling.
+  The upgrade's real gate is the single-use ticket from the Bearer-authed
+  `POST /api/admin/ws-ticket`.
 - Input validation: model name 256 chars, tools max 128, stop sequences max 16
 - HuggingFace inputs validated (repo_id format, filename .gguf extension, no path traversal)
 - HTTP timeout: 5 minutes (tower-http TimeoutLayer, Slowloris protection).
@@ -1559,7 +1585,7 @@ Routes Claude model requests through a locally-authenticated `claude` CLI subpro
   pushed on the WS stats tick — see § Request Tracing, cardinality rule.
 - `GET     /api/admin/credits` — Credit balance and tier info
 - `GET     /api/admin/shard-storage` — Per-model storage breakdown, disk/VRAM usage
-- `GET     /api/admin/api-key` — Retrieve API key (Bearer auth required)
+- `GET     /api/admin/api-key` — Retrieve API key (Bearer auth required; the dashboard's key-less bootstrap needs a trusted source network per `api::dashboard_trust` AND a valid single-use `X-Dashboard-Nonce`)
 - `POST    /api/admin/ws-ticket` — Issue a single-use 30s ticket (Bearer auth) — required pre-step for the WS upgrade
 - `GET     /api/admin/ws` — WebSocket for live updates (consumes a ws-ticket)
 - `GET     /api/admin/downloads` — Download queue with priorities and progress

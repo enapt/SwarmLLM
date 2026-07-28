@@ -107,6 +107,35 @@ lsof -i :8800                 # Find what's using 8800
 ./swarmllm status             # Check if another instance is running
 ```
 
+## Dashboard opens but nothing saves
+
+Symptoms: the page loads from another device, but the setup wizard's "Start
+SwarmLLM" button appears to do nothing, settings won't save, and panels sit
+empty. The hardware panel may say "CPU only" on a machine that has a GPU.
+
+Every admin call is returning 401 because the page was never handed an access
+key. The daemon only hands it out automatically over networks it trusts:
+loopback always, a Tailscale-style overlay when this node is on one too, and a
+private/LAN address only if you opted in.
+
+A banner at the top of the page states this, and — importantly — names the
+address the daemon actually saw for you. Behind a NAT, a container publish, or a
+Tailscale **subnet router** that is *not* the address in your browser's address
+bar, because those rewrite the source address by default.
+
+Two ways through:
+
+- Paste your access key into the banner. It's in the `api_key` file in the data
+  directory (read it from inside the container, if that's where SwarmLLM runs),
+  and is remembered per node so this is a one-time step per browser.
+- Turn on **Allow access from my local network** in Settings → Identity &
+  Access. This applies immediately without restarting the node, which matters
+  when the node you can't reach is the one you'd have to restart.
+
+Inference and the OpenAI/Anthropic APIs are unaffected — they accept the key as
+a Bearer token from any address. Full detail in
+[Tailscale / WAN](operations/tailscale-wan.md).
+
 ## Slow First Request
 
 If the first inference request to a model takes noticeably longer than subsequent ones, this is expected. SwarmLLM uses **on-demand model loading** — models whose shards are on disk but not loaded into VRAM are loaded when first requested. If VRAM is full, an LRU eviction occurs first. Subsequent requests to the same model will be fast.

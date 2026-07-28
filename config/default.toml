@@ -83,6 +83,17 @@ check_interval_hours = 6
 # api_key = ""                   # Bearer token for API auth. Empty = auto-generate on first run.
 # rate_limit_rpm = 60            # Max requests/min for /v1/ and /api/chat endpoints (default: 60)
 # rate_limit_admin_rpm = 200     # Max requests/min for /api/admin/ endpoints (default: 200)
+# Which networks the dashboard is handed its access key on automatically.
+# Anywhere else it still works — the page asks you to paste the key once.
+# dashboard_trust_overlay = true # Trust Tailscale-style overlays (100.64.0.0/10,
+                                 # fd7a:115c:a1e0::/48), but only when THIS node is on
+                                 # one too. Set false if you share your tailnet with
+                                 # people you would not give admin access to.
+# dashboard_trust_lan = false    # Trust any private/LAN address. Off by default: a LAN
+                                 # is not an authenticated boundary. Turn on if you reach
+                                 # this node through a Tailscale subnet router or a
+                                 # container, where requests arrive from the router's
+                                 # address rather than your device's.
 
 [model]
 shard_size_mb = 512            # Shard size in MB (64-2048, power of 2 recommended)

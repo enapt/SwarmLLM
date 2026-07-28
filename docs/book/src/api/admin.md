@@ -388,6 +388,19 @@ UI uses it as a transparency view rather than a manual action surface.
 ### GET /api/admin/api-key
 Retrieve the API key. Bearer auth required.
 
+The dashboard is the exception: it has no key yet on page load, so it may fetch
+one here without a Bearer token, provided **both** of the following hold.
+
+1. The request arrives over a network this node trusts — loopback always, a
+   Tailscale-style overlay when the node is on one too, and a private/LAN
+   address only with `api.dashboard_trust_lan`. See
+   the `[api]` section of the [configuration reference](../configuration/reference.md).
+2. It carries the single-use `X-Dashboard-Nonce` that the daemon substituted
+   into the served HTML for that page load (60s TTL).
+
+A bare `curl` against this endpoint therefore returns 401 — it has neither. To
+read the key from a script, use the `api_key` file in the data directory.
+
 ## WebSocket
 
 ### GET /api/admin/ws

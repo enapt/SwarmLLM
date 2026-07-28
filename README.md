@@ -72,8 +72,12 @@ See the [Getting Started Guide](https://enapt.github.io/SwarmLLM/getting-started
 
 ## Use it as an API
 
+Your access key is written to `api_key` in SwarmLLM's data directory, and is
+shown under Settings → Access Token in the dashboard.
+
 ```bash
-KEY=$(curl -s http://localhost:8800/api/admin/api-key)
+# Linux; macOS uses ~/Library/Application Support/swarmllm/api_key
+KEY=$(cat ~/.local/share/swarmllm/api_key)
 
 curl http://localhost:8800/v1/chat/completions \
   -H "Content-Type: application/json" \

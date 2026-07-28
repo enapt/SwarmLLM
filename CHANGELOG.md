@@ -2,6 +2,62 @@
 
 All notable changes to SwarmLLM are documented here.
 
+## [0.3.41-alpha] — 2026-07-28
+
+### Fixed
+
+- **The dashboard now works when you open it from another device.** Opening a
+  machine's dashboard from your phone or laptop showed the page but left it
+  unable to do anything: the setup wizard's "Start SwarmLLM" button appeared to
+  do nothing, settings would not save, and the hardware panel could report "CPU
+  only" on a machine with a graphics card. Every one of those was the same
+  problem — the page is given its access key automatically only in certain
+  situations, and opening it from elsewhere was not one of them, so each request
+  it made was turned away.
+
+  A machine that has joined a Tailscale network now serves a working dashboard
+  to that network with nothing to configure. Anywhere else, the page explains
+  itself and offers a box to paste your access key, which it then remembers for
+  that machine. It also tells you the address the machine actually saw you
+  arrive from — which, if you reach it through a router or a container, is not
+  the address in your browser's address bar and was previously impossible to
+  find out.
+
+  There is a new setting, **Allow access from my local network** (Settings →
+  Identity & Access, off by default), for reaching a machine through a Tailscale
+  subnet router or a container. Those change the address your request appears to
+  come from, so it arrives looking like any other device on the network. The
+  setting takes effect immediately, without restarting the machine you are
+  trying to reach.
+
+  Please note what turning either of these on means: on a network the machine
+  trusts, anything able to reach it can obtain its access key, and with that key
+  it can control the machine and use it for inference. That is the intended
+  trade for your own Tailscale network, whose devices you approved yourself, and
+  it is why the local network option is off unless you choose it. Set
+  `dashboard_trust_overlay = false` to decline even the Tailscale case.
+
+- **Live updates work when the dashboard is opened from another device.**
+  Counters, activity and peers only refreshed on a slow poll instead of
+  arriving as they happened, because the live connection was refused for any
+  address other than the machine itself.
+
+- **Six panels were blank on every dashboard, on every machine.** Reference
+  models, the wishlist, swarm capacity, the capacity plan, quant
+  recommendations and the foreign pool catalog asked for their data before the
+  page had its access key, so all six were turned away and quietly showed
+  nothing — including on the machine's own screen, where everything else
+  worked. The wait now happens in the one place every request passes through.
+
+- **The API example in the README could not have worked.** It told you to fetch
+  your access key with `curl`, which has returned an error since May. Your key
+  is in the `api_key` file in SwarmLLM's data directory, and is shown under
+  Settings → Access Token.
+
+- **A setting documented as on by default shipped off.** New installs with no
+  configuration file got the wrong value for the new Tailscale option and then
+  wrote it into the file they generated, where it looked deliberate.
+
 ## [0.3.40-alpha] — 2026-07-28
 
 ### Fixed

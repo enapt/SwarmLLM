@@ -196,7 +196,63 @@ All 20 build phases complete. All subsystems wired — no stubs. **1417 lib + 80
 
 Per-round history lives in `~/.claude/projects/-home-user-SwarmLLM/memory/round_log_*.md` and the CHANGELOG; `docs/ARCHITECTURE.md` is the canonical architecture. This section keeps only the current release line plus one-line prior-round pointers.
 
-### Latest — v0.3.40-alpha (2026-07-28): a slow machine no longer stalls everyone else
+### Latest — v0.3.41-alpha (2026-07-28): the dashboard works from another device
+
+From a tester who could open his node's dashboard on his phone over Tailscale
+but whose setup wizard's "Start SwarmLLM" button did nothing. **Every symptom
+was one cause, and the reported one was the least of it**: `/admin` is
+auth-exempt at any origin, so the page rendered, but the key handout was gated
+on loopback — so every admin call 401'd, including the hardware probe, which is
+why the wizard also said "CPU only" on a machine with an RTX 3070.
+
+**`addr.ip().is_loopback()` does not mean what it reads as** (gotcha #195). It
+means "the last TCP hop began inside this daemon's netns", and it is wrong in
+BOTH directions — both reproduced. A same-host reverse proxy (plain `tailscale
+serve`) dials us over loopback and hands the key to a fully remote phone; a
+container publish or a Tailscale **subnet router** never satisfies it, *not even
+from the host's own localhost*, because subnet routers **SNAT by default**. That
+last point killed the obvious fix: the tester has a subnet route, so his
+container sees the Proxmox host's private address — **an allowlist of Tailscale's
+`100.64.0.0/10` would not have fixed the bug that motivated it.**
+
+`api::dashboard_trust::classify` is now the one decision point. Tailnet trust is
+default-on but only when THIS node holds an overlay address (the IPv4 half is
+shared CGNAT space ISPs also use); LAN is opt-in via a runtime atomic, because
+the user flips it precisely when they cannot reach the node to restart it.
+Untrusted origins are not a dead end — the page names **the address the daemon
+saw** (invisible behind NAT, and the one you'd need to allow) and takes a pasted
+key. **Threat model, stated plainly: on a trusted network, reachability of the
+API port is admin access.** The nonce only stops a non-browser local process
+that cannot read the served HTML — `/admin` is unauthenticated, so scraping a
+nonce and spending it is two requests (verified). A code comment claiming more
+than that was corrected.
+
+**The same hardcoded-loopback assumption was independently present in the WS
+Origin check**, so every remote dashboard silently lost live updates and fell
+back to polling. The property wanted is same-origin: `Origin` vs the request's
+own `Host`, never a fixed list.
+
+Two more, both found by loading the page rather than reading the diff: **six
+panels 401'd on EVERY dashboard load including loopback** (callers *sampled*
+whether the key exchange had started instead of ensuring it; `_restFetch`
+discards failures, so they just rendered nothing forever) — and the first fix
+for it caused a **1266-request storm**, because `loadApiKey` fetched via
+`authFetch` which now called `ensureApiKey`, re-entering while the memo was
+still null (gotcha #197: an async fn runs to its first `await` before it
+returns, so a memo from the return value cannot break a cycle; the bootstrap
+request is unauthenticated by definition and must not use `authFetch`).
+
+Also: **`#[derive(Default)]` ignores `#[serde(default = "...")]`** (gotcha #196),
+so the new default-on flag shipped off to exactly the fresh installs it was for,
+then wrote that `false` into the config it generated. Whole-tree audit found no
+other instance. And the README's `curl … /api/admin/api-key` has returned an
+error since the nonce landed in May.
+
+**Not fixed, flagged:** there is no `Host`-header validation anywhere, so DNS
+rebinding against loopback remains possible. Predates this work; hardening it
+can break legitimate reverse proxies, so it wants its own change.
+
+### v0.3.40-alpha (2026-07-28): a slow machine no longer stalls everyone else
 
 Three changes, all measured on real hardware (RTX 3070 + a CPU-only Proxmox
 container) rather than reasoned about. **Two of the three were found by running

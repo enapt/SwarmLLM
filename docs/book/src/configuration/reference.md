@@ -160,6 +160,29 @@ Every configuration option, organized by section.
 | `api_key` | string | none | Bearer token. Empty = auto-generated |
 | `rate_limit_rpm` | integer | `60` | Rate limit for `/v1/` endpoints (requests/min) |
 | `rate_limit_admin_rpm` | integer | `200` | Rate limit for `/api/admin/` endpoints (requests/min) |
+| `metrics_auth_required` | boolean | `false` | Require Bearer auth on `/metrics` even from loopback |
+| `dashboard_trust_overlay` | boolean | `true` | Hand the dashboard its access key over a Tailscale-style overlay, when this node is on one too |
+| `dashboard_trust_lan` | boolean | `false` | Hand the dashboard its access key to any private/LAN address |
+
+The dashboard fetches its own access key on page load. These two options decide
+which networks that happens on — loopback always does, and anywhere else the
+page asks you to paste the key once instead of failing silently.
+
+`dashboard_trust_overlay` only takes effect when this node itself holds an
+overlay address. The IPv4 range Tailscale uses (`100.64.0.0/10`) is shared
+carrier-grade NAT space that some ISPs also hand out, so a peer's address alone
+does not prove a tailnet.
+
+`dashboard_trust_lan` exists for the case where you reach a node through a
+Tailscale **subnet router** or a container publish. Those rewrite the source
+address by default, so the request arrives from the router's private address and
+is indistinguishable from any other LAN client. It can be toggled from Settings →
+Identity & Access and applies immediately, without restarting the node.
+
+On a network this node trusts, anything that can reach the API port can obtain
+the access key, and with it admin and inference. That is the intended bargain for
+a tailnet — devices you authorised — which is why the LAN case stays opt-in. See
+[Tailscale / WAN](../operations/tailscale-wan.md).
 
 ## `[model]` — Model Storage
 
