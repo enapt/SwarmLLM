@@ -132,6 +132,39 @@ become discoverable to each other.
   same split as `unattended-upgrades` for the OS. Refuses unverified binaries;
   never downgrades.
 
+## Updating an anchor that is already running
+
+The automatic updater replaces the **binary** and restarts the service. It does
+not touch its own systemd units — not `swarmllm-anchor.service`, not
+`swarmllm-update.timer`, not `swarmllm-update.sh` itself.
+
+That is deliberate (a bad unit file could break both the anchor and the thing
+meant to repair it), but it has a consequence worth knowing: **changes to how
+often the anchor checks for updates, or to how it runs, never reach an anchor
+that is already deployed.** The binary keeps updating; everything around it
+stays as installed.
+
+Concretely, the check interval moved from daily to hourly in v0.3.44. An anchor
+installed before that keeps checking daily however many times its binary
+updates. During alpha, when several releases can ship in a day, that means it is
+usually running something other than the current build.
+
+To pick up unit changes on an existing anchor, refresh them once:
+
+```bash
+RAW=https://raw.githubusercontent.com/enapt/SwarmLLM/main/deploy/anchor
+curl -fsSL "$RAW/swarmllm-update.sh"    -o /usr/local/bin/swarmllm-update.sh
+chmod +x /usr/local/bin/swarmllm-update.sh
+curl -fsSL "$RAW/swarmllm-update.timer" -o /etc/systemd/system/swarmllm-update.timer
+curl -fsSL "$RAW/swarmllm-anchor.service" -o /etc/systemd/system/swarmllm-anchor.service
+systemctl daemon-reload
+systemctl restart swarmllm-update.timer swarmllm-anchor.service
+systemctl list-timers swarmllm-update.timer   # confirm the new cadence
+```
+
+Check what an anchor is actually running with `swarmllm --version`, and when it
+last looked with `journalctl -u swarmllm-update --since -1d`.
+
 ## Maintenance
 
 - **Status / logs**: `systemctl status swarmllm-anchor`, `journalctl -u swarmllm-anchor -f`
