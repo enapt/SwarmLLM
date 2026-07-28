@@ -67,10 +67,11 @@ impl DashboardTrust {
 /// `fd7a:115c:a1e0::/48` unique-local prefix for IPv6.
 ///
 /// The IPv4 half is *shared* address space — real ISPs use it for carrier-grade
-/// NAT, so it is not by itself proof of a tailnet. That is why every caller
-/// pairs this with [`node_is_on_overlay`]: we only extend trust across this
-/// range when this node holds an address in it too, which an ISP's CGNAT
-/// segment does not give us. The IPv6 half is Tailscale-specific.
+/// NAT, so it is not by itself proof of a tailnet, on either side of the
+/// connection. That is why every caller pairs this with [`node_is_on_overlay`],
+/// which requires Tailscale-SPECIFIC evidence that this node is a member.
+/// "We also hold a 100.x address" is not such evidence — see that function.
+/// The IPv6 half is Tailscale-specific and is the strong signal.
 pub fn is_overlay_ip(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => is_cgnat_v4(v4),
@@ -102,40 +103,87 @@ pub fn is_local_network_ip(ip: IpAddr) -> bool {
     }
 }
 
-/// Does this node itself hold an overlay address?
+/// Is this node genuinely a member of a Tailscale-style overlay?
 ///
-/// Read from `state.listen_multiaddrs`, which the NetworkManager keeps as the
-/// union of bound sockets and confirmed external addresses. The API server
-/// binds `0.0.0.0`, so a machine that joined a tailnet has its overlay address
-/// enumerated there as a listener without us needing to walk interfaces
-/// ourselves or take a new dependency.
+/// **Only Tailscale-specific evidence counts.** An earlier version accepted any
+/// address of ours inside `100.64.0.0/10`, reasoning that an ISP's CGNAT could
+/// not give us one. An external security review showed it can, and by a path
+/// the reasoning never considered: `listen_multiaddrs` is the union of
+/// `swarm.listeners()` — every locally BOUND interface address, since the
+/// daemon binds `0.0.0.0` — with confirmed external addresses, and
+/// `addr_is_remotely_reachable` deliberately keeps CGNAT. So a host whose own
+/// interface sits in that block for an unrelated reason (a cellular carrier
+/// numbering the device directly, an ISP numbering a customer LAN, a
+/// coincidental VPN or container interface) declared itself "on the overlay"
+/// having never joined a tailnet — and would then hand its API key to any
+/// browser sharing that address space, which for an ISP pool means unrelated
+/// customers.
+///
+/// The same file already had the correct instinct one function away:
+/// `publicly_reachable` is computed from confirmed external addresses and
+/// *never* a bound listener, because "binding a socket says nothing about
+/// whether anyone outside can reach it". Membership of an overlay is the same
+/// kind of claim, and needs the same kind of evidence.
+///
+/// Two signals, either sufficient, both Tailscale-specific:
+///
+///  * an address of ours inside `fd7a:115c:a1e0::/48` — Tailscale's own ULA
+///    prefix, which is not shared space and cannot be handed out by an ISP;
+///  * a network interface named `tailscale*` (Linux, where interface names are
+///    enumerable without a dependency).
+///
+/// Deliberately fails closed: a tailnet node with IPv6 disabled on a platform
+/// whose interfaces we cannot enumerate simply is not auto-trusted, and uses
+/// the paste-the-key path like any other untrusted origin. Wrongly withholding
+/// a key costs one paste; wrongly handing it out costs the node.
 pub fn node_is_on_overlay(state: &SharedState) -> bool {
-    state
+    let holds_tailscale_ula = state
         .listen_multiaddrs
         .load()
         .iter()
-        .any(|addr| multiaddr_overlay_ip(addr))
+        .any(|addr| multiaddr_has_tailscale_v6(addr));
+    holds_tailscale_ula || tailscale_interface_present()
 }
 
-/// Pull an IP literal out of a multiaddr string (`/ip4/100.64.0.5/tcp/8810/...`)
-/// and test it. Parsing textually keeps this helper free of a libp2p dependency
-/// so it stays unit-testable in isolation.
-fn multiaddr_overlay_ip(addr: &str) -> bool {
+/// Is there a Tailscale interface on this host?
+///
+/// Linux only, by reading `/sys/class/net` — no new dependency, and the answer
+/// is a directory listing rather than anything that touches the network. Other
+/// platforms return false and fall back to the ULA signal above; `utun` on
+/// macOS is used by every VPN, so matching it would reintroduce exactly the
+/// coincidence this function exists to rule out.
+fn tailscale_interface_present() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        let Ok(entries) = std::fs::read_dir("/sys/class/net") else {
+            return false;
+        };
+        entries.filter_map(Result::ok).any(|e| {
+            e.file_name()
+                .to_str()
+                .is_some_and(|n| n.starts_with("tailscale"))
+        })
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        false
+    }
+}
+
+/// Does this multiaddr carry an address in Tailscale's own IPv6 ULA prefix?
+///
+/// Deliberately IPv6-only. The v4 CGNAT range is shared address space and
+/// proves nothing about tailnet membership — treating it as proof is the defect
+/// this function was narrowed to fix. Parsing textually keeps the helper free
+/// of a libp2p dependency so it stays unit-testable in isolation.
+fn multiaddr_has_tailscale_v6(addr: &str) -> bool {
     let mut parts = addr.split('/');
     while let Some(seg) = parts.next() {
-        let is_v4 = seg == "ip4";
-        let is_v6 = seg == "ip6";
-        if !is_v4 && !is_v6 {
+        if seg != "ip6" {
             continue;
         }
         let Some(literal) = parts.next() else { break };
-        if is_v4 {
-            if let Ok(v4) = literal.parse::<Ipv4Addr>() {
-                if is_cgnat_v4(v4) {
-                    return true;
-                }
-            }
-        } else if let Ok(v6) = literal.parse::<Ipv6Addr>() {
+        if let Ok(v6) = literal.parse::<Ipv6Addr>() {
             if is_tailscale_v6(v6) {
                 return true;
             }
@@ -230,14 +278,83 @@ mod tests {
         let state = test_state(crate::config::Config::default());
         let peer = v4("100.101.102.103");
 
-        // Before the swarm reports an overlay address of our own, a 100.x
-        // source is just shared CGNAT space and proves nothing.
+        // Before any Tailscale-specific evidence, a 100.x source is just
+        // shared CGNAT space and proves nothing.
         assert_eq!(classify(&state, peer), DashboardTrust::Untrusted);
 
-        state
-            .listen_multiaddrs
-            .store(std::sync::Arc::new(vec!["/ip4/100.64.0.7/tcp/8810".into()]));
+        // Tailscale gives every node an address in its own IPv6 ULA prefix.
+        // That is not shared space, so holding one is proof of membership.
+        state.listen_multiaddrs.store(std::sync::Arc::new(vec![
+            "/ip4/100.64.0.7/tcp/8810".into(),
+            "/ip6/fd7a:115c:a1e0::1234/tcp/8810".into(),
+        ]));
         assert_eq!(classify(&state, peer), DashboardTrust::Overlay);
+    }
+
+    /// Both CGNAT tests below assert what happens with NO Tailscale-specific
+    /// evidence, so they are meaningless on a machine that genuinely runs
+    /// Tailscale — the interface probe would (correctly) return true. Skip
+    /// rather than fail: a contributor on a tailnet should not see a red test
+    /// for being on a tailnet.
+    fn skip_if_host_runs_tailscale() -> bool {
+        if tailscale_interface_present() {
+            eprintln!("skipped: this host has a tailscale interface");
+            return true;
+        }
+        false
+    }
+
+    /// The finding from an external security review, 2026-07-28.
+    ///
+    /// `listen_multiaddrs` includes every locally BOUND address (the daemon
+    /// binds 0.0.0.0), and CGNAT is deliberately kept as "remotely reachable".
+    /// So a host numbered inside 100.64.0.0/10 for a reason that has nothing to
+    /// do with Tailscale — a cellular carrier addressing the device directly,
+    /// an ISP numbering a customer LAN, a coincidental VPN or container
+    /// interface — used to classify itself as being on the overlay, and would
+    /// then hand its API key to any browser in that same space. On an ISP pool
+    /// that means unrelated customers of that ISP.
+    #[test]
+    fn our_own_cgnat_address_is_not_proof_of_a_tailnet() {
+        if skip_if_host_runs_tailscale() {
+            return;
+        }
+        let state = test_state(crate::config::Config::default());
+        // Every one of these is a plausible non-Tailscale CGNAT interface.
+        state.listen_multiaddrs.store(std::sync::Arc::new(vec![
+            "/ip4/100.64.0.7/tcp/8810".into(),
+            "/ip4/100.96.13.2/udp/8800/quic-v1".into(),
+            "/ip4/192.168.1.53/tcp/8810".into(),
+        ]));
+        assert!(
+            !state
+                .listen_multiaddrs
+                .load()
+                .iter()
+                .any(|a| multiaddr_has_tailscale_v6(a)),
+            "no Tailscale-specific evidence is present"
+        );
+        assert_eq!(
+            classify(&state, v4("100.101.102.103")),
+            DashboardTrust::Untrusted,
+            "a CGNAT neighbour must not be handed the API key on this evidence"
+        );
+    }
+
+    /// A non-Tailscale IPv6 ULA is not proof either — only Tailscale's prefix.
+    #[test]
+    fn a_generic_ipv6_ula_is_not_proof_of_a_tailnet() {
+        if skip_if_host_runs_tailscale() {
+            return;
+        }
+        let state = test_state(crate::config::Config::default());
+        state.listen_multiaddrs.store(std::sync::Arc::new(vec![
+            "/ip6/fd00:dead:beef::1/tcp/8810".into()
+        ]));
+        assert_eq!(
+            classify(&state, v4("100.101.102.103")),
+            DashboardTrust::Untrusted
+        );
     }
 
     /// An ISP that puts its customers behind carrier-grade NAT hands out
@@ -246,6 +363,9 @@ mod tests {
     /// is why membership is proven from our own addresses, not the peer's.
     #[test]
     fn cgnat_neighbour_is_untrusted_when_we_are_not_on_a_tailnet() {
+        if skip_if_host_runs_tailscale() {
+            return;
+        }
         let state = test_state(crate::config::Config::default());
         state.listen_multiaddrs.store(std::sync::Arc::new(vec![
             "/ip4/192.168.1.53/tcp/8810".into(),
@@ -310,16 +430,17 @@ mod tests {
     }
 
     #[test]
-    fn overlay_address_is_found_in_listen_multiaddrs() {
-        assert!(multiaddr_overlay_ip("/ip4/100.101.102.103/tcp/8810"));
-        assert!(multiaddr_overlay_ip(
+    fn only_the_tailscale_ula_is_found_in_listen_multiaddrs() {
+        assert!(multiaddr_has_tailscale_v6(
             "/ip6/fd7a:115c:a1e0::1/udp/8800/quic-v1"
         ));
-        assert!(!multiaddr_overlay_ip("/ip4/192.168.1.53/tcp/8810"));
-        assert!(!multiaddr_overlay_ip("/ip4/127.0.0.1/tcp/8810"));
+        // v4 CGNAT is shared space — never evidence, however it is written.
+        assert!(!multiaddr_has_tailscale_v6("/ip4/100.101.102.103/tcp/8810"));
+        assert!(!multiaddr_has_tailscale_v6("/ip6/fd00::1/tcp/8810"));
+        assert!(!multiaddr_has_tailscale_v6("/ip4/192.168.1.53/tcp/8810"));
         // A p2p-only address carries no IP and must not panic or match.
-        assert!(!multiaddr_overlay_ip("/p2p/12D3KooWFake"));
-        // Truncated input: `/ip4` with no literal following.
-        assert!(!multiaddr_overlay_ip("/ip4"));
+        assert!(!multiaddr_has_tailscale_v6("/p2p/12D3KooWFake"));
+        // Truncated input: `/ip6` with no literal following.
+        assert!(!multiaddr_has_tailscale_v6("/ip6"));
     }
 }
