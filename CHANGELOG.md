@@ -2,6 +2,36 @@
 
 All notable changes to SwarmLLM are documented here.
 
+## [0.3.45-alpha] — 2026-07-28
+
+### Fixed
+
+- **Some models could not be downloaded at all, and pieces already held were
+  deleted.** v0.3.44 started checking each piece of a model received from
+  another machine against its expected fingerprint before passing it on. Where
+  a model's listing carries no fingerprints, that check has nothing to compare
+  against — but it treated the absence as a failure, so every piece was thrown
+  away on arrival and the machine that sent it was penalised. Affected models
+  could never finish downloading, and pieces already on disk were removed as
+  they were re-checked.
+
+  What you would have seen is a download that never progresses and eventually
+  gives up, with nothing saying why. If a model disappeared from your machine
+  after updating to v0.3.44, this is why, and it will download again on its own.
+
+  Pieces are now checked when there is a fingerprint to check them against, and
+  accepted otherwise. The protection added in v0.3.44 is unaffected: a machine
+  serving bytes that do not match a fingerprint we hold is still refused and
+  still loses trust.
+
+- **The dashboard could stop updating its model badges.** Checking which cloud
+  models are reachable shared a budget with changing your access key and
+  installing updates — things you do deliberately and rarely, so the budget is
+  deliberately small. The dashboard does this check by itself, and the budget
+  counts per machine rather than per browser tab, so a few dashboards open at
+  once used it up and the badges quietly stopped refreshing. It now has its own
+  allowance.
+
 ## [0.3.44-alpha] — 2026-07-28
 
 Security fixes from an external audit, plus updates that finish by themselves.

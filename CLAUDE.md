@@ -196,7 +196,35 @@ All 20 build phases complete. All subsystems wired — no stubs. **1438 lib + 80
 
 Per-round history lives in `~/.claude/projects/-home-user-SwarmLLM/memory/round_log_*.md` and the CHANGELOG; `docs/ARCHITECTURE.md` is the canonical architecture. This section keeps only the current release line plus one-line prior-round pointers.
 
-### Latest — v0.3.44-alpha (2026-07-28): external security audit + self-updating
+### Latest — v0.3.45-alpha (2026-07-28): the .44 shard check ate good shards
+
+**Found by the soak within hours of .44 shipping, in my own change.**
+`verify_shard` treats an all-zero manifest hash as a FAILURE ("placeholder
+required") — right for auditing a shard already held, wrong as an accept-gate
+for a download, where a missing hash means *nothing to compare against*, not
+*bad bytes*. The .44 P2P accept path called it unconditionally, so every shard
+of any hash-less manifest was rejected, **deleted**, and its sender penalised.
+Live proof: `meta-llama-3.1-8b` lost all its shards and the acquisition went
+`Reconciled stalled acquisition → Failed`. A/B after the fix: 10 shards
+re-acquired, 0 quarantines.
+
+**Same shape as #195/#198 — an invariant enforced without checking its
+precondition holds.** It shipped because the rejection path was tested with a
+real hash present and never with a manifest lacking one.
+
+Also: `provider-model-status` got its own rate bucket. It sat in
+`SensitiveAdmin` (5/min) with api-key/provider MUTATIONS and update apply —
+human-triggered things that want a tight cap — while being fired automatically
+by the dashboard. Budgets key per IP not per tab, so ~5 open dashboards silently
+stopped refreshing model badges (`if (!resp.ok) return;` swallows the 429). Same
+split, same reason, as ws-ticket in #182.
+
+**Audit item closed: `crypto/session.rs` replay resistance is sound** — RFC 6479
+sliding window, `check` before decrypt, `record` only after auth succeeds (so a
+forged nonce can't poison the window), high-initial-nonce DoS guarded, tested.
+The external audit listed it "not examined"; it needed no change.
+
+### v0.3.44-alpha (2026-07-28): external security audit + self-updating
 
 **Three security fixes from an external audit of .42, and the update lifecycle.**
 
