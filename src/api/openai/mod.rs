@@ -310,6 +310,7 @@ pub async fn chat_completions(
 
             if let Some(router_tx) = &state.router_tx {
                 return dispatch_inference(
+                    &state,
                     router_tx.clone(),
                     &req,
                     internal_messages.clone(),
@@ -384,6 +385,7 @@ pub async fn chat_completions(
                 );
                 if let Some(router_tx) = &state.router_tx {
                     return dispatch_inference(
+                        &state,
                         router_tx.clone(),
                         &req,
                         internal_messages.clone(),
@@ -492,6 +494,7 @@ pub async fn chat_completions(
     if peers_have_shards {
         if let Some(router_tx) = &state.router_tx {
             return dispatch_inference(
+                &state,
                 router_tx.clone(),
                 &req,
                 internal_messages.clone(),

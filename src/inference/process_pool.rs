@@ -34,6 +34,17 @@ pub struct PrefixManifestEvent {
     pub blocks: Vec<PrefixBlockEntry>,
 }
 
+/// Progress on a request that has not produced its first token yet. Workers
+/// emit one per prefill chunk; the daemon-side forwarder stamps it onto the
+/// request's `RequestTrace`, which is what every surface reads from.
+#[derive(Clone, Debug)]
+pub struct ProgressEvent {
+    pub request_id: Uuid,
+    pub phase: crate::inference::worker_ipc::ProgressPhase,
+    pub done: u32,
+    pub total: u32,
+}
+
 /// Item 8 Phase 2b: worker-initiated cross-node prefix-KV probe. The
 /// daemon's probe handler drains these off the channel, runs
 /// `SharedState::try_fetch_cross_node_prefix`, and sends the (possibly
@@ -136,9 +147,14 @@ fn worker_msg_request_id(msg: &WorkerMsg) -> Option<Uuid> {
         // normal response-routing channel — `fetch_local_snapshot`
         // registers a receiver up-front and waits for the reply.
         WorkerMsg::PrefixSnapshotResponse { request_id, .. } => Some(*request_id),
+        // `Progress` carries a request_id but is explicitly NOT a response:
+        // routing it to the per-request channel would hand the waiting caller a
+        // progress note where it expects a result. Side-band, like the prefix
+        // messages above.
         WorkerMsg::BatchResult { .. }
         | WorkerMsg::PrefixManifestUpdate { .. }
         | WorkerMsg::PrefixFetchProbe { .. }
+        | WorkerMsg::Progress { .. }
         | WorkerMsg::Ready
         | WorkerMsg::Bye => None,
     }
@@ -155,6 +171,7 @@ async fn reader_actor(
     model_id: ModelId,
     prefix_manifest_tx: Option<mpsc::Sender<PrefixManifestEvent>>,
     prefix_probe_tx: Option<mpsc::Sender<PrefixProbeEvent>>,
+    progress_tx: Option<mpsc::Sender<ProgressEvent>>,
 ) {
     loop {
         match recv_worker(&mut reader).await {
@@ -191,6 +208,26 @@ async fn reader_actor(
                         {
                             tracing::debug!("prefix manifest channel full — dropping announce");
                         }
+                    }
+                    continue;
+                }
+                // Prefill/load progress. Best-effort by construction: a full
+                // channel means the display lags, which is strictly better than
+                // stalling the worker's result path to deliver a status note.
+                if let WorkerMsg::Progress {
+                    request_id,
+                    phase,
+                    done,
+                    total,
+                } = msg
+                {
+                    if let Some(tx) = progress_tx.as_ref() {
+                        let _ = tx.try_send(ProgressEvent {
+                            request_id,
+                            phase,
+                            done,
+                            total,
+                        });
                     }
                     continue;
                 }
@@ -710,6 +747,8 @@ pub struct ModelProcessPool {
     /// into spawned workers as `--prefill-chunk-tokens`. Matches
     /// `InferenceConfig::prefill_chunk_tokens`.
     prefill_chunk_tokens: std::sync::atomic::AtomicU32,
+    /// Runtime mirror of `InferenceConfig::prefill_target_ms`.
+    prefill_target_ms: std::sync::atomic::AtomicU64,
     /// Item 7 Phase 4: fuse concurrent same-shape Prefilling slots into one
     /// `forward_batch` call. Passed into spawned workers as
     /// `--batched-prefill-forward`. Matches
@@ -726,6 +765,7 @@ pub struct ModelProcessPool {
     /// IPC reader. When unset (e.g. unit tests constructing a bare pool),
     /// inbound `PrefixManifestUpdate` messages are dropped silently.
     prefix_manifest_tx: std::sync::OnceLock<mpsc::Sender<PrefixManifestEvent>>,
+    progress_tx: std::sync::OnceLock<mpsc::Sender<ProgressEvent>>,
     /// Item 8 Phase 2b: worker-initiated fetch probes land here. Daemon
     /// drains and responds via `send_prefix_fetch_result`. Unset → drop.
     prefix_probe_tx: std::sync::OnceLock<mpsc::Sender<PrefixProbeEvent>>,
@@ -799,9 +839,11 @@ impl ModelProcessPool {
             batch_collection_ms: std::sync::atomic::AtomicU64::new(5),
             max_concurrent_decode_batch: std::sync::atomic::AtomicU32::new(8),
             prefill_chunk_tokens: std::sync::atomic::AtomicU32::new(128),
+            prefill_target_ms: std::sync::atomic::AtomicU64::new(200),
             batched_prefill_forward: std::sync::atomic::AtomicBool::new(true),
             batch_scheduler: std::sync::OnceLock::new(),
             prefix_manifest_tx: std::sync::OnceLock::new(),
+            progress_tx: std::sync::OnceLock::new(),
             prefix_probe_tx: std::sync::OnceLock::new(),
         }
     }
@@ -809,6 +851,10 @@ impl ModelProcessPool {
     /// Install the prefix-manifest sink. The daemon spawns a forwarder task
     /// that owns the receiver and turns each event into a gossip broadcast +
     /// local-index update. Idempotent — a second call is a no-op.
+    pub fn set_progress_tx(&self, tx: mpsc::Sender<ProgressEvent>) {
+        let _ = self.progress_tx.set(tx);
+    }
+
     pub fn set_prefix_manifest_tx(&self, tx: mpsc::Sender<PrefixManifestEvent>) {
         let _ = self.prefix_manifest_tx.set(tx);
     }
@@ -961,6 +1007,13 @@ impl ModelProcessPool {
     pub fn set_prefill_chunk_tokens(&self, chunk_tokens: u32) {
         self.prefill_chunk_tokens
             .store(chunk_tokens.max(1), std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Per-tick prefill wall-time budget for future-spawned workers. Existing
+    /// workers retain whatever budget they were spawned with.
+    pub fn set_prefill_target_ms(&self, target_ms: u64) {
+        self.prefill_target_ms
+            .store(target_ms.max(1), std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Item 7 Phase 4: toggle prefill-chunk fusion inside the worker's
@@ -1348,6 +1401,8 @@ impl ModelProcessPool {
                     .load(Ordering::Relaxed)
                     .to_string(),
             );
+            args.push("--prefill-target-ms".to_string());
+            args.push(self.prefill_target_ms.load(Ordering::Relaxed).to_string());
             args.push("--batched-prefill-forward".to_string());
             args.push(
                 self.batched_prefill_forward
@@ -1437,6 +1492,7 @@ impl ModelProcessPool {
             model_id.clone(),
             self.prefix_manifest_tx.get().cloned(),
             self.prefix_probe_tx.get().cloned(),
+            self.progress_tx.get().cloned(),
         ));
         Ok(WorkerHandle {
             child,

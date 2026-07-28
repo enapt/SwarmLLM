@@ -200,6 +200,12 @@ enum Commands {
         /// up to this many tokens before its first decode token is sampled.
         #[arg(long, default_value = "128")]
         prefill_chunk_tokens: u32,
+        /// Wall-time budget (ms) for one tick's prefill work while more than
+        /// one slot is active. The quantum is sized from measured ms-per-token
+        /// to land near this; `prefill_chunk_tokens` caps it. See
+        /// `inference::prefill_pacer`.
+        #[arg(long, default_value = "200")]
+        prefill_target_ms: u64,
         /// Item 7 Phase 4: fuse concurrent same-shape Prefilling slots into
         /// one `forward_batch` call inside `step_decode_pool`'s Phase A.
         /// Off → Phase A runs singleton forwards per slot (useful for A/B).
@@ -375,6 +381,7 @@ async fn async_main(mut cli: Cli) -> anyhow::Result<()> {
             batch_generate,
             batch_generate_max_slots,
             prefill_chunk_tokens,
+            prefill_target_ms,
             batched_prefill_forward,
         } => {
             let window: Option<Vec<u32>> = shard_window.map(|s| {
@@ -407,6 +414,7 @@ async fn async_main(mut cli: Cli) -> anyhow::Result<()> {
                 batch_generate,
                 batch_generate_max_slots,
                 prefill_chunk_tokens,
+                prefill_target_ms,
                 batched_prefill_forward,
                 gpu_layers,
             };

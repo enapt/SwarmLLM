@@ -286,6 +286,40 @@ impl super::SharedState {
     ///
     /// Only peers that have actually served something appear: a row of dashes
     /// for every peer in the registry would bury the handful that matter.
+    /// In-flight requests that have not produced a token yet, with what they
+    /// are doing and how long is left.
+    ///
+    /// Only requests carrying a progress snapshot appear: one that is already
+    /// streaming has TTFT and a token count, which say more than a phase label
+    /// would. Sorted longest-running first — if a user is looking here at all,
+    /// it is because something feels stuck, and that is the row they want.
+    pub fn active_request_rows(&self) -> Vec<serde_json::Value> {
+        let mut rows: Vec<(u64, serde_json::Value)> = self
+            .active_traces
+            .iter()
+            .filter_map(|e| {
+                let trace = e.value();
+                let p = trace.progress()?;
+                Some((
+                    p.elapsed_ms,
+                    serde_json::json!({
+                        "request_id": trace.request_id.to_string(),
+                        "model": trace.model,
+                        "operation": trace.operation,
+                        "phase": p.phase,
+                        "done": p.done,
+                        "total": p.total,
+                        "percent": p.percent,
+                        "eta_ms": p.eta_ms,
+                        "elapsed_ms": p.elapsed_ms,
+                    }),
+                ))
+            })
+            .collect();
+        rows.sort_by_key(|r| std::cmp::Reverse(r.0));
+        rows.into_iter().map(|(_, v)| v).collect()
+    }
+
     pub fn peer_performance_rows(&self) -> Vec<super::PeerPerformanceRow> {
         let hedge: std::collections::HashMap<crate::types::NodeId, (f32, u32)> = self
             .metrics

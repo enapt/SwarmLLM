@@ -89,8 +89,12 @@ pub struct WorkerOptions {
     pub batch_generate: bool,
     /// Maximum number of concurrent decode slots when `batch_generate` is on.
     pub batch_generate_max_slots: u32,
-    /// Item 7 Phase 2 chunked prefill chunk size (in prompt tokens).
+    /// Item 7 Phase 2 chunked prefill chunk size (in prompt tokens). A CEILING
+    /// — `prefill_target_ms` picks the operating quantum.
     pub prefill_chunk_tokens: u32,
+    /// Wall-time budget (ms) for one tick's prefill work while slots are
+    /// shared. See `inference::prefill_pacer`.
+    pub prefill_target_ms: u64,
     /// Item 7 Phase 4: fuse concurrent same-shape Prefilling slots into one
     /// `forward_batch` call inside `step_decode_pool`'s Phase A.
     pub batched_prefill_forward: bool,
@@ -111,6 +115,7 @@ impl Default for WorkerOptions {
             batch_generate_max_slots: 8,
             gpu_layers: -1,
             prefill_chunk_tokens: 128,
+            prefill_target_ms: 200,
             batched_prefill_forward: true,
         }
     }
@@ -144,6 +149,7 @@ pub async fn run_worker(
         batch_generate,
         batch_generate_max_slots,
         prefill_chunk_tokens,
+        prefill_target_ms,
         batched_prefill_forward,
         gpu_layers,
     } = options;
@@ -245,7 +251,15 @@ pub async fn run_worker(
     );
 
     let mut slot_table = SlotTable::new(batch_generate_max_slots as usize);
-    let chunk_size_tokens = prefill_chunk_tokens.max(1) as usize;
+    // `prefill_chunk_tokens` is the ceiling; the pacer picks the operating
+    // quantum from measured wall time whenever more than one slot is active,
+    // so a long prompt cannot starve a co-scheduled request on a slow machine
+    // (gotcha #191). One pacer per worker: the cost of a prompt token is a
+    // property of this machine and this loaded model.
+    let mut prefill_pacer = crate::inference::prefill_pacer::PrefillPacer::new(
+        prefill_chunk_tokens.max(1) as usize,
+        prefill_target_ms,
+    );
 
     // Item 8 Phase 2b: cross-node prefix-KV probe waiters. `handle_generate`
     // and `try_register_generate_slot` register a oneshot keyed by the
@@ -418,7 +432,7 @@ pub async fn run_worker(
                 &kv_store,
                 &prefix_cache,
                 &mut slot_table,
-                chunk_size_tokens,
+                &mut prefill_pacer,
                 force_standard_attn,
                 batched_prefill_forward,
             )
@@ -2440,7 +2454,7 @@ async fn step_decode_pool(
     kv_store: &Arc<KvCacheStore>,
     prefix_cache: &Arc<PrefixCache>,
     slot_table: &mut SlotTable,
-    chunk_size: usize,
+    prefill_pacer: &mut crate::inference::prefill_pacer::PrefillPacer,
     force_standard_attn: bool,
     batched_prefill_forward: bool,
 ) -> Result<(), SwarmError> {
@@ -2478,6 +2492,13 @@ async fn step_decode_pool(
         }
 
         let active = slot_table.active();
+
+        // Size this tick's quantum from measured wall time. `is_sharing` gates
+        // on there being someone to starve — a solo prompt keeps the full
+        // configured chunk so its throughput is untouched.
+        let sharing = crate::inference::prefill_pacer::PrefillPacer::is_sharing(active.len());
+        let chunk_size = prefill_pacer.chunk_size(sharing);
+        let phase_a_started = std::time::Instant::now();
 
         // Stage 1: collect chunks + build input tensors.
         let mut steps: Vec<PrefillStep> = Vec::new();
@@ -2610,6 +2631,7 @@ async fn step_decode_pool(
             // prefix-cache insert + promote-to-decoding on the final chunk).
             // Announces are accumulated here and dispatched after the
             // mutable borrow on `active` drops below.
+            let mut pending_progress: Vec<(uuid::Uuid, u32, u32)> = Vec::new();
             let mut pending_announces: Vec<(
                 crate::types::ModelId,
                 Vec<crate::types::PrefixBlockEntry>,
@@ -2627,6 +2649,11 @@ async fn step_decode_pool(
                     remaining_after = step.remaining_after,
                     "DIAG: BatchGenerate prefill chunk ran"
                 );
+                pending_progress.push((
+                    request_id,
+                    (step.pos + step.chunk_len) as u32,
+                    (step.pos + step.chunk_len + step.remaining_after) as u32,
+                ));
                 if step.remaining_after == 0 {
                     let (first_token, first_logprob) =
                         match crate::inference::tensor_util::sample_token_with_logprob(
@@ -2666,6 +2693,31 @@ async fn step_decode_pool(
                 )
                 .await;
             }
+
+            // Tell the daemon how far each still-prefilling request has got, so
+            // a long prompt reads as progress rather than as a hang. Same
+            // collect-then-send shape as the announces above: the `active`
+            // borrow has to end before we can touch the writer.
+            for (request_id, done, total) in pending_progress {
+                let _ = send_worker(
+                    writer,
+                    &WorkerMsg::Progress {
+                        request_id,
+                        phase: crate::inference::worker_ipc::ProgressPhase::Prefill,
+                        done,
+                        total,
+                    },
+                    &[],
+                )
+                .await;
+            }
+
+            // Feed the measured cost back into the pacer. Timed across the whole
+            // of Phase A rather than per group, because that is the quantity the
+            // budget is about: what a co-scheduled decode slot waits through
+            // before Phase B runs.
+            let prefill_tokens: usize = steps.iter().map(|s| s.chunk_len).sum();
+            prefill_pacer.observe(prefill_tokens, phase_a_started.elapsed());
         }
     }
 

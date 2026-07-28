@@ -214,6 +214,7 @@ pub async fn messages(
         if let Some(router_tx) = &state.router_tx {
             if req.stream {
                 return handlers::anthropic_stream(
+                    &state,
                     router_tx.clone(),
                     internal_messages,
                     sampling_params,

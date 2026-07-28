@@ -715,6 +715,9 @@ impl SharedState {
             .set_prefill_chunk_tokens(state.config.inference.prefill_chunk_tokens);
         state
             .model_process_pool
+            .set_prefill_target_ms(state.config.inference.prefill_target_ms);
+        state
+            .model_process_pool
             .set_batched_prefill_forward(state.config.inference.batched_prefill_forward);
         state
             .model_process_pool

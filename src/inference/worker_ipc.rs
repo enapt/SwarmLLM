@@ -166,8 +166,50 @@ pub enum WorkerMsg {
     /// and overflows the 64 MiB header cap. `present == false` means the
     /// worker couldn't produce a snapshot (eviction race / miss).
     PrefixSnapshotResponse { request_id: Uuid, present: bool },
+    /// Progress on a request that has not produced its first token yet.
+    ///
+    /// Prefill is linear in prompt length and is ~99% of a long request, so a
+    /// large prompt on a modest machine can run for minutes before anything
+    /// reaches the client — indistinguishable, from outside, from a hang. This
+    /// carries enough to say what the worker is doing and how far along it is;
+    /// the daemon derives an ETA from the observed rate (it has the timing and
+    /// the trace, the worker has neither).
+    ///
+    /// Additive and fire-and-forget: a daemon that does not understand it loses
+    /// only the progress display, and a worker that never sends it (an older
+    /// binary) simply leaves the request's phase unset.
+    Progress {
+        request_id: Uuid,
+        phase: ProgressPhase,
+        /// Prompt tokens consumed so far.
+        done: u32,
+        /// Prompt tokens in total. Zero when not meaningful for the phase.
+        total: u32,
+    },
     /// Worker is about to exit.
     Bye,
+}
+
+/// What a not-yet-streaming request is currently doing.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProgressPhase {
+    /// Reading model weights off disk and onto the device. Has no token
+    /// counter — the cost is per byte, not per token.
+    LoadingModel,
+    /// Reading the prompt. `done`/`total` are prompt tokens.
+    Prefill,
+}
+
+impl ProgressPhase {
+    /// Short label for logs, API payloads and the dashboard. Stable — the
+    /// frontend and the admin API both key off these strings.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ProgressPhase::LoadingModel => "loading_model",
+            ProgressPhase::Prefill => "prefill",
+        }
+    }
 }
 
 /// Forward-pass request header (activation bytes are the binary payload).

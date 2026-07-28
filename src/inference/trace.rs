@@ -143,6 +143,40 @@ struct TraceInner {
     prompt_tokens: u32,
     completion_tokens: u32,
     outcome: Outcome,
+    /// Latest pre-first-token progress report, if the request is still in a
+    /// phase that has one. Cleared once tokens start flowing — at that point
+    /// TTFT is the honest answer and a stale "prefill 100%" would be noise.
+    progress: Option<ProgressSnapshot>,
+    /// When the current phase began, and how far along it already was. The rate
+    /// is measured from THIS request's own updates rather than a global average,
+    /// because prompt-token cost climbs with context and varies per model.
+    progress_started: Option<Instant>,
+    progress_base_done: u32,
+}
+
+/// A point-in-time view of what a not-yet-streaming request is doing.
+///
+/// Prefill is linear in prompt length and ~99% of a long request, so on a modest
+/// machine a large prompt runs for minutes with nothing reaching the client.
+/// Without this the only honest thing a UI could say was "waiting", which is
+/// indistinguishable from a hang (gotcha #191).
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct ProgressSnapshot {
+    /// `loading_model` | `prefill` — stable strings, keyed on by the admin API
+    /// and the dashboard.
+    pub phase: &'static str,
+    pub done: u32,
+    pub total: u32,
+    /// Completion 0-100, or `None` when the phase has no meaningful total
+    /// (model loading is per byte, not per token).
+    pub percent: Option<u8>,
+    /// Estimated milliseconds remaining in this phase, from the rate observed
+    /// across this request's own updates. `None` until two updates have landed
+    /// — a single sample cannot distinguish a slow machine from a long prompt.
+    pub eta_ms: Option<u64>,
+    /// Milliseconds since this phase began. Lets a caller show elapsed even
+    /// when the rate is not yet established.
+    pub elapsed_ms: u64,
 }
 
 /// The per-request record. Cheap to clone behind an `Arc`.
@@ -184,6 +218,73 @@ impl RequestTrace {
         self.lock().t_dequeued = Some(Instant::now());
     }
 
+    /// Record pre-first-token progress, deriving percent and an ETA.
+    ///
+    /// The rate comes from this request's own updates since the phase began, so
+    /// the first update establishes only a baseline and yields no ETA — one
+    /// sample cannot separate "slow machine" from "long prompt", and a
+    /// confidently wrong first estimate is worse than none.
+    pub fn set_progress(&self, phase: &'static str, done: u32, total: u32) {
+        let now = Instant::now();
+        let mut inner = self.lock();
+
+        // A phase change restarts the measurement: ms-per-token during prefill
+        // says nothing about how long loading weights will take.
+        let phase_changed = inner.progress.as_ref().map(|p| p.phase) != Some(phase);
+        if phase_changed || inner.progress_started.is_none() {
+            inner.progress_started = Some(now);
+            inner.progress_base_done = done;
+        }
+
+        let started = inner.progress_started.unwrap_or(now);
+        let elapsed = now.saturating_duration_since(started);
+        let advanced = done.saturating_sub(inner.progress_base_done);
+        let remaining = total.saturating_sub(done);
+
+        let eta_ms = if advanced > 0 && remaining > 0 && elapsed.as_millis() > 0 {
+            let per_unit_ms = elapsed.as_secs_f64() * 1000.0 / advanced as f64;
+            let eta = per_unit_ms * remaining as f64;
+            eta.is_finite().then(|| eta.round() as u64)
+        } else {
+            None
+        };
+
+        inner.progress = Some(ProgressSnapshot {
+            phase,
+            done,
+            total,
+            percent: (total > 0).then(|| ((done as u64 * 100) / total as u64).min(100) as u8),
+            eta_ms,
+            elapsed_ms: elapsed.as_millis() as u64,
+        });
+    }
+
+    /// Latest progress snapshot, if the request is still pre-first-token.
+    pub fn progress(&self) -> Option<ProgressSnapshot> {
+        let inner = self.lock();
+        let mut snap = inner.progress.clone()?;
+        // `elapsed_ms` is answered at READ time, not frozen at the last worker
+        // update. Updates arrive one per prefill chunk, which on a slow machine
+        // is tens of seconds apart — a reader polling in between would otherwise
+        // see the same stale number every time and could not tell a working
+        // request from a stuck one. Observed on the Proxmox CPU node
+        // (2026-07-28): six consecutive polls all reporting elapsed 0.0s.
+        if let Some(started) = inner.progress_started {
+            snap.elapsed_ms = started.elapsed().as_millis() as u64;
+        }
+        Some(snap)
+    }
+
+    /// Drop progress once the request is actually producing output. Called from
+    /// the same place TTFT is stamped, so the two can never disagree about
+    /// whether the request has started answering.
+    pub fn clear_progress(&self) {
+        let mut inner = self.lock();
+        inner.progress = None;
+        inner.progress_started = None;
+        inner.progress_base_done = 0;
+    }
+
     /// Pipeline assembled. Records the route and the segment layout in one
     /// call so the two can never disagree.
     ///
@@ -216,9 +317,18 @@ impl RequestTrace {
         // Clamp to >=1us so 0 keeps meaning "unset" for a token that arrives
         // within the timer's resolution.
         let us = (self.t_admitted.elapsed().as_micros() as u64).max(1);
-        let _ = self
+        let won = self
             .ttft_us
-            .compare_exchange(0, us, Ordering::Relaxed, Ordering::Relaxed);
+            .compare_exchange(0, us, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok();
+        // Only the thread that actually stamped TTFT clears progress, so the
+        // mutex is taken once per request rather than once per token — this
+        // function is called on every token precisely because that is cheap.
+        // Tying the two together here is what stops a finished request still
+        // advertising "prefill 100%, eta 0".
+        if won {
+            self.clear_progress();
+        }
     }
 
     /// Attach timing to a segment already recorded by `mark_assembled`.
@@ -620,6 +730,48 @@ pub fn classify_route(segments: &[SegmentTrace]) -> Route {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn progress_elapsed_advances_between_worker_updates() {
+        // A reader polling between updates must see time moving. Frozen
+        // elapsed made a working request indistinguishable from a stuck one.
+        let t = RequestTrace::new(uuid::Uuid::new_v4(), "m", "chat");
+        t.set_progress("prefill", 128, 4096);
+        let first = t.progress().unwrap().elapsed_ms;
+        std::thread::sleep(std::time::Duration::from_millis(25));
+        let second = t.progress().unwrap().elapsed_ms;
+        assert!(
+            second > first,
+            "elapsed must advance without a new update ({first} -> {second})"
+        );
+    }
+
+    #[test]
+    fn progress_eta_needs_two_samples_then_appears() {
+        let t = RequestTrace::new(uuid::Uuid::new_v4(), "m", "chat");
+        t.set_progress("prefill", 128, 1024);
+        assert!(
+            t.progress().unwrap().eta_ms.is_none(),
+            "one sample cannot separate a slow machine from a long prompt"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        t.set_progress("prefill", 256, 1024);
+        let p = t.progress().unwrap();
+        assert!(p.eta_ms.is_some(), "a second sample establishes a rate");
+        assert_eq!(p.percent, Some(25));
+    }
+
+    #[test]
+    fn first_token_clears_progress() {
+        let t = RequestTrace::new(uuid::Uuid::new_v4(), "m", "chat");
+        t.set_progress("prefill", 512, 512);
+        assert!(t.progress().is_some());
+        t.mark_first_token();
+        assert!(
+            t.progress().is_none(),
+            "a streaming request has TTFT; stale prefill progress would be noise"
+        );
+    }
+
     use super::*;
 
     fn seg(index: u16, node: &str, local: bool, transport: Transport) -> SegmentTrace {

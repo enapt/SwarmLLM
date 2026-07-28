@@ -141,14 +141,39 @@ pub(super) fn serialize_anthropic_event(event: &AnthropicSseEvent) -> (&'static 
 }
 
 /// Build an SSE response from an Anthropic event channel.
+/// `progress` is an optional (state, request uuid) pair used to interleave SSE
+/// comment frames describing a not-yet-streaming request — the same treatment
+/// the OpenAI encoder gives, so a long prefill reads as progress on this API
+/// too rather than as an idle socket. Pass `None` where no trace exists (a
+/// cloud proxy stream, for instance, whose latency is not ours to explain).
 pub(super) fn build_anthropic_sse_response(
     sse_rx: tokio::sync::mpsc::Receiver<AnthropicSseEvent>,
+    progress: Option<(std::sync::Arc<crate::daemon::SharedState>, uuid::Uuid)>,
 ) -> axum::response::Response {
+    let finished = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let finished_for_map = finished.clone();
     let stream = tokio_stream::wrappers::ReceiverStream::new(sse_rx).map(move |event| {
         let (event_type, data) = serialize_anthropic_event(&event);
+        // `message_stop` is Anthropic's terminal frame; after it the ticker
+        // must end or `merge` would hold the response open forever.
+        if event_type == "message_stop" {
+            finished_for_map.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
         Ok::<_, Infallible>(Event::default().event(event_type).data(data))
     });
-    Sse::new(stream)
+    let ticker = futures::stream::unfold((progress, finished), |(p, finished)| async move {
+        tokio::time::sleep(std::time::Duration::from_secs(SSE_KEEPALIVE_INTERVAL_SECS)).await;
+        if finished.load(std::sync::atomic::Ordering::Relaxed) {
+            return None;
+        }
+        let text = p
+            .as_ref()
+            .and_then(|(state, rid)| state.active_traces.get(rid).and_then(|t| t.progress()))
+            .map(|s| crate::api::sse::format_progress_comment(&s))
+            .unwrap_or_default();
+        Some((Ok(Event::default().comment(text)), (p, finished)))
+    });
+    Sse::new(tokio_stream::StreamExt::merge(stream, ticker))
         .keep_alive(
             KeepAlive::new().interval(std::time::Duration::from_secs(SSE_KEEPALIVE_INTERVAL_SECS)),
         )

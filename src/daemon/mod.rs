@@ -545,6 +545,19 @@ impl Daemon {
             shutdown_rx.clone(),
         );
 
+        // Pre-first-token progress (prefill / model load). Workers emit one per
+        // prefill chunk; the forwarder stamps it onto the in-flight trace so a
+        // long prompt reads as progress rather than as a hang.
+        let (progress_tx, progress_rx) =
+            mpsc::channel::<crate::inference::process_pool::ProgressEvent>(256);
+        shared_state.model_process_pool.set_progress_tx(progress_tx);
+        background::spawn_progress_forwarder(
+            &mut background_tasks,
+            shared_state.clone(),
+            progress_rx,
+            shutdown_rx.clone(),
+        );
+
         // Item 8 Phase 2b: worker-initiated fetch probes go here.
         let (prefix_probe_tx, prefix_probe_rx) =
             mpsc::channel::<crate::inference::process_pool::PrefixProbeEvent>(256);

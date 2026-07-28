@@ -136,6 +136,39 @@ pub type SplitStream = (
     SplitStreamUsage,
 );
 
+/// Keeps an `active_traces` entry alive for the duration of a request and
+/// removes it however the request ends.
+///
+/// The router path gets this from `ActivePipelineGuard`; the local split fast
+/// path has no pipeline, so it needs its own. RAII rather than an explicit
+/// removal because the streaming task has two exits — generation finishing and
+/// the client disconnecting — and a leaked entry would keep a stale request
+/// showing as "in progress" on every surface forever.
+struct TraceGuard {
+    state: std::sync::Arc<crate::daemon::SharedState>,
+    request_id: uuid::Uuid,
+}
+
+impl TraceGuard {
+    fn register(
+        state: &std::sync::Arc<crate::daemon::SharedState>,
+        request_id: uuid::Uuid,
+        trace: std::sync::Arc<crate::inference::trace::RequestTrace>,
+    ) -> Self {
+        state.active_traces.insert(request_id, trace);
+        Self {
+            state: state.clone(),
+            request_id,
+        }
+    }
+}
+
+impl Drop for TraceGuard {
+    fn drop(&mut self) {
+        self.state.active_traces.remove(&self.request_id);
+    }
+}
+
 pub fn spawn_split_stream(
     state: &AppState,
     model_id: &crate::types::ModelId,
@@ -166,7 +199,7 @@ pub fn spawn_split_stream(
     // the dashboard compare page) was the one place that didn't, which is why
     // the leak only showed up on some models via some endpoints.
     let params = with_template_stops(params, meta.chat_template.as_deref());
-    let rid = uuid::Uuid::parse_str(request_id).unwrap_or_else(|_| uuid::Uuid::new_v4());
+    let rid = crate::api::request_uuid(request_id);
     let (token_tx, token_rx) = crate::inference::router::StreamingTokenTx::channel(64);
     // Records why generation stopped when it produced nothing. Without this the
     // channel simply closes and the client sees an empty-but-successful stream,
@@ -188,7 +221,27 @@ pub fn spawn_split_stream(
     // RECEIVER is dropped, which is what happens when the SSE bridge task exits
     // — and that task exits as soon as a send to the disconnected client fails.
     let disconnect_watch = token_tx.clone();
+    // Register an in-flight trace so worker progress has somewhere to land.
+    //
+    // This fast path bypasses the router, and the router was the ONLY place
+    // inserting into `active_traces` — so a local split request produced no
+    // trace at all, and a progress report keyed to it was silently dropped by
+    // the forwarder. That is precisely the case progress exists for: a long
+    // prompt on a CPU-only node, answered locally, prefilling for minutes.
+    //
+    // Guarded by `TraceGuard` rather than removed at the end of the happy path,
+    // because this task can also exit through the disconnect branch below.
+    let trace_guard = TraceGuard::register(
+        &state.shared_state,
+        rid,
+        std::sync::Arc::new(crate::inference::trace::RequestTrace::new(
+            rid,
+            model_id.0.clone(),
+            "chat",
+        )),
+    );
     tokio::spawn(async move {
+        let _trace_guard = trace_guard;
         let generate = pool.generate(
             &model_id,
             layer_range,
@@ -261,6 +314,11 @@ pub async fn submit_stream_to_router(
             Result<crate::inference::router::InferenceOutput, crate::error::SwarmError>,
         >,
         tokio::sync::mpsc::Receiver<StreamingTokenEvent>,
+        // The id the router will trace this request under. `InferenceRequest`
+        // mints its own, unrelated to the public `swarm-<hex>` request id, so
+        // the caller cannot derive it — returning it is the only way a caller
+        // can look the request up in `active_traces`.
+        uuid::Uuid,
     ),
     ApiError,
 > {
@@ -276,6 +334,7 @@ pub async fn submit_stream_to_router(
         lora_adapter,
     );
     inference_req.cancel = cancel;
+    let traced_id = inference_req.id;
 
     router_tx
         .send(RouterCommand::StreamSubmit {
@@ -290,7 +349,7 @@ pub async fn submit_stream_to_router(
             ))
         })?;
 
-    Ok((result_rx, token_rx))
+    Ok((result_rx, token_rx, traced_id))
 }
 
 /// Run non-streaming inference on a local split model.
@@ -346,7 +405,7 @@ pub async fn run_split_generate(
 
     let params = with_template_stops(params, meta.chat_template.as_deref());
 
-    let rid = uuid::Uuid::parse_str(request_id).unwrap_or_else(|_| uuid::Uuid::new_v4());
+    let rid = crate::api::request_uuid(request_id);
 
     // This path deliberately bypasses the router, so it must build its own
     // trace — it is the local-complete fast path the dashboard chat uses, i.e.
@@ -358,6 +417,10 @@ pub async fn run_split_generate(
         model_id.0.clone(),
         "chat",
     ));
+    // Visible as in-flight for as long as it runs, so worker progress lands on
+    // it. Without this the trace existed only to be published at the END, which
+    // is no help at all to somebody asking why a request is taking minutes.
+    let _trace_guard = TraceGuard::register(&state.shared_state, rid, trace.clone());
     trace.mark_dequeued();
     trace.mark_assembled(
         crate::inference::trace::Route::Local,
@@ -389,6 +452,7 @@ pub async fn run_split_generate(
 
 /// Dispatch to `router_inference` or `router_inference_stream` based on `req.stream`.
 pub(super) async fn dispatch_inference(
+    state: &AppState,
     router_tx: tokio::sync::mpsc::Sender<RouterCommand>,
     req: &ChatCompletionRequest,
     messages: Vec<ChatMessage>,
@@ -397,7 +461,7 @@ pub(super) async fn dispatch_inference(
     cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 ) -> Result<axum::response::Response, ApiError> {
     if req.stream {
-        router_inference_stream(router_tx, req, messages, request_id, created, cancel).await
+        router_inference_stream(state, router_tx, req, messages, request_id, created, cancel).await
     } else {
         router_inference(router_tx, req, messages, request_id, created, cancel).await
     }
@@ -484,6 +548,7 @@ async fn emit_openai_tool_calls(
 }
 
 async fn router_inference_stream(
+    state: &AppState,
     router_tx: tokio::sync::mpsc::Sender<RouterCommand>,
     req: &ChatCompletionRequest,
     messages: Vec<ChatMessage>,
@@ -491,7 +556,7 @@ async fn router_inference_stream(
     created: i64,
     cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 ) -> Result<axum::response::Response, ApiError> {
-    let (result_rx, mut token_rx) = submit_stream_to_router(
+    let (result_rx, mut token_rx, traced_id) = submit_stream_to_router(
         &router_tx,
         ModelId(req.model.clone()),
         messages,
@@ -769,7 +834,16 @@ async fn router_inference_stream(
         );
     });
 
-    Ok(stream_events_to_sse(sse_rx, rid, created, model_name, stream_session_id).into_response())
+    let progress_handle = Some((state.shared_state.clone(), traced_id));
+    Ok(stream_events_to_sse(
+        sse_rx,
+        rid,
+        created,
+        model_name,
+        stream_session_id,
+        progress_handle,
+    )
+    .into_response())
 }
 
 /// Direct split-model generation (non-streaming).
@@ -829,6 +903,14 @@ pub(super) async fn split_stream_response(
     tools_requested: bool,
     include_usage: bool,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    // Captured before `state` is moved into the generation task. This is the
+    // LOCAL-model streaming path — the one most likely to sit in a long prefill
+    // on a modest machine — so omitting progress here would leave it missing
+    // from exactly the case it exists for.
+    let progress_handle = Some((
+        state.shared_state.clone(),
+        crate::api::request_uuid(&request_id),
+    ));
     let (tx, rx) = tokio::sync::mpsc::channel::<StreamEvent>(64);
     let request_id_inner = request_id.clone();
 
@@ -1002,7 +1084,7 @@ pub(super) async fn split_stream_response(
         );
     });
 
-    stream_events_to_sse(rx, request_id, created, model_name, None)
+    stream_events_to_sse(rx, request_id, created, model_name, None, progress_handle)
 }
 
 pub(super) async fn stream_response(
@@ -1014,6 +1096,11 @@ pub(super) async fn stream_response(
     params: SamplingParams,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     let (tx, rx) = tokio::sync::mpsc::channel::<StreamEvent>(64);
+    // Captured before `state` moves into the generation task below.
+    let progress_handle = Some((
+        state.shared_state.clone(),
+        crate::api::request_uuid(&request_id),
+    ));
 
     // Spawn generation in background
     tokio::spawn(async move {
@@ -1077,18 +1164,40 @@ pub(super) async fn stream_response(
         );
     });
 
-    stream_events_to_sse(rx, request_id, created, model_name, None)
+    stream_events_to_sse(rx, request_id, created, model_name, None, progress_handle)
 }
 
 /// Convert a StreamEvent receiver into an SSE stream of OpenAI-format chat completion chunks.
+///
+/// `progress` is an optional (state, request uuid) pair used to interleave SSE
+/// **comment** frames describing what a not-yet-streaming request is doing.
+/// Reading a long prompt is ~99% of a long request, so without this the client
+/// sees an idle socket for minutes and cannot tell work from a hang.
+///
+/// Comments are the right frame for it: `:`-prefixed lines are ignored by every
+/// conforming SSE client, so this cannot corrupt an OpenAI-compatible response,
+/// while a human watching `curl` sees the phase and ETA. It also subsumes the
+/// keep-alive, which sent an empty comment on the same schedule for liveness
+/// alone.
+///
+/// This sits inside the shared encoder rather than in the three callers on
+/// purpose — a streaming path added later inherits it without its author
+/// having to know (see `.claude/rules/architecture.md` § "One invariant, N
+/// paths").
 fn stream_events_to_sse(
     rx: tokio::sync::mpsc::Receiver<StreamEvent>,
     request_id: String,
     created: i64,
     model_name: String,
     session_id: Option<String>,
+    progress: Option<(std::sync::Arc<crate::daemon::SharedState>, uuid::Uuid)>,
 ) -> Sse<impl futures::Stream<Item = Result<Event, Infallible>>> {
     let mut json_buf = Vec::with_capacity(512);
+    // Set when the terminal frame is emitted, so the progress ticker below
+    // knows to stop. `merge` ends only when BOTH sides end, so without this the
+    // response would stay open forever after `[DONE]`.
+    let finished = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let finished_for_map = finished.clone();
     let stream = tokio_stream::wrappers::ReceiverStream::new(rx).map(move |event| match event {
         StreamEvent::Delta {
             content,
@@ -1188,9 +1297,39 @@ fn stream_events_to_sse(
             let json = serde_json::to_string(&chunk).unwrap_or_default();
             Ok(Event::default().data(json))
         }
-        StreamEvent::Done => Ok(Event::default().data("[DONE]")),
+        StreamEvent::Done => {
+            finished_for_map.store(true, std::sync::atomic::Ordering::Relaxed);
+            Ok(Event::default().data("[DONE]"))
+        }
     });
-    Sse::new(stream).keep_alive(
+
+    // Interleave progress comments with the token stream. A merged ticker
+    // rather than a timeout on the receiver, because it has to keep firing
+    // while the receiver is blocked — which is precisely the situation being
+    // reported on.
+    //
+    // **The ticker MUST terminate.** `merge` ends only when both sides end, so
+    // an unbounded ticker would hold the SSE response open forever after
+    // `[DONE]`. It keys off a flag set by the mapper above rather than off the
+    // trace's lifetime: not every streaming path registers a trace, and a
+    // termination condition that depends on one would hang exactly the paths
+    // that have none.
+    let ticker = futures::stream::unfold((progress, finished), |(p, finished)| async move {
+        tokio::time::sleep(std::time::Duration::from_secs(SSE_KEEPALIVE_INTERVAL_SECS)).await;
+        if finished.load(std::sync::atomic::Ordering::Relaxed) {
+            return None;
+        }
+        let text = p
+            .as_ref()
+            .and_then(|(state, rid)| state.active_traces.get(rid).and_then(|t| t.progress()))
+            .map(|s| crate::api::sse::format_progress_comment(&s))
+            // No snapshot yet, or already streaming: an empty comment is a
+            // valid keep-alive, which is what this subsumes.
+            .unwrap_or_default();
+        Some((Ok(Event::default().comment(text)), (p, finished)))
+    });
+
+    Sse::new(StreamExt::merge(stream, ticker)).keep_alive(
         KeepAlive::new().interval(std::time::Duration::from_secs(SSE_KEEPALIVE_INTERVAL_SECS)),
     )
 }

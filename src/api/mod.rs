@@ -249,6 +249,55 @@ pub mod pool;
 pub mod providers;
 pub mod server;
 pub mod sse;
+
+/// Derive the internal request UUID from a public API request id.
+///
+/// **Deterministic on purpose.** API request ids look like `swarm-<hex>`, which
+/// is not a UUID, so `Uuid::parse_str` fails on every real request. Two call
+/// sites each doing `parse_str(...).unwrap_or_else(|_| Uuid::new_v4())` will
+/// therefore mint two DIFFERENT random ids for the same request and silently
+/// fail to find each other — which is exactly how the streaming progress
+/// lookup came to return nothing while the admin API showed the request fine
+/// (found by running it, 2026-07-28).
+///
+/// Hashing the id means any number of call sites agree without threading a
+/// value between them. A genuine UUID is still parsed as itself so ids that
+/// already round-trip keep doing so.
+pub fn request_uuid(request_id: &str) -> uuid::Uuid {
+    if let Ok(u) = uuid::Uuid::parse_str(request_id) {
+        return u;
+    }
+    let digest = blake3::hash(request_id.as_bytes());
+    let mut bytes = [0u8; 16];
+    bytes.copy_from_slice(&digest.as_bytes()[..16]);
+    uuid::Uuid::from_bytes(bytes)
+}
+
+#[cfg(test)]
+mod request_uuid_tests {
+    use super::request_uuid;
+
+    #[test]
+    fn the_same_api_id_always_yields_the_same_uuid() {
+        let a = request_uuid("swarm-b553d8a867eb4fe580b5da821327c029");
+        let b = request_uuid("swarm-b553d8a867eb4fe580b5da821327c029");
+        assert_eq!(
+            a, b,
+            "derivation must not be random — call sites must agree"
+        );
+    }
+
+    #[test]
+    fn different_api_ids_yield_different_uuids() {
+        assert_ne!(request_uuid("swarm-aaa"), request_uuid("swarm-bbb"));
+    }
+
+    #[test]
+    fn a_real_uuid_is_preserved() {
+        let u = uuid::Uuid::new_v4();
+        assert_eq!(request_uuid(&u.to_string()), u);
+    }
+}
 pub mod tool_parse;
 pub mod websocket;
 

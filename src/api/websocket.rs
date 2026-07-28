@@ -577,6 +577,10 @@ async fn build_stats_message(state: &SharedState) -> String {
         "remote_peers": remote_peers,
         "credits": credit_json,
         "active_requests": state.active_pipelines.len(),
+        // Per-request progress for anything still pre-first-token. Rides the
+        // existing 2s stats tick rather than a new message type — the cadence
+        // suits a progress bar and there are deliberately only five WS types.
+        "active_request_progress": state.active_request_rows(),
         "requests_served": state.metrics.requests_served_atomic.load(std::sync::atomic::Ordering::Relaxed),
         "requests_made": requests_made,
         "forwards_served": state.metrics.forwards_served_atomic.load(std::sync::atomic::Ordering::Relaxed),

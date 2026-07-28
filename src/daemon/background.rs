@@ -381,6 +381,50 @@ pub(super) fn spawn_browser_open(
 /// index. This lets a single-node setup verify the wire path end-to-end —
 /// after sending a prompt we should see our own NodeId returned by
 /// `cross_node_prefix_holders` on the matching block hashes.
+/// Drains worker progress reports onto the matching in-flight `RequestTrace`.
+///
+/// `active_traces` is the single place every surface already reads from — the
+/// admin API, the DIAG line, the dashboard stats payload — so stamping progress
+/// there means none of them need their own plumbing, and a request that
+/// finishes drops its progress with the trace it belongs to.
+///
+/// Reports for unknown request ids are dropped without complaint: the request
+/// finished (or was cancelled) between the worker sending and this draining,
+/// which is normal and not worth a log line per chunk.
+pub(super) fn spawn_progress_forwarder(
+    tasks: &mut BackgroundTasks,
+    shared_state: Arc<SharedState>,
+    mut rx: mpsc::Receiver<crate::inference::process_pool::ProgressEvent>,
+    mut shutdown_rx: watch::Receiver<bool>,
+) {
+    tasks.spawn(async move {
+        loop {
+            tokio::select! {
+                _ = shutdown_rx.changed() => break,
+                msg = rx.recv() => {
+                    let Some(event) = msg else { break };
+                    let Some(trace) = shared_state.active_traces.get(&event.request_id) else {
+                        continue;
+                    };
+                    trace.set_progress(event.phase.as_str(), event.done, event.total);
+                    if let Some(p) = trace.progress() {
+                        tracing::debug!(
+                            request_id = %event.request_id,
+                            phase = p.phase,
+                            done = p.done,
+                            total = p.total,
+                            percent = ?p.percent,
+                            eta_ms = ?p.eta_ms,
+                            "DIAG: request progress"
+                        );
+                    }
+                }
+            }
+        }
+        "progress_forwarder"
+    });
+}
+
 pub(super) fn spawn_prefix_announce_forwarder(
     tasks: &mut BackgroundTasks,
     shared_state: Arc<SharedState>,

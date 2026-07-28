@@ -97,3 +97,24 @@ pub async fn send_role_preamble(tx: &mpsc::Sender<StreamEvent>) -> bool {
     .await
     .is_ok()
 }
+
+/// One-line human-readable progress note for an SSE comment frame.
+///
+/// Deliberately plain text, not JSON: it is a comment, so nothing parses it —
+/// its only reader is a person watching a stream that would otherwise look
+/// dead. Says "still reading" rather than naming an internal phase, and omits
+/// the ETA entirely rather than inventing one before the rate is known.
+pub fn format_progress_comment(s: &crate::inference::trace::ProgressSnapshot) -> String {
+    let what = match s.phase {
+        "loading_model" => "loading model".to_string(),
+        "prefill" => match s.percent {
+            Some(pct) => format!("reading prompt {pct}% ({}/{} tokens)", s.done, s.total),
+            None => "reading prompt".to_string(),
+        },
+        other => other.to_string(),
+    };
+    match s.eta_ms {
+        Some(ms) if ms >= 1000 => format!("{what}, about {}s left", ms / 1000),
+        _ => what,
+    }
+}

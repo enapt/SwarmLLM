@@ -117,15 +117,27 @@ pub struct InferenceConfig {
     /// at the cost of more prefill ticks; larger = the opposite. 0 / 1
     /// degenerate to one-token-per-tick prefill.
     ///
-    /// **The bound is in tokens of compute, not wall time**, so the right
-    /// value depends on the hardware: 128 prompt tokens is milliseconds on a
-    /// GPU and 45–59s on a modest CPU node, where it means a co-scheduled
-    /// decode slot advances one token per tick for the whole of a long
-    /// prefill. See `docs/FUTURE_WORK.md` § "`prefill_chunk_tokens` bounds
-    /// decode interruption in tokens, not time" for the measurement and the
-    /// self-calibrating fix.
+    /// **This is a CEILING, not the operating point.** A bound in tokens of
+    /// compute is not a bound in time — 128 prompt tokens is milliseconds on a
+    /// GPU and 45–59s on a modest CPU node, where it used to mean a
+    /// co-scheduled decode slot advanced one token per tick for the whole of a
+    /// long prefill (gotcha #191). `prefill_target_ms` below now picks the
+    /// actual quantum from measured wall time whenever slots are shared; this
+    /// value only caps how large that choice may get.
     #[serde(default = "default_prefill_chunk_tokens")]
     pub prefill_chunk_tokens: u32,
+    /// Wall-time budget, in milliseconds, for one tick's prefill work **while
+    /// more than one slot is active**. `prefill_chunk_tokens` above is a ceiling
+    /// expressed in tokens; this is the target expressed in the thing a waiting
+    /// request actually experiences, and the worker sizes the chunk from
+    /// measured ms-per-token to land near it (`inference::prefill_pacer`).
+    ///
+    /// A solo request is never paced — it has nobody to starve, and smaller
+    /// chunks would only add per-call overhead. On a machine so slow that even
+    /// `MIN_CHUNK_TOKENS` overruns this budget the floor wins and the target is
+    /// simply not met; the worker reports that rather than pretending.
+    #[serde(default = "default_prefill_target_ms")]
+    pub prefill_target_ms: u64,
     /// Item 7 Phase 4: fuse concurrent same-shape Prefilling slots into one
     /// `forward_batch` call inside `step_decode_pool`'s Phase A. Groups are
     /// formed by `(chunk_len, index_pos)`; non-matching chunks fall back to
@@ -808,10 +820,23 @@ fn default_max_decode_batch() -> u32 {
 }
 
 fn default_prefill_chunk_tokens() -> u32 {
-    // Sized to keep a single chunk's compute well under typical per-decode
-    // latency on small models (TinyLlama Q4 ~ a few ms per token at 128
-    // chunk on CPU). Bigger models / GPU users can raise via config.
+    // A CEILING, not the operating point — `prefill_target_ms` picks the actual
+    // quantum from measured wall time whenever more than one slot is active.
+    //
+    // This was originally chosen on the reasoning that 128 tokens is "a few ms
+    // per token at 128 chunk on CPU", measured on TinyLlama Q4. That does not
+    // generalise: the same 128 tokens took 45–59s on Llama-3.2-3B Q4 on a modest
+    // CPU (measured 2026-07-28), which is where the one-token-per-tick
+    // starvation came from. The number is fine as an upper bound; it was never
+    // safe as a fixed quantum.
     128
+}
+
+fn default_prefill_target_ms() -> u64 {
+    // Comfortably under a human's sense of "responding", and well above the
+    // per-call overhead of splitting a prompt finely. Only applies when slots
+    // are shared.
+    200
 }
 
 fn default_batch_collection_ms() -> u64 {
@@ -850,6 +875,7 @@ impl Default for InferenceConfig {
             max_concurrent_decode_batch: default_max_decode_batch(),
             batch_collection_ms: default_batch_collection_ms(),
             prefill_chunk_tokens: default_prefill_chunk_tokens(),
+            prefill_target_ms: default_prefill_target_ms(),
             batched_prefill_forward: default_batched_prefill_forward(),
             speculative_gamma: default_speculative_gamma(),
             hedge_enabled: false,

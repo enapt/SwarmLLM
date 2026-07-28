@@ -221,6 +221,7 @@ pub async fn performance(State(state): State<AppState>) -> impl axum::response::
 
     axum::Json(serde_json::json!({
         "recent": recent,
+        "active": ss.active_request_rows(),
         "hourly": hourly,
         "peers": ss.peer_performance_rows(),
         "served": {

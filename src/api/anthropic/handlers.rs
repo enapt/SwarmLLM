@@ -182,6 +182,7 @@ pub(super) async fn anthropic_non_stream(
 
 /// Streaming inference via router, returning Anthropic SSE format.
 pub(super) async fn anthropic_stream(
+    state: &AppState,
     router_tx: tokio::sync::mpsc::Sender<RouterCommand>,
     messages: Vec<ChatMessage>,
     params: SamplingParams,
@@ -189,7 +190,7 @@ pub(super) async fn anthropic_stream(
     model: String,
     tools_requested: bool,
 ) -> Result<axum::response::Response, ApiError> {
-    let (result_rx, mut token_rx) = crate::api::openai::submit_stream_to_router(
+    let (result_rx, mut token_rx, traced_id) = crate::api::openai::submit_stream_to_router(
         &router_tx,
         ModelId(model.clone()),
         messages,
@@ -199,6 +200,7 @@ pub(super) async fn anthropic_stream(
         None, // anthropic /v1/messages doesn't have a cancel-by-token wire yet
     )
     .await?;
+    let progress_handle = Some((state.shared_state.clone(), traced_id));
 
     let (sse_tx, sse_rx) = tokio::sync::mpsc::channel::<AnthropicSseEvent>(64);
 
@@ -366,7 +368,7 @@ pub(super) async fn anthropic_stream(
         }
     });
 
-    Ok(build_anthropic_sse_response(sse_rx))
+    Ok(build_anthropic_sse_response(sse_rx, progress_handle))
 }
 
 /// Direct split-model non-streaming generation for Anthropic Messages API.
@@ -412,6 +414,10 @@ pub(super) async fn anthropic_split_stream(
     model: String,
     tools_requested: bool,
 ) -> Result<axum::response::Response, ApiError> {
+    let progress_handle = Some((
+        state.shared_state.clone(),
+        crate::api::request_uuid(&request_id),
+    ));
     let (sse_tx, sse_rx) = tokio::sync::mpsc::channel::<AnthropicSseEvent>(64);
 
     let state = state.clone();
@@ -546,7 +552,7 @@ pub(super) async fn anthropic_split_stream(
         .await;
     });
 
-    Ok(build_anthropic_sse_response(sse_rx))
+    Ok(build_anthropic_sse_response(sse_rx, progress_handle))
 }
 
 /// Translate an Anthropic Messages API request to OpenAI chat completions
@@ -615,7 +621,9 @@ pub(super) async fn anthropic_to_openai_proxy(
             stream_openai_to_anthropic(resp, sse_tx, model_clone).await;
         });
 
-        return Ok(build_anthropic_sse_response(sse_rx));
+        // Cloud proxy: the wait is the upstream provider's, not ours, and there
+        // is no local trace to report on. Keep-alive only.
+        return Ok(build_anthropic_sse_response(sse_rx, None));
     }
 
     // Non-streaming: read full JSON response.
