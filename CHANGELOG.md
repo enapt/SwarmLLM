@@ -2,6 +2,39 @@
 
 All notable changes to SwarmLLM are documented here.
 
+## [0.3.46-alpha] — 2026-07-29
+
+### Fixed
+
+- **Answers from your own machine had a stray character in place of every
+  space.** Asking your machine directly could return something like
+  `A▁distributed▁system▁is▁a▁network` — the marker a tokenizer uses internally
+  to show where words begin, left in the finished text. Most of the words in the
+  reply were affected, so it was not subtle when it happened.
+
+  It only affected answers your machine produced for *you*. Work it did for
+  other machines on the network was converted to text by a different route that
+  was never affected, which is why it survived so long: every check that
+  involved a second machine looked perfect.
+
+  Whether it affected you depended on the model. It also explains a stray `<0x0A>`
+  that turned up in a reply the previous day — the same cause, a different
+  symptom.
+
+- **A prompt that is too long is now reported as your request being too long.**
+  It previously came back as an internal server error, which says the machine
+  broke when in fact the one thing you can change is the length of what you
+  sent. It also meant software that automatically retries after a server error
+  would keep re-sending a request that could never succeed. The explanation
+  itself was already right — it tells you the length, the limit, and what to
+  change — it was simply filed under the wrong kind of failure.
+
+- **Windows GPU builds are back.** v0.3.45 shipped without them: the graphics
+  library needed at link time was not on the search path, and the step that
+  fixes exactly this for the other GPU library had never been extended to cover
+  it. The version of that library is now pinned as well, so a release cannot be
+  broken by it changing on its own.
+
 ## [0.3.45-alpha] — 2026-07-28
 
 ### Fixed

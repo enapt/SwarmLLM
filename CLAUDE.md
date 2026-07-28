@@ -196,7 +196,43 @@ All 20 build phases complete. All subsystems wired — no stubs. **1438 lib + 80
 
 Per-round history lives in `~/.claude/projects/-home-user-SwarmLLM/memory/round_log_*.md` and the CHANGELOG; `docs/ARCHITECTURE.md` is the canonical architecture. This section keeps only the current release line plus one-line prior-round pointers.
 
-### Latest — v0.3.45-alpha (2026-07-28): the .44 shard check ate good shards
+### Latest — v0.3.46-alpha (2026-07-29): local replies were mangled by a stale comment
+
+**Found by the overnight soak; took three attempts, two of them wrong.**
+`CachedDecoder` (`inference/pipeline/prompt.rs`) was built with
+`is_sentencepiece: false, has_tokenizer: false` under the comment "no tokenizer
+in-process" — true when written, then `state.standalone_tokenizer()` was added
+for exactly this case and the call site was never revisited. Pinned false, the
+decoder could ONLY take its fallback: raw vocab entries through
+`decode_bpe_text`, a **GPT-2** byte decoder. U+2581 is outside every range it
+maps, so every space in a local SentencePiece reply became `▁`. Byte-fallback
+tokens leaked the same way — that is the unexplained `<0x0A>` from the day
+before. One defect, two symptoms, reported a day apart. Gotcha **#200**.
+
+**Why it hid**: peer-served work is decoded on the SERVING side by a path that
+does hold a tokenizer, so every cross-node check was clean. Only asking a node
+directly reproduced it. **The diagnostic that cracked it: compare the same node
+against itself on two paths** — same model, same prompt, one clean, one mangled.
+
+**Two mistakes worth not repeating.** I first fixed the identical error in a
+DIFFERENT file (`model_worker::decode_token`), shipped it, and nothing changed —
+a path that *could* produce the symptom is not evidence it is the path taken. I
+also announced it resolved and closed the FUTURE_WORK entry before verifying,
+which had to be retracted. What settled it was reading the CONSTRUCTION site and
+finding literals, making the branch reachable-by-construction rather than
+hypothesised.
+
+Also: an over-long prompt returned **500** carrying a perfectly good
+`Validation` message — the class was lost crossing the worker IPC boundary, so
+`classify_worker_error` labelled everything `Inference`. Now 400. A 500 there
+also makes retry-on-5xx clients re-send a request that can never succeed.
+
+And the Windows GPU build, absent from .45: the Vulkan lib dir was never added
+to `LIB` (the step that does exactly this for CUDA was never extended), and
+`msvc-dev-cmd` replaces `LIB` afterwards. SDK version now pinned — `latest` let
+an unpinned toolchain break a release with no commit of ours.
+
+### v0.3.45-alpha (2026-07-28): the .44 shard check ate good shards
 
 **Found by the soak within hours of .44 shipping, in my own change.**
 `verify_shard` treats an all-zero manifest hash as a FAILURE ("placeholder
