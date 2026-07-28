@@ -135,7 +135,13 @@ pub(super) async fn handle_remote_generate_request(
     // queue behind it (same behaviour as the local-API Generate path).
     let pool = shared_state.model_process_pool.clone();
     let layer_range_u32 = (layer_range.0, layer_range.1);
+    // Mark the model as in-use-for-a-peer for the whole generate. Without this
+    // the idle-VRAM unload sees only `active_pipelines` — which covers requests
+    // this node ORIGINATED — and will happily kill the worker mid-answer on a
+    // node that does nothing but serve (caught by soak, 2026-07-28).
+    let serving_guard = crate::daemon::state::ServingGuard::new(&shared_state, model_id.clone());
     let gen_fut = tokio::spawn(async move {
+        let _serving_guard = serving_guard;
         pool.generate(
             &model_id,
             layer_range_u32,

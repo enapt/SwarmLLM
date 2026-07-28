@@ -2,6 +2,38 @@
 
 All notable changes to SwarmLLM are documented here.
 
+## [Unreleased]
+
+### Fixed
+
+- **A busy machine no longer stalls other people's requests.** Reading a long
+  prompt is most of the wait, and it was done in fixed-size pieces counted in
+  words rather than in time. The same number of words means very different
+  things on different hardware — milliseconds on a graphics card, around a
+  minute on a modest processor — so on a slower machine a second request
+  arriving meanwhile advanced by only one word per turn for as long as the long
+  prompt was still being read. Measured at eight words in five and a half
+  minutes, which is indistinguishable from a stall.
+
+  The piece size is now set from how long the last one actually took, so it
+  suits whatever hardware it runs on. A request with nothing else running is
+  never slowed, and on machines where smaller pieces turn out not to help, the
+  pacing switches itself off rather than making things worse. Measured on the
+  same prompt and machine before and after: on a processor, a co-scheduled
+  request went from 470.5s to 48.9s and the long prompt itself from 490.9s to
+  192.6s; on a graphics card, from 14.8s to 1.3s and 89.3s to 63.7s. Both
+  requests got faster in every case.
+
+### Added
+
+- **A request that hasn't started answering yet now says what it is doing.**
+  Loading a model and reading a long prompt can each take minutes with nothing
+  reaching you, which looks the same as a machine that has stopped responding.
+  Both now report their stage, how far along they are, and roughly how long is
+  left — on the dashboard, in the admin API, in the logs, and as progress notes
+  on streamed replies. The estimate appears once there is enough measurement to
+  make it meaningful rather than guessing from the first moment.
+
 ## [0.3.39-alpha] — 2026-07-28
 
 ### Fixed

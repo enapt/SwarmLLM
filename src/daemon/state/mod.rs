@@ -84,6 +84,54 @@ pub struct PeerPerformanceRow {
     pub region: Option<String>,
 }
 
+/// What a node is currently doing on behalf of other peers, per model.
+#[derive(Debug, Clone)]
+pub struct ServingState {
+    /// Requests from peers currently being computed for this model.
+    pub in_flight: u32,
+    /// When this node last finished serving this model to a peer.
+    pub last_served_at: std::time::Instant,
+}
+
+/// RAII marker for one peer-served request. Increments the model's in-flight
+/// count on construction and decrements on drop, so a serving path that panics
+/// or is cancelled cannot leave the model looking permanently busy.
+pub struct ServingGuard {
+    state: std::sync::Arc<SharedState>,
+    model_id: crate::types::ModelId,
+}
+
+impl ServingGuard {
+    pub fn new(state: &std::sync::Arc<SharedState>, model_id: crate::types::ModelId) -> Self {
+        state
+            .serving_models
+            .entry(model_id.clone())
+            .and_modify(|s| {
+                s.in_flight = s.in_flight.saturating_add(1);
+                s.last_served_at = std::time::Instant::now();
+            })
+            .or_insert_with(|| ServingState {
+                in_flight: 1,
+                last_served_at: std::time::Instant::now(),
+            });
+        Self {
+            state: state.clone(),
+            model_id,
+        }
+    }
+}
+
+impl Drop for ServingGuard {
+    fn drop(&mut self) {
+        if let Some(mut e) = self.state.serving_models.get_mut(&self.model_id) {
+            e.in_flight = e.in_flight.saturating_sub(1);
+            // Stamped on the way out too: the useful question for idleness is
+            // "when did work last finish", not "when did it last start".
+            e.last_served_at = std::time::Instant::now();
+        }
+    }
+}
+
 pub struct SharedState {
     // Core infrastructure (accessed by nearly every subsystem)
     pub config: Config,
@@ -269,6 +317,26 @@ pub struct SharedState {
     /// inherits that mechanism's already-correct cleanup, including the panic
     /// path via `ActivePipelineGuard::drop`.
     pub active_traces: DashMap<uuid::Uuid, std::sync::Arc<crate::inference::trace::RequestTrace>>,
+    /// Per-model record of work this node is doing **for other peers**:
+    /// `(requests currently in flight, when we last served one)`.
+    ///
+    /// **`active_pipelines` does not cover this.** That map is the
+    /// *coordinator's* view — it holds pipelines this node assembled and
+    /// originated. A node answering a peer's `RemoteGenerateRequest` or
+    /// `LayerForward` never appears in it, so anything that consults only
+    /// `active_pipelines` believes a pure-server node is doing nothing.
+    ///
+    /// That is not hypothetical: the idle-VRAM unload's active-pipeline guard
+    /// consulted only `active_pipelines`, so on 2026-07-28 a soak caught it
+    /// killing a worker with two peer requests mid-generate — the node had
+    /// served nothing of its own, so it looked idle for 12x the window and the
+    /// hard-unload ceiling fired. `record_request` has the same outbound-only
+    /// blind spot (v0.3.38), which is why "regional demand" was standing in for
+    /// it; this map is the real signal that proxy was approximating.
+    ///
+    /// Anything asking "is this model in use?" MUST consult this as well as
+    /// `active_pipelines`, or it is only asking about half the node's work.
+    pub serving_models: DashMap<crate::types::ModelId, ServingState>,
     /// Hourly performance rollups, persisted so a trend survives a restart.
     /// Aggregates only — per-request detail stays in `recent_traces`, in memory.
     pub perf_history: perf_history::PerfHistory,
@@ -640,6 +708,7 @@ impl SharedState {
             recent_failures: std::sync::Mutex::new(std::collections::VecDeque::new()),
             recent_traces: std::sync::Mutex::new(std::collections::VecDeque::new()),
             active_traces: DashMap::new(),
+            serving_models: DashMap::new(),
             perf_history: perf_history::PerfHistory::load(&db),
             request_holder_blacklist: DashMap::new(),
             vision_modules: DashMap::new(),

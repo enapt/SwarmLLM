@@ -1029,8 +1029,15 @@ impl AutoShardManager {
             return;
         }
 
-        // Active-pipeline guard: never unload a model with an in-flight request
-        // on this node.
+        // Never unload a model with an in-flight request on this node —
+        // whether this node ORIGINATED it (`active_pipelines`) or is SERVING it
+        // for a peer (`serving_models`).
+        //
+        // Only the first was checked until 2026-07-28, when a soak caught this
+        // killing a worker with two peer requests mid-generate. `active_pipelines`
+        // is the coordinator's map: a node that only ever answers other people's
+        // requests never appears in it, looks idle forever, and eventually trips
+        // the hard-unload ceiling while busy.
         let local_node_id = self.shared_state.identity.node_id().clone();
         let mut active_models: std::collections::HashSet<ModelId> =
             std::collections::HashSet::new();
@@ -1039,6 +1046,11 @@ impl AutoShardManager {
                 if seg.node_id == local_node_id {
                     active_models.insert(seg.shard_id.model_id.clone());
                 }
+            }
+        }
+        for entry in self.shared_state.serving_models.iter() {
+            if entry.value().in_flight > 0 {
+                active_models.insert(entry.key().clone());
             }
         }
 
@@ -1104,10 +1116,21 @@ impl AutoShardManager {
                 .model_trust
                 .get(&model_id)
                 .and_then(|t| t.last_request_at);
-            let idle = match last_req {
-                Some(t) => (now - t).num_seconds() >= idle_unload_secs as i64,
-                None => true,
+            // Most recent activity of ANY kind — a request this node made, or
+            // one it served for a peer. Serving was invisible here until
+            // 2026-07-28, which is why "regional demand" below had to stand in
+            // for it: a pure-server node otherwise looks permanently idle.
+            let since_local = last_req.map(|t| (now - t).num_seconds());
+            let since_served = self
+                .shared_state
+                .serving_models
+                .get(&model_id)
+                .map(|s| s.last_served_at.elapsed().as_secs().min(i64::MAX as u64) as i64);
+            let since_any = match (since_local, since_served) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (a, b) => a.or(b),
             };
+            let idle = since_any.map_or(true, |s| s >= idle_unload_secs as i64);
             if !idle {
                 continue;
             }
@@ -1123,10 +1146,8 @@ impl AutoShardManager {
             // last request, both with regional demand barely over the line
             // (0.107 and 0.126 against a 0.1 threshold), on a node that then hit
             // GPU-OOM.
-            let hard_idle = match last_req {
-                Some(t) => (now - t).num_seconds() >= idle_hard_unload_secs(idle_unload_secs),
-                None => true,
-            };
+            let hard_idle =
+                since_any.map_or(true, |s| s >= idle_hard_unload_secs(idle_unload_secs));
             // Low network demand: the region isn't asking for it either. Keep a
             // wanted model warm even when THIS node is momentarily quiet.
             let ema = self
@@ -1304,6 +1325,84 @@ pub(crate) fn effective_prune_target(
 
 #[cfg(test)]
 mod tests {
+    use crate::daemon::state::{ServingGuard, ServingState};
+
+    fn serving_test_state() -> std::sync::Arc<crate::daemon::SharedState> {
+        let config = crate::config::Config::default();
+        let identity = crate::identity::Identity::generate();
+        let temp = tempfile::tempdir().unwrap();
+        let db = crate::storage::db::Database::open(temp.path()).unwrap();
+        let executor = std::sync::Arc::new(tokio::sync::Mutex::new(
+            crate::inference::executor::ModelExecutor::new(),
+        ));
+        let (state, _, _) = crate::daemon::SharedState::new(config, identity, db, executor, None);
+        state
+    }
+
+    /// A node that only ever answers OTHER people's requests must not read as
+    /// idle. Before 2026-07-28 it did: `active_pipelines` is the coordinator's
+    /// map and never contains peer-served work, so the hard-unload ceiling
+    /// eventually killed a worker mid-answer. Caught by soak, not by review.
+    #[test]
+    fn serving_a_peer_counts_as_the_model_being_in_use() {
+        let state = serving_test_state();
+        let mid = crate::types::ModelId("m".into());
+
+        // Nothing in flight, nothing served: genuinely idle.
+        assert!(state.serving_models.get(&mid).is_none());
+
+        {
+            let _g = ServingGuard::new(&state, mid.clone());
+            let e = state.serving_models.get(&mid).expect("guard registers");
+            assert_eq!(e.in_flight, 1, "a peer request must mark the model busy");
+        }
+
+        // Guard dropped: no longer in flight, but recently served.
+        let e = state
+            .serving_models
+            .get(&mid)
+            .expect("entry survives the guard");
+        assert_eq!(e.in_flight, 0, "in-flight must fall back to zero on drop");
+        assert!(
+            e.last_served_at.elapsed().as_secs() < 5,
+            "last_served_at must be fresh so the idle timer sees the activity"
+        );
+    }
+
+    /// Concurrent peer requests must not let the first one's completion mark
+    /// the model idle while the second is still running.
+    #[test]
+    fn overlapping_peer_requests_keep_the_model_busy_until_the_last_finishes() {
+        let state = serving_test_state();
+        let mid = crate::types::ModelId("m".into());
+        let a = ServingGuard::new(&state, mid.clone());
+        let b = ServingGuard::new(&state, mid.clone());
+        assert_eq!(state.serving_models.get(&mid).unwrap().in_flight, 2);
+        drop(a);
+        assert_eq!(
+            state.serving_models.get(&mid).unwrap().in_flight,
+            1,
+            "one finishing must not clear the other"
+        );
+        drop(b);
+        assert_eq!(state.serving_models.get(&mid).unwrap().in_flight, 0);
+    }
+
+    #[test]
+    fn serving_state_in_flight_never_underflows() {
+        let state = serving_test_state();
+        let mid = crate::types::ModelId("m".into());
+        state.serving_models.insert(
+            mid.clone(),
+            ServingState {
+                in_flight: 0,
+                last_served_at: std::time::Instant::now(),
+            },
+        );
+        drop(ServingGuard::new(&state, mid.clone()));
+        assert_eq!(state.serving_models.get(&mid).unwrap().in_flight, 0);
+    }
+
     use super::*;
 
     #[test]
