@@ -59,6 +59,17 @@ pub struct UpdateInfo {
     /// Whether the update binary has been downloaded and is ready to apply.
     #[serde(default)]
     pub downloaded: bool,
+    /// Whether this installation can replace its own binary at all.
+    ///
+    /// False for every managed install: a `.deb`/`.rpm` service runs under
+    /// `ProtectSystem=strict` with only its data directory writable, and the
+    /// hardened anchor unit is the same but stricter. Those are updated by the
+    /// package manager or, for an anchor, by the root-run
+    /// `swarmllm-update.timer` in `deploy/anchor/` — which is the correct
+    /// design, not a limitation to work around. Surfaced so the dashboard can
+    /// say how THIS node updates instead of offering a button that cannot work.
+    #[serde(default)]
+    pub self_update_supported: bool,
 }
 
 /// State for the update checker, stored in SharedState.
@@ -80,6 +91,9 @@ pub struct UpdateChecker {
     state: Arc<RwLock<UpdateState>>,
     /// Dashboard signal sender for update notifications.
     dashboard_tx: tokio::sync::broadcast::Sender<crate::daemon::state::DashboardSignal>,
+    /// Present only when running inside the daemon. The standalone
+    /// `swarmllm update` CLI has no node to drain, so it stays `None`.
+    shared: Option<Arc<crate::daemon::SharedState>>,
 }
 
 /// GitHub release API response (subset of fields we need).
@@ -143,7 +157,16 @@ impl UpdateChecker {
             binary_path,
             state,
             dashboard_tx,
+            shared: None,
         }
+    }
+
+    /// Attach the node's state so an automatic install can wait for in-flight
+    /// work to finish first. Without it, `Install` mode declines to restart
+    /// rather than interrupting a request it cannot see.
+    pub fn with_shared_state(mut self, shared: Arc<crate::daemon::SharedState>) -> Self {
+        self.shared = Some(shared);
+        self
     }
 
     /// Check GitHub for a newer release. Returns `Some(UpdateInfo)` if an update is available.
@@ -175,11 +198,9 @@ impl UpdateChecker {
             .await
             .map_err(|e| SwarmError::Network(format!("Failed to parse releases JSON: {e}")))?;
 
-        // Include pre-releases only in `All` mode. `Stable`/`Disabled` track
-        // stable releases only (Disabled still checks so the dashboard can
-        // surface "update available" without auto-applying).
-        let include_prereleases =
-            matches!(self.config.auto_update, crate::config::AutoUpdateMode::All);
+        // Defaults true: every release this project publishes is tagged
+        // `-alpha`, so filtering pre-releases out means finding nothing, ever.
+        let include_prereleases = self.config.include_prereleases;
         let release = match select_target_release(&releases, include_prereleases) {
             Some(r) => r,
             None => {
@@ -252,6 +273,7 @@ impl UpdateChecker {
             published_at: release.published_at.clone().unwrap_or_default(),
             checksum_sha256,
             downloaded: false,
+            self_update_supported: self.can_self_update().await,
         };
 
         Ok(Some(info))
@@ -263,6 +285,29 @@ impl UpdateChecker {
     /// rename in `apply_update` succeeds.
     pub fn preferred_tmp_path(&self) -> PathBuf {
         self.binary_path.with_extension("update.tmp")
+    }
+
+    /// Can this installation replace its own binary?
+    ///
+    /// Probes by creating and removing the staging file, because the question
+    /// is not "am I root" but "is this exact path writable by this exact
+    /// process" — under `ProtectSystem=strict` even root cannot write
+    /// `/usr/bin`, and a `.deb` service runs as `swarmllm` besides. Every
+    /// managed install answers false: packages update through apt/dnf, and the
+    /// hardened anchor updates through the root-run `swarmllm-update.timer`.
+    ///
+    /// Checked BEFORE downloading rather than after, so a node that can never
+    /// apply an update does not fetch ~1 GB every hour to stage a file it will
+    /// then refuse to use.
+    pub async fn can_self_update(&self) -> bool {
+        let probe = self.binary_path.with_extension("update.probe");
+        match tokio::fs::File::create(&probe).await {
+            Ok(_) => {
+                let _ = tokio::fs::remove_file(&probe).await;
+                true
+            }
+            Err(_) => false,
+        }
     }
 
     pub async fn download_update(&self, info: &UpdateInfo) -> Result<PathBuf, SwarmError> {
@@ -566,12 +611,75 @@ impl UpdateChecker {
         }
     }
 
+    /// Wait for the node to go quiet, swap the binary, and restart into it.
+    ///
+    /// Only reached in `Install` mode. Everything here is best-effort: a node
+    /// that cannot install must carry on serving on the old version, never fall
+    /// over. Each failure therefore logs and returns, leaving the dashboard
+    /// banner in place so a human can act.
+    async fn install_and_restart(&self, info: &UpdateInfo) {
+        let Some(shared) = self.shared.as_ref() else {
+            tracing::warn!("Automatic install skipped — no node state to drain against");
+            return;
+        };
+
+        shared.emit_activity(
+            crate::daemon::state::ActivityEvent::new(
+                "update",
+                "installing",
+                format!(
+                    "Installing v{} — finishing current work first",
+                    info.latest_version
+                ),
+            )
+            .with_toast("info", 8000),
+        );
+
+        // Waiting out in-flight work is the whole point: replacing the binary
+        // under a running request is what made an "updated" node fail every
+        // inference until someone restarted it by hand.
+        let idle = crate::update_restart::drain(shared).await;
+        tracing::info!(
+            drained_cleanly = idle,
+            version = %info.latest_version,
+            "Applying update"
+        );
+
+        let staged = self.preferred_tmp_path();
+        if let Err(e) = self.apply_update(
+            &staged,
+            &info.latest_version,
+            info.checksum_sha256.as_deref(),
+        ) {
+            tracing::error!(error = %e, "Update apply failed — staying on the current version");
+            shared.emit_activity(
+                crate::daemon::state::ActivityEvent::new(
+                    "update",
+                    "install_failed",
+                    format!("Could not install v{}: {e}", info.latest_version),
+                )
+                .with_toast("error", 10000),
+            );
+            return;
+        }
+
+        let err = crate::update_restart::exec_into(&self.binary_path);
+        // exec only returns on failure. The binary IS updated at this point, so
+        // the node keeps running the old image until something restarts it —
+        // say so loudly rather than leaving it looking healthy (gotcha #188).
+        tracing::error!(
+            error = %err,
+            "Update installed but restarting into it failed — restart this node manually"
+        );
+    }
+
     /// Background update loop — checks periodically and stores results in shared state.
     pub async fn run(&self, mut shutdown_rx: watch::Receiver<bool>) {
-        use crate::config::AutoUpdateMode;
+        use crate::config::UpdateMode;
 
-        if self.config.auto_update == AutoUpdateMode::Disabled {
-            tracing::info!("Update checking disabled");
+        let mode = self.config.effective_mode();
+        if mode == UpdateMode::Off {
+            tracing::info!("Update checking disabled (updates.mode = \"off\")");
             return;
         }
 
@@ -595,15 +703,21 @@ impl UpdateChecker {
                         "Update available"
                     );
 
-                    // Auto-download if auto_update is enabled
-                    // Stable mode skips pre-release versions (tags containing '-')
+                    // Download from `Download` up; `Notify` only surfaces it.
+                    // A managed install (package / hardened anchor) can never
+                    // apply what it downloads, so it does not download at all —
+                    // otherwise it re-fetches the release every check forever.
                     let mut info = info;
-                    let is_prerelease = info.latest_version.contains('-');
-                    let should_download = match self.config.auto_update {
-                        crate::config::AutoUpdateMode::Disabled => false,
-                        crate::config::AutoUpdateMode::Stable => !is_prerelease,
-                        crate::config::AutoUpdateMode::All => true,
-                    };
+                    let should_download =
+                        mode >= UpdateMode::Download && info.self_update_supported;
+                    if mode >= UpdateMode::Download && !info.self_update_supported {
+                        tracing::info!(
+                            latest = %info.latest_version,
+                            "Update available, but this installation cannot replace its own \
+                             binary — update via your package manager (deb/rpm) or, on an \
+                             anchor, swarmllm-update.timer"
+                        );
+                    }
                     if should_download {
                         match self.download_update(&info).await {
                             Ok(path) => {
@@ -640,9 +754,16 @@ impl UpdateChecker {
                         state.last_checked = Some(chrono::Utc::now().to_rfc3339());
                         state.last_error = None;
                     }
-                    let _ = self
-                        .dashboard_tx
-                        .send(crate::daemon::state::DashboardSignal::UpdateAvailable(info));
+                    let _ = self.dashboard_tx.send(
+                        crate::daemon::state::DashboardSignal::UpdateAvailable(info.clone()),
+                    );
+
+                    // Install mode finishes the job. Announce first (above) so
+                    // the dashboard shows what is happening before the node
+                    // goes away for a few seconds.
+                    if mode == UpdateMode::Install && info.downloaded {
+                        self.install_and_restart(&info).await;
+                    }
                 }
                 Ok(None) => {
                     tracing::debug!("No update available");
@@ -1005,8 +1126,13 @@ mod tests {
     #[test]
     fn update_config_defaults() {
         let config = UpdateConfig::default();
+        // Automatic INSTALLING stays opt-in — these are unsigned binaries
+        // verified only by a published SHA256 (deferred item C1, minisign).
         assert_eq!(config.auto_update, crate::config::AutoUpdateMode::Disabled);
-        assert_eq!(config.check_interval_hours, 6);
+        // ...but a fresh install must at least find out an update exists, and
+        // often enough to matter when several releases can ship in one day.
+        assert_eq!(config.effective_mode(), crate::config::UpdateMode::Notify);
+        assert!(config.check_interval_hours <= 1);
     }
 
     #[test]
@@ -1019,6 +1145,7 @@ mod tests {
             published_at: "2026-01-01T00:00:00Z".into(),
             checksum_sha256: Some("abc123".into()),
             downloaded: false,
+            self_update_supported: true,
         };
         let json = serde_json::to_string(&info).unwrap();
         let parsed: UpdateInfo = serde_json::from_str(&json).unwrap();

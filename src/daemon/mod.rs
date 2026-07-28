@@ -444,7 +444,7 @@ impl Daemon {
         // Spawn UpdateChecker (11th subsystem task — optional, runs only if not disabled).
         // When disabled, skip the spawn entirely — otherwise the supervisor logs a
         // misleading "Subsystem exited unexpectedly with Ok" warning at startup.
-        if self.config.updates.auto_update != crate::config::AutoUpdateMode::Disabled {
+        if self.config.updates.effective_mode() != crate::config::UpdateMode::Off {
             let update_config = self.config.updates.clone();
             let update_state = shared_state.events.update_state.clone();
             let dash_tx = shared_state.events.dashboard_tx.clone();
@@ -454,7 +454,9 @@ impl Daemon {
                 crate::update::SWARMLLM_GITHUB_REPO.to_string(),
                 update_state,
                 dash_tx,
-            );
+            )
+            // Needed to drain in-flight work before restarting into an update.
+            .with_shared_state(shared_state.clone());
             subsystems.spawn(async move {
                 checker.run(update_shutdown).await;
                 ("UpdateChecker", SubsystemCriticality::NonCritical, Ok(()))

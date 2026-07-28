@@ -47,6 +47,7 @@ pub mod pool;
 pub mod storage;
 pub mod types;
 pub mod update;
+pub mod update_restart;
 
 /// Verbosity the daemon was started with (`-v` count), so spawned
 /// `model-worker` subprocesses can be given the same.

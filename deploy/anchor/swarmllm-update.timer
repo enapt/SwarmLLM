@@ -1,10 +1,19 @@
 [Unit]
-Description=Check daily for SwarmLLM anchor updates
+Description=Check hourly for SwarmLLM anchor updates
 
 [Timer]
-OnBootSec=10min
-OnCalendar=daily
-RandomizedDelaySec=1h
+# Hourly, not daily: during alpha several releases can ship in a single day, so
+# a once-a-day check leaves the anchor — the node every fresh install bootstraps
+# from — running yesterday's build most of the time, and its operator updating
+# by hand to compensate.
+#
+# The jitter matters as the anchor count grows: without it every anchor wakes on
+# the same boundary and hits the GitHub API together. 10 minutes spreads them
+# while keeping the worst-case lag near an hour. The updater itself is a no-op
+# when already current, so a frequent check is cheap.
+OnBootSec=2min
+OnUnitActiveSec=1h
+RandomizedDelaySec=10min
 Persistent=true
 
 [Install]

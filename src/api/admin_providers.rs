@@ -1068,9 +1068,31 @@ pub async fn apply_update(
         )
         .map_err(ApiError)?;
 
+    // Restart into it, rather than leaving the node running the old image while
+    // reporting success. Replacing the file changes nothing about a process
+    // that has already started: the daemon goes on serving the previous version
+    // and reporting the previous version, which is exactly what a tester hit on
+    // 2026-07-28 after the button told them "Apply & Restart".
+    //
+    // Spawned so this request can return first — the caller gets its 200 and
+    // the dashboard can say what is happening before the node goes away. The
+    // drain inside means the restart waits for in-flight work, so this may sit
+    // for minutes on a busy node; that is the point.
+    let shared = state.shared_state.clone();
+    let version = info.latest_version.clone();
+    tokio::spawn(async move {
+        let idle = crate::update_restart::drain(&shared).await;
+        tracing::info!(drained_cleanly = idle, version = %version, "Restarting into applied update");
+        let err = crate::update_restart::exec_into(&binary_path);
+        tracing::error!(
+            error = %err,
+            "Update applied but restarting into it failed — restart this node manually"
+        );
+    });
+
     Ok(Json(serde_json::json!({
         "status": "applied",
         "version": info.latest_version,
-        "message": "Update applied. Restart the daemon to use the new version.",
+        "message": "Update applied. Restarting once in-flight work finishes.",
     })))
 }

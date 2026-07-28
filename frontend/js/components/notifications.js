@@ -273,20 +273,38 @@
     if (document.getElementById('update-banner')) return;
     var banner = document.createElement('div');
     banner.id = 'update-banner';
-    banner.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:10000;background:var(--yellow, #eab308);color:var(--bg-primary, #0a0e14);padding:0.6rem 1rem;display:flex;align-items:center;justify-content:center;gap:1rem;font-size:0.85rem;font-weight:500;box-shadow:0 2px 8px rgba(0,0,0,0.3)';
+    banner.className = 'update-banner';
     var text = I18n.t('update.available', { from: data.current_version, to: data.latest_version });
     banner.innerHTML = '<span>' + U.escapeHtml(text) + '</span>';
+
+    // A managed install (deb/rpm service, hardened anchor) cannot replace its
+    // own binary — its unit only grants write access to the data directory. An
+    // Install button there fails every time, so say how this node actually
+    // updates instead of offering one.
+    if (data.self_update_supported === false) {
+      var note = document.createElement('span');
+      note.className = 'update-banner-note';
+      note.textContent = I18n.t('update.managed');
+      banner.appendChild(note);
+      document.body.prepend(banner);
+      return;
+    }
+
     if (data.downloaded) {
       var applyBtn = document.createElement('button');
       applyBtn.textContent = I18n.t('update.apply_restart');
-      applyBtn.style.cssText = 'background:var(--bg-primary, #0a0e14);color:var(--yellow, #eab308);border:none;border-radius:4px;padding:0.3rem 0.8rem;cursor:pointer;font-size:0.8rem;font-weight:600';
+      applyBtn.className = 'update-banner-btn';
       applyBtn.onclick = async function() {
         applyBtn.disabled = true;
         applyBtn.textContent = I18n.t('update.applying');
         try {
           var resp = await App.authFetch('/api/admin/update/apply', { method: 'POST' });
           if (resp.ok) {
-            banner.querySelector('span').textContent = I18n.t('update.applied', { version: data.latest_version });
+            // The node now drains in-flight work and restarts itself, so the
+            // page is about to lose its connection. Say that rather than
+            // "restart it yourself", which is what the old copy said while the
+            // button claimed it would restart.
+            banner.querySelector('span').textContent = I18n.t('update.restarting', { version: data.latest_version });
             applyBtn.style.display = 'none';
           } else {
             applyBtn.textContent = I18n.t('update.failed');
@@ -301,7 +319,7 @@
     } else {
       var dlBtn = document.createElement('button');
       dlBtn.textContent = I18n.t('update.download_apply');
-      dlBtn.style.cssText = 'background:var(--bg-primary, #0a0e14);color:var(--yellow, #eab308);border:none;border-radius:4px;padding:0.3rem 0.8rem;cursor:pointer;font-size:0.8rem;font-weight:600';
+      dlBtn.className = 'update-banner-btn';
       dlBtn.onclick = async function() {
         dlBtn.disabled = true;
         dlBtn.textContent = I18n.t('update.checking');
@@ -313,7 +331,7 @@
               dlBtn.textContent = I18n.t('update.applying');
               var applyResp = await App.authFetch('/api/admin/update/apply', { method: 'POST' });
               if (applyResp.ok) {
-                banner.querySelector('span').textContent = I18n.t('update.applied', { version: data.latest_version });
+                banner.querySelector('span').textContent = I18n.t('update.restarting', { version: data.latest_version });
                 dlBtn.style.display = 'none';
               }
             }

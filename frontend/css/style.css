@@ -3866,6 +3866,26 @@ textarea.pool-code-input { min-height: 4.5em; }
 .mobile-model-bar .btn { flex-shrink: 0; }
 @media (max-width: 768px) { .mobile-model-bar { display: flex; } }
 
+/* ─── Update banner ───
+   Was inline styles built in JS. As a class it can be prominent without each
+   rule being restated, and it wraps on a phone instead of overflowing. */
+.update-banner {
+  position: fixed; top: 0; left: 0; right: 0; z-index: 10000;
+  display: flex; align-items: center; justify-content: center;
+  flex-wrap: wrap; gap: 0.5rem 1rem;
+  padding: 0.7rem 1rem;
+  background: var(--yellow, #eab308); color: var(--bg-primary, #0a0e14);
+  font-size: 0.9rem; font-weight: 600; line-height: 1.4;
+  box-shadow: 0 2px 12px rgba(0,0,0,0.35);
+}
+.update-banner-btn {
+  background: var(--bg-primary, #0a0e14); color: var(--yellow, #eab308);
+  border: none; border-radius: 4px; padding: 0.35rem 0.9rem;
+  cursor: pointer; font-size: 0.82rem; font-weight: 600; flex-shrink: 0;
+}
+.update-banner-btn:disabled { opacity: 0.6; cursor: default; }
+.update-banner-note { font-weight: 400; opacity: 0.9; flex-basis: 100%; text-align: center; }
+
 /* ─── Untrusted-dashboard notice ───
    Sits above the setup wizard (.modal-overlay is z-index 200): this is most
    often hit inside that wizard, so it has to be legible over it. Persistent

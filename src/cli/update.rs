@@ -12,14 +12,11 @@ pub async fn run_update_command(check_only: bool) -> anyhow::Result<()> {
     );
 
     // A manual `swarmllm update` check must report the newest available build,
-    // including pre-releases. This repo ships alpha/beta tags AS GitHub
-    // pre-releases, so the default `Disabled`/`Stable` filter hides every
-    // release published so far — making the check always answer "you're on the
-    // latest" even when several versions behind (field report, 2026-07-23). The
-    // auto-update MODE only governs auto-APPLYING in the background; an explicit
-    // check the user typed should show whatever is actually out there.
-    let mut config = swarmllm::config::UpdateConfig::default();
-    config.auto_update = swarmllm::config::AutoUpdateMode::All;
+    // including pre-releases — this repo ships alpha tags AS GitHub
+    // pre-releases, so filtering them hides every release published so far
+    // (field report, 2026-07-23). `include_prereleases` now defaults true for
+    // exactly that reason, so the default config is already right here.
+    let config = swarmllm::config::UpdateConfig::default();
     let state = Arc::new(RwLock::new(UpdateState::default()));
     let (dashboard_tx, _) =
         tokio::sync::broadcast::channel::<swarmllm::daemon::state::DashboardSignal>(16);
@@ -56,10 +53,8 @@ pub async fn run_update_command(check_only: bool) -> anyhow::Result<()> {
                         info.checksum_sha256.as_deref(),
                     ) {
                         Ok(()) => {
-                            println!(
-                                "Update applied successfully! Restart SwarmLLM to use v{}.",
-                                info.latest_version
-                            );
+                            println!("\nUpdate applied — v{} is on disk.", info.latest_version);
+                            report_restart_needed(&info.latest_version).await;
                         }
                         Err(e) => {
                             eprintln!("Failed to apply update: {e}");
@@ -86,4 +81,64 @@ pub async fn run_update_command(check_only: bool) -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+/// Say — unmissably — that a daemon already running is STILL on the old build.
+///
+/// Replacing the file on disk does not change a running process: it keeps
+/// executing the old image and keeps reporting the old version. A tester hit
+/// exactly this on 2026-07-28 — ran `swarmllm update`, saw it succeed, and the
+/// node went on answering as the previous version until they killed it by hand.
+/// The old wording ("Restart SwarmLLM to use vX") was true but read as a
+/// footnote to a success message, so it did not land.
+///
+/// Only shouts when a daemon is actually up; updating with nothing running
+/// needs no ceremony.
+async fn report_restart_needed(version: &str) {
+    if !daemon_is_running().await {
+        println!("Start SwarmLLM when you're ready — it will come up on v{version}.");
+        return;
+    }
+
+    let how = if std::path::Path::new("/run/systemd/system").exists()
+        && std::path::Path::new("/usr/lib/systemd/system/swarmllm.service").exists()
+    {
+        "  sudo systemctl restart swarmllm"
+    } else {
+        "  stop the running node (Ctrl-C or `swarmllm stop`), then start it again"
+    };
+
+    println!();
+    println!("  ┌──────────────────────────────────────────────────────────────┐");
+    println!("  │  RESTART REQUIRED                                            │");
+    println!("  └──────────────────────────────────────────────────────────────┘");
+    println!("  SwarmLLM is still RUNNING the previous version. Replacing the");
+    println!("  file does not change a process that already started, so this");
+    println!("  node keeps serving the old build until you restart it:");
+    println!();
+    println!("{how}");
+    println!();
+}
+
+/// Is a node answering on the local API?
+///
+/// `/health` needs no credentials, so this works without reading the API key.
+async fn daemon_is_running() -> bool {
+    let port = std::env::var("SWARMLLM_PORT")
+        .ok()
+        .and_then(|p| p.parse::<u16>().ok())
+        .unwrap_or(8800);
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(2))
+        .build()
+    {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+    client
+        .get(format!("http://127.0.0.1:{port}/health"))
+        .send()
+        .await
+        .map(|r| r.status().is_success())
+        .unwrap_or(false)
 }

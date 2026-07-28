@@ -305,6 +305,16 @@
         <span class="text-muted field-hint" data-i18n="settings.trust_lan_desc">Let devices on your local network open this dashboard without pasting a key. Turn this on if you reach SwarmLLM through a Tailscale subnet router or a container, where requests arrive from your router's address rather than your own.</span>
       </div>
       <div class="form-group">
+        <label for="settings-update-mode" data-i18n="settings.update_mode">Software updates</label>
+        <select id="settings-update-mode">
+          <option value="off" data-i18n="settings.update_mode_off">Off — never check</option>
+          <option value="notify" data-i18n="settings.update_mode_notify">Tell me when one is available</option>
+          <option value="download" data-i18n="settings.update_mode_download">Download in the background, I'll install</option>
+          <option value="install" data-i18n="settings.update_mode_install">Install automatically and restart when idle</option>
+        </select>
+        <span class="text-muted field-hint" data-i18n="settings.update_mode_desc">Updates are downloaded from GitHub and checked against a published checksum. Automatic installing waits until this machine has finished any work it is doing, then restarts itself.</span>
+      </div>
+      <div class="form-group">
         <label for="settings-nickname" data-i18n="settings.nickname_label">Nickname</label>
         <input type="text" id="settings-nickname" data-i18n-placeholder="setup.summary_anonymous" placeholder="Anonymous" maxlength="32" pattern="[a-zA-Z0-9_-]+">
         <span class="text-muted field-hint" data-i18n="settings.nickname_hint">1-32 chars, letters/numbers/underscore/dash only</span>

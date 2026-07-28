@@ -946,6 +946,14 @@ pub async fn get_config(State(state): State<AppState>) -> Json<serde_json::Value
         "dashboard_trust_lan": state.shared_state.dashboard_trust_lan.load(std::sync::atomic::Ordering::Relaxed),
         "dashboard_trust_overlay": config.api.dashboard_trust_overlay,
         "dashboard_on_overlay": crate::api::dashboard_trust::node_is_on_overlay(&state.shared_state),
+        // Effective, not raw: a config predating the `mode` key reports what it
+        // actually does rather than a null the settings panel can't render.
+        "update_mode": match config.updates.effective_mode() {
+            crate::config::UpdateMode::Off => "off",
+            crate::config::UpdateMode::Notify => "notify",
+            crate::config::UpdateMode::Download => "download",
+            crate::config::UpdateMode::Install => "install",
+        },
     });
     if let Some(cs) = claude_sub {
         result["claude_subscription"] = cs;
@@ -1070,6 +1078,23 @@ pub async fn update_config(
             .credits
             .share_model_catalog
             .store(share, std::sync::atomic::Ordering::Release);
+    }
+    if let Some(ref m) = body.update_mode {
+        let parsed = match m.as_str() {
+            "off" => Some(crate::config::UpdateMode::Off),
+            "notify" => Some(crate::config::UpdateMode::Notify),
+            "download" => Some(crate::config::UpdateMode::Download),
+            "install" => Some(crate::config::UpdateMode::Install),
+            _ => None,
+        };
+        match parsed {
+            Some(mode) => config.updates.mode = Some(mode),
+            None => {
+                return Err(ApiError(crate::error::SwarmError::Validation(format!(
+                    "unknown update mode {m:?} (expected off, notify, download or install)"
+                ))))
+            }
+        }
     }
     if let Some(trust_lan) = body.dashboard_trust_lan {
         // Same pattern: persist for restart durability AND mirror to the
@@ -1266,6 +1291,9 @@ pub struct ConfigUpdate {
     /// Persisted to config TOML + mirrored to `state.dashboard_trust_lan` so
     /// it applies on the next page load rather than the next restart.
     pub dashboard_trust_lan: Option<bool>,
+    /// "off" | "notify" | "download" | "install". Takes effect on restart —
+    /// the UpdateChecker task is spawned (or not) at startup.
+    pub update_mode: Option<String>,
 }
 
 /// POST /api/admin/shutdown — Gracefully shut down the node.

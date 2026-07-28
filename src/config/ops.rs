@@ -38,10 +38,67 @@ impl Default for UiConfig {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct UpdateConfig {
+    /// What this node does about updates. `None` means the config predates this
+    /// field, in which case [`UpdateConfig::effective_mode`] derives it from
+    /// the legacy `auto_update` setting.
+    ///
+    /// Deliberately `Option` rather than a defaulted enum: a serde default only
+    /// fills a key that is ABSENT, and the daemon serialises every field, so
+    /// every existing config on disk already says `auto_update = "disabled"` —
+    /// not because anyone chose it, but because it was the default when that
+    /// file was written. A new key is the one thing those configs don't have,
+    /// so it is the only way a new default can actually reach them. Same trap
+    /// as `bootstrap_peers = []` (gotcha #198).
+    #[serde(default)]
+    pub mode: Option<UpdateMode>,
+    /// Legacy setting, kept so old configs keep working and so a deliberate
+    /// `auto_update = "all"` is not silently downgraded. Superseded by `mode`.
     #[serde(default = "default_auto_update")]
     pub auto_update: AutoUpdateMode,
     #[serde(default = "default_check_interval_hours")]
     pub check_interval_hours: u32,
+    /// Offer pre-release builds. Defaults TRUE because every release this
+    /// project has ever published is tagged `-alpha`: excluding pre-releases
+    /// would mean a node never sees any update at all, which is how
+    /// `auto_update = "stable"` came to be a setting that silently did nothing.
+    #[serde(default = "default_true")]
+    pub include_prereleases: bool,
+}
+
+/// What a node does when a newer release exists.
+///
+/// Ordered by how much it does on its own; each level includes the one before.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "lowercase")]
+pub enum UpdateMode {
+    /// Never contact GitHub. Nothing is checked, downloaded or shown.
+    Off,
+    /// Check and tell the user. Nothing is downloaded until they ask.
+    Notify,
+    /// Check and download in the background; installing stays a click.
+    Download,
+    /// Check, download, install and restart once the node is idle.
+    Install,
+}
+
+impl UpdateConfig {
+    /// The mode actually in force, migrating a pre-`mode` config.
+    ///
+    /// A legacy `auto_update` of `stable`/`all` was an explicit opt-in to
+    /// automatic downloads and is preserved as `Download`. Legacy `disabled`
+    /// becomes `Notify`, NOT `Off`: it was the shipped default rather than a
+    /// decision, and it suppressed the update check entirely — so nodes went on
+    /// running old builds with nothing ever telling anyone. `mode = "off"` is
+    /// how you actually opt out now.
+    pub fn effective_mode(&self) -> UpdateMode {
+        match self.mode {
+            Some(m) => m,
+            None => match self.auto_update {
+                AutoUpdateMode::Disabled => UpdateMode::Notify,
+                AutoUpdateMode::Stable | AutoUpdateMode::All => UpdateMode::Download,
+            },
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -55,8 +112,10 @@ pub enum AutoUpdateMode {
 impl Default for UpdateConfig {
     fn default() -> Self {
         Self {
+            mode: Some(UpdateMode::Notify),
             auto_update: AutoUpdateMode::Disabled,
             check_interval_hours: default_check_interval_hours(),
+            include_prereleases: true,
         }
     }
 }
@@ -70,8 +129,13 @@ fn default_auto_update() -> AutoUpdateMode {
     AutoUpdateMode::Disabled
 }
 
+/// Hourly. Six hours was chosen when releases were rare; during alpha several
+/// can ship in a day, so a six-hour window means a node usually reports an
+/// update that is already superseded — and the operator updates by hand rather
+/// than waiting. The check is one small GitHub request and a no-op when
+/// current.
 fn default_check_interval_hours() -> u32 {
-    6
+    1
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -171,5 +235,67 @@ impl Default for LoggingConfig {
             format: default_log_format(),
             file: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod update_mode_tests {
+    use super::*;
+
+    /// The reason `mode` is an Option. Every config the daemon has ever written
+    /// contains `auto_update = "disabled"` — the shipped default, not a choice —
+    /// and that value suppressed the update check entirely, so nodes ran old
+    /// builds with nothing ever saying so.
+    #[test]
+    fn a_legacy_config_starts_getting_notified() {
+        let cfg: UpdateConfig = toml::from_str("auto_update = \"disabled\"").unwrap();
+        assert_eq!(cfg.mode, None, "old configs have no mode key");
+        assert_eq!(cfg.effective_mode(), UpdateMode::Notify);
+    }
+
+    /// ...but a deliberate opt-in to automatic downloads must not be downgraded.
+    #[test]
+    fn a_legacy_opt_in_is_preserved() {
+        for legacy in ["stable", "all"] {
+            let cfg: UpdateConfig = toml::from_str(&format!("auto_update = \"{legacy}\"")).unwrap();
+            assert_eq!(
+                cfg.effective_mode(),
+                UpdateMode::Download,
+                "legacy auto_update = {legacy} opted in to downloading"
+            );
+        }
+    }
+
+    /// An explicit mode always wins, including the one that turns everything off.
+    #[test]
+    fn an_explicit_mode_overrides_the_legacy_field() {
+        let cfg: UpdateConfig = toml::from_str("mode = \"off\"\nauto_update = \"all\"").unwrap();
+        assert_eq!(cfg.effective_mode(), UpdateMode::Off);
+
+        let cfg: UpdateConfig =
+            toml::from_str("mode = \"install\"\nauto_update = \"disabled\"").unwrap();
+        assert_eq!(cfg.effective_mode(), UpdateMode::Install);
+    }
+
+    /// Ordering is load-bearing: the loop gates downloading on `>= Download`
+    /// and installing on `== Install`.
+    #[test]
+    fn modes_are_ordered_by_how_much_they_do() {
+        assert!(UpdateMode::Off < UpdateMode::Notify);
+        assert!(UpdateMode::Notify < UpdateMode::Download);
+        assert!(UpdateMode::Download < UpdateMode::Install);
+    }
+
+    /// Every release is tagged `-alpha`; excluding pre-releases would mean
+    /// never finding an update at all, which is what `auto_update = "stable"`
+    /// silently did.
+    #[test]
+    fn prereleases_are_included_by_default() {
+        let cfg = UpdateConfig::default();
+        assert!(cfg.include_prereleases);
+        assert_eq!(cfg.effective_mode(), UpdateMode::Notify);
+        // A fresh install checks often enough to matter when several releases
+        // can ship in one day.
+        assert!(cfg.check_interval_hours <= 1);
     }
 }

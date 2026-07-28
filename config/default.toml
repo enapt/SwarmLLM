@@ -1,3 +1,12 @@
+# SwarmLLM configuration TEMPLATE.
+#
+# On a packaged install this file lives at /etc/swarmllm/default.toml and is
+# copied to the node's data directory (/var/lib/swarmllm/config.toml) the first
+# time the package is installed. The daemon reads the DATA-DIRECTORY copy, and
+# the dashboard writes it — so once a node has started, edit that file (or use
+# the dashboard) rather than this one. Editing this file afterwards has no
+# effect on a node that is already set up.
+
 [node]
 # data_dir = "~/.local/share/swarmllm"    # Platform default
 listen_port = 8800

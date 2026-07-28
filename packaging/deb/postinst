@@ -10,6 +10,20 @@ fi
 mkdir -p /var/lib/swarmllm
 chown swarmllm:swarmllm /var/lib/swarmllm
 
+# Seed the node's config from the shipped template on first install only.
+#
+# The daemon reads <data_dir>/config.toml — it is never told about
+# /etc/swarmllm/default.toml, and the dashboard writes the data-dir copy. So
+# without this, an admin edits the file in the conventional location and
+# nothing happens, silently. Copying it once makes /etc a template that
+# actually reaches the node, and leaves exactly one authoritative config
+# afterwards rather than two that can disagree.
+if [ ! -e /var/lib/swarmllm/config.toml ] && [ -f /etc/swarmllm/default.toml ]; then
+    cp /etc/swarmllm/default.toml /var/lib/swarmllm/config.toml
+    chown swarmllm:swarmllm /var/lib/swarmllm/config.toml
+    chmod 644 /var/lib/swarmllm/config.toml
+fi
+
 # Reload systemd and enable service
 if [ -d /run/systemd/system ]; then
     systemctl daemon-reload

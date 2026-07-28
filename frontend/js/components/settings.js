@@ -333,6 +333,8 @@
         document.getElementById('settings-disk').value = data.max_disk_mb || 50000;
         var trustLanEl = document.getElementById('settings-trust-lan');
         if (trustLanEl) trustLanEl.checked = !!data.dashboard_trust_lan;
+        var updModeEl = document.getElementById('settings-update-mode');
+        if (updModeEl && data.update_mode) updModeEl.value = data.update_mode;
         var autoManage = data.auto_manage_shards ? 'on' : 'off';
         document.getElementById('settings-auto-shards').value = autoManage;
         var isOn = autoManage === 'on';
@@ -779,6 +781,7 @@
         max_disk_mb: parseInt(document.getElementById('settings-disk').value, 10),
         auto_manage_shards: autoManageOn,
         dashboard_trust_lan: !!(document.getElementById('settings-trust-lan') || {}).checked,
+        update_mode: (document.getElementById('settings-update-mode') || {}).value || undefined,
         // R110 removed the standalone max-storage slider — the auto-manage budget
         // is derived from Max Disk + contribution mode, so this field is no longer
         // sent (omitting it leaves the derived value untouched server-side). The
