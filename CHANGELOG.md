@@ -2,9 +2,12 @@
 
 All notable changes to SwarmLLM are documented here.
 
-## [0.3.43-alpha] — 2026-07-28
+## [0.3.44-alpha] — 2026-07-28
 
 Security fixes from an external audit, plus updates that finish by themselves.
+
+(v0.3.43 was withdrawn: it built without Windows binaries. Everything below was
+in it, and this release adds the Windows fix.)
 
 ### Security
 
@@ -76,6 +79,12 @@ Security fixes from an external audit, plus updates that finish by themselves.
 - The configuration file shipped at `/etc/swarmllm/default.toml` was never read.
   It is now copied into place when the package is first installed, and labelled
   as a template.
+- Windows builds work again. The new Tailscale check talks to the local
+  Tailscale service over a socket type Windows does not have, which stopped the
+  Windows binaries being produced at all. Windows now reports that it could not
+  ask — already treated as "no, ask for the key" rather than as a yes — and
+  falls back to the same checks as any machine where that service is
+  unreachable.
 
 ## [0.3.42-alpha] — 2026-07-28
 

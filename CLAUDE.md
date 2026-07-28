@@ -196,7 +196,7 @@ All 20 build phases complete. All subsystems wired — no stubs. **1438 lib + 80
 
 Per-round history lives in `~/.claude/projects/-home-user-SwarmLLM/memory/round_log_*.md` and the CHANGELOG; `docs/ARCHITECTURE.md` is the canonical architecture. This section keeps only the current release line plus one-line prior-round pointers.
 
-### Latest — v0.3.43-alpha (2026-07-28): external security audit + self-updating
+### Latest — v0.3.44-alpha (2026-07-28): external security audit + self-updating
 
 **Three security fixes from an external audit of .42, and the update lifecycle.**
 
