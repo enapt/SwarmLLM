@@ -10,8 +10,10 @@
   var DEFAULT_TIMEOUT_MS = 30000;
 
   async function authFetch(url, opts) {
-    if (!App.settings._apiKeyFull && App.settings._apiKeyPromise) {
-      await App.settings._apiKeyPromise;
+    // Ensure the key bootstrap has run — do NOT merely check whether something
+    // else already started it. See App.settings.ensureApiKey.
+    if (!App.settings._apiKeyFull && App.settings.ensureApiKey) {
+      try { await App.settings.ensureApiKey(); } catch (e) { /* fall through unauthenticated */ }
     }
     opts = opts || {};
     opts.headers = opts.headers || {};

@@ -44,7 +44,7 @@
   App.models = {
     load: async function() {
       try {
-        if (App.settings._apiKeyPromise) await App.settings._apiKeyPromise;
+        await App.settings.ensureApiKey();
         var result = await App.data.loadModels();
         var adminModels = result.models;
         var providerModels = result.cloudModels;

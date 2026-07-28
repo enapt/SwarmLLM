@@ -13,6 +13,35 @@
     _apiKeyFull: '',
     _apiKeyPromise: null,
 
+    // Start the API-key bootstrap if it hasn't started, and return the promise.
+    //
+    // Callers used to test `if (App.settings._apiKeyPromise)` and skip the wait
+    // when it was still null — i.e. they SAMPLED whether someone else had begun
+    // the bootstrap rather than ensuring it had. Anything running before the
+    // one assignment therefore fetched with no Authorization header and got a
+    // 401: six dashboard panels did exactly that on every single page load, on
+    // loopback too, and never showed an error because `_restFetch` in
+    // swarm-tab.js discards failures. Awaiting this instead makes the wrong
+    // call unrepresentable.
+    //
+    // Memoized because `loadApiKey` consumes the single-use bootstrap nonce and
+    // blanks the meta tag — a second concurrent call would find no nonce, take
+    // the 401 path, and misreport the origin as untrusted.
+    // `_apiKeyStarted` flips BEFORE loadApiKey is invoked, because an async
+    // function runs synchronously up to its first await — so anything it calls
+    // on the way there re-enters this function while `_apiKeyPromise` is still
+    // null, and a memo assigned from the return value is too late to stop it.
+    _apiKeyStarted: false,
+    ensureApiKey: function() {
+      if (App.settings._apiKeyStarted) {
+        return App.settings._apiKeyPromise || Promise.resolve();
+      }
+      if (typeof App.settings.loadApiKey !== 'function') return Promise.resolve();
+      App.settings._apiKeyStarted = true;
+      App.settings._apiKeyPromise = App.settings.loadApiKey();
+      return App.settings._apiKeyPromise;
+    },
+
     _formatSlider: function(fmt, v) {
       v = parseInt(v, 10) || 0;
       switch (fmt) {
@@ -317,7 +346,7 @@
       } catch (e) {
         App.ui.showBanner('error', I18n.t('settings.load_failed') + ': ' + (e.message || I18n.t('common.request_failed')));
       }
-      App.settings._apiKeyPromise = App.settings.loadApiKey();
+      App.settings.ensureApiKey();
       App.settings.loadProviders();
     },
 
@@ -341,7 +370,14 @@
           headers['X-Dashboard-Nonce'] = nonce;
           if (nonceEl) nonceEl.setAttribute('content', '');
         }
-        var resp = await App.authFetch('/api/admin/api-key', { headers: headers });
+        // Plain `fetch`, NOT `App.authFetch`. This request is by definition
+        // unauthenticated — it is how the page obtains the credential that
+        // authFetch attaches — so routing it through authFetch is both
+        // pointless and circular: authFetch calls ensureApiKey, which calls
+        // this function, whose memo is not assigned until it returns. That
+        // recursed into a request storm the moment authFetch started ensuring
+        // rather than sampling.
+        var resp = await fetch('/api/admin/api-key', { headers: headers });
         if (resp.ok) {
           var data = await resp.json();
           var key = data.api_key || '';

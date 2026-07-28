@@ -529,8 +529,8 @@
   /// during page load is not mistaken for an unauthenticated one.
   async function hasCredentials() {
     if (!App.settings) return false;
-    if (!App.settings._apiKeyFull && App.settings._apiKeyPromise) {
-      try { await App.settings._apiKeyPromise; } catch (e) {}
+    if (!App.settings._apiKeyFull && App.settings.ensureApiKey) {
+      try { await App.settings.ensureApiKey(); } catch (e) {}
     }
     return !!App.settings._apiKeyFull;
   }

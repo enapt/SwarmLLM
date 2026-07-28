@@ -793,7 +793,7 @@
     // even when the user lands on a different tab — no fetches happen
     // until `onShow` or the first stats_update.
     if (App.swarmTab) App.swarmTab.bind();
-    App.settings._apiKeyPromise = App.settings.loadApiKey();
+    App.settings.ensureApiKey();
 
     App.ui.switchTab(S.activeTab, true);
 
