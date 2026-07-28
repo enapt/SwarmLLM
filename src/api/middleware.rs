@@ -110,6 +110,10 @@ enum BucketKind {
     /// meant the dashboard's own default polling plus ordinary interaction
     /// exceeded the limit and the page 429'd itself.
     ProviderHealth,
+    /// Cloud-model availability probes. Makes external API calls, so it stays
+    /// capped — but in its own bucket, because it is fired AUTOMATICALLY by the
+    /// dashboard rather than by a person doing something sensitive.
+    ProviderModelStatus,
     /// WebSocket ticket issuance. Bounded for its own reason — every ticket
     /// writes an entry to `state.events.ws_tickets` — which is unrelated to the
     /// external-API cost that sets `SENSITIVE_ADMIN_RPM`. Sharing one bucket
@@ -129,6 +133,22 @@ const SENSITIVE_ADMIN_RPM: u64 = 5;
 /// three tabs and started refusing at the third. 20 leaves room for around ten
 /// while still bounding how fast we can be made to call out to cloud providers.
 const PROVIDER_HEALTH_RPM: u64 = 20;
+/// Requests per minute for cloud-model availability probes.
+///
+/// Sized by the same argument as `PROVIDER_HEALTH_RPM`, and for the same reason
+/// it was raised from 6: **budgets are keyed by client IP, not by browser tab**,
+/// so one machine with several dashboards open shares this. The frontend already
+/// batches up to 20 models per call and caches each result for 60s, so a tab
+/// costs about one request a minute — which made the previous shared value of 5
+/// mean "five tabs", after which model badges silently stopped updating
+/// (`if (!resp.ok) return;` in notifications.js swallows the 429).
+///
+/// It sat in `SensitiveAdmin` alongside key and provider MUTATIONS plus the
+/// update endpoints, which genuinely want a tight cap because a person triggers
+/// them deliberately. This one the dashboard fires by itself, so sharing that
+/// budget put automatic traffic on a human-scale limit — the same mistake the
+/// ws-ticket bucket was split out to fix.
+const PROVIDER_MODEL_STATUS_RPM: u64 = 20;
 /// Requests per minute for WebSocket ticket issuance. Generous enough for a
 /// dashboard that reconnects a few times (each reconnect needs a fresh ticket),
 /// tight enough that a token holder cannot flood the ticket map.
@@ -177,8 +197,9 @@ impl RateLimiter {
         // call these on every refresh and hitting 5/min breaks the dashboard).
         let (kind, limit) = if path == "/api/admin/provider-health" {
             (BucketKind::ProviderHealth, PROVIDER_HEALTH_RPM)
-        } else if path == "/api/admin/provider-model-status"
-            || ((path == "/api/admin/providers" || path == "/api/admin/api-key") && is_mutating)
+        } else if path == "/api/admin/provider-model-status" {
+            (BucketKind::ProviderModelStatus, PROVIDER_MODEL_STATUS_RPM)
+        } else if ((path == "/api/admin/providers" || path == "/api/admin/api-key") && is_mutating)
             // Auto-update endpoints: download + SHA256 verify + atomic
             // rename. Strict cap so a runaway caller can't trigger
             // repeated update downloads (each is a heavy GitHub fetch).
@@ -893,12 +914,19 @@ mod tests {
             assert!(limiter.try_acquire(ip2, "/api/admin/providers", false));
         }
 
-        // provider-model-status is always SensitiveAdmin (makes external API calls)
+        // provider-model-status has its OWN bucket, wide enough for several
+        // dashboards on one machine — it is fired automatically, not by a
+        // person, so it must not share the human-scale sensitive budget.
         let ip3: IpAddr = "10.0.0.3".parse().unwrap();
-        for _ in 0..5 {
+        for _ in 0..PROVIDER_MODEL_STATUS_RPM {
             assert!(limiter.try_acquire(ip3, "/api/admin/provider-model-status", false));
         }
         assert!(!limiter.try_acquire(ip3, "/api/admin/provider-model-status", false));
+        // ...and exhausting it must NOT have consumed the sensitive budget that
+        // key/provider mutations rely on.
+        for _ in 0..SENSITIVE_ADMIN_RPM {
+            assert!(limiter.try_acquire(ip3, "/api/admin/api-key", true));
+        }
     }
 
     #[test]
@@ -950,8 +978,8 @@ mod tests {
         let limiter = RateLimiter::new(200, 200);
         let ip: IpAddr = "127.0.0.1".parse().unwrap();
 
-        // Burn the sensitive budget entirely on external-API probes.
-        for _ in 0..SENSITIVE_ADMIN_RPM + 5 {
+        // Burn the probe budget entirely on external-API probes.
+        for _ in 0..PROVIDER_MODEL_STATUS_RPM + 5 {
             let _ = limiter.try_acquire(ip, "/api/admin/provider-model-status", false);
         }
         assert!(

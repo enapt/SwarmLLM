@@ -715,7 +715,30 @@ impl NetworkManager {
                             .and_then(|m| {
                                 m.shards.iter().find(|s| s.index == shard_id.index).cloned()
                             });
-                        if let Some(info) = shard_info {
+                        // Only enforce when the manifest actually carries a
+                        // hash to check against.
+                        //
+                        // `verify_shard` treats an all-zero hash as a FAILURE
+                        // ("placeholder required"), which is right for a
+                        // deliberate integrity audit but wrong as a gate on
+                        // accepting a download: a manifest without hashes means
+                        // we have nothing to compare to, not that the bytes are
+                        // bad. Enforcing it unconditionally — as this did when
+                        // first written — rejected and quarantined every P2P
+                        // shard of any model whose manifest lacks hashes,
+                        // making that model impossible to acquire over the
+                        // network at all. Caught by a soak run against
+                        // meta-llama-3.1-8b within hours of shipping.
+                        let manifest_has_hash =
+                            shard_info.as_ref().is_some_and(|i| i.hash != [0u8; 32]);
+                        if !manifest_has_hash {
+                            tracing::debug!(
+                                model = %shard_id.model_id,
+                                shard = shard_id.index,
+                                "Manifest carries no hash for this shard — accepting unverified"
+                            );
+                        }
+                        if let Some(info) = shard_info.filter(|_| manifest_has_hash) {
                             if let Err(e) = self.shard_store.verify_shard(&shard_id.model_id, &info)
                             {
                                 tracing::error!(
