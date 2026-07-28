@@ -49,6 +49,10 @@ window.App = {
   SESSIONS_KEY: 'swarmllm_sessions',
   ACTIVE_SESSION_KEY: 'swarmllm_active_session',
   SETUP_DONE_KEY: 'swarmllm_setup_done',
+  // API key the user pasted in by hand, for dashboards the daemon won't hand a
+  // key to automatically (see App.utils.clientTrust). Per-origin so a browser
+  // used against several nodes doesn't send one node's key to another.
+  MANUAL_KEY_KEY: 'swarmllm_manual_api_key',
   SETUP_SKIPPED_KEY: 'swarmllm_setup_skipped',
   SETUP_CHIP_DISMISSED_KEY: 'swarmllm_setup_chip_dismissed',
   WELCOME_SEEN_KEY: 'swarmllm_welcome_seen',

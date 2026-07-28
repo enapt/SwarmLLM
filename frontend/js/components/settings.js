@@ -302,6 +302,8 @@
         document.getElementById('settings-max-requests').value = data.max_concurrent_requests || 10;
         document.getElementById('settings-bandwidth').value = data.max_bandwidth_mbps || 0;
         document.getElementById('settings-disk').value = data.max_disk_mb || 50000;
+        var trustLanEl = document.getElementById('settings-trust-lan');
+        if (trustLanEl) trustLanEl.checked = !!data.dashboard_trust_lan;
         var autoManage = data.auto_manage_shards ? 'on' : 'off';
         document.getElementById('settings-auto-shards').value = autoManage;
         var isOn = autoManage === 'on';
@@ -320,8 +322,11 @@
     },
 
     loadApiKey: async function() {
+      // Deliberately NOT gated on the settings field existing: obtaining the
+      // key is what unblocks every admin write on the page, so it must run
+      // even if the settings panel is absent from the DOM.
       var keyEl = document.getElementById('settings-api-key');
-      if (!keyEl) return;
+      var setField = function(v) { if (keyEl) keyEl.value = v; };
       try {
         // Bootstrap path: include the per-page nonce the daemon embedded
         // in the served HTML so the loopback gate in src/api/middleware.rs
@@ -341,13 +346,143 @@
           var data = await resp.json();
           var key = data.api_key || '';
           App.settings._apiKeyFull = key;
-          keyEl.value = key ? key.substring(0, 4) + '****' + key.substring(key.length - 4) : I18n.t('settings.no_api_key');
+          App.settings._apiKeyDenied = false;
+          setField(key ? key.substring(0, 4) + '****' + key.substring(key.length - 4) : I18n.t('settings.no_api_key'));
+        } else if (resp.status === 401 && !App.utils.isTrustedOrigin()) {
+          // Expected refusal, not a fault: the daemon does not hand keys to
+          // this network. A key the user pasted on a previous visit is the
+          // supported way through, so try that before declaring failure.
+          var saved = App.settings._loadManualKey();
+          if (saved) {
+            App.settings._apiKeyFull = saved;
+            App.settings._apiKeyDenied = false;
+            setField(saved.substring(0, 4) + '****' + saved.substring(saved.length - 4));
+          } else {
+            App.settings._apiKeyDenied = true;
+            setField(I18n.t('settings.key_remote'));
+          }
         } else {
-          keyEl.value = I18n.t('settings.key_unavailable');
+          App.settings._apiKeyDenied = false;
+          setField(I18n.t('settings.key_unavailable'));
         }
       } catch (e) {
-        keyEl.value = I18n.t('settings.key_error');
+        setField(I18n.t('settings.key_error'));
       }
+      App.settings._notifyIfUntrusted();
+    },
+
+    // Per-origin so one browser used against several nodes never sends node A's
+    // key to node B — the keys are unrelated and a mismatch reads as a 401.
+    _manualKeyName: function() {
+      return App.MANUAL_KEY_KEY + ':' + location.host;
+    },
+
+    _loadManualKey: function() {
+      try {
+        return localStorage.getItem(App.settings._manualKeyName()) || '';
+      } catch (e) {
+        return '';
+      }
+    },
+
+    // Verify before storing. A key that doesn't work must fail here, while the
+    // user is looking at the box they typed it into — not silently later as a
+    // generic failure on some unrelated panel.
+    saveManualKey: async function(key) {
+      key = (key || '').trim();
+      if (!key) return false;
+      var resp;
+      try {
+        resp = await fetch('/api/admin/stats', { headers: { 'Authorization': 'Bearer ' + key } });
+      } catch (e) {
+        return false;
+      }
+      if (!resp.ok) return false;
+      try {
+        localStorage.setItem(App.settings._manualKeyName(), key);
+      } catch (e) {
+        // Private browsing with storage disabled — the key still works for
+        // this page load, it just won't survive a reload.
+      }
+      App.settings._apiKeyFull = key;
+      App.settings._apiKeyDenied = false;
+      return true;
+    },
+
+    forgetManualKey: function() {
+      try {
+        localStorage.removeItem(App.settings._manualKeyName());
+      } catch (e) { /* nothing to remove */ }
+    },
+
+    // Persistent, dismissible explanation, with the way out attached.
+    //
+    // Persistent because the user has to go and DO something (fetch a key off
+    // the machine), which is more than a toast's few seconds allow; at the top
+    // of the page because the setup wizard is a modal overlay and this has to
+    // be legible over it.
+    _notifyIfUntrusted: function() {
+      if (!App.settings._apiKeyDenied) return;
+      if (document.getElementById('remote-dashboard-banner')) return;
+      var U = App.utils;
+      var banner = document.createElement('div');
+      banner.id = 'remote-dashboard-banner';
+      banner.className = 'remote-dashboard-banner';
+
+      var text = document.createElement('span');
+      // Name the address the DAEMON saw. Behind a subnet router or a container
+      // publish that is not the address in the user's address bar, and it is
+      // the one they would have to allow. Fall back to the address bar only if
+      // the page wasn't rendered by the daemon (dev server, raw file open).
+      text.textContent = I18n.t('errors.untrusted_dashboard', {
+        addr: U.clientAddr() || location.hostname,
+      });
+      banner.appendChild(text);
+
+      var form = document.createElement('form');
+      form.className = 'remote-dashboard-banner-form';
+      var input = document.createElement('input');
+      input.type = 'password';
+      input.autocomplete = 'off';
+      input.spellcheck = false;
+      input.placeholder = I18n.t('settings.paste_key_placeholder');
+      input.setAttribute('aria-label', I18n.t('settings.paste_key_placeholder'));
+      var submit = document.createElement('button');
+      submit.type = 'submit';
+      submit.className = 'btn btn-sm';
+      submit.textContent = I18n.t('actions.unlock');
+      form.appendChild(input);
+      form.appendChild(submit);
+      form.addEventListener('submit', async function(ev) {
+        ev.preventDefault();
+        submit.disabled = true;
+        var ok = await App.settings.saveManualKey(input.value);
+        submit.disabled = false;
+        if (ok) {
+          banner.remove();
+          // Everything on the page loaded without a key, so re-fetch rather
+          // than leaving a dashboard full of empty panels behind the banner.
+          location.reload();
+        } else {
+          input.value = '';
+          input.placeholder = I18n.t('settings.paste_key_rejected');
+          App.ui.showToast('error', I18n.t('settings.paste_key_rejected'));
+        }
+      });
+      banner.appendChild(form);
+
+      var help = document.createElement('span');
+      help.className = 'remote-dashboard-banner-help';
+      help.textContent = I18n.t('errors.untrusted_dashboard_where');
+      banner.appendChild(help);
+
+      var close = document.createElement('button');
+      close.className = 'remote-dashboard-banner-close';
+      close.setAttribute('aria-label', I18n.t('actions.dismiss'));
+      close.textContent = '✕';
+      close.addEventListener('click', function() { banner.remove(); });
+      banner.appendChild(close);
+      document.body.appendChild(banner);
     },
 
     copyApiKey: async function() {
@@ -607,6 +742,7 @@
         max_bandwidth_mbps: parseInt(document.getElementById('settings-bandwidth').value, 10),
         max_disk_mb: parseInt(document.getElementById('settings-disk').value, 10),
         auto_manage_shards: autoManageOn,
+        dashboard_trust_lan: !!(document.getElementById('settings-trust-lan') || {}).checked,
         // R110 removed the standalone max-storage slider — the auto-manage budget
         // is derived from Max Disk + contribution mode, so this field is no longer
         // sent (omitting it leaves the derived value untouched server-side). The

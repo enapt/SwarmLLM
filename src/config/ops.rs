@@ -74,7 +74,7 @@ fn default_check_interval_hours() -> u32 {
     6
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ApiConfig {
     /// Bearer token for API authentication. If empty, one is auto-generated on first run.
     #[serde(default)]
@@ -102,6 +102,54 @@ pub struct ApiConfig {
     /// should set this to `true`.
     #[serde(default)]
     pub metrics_auth_required: bool,
+    /// Hand the dashboard its API key when the browser reaches us over a
+    /// Tailscale-style overlay (100.64.0.0/10, `fd7a:115c:a1e0::/48`).
+    ///
+    /// Default `true`, but it only takes effect when THIS node is itself on
+    /// such an overlay — see `api::dashboard_trust::node_is_on_overlay`. We
+    /// document running nodes over Tailscale, and a dashboard that 401s on
+    /// the tailnet makes remote nodes unmanageable. Membership of a tailnet
+    /// is an authenticated act (the device was authorised into it), which is
+    /// a stronger claim than being on the same LAN.
+    ///
+    /// Set `false` on a node whose overlay you share with people you would
+    /// not give admin access to.
+    #[serde(default = "default_true")]
+    pub dashboard_trust_overlay: bool,
+    /// Hand the dashboard its API key when the browser reaches us from a
+    /// private/LAN address (RFC1918, IPv6 ULA, link-local).
+    ///
+    /// Default `false` — a LAN is not an authenticated boundary, and this
+    /// grants admin + inference to anything on it. It exists because a
+    /// Tailscale *subnet router* masquerades by default, so traffic from a
+    /// tailnet arrives from the router's own private address and is
+    /// indistinguishable from any other LAN client (see
+    /// `docs/book/src/operations/tailscale-wan.md`). Users in that topology
+    /// turn this on deliberately, from the dashboard, once.
+    #[serde(default)]
+    pub dashboard_trust_lan: bool,
+}
+
+/// Written out by hand rather than derived.
+///
+/// `#[derive(Default)]` does NOT consult `#[serde(default = "...")]` — the two
+/// are unrelated mechanisms. The serde attribute only fills a key missing from
+/// the TOML being parsed, whereas a node starting with no config file at all
+/// goes through `Default`. Deriving it therefore shipped
+/// `dashboard_trust_overlay = false` to exactly the fresh installs the default
+/// exists for, and wrote that `false` back to the generated config.toml where
+/// it then looked deliberate.
+impl Default for ApiConfig {
+    fn default() -> Self {
+        Self {
+            api_key: None,
+            rate_limit_rpm: None,
+            rate_limit_admin_rpm: None,
+            metrics_auth_required: false,
+            dashboard_trust_overlay: default_true(),
+            dashboard_trust_lan: false,
+        }
+    }
 }
 
 fn default_theme() -> String {

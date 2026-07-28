@@ -240,6 +240,7 @@ pub mod anthropic;
 pub mod claude_session;
 #[cfg(feature = "claude-subscription")]
 pub mod claude_sub;
+pub mod dashboard_trust;
 pub mod identity;
 pub mod mcp;
 pub mod metrics;

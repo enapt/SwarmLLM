@@ -3866,13 +3866,45 @@ textarea.pool-code-input { min-height: 4.5em; }
 .mobile-model-bar .btn { flex-shrink: 0; }
 @media (max-width: 768px) { .mobile-model-bar { display: flex; } }
 
-/* ─── Mode indicator ─── */
-
-/* Left: stronger colored mode label block */
-.mode-swarm .mode-cloud .mode-hybrid .mode-offline 
-
-.mode-swarm .mode-cloud .mode-hybrid .mode-offline 
-/* Right: status detail, pushed to the right */
+/* ─── Untrusted-dashboard notice ───
+   Sits above the setup wizard (.modal-overlay is z-index 200): this is most
+   often hit inside that wizard, so it has to be legible over it. Persistent
+   rather than a toast — it carries the unlock form, not just a message.
+   Wraps because it holds a sentence, an input and a button, and is regularly
+   read on a phone. */
+.remote-dashboard-banner {
+  position: fixed; top: 0; left: 0; right: 0; z-index: 10000;
+  display: flex; align-items: center; justify-content: center;
+  flex-wrap: wrap; gap: 0.5rem 1rem;
+  padding: 0.7rem 2rem 0.7rem 1rem;
+  background: var(--yellow, #eab308); color: var(--bg-primary, #0a0e14);
+  font-size: 0.85rem; font-weight: 500; line-height: 1.4;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+  max-height: 60vh; overflow-y: auto;
+}
+.remote-dashboard-banner-form { display: flex; gap: 0.4rem; flex-shrink: 0; }
+.remote-dashboard-banner-form input {
+  min-width: 16rem; max-width: 100%;
+  padding: 0.3rem 0.5rem; font-size: 0.85rem;
+  border: 1px solid rgba(0,0,0,0.35); border-radius: 4px;
+  background: var(--bg-primary, #0a0e14); color: var(--text-primary, #e6edf3);
+}
+.remote-dashboard-banner-help {
+  flex-basis: 100%; text-align: center;
+  font-weight: 400; opacity: 0.85; font-size: 0.8rem;
+}
+.remote-dashboard-banner-close {
+  position: absolute; top: 0.5rem; right: 0.5rem;
+  background: none; border: none; cursor: pointer;
+  color: inherit; font-size: 1rem; line-height: 1;
+  padding: 0 0.25rem; flex-shrink: 0; opacity: 0.7;
+}
+.remote-dashboard-banner-close:hover { opacity: 1; }
+@media (max-width: 600px) {
+  .remote-dashboard-banner { justify-content: flex-start; font-size: 0.8rem; }
+  .remote-dashboard-banner-form { width: 100%; }
+  .remote-dashboard-banner-form input { min-width: 0; flex: 1; }
+}
 
 /* ─── Toast Notifications ─── */
 .toast-container {

@@ -127,9 +127,70 @@ The same approach works with any VPN overlay:
 
 - **API key still required** — remote access to inference endpoints requires Bearer token auth, even over Tailscale
 - **E2E encryption is independent of VPN** — SwarmLLM encrypts all P2P traffic with X25519 + ChaCha20-Poly1305 regardless of whether you use a VPN. The VPN adds a second layer of encryption at the network level
-- **Dashboard is not auth-protected** — the admin dashboard at `/admin` doesn't require authentication. If exposing to untrusted networks, use Tailscale ACLs to restrict access or bind to `127.0.0.1` and use SSH tunneling
+- **Dashboard requires the API key** — admin endpoints need Bearer token auth. The dashboard fetches that key for itself on page load, but only over networks the node trusts (see below)
+
+## Opening the dashboard over Tailscale
+
+Admin endpoints need a Bearer token. The dashboard normally obtains one for
+itself on page load, and the daemon decides whether to hand it over based on the
+source address of the request:
+
+| Source | Handed a key? |
+|---|---|
+| Loopback (`127.0.0.1`, `::1`) | Always |
+| Tailscale (`100.64.0.0/10`, `fd7a:115c:a1e0::/48`) | Yes, **if this node is itself on a tailnet** |
+| Private / LAN address | Only with `api.dashboard_trust_lan = true` |
+| Anything else | No — paste the key instead |
+
+So if SwarmLLM runs on a machine that has joined your tailnet, browsing to
+`http://100.x.x.x:8800` from another device on the tailnet just works, with no
+configuration. Set `api.dashboard_trust_overlay = false` to turn that off — worth
+doing if you share the tailnet with people you would not give admin access to.
+
+The IPv4 range is shared CGNAT space that some ISPs also use, so it is not on its
+own proof of a tailnet. Trust is only extended across it when this node holds an
+overlay address too, which an ISP's CGNAT segment does not give it.
+
+### If you reach the node through a subnet router
+
+**A subnet router masquerades by default.** If Tailscale runs on a Proxmox host
+(or any gateway) and advertises the subnet a SwarmLLM container sits on, the
+container does not see your device's `100.x` address — it sees the *router's*
+private address, which is indistinguishable from any other LAN client. The same
+is true of a container port publish or any NAT hop.
+
+Two ways through, in order of preference:
+
+1. **Unlock the dashboard once with the key.** The page will say it wasn't given
+   a key and offer a box to paste one. The key is printed when SwarmLLM starts
+   and stored in the `api_key` file in its data directory — read it from inside
+   the container. It's remembered per node, so this is a one-time step per
+   browser.
+2. **Turn on "Allow access from my local network"** in Settings → Identity &
+   Access (or `api.dashboard_trust_lan = true`). This admits any private address,
+   including the router's, and applies immediately without restarting the node.
+   Only do this on a network whose devices you trust — it is a weaker boundary
+   than the tailnet, which at least authenticates its members.
+
+Alternatively, stop the router masquerading so the original address survives, and
+the tailnet rule above applies unchanged:
+
+```bash
+tailscale up --advertise-routes=<subnet> --snat-subnet-routes=false
+```
+
+That requires the destination to route back over the tailnet, and is Linux-only.
+
+Inference and the OpenAI/Anthropic APIs are unaffected by any of this — they
+accept the API key as a Bearer token from any address.
 
 ## Troubleshooting
+
+**Dashboard loads but nothing saves (setup wizard's "Start SwarmLLM" appears to
+do nothing):** every admin call is returning 401 because the page was never given
+a key. The banner at the top of the page names the address the daemon actually
+saw for you — which behind a NAT or subnet router is *not* the address in your
+browser's address bar — and offers the paste box. See the section above.
 
 **Peers don't connect:**
 - Verify Tailscale is running: `tailscale status`

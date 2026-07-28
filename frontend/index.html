@@ -19,6 +19,14 @@
        loopback attacker can no longer spoof browser-only signals to read
        the api-key. -->
   <meta name="bootstrap-nonce" content="__SWARMLLM_BOOTSTRAP_NONCE__">
+  <!-- What the daemon saw about where this page load came from: the source
+       address on the socket, and how it was classified (loopback / overlay /
+       local-network / untrusted). Behind a NAT, a container publish or a
+       Tailscale subnet router this address is NOT one the browser can work
+       out for itself, and it is exactly what the user needs in order to allow
+       it — so the server tells the page directly. Neither value is a secret. -->
+  <meta name="client-addr" content="__SWARMLLM_CLIENT_ADDR__">
+  <meta name="client-trust" content="__SWARMLLM_CLIENT_TRUST__">
   <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
   <title>SwarmLLM — Join the Swarm</title>
   <link rel="stylesheet" href="/static/css/utilities.css">
@@ -285,6 +293,16 @@
           <button class="btn btn-sm" id="btn-copy-api-key" data-i18n-title="settings.copy_token_title" title="Copy access token" data-i18n="actions.copy">Copy</button>
         </div>
         <span class="text-muted field-hint" data-i18n="settings.access_token_hint">Your private key for connecting other apps to SwarmLLM. Keep it secret.</span>
+      </div>
+      <div class="form-group">
+        <div class="flex-center gap-1">
+          <label class="toggle-switch" style="margin-right:4px">
+            <input type="checkbox" id="settings-trust-lan">
+            <span class="toggle-slider"></span>
+          </label>
+          <span data-i18n="settings.trust_lan">Allow access from my local network</span>
+        </div>
+        <span class="text-muted field-hint" data-i18n="settings.trust_lan_desc">Let devices on your local network open this dashboard without pasting a key. Turn this on if you reach SwarmLLM through a Tailscale subnet router or a container, where requests arrive from your router's address rather than your own.</span>
       </div>
       <div class="form-group">
         <label for="settings-nickname" data-i18n="settings.nickname_label">Nickname</label>

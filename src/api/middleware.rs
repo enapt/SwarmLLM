@@ -427,22 +427,41 @@ pub async fn auth_middleware(
         return next.run(req).await;
     }
 
-    // Exempt API key retrieval on first dashboard load. Loopback-only AND
-    // the request must carry a valid one-time-use bootstrap nonce that the
-    // dashboard handler embedded in the served HTML for this page load.
-    // See `is_valid_bootstrap_nonce` — the prior `Sec-Fetch-Site` fallback
-    // was curl-spoofable, so any local process could read the api-key by
-    // setting that header.
+    // Exempt API key retrieval on first dashboard load. Two independent
+    // conditions, and BOTH are required:
+    //
+    //   1. The request arrived over a network the operator has vouched for —
+    //      see `api::dashboard_trust`. This used to be a bare
+    //      `addr.ip().is_loopback()`, which is not the question we mean: a
+    //      same-host reverse proxy satisfies it on behalf of a remote client,
+    //      while a container publish or a Tailscale subnet router never
+    //      satisfies it even for the operator sitting at the host.
+    //   2. The request carries a valid one-time-use bootstrap nonce that the
+    //      dashboard handler embedded in the served HTML for this page load.
+    //      See `is_valid_bootstrap_nonce` — the prior `Sec-Fetch-Site`
+    //      fallback was curl-spoofable, so any local process could read the
+    //      api-key by setting that header.
     //
     // The dashboard JS reads the nonce out of `<meta name="bootstrap-nonce">`
-    // and sends it as `X-Dashboard-Nonce`. A determined local attacker can
-    // still scrape `/admin` to obtain a fresh nonce — this raises the bar
-    // (curl now needs two coordinated requests against a 60s window) but
-    // is not a hard boundary. The api_key file in data_dir is mode 0o600;
-    // any same-UID process with shell access already has the key.
+    // and sends it as `X-Dashboard-Nonce`.
+    //
+    // Be clear about what (2) is and is not worth. It defends against a
+    // NON-BROWSER process that cannot read the served HTML — the `curl` that
+    // used to spoof `Sec-Fetch-Site`. It is NOT a barrier against anyone who
+    // can reach this port: `/admin` is unauthenticated, so scraping a fresh
+    // nonce and spending it is two ordinary requests (verified). Nor is it a
+    // barrier locally — the api_key file in data_dir is mode 0o600, and any
+    // same-UID process with shell access already has the key.
+    //
+    // So the real boundary is (1), and "trusted network" must be read
+    // literally: on a network this node trusts, anything that can open a TCP
+    // connection to the API port can obtain the API key, and with it admin
+    // and inference. That is the intended bargain for a tailnet — an
+    // authenticated set of devices the operator chose — which is why LAN is
+    // opt-in and `api.dashboard_trust_overlay` exists to decline even that.
     if path == "/api/admin/api-key"
         && method == Method::GET
-        && addr.ip().is_loopback()
+        && crate::api::dashboard_trust::classify(&state.shared_state, addr.ip()).is_trusted()
         && is_valid_bootstrap_nonce(&state, req.headers())
     {
         return next.run(req).await;

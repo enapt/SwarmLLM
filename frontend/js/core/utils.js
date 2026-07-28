@@ -929,8 +929,42 @@
     return I18n.t(remote === 1 ? key + '_one' : key + '_other', { count: remote });
   }
 
+  function metaContent(name) {
+    var el = document.querySelector('meta[name="' + name + '"]');
+    var v = el && el.getAttribute('content');
+    // Unsubstituted placeholder = the page wasn't rendered by the daemon
+    // (a raw file open, or a dev server). Treat as unknown, not as a value.
+    if (!v || v.indexOf('__SWARMLLM_') === 0) return '';
+    return v;
+  }
+
+  // The source address the daemon saw for this page load, e.g. "100.101.102.103".
+  //
+  // Deliberately taken from the server rather than inferred from `location`:
+  // behind a NAT, a container publish, or a Tailscale subnet router the address
+  // the daemon sees is NOT the one in the address bar, and it is the address
+  // that decides whether the key handout is allowed.
+  function clientAddr() {
+    return metaContent('client-addr');
+  }
+
+  // How the daemon classified this page load — 'loopback', 'overlay',
+  // 'local-network' or 'untrusted' (see src/api/dashboard_trust.rs). Anything
+  // other than 'untrusted' means the dashboard is handed its API key
+  // automatically; 'untrusted' means the user must supply it.
+  function clientTrust() {
+    return metaContent('client-trust') || 'loopback';
+  }
+
+  function isTrustedOrigin() {
+    return clientTrust() !== 'untrusted';
+  }
+
   // Export utilities
   App.utils = {
+    clientAddr: clientAddr,
+    clientTrust: clientTrust,
+    isTrustedOrigin: isTrustedOrigin,
     readRouteHeaders: readRouteHeaders,
     routeSummary: routeSummary,
     escapeHtml: escapeHtml,

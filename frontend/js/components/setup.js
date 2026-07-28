@@ -386,7 +386,18 @@
           }),
         });
         if (!resp.ok) {
-          App.ui.showBanner('error', I18n.t('setup.failed_save'));
+          // A 401 here is almost never a wrong key — the dashboard is handed
+          // its key automatically. It means we never got one, which from an
+          // untrusted origin is the daemon declining the handout. Say that and
+          // offer the way through: "could not save configuration" sends the
+          // user looking at their settings for a fault that isn't there.
+          if (resp.status === 401 && !App.utils.isTrustedOrigin()) {
+            App.settings._apiKeyDenied = true;
+            App.settings._notifyIfUntrusted();
+            App.ui.showBanner('error', I18n.t('setup.failed_save_untrusted'));
+          } else {
+            App.ui.showBanner('error', I18n.t('setup.failed_save'));
+          }
           return;
         }
       } catch (e) {

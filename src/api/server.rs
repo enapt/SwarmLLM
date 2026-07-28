@@ -162,18 +162,42 @@ where
 /// on its `/api/admin/api-key` bootstrap fetch. Single-use, 60-second TTL.
 const BOOTSTRAP_NONCE_PLACEHOLDER: &str = "__SWARMLLM_BOOTSTRAP_NONCE__";
 
+/// Tokens carrying what the daemon observed about this request's origin: the
+/// source address it actually saw, and how `api::dashboard_trust` classified
+/// it. Without these the page cannot tell "the key handout refused me" from
+/// any other 401, and the user cannot see the one address they would need to
+/// allow — behind a NAT or a Tailscale subnet router it is not an address the
+/// browser knows about.
+const CLIENT_ADDR_PLACEHOLDER: &str = "__SWARMLLM_CLIENT_ADDR__";
+const CLIENT_TRUST_PLACEHOLDER: &str = "__SWARMLLM_CLIENT_TRUST__";
+
+/// Render the dashboard HTML for one page load.
+///
+/// The single place the per-page placeholders are substituted. Both dashboard
+/// routes go through it so a new SPA entry point cannot ship a page that is
+/// missing the nonce (no key) or the trust markers (an unexplainable 401) —
+/// the substitutions belong together and were previously duplicated per
+/// handler.
+fn render_dashboard(state: &AppState, html: String, client_ip: std::net::IpAddr) -> String {
+    let nonce = state.issue_bootstrap_nonce();
+    let trust = crate::api::dashboard_trust::classify(&state.shared_state, client_ip);
+    html.replace(BOOTSTRAP_NONCE_PLACEHOLDER, &nonce)
+        .replace(CLIENT_ADDR_PLACEHOLDER, &client_ip.to_string())
+        .replace(CLIENT_TRUST_PLACEHOLDER, trust.as_str())
+}
+
 /// Wrapper handler for the dashboard HTML. Issues a fresh per-page
 /// bootstrap nonce and substitutes it for the placeholder before
-/// returning. Replaces the bare `assets::serve_dashboard` so loopback
+/// returning. Replaces the bare `assets::serve_dashboard` so the
 /// admin-key bootstrap is gated by a value the legitimate dashboard JS
 /// must read out of the served HTML, raising the bar against curl-style
-/// local attackers that previously bypassed via `Sec-Fetch-Site`.
+/// attackers that previously bypassed via `Sec-Fetch-Site`.
 async fn serve_dashboard_with_nonce(
+    axum::extract::ConnectInfo(addr): axum::extract::ConnectInfo<std::net::SocketAddr>,
     axum::extract::State(state): axum::extract::State<AppState>,
 ) -> axum::response::Html<String> {
     let html = assets::dashboard_html_owned().await;
-    let nonce = state.issue_bootstrap_nonce();
-    axum::response::Html(html.replace(BOOTSTRAP_NONCE_PLACEHOLDER, &nonce))
+    axum::response::Html(render_dashboard(&state, html, addr.ip()))
 }
 
 /// SPA catch-all variant of [`serve_dashboard_with_nonce`]. Any path that
@@ -181,12 +205,12 @@ async fn serve_dashboard_with_nonce(
 /// dashboard HTML with a fresh nonce so client-side routing resolves to
 /// the same shell.
 async fn serve_dashboard_catchall_with_nonce(
+    axum::extract::ConnectInfo(addr): axum::extract::ConnectInfo<std::net::SocketAddr>,
     axum::extract::State(state): axum::extract::State<AppState>,
     axum::extract::Path(_path): axum::extract::Path<String>,
 ) -> axum::response::Html<String> {
     let html = assets::dashboard_html_owned().await;
-    let nonce = state.issue_bootstrap_nonce();
-    axum::response::Html(html.replace(BOOTSTRAP_NONCE_PLACEHOLDER, &nonce))
+    axum::response::Html(render_dashboard(&state, html, addr.ip()))
 }
 
 /// Build the Axum router with all routes.

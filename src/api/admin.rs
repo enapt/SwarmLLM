@@ -940,6 +940,12 @@ pub async fn get_config(State(state): State<AppState>) -> Json<serde_json::Value
         // so the dashboard reflects post-PUT state immediately.
         "allow_cross_pool_inference": state.shared_state.credits.allow_cross_pool_inference.load(std::sync::atomic::Ordering::Relaxed),
         "share_model_catalog": state.shared_state.credits.share_model_catalog.load(std::sync::atomic::Ordering::Relaxed),
+        // Runtime value, same reason. Paired with `dashboard_on_overlay` so the
+        // settings panel can say whether the overlay path is actually in play
+        // on this node rather than just offering an abstract switch.
+        "dashboard_trust_lan": state.shared_state.dashboard_trust_lan.load(std::sync::atomic::Ordering::Relaxed),
+        "dashboard_trust_overlay": config.api.dashboard_trust_overlay,
+        "dashboard_on_overlay": crate::api::dashboard_trust::node_is_on_overlay(&state.shared_state),
     });
     if let Some(cs) = claude_sub {
         result["claude_subscription"] = cs;
@@ -1064,6 +1070,21 @@ pub async fn update_config(
             .credits
             .share_model_catalog
             .store(share, std::sync::atomic::Ordering::Release);
+    }
+    if let Some(trust_lan) = body.dashboard_trust_lan {
+        // Same pattern: persist for restart durability AND mirror to the
+        // runtime atomic, because this setting's whole purpose is to make a
+        // dashboard reachable that currently isn't — a restart requirement
+        // would defeat it.
+        config.api.dashboard_trust_lan = trust_lan;
+        state
+            .shared_state
+            .dashboard_trust_lan
+            .store(trust_lan, std::sync::atomic::Ordering::Release);
+        tracing::info!(
+            enabled = trust_lan,
+            "Dashboard local-network trust changed via admin API"
+        );
     }
 
     // Write updated config to disk
@@ -1241,6 +1262,10 @@ pub struct ConfigUpdate {
     /// Persisted to config TOML + mirrored to
     /// `state.credits.share_model_catalog`.
     pub share_model_catalog: Option<bool>,
+    /// Hand the dashboard its API key to browsers on a private/LAN address.
+    /// Persisted to config TOML + mirrored to `state.dashboard_trust_lan` so
+    /// it applies on the next page load rather than the next restart.
+    pub dashboard_trust_lan: Option<bool>,
 }
 
 /// POST /api/admin/shutdown — Gracefully shut down the node.

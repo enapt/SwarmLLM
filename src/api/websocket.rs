@@ -64,6 +64,33 @@ pub async fn issue_ticket(State(state): State<AppState>) -> impl IntoResponse {
     axum::Json(serde_json::json!({ "ticket": ticket })).into_response()
 }
 
+/// Is this `Origin` the same origin as the request's own `Host`?
+///
+/// The property being defended is same-origin: a page on `evil.com` must not be
+/// able to open this socket. Deriving that from the request's own `Host` is the
+/// general form of the check. The previous implementation instead hardcoded the
+/// three loopback origins, which enforced something narrower and unintended —
+/// a dashboard legitimately served at a LAN or Tailscale address sent a
+/// matching `Origin` for the page it was actually on and was refused, so remote
+/// dashboards silently lost every live update and fell back to polling.
+///
+/// Loopback forms stay allowlisted because `Host` can legitimately differ from
+/// them when a proxy rewrites it, and they are the same machine regardless.
+fn ws_origin_allowed(origin: &str, host: &str, port: u16) -> bool {
+    if !host.is_empty()
+        && (origin == format!("http://{host}") || origin == format!("https://{host}"))
+    {
+        return true;
+    }
+    [
+        format!("http://localhost:{port}"),
+        format!("http://127.0.0.1:{port}"),
+        format!("http://[::1]:{port}"),
+    ]
+    .iter()
+    .any(|a| a == origin)
+}
+
 /// GET /api/admin/ws — WebSocket handler for real-time dashboard updates.
 ///
 /// Authentication: requires a valid single-use ticket in `?t=<hex>` (issued
@@ -88,13 +115,11 @@ pub async fn handler(
     // don't send it).
     if let Some(origin) = headers.get(axum::http::header::ORIGIN) {
         let origin_str = origin.to_str().unwrap_or("");
-        let port = state.config.node.listen_port;
-        let allowed = [
-            format!("http://localhost:{port}"),
-            format!("http://127.0.0.1:{port}"),
-            format!("http://[::1]:{port}"),
-        ];
-        if !allowed.iter().any(|a| a == origin_str) {
+        let host = headers
+            .get(axum::http::header::HOST)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        if !ws_origin_allowed(origin_str, host, state.config.node.listen_port) {
             tracing::warn!(
                 origin = %origin_str,
                 remote = %addr,
@@ -695,4 +720,61 @@ async fn build_stats_message(state: &SharedState) -> String {
     });
 
     serde_json::to_string(&msg).unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A dashboard opened at a LAN or Tailscale address sends the Origin of the
+    /// page it is actually on. Refusing that is what silently killed live
+    /// updates for every non-loopback dashboard.
+    #[test]
+    fn same_origin_is_allowed_at_any_address() {
+        assert!(ws_origin_allowed(
+            "http://192.168.1.53:8802",
+            "192.168.1.53:8802",
+            8802
+        ));
+        assert!(ws_origin_allowed(
+            "http://100.101.102.103:8800",
+            "100.101.102.103:8800",
+            8800
+        ));
+        // Behind a TLS-terminating proxy the page is https on the same host.
+        assert!(ws_origin_allowed(
+            "https://node.tail1234.ts.net",
+            "node.tail1234.ts.net",
+            8800
+        ));
+        // Loopback still works, including when Host was rewritten by a proxy.
+        assert!(ws_origin_allowed("http://localhost:8800", "", 8800));
+        assert!(ws_origin_allowed("http://127.0.0.1:8800", "", 8800));
+    }
+
+    /// The property the check exists for: a foreign page must not open this
+    /// socket, whatever address the node is reachable at.
+    #[test]
+    fn cross_origin_is_still_refused() {
+        assert!(!ws_origin_allowed(
+            "http://evil.com",
+            "192.168.1.53:8802",
+            8802
+        ));
+        // Same host, different port is a different origin.
+        assert!(!ws_origin_allowed(
+            "http://192.168.1.53:9999",
+            "192.168.1.53:8802",
+            8802
+        ));
+        // A host that merely ends with ours must not match by prefix/suffix.
+        assert!(!ws_origin_allowed(
+            "http://evil-192.168.1.53:8802",
+            "192.168.1.53:8802",
+            8802
+        ));
+        // An empty Host must not make everything match.
+        assert!(!ws_origin_allowed("http://evil.com", "", 8800));
+        assert!(!ws_origin_allowed("http://", "", 8800));
+    }
 }
