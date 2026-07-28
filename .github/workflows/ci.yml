@@ -103,6 +103,23 @@ jobs:
             features: "default"
             flags: ""
             cache_key: "default"
+          # Windows compiles a different crate — anything behind `#[cfg(unix)]`
+          # is absent and anything unix-only that leaked past a gate is a hard
+          # error. Nothing else in CI notices: fmt, clippy and tests all ran
+          # green on Linux while v0.3.43 was being built without Windows
+          # binaries, because a Unix socket type does not exist there. That was
+          # found by the release job, i.e. after the release was public.
+          #
+          # `cache-warm` does build Windows, but only when the dependency graph
+          # changes — which a version bump always does, so it fires at the same
+          # moment as the tag rather than before it. This job closes that gap by
+          # running on every push, on the default feature set (no CUDA, so it is
+          # far short of the GPU warm build). Windows runners bill at 2x
+          # minutes; a platform shipping broken costs more.
+          - os: windows-latest
+            features: "default"
+            flags: ""
+            cache_key: "default"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
