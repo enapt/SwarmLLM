@@ -2,6 +2,27 @@
 
 All notable changes to SwarmLLM are documented here.
 
+## [0.3.42-alpha] — 2026-07-28
+
+### Fixed
+
+- **Machines set up before 21 July could no longer find the network.** If you
+  first configured SwarmLLM before that date, your machine starts with an empty
+  peer list and never joins, however many times you restart or update it, and
+  nothing says why. It looks like the newest release broke your networking.
+
+  The starting point every fresh install dials to reach the network arrived on
+  21 July. It only takes effect when your settings file does not mention
+  starting points at all — but the app saves every setting to that file,
+  including an empty list of them, which is what the setting was before the
+  starting point existed. So anyone already set up by then had that empty list
+  saved, and from then on it quietly overrode the new one.
+
+  An empty list is now understood as "not set" rather than "none", so affected
+  machines join again on the next start with nothing to edit. If you deliberately
+  run with no starting points — a private or offline network of your own — say so
+  with `disable_default_bootstrap = true` under `[network]`.
+
 ## [0.3.41-alpha] — 2026-07-28
 
 ### Fixed

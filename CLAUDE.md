@@ -196,7 +196,39 @@ All 20 build phases complete. All subsystems wired — no stubs. **1421 lib + 80
 
 Per-round history lives in `~/.claude/projects/-home-user-SwarmLLM/memory/round_log_*.md` and the CHANGELOG; `docs/ARCHITECTURE.md` is the canonical architecture. This section keeps only the current release line plus one-line prior-round pointers.
 
-### Latest — v0.3.41-alpha (2026-07-28): the dashboard works from another device
+### Latest — v0.3.42-alpha (2026-07-28): pre-21-July nodes could never rejoin
+
+Found while updating the local test node for the .41 release — it came up with
+an empty peer list and nothing explaining why. **A default that lives only in
+`#[serde(default = "…")]` is never applied to a config the daemon already
+wrote, and the daemon writes every field** (gotcha #198). The built-in anchor
+landed 2026-07-21 (`aeedb35c`, v0.3.1); before that the default was `vec![]`.
+`PUT /api/admin/config` serialises the WHOLE `Config`, and **the setup wizard
+calls it on "Start SwarmLLM"** — so every user set up before that date has a
+literal `bootstrap_peers = []` on disk, which outranks the anchor forever. No
+bootstrap, no DHT route, no peers, no log line. Reads as "the update broke my
+networking".
+
+**Empty was NOT always accidental, which is what made the obvious fix wrong**:
+`deploy/anchor/config.toml` uses it ("the anchor IS the bootstrap — don't dial
+itself") and `examples/3node_sharded_setup.sh` uses it to keep the bench cluster
+off the public swarm, where a stray peer silently collapses the split being
+measured. IPFS is the precedent for keeping empty meaningful. So: empty → the
+built-in anchors, with `network.disable_default_bootstrap` to genuinely mean
+none, implied by `node.anchor_mode`, and set in both consumers.
+
+**Measurement trap worth remembering**: the first isolation test "failed" — an
+opt-out node found 5 peers — because four other nodes were running on the same
+host and PEX handed it the anchor ~10ms after the first loopback connection.
+`bootstrap_peers=0` in its own startup log was the tell that the config was
+right. Re-run alone before believing an isolation result.
+
+**Found, NOT fixed:** `/etc/swarmllm/default.toml` is never read — the systemd
+unit runs `swarmllm run` with no `--config` and the daemon loads
+`<data_dir>/config.toml`. The `.deb` ships a config in the conventional place
+that the daemon ignores (which is why package installs were not stranded).
+
+### v0.3.41-alpha (2026-07-28): the dashboard works from another device
 
 From a tester who could open his node's dashboard on his phone over Tailscale
 but whose setup wizard's "Start SwarmLLM" button did nothing. **Every symptom
