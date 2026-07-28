@@ -2,9 +2,21 @@
 
 All notable changes to SwarmLLM are documented here.
 
-## [Unreleased]
+## [0.3.40-alpha] — 2026-07-28
 
 ### Fixed
+
+- **A machine that only helps others no longer has its model shut down
+  mid-answer.** A machine reclaims memory from a model nothing has asked for in
+  a while, but the check for whether anyone was using it only counted requests
+  the machine had started itself — not ones it was answering for other people.
+  A machine doing nothing but contributing spare capacity therefore looked
+  permanently unused, and after long enough its model was shut down while it was
+  still answering, so whoever asked saw the reply stop partway through.
+
+  That is the ordinary case for a machine helping the network, which is the
+  point of joining it. Work done for others now counts as the model being in
+  use, both while it runs and as the "last used" time afterwards.
 
 - **A busy machine no longer stalls other people's requests.** Reading a long
   prompt is most of the wait, and it was done in fixed-size pieces counted in

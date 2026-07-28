@@ -151,7 +151,7 @@ libp2p 0.56, axum 0.8, candle-core/candle-transformers 0.10 (CUDA), redb 4, ed25
 
 ## Testing
 
-- 1385 lib tests passing + 9 ignored (env-var-gated real-model + manual smoke), 80 integration tests in `tests/integration/` + 2 ignored end-to-end (`cargo test --test integration_phase10_11 -- --ignored`), 2 repo-consistency, 26 in `swarmllm-types` (`cargo test -p swarmllm-types` — NOT covered by a bare `cargo test` from the root), 6 in the vendored request-response patch (`cargo test --manifest-path vendor/libp2p-request-response/Cargo.toml --lib` — the crate is workspace-`exclude`d, and its own integration tests need `libp2p-swarm-test` so use `--lib`), clippy clean. Microbench: `cargo run --release --no-default-features --features dev,claude-subscription --example swarm_spec_bench` (R136 — measures all 4 SWARM-SPEC layer primitives + synthetic cascade hit-rate). Local-cluster bench: `examples/3node_setup.sh` (boots 3 daemons) + `examples/3node_inference_bench.sh` (runs 3 workloads × 3 trials and prints tok/s + swarm_spec metrics). Sharded variant: `examples/3node_sharded_setup.sh` (forced distributed pipeline; writes its own per-node config disabling auto-manage and bootstrap so the split survives). **Its inference step is EXPECTED to fail on a single multi-interface host** — that is the zero-redundancy same-host case documented in `docs/FUTURE_WORK.md` § "Connection churn on multi-interface hosts", not a distributed-inference regression (confirmed on released v0.3.28, 2026-07-26). Validate the forward path on two real machines. Both scripts take `SWARM_BENCH_MODEL`. **Pinned reference models for cross-swarm comparison: `docs/REFERENCE_MODELS.md`** (smoke / standard / stress tiers + `examples/fetch_reference_model.sh` to opt in).
+- 1406 lib tests passing + 9 ignored (env-var-gated real-model + manual smoke), 80 integration tests in `tests/integration/` + 2 ignored end-to-end (`cargo test --test integration_phase10_11 -- --ignored`), 2 repo-consistency, 26 in `swarmllm-types` (`cargo test -p swarmllm-types` — NOT covered by a bare `cargo test` from the root), 6 in the vendored request-response patch (`cargo test --manifest-path vendor/libp2p-request-response/Cargo.toml --lib` — the crate is workspace-`exclude`d, and its own integration tests need `libp2p-swarm-test` so use `--lib`), clippy clean. Microbench: `cargo run --release --no-default-features --features dev,claude-subscription --example swarm_spec_bench` (R136 — measures all 4 SWARM-SPEC layer primitives + synthetic cascade hit-rate). Local-cluster bench: `examples/3node_setup.sh` (boots 3 daemons) + `examples/3node_inference_bench.sh` (runs 3 workloads × 3 trials and prints tok/s + swarm_spec metrics). Sharded variant: `examples/3node_sharded_setup.sh` (forced distributed pipeline; writes its own per-node config disabling auto-manage and bootstrap so the split survives). **Its inference step is EXPECTED to fail on a single multi-interface host** — that is the zero-redundancy same-host case documented in `docs/FUTURE_WORK.md` § "Connection churn on multi-interface hosts", not a distributed-inference regression (confirmed on released v0.3.28, 2026-07-26). Validate the forward path on two real machines. Both scripts take `SWARM_BENCH_MODEL`. **Pinned reference models for cross-swarm comparison: `docs/REFERENCE_MODELS.md`** (smoke / standard / stress tiers + `examples/fetch_reference_model.sh` to opt in).
 - Unit tests: in-module `#[cfg(test)]` blocks
 - Integration tests: `tests/integration/` — multi-node simulations with `--test-threads=1`
 - Real-model spawn-and-infer test: set `SWARMLLM_TEST_MODEL_DIR` to a fully-populated model directory (e.g. `~/.local/share/swarmllm/models/tinyllama-1.1b-...`) and run `cargo test --test integration_phase10_11 -- --ignored end_to_end`. No synthetic GGUF fixture is committed; see `docs/ARCHITECTURE.md` § Deferred Items.
@@ -192,11 +192,65 @@ When spawning subagents in this repo, use these model picks (overrides defaults 
 
 ## Status
 
-All 20 build phases complete. All subsystems wired — no stubs. **1385 lib + 80 integration + 2 repo-consistency + 26 swarmllm-types tests passing**; 9 lib + 2 e2e ignored (env-var or manual). Clippy clean default + features dev,claude-subscription + `--features llama`.
+All 20 build phases complete. All subsystems wired — no stubs. **1406 lib + 80 integration + 2 repo-consistency + 26 swarmllm-types tests passing**; 9 lib + 2 e2e ignored (env-var or manual). Clippy clean default + features dev,claude-subscription + `--features llama`.
 
 Per-round history lives in `~/.claude/projects/-home-user-SwarmLLM/memory/round_log_*.md` and the CHANGELOG; `docs/ARCHITECTURE.md` is the canonical architecture. This section keeps only the current release line plus one-line prior-round pointers.
 
-### Latest — v0.3.39-alpha (2026-07-28): updating a node left it unable to answer
+### Latest — v0.3.40-alpha (2026-07-28): a slow machine no longer stalls everyone else
+
+Three changes, all measured on real hardware (RTX 3070 + a CPU-only Proxmox
+container) rather than reasoned about. **Two of the three were found by running
+the thing; one of those was found by the soak, not by review.**
+
+**`prefill_chunk_tokens` bounded decode interruption in TOKENS, not time**
+(gotcha #191). Chunked prefill exists so a long admission cannot stall active
+decode slots, and the guarantee held exactly as written — the trap was the unit.
+128 prompt tokens is ~130ms on a GPU and 45–59s on a modest CPU, so a
+co-scheduled request advanced **one token per tick** for the whole of a long
+prefill. `inference/prefill_pacer.rs` now sizes the quantum from measured wall
+time (`inference.prefill_target_ms`, default 200ms); `prefill_chunk_tokens` is
+demoted to a ceiling. Measured, same prompt and machine:
+
+| | co-scheduled | long prompt |
+|---|---|---|
+| CPU | 470.5s → **48.9s** | 490.9s → 192.6s |
+| GPU | 14.8s → **1.3s** | 89.3s → 63.7s |
+
+**The GPU number is the interesting one — the first version made GPUs WORSE.**
+Cost there is dominated by fixed per-call overhead, not per-token work: 128
+tokens/tick ≈ 130ms but 8 tokens/tick ≈ 790ms. Dividing a near-constant tick
+time by fewer tokens *raises* apparent ms/token, which shrinks the chunk further
+— a feedback loop pointing the wrong way, pinned at the floor. The pacer now
+checks whether a shrink actually made the tick cheaper and disables itself
+permanently if not. **Do not remove that check**; the CPU numbers alone look
+like a clean win.
+
+**Progress + ETA for anything pre-first-token** — `WorkerMsg::Progress` →
+forwarder → `RequestTrace`, surfaced on the dashboard, `/api/admin/performance`
+`active`, SSE comment frames (OpenAI *and* Anthropic), and a DIAG line. Two
+gotchas fell out: API ids are `swarm-<hex>` so `Uuid::parse_str` fails on EVERY
+request — two call sites each falling back to a random uuid could never agree,
+hence `crate::api::request_uuid` as the ONE deterministic derivation; and
+`elapsed_ms` was computed at write time, so a reader between updates saw a
+frozen number (six consecutive polls at 0.0s).
+
+**A node that ONLY serves peers had its worker killed mid-answer** — found by
+the soak. `active_pipelines` is the *coordinator's* map and never contains
+peer-served work, so the idle-VRAM guard believed a pure-server node was idle,
+and v0.3.39's hard-unload ceiling fired while it was answering. New
+`state.serving_models` (`ServingState` + RAII `ServingGuard`) is the real signal
+the "regional demand" proxy was approximating. **Anything asking "is this model
+in use?" MUST consult it as well as `active_pipelines`.**
+
+**Analysed, NOT fixed — the routing ratchet** (`docs/FUTURE_WORK.md`). Slower
+nodes go dark and cannot recover: the load compensator is ~3 500 concurrent
+requests too weak to span a GPU/CPU gap, and `observed_latency_ms_per_layer` is
+only recorded when we route, with no decay — so an unrouted node is never
+re-measured and an unmeasured one is priced at `UNKNOWN_COMPUTE_MS`. Replication
+does not fix it. Cheapest remedy is EMA decay toward the prior; ε-greedy
+exploration is the principled one. Measure first.
+
+### v0.3.39-alpha (2026-07-28): updating a node left it unable to answer
 
 Seven fixes; full detail in `round_log_overnight_0728.md`. **The theme is that
 every one was found by running something, and three of them were only reachable
