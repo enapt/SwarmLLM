@@ -3992,6 +3992,55 @@ question is which reply-text source produced the string, not what to strip from
 it. Related: gotchas #167-169, where four releases chased an output scrubber for
 what turned out to be a prompt-side fault.
 
+## A serving peer sets the price of the request it served (2026-07-29)
+
+Flagged as untraced by the external audit ("whether `actual_cost` feeding
+escrow release can be influenced by a remote peer in a multi-node pipeline").
+Traced: **it can, and the overcharge is not bounded by the escrow.**
+
+### The path
+
+1. `pipeline/remote_generate.rs:~294` — when a remote segment streams back, the
+   coordinator adopts the peer's self-reported usage verbatim:
+   `prompt_tokens = usage.prompt_tokens; completion_tokens = usage.completion_tokens;`
+2. `router/mod.rs:~1056` — those become the price:
+   `actual_cost = RATE_INFERENCE_CONSUME * (prompt_tokens + completion_tokens)`.
+3. `credit/escrow.rs::release_escrow` — reconciles against the reservation. It
+   clamps at zero so a negative can never MINT credits, but it does **not** cap
+   at the amount escrowed: when `actual > amount` the difference is charged as a
+   shortfall. The comment explains why that is deliberate ("long prompt, small
+   max_tokens"), and for an honest counterparty it is right.
+
+Together: the node that did the work states the number that decides what the
+node that asked for it pays, with no ceiling. A patched client returning an
+inflated `usage` drains the requester. Nothing is forged and no signature is
+broken — the protocol simply asks the wrong party.
+
+### Why it is not urgent, and why it should still be fixed
+
+Credits are unenforced today, so the present impact is a wrong number rather
+than a loss. But this sits in the same family as the headline finding above
+(self-attested hosting credits): **the economy trusts a self-report from the
+party with the incentive to inflate it.** Whatever proof-of-service design lands
+has to answer this too, or it will authenticate a claim that was never checked.
+
+### The cheap bound, if a full design is far off
+
+Both quantities are already known to the coordinator, so neither needs to be
+taken on trust:
+
+- `prompt_tokens` — the coordinator BUILT the prompt. It can count them itself,
+  and already estimates them for the first-token budget
+  (`remote_generate::estimate_prompt_tokens`).
+- `completion_tokens` — cannot legitimately exceed the `max_tokens` the
+  coordinator put in the request.
+
+Clamping the reported completion count at the requested `max_tokens`, and
+preferring a locally-computed prompt count, removes the unbounded case in a few
+lines. A peer could still over-report up to `max_tokens` — but the requester
+already agreed to pay for that many, so the exposure is exactly what they chose.
+That is a bound worth having even before the larger question is settled.
+
 ## How to use this file
 
 When starting a new feature, grep this file for keywords related to the area you're touching. If your feature unblocks a deferred item, either pick it up in the same PR (if scope allows) or move the entry to "completed" with the closing commit reference.
