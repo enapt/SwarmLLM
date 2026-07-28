@@ -474,9 +474,17 @@ impl KvCacheManager {
         let mut restored = 0;
 
         for persisted in entries {
+            // A record stamped ahead of our clock is the freshest thing we
+            // have, not the oldest, so a failed `duration_since` means zero
+            // elapsed. `SystemTime` is not monotonic — an NTP step, a resume
+            // from suspend, or a VM clock resync can move the wall clock
+            // backwards between the save at shutdown and the restore at
+            // startup. Falling back to `Duration::MAX` here treated every such
+            // record as infinitely old, so a clock that stepped back by one
+            // millisecond silently discarded every multi-turn session.
             let elapsed = now
                 .duration_since(persisted.last_accessed)
-                .unwrap_or(Duration::from_secs(u64::MAX));
+                .unwrap_or(Duration::ZERO);
 
             let ttl = Duration::from_secs(persisted.ttl_secs);
             if elapsed > ttl {
@@ -927,6 +935,39 @@ mod tests {
             ttl_secs: 3600,
         };
         db.put_json("kv_sessions", "user-sess-2", &fresh).unwrap();
+
+        let mut mgr = KvCacheManager::new(Duration::from_secs(600));
+        assert_eq!(mgr.restore_from_db(&db).unwrap(), 1);
+        assert_eq!(mgr.active_sessions(), 1);
+    }
+
+    #[test]
+    fn restore_keeps_sessions_stamped_in_the_future() {
+        // A record whose timestamp is AHEAD of our clock is the freshest thing
+        // we have, not the oldest. `SystemTime` is not monotonic: an NTP step,
+        // a VM resuming from suspend, or a host/guest clock resync can move the
+        // wall clock backwards between the save (shutdown) and the restore
+        // (startup), leaving every persisted record stamped in the future.
+        //
+        // `duration_since` returns Err in exactly that case, and the fallback
+        // used to be `Duration::MAX` — treating a future record as infinitely
+        // old, so a clock that stepped back by one millisecond silently
+        // discarded every multi-turn session on the node.
+        let db = Database::open_temp().unwrap();
+        let id = uuid::Uuid::new_v4();
+
+        let future = PersistedSession {
+            user_session_id: "user-sess-future".to_string(),
+            internal_id: id,
+            pipeline: make_pipeline(id),
+            cached_tokens: 50,
+            cache_holders: vec![],
+            cached_prompt: "Hello".to_string(),
+            last_accessed: SystemTime::now() + Duration::from_secs(30),
+            ttl_secs: 600,
+        };
+        db.put_json("kv_sessions", "user-sess-future", &future)
+            .unwrap();
 
         let mut mgr = KvCacheManager::new(Duration::from_secs(600));
         assert_eq!(mgr.restore_from_db(&db).unwrap(), 1);
