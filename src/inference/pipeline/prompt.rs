@@ -165,11 +165,39 @@ impl PipelineExecutor {
             // Rough estimate: chars / 4 (average BPE token length), minimum 1
             let ptc = (prompt.chars().count() / 4).max(1);
 
-            let decoder = CachedDecoder {
-                vocab,
-                byte_decoder: HashMap::new(),
-                is_sentencepiece: false,
-                has_tokenizer: false,
+            // Use this node's standalone tokenizer when one can be loaded.
+            //
+            // These flags used to be hardcoded false, on the reasoning that
+            // there is "no tokenizer in-process" — true when written, but
+            // `standalone_tokenizer` now lazily builds one from
+            // `gguf_header.bin` for exactly this purpose. Leaving them false
+            // meant `decode_tokens` could ONLY take its fallback, which
+            // concatenates raw vocabulary entries and runs them through
+            // `decode_bpe_text` — a GPT-2 byte decoder. U+2581 is outside every
+            // range that maps, so for a SentencePiece model the word-boundary
+            // marker survived into the reply: Phi-3.5 answered
+            // `A▁distributed▁system▁is…` locally while the same node returned
+            // clean text for the same prompt over the network, because the
+            // network path decodes on the serving side with a real tokenizer
+            // (observed 2026-07-29). Byte-fallback tokens leaked the same way,
+            // which is where the stray `<0x0A>` came from.
+            let tokenizer = self.shared_state.standalone_tokenizer(model_id);
+            let decoder = match tokenizer {
+                Some(tok) => CachedDecoder {
+                    vocab,
+                    byte_decoder: tok.byte_decoder(),
+                    is_sentencepiece: tok.is_sentencepiece(),
+                    has_tokenizer: true,
+                },
+                // Still no tokenizer: the fallback below is the best we can do,
+                // but it must not pretend the vocabulary is GPT-2-encoded when
+                // it is not — see `decode_tokens`.
+                None => CachedDecoder {
+                    vocab,
+                    byte_decoder: HashMap::new(),
+                    is_sentencepiece: false,
+                    has_tokenizer: false,
+                },
             };
 
             (ptc, eos, decoder)
