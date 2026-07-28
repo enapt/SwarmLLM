@@ -3948,6 +3948,50 @@ that originates and terminates inside it proves nothing.
   multi-node pipeline. Not traced by the audit; worth checking before the
   economy is enforced.
 
+## A byte-fallback token leaked once, on a cold-start request (2026-07-28)
+
+Observed while smoke-testing v0.3.44 on two real machines. The FIRST request
+after a fresh daemon start returned `Reply<0x0A>` — the literal six characters,
+where `<0x0A>` is a SentencePiece byte-fallback token that should have decoded
+to a newline. **Not reproduced**: four subsequent runs of the identical prompt
+gave ordinary output (two empty, one prompt echo, one continuation), and a reply
+deliberately forced to contain line breaks came back with real `\n\n` and no
+`<0x` anywhere.
+
+### What was ruled out
+
+- **The decode is correct.** `inference/tokenizer.rs::decode_token_impl` maps
+  `<0xNN>` to the raw byte.
+- **Its gate is satisfied.** That branch is conditional on `is_sentencepiece`,
+  which is `tokenizer_model == "llama"`; TinyLlama's `gguf_header.bin` was read
+  directly and declares exactly that. This matters because the GPT-2 branch maps
+  each character through `byte_decoder`, which would emit `<`, `0`, `x`, `0`,
+  `A`, `>` verbatim — i.e. precisely the observed string. It is not that path.
+
+### The hypothesis worth testing, not acted on
+
+A leak that appears only on the first request after load fits a shape this
+codebase has hit repeatedly: **the cold-start request takes the distributed
+path while later ones take the split path**, so a defect in one reply-text
+source hides behind five clean runs (see the "one invariant, N paths" rule in
+`.claude/rules/architecture.md`). The three sources were unified behind
+`inference::finalize_reply_text` specifically to stop this, so a regression
+there would be worth knowing about.
+
+But shape-fitting is not evidence, and the observation is a single sample from a
+1.1B model that was visibly sampling at random across runs. Guessing at a fix
+for a path that has already been through four rounds of control-token
+corrections would more likely add a scrubber than find the cause.
+
+### How to actually settle it
+
+Restart the daemon and issue the same first request repeatedly ACROSS restarts —
+the variable is cold start, not prompt. If it recurs, capture the raw token ids
+before detokenisation and compare the cold path against the warm one; the
+question is which reply-text source produced the string, not what to strip from
+it. Related: gotchas #167-169, where four releases chased an output scrubber for
+what turned out to be a prompt-side fault.
+
 ## How to use this file
 
 When starting a new feature, grep this file for keywords related to the area you're touching. If your feature unblocks a deferred item, either pick it up in the same PR (if scope allows) or move the entry to "completed" with the closing commit reference.
