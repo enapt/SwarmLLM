@@ -4089,6 +4089,53 @@ step 2 treats "cannot read the database" and "no key stored" identically.
 3. The soak harness now resolves the key through the dashboard bootstrap
    instead of the file, which is why this was caught at all.
 
+## Gossip has no peer scoring (2026-07-29)
+
+Last of the three items the external audit listed as unexamined. Reviewed; the
+gossip path is in good shape apart from one absence.
+
+### What is already there
+
+- `MessageAuthenticity::Signed` + `ValidationMode::Strict` — a forged sender is
+  not possible; every message carries the publisher's libp2p signature.
+- `max_transmit_size(4 MiB)`, matching the JSON codec cap and far tighter than
+  the 256 MiB request/response ceiling.
+- Mesh sizing that scales with known peers (`mesh_n` and friends).
+- A custom `message_id_fn` keyed on data AND source, so two peers announcing the
+  same shard are not collapsed into one message.
+- App-level one-sided freshness on receipt (5 min old / 30 s future) via the
+  shared `timestamp_fresh_one_sided`, plus per-handler checks for the variants
+  not covered by the pre-filter.
+- Downstream state is bounded: `foreign_wishlist` and `foreign_pool_catalog` are
+  capped with oldest-first eviction, so a flood cannot grow memory without limit.
+
+### The gap
+
+`gossipsub::Behaviour::new` is built without `with_peer_score(...)`. Scoring is
+opt-in in libp2p, and without it there is no mechanism that penalises, prunes or
+graylists a peer for behaviour that is technically valid: publishing fresh,
+correctly signed messages as fast as it can. Each one costs every node in the
+mesh a decode, a freshness check and a handler call, and the mesh propagates it
+faithfully. Nothing feeds gossip misbehaviour into `TrustManager` either, so a
+flooder's reputation is untouched by flooding.
+
+### Why this is not simply "turn scoring on"
+
+Peer scoring is a large parameter surface — topic weights, decay intervals,
+mesh-delivery windows, and the graylist/publish/gossip thresholds. Mis-tuned, it
+penalises HONEST peers: a node on a slow link that delivers late looks the same
+as one that is misbehaving, and the result is your own mesh partitioning
+itself. That failure is harder to diagnose than the flooding it prevents, and
+would land on exactly the home and CGNAT-bound nodes this project is built for.
+
+If it is taken on, it wants: parameters derived from measured delivery times on
+a real multi-node swarm rather than copied from a reference config, the
+thresholds set permissively at first, and a metric exposing per-peer score so a
+wrongly-penalised peer is visible before someone reports "my node stopped
+receiving announcements". Wiring a sustained-low-score signal into
+`TrustManager` would close the loop, but only after the scores themselves are
+trusted.
+
 ## How to use this file
 
 When starting a new feature, grep this file for keywords related to the area you're touching. If your feature unblocks a deferred item, either pick it up in the same PR (if scope allows) or move the entry to "completed" with the closing commit reference.
