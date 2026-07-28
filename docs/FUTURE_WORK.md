@@ -3948,17 +3948,30 @@ that originates and terminates inside it proves nothing.
   multi-node pipeline. Not traced by the audit; worth checking before the
   economy is enforced.
 
-## A byte-fallback token leaked once, on a cold-start request (2026-07-28)
+## RESOLVED — the byte-fallback leak was a missing tokenizer (2026-07-28, closed 2026-07-29)
 
-Observed while smoke-testing v0.3.44 on two real machines. The FIRST request
-after a fresh daemon start returned `Reply<0x0A>` — the literal six characters,
-where `<0x0A>` is a SentencePiece byte-fallback token that should have decoded
-to a newline. **Not reproduced**: four subsequent runs of the identical prompt
-gave ordinary output (two empty, one prompt echo, one continuation), and a reply
-deliberately forced to contain line breaks came back with real `\n\n` and no
-`<0x` anywhere.
+The entry that used to sit here recorded a single unreproduced sighting of
+`Reply<0x0A>` and hypothesised a cold-start path difference. The soak found the
+real cause, and the same cause produced a second, much more visible symptom.
 
-### What was ruled out
+`model_worker::decode_token` fell back to returning the RAW vocabulary entry
+when `model.tokenizer()` was `None`. A raw entry is the vocabulary's own
+notation, not text: every space is `▁` (U+2581) and a byte-fallback token is
+literally the six characters `<0x0A>`. So both symptoms were the same bug.
+
+It was caught because Phi-3.5 answered `A▁distributed▁system▁is…` through the
+local API while **the same node, same model, same prompt** returned clean text
+over the network — the network path had a tokenizer and the local one did not.
+That asymmetry is what made it findable; a single mangled reply looks like a
+model quirk.
+
+Fixed by never emitting a raw vocabulary entry: the two notations that are
+artefacts in every tokenizer family are undone, and a missing tokenizer now
+warns once instead of silently degrading every reply. The underlying question —
+why the tokenizer was absent for a model whose `gguf_header.bin` is present —
+is worth a look, but the output is no longer corrupted while it goes unanswered.
+
+## What was ruled out
 
 - **The decode is correct.** `inference/tokenizer.rs::decode_token_impl` maps
   `<0xNN>` to the raw byte.

@@ -3188,8 +3188,84 @@ fn decode_token(model: &SplitModel, token_id: u32) -> String {
                 let bytes = tokenizer.decode_token(token_str);
                 return String::from_utf8_lossy(&bytes).into_owned();
             }
-            return token_str.clone();
+            // No tokenizer: the raw vocab entry is NOT user-facing text.
+            //
+            // Returning it verbatim — as this used to — puts the vocabulary's
+            // own notation into the reply: every space becomes `▁` (U+2581) and
+            // a byte-fallback token appears literally as `<0x0A>`. Both were
+            // seen in served replies (2026-07-28/29): Phi-3.5 answered
+            // `A▁distributed▁system▁is…` through the local API while the very
+            // same node returned clean text for the same prompt over the
+            // network, because that path had a tokenizer and this one did not.
+            //
+            // We cannot know the vocabulary's family without the tokenizer, but
+            // these two conventions are never legitimate output in ANY family,
+            // so undoing them is strictly better than emitting them. Warn once
+            // so a missing tokenizer is visible rather than silently degrading
+            // every reply this node produces.
+            warn_missing_tokenizer_once();
+            return decode_raw_vocab_entry(token_str);
         }
     }
     String::new()
+}
+
+/// Best-effort cleanup of a raw vocabulary entry when no tokenizer is loaded.
+///
+/// Handles the two notations that are always artefacts rather than content:
+/// SentencePiece's `▁` word-boundary marker, and `<0xNN>` byte fallback.
+fn decode_raw_vocab_entry(token_str: &str) -> String {
+    // Byte fallback: `<0x0A>` is one byte, not six characters.
+    if token_str.len() == 6 && token_str.starts_with("<0x") && token_str.ends_with('>') {
+        if let Ok(byte) = u8::from_str_radix(&token_str[3..5], 16) {
+            return String::from_utf8_lossy(&[byte]).into_owned();
+        }
+    }
+    token_str.replace('\u{2581}', " ")
+}
+
+/// One warning per process — this fires per TOKEN, so logging every time would
+/// bury the log in exactly the situation where it is needed.
+fn warn_missing_tokenizer_once() {
+    static WARNED: std::sync::Once = std::sync::Once::new();
+    WARNED.call_once(|| {
+        tracing::warn!(
+            "No tokenizer available for this model — replies are being assembled \
+             from raw vocabulary entries. Text will be approximate; check that \
+             gguf_header.bin is present for this model."
+        );
+    });
+}
+
+#[cfg(test)]
+mod decode_raw_vocab_tests {
+    use super::decode_raw_vocab_entry;
+
+    /// The observed defect: SentencePiece word boundaries reaching the user.
+    #[test]
+    fn word_boundary_markers_become_spaces() {
+        assert_eq!(
+            decode_raw_vocab_entry("\u{2581}distributed"),
+            " distributed"
+        );
+        assert_eq!(decode_raw_vocab_entry("\u{2581}a\u{2581}b"), " a b");
+    }
+
+    /// The other half of the same defect — `<0x0A>` is a newline, not six
+    /// characters of literal text.
+    #[test]
+    fn byte_fallback_tokens_become_their_byte() {
+        assert_eq!(decode_raw_vocab_entry("<0x0A>"), "\n");
+        assert_eq!(decode_raw_vocab_entry("<0x20>"), " ");
+    }
+
+    /// Ordinary text is passed through untouched.
+    #[test]
+    fn ordinary_tokens_are_unchanged() {
+        assert_eq!(decode_raw_vocab_entry("hello"), "hello");
+        assert_eq!(decode_raw_vocab_entry("."), ".");
+        // Not a byte-fallback token despite the shape — left alone.
+        assert_eq!(decode_raw_vocab_entry("<0xZZ>"), "<0xZZ>");
+        assert_eq!(decode_raw_vocab_entry("<s>"), "<s>");
+    }
 }
