@@ -272,7 +272,10 @@ jobs:
         if: matrix.vulkan
         uses: jakoch/install-vulkan-sdk-action@85a045da72257cc52d4b11e0d4125ab8a7b768e4 # v1
         with:
-          vulkan_version: latest
+          # Pinned, not "latest": an unpinned toolchain changes underneath
+          # releases with no commit of ours, which makes a green build no
+          # evidence that the next one passes. Bump deliberately.
+          vulkan_version: 1.4.357.0
           install_runtime: true
           cache: true
 
@@ -292,11 +295,29 @@ jobs:
       # LIB env var. candle-kernels emits `cargo:rustc-link-lib=cudart` in
       # its build.rs — without this step the link fails with
       # `LINK : fatal error LNK1181: cannot open input file 'cudart.lib'`.
-      - name: Extend LIB with CUDA lib dir (Windows GPU)
+      # The same is true of the Vulkan SDK, and for the same reason: the
+      # install action sets VULKAN_SDK and puts its `bin` on PATH, but never
+      # extends LIB — and `ilammy/msvc-dev-cmd` above REPLACES LIB wholesale
+      # after it runs, so anything the Vulkan action might have contributed is
+      # gone by link time. `llama-cpp-2/vulkan` emits a link directive for
+      # `vulkan-1`, so the build fails with
+      # `LNK1181: cannot open input file 'vulkan-1.lib'`.
+      #
+      # This escaped notice until v0.3.45 because the Vulkan SDK is cached
+      # between runs and a cache HIT happened to leave a usable environment;
+      # the miss on that release exposed it. Setting LIB explicitly makes the
+      # result the same either way rather than depending on cache state.
+      #
+      # Both paths go in ONE assignment: each write to GITHUB_ENV that
+      # references $env:LIB reads the value from BEFORE this step, so two
+      # separate appends would have the second discard the first.
+      - name: Extend LIB with CUDA + Vulkan lib dirs (Windows GPU)
         if: matrix.cuda_windows
         shell: pwsh
         run: |
-          "LIB=$env:CUDA_PATH\lib\x64;$env:LIB" | Out-File -Append -FilePath $env:GITHUB_ENV -Encoding utf8
+          $libs = "$env:CUDA_PATH\lib\x64"
+          if ($env:VULKAN_SDK) { $libs = "$libs;$env:VULKAN_SDK\Lib" }
+          "LIB=$libs;$env:LIB" | Out-File -Append -FilePath $env:GITHUB_ENV -Encoding utf8
 
       # Windows GPU: switch the llama-cpp-sys-2 cmake-rs invocation
       # from the default Visual Studio generator to Ninja.
