@@ -116,6 +116,14 @@ pub struct InferenceConfig {
     /// on already-active decode slots. Smaller = lower decode interruption
     /// at the cost of more prefill ticks; larger = the opposite. 0 / 1
     /// degenerate to one-token-per-tick prefill.
+    ///
+    /// **The bound is in tokens of compute, not wall time**, so the right
+    /// value depends on the hardware: 128 prompt tokens is milliseconds on a
+    /// GPU and 45–59s on a modest CPU node, where it means a co-scheduled
+    /// decode slot advances one token per tick for the whole of a long
+    /// prefill. See `docs/FUTURE_WORK.md` § "`prefill_chunk_tokens` bounds
+    /// decode interruption in tokens, not time" for the measurement and the
+    /// self-calibrating fix.
     #[serde(default = "default_prefill_chunk_tokens")]
     pub prefill_chunk_tokens: u32,
     /// Item 7 Phase 4: fuse concurrent same-shape Prefilling slots into one

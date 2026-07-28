@@ -1463,6 +1463,51 @@ throughput, and on this path it does not. Worth either documenting the
 homogeneity condition on those settings or gating the claim until ragged
 batching lands.
 
+### `prefill_chunk_tokens` bounds decode interruption in tokens, not time (observed 2026-07-28)
+
+**Status: observed and root-caused, not fixed.** Found reading back the overnight
+soak log, not from a report — and it is the same defect class as gotcha #190
+(a constant that bounds the wrong quantity), one layer down.
+
+Chunked prefill exists precisely so a long admission cannot stall active decode
+slots; `slot_table.rs` states the guarantee as "a long admission can no longer
+block decode for more than `prefill_chunk_tokens` of compute", and that holds
+exactly as written. The problem is the unit. 128 prompt tokens of prefill is a
+few milliseconds on a GPU and **45–59 seconds** on the modest CPU node measured
+here — so the *per-tick* bound is honoured while a co-scheduled decode advances
+one token per tick, for as long as the big prefill lasts.
+
+Measured, tinyllama/llama-3.2-3b on the CPU node, from `node.log` 17:48–17:58Z:
+
+| | |
+|---|---|
+| long request (`168c97fb`), 3 968 prompt tokens | 31 chunks, ~45→59s each (cost grows with `index_pos`) |
+| co-scheduled small request (`1b08b5e5`), 55 prompt tokens | prefilled in one chunk, then **8 tokens in 5.5 min** before the client gave up |
+
+The small request was never stuck — it was advancing correctly at exactly the
+rate the design specifies. Two soak rows recorded it as ~380s with an empty
+body; both are this, not a fault in the request path.
+
+**Why it matters now rather than earlier:** the 300s `TimeoutLayer` removed on
+2026-07-27 used to kill any prefill this long before it could starve anything.
+Prompt-scaled budgets now legitimately allow ~600s prefills, so this is newly
+reachable in normal operation. Fixing one ceiling exposed the next one down —
+worth expecting more of that.
+
+**Fix direction** (not attempted): size the quantum by *time* rather than token
+count — measure chunk wall-time and adapt `chunk_size_tokens` toward a target
+per-tick budget (~100–200ms), which self-calibrates across GPU and CPU nodes
+instead of asking an operator to pick a number whose meaning depends on their
+hardware. The value is already plumbed end-to-end and hot-settable
+(`ProcessPool::set_prefill_chunk_tokens`), so this is a policy change at one
+site, not a feature. Until then the doc comment on
+`InferenceConfig::prefill_chunk_tokens` should say the bound is in tokens of
+compute, since on a slow node that is seconds of decode stall per tick.
+
+Note this is *decode starvation under a concurrent long prefill*, a different
+problem from the batch-homogeneity loss above — ragged batching would not fix
+it, and it does not need ragged batching to be fixed.
+
 ### Ragged batching — spec, and the measurement that says don't build it yet
 
 **Research run first, because it decides whether the feature is worth building.**
