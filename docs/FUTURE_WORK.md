@@ -3948,53 +3948,6 @@ that originates and terminates inside it proves nothing.
   multi-node pipeline. Not traced by the audit; worth checking before the
   economy is enforced.
 
-## Local replies contain the tokenizer's word-boundary marker (2026-07-29)
-
-**Reproducible on demand**, which is the useful part — this began as a single
-unexplained `<0x0A>` and is now a reliable test.
-
-Ask this node directly and Phi-3.5 answers
-`A▁distributed▁system▁is▁a▁network…` — U+2581, SentencePiece's word-boundary
-marker, in place of every space. Ask a DIFFERENT node, which has no shards for
-the model and therefore routes the work back to this same node, and the answer
-comes back clean: `A distributed system is a network…`. Same node, same model,
-same prompt, same weights. Only the path differs.
-
-### What has been ruled out
-
-- **Not the decoder logic.** `decode_token_impl` replaces `▁` with a space
-  whenever `is_sentencepiece`, and Phi's GGUF declares
-  `tokenizer.ggml.model = "llama"`, so the flag is true. The SentencePiece
-  variant hard-codes it true regardless.
-- **Not a missing tokenizer.** This was the first hypothesis and it is WRONG.
-  A fix was shipped for the raw-vocabulary fallback in
-  `model_worker::decode_token` and the corruption survived it unchanged. That
-  fallback is worth having — a raw vocabulary entry is never user-facing text —
-  but it is not what fires here. The load path logs
-  "Built tokenizer from GGUF metadata" for these models.
-- **Not `finalize_reply_text`.** It scrubs control tokens, applies stop strings
-  and trims; it never touches `▁`, so the remote path is not being cleaned there.
-
-### Where to look next
-
-The remote path is the one that behaves. Establish FIRST whether the coordinator
-receives text or token ids from the serving node: if it receives ids and decodes
-them itself, then the two paths use different tokenizer instances (a peer with
-no shards can only have built one from `gguf_header.bin`, while this node builds
-one from the loaded split model) and the question becomes why those two disagree
-for the same GGUF. If it receives text, the cleaning happens somewhere on the
-send path and the local path is simply missing that step.
-
-Do not fix this by stripping `▁` from output. That would paper over whichever
-of the two decoders is wrong, and this project has already spent four releases
-treating a prompt-side fault as an output-scrubbing problem (gotchas #167-169).
-
-### Why it matters
-
-Every local reply from an affected model is mangled — this is not cosmetic, it
-is most of the words in the answer. It went unnoticed because the models used
-for smoke-testing either are not affected or were exercised over the network.
-
 ## What was ruled out
 
 - **The decode is correct.** `inference/tokenizer.rs::decode_token_impl` maps
