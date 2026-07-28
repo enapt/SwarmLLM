@@ -1010,6 +1010,82 @@ attention if either cap grows materially.
 
 ---
 
+## Slow nodes go dark and never come back — the routing ratchet (analysed 2026-07-28)
+
+**Status: analysed, not fixed.** Raised as a design question ("GPU nodes will be
+relied on more, but slower nodes still need to contribute — we don't want dead
+nodes and a few nodes getting hammered; does enough replication fix it?"). The
+short answer is that replication does NOT fix it, and there is a specific
+feedback loop that makes it worse than a simple preference for fast nodes.
+
+### The load term cannot rebalance across a hardware gap
+
+`scheduler/parallax.rs::vertex_cost` totals `network_ms + compute_ms + load_ms`:
+
+```
+compute_ms = per_layer_ms × layers × ASSUMED_FORWARD_PASSES   (64)
+load_ms    = concurrent_requests × LOAD_COMPENSATOR_MS        (25)
+```
+
+For a 28-layer model, a GPU measured at ~1 ms/layer costs ~1 800; a CPU at
+~50 ms/layer costs ~89 600. Closing that on the load term alone needs
+`(89600-1800)/25 ≈ 3 500` concurrent requests on the GPU. **The load compensator
+is ~3 orders of magnitude too weak to divert traffic across a GPU/CPU gap** — it
+only breaks ties between similarly-fast candidates. That is not a bug in the
+constant; no fixed per-request penalty can span that ratio.
+
+### What actually self-balances, and why it is not enough
+
+`observed_latency_ms_per_layer` folds in the peer's whole segment wall-clock
+*including its queueing*, and enters the cost at full weight (×layers×64). So a
+hammered GPU does get more expensive as its queue deepens, and the hotspot
+converges rather than running away. This is the real mechanism and it is sound.
+
+**The ratchet is that the measurement is only taken when we route.**
+`record_peer_segment_latency` is called from exactly one place —
+`pipeline/distributed.rs`, after a successful hop — and the EMA (α=0.3) has **no
+time decay and no staleness expiry**. Therefore:
+
+- a node we stop routing to is never re-measured and its estimate is frozen
+  forever, however wrong it has become;
+- a node never measured falls back to `UNKNOWN_COMPUTE_MS = 25` ms/layer →
+  25×28×64 = **44 800**, i.e. priced like a very slow node.
+
+`UNKNOWN_COMPUTE_MS` was deliberately made non-zero because zero made an
+unmeasured candidate outrank every measured one (cold-start routing was decided
+by vertex iteration order). That fix was right. Its side effect is that
+**unmeasured looks expensive → never selected → stays unmeasured**: a node that
+loses traffic has no path back, and a newly-joined node starts in the same hole.
+
+Replication does not address this. More replicas spread load among the *fast*
+holders; the rule is still argmin(latency), and a slow holder loses every
+comparison regardless of how many replicas exist.
+
+### Why it matters beyond utilisation
+
+Nodes earn credits by serving. A node that is never routed to never earns, so
+the ratchet is also an economic dead end for exactly the contributor the network
+wants to attract — spare capacity on modest hardware. This is the supply/demand
+asymmetry Petals' own paper names, arriving by a different route.
+
+### Fix sketch (not attempted)
+
+1. **Decay the EMA toward "unknown" with age.** A frozen estimate should lose
+   confidence; a peer unmeasured for hours should drift back toward the neutral
+   prior rather than keep a stale number forever. Cheap, local, no protocol
+   change.
+2. **Explore.** ε-greedy or UCB over candidates: occasionally route a segment to
+   a stale/unmeasured holder specifically to refresh its estimate. The cost is
+   bounded (one slower request per ε) and it is the standard remedy for exactly
+   this bandit problem. Worth measuring ε against tail latency before choosing.
+3. **Prefer slower nodes where latency is not the binding constraint** —
+   background/batch work, prefetch, and shard seeding do not need the fastest
+   holder, and routing them to slow nodes uses capacity that is otherwise idle
+   without touching interactive latency.
+
+Note (1) alone may be sufficient and is much the simplest; (2) is the principled
+version. Measure before building either.
+
 ## Inference performance — research backlog (R135 brief)
 
 > **STATUS as of 2026-05-20 (post-R139):**
