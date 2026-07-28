@@ -37,9 +37,10 @@ const SOCKET_PATHS: &[&str] = &[
 /// path: being slow to answer would be worse than falling back.
 const LOCALAPI_TIMEOUT: Duration = Duration::from_millis(400);
 
-/// Cap on the response we will read. A `whois` reply is a few KB of JSON; this
-/// only stops a compromised or malfunctioning local daemon from streaming
-/// unboundedly into our memory.
+/// Cap on the response we will read. A `whois` reply is a few KB of JSON;
+/// this only stops a compromised or malfunctioning local daemon from
+/// streaming unboundedly into our memory.
+#[cfg(unix)]
 const MAX_RESPONSE_BYTES: usize = 256 * 1024;
 
 /// What `tailscaled` said about a source address.
@@ -72,6 +73,23 @@ pub async fn whois(ip: IpAddr) -> WhoIs {
     WhoIs::Unavailable
 }
 
+/// Windows has no Unix sockets, and `tailscaled` there exposes the LocalAPI over
+/// a loopback TCP port guarded by a token file instead. That is a different
+/// mechanism, and implementing it without a Windows machine to test against
+/// would be guessing at a security boundary — the exact mistake that produced
+/// the finding this module exists to fix. So Windows reports
+/// [`WhoIs::Unavailable`] and falls back to the narrowed address check and the
+/// paste-the-key path, which is correct-but-less-convenient rather than wrong.
+/// Noted in `docs/FUTURE_WORK.md`.
+#[cfg(not(unix))]
+async fn query_socket(_path: &str, _ip: IpAddr) -> std::io::Result<WhoIs> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "LocalAPI over a Unix socket is not available on this platform",
+    ))
+}
+
+#[cfg(unix)]
 async fn query_socket(path: &str, ip: IpAddr) -> std::io::Result<WhoIs> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -117,6 +135,7 @@ async fn query_socket(path: &str, ip: IpAddr) -> std::io::Result<WhoIs> {
 /// an unknown one. A 200 whose body carries no node is treated as NOT a member:
 /// this decides whether to hand out an API key, so anything we cannot
 /// affirmatively read as membership must not count as membership.
+#[cfg(unix)]
 pub(crate) fn classify_response(raw: &[u8]) -> WhoIs {
     let text = String::from_utf8_lossy(raw);
     let mut lines = text.split("\r\n");
@@ -161,8 +180,8 @@ pub(crate) fn classify_response(raw: &[u8]) -> WhoIs {
     }
 }
 
-#[cfg(test)]
-mod tests {
+#[cfg(all(test, unix))]
+mod parse_tests {
     use super::*;
 
     fn response(status: &str, body: &str) -> Vec<u8> {
@@ -223,13 +242,20 @@ mod tests {
             WhoIs::NotAMember
         );
     }
+}
 
-    /// Probing a path nothing is listening on must fail closed, promptly.
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Probing a daemon that is not there must fail closed, on every platform.
+    /// On Windows there is no Unix socket at all, so this also pins that the
+    /// unsupported path reports Unavailable rather than claiming membership.
     #[tokio::test]
-    async fn a_missing_daemon_is_unavailable() {
+    async fn a_missing_daemon_is_never_a_member() {
         let verdict = whois("100.101.102.103".parse().unwrap()).await;
-        // CI has no tailscaled; a developer machine might. Either is fine —
-        // what must never happen is a claim of membership from a dead socket.
+        // A developer machine may genuinely run Tailscale; CI does not. What
+        // must never happen is Member from a socket that answered nothing.
         assert!(matches!(verdict, WhoIs::Unavailable | WhoIs::NotAMember));
     }
 }
