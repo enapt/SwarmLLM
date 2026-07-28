@@ -82,7 +82,7 @@ pub(super) async fn handle_layer_forward(
         (ls as usize, le as usize, total)
     };
 
-    if layer_start >= layer_end || layer_end > total_layers {
+    if !layer_range_is_valid(layer_start, layer_end, total_layers) {
         send_error_result(
             &network_tx,
             &sender_peer_bytes,
@@ -274,4 +274,66 @@ pub(super) async fn send_error_result(
             result,
         })
         .await;
+}
+
+/// Is a peer-supplied layer range safe to act on for a model of `total_layers`?
+///
+/// `layer_range` arrives over the network and is attacker-controlled: it decides
+/// which slice of a model a forward is executed against, so an unchecked value
+/// is an out-of-bounds read waiting to happen. An external security audit
+/// flagged this path as unverified (2026-07-28); the check was present but
+/// inline and untested, which is indistinguishable from absent to anyone
+/// reading, and one refactor away from actually being absent.
+///
+/// Both inbound transports — the request/response decrypt path and the
+/// persistent pipeline stream — funnel through `handle_layer_forward`, so this
+/// is the single place the range is admitted. Keep it that way: a second entry
+/// point that skips this is the "one invariant, N paths" defect this codebase
+/// keeps rediscovering.
+///
+/// Rejects an empty or inverted range as well as one running past the end —
+/// `start >= end` covers both, and an empty range would otherwise reach the
+/// executor as a no-op segment that still allocates and still answers.
+pub(crate) fn layer_range_is_valid(start: usize, end: usize, total: usize) -> bool {
+    start < end && end <= total
+}
+
+#[cfg(test)]
+mod layer_range_tests {
+    use super::layer_range_is_valid;
+
+    #[test]
+    fn a_range_inside_the_model_is_accepted() {
+        assert!(layer_range_is_valid(0, 16, 32));
+        assert!(layer_range_is_valid(16, 32, 32)); // touching the end exactly
+        assert!(layer_range_is_valid(0, 1, 1));
+    }
+
+    #[test]
+    fn a_range_past_the_end_is_refused() {
+        assert!(!layer_range_is_valid(0, 33, 32));
+        assert!(!layer_range_is_valid(30, 64, 32));
+        // u32::MAX arriving off the wire, widened to usize.
+        assert!(!layer_range_is_valid(0, u32::MAX as usize, 32));
+        assert!(!layer_range_is_valid(
+            u32::MAX as usize,
+            u32::MAX as usize,
+            32
+        ));
+    }
+
+    #[test]
+    fn an_empty_or_inverted_range_is_refused() {
+        assert!(!layer_range_is_valid(16, 16, 32)); // empty
+        assert!(!layer_range_is_valid(20, 4, 32)); // inverted
+        assert!(!layer_range_is_valid(0, 0, 32));
+    }
+
+    /// A manifest claiming no layers must admit nothing rather than divide by
+    /// or index into an empty model.
+    #[test]
+    fn a_model_with_no_layers_admits_nothing() {
+        assert!(!layer_range_is_valid(0, 1, 0));
+        assert!(!layer_range_is_valid(0, 0, 0));
+    }
 }

@@ -151,7 +151,7 @@ libp2p 0.56, axum 0.8, candle-core/candle-transformers 0.10 (CUDA), redb 4, ed25
 
 ## Testing
 
-- 1434 lib tests passing + 9 ignored (env-var-gated real-model + manual smoke), 80 integration tests in `tests/integration/` + 2 ignored end-to-end (`cargo test --test integration_phase10_11 -- --ignored`), 2 repo-consistency, 26 in `swarmllm-types` (`cargo test -p swarmllm-types` — NOT covered by a bare `cargo test` from the root), 6 in the vendored request-response patch (`cargo test --manifest-path vendor/libp2p-request-response/Cargo.toml --lib` — the crate is workspace-`exclude`d, and its own integration tests need `libp2p-swarm-test` so use `--lib`), clippy clean. Microbench: `cargo run --release --no-default-features --features dev,claude-subscription --example swarm_spec_bench` (R136 — measures all 4 SWARM-SPEC layer primitives + synthetic cascade hit-rate). Local-cluster bench: `examples/3node_setup.sh` (boots 3 daemons) + `examples/3node_inference_bench.sh` (runs 3 workloads × 3 trials and prints tok/s + swarm_spec metrics). Sharded variant: `examples/3node_sharded_setup.sh` (forced distributed pipeline; writes its own per-node config disabling auto-manage and bootstrap so the split survives). **Its inference step is EXPECTED to fail on a single multi-interface host** — that is the zero-redundancy same-host case documented in `docs/FUTURE_WORK.md` § "Connection churn on multi-interface hosts", not a distributed-inference regression (confirmed on released v0.3.28, 2026-07-26). Validate the forward path on two real machines. Both scripts take `SWARM_BENCH_MODEL`. **Pinned reference models for cross-swarm comparison: `docs/REFERENCE_MODELS.md`** (smoke / standard / stress tiers + `examples/fetch_reference_model.sh` to opt in).
+- 1438 lib tests passing + 9 ignored (env-var-gated real-model + manual smoke), 80 integration tests in `tests/integration/` + 2 ignored end-to-end (`cargo test --test integration_phase10_11 -- --ignored`), 2 repo-consistency, 26 in `swarmllm-types` (`cargo test -p swarmllm-types` — NOT covered by a bare `cargo test` from the root), 6 in the vendored request-response patch (`cargo test --manifest-path vendor/libp2p-request-response/Cargo.toml --lib` — the crate is workspace-`exclude`d, and its own integration tests need `libp2p-swarm-test` so use `--lib`), clippy clean. Microbench: `cargo run --release --no-default-features --features dev,claude-subscription --example swarm_spec_bench` (R136 — measures all 4 SWARM-SPEC layer primitives + synthetic cascade hit-rate). Local-cluster bench: `examples/3node_setup.sh` (boots 3 daemons) + `examples/3node_inference_bench.sh` (runs 3 workloads × 3 trials and prints tok/s + swarm_spec metrics). Sharded variant: `examples/3node_sharded_setup.sh` (forced distributed pipeline; writes its own per-node config disabling auto-manage and bootstrap so the split survives). **Its inference step is EXPECTED to fail on a single multi-interface host** — that is the zero-redundancy same-host case documented in `docs/FUTURE_WORK.md` § "Connection churn on multi-interface hosts", not a distributed-inference regression (confirmed on released v0.3.28, 2026-07-26). Validate the forward path on two real machines. Both scripts take `SWARM_BENCH_MODEL`. **Pinned reference models for cross-swarm comparison: `docs/REFERENCE_MODELS.md`** (smoke / standard / stress tiers + `examples/fetch_reference_model.sh` to opt in).
 - Unit tests: in-module `#[cfg(test)]` blocks
 - Integration tests: `tests/integration/` — multi-node simulations with `--test-threads=1`
 - Real-model spawn-and-infer test: set `SWARMLLM_TEST_MODEL_DIR` to a fully-populated model directory (e.g. `~/.local/share/swarmllm/models/tinyllama-1.1b-...`) and run `cargo test --test integration_phase10_11 -- --ignored end_to_end`. No synthetic GGUF fixture is committed; see `docs/ARCHITECTURE.md` § Deferred Items.
@@ -192,11 +192,61 @@ When spawning subagents in this repo, use these model picks (overrides defaults 
 
 ## Status
 
-All 20 build phases complete. All subsystems wired — no stubs. **1434 lib + 80 integration + 2 repo-consistency + 26 swarmllm-types tests passing**; 9 lib + 2 e2e ignored (env-var or manual). Clippy clean default + features dev,claude-subscription + `--features llama`.
+All 20 build phases complete. All subsystems wired — no stubs. **1438 lib + 80 integration + 2 repo-consistency + 26 swarmllm-types tests passing**; 9 lib + 2 e2e ignored (env-var or manual). Clippy clean default + features dev,claude-subscription + `--features llama`.
 
 Per-round history lives in `~/.claude/projects/-home-user-SwarmLLM/memory/round_log_*.md` and the CHANGELOG; `docs/ARCHITECTURE.md` is the canonical architecture. This section keeps only the current release line plus one-line prior-round pointers.
 
-### Latest — v0.3.42-alpha (2026-07-28): pre-21-July nodes could never rejoin
+### Latest — v0.3.43-alpha (2026-07-28): external security audit + self-updating
+
+**Three security fixes from an external audit of .42, and the update lifecycle.**
+
+**Overlay trust was satisfiable by coincidence (gotcha #199).** `100.64.0.0/10`
+is shared RFC 6598 space, and `node_is_on_overlay` accepted any address of ours
+in it — but `listen_multiaddrs` is `swarm.listeners()` (every BOUND interface,
+since we bind `0.0.0.0`) ∪ external addrs, and `addr_is_remotely_reachable`
+deliberately keeps CGNAT. So a host on a cellular carrier / an ISP numbering a
+customer LAN / a coincidental VPN interface declared itself on a tailnet having
+never joined, and would hand its API key to any browser in that block. **The
+correct instinct was one function away**: `publicly_reachable` uses confirmed
+external addrs and NEVER a bound listener. Fix: ask `tailscaled` —
+`GET /localapi/v0/whois?addr=<ip>` over `/run/tailscale/tailscaled.sock`
+(`src/api/tailscale.rs`), which answers for BOTH sides at once. Three-way verdict
+`Member`/`NotAMember`/**`Unavailable`** — the third must never read as yes, since
+an unreadable socket is what a sandboxed service looks like. `classify()` is now
+async. Narrowed address test kept as fallback (Tailscale's own
+`fd7a:115c:a1e0::/48` ULA or a `tailscale*` interface — never shared v4 space).
+**Untested against a real tailnet** — no Tailscale on this machine.
+
+**P2P shards were announced before verification.** The HF path verified; the
+*untrusted* path did not. A corrupt/forged shard was recorded as held, announced
+and re-served until the ~5min scan re-hashed it. Now verified before announcing,
+with the quarantine+penalise policy CLAUDE.md already documented; new
+`TrustEvent::ShardVerificationFail` (-0.2, weighted with signature violation).
+
+**`vec![0u8; len]` committed the declared size before any payload arrived** — a
+5-byte header claiming 256 MiB cost that much per stream, free to the sender.
+Now grows in 1 MiB steps as bytes land.
+
+**`layer_range` bounds were checked but untested** — extracted to
+`layer_range_is_valid` with tests. Both transports funnel through the one
+dispatcher; keep it that way.
+
+**Update lifecycle**: apply now drains (`active_pipelines` AND `serving_models`,
+per #194) then `exec`s into the new binary, so it works under systemd and a bare
+terminal alike. Checking is decoupled from installing and ON by default —
+`UpdateMode` is `Option` precisely because a serde default cannot reach a config
+the daemon already wrote (#198 again). Managed installs (deb/rpm, hardened
+anchor) can never write their own binary under `ProtectSystem=strict`, so they
+are told to use their package manager rather than shown a button that fails.
+Anchor timer daily→hourly; releases now carry the CHANGELOG section.
+
+**Credits are self-attested and unenforced by design** — researched, NOT fixed,
+written up in `docs/FUTURE_WORK.md` with four approaches (challenge-response on
+random ranges is the cheapest; paying for *observed service* rather than claimed
+storage may sidestep proof-of-storage entirely) plus the free-Sybil-reset problem
+any enforcement would rest on.
+
+### v0.3.42-alpha (2026-07-28): pre-21-July nodes could never rejoin
 
 Found while updating the local test node for the .41 release — it came up with
 an empty peer list and nothing explaining why. **A default that lives only in

@@ -2,6 +2,81 @@
 
 All notable changes to SwarmLLM are documented here.
 
+## [0.3.43-alpha] — 2026-07-28
+
+Security fixes from an external audit, plus updates that finish by themselves.
+
+### Security
+
+- **Being on a carrier-NAT address no longer counts as being on Tailscale.**
+  Your machine hands its dashboard an access key automatically when you reach it
+  over Tailscale. Deciding whether the machine was on Tailscale meant looking for
+  an address in the range Tailscale uses — and that range is shared with the
+  carrier-grade NAT that real internet providers hand out. A machine could
+  therefore believe it was on Tailscale without ever having joined: some mobile
+  networks address the device from that range, some providers number customer
+  networks inside it, and a virtual or VPN adapter can land there by chance. In
+  that state it would hand its key to any browser arriving from the same range,
+  which on a provider's network can mean other customers.
+
+  The machine now asks the Tailscale service running on it who a connection
+  belongs to, instead of guessing from the address. That settles both halves: no
+  Tailscale service means this machine is not on it, and an address Tailscale
+  does not recognise means the visitor is not on yours. Where that service
+  cannot be reached, a stricter check requiring evidence specific to Tailscale is
+  used, and anything short of a clear yes asks for the key to be pasted as usual.
+
+  Affects v0.3.41 and v0.3.42, and only machines that had a carrier-NAT address
+  of their own. An ordinary home or office network was never in this state.
+
+- **A model piece received from another machine is checked before it is shared
+  on.** Pieces arriving over the network were saved, recorded as held, and
+  offered to others without their contents being checked against the expected
+  fingerprint — that check only came later, when a routine scan came round, up to
+  five minutes on. A corrupted or forged piece could spread in the meantime.
+  Pieces downloaded from HuggingFace were already checked; this was the one path
+  that was not, and the one where the bytes come from a stranger. A piece that
+  fails is discarded rather than announced, and the sender loses trust.
+
+- **A machine cannot be made to set aside memory for data nobody sent.** Any
+  peer that completed a connection could announce a quarter-gigabyte message in a
+  five-byte header, and that much memory was reserved before any of it arrived —
+  free for the sender, costly for the receiver. Memory is now committed as the
+  data actually turns up.
+
+- **The slice of a model a peer asks for is confirmed to exist.** This was
+  already checked, but the check was untested and easy to lose in a future
+  change; it is now a named rule with tests, covering ranges past the end of a
+  model, empty and backwards ranges, and models claiming no layers at all.
+
+### Added
+
+- **Machines can now install updates themselves.** Updating used to leave the
+  node running the old version, because replacing a file does not change a
+  program that has already started — so it kept serving and reporting the
+  previous build until somebody restarted it. Installing now waits for the
+  machine to finish any work it is doing, including work it is doing for other
+  people, and then restarts into the new version.
+
+- **Machines find out that updates exist.** Checking was tied to the
+  install-automatically setting, which is off by default, so a normal install
+  never looked and never showed the notice. Checking is now separate and on,
+  while installing automatically remains your choice — under Settings, with four
+  levels from never check to install and restart when idle.
+
+- Releases now carry the changelog for that version rather than only a link to
+  the list of commits.
+
+### Fixed
+
+- Pre-release builds are included when checking, so "stable" no longer silently
+  finds nothing on a project that has only ever published alpha releases.
+- Installations managed by a package manager say so, instead of offering an
+  install button that cannot work.
+- The configuration file shipped at `/etc/swarmllm/default.toml` was never read.
+  It is now copied into place when the package is first installed, and labelled
+  as a template.
+
 ## [0.3.42-alpha] — 2026-07-28
 
 ### Fixed
