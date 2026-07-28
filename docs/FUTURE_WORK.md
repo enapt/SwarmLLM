@@ -3948,28 +3948,52 @@ that originates and terminates inside it proves nothing.
   multi-node pipeline. Not traced by the audit; worth checking before the
   economy is enforced.
 
-## RESOLVED — the byte-fallback leak was a missing tokenizer (2026-07-28, closed 2026-07-29)
+## Local replies contain the tokenizer's word-boundary marker (2026-07-29)
 
-The entry that used to sit here recorded a single unreproduced sighting of
-`Reply<0x0A>` and hypothesised a cold-start path difference. The soak found the
-real cause, and the same cause produced a second, much more visible symptom.
+**Reproducible on demand**, which is the useful part — this began as a single
+unexplained `<0x0A>` and is now a reliable test.
 
-`model_worker::decode_token` fell back to returning the RAW vocabulary entry
-when `model.tokenizer()` was `None`. A raw entry is the vocabulary's own
-notation, not text: every space is `▁` (U+2581) and a byte-fallback token is
-literally the six characters `<0x0A>`. So both symptoms were the same bug.
+Ask this node directly and Phi-3.5 answers
+`A▁distributed▁system▁is▁a▁network…` — U+2581, SentencePiece's word-boundary
+marker, in place of every space. Ask a DIFFERENT node, which has no shards for
+the model and therefore routes the work back to this same node, and the answer
+comes back clean: `A distributed system is a network…`. Same node, same model,
+same prompt, same weights. Only the path differs.
 
-It was caught because Phi-3.5 answered `A▁distributed▁system▁is…` through the
-local API while **the same node, same model, same prompt** returned clean text
-over the network — the network path had a tokenizer and the local one did not.
-That asymmetry is what made it findable; a single mangled reply looks like a
-model quirk.
+### What has been ruled out
 
-Fixed by never emitting a raw vocabulary entry: the two notations that are
-artefacts in every tokenizer family are undone, and a missing tokenizer now
-warns once instead of silently degrading every reply. The underlying question —
-why the tokenizer was absent for a model whose `gguf_header.bin` is present —
-is worth a look, but the output is no longer corrupted while it goes unanswered.
+- **Not the decoder logic.** `decode_token_impl` replaces `▁` with a space
+  whenever `is_sentencepiece`, and Phi's GGUF declares
+  `tokenizer.ggml.model = "llama"`, so the flag is true. The SentencePiece
+  variant hard-codes it true regardless.
+- **Not a missing tokenizer.** This was the first hypothesis and it is WRONG.
+  A fix was shipped for the raw-vocabulary fallback in
+  `model_worker::decode_token` and the corruption survived it unchanged. That
+  fallback is worth having — a raw vocabulary entry is never user-facing text —
+  but it is not what fires here. The load path logs
+  "Built tokenizer from GGUF metadata" for these models.
+- **Not `finalize_reply_text`.** It scrubs control tokens, applies stop strings
+  and trims; it never touches `▁`, so the remote path is not being cleaned there.
+
+### Where to look next
+
+The remote path is the one that behaves. Establish FIRST whether the coordinator
+receives text or token ids from the serving node: if it receives ids and decodes
+them itself, then the two paths use different tokenizer instances (a peer with
+no shards can only have built one from `gguf_header.bin`, while this node builds
+one from the loaded split model) and the question becomes why those two disagree
+for the same GGUF. If it receives text, the cleaning happens somewhere on the
+send path and the local path is simply missing that step.
+
+Do not fix this by stripping `▁` from output. That would paper over whichever
+of the two decoders is wrong, and this project has already spent four releases
+treating a prompt-side fault as an output-scrubbing problem (gotchas #167-169).
+
+### Why it matters
+
+Every local reply from an affected model is mangled — this is not cosmetic, it
+is most of the words in the answer. It went unnoticed because the models used
+for smoke-testing either are not affected or were exercised over the network.
 
 ## What was ruled out
 
