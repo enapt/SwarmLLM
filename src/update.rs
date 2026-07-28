@@ -576,9 +576,9 @@ impl UpdateChecker {
         // Reject early with a clear message instead of a confusing I/O error.
         #[cfg(target_os = "windows")]
         {
-            return Err(SwarmError::Validation(
+            Err(SwarmError::Validation(
                 "Auto-update apply is not supported on Windows. Download the new version manually and replace the binary after stopping the daemon.".to_string(),
-            ));
+            ))
         }
 
         #[cfg(not(target_os = "windows"))]

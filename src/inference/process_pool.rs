@@ -122,8 +122,13 @@ struct WorkerHandle {
     /// Set to true when the reader actor observes a socket error. Subsequent
     /// callers short-circuit with an error + trigger worker eviction.
     dead: Arc<AtomicBool>,
-    /// Socket name used to connect (Unix filesystem path / Windows namespace
-    /// name). Only the Unix filesystem variant requires drop-time cleanup.
+    /// Socket path used to connect, kept for drop-time cleanup.
+    ///
+    /// Unix only: the filesystem entry has to be unlinked when the worker goes
+    /// away, whereas a Windows named pipe is reclaimed by the kernel once every
+    /// handle closes. Carrying the field on Windows would be storing a value
+    /// nothing reads, which is what the Windows lint build reports.
+    #[cfg(unix)]
     socket_name: String,
     /// Handle to the reader actor task. Aborted on drop so the task doesn't
     /// outlive its worker; also unblocks any pending `recv_worker` in tests.
@@ -1499,6 +1504,7 @@ impl ModelProcessPool {
             writer: Mutex::new(write_half),
             responses,
             dead,
+            #[cfg(unix)]
             socket_name,
             reader_handle,
         })

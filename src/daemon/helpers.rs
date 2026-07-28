@@ -135,13 +135,13 @@ pub(super) fn open_browser(url: &str) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
         // On Windows, use `cmd /C start` for opening URLs
-        return std::process::Command::new("cmd")
+        std::process::Command::new("cmd")
             .args(["/C", "start", "", url])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .spawn()
             .map_err(|e| e.to_string())
-            .map(|_| ());
+            .map(|_| ())
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
     return Err("Unsupported platform".into());
