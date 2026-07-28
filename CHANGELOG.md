@@ -2,7 +2,7 @@
 
 All notable changes to SwarmLLM are documented here.
 
-## [Unreleased]
+## [0.3.39-alpha] — 2026-07-28
 
 ### Fixed
 
@@ -60,6 +60,16 @@ All notable changes to SwarmLLM are documented here.
 - **A clearer message when a node is asked for work it only holds part of a
   model for.** This used to fail deep in the maths with an unreadable error
   about tensor shapes. It now says plainly that the request needs the pipeline.
+
+- **Ongoing conversations survive a restart when the clock has moved.** Saved
+  conversation context was thrown away if the machine's clock went backwards at
+  all between shutting down and starting up — which is ordinary: clocks correct
+  themselves against the network at startup, and machines that were suspended or
+  running as virtual machines resync on waking. Records saved a moment before
+  then carry a time slightly in the future, and anything stamped in the future
+  was treated as impossibly old rather than as the newest thing present, so every
+  ongoing conversation was silently discarded and the next reply in each had to
+  start over from nothing. A clock a single millisecond out was enough.
 
 ## [0.3.38-alpha] — 2026-07-27
 
