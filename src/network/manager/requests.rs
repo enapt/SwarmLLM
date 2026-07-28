@@ -691,6 +691,75 @@ impl NetworkManager {
                             );
                         }
 
+                        // Verify the content hash BEFORE this shard becomes visible
+                        // to anyone else.
+                        //
+                        // This is the untrusted path — the bytes came from a peer —
+                        // and it was the one path that did not check. The
+                        // HuggingFace download verifies (auto_manage/download.rs),
+                        // and a load-time check exists, but between finalize and
+                        // those the shard was already recorded as held and
+                        // announced to the swarm, so a corrupt or forged shard was
+                        // advertised and re-served to other nodes until a periodic
+                        // scan happened to re-hash it (~5 min). Reported by an
+                        // external security review, 2026-07-28.
+                        //
+                        // Policy on failure is the one documented in CLAUDE.md for
+                        // shard integrity errors: quarantine, penalise the sender's
+                        // trust, and let the normal retry path fetch it again —
+                        // crucially without announcing ourselves as a holder.
+                        let shard_info = self
+                            .shared_state
+                            .model_registry
+                            .get_manifest(&shard_id.model_id)
+                            .and_then(|m| {
+                                m.shards.iter().find(|s| s.index == shard_id.index).cloned()
+                            });
+                        if let Some(info) = shard_info {
+                            if let Err(e) = self.shard_store.verify_shard(&shard_id.model_id, &info)
+                            {
+                                tracing::error!(
+                                    model = %shard_id.model_id,
+                                    shard = shard_id.index,
+                                    peer = %peer,
+                                    error = %e,
+                                    "P2P shard failed hash verification — quarantining, not announcing"
+                                );
+                                let _ = self
+                                    .shard_store
+                                    .delete_shard(&shard_id.model_id, shard_id.index);
+                                self.shared_state
+                                    .models
+                                    .shard_p2p_failed
+                                    .insert(shard_id.clone());
+                                if let Some(node) = self.peer_to_node.get(&peer).map(|n| n.clone())
+                                {
+                                    self.shared_state.credits.trust_manager.update_trust(
+                                        &self.shared_state.peer_registry,
+                                        &node,
+                                        crate::credit::trust::TrustEvent::ShardVerificationFail,
+                                    );
+                                }
+                                self.shared_state.emit_activity(
+                                    crate::daemon::state::ActivityEvent::new(
+                                        "download",
+                                        "shard_verification_failed",
+                                        format!(
+                                            "Shard {} of {} arrived corrupted and was discarded",
+                                            crate::types::ShardId::display_index_short(
+                                                shard_id.index
+                                            ),
+                                            shard_id.model_id
+                                        ),
+                                    )
+                                    .with_model(shard_id.model_id.0.clone())
+                                    .with_detail_num(shard_id.index as i64)
+                                    .with_toast("warn", 6000),
+                                );
+                                return;
+                            }
+                        }
+
                         // Mark acquisition as complete so frontend clears the download bar
                         if let Some(mut entry) = self
                             .shared_state

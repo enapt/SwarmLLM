@@ -287,8 +287,27 @@ async fn read_wire_frame<T: AsyncRead + Unpin + Send>(
         ));
     }
 
-    let mut buf = vec![0u8; len];
-    io.read_exact(&mut buf).await?;
+    // Grow as bytes actually arrive rather than trusting the declared length.
+    //
+    // `vec![0u8; len]` allocated the full declared size before a single byte of
+    // payload had been read, so any peer that completed a Noise handshake could
+    // send a 5-byte header claiming 256 MiB and cost us that much memory per
+    // stream, at essentially zero cost to itself (external security review,
+    // 2026-07-28). The size cap was already enforced above, which bounds a
+    // single frame — but not the asymmetry.
+    //
+    // Reading in bounded steps makes our allocation track the data the peer has
+    // actually delivered: a liar who declares 256 MiB and then stalls costs us
+    // one step, not 256 MiB. An honest sender is unaffected — the Vec's
+    // amortised growth means the same number of bytes end up in the same buffer.
+    const READ_STEP: usize = 1024 * 1024;
+    let mut buf: Vec<u8> = Vec::new();
+    while buf.len() < len {
+        let step = READ_STEP.min(len - buf.len());
+        let start = buf.len();
+        buf.resize(start + step, 0);
+        io.read_exact(&mut buf[start..]).await?;
+    }
     Ok((tag_buf[0], buf))
 }
 

@@ -461,7 +461,9 @@ pub async fn auth_middleware(
     // opt-in and `api.dashboard_trust_overlay` exists to decline even that.
     if path == "/api/admin/api-key"
         && method == Method::GET
-        && crate::api::dashboard_trust::classify(&state.shared_state, addr.ip()).is_trusted()
+        && crate::api::dashboard_trust::classify(&state.shared_state, addr.ip())
+            .await
+            .is_trusted()
         && is_valid_bootstrap_nonce(&state, req.headers())
     {
         return next.run(req).await;

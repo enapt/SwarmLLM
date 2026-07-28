@@ -250,6 +250,7 @@ pub mod pool;
 pub mod providers;
 pub mod server;
 pub mod sse;
+pub mod tailscale;
 
 /// Derive the internal request UUID from a public API request id.
 ///

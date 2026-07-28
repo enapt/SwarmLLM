@@ -15,6 +15,14 @@ pub const TRUST_SPOT_CHECK_FAIL: f32 = -0.1;
 const TRUST_INVALID_GOSSIP: f32 = -0.05;
 const TRUST_VALID_TRANSACTION: f32 = 0.02;
 const TRUST_SIGNATURE_VIOLATION: f32 = -0.2;
+/// Served a shard whose contents did not match its advertised BLAKE3 hash.
+///
+/// Weighted with the signature violation rather than the spot-check miss: a
+/// wrong hash is not a marginal quality signal, it means the peer served bytes
+/// that are not the thing it claimed. That is either corruption it failed to
+/// notice or content it forged, and in both cases we do not want to fetch from
+/// it again soon.
+const TRUST_SHARD_VERIFICATION_FAIL: f32 = -0.2;
 /// Trust penalty for nodes sharing a /24 subnet with many other nodes (Sybil indicator).
 const TRUST_SUBNET_CLUSTERING: f32 = -0.03;
 
@@ -32,6 +40,8 @@ pub enum TrustEvent {
     SignatureViolation,
     /// Multiple nodes sharing the same /24 subnet — potential Sybil attack.
     SubnetClustering,
+    /// A shard this peer served failed its content-hash check on arrival.
+    ShardVerificationFail,
 }
 
 impl TrustEvent {
@@ -43,6 +53,7 @@ impl TrustEvent {
             Self::ValidTransaction => TRUST_VALID_TRANSACTION,
             Self::SignatureViolation => TRUST_SIGNATURE_VIOLATION,
             Self::SubnetClustering => TRUST_SUBNET_CLUSTERING,
+            Self::ShardVerificationFail => TRUST_SHARD_VERIFICATION_FAIL,
         }
     }
 
@@ -54,6 +65,7 @@ impl TrustEvent {
             Self::ValidTransaction => "valid_transaction",
             Self::SignatureViolation => "signature_violation",
             Self::SubnetClustering => "subnet_clustering",
+            Self::ShardVerificationFail => "shard_verification_fail",
         }
     }
 }

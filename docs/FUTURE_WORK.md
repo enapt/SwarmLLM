@@ -3864,6 +3864,90 @@ format instead of ChatML.
 
 ---
 
+## Shard-hosting credits are self-attested — no proof of storage (2026-07-28)
+
+Raised by an external security audit of v0.3.42, phrased as: "is a
+RatioMaster-style attack possible?" It is, and it is structurally the same
+thing. Credits are **unenforced by design at this stage** — this note records
+the shape of the problem and the options, so that when enforcement is built it
+is chosen deliberately rather than improvised.
+
+### What the code actually does
+
+`CreditLedger::run`'s `hosting_interval` arm asks whether **this node lists
+itself** in its own in-memory holder registry, and if so calls
+`earn_shard_hosting`. Nothing in that path touches the filesystem, re-hashes
+anything, or asks a peer to confirm. The registry entry is written once when a
+download completes and is never re-checked at credit time. `earn_shard_seeding`,
+`earn_relay_forwarding` and `earn_relay_service` have the same shape: local
+counters feed the formula, bounded only for numeric sanity by `safe_f64_credits`
+(which stops `f64::INFINITY` minting a Platinum tier — it says nothing about
+whether the input was earned).
+
+The resulting balance IS Ed25519-signed before gossip, and the audit confirmed
+that part is solid: one-directional freshness window, saturating arithmetic,
+dedup by `node_id` so percentiles cannot be stuffed. But a signature
+authenticates *who is claiming*, not *that the work happened*. A modified client
+— the actual RatioMaster move, patch your own binary, leave the protocol alone —
+can claim holder status for shards it deleted and keep earning at zero storage
+cost.
+
+The periodic integrity scan (`auto_manage/scan.rs`) re-hashes shards and would
+notice a missing file, but it runs **inside the client an attacker controls**,
+so it is self-policing and not adversarially binding. That is precisely what
+RatioMaster bypassed.
+
+### Why this is hard, and what the options are
+
+Proving that a remote party is really storing something, cheaply and
+repeatedly, is a genuine research area rather than a missing `if`. The
+established approaches, roughly in order of cost to build:
+
+1. **Challenge-response on random byte ranges.** A verifier asks for the hash of
+   a randomly chosen range of a shard it also holds, with a deadline. Cheap, no
+   new crypto, and it composes with the existing spot-check machinery in
+   `credit/anti_gaming.rs`. Defeated by a node that keeps the data but serves it
+   from elsewhere, and requires the challenger to hold the shard too — so it
+   verifies replication among peers who already have it, not storage by a node
+   nobody can check. Good value for the effort; the obvious first step.
+2. **Proof of Retrievability / Provable Data Possession.** The node stores
+   pre-computed tags alongside the data and answers challenges over them without
+   the verifier holding the file. Long-established literature (Juels–Kaliski PoR,
+   Ateniese PDP). Real crypto work and a tag-generation cost at ingest, but it
+   removes the "verifier must also hold it" limitation.
+3. **Proof of Replication / Space-Time**, as Filecoin deploys it. Proves a
+   *distinct physical copy* exists and persisted over an interval, which is the
+   property the credit formula actually pays for. By far the most expensive to
+   build and operate, and it drags in sealing costs that would be absurd for a
+   node hosting a few GB of model shards.
+4. **Make the credit follow observed service instead of claimed storage.** Pay
+   for shard bytes that a *peer confirms it received*, rather than for the claim
+   to be holding them. Storage then earns nothing on its own — only serving
+   does, and serving is externally observable by the party that benefited. This
+   sidesteps proof-of-storage entirely and fits the economics (the network wants
+   shards *served*, not merely *held*), at the cost of under-rewarding a node
+   that holds a rare shard nobody has asked for yet. Worth serious consideration
+   before reaching for (2) or (3).
+
+Whatever is chosen has to survive the same question the audit asked: the client
+doing the reporting is the client under the attacker's control, so any signal
+that originates and terminates inside it proves nothing.
+
+### Adjacent findings from the same audit
+
+- **Sybil reset is free.** A `NodeId` is an Ed25519 keypair with no minting
+  cost, trust starts at 0.5, so a peer penalised for `SignatureViolation`
+  (-0.2) or a failed spot check can abandon the identity and reconnect clean.
+  The subnet-clustering signal in `anti_gaming.rs` only raises the spot-check
+  rate (5%→25%) and never blocks, and is avoided by spreading identities across
+  subnets. Any enforcement built above assumes identity has some cost, so this
+  needs answering in the same pass — even a small proof-of-work or a
+  stake/escrow on new identities changes the arithmetic.
+- **Escrow token counts** (`actual_cost` from prompt+completion tokens feeding
+  escrow release) were flagged as possibly influenceable by a remote peer in a
+  multi-node pipeline. Not traced by the audit; worth checking before the
+  economy is enforced.
+
 ## How to use this file
 
 When starting a new feature, grep this file for keywords related to the area you're touching. If your feature unblocks a deferred item, either pick it up in the same PR (if scope allows) or move the entry to "completed" with the closing commit reference.

@@ -198,12 +198,35 @@ fn multiaddr_has_tailscale_v6(addr: &str) -> bool {
 /// overlay (an authenticated network), then the LAN (an opt-in). A Tailscale
 /// address is reported as `Overlay` even when LAN trust is what would also have
 /// admitted it, so the dashboard explains the specific reason.
-pub fn classify(state: &SharedState, ip: IpAddr) -> DashboardTrust {
+pub async fn classify(state: &SharedState, ip: IpAddr) -> DashboardTrust {
     if ip.is_loopback() {
         return DashboardTrust::Loopback;
     }
-    if is_overlay_ip(ip) && state.config.api.dashboard_trust_overlay && node_is_on_overlay(state) {
-        return DashboardTrust::Overlay;
+    // Ask Tailscale who this is, rather than inferring it from the address.
+    //
+    // `whois` is authoritative in a way no address test can be: it answers for
+    // BOTH sides at once — a daemon that is not there means we are not on a
+    // tailnet, and an address it does not recognise means the caller is not on
+    // ours. Only `Member` grants trust; `Unavailable` means we could not ask
+    // and must not be read as a yes.
+    //
+    // The address test remains as a fallback for hosts where the socket is not
+    // readable (a sandboxed service cannot open it), and is narrowed to
+    // Tailscale-specific evidence for the reason described on
+    // `node_is_on_overlay`.
+    if is_overlay_ip(ip) && state.config.api.dashboard_trust_overlay {
+        match crate::api::tailscale::whois(ip).await {
+            crate::api::tailscale::WhoIs::Member => return DashboardTrust::Overlay,
+            crate::api::tailscale::WhoIs::NotAMember => {
+                // A definitive no. Do not fall through to the weaker test —
+                // Tailscale has told us this address is not one of ours.
+            }
+            crate::api::tailscale::WhoIs::Unavailable => {
+                if node_is_on_overlay(state) {
+                    return DashboardTrust::Overlay;
+                }
+            }
+        }
     }
     // Runtime atomic, NOT `config.api.dashboard_trust_lan`: the user flips this
     // precisely when their dashboard is unreachable, so it has to apply without
@@ -273,14 +296,14 @@ mod tests {
     /// The whole point of the feature: a node that has joined a tailnet serves
     /// a working dashboard to the tailnet without any configuration. We
     /// document running nodes over Tailscale, so this is the advertised path.
-    #[test]
-    fn tailnet_browser_is_trusted_when_this_node_is_on_the_tailnet() {
+    #[tokio::test]
+    async fn tailnet_browser_is_trusted_when_this_node_is_on_the_tailnet() {
         let state = test_state(crate::config::Config::default());
         let peer = v4("100.101.102.103");
 
         // Before any Tailscale-specific evidence, a 100.x source is just
         // shared CGNAT space and proves nothing.
-        assert_eq!(classify(&state, peer), DashboardTrust::Untrusted);
+        assert_eq!(classify(&state, peer).await, DashboardTrust::Untrusted);
 
         // Tailscale gives every node an address in its own IPv6 ULA prefix.
         // That is not shared space, so holding one is proof of membership.
@@ -288,7 +311,7 @@ mod tests {
             "/ip4/100.64.0.7/tcp/8810".into(),
             "/ip6/fd7a:115c:a1e0::1234/tcp/8810".into(),
         ]));
-        assert_eq!(classify(&state, peer), DashboardTrust::Overlay);
+        assert_eq!(classify(&state, peer).await, DashboardTrust::Overlay);
     }
 
     /// Both CGNAT tests below assert what happens with NO Tailscale-specific
@@ -314,8 +337,8 @@ mod tests {
     /// interface — used to classify itself as being on the overlay, and would
     /// then hand its API key to any browser in that same space. On an ISP pool
     /// that means unrelated customers of that ISP.
-    #[test]
-    fn our_own_cgnat_address_is_not_proof_of_a_tailnet() {
+    #[tokio::test]
+    async fn our_own_cgnat_address_is_not_proof_of_a_tailnet() {
         if skip_if_host_runs_tailscale() {
             return;
         }
@@ -335,15 +358,15 @@ mod tests {
             "no Tailscale-specific evidence is present"
         );
         assert_eq!(
-            classify(&state, v4("100.101.102.103")),
+            classify(&state, v4("100.101.102.103")).await,
             DashboardTrust::Untrusted,
             "a CGNAT neighbour must not be handed the API key on this evidence"
         );
     }
 
     /// A non-Tailscale IPv6 ULA is not proof either — only Tailscale's prefix.
-    #[test]
-    fn a_generic_ipv6_ula_is_not_proof_of_a_tailnet() {
+    #[tokio::test]
+    async fn a_generic_ipv6_ula_is_not_proof_of_a_tailnet() {
         if skip_if_host_runs_tailscale() {
             return;
         }
@@ -352,7 +375,7 @@ mod tests {
             "/ip6/fd00:dead:beef::1/tcp/8810".into()
         ]));
         assert_eq!(
-            classify(&state, v4("100.101.102.103")),
+            classify(&state, v4("100.101.102.103")).await,
             DashboardTrust::Untrusted
         );
     }
@@ -361,8 +384,8 @@ mod tests {
     /// addresses from the same 100.64.0.0/10 block Tailscale uses. A node that
     /// is NOT on a tailnet must not treat such a neighbour as trusted — which
     /// is why membership is proven from our own addresses, not the peer's.
-    #[test]
-    fn cgnat_neighbour_is_untrusted_when_we_are_not_on_a_tailnet() {
+    #[tokio::test]
+    async fn cgnat_neighbour_is_untrusted_when_we_are_not_on_a_tailnet() {
         if skip_if_host_runs_tailscale() {
             return;
         }
@@ -372,7 +395,7 @@ mod tests {
             "/ip4/203.0.113.9/tcp/8810".into(),
         ]));
         assert_eq!(
-            classify(&state, v4("100.101.102.103")),
+            classify(&state, v4("100.101.102.103")).await,
             DashboardTrust::Untrusted
         );
     }
@@ -381,32 +404,38 @@ mod tests {
     /// from the tailnet arrives from the router's own private address. Nothing
     /// distinguishes it from any other LAN client, so it takes the explicit
     /// opt-in — and that opt-in must apply without a restart.
-    #[test]
-    fn lan_browser_is_trusted_only_after_the_opt_in() {
+    #[tokio::test]
+    async fn lan_browser_is_trusted_only_after_the_opt_in() {
         let state = test_state(crate::config::Config::default());
         let router = v4("192.168.1.10");
-        assert_eq!(classify(&state, router), DashboardTrust::Untrusted);
+        assert_eq!(classify(&state, router).await, DashboardTrust::Untrusted);
 
         state
             .dashboard_trust_lan
             .store(true, std::sync::atomic::Ordering::Release);
-        assert_eq!(classify(&state, router), DashboardTrust::LocalNetwork);
+        assert_eq!(classify(&state, router).await, DashboardTrust::LocalNetwork);
 
         // A public address is never admitted by the LAN opt-in.
-        assert_eq!(classify(&state, v4("8.8.8.8")), DashboardTrust::Untrusted);
+        assert_eq!(
+            classify(&state, v4("8.8.8.8")).await,
+            DashboardTrust::Untrusted
+        );
     }
 
-    #[test]
-    fn loopback_is_always_trusted() {
+    #[tokio::test]
+    async fn loopback_is_always_trusted() {
         let state = test_state(crate::config::Config::default());
-        assert_eq!(classify(&state, v4("127.0.0.1")), DashboardTrust::Loopback);
-        assert_eq!(classify(&state, v6("::1")), DashboardTrust::Loopback);
+        assert_eq!(
+            classify(&state, v4("127.0.0.1")).await,
+            DashboardTrust::Loopback
+        );
+        assert_eq!(classify(&state, v6("::1")).await, DashboardTrust::Loopback);
     }
 
     /// Turning the overlay off is the escape hatch for someone sharing a
     /// tailnet with people they would not give admin to.
-    #[test]
-    fn overlay_trust_can_be_disabled() {
+    #[tokio::test]
+    async fn overlay_trust_can_be_disabled() {
         let mut config = crate::config::Config::default();
         config.api.dashboard_trust_overlay = false;
         let state = test_state(config);
@@ -414,7 +443,7 @@ mod tests {
             .listen_multiaddrs
             .store(std::sync::Arc::new(vec!["/ip4/100.64.0.7/tcp/8810".into()]));
         assert_eq!(
-            classify(&state, v4("100.101.102.103")),
+            classify(&state, v4("100.101.102.103")).await,
             DashboardTrust::Untrusted
         );
     }
