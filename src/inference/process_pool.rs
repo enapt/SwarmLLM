@@ -2172,6 +2172,24 @@ impl ModelProcessPool {
             // this server can't serve right now, but it isn't a code bug.
             return SwarmError::ServiceUnavailable(format!("worker fatal error: {message}"));
         }
+
+        // A worker-side VALIDATION failure is the caller's input, not our bug.
+        //
+        // The worker raises a real `SwarmError::Validation` for things like a
+        // prompt longer than the model's context window, but crossing the IPC
+        // boundary flattens it to a string — so everything arrived here as
+        // `Inference`, which maps to HTTP 500 `server_error`. A prompt that is
+        // too long is the one thing the user CAN fix, and telling them the
+        // server broke is both wrong and actively harmful: any client with
+        // retry-on-5xx will re-send a request that cannot ever succeed.
+        //
+        // Re-deriving the class from the message is the same approach
+        // `worker_error_is_fatal` already takes for the same reason (the typed
+        // information does not survive the hop). Observed against a 2176-token
+        // prompt on a 2048-context model, 2026-07-29.
+        if let Some(detail) = validation_detail(&message) {
+            return SwarmError::Validation(detail);
+        }
         SwarmError::Inference(message)
     }
 
@@ -2414,5 +2432,66 @@ mod tests {
         );
         assert!(matches!(err, SwarmError::ServiceUnavailable(_)));
         assert!(!pool.is_cpu_pinned(&model));
+    }
+}
+
+/// Pull the user-facing part out of a worker message that wrapped a validation
+/// failure, or `None` when it is not one.
+///
+/// Worker messages arrive with call-site context prepended
+/// (`"prefill forward: Validation error: <detail>"`). Taking the text after the
+/// LAST marker drops that plumbing, which the caller can neither act on nor
+/// understand, and keeps the part that tells them what to change.
+fn validation_detail(message: &str) -> Option<String> {
+    const MARKER: &str = "Validation error: ";
+    let idx = message.rfind(MARKER)?;
+    let detail = message[idx + MARKER.len()..].trim();
+    if detail.is_empty() {
+        None
+    } else {
+        Some(detail.to_string())
+    }
+}
+
+#[cfg(test)]
+mod validation_detail_tests {
+    use super::validation_detail;
+
+    /// The case this exists for: an over-long prompt must reach the user as
+    /// their problem, with the sentence that says how to fix it intact.
+    #[test]
+    fn a_context_overflow_is_recognised_and_unwrapped() {
+        let msg = "prefill forward: Validation error: Sequence length (2176) exceeds \
+                   model context window (2048). Reduce your prompt or max_tokens.";
+        let got = validation_detail(msg).expect("should be recognised as validation");
+        assert!(got.starts_with("Sequence length (2176) exceeds"));
+        assert!(got.ends_with("Reduce your prompt or max_tokens."));
+        assert!(
+            !got.contains("prefill forward"),
+            "call-site plumbing must be dropped"
+        );
+    }
+
+    /// Genuine faults must keep mapping to a server error — this must not
+    /// become a way to relabel our own bugs as the caller's fault.
+    #[test]
+    fn other_worker_errors_are_not_treated_as_validation() {
+        assert!(validation_detail("Internal error: blk.0.attn_q: missing region").is_none());
+        assert!(validation_detail("CUDA_ERROR_OUT_OF_MEMORY").is_none());
+        assert!(validation_detail("worker closed connection mid-generate").is_none());
+    }
+
+    /// A marker with nothing after it carries no information for the user, so
+    /// it stays an inference error rather than becoming an empty 400.
+    #[test]
+    fn an_empty_detail_is_not_a_validation_error() {
+        assert!(validation_detail("prefill forward: Validation error: ").is_none());
+    }
+
+    /// Nested prefixes: take the LAST marker so the innermost detail wins.
+    #[test]
+    fn the_innermost_detail_wins() {
+        let got = validation_detail("a: Validation error: b: Validation error: real detail");
+        assert_eq!(got.as_deref(), Some("real detail"));
     }
 }
