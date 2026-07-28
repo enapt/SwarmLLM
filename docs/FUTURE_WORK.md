@@ -4041,6 +4041,54 @@ lines. A peer could still over-report up to `max_tokens` — but the requester
 already agreed to pay for that many, so the exposure is exactly what they chose.
 That is a bound worth having even before the larger question is settled.
 
+## The api_key file can diverge from the key the daemon accepts (2026-07-29)
+
+Observed during an overnight soak. Every local request began failing 401 while
+cross-node requests kept succeeding — which reads like an inference fault rather
+than an auth one. The `api_key` file held `e5666bd2…`; the running daemon
+accepted `13e6389f…`. Both 64 hex chars, both plausible, silently different.
+
+**This breaks every CLI tool.** `swarmllm status`, `chat`, `peers`, `bench` and
+`pool` all resolve credentials through `cli::read_api_key(data_dir)`, which
+reads that file. When it is stale they fail with an auth error or the
+"SwarmLLM is not running (no API key at …)" message — both of which point the
+user at the wrong problem, since the daemon is running fine and the key simply
+does not match.
+
+### What was ruled out
+
+- **Not key rotation.** `crypto/key_rotation.rs` re-keys ephemeral X25519
+  sessions; it never touches the API key.
+- **Not a rotate endpoint.** `/api/admin/api-key` is registered GET-only
+  (`api/server.rs`). The rate limiter has a `is_mutating` branch for that path,
+  but nothing routes a mutating method to it.
+- **Not a second daemon on the same data dir.** Only one startup banner in the
+  log, and the other node running at the time was correctly on its own data
+  directory with its own distinct key.
+- **Not the daemon itself.** `resolve_api_key` (`daemon/helpers.rs`) writes the
+  file only at startup, and the file's mtime was ~39 minutes AFTER the banner.
+
+So a process wrote the file, after startup, with a key the running daemon had
+never adopted. The likely shape is a second `swarmllm` invocation against the
+same data directory that could not open the redb (single-writer, held by the
+running daemon), fell through `resolve_api_key` to the GENERATE branch, wrote
+the fresh key to the file, and then exited. That path is reachable by design:
+step 2 treats "cannot read the database" and "no key stored" identically.
+
+### Worth doing regardless of the trigger
+
+1. **Do not overwrite an existing api_key file with a freshly generated key.**
+   If the file exists and the DB was unreadable, that is a strong signal another
+   instance owns this data directory — generating and clobbering is the wrong
+   move. Failing loudly ("another node appears to be using this data directory")
+   would be better than silently breaking the running node's tooling.
+2. **Make the divergence diagnosable.** When a CLI request is rejected, the
+   message should distinguish "the key in <path> was refused by the running
+   daemon — it may be stale" from "no key found". Today both read as
+   the daemon being absent.
+3. The soak harness now resolves the key through the dashboard bootstrap
+   instead of the file, which is why this was caught at all.
+
 ## How to use this file
 
 When starting a new feature, grep this file for keywords related to the area you're touching. If your feature unblocks a deferred item, either pick it up in the same PR (if scope allows) or move the entry to "completed" with the closing commit reference.
