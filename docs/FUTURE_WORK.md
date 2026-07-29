@@ -4344,3 +4344,43 @@ and nothing logs when it happens.
 a word list, and add that as a test. Reply quality across every SentencePiece
 model depends on this being right, and the failure is silent — nothing logs,
 the model simply gets nonsense.
+
+## Shard verification may be penalising peers for OUR truncated reads
+
+**Observed 2026-07-29**, four failures from one peer across ~2 hours:
+
+```
+shard=2  expected 1cbfd4f9…  got ae820546…   06:35
+shard=2  expected 1cbfd4f9…  got 169cd659…   06:38
+shard=1  expected 17bf81a8…  got c3903d0c…   07:36
+shard=2  expected 1cbfd4f9…  got 901f15d6…   08:43
+```
+
+The `expected` hash is stable; the `got` hash is **different every time for the
+same shard**. A corrupt file on the sender's disk would produce the SAME wrong
+hash on every attempt. Varying output means the difference arises in transfer —
+a truncated or partially-assembled buffer being hashed as though complete — not
+in what the peer stores.
+
+**Why this matters beyond noise.** v0.3.44 made a failed verification
+quarantine the shard AND penalise the sender's trust score
+(`TrustEvent::ShardVerificationFail`, -0.2). If the corruption is happening on
+OUR receive side, we are lowering the reputation of honest peers for our own
+incomplete reads — and the same peer is also producing frequent
+`OutboundFailure` timeouts, which is consistent with a flaky link that
+truncates transfers rather than a malicious or corrupt host.
+
+**What to check first**, cheapest to most involved:
+
+1. Log the received byte count alongside the hash mismatch and compare it to the
+   manifest's declared shard size. If it is short, this is truncation and the
+   verification is working on an incomplete buffer.
+2. Verify only after the transfer is known complete — a length check against the
+   manifest before hashing turns a silent mis-attribution into a clear
+   "incomplete transfer" outcome.
+3. Only penalise trust when the payload was complete AND the hash is wrong.
+   Those are different failures and only the second is the sender's fault.
+
+**Do not simply remove the penalty**: it exists because an unverified shard was
+previously announced and re-served network-wide, which is a genuine integrity
+hole. The fix is to attribute the failure correctly, not to stop detecting it.
