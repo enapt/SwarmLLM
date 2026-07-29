@@ -6,15 +6,19 @@ All notable changes to SwarmLLM are documented here.
 
 ### Fixed
 
-- **Answers put together by several machines could contain a stray mark in
-  place of a space** — something like `"a▁"` appearing in the middle of an
-  otherwise normal sentence. Asking the same question of a single machine came
-  back clean, so it looked like a networking problem rather than a text one.
+- **Shared and single-machine answers now convert text the same way.** The
+  previous release gave the decoder used for a machine's own answers the
+  information it needed; the equivalent step used when work is spread across
+  machines lives in a separate function and kept the older behaviour. They are
+  now consistent.
 
-  The previous release fixed exactly this for answers a machine produced on its
-  own. The equivalent step used when work is shared across machines lives in a
-  separate function and kept the old behaviour, so the same fault survived on
-  that path. Both now work the same way.
+  **This does not fix the stray `▁` mark some answers still contain.** That was
+  the reason for this release and it turned out to have a different cause,
+  found immediately afterwards: some words are converted into numbers
+  incorrectly *before* the model ever sees them, so the model receives
+  gibberish and says so. "banana" is one such word. It is not specific to shared
+  work and it is not new — it behaved the same way several releases back, just
+  with a differently mangled character. Tracked in docs/FUTURE_WORK.md.
 
 ## [0.3.48-alpha] — 2026-07-29
 

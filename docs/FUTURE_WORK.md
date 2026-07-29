@@ -4266,3 +4266,46 @@ Options, roughly in order of how much they change:
    ~980 MB file that will never be applied.
 
 Recommendation: (2) now and (1) with a migration; (3) only after signing.
+
+## Some words are tokenized to byte-fallback garbage before the model sees them
+
+**Open, reproducible in seconds, and NOT new** — v0.3.46 behaves the same way.
+
+`SpmTokenizer::spm_encode` fails on some ordinary words and emits byte-fallback
+tokens instead of real vocabulary pieces. The model then receives gibberish and
+correctly reports the question as nonsensical. Verified against Phi-3.5's real
+vocabulary:
+
+```
+banana   ids=[229,153,132,101,100,113,100,113,29874]  -> "\u{fffd}\u{fffd}\u{fffd}banana"
+apple    ids=[26163]                                  -> " apple"
+```
+
+`"apple"` encodes to ONE correct piece. `"banana"` produces nine tokens, the
+first three being byte-fallback for the `▁` word-boundary marker (U+2581 is
+`E2 96 81`; the ids are those bytes plus a constant offset of 3), which means
+the marker never merged with the following letters and was emitted as raw bytes.
+
+**User-visible effect**: any prompt containing an affected word gets a reply
+like *"The question seems to be nonsensical or a typographical error as
+\"a▁\" does not correspond to any known colour"* — the model quoting the
+corruption back. Confirmed by isolation: `What colour is an apple?` answers
+"Red" correctly, while `What colour is a banana?` does not, with the spelling of
+"colour" ruled out as a factor.
+
+**What has been ruled out**: it is not the distributed path (local reproduces
+it), not the BOS work in v0.3.47 (v0.3.46 produces the same failure with
+differently mangled bytes), not output decoding (the ids are already wrong at
+encode time), and not the merge *ordering* (`Merge`'s `Ord` correctly sorts
+highest-score-first).
+
+**Where to look**: the initial bigram seeding and `try_add_bigram` in
+`spm_encode`. A symbol that never finds any merge partner falls through to
+byte-fallback; the question is why `▁` + `b` is not being merged when
+`▁apple` resolves as a single piece.
+
+**Do not attempt this without a reference**: compare our ids against
+`llama.cpp`'s tokenizer or HuggingFace's `sentencepiece` for the same vocab and
+a word list, and add that as a test. Reply quality across every SentencePiece
+model depends on this being right, and the failure is silent — nothing logs,
+the model simply gets nonsense.
