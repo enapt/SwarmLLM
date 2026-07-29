@@ -75,8 +75,18 @@ pub async fn hf_download_shards(
 
     // peer_fair_share: compute shard assignment deterministically.
     // Deferred until after probe (we need shard_count), so store the peer count now.
+    // Count only peers that are actually CONNECTED. `peer_registry` is
+    // deliberately preserved across disconnects (see the scheduler-liveness
+    // rule), so using it divides the model among peers that may be long gone —
+    // this node then takes a small slice of a model nobody else is holding and
+    // every request fails with "No node available for layer 0". Reported
+    // 2026-07-29: a fair-share fetch of 4 shards left an unusable model while
+    // none of the 4 connected peers advertised it at all.
+    //
+    // `connected_node_ids` is the same oracle the scheduler uses to decide who
+    // can serve a segment, which is exactly the question being asked here.
     let fair_share_peer_count = if peer_fair_share && shard_indices.is_empty() {
-        Some(state.shared_state.peer_registry.len())
+        Some(state.shared_state.connected_node_ids.len())
     } else {
         None
     };

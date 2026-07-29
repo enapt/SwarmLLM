@@ -25,6 +25,9 @@ pub async fn query_status(port: u16, data_dir: &std::path::Path) -> anyhow::Resu
     match req.send().await {
         Ok(resp) => {
             let body = resp.text().await?;
+            if crate::cli::body_is_auth_error(&body) {
+                crate::cli::exit_api_key_rejected(data_dir, port);
+            }
             if let Ok(json) = serde_json::from_str::<serde_json::Value>(&body) {
                 println!("{}", serde_json::to_string_pretty(&json)?);
             } else {

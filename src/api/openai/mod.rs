@@ -645,12 +645,42 @@ pub async fn status(State(state): State<AppState>) -> Json<serde_json::Value> {
     network_models.sort();
     network_models.dedup();
 
+    // `model_loaded` only ever meant "this node has *a* model loaded" — it is
+    // derived from a singleton and says nothing about the model you asked for,
+    // or about one still downloading. Reported 2026-07-29 by a user who saw
+    // `model_loaded: true` while shards were still arriving, trusted it, and
+    // got "No node available for layer 3". The field is kept for compatibility;
+    // `models_downloading` is the honest signal for readiness.
+    let mut models_downloading = Vec::new();
+    for entry in state.shared_state.models.acquisition_progress.iter() {
+        let st = entry.value();
+        if matches!(
+            st.state,
+            crate::model::acquisition::AcquisitionState::Downloading
+                | crate::model::acquisition::AcquisitionState::AwaitingManifest
+        ) {
+            models_downloading.push(serde_json::json!({
+                "model": st.model_id.0,
+                "downloaded_shards": st.downloaded_shards,
+                "total_shards": st.total_shards,
+                "state": match st.state {
+                    crate::model::acquisition::AcquisitionState::AwaitingManifest => "awaiting_manifest",
+                    _ => "downloading",
+                },
+            }));
+        }
+    }
+    models_downloading.sort_by(|a, b| a["model"].as_str().cmp(&b["model"].as_str()));
+
     Json(serde_json::json!({
         "status": "ok",
         "version": env!("CARGO_PKG_VERSION"),
         "model_loaded": local_model,
         "model_name": model_name,
         "network_models": network_models,
+        // Non-empty means shards are still arriving: models listed here are NOT
+        // ready to serve, regardless of `model_loaded`.
+        "models_downloading": models_downloading,
         "peers": state.shared_state.peer_registry.len(),
     }))
 }

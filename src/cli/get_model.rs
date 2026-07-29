@@ -94,6 +94,18 @@ pub async fn get_model(
 
     println!("Started — downloads run in the background.");
     println!("  Watch it:  swarmllm status   (or the dashboard at http://localhost:{port})");
+    if !all {
+        // A fair share is only usable if other nodes hold the rest. They are
+        // expected to pick the remainder up via auto-manage, but nothing
+        // guarantees they have, so say so rather than letting the first
+        // inference fail with "No node available for layer 0".
+        println!();
+        println!("  Note: a fair share is only part of this model. Answering needs the");
+        println!("  other shards to be held by connected peers — usually automatic, but");
+        println!("  not instant, and not guaranteed.");
+        println!("  If requests fail with \"No node available for layer ...\", fetch the");
+        println!("  rest yourself:  swarmllm get-model {} --all", model.tier);
+    }
     Ok(())
 }
 

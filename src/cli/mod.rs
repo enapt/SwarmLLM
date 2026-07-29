@@ -45,6 +45,45 @@ pub(crate) fn exit_daemon_unreachable(port: u16) -> ! {
     std::process::exit(1);
 }
 
+/// Explain a rejected API key and `exit(1)`.
+///
+/// A 401 from your own daemon is almost never "wrong password" — it is the CLI
+/// reading a key from a different place than the daemon wrote it. Two ways that
+/// happens, and the raw `authentication_error` names neither:
+///
+/// - The daemon runs with `-d /some/dir` (needed for a systemd unit, since the
+///   default XDG path is wrong there) and the CLI, invoked without `-d`, looks
+///   under the default data dir. Reported 2026-07-29.
+/// - The key file has diverged from the key the daemon actually accepts, so a
+///   file exists and is simply stale.
+///
+/// Both are fixed by pointing the CLI at the right data dir, so say so.
+pub(crate) fn exit_api_key_rejected(data_dir: &std::path::Path, port: u16) -> ! {
+    eprintln!("Error: the daemon on port {port} rejected this API key.");
+    eprintln!("  Key read from: {}", data_dir.join("api_key").display());
+    eprintln!();
+    eprintln!("  This usually means the CLI and the daemon disagree about the data directory.");
+    eprintln!("  If you started the daemon with -d/--data-dir, pass the SAME one here:");
+    eprintln!("      swarmllm -d <dir> <command>");
+    eprintln!("  or set SWARMLLM_NODE_DATA_DIR so both agree.");
+    eprintln!();
+    eprintln!("  If the path above IS correct, the stored key is stale — restart the daemon.");
+    std::process::exit(1);
+}
+
+/// Whether a daemon response body is an authentication failure.
+pub(crate) fn body_is_auth_error(body: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|v| {
+            v.get("error")
+                .and_then(|e| e.get("type"))
+                .and_then(|t| t.as_str())
+                .map(|t| t == "authentication_error")
+        })
+        .unwrap_or(false)
+}
+
 /// Resolve a model id: explicit override wins, otherwise pick the first
 /// listing from the daemon's `/v1/models`.
 pub(crate) async fn discover_model(

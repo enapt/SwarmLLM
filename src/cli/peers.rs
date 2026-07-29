@@ -35,6 +35,9 @@ pub async fn query_peers(
                 let peers: Vec<serde_json::Value> = match serde_json::from_str(&body) {
                     Ok(p) => p,
                     Err(_) => {
+                        if crate::cli::body_is_auth_error(&body) {
+                            crate::cli::exit_api_key_rejected(data_dir, port);
+                        }
                         eprintln!("Unexpected response from daemon:\n{body}");
                         std::process::exit(1);
                     }
