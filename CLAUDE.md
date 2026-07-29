@@ -151,7 +151,7 @@ libp2p 0.56, axum 0.8, candle-core/candle-transformers 0.10 (CUDA), redb 4, ed25
 
 ## Testing
 
-- 1438 lib tests passing + 9 ignored (env-var-gated real-model + manual smoke), 80 integration tests in `tests/integration/` + 2 ignored end-to-end (`cargo test --test integration_phase10_11 -- --ignored`), 2 repo-consistency, 26 in `swarmllm-types` (`cargo test -p swarmllm-types` — NOT covered by a bare `cargo test` from the root), 6 in the vendored request-response patch (`cargo test --manifest-path vendor/libp2p-request-response/Cargo.toml --lib` — the crate is workspace-`exclude`d, and its own integration tests need `libp2p-swarm-test` so use `--lib`), clippy clean. Microbench: `cargo run --release --no-default-features --features dev,claude-subscription --example swarm_spec_bench` (R136 — measures all 4 SWARM-SPEC layer primitives + synthetic cascade hit-rate). Local-cluster bench: `examples/3node_setup.sh` (boots 3 daemons) + `examples/3node_inference_bench.sh` (runs 3 workloads × 3 trials and prints tok/s + swarm_spec metrics). Sharded variant: `examples/3node_sharded_setup.sh` (forced distributed pipeline; writes its own per-node config disabling auto-manage and bootstrap so the split survives). **Its inference step is EXPECTED to fail on a single multi-interface host** — that is the zero-redundancy same-host case documented in `docs/FUTURE_WORK.md` § "Connection churn on multi-interface hosts", not a distributed-inference regression (confirmed on released v0.3.28, 2026-07-26). Validate the forward path on two real machines. Both scripts take `SWARM_BENCH_MODEL`. **Pinned reference models for cross-swarm comparison: `docs/REFERENCE_MODELS.md`** (smoke / standard / stress tiers + `examples/fetch_reference_model.sh` to opt in).
+- 1455 lib tests passing + 9 ignored (env-var-gated real-model + manual smoke), 80 integration tests in `tests/integration/` + 2 ignored end-to-end (`cargo test --test integration_phase10_11 -- --ignored`), 2 repo-consistency, 26 in `swarmllm-types` (`cargo test -p swarmllm-types` — NOT covered by a bare `cargo test` from the root), 6 in the vendored request-response patch (`cargo test --manifest-path vendor/libp2p-request-response/Cargo.toml --lib` — the crate is workspace-`exclude`d, and its own integration tests need `libp2p-swarm-test` so use `--lib`), clippy clean. Microbench: `cargo run --release --no-default-features --features dev,claude-subscription --example swarm_spec_bench` (R136 — measures all 4 SWARM-SPEC layer primitives + synthetic cascade hit-rate). Local-cluster bench: `examples/3node_setup.sh` (boots 3 daemons) + `examples/3node_inference_bench.sh` (runs 3 workloads × 3 trials and prints tok/s + swarm_spec metrics). Sharded variant: `examples/3node_sharded_setup.sh` (forced distributed pipeline; writes its own per-node config disabling auto-manage and bootstrap so the split survives). **Its inference step is EXPECTED to fail on a single multi-interface host** — that is the zero-redundancy same-host case documented in `docs/FUTURE_WORK.md` § "Connection churn on multi-interface hosts", not a distributed-inference regression (confirmed on released v0.3.28, 2026-07-26). Validate the forward path on two real machines. Both scripts take `SWARM_BENCH_MODEL`. **Pinned reference models for cross-swarm comparison: `docs/REFERENCE_MODELS.md`** (smoke / standard / stress tiers + `examples/fetch_reference_model.sh` to opt in).
 - Unit tests: in-module `#[cfg(test)]` blocks
 - Integration tests: `tests/integration/` — multi-node simulations with `--test-threads=1`
 - Real-model spawn-and-infer test: set `SWARMLLM_TEST_MODEL_DIR` to a fully-populated model directory (e.g. `~/.local/share/swarmllm/models/tinyllama-1.1b-...`) and run `cargo test --test integration_phase10_11 -- --ignored end_to_end`. No synthetic GGUF fixture is committed; see `docs/ARCHITECTURE.md` § Deferred Items.
@@ -192,456 +192,167 @@ When spawning subagents in this repo, use these model picks (overrides defaults 
 
 ## Status
 
-All 20 build phases complete. All subsystems wired — no stubs. **1443 lib + 80 integration + 2 repo-consistency + 26 swarmllm-types tests passing**; 9 lib + 2 e2e ignored (env-var or manual). Clippy clean default + features dev,claude-subscription + `--features llama`.
+All 20 build phases complete. All subsystems wired — no stubs. **1455 lib + 80 integration + 2 repo-consistency + 26 swarmllm-types tests passing**; 9 lib + 2 e2e ignored (env-var or manual). Clippy clean default + features dev,claude-subscription + `--features llama`.
 
 Per-round history lives in `~/.claude/projects/-home-user-SwarmLLM/memory/round_log_*.md` and the CHANGELOG; `docs/ARCHITECTURE.md` is the canonical architecture. This section keeps only the current release line plus one-line prior-round pointers.
 
-### Latest — v0.3.46-alpha (2026-07-29): local replies were mangled by a stale comment
+### Latest — v0.3.47 / v0.3.48-alpha (2026-07-29): models asked the wrong question
 
-**Found by the overnight soak; took three attempts, two of them wrong.**
-`CachedDecoder` (`inference/pipeline/prompt.rs`) was built with
-`is_sentencepiece: false, has_tokenizer: false` under the comment "no tokenizer
-in-process" — true when written, then `state.standalone_tokenizer()` was added
-for exactly this case and the call site was never revisited. Pinned false, the
-decoder could ONLY take its fallback: raw vocab entries through
-`decode_bpe_text`, a **GPT-2** byte decoder. U+2581 is outside every range it
-maps, so every space in a local SentencePiece reply became `▁`. Byte-fallback
-tokens leaked the same way — that is the unexplained `<0x0A>` from the day
-before. One defect, two symptoms, reported a day apart. Gotcha **#200**.
+**A night of prompt-construction bugs, each hiding the next.** All were found by
+running requests and comparing the SAME model on TWO paths (local vs
+distributed) — the diagnostic that has now isolated five separate defects here.
 
-**Why it hid**: peer-served work is decoded on the SERVING side by a path that
-does hold a tokenizer, so every cross-node check was clean. Only asking a node
-directly reproduced it. **The diagnostic that cracked it: compare the same node
-against itself on two paths** — same model, same prompt, one clean, one mangled.
+**Small models replied with nothing at all** (~2 in 3, deterministic under
+`temperature=0`) and it was reported as a *successful* completion — `stop`,
+HTTP 200, content `" "`. The model emitted a `<|user|>` turn marker instead of
+answering and stop-truncation ate it. The prompt was byte-identical to
+HuggingFace's; what it LACKED was a system turn, which Zephyr/TinyLlama models
+are trained with. Injection is gated on the template having a system branch AND
+no `raise_exception` — Gemma/Mistral decline the role, and our evaluator treats
+`raise_exception` as a **silent skip**, so blanket injection would render a turn
+the model never saw. Gotcha #201. **I dismissed this twice** (as model weakness,
+then as fixed by an unrelated change); `temperature=0` settled it in a minute —
+*a reproducible "flaky" output is not variance*.
 
-**Two mistakes worth not repeating.** I first fixed the identical error in a
-DIFFERENT file (`model_worker::decode_token`), shipped it, and nothing changed —
-a path that *could* produce the symptom is not evidence it is the path taken. I
-also announced it resolved and closed the FUTURE_WORK entry before verifying,
-which had to be retracted. What settled it was reading the CONSTRUCTION site and
-finding literals, making the branch reachable-by-construction rather than
-hypothesised.
+**No Llama-family model was getting its BOS token.** The id was found by
+searching the vocab for Gemma's `<bos>` (Llama spells it `<s>`), and
+`add_bos_token` defaulted false where llama.cpp defaults true for SPM. The GGUF
+declares the id and it was parsed, carried, and never passed down. BOS now
+applied at the ONE shared `SplitTokenizer::encode`, not per-variant — the first
+fix touched only the SPM path and TinyLlama takes the BPE path.
 
-Also: an over-long prompt returned **500** carrying a perfectly good
-`Validation` message — the class was lost crossing the worker IPC boundary, so
-`classify_worker_error` labelled everything `Inference`. Now 400. A 500 there
-also makes retry-on-5xx clients re-send a request that can never succeed.
+**The distributed path prompted models with ANOTHER model's chat template**
+(gotcha #202). `loaded_model_info` is a singleton describing whatever the node
+last loaded, used as a fallback exactly when the coordinator holds none of the
+requested model's shards. Phi-3.5 answered a one-word question carrying
+**Llama-3** control tokens, `prompt_tokens` **145 vs 35**. The line's own comment
+said `// may be wrong model` — **written down, shipped anyway**. The tell was
+`prompt_tokens`, visible in every response without instrumentation.
 
-And the Windows GPU build, absent from .45: the Vulkan lib dir was never added
-to `LIB` (the step that does exactly this for CUDA was never extended), and
-`msvc-dev-cmd` replaces `LIB` afterwards. SDK version now pinned — `latest` let
-an unpinned toolchain break a release with no commit of ours.
+**Fixing that exposed the next layer**: TinyLlama matched no family in
+`fallback_by_model_name` ("tinyllama" lacks "llama-3") so it reached **ChatML**.
+New `zephyr_fallback`, with a test pinning that Llama-3 and TinyLlama are never
+confused.
 
-### v0.3.45-alpha (2026-07-28): the .44 shard check ate good shards
+**Config defaults never reached existing installs** — the daemon wrote EVERY
+field and a value on disk always wins, so improving a default only ever helped
+new installs. Three prior faults trace to this (#198, #196, and update checks
+stuck at 6h). Now only non-default values are written. The round-trip test
+**failed on first run** and caught a latent bug: `updates.mode` had
+`impl Default = Some(Notify)` but `#[serde(default) = None`, so the effective
+mode depended on whether the `[updates]` *header* existed. Rule in
+`.claude/rules/architecture.md` § "Config defaults must stay live".
 
-**Found by the soak within hours of .44 shipping, in my own change.**
-`verify_shard` treats an all-zero manifest hash as a FAILURE ("placeholder
-required") — right for auditing a shard already held, wrong as an accept-gate
-for a download, where a missing hash means *nothing to compare against*, not
-*bad bytes*. The .44 P2P accept path called it unconditionally, so every shard
-of any hash-less manifest was rejected, **deleted**, and its sender penalised.
-Live proof: `meta-llama-3.1-8b` lost all its shards and the acquisition went
-`Reconciled stalled acquisition → Failed`. A/B after the fix: 10 shards
-re-acquired, 0 quarantines.
+**Auto-update verified end-to-end for the first time**: detect → download →
+SHA256 verify → stage → "ready to apply". It does **NOT** apply:
+`auto_update = "stable"` maps to `Download`, and only `mode = "install"`
+restarts. Deliberate (binaries are unsigned) but **the name misleads** — a user
+sits on a staged binary believing they are current. Open question for the user.
 
-**Same shape as #195/#198 — an invariant enforced without checking its
-precondition holds.** It shipped because the rejection path was tested with a
-real hash present and never with a manifest lacking one.
+**Also from a user report** (EnigmaJim, on .47): fair-share fetch divided by
+`peer_registry.len()` — *every peer ever seen*, the documented-wrong oracle — so
+a node took a slice of a model nobody held ("No node available for layer 0");
+now `connected_node_ids`. `status` said `model_loaded: true` mid-download; now
+lists `models_downloading`. CLI 401s on a custom `--data-dir` now name the file
+and the cause. Unknown config keys now warn instead of being silently ignored.
 
-Also: `provider-model-status` got its own rate bucket. It sat in
-`SensitiveAdmin` (5/min) with api-key/provider MUTATIONS and update apply —
-human-triggered things that want a tight cap — while being fired automatically
-by the dashboard. Budgets key per IP not per tab, so ~5 open dashboards silently
-stopped refreshing model badges (`if (!resp.ok) return;` swallows the 429). Same
-split, same reason, as ws-ticket in #182.
+**Process note**: deploying a WSL-built binary to the Proxmox LXC failed on
+GLIBC 2.39 and took their node down ~90s (backup made recovery immediate).
+Check target GLIBC before touching a machine you cannot easily recover.
 
-**Audit item closed: `crypto/session.rs` replay resistance is sound** — RFC 6479
-sliding window, `check` before decrypt, `record` only after auth succeeds (so a
-forged nonce can't poison the window), high-initial-nonce DoS guarded, tested.
-The external audit listed it "not examined"; it needed no change.
+### v0.3.39 – v0.3.46 (07-27→29) — one line each; detail in `round_log_overnight_0728.md` + CHANGELOG
 
-### v0.3.44-alpha (2026-07-28): external security audit + self-updating
+- **v0.3.46**: local replies had `▁` in place of every space — `CachedDecoder`
+  was built `is_sentencepiece:false, has_tokenizer:false` under a comment that
+  went stale when `standalone_tokenizer()` was added, so decoding could only
+  take a **GPT-2** byte-decoder fallback. Same defect produced the unexplained
+  `<0x0A>` — one cause, two symptoms a day apart (#200). **Peer-served work is
+  decoded on the SERVING side, so every cross-node check looked clean.** Also:
+  over-long prompt returned 500 (a real `Validation` flattened crossing the
+  worker IPC) → now 400; Windows GPU build fixed (Vulkan lib dir never added to
+  `LIB`; `msvc-dev-cmd` replaces `LIB` afterwards; SDK version now pinned).
+- **v0.3.45**: my own .44 shard check ate good shards — `verify_shard` treats an
+  all-zero manifest hash as FAILURE, right when auditing a held shard, wrong as
+  an accept-gate where a missing hash means *nothing to compare*. Every shard of
+  a hash-less manifest was rejected, **deleted**, and its sender penalised.
+  Also: `provider-model-status` got its own rate bucket (it sat with human-
+  triggered mutations while being fired automatically by the dashboard).
+- **v0.3.44**: external security audit — overlay trust was satisfiable by
+  coincidence (`100.64.0.0/10` is shared CGNAT and `listen_multiaddrs` includes
+  every BOUND interface), now answered by Tailscale's `whois` LocalAPI with a
+  three-way verdict where **`Unavailable` must never read as yes** (#199); P2P
+  shards were announced *before* verification; `vec![0u8; len]` committed a
+  declared size before any payload arrived. Update lifecycle drains then `exec`s.
+  **Credits are self-attested and unenforced by design** — researched, written
+  up in FUTURE_WORK, NOT fixed.
+- **v0.3.42**: nodes set up before 2026-07-21 could never rejoin — a default
+  that lives only in `#[serde(default)]` never reaches a config the daemon
+  already wrote, and the wizard writes every field on "Start SwarmLLM" (#198).
+  **Empty was NOT always accidental** (the anchor and the bench cluster rely on
+  it), so the naive fix would have broken both.
+- **v0.3.41**: the dashboard works from another device. **`is_loopback()` means
+  "the last TCP hop began in this daemon's netns" and is wrong BOTH ways**
+  (#195) — a same-host reverse proxy passes it for a remote phone; a Tailscale
+  subnet router never does, because they **SNAT by default**.
+  `api::dashboard_trust::classify` is now the one decision point. Also: an async
+  fn runs to its first `await` before returning, so a memo from the return value
+  cannot break a cycle — that caused a **1266-request storm** (#197).
+- **v0.3.40**: a slow machine no longer stalls everyone else —
+  `prefill_chunk_tokens` bounded decode interruption in TOKENS not time (#191);
+  CPU 470s→49s, GPU 14.8s→1.3s. **The first version made GPUs WORSE** (fixed
+  per-call cost dominates, so shrinking raised apparent ms/token — a feedback
+  loop pinned at the floor); the pacer self-disables if a shrink did not help —
+  **do not remove that check**. `active_pipelines` is the COORDINATOR's map and
+  never holds peer-served work (#194) — use `state.serving_models`.
+- **v0.3.39**: `current_exe()` returns `"...(deleted)"` once the binary is
+  replaced, and replacing it IS updating — an updated-not-restarted node failed
+  EVERY inference while still advertising its shards (#188). Two "separate
+  crashes" were ONE defect (`split_models` keyed `(model,start,end)`, two
+  lookups, DashMap order picked, #187). New rule: **timeouts must bound what
+  actually varies** (#189, #190).
 
-**Three security fixes from an external audit of .42, and the update lifecycle.**
+### v0.3.15 – v0.3.38 (07-23→28) — pointers only; full detail in the round logs
 
-**Overlay trust was satisfiable by coincidence (gotcha #199).** `100.64.0.0/10`
-is shared RFC 6598 space, and `node_is_on_overlay` accepted any address of ours
-in it — but `listen_multiaddrs` is `swarm.listeners()` (every BOUND interface,
-since we bind `0.0.0.0`) ∪ external addrs, and `addr_is_remotely_reachable`
-deliberately keeps CGNAT. So a host on a cellular carrier / an ISP numbering a
-customer LAN / a coincidental VPN interface declared itself on a tailnet having
-never joined, and would hand its API key to any browser in that block. **The
-correct instinct was one function away**: `publicly_reachable` uses confirmed
-external addrs and NEVER a bound listener. Fix: ask `tailscaled` —
-`GET /localapi/v0/whois?addr=<ip>` over `/run/tailscale/tailscaled.sock`
-(`src/api/tailscale.rs`), which answers for BOTH sides at once. Three-way verdict
-`Member`/`NotAMember`/**`Unavailable`** — the third must never read as yes, since
-an unreadable socket is what a sandboxed service looks like. `classify()` is now
-async. Narrowed address test kept as fallback (Tailscale's own
-`fd7a:115c:a1e0::/48` ULA or a `tailscale*` interface — never shared v4 space).
-**Untested against a real tailnet** — no Tailscale on this machine.
+Read the named `memory/round_log_*.md` before re-deriving any of these.
 
-**P2P shards were announced before verification.** The HF path verified; the
-*untrusted* path did not. A corrupt/forged shard was recorded as held, announced
-and re-served until the ~5min scan re-hashed it. Now verified before announcing,
-with the quarantine+penalise policy CLAUDE.md already documented; new
-`TrustEvent::ShardVerificationFail` (-0.2, weighted with signature violation).
-
-**`vec![0u8; len]` committed the declared size before any payload arrived** — a
-5-byte header claiming 256 MiB cost that much per stream, free to the sender.
-Now grows in 1 MiB steps as bytes land.
-
-**`layer_range` bounds were checked but untested** — extracted to
-`layer_range_is_valid` with tests. Both transports funnel through the one
-dispatcher; keep it that way.
-
-**Update lifecycle**: apply now drains (`active_pipelines` AND `serving_models`,
-per #194) then `exec`s into the new binary, so it works under systemd and a bare
-terminal alike. Checking is decoupled from installing and ON by default —
-`UpdateMode` is `Option` precisely because a serde default cannot reach a config
-the daemon already wrote (#198 again). Managed installs (deb/rpm, hardened
-anchor) can never write their own binary under `ProtectSystem=strict`, so they
-are told to use their package manager rather than shown a button that fails.
-Anchor timer daily→hourly; releases now carry the CHANGELOG section.
-
-**Credits are self-attested and unenforced by design** — researched, NOT fixed,
-written up in `docs/FUTURE_WORK.md` with four approaches (challenge-response on
-random ranges is the cheapest; paying for *observed service* rather than claimed
-storage may sidestep proof-of-storage entirely) plus the free-Sybil-reset problem
-any enforcement would rest on.
-
-### v0.3.42-alpha (2026-07-28): pre-21-July nodes could never rejoin
-
-Found while updating the local test node for the .41 release — it came up with
-an empty peer list and nothing explaining why. **A default that lives only in
-`#[serde(default = "…")]` is never applied to a config the daemon already
-wrote, and the daemon writes every field** (gotcha #198). The built-in anchor
-landed 2026-07-21 (`aeedb35c`, v0.3.1); before that the default was `vec![]`.
-`PUT /api/admin/config` serialises the WHOLE `Config`, and **the setup wizard
-calls it on "Start SwarmLLM"** — so every user set up before that date has a
-literal `bootstrap_peers = []` on disk, which outranks the anchor forever. No
-bootstrap, no DHT route, no peers, no log line. Reads as "the update broke my
-networking".
-
-**Empty was NOT always accidental, which is what made the obvious fix wrong**:
-`deploy/anchor/config.toml` uses it ("the anchor IS the bootstrap — don't dial
-itself") and `examples/3node_sharded_setup.sh` uses it to keep the bench cluster
-off the public swarm, where a stray peer silently collapses the split being
-measured. IPFS is the precedent for keeping empty meaningful. So: empty → the
-built-in anchors, with `network.disable_default_bootstrap` to genuinely mean
-none, implied by `node.anchor_mode`, and set in both consumers.
-
-**Measurement trap worth remembering**: the first isolation test "failed" — an
-opt-out node found 5 peers — because four other nodes were running on the same
-host and PEX handed it the anchor ~10ms after the first loopback connection.
-`bootstrap_peers=0` in its own startup log was the tell that the config was
-right. Re-run alone before believing an isolation result.
-
-**Found, NOT fixed:** `/etc/swarmllm/default.toml` is never read — the systemd
-unit runs `swarmllm run` with no `--config` and the daemon loads
-`<data_dir>/config.toml`. The `.deb` ships a config in the conventional place
-that the daemon ignores (which is why package installs were not stranded).
-
-### v0.3.41-alpha (2026-07-28): the dashboard works from another device
-
-From a tester who could open his node's dashboard on his phone over Tailscale
-but whose setup wizard's "Start SwarmLLM" button did nothing. **Every symptom
-was one cause, and the reported one was the least of it**: `/admin` is
-auth-exempt at any origin, so the page rendered, but the key handout was gated
-on loopback — so every admin call 401'd, including the hardware probe, which is
-why the wizard also said "CPU only" on a machine with an RTX 3070.
-
-**`addr.ip().is_loopback()` does not mean what it reads as** (gotcha #195). It
-means "the last TCP hop began inside this daemon's netns", and it is wrong in
-BOTH directions — both reproduced. A same-host reverse proxy (plain `tailscale
-serve`) dials us over loopback and hands the key to a fully remote phone; a
-container publish or a Tailscale **subnet router** never satisfies it, *not even
-from the host's own localhost*, because subnet routers **SNAT by default**. That
-last point killed the obvious fix: the tester has a subnet route, so his
-container sees the Proxmox host's private address — **an allowlist of Tailscale's
-`100.64.0.0/10` would not have fixed the bug that motivated it.**
-
-`api::dashboard_trust::classify` is now the one decision point. Tailnet trust is
-default-on but only when THIS node holds an overlay address (the IPv4 half is
-shared CGNAT space ISPs also use); LAN is opt-in via a runtime atomic, because
-the user flips it precisely when they cannot reach the node to restart it.
-Untrusted origins are not a dead end — the page names **the address the daemon
-saw** (invisible behind NAT, and the one you'd need to allow) and takes a pasted
-key. **Threat model, stated plainly: on a trusted network, reachability of the
-API port is admin access.** The nonce only stops a non-browser local process
-that cannot read the served HTML — `/admin` is unauthenticated, so scraping a
-nonce and spending it is two requests (verified). A code comment claiming more
-than that was corrected.
-
-**The same hardcoded-loopback assumption was independently present in the WS
-Origin check**, so every remote dashboard silently lost live updates and fell
-back to polling. The property wanted is same-origin: `Origin` vs the request's
-own `Host`, never a fixed list.
-
-Two more, both found by loading the page rather than reading the diff: **six
-panels 401'd on EVERY dashboard load including loopback** (callers *sampled*
-whether the key exchange had started instead of ensuring it; `_restFetch`
-discards failures, so they just rendered nothing forever) — and the first fix
-for it caused a **1266-request storm**, because `loadApiKey` fetched via
-`authFetch` which now called `ensureApiKey`, re-entering while the memo was
-still null (gotcha #197: an async fn runs to its first `await` before it
-returns, so a memo from the return value cannot break a cycle; the bootstrap
-request is unauthenticated by definition and must not use `authFetch`).
-
-Also: **`#[derive(Default)]` ignores `#[serde(default = "...")]`** (gotcha #196),
-so the new default-on flag shipped off to exactly the fresh installs it was for,
-then wrote that `false` into the config it generated. Whole-tree audit found no
-other instance. And the README's `curl … /api/admin/api-key` has returned an
-error since the nonce landed in May.
-
-**Not fixed, flagged:** there is no `Host`-header validation anywhere, so DNS
-rebinding against loopback remains possible. Predates this work; hardening it
-can break legitimate reverse proxies, so it wants its own change.
-
-### v0.3.40-alpha (2026-07-28): a slow machine no longer stalls everyone else
-
-Three changes, all measured on real hardware (RTX 3070 + a CPU-only Proxmox
-container) rather than reasoned about. **Two of the three were found by running
-the thing; one of those was found by the soak, not by review.**
-
-**`prefill_chunk_tokens` bounded decode interruption in TOKENS, not time**
-(gotcha #191). Chunked prefill exists so a long admission cannot stall active
-decode slots, and the guarantee held exactly as written — the trap was the unit.
-128 prompt tokens is ~130ms on a GPU and 45–59s on a modest CPU, so a
-co-scheduled request advanced **one token per tick** for the whole of a long
-prefill. `inference/prefill_pacer.rs` now sizes the quantum from measured wall
-time (`inference.prefill_target_ms`, default 200ms); `prefill_chunk_tokens` is
-demoted to a ceiling. Measured, same prompt and machine:
-
-| | co-scheduled | long prompt |
-|---|---|---|
-| CPU | 470.5s → **48.9s** | 490.9s → 192.6s |
-| GPU | 14.8s → **1.3s** | 89.3s → 63.7s |
-
-**The GPU number is the interesting one — the first version made GPUs WORSE.**
-Cost there is dominated by fixed per-call overhead, not per-token work: 128
-tokens/tick ≈ 130ms but 8 tokens/tick ≈ 790ms. Dividing a near-constant tick
-time by fewer tokens *raises* apparent ms/token, which shrinks the chunk further
-— a feedback loop pointing the wrong way, pinned at the floor. The pacer now
-checks whether a shrink actually made the tick cheaper and disables itself
-permanently if not. **Do not remove that check**; the CPU numbers alone look
-like a clean win.
-
-**Progress + ETA for anything pre-first-token** — `WorkerMsg::Progress` →
-forwarder → `RequestTrace`, surfaced on the dashboard, `/api/admin/performance`
-`active`, SSE comment frames (OpenAI *and* Anthropic), and a DIAG line. Two
-gotchas fell out: API ids are `swarm-<hex>` so `Uuid::parse_str` fails on EVERY
-request — two call sites each falling back to a random uuid could never agree,
-hence `crate::api::request_uuid` as the ONE deterministic derivation; and
-`elapsed_ms` was computed at write time, so a reader between updates saw a
-frozen number (six consecutive polls at 0.0s).
-
-**A node that ONLY serves peers had its worker killed mid-answer** — found by
-the soak. `active_pipelines` is the *coordinator's* map and never contains
-peer-served work, so the idle-VRAM guard believed a pure-server node was idle,
-and v0.3.39's hard-unload ceiling fired while it was answering. New
-`state.serving_models` (`ServingState` + RAII `ServingGuard`) is the real signal
-the "regional demand" proxy was approximating. **Anything asking "is this model
-in use?" MUST consult it as well as `active_pipelines`.**
-
-**Analysed, NOT fixed — the routing ratchet** (`docs/FUTURE_WORK.md`). Slower
-nodes go dark and cannot recover: the load compensator is ~3 500 concurrent
-requests too weak to span a GPU/CPU gap, and `observed_latency_ms_per_layer` is
-only recorded when we route, with no decay — so an unrouted node is never
-re-measured and an unmeasured one is priced at `UNKNOWN_COMPUTE_MS`. Replication
-does not fix it. Cheapest remedy is EMA decay toward the prior; ε-greedy
-exploration is the principled one. Measure first.
-
-### v0.3.39-alpha (2026-07-28): updating a node left it unable to answer
-
-Seven fixes; full detail in `round_log_overnight_0728.md`. **The theme is that
-every one was found by running something, and three of them were only reachable
-because the previous fix removed the ceiling hiding them.**
-
-**Biggest user impact — `current_exe()` returns `"...(deleted)"` once the binary
-is replaced, and replacing the binary IS updating** (rename / `dpkg` / `mv`; only
-`cp` escapes, reusing the inode, which is why manual testing never showed it).
-Three consumers: worker spawning (**every inference on the node fails**) and both
-halves of the self-updater (would have written `swarmllm (deleted).tmp` and left
-the real binary alone — a silent no-op update). Severity is in the combination:
-the node kept advertising its shards and stayed in `connected_node_ids`, so the
-swarm went on routing work to a node that could do none. Gotcha **#188**.
-
-**Two "separate crashes" were one defect.** `split_models` is keyed
-`(model, layer_start, layer_end)`, so a node can hold a whole-model entry AND a
-tail entry it serves to peers. `has_complete_split_model` asked "is ANY entry
-complete?" to pick the local fast path, then `get_split_model_meta` took the
-**first entry matching the model id** for the layer range — two lookups, and
-`DashMap` order picks. Non-first → no embedding table → prompt token ids hit
-block 21's rms-norm; non-last → no output head → sampler gets hidden states. The
-range lookup now requires `is_complete`, so decision and data cannot diverge.
-Reproduced deterministically in a unit test, both insertion orders. Gotcha **#187**.
-
-**Timeouts: bound what actually varies** — now a rule in
-`.claude/rules/architecture.md`. A blanket 300s `TimeoutLayer` capped the
-prompt-scaled 600s first-token budget shipped hours earlier, its comment
-asserting two things that were both false (**#189**); `UPDATE_DOWNLOAD_TIMEOUT`
-demanded a sustained ~3.1 MB/s for the ~933MB GPU build, so a slower line could
-**never** update (**#190**). Fix is an inactivity timeout, not a bigger number.
-**The risk in the `TimeoutLayer` fix is layer order** — generation routes must
-merge BEFORE the auth layer or they answer without a key; existing auth tests
-only covered `/v1/models`, which was not one of the moved routes. Pinned by
-`generation_routes_still_require_a_key`.
-
-**Retry needed both halves**: a peer's `ServiceUnavailable` is retryable (gated
-on the trace showing a remote segment actually ran, since our own worker failing
-reads identically) AND that peer is blacklisted for the request — without the
-blacklist the retry re-picked the same broken peer. The v0.3.34 lesson recurring.
-
-**A clock stepping backwards discarded every saved conversation.**
-`SystemTime::duration_since` errs when its argument is in the FUTURE, and the
-fallback was `Duration::MAX` — treating the freshest possible record as
-infinitely old. Save-at-shutdown/restore-at-startup straddles exactly when NTP
-corrects a clock, so a **1ms** step silently dropped every multi-turn session.
-Found as a test that failed once under load and passed in isolation — worth
-chasing, not re-running. Gotcha **#192**.
-
-**Found reading the soak log, NOT fixed** (in `docs/FUTURE_WORK.md`):
-`prefill_chunk_tokens` bounds decode interruption in **tokens, not time**. 128
-tokens is milliseconds on a GPU and **45–59s** on a modest CPU node, so a
-co-scheduled request decodes one token per tick — measured 8 tokens in 5.5min
-beside a 3 968-token prefill, which reads as a hang. Newly reachable *because*
-#189 removed the 300s ceiling that used to kill such prefills. Gotcha **#191**.
-
-### v0.3.30 – v0.3.38 (07-26→28) — one line each; detail in the round logs
-
-- **v0.3.38**: idle VRAM was never actually reclaimed — two workers resident on
-  an 8GB card **2h16 past the last request** with `idle_unload_secs = 300`.
-  `try_idle_vram_unload`'s second gate refuses to unload while regional demand
-  >= `IDLE_DEMAND_EMA_THRESHOLD = 0.1` and the reported models sat *just* over
-  it, so the reprieve applied indefinitely. **The gate exists because
-  `record_request` is called ONLY from the outbound router path** — serving a
-  peer never updates it, so without the gate a node evicts models it is actively
-  serving. Reprieve now expires at 12x the window. **Better fix, not done**:
-  track last-served-at and drop the demand proxy (needs a per-model timestamp).
-  Gotcha from its own test: `idle_unload_secs as i64` wraps a huge window
-  NEGATIVE, inverting the check — use `try_from`.
-
-- **v0.3.37**: three shipped bugs from an external report — `swarmllm chat
-  --model X` panicked (clap compares INNER value types of same-named args;
-  renaming the id does NOT fix it, gotcha **#183**); a wrong-sized shard was
-  registered as HELD because `daemon/startup.rs` checks only `exists()`, so
-  nothing re-downloaded it (**#184**); requests outlived dead clients (TCP
-  keepalive, ~90s). **Privacy**: on by default where the node holds both ends;
-  `encrypted_pipeline_for` is the ONE answer; one-step enable via button +
-  `swarmllm privacy <model>`. **"End-to-end encrypted" named two different
-  guarantees** — wire vs compute boundary (**#185**). **Ragged batching measured
-  on GPU: NOT worth building** — 4x work, 23% throughput.
-
-- **v0.3.36**: the dashboard rate-limited ITSELF on load — `ws-ticket` shared a
-  5/min bucket (keyed `(ip, BucketKind)`) with cloud-provider probes, so the
-  WebSocket got refused and live updates died; probes fired once per provider
-  card. Separate buckets + coalesced probes + skip-before-auth. Gotcha **#182** —
-  found by loading the page in a real browser, which no test does. **The auth
-  guard's first version was wrong**: it read `_apiKeyFull` synchronously, but the
-  key arrives asynchronously via a bootstrap nonce, so it skipped legitimate
-  calls on every NORMAL load. `authFetch` awaits `_apiKeyPromise`; any new
-  credential gate must await it too, not sample it.
-
-- **v0.3.35**: six fixes, all traced not diffed — retry killed BOTH attempts and
-  evicted a healthy worker (`responses` keyed by `request_id`, which is not unique
-  across *attempts*, gotcha #180); `FIRST_TOKEN_TIMEOUT` was flat 120s sized for
-  *generation* and ignored *prefill*, so long prompts could not succeed on modest
-  nodes at all (gotcha #181, now sized by the real tokenizer since a chars/token
-  guess under-budgets CJK ~2.5x); two LAN peers could mutually forget each other
-  permanently (re-dial fired only for mid-pipeline or never-identified peers);
-  shard downloads stream instead of buffering a range in RAM; delete/prune guards
-  protected only the FIRST shard of a segment (`shards_spanned_by_segment` is now
-  the one answer); and the scheduler priced routes on wrong signals — unmeasured
-  candidates cost **zero** so cold-node routing was decided by vertex iteration
-  order, and the local node was never measured at all. **`parallax_partial_ranges`
-  ships OFF**: a node holding every shard is otherwise the only representable
-  route, but the split measured slower (~12.0s vs ~10.2s). Remaining gap and the
-  two invalid-A/B traps are in `docs/FUTURE_WORK.md`.
-
-- **v0.3.34**: connection selection is now *fewest un-answered, tie-break newest*
-  (`pending_outbound_responses` was a signal the crate already tracked). And
-  **retraction alone is futile — the blacklist is REQUIRED**: the DHT re-advertises
-  a retracted holder, so a retry re-learns the claim and picks the same dead peer.
-- **v0.3.33**: **read gotcha #179 before touching connection selection.** A relay
-  carrying an INBOUND connection is a bare `/p2p/<peer>` with **no transport
-  component at all**, so `connection_is_relayed` counted it as direct and — being
-  newest — it won every send, silently dropping them. Affects any NAT'd user;
-  31s→8.6s. Diagnostic worth reusing: `grep "connection established peer_id=<peer>"
-  node.log | grep -oE "remote_addr=[^ ]+" | sort | uniq -c`.
-- **v0.3.32**: first request after a restart failed outright — holder claims come
-  from gossip and a full re-announce is ~40min, so a fresh node knew no holders
-  while the DHT query was fire-and-forget. `assemble_awaiting_dht` grants a 1.5s
-  grace, gated so ONLY that failure waits.
-- **v0.3.31**: stale shard-holder claims self-correct. **Scoping is the part not
-  to undo** — a segment spans several shards and `segment.shard_id` is only the
-  first, so retraction must cover every shard overlapping the failed *span*
-  (v0.3.35 generalised this into `shards_spanned_by_segment`).
-- **v0.3.30**: one `RequestTrace` (`inference/trace.rs`) feeds every surface —
-  DIAG line, `x-swarm-*` + `Server-Timing` headers, admin endpoints, Prometheus,
-  hourly redb rollups. **The finding was that nearly all of it was already
-  measured and thrown away.** TTFT is stamped by the token CHANNEL
-  (`StreamingTokenTx`) because tokens leave from seven sites. Three decisions not
-  to undo: Prometheus carries `(route, outcome)` ONLY; headers flush before the
-  body so SSE cannot carry TTFT; **"tok/s per node per shard" is NOT measurable
-  in a pipeline** — use each segment's share of inter-token latency. Also fixed:
-  weight-tied models were unservable from a node lacking shard 0 (gotcha #178).
-
-### Recent releases (one line each; full detail in CHANGELOG.md + `memory/round_log_*.md`)
-
-**This week was dominated by one recurring defect — a shared invariant
-implemented per-path — documented as a rule in `.claude/rules/architecture.md`.
-Read that before touching any request/response path.**
-
-- **v0.3.27** (07-26): `provider:model` prefix stripped at the OpenAI proxy
-  boundary; `PUT /api/admin/providers` no longer a silent no-op on a wrong
-  field name; `Quantization::parse` + `trailing_tag` handle hyphenated
-  multi-part tags. All three needed follow-up in .28 — see above.
-- **v0.3.29** (07-26): tool calls carried schema-shaped arguments that parsed
-  and validated while being wrong (#174); Anthropic streaming emitted nested
-  rather than sequential content blocks (#175); MCP ignored the client's protocol
-  revision; a taken port printed `Failed to listen on QUIC: ` with nothing after
-  the colon (#177). First-run UX in 21 locales. **`3node_sharded_setup.sh`
-  inference is EXPECTED to fail on one multi-interface host** (#176) — confirmed
-  identical on released .28. Detail: `round_log_v0329_livetest.md`.
-- **v0.3.28** (07-26): **read gotcha #169 before touching reply text.** The
-  control-token leak that .22/.24/.25/.26 chased through the output *scrubber*
-  was a **prompt** bug — `eval_block` missed `{% set loop_messages = messages %}`
-  so every Llama-3 model was prompted in ChatML and replied in ChatML. The `grep
-  "chat template failed" node.log` WARN had fired on every request for releases.
-  The fallback chain was also unreachable on 6 of 7 paths (`build_prompt`
-  hardcoded `model_name: None`, #171). **Meta-fix**:
-  `inference::finalize_reply_text` owns the ordered scrub→truncate→trim sequence
-  for all three text sources; escalation ladder in
-  `.claude/rules/architecture.md` (#173). Mistral's template still can't be
-  *rendered* and degrades via fallback; `minijinja` proposed in FUTURE_WORK.
-- **v0.3.22-v0.3.26** (07-25→26): control-token scrubbing at the THREE text
-  sources, strip BEFORE stop-truncation (#167-168); template stop-markers on the
-  non-streaming split path; `include_usage` on `split_stream_response`; Responses
-  API tool cap; local tool calling (`src/api/tool_parse.rs`, 4 formats, all four
-  streaming paths); recent-failures diagnostics ring. Detail:
-  `round_log_overnight_0726.md`.
-- **v0.3.23** (07-25): **the big networking fix** — we recorded an INBOUND
-  connection's ephemeral source port as a dialable address and published it, so
-  peers learned dead addresses for us. One bug, four symptoms. Gotcha #165.
-  Poisoned entries persist in caches — nodes must RESTART, not just swap
-  binaries.
-- **v0.3.15-v0.3.21** (07-23→25): the networking release line — app-level
-  inference + tensor relay across NAT, additive protocol/feature handshake,
-  multi-relay + DHT discovery, auto-updater cap 500MB→2GB, deterministic LAN
-  dialer, WSL2 mirrored-mode detection, Docker bridge filtering. Audit found
-  `max_established_per_peer = 1` was structurally disabling DCUtR (#163);
-  `max_circuits` 16→128. **Hole punching verified live 07-25.** Detail:
-  `round_log_networking_audit.md`, `round_log_networking_plan.md`,
-  `round_log_v0315_livetest.md`.
+- **v0.3.38**: idle VRAM was never reclaimed — the demand-EMA gate's reprieve
+  applied indefinitely. The gate exists because `record_request` is called ONLY
+  from the outbound router path, so serving a peer never updates it.
+- **v0.3.37**: `swarmllm chat --model X` panicked (clap compares INNER value
+  types of same-named args, #183); a wrong-sized shard was registered as HELD
+  because startup checks only `exists()` (#184). **Ragged batching measured on
+  GPU: NOT worth building** — 4x work, 23% throughput.
+- **v0.3.36**: the dashboard rate-limited ITSELF on load (#182) — found by
+  loading the page in a real browser, which no test does.
+- **v0.3.35**: six fixes, all traced not diffed — retry killed BOTH attempts
+  (#180); `FIRST_TOKEN_TIMEOUT` ignored prefill (#181).
+  **`parallax_partial_ranges` ships OFF** (~12.0s vs ~10.2s).
+- **v0.3.33/34**: **read gotcha #179 before touching connection selection.** A
+  relay carrying an INBOUND connection is a bare `/p2p/<peer>` with no transport
+  component, so it counted as direct and won every send. And **retraction alone
+  is futile — the blacklist is REQUIRED**, since the DHT re-advertises a
+  retracted holder.
+- **v0.3.30-32**: one `RequestTrace` feeds every surface; stale shard-holder
+  claims self-correct; a fresh node gets a 1.5s DHT grace. **"tok/s per node per
+  shard" is NOT measurable in a pipeline** — use each segment's share of
+  inter-token latency.
+- **v0.3.22-29**: the control-token leak chased across four releases was a
+  **prompt** bug, not an output-scrubber bug (#169) — `grep "chat template
+  failed" node.log` had been firing on every request for releases.
+  `inference::finalize_reply_text` now owns the ordered scrub→truncate→trim.
+- **v0.3.15-21**: the networking line — NAT relay, additive protocol/feature
+  handshake, multi-relay + DHT discovery. **Hole punching verified live 07-25.**
+  We published an inbound connection's ephemeral source port as dialable (#165);
+  poisoned caches need a node RESTART, not just a new binary.
 
 ### Prior rounds (pre-v0.3.15)
 
-- **R143-R150** (07-20→23): NAT/internet reachability (UPnP default-on, AutoNAT v1→v2, `--anchor` + `deploy/anchor/`), request cancellation, `worker_error_is_fatal`, `gpu_layers` plumbing, per-shard download backoff, GPU coverage (`CUDA_COMPUTE_CAP` 80→75). Gotchas #150-160.
-- **R136-R142** (05→07-19): SWARM-SPEC v0.1 acceleration cascade (L0 Q8_0, L1 n-gram, L2 hedge, L3 prefetch); `swarmpool://` invite codes v2; cross-pool gossip/routing; autonomous 8h sweep.
-- **Pre-R136**: the 20 build phases (P2P/libp2p, split + distributed inference, credits, pools, OpenAI+Anthropic+MCP API, frontend, VLM, Claude Code integration).
+- **R143-R150** (07-20→23): NAT/internet reachability (UPnP default-on, AutoNAT
+  v1→v2, `--anchor`), request cancellation, `gpu_layers` plumbing. Gotchas #150-160.
+- **R136-R142**: SWARM-SPEC v0.1 cascade (L0 Q8_0, L1 n-gram, L2 hedge, L3
+  prefetch); `swarmpool://` invites v2; cross-pool gossip/routing.
+- **Pre-R136**: the 20 build phases. `docs/ARCHITECTURE.md` § phase history.
 
-Full detail for any round: `memory/round_log_*.md` + `docs/ARCHITECTURE.md` § phase history.
 
 ## Public-Facing Repo (2026-07-22)
 
