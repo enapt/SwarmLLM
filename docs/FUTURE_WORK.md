@@ -4152,3 +4152,42 @@ scrub/truncate/trim sequence for all three text sources). Options, cheapest
 first: emit a WARN with the pre-truncation text so it is diagnosable from logs;
 count it in the trace/Prometheus outcome; or fail the request so retry-capable
 clients re-route. The first is worth doing regardless of the others.
+
+## Peer-gossiped versions could shorten the update-detection window
+
+**Status**: not built. Requested during the v0.3.44 update-lifecycle work
+("nodes report their version, so this could trigger or let other nodes to update
+too") and only half-delivered — the reporting exists, the triggering does not.
+
+**What exists today**: `NodeCapability.version` is gossiped by every node and is
+read for display only (`api/identity.rs`, `api/admin.rs`, the dashboard peer
+list). The *sole* trigger for an update check is `UpdateChecker`'s periodic
+GitHub poll (`ops.check_interval_hours`, default 1). A node that starts up just
+after its window, or whose connection to GitHub is unreliable, stays unaware of
+a release for up to an hour even while connected to peers already running it —
+observed directly on 2026-07-29, with the anchor on 0.3.47 and two connected
+nodes still on 0.3.46 with no mechanism to notice.
+
+**The constraint that shapes the design**: a peer's advertised version is
+**self-attested**, exactly like credits. Nothing proves a node runs what it
+claims. So the peer signal must never be load-bearing:
+
+- A newer gossiped version may only **shorten the poll interval** — bring the
+  next GitHub check forward. It must never select, name, or fetch an artifact.
+  GitHub's signed release stays the only source of what gets installed, and the
+  existing SHA256 verification stays the only thing that decides it is genuine.
+- Without that rule, announcing `9.9.9` is a cheap way to make every node in the
+  swarm hit the update path at once — a stampede that costs the attacker one
+  gossip message.
+- Require corroboration before acting: N distinct peers advertising the same
+  higher version, not one. A single node's claim is worth nothing.
+- **Jitter the triggered check.** The motivating case is every node seeing the
+  anchor jump simultaneously, which is precisely a thundering herd. The periodic
+  poll already jitters; a triggered one needs it more, not less.
+- Ignore versions that are not plausibly adjacent to ours (a jump of several
+  minor versions is more likely a lie or a stale field than a real release).
+
+**Sequencing**: verify the GitHub path works unattended first. A second trigger
+for a mechanism that does not fire on its own adds a failure mode without fixing
+the underlying one. See also the self-attested-credits entry — the trust
+question is identical and a solution to one likely informs the other.
