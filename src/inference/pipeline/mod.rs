@@ -755,6 +755,41 @@ mod tests {
         }
     }
 
+    /// `is_shard_in_vram`'s legacy fallback matched with `contains`, so a node
+    /// with "Llama 3.2" resident reported every `llama-3.2-*` id as being in
+    /// VRAM — other quantisations, other parameter counts, any id sharing the
+    /// prefix. It now shares the dispatch path's exact rule.
+    #[tokio::test]
+    async fn shard_in_vram_does_not_substring_match_the_loaded_model() {
+        let state = make_test_state();
+        *state.loaded_model_info.write().await = Some(crate::daemon::state::LoadedModelInfo {
+            name: "Llama 3.2".into(),
+            size_bytes: 0,
+            eos_tokens: vec![],
+            chat_template: None,
+            bos_token: String::new(),
+            eos_token: String::new(),
+        });
+        state
+            .model_loaded
+            .store(true, std::sync::atomic::Ordering::Release);
+
+        // Nothing is registered and no split segment is loaded, so the legacy
+        // fallback is the only thing that can answer here.
+        for other in [
+            "llama-3.2-3b-instruct-q4-k-m",
+            "llama-3.2-1b-instruct-q8-0",
+            "llama-3.2-90b-vision",
+        ] {
+            assert!(
+                !state.is_shard_in_vram(&ModelId(other.into()), 0),
+                "{other} shares a prefix with the resident model but is not it"
+            );
+        }
+        // The resident model itself still reports correctly, by slug.
+        assert!(state.is_shard_in_vram(&ModelId("llama-3.2".into()), 0));
+    }
+
     /// The flag can be true while the cached info is absent (unload clears the
     /// info under a separate lock). Say no rather than guessing.
     #[tokio::test]

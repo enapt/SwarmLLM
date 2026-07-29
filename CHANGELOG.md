@@ -19,6 +19,12 @@ All notable changes to SwarmLLM are documented here.
   Nodes that run on downloaded pieces rather than whole files were never
   affected.
 
+- **The dashboard claimed models were loaded in graphics memory when they were
+  not.** A node with, say, "Llama 3.2" loaded marked every model whose name
+  began the same way — other sizes, other quality settings — as being in
+  graphics memory too, because the names were compared by prefix rather than
+  matched properly. The badge now reflects what is actually loaded.
+
 - **Some models ran at a fraction of their speed on a GPU, with nothing to
   say so.** Models that advertise a very large maximum conversation length —
   Llama 3.2, Phi-3.5 and most other recent releases advertise 131,072 words'

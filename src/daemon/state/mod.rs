@@ -1533,16 +1533,34 @@ impl SharedState {
             return false;
         }
         let info = self.loaded_model_info.read().await;
-        let Some(loaded) = info.as_ref() else {
-            return false;
-        };
-        if model_id.0 == loaded.name || model_id.0 == crate::types::slugify_model_name(&loaded.name)
+        info.as_ref()
+            .is_some_and(|loaded| self.model_id_names(model_id, &loaded.name))
+    }
+
+    /// Does `model_id` name the model whose GGUF display name is `loaded_name`?
+    ///
+    /// The one rule for "is this identifier that model", shared by
+    /// [`Self::local_executor_serves`] (dispatch) and [`Self::is_shard_in_vram`]
+    /// (reporting). The three accepted spellings are exactly what
+    /// `resolve_model_for_inference` can produce: the display name, its slug,
+    /// or a registry id whose manifest carries that same display name.
+    ///
+    /// **Matching is exact, never a substring.** `is_shard_in_vram` used to ask
+    /// `model_id.0.contains(slug)`, so a node with "Llama 3.2" resident
+    /// reported every `llama-3.2-*` variant as being in VRAM — different
+    /// quantisations, different parameter counts, any id that merely started
+    /// the same way. The registry clause covers the case a substring test was
+    /// really reaching for (an id carrying a quant suffix the display name
+    /// lacks) without matching unrelated models, because it requires the
+    /// manifest's OWN name to equal the loaded one.
+    fn model_id_names(&self, model_id: &crate::types::ModelId, loaded_name: &str) -> bool {
+        if model_id.0 == loaded_name || model_id.0 == crate::types::slugify_model_name(loaded_name)
         {
             return true;
         }
         self.model_registry
             .get_manifest(model_id)
-            .is_some_and(|m| m.name == loaded.name)
+            .is_some_and(|m| m.name == loaded_name)
     }
 
     /// Whether any holder in `holders` can actually serve a shard *right now* —
@@ -1588,17 +1606,18 @@ impl SharedState {
                         }
                     }
                 }
-                // Legacy fallback: check loaded_model_info for --model flag loaded models
+                // Legacy fallback: a model loaded whole via `--model`. Uses the
+                // shared identity rule — `try_read` rather than `.await`
+                // because this is a sync reporting path; a write lock in
+                // flight means a load/unload is happening, and "not in VRAM"
+                // is the honest answer during that window.
                 self.model_loaded.load(std::sync::atomic::Ordering::Relaxed)
                     && self
                         .loaded_model_info
                         .try_read()
                         .map(|info| {
-                            info.as_ref().is_some_and(|i| {
-                                model_id
-                                    .0
-                                    .contains(&i.name.to_lowercase().replace([' ', '_'], "-"))
-                            })
+                            info.as_ref()
+                                .is_some_and(|i| self.model_id_names(model_id, &i.name))
                         })
                         .unwrap_or(false)
             }
