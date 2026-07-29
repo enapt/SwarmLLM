@@ -5,7 +5,7 @@
 //! handle the common patterns used by popular model families:
 //! ChatML, Llama, Mistral, Qwen, Gemma, Phi, TinyLlama, etc.
 
-use crate::types::ChatMessage;
+use crate::types::{ChatMessage, Role};
 
 mod eval;
 mod fallbacks;
@@ -207,7 +207,70 @@ fn fallback_by_model_name(
     None
 }
 
+/// System message supplied when the caller sends none and the model's template
+/// shows it expects one.
+pub const DEFAULT_SYSTEM_PROMPT: &str = "You are a helpful assistant.";
+
+/// Whether this template has a system-role branch it will actually honour.
+///
+/// Two families must be told apart:
+///
+/// - Zephyr/TinyLlama, Phi and Llama-3 branch on `role == 'system'` and emit a
+///   distinct marker for it. These models are trained with a system turn and
+///   behave badly without one.
+/// - Gemma and Mistral do NOT support a system role and say so with
+///   `raise_exception`. Our evaluator deliberately treats `raise_exception` as
+///   a silent skip, so injecting a system message for them does not fail
+///   loudly — it renders a turn the model was never trained on (Gemma would
+///   emit `<start_of_turn>system`). The presence of `raise_exception` is
+///   therefore a hard veto.
+///
+/// Absent positive evidence, this returns false: not injecting is always safe,
+/// injecting into the wrong template is not.
+fn template_expects_system(template: &str) -> bool {
+    if template.contains("raise_exception") {
+        return false;
+    }
+    template.contains("'system'") || template.contains("\"system\"")
+}
+
+/// Ensure a usable system turn, returning an owned list only when one is needed.
+///
+/// A blank system message is treated as absent — it renders an empty system
+/// turn, which for TinyLlama reproduces the exact failure this guards against
+/// (verified: an empty system message still yields a blank reply).
+fn with_system_message(messages: &[ChatMessage]) -> Option<Vec<ChatMessage>> {
+    if messages.is_empty() {
+        return None;
+    }
+    match messages.iter().position(|m| matches!(m.role, Role::System)) {
+        // Caller supplied a real system message — never override it.
+        Some(i) if !messages[i].content.trim().is_empty() => None,
+        Some(i) => {
+            let mut v = messages.to_vec();
+            v[i].content = DEFAULT_SYSTEM_PROMPT.to_string();
+            Some(v)
+        }
+        None => {
+            let mut v = Vec::with_capacity(messages.len() + 1);
+            v.push(ChatMessage {
+                role: Role::System,
+                content: DEFAULT_SYSTEM_PROMPT.to_string(),
+                images: Vec::new(),
+            });
+            v.extend_from_slice(messages);
+            Some(v)
+        }
+    }
+}
+
 /// Build prompt with optional model name hint for fallback template selection.
+///
+/// When the model's template shows it expects a system turn and the caller sent
+/// none, a neutral default is supplied. TinyLlama-1.1B-Chat answers a bare user
+/// question with nothing but a `<|user|>` turn marker — stop-truncation strips
+/// it and the user sees a blank reply reported as a successful completion. The
+/// same question with a system message is answered normally.
 pub fn build_prompt_with_model(
     messages: &[ChatMessage],
     template: Option<&str>,
@@ -215,6 +278,11 @@ pub fn build_prompt_with_model(
     eos_token: &str,
     model_name: Option<&str>,
 ) -> String {
+    let injected = template
+        .filter(|t| template_expects_system(t))
+        .and_then(|_| with_system_message(messages));
+    let messages: &[ChatMessage] = injected.as_deref().unwrap_or(messages);
+
     if let Some(tmpl) = template {
         if let Some(result) = apply_chat_template(tmpl, messages, bos_token, eos_token, true) {
             tracing::debug!(template_matched = true, "DIAG: chat template applied");

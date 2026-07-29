@@ -4132,39 +4132,23 @@ When starting a new feature, grep this file for keywords related to the area you
 
 When closing a sweep finding as `deferred`, add an entry here so future sweeps don't re-flag it. The entry must include enough context that the closure isn't a black hole.
 
-## TinyLlama returns an empty reply ~2 times in 3 (open, reproducible)
+## An empty completion is still reported as success
 
-**Status**: root cause NOT found. Reproducible in ~6s, so this is cheap to pick up.
+**Context**: TinyLlama returning a blank reply to every bare question was
+root-caused and fixed (it needs a populated system turn; see the chat-template
+injection in `build_prompt_with_model`). But the *presentation* of that failure
+is a separate, unfixed problem worth addressing on its own.
 
-**Symptom**: `tinyllama-1.1b-chat-v1.0.q4-k-m` answers a plain question with an
-empty string. The API reports it as a *successful* completion —
-`finish_reason: "stop"`, `completion_tokens: 4`, content `" "`.
+When stop-truncation removes everything the model generated, the API returns
+`content: " "` with `finish_reason: "stop"` and HTTP 200 — indistinguishable
+from a successful answer. A user sees a blank reply and no error; a programmatic
+client sees a successful completion. Every diagnosis of the TinyLlama bug had to
+start by noticing the blankness manually, because nothing in the response, the
+metrics, or the logs flagged it.
 
-**What is established** (all verified by running, not by reading):
-
-- It is **deterministic**, not sampling variance: `temperature=0` reproduces it
-  3/3. Under default sampling it is ~4/6, because sampling sometimes deviates
-  from the greedy path and then the model answers normally to the 96-token cap.
-  The bimodality (always exactly 4 tokens or exactly the cap) is the tell.
-- The raw streamed deltas are `[' <', '|', 'user', '|']` — the model opens a new
-  **user** turn instead of answering. `<|user|>` is a template stop string, so
-  stop-truncation strips it and leaves `" "`.
-- The prompt is **correct**. The rendered value is
-  `"<|user|>\nHello</s>\n<|assistant|>\n"`, which matches HuggingFace exactly;
-  `add_generation_prompt=true` is passed; `trim_blocks`/`lstrip_blocks` match
-  HF's defaults; special tokens (`</s>`) are split before encoding; and
-  `grep "chat template failed"` reports zero occurrences.
-- It is **not** the missing-BOS defect fixed alongside this entry. That fix is
-  live (`prompt_tokens` 27→28) and the symptom is unchanged.
-
-**Where to look next**: the model emits a turn marker immediately, which usually
-means the prefill state differs from what the prompt text implies — candidates
-are the KV-cache/prefix-cache path, the `<|assistant|>` trailing-newline
-handling at tokenization, or Q4_K_M quantisation damage specific to this build.
-Compare against `llama.cpp` running the same GGUF with the same prompt; if
-llama.cpp answers correctly, the fault is ours and the token id sequence at
-prefill is the thing to diff.
-
-**Independent of root cause**, an empty post-truncation reply should arguably
-never be returned as a successful completion — a user sees a blank answer with
-no error. Guarding that at the choke point is worth doing regardless.
+**Suggested**: treat a post-truncation empty completion as a failed generation
+at the choke point (`inference::finalize_reply_text` already owns the ordered
+scrub/truncate/trim sequence for all three text sources). Options, cheapest
+first: emit a WARN with the pre-truncation text so it is diagnosable from logs;
+count it in the trace/Prometheus outcome; or fail the request so retry-capable
+clients re-route. The first is worth doing regardless of the others.

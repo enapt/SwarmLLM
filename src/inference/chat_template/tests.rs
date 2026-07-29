@@ -844,3 +844,79 @@ fn real_mistral_template_failure_degrades_to_mistral_not_chatml() {
         "must not fall through to ChatML"
     );
 }
+
+// ── Default system message injection ──
+
+fn bare_user() -> Vec<ChatMessage> {
+    vec![ChatMessage {
+        role: Role::User,
+        content: "Hi".to_string(),
+        images: vec![],
+    }]
+}
+
+const TINYLLAMA_TMPL: &str = "{% for message in messages %}\n{% if message['role'] == 'user' %}\n{{ '<|user|>\n' + message['content'] + eos_token }}\n{% elif message['role'] == 'system' %}\n{{ '<|system|>\n' + message['content'] + eos_token }}\n{% endif %}\n{% if loop.last and add_generation_prompt %}\n{{ '<|assistant|>' }}\n{% endif %}\n{% endfor %}";
+
+/// TinyLlama answers a bare user question with nothing but a `<|user|>` turn
+/// marker; the same question with a system message is answered normally.
+#[test]
+fn system_message_injected_for_zephyr_template() {
+    let out = build_prompt_with_model(&bare_user(), Some(TINYLLAMA_TMPL), "<s>", "</s>", None);
+    assert!(
+        out.contains("<|system|>"),
+        "expected an injected system turn, got: {out:?}"
+    );
+}
+
+/// Gemma and Mistral declare no system role via `raise_exception`. Our
+/// evaluator treats that as a silent skip, so injecting would quietly render a
+/// turn the model was never trained on rather than failing loudly.
+#[test]
+fn system_message_never_injected_when_template_raises() {
+    let gemma = "{% if messages[0]['role'] == 'system' %}{{ raise_exception('System role not supported') }}{% endif %}{% for message in messages %}{{ '<start_of_turn>' + message['role'] + '\n' + message['content'] + '<end_of_turn>\n' }}{% endfor %}";
+    let out = build_prompt_with_model(&bare_user(), Some(gemma), "<bos>", "<eos>", None);
+    assert!(
+        !out.contains("system"),
+        "must not inject into a template that raises on system: {out:?}"
+    );
+}
+
+/// A caller-supplied system message must never be overridden.
+#[test]
+fn caller_system_message_is_preserved() {
+    let msgs = vec![
+        ChatMessage {
+            role: Role::System,
+            content: "You are a pirate.".to_string(),
+            images: vec![],
+        },
+        ChatMessage {
+            role: Role::User,
+            content: "Hi".to_string(),
+            images: vec![],
+        },
+    ];
+    let out = build_prompt_with_model(&msgs, Some(TINYLLAMA_TMPL), "<s>", "</s>", None);
+    assert!(out.contains("You are a pirate."), "got: {out:?}");
+    assert!(!out.contains(DEFAULT_SYSTEM_PROMPT), "got: {out:?}");
+}
+
+/// A blank system message renders an empty system turn, which reproduces the
+/// original failure — treat it as absent.
+#[test]
+fn blank_system_message_is_replaced() {
+    let msgs = vec![
+        ChatMessage {
+            role: Role::System,
+            content: "   ".to_string(),
+            images: vec![],
+        },
+        ChatMessage {
+            role: Role::User,
+            content: "Hi".to_string(),
+            images: vec![],
+        },
+    ];
+    let out = build_prompt_with_model(&msgs, Some(TINYLLAMA_TMPL), "<s>", "</s>", None);
+    assert!(out.contains(DEFAULT_SYSTEM_PROMPT), "got: {out:?}");
+}
