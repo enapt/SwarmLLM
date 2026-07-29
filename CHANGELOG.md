@@ -2,6 +2,26 @@
 
 All notable changes to SwarmLLM are documented here.
 
+## [0.3.51-alpha] — 2026-07-29
+
+### Fixed
+
+- **Machines on a poor connection were losing reputation for downloads that
+  were cut short.** When a model file failed its integrity check it was always
+  treated as the sender's fault — the file was thrown away and that machine's
+  reputation was lowered. But an integrity check cannot tell "these are the
+  wrong contents" from "only part of it arrived": both simply fail to match. A
+  machine with an unreliable connection was therefore penalised for our own
+  interrupted downloads, over and over, because an unreliable connection
+  interrupts repeatedly.
+
+  The size the model's manifest declares is now checked before the contents
+  are, so the two cases are told apart. A file of the wrong size is treated as
+  an interrupted download: discarded, fetched again, nobody blamed. A file of
+  the right size whose contents are still wrong is treated exactly as before.
+  Checking the size first is also considerably faster than reading several
+  hundred megabytes to reach the same conclusion.
+
 ## [0.3.50-alpha] — 2026-07-29
 
 ### Fixed
