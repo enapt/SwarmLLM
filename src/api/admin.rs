@@ -1112,12 +1112,11 @@ pub async fn update_config(
         );
     }
 
-    // Write updated config to disk
-    let toml_str = toml::to_string_pretty(&config).map_err(|e| {
-        ApiError(crate::error::SwarmError::Internal(format!(
-            "Failed to serialize config to TOML: {e}"
-        )))
-    })?;
+    // Write updated config to disk, emitting ONLY what differs from the
+    // compiled defaults. Serializing the whole struct here is what stranded
+    // three separate defaults on existing installs — see
+    // `config::prune_defaults` for the full reasoning.
+    let toml_str = crate::config::to_minimal_toml(&config).map_err(ApiError)?;
 
     let cp = config_path.clone();
     let cp_for_err = config_path.clone();

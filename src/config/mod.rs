@@ -81,6 +81,154 @@ pub struct Config {
     pub providers: ProvidersConfig,
 }
 
+/// Strip every value that is identical to the compiled default.
+///
+/// **Why this exists.** The daemon used to serialize the WHOLE `Config` on every
+/// save, and `PUT /api/admin/config` is called by the setup wizard on "Start
+/// SwarmLLM" — so every field landed on disk as an explicit value. A
+/// `#[serde(default)]` only fills a key that is *missing*, which means that once
+/// a field is written, no future change to its default can ever reach that
+/// install. The user sees a config that looks deliberately chosen and has no way
+/// to tell it apart from one they actually chose.
+///
+/// This has now caused three separate user-visible faults: `bootstrap_peers = []`
+/// stranding every pre-2026-07-21 node with no bootstrap (gotcha #198), a
+/// default-on dashboard flag shipping off to the fresh installs it was written
+/// for, and `check_interval_hours = 6` keeping nodes on a six-hour update check
+/// after the default became hourly.
+///
+/// Writing only what differs from the default keeps defaults *live*: a key the
+/// user never set stays absent, so it follows the compiled value across
+/// upgrades. A user who explicitly set a value equal to the default has it
+/// dropped, and will likewise follow the default if it later changes — which is
+/// the intended reading of "I did not override this".
+///
+/// Safe by construction: `empty_toml_parses_to_full_default` proves every field
+/// has a serde default, so a fully pruned file always reloads to the same
+/// effective config.
+///
+/// Returns true when `value` is left empty and the caller may drop it entirely.
+pub(crate) fn prune_defaults(value: &mut toml::Value, defaults: &toml::Value) -> bool {
+    let (v, d) = match (value, defaults) {
+        (toml::Value::Table(v), toml::Value::Table(d)) => (v, d),
+        _ => return false,
+    };
+    let mut drop_keys = Vec::new();
+    for (k, val) in v.iter_mut() {
+        let Some(dv) = d.get(k) else { continue };
+        // Identical to the default, or a sub-table left empty once its own
+        // defaults were pruned out.
+        if val == dv || (val.is_table() && dv.is_table() && prune_defaults(val, dv)) {
+            drop_keys.push(k.clone());
+        }
+    }
+    for k in drop_keys {
+        v.remove(&k);
+    }
+    v.is_empty()
+}
+
+/// Serialize a config, emitting only what differs from the compiled defaults.
+pub fn to_minimal_toml(config: &Config) -> Result<String, SwarmError> {
+    let mut value = toml::Value::try_from(config)
+        .map_err(|e| SwarmError::Internal(format!("Failed to serialize config: {e}")))?;
+    let defaults = toml::Value::try_from(Config::default())
+        .map_err(|e| SwarmError::Internal(format!("Failed to serialize default config: {e}")))?;
+    prune_defaults(&mut value, &defaults);
+    toml::to_string_pretty(&value)
+        .map_err(|e| SwarmError::Internal(format!("Failed to serialize config to TOML: {e}")))
+}
+
+/// Reset values that are stranded copies of a superseded default.
+///
+/// The pruning above stops this recurring, but it cannot help a config that
+/// already carries the old value — that key is present, so it keeps winning.
+/// Each entry here is a default the daemon itself wrote, which a later release
+/// changed, and which was never exposed in any UI — so a value matching the old
+/// default is overwhelmingly the daemon's, not a deliberate choice.
+///
+/// Keep this list SHORT and delete entries once the affected installs are gone.
+/// Anything that a user could plausibly have chosen on purpose does not belong
+/// here: silently changing a deliberate setting is worse than a stale default.
+pub(crate) fn migrate_superseded_defaults(config: &mut Config, source: &str) {
+    // Update checks moved 6h -> 1h when releases became several-per-day. There
+    // is no UI for this field, so 6 on disk is the daemon's old default.
+    const SUPERSEDED_UPDATE_INTERVAL_HOURS: u32 = 6;
+    if config.updates.check_interval_hours == SUPERSEDED_UPDATE_INTERVAL_HOURS {
+        let fresh = UpdateConfig::default().check_interval_hours;
+        if fresh != SUPERSEDED_UPDATE_INTERVAL_HOURS {
+            tracing::info!(
+                from = SUPERSEDED_UPDATE_INTERVAL_HOURS,
+                to = fresh,
+                source,
+                "Update-check interval was a stranded copy of an old default; using the current default"
+            );
+            config.updates.check_interval_hours = fresh;
+        }
+    }
+}
+
+/// Warn about keys in the config file that no longer (or never did) exist.
+///
+/// serde ignores unknown fields, which is what keeps an older binary able to
+/// read a newer config — but it also means a typo, a key in the wrong section,
+/// or a setting copied from a blog post does nothing at all and says nothing.
+/// Reported 2026-07-29 by a user who set `disable_default_bootstrap` and
+/// `enable_upnp`, saw "Loaded config" in the log, and reasonably concluded the
+/// settings were wired up and broken.
+///
+/// `deny_unknown_fields` is deliberately NOT used: refusing to start because a
+/// config mentions a key from a later release is worse than ignoring it. A
+/// warning names the key and moves on.
+///
+/// Tables that are empty in the schema are treated as free-form maps
+/// (`auto_manage.model_policies`, `identity`) and are not descended into,
+/// since any key inside them is user data rather than a setting name.
+pub(crate) fn collect_unknown_config_keys(
+    file: &toml::Value,
+    schema: &toml::Value,
+    path: &str,
+    out: &mut Vec<String>,
+) {
+    let (f, s) = match (file, schema) {
+        (toml::Value::Table(f), toml::Value::Table(s)) => (f, s),
+        _ => return,
+    };
+    if s.is_empty() {
+        return; // free-form map — its keys are values, not setting names
+    }
+    for (k, v) in f {
+        let full = if path.is_empty() {
+            k.clone()
+        } else {
+            format!("{path}.{k}")
+        };
+        match s.get(k) {
+            None => out.push(full),
+            Some(sv) => collect_unknown_config_keys(v, sv, &full, out),
+        }
+    }
+}
+
+/// Check a parsed config file for keys the daemon does not recognise.
+pub(crate) fn warn_unknown_keys_in(contents: &str) {
+    let Ok(file) = toml::from_str::<toml::Value>(contents) else {
+        return; // a parse error is reported by the caller with a better message
+    };
+    let Ok(schema) = toml::Value::try_from(Config::default()) else {
+        return;
+    };
+    let mut unknown = Vec::new();
+    collect_unknown_config_keys(&file, &schema, "", &mut unknown);
+    for key in unknown {
+        tracing::warn!(
+            %key,
+            "Unknown setting in config file — it is being IGNORED. Check the \
+             spelling and which section it belongs under"
+        );
+    }
+}
+
 /// Provider config types (ProvidersConfig, ProviderEntry, CustomProvider,
 /// ProviderKeySource) and the .env loader. Their Debug/Drop impls handle
 /// API-key redaction and zeroization.
@@ -214,6 +362,8 @@ impl Config {
             config = toml::from_str(&contents).map_err(|e| {
                 SwarmError::Config(format!("Failed to parse {}: {e}", path.display()))
             })?;
+            warn_unknown_keys_in(&contents);
+            migrate_superseded_defaults(&mut config, "config.toml");
             // Re-apply data_dir overrides since toml::from_str replaces the entire config
             if let Some(dir) = cli_data_dir {
                 config.node.data_dir = dir.to_path_buf();
@@ -914,5 +1064,153 @@ max_concurrent_requests = 42
     fn vram_budget_no_gpu() {
         let rc = ResourceConfig::default();
         assert_eq!(rc.inference_vram_budget_mb(0), None);
+    }
+}
+
+#[cfg(test)]
+mod config_default_hygiene {
+    /// An *empty section* must deserialize to the same thing as a *missing*
+    /// section. These take different code paths — a missing section uses the
+    /// section's `impl Default`, a present-but-empty one uses each field's
+    /// `#[serde(default)]` — and they silently disagreed for `updates.mode`,
+    /// where the struct default said `Some(Notify)` and the field default said
+    /// `None`. That made the effective update mode depend on whether the
+    /// `[updates]` header happened to be in the file.
+    #[test]
+    fn empty_section_matches_missing_section() {
+        let defaults = toml::Value::try_from(crate::config::Config::default()).unwrap();
+        let sections: Vec<String> = match &defaults {
+            toml::Value::Table(t) => t.keys().cloned().collect(),
+            _ => panic!("config must serialize to a table"),
+        };
+        assert!(!sections.is_empty());
+        for section in sections {
+            let text = format!("[{section}]\n");
+            let parsed: crate::config::Config = toml::from_str(&text)
+                .unwrap_or_else(|e| panic!("[{section}] alone must parse: {e}"));
+            let got = toml::Value::try_from(&parsed).unwrap();
+            assert_eq!(
+                got.get(&section),
+                defaults.get(&section),
+                "an empty [{section}] must equal a missing one — a field's \
+                 serde default disagrees with the section's impl Default"
+            );
+        }
+    }
+
+    /// A misspelled or misplaced key must be named in the log rather than
+    /// silently ignored — reported by a user who set two real settings in the
+    /// wrong place, saw "Loaded config", and concluded they were broken.
+    #[test]
+    fn unknown_keys_are_detected() {
+        let schema = toml::Value::try_from(crate::config::Config::default()).unwrap();
+        // A real key in the WRONG section, and an outright typo.
+        let file: toml::Value = toml::from_str(
+            "[node]\ndisable_default_bootstrap = true\n[network]\nenable_upnpp = false\n",
+        )
+        .unwrap();
+        let mut unknown = Vec::new();
+        crate::config::collect_unknown_config_keys(&file, &schema, "", &mut unknown);
+        assert!(
+            unknown.contains(&"node.disable_default_bootstrap".to_string()),
+            "a real key in the wrong section is unknown there: {unknown:?}"
+        );
+        assert!(
+            unknown.contains(&"network.enable_upnpp".to_string()),
+            "a typo must be caught: {unknown:?}"
+        );
+
+        // A correct config must produce no warnings at all.
+        let good = toml::Value::try_from(crate::config::Config::default()).unwrap();
+        let mut none_expected = Vec::new();
+        crate::config::collect_unknown_config_keys(&good, &schema, "", &mut none_expected);
+        assert!(
+            none_expected.is_empty(),
+            "a valid config must not warn: {none_expected:?}"
+        );
+    }
+
+    /// A value stranded from a superseded default is reset; a deliberate one is
+    /// left alone.
+    #[test]
+    fn superseded_update_interval_is_migrated() {
+        let text = "[updates]\ncheck_interval_hours = 6\n";
+        let mut c: crate::config::Config = toml::from_str(text).unwrap();
+        assert_eq!(c.updates.check_interval_hours, 6);
+        crate::config::migrate_superseded_defaults(&mut c, "test");
+        assert_eq!(
+            c.updates.check_interval_hours,
+            crate::config::UpdateConfig::default().check_interval_hours,
+            "a stranded copy of the old default must follow the current one"
+        );
+
+        let mut other: crate::config::Config =
+            toml::from_str("[updates]\ncheck_interval_hours = 24\n").unwrap();
+        crate::config::migrate_superseded_defaults(&mut other, "test");
+        assert_eq!(
+            other.updates.check_interval_hours, 24,
+            "a value that was never a default must be left alone"
+        );
+    }
+
+    /// Any config, once pruned, must reload to exactly the same effective
+    /// values. This is the property that makes pruning safe: what we drop is
+    /// only ever what the defaults will put back.
+    #[test]
+    fn pruned_config_round_trips_unchanged() {
+        let mut original = crate::config::Config::default();
+        original.node.listen_port = 9123;
+        original.updates.check_interval_hours = 12;
+        original.network.enable_mdns = !original.network.enable_mdns;
+        original.inference.max_concurrent_requests += 7;
+
+        let text = crate::config::to_minimal_toml(&original).expect("serialize");
+        let reloaded: crate::config::Config = toml::from_str(&text).expect("reload pruned config");
+
+        assert_eq!(
+            toml::Value::try_from(&original).unwrap(),
+            toml::Value::try_from(&reloaded).unwrap(),
+            "pruned config must reload identically; wrote:\n{text}"
+        );
+    }
+
+    /// The whole point: a field the user never set must not appear on disk, so
+    /// a future change to its default still reaches this install.
+    #[test]
+    fn untouched_fields_are_not_written() {
+        let mut c = crate::config::Config::default();
+        c.node.listen_port = 9123;
+        let text = crate::config::to_minimal_toml(&c).expect("serialize");
+
+        assert!(
+            text.contains("9123"),
+            "the changed value must be written: {text}"
+        );
+        assert!(
+            !text.contains("check_interval_hours"),
+            "an untouched field must stay absent so its default stays live: {text}"
+        );
+    }
+
+    /// A default-valued config should write essentially nothing.
+    #[test]
+    fn default_config_writes_nothing() {
+        let text = crate::config::to_minimal_toml(&crate::config::Config::default()).unwrap();
+        assert!(
+            text.trim().is_empty(),
+            "a config identical to defaults should emit no keys, got:\n{text}"
+        );
+    }
+
+    #[test]
+    fn empty_toml_parses_to_full_default() {
+        let parsed: crate::config::Config = toml::from_str("")
+            .expect("an empty config must parse — every field needs a serde default");
+        let d = crate::config::Config::default();
+        assert_eq!(
+            toml::Value::try_from(&parsed).unwrap(),
+            toml::Value::try_from(&d).unwrap(),
+            "empty config must equal Config::default()"
+        );
     }
 }

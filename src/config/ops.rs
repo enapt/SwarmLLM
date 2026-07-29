@@ -112,7 +112,16 @@ pub enum AutoUpdateMode {
 impl Default for UpdateConfig {
     fn default() -> Self {
         Self {
-            mode: Some(UpdateMode::Notify),
+            // MUST stay `None`, matching the `#[serde(default)]` on the field.
+            // `None` is the designed "not explicitly set" state that
+            // `effective_mode` resolves from `auto_update`; hardcoding
+            // `Some(Notify)` here made the answer depend on whether the
+            // `[updates]` *section* happened to exist — a section with no
+            // `mode` key deserialized to `None` while a missing section used
+            // this impl and got `Some(Notify)`. With the default
+            // `auto_update: Disabled`, `effective_mode(None)` is already
+            // `Notify`, so agreeing costs nothing.
+            mode: None,
             auto_update: AutoUpdateMode::Disabled,
             check_interval_hours: default_check_interval_hours(),
             include_prereleases: true,

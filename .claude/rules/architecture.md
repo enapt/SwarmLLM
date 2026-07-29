@@ -571,3 +571,45 @@ Rules that follow:
    reasoned about one quantity ("before the first token") while the constant
    bounded another (the total). A stale comment asserting an invariant reads as
    verification and stops anyone re-deriving it.
+
+## Config defaults must stay live
+
+The daemon must write **only values that differ from the compiled default**.
+`config::to_minimal_toml` is the one serializer for the config file; do not call
+`toml::to_string_pretty(&config)` directly.
+
+**Why.** A `#[serde(default)]` fills a key that is *missing*. Once a key is
+written to disk it wins forever, so any later change to that default can never
+reach that install — and the file looks like a deliberate user choice, which is
+indistinguishable from one. `PUT /api/admin/config` is called by the setup
+wizard on "Start SwarmLLM", so in practice every field landed on disk on first
+run. This produced three separate user-visible faults before it was fixed:
+
+- `bootstrap_peers = []` stranded every node set up before 2026-07-21 with no
+  bootstrap peer, no DHT route and no log line (gotcha #198).
+- A default-on dashboard-trust flag shipped *off* to exactly the fresh installs
+  it was written for (gotcha #196).
+- `check_interval_hours = 6` kept nodes on a six-hour update check after the
+  default became hourly — found live on 2026-07-29 while watching a node fail
+  to notice a release.
+
+Rules that follow:
+
+1. **Never serialize the whole `Config` to disk.** Use `to_minimal_toml`.
+2. **A section's `impl Default` MUST agree with its fields' `#[serde(default)]`.**
+   These are different code paths: a *missing* section uses `impl Default`, a
+   *present but empty* section uses each field's serde default. They disagreed
+   for `updates.mode` (`Some(Notify)` vs `None`), which made the effective
+   update mode depend on whether the `[updates]` header happened to exist.
+   Pinned by `empty_section_matches_missing_section`, which checks every
+   section, so a new one inherits the coverage.
+3. **Every field needs a serde default**, or a pruned file will not reload.
+   Pinned by `empty_toml_parses_to_full_default`.
+4. **Changing a default does not reach existing installs.** If the old value is
+   already on disk it stays. When a default changes in a way that matters, add
+   an entry to `migrate_superseded_defaults` — and only when the old value was
+   the daemon's, never something a user could plausibly have chosen, because
+   silently overriding a deliberate setting is worse than a stale default.
+5. **Unknown keys warn, they do not fail.** `deny_unknown_fields` would refuse
+   to start on a config mentioning a later release's key. `warn_unknown_keys_in`
+   names the key and continues.
