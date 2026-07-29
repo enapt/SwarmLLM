@@ -12,13 +12,38 @@ pub(crate) fn scrub_truncate_error(body: &str) -> String {
     }
 }
 
+/// Strip the `Bearer` scheme from an `Authorization` header value.
+///
+/// **The scheme is case-INSENSITIVE** (RFC 7235 §2.1: "the scheme is
+/// matched case-insensitively"), and several HTTP clients emit it lowercase.
+/// A plain `strip_prefix("Bearer ")` rejected `bearer <key>` with a bare 401,
+/// which is indistinguishable from a wrong key — so the user's next move is to
+/// go hunting for a credential problem that does not exist. Reported by a
+/// tester 2026-07-29; the header *name* was already case-insensitive (axum
+/// normalizes it), which made the failure look arbitrary.
+///
+/// This is the single place the scheme is parsed. Do not re-derive it with
+/// `strip_prefix` at a call site: six sites had their own copy, and one of
+/// them accepting a form the others reject is worse than all of them being
+/// strict.
+pub(crate) fn strip_bearer_scheme(value: &str) -> Option<&str> {
+    const SCHEME: &str = "bearer";
+    let (scheme, rest) = value.split_at_checked(SCHEME.len())?;
+    if !scheme.eq_ignore_ascii_case(SCHEME) {
+        return None;
+    }
+    // RFC 7235 requires whitespace between the scheme and the token, so a
+    // header like `Bearerxyz` must NOT be accepted as the token `xyz`.
+    Some(rest.strip_prefix(' ')?.trim_start_matches(' '))
+}
+
 /// Extract a Bearer token from `Authorization: Bearer <tok>` or `x-api-key` header.
 /// Returns an empty string if neither header is present.
 pub(crate) fn extract_bearer_token(headers: &axum::http::HeaderMap) -> &str {
     headers
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
+        .and_then(strip_bearer_scheme)
         .or_else(|| headers.get("x-api-key").and_then(|v| v.to_str().ok()))
         .unwrap_or("")
 }

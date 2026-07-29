@@ -834,50 +834,80 @@ mod tests {
 
     // --- Auth extraction logic tests ---
 
+    /// These exercise `api::strip_bearer_scheme` itself rather than a local
+    /// copy of the parsing. The previous versions re-implemented
+    /// `strip_prefix("Bearer ")` inline, so they asserted the behaviour of the
+    /// test rather than of the server and stayed green while lowercase
+    /// `bearer` was rejected in production.
     #[test]
     fn bearer_token_extraction_from_header() {
-        // Simulate the token extraction logic from auth_middleware
-        let auth_header = Some("Bearer my-secret-key");
-        let token = auth_header.and_then(|h| h.strip_prefix("Bearer "));
-        assert_eq!(token, Some("my-secret-key"));
+        assert_eq!(
+            crate::api::strip_bearer_scheme("Bearer my-secret-key"),
+            Some("my-secret-key")
+        );
+    }
+
+    /// RFC 7235 §2.1 matches the auth-scheme case-insensitively, and real
+    /// clients emit every casing. Rejecting them produced a bare 401 that
+    /// looks exactly like a wrong key (reported 2026-07-29).
+    #[test]
+    fn bearer_scheme_is_case_insensitive() {
+        for header in ["Bearer k", "bearer k", "BEARER k", "BeArEr k"] {
+            assert_eq!(
+                crate::api::strip_bearer_scheme(header),
+                Some("k"),
+                "{header} must be accepted"
+            );
+        }
+    }
+
+    /// A scheme with no separating space is not Bearer auth — accepting
+    /// `Bearerxyz` as the token `xyz` would be a parser of our own invention.
+    #[test]
+    fn bearer_requires_a_separating_space() {
+        assert_eq!(crate::api::strip_bearer_scheme("Bearerxyz"), None);
+        assert_eq!(crate::api::strip_bearer_scheme("Bearer"), None);
+        assert_eq!(crate::api::strip_bearer_scheme(""), None);
+        assert_eq!(crate::api::strip_bearer_scheme("Bear"), None);
+        // Extra spaces after the scheme are tolerated; the token is not padded.
+        assert_eq!(crate::api::strip_bearer_scheme("Bearer   k"), Some("k"));
     }
 
     #[test]
     fn bearer_token_extraction_missing_prefix() {
-        let auth_header = Some("Basic dXNlcjpwYXNz");
-        let token = auth_header.and_then(|h| h.strip_prefix("Bearer "));
-        assert_eq!(token, None);
-    }
-
-    #[test]
-    fn bearer_token_extraction_no_header() {
-        let auth_header: Option<&str> = None;
-        let token = auth_header.and_then(|h| h.strip_prefix("Bearer "));
-        assert_eq!(token, None);
+        assert_eq!(crate::api::strip_bearer_scheme("Basic dXNlcjpwYXNz"), None);
     }
 
     #[test]
     fn x_api_key_fallback_logic() {
-        // When Authorization header has no Bearer prefix, fall back to x-api-key
-        let auth_header = Some("Basic dXNlcjpwYXNz"); // not Bearer
-        let x_api_key = Some("my-api-key-from-header");
-
-        let token = auth_header
-            .and_then(|h| h.strip_prefix("Bearer "))
-            .or(x_api_key);
-        assert_eq!(token, Some("my-api-key-from-header"));
+        // When Authorization carries a non-Bearer scheme, fall back to x-api-key.
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            "Basic dXNlcjpwYXNz".parse().unwrap(),
+        );
+        headers.insert("x-api-key", "my-api-key-from-header".parse().unwrap());
+        assert_eq!(
+            crate::api::extract_bearer_token(&headers),
+            "my-api-key-from-header"
+        );
     }
 
     #[test]
     fn bearer_takes_precedence_over_x_api_key() {
-        // When both Authorization: Bearer and x-api-key are present, Bearer wins
-        let auth_header = Some("Bearer bearer-token");
-        let x_api_key = Some("x-api-key-token");
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            "Bearer bearer-token".parse().unwrap(),
+        );
+        headers.insert("x-api-key", "x-api-key-token".parse().unwrap());
+        assert_eq!(crate::api::extract_bearer_token(&headers), "bearer-token");
+    }
 
-        let token = auth_header
-            .and_then(|h| h.strip_prefix("Bearer "))
-            .or(x_api_key);
-        assert_eq!(token, Some("bearer-token"));
+    #[test]
+    fn no_auth_headers_yields_empty() {
+        let headers = axum::http::HeaderMap::new();
+        assert_eq!(crate::api::extract_bearer_token(&headers), "");
     }
 
     #[test]
