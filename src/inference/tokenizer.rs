@@ -268,7 +268,15 @@ impl BpeTokenizer {
 
 /// Unified tokenizer that wraps either our BPE tokenizer or a SentencePiece
 /// merge-based tokenizer built from GGUF vocab + scores.
-pub enum SplitTokenizer {
+pub struct SplitTokenizer {
+    kind: TokenizerKind,
+    /// BOS token id from the GGUF's `tokenizer.ggml.bos_token_id`.
+    bos_id: Option<u32>,
+    /// Whether to prepend BOS at position 0.
+    add_bos_token: bool,
+}
+
+enum TokenizerKind {
     Bpe(Box<BpeTokenizer>),
     SentencePiece(SpmTokenizer),
 }
@@ -314,10 +322,6 @@ pub struct SpmTokenizer {
     piece_to_id: HashMap<String, (u32, f32)>,
     /// Whether to prepend ▁ to the input
     add_space_prefix: bool,
-    /// BOS token ID
-    bos_id: Option<u32>,
-    /// Whether to auto-prepend BOS token (from GGUF tokenizer.ggml.add_bos_token)
-    add_bos_token: bool,
     /// UNK token ID
     unk_id: Option<u32>,
     /// Special tokens sorted by length (longest first) for greedy matching
@@ -325,18 +329,17 @@ pub struct SpmTokenizer {
 }
 
 impl SpmTokenizer {
-    pub fn new(
-        tokens: &[String],
-        scores: &[f32],
-        add_space_prefix: bool,
-        add_bos_token: bool,
-    ) -> Self {
+    pub fn new(tokens: &[String], scores: &[f32], add_space_prefix: bool) -> Self {
         let mut piece_to_id = HashMap::new();
         for (i, (tok, &score)) in tokens.iter().zip(scores.iter()).enumerate() {
             piece_to_id.insert(tok.clone(), (i as u32, score));
         }
         let unk_id = tokens.iter().position(|t| t == "<unk>").map(|i| i as u32);
-        let bos_id = tokens.iter().position(|t| t == "<bos>").map(|i| i as u32);
+        // Trust the GGUF's declared id; only fall back to a vocab search when
+        // the file does not declare one. The fallback covers BOTH families'
+        // literals — `<s>` (Llama/Mistral/Phi) and `<bos>` (Gemma) — because
+        // searching for one family's spelling silently disables BOS for the
+        // other, which is exactly the bug this parameter exists to prevent.
 
         // Collect special tokens (control tokens like <bos>, <start_of_turn>, etc.)
         let mut special_tokens: Vec<(String, u32)> = tokens
@@ -354,17 +357,13 @@ impl SpmTokenizer {
             vocab_size = tokens.len(),
             special_tokens = special_tokens.len(),
             add_space_prefix,
-            add_bos_token,
             unk_id = ?unk_id,
-            bos_id = ?bos_id,
             "Built SPM tokenizer from GGUF vocab"
         );
 
         Self {
             piece_to_id,
             add_space_prefix,
-            bos_id,
-            add_bos_token,
             unk_id,
             special_tokens,
         }
@@ -373,13 +372,6 @@ impl SpmTokenizer {
     /// Encode text to token IDs using SPM merge algorithm.
     pub fn encode(&self, text: &str) -> Vec<i64> {
         let mut result = Vec::new();
-
-        // Auto-prepend BOS token if configured (Gemma-2 uses this)
-        if self.add_bos_token {
-            if let Some(bos) = self.bos_id {
-                result.push(bos as i64);
-            }
-        }
 
         // Split text around special tokens first
         let segments = self.split_special_tokens(text);
@@ -390,9 +382,7 @@ impl SpmTokenizer {
                 }
             } else {
                 // Normalize: replace spaces with ▁, optionally prepend ▁
-                let normalized = if self.add_space_prefix
-                    && result.len() <= (if self.add_bos_token { 1 } else { 0 })
-                {
+                let normalized = if self.add_space_prefix && result.is_empty() {
                     format!("\u{2581}{}", segment.replace(' ', "\u{2581}"))
                 } else {
                     segment.replace(' ', "\u{2581}")
@@ -615,11 +605,36 @@ impl SpmTokenizer {
 }
 
 impl SplitTokenizer {
+    /// Resolve the BOS id to use, preferring the GGUF's declared value.
+    ///
+    /// The fallback covers BOTH families' literals — `<s>` (Llama/Mistral/Phi)
+    /// and `<bos>` (Gemma). Searching for only one family's spelling is how
+    /// every Llama-family model silently lost its BOS token.
+    fn resolve_bos(tokens: &[String], declared: Option<u32>) -> Option<u32> {
+        declared.or_else(|| {
+            tokens
+                .iter()
+                .position(|t| t == "<s>" || t == "<bos>")
+                .map(|i| i as u32)
+        })
+    }
+
     /// Build from GGUF BPE merges (existing path).
-    pub fn from_bpe(tokens: &[String], merges: &[String], pre_type: &str, model: &str) -> Self {
-        Self::Bpe(Box::new(BpeTokenizer::from_gguf(
-            tokens, merges, pre_type, model,
-        )))
+    pub fn from_bpe(
+        tokens: &[String],
+        merges: &[String],
+        pre_type: &str,
+        model: &str,
+        add_bos_token: bool,
+        bos_id: Option<u32>,
+    ) -> Self {
+        Self {
+            kind: TokenizerKind::Bpe(Box::new(BpeTokenizer::from_gguf(
+                tokens, merges, pre_type, model,
+            ))),
+            bos_id: Self::resolve_bos(tokens, bos_id),
+            add_bos_token,
+        }
     }
 
     /// Build a SentencePiece tokenizer from GGUF vocab + scores.
@@ -628,44 +643,58 @@ impl SplitTokenizer {
         scores: &[f32],
         add_space_prefix: bool,
         add_bos_token: bool,
+        bos_id: Option<u32>,
     ) -> Self {
-        Self::SentencePiece(SpmTokenizer::new(
-            tokens,
-            scores,
-            add_space_prefix,
+        Self {
+            kind: TokenizerKind::SentencePiece(SpmTokenizer::new(tokens, scores, add_space_prefix)),
+            bos_id: Self::resolve_bos(tokens, bos_id),
             add_bos_token,
-        ))
+        }
     }
 
     /// Encode text to token IDs.
+    ///
+    /// BOS is prepended HERE, at the single entry point every variant shares,
+    /// rather than inside each variant's own `encode`. It previously lived in
+    /// the SentencePiece variant alone, so every model that took the BPE path
+    /// — which is any GGUF shipping merges, TinyLlama included — was prefilled
+    /// with no BOS at position 0 and produced degenerate replies. Adding a
+    /// third variant cannot reintroduce that gap.
     pub fn encode(&self, text: &str) -> Vec<i64> {
-        match self {
-            Self::Bpe(bpe) => bpe.encode(text),
-            Self::SentencePiece(spm) => spm.encode(text),
+        let mut out = Vec::new();
+        if self.add_bos_token {
+            if let Some(bos) = self.bos_id {
+                out.push(bos as i64);
+            }
         }
+        out.extend(match &self.kind {
+            TokenizerKind::Bpe(bpe) => bpe.encode(text),
+            TokenizerKind::SentencePiece(spm) => spm.encode(text),
+        });
+        out
     }
 
     /// Decode a single token string back to UTF-8 bytes.
     pub fn decode_token(&self, token_str: &str) -> Vec<u8> {
-        match self {
-            Self::Bpe(bpe) => bpe.decode_token(token_str),
-            Self::SentencePiece(_) => decode_token_impl(token_str, true, &HashMap::new()),
+        match &self.kind {
+            TokenizerKind::Bpe(bpe) => bpe.decode_token(token_str),
+            TokenizerKind::SentencePiece(_) => decode_token_impl(token_str, true, &HashMap::new()),
         }
     }
 
     /// Whether this tokenizer uses SentencePiece encoding.
     pub fn is_sentencepiece(&self) -> bool {
-        match self {
-            Self::Bpe(bpe) => bpe.is_sentencepiece(),
-            Self::SentencePiece(_) => true,
+        match &self.kind {
+            TokenizerKind::Bpe(bpe) => bpe.is_sentencepiece(),
+            TokenizerKind::SentencePiece(_) => true,
         }
     }
 
     /// Return a reference to the byte decoder mapping (for BPE caching).
     pub fn byte_decoder(&self) -> HashMap<char, u8> {
-        match self {
-            Self::Bpe(bpe) => bpe.byte_decoder().clone(),
-            Self::SentencePiece(_) => HashMap::new(),
+        match &self.kind {
+            TokenizerKind::Bpe(bpe) => bpe.byte_decoder().clone(),
+            TokenizerKind::SentencePiece(_) => HashMap::new(),
         }
     }
 }
@@ -695,4 +724,91 @@ fn build_gpt2_byte_encoder() -> ([char; 256], HashMap<char, u8>) {
     }
 
     (encoder, decoder)
+}
+
+#[cfg(test)]
+mod bos_tests {
+    use super::*;
+
+    /// A minimal Llama-style SPM vocab: `<s>` is id 1, as in every
+    /// Llama/Mistral/Phi GGUF.
+    fn llama_vocab() -> (Vec<String>, Vec<f32>) {
+        let toks: Vec<String> = ["<unk>", "<s>", "</s>", "\u{2581}Hi", "\u{2581}there"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let scores = vec![0.0; toks.len()];
+        (toks, scores)
+    }
+
+    /// The GGUF declares `tokenizer.ggml.bos_token_id`; that is the
+    /// authoritative answer and must be used verbatim.
+    #[test]
+    fn declared_bos_id_is_prepended_for_llama_vocab() {
+        let (toks, scores) = llama_vocab();
+        let tok = SplitTokenizer::from_sentencepiece(&toks, &scores, true, true, Some(1));
+        let ids = tok.encode("Hi there");
+        assert_eq!(
+            ids.first(),
+            Some(&1i64),
+            "declared BOS id must be prepended, got {ids:?}"
+        );
+    }
+
+    /// Regression: the id used to be derived by searching the vocab for
+    /// Gemma's `<bos>` literal, so every `<s>` model resolved to `None` and
+    /// was prefilled with no BOS at all. The fallback must cover both
+    /// families' spellings.
+    #[test]
+    fn undeclared_bos_falls_back_across_both_families() {
+        let (toks, scores) = llama_vocab();
+        let tok = SplitTokenizer::from_sentencepiece(&toks, &scores, true, true, None);
+        assert_eq!(
+            tok.encode("Hi there").first(),
+            Some(&1i64),
+            "Llama `<s>` vocab must still resolve a BOS when the GGUF omits the id"
+        );
+
+        let gemma: Vec<String> = ["<pad>", "<bos>", "<eos>", "\u{2581}Hi"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let gscores = vec![0.0; gemma.len()];
+        let gtok = SplitTokenizer::from_sentencepiece(&gemma, &gscores, true, true, None);
+        assert_eq!(
+            gtok.encode("Hi").first(),
+            Some(&1i64),
+            "Gemma `<bos>` vocab must keep working"
+        );
+    }
+
+    /// The BPE path must inherit BOS too. TinyLlama ships merges, so it takes
+    /// this branch — BOS handling that lived only in the SentencePiece variant
+    /// left every such model prefilled without one.
+    #[test]
+    fn bpe_path_also_prepends_bos() {
+        let toks: Vec<String> = ["<unk>", "<s>", "</s>", "Hi"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let merges: Vec<String> = vec![];
+        let tok = SplitTokenizer::from_bpe(&toks, &merges, "default", "llama", true, Some(1));
+        assert_eq!(
+            tok.encode("Hi").first(),
+            Some(&1i64),
+            "BPE-path models must get BOS at position 0"
+        );
+    }
+
+    /// A GGUF that explicitly opts out must still be honoured.
+    #[test]
+    fn explicit_opt_out_is_respected() {
+        let (toks, scores) = llama_vocab();
+        let tok = SplitTokenizer::from_sentencepiece(&toks, &scores, false, false, Some(1));
+        assert_ne!(
+            tok.encode("Hi there").first(),
+            Some(&1i64),
+            "add_bos_token=false must not prepend"
+        );
+    }
 }

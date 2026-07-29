@@ -323,10 +323,16 @@ impl GgufTokenizerMeta {
             .and_then(|v| v.to_bool().ok())
             .unwrap_or(true);
 
+        // llama.cpp defaults this to TRUE for SentencePiece vocabs and false
+        // only for BPE; this field is consumed solely by the SPM path below.
+        // Defaulting to false meant every Llama-family GGUF that simply omits
+        // the key — TinyLlama and Phi-3.5 among them — was prefilled with no
+        // BOS at position 0, which is out-of-distribution for models trained
+        // with one and produced degenerate replies.
         let add_bos_token = md
             .get("tokenizer.ggml.add_bos_token")
             .and_then(|v| v.to_bool().ok())
-            .unwrap_or(false);
+            .unwrap_or(true);
 
         Self {
             vocab,
@@ -391,6 +397,8 @@ impl GgufTokenizerMeta {
                 &self.merges,
                 &self.pre_tokenizer,
                 &self.tokenizer_model,
+                self.add_bos_token,
+                self.bos_token_id,
             ))
         } else if self.tokenizer_model == "llama" && !self.scores.is_empty() {
             Some(SplitTokenizer::from_sentencepiece(
@@ -398,6 +406,7 @@ impl GgufTokenizerMeta {
                 &self.scores,
                 self.add_space_prefix,
                 self.add_bos_token,
+                self.bos_token_id,
             ))
         } else {
             None
