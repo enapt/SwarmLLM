@@ -741,13 +741,39 @@ impl NetworkManager {
                         if let Some(info) = shard_info.filter(|_| manifest_has_hash) {
                             if let Err(e) = self.shard_store.verify_shard(&shard_id.model_id, &info)
                             {
-                                tracing::error!(
-                                    model = %shard_id.model_id,
-                                    shard = shard_id.index,
-                                    peer = %peer,
-                                    error = %e,
-                                    "P2P shard failed hash verification — quarantining, not announcing"
-                                );
+                                // An INCOMPLETE transfer is not evidence about
+                                // the sender: the bytes that did arrive may be
+                                // perfectly good and the connection simply
+                                // dropped. Only bytes that arrived in FULL and
+                                // still hash wrong implicate the peer.
+                                //
+                                // Observed 2026-07-29: one peer produced four
+                                // failures whose computed hash differed every
+                                // time for the same shard — the signature of a
+                                // truncated transfer, not corrupt storage —
+                                // while also timing out constantly. Penalising
+                                // trust there lowers the reputation of an
+                                // honest node on a bad link.
+                                let incomplete =
+                                    matches!(e, crate::error::SwarmError::ShardIncomplete { .. });
+                                if incomplete {
+                                    tracing::warn!(
+                                        model = %shard_id.model_id,
+                                        shard = shard_id.index,
+                                        peer = %peer,
+                                        error = %e,
+                                        "P2P shard transfer incomplete — discarding and retrying, \
+                                         NOT penalising the sender"
+                                    );
+                                } else {
+                                    tracing::error!(
+                                        model = %shard_id.model_id,
+                                        shard = shard_id.index,
+                                        peer = %peer,
+                                        error = %e,
+                                        "P2P shard failed hash verification — quarantining, not announcing"
+                                    );
+                                }
                                 let _ = self
                                     .shard_store
                                     .delete_shard(&shard_id.model_id, shard_id.index);
@@ -755,20 +781,23 @@ impl NetworkManager {
                                     .models
                                     .shard_p2p_failed
                                     .insert(shard_id.clone());
-                                if let Some(node) = self.peer_to_node.get(&peer).map(|n| n.clone())
-                                {
-                                    self.shared_state.credits.trust_manager.update_trust(
-                                        &self.shared_state.peer_registry,
-                                        &node,
-                                        crate::credit::trust::TrustEvent::ShardVerificationFail,
-                                    );
+                                if !incomplete {
+                                    if let Some(node) =
+                                        self.peer_to_node.get(&peer).map(|n| n.clone())
+                                    {
+                                        self.shared_state.credits.trust_manager.update_trust(
+                                            &self.shared_state.peer_registry,
+                                            &node,
+                                            crate::credit::trust::TrustEvent::ShardVerificationFail,
+                                        );
+                                    }
                                 }
                                 self.shared_state.emit_activity(
                                     crate::daemon::state::ActivityEvent::new(
                                         "download",
                                         "shard_verification_failed",
                                         format!(
-                                            "Shard {} of {} arrived corrupted and was discarded",
+                                            "Shard {} of {} did not arrive intact and will be fetched again",
                                             crate::types::ShardId::display_index_short(
                                                 shard_id.index
                                             ),

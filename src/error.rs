@@ -32,6 +32,16 @@ pub enum SwarmError {
     // Shards
     #[error("Shard verification failed: expected {expected}, got {actual}")]
     ShardIntegrity { expected: String, actual: String },
+    /// The shard file is the wrong SIZE — the transfer did not complete.
+    ///
+    /// Distinct from `ShardIntegrity`, which means the bytes arrived in full
+    /// but are not the bytes we asked for. Only the latter is evidence about
+    /// the sender; conflating them penalises honest peers on a flaky link.
+    #[error("Shard transfer incomplete: expected {expected_bytes} bytes, got {actual_bytes}")]
+    ShardIncomplete {
+        expected_bytes: u64,
+        actual_bytes: u64,
+    },
     #[error("Shard not found: {0:?}")]
     ShardNotFound(ShardId),
 
@@ -170,6 +180,11 @@ impl IntoResponse for ApiError {
                 self.0.to_string(),
                 "server_error",
             ),
+            SwarmError::ShardIncomplete { .. } => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                self.0.to_string(),
+                "service_unavailable",
+            ),
             SwarmError::PipelineError(_) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 self.0.to_string(),
@@ -301,6 +316,10 @@ pub fn error_hint(err: &SwarmError) -> Option<&'static str> {
         SwarmError::ShardIntegrity { .. } => Some(
             "A model file was corrupted and will be re-downloaded automatically. \
              This is usually caused by an interrupted download — try again in a moment.",
+        ),
+        SwarmError::ShardIncomplete { .. } => Some(
+            "A model file did not download completely and will be fetched again \
+             automatically. This usually means the connection dropped part-way.",
         ),
         SwarmError::PipelineError(_) => Some(
             "Something went wrong assembling the inference pipeline. This usually means \

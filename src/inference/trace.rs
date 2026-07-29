@@ -688,6 +688,7 @@ pub fn error_kind(err: &crate::error::SwarmError) -> &'static str {
         E::Serialization(_) => "Serialization",
         E::ServiceUnavailable(_) => "ServiceUnavailable",
         E::ShardIntegrity { .. } => "ShardIntegrity",
+        E::ShardIncomplete { .. } => "ShardIncomplete",
         E::ShardNotFound(_) => "ShardNotFound",
         E::Unauthorized(_) => "Unauthorized",
         E::Validation(_) => "Validation",

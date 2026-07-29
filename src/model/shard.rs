@@ -202,6 +202,39 @@ impl ShardStore {
             });
         }
 
+        // Check the DECLARED SIZE before hashing, via the same helper the
+        // startup and periodic scans already use.
+        //
+        // A hash mismatch alone cannot tell a truncated transfer apart from
+        // genuinely bad bytes — both just produce "not the expected digest".
+        // Observed 2026-07-29: one peer produced four failures whose computed
+        // hash differed EVERY time for the same shard. Corrupt storage on the
+        // sender would give the same wrong hash repeatedly; varying results
+        // mean the bytes differed per attempt, i.e. the transfer was
+        // incomplete — and that peer was simultaneously timing out constantly.
+        //
+        // This matters because the P2P caller lowers the sender's trust score
+        // on failure, so attributing our own short read to the peer penalises
+        // honest nodes on a flaky link. `quarantine_shard_if_size_mismatch`
+        // already existed and was called from both scan paths but NOT from
+        // here — the accept gate for untrusted bytes, where it matters most.
+        // Size is also far cheaper than a BLAKE3 pass over a large file.
+        if let Some((actual_bytes, expected_bytes)) =
+            quarantine_shard_if_size_mismatch(&path, info.size_bytes)
+        {
+            tracing::info!(
+                model = %model_id,
+                shard = info.index,
+                expected_bytes,
+                actual_bytes,
+                "DIAG: verify_shard FAILED — incomplete transfer (size mismatch), not corruption"
+            );
+            return Err(SwarmError::ShardIncomplete {
+                expected_bytes,
+                actual_bytes,
+            });
+        }
+
         let actual = hash_file_blake3(&path)?;
 
         if actual != info.hash {
@@ -653,6 +686,88 @@ mod tests {
         // "../../etc" → replace / → "_.._etc" wait no: ".._._etc" no.
         // "../../etc" → replace / → ".._.._etc" → replace .. → "____etc"
         assert_eq!(path.to_string_lossy(), "/data/models/____etc/shard_000.bin");
+    }
+
+    /// A shard that is the RIGHT size but the WRONG bytes is the sender's
+    /// fault, and must be reported as an integrity failure so trust is docked.
+    #[test]
+    fn wrong_bytes_at_correct_size_is_an_integrity_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ShardStore::new(dir.path());
+        let model_id = ModelId("test".into());
+        let data = b"exactly these bytes were expected";
+        store.write_chunk(&model_id, 0, 0, data).unwrap();
+        store.finalize_shard(&model_id, 0).unwrap();
+
+        let mut wrong_hash = [0u8; 32];
+        wrong_hash[0] = 0xAB;
+        let info = ShardInfo {
+            index: 0,
+            layer_range: (0, 1),
+            size_bytes: data.len() as u64,
+            hash: wrong_hash,
+            tensors: vec![],
+        };
+        match store.verify_shard(&model_id, &info) {
+            Err(SwarmError::ShardIntegrity { .. }) => {}
+            other => panic!("expected ShardIntegrity, got {other:?}"),
+        }
+    }
+
+    /// A short file is an INCOMPLETE transfer, not corruption. Reporting it as
+    /// an integrity failure penalises the sender's trust for what is usually a
+    /// dropped connection on our side.
+    #[test]
+    fn short_file_is_reported_as_incomplete_not_corrupt() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ShardStore::new(dir.path());
+        let model_id = ModelId("test".into());
+        let data = b"only part of it";
+        store.write_chunk(&model_id, 0, 0, data).unwrap();
+        store.finalize_shard(&model_id, 0).unwrap();
+
+        let info = ShardInfo {
+            index: 0,
+            layer_range: (0, 1),
+            // Manifest says the shard is much larger than what landed.
+            size_bytes: (data.len() as u64) * 4,
+            hash: blake3::hash(b"whatever the full content would be").into(),
+            tensors: vec![],
+        };
+        match store.verify_shard(&model_id, &info) {
+            Err(SwarmError::ShardIncomplete {
+                expected_bytes,
+                actual_bytes,
+            }) => {
+                assert_eq!(expected_bytes, (data.len() as u64) * 4);
+                assert_eq!(actual_bytes, data.len() as u64);
+            }
+            other => panic!("expected ShardIncomplete, got {other:?}"),
+        }
+    }
+
+    /// A manifest with no declared size must not be treated as a mismatch —
+    /// older manifests carry 0 and there is nothing to compare against.
+    #[test]
+    fn zero_declared_size_skips_the_length_gate() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ShardStore::new(dir.path());
+        let model_id = ModelId("test".into());
+        let data = b"content with no declared size";
+        store.write_chunk(&model_id, 0, 0, data).unwrap();
+        store.finalize_shard(&model_id, 0).unwrap();
+
+        let info = ShardInfo {
+            index: 0,
+            layer_range: (0, 1),
+            size_bytes: 0,
+            hash: blake3::hash(data).into(),
+            tensors: vec![],
+        };
+        assert!(
+            store.verify_shard(&model_id, &info).is_ok(),
+            "a zero declared size must fall through to the hash check"
+        );
     }
 }
 
