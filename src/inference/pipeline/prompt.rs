@@ -149,15 +149,34 @@ impl PipelineExecutor {
         if let Some(entry) = entry {
             let vocab = entry.value().vocab.clone().unwrap_or_default();
             if !vocab.is_empty() {
-                let mut raw = String::new();
-                for &id in token_ids {
-                    if let Some(token_str) = vocab.get(id as usize) {
-                        raw.push_str(token_str);
-                    } else {
-                        raw.push_str(&format!("[{id}]"));
-                    }
-                }
-                return decode_bpe_text(&raw);
+                // Decode through the same tokenizer-aware path
+                // `extract_model_cache` builds, NOT the raw `decode_bpe_text`
+                // fallback. That fallback is a GPT-2 byte decoder: U+2581 is
+                // outside every range it maps, so a SentencePiece model leaks
+                // the word-boundary marker into the reply.
+                //
+                // This is the sibling of the decoder fixed in v0.3.46. That fix
+                // corrected `CachedDecoder`'s CONSTRUCTION and left this
+                // function, which `distributed.rs` calls whenever it has no
+                // cached decoder — so the identical corruption survived on the
+                // distributed path. Observed 2026-07-29: a Phi-3.5 answer over
+                // the network contained `"a▁"` while the same question answered
+                // locally was clean.
+                let decoder = match self.shared_state.standalone_tokenizer(model_id) {
+                    Some(tok) => CachedDecoder {
+                        vocab,
+                        byte_decoder: tok.byte_decoder(),
+                        is_sentencepiece: tok.is_sentencepiece(),
+                        has_tokenizer: true,
+                    },
+                    None => CachedDecoder {
+                        vocab,
+                        byte_decoder: HashMap::new(),
+                        is_sentencepiece: false,
+                        has_tokenizer: false,
+                    },
+                };
+                return decoder.decode_tokens(token_ids);
             }
         }
         // Fallback: return token IDs as text
@@ -526,5 +545,39 @@ mod loaded_info_tests {
             "phi-3.5-mini-instruct.q8-0",
             "phi-3.5-mini-instruct.q4-k-m"
         ));
+    }
+}
+
+#[cfg(test)]
+mod decoder_tests {
+    use super::CachedDecoder;
+    use std::collections::HashMap;
+
+    fn spm_vocab() -> Vec<String> {
+        vec![
+            "<unk>".to_string(),
+            "\u{2581}Hello".to_string(),
+            "\u{2581}world".to_string(),
+        ]
+    }
+
+    /// A SentencePiece vocabulary must decode the word-boundary marker to a
+    /// space. Running these through the GPT-2 byte decoder instead leaves
+    /// U+2581 in the visible reply — the v0.3.46 corruption, which survived on
+    /// the distributed path because a sibling function kept the raw fallback.
+    #[test]
+    fn sentencepiece_marker_becomes_a_space() {
+        let d = CachedDecoder {
+            vocab: spm_vocab(),
+            byte_decoder: HashMap::new(),
+            is_sentencepiece: true,
+            has_tokenizer: true,
+        };
+        let out = d.decode_tokens(&[1, 2]);
+        assert!(
+            !out.contains('\u{2581}'),
+            "U+2581 must never reach the reply, got {out:?}"
+        );
+        assert_eq!(out, " Hello world", "got {out:?}");
     }
 }
