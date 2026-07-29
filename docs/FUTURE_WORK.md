@@ -4191,3 +4191,33 @@ claims. So the peer signal must never be load-bearing:
 for a mechanism that does not fire on its own adds a failure mode without fixing
 the underlying one. See also the self-attested-credits entry — the trust
 question is identical and a solution to one likely informs the other.
+
+## A repeatedly-failing peer is retried indefinitely with no backoff
+
+**Observed 2026-07-29**: one remote peer accumulated 13 `OutboundFailure`s
+(alternating `Timeout while waiting for a response` and `IO error on outbound
+stream: connection lost`) over ~2 hours, across 8 separate connection
+establishments, while every other connected peer was fine — it was the only peer
+producing failures at all.
+
+Nothing throttles this. The peer is re-dialled and re-sent to on the normal
+cadence regardless of how many consecutive sends have failed, so a single
+unhealthy node produces a steady trickle of failed work and log noise
+indefinitely.
+
+**Impact is currently low** — the observed sends were `DirectMessage` control
+traffic (`pending_tensor_out=0`, no affected request ids), so no inference was
+lost. It matters more if the same peer is holding shards we route to, where each
+attempt costs a request a retry.
+
+**Prior art in this codebase to reuse rather than reinvent**:
+`state.models.shard_download_backoff` already implements exactly this shape for
+shard downloads — exponential cooldown (30→60→120→240→300s cap) recorded at
+terminal failure sites, cleared on success, self-evicting when idle. A
+per-`NodeId` equivalent for rr sends would fit the same pattern.
+
+**Care needed on the clearing rule.** The inverse defect is already documented
+as the "routing ratchet": `observed_latency_ms_per_layer` is only recorded when
+we route, with no decay, so an unrouted node is never re-measured and can never
+recover. Any send-side backoff needs a path back — a cooldown that expires, not
+a permanent demotion — or a transiently flaky peer becomes permanently invisible.
