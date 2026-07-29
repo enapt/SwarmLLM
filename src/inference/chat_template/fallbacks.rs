@@ -143,3 +143,36 @@ pub(super) fn vicuna_fallback(messages: &[ChatMessage]) -> String {
     prompt.push_str("ASSISTANT:");
     prompt
 }
+
+/// Zephyr / TinyLlama format.
+///
+/// `<|system|>\n…</s>\n<|user|>\n…</s>\n<|assistant|>\n`
+///
+/// TinyLlama-1.1B-Chat is one of the most commonly tried small models and its
+/// name matches none of the other families here — "tinyllama" does not contain
+/// "llama-3" — so without this it reached the ChatML fallback and was asked a
+/// ChatML question. Observed 2026-07-29: a coordinator holding none of the
+/// model's shards has no GGUF header to read the real template from, answered a
+/// one-word question with a `<|user|>` marker and an unrelated question of its
+/// own. A model answers in whatever format it was asked in (gotcha #169).
+///
+/// These models are trained with a system turn present, so one is always
+/// emitted — matching `build_prompt_with_model`, which supplies a neutral
+/// default when the caller sends none.
+pub(super) fn zephyr_fallback(messages: &[ChatMessage]) -> String {
+    let mut prompt = String::new();
+    let has_system = messages.iter().any(|m| matches!(m.role, Role::System));
+    if !has_system {
+        prompt.push_str("<|system|>\nYou are a helpful assistant.</s>\n");
+    }
+    for msg in messages {
+        let role = match msg.role {
+            Role::System => "system",
+            Role::Assistant => "assistant",
+            Role::User | Role::Tool => "user",
+        };
+        prompt.push_str(&format!("<|{}|>\n{}</s>\n", role, msg.content));
+    }
+    prompt.push_str("<|assistant|>\n");
+    prompt
+}

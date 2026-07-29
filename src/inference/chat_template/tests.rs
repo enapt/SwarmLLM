@@ -920,3 +920,45 @@ fn blank_system_message_is_replaced() {
     let out = build_prompt_with_model(&msgs, Some(TINYLLAMA_TMPL), "<s>", "</s>", None);
     assert!(out.contains(DEFAULT_SYSTEM_PROMPT), "got: {out:?}");
 }
+
+/// TinyLlama's name matches none of the other families, so without a Zephyr
+/// entry it reached ChatML and was asked a ChatML question — which it answered
+/// with a stray `<|user|>` marker and an unrelated question.
+#[test]
+fn tinyllama_without_a_template_gets_zephyr_not_chatml() {
+    let out = build_prompt_with_model(
+        &bare_user(),
+        None,
+        "<s>",
+        "</s>",
+        Some("tinyllama-1.1b-chat-v1.0.q4-k-m"),
+    );
+    assert!(
+        out.contains("<|user|>"),
+        "expected Zephyr format, got: {out:?}"
+    );
+    assert!(
+        out.trim_end().ends_with("<|assistant|>"),
+        "must end with the generation prompt: {out:?}"
+    );
+    assert!(
+        !out.contains("<|im_start|>"),
+        "must NOT fall through to ChatML: {out:?}"
+    );
+    assert!(
+        out.contains("<|system|>"),
+        "Zephyr models are trained with a system turn: {out:?}"
+    );
+}
+
+/// A Llama-3 model must keep its own format — "tinyllama" must not be matched
+/// by a broad "llama" substring, and vice versa.
+#[test]
+fn llama3_still_gets_llama3_format() {
+    let out = build_prompt_with_model(&bare_user(), None, "<s>", "</s>", Some("meta-llama-3.1-8b"));
+    assert!(
+        out.contains("<|start_header_id|>"),
+        "Llama-3 must keep its own format: {out:?}"
+    );
+    assert!(!out.contains("<|user|>\n"), "must not be Zephyr: {out:?}");
+}

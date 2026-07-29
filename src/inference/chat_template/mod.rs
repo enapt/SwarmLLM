@@ -14,7 +14,9 @@ mod parser;
 pub use fallbacks::chatml_fallback;
 
 use eval::{eval_block, EvalCtx, EvalState};
-use fallbacks::{gemma_fallback, llama3_fallback, mistral_fallback, vicuna_fallback};
+use fallbacks::{
+    gemma_fallback, llama3_fallback, mistral_fallback, vicuna_fallback, zephyr_fallback,
+};
 use parser::tokenize;
 
 /// Apply a Jinja2-style chat template to a list of messages.
@@ -186,6 +188,11 @@ fn fallback_by_model_name(
     let name_lower = model_name?.to_lowercase();
     if name_lower.contains("llava") || name_lower.contains("vicuna") {
         return Some((vicuna_fallback(messages), "vicuna"));
+    }
+    // Checked before the llama families: "tinyllama" contains "llama" and this
+    // is a Zephyr-format model, not a Llama-chat one.
+    if name_lower.contains("tinyllama") || name_lower.contains("zephyr") {
+        return Some((zephyr_fallback(messages), "zephyr"));
     }
     if name_lower.contains("gemma") {
         return Some((gemma_fallback(messages), "gemma"));
