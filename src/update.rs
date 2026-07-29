@@ -226,6 +226,27 @@ impl UpdateChecker {
         // Find the binary asset matching this platform AND build variant.
         let asset_name = update_asset_name();
 
+        // A CPU build on a GPU machine will keep resolving the CPU asset for
+        // ever. Say so here, where the user is about to be handed one, rather
+        // than leaving them to notice the GPU is idle.
+        if let Some(gpu) = cpu_build_on_gpu_host() {
+            let cuda_asset = asset_name_for(
+                std::env::consts::OS,
+                std::env::consts::ARCH,
+                "-cuda",
+                cfg!(windows),
+            );
+            tracing::warn!(
+                gpu = %gpu,
+                running_variant = %asset_name,
+                gpu_variant = %cuda_asset,
+                "This is the CPU build, but a GPU is present — the update will keep it \
+                 on CPU, because updates never switch build variant. To use the GPU, \
+                 install the {cuda_asset} asset from the release page once; updates \
+                 after that will stay on the GPU build"
+            );
+        }
+
         let binary_asset = release.assets.iter().find(|a| a.name == asset_name);
 
         let download_url = match binary_asset {
@@ -885,14 +906,44 @@ fn checksum_matches(sidecar_body: &str, actual_hash: &str) -> bool {
 /// happens to be sitting on.
 ///
 /// Keep in sync with the `bare_asset` names in `.github/workflows/release.yml`.
+/// `candle-cuda` is included here, not just `cuda`. The published Linux GPU
+/// asset is built `--features cuda`, which pulls in `candle-cuda` — but the
+/// documented local GPU build is `--features candle-cuda` alone, and the split
+/// engine (which is what actually runs inference) is GPU-capable with just
+/// that. Keying only on `cuda` classified those builds as CPU, so they resolved
+/// the CPU asset and updated their own GPU support away.
 fn build_variant_suffix() -> &'static str {
-    if cfg!(feature = "cuda") {
+    if cfg!(any(feature = "cuda", feature = "candle-cuda")) {
         "-cuda"
     } else if cfg!(feature = "windows-gpu") {
         "-gpu"
     } else {
         ""
     }
+}
+
+/// Is this a CPU-variant build sitting on a machine that has a usable GPU?
+///
+/// The variant is a compile-time property, deliberately: what may be installed
+/// is decided by which artefact is running, not by what hardware it happens to
+/// find. That is right, but it makes the CPU variant a **one-way trapdoor** —
+/// a node that lands on the CPU binary once will resolve the CPU asset forever
+/// after, because the running binary is the thing being asked. It keeps
+/// updating "successfully" while the GPU sits idle, and nothing says so.
+///
+/// Reported 2026-07-29 by a tester who had been manually reinstalling the
+/// `-cuda` asset after every update and could find nothing in the UI or logs
+/// explaining why it kept reverting.
+///
+/// So: detect the mismatch and say it out loud. We do NOT silently switch
+/// variants — a GPU being present is not proof its driver stack can run the
+/// CUDA build, and installing an unusable binary is worse than a slow one.
+pub fn cpu_build_on_gpu_host() -> Option<String> {
+    if !build_variant_suffix().is_empty() {
+        return None;
+    }
+    let (name, _vram) = crate::model::auto_manage::vram::detect_gpu_nvidia_smi();
+    name
 }
 
 /// Compose a bare-binary release asset name. Pure so every published variant
@@ -1112,7 +1163,14 @@ mod tests {
         let variant = build_variant_suffix();
         // Exactly one of the three known variants, and it must agree with the
         // features this test binary was compiled with.
-        if cfg!(feature = "cuda") {
+        //
+        // `candle-cuda` counts as a GPU build, not just `cuda`. The published
+        // Linux GPU asset is built `--features cuda` (which implies
+        // candle-cuda), but the documented LOCAL GPU build is
+        // `--features candle-cuda` alone and is genuinely GPU-capable through
+        // the split engine. Classifying those as CPU made them resolve the CPU
+        // asset and update their own GPU support away.
+        if cfg!(any(feature = "cuda", feature = "candle-cuda")) {
             assert_eq!(variant, "-cuda");
         } else if cfg!(feature = "windows-gpu") {
             assert_eq!(variant, "-gpu");
@@ -1121,6 +1179,25 @@ mod tests {
         }
         // The composed name always starts with the product prefix.
         assert!(update_asset_name().starts_with("swarmllm-"));
+    }
+
+    /// The variant is compile-time on purpose, so a CPU build never installs
+    /// itself a GPU binary it may not be able to run. The cost is that landing
+    /// on the CPU asset is a one-way trapdoor, so the mismatch has to be
+    /// *reported* — a tester spent weeks manually reinstalling the `-cuda`
+    /// asset with nothing in the logs explaining why it kept reverting.
+    #[test]
+    fn cpu_build_on_gpu_host_only_fires_for_cpu_builds() {
+        if build_variant_suffix().is_empty() {
+            // CPU build: the answer depends on whether this machine has a GPU,
+            // so only the shape is assertable here.
+            let _ = cpu_build_on_gpu_host();
+        } else {
+            assert!(
+                cpu_build_on_gpu_host().is_none(),
+                "a GPU build must never report itself as a CPU build on a GPU host"
+            );
+        }
     }
 
     #[test]

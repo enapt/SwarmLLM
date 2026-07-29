@@ -6,6 +6,25 @@ All notable changes to SwarmLLM are documented here.
 
 ### Fixed
 
+- **Updating could silently take away your graphics-card support, with no way
+  back.** Updates deliberately never switch between the graphics-card and
+  processor-only builds, so an update can't hand you a binary your machine
+  can't run. But a node that ended up on the processor-only build stayed there
+  for ever — every later update dutifully fetched the processor-only version
+  again, the graphics card sat unused, and nothing anywhere said why. One
+  tester had been reinstalling the graphics-card build by hand after every
+  update, unable to find an explanation.
+
+  The daemon now says so plainly when it is the processor-only build on a
+  machine with a graphics card, and names the file to install once to get back.
+  It still won't switch automatically — a card being present is not proof its
+  drivers can run the graphics build, and installing one that won't start is
+  worse than running slowly.
+
+  Separately, a graphics-card build compiled locally with `--features
+  candle-cuda` was misreported as processor-only and would update away its own
+  graphics support. It's now correctly recognised.
+
 - **Models were being fed gibberish instead of some of the words you typed.**
   Models that use SentencePiece — Phi-3.5, Mistral, Llama 2 and many others —
   split text into pieces using a lookup table. A fault in that step meant some
