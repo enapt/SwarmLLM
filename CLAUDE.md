@@ -151,7 +151,7 @@ libp2p 0.56, axum 0.8, candle-core/candle-transformers 0.10 (CUDA), redb 4, ed25
 
 ## Testing
 
-- 1455 lib tests passing + 9 ignored (env-var-gated real-model + manual smoke), 80 integration tests in `tests/integration/` + 2 ignored end-to-end (`cargo test --test integration_phase10_11 -- --ignored`), 2 repo-consistency, 26 in `swarmllm-types` (`cargo test -p swarmllm-types` — NOT covered by a bare `cargo test` from the root), 6 in the vendored request-response patch (`cargo test --manifest-path vendor/libp2p-request-response/Cargo.toml --lib` — the crate is workspace-`exclude`d, and its own integration tests need `libp2p-swarm-test` so use `--lib`), clippy clean. Microbench: `cargo run --release --no-default-features --features dev,claude-subscription --example swarm_spec_bench` (R136 — measures all 4 SWARM-SPEC layer primitives + synthetic cascade hit-rate). Local-cluster bench: `examples/3node_setup.sh` (boots 3 daemons) + `examples/3node_inference_bench.sh` (runs 3 workloads × 3 trials and prints tok/s + swarm_spec metrics). Sharded variant: `examples/3node_sharded_setup.sh` (forced distributed pipeline; writes its own per-node config disabling auto-manage and bootstrap so the split survives). **Its inference step is EXPECTED to fail on a single multi-interface host** — that is the zero-redundancy same-host case documented in `docs/FUTURE_WORK.md` § "Connection churn on multi-interface hosts", not a distributed-inference regression (confirmed on released v0.3.28, 2026-07-26). Validate the forward path on two real machines. Both scripts take `SWARM_BENCH_MODEL`. **Pinned reference models for cross-swarm comparison: `docs/REFERENCE_MODELS.md`** (smoke / standard / stress tiers + `examples/fetch_reference_model.sh` to opt in).
+- 1461 lib tests passing + 9 ignored (env-var-gated real-model + manual smoke), 80 integration tests in `tests/integration/` + 2 ignored end-to-end (`cargo test --test integration_phase10_11 -- --ignored`), 2 repo-consistency, 26 in `swarmllm-types` (`cargo test -p swarmllm-types` — NOT covered by a bare `cargo test` from the root), 6 in the vendored request-response patch (`cargo test --manifest-path vendor/libp2p-request-response/Cargo.toml --lib` — the crate is workspace-`exclude`d, and its own integration tests need `libp2p-swarm-test` so use `--lib`), clippy clean. Microbench: `cargo run --release --no-default-features --features dev,claude-subscription --example swarm_spec_bench` (R136 — measures all 4 SWARM-SPEC layer primitives + synthetic cascade hit-rate). Local-cluster bench: `examples/3node_setup.sh` (boots 3 daemons) + `examples/3node_inference_bench.sh` (runs 3 workloads × 3 trials and prints tok/s + swarm_spec metrics). Sharded variant: `examples/3node_sharded_setup.sh` (forced distributed pipeline; writes its own per-node config disabling auto-manage and bootstrap so the split survives). **Its inference step is EXPECTED to fail on a single multi-interface host** — that is the zero-redundancy same-host case documented in `docs/FUTURE_WORK.md` § "Connection churn on multi-interface hosts", not a distributed-inference regression (confirmed on released v0.3.28, 2026-07-26). Validate the forward path on two real machines. Both scripts take `SWARM_BENCH_MODEL`. **Pinned reference models for cross-swarm comparison: `docs/REFERENCE_MODELS.md`** (smoke / standard / stress tiers + `examples/fetch_reference_model.sh` to opt in).
 - Unit tests: in-module `#[cfg(test)]` blocks
 - Integration tests: `tests/integration/` — multi-node simulations with `--test-threads=1`
 - Real-model spawn-and-infer test: set `SWARMLLM_TEST_MODEL_DIR` to a fully-populated model directory (e.g. `~/.local/share/swarmllm/models/tinyllama-1.1b-...`) and run `cargo test --test integration_phase10_11 -- --ignored end_to_end`. No synthetic GGUF fixture is committed; see `docs/ARCHITECTURE.md` § Deferred Items.
@@ -192,73 +192,70 @@ When spawning subagents in this repo, use these model picks (overrides defaults 
 
 ## Status
 
-All 20 build phases complete. All subsystems wired — no stubs. **1455 lib + 80 integration + 2 repo-consistency + 26 swarmllm-types tests passing**; 9 lib + 2 e2e ignored (env-var or manual). Clippy clean default + features dev,claude-subscription + `--features llama`.
+All 20 build phases complete. All subsystems wired — no stubs. **1461 lib + 80 integration + 2 repo-consistency + 26 swarmllm-types tests passing**; 9 lib + 2 e2e ignored (env-var or manual). Clippy clean default + features dev,claude-subscription + `--features llama`.
 
 Per-round history lives in `~/.claude/projects/-home-user-SwarmLLM/memory/round_log_*.md` and the CHANGELOG; `docs/ARCHITECTURE.md` is the canonical architecture. This section keeps only the current release line plus one-line prior-round pointers.
 
-### Latest — v0.3.47 / v0.3.48-alpha (2026-07-29): models asked the wrong question
+### Latest — v0.3.49 / .50 / .51-alpha (2026-07-29): attribution, and a tokenizer bug still open
 
-**A night of prompt-construction bugs, each hiding the next.** All were found by
-running requests and comparing the SAME model on TWO paths (local vs
-distributed) — the diagnostic that has now isolated five separate defects here.
+**Read `docs/FUTURE_WORK.md` first — the biggest defect found is NOT fixed.**
 
-**Small models replied with nothing at all** (~2 in 3, deterministic under
-`temperature=0`) and it was reported as a *successful* completion — `stop`,
-HTTP 200, content `" "`. The model emitted a `<|user|>` turn marker instead of
-answering and stop-truncation ate it. The prompt was byte-identical to
-HuggingFace's; what it LACKED was a system turn, which Zephyr/TinyLlama models
-are trained with. Injection is gated on the template having a system branch AND
-no `raise_exception` — Gemma/Mistral decline the role, and our evaluator treats
-`raise_exception` as a **silent skip**, so blanket injection would render a turn
-the model never saw. Gotcha #201. **I dismissed this twice** (as model weakness,
-then as fixed by an unrelated change); `temperature=0` settled it in a minute —
-*a reproducible "flaky" output is not variance*.
+**OPEN, HIGH IMPACT — the SPM tokenizer mis-encodes ~1 word in 4.**
+`SpmTokenizer::spm_encode` emits byte-fallback garbage for any word that must be
+BUILT by merging pieces; a word present in the vocab verbatim is fine. Measured
+against Phi-3.5's real vocab: `banana`, `quantization`, `pineapple` fail;
+`apple`, `computer`, `distributed`, `hello`, `system`, `networking`, `the`,
+`running` pass. The model then receives gibberish and *says so* — "the question
+seems to be nonsensical … as `a▁` does not correspond to any known colour".
+Affects every SentencePiece model, silently, and predates all of this week's
+tokenizer work (v0.3.46 fails identically with differently-mangled bytes).
+**Ruled out already** (don't redo): missing vocab entries, a truncated score
+array, merge ordering. Next step is diffing our ids against llama.cpp or HF
+`sentencepiece` for the same vocab and pinning it as a test.
 
-**No Llama-family model was getting its BOS token.** The id was found by
-searching the vocab for Gemma's `<bos>` (Llama spells it `<s>`), and
-`add_bos_token` defaulted false where llama.cpp defaults true for SPM. The GGUF
-declares the id and it was parsed, carried, and never passed down. BOS now
-applied at the ONE shared `SplitTokenizer::encode`, not per-variant — the first
-fix touched only the SPM path and TinyLlama takes the BPE path.
+**v0.3.51 — stop blaming peers for OUR truncated downloads.** A failed shard
+hash always docked the sender's trust, but a hash cannot tell "wrong bytes" from
+"only some bytes arrived". Tell: one peer failed the same shard four times with
+a DIFFERENT computed hash each time (corrupt storage gives the SAME wrong hash;
+varying output means varying amounts arrived) while timing out constantly.
+`verify_shard` now checks the manifest's `size_bytes` FIRST via the existing
+`quarantine_shard_if_size_mismatch` — which was already called from the startup
+and periodic scans and NOT from the accept gate for untrusted bytes. New
+`SwarmError::ShardIncomplete`; trust is docked only for right-size-wrong-hash.
 
-**The distributed path prompted models with ANOTHER model's chat template**
-(gotcha #202). `loaded_model_info` is a singleton describing whatever the node
-last loaded, used as a fallback exactly when the coordinator holds none of the
-requested model's shards. Phi-3.5 answered a one-word question carrying
-**Llama-3** control tokens, `prompt_tokens` **145 vs 35**. The line's own comment
-said `// may be wrong model` — **written down, shipped anyway**. The tell was
-`prompt_tokens`, visible in every response without instrumentation.
+**v0.3.50 — one abandoned request froze a model for everyone.** Cancellation was
+only ever wired to an explicit `x-swarmllm-cancel-token` header that one internal
+caller sets, so a client that simply disconnected signalled nothing: the request
+ran to completion holding the executor, and every later request queued behind it.
+Requests now always carry a cancel flag, flipped by an RAII guard when the
+handler future drops. **Non-streaming paths ONLY** — a streaming handler returns
+as soon as the SSE body exists and generation continues after, so arming it there
+would cut every stream.
 
-**Fixing that exposed the next layer**: TinyLlama matched no family in
-`fallback_by_model_name` ("tinyllama" lacks "llama-3") so it reached **ChatML**.
-New `zephyr_fallback`, with a test pinning that Llama-3 and TinyLlama are never
-confused.
+**v0.3.50 also un-stranded every pre-.44 node.** Those query
+`/releases/latest`, which 404s while every release is `prerelease: true`, so they
+were told "you are running the latest version" forever. Publishing one release
+as non-prerelease is the ONLY mechanism that reaches them. Keep doing this, or
+they strand again.
 
-**Config defaults never reached existing installs** — the daemon wrote EVERY
-field and a value on disk always wins, so improving a default only ever helped
-new installs. Three prior faults trace to this (#198, #196, and update checks
-stuck at 6h). Now only non-default values are written. The round-trip test
-**failed on first run** and caught a latent bug: `updates.mode` had
-`impl Default = Some(Notify)` but `#[serde(default) = None`, so the effective
-mode depended on whether the `[updates]` *header* existed. Rule in
-`.claude/rules/architecture.md` § "Config defaults must stay live".
+**v0.3.49 shipped a changelog claim that was false** — it was cut to fix a stray
+`▁` in shared answers, the fix addressed a real sibling decoder path, and the
+symptom was unchanged because the cause was the tokenizer bug above. CHANGELOG
+was corrected after release rather than left standing.
 
-**Auto-update verified end-to-end for the first time**: detect → download →
-SHA256 verify → stage → "ready to apply". It does **NOT** apply:
-`auto_update = "stable"` maps to `Download`, and only `mode = "install"`
-restarts. Deliberate (binaries are unsigned) but **the name misleads** — a user
-sits on a staged binary believing they are current. Open question for the user.
+**Process — two self-inflicted failures worth not repeating.** (1) I tagged
+`.50` on a commit whose CI had FAILED, because the wait script conflated
+"completed" with "succeeded"; caught while still a draft with 0 assets, tag and
+draft deleted. Use `scratchpad/tag_when_green.sh`: it requires the run
+conclusion to be exactly `success` AND every individual job green, verified
+BEFORE tagging. (2) The break itself was a `Cargo.toml` bump without the matching
+`Cargo.lock` — CI builds `--locked`. Run `cargo check` and confirm `Cargo.lock`
+is in the release commit. Also: rapid pushes cancel the in-flight CI run you are
+waiting on; stop pushing during a release window.
 
-**Also from a user report** (EnigmaJim, on .47): fair-share fetch divided by
-`peer_registry.len()` — *every peer ever seen*, the documented-wrong oracle — so
-a node took a slice of a model nobody held ("No node available for layer 0");
-now `connected_node_ids`. `status` said `model_loaded: true` mid-download; now
-lists `models_downloading`. CLI 401s on a custom `--data-dir` now name the file
-and the cause. Unknown config keys now warn instead of being silently ignored.
-
-**Process note**: deploying a WSL-built binary to the Proxmox LXC failed on
-GLIBC 2.39 and took their node down ~90s (backup made recovery immediate).
-Check target GLIBC before touching a machine you cannot easily recover.
+**Left running twice**: a stray test node kept advertising shards to the swarm
+after I reported cleanup done. `pkill` errored both times and I did not verify.
+Always confirm with `pgrep -af "bin/swarmllm"` after killing.
 
 ### v0.3.39 – v0.3.46 (07-27→29) — one line each; detail in `round_log_overnight_0728.md` + CHANGELOG
 
