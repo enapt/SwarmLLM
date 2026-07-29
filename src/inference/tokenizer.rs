@@ -474,6 +474,11 @@ impl SpmTokenizer {
             left: usize,
             right: usize,
             token_id: u32,
+            /// Combined byte length of `left` + `right` **at the moment this
+            /// bigram was scored**. The queue is not invalidated when a symbol
+            /// grows, so this is what proves the entry still describes the same
+            /// text — see the check in the merge loop.
+            size: usize,
         }
         impl Eq for Merge {}
         impl PartialOrd for Merge {
@@ -508,6 +513,7 @@ impl SpmTokenizer {
                     left,
                     right,
                     token_id: id,
+                    size: symbols[left].len + symbols[right].len,
                 });
             }
         };
@@ -529,6 +535,26 @@ impl SpmTokenizer {
 
             // Verify the merge is still valid (symbols are still adjacent)
             if symbols[left].next != right as i32 {
+                continue;
+            }
+
+            // …and that neither side has GROWN since this bigram was scored.
+            //
+            // Merging extends `left` to cover `right`, so any queued bigram
+            // naming `left` still names a live, adjacent symbol — but one whose
+            // text is now longer than the piece we looked up. Applying it built
+            // a symbol for text nobody had checked against the vocabulary, and
+            // the final lookup then missed and dumped the whole span through
+            // byte fallback. Measured on Phi-3.5's real vocabulary: `banana`
+            // came out as `▁banan` in raw `<0xNN>` bytes plus a stray `a`, and
+            // 5 of 16 ordinary English words failed the same way. The model
+            // receives gibberish and says so, which reads as the model being
+            // stupid rather than as a tokenizer bug.
+            //
+            // llama.cpp's `llm_tokenizer_spm` carries the same guard
+            // (`left_sym.n + right_sym.n != bigram.size`); it is what makes the
+            // lazy queue sound, not an optimisation.
+            if symbols[left].len + symbols[right].len != merge.size {
                 continue;
             }
 
@@ -810,5 +836,91 @@ mod bos_tests {
             Some(&1i64),
             "add_bos_token=false must not prepend"
         );
+    }
+}
+
+#[cfg(test)]
+mod spm_merge_tests {
+    use super::*;
+
+    /// Vocabulary engineered to force a *stale* bigram to reach the front of
+    /// the merge queue.
+    ///
+    /// Over the input `abcd`: the initial bigrams are `ab` (score 1.0) and
+    /// `bc` (score 5.0); `cd` is absent. `bc` wins and merges, which grows
+    /// symbol 1 from `b` to `bc`. The queued `ab` entry still names symbols
+    /// 0 and 1, and they are still live and still adjacent — but together
+    /// they now spell `abc`, which is not in this vocabulary at all.
+    fn stale_bigram_vocab() -> (Vec<String>, Vec<f32>) {
+        let mut toks: Vec<String> = ["<unk>", "<s>", "</s>", "a", "b", "c", "d", "ab", "bc"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let mut scores = vec![0.0f32, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 5.0];
+        // Byte-fallback tokens, so a failed merge is observable as `<0xNN>`
+        // rather than collapsing to <unk>.
+        for b in 0u16..=255 {
+            toks.push(format!("<0x{b:02X}>"));
+            scores.push(-1000.0);
+        }
+        (toks, scores)
+    }
+
+    fn pieces(toks: &[String], ids: &[i64]) -> Vec<String> {
+        ids.iter()
+            .map(|&i| toks[i as usize].clone())
+            .collect::<Vec<_>>()
+    }
+
+    /// A queued bigram must not be applied once either side has grown.
+    ///
+    /// Applying it built a symbol spanning text that was never checked against
+    /// the vocabulary, so the final lookup missed and dumped the whole span
+    /// through byte fallback. Against Phi-3.5's real vocabulary this corrupted
+    /// **64.9% of a 4128-line corpus** of ordinary sentences: `banana` came out
+    /// as `▁banan` in raw bytes plus a stray `a`. The model receives gibberish
+    /// and says so, which reads as the model being stupid.
+    ///
+    /// llama.cpp's `llm_tokenizer_spm` guards this with
+    /// `left_sym.n + right_sym.n != bigram.size`; the guard is what makes the
+    /// lazy queue sound, not an optimisation.
+    #[test]
+    fn a_grown_symbol_invalidates_its_queued_bigram() {
+        let (toks, scores) = stale_bigram_vocab();
+        let tok = SplitTokenizer::from_sentencepiece(&toks, &scores, false, false, None);
+        let ids = tok.encode("abcd");
+        let got = pieces(&toks, &ids);
+
+        assert_eq!(
+            got,
+            vec!["a", "bc", "d"],
+            "expected the higher-scoring `bc` merge to stand and the stale `ab` \
+             bigram to be discarded; got {got:?}"
+        );
+        assert!(
+            !got.iter().any(|p| p.starts_with("<0x")),
+            "no byte fallback should occur — every character is in the vocab: {got:?}"
+        );
+    }
+
+    /// The guard must not block *legitimate* merges: `ab` alone still merges
+    /// when nothing has grown underneath it.
+    #[test]
+    fn a_valid_bigram_still_merges() {
+        let (toks, scores) = stale_bigram_vocab();
+        let tok = SplitTokenizer::from_sentencepiece(&toks, &scores, false, false, None);
+        // No `c` to trigger the higher-scoring `bc`, so `ab` is uncontested.
+        let ids = tok.encode("abd");
+        assert_eq!(pieces(&toks, &ids), vec!["ab", "d"]);
+    }
+
+    /// Single characters and empty input must survive the guard untouched.
+    #[test]
+    fn degenerate_inputs_are_unaffected() {
+        let (toks, scores) = stale_bigram_vocab();
+        let tok = SplitTokenizer::from_sentencepiece(&toks, &scores, false, false, None);
+        assert!(tok.encode("").is_empty());
+        assert_eq!(pieces(&toks, &tok.encode("a")), vec!["a"]);
+        assert_eq!(pieces(&toks, &tok.encode("bc")), vec!["bc"]);
     }
 }

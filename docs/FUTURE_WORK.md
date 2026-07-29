@@ -4267,83 +4267,57 @@ Options, roughly in order of how much they change:
 
 Recommendation: (2) now and (1) with a migration; (3) only after signing.
 
-## Some words are tokenized to byte-fallback garbage before the model sees them
+## RESOLVED 2026-07-29 — words were tokenized to byte-fallback garbage
 
-**Open, reproducible in seconds, and NOT new** — v0.3.46 behaves the same way.
+**Root cause: a stale entry in the merge priority queue was applied without
+checking that its symbols still spelled the text it had been scored for.**
 
-`SpmTokenizer::spm_encode` fails on some ordinary words and emits byte-fallback
-tokens instead of real vocabulary pieces. The model then receives gibberish and
-correctly reports the question as nonsensical. Verified against Phi-3.5's real
-vocabulary:
+`spm_encode` seeds a max-heap with every adjacent bigram, then pops the
+highest-scoring one and merges. Merging extends `left` to cover `right`. Any
+bigram already queued that names `left` still names a live, adjacent symbol —
+but one whose text is now **longer** than the piece that was looked up. The loop
+revalidated liveness and adjacency and stopped there, so it applied those
+entries, building a symbol spanning text nobody had checked against the
+vocabulary. The final lookup then missed and dumped the whole span through byte
+fallback.
 
-```
-banana   ids=[229,153,132,101,100,113,100,113,29874]  -> "\u{fffd}\u{fffd}\u{fffd}banana"
-apple    ids=[26163]                                  -> " apple"
-```
+That is why `apple` worked and `banana` did not: `▁apple` is a single vocabulary
+entry reached by an uncontested merge chain, whereas `▁ban` + `ana` requires two
+competing merges, and the loser was applied anyway.
 
-`"apple"` encodes to ONE correct piece. `"banana"` produces nine tokens, the
-first three being byte-fallback for the `▁` word-boundary marker (U+2581 is
-`E2 96 81`; the ids are those bytes plus a constant offset of 3), which means
-the marker never merged with the following letters and was emitted as raw bytes.
+llama.cpp's `llm_tokenizer_spm` guards this with
+`left_sym.n + right_sym.n != bigram.size`. `Merge` now carries `size` and the
+loop checks it. **The guard is what makes a lazy queue sound, not an
+optimisation** — any queue that is not invalidated on mutation needs one.
 
-**User-visible effect**: any prompt containing an affected word gets a reply
-like *"The question seems to be nonsensical or a typographical error as
-\"a▁\" does not correspond to any known colour"* — the model quoting the
-corruption back. Confirmed by isolation: `What colour is an apple?` answers
-"Red" correctly, while `What colour is a banana?` does not, with the spelling of
-"colour" ruled out as a factor.
+**Measured scope, which was far worse than the earlier estimate.** Against
+Phi-3.5's real vocabulary over a 4,128-line corpus (sentences, punctuation,
+email addresses, source code, accented Unicode, digits, casing variants and
+4,000 random strings), **64.9% of inputs were mis-tokenised** — not "a quarter
+of words". Whole ordinary sentences were affected.
 
-**What has been ruled out**: it is not the distributed path (local reproduces
-it), not the BOS work in v0.3.47 (v0.3.46 produces the same failure with
-differently mangled bytes), not output decoding (the ids are already wrong at
-encode time), and not the merge *ordering* (`Merge`'s `Ord` correctly sorts
-highest-score-first).
+**Verification.** Diffed against the real `sentencepiece` Python library loaded
+with Phi-3.5's own `tokenizer.model`: **0 mismatches on all 4,128 inputs** after
+the fix. Live before/after on the same model and data directory:
 
-**Ruled out (checked 2026-07-29, do not redo)**:
+| prompt | before | after |
+|---|---|---|
+| "What colour is a banana?" | `The text "a␦␦␦ debido a que debido a que…` | "The typical color of a banana when it is ripe is yellow…" |
+| "What is quantization…?" | answered about **"dataset"** | correct definition |
 
-- *Missing vocabulary*: `▁b`, `▁ban`, `an`, `na` are all present in the header;
-  only the whole word `▁banana` is absent, which is exactly the case merging
-  exists to handle.
-- *Truncated score array*: `piece_to_id` is built with `tokens.iter().zip(scores)`,
-  which would silently truncate on a length mismatch — but
-  `tokenizer.ggml.tokens`, `.scores` and `.token_type` are all 32064 for
-  Phi-3.5, so the table is complete.
-- *Merge ordering*: `Merge`'s `Ord` sorts highest-score-first with a positional
-  tie-break, which is correct.
+Inflated `prompt_tokens` (30 vs 23, 42 vs 29) is the cheap tell that byte
+fallback is happening — it is visible in every API response with no
+instrumentation.
 
-**Confirmed shape of the failure**: decoding the produced ids shows EVERY
-character emitted as byte-fallback (`▁` becomes three byte tokens; `b`, `a`, `n`
-each become one — the ids are the raw byte values plus a constant offset of 3).
-So for an affected word **not a single merge is applied**, even though the
-merge partners exist. Yet `▁apple` merges six characters down to one token, so
-the merge path demonstrably works for some inputs. Whatever differs between
-those two cases is the bug.
+Pinned by `spm_merge_tests` in `inference/tokenizer.rs`, using a synthetic
+vocabulary that forces a stale bigram to the front of the queue; the test fails
+against the old code with exactly the real symptom in miniature
+(`abcd` → `<0x61><0x62><0x63>d`). `examples/spm_probe.rs` reproduces and diffs
+against any GGUF header on disk.
 
-**Where to look**: the initial bigram seeding and `try_add_bigram` in
-`spm_encode`. A symbol that never finds any merge partner falls through to
-byte-fallback; the question is why `▁` + `b` is not being merged when
-`▁apple` resolves as a single piece.
-
-**Measured scope (2026-07-29)** — this is not one odd word. Of 11 common words
-tested against Phi-3.5's vocabulary, **3 failed**: `banana`, `quantization`,
-`pineapple`. The pattern is exact:
-
-- a word present in the vocabulary VERBATIM encodes to one correct token
-  (`apple`, `computer`, `distributed`, `hello`, `system`, `networking`, `the`,
-  `running`)
-- a word that must be BUILT by merging pieces falls through to byte-fallback and
-  becomes gibberish
-
-`▁banana` is not a vocabulary entry, but `▁b`, `▁ban`, `an` and `na` all are — so
-the pieces needed to build it exist and the merge simply does not use them.
-Roughly a quarter of ordinary words are affected, on every SentencePiece model,
-and nothing logs when it happens.
-
-**Do not attempt this without a reference**: compare our ids against
-`llama.cpp`'s tokenizer or HuggingFace's `sentencepiece` for the same vocab and
-a word list, and add that as a test. Reply quality across every SentencePiece
-model depends on this being right, and the failure is silent — nothing logs,
-the model simply gets nonsense.
+**The BPE path was checked and is not affected** — it rescans for the best-ranked
+pair from current state on every iteration rather than using a lazy queue, so it
+has no stale-entry exposure.
 
 ## Shard verification may be penalising peers for OUR truncated reads
 

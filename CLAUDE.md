@@ -151,7 +151,7 @@ libp2p 0.56, axum 0.8, candle-core/candle-transformers 0.10 (CUDA), redb 4, ed25
 
 ## Testing
 
-- 1486 lib tests passing + 9 ignored (env-var-gated real-model + manual smoke), 80 integration tests in `tests/integration/` + 2 ignored end-to-end (`cargo test --test integration_phase10_11 -- --ignored`), 2 repo-consistency, 26 in `swarmllm-types` (`cargo test -p swarmllm-types` — NOT covered by a bare `cargo test` from the root), 6 in the vendored request-response patch (`cargo test --manifest-path vendor/libp2p-request-response/Cargo.toml --lib` — the crate is workspace-`exclude`d, and its own integration tests need `libp2p-swarm-test` so use `--lib`), clippy clean. Microbench: `cargo run --release --no-default-features --features dev,claude-subscription --example swarm_spec_bench` (R136 — measures all 4 SWARM-SPEC layer primitives + synthetic cascade hit-rate). Local-cluster bench: `examples/3node_setup.sh` (boots 3 daemons) + `examples/3node_inference_bench.sh` (runs 3 workloads × 3 trials and prints tok/s + swarm_spec metrics). Sharded variant: `examples/3node_sharded_setup.sh` (forced distributed pipeline; writes its own per-node config disabling auto-manage and bootstrap so the split survives). **Its inference step is EXPECTED to fail on a single multi-interface host** — that is the zero-redundancy same-host case documented in `docs/FUTURE_WORK.md` § "Connection churn on multi-interface hosts", not a distributed-inference regression (confirmed on released v0.3.28, 2026-07-26). Validate the forward path on two real machines. Both scripts take `SWARM_BENCH_MODEL`. **Pinned reference models for cross-swarm comparison: `docs/REFERENCE_MODELS.md`** (smoke / standard / stress tiers + `examples/fetch_reference_model.sh` to opt in).
+- 1489 lib tests passing + 9 ignored (env-var-gated real-model + manual smoke), 80 integration tests in `tests/integration/` + 2 ignored end-to-end (`cargo test --test integration_phase10_11 -- --ignored`), 2 repo-consistency, 26 in `swarmllm-types` (`cargo test -p swarmllm-types` — NOT covered by a bare `cargo test` from the root), 6 in the vendored request-response patch (`cargo test --manifest-path vendor/libp2p-request-response/Cargo.toml --lib` — the crate is workspace-`exclude`d, and its own integration tests need `libp2p-swarm-test` so use `--lib`), clippy clean. Microbench: `cargo run --release --no-default-features --features dev,claude-subscription --example swarm_spec_bench` (R136 — measures all 4 SWARM-SPEC layer primitives + synthetic cascade hit-rate). Local-cluster bench: `examples/3node_setup.sh` (boots 3 daemons) + `examples/3node_inference_bench.sh` (runs 3 workloads × 3 trials and prints tok/s + swarm_spec metrics). Sharded variant: `examples/3node_sharded_setup.sh` (forced distributed pipeline; writes its own per-node config disabling auto-manage and bootstrap so the split survives). **Its inference step is EXPECTED to fail on a single multi-interface host** — that is the zero-redundancy same-host case documented in `docs/FUTURE_WORK.md` § "Connection churn on multi-interface hosts", not a distributed-inference regression (confirmed on released v0.3.28, 2026-07-26). Validate the forward path on two real machines. Both scripts take `SWARM_BENCH_MODEL`. **Pinned reference models for cross-swarm comparison: `docs/REFERENCE_MODELS.md`** (smoke / standard / stress tiers + `examples/fetch_reference_model.sh` to opt in).
 - Unit tests: in-module `#[cfg(test)]` blocks
 - Integration tests: `tests/integration/` — multi-node simulations with `--test-threads=1`
 - Real-model spawn-and-infer test: set `SWARMLLM_TEST_MODEL_DIR` to a fully-populated model directory (e.g. `~/.local/share/swarmllm/models/tinyllama-1.1b-...`) and run `cargo test --test integration_phase10_11 -- --ignored end_to_end`. No synthetic GGUF fixture is committed; see `docs/ARCHITECTURE.md` § Deferred Items.
@@ -192,26 +192,29 @@ When spawning subagents in this repo, use these model picks (overrides defaults 
 
 ## Status
 
-All 20 build phases complete. All subsystems wired — no stubs. **1486 lib + 80 integration + 2 repo-consistency + 26 swarmllm-types tests passing**; 9 lib + 2 e2e ignored (env-var or manual). Clippy clean default + features dev,claude-subscription + `--features llama`.
+All 20 build phases complete. All subsystems wired — no stubs. **1489 lib + 80 integration + 2 repo-consistency + 26 swarmllm-types tests passing**; 9 lib + 2 e2e ignored (env-var or manual). Clippy clean default + features dev,claude-subscription + `--features llama`.
 
 Per-round history lives in `~/.claude/projects/-home-user-SwarmLLM/memory/round_log_*.md` and the CHANGELOG; `docs/ARCHITECTURE.md` is the canonical architecture. This section keeps only the current release line plus one-line prior-round pointers.
 
 ### Latest — v0.3.49 / .50 / .51-alpha (2026-07-29): attribution, and a tokenizer bug still open
 
-**Read `docs/FUTURE_WORK.md` first — the biggest defect found is NOT fixed.**
+**FIXED 2026-07-29 — the SPM tokenizer defect is closed.** `spm_encode` applied
+stale entries from its merge priority queue: merging extends `left` to cover
+`right`, so a queued bigram naming `left` still named a live, adjacent symbol
+but one whose text had grown past the piece that was scored. Applying it built a
+symbol for text never checked against the vocabulary, and the final lookup
+missed and dumped the span through byte fallback. `Merge` now carries the
+combined size it was scored at and the loop rejects any entry whose symbols no
+longer match it — the same guard as llama.cpp's `llm_tokenizer_spm`.
 
-**OPEN, HIGH IMPACT — the SPM tokenizer mis-encodes ~1 word in 4.**
-`SpmTokenizer::spm_encode` emits byte-fallback garbage for any word that must be
-BUILT by merging pieces; a word present in the vocab verbatim is fine. Measured
-against Phi-3.5's real vocab: `banana`, `quantization`, `pineapple` fail;
-`apple`, `computer`, `distributed`, `hello`, `system`, `networking`, `the`,
-`running` pass. The model then receives gibberish and *says so* — "the question
-seems to be nonsensical … as `a▁` does not correspond to any known colour".
-Affects every SentencePiece model, silently, and predates all of this week's
-tokenizer work (v0.3.46 fails identically with differently-mangled bytes).
-**Ruled out already** (don't redo): missing vocab entries, a truncated score
-array, merge ordering. Next step is diffing our ids against llama.cpp or HF
-`sentencepiece` for the same vocab and pinning it as a test.
+Scope was **much worse than the "1 word in 4" estimate**: against Phi-3.5's real
+vocabulary over a 4,128-line corpus, **64.9% of inputs were mis-tokenised**.
+Verified against the real `sentencepiece` library with Phi-3.5's own
+`tokenizer.model` — **0 mismatches on 4,128 inputs** after the fix. Live: "What
+colour is a banana?" went from `The text "a␦␦␦ debido a que debido a que…` to a
+correct answer. Pinned by `spm_merge_tests`; `examples/spm_probe.rs` diffs any
+GGUF header against a reference. The BPE path rescans from current state each
+iteration and was never exposed.
 
 **v0.3.51 — stop blaming peers for OUR truncated downloads.** A failed shard
 hash always docked the sender's trust, but a hash cannot tell "wrong bytes" from

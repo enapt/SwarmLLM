@@ -2,6 +2,30 @@
 
 All notable changes to SwarmLLM are documented here.
 
+## [Unreleased]
+
+### Fixed
+
+- **Models were being fed gibberish instead of some of the words you typed.**
+  Models that use SentencePiece — Phi-3.5, Mistral, Llama 2 and many others —
+  split text into pieces using a lookup table. A fault in that step meant some
+  words were handed to the model as raw character codes rather than as words.
+  The model received nonsense, and would often say so, which read as the model
+  being stupid rather than as a bug on our side.
+
+  It was worse than previously believed: measured against Phi-3.5's real
+  vocabulary over a 4,128-line sample of ordinary sentences, code, email
+  addresses and accented text, **65% of them were affected**. Asked "What colour
+  is a banana?", the model previously replied `The text "a␦␦␦ debido a que
+  debido a que…`; it now answers that a ripe banana is yellow. Asked what
+  quantization is, it previously answered about datasets, because it never
+  received the word.
+
+  Our output is now checked line for line against the reference SentencePiece
+  implementation using each model's own vocabulary file, with no differences
+  across all 4,128 samples. Models using the other tokenizer style (Llama 3,
+  Qwen, TinyLlama) were never affected.
+
 ## [0.3.52-alpha] — 2026-07-29
 
 ### Fixed
