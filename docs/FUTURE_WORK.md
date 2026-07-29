@@ -4299,6 +4299,26 @@ differently mangled bytes), not output decoding (the ids are already wrong at
 encode time), and not the merge *ordering* (`Merge`'s `Ord` correctly sorts
 highest-score-first).
 
+**Ruled out (checked 2026-07-29, do not redo)**:
+
+- *Missing vocabulary*: `▁b`, `▁ban`, `an`, `na` are all present in the header;
+  only the whole word `▁banana` is absent, which is exactly the case merging
+  exists to handle.
+- *Truncated score array*: `piece_to_id` is built with `tokens.iter().zip(scores)`,
+  which would silently truncate on a length mismatch — but
+  `tokenizer.ggml.tokens`, `.scores` and `.token_type` are all 32064 for
+  Phi-3.5, so the table is complete.
+- *Merge ordering*: `Merge`'s `Ord` sorts highest-score-first with a positional
+  tie-break, which is correct.
+
+**Confirmed shape of the failure**: decoding the produced ids shows EVERY
+character emitted as byte-fallback (`▁` becomes three byte tokens; `b`, `a`, `n`
+each become one — the ids are the raw byte values plus a constant offset of 3).
+So for an affected word **not a single merge is applied**, even though the
+merge partners exist. Yet `▁apple` merges six characters down to one token, so
+the merge path demonstrably works for some inputs. Whatever differs between
+those two cases is the bug.
+
 **Where to look**: the initial bigram seeding and `try_add_bigram` in
 `spm_encode`. A symbol that never finds any merge partner falls through to
 byte-fallback; the question is why `▁` + `b` is not being merged when
