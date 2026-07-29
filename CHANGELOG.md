@@ -2,6 +2,20 @@
 
 All notable changes to SwarmLLM are documented here.
 
+## [0.3.49-alpha] — 2026-07-29
+
+### Fixed
+
+- **Answers put together by several machines could contain a stray mark in
+  place of a space** — something like `"a▁"` appearing in the middle of an
+  otherwise normal sentence. Asking the same question of a single machine came
+  back clean, so it looked like a networking problem rather than a text one.
+
+  The previous release fixed exactly this for answers a machine produced on its
+  own. The equivalent step used when work is shared across machines lives in a
+  separate function and kept the old behaviour, so the same fault survived on
+  that path. Both now work the same way.
+
 ## [0.3.48-alpha] — 2026-07-29
 
 ### Fixed
