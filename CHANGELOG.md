@@ -2,6 +2,30 @@
 
 All notable changes to SwarmLLM are documented here.
 
+## [0.3.50-alpha] — 2026-07-29
+
+### Fixed
+
+- **One abandoned request could freeze a model for everyone.** Sending a long
+  request and then closing the window or killing the client left that request
+  running to the end. It kept hold of the model the whole time, so every later
+  request for that model waited behind work nobody wanted any more. On a long
+  prompt this looked exactly like the node had frozen: no error, nothing in the
+  logs, and no way back short of restarting it.
+
+  Requests now stop when the connection to them is lost. Streaming replies are
+  unaffected.
+
+### Changed
+
+- **This release is marked as the latest release rather than a pre-release.**
+  Nodes older than v0.3.44 ask GitHub for "the latest release", which returns
+  nothing at all while every release is marked pre-release — so those nodes
+  were told they were up to date no matter how far behind they had fallen, with
+  no way to discover otherwise. Publishing one normal release is the only thing
+  that reaches them. Newer nodes are unaffected; they already list releases
+  directly.
+
 ## [0.3.49-alpha] — 2026-07-29
 
 ### Fixed
