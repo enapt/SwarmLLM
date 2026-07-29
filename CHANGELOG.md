@@ -2,6 +2,50 @@
 
 All notable changes to SwarmLLM are documented here.
 
+## [0.3.48-alpha] — 2026-07-29
+
+### Fixed
+
+- **Answers could come back in the wrong shape, or answer a question you never
+  asked.** Every model expects its question wrapped in its own particular
+  format. When a machine co-ordinated a request for a model whose files it did
+  not hold — which is the normal case once work is shared across the network —
+  it could use the format of whichever model it happened to have loaded most
+  recently, or fall back to a generic one that did not fit. Models answer in
+  whatever format they are asked in, so the result was a reply that wandered off
+  topic, contained stray markup such as `<|user|>`, or answered something else
+  entirely. Reproduced with a one-word question that came back carrying another
+  model family's markup and a question four times longer than the one asked.
+  TinyLlama specifically is now recognised properly; it was among the worst
+  affected and is one of the first models most people try.
+
+- **Fetching only part of a model could leave it unusable.** Asking for this
+  machine's share of a model divided the work by every peer it had ever seen
+  rather than the ones actually connected, so it could take a small slice of a
+  model nobody else was holding. Requests then failed with "No node available
+  for layer 0" and the only way out was to fetch the whole model. With no peers
+  online, a share is now simply the whole model. `get-model` also says plainly
+  that a share depends on other machines holding the rest.
+
+- **Settings you never chose now follow their defaults.** Improving a default
+  had no effect on anyone who already had SwarmLLM installed: the whole
+  configuration was written to disk on first run, and a value on disk always
+  wins. Only new installs ever saw an improved default. The config file now
+  records only what actually differs from the built-in values. This also fixes
+  update checks that were stuck on a six-hour cycle after the default became
+  hourly.
+
+- **`swarmllm status` said a model was loaded while it was still downloading**,
+  which read as "ready" and led to failed requests. It now also lists anything
+  still arriving, with its progress.
+
+- **Clearer errors.** Settings in a config file that SwarmLLM does not recognise
+  — a typo, or a key under the wrong heading — are now named in the log instead
+  of being silently ignored. And `swarmllm status` and `swarmllm peers` no
+  longer answer with a bare authentication error when the daemon was started
+  with a custom data directory: they name the file they read and how to point
+  both at the same place.
+
 ## [0.3.47-alpha] — 2026-07-29
 
 ### Fixed
