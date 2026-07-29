@@ -2,6 +2,34 @@
 
 All notable changes to SwarmLLM are documented here.
 
+## [0.3.47-alpha] — 2026-07-29
+
+### Fixed
+
+- **Small models sometimes replied with nothing at all.** Ask a small chat
+  model a plain question and roughly two times in three it would answer with a
+  completely blank message. Nothing reported an error — the reply arrived
+  looking like a perfectly normal, successful answer that simply happened to be
+  empty. TinyLlama, the model many people try first, was affected on almost
+  every question.
+
+  These models are trained to be given a short instruction about how to behave
+  (a "system message") before your question. Chat apps normally send one, but
+  ours did not, and without it the model would start writing your *next*
+  question instead of answering the current one. That text gets removed before
+  you see it, which is why the reply came out blank.
+
+  SwarmLLM now supplies a neutral one when your app does not send its own. If
+  your app does send one, yours is used unchanged. Models that do not want a
+  system message are left exactly as they were.
+
+- **Replies from most models should be a little better across the board.** Most
+  models expect a marker at the very start of everything they read, and we were
+  not adding it for the Llama family — which covers TinyLlama, Phi, Mistral and
+  many popular community models. They still worked, but were being given a
+  slightly unfamiliar starting point on every request. Gemma models were
+  unaffected and are unchanged.
+
 ## [0.3.46-alpha] — 2026-07-29
 
 ### Fixed
