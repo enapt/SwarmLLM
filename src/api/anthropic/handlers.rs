@@ -159,6 +159,29 @@ async fn emit_anthropic_tool_blocks(
     emitted
 }
 
+/// Cancels the request if dropped before `disarm` — see the OpenAI handler's
+/// copy for the full reasoning. Duplicated rather than shared because the two
+/// API modules do not otherwise depend on each other; if a third path needs it,
+/// lift it to `crate::api`.
+pub(super) struct CancelOnDisconnect(
+    pub(super) Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+);
+
+impl CancelOnDisconnect {
+    pub(super) fn disarm(mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for CancelOnDisconnect {
+    fn drop(&mut self) {
+        if let Some(flag) = self.0.take() {
+            flag.store(true, std::sync::atomic::Ordering::Release);
+            tracing::info!("DIAG: client disconnected before completion — cancelling request");
+        }
+    }
+}
+
 pub(super) async fn anthropic_non_stream(
     router_tx: tokio::sync::mpsc::Sender<RouterCommand>,
     messages: Vec<ChatMessage>,
@@ -167,10 +190,20 @@ pub(super) async fn anthropic_non_stream(
     model: String,
     tools_requested: bool,
 ) -> Result<axum::response::Response, ApiError> {
-    let inference_req =
+    let mut inference_req =
         InferenceRequest::local(ModelId(model.clone()), messages, params, false, None, None);
 
-    let output = crate::api::submit_to_router(&router_tx, inference_req).await?;
+    // A client that disconnects must stop the work rather than leave the model
+    // held for the whole generation — same contract as the OpenAI
+    // non-streaming path, which owns the explanation. This handler awaits the
+    // result, so dropping its future means the caller is gone.
+    let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    inference_req.cancel = Some(cancel.clone());
+    let disconnect_guard = CancelOnDisconnect(Some(cancel));
+
+    let output = crate::api::submit_to_router(&router_tx, inference_req).await;
+    disconnect_guard.disarm();
+    let output = output?;
     let trace = output.trace.clone();
     let response = build_messages_response(request_id, model, output, tools_requested);
     Ok(crate::api::attach_route_headers(

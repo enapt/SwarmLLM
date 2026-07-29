@@ -193,6 +193,38 @@ async fn try_cloud_proxy(
     crate::api::providers::try_proxy_openai(state, &body, req.stream).await
 }
 
+/// Cancels an in-flight request if this guard drops before `disarm` is called.
+///
+/// A client that simply closes its connection cancels nothing on its own:
+/// cancellation was only ever wired to an explicit `x-swarmllm-cancel-token`
+/// header, which only the `/v1/responses` background runner sets. So a client
+/// that sent a long prompt and went away left the request running, holding the
+/// executor for the whole generation and blocking every later request to that
+/// model — reported 2026-07-29, where the next trivial request stayed blocked
+/// and only killing the process recovered it.
+///
+/// Axum drops the handler future when the client disconnects, so a drop guard
+/// is the signal. It is armed ONLY on the non-streaming path: a streaming
+/// handler returns as soon as the SSE body is constructed and the generation
+/// continues afterwards, so cancelling on its return would kill every stream.
+struct CancelOnDisconnect(Option<std::sync::Arc<std::sync::atomic::AtomicBool>>);
+
+impl CancelOnDisconnect {
+    /// The request finished normally — do not cancel on drop.
+    fn disarm(mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for CancelOnDisconnect {
+    fn drop(&mut self) {
+        if let Some(flag) = self.0.take() {
+            flag.store(true, std::sync::atomic::Ordering::Release);
+            tracing::info!("DIAG: client disconnected before completion — cancelling request");
+        }
+    }
+}
+
 pub async fn chat_completions(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
@@ -521,16 +553,28 @@ pub async fn chat_completions(
         .await
         .into_response())
     } else if let Some(router_tx) = &state.router_tx {
-        // Non-streaming: route through InferenceRouter for priority queueing
-        router_inference(
+        // Non-streaming: route through InferenceRouter for priority queueing.
+        //
+        // Give the request a cancel flag even when the caller supplied none, so
+        // that a client going away actually stops the work instead of leaving
+        // the model held for the full generation.
+        let effective_cancel = cancel_token.clone().or_else(|| {
+            Some(std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
+                false,
+            )))
+        });
+        let disconnect_guard = CancelOnDisconnect(effective_cancel.clone());
+        let result = router_inference(
             router_tx.clone(),
             &req,
             internal_messages,
             request_id,
             created,
-            cancel_token,
+            effective_cancel,
         )
-        .await
+        .await;
+        disconnect_guard.disarm();
+        result
     } else {
         Err(crate::error::ApiError(
             crate::error::SwarmError::ServiceUnavailable(
@@ -1062,5 +1106,36 @@ mod tests {
         assert_eq!(round_tripped["metadata"]["run"], "eval-batch-1");
         assert_eq!(round_tripped["parallel_tool_calls"], false);
         assert_eq!(round_tripped["stream_options"]["include_usage"], true);
+    }
+}
+
+#[cfg(test)]
+mod cancel_on_disconnect_tests {
+    use super::CancelOnDisconnect;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    /// Dropping without disarming means the client went away — cancel.
+    #[test]
+    fn drop_without_disarm_cancels() {
+        let flag = Arc::new(AtomicBool::new(false));
+        {
+            let _g = CancelOnDisconnect(Some(flag.clone()));
+        }
+        assert!(
+            flag.load(Ordering::Acquire),
+            "an abandoned request must be cancelled so it stops holding the model"
+        );
+    }
+
+    /// A request that completed normally must NOT be marked cancelled.
+    #[test]
+    fn disarm_prevents_cancellation() {
+        let flag = Arc::new(AtomicBool::new(false));
+        CancelOnDisconnect(Some(flag.clone())).disarm();
+        assert!(
+            !flag.load(Ordering::Acquire),
+            "a completed request must not be flagged cancelled"
+        );
     }
 }
