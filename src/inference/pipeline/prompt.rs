@@ -100,9 +100,26 @@ impl PipelineExecutor {
             );
             return prompt;
         }
-        // Fall back to loaded_model_info (singleton, may be wrong model)
+        // `loaded_model_info` is a SINGLETON describing whichever model this
+        // node last loaded — which is frequently not the model being asked for.
+        // Its template may only be used when it genuinely describes this model.
+        //
+        // Using it unconditionally meant a distributed request could be prompted
+        // in another family's format entirely: observed 2026-07-29 with a
+        // Phi-3.5 request rendered in Llama-3's template, which answered a
+        // one-word question with `<|start_header_id|>system<|end_header_id|>`
+        // in the visible text and a prompt 4x the expected length. A model
+        // answers in whatever format it was asked in (gotcha #169), so a
+        // foreign template is a correctness bug, not a cosmetic one.
+        //
+        // When it does not match, the model id alone drives the family fallback
+        // — the same choice `local_exec` makes, and always better than a
+        // template belonging to a different model.
         let info = self.shared_state.loaded_model_info.read().await;
-        match info.as_ref() {
+        let matching = info
+            .as_ref()
+            .filter(|i| loaded_info_describes(&i.name, &model_id.0));
+        match matching {
             Some(i) => chat_template::build_prompt_with_model(
                 &self.request.messages,
                 i.chat_template.as_deref(),
@@ -110,9 +127,14 @@ impl PipelineExecutor {
                 &i.eos_token,
                 Some(&model_id.0),
             ),
-            // See local_exec: the model id alone is enough for the family
-            // fallback, so don't collapse to ChatML.
             None => {
+                if info.is_some() {
+                    tracing::debug!(
+                        model = %model_id,
+                        "DIAG: loaded_model_info describes a different model; \
+                         using the name-based template fallback"
+                    );
+                }
                 chat_template::build_prompt(&self.request.messages, None, "", "", Some(&model_id.0))
             }
         }
@@ -448,5 +470,61 @@ fn gpt2_unicode_to_byte(cp: u32) -> u8 {
         table[offset]
     } else {
         b'?'
+    }
+}
+
+/// Whether the singleton `loaded_model_info` genuinely describes `model_id`.
+///
+/// The stored `name` comes from the manifest and the requested id comes from the
+/// API, so they can differ in case and in separator style for the same model.
+/// The comparison is deliberately conservative: a false negative costs only the
+/// name-based family fallback, while a false positive prompts the model in
+/// another family's format.
+pub(super) fn loaded_info_describes(loaded_name: &str, model_id: &str) -> bool {
+    fn norm(s: &str) -> String {
+        s.to_lowercase()
+            .chars()
+            .filter(|c| c.is_alphanumeric())
+            .collect()
+    }
+    !loaded_name.is_empty() && norm(loaded_name) == norm(model_id)
+}
+
+#[cfg(test)]
+mod loaded_info_tests {
+    use super::loaded_info_describes;
+
+    #[test]
+    fn same_model_matches_across_separator_and_case_differences() {
+        assert!(loaded_info_describes(
+            "TinyLlama-1.1B-Chat-v1.0.Q4_K_M",
+            "tinyllama-1.1b-chat-v1.0.q4-k-m"
+        ));
+        assert!(loaded_info_describes("phi-3.5-mini", "phi-3.5-mini"));
+    }
+
+    /// The bug this guards: a Phi request must never be handed the template of
+    /// whatever model happened to be loaded last.
+    #[test]
+    fn different_models_never_match() {
+        assert!(!loaded_info_describes(
+            "meta-llama-3.1-8b-instruct",
+            "phi-3.5-mini-instruct.q4-k-m"
+        ));
+        assert!(!loaded_info_describes(
+            "tinyllama-1.1b-chat-v1.0.q4-k-m",
+            "phi-3.5-mini-instruct.q4-k-m"
+        ));
+        assert!(!loaded_info_describes("", "phi-3.5-mini-instruct.q4-k-m"));
+    }
+
+    /// Different quantisations of the same base model are different files with
+    /// potentially different metadata — treat them as distinct.
+    #[test]
+    fn different_quantisations_do_not_match() {
+        assert!(!loaded_info_describes(
+            "phi-3.5-mini-instruct.q8-0",
+            "phi-3.5-mini-instruct.q4-k-m"
+        ));
     }
 }
