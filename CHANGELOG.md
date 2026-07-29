@@ -6,6 +6,19 @@ All notable changes to SwarmLLM are documented here.
 
 ### Fixed
 
+- **A node with one model loaded could answer questions about a different
+  model.** If a model had been loaded from a single file — set at startup, or
+  downloaded whole from Hugging Face — the node treated *every* later request
+  as one it could answer itself, whichever model was actually asked for. The
+  reply came back from the resident model, using that model's conversation
+  formatting, reported as a success with the requested model's name on it.
+  Nothing in the response or the logs indicated the substitution.
+
+  A request is now served locally only when the loaded model is the one that
+  was asked for. Anything else goes to the network as it always should have.
+  Nodes that run on downloaded pieces rather than whole files were never
+  affected.
+
 - **Some models ran at a fraction of their speed on a GPU, with nothing to
   say so.** Models that advertise a very large maximum conversation length —
   Llama 3.2, Phi-3.5 and most other recent releases advertise 131,072 words'

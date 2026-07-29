@@ -41,11 +41,24 @@ pub(super) async fn execute_batch(
     // explicit fetch_sub arms in distributed) handle every exit.
     active_count.fetch_add(batch_size, std::sync::atomic::Ordering::Relaxed);
     let is_split_mode = shared_state.config.inference.shard_range.is_some();
-    let model_loaded = shared_state
-        .model_loaded
-        .load(std::sync::atomic::Ordering::Acquire);
+    // Every request in a batch targets the same model (see `collect_batch`),
+    // so the first one settles it for all of them.
+    //
+    // This asks whether the local executor holds THE REQUESTED model, not the
+    // bare `model_loaded` flag. The flag is global — "a model is loaded" — and
+    // `execute_local_batch` never looks at `request.model_id`, so dispatching
+    // on it alone answered requests for other models with whichever model
+    // happened to be resident. See `SharedState::local_executor_serves`.
+    let serves_locally = match batch.first() {
+        Some(q) => {
+            shared_state
+                .local_executor_serves(&q.request.model_id)
+                .await
+        }
+        None => false,
+    };
 
-    if model_loaded && !is_split_mode {
+    if serves_locally && !is_split_mode {
         // Local inference batch: hold the executor lock once, process all requests
         execute_local_batch(shared_state, batch, active_count, queue_notify).await;
     } else {

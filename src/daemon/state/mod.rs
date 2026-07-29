@@ -1502,6 +1502,49 @@ impl SharedState {
         self.detected_region.try_read().ok().and_then(|g| g.clone())
     }
 
+    /// Does the legacy single-model executor hold **this** model?
+    ///
+    /// **`model_loaded` on its own must never be used to pick the local
+    /// inference path.** It is a global `AtomicBool` meaning "*a* model has
+    /// been loaded at least once" — set when `inference.model_path` is
+    /// configured at startup, or after a full-GGUF download via
+    /// `/api/admin/hf/download`, and never cleared per-model. It says nothing
+    /// about the model the caller actually asked for.
+    ///
+    /// `execute_local_batch` reads neither `request.model_id` nor anything
+    /// derived from it: it generates from the singleton `executor` using the
+    /// singleton `loaded_model_info`'s chat template. So dispatching on the
+    /// bare flag meant that once a node had any full-GGUF model resident, a
+    /// request for a *different* model was answered by the resident one —
+    /// wrong weights and wrong prompt template, reported as a success, with
+    /// the requested name echoed back in the response. Silently serving the
+    /// wrong model is worse than failing, because nothing surfaces it.
+    ///
+    /// Matching mirrors what `resolve_model_for_inference` can hand the
+    /// router: the display name, its slug, or a registry id whose manifest
+    /// carries that same display name. Anything else is not this model.
+    ///
+    /// Note the deliberate asymmetry in the false case: answering "no" costs a
+    /// trip through the distributed path, which handles a locally-complete
+    /// model perfectly well. Answering "yes" wrongly produces a confident
+    /// wrong answer. When in doubt, say no.
+    pub async fn local_executor_serves(&self, model_id: &crate::types::ModelId) -> bool {
+        if !self.model_loaded.load(std::sync::atomic::Ordering::Acquire) {
+            return false;
+        }
+        let info = self.loaded_model_info.read().await;
+        let Some(loaded) = info.as_ref() else {
+            return false;
+        };
+        if model_id.0 == loaded.name || model_id.0 == crate::types::slugify_model_name(&loaded.name)
+        {
+            return true;
+        }
+        self.model_registry
+            .get_manifest(model_id)
+            .is_some_and(|m| m.name == loaded.name)
+    }
+
     /// Whether any holder in `holders` can actually serve a shard *right now* —
     /// the local node, or a currently-connected peer.
     ///

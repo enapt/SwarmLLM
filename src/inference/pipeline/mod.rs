@@ -606,18 +606,23 @@ impl PipelineExecutor {
             ));
         }
 
-        // Check if this is a single-node pipeline on the local node
-        // AND we have the llama-cpp executor loaded (full GGUF path).
+        // Check if this is a single-node pipeline on the local node AND the
+        // llama-cpp executor holds THE REQUESTED model (full GGUF path).
         // If the model was loaded from shards (auto-manage), the executor
         // won't be loaded — fall through to execute_distributed which uses
         // the split model via process_local_segment.
-        // Use the atomic flag to avoid locking the executor mutex just to check.
+        //
+        // The model check is not optional: `execute_local` generates from the
+        // singleton executor without consulting `request.model_id`, so testing
+        // only the global `model_loaded` flag here served requests for other
+        // models from whichever one was resident. Same defect, same fix as
+        // `router::batch::execute_batch`.
         if num_segments == 1
             && self.assignment.segments[0].node_id == *self.shared_state.identity.node_id()
             && self
                 .shared_state
-                .model_loaded
-                .load(std::sync::atomic::Ordering::Acquire)
+                .local_executor_serves(&self.request.model_id)
+                .await
         {
             return self.execute_local().await;
         }
@@ -683,6 +688,87 @@ mod tests {
             lora_adapter: None,
             cancel: None,
         }
+    }
+
+    /// `model_loaded` is global — "a model is loaded", not "this one". Both
+    /// local fast paths (`pipeline::execute` and `router::batch::execute_batch`)
+    /// generate from the singleton executor WITHOUT consulting
+    /// `request.model_id`, so gating them on the bare flag answered a request
+    /// for one model with a different model's weights and chat template, and
+    /// reported it as a success. These pin the identity check that replaced it.
+    #[tokio::test]
+    async fn local_executor_serves_requires_the_flag() {
+        let state = make_test_state();
+        // Nothing loaded: the flag is false and no info is cached.
+        assert!(
+            !state
+                .local_executor_serves(&ModelId("anything".into()))
+                .await
+        );
+    }
+
+    #[tokio::test]
+    async fn local_executor_serves_matches_name_and_slug_only() {
+        let state = make_test_state();
+        *state.loaded_model_info.write().await = Some(crate::daemon::state::LoadedModelInfo {
+            name: "Qwen2.5 Coder 7B Instruct".into(),
+            size_bytes: 0,
+            eos_tokens: vec![],
+            chat_template: None,
+            bos_token: String::new(),
+            eos_token: String::new(),
+        });
+        state
+            .model_loaded
+            .store(true, std::sync::atomic::Ordering::Release);
+
+        // The display name and its slug are both legitimate spellings of the
+        // resident model — `resolve_model_for_inference` can hand the router
+        // either one.
+        assert!(
+            state
+                .local_executor_serves(&ModelId("Qwen2.5 Coder 7B Instruct".into()))
+                .await
+        );
+        assert!(
+            state
+                .local_executor_serves(&ModelId(crate::types::slugify_model_name(
+                    "Qwen2.5 Coder 7B Instruct"
+                )))
+                .await
+        );
+
+        // A DIFFERENT model must not be served by this executor, however
+        // plausible the name. This is the whole point: before the fix every
+        // one of these was answered with Qwen's weights.
+        for other in [
+            "tinyllama-1.1b-chat-v1.0.q4-k-m",
+            "llama-3.2-3b-instruct-q4-k-m",
+            "Qwen2.5 Coder 14B Instruct",
+            "qwen2.5-coder-7b",
+            "",
+        ] {
+            assert!(
+                !state.local_executor_serves(&ModelId(other.into())).await,
+                "{other} must not be served by the resident Qwen executor"
+            );
+        }
+    }
+
+    /// The flag can be true while the cached info is absent (unload clears the
+    /// info under a separate lock). Say no rather than guessing.
+    #[tokio::test]
+    async fn local_executor_serves_says_no_without_model_info() {
+        let state = make_test_state();
+        state
+            .model_loaded
+            .store(true, std::sync::atomic::Ordering::Release);
+        assert!(state.loaded_model_info.read().await.is_none());
+        assert!(
+            !state
+                .local_executor_serves(&ModelId("anything".into()))
+                .await
+        );
     }
 
     #[tokio::test]
