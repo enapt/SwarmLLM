@@ -4221,3 +4221,48 @@ as the "routing ratchet": `observed_latency_ms_per_layer` is only recorded when
 we route, with no decay, so an unrouted node is never re-measured and can never
 recover. Any send-side backoff needs a path back — a cooldown that expires, not
 a permanent demotion — or a transiently flaky peer becomes permanently invisible.
+
+## "Auto update" downloads but never installs, and the name does not say so
+
+**Verified end-to-end 2026-07-29.** The update path works: detect → download →
+SHA256 verify → stage beside the running binary → mark "ready to apply". It then
+stops. Nothing restarts into the new binary.
+
+That is deliberate. `UpdateConfig::effective_mode` maps `auto_update = "stable"`
+(and `"all"`) to `UpdateMode::Download`; only an explicit `mode = "install"`
+applies. The reason is sound — release binaries are verified by a SHA256 served
+from the same host that serves the binary, which is not a signature, so
+unattended self-replacement is held back pending binary signing (the deferred
+minisign item in `signing_options.md`).
+
+**The problem is the name.** A user who sets "auto update: stable" reasonably
+expects their node to update. Instead it sits on a fully downloaded, verified,
+staged binary indefinitely, showing a banner. Observed exactly this on the
+maintainer's own node: it staged v0.3.47 and stayed on v0.3.46 until updated by
+hand, by which time v0.3.48 had shipped and the staged file was already stale.
+The disk cost is real too — a staged CUDA build is ~980 MB.
+
+This is the same shape as the six-hour check interval: **the setting reads as
+one thing and does another**, and nothing surfaces the gap.
+
+Options, roughly in order of how much they change:
+
+1. **Rename only.** Make the values say what they do — `download` /
+   `notify` / `install` rather than `stable` / `all` / `disabled`. Truthful, no
+   change in risk, but existing configs carry the old spelling (and per the
+   config-defaults rule, values already on disk keep winning, so this needs a
+   migration entry).
+2. **Surface the gap.** Keep the behaviour, but make a staged-but-unapplied
+   update visibly actionable — a dashboard prompt that applies it in one click,
+   and a periodic log line naming how long it has been waiting. Cheapest fix for
+   the real harm, which is that people believe they are current when they are
+   not.
+3. **Default to `install`.** Genuinely automatic, and what most users assume
+   they already have. Should NOT be done before binary signing: it would mean
+   unattended replacement of a binary whose only integrity check is a checksum
+   fetched from the same origin.
+4. **Re-stage on a newer release.** Independent of the above: a staged binary
+   should be discarded when a newer version appears, rather than leaving a stale
+   ~980 MB file that will never be applied.
+
+Recommendation: (2) now and (1) with a migration; (3) only after signing.
