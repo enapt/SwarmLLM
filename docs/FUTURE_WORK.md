@@ -4304,6 +4304,21 @@ highest-score-first).
 byte-fallback; the question is why `▁` + `b` is not being merged when
 `▁apple` resolves as a single piece.
 
+**Measured scope (2026-07-29)** — this is not one odd word. Of 11 common words
+tested against Phi-3.5's vocabulary, **3 failed**: `banana`, `quantization`,
+`pineapple`. The pattern is exact:
+
+- a word present in the vocabulary VERBATIM encodes to one correct token
+  (`apple`, `computer`, `distributed`, `hello`, `system`, `networking`, `the`,
+  `running`)
+- a word that must be BUILT by merging pieces falls through to byte-fallback and
+  becomes gibberish
+
+`▁banana` is not a vocabulary entry, but `▁b`, `▁ban`, `an` and `na` all are — so
+the pieces needed to build it exist and the merge simply does not use them.
+Roughly a quarter of ordinary words are affected, on every SentencePiece model,
+and nothing logs when it happens.
+
 **Do not attempt this without a reference**: compare our ids against
 `llama.cpp`'s tokenizer or HuggingFace's `sentencepiece` for the same vocab and
 a word list, and add that as a test. Reply quality across every SentencePiece
