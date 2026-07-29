@@ -261,6 +261,36 @@ pub(crate) fn query_gpu_vram_used() -> Option<u64> {
     text.trim().parse::<u64>().ok()
 }
 
+/// Query live free GPU VRAM in MB via a single `nvidia-smi` call.
+///
+/// `memory.total - memory.used`, so it accounts for everything already
+/// resident — other processes, and any model this daemon already loaded.
+/// One combined query rather than [`detect_gpu_nvidia_smi`] +
+/// [`query_gpu_vram_used`] because the two would be sampled at different
+/// instants, and the subtraction of two racing samples can go negative.
+///
+/// Called once per model load by the split loader to size the KV cache
+/// (`inference::split::kv_budget`). Returns None when nvidia-smi is
+/// unavailable, which the caller must treat as "unknown", never as "zero".
+pub(crate) fn query_gpu_vram_free_mb() -> Option<u64> {
+    let output = std::process::Command::new("nvidia-smi")
+        .args([
+            "--query-gpu=memory.total,memory.used",
+            "--format=csv,noheader,nounits",
+        ])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    let line = text.trim().lines().next()?;
+    let (total, used) = line.split_once(',')?;
+    let total = total.trim().parse::<u64>().ok()?;
+    let used = used.trim().parse::<u64>().ok()?;
+    Some(total.saturating_sub(used))
+}
+
 /// Estimate VRAM for a segment (layer range) by scaling the full-model estimate
 /// by the fraction of layers covered.
 pub(super) fn estimate_segment_vram_mb(

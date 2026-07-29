@@ -2,6 +2,34 @@
 
 All notable changes to SwarmLLM are documented here.
 
+## [Unreleased]
+
+### Fixed
+
+- **Some models ran at a fraction of their speed on a GPU, with nothing to
+  say so.** Models that advertise a very large maximum conversation length —
+  Llama 3.2, Phi-3.5 and most other recent releases advertise 131,072 words'
+  worth — reserved graphics memory for that entire length the moment they
+  loaded, even for a two-line question. On a typical consumer card there was
+  not enough to go round, so the graphics driver quietly spilled the overflow
+  into ordinary system memory and carried on. Nothing failed, nothing was
+  logged, and the model answered normally — roughly fourteen times slower than
+  it should have. Measured on an RTX 3070 with Llama 3.2 1B: 3.7 words per
+  second before, 46–54 after, using 4.6 GB less graphics memory.
+
+  Models now reserve a sensible working length up front and shrink it further
+  if the card is small, the same approach llama.cpp takes. Raise it with
+  `inference.max_seq_len_override` if you want the full advertised length and
+  have the memory for it. This also leaves room for a second model to load
+  alongside the first, which previously could fail outright.
+
+- **The daemon reported working settings as being ignored.** Any setting whose
+  default is "unset" — including `inference.max_seq_len_override`,
+  `api.rate_limit_rpm`, `logging.file` and `network.gossip_network_id` — was
+  announced at startup as *"Unknown setting in config file — it is being
+  IGNORED"*, while in fact taking effect normally. Genuine typos are still
+  caught and named.
+
 ## [0.3.51-alpha] — 2026-07-29
 
 ### Fixed

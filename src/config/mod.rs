@@ -211,16 +211,38 @@ pub(crate) fn collect_unknown_config_keys(
 }
 
 /// Check a parsed config file for keys the daemon does not recognise.
-pub(crate) fn warn_unknown_keys_in(contents: &str) {
+///
+/// The schema is the user's OWN file round-tripped through `Config`, not
+/// `Config::default()`. TOML cannot represent null, so serializing the
+/// defaults omits every `Option` field that defaults to `None` — which made
+/// the check report working settings as ignored. Observed 2026-07-29:
+/// `inference.max_seq_len_override`, `api.rate_limit_rpm`, `logging.file` and
+/// `node.region` were all announced as "being IGNORED" while taking effect,
+/// whereas `inference.kv_cache_ttl_secs` (default `Some`) was not — telling a
+/// user their API rate limit does nothing is worse than saying nothing.
+///
+/// Round-tripping inverts the test into exactly the question worth asking: a
+/// key the daemon understood is populated by deserialization and therefore
+/// survives re-serialization; one it ignored disappears. New `Option` fields
+/// inherit the correct behaviour with no per-field maintenance.
+pub(crate) fn unknown_config_keys(contents: &str) -> Vec<String> {
     let Ok(file) = toml::from_str::<toml::Value>(contents) else {
-        return; // a parse error is reported by the caller with a better message
+        return Vec::new(); // a parse error is reported by the caller with a better message
     };
-    let Ok(schema) = toml::Value::try_from(Config::default()) else {
-        return;
+    let Ok(parsed) = toml::from_str::<Config>(contents) else {
+        return Vec::new();
+    };
+    let Ok(schema) = toml::Value::try_from(parsed) else {
+        return Vec::new();
     };
     let mut unknown = Vec::new();
     collect_unknown_config_keys(&file, &schema, "", &mut unknown);
-    for key in unknown {
+    unknown
+}
+
+/// Log every unrecognised key in `contents`.
+pub(crate) fn warn_unknown_keys_in(contents: &str) {
+    for key in unknown_config_keys(contents) {
         tracing::warn!(
             %key,
             "Unknown setting in config file — it is being IGNORED. Check the \
@@ -1103,14 +1125,13 @@ mod config_default_hygiene {
     /// wrong place, saw "Loaded config", and concluded they were broken.
     #[test]
     fn unknown_keys_are_detected() {
-        let schema = toml::Value::try_from(crate::config::Config::default()).unwrap();
-        // A real key in the WRONG section, and an outright typo.
-        let file: toml::Value = toml::from_str(
+        // A real key in the WRONG section, and an outright typo. Goes through
+        // the real entry point: the previous version of this test rebuilt the
+        // schema itself, the same way the code did, so it reproduced the
+        // defect instead of catching it (see `option_settings_are_not_reported_as_unknown`).
+        let unknown = crate::config::unknown_config_keys(
             "[node]\ndisable_default_bootstrap = true\n[network]\nenable_upnpp = false\n",
-        )
-        .unwrap();
-        let mut unknown = Vec::new();
-        crate::config::collect_unknown_config_keys(&file, &schema, "", &mut unknown);
+        );
         assert!(
             unknown.contains(&"node.disable_default_bootstrap".to_string()),
             "a real key in the wrong section is unknown there: {unknown:?}"
@@ -1121,12 +1142,65 @@ mod config_default_hygiene {
         );
 
         // A correct config must produce no warnings at all.
-        let good = toml::Value::try_from(crate::config::Config::default()).unwrap();
-        let mut none_expected = Vec::new();
-        crate::config::collect_unknown_config_keys(&good, &schema, "", &mut none_expected);
+        let good = toml::to_string_pretty(&crate::config::Config::default()).unwrap();
+        let none_expected = crate::config::unknown_config_keys(&good);
         assert!(
             none_expected.is_empty(),
             "a valid config must not warn: {none_expected:?}"
+        );
+    }
+
+    /// Every `Option` setting that defaults to `None` was reported as "being
+    /// IGNORED" while actually taking effect, because TOML cannot represent
+    /// null so `Config::default()` serialized without the key. Observed live
+    /// 2026-07-29 on `inference.max_seq_len_override`, which was applied (the
+    /// loader logged the clamp) and denounced in the same run.
+    ///
+    /// Asserted per-field rather than on one example: the sibling
+    /// `kv_cache_ttl_secs` defaults to `Some` and was never affected, so a
+    /// single-case test proves nothing about the class.
+    #[test]
+    fn option_settings_are_not_reported_as_unknown() {
+        for (section, key, value) in [
+            ("inference", "max_seq_len_override", "4096"),
+            ("api", "rate_limit_rpm", "500"),
+            ("api", "rate_limit_admin_rpm", "60"),
+            ("logging", "file", "\"/tmp/swarmllm.log\""),
+            // `region` is the sole field of IdentityConfig, so `[identity]`
+            // serialized to an EMPTY table whenever it was unset — which the
+            // walker then treated as a free-form map and skipped entirely.
+            // Round-tripping gives the section real content, so it is now
+            // checked like any other.
+            ("identity", "region", "\"eu-west\""),
+            ("network", "gossip_network_id", "\"testnet\""),
+            ("inference", "max_split_model_memory_mb", "2048"),
+            ("inference", "draft_gpu_layers", "8"),
+        ] {
+            let text = format!("[{section}]\n{key} = {value}\n");
+            let unknown = crate::config::unknown_config_keys(&text);
+            assert!(
+                unknown.is_empty(),
+                "{section}.{key} is a real setting and must not be reported as \
+                 unknown, but got: {unknown:?}"
+            );
+        }
+    }
+
+    /// The round-trip schema must not become a blanket amnesty: a typo inside
+    /// a section whose only other content is an `Option` field still has to be
+    /// caught.
+    #[test]
+    fn typos_beside_option_settings_are_still_caught() {
+        let unknown = crate::config::unknown_config_keys(
+            "[inference]\nmax_seq_len_override = 4096\nmax_seq_len_overide = 2048\n",
+        );
+        assert!(
+            unknown.contains(&"inference.max_seq_len_overide".to_string()),
+            "the misspelling must still be named: {unknown:?}"
+        );
+        assert!(
+            !unknown.contains(&"inference.max_seq_len_override".to_string()),
+            "the correct spelling must not be: {unknown:?}"
         );
     }
 

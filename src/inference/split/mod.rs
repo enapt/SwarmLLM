@@ -8,6 +8,7 @@
 mod entry;
 mod executor;
 mod gguf_meta;
+mod kv_budget;
 mod kv_cache;
 mod loader;
 mod model;

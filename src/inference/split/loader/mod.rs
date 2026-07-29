@@ -39,6 +39,70 @@ pub(super) struct SplitLoadOptions<'a> {
     pub parallel_data: Option<&'a [u8]>,
 }
 
+/// Sum the on-device byte cost of the tensors this segment will load.
+///
+/// Only the segment's own layers count — a node holding layers 8..16 never
+/// allocates the others. `token_embd.weight` is charged at its **dequantized
+/// f32** size because the loader dequantizes it (`Embedding::new` takes a
+/// dense tensor), which on a 128K-vocab model is several times its quantized
+/// size and is exactly the term a file-size-based estimate misses.
+///
+/// Used only to decide how much VRAM is left for the KV cache, so an
+/// over-estimate is the safe direction: it shortens context rather than
+/// letting the allocation fail.
+fn segment_weight_bytes(
+    ct: &gguf_file::Content,
+    layer_start: usize,
+    layer_end: usize,
+    is_first: bool,
+    is_last: bool,
+) -> u64 {
+    let tensor_bytes = |info: &gguf_file::TensorInfo| -> u64 {
+        let elems = info.shape.elem_count() as u64;
+        let block = info.ggml_dtype.block_size().max(1) as u64;
+        elems * info.ggml_dtype.type_size() as u64 / block
+    };
+
+    let mut total = 0u64;
+    for (name, info) in ct.tensor_infos.iter() {
+        let counted = if let Some(rest) = name.strip_prefix("blk.") {
+            match rest
+                .split_once('.')
+                .and_then(|(n, _)| n.parse::<usize>().ok())
+            {
+                Some(idx) => (layer_start..layer_end).contains(&idx),
+                None => false,
+            }
+        } else if name == "token_embd.weight" {
+            // Charged below at its dequantized size instead.
+            false
+        } else if name == "output.weight" || name == "output_norm.weight" {
+            is_last
+        } else {
+            // Small odds and ends (rope factors, per-model extras).
+            true
+        };
+        if counted {
+            total = total.saturating_add(tensor_bytes(info));
+        }
+    }
+
+    if is_first {
+        if let Some(info) = ct.tensor_infos.get("token_embd.weight") {
+            const F32: u64 = std::mem::size_of::<f32>() as u64;
+            total = total.saturating_add(info.shape.elem_count() as u64 * F32);
+        }
+    }
+    // A weight-tied model reuses token_embd as its LM head; on the last
+    // segment that tensor is resident as a quantized QMatMul as well.
+    if is_last && !ct.tensor_infos.contains_key("output.weight") {
+        if let Some(info) = ct.tensor_infos.get("token_embd.weight") {
+            total = total.saturating_add(tensor_bytes(info));
+        }
+    }
+    total
+}
+
 /// Bundle returned by [`load_qkv_weights`]: either fused `wqkv` is Some, or
 /// all three of `wq/wk/wv` are Some.
 type QkvWeights = (
@@ -253,6 +317,82 @@ impl SplitModel {
                     "Clamping context_length to MAX_SEQ_LEN_OVERRIDE — KV-cache and RoPE table sized to override"
                 );
                 context_length = cap;
+            }
+        } else {
+            // No explicit override. Two independent reductions apply, in order.
+            //
+            // 1. A default target, the way llama.cpp's `-c` defaults to 4096
+            //    rather than to whatever the model advertises. candle
+            //    allocates the whole `max_seq_len` buffer up front, so a 128K
+            //    declaration is a 128K *allocation* even for a conversation of
+            //    twenty tokens. Measured on an RTX 3070 with
+            //    llama-3.2-1b-instruct-q8-0: serving the full declared context
+            //    costs 7138 MiB and serving 4096 costs 3110 MiB, at an
+            //    identical 46-53 tok/s. The extra 4 GB buys nothing and is the
+            //    difference between a second model fitting and a hard OOM.
+            if context_length > DEFAULT_MAX_SEQ_LEN {
+                tracing::info!(
+                    gguf_context_length = context_length,
+                    default_context = DEFAULT_MAX_SEQ_LEN,
+                    "Using the default {DEFAULT_MAX_SEQ_LEN}-token context — the KV cache is \
+                     allocated in full up front, so serving this model's full \
+                     {context_length} tokens would reserve several GB for no gain at typical \
+                     conversation lengths. Raise it with inference.max_seq_len_override",
+                );
+                context_length = DEFAULT_MAX_SEQ_LEN;
+            }
+        }
+
+        // 2. Even the default target may not fit on a small card beside the
+        //    weights. Shrink further rather than let the allocation spill into
+        //    host memory, which costs ~14x throughput and reports no error at
+        //    all. Skipped when the operator named a value: an explicit setting
+        //    wins, and the load-time OOM fallback to CPU still backstops it.
+        if device.is_cuda() && super::max_seq_len_override().is_none() {
+            let seg_layers = layer_end.min(block_count).saturating_sub(layer_start);
+            let (k_elems, v_elems) = if matches!(model_arch, ModelArch::DeepSeek2) {
+                let key_length = md_get("attention.key_length")
+                    .and_then(|v| v.to_u32().map_err(SwarmError::internal))
+                    .map(|v| v as usize)
+                    .unwrap_or(head_dim);
+                let value_length = md_get("attention.value_length")
+                    .and_then(|v| v.to_u32().map_err(SwarmError::internal))
+                    .map(|v| v as usize)
+                    .unwrap_or(head_dim);
+                super::kv_budget::mla_kv_elems(head_count, key_length, value_length)
+            } else {
+                super::kv_budget::standard_kv_elems(head_count_kv, head_dim)
+            };
+            let per_token = super::kv_budget::kv_bytes_per_token(seg_layers, k_elems, v_elems);
+            let weight_bytes = segment_weight_bytes(&ct, layer_start, layer_end, is_first, is_last);
+
+            // A missing nvidia-smi means "unknown", never "zero" — capping on
+            // a guess would shrink context on machines that had no problem.
+            if let Some(free_mb) = crate::model::auto_manage::vram::query_gpu_vram_free_mb() {
+                let free_bytes = free_mb.saturating_mul(1024 * 1024);
+                if let Some(fitted) = super::kv_budget::fit_context_to_budget(
+                    context_length,
+                    per_token,
+                    weight_bytes,
+                    free_bytes,
+                ) {
+                    // Reaching here means even the default target does not
+                    // fit, so this is always a reduction below what the user
+                    // would otherwise get — always worth saying out loud.
+                    tracing::warn!(
+                        requested_context = context_length,
+                        fitted_context = fitted,
+                        free_vram_mb = free_mb,
+                        weight_mb = weight_bytes / (1024 * 1024),
+                        kv_bytes_per_token = per_token,
+                        "Not enough free GPU memory for a {context_length}-token context — \
+                         limiting this model to {fitted} tokens so it still runs on the GPU. \
+                         Longer prompts will be refused. Close other GPU programs or use a \
+                         smaller model to raise this; inference.max_seq_len_override sets it \
+                         manually",
+                    );
+                    context_length = fitted;
+                }
             }
         }
 
