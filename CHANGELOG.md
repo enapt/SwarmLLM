@@ -4,10 +4,43 @@ All notable changes to SwarmLLM are documented here.
 
 ## [0.3.55-alpha] — 2026-07-30
 
+### Fixed
+
+- **The model list said "network" for models held completely, and "local" for
+  one held only in part.** `GET /v1/models` decided this from whichever model
+  was loaded most recently rather than from which pieces the node actually
+  holds, so the label was effectively inverted — a client choosing models by it
+  to avoid network round trips picked exactly wrong. It now reports `local` when
+  every piece is here, `hybrid` when some are, `network` when none are, using the
+  same count the admin API already got right.
+
+- **The node blamed a peer for a model piece it was missing itself.** A request
+  that could not be routed said "a peer went offline mid-request — try again",
+  when in fact a piece was absent locally and no peer had it. Following that
+  advice means retrying for ever. That case now says so, and names the command
+  that fetches the rest of the model.
+
+- **A storage limit larger than the disk was taken at face value.** A 50 GB
+  budget was accepted on a filesystem with 15 GB free, and with the piece caps at
+  their unlimited defaults the node would keep accepting until the disk was full
+  rather than making room. The budget is now capped to what is genuinely free,
+  with a warning saying so.
+
+- **The Sybil check flagged the project's own bootstrap server.** Every node
+  behind a router logged "subnet clustering detected" against the anchor's own
+  address range every few minutes, which raised the inspection rate on the one
+  relay those nodes depend on and buried real warnings. The addresses the daemon
+  itself ships as bootstrap servers are now recognised.
+
 ### Added
 
+- **Credit figures on `/metrics`.** `swarmllm_credits_earned_total`,
+  `..._reserved_total` and `..._returned_total` alongside the existing balance —
+  previously only the balance was exposed, so Prometheus users saw far less than
+  the dashboard.
+
 - **Model loads now report how much graphics memory they actually used**
-  (`vram_measured_mb` in the log). Groundwork for refusing a model that will not
+  (`vram_after_load_mb` in the log). Groundwork for refusing a model that will not
   fit rather than discovering it by running out: the existing estimate is derived
   from file size and was found to be 56-117% low, because the largest single
   component — the vocabulary table, which is expanded in memory — is invisible to
