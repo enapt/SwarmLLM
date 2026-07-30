@@ -1670,19 +1670,13 @@ impl SharedState {
         let vram_budget = crate::model::auto_manage::compute_vram_budget(self)
             .or(self.config.inference.max_split_model_memory_mb);
         if let Some(budget_mb) = vram_budget {
-            let evicted = crate::inference::split::evict_split_models_lru(
-                &self.split_models,
-                &self.active_pipelines,
-                budget_mb,
-                entry.estimated_vram_mb,
-            );
+            let evicted = self.evict_split_models_and_free_vram(budget_mb, entry.estimated_vram_mb);
             if !evicted.is_empty() {
                 tracing::info!(
                     evicted = evicted.len(),
                     budget_mb,
                     "Evicted LRU split models for VRAM budget"
                 );
-                self.purge_split_model_index_entries(&evicted);
             }
         }
         self.index_split_model_insert(model_id, layer_start, layer_end);
@@ -1701,6 +1695,80 @@ impl SharedState {
             .entry(model_id.clone())
             .or_default()
             .push((layer_start, layer_end));
+    }
+
+    /// Evict split-model entries for the VRAM budget **and actually free the
+    /// VRAM**.
+    ///
+    /// `evict_split_models_lru` only removes daemon-side metadata from
+    /// `split_models`. The memory itself belongs to the model worker
+    /// **subprocess**, and the only thing that returns it to the OS is killing
+    /// that child (`ModelProcessPool::unload_model`). Every eviction site
+    /// evicted and purged the index but never unloaded, so the budget was
+    /// enforced against a phantom: the daemon decided it had freed 2 GB, loaded
+    /// another model on top of memory that was never released, and the worker
+    /// hit a real `CUDA_ERROR_OUT_OF_MEMORY`. `classify_worker_error` then
+    /// pinned that model to the CPU for the rest of the run — a ~10x throughput
+    /// loss with nothing in the API response to show for it. Reported across
+    /// v0.3.53 and v0.3.54 as "GPU silently falls back to CPU from the daemon's
+    /// own background churn"; open since 2026-07-21.
+    ///
+    /// **A model is unloaded only when no split-model entry references it any
+    /// more.** Entries are keyed per layer range, so a node holding two
+    /// segments of one model shares a single worker; unloading on the first
+    /// eviction would kill a worker still serving the second.
+    ///
+    /// **And never while it is in use.** `active_pipelines` is the
+    /// COORDINATOR's map and never holds peer-served work, so `serving_models`
+    /// has to be checked too — otherwise this kills a worker mid-answer for a
+    /// peer, which is precisely the mistake gotcha #194 records.
+    ///
+    /// The unload is spawned rather than awaited because the callers are sync
+    /// and on the model-load path; the kill is a signal plus a process reap, so
+    /// the VRAM comes back promptly without blocking the loader.
+    pub fn evict_split_models_and_free_vram(
+        &self,
+        budget_mb: u64,
+        needed_mb: u64,
+    ) -> Vec<crate::inference::split::SplitModelKey> {
+        let evicted = crate::inference::split::evict_split_models_lru(
+            &self.split_models,
+            &self.active_pipelines,
+            budget_mb,
+            needed_mb,
+        );
+        if evicted.is_empty() {
+            return evicted;
+        }
+        self.purge_split_model_index_entries(&evicted);
+
+        let mut to_unload: Vec<crate::types::ModelId> = Vec::new();
+        for key in &evicted {
+            let model_id = &key.0;
+            if to_unload.contains(model_id) {
+                continue;
+            }
+            // Another segment of the same model still resident → shared worker.
+            if self.split_models.iter().any(|e| &e.key().0 == model_id) {
+                continue;
+            }
+            if self.serving_models.contains_key(model_id) {
+                tracing::debug!(model = %model_id, "Evicted metadata but worker is serving a peer — leaving it loaded");
+                continue;
+            }
+            to_unload.push(model_id.clone());
+        }
+
+        if !to_unload.is_empty() {
+            let pool = self.model_process_pool.clone();
+            tokio::spawn(async move {
+                for model_id in to_unload {
+                    tracing::info!(model = %model_id, "Unloading evicted model to actually free its GPU memory");
+                    pool.unload_model(&model_id).await;
+                }
+            });
+        }
+        evicted
     }
 
     /// Purge a list of evicted split-model keys from the secondary index.

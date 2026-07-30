@@ -4,6 +4,25 @@ All notable changes to SwarmLLM are documented here.
 
 ## [0.3.55-alpha] — 2026-07-30
 
+### Fixed
+
+- **A graphics card could quietly stop being used, because of the node's own
+  background work.** When memory ran short, the daemon made room by dropping
+  models from its own list — but that list is only bookkeeping. The memory
+  itself is held by separate worker processes, and nothing told them to let go.
+  So the node believed it had freed several gigabytes, loaded another model on
+  top of memory that was never released, and ran out for real. The model that
+  lost the race was then moved to the processor and left there for as long as
+  the node kept running, roughly ten times slower, with nothing anywhere saying
+  so. Nobody had to be using the node for this to happen — its own routine
+  model loading was enough.
+
+  Freeing memory now actually frees it, and a model moved to the processor is
+  returned to the graphics card once memory comes back. `GET /api/admin/stats`
+  gained `models_on_cpu_fallback`, because the existing `inference_backend`
+  field describes the build rather than what any model is really running on —
+  it happily reported "CUDA" throughout.
+
 ### Clarified
 
 - **Correction to the v0.3.53 note on repeated prompts.** That entry read as

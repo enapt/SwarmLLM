@@ -1407,6 +1407,11 @@ fn detect_hardware(shared_state: &crate::daemon::SharedState) -> serde_json::Val
         "gpu_vram_used_mb": gpu_vram_used_mb,
         "gpu_inference": gpu_inference,
         "inference_backend": inference_backend,
+        // `inference_backend` is a property of the BUILD. These are the models
+        // that are NOT on the GPU right now despite it — pinned there by a GPU
+        // OOM. Without this the API reported "CUDA" while everything ran on the
+        // CPU at roughly a tenth of the speed.
+        "models_on_cpu_fallback": shared_state.model_process_pool.cpu_pinned_model_ids(),
         "memory_bandwidth_gbps": memory_bandwidth_gbps,
         "est_tokens_per_sec_7b": est_tokens_per_sec_7b,
         "total_ram_mb": total_ram_mb,

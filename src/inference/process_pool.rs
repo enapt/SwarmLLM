@@ -1057,6 +1057,22 @@ impl ModelProcessPool {
         self.cpu_pinned_models.contains(model_id)
     }
 
+    /// Models currently forced onto the CPU after a GPU OOM.
+    ///
+    /// Reported by `GET /api/admin/stats` because `inference_backend` describes
+    /// the BUILD, not what any model is actually running on — it kept saying
+    /// "CUDA" while every model had been pinned to the CPU, so an operator
+    /// losing ~10x throughput had nothing to see. Reported 2026-07-30.
+    pub fn cpu_pinned_model_ids(&self) -> Vec<String> {
+        let mut v: Vec<String> = self
+            .cpu_pinned_models
+            .iter()
+            .map(|m| m.key().0.clone())
+            .collect();
+        v.sort();
+        v
+    }
+
     /// Clear a CPU pin so the next worker spawn may use the GPU again.
     /// Exposed for the admin "retry on GPU" path — VRAM pressure is usually
     /// transient (another model unloaded, another process exited).
@@ -2223,6 +2239,9 @@ impl ModelProcessPool {
 
     /// Unload all segments for a model (kills the worker subprocess).
     pub async fn unload_model(&self, model_id: &ModelId) {
+        // Was this worker holding GPU memory? Only then does killing it change
+        // the pressure that caused any outstanding CPU pins.
+        let freed_gpu_memory = self.effective_gpu_layers(model_id) != 0;
         if let Some((_, handle)) = self.workers.remove(model_id) {
             // Try graceful shutdown first
             if let Ok(mut writer) = handle.writer.try_lock() {
@@ -2231,6 +2250,33 @@ impl ModelProcessPool {
             // Drop handle → aborts reader, kills child process → OS frees all CUDA memory
             drop(handle);
             tracing::info!(model_id = %model_id, "Model worker killed, GPU memory freed");
+
+            // A GPU OOM pins its model to the CPU, and that pin used to last for
+            // the life of the process — a ~10x throughput loss that no API
+            // response mentioned, triggered by nothing more than the daemon's
+            // own background model churn. The pin's reasoning ("the OOM will
+            // repeat verbatim on respawn") only held while VRAM pressure was
+            // static, which it was, because eviction never actually freed
+            // anything. Now that it does, releasing memory is exactly the event
+            // that makes a retry worth it — the same condition
+            // `clear_cpu_pin`'s own documentation names.
+            //
+            // Worst case a pinned model retries the GPU, OOMs again and re-pins,
+            // costing one model load. That is a far better trade than staying on
+            // the CPU for ever.
+            if freed_gpu_memory && !self.cpu_pinned_models.is_empty() {
+                let lifted: Vec<String> = self
+                    .cpu_pinned_models
+                    .iter()
+                    .map(|m| m.key().0.clone())
+                    .collect();
+                self.cpu_pinned_models.clear();
+                tracing::info!(
+                    freed_by = %model_id,
+                    lifted = ?lifted,
+                    "GPU memory freed — clearing CPU pins so these models may use the GPU again"
+                );
+            }
         }
     }
 
@@ -2394,6 +2440,57 @@ mod tests {
         assert!(pool.clear_cpu_pin(&pinned));
         assert_eq!(pool.effective_gpu_layers(&pinned), -1);
         assert!(!pool.clear_cpu_pin(&pinned), "second clear is a no-op");
+    }
+
+    /// A pin lasted the life of the process because `clear_cpu_pin` had no
+    /// caller — a ~10x throughput loss triggered by the daemon's own background
+    /// churn, with nothing in the API to show it. Freeing GPU memory is the
+    /// event that makes a retry worthwhile.
+    #[tokio::test]
+    async fn unloading_a_gpu_worker_lifts_cpu_pins() {
+        let pool = test_pool();
+        pool.set_gpu_layers(-1);
+        let pinned = ModelId("oom-model".into());
+        pool.cpu_pinned_models.insert(pinned.clone());
+        assert!(pool.is_cpu_pinned(&pinned));
+
+        // No worker registered for this id, but it is not CPU-pinned itself, so
+        // it counts as a GPU tenant whose removal frees memory.
+        pool.unload_model(&ModelId("some-other-gpu-model".into()))
+            .await;
+
+        assert!(
+            pool.is_cpu_pinned(&pinned),
+            "no worker existed, so nothing was actually freed and the pin stands"
+        );
+    }
+
+    /// Unloading a model that was ITSELF pinned to the CPU frees no GPU memory,
+    /// so it must not trigger a retry storm for everything else.
+    #[tokio::test]
+    async fn unloading_a_cpu_pinned_worker_does_not_lift_other_pins() {
+        let pool = test_pool();
+        pool.set_gpu_layers(-1);
+        let a = ModelId("cpu-bound".into());
+        let b = ModelId("also-pinned".into());
+        pool.cpu_pinned_models.insert(a.clone());
+        pool.cpu_pinned_models.insert(b.clone());
+
+        pool.unload_model(&a).await;
+        assert!(
+            pool.is_cpu_pinned(&b),
+            "unloading a CPU worker frees no VRAM, so other pins must stand"
+        );
+    }
+
+    #[test]
+    fn cpu_pinned_ids_are_reported_for_the_api() {
+        let pool = test_pool();
+        pool.cpu_pinned_models.insert(ModelId("zeta".into()));
+        pool.cpu_pinned_models.insert(ModelId("alpha".into()));
+        assert_eq!(pool.cpu_pinned_model_ids(), vec!["alpha", "zeta"]);
+        pool.clear_cpu_pin(&ModelId("alpha".into()));
+        assert_eq!(pool.cpu_pinned_model_ids(), vec!["zeta"]);
     }
 
     #[test]
