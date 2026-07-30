@@ -54,16 +54,46 @@ pub async fn metrics(State(state): State<AppState>) -> Response {
         requests as f64,
     );
 
-    // swarmllm_credits_balance (gauge)
-    let balance = {
+    // Credits. `/metrics` carried only the balance while the JSON API grew the
+    // lifetime figures, so anyone monitoring with Prometheus rather than the
+    // dashboard saw a materially poorer picture — reported 2026-07-30 alongside
+    // two counters that were not wired up at all.
+    //
+    // `lifetime_refunded` is the interesting one: as a share of
+    // `lifetime_spent` it is the node's own request failure rate, which was
+    // otherwise invisible. See `CreditBalance::lifetime_refunded`.
+    let (balance, earned, spent, refunded) = {
         let cb = shared.credits.credit_balance.read().await;
-        cb.balance
+        (
+            cb.balance,
+            cb.lifetime_earned,
+            cb.lifetime_spent,
+            cb.lifetime_refunded,
+        )
     };
     write_gauge(
         &mut buf,
         "swarmllm_credits_balance",
         "Current credit balance",
         balance as f64,
+    );
+    write_counter(
+        &mut buf,
+        "swarmllm_credits_earned_total",
+        "Credits earned over this node's lifetime",
+        earned as f64,
+    );
+    write_counter(
+        &mut buf,
+        "swarmllm_credits_reserved_total",
+        "Credits ever reserved for spending, including reservations later returned",
+        spent as f64,
+    );
+    write_counter(
+        &mut buf,
+        "swarmllm_credits_returned_total",
+        "Credits returned by reverting a reservation — usually a failed request",
+        refunded as f64,
     );
 
     // swarmllm_shards_hosted (gauge)

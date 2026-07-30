@@ -183,6 +183,37 @@ impl AntiGaming {
         entries.len() < self.max_tx_per_window
     }
 
+    /// /24 prefixes belonging to the project's own bootstrap anchors.
+    ///
+    /// Derived from `network::default_bootstrap_peers()` so adding an anchor
+    /// allow-lists it automatically and the two lists cannot drift.
+    ///
+    /// **Why this exists.** The shipped anchor and its co-located infrastructure
+    /// share a /24, so every NAT-bound node that talks to it saw
+    /// `Subnet clustering detected subnet="212.132.104.0/24" node_count=6` —
+    /// 17 times in 4.5 hours on one reporting node. It is a false positive
+    /// against the project's own relay, it raised the spot-check rate against
+    /// the one peer every relay-bound node depends on, and at WARN every few
+    /// minutes it buried real warnings. Reported 2026-07-30.
+    ///
+    /// **This is a deliberate, narrow trust delegation**, the same shape as the
+    /// trusted-publisher allowlist: a genuine Sybil farm co-located with the
+    /// anchor would escape this heuristic. That is accepted because the anchor is
+    /// project-operated, and because the heuristic only ever raised a
+    /// spot-check rate — it never blocked anything.
+    fn anchor_subnets() -> Vec<[u8; 3]> {
+        crate::config::default_bootstrap_peers()
+            .iter()
+            .filter_map(|addr| {
+                // "/ip4/212.132.104.177/tcp/..." → the octets after `/ip4/`.
+                let rest = addr.strip_prefix("/ip4/")?;
+                let ip = rest.split('/').next()?;
+                let parts: Vec<u8> = ip.split('.').filter_map(|o| o.parse().ok()).collect();
+                (parts.len() == 4).then(|| [parts[0], parts[1], parts[2]])
+            })
+            .collect()
+    }
+
     /// Register a node's observed IPv4 address for subnet clustering detection.
     /// Extracts the /24 prefix and tracks which NodeIds share it.
     ///
@@ -194,6 +225,12 @@ impl AntiGaming {
     /// no longer belong to. Drop the stale entry first.
     pub fn register_subnet(&mut self, node_id: &NodeId, ip_bytes: [u8; 4]) {
         let prefix = [ip_bytes[0], ip_bytes[1], ip_bytes[2]];
+        // The project's own anchors share a /24 with their co-located
+        // infrastructure; counting them as clustering is a false positive
+        // against the relay every NAT-bound node depends on.
+        if Self::anchor_subnets().contains(&prefix) {
+            return;
+        }
         // O(1) reverse-index lookup of the previous bucket. If the node was
         // last seen in a different /24, drop it from that bucket; otherwise
         // we're refreshing in place. The previous full-scan implementation
@@ -397,5 +434,45 @@ mod tests {
                 assert!((amount - 0.1).abs() < f64::EPSILON);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod anchor_subnet_tests {
+    use super::*;
+
+    /// The shipped anchor's /24 must be recognised, so the project's own relay
+    /// is not reported as a Sybil cluster to every NAT-bound node.
+    #[test]
+    fn the_shipped_anchor_subnet_is_recognised() {
+        let subnets = AntiGaming::anchor_subnets();
+        assert!(
+            !subnets.is_empty(),
+            "the bootstrap list should yield at least one /ip4/ anchor"
+        );
+        // Derived from the same list the daemon dials, so it cannot drift.
+        for addr in crate::config::default_bootstrap_peers() {
+            if let Some(rest) = addr.strip_prefix("/ip4/") {
+                let ip = rest.split('/').next().unwrap();
+                let o: Vec<u8> = ip.split('.').filter_map(|p| p.parse().ok()).collect();
+                if o.len() == 4 {
+                    assert!(
+                        subnets.contains(&[o[0], o[1], o[2]]),
+                        "anchor {ip} must be allow-listed"
+                    );
+                }
+            }
+        }
+    }
+
+    /// An unrelated subnet must still be tracked — this allowlist is narrow, not
+    /// a hole in the heuristic.
+    #[test]
+    fn an_unrelated_subnet_is_still_tracked() {
+        let subnets = AntiGaming::anchor_subnets();
+        assert!(
+            !subnets.contains(&[203, 0, 113]),
+            "TEST-NET-3 is not an anchor"
+        );
     }
 }

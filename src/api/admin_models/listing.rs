@@ -41,28 +41,12 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
     }
 
     // Helper: count local and global shard availability for a manifest
+    // Delegates to `api::count_shard_availability` so this and `/v1/models`
+    // cannot disagree about what "local" means — they did, and the public
+    // endpoint was the one that was wrong.
     let count_shard_availability =
         |m: &crate::types::ModelManifest, state: &AppState| -> (usize, usize) {
-            let mut local_count = 0usize;
-            let mut global_count = 0usize;
-            for idx in 0..m.shard_count {
-                let sid = crate::types::ShardId {
-                    model_id: m.id.clone(),
-                    index: idx,
-                };
-                let holders = state.shared_state.model_registry.shard_holders(&sid);
-                if holders.contains(&local_node_id) {
-                    local_count += 1;
-                }
-                // A shard only counts toward network-wide "ready" if a holder can
-                // actually serve it now — the local node or a connected peer.
-                // Matching the scheduler's oracle stops a disconnected peer's
-                // stale announce from making a model look ready it can't serve.
-                if state.shared_state.any_holder_reachable(&holders) {
-                    global_count += 1;
-                }
-            }
-            (local_count, global_count)
+            crate::api::count_shard_availability(m, &state.shared_state)
         };
 
     // Helper: build per-shard detail for a manifest, including download state + in_vram

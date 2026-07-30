@@ -508,6 +508,45 @@ pub(crate) fn validate_tools<T>(
     Ok(())
 }
 
+/// How many of a model's shards this node holds, and how many are reachable
+/// network-wide right now.
+///
+/// The single answer to "can this node serve the model itself". `/v1/models`
+/// used to label a model `local` when it matched `loaded_model_info` — the
+/// most-recently-loaded singleton — which had nothing to do with shard
+/// possession. A tester found the flag effectively inverted: four models held
+/// completely (4/4, 3/3, 2/2) were reported `network`, while the only partially
+/// held model (2/8) was reported `local`, because it happened to be the last one
+/// touched. A client choosing models by `owned_by` to avoid network round trips
+/// picked exactly wrong. `/api/admin/shard-storage` was already correct because
+/// it counted shards; this is that computation, shared.
+///
+/// The global count uses `any_holder_reachable`, matching the scheduler's
+/// liveness oracle, so a departed peer's stale announce cannot make a model look
+/// servable when it is not.
+pub(crate) fn count_shard_availability(
+    m: &crate::types::ModelManifest,
+    shared: &crate::daemon::SharedState,
+) -> (usize, usize) {
+    let local_node_id = shared.identity.node_id().clone();
+    let mut local_count = 0usize;
+    let mut global_count = 0usize;
+    for idx in 0..m.shard_count {
+        let sid = crate::types::ShardId {
+            model_id: m.id.clone(),
+            index: idx,
+        };
+        let holders = shared.model_registry.shard_holders(&sid);
+        if holders.contains(&local_node_id) {
+            local_count += 1;
+        }
+        if shared.any_holder_reachable(&holders) {
+            global_count += 1;
+        }
+    }
+    (local_count, global_count)
+}
+
 /// Build a credit balance summary JSON object.
 ///
 /// `lifetime_refunded` and `net_spent` are reported alongside the raw counters

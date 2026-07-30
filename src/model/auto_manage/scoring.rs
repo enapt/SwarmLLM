@@ -22,6 +22,7 @@ impl AutoShardManager {
             config.max_storage_mb,
             self.shared_state.config.resources.max_disk_mb,
             &self.shared_state.config.node.contribution,
+            super::free_disk_bytes_for(&self.shared_state.config.node.data_dir),
         );
         effective_max.saturating_sub(current_bytes)
     }

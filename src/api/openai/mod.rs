@@ -584,6 +584,36 @@ pub async fn chat_completions(
     }
 }
 
+/// How a model is served from this node's point of view: `local` when every
+/// shard is here, `hybrid` when some are, `network` when none are.
+///
+/// Derived from shard possession. It previously came from `loaded_model_info`,
+/// the most-recently-loaded singleton, which made the flag effectively inverted:
+/// a tester saw four completely-held models reported `network` while the only
+/// partially-held one (2/8) was reported `local`, because it was the last one
+/// touched. Clients pick models by this field to avoid network round trips, so
+/// wrong is worse than absent. `hybrid` is reported honestly rather than being
+/// rounded to `local` — holding some shards is not the same as being able to
+/// answer alone.
+fn owned_by_for(state: &AppState, model_id: &str) -> String {
+    let Some(m) = state
+        .shared_state
+        .model_registry
+        .get_manifest(&crate::types::ModelId(model_id.to_string()))
+    else {
+        // No manifest: it is servable (we listed it) but we cannot count shards.
+        return "network".into();
+    };
+    let (local, _reachable) = crate::api::count_shard_availability(&m, &state.shared_state);
+    if m.shard_count > 0 && local == m.shard_count as usize {
+        "local".into()
+    } else if local > 0 {
+        "hybrid".into()
+    } else {
+        "network".into()
+    }
+}
+
 /// GET /v1/models
 ///
 /// Lists models usable for inference. A model is usable when all its layers
@@ -625,11 +655,14 @@ pub async fn list_models(State(state): State<AppState>) -> Json<ModelListRespons
             .get_manifest(&crate::types::ModelId(model_id.clone()))
             .map(|m| m.publish_date.timestamp())
             .unwrap_or(0);
+        // `owned_by` must describe shard possession, not which model happened
+        // to be loaded last. See `api::count_shard_availability`.
+        let owned_by = owned_by_for(&state, &model_id);
         data.push(ModelInfo {
             id: model_id,
             object: "model",
             created,
-            owned_by: "local".into(),
+            owned_by,
         });
     }
 
@@ -641,11 +674,12 @@ pub async fn list_models(State(state): State<AppState>) -> Json<ModelListRespons
         }
         if all_shards_available(&state, &id) {
             seen.insert(id.clone());
+            let owned_by = owned_by_for(&state, &id);
             data.push(ModelInfo {
                 id,
                 object: "model",
                 created: manifest.publish_date.timestamp(),
-                owned_by: "network".into(),
+                owned_by,
             });
         }
     }

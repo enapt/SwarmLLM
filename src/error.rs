@@ -321,6 +321,17 @@ pub fn error_hint(err: &SwarmError) -> Option<&'static str> {
             "A model file did not download completely and will be fetched again \
              automatically. This usually means the connection dropped part-way.",
         ),
+        // `PipelineError` covers two causes needing OPPOSITE advice, and the
+        // generic text asserted the wrong one. A tester was told "a peer went
+        // offline mid-request" when the real cause was a piece of the model
+        // missing locally that no peer could supply — so following the hint
+        // means retrying for ever instead of fetching the piece. Reported
+        // 2026-07-30.
+        SwarmError::PipelineError(msg) if msg.contains("No node available for layer") => Some(
+            "Part of this model isn't available — not on this machine, and not on any \
+             connected peer. Fetch the whole model with `swarmllm get-model <name> --all`, \
+             or wait for more peers to come online.",
+        ),
         SwarmError::PipelineError(_) => Some(
             "Something went wrong assembling the inference pipeline. This usually means \
              a peer went offline mid-request. Try again — a different route will be used.",

@@ -750,6 +750,7 @@ pub async fn storage_breakdown(State(state): State<AppState>) -> Json<serde_json
         config.auto_manage.max_storage_mb,
         config.resources.max_disk_mb,
         &config.node.contribution,
+        crate::model::auto_manage::free_disk_bytes_for(&config.node.data_dir),
     );
     let total_bytes = config
         .resources

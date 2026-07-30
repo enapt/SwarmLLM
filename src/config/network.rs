@@ -173,7 +173,7 @@ fn default_listen_address() -> String {
 /// `bootstrap_peers` in config; to run with none at all set
 /// `disable_default_bootstrap = true`, because an empty list means "not
 /// configured" (see that field for why).
-pub(super) fn default_bootstrap_peers() -> Vec<String> {
+pub fn default_bootstrap_peers() -> Vec<String> {
     vec![
         // DNS form (primary, portable across a host IP change — requires the
         // swarm's DNS transport, wired via `.with_dns()` in the manager).
