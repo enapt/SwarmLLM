@@ -4,6 +4,15 @@ All notable changes to SwarmLLM are documented here.
 
 ## [0.3.55-alpha] — 2026-07-30
 
+### Added
+
+- **Model loads now report how much graphics memory they actually used**
+  (`vram_measured_mb` in the log). Groundwork for refusing a model that will not
+  fit rather than discovering it by running out: the existing estimate is derived
+  from file size and was found to be 56-117% low, because the largest single
+  component — the vocabulary table, which is expanded in memory — is invisible to
+  it. On one 1B model that table alone is bigger than the whole file.
+
 ### Fixed
 
 - **Freeing graphics memory now actually frees it.** When memory ran short the

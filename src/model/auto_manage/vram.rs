@@ -12,6 +12,97 @@ pub fn estimate_model_vram_mb(total_size_bytes: u64) -> u64 {
     (total_size_bytes as f64 * 1.15 / (1024.0 * 1024.0)) as u64
 }
 
+/// The pieces a worker's GPU footprint is actually made of.
+///
+/// [`estimate_model_vram_mb`] is `file_size * 1.15`, a flat 15% for "KV cache
+/// overhead" with no term for vocabulary, context length, layer count or
+/// KV-head geometry. Measured against real loads on an RTX 3070 it is
+/// **56%-117% low**, which is fine for the prune scoring it was written for and
+/// useless as an admission decision: a gate fed those numbers admits models
+/// that cannot fit and the worker dies with `CUDA_ERROR_OUT_OF_MEMORY` anyway.
+///
+/// The dominant missing term is the **embedding table, dequantized to f32**.
+/// The loader does `tok_embd.dequantize(&device)` because `Embedding::new` takes
+/// a dense tensor, so a 128k-vocabulary model carries
+/// `128256 * 2048 * 4 = 1002 MB` that no file-size multiple can see — larger
+/// than the entire quantized checkpoint for a 1B model. The KV cache is the
+/// second, and is the one `inference.max_seq_len_override` and the 4096 default
+/// bound (see `inference::split::kv_budget`).
+#[derive(Debug, Clone, Copy)]
+pub struct VramFootprintInputs {
+    /// Sum of the shard bytes this worker will map. Quantized, on-disk size.
+    pub quantized_weight_bytes: u64,
+    /// Rows in the embedding table — `{arch}.vocab_size`, or the token count.
+    pub vocab_size: u64,
+    /// `{arch}.embedding_length` (hidden dim).
+    pub embedding_length: u64,
+    /// Layers in THIS segment, not the whole model.
+    pub segment_layers: u64,
+    /// `{arch}.attention.head_count_kv`.
+    pub head_count_kv: u64,
+    /// `{arch}.attention.key_length`, or `embedding_length / head_count`.
+    pub head_dim: u64,
+    /// `{arch}.rope.dimension_count`.
+    pub rope_dim: u64,
+    /// The context length the KV cache will actually be sized to — i.e. AFTER
+    /// the `DEFAULT_MAX_SEQ_LEN` cap and any override, not the raw GGUF value.
+    pub effective_context: u64,
+    /// Does this segment hold the embedding table (layer 0)?
+    pub is_first: bool,
+}
+
+/// Bytes a CUDA worker process costs before any model weights: driver context,
+/// cuBLAS handles and workspace.
+///
+/// Provisional. Two clean measurements implied 170 MB and 651 MB, which no
+/// constant fits, so this is NOT yet calibrated — WSL reports `[N/A]` for
+/// per-process GPU memory, so the deltas had to come from whole-device sampling
+/// with another daemon resident. The worker now reports its own measured
+/// footprint (`vram_measured_mb`); calibrate from that and prefer the measured
+/// value over this estimate wherever one exists.
+pub const CUDA_PROCESS_OVERHEAD_BYTES: u64 = 320 * 1024 * 1024;
+
+/// Estimate a worker's GPU footprint in MB from the model's real geometry.
+///
+/// Deliberately errs HIGH: for an admission decision, over-estimating costs a
+/// model that would have fitted, while under-estimating costs a hard OOM and —
+/// until this release — a permanent fall back to the CPU.
+pub fn estimate_worker_vram_mb(i: &VramFootprintInputs) -> u64 {
+    const F32: u64 = 4;
+    let mut bytes = i.quantized_weight_bytes;
+
+    // Embedding table, dequantized to f32 by the loader. First segment only.
+    if i.is_first {
+        bytes = bytes.saturating_add(
+            i.vocab_size
+                .saturating_mul(i.embedding_length)
+                .saturating_mul(F32),
+        );
+    }
+
+    // KV cache: candle allocates the whole [B, H, ctx, D] buffer per layer on
+    // the first append, for K and V, as f32.
+    bytes = bytes.saturating_add(
+        i.segment_layers
+            .saturating_mul(2)
+            .saturating_mul(i.head_count_kv)
+            .saturating_mul(i.head_dim)
+            .saturating_mul(i.effective_context)
+            .saturating_mul(F32),
+    );
+
+    // RoPE cos/sin tables, sized to the same context.
+    bytes = bytes.saturating_add(
+        i.effective_context
+            .saturating_mul(i.rope_dim.max(2) / 2)
+            .saturating_mul(F32)
+            .saturating_mul(2),
+    );
+
+    bytes = bytes.saturating_add(CUDA_PROCESS_OVERHEAD_BYTES);
+    bytes / (1024 * 1024)
+}
+
 /// MoE-aware VRAM estimation. For Mixture-of-Experts models, only a fraction
 /// of expert weights are active at any time, so the actual VRAM requirement
 /// is much lower than the total file size.
@@ -400,5 +491,138 @@ mod tests {
     fn shard_window_single_shard() {
         let result = compute_optimal_shard_window(1, 500, 1000);
         assert_eq!(result, Some(vec![0]));
+    }
+}
+
+#[cfg(test)]
+mod footprint_tests {
+    use super::*;
+
+    /// tinyllama-1.1b-q4 as it actually sits on disk: 636 MB of shards, 32k
+    /// vocabulary, 22 layers, 4 KV heads, head_dim 64, 2048 context.
+    fn tinyllama() -> VramFootprintInputs {
+        VramFootprintInputs {
+            quantized_weight_bytes: 667_078_656,
+            vocab_size: 32_000,
+            embedding_length: 2048,
+            segment_layers: 22,
+            head_count_kv: 4,
+            head_dim: 64,
+            rope_dim: 64,
+            effective_context: 2048,
+            is_first: true,
+        }
+    }
+
+    /// llama-3.2-1b-q8: only 821 MB of weights but a 128k vocabulary, so the
+    /// f32 embedding table alone is larger than the checkpoint.
+    fn llama32_1b() -> VramFootprintInputs {
+        VramFootprintInputs {
+            quantized_weight_bytes: 860_807_296,
+            vocab_size: 128_256,
+            embedding_length: 2048,
+            segment_layers: 16,
+            head_count_kv: 8,
+            head_dim: 64,
+            rope_dim: 64,
+            effective_context: 4096,
+            is_first: true,
+        }
+    }
+
+    /// The whole point: the old estimator is wildly low on a large-vocabulary
+    /// model, because a file-size multiple cannot see a dequantized embedding
+    /// table. Measured on an RTX 3070: 1145 MiB and 2731 MiB respectively.
+    #[test]
+    fn beats_the_file_size_multiple_on_a_large_vocabulary_model() {
+        let old = estimate_model_vram_mb(llama32_1b().quantized_weight_bytes);
+        let new = estimate_worker_vram_mb(&llama32_1b());
+        const MEASURED: u64 = 2731;
+        let old_err = (MEASURED as i64 - old as i64).abs();
+        let new_err = (MEASURED as i64 - new as i64).abs();
+        assert!(
+            new_err < old_err,
+            "new estimate {new} must be closer to {MEASURED} than old {old}"
+        );
+        // The old one is not merely worse, it is under by more than half.
+        assert!(old < MEASURED / 2, "old estimate {old} vs {MEASURED}");
+    }
+
+    /// The embedding term dominates on a large vocabulary and must only be
+    /// charged to the segment that actually holds it.
+    #[test]
+    fn the_embedding_table_is_charged_to_the_first_segment_only() {
+        let first = estimate_worker_vram_mb(&llama32_1b());
+        let mut middle = llama32_1b();
+        middle.is_first = false;
+        let mid = estimate_worker_vram_mb(&middle);
+        // 128256 * 2048 * 4 = 1002 MB
+        assert!(
+            (first - mid) > 900 && (first - mid) < 1100,
+            "first {first} minus middle {mid} should be ~1002 MB"
+        );
+    }
+
+    /// Context length drives the KV term, which is what the 4096 default caps.
+    /// A 128k context must estimate far higher than the capped one.
+    #[test]
+    fn context_length_moves_the_estimate() {
+        let capped = estimate_worker_vram_mb(&llama32_1b());
+        let mut uncapped = llama32_1b();
+        uncapped.effective_context = 131_072;
+        let full = estimate_worker_vram_mb(&uncapped);
+        assert!(
+            full > capped + 7_000,
+            "131k context should add many GB over 4096: {capped} -> {full}"
+        );
+    }
+
+    /// A short-context, small-vocabulary model should not be wildly
+    /// over-estimated either — over-estimating costs admissions.
+    #[test]
+    fn a_small_model_is_not_grossly_over_estimated() {
+        const MEASURED: u64 = 1145;
+        let est = estimate_worker_vram_mb(&tinyllama());
+        assert!(
+            est >= MEASURED,
+            "must not under-estimate ({est} < {MEASURED})"
+        );
+        assert!(
+            est < MEASURED * 2,
+            "must not be more than 2x over ({est} vs {MEASURED})"
+        );
+    }
+
+    /// Degenerate geometry must not panic or overflow.
+    #[test]
+    fn degenerate_inputs_are_safe() {
+        let z = VramFootprintInputs {
+            quantized_weight_bytes: 0,
+            vocab_size: 0,
+            embedding_length: 0,
+            segment_layers: 0,
+            head_count_kv: 0,
+            head_dim: 0,
+            rope_dim: 0,
+            effective_context: 0,
+            is_first: true,
+        };
+        // Just the process overhead.
+        assert_eq!(
+            estimate_worker_vram_mb(&z),
+            CUDA_PROCESS_OVERHEAD_BYTES / (1024 * 1024)
+        );
+        let huge = VramFootprintInputs {
+            quantized_weight_bytes: u64::MAX,
+            vocab_size: u64::MAX,
+            embedding_length: u64::MAX,
+            segment_layers: u64::MAX,
+            head_count_kv: u64::MAX,
+            head_dim: u64::MAX,
+            rope_dim: u64::MAX,
+            effective_context: u64::MAX,
+            is_first: true,
+        };
+        let _ = estimate_worker_vram_mb(&huge); // must not panic
     }
 }

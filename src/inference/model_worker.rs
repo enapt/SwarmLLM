@@ -525,6 +525,40 @@ fn worker_force_cpu() -> bool {
     WORKER_FORCE_CPU.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+/// Whole-device GPU memory in use, in MB, or `None` when there is no GPU to ask.
+///
+/// Whole-device rather than per-process because WSL reports `[N/A]` for
+/// `--query-compute-apps` memory, so process attribution is simply unavailable
+/// there. Sound enough to bracket a single load in a process that does one at a
+/// time; not sound as a live admission input.
+fn current_vram_used_mb() -> Option<u64> {
+    let out = std::process::Command::new("nvidia-smi")
+        .args(["--query-gpu=memory.used", "--format=csv,noheader,nounits"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .next()?
+        .trim()
+        .parse()
+        .ok()
+}
+
+/// GPU memory this load appears to have cost, in MB.
+///
+/// `None` when there is no GPU, when either sample failed, or when the device
+/// went DOWN across the load — that last case means another process freed more
+/// than we allocated, so the delta says nothing about us and a negative number
+/// dressed up as zero would be worse than admitting we do not know.
+fn measured_vram_delta_mb(before: Option<u64>) -> Option<u64> {
+    let before = before?;
+    let after = current_vram_used_mb()?;
+    after.checked_sub(before)
+}
+
 /// The request id a cancellation would apply to, for message kinds worth
 /// checking before starting work.
 ///
@@ -632,6 +666,9 @@ fn ensure_model_loaded(
         total_layers,
     );
 
+    // Sampled before the load so the delta is attributable to it.
+    let vram_before_mb = current_vram_used_mb();
+
     // Try loading the split model from available sources
     let gguf_path = model_dir.join("model.gguf");
     let source_path_file = model_dir.join("source_path");
@@ -705,12 +742,23 @@ fn ensure_model_loaded(
         model.pre_split_for_tp(tp_rank, tp_size)?;
     }
 
+    // Report what this load ACTUALLY cost on the GPU, not what we guessed.
+    //
+    // Admission control needs a number it can trust, and the estimate is built
+    // from GGUF geometry with a provisional constant for driver overhead. On
+    // WSL, `nvidia-smi --query-compute-apps` reports `[N/A]` for per-process
+    // memory, so whole-device sampling around the load is the only attribution
+    // available — and it is only sound because this process does one load at a
+    // time. Treat a sample taken while another process is allocating as noise;
+    // that is why this is logged rather than fed straight into a decision.
+    let vram_measured_mb = measured_vram_delta_mb(vram_before_mb);
     tracing::info!(
         model = %model_id,
         layers = format!("[{layer_start}..{layer_end})"),
         tp_rank,
         tp_size,
         device = ?model.device(),
+        vram_measured_mb,
         "model-worker: Model loaded"
     );
     models.insert(key, model);
