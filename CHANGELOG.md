@@ -29,12 +29,21 @@ All notable changes to SwarmLLM are documented here.
   describes which build is running rather than what any model is actually
   using — it reported the graphics card throughout.
 
-  **This does not yet fix the reported case of a card dropping out under the
-  node's own background loading.** Testing showed why: loading a model for a
-  request does not consult the memory budget at all, so two models totalling
-  3.8 GB both loaded against a 2.2 GB budget without any limit being applied.
-  The accounting above had to be correct before a limit could mean anything,
-  but the limit itself is still missing and is tracked as the next piece of work.
+- **A model that will not fit is now loaded on the processor instead of failing.**
+  Loading a model never checked whether there was room for it, so on a card that
+  could hold one large model but not two, the second simply ran out of memory
+  mid-load. That killed its worker and left the model on the processor for as
+  long as the node ran. Nobody had to be using the node for it to happen — its
+  own background loading was enough.
+
+  Each model's memory needs are now worked out from its actual shape before
+  loading, weighed against what is already committed, and a model that does not
+  fit is loaded on the processor deliberately, with a clear reason logged and
+  shown in the interface. Verified on an RTX 3070: with room for one model, the
+  first went to the graphics card and the second was placed on the processor with
+  no failure at all, where previously both were attempted and the second died.
+
+  Nodes without a configured memory limit behave exactly as before.
 
 ### Clarified
 

@@ -704,6 +704,22 @@ pub struct ModelProcessPool {
     /// respawned worker makes the identical allocation and dies the same way,
     /// and the user sees an unbroken run of 500s with no path out.
     cpu_pinned_models: dashmap::DashSet<ModelId>,
+    /// GPU memory budget in MB, 0 = unset (no admission control).
+    ///
+    /// Mirror of the effective `resources` budget, set at startup like the other
+    /// knobs here. The pool cannot reach `SharedState`, and this has to be
+    /// readable from inside `spawn_lock` where the admission decision happens.
+    vram_budget_mb: std::sync::atomic::AtomicU64,
+    /// GPU memory charged to each live worker, in MB.
+    ///
+    /// Admission needs to know what is already committed, and it cannot ask the
+    /// device: `nvidia-smi` reports the whole machine (so it counts other
+    /// programs, and on WSL per-process figures are unavailable), and a worker
+    /// that has been admitted but has not finished loading has allocated
+    /// nothing yet while still owing its footprint. Charging at admission and
+    /// crediting on unload is the only view that is correct at the moment the
+    /// decision is made.
+    vram_reserved_mb: dashmap::DashMap<ModelId, u64>,
     /// Activity event sender for dashboard notifications.
     activity_tx:
         std::sync::OnceLock<tokio::sync::broadcast::Sender<crate::daemon::state::ActivityEvent>>,
@@ -826,6 +842,8 @@ impl ModelProcessPool {
             active_shard_windows: DashMap::new(),
             gpu_layers: std::sync::atomic::AtomicI32::new(-1),
             cpu_pinned_models: dashmap::DashSet::new(),
+            vram_budget_mb: std::sync::atomic::AtomicU64::new(0),
+            vram_reserved_mb: dashmap::DashMap::new(),
             activity_tx: std::sync::OnceLock::new(),
             kv_cache_ttl_secs: std::sync::atomic::AtomicU64::new(DEFAULT_KV_CACHE_TTL_SECS),
             prefix_cache_enabled: std::sync::atomic::AtomicBool::new(true),
@@ -1057,6 +1075,131 @@ impl ModelProcessPool {
         self.cpu_pinned_models.contains(model_id)
     }
 
+    /// Estimate this model's GPU footprint from its own GGUF header and shards.
+    ///
+    /// Reads `gguf_header.bin` from the model directory; a spawn happens once per
+    /// model, so the read is not on any hot path. Returns 0 when the header or
+    /// geometry cannot be read, which `admit_to_gpu` treats as "do not judge" —
+    /// refusing the GPU because a file was unreadable would be a worse failure
+    /// than the one being prevented.
+    fn estimate_gpu_footprint_mb(&self, model_id: &ModelId) -> u64 {
+        use crate::model::auto_manage::vram::{estimate_worker_vram_mb, VramFootprintInputs};
+        let model_dir = crate::model::shard::model_dir(&self.data_dir, &model_id.0);
+        let header = model_dir.join(crate::model::shard::HEADER_FILENAME);
+        let Ok(meta) = crate::inference::split::GgufTokenizerMeta::from_gguf_file(&header) else {
+            return 0;
+        };
+        let Ok(file) = std::fs::File::open(&header) else {
+            return 0;
+        };
+        let mut reader = std::io::BufReader::new(file);
+        let Ok(ct) = candle_core::quantized::gguf_file::Content::read(&mut reader) else {
+            return 0;
+        };
+        let Ok(tensor_meta) = crate::inference::split::GgufTensorMeta::from_content(&ct) else {
+            return 0;
+        };
+        let arch = crate::inference::split::gguf_arch_str(&ct);
+        let md_u32 = |suffix: &str| -> Option<u64> {
+            ct.metadata
+                .get(&format!("{arch}.{suffix}"))
+                .and_then(|v| v.to_u32().ok())
+                .map(u64::from)
+        };
+        let declared_ctx = md_u32("context_length").unwrap_or(4096);
+        // The KV cache is sized to the EFFECTIVE context, which is the override
+        // when set and otherwise the shipped default cap — not the GGUF value.
+        let override_ctx = self
+            .max_seq_len_override
+            .load(std::sync::atomic::Ordering::Relaxed) as u64;
+        let effective_ctx = if override_ctx > 0 {
+            declared_ctx.min(override_ctx)
+        } else {
+            declared_ctx.min(crate::inference::split::DEFAULT_MAX_SEQ_LEN as u64)
+        };
+        let vocab = md_u32("vocab_size").unwrap_or(meta.vocab.len() as u64);
+
+        // Only the shards actually on disk will be mapped.
+        let shard_bytes: u64 = std::fs::read_dir(&model_dir)
+            .map(|rd| {
+                rd.filter_map(Result::ok)
+                    .filter(|e| {
+                        e.file_name()
+                            .to_str()
+                            .is_some_and(|n| n.starts_with("shard_") && n.ends_with(".bin"))
+                    })
+                    .filter_map(|e| e.metadata().ok().map(|m| m.len()))
+                    .sum()
+            })
+            .unwrap_or(0);
+
+        estimate_worker_vram_mb(&VramFootprintInputs {
+            quantized_weight_bytes: shard_bytes,
+            vocab_size: vocab,
+            embedding_length: tensor_meta.embedding_length as u64,
+            segment_layers: tensor_meta.block_count as u64,
+            head_count_kv: tensor_meta.head_count_kv as u64,
+            head_dim: tensor_meta.head_dim as u64,
+            rope_dim: tensor_meta.rope_dim as u64,
+            effective_context: effective_ctx,
+            is_first: true,
+        })
+    }
+
+    /// Set the GPU memory budget used for admission. 0 disables the check.
+    pub fn set_vram_budget_mb(&self, budget_mb: u64) {
+        self.vram_budget_mb
+            .store(budget_mb, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// GPU memory already committed to live workers, in MB.
+    fn vram_committed_mb(&self) -> u64 {
+        self.vram_reserved_mb.iter().map(|e| *e.value()).sum()
+    }
+
+    /// Decide whether `model_id` may be loaded onto the GPU, and charge it if so.
+    ///
+    /// Called inside `spawn_lock`, which already serializes spawns, so the
+    /// read-decide-charge sequence cannot interleave with another admission.
+    /// That matters because a worker is admitted well before it allocates: the
+    /// process starts here, and the model is loaded lazily on its first message.
+    /// Two concurrent spawns that both consulted the *device* would each see
+    /// plenty free and both proceed.
+    ///
+    /// Returning `false` means "spawn on the CPU instead" — deliberately slow
+    /// rather than a `CUDA_ERROR_OUT_OF_MEMORY` that kills the worker and (until
+    /// the pin became recoverable) cost the model its GPU for the whole run.
+    fn admit_to_gpu(&self, model_id: &ModelId, estimated_mb: u64) -> bool {
+        let budget = self
+            .vram_budget_mb
+            .load(std::sync::atomic::Ordering::Relaxed);
+        if budget == 0 || estimated_mb == 0 {
+            // No budget configured, or nothing to weigh: preserve the previous
+            // behaviour rather than inventing a limit.
+            self.vram_reserved_mb.insert(model_id.clone(), estimated_mb);
+            return true;
+        }
+        let committed = self.vram_committed_mb();
+        if committed.saturating_add(estimated_mb) <= budget {
+            self.vram_reserved_mb.insert(model_id.clone(), estimated_mb);
+            return true;
+        }
+        tracing::warn!(
+            model = %model_id,
+            estimated_mb,
+            committed_mb = committed,
+            budget_mb = budget,
+            "Not enough GPU memory budget for this model — loading it on the CPU instead \
+             (slower, but it answers). It will use the GPU again once memory frees up"
+        );
+        false
+    }
+
+    /// Release a worker's charge. Must pair with every `admit_to_gpu`.
+    fn release_vram_charge(&self, model_id: &ModelId) {
+        self.vram_reserved_mb.remove(model_id);
+    }
+
     /// Models currently forced onto the CPU after a GPU OOM.
     ///
     /// Reported by `GET /api/admin/stats` because `inference_backend` describes
@@ -1180,6 +1323,33 @@ impl ModelProcessPool {
                 )));
             }
         }
+        // Admission control. Inside `spawn_lock`, so read-decide-charge cannot
+        // interleave with another spawn — which matters because a worker is
+        // admitted long before it allocates (the model loads lazily on its first
+        // message), so two spawns that both asked the device would each see
+        // plenty free and both proceed. Refusing here means the model loads on
+        // the CPU: slower, but not a dead worker and a lost GPU.
+        if self.effective_gpu_layers(model_id) != 0 {
+            let estimated = self.estimate_gpu_footprint_mb(model_id);
+            if !self.admit_to_gpu(model_id, estimated) {
+                self.cpu_pinned_models.insert(model_id.clone());
+                if let Some(tx) = self.activity_tx.get() {
+                    let _ = tx.send(
+                        crate::daemon::state::ActivityEvent::new(
+                            "inference",
+                            "model_cpu_fallback",
+                            format!(
+                                "{} needs more graphics memory than is free — running it on the CPU for now",
+                                model_id.0
+                            ),
+                        )
+                        .with_model(model_id.0.clone())
+                        .with_toast("warning", 8000),
+                    );
+                }
+            }
+        }
+
         match self.spawn_worker(model_id).await {
             Ok(handle) => {
                 // Reset the failure counter on first success.
@@ -1189,6 +1359,9 @@ impl ModelProcessPool {
                 Ok(handle)
             }
             Err(e) => {
+                // The worker never started, so it owes nothing. Leaving the
+                // charge would shrink the budget permanently on every failure.
+                self.release_vram_charge(model_id);
                 let count = self
                     .spawn_failures
                     .entry(model_id.clone())
@@ -2249,6 +2422,7 @@ impl ModelProcessPool {
             }
             // Drop handle → aborts reader, kills child process → OS frees all CUDA memory
             drop(handle);
+            self.release_vram_charge(model_id);
             tracing::info!(model_id = %model_id, "Model worker killed, GPU memory freed");
 
             // A GPU OOM pins its model to the CPU, and that pin used to last for
@@ -2590,5 +2764,87 @@ mod validation_detail_tests {
     fn the_innermost_detail_wins() {
         let got = validation_detail("a: Validation error: b: Validation error: real detail");
         assert_eq!(got.as_deref(), Some("real detail"));
+    }
+}
+
+#[cfg(test)]
+mod admission_tests {
+    use super::*;
+
+    fn pool() -> ModelProcessPool {
+        ModelProcessPool::new(std::path::PathBuf::from("/tmp/swarmllm-admission-test"))
+    }
+
+    /// With no budget configured, behaviour must be exactly as before — this
+    /// gate must not start refusing GPU loads on nodes that never asked for a
+    /// limit.
+    #[test]
+    fn no_budget_admits_everything() {
+        let p = pool();
+        assert!(p.admit_to_gpu(&ModelId("a".into()), 99_999));
+        assert!(p.admit_to_gpu(&ModelId("b".into()), 99_999));
+    }
+
+    /// A model that fits is admitted and charged; the next one is judged against
+    /// what is already committed, not against an empty device.
+    #[test]
+    fn a_second_model_is_judged_against_the_first() {
+        let p = pool();
+        p.set_vram_budget_mb(6000);
+        assert!(p.admit_to_gpu(&ModelId("first".into()), 4000));
+        assert_eq!(p.vram_committed_mb(), 4000);
+        // 4000 + 2500 > 6000 → refused, and NOT charged.
+        assert!(!p.admit_to_gpu(&ModelId("second".into()), 2500));
+        assert_eq!(p.vram_committed_mb(), 4000, "a refusal must not charge");
+        // Something that does fit still gets in.
+        assert!(p.admit_to_gpu(&ModelId("small".into()), 1500));
+        assert_eq!(p.vram_committed_mb(), 5500);
+    }
+
+    /// The reported failure in miniature: two models that each fit alone but not
+    /// together. Before admission control both proceeded and the second worker
+    /// died with a real CUDA OOM.
+    #[test]
+    fn two_models_that_do_not_fit_together_are_not_both_admitted() {
+        let p = pool();
+        p.set_vram_budget_mb(6000);
+        let a = ModelId("phi-3.5".into());
+        let b = ModelId("llama-3b".into());
+        assert!(p.admit_to_gpu(&a, 5900), "fits on its own");
+        assert!(
+            !p.admit_to_gpu(&b, 3000),
+            "must be refused rather than left to OOM"
+        );
+    }
+
+    /// Releasing a charge frees the budget for the next admission — otherwise
+    /// unloading a model would not actually make room.
+    #[test]
+    fn releasing_a_charge_frees_the_budget() {
+        let p = pool();
+        p.set_vram_budget_mb(6000);
+        let a = ModelId("a".into());
+        assert!(p.admit_to_gpu(&a, 5000));
+        assert!(!p.admit_to_gpu(&ModelId("b".into()), 2000));
+        p.release_vram_charge(&a);
+        assert_eq!(p.vram_committed_mb(), 0);
+        assert!(p.admit_to_gpu(&ModelId("b".into()), 2000));
+    }
+
+    /// An unreadable header yields a 0 estimate, which must NOT be read as "it
+    /// fits in nothing" nor as a refusal — failing to read a file is a worse
+    /// reason to lose the GPU than the OOM this prevents.
+    #[test]
+    fn an_unknown_footprint_does_not_refuse() {
+        let p = pool();
+        p.set_vram_budget_mb(1);
+        assert!(p.admit_to_gpu(&ModelId("mystery".into()), 0));
+    }
+
+    /// A missing model directory must yield 0 rather than panicking.
+    #[test]
+    fn estimating_a_missing_model_is_zero() {
+        let p = pool();
+        assert_eq!(p.estimate_gpu_footprint_mb(&ModelId("nope".into())), 0);
     }
 }

@@ -794,6 +794,11 @@ impl SharedState {
         state
             .model_process_pool
             .set_activation_compression(state.config.inference.activation_compression);
+        // Admission budget. Same source as the split-model eviction budget, so
+        // the two cannot disagree about how much GPU memory this node may use.
+        if let Some(budget) = crate::model::auto_manage::compute_vram_budget(&state) {
+            state.model_process_pool.set_vram_budget_mb(budget);
+        }
         state
             .model_process_pool
             .set_continuous_batching(state.config.inference.continuous_batching);
