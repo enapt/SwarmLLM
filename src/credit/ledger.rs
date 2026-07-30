@@ -1574,6 +1574,11 @@ mod backfill_tests {
         for (b, e, s, expect) in [
             (850_467i64, 881_047u64, 31_230u64, 650u64),
             (1_772_870, 1_809_850, 38_660, 1_680),
+            // A tester's node, reported 2026-07-30: the ~905k gap their two
+            // separate reports both cite. `lifetime_refunded` read 0 after
+            // updating despite weeks of deliberately-provoked failures, and
+            // they correctly concluded the fix was forward-only.
+            (220_135, 260_350, 945_340, 905_125),
         ] {
             let mut cb = bal(b, e, s, 0);
             assert!(!cb.books_balance(), "precondition: must not close yet");

@@ -1560,10 +1560,16 @@ const PREFIX_FETCH_TIMEOUT_MS: u64 = 3000;
 /// `index_pos`, so the final prompt token ended up in the cache twice and the
 /// model attended to a duplicate.
 ///
-/// It bites precisely when the whole prompt is already cached, i.e. **the second
-/// identical request** — which is the only case cross-node prefix sharing exists
-/// to serve, and the exact scenario a tester was using to try to measure its
-/// speedup (2026-07-29).
+/// **Only the cross-node path can reach this.** `PrefixCache::lookup` clamps its
+/// own result to `prompt_tokens - 1` and filters out any entry longer than that,
+/// so a LOCAL hit can never over-fill the cache and the clamp below is inert for
+/// it. `hydrate_request_from_bytes` takes a snapshot sent by a PEER and applies
+/// no such bound — the peer returns whatever blocks it matched — so that is the
+/// path where the cache can end up holding the whole prompt.
+///
+/// Established 2026-07-30 by a tester who deduced it from black-box behaviour
+/// (`matched_tokens` never exceeding half a 128-token prompt across three
+/// repeats) without source access, and asked which cache path was meant.
 ///
 /// `KvCacheStore::truncate_request_to` already existed for the speculative
 /// partial-accept fixup; this is the same need.

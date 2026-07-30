@@ -4,6 +4,15 @@ All notable changes to SwarmLLM are documented here.
 
 ## [0.3.55-alpha] — 2026-07-30
 
+### Clarified
+
+- **Correction to the v0.3.53 note on repeated prompts.** That entry read as
+  though it covered any repeated prompt. It does not: the local prompt cache
+  already limits itself to one piece short of the whole prompt, so it was never
+  affected. The fault was only ever reachable when the saved work came from
+  *another node*. Thanks to the tester who worked that out from the outside and
+  asked which path was meant — the original wording was too broad.
+
 ### Fixed
 
 - **Hosting shards earned no credits at all.** Credit for hosting is worked out
