@@ -6,22 +6,26 @@ All notable changes to SwarmLLM are documented here.
 
 ### Fixed
 
-- **A graphics card could quietly stop being used, because of the node's own
-  background work.** When memory ran short, the daemon made room by dropping
-  models from its own list — but that list is only bookkeeping. The memory
-  itself is held by separate worker processes, and nothing told them to let go.
-  So the node believed it had freed several gigabytes, loaded another model on
-  top of memory that was never released, and ran out for real. The model that
-  lost the race was then moved to the processor and left there for as long as
-  the node kept running, roughly ten times slower, with nothing anywhere saying
-  so. Nobody had to be using the node for this to happen — its own routine
-  model loading was enough.
+- **Freeing graphics memory now actually frees it.** When memory ran short the
+  daemon made room by dropping models from its own list — but that list is only
+  bookkeeping. The memory is held by separate worker processes, and nothing told
+  them to let go, so the node believed it had freed several gigabytes that were
+  still in use. Dropping a model now stops its worker, which is the only thing
+  that returns the memory.
 
-  Freeing memory now actually frees it, and a model moved to the processor is
-  returned to the graphics card once memory comes back. `GET /api/admin/stats`
-  gained `models_on_cpu_fallback`, because the existing `inference_backend`
-  field describes the build rather than what any model is really running on —
-  it happily reported "CUDA" throughout.
+  A model that was moved to the processor after running out of graphics memory
+  is now returned to the graphics card once memory comes back, instead of
+  staying there for as long as the node runs. `GET /api/admin/stats` gained
+  `models_on_cpu_fallback`, because the existing `inference_backend` field
+  describes which build is running rather than what any model is actually
+  using — it reported the graphics card throughout.
+
+  **This does not yet fix the reported case of a card dropping out under the
+  node's own background loading.** Testing showed why: loading a model for a
+  request does not consult the memory budget at all, so two models totalling
+  3.8 GB both loaded against a 2.2 GB budget without any limit being applied.
+  The accounting above had to be correct before a limit could mean anything,
+  but the limit itself is still missing and is tracked as the next piece of work.
 
 ### Clarified
 
