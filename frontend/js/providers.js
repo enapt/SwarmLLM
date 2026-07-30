@@ -51,13 +51,25 @@ var PROVIDER_NAMES = {
 
 // Default test models per provider. Used by setup wizard + settings "Test"
 // button to validate an API key with the cheapest credible model.
+//
+// These IDs rot: providers retire models without notice, and a stale entry
+// means a user with a perfectly good key gets a bare 404 on their very first
+// attempt with no hint that OUR default is at fault. Reported 2026-07-30 for
+// Cerebras, whose entry named a model that provider never published — and which
+// disagreed with the backend's own table for the same provider. Keep this list
+// and `api/admin_providers.rs`'s in agreement; the durable fix is to ask each
+// provider's /models endpoint instead of hardcoding.
+//
+// The value is sent VERBATIM as the request's `model`, so a `provider:` prefix
+// here is load-bearing routing, not decoration — do not "tidy" them away.
+// Entries without one are resolved by the backend from the model name alone.
 var PROVIDER_TEST_MODELS = {
   openai:     'gpt-4o-mini',
   deepseek:   'deepseek-v4-flash',
   mistral:    'mistral-small-latest',
   groq:       'llama-3.1-8b-instant',
   nvidia_nim: 'meta/llama-3.1-8b-instruct',
-  cerebras:   'cerebras:llama-3.1-8b',
+  cerebras:   'cerebras:gpt-oss-120b',
   sambanova:  'sambanova:Meta-Llama-3.3-70B-Instruct',
   fireworks:  'accounts/fireworks/models/llama-v3p3-70b-instruct',
   together:   'together:meta-llama/Llama-3.3-70B-Instruct-Turbo',

@@ -26,6 +26,14 @@ All notable changes to SwarmLLM are documented here.
   rather than making room. The budget is now capped to what is genuinely free,
   with a warning saying so.
 
+- **Testing a Cerebras key failed with an unexplained 404.** The built-in model
+  used to check that provider's key had been retired by them, so a user with a
+  perfectly valid key got a bare "model does not exist" on their very first
+  attempt, with nothing to indicate our default was at fault rather than their
+  key. The dashboard and the daemon also disagreed about which model to use, and
+  both were wrong. Note these built-in choices go stale whenever a provider
+  retires a model; asking each provider for its own list would be the durable fix.
+
 - **The Sybil check flagged the project's own bootstrap server.** Every node
   behind a router logged "subnet clustering detected" against the anchor's own
   address range every few minutes, which raised the inspection rate on the one

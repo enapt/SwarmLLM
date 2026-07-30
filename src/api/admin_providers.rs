@@ -615,7 +615,11 @@ pub async fn provider_health(State(state): State<AppState>) -> Json<serde_json::
             config.nvidia_nim.as_ref(),
             "meta/llama-3.1-8b-instruct",
         ),
-        ("cerebras", config.cerebras.as_ref(), "llama-3.3-70b"),
+        // Cerebras retired its Llama/Qwen ids; `llama-3.3-70b` no longer
+        // resolves and returned a bare 404 on a first request with a valid key.
+        // Keep in step with `frontend/js/providers.js`'s PROVIDER_TEST_MODELS —
+        // the two disagreed, and both were wrong.
+        ("cerebras", config.cerebras.as_ref(), "gpt-oss-120b"),
         (
             "sambanova",
             config.sambanova.as_ref(),
