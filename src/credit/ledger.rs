@@ -80,6 +80,45 @@ pub(crate) fn negative_balance_decay_amount(balance: i64) -> i64 {
     pct.max(NEGATIVE_BALANCE_DECAY_FLOOR).min(deficit)
 }
 
+/// Attribute a pre-existing earned/spent/balance gap to refunds, once, on load.
+///
+/// `lifetime_refunded` was added after nodes had been running for weeks. It
+/// defaults to 0 on an old persisted record, but the refunds it should have
+/// counted are already folded into `balance` — so the identity
+/// `earned - spent + refunded == balance` could never close on an existing
+/// install, and `books_balance` reported `false` for ever. That is precisely the
+/// false alarm the field was added to remove: observed on both test nodes
+/// immediately after shipping it (gaps of 650 and 1680).
+///
+/// A refund is the only mechanism that makes `balance` exceed
+/// `earned - spent`, so the gap IS historical refunds and labelling it as such
+/// is accurate rather than a fudge.
+///
+/// Only fires when `lifetime_refunded` is still 0 and the gap is positive, so it
+/// is idempotent and cannot touch a node that has recorded real refunds. A
+/// fresh node has all three at 0 and is left alone. A NEGATIVE gap is left
+/// alone too — that direction cannot be explained by refunds, so inventing a
+/// number would hide a genuine inconsistency instead of surfacing it.
+pub(crate) fn backfill_historical_refunds(bal: &mut CreditBalance) {
+    if bal.lifetime_refunded != 0 {
+        return;
+    }
+    let implied =
+        (bal.balance as i128) - (bal.lifetime_earned as i128) + (bal.lifetime_spent as i128);
+    if implied <= 0 {
+        return;
+    }
+    let implied = implied.min(u64::MAX as i128) as u64;
+    bal.lifetime_refunded = implied;
+    tracing::info!(
+        lifetime_refunded = implied,
+        balance = bal.balance,
+        lifetime_earned = bal.lifetime_earned,
+        lifetime_spent = bal.lifetime_spent,
+        "Attributed a pre-existing credit gap to historical refunds so the ledger reconciles"
+    );
+}
+
 /// CreditLedger tracks the local node's credit balance and transaction history.
 ///
 /// It persists balance and transactions to redb, and gossips balance buckets
@@ -128,8 +167,9 @@ impl CreditLedger {
             }
         };
 
-        if let Some(restored_balance) = restored {
+        if let Some(mut restored_balance) = restored {
             if restored_balance.node_id == node_id {
+                backfill_historical_refunds(&mut restored_balance);
                 // Use try_write — should always succeed at startup before concurrent access.
                 if let Ok(mut bal) = balance.try_write() {
                     tracing::info!(
@@ -1464,5 +1504,75 @@ mod tests {
         // saturating_neg + f64 path must not overflow on the extreme.
         let forgiven = negative_balance_decay_amount(i64::MIN);
         assert!(forgiven > 0);
+    }
+}
+
+#[cfg(test)]
+mod backfill_tests {
+    use super::backfill_historical_refunds;
+    use crate::types::{CreditBalance, NodeId};
+
+    fn bal(balance: i64, earned: u64, spent: u64, refunded: u64) -> CreditBalance {
+        CreditBalance {
+            node_id: NodeId([3u8; 32]),
+            balance,
+            lifetime_earned: earned,
+            lifetime_spent: spent,
+            lifetime_refunded: refunded,
+            last_updated: chrono::DateTime::<chrono::Utc>::UNIX_EPOCH,
+        }
+    }
+
+    /// Both live test nodes immediately after the field shipped: a real gap,
+    /// zero recorded refunds, `books_balance` false for ever without this.
+    #[test]
+    fn a_pre_existing_gap_is_attributed_and_the_books_close() {
+        for (b, e, s, expect) in [
+            (850_467i64, 881_047u64, 31_230u64, 650u64),
+            (1_772_870, 1_809_850, 38_660, 1_680),
+        ] {
+            let mut cb = bal(b, e, s, 0);
+            assert!(!cb.books_balance(), "precondition: must not close yet");
+            backfill_historical_refunds(&mut cb);
+            assert_eq!(cb.lifetime_refunded, expect);
+            assert!(cb.books_balance(), "must reconcile after backfill");
+        }
+    }
+
+    /// Idempotent: a second load must not double-count.
+    #[test]
+    fn backfill_is_idempotent() {
+        let mut cb = bal(850_467, 881_047, 31_230, 0);
+        backfill_historical_refunds(&mut cb);
+        let once = cb.lifetime_refunded;
+        backfill_historical_refunds(&mut cb);
+        assert_eq!(cb.lifetime_refunded, once);
+    }
+
+    /// A node that already records refunds must never be rewritten.
+    #[test]
+    fn a_node_with_real_refunds_is_untouched() {
+        let mut cb = bal(146_065, 174_330, 933_290, 905_025);
+        backfill_historical_refunds(&mut cb);
+        assert_eq!(cb.lifetime_refunded, 905_025);
+    }
+
+    /// A fresh node has nothing to attribute.
+    #[test]
+    fn a_fresh_node_is_untouched() {
+        let mut cb = bal(0, 0, 0, 0);
+        backfill_historical_refunds(&mut cb);
+        assert_eq!(cb.lifetime_refunded, 0);
+        assert!(cb.books_balance());
+    }
+
+    /// A gap in the OTHER direction cannot be refunds. Leave it visible rather
+    /// than inventing a number that hides a real inconsistency.
+    #[test]
+    fn a_negative_gap_is_left_alone() {
+        let mut cb = bal(100, 500, 100, 0);
+        backfill_historical_refunds(&mut cb);
+        assert_eq!(cb.lifetime_refunded, 0);
+        assert!(!cb.books_balance(), "the inconsistency must stay visible");
     }
 }

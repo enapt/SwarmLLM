@@ -2,6 +2,19 @@
 
 All notable changes to SwarmLLM are documented here.
 
+## [Unreleased]
+
+### Fixed
+
+- **Existing nodes reported their credit totals as not adding up.** v0.3.54
+  started publishing credits returned, but the counter began at zero on nodes
+  that had already been running — while the refunds it should have counted were
+  already folded into the balance. The reconciliation flag therefore read
+  "false" on every existing node, for ever: exactly the false alarm the figure
+  was added to remove. The pre-existing difference is now attributed to
+  historical refunds on first load, so the totals reconcile. Fresh nodes and
+  nodes already recording refunds are untouched.
+
 ## [0.3.54-alpha] — 2026-07-30
 
 ### Fixed
