@@ -744,6 +744,12 @@ fn ensure_model_loaded(
 
     // Report what this load ACTUALLY cost on the GPU, not what we guessed.
     //
+    // This is the footprint AT LOAD, which is NOT the steady state: candle
+    // allocates the KV cache lazily on the first append, i.e. during the first
+    // forward. Measured on phi-3.5-mini-q4, load was 2772 MB and steady state
+    // 6037 MB — the KV cache is over half the total. Do not compare this figure
+    // to an admission estimate without adding the KV term.
+    //
     // Admission control needs a number it can trust, and the estimate is built
     // from GGUF geometry with a provisional constant for driver overhead. On
     // WSL, `nvidia-smi --query-compute-apps` reports `[N/A]` for per-process
@@ -751,14 +757,14 @@ fn ensure_model_loaded(
     // available — and it is only sound because this process does one load at a
     // time. Treat a sample taken while another process is allocating as noise;
     // that is why this is logged rather than fed straight into a decision.
-    let vram_measured_mb = measured_vram_delta_mb(vram_before_mb);
+    let vram_after_load_mb = measured_vram_delta_mb(vram_before_mb);
     tracing::info!(
         model = %model_id,
         layers = format!("[{layer_start}..{layer_end})"),
         tp_rank,
         tp_size,
         device = ?model.device(),
-        vram_measured_mb,
+        vram_after_load_mb,
         "model-worker: Model loaded"
     );
     models.insert(key, model);

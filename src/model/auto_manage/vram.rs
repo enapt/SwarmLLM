@@ -16,8 +16,9 @@ pub fn estimate_model_vram_mb(total_size_bytes: u64) -> u64 {
 ///
 /// [`estimate_model_vram_mb`] is `file_size * 1.15`, a flat 15% for "KV cache
 /// overhead" with no term for vocabulary, context length, layer count or
-/// KV-head geometry. Measured against real loads on an RTX 3070 it is
-/// **56%-117% low**, which is fine for the prune scoring it was written for and
+/// KV-head geometry. Measured against real steady-state loads on an RTX 3070 it
+/// is **56% low on phi-3.5-mini-q4**, which is fine for the prune scoring it was
+/// written for and
 /// useless as an admission decision: a gate fed those numbers admits models
 /// that cannot fit and the worker dies with `CUDA_ERROR_OUT_OF_MEMORY` anyway.
 ///
@@ -51,15 +52,24 @@ pub struct VramFootprintInputs {
     pub is_first: bool,
 }
 
-/// Bytes a CUDA worker process costs before any model weights: driver context,
-/// cuBLAS handles and workspace.
+/// Bytes a CUDA worker process costs beyond its tensors: driver context, cuBLAS
+/// handles, activation and prefill-chunk buffers.
 ///
-/// Provisional. Two clean measurements implied 170 MB and 651 MB, which no
-/// constant fits, so this is NOT yet calibrated — WSL reports `[N/A]` for
-/// per-process GPU memory, so the deltas had to come from whole-device sampling
-/// with another daemon resident. The worker now reports its own measured
-/// footprint (`vram_measured_mb`); calibrate from that and prefer the measured
-/// value over this estimate wherever one exists.
+/// **Calibrated against measured steady state, 2026-07-30.** phi-3.5-mini-q4 on
+/// an RTX 3070: weights 2282 + f32 embedding 376 + KV 3072 + RoPE 1.5 = 5731 MB
+/// of tensors, against 6037 MiB measured once a request had completed — so ~306
+/// MB of everything else. 320 MB reproduces the total to **+0.2%**, where the
+/// file-size estimator is 56.5% low on the same model.
+///
+/// It is a fixed constant for a term that is partly fixed (driver context, ~120
+/// MB) and partly scaled by hidden size and prefill chunk. On a small model that
+/// over-charges by ~190 MB, which is the safe direction for admission.
+///
+/// **Do not calibrate against the worker's `vram_after_load_mb`.** That is
+/// sampled when loading finishes, and candle allocates the KV cache lazily on
+/// the *first append* — i.e. during the first forward, after that sample. Load
+/// time and steady state differed by 3265 MB on phi-3.5; comparing the estimate
+/// to the load figure makes it look ~2x high when it is not.
 pub const CUDA_PROCESS_OVERHEAD_BYTES: u64 = 320 * 1024 * 1024;
 
 /// Estimate a worker's GPU footprint in MB from the model's real geometry.
@@ -530,22 +540,57 @@ mod footprint_tests {
         }
     }
 
-    /// The whole point: the old estimator is wildly low on a large-vocabulary
-    /// model, because a file-size multiple cannot see a dequantized embedding
-    /// table. Measured on an RTX 3070: 1145 MiB and 2731 MiB respectively.
+    /// phi-3.5-mini-q4: 32 layers, full MHA (32 KV heads), head_dim 96, 32k
+    /// vocabulary, 131072 declared context capped to 4096.
+    fn phi35() -> VramFootprintInputs {
+        VramFootprintInputs {
+            quantized_weight_bytes: 2_392_493_952,
+            vocab_size: 32_064,
+            embedding_length: 3072,
+            segment_layers: 32,
+            head_count_kv: 32,
+            head_dim: 96,
+            rope_dim: 96,
+            effective_context: 4096,
+            is_first: true,
+        }
+    }
+
+    /// The calibration case, measured on an RTX 3070 once a request had
+    /// completed (so the KV cache was actually allocated): **6037 MiB**.
+    ///
+    /// This is the test that justifies `CUDA_PROCESS_OVERHEAD_BYTES`. The
+    /// file-size estimator is 56% low on the same model, which is what made it
+    /// useless for admission.
+    #[test]
+    fn matches_measured_steady_state_on_phi35() {
+        const MEASURED: u64 = 6037;
+        let new = estimate_worker_vram_mb(&phi35());
+        let err_pct = 100.0 * (new as f64 - MEASURED as f64) / MEASURED as f64;
+        assert!(
+            err_pct.abs() < 5.0,
+            "estimate {new} vs measured {MEASURED} is {err_pct:+.1}% — outside 5%"
+        );
+        let old = estimate_model_vram_mb(phi35().quantized_weight_bytes);
+        assert!(
+            old < MEASURED * 2 / 3,
+            "the file-size estimator should be far low: {old} vs {MEASURED}"
+        );
+    }
+
+    /// A large vocabulary is where the file-size multiple fails worst, because
+    /// the dequantized embedding table is invisible to it — on this model that
+    /// table is larger than the whole checkpoint.
     #[test]
     fn beats_the_file_size_multiple_on_a_large_vocabulary_model() {
         let old = estimate_model_vram_mb(llama32_1b().quantized_weight_bytes);
         let new = estimate_worker_vram_mb(&llama32_1b());
-        const MEASURED: u64 = 2731;
-        let old_err = (MEASURED as i64 - old as i64).abs();
-        let new_err = (MEASURED as i64 - new as i64).abs();
+        assert!(new > old, "new {new} must exceed old {old}");
+        // The f32 embedding alone (1002 MB) exceeds the 821 MB checkpoint.
         assert!(
-            new_err < old_err,
-            "new estimate {new} must be closer to {MEASURED} than old {old}"
+            new - old > 1_000,
+            "the embedding term alone should dominate: {old} -> {new}"
         );
-        // The old one is not merely worse, it is under by more than half.
-        assert!(old < MEASURED / 2, "old estimate {old} vs {MEASURED}");
     }
 
     /// The embedding term dominates on a large vocabulary and must only be
