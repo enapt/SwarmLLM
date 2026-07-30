@@ -445,6 +445,7 @@ mod tests {
             balance: initial,
             lifetime_earned: initial.max(0) as u64,
             lifetime_spent: 0,
+            lifetime_refunded: 0,
             last_updated: chrono::Utc::now(),
         }))
     }

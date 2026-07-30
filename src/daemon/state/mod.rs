@@ -575,6 +575,7 @@ impl SharedState {
                     balance: 0,
                     lifetime_earned: 0,
                     lifetime_spent: 0,
+                    lifetime_refunded: 0,
                     last_updated: chrono::Utc::now(),
                 })),
                 pending_credit_earn: std::sync::atomic::AtomicI64::new(0),

@@ -1231,12 +1231,24 @@ pub async fn list_peers(State(state): State<AppState>) -> Json<Vec<serde_json::V
 pub async fn credit_info(State(state): State<AppState>) -> Json<serde_json::Value> {
     // Snapshot the balance and drop the read lock before computing escrow
     // so the credit hot-path doesn't park behind us.
-    let (balance, lifetime_earned, lifetime_spent, last_updated, tier) = {
+    let (
+        balance,
+        lifetime_earned,
+        lifetime_spent,
+        lifetime_refunded,
+        net_spent,
+        books_balance,
+        last_updated,
+        tier,
+    ) = {
         let credit = state.shared_state.credits.credit_balance.read().await;
         (
             credit.balance,
             credit.lifetime_earned,
             credit.lifetime_spent,
+            credit.lifetime_refunded,
+            credit.net_spent(),
+            credit.books_balance(),
             credit.last_updated.to_rfc3339(),
             crate::credit::priority::PriorityCalculator::tier_name(credit.balance),
         )
@@ -1248,6 +1260,13 @@ pub async fn credit_info(State(state): State<AppState>) -> Json<serde_json::Valu
         "balance": balance,
         "lifetime_earned": lifetime_earned,
         "lifetime_spent": lifetime_spent,
+        // `lifetime_spent` is GROSS reservations and never decreases, so
+        // `earned - spent` does not equal `balance`. Report the refunds and the
+        // net so the arithmetic closes without the reader having to guess —
+        // and because refunds/spent IS this node's request failure rate.
+        "lifetime_refunded": lifetime_refunded,
+        "net_spent": net_spent,
+        "books_balance": books_balance,
         "tier": tier,
         "last_updated": last_updated,
         "escrow_held": escrow_held,

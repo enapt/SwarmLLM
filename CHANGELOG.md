@@ -2,6 +2,23 @@
 
 All notable changes to SwarmLLM are documented here.
 
+## [Unreleased]
+
+### Fixed
+
+- **Credit totals looked like they didn't add up.** The dashboard and API
+  reported credits earned and credits spent, but not credits *returned*. When a
+  request fails, the credits reserved for it are given back — and the "spent"
+  figure deliberately never goes down, so on a node with many failed requests
+  the two numbers could imply a hugely negative balance while the actual balance
+  was positive. One node showed a ~905,000 discrepancy. Nothing was wrong with
+  the accounting; the number that reconciled it was simply never published.
+
+  Credits returned and net spend are now reported alongside the existing totals,
+  so the figures add up. This is also worth watching: returned credits as a
+  share of reserved credits is your node's own request failure rate. On the node
+  that prompted the report it was 97%, which had been invisible.
+
 ## [0.3.53-alpha] — 2026-07-30
 
 ### Fixed

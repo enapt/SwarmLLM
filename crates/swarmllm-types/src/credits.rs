@@ -29,10 +29,47 @@ pub struct CreditBalance {
     pub balance: i64,
     #[serde(default)]
     pub lifetime_earned: u64,
+    /// Gross credits ever *reserved* for spending, including reservations that
+    /// were later refunded. Monotonic on purpose, so it is NOT net spend.
     #[serde(default)]
     pub lifetime_spent: u64,
+    /// Credits returned by reverting a reservation — an escrow refund after a
+    /// failed inference, almost always.
+    ///
+    /// Without this the books cannot be closed from the outside.
+    /// `lifetime_spent` is monotonic and a refund deliberately does not
+    /// decrement it, so the identity is
+    /// `balance == lifetime_earned - lifetime_spent + lifetime_refunded`,
+    /// and with the last term missing a node looks broken. Reported
+    /// 2026-07-29 as a "credit arithmetic anomaly": `balance` +146065 against
+    /// `earned - spent` of −758960, a ~905k discrepancy. It was neither an
+    /// anomaly nor arithmetic — 97% of that node's reservations had been
+    /// refunded because 97% of its inference attempts failed.
+    ///
+    /// So this is a health signal as much as an accounting one: refunds as a
+    /// share of `lifetime_spent` is the node's own request failure rate, and
+    /// it was previously invisible.
+    #[serde(default)]
+    pub lifetime_refunded: u64,
     #[serde(default)]
     pub last_updated: chrono::DateTime<chrono::Utc>,
+}
+
+impl CreditBalance {
+    /// Net credits actually consumed: reservations minus what came back.
+    pub fn net_spent(&self) -> u64 {
+        self.lifetime_spent.saturating_sub(self.lifetime_refunded)
+    }
+
+    /// Does the ledger balance? `earned - spent + refunded == balance`.
+    ///
+    /// Exposed so the invariant can be asserted in tests and surfaced by the
+    /// admin API rather than left for a user to try to derive.
+    pub fn books_balance(&self) -> bool {
+        let expected = (self.lifetime_earned as i128) - (self.lifetime_spent as i128)
+            + (self.lifetime_refunded as i128);
+        expected == self.balance as i128
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -89,6 +126,7 @@ mod tests {
             balance: 12_345,
             lifetime_earned: 99_999,
             lifetime_spent: 100,
+            lifetime_refunded: 40,
             last_updated: chrono::DateTime::<chrono::Utc>::UNIX_EPOCH
                 + chrono::Duration::seconds(1_700_000_000),
         };
@@ -98,6 +136,7 @@ mod tests {
         assert_eq!(round.balance, cb.balance);
         assert_eq!(round.lifetime_earned, cb.lifetime_earned);
         assert_eq!(round.lifetime_spent, cb.lifetime_spent);
+        assert_eq!(round.lifetime_refunded, cb.lifetime_refunded);
         assert_eq!(round.last_updated, cb.last_updated);
     }
 
@@ -117,6 +156,7 @@ mod tests {
         assert_eq!(cb.balance, 0);
         assert_eq!(cb.lifetime_earned, 0);
         assert_eq!(cb.lifetime_spent, 0);
+        assert_eq!(cb.lifetime_refunded, 0);
         assert_eq!(cb.last_updated, chrono::DateTime::<chrono::Utc>::UNIX_EPOCH);
     }
 
@@ -148,6 +188,64 @@ mod tests {
         assert!(
             r.is_err(),
             "missing node_id must error, not silently default"
+        );
+    }
+}
+
+#[cfg(test)]
+mod refund_accounting_tests {
+    use super::*;
+
+    fn bal(balance: i64, earned: u64, spent: u64, refunded: u64) -> CreditBalance {
+        CreditBalance {
+            node_id: NodeId([9u8; 32]),
+            balance,
+            lifetime_earned: earned,
+            lifetime_spent: spent,
+            lifetime_refunded: refunded,
+            last_updated: chrono::DateTime::<chrono::Utc>::UNIX_EPOCH,
+        }
+    }
+
+    /// The exact figures reported as a "credit arithmetic anomaly" on
+    /// 2026-07-29: `balance` +146065 against `lifetime_earned - lifetime_spent`
+    /// of −758960. Nothing was wrong — 97% of that node's reservations had been
+    /// refunded after failed requests, and no surface reported refunds, so the
+    /// books could not be closed from outside.
+    #[test]
+    fn the_reported_anomaly_closes_once_refunds_are_counted() {
+        let b = bal(146_065, 174_330, 933_290, 905_025);
+        assert!(
+            b.books_balance(),
+            "earned - spent + refunded must equal balance"
+        );
+        assert_eq!(b.net_spent(), 28_265);
+    }
+
+    /// A node with few failures shows a small gap — the shape seen locally
+    /// (650 of 31230, ~2%). Same identity, different failure rate.
+    #[test]
+    fn a_healthy_node_also_closes() {
+        let b = bal(850_467, 881_047, 31_230, 650);
+        assert!(b.books_balance());
+        assert_eq!(b.net_spent(), 30_580);
+    }
+
+    /// Refunds must never exceed reservations, but if a bad record claims they
+    /// do, `net_spent` must saturate rather than underflow a `u64`.
+    #[test]
+    fn net_spent_saturates_instead_of_underflowing() {
+        let b = bal(0, 0, 10, 99);
+        assert_eq!(b.net_spent(), 0);
+    }
+
+    /// Omitting refunds is exactly what made a correct ledger look broken.
+    #[test]
+    fn ignoring_refunds_does_not_close() {
+        let b = bal(146_065, 174_330, 933_290, 0);
+        assert!(
+            !b.books_balance(),
+            "without the refund term the identity must fail — that was the bug report"
         );
     }
 }

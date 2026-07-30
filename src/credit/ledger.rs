@@ -226,7 +226,8 @@ impl CreditLedger {
         };
 
         if local_credit > 0 {
-            self.apply_credit(local_credit, true).await?;
+            self.apply_credit(local_credit, CreditDelta::Earning)
+                .await?;
             self.persist_balance().await?;
         }
         if local_credit < amount {
@@ -249,7 +250,7 @@ impl CreditLedger {
     ) -> Result<i64, SwarmError> {
         let rates = self.credit_rates();
         let amount = rates.inference_consume.saturating_mul(tokens as i64);
-        self.apply_credit(-amount, false).await?;
+        self.apply_credit(-amount, CreditDelta::Spending).await?;
         self.persist_balance().await?;
 
         tracing::info!(
@@ -292,7 +293,7 @@ impl CreditLedger {
         const MAX_HOSTING_PER_TICK: f64 = 1_000_000.0;
         let amount = Self::safe_f64_credits(raw, MAX_HOSTING_PER_TICK);
         if amount > 0 {
-            self.apply_credit(amount, true).await?;
+            self.apply_credit(amount, CreditDelta::Earning).await?;
             self.persist_balance().await?;
         }
         Ok(amount)
@@ -310,7 +311,7 @@ impl CreditLedger {
         const MAX_SEEDING_PER_CALL: f64 = 1_000_000.0;
         let amount = Self::safe_f64_credits(raw, MAX_SEEDING_PER_CALL);
         if amount > 0 {
-            self.apply_credit(amount, true).await?;
+            self.apply_credit(amount, CreditDelta::Earning).await?;
             self.persist_balance().await?;
         }
         Ok(amount)
@@ -330,7 +331,7 @@ impl CreditLedger {
         const MAX_RELAY_FWD_PER_CALL: f64 = 1_000_000.0;
         let amount = Self::safe_f64_credits(raw, MAX_RELAY_FWD_PER_CALL);
         if amount > 0 {
-            self.apply_credit(amount, true).await?;
+            self.apply_credit(amount, CreditDelta::Earning).await?;
             self.persist_balance().await?;
         }
         Ok(amount)
@@ -344,7 +345,7 @@ impl CreditLedger {
         const MAX_RELAY_PER_CALL: f64 = 1_000_000.0;
         let amount = Self::safe_f64_credits(raw, MAX_RELAY_PER_CALL);
         if amount > 0 {
-            self.apply_credit(amount, true).await?;
+            self.apply_credit(amount, CreditDelta::Earning).await?;
             self.persist_balance().await?;
         }
         Ok(amount)
@@ -376,15 +377,25 @@ impl CreditLedger {
 
     /// Apply a credit delta to the balance.
     /// SEC-I1: Uses saturating arithmetic to prevent overflow.
-    async fn apply_credit(&self, delta: i64, is_earning: bool) -> Result<(), SwarmError> {
+    async fn apply_credit(&self, delta: i64, kind: CreditDelta) -> Result<(), SwarmError> {
         let mut bal = self.balance.write().await;
         bal.balance = bal.balance.saturating_add(delta);
         bal.last_updated = chrono::Utc::now();
 
-        if is_earning {
-            bal.lifetime_earned = bal.lifetime_earned.saturating_add(delta.unsigned_abs());
-        } else {
-            bal.lifetime_spent = bal.lifetime_spent.saturating_add(delta.unsigned_abs());
+        // Counters take |delta|, so the KIND and the SIGN must agree or the
+        // books stop closing. Taking `CreditDelta` rather than a bool means the
+        // two accounting paths share one vocabulary and a refund is
+        // expressible here too, instead of being silently counted as a spend.
+        match kind {
+            CreditDelta::Earning => {
+                bal.lifetime_earned = bal.lifetime_earned.saturating_add(delta.unsigned_abs());
+            }
+            CreditDelta::Spending => {
+                bal.lifetime_spent = bal.lifetime_spent.saturating_add(delta.unsigned_abs());
+            }
+            CreditDelta::Refund => {
+                bal.lifetime_refunded = bal.lifetime_refunded.saturating_add(delta.unsigned_abs());
+            }
         }
 
         tracing::debug!(
@@ -770,7 +781,11 @@ pub async fn apply_credit_direct(
                 bal.lifetime_spent = bal.lifetime_spent.saturating_add(delta.unsigned_abs());
             }
             CreditDelta::Refund => {
-                // Reverting a prior spend — leave the monotonic counters alone.
+                // Reverting a prior spend. `lifetime_spent` stays monotonic,
+                // so record the return separately — otherwise the books cannot
+                // be closed from outside and the node looks broken (see
+                // `CreditBalance::lifetime_refunded`).
+                bal.lifetime_refunded = bal.lifetime_refunded.saturating_add(delta.unsigned_abs());
             }
         }
 
@@ -802,7 +817,11 @@ pub async fn apply_credit_direct(
             CreditDelta::Spending => {
                 bal.lifetime_spent = bal.lifetime_spent.saturating_sub(delta.unsigned_abs());
             }
-            CreditDelta::Refund => {}
+            CreditDelta::Refund => {
+                // Mirror of the forward path — a reverted refund must give
+                // back its counter increment too, or the books stop closing.
+                bal.lifetime_refunded = bal.lifetime_refunded.saturating_sub(delta.unsigned_abs());
+            }
         }
         tracing::warn!(
             error = %e,
@@ -1023,6 +1042,7 @@ mod tests {
             balance: 0,
             lifetime_earned: 0,
             lifetime_spent: 0,
+            lifetime_refunded: 0,
             last_updated: chrono::Utc::now(),
         }));
         let (network_tx, _rx) = mpsc::channel(16);
@@ -1061,6 +1081,7 @@ mod tests {
             balance: 1000,
             lifetime_earned: 1000,
             lifetime_spent: 0,
+            lifetime_refunded: 0,
             last_updated: chrono::Utc::now(),
         }));
         let (network_tx, _rx) = mpsc::channel(16);
@@ -1098,6 +1119,7 @@ mod tests {
             balance: 500,
             lifetime_earned: 500,
             lifetime_spent: 0,
+            lifetime_refunded: 0,
             last_updated: chrono::Utc::now(),
         }));
         let (network_tx, _rx) = mpsc::channel(16);
@@ -1136,6 +1158,7 @@ mod tests {
             balance: 0,
             lifetime_earned: 0,
             lifetime_spent: 0,
+            lifetime_refunded: 0,
             last_updated: chrono::Utc::now(),
         }));
         let (network_tx, _rx) = mpsc::channel(16);

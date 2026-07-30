@@ -509,11 +509,20 @@ pub(crate) fn validate_tools<T>(
 }
 
 /// Build a credit balance summary JSON object.
+///
+/// `lifetime_refunded` and `net_spent` are reported alongside the raw counters
+/// because `lifetime_spent` is GROSS reservations and stays monotonic across
+/// refunds. Publishing only earned/spent/balance made a healthy node look
+/// broken — reported 2026-07-29 as a ~905k "arithmetic anomaly" that was
+/// simply 97% of that node's reservations being refunded after failed
+/// requests. See `CreditBalance::lifetime_refunded`.
 pub(crate) fn credit_summary_json(credit: &swarmllm_types::CreditBalance) -> serde_json::Value {
     serde_json::json!({
         "balance": credit.balance,
         "lifetime_earned": credit.lifetime_earned,
         "lifetime_spent": credit.lifetime_spent,
+        "lifetime_refunded": credit.lifetime_refunded,
+        "net_spent": credit.net_spent(),
     })
 }
 

@@ -705,6 +705,7 @@ mod tests {
             balance: 100,
             lifetime_earned: 0,
             lifetime_spent: 0,
+            lifetime_refunded: 0,
             last_updated: chrono::Utc::now(),
         };
         serde_json::to_vec(&cb).expect("serialise CreditBalance")
