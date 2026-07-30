@@ -6,6 +6,16 @@ All notable changes to SwarmLLM are documented here.
 
 ### Fixed
 
+- **Repeating a long prompt reused the saved work slightly wrong.** When a
+  prompt is sent again, the node restores the work it already did rather than
+  redoing it. The bookkeeping kept one more piece of that saved work than it
+  told the rest of the system about, so the last word of the prompt was counted
+  twice when the model looked back over it. Nothing failed and nothing was
+  logged, which is why it went unnoticed — but it only happened when the
+  *entire* prompt was already saved, which is exactly the case this feature
+  exists for. Anyone trying to measure the speed-up was measuring a subtly
+  wrong answer.
+
 - **Updating could silently take away your graphics-card support, with no way
   back.** Updates deliberately never switch between the graphics-card and
   processor-only builds, so an update can't hand you a binary your machine

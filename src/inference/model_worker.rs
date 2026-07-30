@@ -1549,6 +1549,55 @@ async fn handle_forward(
 /// starving decode on peers that never respond.
 const PREFIX_FETCH_TIMEOUT_MS: u64 = 3000;
 
+/// Clamp a hydrated prefix to leave one token for the forward, and truncate the
+/// KV cache so it holds exactly that many positions.
+///
+/// Hydration writes however many tokens the cached snapshot covers. The callers
+/// then clamped only the *number they carry forward*, leaving the cache holding
+/// more positions than the clamp claimed. Nothing crashed, because a 1-token
+/// forward takes the `seq_len == 1` path where no mask is built — but
+/// `forward_inner_impl` reads `kv_offset` from the **cache**, not from
+/// `index_pos`, so the final prompt token ended up in the cache twice and the
+/// model attended to a duplicate.
+///
+/// It bites precisely when the whole prompt is already cached, i.e. **the second
+/// identical request** — which is the only case cross-node prefix sharing exists
+/// to serve, and the exact scenario a tester was using to try to measure its
+/// speedup (2026-07-29).
+///
+/// `KvCacheStore::truncate_request_to` already existed for the speculative
+/// partial-accept fixup; this is the same need.
+fn reconcile_hydrated_prefix(
+    kv_store: &Arc<KvCacheStore>,
+    model_key: &str,
+    req_id_str: &str,
+    hydrated: usize,
+    prompt_tokens: usize,
+) -> usize {
+    let clamped = hydrated.min(prompt_tokens.saturating_sub(1));
+    if clamped < hydrated {
+        if let Err(e) = kv_store.truncate_request_to(model_key, req_id_str, clamped) {
+            // Truncation failed, so the cache still holds `hydrated` positions
+            // and we cannot describe it honestly. Drop it and prefill in full:
+            // slower, but correct.
+            tracing::warn!(
+                error = %e, hydrated, clamped,
+                "prefix hydrate: could not truncate KV to the clamped length — \
+                 discarding the hydrated cache and prefilling the whole prompt"
+            );
+            kv_store.clear_request(model_key, req_id_str);
+            return 0;
+        }
+        tracing::debug!(
+            hydrated,
+            clamped,
+            prompt_tokens,
+            "prefix hydrate: truncated KV cache to leave a token for the forward"
+        );
+    }
+    clamped
+}
+
 /// Item 8 Phase 2b: probe the daemon for a cross-node prefix KV hit and,
 /// if one arrives inside the timeout, hydrate the request's KV entry from
 /// the returned snapshot bytes. Returns the number of tokens seeded (0
@@ -1637,7 +1686,18 @@ async fn try_remote_prefix_hydrate(
         model.device(),
     ) {
         Ok(n) => {
-            let n = n.min(usable);
+            // Same reconciliation as the local-hit path: the clamp must move
+            // the cache, not just the number we report.
+            // `n` is what the cache actually holds; reconcile does the clamp
+            // (to `prompt_tokens - 1`, the same bound `usable` applies) AND
+            // truncates the cache to match, so pass `n` through unmodified.
+            let n = reconcile_hydrated_prefix(
+                kv_store,
+                model.kv_model_key(),
+                req_id_str,
+                n,
+                prompt_tokens,
+            );
             tracing::info!(
                 matched_tokens = n,
                 total_tokens = prompt_tokens,
@@ -1716,8 +1776,15 @@ async fn handle_generate(
             .unwrap_or(0),
         None => 0,
     };
-    // Clamp to keep at least one token for the forward pass.
-    prefix_len = prefix_len.min(prompt_tokens.saturating_sub(1));
+    // Clamp to keep at least one token for the forward pass, and make the KV
+    // cache AGREE with the clamp — see `reconcile_hydrated_prefix`.
+    prefix_len = reconcile_hydrated_prefix(
+        kv_store,
+        model.kv_model_key(),
+        &req_id_str,
+        prefix_len,
+        prompt_tokens,
+    );
     if prefix_len == 0 {
         // Only probe when the local cache missed — avoids wasting a round
         // trip when we already have a good hydration source.
@@ -2354,8 +2421,15 @@ async fn try_register_generate_slot(
         None => 0,
     };
     // Always leave at least one prompt token for the first chunk's forward —
-    // we need that forward to produce logits for the first sample.
-    prefix_len = prefix_len.min(prompt_tokens.saturating_sub(1));
+    // we need that forward to produce logits for the first sample — and make
+    // the KV cache agree with that count. See `reconcile_hydrated_prefix`.
+    prefix_len = reconcile_hydrated_prefix(
+        kv_store,
+        model.kv_model_key(),
+        &req_id_str,
+        prefix_len,
+        prompt_tokens,
+    );
     if prefix_len == 0 {
         // Item 8 Phase 2b: probe cross-node only when local missed.
         prefix_len = try_remote_prefix_hydrate(
@@ -3267,5 +3341,89 @@ mod decode_raw_vocab_tests {
         // Not a byte-fallback token despite the shape — left alone.
         assert_eq!(decode_raw_vocab_entry("<0xZZ>"), "<0xZZ>");
         assert_eq!(decode_raw_vocab_entry("<s>"), "<s>");
+    }
+}
+
+#[cfg(test)]
+mod prefix_reconcile_tests {
+    use super::reconcile_hydrated_prefix;
+    use crate::inference::split::KvCacheStore;
+    use candle_core::{Device, Tensor};
+    use std::sync::Arc;
+
+    const MODEL_KEY: &str = "m";
+    const REQ: &str = "r";
+
+    /// Put `n` sequence positions into every layer of a request's KV cache,
+    /// the way hydration does.
+    fn hydrate(store: &Arc<KvCacheStore>, n: usize, layers: usize) {
+        let mut entry = store.get_or_create(MODEL_KEY, REQ, layers);
+        for slot in entry.layers.iter_mut() {
+            let mut kv = candle_nn::kv_cache::KvCache::new(2, 64);
+            // [batch, heads, seq, head_dim]
+            let k =
+                Tensor::zeros((1usize, 2, n, 4), candle_core::DType::F32, &Device::Cpu).unwrap();
+            let v = k.clone();
+            kv.append(&k, &v).unwrap();
+            *slot = Some(kv);
+        }
+    }
+
+    fn cached_len(store: &Arc<KvCacheStore>) -> usize {
+        let key = KvCacheStore::cache_key(MODEL_KEY, REQ);
+        store
+            .get_entry(&key)
+            .and_then(|e| {
+                e.layers
+                    .iter()
+                    .find_map(|c| c.as_ref().map(|kv| kv.k_cache().current_seq_len()))
+            })
+            .unwrap_or(0)
+    }
+
+    /// The reported defect's precondition: an EXACT repeat of a prompt hydrates
+    /// every token, so the clamp to `prompt_tokens - 1` has real work to do.
+    /// Before this, the cache kept all 8 positions while the caller was told 7
+    /// — `forward_inner_impl` reads `kv_offset` from the cache, so the last
+    /// prompt token was attended to twice.
+    #[test]
+    fn a_full_prompt_hit_leaves_the_cache_agreeing_with_the_clamp() {
+        let store = Arc::new(KvCacheStore::new(std::time::Duration::from_secs(60)));
+        hydrate(&store, 8, 3);
+        assert_eq!(cached_len(&store), 8);
+
+        let got = reconcile_hydrated_prefix(&store, MODEL_KEY, REQ, 8, 8);
+        assert_eq!(got, 7, "must leave one token for the forward");
+        assert_eq!(
+            cached_len(&store),
+            7,
+            "the cache must be truncated to match the number reported, not just the number"
+        );
+    }
+
+    /// A partial hit needs no truncation and must be left exactly as hydrated.
+    #[test]
+    fn a_partial_hit_is_untouched() {
+        let store = Arc::new(KvCacheStore::new(std::time::Duration::from_secs(60)));
+        hydrate(&store, 4, 3);
+        let got = reconcile_hydrated_prefix(&store, MODEL_KEY, REQ, 4, 10);
+        assert_eq!(got, 4);
+        assert_eq!(cached_len(&store), 4);
+    }
+
+    /// A single-token prompt cannot keep any prefix — the forward needs it.
+    #[test]
+    fn a_one_token_prompt_yields_no_prefix() {
+        let store = Arc::new(KvCacheStore::new(std::time::Duration::from_secs(60)));
+        hydrate(&store, 1, 2);
+        assert_eq!(reconcile_hydrated_prefix(&store, MODEL_KEY, REQ, 1, 1), 0);
+        assert_eq!(cached_len(&store), 0);
+    }
+
+    /// Nothing hydrated is a no-op, not a truncation attempt.
+    #[test]
+    fn zero_hydrated_is_inert() {
+        let store = Arc::new(KvCacheStore::new(std::time::Duration::from_secs(60)));
+        assert_eq!(reconcile_hydrated_prefix(&store, MODEL_KEY, REQ, 0, 10), 0);
     }
 }
