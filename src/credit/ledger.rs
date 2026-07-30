@@ -143,6 +143,22 @@ pub struct CreditLedger {
     shared_state: Option<std::sync::Arc<crate::daemon::SharedState>>,
     /// Node identity for signing balance reports (Sybil resistance).
     identity: Option<crate::identity::Identity>,
+    /// Fractional shard-hosting credit carried between hourly accruals, in
+    /// millionths of a credit.
+    ///
+    /// Hosting pays `rate * size_gb * hours` and the result was truncated to an
+    /// integer **per shard**. With the shipped defaults — `shard_size_mb = 512`
+    /// and `shard_hosting = 1` — that is `1 * 0.5 * 1.0 = 0.5`, which truncates
+    /// to **zero**. Every shard smaller than 1 GB therefore earned nothing, on
+    /// every node, for ever, while spending worked normally: a node that hosted
+    /// more got monotonically poorer, inverting the whole incentive. Reported
+    /// 2026-07-30 by an operator who went from 5 to 13 shards and watched
+    /// `credits_earned=0` at every accrual.
+    ///
+    /// Integer micro-credits rather than an `f64` accumulator so repeated ticks
+    /// cannot drift. In memory only — losing it on restart forfeits less than
+    /// one credit, which is not worth a write on every tick.
+    hosting_remainder_micro: std::sync::atomic::AtomicI64,
 }
 
 impl CreditLedger {
@@ -193,6 +209,7 @@ impl CreditLedger {
             peer_balances,
             shared_state: None,
             identity: None,
+            hosting_remainder_micro: std::sync::atomic::AtomicI64::new(0),
         }
     }
 
@@ -322,16 +339,37 @@ impl CreditLedger {
     }
 
     /// Earn credits for hosting a shard.
-    pub async fn earn_shard_hosting(
+    /// Accrue hosting credit for the WHOLE set of shards held this tick.
+    ///
+    /// Batched, not per-shard, and carries the sub-credit remainder forward.
+    /// Paying each shard separately truncated `0.5` to `0` for every 512 MB
+    /// shard — see `hosting_remainder_micro`. Summing first means a node with
+    /// two half-gigabyte shards earns 1/hour instead of 0, and the carry means
+    /// even a single small shard eventually pays rather than rounding away for
+    /// ever.
+    ///
+    /// One `apply_credit` + one persist per tick rather than per shard, so a
+    /// node hosting hundreds of shards no longer does hundreds of DB writes an
+    /// hour either.
+    pub async fn earn_shard_hosting_total(
         &self,
-        _shard_id: &ShardId,
-        size_gb: f64,
+        total_gb: f64,
         hours: f32,
     ) -> Result<i64, SwarmError> {
+        use std::sync::atomic::Ordering;
         let rates = self.credit_rates();
-        let raw = rates.shard_hosting as f64 * size_gb * hours as f64;
+        let raw = rates.shard_hosting as f64 * total_gb * hours as f64;
+        if !raw.is_finite() || raw < 0.0 {
+            return Ok(0);
+        }
+        // Cap before converting so a preposterous rate cannot overflow.
         const MAX_HOSTING_PER_TICK: f64 = 1_000_000.0;
-        let amount = Self::safe_f64_credits(raw, MAX_HOSTING_PER_TICK);
+        let micro = (raw.min(MAX_HOSTING_PER_TICK) * 1_000_000.0).round() as i64;
+        let carried = self.hosting_remainder_micro.load(Ordering::Relaxed);
+        let total_micro = micro.saturating_add(carried);
+        let amount = total_micro / 1_000_000;
+        self.hosting_remainder_micro
+            .store(total_micro % 1_000_000, Ordering::Relaxed);
         if amount > 0 {
             self.apply_credit(amount, CreditDelta::Earning).await?;
             self.persist_balance().await?;
@@ -610,7 +648,10 @@ impl CreditLedger {
                 _ = hosting_interval.tick() => {
                     // Earn credits for each shard we're hosting
                     if let Some(ref ss) = self.shared_state {
-                        let mut total_earned: i64 = 0;
+                        // Sum the whole set FIRST, then pay once. Paying per
+                        // shard truncated every sub-1 GB shard to zero credits
+                        // — see `hosting_remainder_micro`.
+                        let mut total_gb: f64 = 0.0;
                         let mut shard_count: u32 = 0;
                         for manifest in ss.model_registry.models() {
                             for shard in &manifest.shards {
@@ -620,23 +661,26 @@ impl CreditLedger {
                                 };
                                 let holders = ss.model_registry.shard_holders(&shard_id);
                                 if holders.contains(&self.node_id) {
-                                    let size_gb = shard.size_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
-                                    match self.earn_shard_hosting(&shard_id, size_gb, 1.0).await {
-                                        Ok(earned) => {
-                                            total_earned += earned;
-                                            shard_count += 1;
-                                        }
-                                        Err(e) => {
-                                            tracing::warn!(error = %e, "Failed to earn shard hosting credit");
-                                        }
-                                    }
+                                    total_gb += shard.size_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
+                                    shard_count += 1;
                                 }
                             }
                         }
+                        let total_earned = match self.earn_shard_hosting_total(total_gb, 1.0).await {
+                            Ok(earned) => earned,
+                            Err(e) => {
+                                tracing::warn!(error = %e, "Failed to earn shard hosting credit");
+                                0
+                            }
+                        };
                         if shard_count > 0 {
                             tracing::info!(
                                 shards = shard_count,
+                                total_gb = format!("{total_gb:.3}"),
                                 credits_earned = total_earned,
+                                carry_micro = self
+                                    .hosting_remainder_micro
+                                    .load(std::sync::atomic::Ordering::Relaxed),
                                 "Earned shard hosting credits"
                             );
                         }
@@ -1574,5 +1618,80 @@ mod backfill_tests {
         backfill_historical_refunds(&mut cb);
         assert_eq!(cb.lifetime_refunded, 0);
         assert!(!cb.books_balance(), "the inconsistency must stay visible");
+    }
+}
+
+#[cfg(test)]
+mod hosting_accrual_tests {
+    /// Pure re-implementation of the accrual arithmetic in
+    /// `earn_shard_hosting_total`, so the rounding rule can be exercised
+    /// without standing up a ledger, a database and a network channel.
+    fn accrue(rate: i64, total_gb: f64, hours: f32, carry: &mut i64) -> i64 {
+        let raw = rate as f64 * total_gb * hours as f64;
+        if !raw.is_finite() || raw < 0.0 {
+            return 0;
+        }
+        let micro = (raw.min(1_000_000.0) * 1_000_000.0).round() as i64;
+        let total = micro.saturating_add(*carry);
+        let amount = total / 1_000_000;
+        *carry = total % 1_000_000;
+        amount
+    }
+
+    /// The reported defect, with the shipped defaults: `shard_size_mb = 512`
+    /// and `shard_hosting = 1`. Paid per shard, `1 * 0.5 * 1.0` truncated to
+    /// zero — on every node, for ever.
+    #[test]
+    fn a_single_half_gigabyte_shard_no_longer_rounds_away_forever() {
+        let mut carry = 0i64;
+        // Per-shard truncation would give 0 here and 0 on every later tick.
+        assert_eq!(accrue(1, 0.5, 1.0, &mut carry), 0, "first hour is still 0");
+        assert_eq!(
+            accrue(1, 0.5, 1.0, &mut carry),
+            1,
+            "but the carry pays out on the second hour instead of vanishing"
+        );
+    }
+
+    /// The operator's actual case: 13 shards at 512 MB. Per-shard truncation
+    /// paid 0; summing first pays for the 6.5 GB actually hosted.
+    #[test]
+    fn thirteen_half_gigabyte_shards_pay() {
+        let mut carry = 0i64;
+        let earned = accrue(1, 13.0 * 0.5, 1.0, &mut carry);
+        assert_eq!(earned, 6);
+        assert_eq!(carry, 500_000, "half a credit carried, not discarded");
+    }
+
+    /// Over many ticks the total must track the exact rate with no drift —
+    /// the reason for integer micro-credits rather than an f64 accumulator.
+    #[test]
+    fn carry_does_not_drift_over_many_ticks() {
+        let mut carry = 0i64;
+        let mut total = 0i64;
+        for _ in 0..100 {
+            total += accrue(1, 0.5, 1.0, &mut carry);
+        }
+        assert_eq!(total, 50, "100 hours at 0.5 credits/hour is exactly 50");
+    }
+
+    /// Hosting nothing pays nothing and must not disturb the carry.
+    #[test]
+    fn zero_shards_pays_zero() {
+        let mut carry = 250_000i64;
+        assert_eq!(accrue(1, 0.0, 1.0, &mut carry), 0);
+        assert_eq!(carry, 250_000);
+    }
+
+    /// Degenerate rates must not panic or mint absurd credit.
+    #[test]
+    fn nonsense_inputs_are_inert() {
+        let mut carry = 0i64;
+        assert_eq!(accrue(1, f64::NAN, 1.0, &mut carry), 0);
+        assert_eq!(accrue(1, -5.0, 1.0, &mut carry), 0);
+        assert_eq!(accrue(1, f64::INFINITY, 1.0, &mut carry), 0);
+        // Enormous but finite: capped, never overflowing.
+        let huge = accrue(i64::MAX, 1e9, 1.0, &mut carry);
+        assert!((0..=1_000_000).contains(&huge), "capped, got {huge}");
     }
 }

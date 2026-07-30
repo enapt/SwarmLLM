@@ -975,40 +975,12 @@ impl InferenceRouter {
                 result.trace = Some(trace.snapshot());
             }
 
-            // Record latency for Prometheus histogram
+            // Latency and the request total are recorded inside
+            // `publish_request_trace` above, at the single choke point every
+            // completion path crosses. Recording them here as well would
+            // double-count this path.
             match &output {
-                Ok(_) => {
-                    let latency_secs = elapsed.as_secs_f64();
-                    if let Ok(mut samples) = shared_state.metrics.inference_latency_samples.write()
-                    {
-                        // R137: drop entries older than the freshness window
-                        // before applying the cap. Without this, a lightly-loaded
-                        // node accumulates day-old samples and reports stale p99.
-                        let cutoff =
-                            std::time::Instant::now() - crate::api::metrics::LATENCY_SAMPLE_MAX_AGE;
-                        while samples.front().is_some_and(|(t, _)| *t < cutoff) {
-                            samples.pop_front();
-                        }
-                        if samples.len() >= 1000 {
-                            samples.pop_front();
-                        }
-                        samples.push_back((std::time::Instant::now(), latency_secs));
-                    }
-                    // CORRECTNESS (R105): keep a monotonic total alongside
-                    // the bounded ring. Prometheus histogram `_count` /
-                    // `_sum` MUST be monotonically non-decreasing for
-                    // `rate()` / `increase()` to work; the ring's count
-                    // capped at 1000 and could fall when it wrapped.
-                    shared_state
-                        .metrics
-                        .inference_latency_total_count
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    let micros = (latency_secs * 1_000_000.0).round() as u64;
-                    shared_state
-                        .metrics
-                        .inference_latency_total_micros
-                        .fetch_add(micros, std::sync::atomic::Ordering::Relaxed);
-                }
+                Ok(_) => {}
                 Err(ref e) => {
                     tracing::error!(
                         request_id = %request.id,

@@ -6,6 +6,26 @@ All notable changes to SwarmLLM are documented here.
 
 ### Fixed
 
+- **Hosting shards earned no credits at all.** Credit for hosting is worked out
+  per gigabyte and then rounded down to a whole number, one shard at a time.
+  With the standard piece size of 512 MB that is half a credit per shard per
+  hour, which rounded down to nothing — so on a typical node, hosting earned
+  zero for ever while spending worked normally. A node that took on more work
+  got steadily poorer, which is the opposite of the intent. Reported by an
+  operator who went from 5 to 13 shards to help under-replicated models and saw
+  nothing credited at any point.
+
+  Hosting is now totalled across everything a node holds before rounding, and
+  the fraction left over is carried to the next hour rather than discarded, so
+  even a single small shard eventually earns.
+
+- **Two Prometheus metrics never recorded anything.** The total request counter
+  and the latency histogram stayed at zero through successful requests, while
+  the per-route breakdown recorded them correctly — so anything built on the
+  total, or on latency, read zero for ever. They were being recorded in one
+  place while requests can complete by three different routes; they are now
+  recorded where every route passes through.
+
 - **Existing nodes reported their credit totals as not adding up.** v0.3.54
   started publishing credits returned, but the counter began at zero on nodes
   that had already been running — while the refunds it should have counted were

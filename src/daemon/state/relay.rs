@@ -122,6 +122,30 @@ impl super::SharedState {
             .requests_by_route
             .entry((snap.route.as_str(), outcome_label(&snap.outcome)))
             .or_insert(0) += 1;
+
+        // The grand total and the latency histogram live HERE, beside the
+        // per-route counter, not in the callers.
+        //
+        // There are three call sites (the router's completion arm, the
+        // distributed executor, and the OpenAI local-complete fast path).
+        // `requests_by_route` was inside this function so every path fed it,
+        // while the total and the latency samples were recorded *outside* at
+        // one site only — so a scrape could show
+        // `requests_by_route{local,ok} 1` next to `inference_requests_total 0`
+        // and an empty histogram, for the same request. Reported 2026-07-30
+        // as two separate findings ("a dead counter", "the histogram is never
+        // populated"); they are one placement mistake.
+        self.metrics
+            .inference_requests_total
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if matches!(snap.outcome, crate::inference::trace::Outcome::Ok) {
+            record_duration_sample(
+                &self.metrics.inference_latency_samples,
+                &self.metrics.inference_latency_total_count,
+                &self.metrics.inference_latency_total_micros,
+                snap.total_ms as f64 / 1000.0,
+            );
+        }
         if let Some(ms) = snap.ttft_ms {
             record_duration_sample(
                 &self.metrics.ttft_samples,
