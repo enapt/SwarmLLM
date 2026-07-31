@@ -35,6 +35,14 @@ on:
       - "crates/*/Cargo.toml"
       - ".github/workflows/cache-warm.yml"
       - ".github/workflows/release.yml"
+      # The composite action IS the toolchain definition — CUDA, Vulkan, MSVC,
+      # LIB, the generator, the cache key. Changing it changes what this
+      # workflow builds and what the release restores, so it must trigger a
+      # re-warm. Omitting it meant the file that defines everything did not
+      # trigger the workflow that validates it: the commit removing a broken
+      # step ran nothing at all, and the stale cache would have been handed
+      # straight to the next release.
+      - ".github/actions/**"
   schedule:
     # Weekly, comfortably inside GitHub's 7-day unused-cache eviction.
     - cron: "0 4 * * 1"
