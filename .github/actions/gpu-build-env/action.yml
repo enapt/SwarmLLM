@@ -144,18 +144,6 @@ runs:
       "LIB=$libs;$env:LIB" | Out-File -Append -FilePath $env:GITHUB_ENV -Encoding utf8
 
       '
-  - name: Discard a stale CMake configure (Windows GPU)
-    if: inputs.cuda-windows == 'true'
-    shell: pwsh
-    run: "$roots = Get-ChildItem -Path target -Recurse -Filter CMakeCache.txt -ErrorAction SilentlyContinue\n\
-      if (-not $roots) { Write-Host \"No cached CMake configure to check.\"; exit 0 }\nforeach ($cache\
-      \ in $roots) {\n  $stale = @()\n  foreach ($line in Get-Content $cache.FullName) {\n    # Only PATH/FILEPATH\
-      \ entries name real locations on disk.\n    if ($line -match '^[^/#].*:(PATH|FILEPATH)=(.+)$') {\n\
-      \      $val = $Matches[2].Trim()\n      if ($val -and $val -ne 'NOTFOUND' -and -not $val.EndsWith('-NOTFOUND'))\
-      \ {\n        if (-not (Test-Path -LiteralPath $val)) { $stale += $line }\n      }\n    }\n  }\n\
-      \  if ($stale.Count -gt 0) {\n    Write-Host \"::warning::Discarding stale CMake configure at $($cache.FullName)\"\
-      \n    $stale | Select-Object -First 10 | ForEach-Object { Write-Host \"  stale: $_\" }\n    Remove-Item\
-      \ -Recurse -Force (Split-Path $cache.FullName -Parent)\n  }\n}\n"
   - name: Use Ninja generator (Windows GPU vulkan-shaders-gen race)
     if: inputs.cuda-windows == 'true'
     shell: bash
