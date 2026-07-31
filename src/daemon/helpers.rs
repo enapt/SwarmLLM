@@ -81,6 +81,22 @@ pub(super) fn resolve_api_key(config: &Config, db: &Database) -> String {
 /// The two-step variant left a TOCTOU window where the file existed with the
 /// process-umask-derived permissions (typically 0o644 — world-readable) before
 /// the chmod tightened it. Mirrors the identity.key write at keypair.rs:62.
+/// Test builds never touch the real data dir.
+///
+/// `SharedState::new` resolves the API key, and a test building one from
+/// `Config::default()` inherits the REAL `data_dir` — `~/.local/share/swarmllm`
+/// — even though its database is a tempdir. The key it generated was written
+/// over the live node's `api_key` file while that node kept using the one in
+/// its own database, so `cargo test` on a machine with a node running silently
+/// broke the dashboard, the CLI and every saved token, presenting as an
+/// unexplained 401 with nothing in the log (reproduced 2026-07-31).
+///
+/// Gating the writer itself, rather than each test helper, means a new test
+/// cannot reintroduce this by forgetting to override `data_dir`.
+#[cfg(test)]
+fn write_api_key_file(_data_dir: &std::path::Path, _key: &str) {}
+
+#[cfg(not(test))]
 fn write_api_key_file(data_dir: &std::path::Path, key: &str) {
     let path = data_dir.join("api_key");
     #[cfg(unix)]
