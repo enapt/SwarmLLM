@@ -2,7 +2,7 @@
 
 All notable changes to SwarmLLM are documented here.
 
-## [Unreleased]
+## [0.3.56-alpha] — 2026-07-31
 
 ### Fixed
 
@@ -17,17 +17,16 @@ All notable changes to SwarmLLM are documented here.
   be spared. Left automatic, the allowance is half the machine where the
   graphics card does the work, and most of it on a processor-only node — where
   serving models is the whole point of the machine, and half would have meant
-  refusing models such nodes run today. A model
-  that will not fit is refused with a message naming what it needed, what the
-  limit is, and how to raise it — rather than being loaded into swap. This
-  matters more since this version began moving models to the processor when
-  the graphics card is full: that fallback is what keeps a node answering, and
-  it had no ceiling.
+  refusing models such nodes run today. A model that will not fit is refused
+  with a message naming what it needed, what the limit is, and how to raise it
+  — rather than being loaded into swap. This matters more since v0.3.55 began
+  moving models to the processor when the graphics card is full: that fallback
+  is what keeps a node answering, and it had no ceiling.
 
 - **A node that had returned any credits was left with its totals permanently
-  not adding up.** The repair shipped earlier in this version brought the books
-  back into balance on nodes that had been running before the "credits returned"
-  figure existed — but it skipped any node that had *already* recorded a return,
+  not adding up.** The repair shipped in v0.3.55 brought the books back into
+  balance on nodes that had been running before the "credits returned" figure
+  existed — but it skipped any node that had *already* recorded a return,
   on the reasoning that such a node needed no help. That is two different things
   confused for one: returns recorded since the figure was added are counted
   correctly, while the older, unrecorded ones still need explaining, and a node
