@@ -2,6 +2,24 @@
 
 All notable changes to SwarmLLM are documented here.
 
+## [Unreleased]
+
+### Fixed
+
+- **A model could be unloaded seconds after it loaded, killing the request that
+  loaded it.** On a node answering its own client, a reply could fail with
+  "worker closed connection mid-generate" while the log claimed the model had
+  been idle for the full configured timeout — for a model that had existed for
+  seven seconds. Three things were wrong at once. Whether a model is busy was
+  worked out from bookkeeping that only covers requests passed to other machines
+  or served for them, so a node answering its own client locally counted as
+  doing nothing; that is now read from the worker itself, which every kind of
+  request goes through. A model with no request history was treated as having
+  been idle for ever, rather than for at most as long as it had been loaded. And
+  the message named graphics memory on machines that have none, sending at least
+  one report looking for a graphics fault that was not there — it now reports
+  the memory it actually freed and the idle time it actually saw.
+
 ## [0.3.57-alpha] — 2026-07-31
 
 ### Fixed

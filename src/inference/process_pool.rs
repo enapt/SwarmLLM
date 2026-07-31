@@ -133,6 +133,14 @@ struct WorkerHandle {
     /// Handle to the reader actor task. Aborted on drop so the task doesn't
     /// outlive its worker; also unblocks any pending `recv_worker` in tests.
     reader_handle: tokio::task::JoinHandle<()>,
+    /// When this worker was spawned.
+    ///
+    /// Idle-unload needs a floor on how long a model *could* have been idle. A
+    /// model with no recorded request history is not "idle forever" — it cannot
+    /// have been idle longer than it has existed. Without this, a model loaded
+    /// seconds ago was evicted as though it had sat unused for the whole
+    /// configured window, killing the request that had just loaded it.
+    spawned_at: std::time::Instant,
 }
 
 /// Pull the `request_id` field out of any `WorkerMsg` variant that carries one.
@@ -1825,6 +1833,7 @@ impl ModelProcessPool {
             #[cfg(unix)]
             socket_name,
             reader_handle,
+            spawned_at: std::time::Instant::now(),
         })
     }
 
@@ -2601,6 +2610,36 @@ impl ModelProcessPool {
     /// List all currently loaded model IDs.
     pub fn loaded_model_ids(&self) -> Vec<ModelId> {
         self.workers.iter().map(|e| e.key().clone()).collect()
+    }
+
+    /// Models with at least one request in flight *right now*.
+    ///
+    /// Read from the pool's own per-request response channels, which is the one
+    /// place EVERY execution path passes through — local, distributed, and
+    /// peer-served alike. The callers' own bookkeeping does not have that
+    /// property: `active_pipelines` is populated only by the distributed path
+    /// (`distributed_exec` inserts; `local_exec` only removes) and
+    /// `serving_models` only by peer-served work, so a node answering its own
+    /// client locally appeared in NEITHER. That is how a worker was killed
+    /// mid-generation seven seconds after loading (reported 2026-07-31).
+    ///
+    /// Anything asking "is this model busy?" should use this rather than
+    /// re-deriving it from a caller-side map that covers one path.
+    pub fn models_with_inflight_requests(&self) -> Vec<ModelId> {
+        self.workers
+            .iter()
+            .filter(|e| !e.value().responses.is_empty())
+            .map(|e| e.key().clone())
+            .collect()
+    }
+
+    /// How long each loaded model's worker has existed. Upper bound on how long
+    /// it can possibly have been idle.
+    pub fn model_residency_secs(&self) -> Vec<(ModelId, u64)> {
+        self.workers
+            .iter()
+            .map(|e| (e.key().clone(), e.value().spawned_at.elapsed().as_secs()))
+            .collect()
     }
 
     /// Restart a model's worker with a new shard window.

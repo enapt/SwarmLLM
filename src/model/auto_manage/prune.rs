@@ -60,6 +60,33 @@ fn idle_hard_unload_secs(idle_unload_secs: u64) -> i64 {
         .saturating_mul(IDLE_HARD_UNLOAD_MULTIPLIER)
 }
 
+/// How long a loaded model can be considered idle.
+///
+/// `since_local` is our own outbound request history, `since_served` is work
+/// done for peers, `residency_secs` is how long the worker has existed.
+///
+/// **A model with no request history is not idle for ever.** It cannot have
+/// been idle longer than it has been loaded, so residency is the bound when
+/// nothing else is known. That is a fact rather than a worst-case guess, and
+/// getting it wrong evicted a model seven seconds after it loaded, killing the
+/// request that had just loaded it: `last_request_at` is written only by the
+/// distributed executor, so a locally-served model never records one and fell
+/// through to "assume maximally idle" (reported 2026-07-31).
+///
+/// Returns `None` only when nothing at all is known — no history and no
+/// residency — which callers must treat as "do not judge", not as idle.
+fn effective_idle_secs(
+    since_local: Option<i64>,
+    since_served: Option<i64>,
+    residency_secs: Option<u64>,
+) -> Option<i64> {
+    let observed = match (since_local, since_served) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
+    };
+    observed.or_else(|| residency_secs.map(|s| s.min(i64::MAX as u64) as i64))
+}
+
 /// R134.7: penalty applied when a model has a recent swarm request.
 /// Combined with the existing `region_demand` penalty this means a
 /// model that's actively being used by THIS node is much harder to
@@ -1053,10 +1080,21 @@ impl AutoShardManager {
                 active_models.insert(entry.key().clone());
             }
         }
+        // And the authoritative source: the worker pool's own in-flight
+        // requests. The two maps above are caller-side bookkeeping and each
+        // covers one path — `active_pipelines` is inserted only by the
+        // distributed executor, `serving_models` only by peer-served work — so
+        // a node answering its OWN client locally was in neither, and its model
+        // could be unloaded mid-generation. The pool sees every path.
+        for model_id in pool.models_with_inflight_requests() {
+            active_models.insert(model_id);
+        }
 
         let our_region = self.our_region().unwrap_or_default();
         let now = chrono::Utc::now();
         let local_id = self.shared_state.identity.node_id().clone();
+        let residency: std::collections::HashMap<ModelId, u64> =
+            pool.model_residency_secs().into_iter().collect();
         // Pool shard pins snapshot (same source the pressure-prune uses).
         let shard_pins = super::manager::read_shard_pins_blocking(&self.shared_state).await;
 
@@ -1126,10 +1164,8 @@ impl AutoShardManager {
                 .serving_models
                 .get(&model_id)
                 .map(|s| s.last_served_at.elapsed().as_secs().min(i64::MAX as u64) as i64);
-            let since_any = match (since_local, since_served) {
-                (Some(a), Some(b)) => Some(a.min(b)),
-                (a, b) => a.or(b),
-            };
+            let since_any =
+                effective_idle_secs(since_local, since_served, residency.get(&model_id).copied());
             let idle = since_any.map_or(true, |s| s >= idle_unload_secs as i64);
             if !idle {
                 continue;
@@ -1168,16 +1204,28 @@ impl AutoShardManager {
                 .get_manifest(&model_id)
                 .map(|m| m.name.clone())
                 .unwrap_or_else(|| model_id.0.clone());
+            // Report the idle time actually observed, not the configured
+            // threshold, and do not claim "GPU"/"VRAM" on a node that has
+            // neither — a CPU-only node logging "Idle VRAM unload ...
+            // idle_unload_secs=300" for a model loaded seconds earlier sent a
+            // reporter looking for a GPU fault that did not exist.
+            let device = if self.shared_state.gpu_info.is_some() {
+                "graphics memory"
+            } else {
+                "system memory"
+            };
             tracing::info!(
                 model = %model_id,
-                idle_unload_secs,
-                "Idle VRAM unload — freed model from GPU (shards kept on disk)"
+                idle_secs = since_any.unwrap_or(-1),
+                threshold_secs = idle_unload_secs,
+                device,
+                "Idle unload — freed model (shards kept on disk)"
             );
             self.shared_state.emit_activity(
                 crate::daemon::state::ActivityEvent::new(
                     "auto_manage",
                     "idle_vram_unload",
-                    format!("Freed idle model {mname} from GPU memory — no recent requests"),
+                    format!("Freed idle model {mname} from {device} — no recent requests"),
                 )
                 .with_model(&model_id.0),
             );
@@ -1325,6 +1373,49 @@ pub(crate) fn effective_prune_target(
 
 #[cfg(test)]
 mod tests {
+
+    use super::effective_idle_secs;
+
+    /// The reported failure: a model loaded 7s ago, with no request history
+    /// because it was served locally, was treated as maximally idle and
+    /// unloaded mid-generation. Residency bounds it — 7 seconds, not for ever.
+    #[test]
+    fn a_freshly_loaded_model_is_not_idle() {
+        let idle = effective_idle_secs(None, None, Some(7)).expect("residency bounds it");
+        assert_eq!(idle, 7);
+        assert!(idle < 300, "must not trip a 300s idle threshold");
+    }
+
+    /// Before the fix this case yielded "unknown", and the call site read
+    /// unknown as idle. Pinning that it now yields a number.
+    #[test]
+    fn no_request_history_still_produces_an_answer() {
+        assert!(effective_idle_secs(None, None, Some(0)).is_some());
+    }
+
+    /// A genuinely old model is still collectable — the fix must not pin
+    /// everything in memory for ever.
+    #[test]
+    fn a_long_resident_unused_model_is_still_idle() {
+        let idle = effective_idle_secs(None, None, Some(4000)).unwrap();
+        assert!(idle >= 300, "an actually-idle model must still unload");
+    }
+
+    /// Real history always wins over residency: a model loaded hours ago but
+    /// requested a second ago is busy, not idle.
+    #[test]
+    fn recent_use_beats_long_residency() {
+        assert_eq!(effective_idle_secs(Some(1), None, Some(9999)), Some(1));
+        assert_eq!(effective_idle_secs(None, Some(2), Some(9999)), Some(2));
+        // Most recent activity of either kind wins.
+        assert_eq!(effective_idle_secs(Some(90), Some(3), Some(9999)), Some(3));
+    }
+
+    /// Nothing known at all must stay "do not judge" rather than becoming 0.
+    #[test]
+    fn total_absence_of_information_is_unknown() {
+        assert_eq!(effective_idle_secs(None, None, None), None);
+    }
     use crate::daemon::state::{ServingGuard, ServingState};
 
     fn serving_test_state() -> std::sync::Arc<crate::daemon::SharedState> {
