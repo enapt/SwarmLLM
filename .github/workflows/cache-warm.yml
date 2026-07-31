@@ -191,6 +191,33 @@ jobs:
 
       # Ninja avoids the vulkan-shaders-gen ExternalProject race the VS
       # generator hits (see release.yml).
+      # Mirror of release.yml's guard — this workflow WRITES the cache the
+      # release restores, so a stale configure created here is what the release
+      # would inherit. Keeping the check on the writing side stops the bad
+      # artifact being produced at all, rather than only detected downstream.
+      - name: Discard a stale CMake configure (Windows GPU)
+        if: matrix.cuda_windows
+        shell: pwsh
+        run: |
+          $roots = Get-ChildItem -Path target -Recurse -Filter CMakeCache.txt -ErrorAction SilentlyContinue
+          if (-not $roots) { Write-Host "No cached CMake configure to check."; exit 0 }
+          foreach ($cache in $roots) {
+            $stale = @()
+            foreach ($line in Get-Content $cache.FullName) {
+              if ($line -match '^[^/#].*:(PATH|FILEPATH)=(.+)$') {
+                $val = $Matches[2].Trim()
+                if ($val -and $val -ne 'NOTFOUND' -and -not $val.EndsWith('-NOTFOUND')) {
+                  if (-not (Test-Path -LiteralPath $val)) { $stale += $line }
+                }
+              }
+            }
+            if ($stale.Count -gt 0) {
+              Write-Host "::warning::Discarding stale CMake configure at $($cache.FullName)"
+              $stale | Select-Object -First 10 | ForEach-Object { Write-Host "  stale: $_" }
+              Remove-Item -Recurse -Force (Split-Path $cache.FullName -Parent)
+            }
+          }
+
       - name: Use Ninja generator (Windows GPU vulkan-shaders-gen race)
         if: matrix.cuda_windows
         shell: bash

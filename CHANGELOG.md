@@ -2,6 +2,24 @@
 
 All notable changes to SwarmLLM are documented here.
 
+## [Unreleased]
+
+### Fixed
+
+- **v0.3.56-alpha shipped with no Windows GPU download.** Every other platform
+  built and published normally, but the Windows GPU archive is missing from
+  that release entirely — if you use it, stay on v0.3.55-alpha until the next
+  release rather than switching to the Windows CPU build, which will not use
+  your graphics card. The cause was our own build caching: the job that keeps
+  the build cache warm installed a different version of the graphics toolkit
+  than the release did, and the cached build files still referred to the older
+  one by path. The toolkit version is now part of the cache's identity, so a
+  mismatch rebuilds from scratch instead of reusing something that no longer
+  matches. Publishing also now checks for each platform's download by name —
+  the previous check counted files, and a count could not tell a complete
+  release from one missing a whole platform, which is how this reached users
+  at all. A release missing a platform is now held back instead of published.
+
 ## [0.3.56-alpha] — 2026-07-31
 
 ### Fixed

@@ -222,7 +222,17 @@ jobs:
   # `cfg(feature = "candle-cuda")` or `cfg(feature = "windows-gpu")` code
   # path before a release tag.
   feature-check:
-    name: Feature compile-check (${{ matrix.features }})
+    # NOTE the "(Linux)" — this job runs on ubuntu-latest and only checks that
+    # the feature-gated Rust code COMPILES. It does not build on Windows and
+    # cannot catch anything in the Windows toolchain: MSVC, CUDA-on-Windows,
+    # the Vulkan SDK, or the CMake configure cache. It was previously named
+    # "Feature compile-check (windows-gpu)", which read as Windows coverage —
+    # it was green throughout the v0.3.56-alpha release that shipped with no
+    # Windows GPU binary at all. The real Windows GPU build lives in
+    # cache-warm.yml (on main) and release.yml (on tags); those are the runs
+    # to check before tagging. A job named for a platform it does not run on
+    # is worse than no job, because it is read as coverage.
+    name: Feature compile-check ${{ matrix.features }} (Linux)
     needs: fmt
     runs-on: ubuntu-latest
     strategy:

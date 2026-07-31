@@ -7,6 +7,8 @@ on:
 
 permissions:
   contents: write
+  # Needed by the `prune-caches` job below to delete tag-scoped caches.
+  actions: write
 
 env:
   CARGO_TERM_COLOR: always
@@ -381,6 +383,45 @@ jobs:
       # parts that are race-free. Other matrix cells leave
       # CMAKE_GENERATOR unset so they keep using their respective
       # defaults (Make on Linux/macOS, Visual Studio on Windows CPU).
+      # Self-healing guard against a restored CMake configure that points at
+      # toolchain paths which no longer exist on this runner.
+      #
+      # CMake bakes ABSOLUTE paths into CMakeCache.txt, and a restored cache is
+      # only re-detected if the cache variable is cleared — `cmake` reuses what
+      # it finds. So any toolchain that moves (a bumped SDK, a changed runner
+      # image, a relocated CUDA) silently produces a configure describing a
+      # machine we are not on. That is exactly how v0.3.56-alpha shipped with no
+      # Windows GPU binary: `Vulkan_INCLUDE_DIR` still named 1.4.350.0 while
+      # 1.4.357.0 was installed, and cl.exe failed on a missing vulkan_core.h.
+      #
+      # The cache key now carries the SDK version, which prevents THAT case. This
+      # step is the general one: it verifies the paths the cache actually claims,
+      # so a drift nobody thought to put in the key costs a rebuild rather than a
+      # broken release. Deleting the build dir is always safe — it is derived.
+      - name: Discard a stale CMake configure (Windows GPU)
+        if: matrix.cuda_windows
+        shell: pwsh
+        run: |
+          $roots = Get-ChildItem -Path target -Recurse -Filter CMakeCache.txt -ErrorAction SilentlyContinue
+          if (-not $roots) { Write-Host "No cached CMake configure to check."; exit 0 }
+          foreach ($cache in $roots) {
+            $stale = @()
+            foreach ($line in Get-Content $cache.FullName) {
+              # Only PATH/FILEPATH entries name real locations on disk.
+              if ($line -match '^[^/#].*:(PATH|FILEPATH)=(.+)$') {
+                $val = $Matches[2].Trim()
+                if ($val -and $val -ne 'NOTFOUND' -and -not $val.EndsWith('-NOTFOUND')) {
+                  if (-not (Test-Path -LiteralPath $val)) { $stale += $line }
+                }
+              }
+            }
+            if ($stale.Count -gt 0) {
+              Write-Host "::warning::Discarding stale CMake configure at $($cache.FullName)"
+              $stale | Select-Object -First 10 | ForEach-Object { Write-Host "  stale: $_" }
+              Remove-Item -Recurse -Force (Split-Path $cache.FullName -Parent)
+            }
+          }
+
       - name: Use Ninja generator (Windows GPU vulkan-shaders-gen race)
         if: matrix.cuda_windows
         shell: bash
@@ -679,3 +720,50 @@ jobs:
           fi
           gh release edit "$TAG" --repo "$REPO" --draft=false
           echo "Published $TAG with all $(wc -l <<<"$NAMES") asset(s)"
+
+  # Reclaim cache quota from tags that will never restore it again.
+  #
+  # A cache is scoped to the ref that created it, and GitHub will not serve a
+  # cache created for one tag to a run for a different tag. So every release
+  # leaves ~0.8 GB behind that is, by GitHub's own scoping rules, permanently
+  # unreachable — while the repository quota is a hard 10 GB that evicts
+  # least-recently-used entries once exceeded.
+  #
+  # Measured 2026-07-31: 3.22 GB of a 9.69 GB total — a third of the quota —
+  # was dead tag cache from four past releases, crowding out the live caches
+  # the builds actually restore. That is a direct cause of "why was this build
+  # cold": not compile cost, but eviction pressure from garbage.
+  #
+  # The CURRENT tag is deliberately kept. Re-running a release to fix one
+  # failed platform is precisely when a warm cache matters most, and that is
+  # not a hypothetical — v0.3.56-alpha needed exactly that.
+  prune-caches:
+    name: Prune caches from older tags
+    needs: publish
+    # Runs even if publish refused, so a failed release still tidies up.
+    if: always() && !cancelled()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Delete tag-scoped caches from previous tags
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          KEEP: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          echo "Keeping caches for $KEEP; pruning other tag-scoped caches."
+          freed=0
+          while read -r id ref size; do
+            [ -z "${id:-}" ] && continue
+            case "$ref" in
+              *"refs/tags/$KEEP") echo "  keep  $ref"; continue ;;
+              *refs/tags/*) ;;
+              *) continue ;;
+            esac
+            if gh api -X DELETE "repos/$REPO/actions/caches/$id" >/dev/null 2>&1; then
+              echo "  prune $ref ($((size/1024/1024)) MiB)"
+              freed=$((freed + size))
+            fi
+          done < <(gh api "repos/$REPO/actions/caches?per_page=100" \
+                     --jq '.actions_caches[] | "\(.id) \(.ref) \(.size_in_bytes)"')
+          echo "Reclaimed $((freed/1024/1024)) MiB of cache quota."
