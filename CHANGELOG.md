@@ -6,6 +6,17 @@ All notable changes to SwarmLLM are documented here.
 
 ### Fixed
 
+- **Running the test suite broke a node on the same machine.** Building the
+  daemon's shared state resolves its API key and writes it into the data
+  directory, and a test that built one from a default configuration inherited
+  the real data directory even though its database was a temporary one. The key
+  it generated was written over the running node's key file while that node
+  carried on using the one in its own database, so anyone running `cargo test`
+  with a node up lost the dashboard, the command-line tools and every saved
+  token at once — with nothing in the log, presenting as an unexplained
+  authentication failure in the daemon. The writer is now inert in test builds,
+  so no future test can reintroduce it by forgetting to redirect the directory.
+
 - **A model could be unloaded seconds after it loaded, killing the request that
   loaded it.** On a node answering its own client, a reply could fail with
   "worker closed connection mid-generate" while the log claimed the model had
