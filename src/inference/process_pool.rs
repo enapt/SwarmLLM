@@ -720,6 +720,20 @@ pub struct ModelProcessPool {
     /// crediting on unload is the only view that is correct at the moment the
     /// decision is made.
     vram_reserved_mb: dashmap::DashMap<ModelId, u64>,
+    /// System RAM budget in MB, 0 = unset (no admission control).
+    ///
+    /// The CPU-side sibling of `vram_budget_mb`, and it matters most exactly
+    /// where that one gives up: refusing a model the GPU cannot hold loads it
+    /// on the CPU instead, so the busier the GPU admission control is, the more
+    /// weight lands in system RAM. With no ceiling there, the fallback that
+    /// keeps a node answering is also what drives a small machine into swap.
+    ram_budget_mb: std::sync::atomic::AtomicU64,
+    /// System RAM charged to each live CPU worker, in MB. Same
+    /// charge-at-admission / credit-on-unload discipline as
+    /// `vram_reserved_mb`, and for the same reason: a worker owes its
+    /// footprint from the moment it is admitted, long before it has loaded
+    /// anything to measure.
+    ram_reserved_mb: dashmap::DashMap<ModelId, u64>,
     /// Activity event sender for dashboard notifications.
     activity_tx:
         std::sync::OnceLock<tokio::sync::broadcast::Sender<crate::daemon::state::ActivityEvent>>,
@@ -844,6 +858,8 @@ impl ModelProcessPool {
             cpu_pinned_models: dashmap::DashSet::new(),
             vram_budget_mb: std::sync::atomic::AtomicU64::new(0),
             vram_reserved_mb: dashmap::DashMap::new(),
+            ram_budget_mb: std::sync::atomic::AtomicU64::new(0),
+            ram_reserved_mb: dashmap::DashMap::new(),
             activity_tx: std::sync::OnceLock::new(),
             kv_cache_ttl_secs: std::sync::atomic::AtomicU64::new(DEFAULT_KV_CACHE_TTL_SECS),
             prefix_cache_enabled: std::sync::atomic::AtomicBool::new(true),
@@ -1083,22 +1099,43 @@ impl ModelProcessPool {
     /// refusing the GPU because a file was unreadable would be a worse failure
     /// than the one being prevented.
     fn estimate_gpu_footprint_mb(&self, model_id: &ModelId) -> u64 {
-        use crate::model::auto_manage::vram::{estimate_worker_vram_mb, VramFootprintInputs};
+        use crate::model::auto_manage::vram::estimate_worker_vram_mb;
+        self.footprint_inputs(model_id)
+            .map(|i| estimate_worker_vram_mb(&i))
+            .unwrap_or(0)
+    }
+
+    /// Estimate this model's system-RAM footprint from the same geometry.
+    ///
+    /// Returns 0 on an unreadable header, which `admit_to_cpu` treats as "do
+    /// not judge" — refusing to load because a file could not be read would be
+    /// a worse failure than the one being prevented, and matches how the GPU
+    /// side handles the same gap.
+    fn estimate_cpu_footprint_mb(&self, model_id: &ModelId) -> u64 {
+        use crate::model::auto_manage::vram::estimate_worker_ram_mb;
+        self.footprint_inputs(model_id)
+            .map(|i| estimate_worker_ram_mb(&i))
+            .unwrap_or(0)
+    }
+
+    /// Read a model's real geometry from its GGUF header and on-disk shards.
+    ///
+    /// Shared by both footprint estimators so the GPU and CPU figures can never
+    /// disagree about the model's shape — only about the per-process overhead
+    /// that is genuinely device-specific. Returns `None` when the header or
+    /// geometry cannot be read.
+    fn footprint_inputs(
+        &self,
+        model_id: &ModelId,
+    ) -> Option<crate::model::auto_manage::vram::VramFootprintInputs> {
+        use crate::model::auto_manage::vram::VramFootprintInputs;
         let model_dir = crate::model::shard::model_dir(&self.data_dir, &model_id.0);
         let header = model_dir.join(crate::model::shard::HEADER_FILENAME);
-        let Ok(meta) = crate::inference::split::GgufTokenizerMeta::from_gguf_file(&header) else {
-            return 0;
-        };
-        let Ok(file) = std::fs::File::open(&header) else {
-            return 0;
-        };
+        let meta = crate::inference::split::GgufTokenizerMeta::from_gguf_file(&header).ok()?;
+        let file = std::fs::File::open(&header).ok()?;
         let mut reader = std::io::BufReader::new(file);
-        let Ok(ct) = candle_core::quantized::gguf_file::Content::read(&mut reader) else {
-            return 0;
-        };
-        let Ok(tensor_meta) = crate::inference::split::GgufTensorMeta::from_content(&ct) else {
-            return 0;
-        };
+        let ct = candle_core::quantized::gguf_file::Content::read(&mut reader).ok()?;
+        let tensor_meta = crate::inference::split::GgufTensorMeta::from_content(&ct).ok()?;
         let arch = crate::inference::split::gguf_arch_str(&ct);
         let md_u32 = |suffix: &str| -> Option<u64> {
             ct.metadata
@@ -1133,7 +1170,7 @@ impl ModelProcessPool {
             })
             .unwrap_or(0);
 
-        estimate_worker_vram_mb(&VramFootprintInputs {
+        Some(VramFootprintInputs {
             quantized_weight_bytes: shard_bytes,
             vocab_size: vocab,
             embedding_length: tensor_meta.embedding_length as u64,
@@ -1198,6 +1235,59 @@ impl ModelProcessPool {
     /// Release a worker's charge. Must pair with every `admit_to_gpu`.
     fn release_vram_charge(&self, model_id: &ModelId) {
         self.vram_reserved_mb.remove(model_id);
+    }
+
+    /// Set the system RAM budget used for CPU admission. 0 disables the check.
+    pub fn set_ram_budget_mb(&self, budget_mb: u64) {
+        self.ram_budget_mb
+            .store(budget_mb, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// System RAM already committed to live CPU workers, in MB.
+    fn ram_committed_mb(&self) -> u64 {
+        self.ram_reserved_mb.iter().map(|e| *e.value()).sum()
+    }
+
+    /// Decide whether `model_id` may be loaded into system RAM, and charge it
+    /// if so. Called inside `spawn_lock` for the same read-decide-charge
+    /// atomicity as [`Self::admit_to_gpu`].
+    ///
+    /// Unlike the GPU case there is **no further fallback**: the CPU already is
+    /// the fallback. So returning `false` fails the spawn rather than demoting
+    /// it, and the caller surfaces `ServiceUnavailable`. That is deliberate —
+    /// the alternative is swapping, which does not merely slow this model down
+    /// but degrades every other request on the machine, and does so without
+    /// anything in the API response explaining why.
+    fn admit_to_cpu(&self, model_id: &ModelId, estimated_mb: u64) -> bool {
+        let budget = self
+            .ram_budget_mb
+            .load(std::sync::atomic::Ordering::Relaxed);
+        if budget == 0 || estimated_mb == 0 {
+            // No budget configured, or the model's geometry could not be read:
+            // preserve the previous behaviour rather than inventing a limit.
+            self.ram_reserved_mb.insert(model_id.clone(), estimated_mb);
+            return true;
+        }
+        let committed = self.ram_committed_mb();
+        if committed.saturating_add(estimated_mb) <= budget {
+            self.ram_reserved_mb.insert(model_id.clone(), estimated_mb);
+            return true;
+        }
+        tracing::warn!(
+            model = %model_id,
+            estimated_mb,
+            committed_mb = committed,
+            budget_mb = budget,
+            "Not enough system memory budget for this model — refusing to load it. \
+             Loading it anyway would swap, which slows down every other request \
+             on this machine, not just this one"
+        );
+        false
+    }
+
+    /// Release a worker's RAM charge. Must pair with every `admit_to_cpu`.
+    fn release_ram_charge(&self, model_id: &ModelId) {
+        self.ram_reserved_mb.remove(model_id);
     }
 
     /// Models currently forced onto the CPU after a GPU OOM.
@@ -1329,9 +1419,11 @@ impl ModelProcessPool {
         // message), so two spawns that both asked the device would each see
         // plenty free and both proceed. Refusing here means the model loads on
         // the CPU: slower, but not a dead worker and a lost GPU.
-        if self.effective_gpu_layers(model_id) != 0 {
+        let mut going_to_cpu = self.effective_gpu_layers(model_id) == 0;
+        if !going_to_cpu {
             let estimated = self.estimate_gpu_footprint_mb(model_id);
             if !self.admit_to_gpu(model_id, estimated) {
+                going_to_cpu = true;
                 self.cpu_pinned_models.insert(model_id.clone());
                 if let Some(tx) = self.activity_tx.get() {
                     let _ = tx.send(
@@ -1349,6 +1441,41 @@ impl ModelProcessPool {
                 }
             }
         }
+        // Anything landing in system RAM — a CPU-only node, or the fallback
+        // just taken above — is charged against the RAM budget. There is no
+        // further device to demote to, so this refuses rather than degrades:
+        // swapping would slow every other request on the machine, not just
+        // this model, and nothing in the response would say so.
+        if going_to_cpu {
+            let estimated = self.estimate_cpu_footprint_mb(model_id);
+            if !self.admit_to_cpu(model_id, estimated) {
+                self.release_vram_charge(model_id);
+                if let Some(tx) = self.activity_tx.get() {
+                    let _ = tx.send(
+                        crate::daemon::state::ActivityEvent::new(
+                            "inference",
+                            "model_ram_refused",
+                            format!(
+                                "{} needs more memory than this node is allowed to use — not loading it",
+                                model_id.0
+                            ),
+                        )
+                        .with_model(model_id.0.clone())
+                        .with_toast("warning", 8000),
+                    );
+                }
+                return Err(SwarmError::ServiceUnavailable(format!(
+                    "{} needs about {} MB of memory but this node's budget allows {} MB \
+                     and {} MB is already in use. Raise `resources.max_ram_mb`, or free \
+                     memory by unloading another model.",
+                    model_id.0,
+                    estimated,
+                    self.ram_budget_mb
+                        .load(std::sync::atomic::Ordering::Relaxed),
+                    self.ram_committed_mb(),
+                )));
+            }
+        }
 
         match self.spawn_worker(model_id).await {
             Ok(handle) => {
@@ -1361,7 +1488,9 @@ impl ModelProcessPool {
             Err(e) => {
                 // The worker never started, so it owes nothing. Leaving the
                 // charge would shrink the budget permanently on every failure.
+                // Both devices: a CPU-bound spawn was charged RAM above.
                 self.release_vram_charge(model_id);
+                self.release_ram_charge(model_id);
                 let count = self
                     .spawn_failures
                     .entry(model_id.clone())
@@ -2423,6 +2552,10 @@ impl ModelProcessPool {
             // Drop handle → aborts reader, kills child process → OS frees all CUDA memory
             drop(handle);
             self.release_vram_charge(model_id);
+            // The process is gone, so it holds neither device's memory. A CPU
+            // worker never had a VRAM charge and vice versa; releasing both is
+            // correct and keeps the two budgets from drifting on churn.
+            self.release_ram_charge(model_id);
             tracing::info!(model_id = %model_id, "Model worker killed, GPU memory freed");
 
             // A GPU OOM pins its model to the CPU, and that pin used to last for
@@ -2654,6 +2787,54 @@ mod tests {
         assert!(
             pool.is_cpu_pinned(&b),
             "unloading a CPU worker frees no VRAM, so other pins must stand"
+        );
+    }
+
+    /// `resources.max_ram_mb` shipped documented as "0 = auto (50% of system
+    /// RAM)" while nothing read it, so a node had no memory ceiling at all.
+    /// Admission now behaves like its GPU sibling.
+    #[test]
+    fn ram_admission_refuses_once_the_budget_is_committed() {
+        let p = test_pool();
+        p.set_ram_budget_mb(6000);
+        assert!(p.admit_to_cpu(&ModelId("first".into()), 4000));
+        assert!(
+            !p.admit_to_cpu(&ModelId("second".into()), 2500),
+            "4000 + 2500 exceeds 6000 — must refuse rather than swap"
+        );
+        // Something that does fit in the remainder is still admitted.
+        assert!(p.admit_to_cpu(&ModelId("small".into()), 1500));
+    }
+
+    /// Releasing must credit the budget back, or churn shrinks it permanently.
+    #[test]
+    fn releasing_a_ram_charge_frees_the_budget_again() {
+        let p = test_pool();
+        p.set_ram_budget_mb(6000);
+        let a = ModelId("a".into());
+        assert!(p.admit_to_cpu(&a, 5000));
+        assert!(!p.admit_to_cpu(&ModelId("b".into()), 2000));
+        p.release_ram_charge(&a);
+        assert!(
+            p.admit_to_cpu(&ModelId("b".into()), 2000),
+            "the freed charge must be usable again"
+        );
+    }
+
+    /// No budget configured, or an unreadable header (estimate 0), must not
+    /// start refusing loads — that would be a worse failure than the one being
+    /// prevented, and mirrors how `admit_to_gpu` treats the same gap.
+    #[test]
+    fn ram_admission_does_not_judge_what_it_cannot_measure() {
+        let p = test_pool();
+        // Budget unset.
+        assert!(p.admit_to_cpu(&ModelId("nobudget".into()), 99_999));
+
+        let p2 = test_pool();
+        p2.set_ram_budget_mb(1);
+        assert!(
+            p2.admit_to_cpu(&ModelId("mystery".into()), 0),
+            "an unreadable model must not be refused on a guess"
         );
     }
 

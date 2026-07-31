@@ -178,6 +178,34 @@ impl ResourceConfig {
             None
         }
     }
+
+    /// Compute the effective system-RAM budget for inference model loading.
+    ///
+    /// - If `max_ram_mb > 0`: use it as a hard cap.
+    /// - Else if total RAM is known: **50% of it**.
+    /// - Else: `None` (could not read the machine; do not invent a limit).
+    ///
+    /// The 50% figure is not new policy. `config/default.toml` has shipped
+    /// `max_ram_mb = 0  # 0 = auto (50% of system RAM)` and the configuration
+    /// reference has documented the same, for as long as the field has
+    /// existed — while nothing in the codebase ever read it. The setting was
+    /// inert: a user capping RAM to protect a small machine got no effect at
+    /// all, silently, and an 8 GB container was driven 2.1 GB into swap, which
+    /// for inference is pathological. This implements what was already promised
+    /// rather than choosing anything new.
+    ///
+    /// Sibling of [`Self::inference_vram_budget_mb`]; the two differ only in
+    /// their headroom fraction (VRAM 80%, RAM 50%) because the rest of the
+    /// machine keeps running out of system RAM but not out of VRAM.
+    pub fn inference_ram_budget_mb(&self, system_ram_total_mb: u64) -> Option<u64> {
+        if self.max_ram_mb > 0 {
+            Some(self.max_ram_mb)
+        } else if system_ram_total_mb > 0 {
+            Some(system_ram_total_mb / 2)
+        } else {
+            None
+        }
+    }
 }
 
 impl Default for ResourceConfig {

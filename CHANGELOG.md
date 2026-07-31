@@ -6,6 +6,21 @@ All notable changes to SwarmLLM are documented here.
 
 ### Fixed
 
+- **The memory limit did nothing at all.** `max_ram_mb` has shipped in the
+  configuration file since it was written, documented there and in the
+  reference as "0 = auto (50% of system RAM)" — and nothing in the program ever
+  read it. Setting it to protect a small machine had no effect whatsoever, and
+  no message said so. In practice an 8 GB machine could be driven into swap,
+  which slows down every request on it rather than just the model responsible.
+  It now works as documented: models loaded on the processor are held to the
+  limit, the automatic setting is half the machine's memory, and a figure
+  larger than the machine is reduced to what can actually be spared. A model
+  that will not fit is refused with a message naming what it needed, what the
+  limit is, and how to raise it — rather than being loaded into swap. This
+  matters more since this version began moving models to the processor when
+  the graphics card is full: that fallback is what keeps a node answering, and
+  it had no ceiling.
+
 - **A node that had returned any credits was left with its totals permanently
   not adding up.** The repair shipped earlier in this version brought the books
   back into balance on nodes that had been running before the "credits returned"

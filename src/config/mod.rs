@@ -1087,6 +1087,31 @@ max_concurrent_requests = 42
         let rc = ResourceConfig::default();
         assert_eq!(rc.inference_vram_budget_mb(0), None);
     }
+
+    #[test]
+    fn ram_budget_explicit_cap() {
+        let rc = ResourceConfig {
+            max_ram_mb: 3000,
+            ..Default::default()
+        };
+        assert_eq!(rc.inference_ram_budget_mb(16000), Some(3000));
+    }
+
+    /// The behaviour `config/default.toml` and the configuration reference have
+    /// both documented since the field existed — while nothing read it, so the
+    /// setting was inert and a node had no memory ceiling at all.
+    #[test]
+    fn ram_budget_auto_is_the_documented_50_percent() {
+        let rc = ResourceConfig::default(); // max_ram_mb = 0
+        assert_eq!(rc.inference_ram_budget_mb(16000), Some(8000));
+    }
+
+    /// A machine we could not read must not have a limit invented for it.
+    #[test]
+    fn ram_budget_unknown_machine() {
+        let rc = ResourceConfig::default();
+        assert_eq!(rc.inference_ram_budget_mb(0), None);
+    }
 }
 
 #[cfg(test)]

@@ -72,12 +72,27 @@ pub struct VramFootprintInputs {
 /// to the load figure makes it look ~2x high when it is not.
 pub const CUDA_PROCESS_OVERHEAD_BYTES: u64 = 320 * 1024 * 1024;
 
-/// Estimate a worker's GPU footprint in MB from the model's real geometry.
+/// Baseline resident set of a worker subprocess that is NOT using CUDA: the
+/// binary, its runtime, the tokenizer and the IPC buffers. The CPU counterpart
+/// of [`CUDA_PROCESS_OVERHEAD_BYTES`], and much smaller because there is no
+/// device context to establish.
 ///
-/// Deliberately errs HIGH: for an admission decision, over-estimating costs a
-/// model that would have fitted, while under-estimating costs a hard OOM and —
-/// until this release — a permanent fall back to the CPU.
-pub fn estimate_worker_vram_mb(i: &VramFootprintInputs) -> u64 {
+/// Errs high for the same reason the VRAM estimate does, but the failure it
+/// guards against is worse: under-estimating here means swapping, which
+/// degrades every request on the machine rather than just this model's.
+pub const CPU_PROCESS_OVERHEAD_BYTES: u64 = 256 * 1024 * 1024;
+
+/// A CPU worker establishes no device context, so it must never be charged
+/// more than a CUDA one. Enforced at build time: inverting these would silently
+/// make the CPU budget the stricter of the two, refusing loads that fit.
+const _: () = assert!(CPU_PROCESS_OVERHEAD_BYTES < CUDA_PROCESS_OVERHEAD_BYTES);
+
+/// The part of a worker's footprint that does not depend on where it runs:
+/// weights, the dequantized embedding table, the KV cache and the RoPE tables.
+/// A model's shape costs the same in system RAM as it does in VRAM; only the
+/// per-process overhead differs, which is why the two public estimators below
+/// are this plus a different constant.
+fn estimate_model_resident_bytes(i: &VramFootprintInputs) -> u64 {
     const F32: u64 = 4;
     let mut bytes = i.quantized_weight_bytes;
 
@@ -109,8 +124,26 @@ pub fn estimate_worker_vram_mb(i: &VramFootprintInputs) -> u64 {
             .saturating_mul(2),
     );
 
-    bytes = bytes.saturating_add(CUDA_PROCESS_OVERHEAD_BYTES);
-    bytes / (1024 * 1024)
+    bytes
+}
+
+/// Estimate a worker's GPU footprint in MB from the model's real geometry.
+///
+/// Deliberately errs HIGH: for an admission decision, over-estimating costs a
+/// model that would have fitted, while under-estimating costs a hard OOM and —
+/// until this release — a permanent fall back to the CPU.
+pub fn estimate_worker_vram_mb(i: &VramFootprintInputs) -> u64 {
+    estimate_model_resident_bytes(i).saturating_add(CUDA_PROCESS_OVERHEAD_BYTES) / (1024 * 1024)
+}
+
+/// Estimate a worker's system-RAM footprint in MB from the same geometry.
+///
+/// Identical to [`estimate_worker_vram_mb`] but for the per-process overhead —
+/// a CPU worker establishes no device context. Used for CPU admission, which
+/// exists because the GPU path's own fallback is "load it in system RAM
+/// instead": the more often that fires, the more weight lands here.
+pub fn estimate_worker_ram_mb(i: &VramFootprintInputs) -> u64 {
+    estimate_model_resident_bytes(i).saturating_add(CPU_PROCESS_OVERHEAD_BYTES) / (1024 * 1024)
 }
 
 /// MoE-aware VRAM estimation. For Mixture-of-Experts models, only a fraction
@@ -418,6 +451,48 @@ pub fn compute_vram_budget(shared: &crate::daemon::SharedState) -> Option<u64> {
     shared.config.resources.inference_vram_budget_mb(gpu_total)
 }
 
+/// Percentage of *currently free* system RAM a configured budget may claim.
+///
+/// Mirrors `FREE_DISK_HEADROOM_PCT`: a configured ceiling is a ceiling, not a
+/// promise the memory exists. Lower than the disk figure because the operating
+/// system and every other process on the box need headroom to keep running,
+/// and the failure mode when they do not get it is swapping — which degrades
+/// the whole machine rather than just this daemon.
+pub const FREE_RAM_HEADROOM_PCT: u64 = 70;
+
+/// Effective system-RAM budget for CPU model loading, in MB.
+///
+/// Takes the configured budget (or the documented 50%-of-total default) and
+/// clamps it to what is genuinely free right now. `None` means "do not judge":
+/// either no budget could be derived, or the machine could not be read — and a
+/// limit must never be invented from a failed measurement.
+pub fn compute_ram_budget(shared: &crate::daemon::SharedState) -> Option<u64> {
+    let mut sys = sysinfo::System::new();
+    sys.refresh_memory();
+    let total_mb = sys.total_memory() / (1024 * 1024);
+    let available_mb = sys.available_memory() / (1024 * 1024);
+
+    let by_config = shared.config.resources.inference_ram_budget_mb(total_mb)?;
+    if available_mb == 0 {
+        return Some(by_config);
+    }
+    // Already-loaded models count as unavailable, so allow the budget to reach
+    // beyond what is free at this instant — it is a steady-state ceiling, not a
+    // point-in-time reading. What it must not do is exceed the machine.
+    let by_machine = (available_mb / 100 * FREE_RAM_HEADROOM_PCT).max(total_mb / 4);
+    if by_machine < by_config {
+        tracing::warn!(
+            configured_mb = by_config,
+            total_mb,
+            available_mb,
+            allowed_mb = by_machine,
+            "Memory budget is larger than this machine can spare — limiting it so that \
+             loading a model cannot push the system into swap"
+        );
+    }
+    Some(by_config.min(by_machine))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -669,5 +744,36 @@ mod footprint_tests {
             is_first: true,
         };
         let _ = estimate_worker_vram_mb(&huge); // must not panic
+        let _ = estimate_worker_ram_mb(&huge); // the CPU sibling likewise
+    }
+
+    /// The two estimators must agree about the model and differ only by the
+    /// per-process overhead, which is the one genuinely device-specific term.
+    /// If they ever disagree about shape, one of the two budgets is wrong.
+    #[test]
+    fn ram_and_vram_estimates_differ_only_by_process_overhead() {
+        for i in [tinyllama(), llama32_1b(), phi35()] {
+            let vram = estimate_worker_vram_mb(&i);
+            let ram = estimate_worker_ram_mb(&i);
+            let delta_mb =
+                (CUDA_PROCESS_OVERHEAD_BYTES - CPU_PROCESS_OVERHEAD_BYTES) / (1024 * 1024);
+            assert_eq!(
+                vram - ram,
+                delta_mb,
+                "the two must differ only by the process overhead"
+            );
+        }
+    }
+
+    /// A CPU worker establishes no device context, so its baseline is lower —
+    /// but still counted, because the process itself is not free.
+    #[test]
+    fn the_cpu_estimate_still_counts_a_process_baseline() {
+        let est = estimate_worker_ram_mb(&tinyllama());
+        let weights_only = tinyllama().quantized_weight_bytes / (1024 * 1024);
+        assert!(
+            est > weights_only,
+            "estimate {est} MB must exceed the raw weights {weights_only} MB"
+        );
     }
 }

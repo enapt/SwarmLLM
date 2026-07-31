@@ -16,7 +16,7 @@ Every configuration option, organized by section.
 | Option | Type | Default | Description |
 |---|---|---|---|
 | `max_gpu_vram_mb` | integer | `0` | Max GPU memory in MB. `0` = auto-detect |
-| `max_ram_mb` | integer | `0` | Max system RAM in MB. `0` = auto |
+| `max_ram_mb` | integer | `0` | Max system RAM in MB for models loaded on the CPU. `0` = auto (50% of system RAM). Clamped to what is actually free, so a value larger than the machine cannot push it into swap. A model that does not fit is refused with a 503 rather than loaded |
 | `max_disk_mb` | integer | `50000` | Max disk space in MB for model storage |
 | `max_bandwidth_mbps` | integer | `0` | Max upload bandwidth. `0` = unlimited |
 

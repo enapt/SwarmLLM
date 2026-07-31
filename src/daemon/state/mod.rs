@@ -799,6 +799,13 @@ impl SharedState {
         if let Some(budget) = crate::model::auto_manage::compute_vram_budget(&state) {
             state.model_process_pool.set_vram_budget_mb(budget);
         }
+        // The CPU-side sibling. `resources.max_ram_mb` has been documented in
+        // the shipped config as "0 = auto (50% of system RAM)" since before any
+        // code read it — the setting was inert, so a user capping RAM to protect
+        // a small machine got nothing, silently.
+        if let Some(budget) = crate::model::auto_manage::vram::compute_ram_budget(&state) {
+            state.model_process_pool.set_ram_budget_mb(budget);
+        }
         state
             .model_process_pool
             .set_continuous_batching(state.config.inference.continuous_batching);
