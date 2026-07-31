@@ -94,24 +94,43 @@ pub(crate) fn negative_balance_decay_amount(balance: i64) -> i64 {
 /// `earned - spent`, so the gap IS historical refunds and labelling it as such
 /// is accurate rather than a fudge.
 ///
-/// Only fires when `lifetime_refunded` is still 0 and the gap is positive, so it
-/// is idempotent and cannot touch a node that has recorded real refunds. A
-/// fresh node has all three at 0 and is left alone. A NEGATIVE gap is left
+/// Fires on the REMAINING gap, whatever `lifetime_refunded` already reads.
+///
+/// The first version keyed off `lifetime_refunded == 0`, reasoning that a
+/// node already recording refunds needed no help. That conflates two
+/// different quantities: refunds recorded *since the counter shipped* (real,
+/// already reflected in `balance`, must not be double-counted) and the
+/// *historical* gap from before the field existed (never recorded, needs
+/// attributing). A node has both the moment it takes a single refund between
+/// the counter shipping and the migration running — and the `!= 0` guard saw
+/// only the first, skipped the node, and left its historical gap permanently
+/// unexplained. Reported from a live node whose ~905k gap survived the
+/// migration because a deliberately-provoked timeout the day before had put
+/// 640 in the counter.
+///
+/// Working from the remaining gap instead is both a strict generalisation —
+/// at `lifetime_refunded == 0` it computes exactly what the old version did —
+/// and idempotent by construction, since applying it drives the gap to 0 and
+/// a second call is a no-op. A correctly-recorded refund raises `balance` and
+/// `lifetime_refunded` together, so it cancels out of the gap and cannot be
+/// double-counted; only unrecorded history shows up here.
+///
+/// A fresh node has all four at 0 and is left alone. A NEGATIVE gap is left
 /// alone too — that direction cannot be explained by refunds, so inventing a
 /// number would hide a genuine inconsistency instead of surfacing it.
 pub(crate) fn backfill_historical_refunds(bal: &mut CreditBalance) {
-    if bal.lifetime_refunded != 0 {
+    let gap = (bal.balance as i128) - (bal.lifetime_earned as i128) + (bal.lifetime_spent as i128)
+        - (bal.lifetime_refunded as i128);
+    if gap <= 0 {
         return;
     }
-    let implied =
-        (bal.balance as i128) - (bal.lifetime_earned as i128) + (bal.lifetime_spent as i128);
-    if implied <= 0 {
-        return;
-    }
-    let implied = implied.min(u64::MAX as i128) as u64;
-    bal.lifetime_refunded = implied;
+    let gap = gap.min(u64::MAX as i128) as u64;
+    let already_recorded = bal.lifetime_refunded;
+    bal.lifetime_refunded = bal.lifetime_refunded.saturating_add(gap);
     tracing::info!(
-        lifetime_refunded = implied,
+        attributed = gap,
+        already_recorded,
+        lifetime_refunded = bal.lifetime_refunded,
         balance = bal.balance,
         lifetime_earned = bal.lifetime_earned,
         lifetime_spent = bal.lifetime_spent,
@@ -1598,12 +1617,66 @@ mod backfill_tests {
         assert_eq!(cb.lifetime_refunded, once);
     }
 
-    /// A node that already records refunds must never be rewritten.
+    /// A node whose books already close must never be rewritten — note this
+    /// holds because its gap is 0, NOT because its refund counter is non-zero.
     #[test]
     fn a_node_with_real_refunds_is_untouched() {
         let mut cb = bal(146_065, 174_330, 933_290, 905_025);
+        assert!(cb.books_balance(), "precondition: already reconciles");
         backfill_historical_refunds(&mut cb);
         assert_eq!(cb.lifetime_refunded, 905_025);
+    }
+
+    /// The case the first version stranded permanently, reported from a live
+    /// node 2026-07-31. It had recorded a real 640-credit refund before the
+    /// migration ran, so keying off `lifetime_refunded == 0` skipped it and
+    /// left a ~905k historical gap unexplained for ever. Any node that took a
+    /// single refund between the counter shipping and this migration running
+    /// was in the same position.
+    #[test]
+    fn a_gap_is_still_attributed_when_some_refunds_are_already_recorded() {
+        let mut cb = bal(216_702, 263_517, 952_580, 640);
+        assert!(!cb.books_balance(), "precondition: the reported gap");
+
+        backfill_historical_refunds(&mut cb);
+
+        // The pre-existing 640 is preserved and the remaining gap added to it,
+        // rather than the counter being overwritten.
+        assert_eq!(cb.lifetime_refunded, 640 + 905_125);
+        assert!(cb.books_balance(), "must reconcile after backfill");
+    }
+
+    /// Idempotent for that case too — the generalised form drives the gap to
+    /// zero, so a second load is a no-op without needing a "have I run?" flag.
+    #[test]
+    fn backfill_is_idempotent_with_pre_existing_refunds() {
+        let mut cb = bal(216_702, 263_517, 952_580, 640);
+        backfill_historical_refunds(&mut cb);
+        let once = cb.lifetime_refunded;
+        backfill_historical_refunds(&mut cb);
+        assert_eq!(cb.lifetime_refunded, once);
+    }
+
+    /// A refund recorded correctly raises `balance` and `lifetime_refunded`
+    /// together, so it cancels out of the gap. Nothing to attribute, and in
+    /// particular nothing double-counted.
+    #[test]
+    fn a_correctly_recorded_refund_is_not_double_counted() {
+        let mut cb = bal(850_467, 881_047, 31_230, 0);
+        backfill_historical_refunds(&mut cb);
+        let after_migration = cb.lifetime_refunded;
+
+        // A 100-credit refund lands: balance and the counter both move.
+        cb.balance += 100;
+        cb.lifetime_refunded += 100;
+        assert!(cb.books_balance());
+
+        backfill_historical_refunds(&mut cb);
+        assert_eq!(
+            cb.lifetime_refunded,
+            after_migration + 100,
+            "a recorded refund must not be attributed a second time"
+        );
     }
 
     /// A fresh node has nothing to attribute.

@@ -6,6 +6,19 @@ All notable changes to SwarmLLM are documented here.
 
 ### Fixed
 
+- **A node that had returned any credits was left with its totals permanently
+  not adding up.** The repair shipped earlier in this version brought the books
+  back into balance on nodes that had been running before the "credits returned"
+  figure existed — but it skipped any node that had *already* recorded a return,
+  on the reasoning that such a node needed no help. That is two different things
+  confused for one: returns recorded since the figure was added are counted
+  correctly, while the older, unrecorded ones still need explaining, and a node
+  can easily have both. A single returned payment between the two releases was
+  enough to have the repair skip a node for good. It now works from whatever
+  remains unexplained, so it corrects the rest without recounting anything
+  already recorded, and does nothing at all on a node whose books already
+  balance. Reported from a live node carrying a ~905k discrepancy.
+
 - **A peer that left kept being answered every 30 seconds, indefinitely.** Nodes
   announce themselves over a mesh that forwards messages between peers that
   cannot reach each other directly, so a node that had dropped off kept being

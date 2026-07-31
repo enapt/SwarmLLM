@@ -4358,3 +4358,56 @@ truncates transfers rather than a malicious or corrupt host.
 **Do not simply remove the penalty**: it exists because an unverified shard was
 previously announced and re-served network-wide, which is a genuine integrity
 hole. The fix is to attribute the failure correctly, not to stop detecting it.
+
+## A request arriving mid-eviction may return 0 tok/s (reported 2026-07-31)
+
+**Status: reported, race window identified, cause NOT confirmed.**
+
+A tester running three back-to-back bench requests on a 6 GB CUDA node saw one
+return **0.0 tok/s**, coinciding exactly with a VRAM eviction and reload:
+
+```
+INFO daemon::state: Unloading evicted model to actually free its GPU memory model=llama-3.2-3b-instruct-q4-k-m
+INFO inference::process_pool: Model worker killed, GPU memory freed model_id=llama-3.2-3b-instruct-q4-k-m
+```
+
+The eviction machinery itself was working as designed — that is the v0.3.55 fix
+confirming the worker is genuinely killed rather than merely dropped from a
+bookkeeping list.
+
+**What the code says.** `SharedState::evict_split_models_lru_and_unload`
+(`daemon/state/mod.rs`) decides what to evict, then performs the actual
+`pool.unload_model()` inside a **`tokio::spawn` — fire-and-forget, after the
+decision**. The decision is guarded against `active_pipelines` (coordinator
+work) and `serving_models` (peer-served work), so a request already registered
+protects its own model. `unload_model` then does `workers.remove(model_id)` and
+drops its `Arc<WorkerHandle>`.
+
+**Why the obvious explanation is probably wrong.** Because the handle is an
+`Arc`, a request that has already cloned it keeps the child process alive until
+it finishes; the drop only kills the child when the last reference goes. So
+genuinely in-flight work appears protected, and the naive "worker killed
+underneath a running request" story does not hold up.
+
+**The window that remains** is a request that has passed the eviction decision
+(so it did not appear in `active_pipelines` at snapshot time) but has not yet
+cloned the worker `Arc`. It then finds `workers.get()` empty and spawns a
+reload. That should still produce tokens, just slowly — which is why 0.0 rather
+than "slow" is the part that does not yet add up.
+
+**What would settle it**, and what to ask for before spending time here:
+
+1. Was the 0.0 an **HTTP error**, or a **200 with empty content**? These are
+   completely different defects. The second is the recurring shape in this
+   codebase — an empty reply reported as a successful completion (gotcha #201,
+   fixed for a different cause in v0.3.47/.48) — and would be the serious one.
+2. The `request_id` and the DIAG lines around it (`docs/DIAGNOSTICS.md`), which
+   would show whether the request waited for a reload, errored, or completed
+   with zero tokens.
+3. Whether the bench reports 0.0 tok/s for a failed request generally, in which
+   case this may be a reporting artefact of a request that was simply slow
+   enough to hit a deadline during the reload.
+
+Do not "fix" this speculatively — the eviction path is guarded in two places
+already and adding a third guard without a reproduction risks re-introducing the
+stranded-VRAM bug those guards were written to avoid.
