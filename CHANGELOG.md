@@ -2,7 +2,7 @@
 
 All notable changes to SwarmLLM are documented here.
 
-## [0.3.55-alpha] — 2026-07-30
+## [Unreleased]
 
 ### Fixed
 
@@ -45,6 +45,10 @@ All notable changes to SwarmLLM are documented here.
   connection to. The same blind-addressing pattern is fixed in the two other
   places it appeared, including key rotation, which no longer leaves behind
   half-finished handshake state for peers that are gone.
+
+## [0.3.55-alpha] — 2026-07-30
+
+### Fixed
 
 - **The model list said "network" for models held completely, and "local" for
   one held only in part.** `GET /v1/models` decided this from whichever model
