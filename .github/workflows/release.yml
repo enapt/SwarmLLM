@@ -18,6 +18,25 @@ env:
   # Opt in to Node.js 24 for JS-based actions (checkout, softprops/gh-release,
   # ...) ahead of the June 2026 deprecation cutoff. Silences Node 20 warnings.
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+  # Vulkan SDK version for the Windows GPU build. Pinned, not `latest`: an
+  # unpinned toolchain changes underneath releases with no commit of ours.
+  #
+  # MUST equal `VULKAN_SDK_VERSION` in cache-warm.yml, and is folded into the
+  # rust-cache key below so that if it ever does not, the release takes a
+  # cache MISS (slow, correct) instead of a stale HIT (fast, broken).
+  #
+  # v0.3.56-alpha shipped without a Windows GPU binary because those two
+  # values disagreed: cache-warm ran `latest` (1.4.350.0) and wrote a
+  # `CMakeCache.txt` into the shared `target/` cache with
+  # `Vulkan_INCLUDE_DIR=C:\VulkanSDK\1.4.350.0\Include` baked in, and the
+  # release restored it while installing the pinned 1.4.357.0. CMake reused
+  # the cached configure and cl.exe failed with
+  # `C1083: Cannot open include file: 'vulkan/vulkan_core.h'`. LIB survived
+  # only because it is recomputed from $env:VULKAN_SDK on every run.
+  #
+  # The lesson worth keeping: pinning a workflow while the workflow that
+  # fills its cache stays on `latest` is not pinning.
+  VULKAN_SDK_VERSION: "1.4.357.0"
 
 jobs:
   # Pre-create the draft release so each build job can attach assets to it
@@ -172,7 +191,12 @@ jobs:
           # bump a warm cache would silently ship the previous arch set. Also
           # bumped for the CUDA 12.4→12.8 toolkit move (native sm_120). Keep this
           # suffix byte-identical to cache-warm.yml.
-          shared-key: release-${{ matrix.target }}-${{ matrix.features }}-gpuarch3
+          # `-vk<version>` is here because the Vulkan SDK path is baked into
+          # llama-cpp-sys-2's cached `CMakeCache.txt` under `target/`. Without
+          # it, changing the pinned SDK silently reuses a configure that points
+          # at an SDK no longer on the runner. Non-Vulkan cells resolve this to
+          # `-vknone`, which keeps their keys stable.
+          shared-key: release-${{ matrix.target }}-${{ matrix.features }}-gpuarch3-vk${{ matrix.vulkan && env.VULKAN_SDK_VERSION || 'none' }}
 
       - name: Install system dependencies (Linux)
         if: runner.os == 'Linux'
@@ -272,10 +296,10 @@ jobs:
         if: matrix.vulkan
         uses: jakoch/install-vulkan-sdk-action@85a045da72257cc52d4b11e0d4125ab8a7b768e4 # v1
         with:
-          # Pinned, not "latest": an unpinned toolchain changes underneath
-          # releases with no commit of ours, which makes a green build no
-          # evidence that the next one passes. Bump deliberately.
-          vulkan_version: 1.4.357.0
+          # Single-sourced from VULKAN_SDK_VERSION at the top of this file,
+          # which is also folded into the rust-cache key. Bump deliberately,
+          # and bump cache-warm.yml's copy in the same commit.
+          vulkan_version: ${{ env.VULKAN_SDK_VERSION }}
           install_runtime: true
           cache: true
 
@@ -620,18 +644,38 @@ jobs:
           TAG="${GITHUB_REF_NAME}"
           # `--repo` lets gh CLI skip `git remote get-url origin` lookup,
           # so we don't need `actions/checkout@v4` on this job.
-          ASSET_COUNT=$(gh release view "$TAG" --repo "$REPO" --json assets --jq '.assets | length')
-          # Expected minimum: one archive per matrix entry (5: linux-cpu,
-          # linux-cuda, macos, windows-cpu, windows-gpu). Linux-x86_64 also
-          # produces .deb + .rpm so a fully successful run uploads 7. We
-          # require >= 5 archives so a single-platform failure still ships
-          # the rest, but a multi-platform regression won't silently publish
-          # a release that's missing binaries for half the user base.
-          MIN_EXPECTED=5
-          if [ "$ASSET_COUNT" -lt "$MIN_EXPECTED" ]; then
-            echo "Refusing to publish: only $ASSET_COUNT asset(s) uploaded to $TAG (expected at least $MIN_EXPECTED — one per matrix entry)"
-            echo "This usually means multiple build jobs failed. Check the build matrix logs."
+          # Check for each platform's archive BY NAME, not by counting.
+          #
+          # A raw count cannot tell "every platform shipped" from "one platform
+          # shipped several files". v0.3.56-alpha published with 14 assets and
+          # NO Windows GPU binary at all: the Linux cells contribute .tar.gz +
+          # bare + .sha256 + .deb + .rpm between them, so the old `>= 5` was
+          # satisfied by the platforms that did build while a whole platform
+          # was missing. Windows GPU is the cell most likely to be the missing
+          # one — it has the most moving parts (CUDA, Vulkan, MSVC, CMake) —
+          # and its users are exactly those who cannot fall back to another
+          # asset.
+          EXPECTED=(
+            swarmllm-linux-x86_64.tar.gz
+            swarmllm-linux-x86_64-cuda.tar.gz
+            swarmllm-macos-aarch64.tar.gz
+            swarmllm-windows-x86_64-cpu.zip
+            swarmllm-windows-x86_64-gpu.zip
+          )
+          NAMES=$(gh release view "$TAG" --repo "$REPO" --json assets --jq '.assets[].name')
+          MISSING=()
+          for want in "${EXPECTED[@]}"; do
+            grep -qxF "$want" <<<"$NAMES" || MISSING+=("$want")
+          done
+          if [ "${#MISSING[@]}" -gt 0 ]; then
+            echo "Refusing to publish $TAG — these platform archives are missing:"
+            printf '  %s\n' "${MISSING[@]}"
+            echo ""
+            echo "The release is left as a DRAFT on purpose. Publishing it would put an"
+            echo "incomplete release in front of users, and the auto-updater cannot fall"
+            echo "back to another platform's binary. Fix the failing build job and re-run,"
+            echo "or publish deliberately by hand if shipping without these is intended."
             exit 1
           fi
           gh release edit "$TAG" --repo "$REPO" --draft=false
-          echo "Published $TAG with $ASSET_COUNT asset(s)"
+          echo "Published $TAG with all $(wc -l <<<"$NAMES") asset(s)"

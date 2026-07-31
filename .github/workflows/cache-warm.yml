@@ -51,6 +51,18 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: ""
+  # MUST equal `VULKAN_SDK_VERSION` in release.yml. This workflow writes the
+  # cache the release restores, and the Vulkan SDK path is baked into
+  # llama-cpp-sys-2's `CMakeCache.txt` inside `target/` — so warming with a
+  # different SDK than the release installs hands the release a configure
+  # pointing at an SDK that is not on its runner.
+  #
+  # This file previously said `latest` while release.yml pinned a version, and
+  # v0.3.56-alpha shipped with no Windows GPU binary as a result
+  # (`C1083: Cannot open include file: 'vulkan/vulkan_core.h'`). The version is
+  # now folded into the shared cache key in both files, so a future divergence
+  # costs a cache miss rather than a broken release.
+  VULKAN_SDK_VERSION: "1.4.357.0"
 
 jobs:
   warm:
@@ -113,7 +125,7 @@ jobs:
           # Byte-identical to release.yml (incl. the `-gpuarch3` bump — see the
           # comment there): the whole point is that the release restores the key
           # this job warms.
-          shared-key: release-${{ matrix.target }}-${{ matrix.features }}-gpuarch3
+          shared-key: release-${{ matrix.target }}-${{ matrix.features }}-gpuarch3-vk${{ matrix.vulkan && env.VULKAN_SDK_VERSION || 'none' }}
 
       - name: Install system dependencies
         if: runner.os == 'Linux'
@@ -158,7 +170,8 @@ jobs:
         if: matrix.vulkan
         uses: jakoch/install-vulkan-sdk-action@85a045da72257cc52d4b11e0d4125ab8a7b768e4 # v1
         with:
-          vulkan_version: latest
+          # Single-sourced from VULKAN_SDK_VERSION above; must match release.yml.
+          vulkan_version: ${{ env.VULKAN_SDK_VERSION }}
           install_runtime: true
           cache: true
 
