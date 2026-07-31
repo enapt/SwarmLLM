@@ -1461,21 +1461,39 @@ pub(crate) async fn dispatch_network_messages(
                                         // (large tensor transfer in flight) can't
                                         // block the dispatch loop. A missed pong
                                         // recovers next health-monitor tick.
-                                        if let Some(peer_bytes) = shared_state
-                                            .peer_id_map
-                                            .get(&sender_id)
-                                            .map(|r| r.clone())
-                                        {
-                                            if let Err(e) = network_tx.try_send(NetworkCommand::SendDirectMessage {
-                                                target_peer_bytes: peer_bytes,
-                                                message: pong,
-                                                delivery_request_id: None,
-                                            }) {
-                                                tracing::debug!(error = %e, "Dropping HealthPong: network_tx busy");
+                                        //
+                                        // The ping reached us over the gossipsub mesh, which
+                                        // relays it from peers we hold no direct connection to.
+                                        // The pong goes back over request_response, which does
+                                        // not relay HealthPong (`is_relay_eligible` refuses it),
+                                        // so a departed-but-still-gossiping peer would otherwise
+                                        // get an undeliverable send every 30s forever. Resolve
+                                        // through the liveness oracle, not `peer_id_map`, which
+                                        // survives disconnects by design.
+                                        match shared_state.resolve_connected_peer_id_bytes(&sender_id) {
+                                            Some(peer_bytes) => {
+                                                if let Err(e) = network_tx.try_send(NetworkCommand::SendDirectMessage {
+                                                    target_peer_bytes: peer_bytes,
+                                                    message: pong,
+                                                    delivery_request_id: None,
+                                                }) {
+                                                    tracing::debug!(error = %e, "Dropping HealthPong: network_tx busy");
+                                                }
                                             }
-                                        } else if let Err(e) = network_tx.try_send(NetworkCommand::Broadcast(pong)) {
-                                            // Fallback to broadcast if peer_id unknown
-                                            tracing::debug!(error = %e, "Dropping HealthPong broadcast: network_tx busy");
+                                            // Connected, but no PeerId mapping yet — broadcast so
+                                            // the pinger still learns our load. Requires an active
+                                            // connection, so this cannot become the 30s loop above.
+                                            None if shared_state.connected_node_ids.contains(&sender_id) => {
+                                                if let Err(e) = network_tx.try_send(NetworkCommand::Broadcast(pong)) {
+                                                    tracing::debug!(error = %e, "Dropping HealthPong broadcast: network_tx busy");
+                                                }
+                                            }
+                                            None => {
+                                                tracing::trace!(
+                                                    peer = %sender_id,
+                                                    "Skipping HealthPong — ping arrived via gossip mesh but peer is not connected"
+                                                );
+                                            }
                                         }
                                     }
                                     // Health pongs: update the sender's load in peer_registry
@@ -1530,10 +1548,11 @@ pub(crate) async fn dispatch_network_messages(
                                             });
                                             // Send reply directly to the initiator (not broadcast)
                                             // to prevent other peers from intercepting the ephemeral key.
+                                            // Direct-only: EphemeralKeyExchange is not relay-eligible,
+                                            // so a target we no longer hold a connection to can only
+                                            // be dropped by the send path.
                                             let target = shared_state
-                                                .peer_id_map
-                                                .get(&exchange.node_id)
-                                                .map(|r| r.value().clone());
+                                                .resolve_connected_peer_id_bytes(&exchange.node_id);
                                             if let Some(target_bytes) = target {
                                                 // try_send to keep the dispatch
                                                 // loop from blocking on a saturated
@@ -1547,9 +1566,9 @@ pub(crate) async fn dispatch_network_messages(
                                                     tracing::warn!(error = %e, "Dropping ephemeral key reply: network_tx busy");
                                                 }
                                             } else {
-                                                tracing::warn!(
+                                                tracing::debug!(
                                                     node_id = %exchange.node_id,
-                                                    "Cannot reply to ephemeral key exchange — no PeerId mapping"
+                                                    "Cannot reply to ephemeral key exchange — peer not connected or no PeerId mapping"
                                                 );
                                             }
                                         } else {

@@ -6,6 +6,18 @@ All notable changes to SwarmLLM are documented here.
 
 ### Fixed
 
+- **A peer that left kept being answered every 30 seconds, indefinitely.** Nodes
+  announce themselves over a mesh that forwards messages between peers that
+  cannot reach each other directly, so a node that had dropped off kept being
+  heard from long after there was any way to reply to it. Each of those
+  announcements drew a reply that could only be thrown away, once every 30
+  seconds for as long as the node stayed up — in an overnight run a single
+  departed peer produced **45% of the entire log**, burying anything else worth
+  reading. Replies are now addressed only to peers there is still a live
+  connection to. The same blind-addressing pattern is fixed in the two other
+  places it appeared, including key rotation, which no longer leaves behind
+  half-finished handshake state for peers that are gone.
+
 - **The model list said "network" for models held completely, and "local" for
   one held only in part.** `GET /v1/models` decided this from whichever model
   was loaded most recently rather than from which pieces the node actually

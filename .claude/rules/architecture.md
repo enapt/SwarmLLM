@@ -352,6 +352,22 @@ silently break at the wire if duplicated:
   convenience wrapper — for three releases the sidecar had three writers and
   zero readers, and every weight-tied model was unservable on any node lacking
   shard 0 (gotcha #178).
+- **`SharedState::resolve_connected_peer_id_bytes`** — the resolver to use for
+  any message that `network::manager::relay::is_relay_eligible` refuses, i.e.
+  everything except `RemoteGenerateRequest` / `StreamingToken` /
+  `CancelInference`. For those direct-only messages "reachable" means
+  "connected", so the ungated `resolve_peer_id_bytes` hands back a target the
+  send path can only drop. **Gossipsub reachability is NOT request_response
+  reachability**: a peer relayed to us through the mesh is frequently
+  undialable, and `peer_id_map` is deliberately persistent across disconnects
+  (its only eviction is gated behind an 8,000-entry soft cap that never trips on
+  a small swarm). Replying to gossip via `peer_id_map` alone produced an
+  unbounded 30s loop of undeliverable sends — one departed peer, 45% of a
+  night's log volume (gotcha #220). `connected_node_ids` is the liveness oracle;
+  `peer_registry` is explicitly NOT, being preserved across disconnects for
+  reconnect. **When adding such a gate, re-check any `else`/fallback arm below
+  it** — the health-pong site had a `Broadcast` fallback that a naive `None`
+  would have turned into mesh-wide traffic every 30s, worse than the bug.
 - **`model::manifest::is_backup_artifact_id`** — canonical check for a
   model id that is a copied-folder backup (`<model>.FULLBACKUP`,
   `<model>.old`, `<model>~`, `… copy`) rather than a real model identity.

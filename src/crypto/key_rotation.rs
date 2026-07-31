@@ -83,13 +83,22 @@ pub async fn run_key_rotation(
                 if peers.is_empty() {
                     continue;
                 }
-                tracing::info!(
-                    active_sessions = peers.len(),
-                    rekey_initiated = peers.len(),
-                    "DIAG: key rotation tick (re-keying)"
-                );
+                let mut rekey_initiated = 0usize;
+                let mut skipped_unreachable = 0usize;
                 for peer in &peers {
+                    // A session outlives the connection that created it — it is
+                    // evicted by age (MAX_SESSION_AGE), not on disconnect — and
+                    // EphemeralKeyExchange is not relay-eligible. Re-keying a
+                    // departed peer therefore buys nothing but an undeliverable
+                    // send plus an orphaned pending-ephemeral entry that lingers
+                    // until PENDING_EPHEMERAL_TTL. Resolve through the liveness
+                    // oracle BEFORE mutating session state.
+                    let Some(target) = shared_state.resolve_connected_peer_id_bytes(peer) else {
+                        skipped_unreachable += 1;
+                        continue;
+                    };
                     let ephemeral_pub = session_manager.initiate_ephemeral_exchange(peer);
+                    rekey_initiated += 1;
                     let msg = SwarmMessage::EphemeralKeyExchange(EphemeralKeyExchange {
                         session_id: uuid::Uuid::new_v4(),
                         node_id: local_node_id.clone(),
@@ -100,24 +109,24 @@ pub async fn run_key_rotation(
                     // Gossip broadcast silently dropped EphemeralKeyExchange (no topic match).
                     // Direct send also ensures the recipient can authenticate the sender
                     // via the request_response protocol's peer identity.
-                    let target_bytes = shared_state
-                        .peer_id_map
-                        .get(peer)
-                        .map(|r| r.value().clone());
-                    if let Some(target) = target_bytes {
-                        if let Err(e) = network_tx.try_send(NetworkCommand::SendDirectMessage {
-                            target_peer_bytes: target,
-                            message: msg,
-                            delivery_request_id: None,
-                        }) {
-                            tracing::debug!(
-                                peer = %peer,
-                                error = %e,
-                                "Failed to send ephemeral key exchange (channel full)"
-                            );
-                        }
+                    if let Err(e) = network_tx.try_send(NetworkCommand::SendDirectMessage {
+                        target_peer_bytes: target,
+                        message: msg,
+                        delivery_request_id: None,
+                    }) {
+                        tracing::debug!(
+                            peer = %peer,
+                            error = %e,
+                            "Failed to send ephemeral key exchange (channel full)"
+                        );
                     }
                 }
+                tracing::info!(
+                    active_sessions = peers.len(),
+                    rekey_initiated,
+                    skipped_unreachable,
+                    "DIAG: key rotation tick (re-keying)"
+                );
             }
         }
     }

@@ -1930,6 +1930,153 @@ impl SharedState {
                     .and_then(|p| p.peer_id_bytes.clone())
             })
     }
+
+    /// Resolve a `NodeId` to its `PeerId` bytes **only while we hold a live
+    /// libp2p connection to it**. Use this for any message that
+    /// `network::manager::relay::is_relay_eligible` refuses — i.e. everything
+    /// except `RemoteGenerateRequest` / `StreamingToken` / `CancelInference`.
+    /// For those direct-only messages "reachable" means "connected", so a
+    /// plain [`Self::resolve_peer_id_bytes`] hands back a target the send path
+    /// can only drop.
+    ///
+    /// **Why this exists.** `peer_id_map` is deliberately persistent — it is
+    /// indexed at first connect and survives disconnects, and its only eviction
+    /// (`cleanup_stale_peer_id_map`) is gated behind an 8,000-entry soft cap
+    /// that never trips on a small swarm. Meanwhile a departed peer keeps
+    /// reaching us through the **gossipsub mesh**, relayed by other peers, long
+    /// after its direct connection is gone. Gossip reachability is not
+    /// request_response reachability, so replying to gossip by resolving
+    /// through `peer_id_map` alone produced an unbounded 30s loop of
+    /// undeliverable sends (one departed peer accounted for 45% of a night's
+    /// log volume).
+    ///
+    /// `connected_node_ids` is the liveness oracle (see
+    /// `.claude/rules/architecture.md` § Scheduler Liveness Oracle);
+    /// `peer_registry` is explicitly NOT, as it is preserved across
+    /// disconnects for reconnect purposes.
+    pub fn resolve_connected_peer_id_bytes(
+        &self,
+        node_id: &crate::types::NodeId,
+    ) -> Option<Vec<u8>> {
+        if !self.connected_node_ids.contains(node_id) {
+            return None;
+        }
+        self.resolve_peer_id_bytes(node_id)
+    }
+}
+
+#[cfg(test)]
+mod connected_peer_resolution_tests {
+    use crate::types::NodeId;
+
+    fn test_state() -> std::sync::Arc<crate::daemon::SharedState> {
+        use crate::identity::Identity;
+        use crate::inference::executor::ModelExecutor;
+        use crate::storage::db::Database;
+        use tokio::sync::Mutex;
+
+        let identity = Identity::generate();
+        let temp = tempfile::tempdir().unwrap();
+        let db = Database::open(temp.path()).unwrap();
+        let executor = std::sync::Arc::new(Mutex::new(ModelExecutor::new()));
+        let (state, _, _) = crate::daemon::SharedState::new(
+            crate::config::Config::default(),
+            identity,
+            db,
+            executor,
+            None,
+        );
+        state
+    }
+
+    fn peer_bytes() -> Vec<u8> {
+        libp2p::PeerId::random().to_bytes()
+    }
+
+    /// A connected peer resolves exactly as the ungated helper does — the gate
+    /// must not cost us reachable targets.
+    #[test]
+    fn a_connected_peer_still_resolves() {
+        let state = test_state();
+        let node = NodeId([7u8; 32]);
+        let bytes = peer_bytes();
+        state.peer_id_map.insert(node.clone(), bytes.clone());
+        state.connected_node_ids.insert(node.clone());
+
+        assert_eq!(
+            state.resolve_connected_peer_id_bytes(&node),
+            Some(bytes),
+            "a live peer must still be reachable"
+        );
+    }
+
+    /// The defect this helper exists for: `peer_id_map` deliberately survives
+    /// disconnects, so the ungated lookup keeps handing back a target the send
+    /// path can only drop. Observed live as one departed-but-still-gossiping
+    /// peer drawing an undeliverable HealthPong every 30s for hours.
+    #[test]
+    fn a_departed_peer_does_not_resolve_even_though_the_map_retains_it() {
+        let state = test_state();
+        let node = NodeId([9u8; 32]);
+        state.peer_id_map.insert(node.clone(), peer_bytes());
+        // Never connected, or connected and since dropped — same state.
+        assert!(!state.connected_node_ids.contains(&node));
+
+        assert!(
+            state.resolve_peer_id_bytes(&node).is_some(),
+            "precondition: the persistent map still holds the mapping"
+        );
+        assert_eq!(
+            state.resolve_connected_peer_id_bytes(&node),
+            None,
+            "an unreachable peer must not be handed to a direct-only send"
+        );
+    }
+
+    /// Disconnecting must actually take effect — the gate reads live state
+    /// rather than caching a verdict from first resolution.
+    #[test]
+    fn resolution_stops_the_moment_the_peer_disconnects() {
+        let state = test_state();
+        let node = NodeId([11u8; 32]);
+        state.peer_id_map.insert(node.clone(), peer_bytes());
+        state.connected_node_ids.insert(node.clone());
+        assert!(state.resolve_connected_peer_id_bytes(&node).is_some());
+
+        state.connected_node_ids.remove(&node);
+        assert_eq!(state.resolve_connected_peer_id_bytes(&node), None);
+    }
+
+    /// `peer_registry` is preserved across disconnects for reconnect purposes
+    /// and is explicitly NOT the liveness oracle, so it must not resurrect a
+    /// departed peer through the fallback arm of `resolve_peer_id_bytes`.
+    #[test]
+    fn the_peer_registry_fallback_is_not_a_liveness_backdoor() {
+        let state = test_state();
+        let node = NodeId([13u8; 32]);
+        state.peer_registry.insert(
+            node.clone(),
+            crate::types::PeerInfo {
+                node_id: node.clone(),
+                addresses: vec![],
+                capability: None,
+                last_seen: chrono::Utc::now(),
+                latency_ms: Some(50),
+                trust_score: 0.5,
+                peer_id_bytes: Some(peer_bytes()),
+                active_request_count: 0,
+                first_seen: 0,
+                verified_transaction_count: 0,
+                is_lan_peer: false,
+            },
+        );
+
+        assert!(
+            state.resolve_peer_id_bytes(&node).is_some(),
+            "precondition: the registry fallback resolves"
+        );
+        assert_eq!(state.resolve_connected_peer_id_bytes(&node), None);
+    }
 }
 
 #[cfg(test)]
