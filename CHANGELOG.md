@@ -13,8 +13,11 @@ All notable changes to SwarmLLM are documented here.
   no message said so. In practice an 8 GB machine could be driven into swap,
   which slows down every request on it rather than just the model responsible.
   It now works as documented: models loaded on the processor are held to the
-  limit, the automatic setting is half the machine's memory, and a figure
-  larger than the machine is reduced to what can actually be spared. A model
+  limit, and a figure larger than the machine is reduced to what can actually
+  be spared. Left automatic, the allowance is half the machine where the
+  graphics card does the work, and most of it on a processor-only node — where
+  serving models is the whole point of the machine, and half would have meant
+  refusing models such nodes run today. A model
   that will not fit is refused with a message naming what it needed, what the
   limit is, and how to raise it — rather than being loaded into swap. This
   matters more since this version began moving models to the processor when

@@ -182,28 +182,44 @@ impl ResourceConfig {
     /// Compute the effective system-RAM budget for inference model loading.
     ///
     /// - If `max_ram_mb > 0`: use it as a hard cap.
-    /// - Else if total RAM is known: **50% of it**.
+    /// - Else if the GPU will actually run the models: 50% of total RAM.
+    /// - Else (**CPU-only**, by hardware *or* by `gpu_layers = 0`): 80%.
     /// - Else: `None` (could not read the machine; do not invent a limit).
     ///
-    /// The 50% figure is not new policy. `config/default.toml` has shipped
-    /// `max_ram_mb = 0  # 0 = auto (50% of system RAM)` and the configuration
-    /// reference has documented the same, for as long as the field has
-    /// existed — while nothing in the codebase ever read it. The setting was
-    /// inert: a user capping RAM to protect a small machine got no effect at
-    /// all, silently, and an 8 GB container was driven 2.1 GB into swap, which
-    /// for inference is pathological. This implements what was already promised
-    /// rather than choosing anything new.
+    /// `has_gpu` must mean "the GPU will run the models", not "a GPU exists" —
+    /// a node with `inference.gpu_layers = 0` runs everything on the CPU
+    /// whatever its hardware, and needs the CPU-only fraction. The caller
+    /// derives it through `daemon::shard_loader::force_cpu_for`.
     ///
-    /// Sibling of [`Self::inference_vram_budget_mb`]; the two differ only in
-    /// their headroom fraction (VRAM 80%, RAM 50%) because the rest of the
-    /// machine keeps running out of system RAM but not out of VRAM.
-    pub fn inference_ram_budget_mb(&self, system_ram_total_mb: u64) -> Option<u64> {
+    /// **Why the split.** The documented default was a flat 50%, which is right
+    /// where a GPU does the inference — system RAM is then support work, and
+    /// leaving half the machine to the OS and everything else is generous. On a
+    /// CPU-only node it is the wrong shape entirely: serving models *is* what
+    /// the machine is for, and half of it is a hard capability cut. An 8 GB
+    /// CPU-only node would get 4096 MB and start refusing
+    /// `llama-3.2-3b-instruct-q4-k-m`, which estimates ~4575 MB and which such
+    /// nodes serve today. Small CPU-only containers are a primary deployment
+    /// target here, so a default that silently drops a common model from them
+    /// is worse than the swapping it was written to prevent.
+    ///
+    /// The 50% figure itself is not new policy — `config/default.toml` has
+    /// shipped `max_ram_mb = 0  # 0 = auto (50% of system RAM)` for as long as
+    /// the field existed, while nothing in the codebase read it. Implementing an
+    /// inert default is exactly when its value first has to be justified rather
+    /// than inherited.
+    ///
+    /// Sibling of [`Self::inference_vram_budget_mb`].
+    pub fn inference_ram_budget_mb(&self, system_ram_total_mb: u64, has_gpu: bool) -> Option<u64> {
         if self.max_ram_mb > 0 {
-            Some(self.max_ram_mb)
-        } else if system_ram_total_mb > 0 {
+            return Some(self.max_ram_mb);
+        }
+        if system_ram_total_mb == 0 {
+            return None;
+        }
+        if has_gpu {
             Some(system_ram_total_mb / 2)
         } else {
-            None
+            Some(system_ram_total_mb / 5 * 4)
         }
     }
 }

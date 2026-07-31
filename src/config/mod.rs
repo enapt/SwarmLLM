@@ -1094,23 +1094,60 @@ max_concurrent_requests = 42
             max_ram_mb: 3000,
             ..Default::default()
         };
-        assert_eq!(rc.inference_ram_budget_mb(16000), Some(3000));
+        // An explicit cap wins regardless of what hardware is present.
+        assert_eq!(rc.inference_ram_budget_mb(16000, true), Some(3000));
+        assert_eq!(rc.inference_ram_budget_mb(16000, false), Some(3000));
     }
 
-    /// The behaviour `config/default.toml` and the configuration reference have
-    /// both documented since the field existed — while nothing read it, so the
-    /// setting was inert and a node had no memory ceiling at all.
+    /// With a GPU, system RAM is support work — half the machine is generous.
+    /// This is the figure `config/default.toml` has always documented.
     #[test]
-    fn ram_budget_auto_is_the_documented_50_percent() {
+    fn ram_budget_auto_is_half_the_machine_when_a_gpu_is_present() {
         let rc = ResourceConfig::default(); // max_ram_mb = 0
-        assert_eq!(rc.inference_ram_budget_mb(16000), Some(8000));
+        assert_eq!(rc.inference_ram_budget_mb(16000, true), Some(8000));
+    }
+
+    /// On a CPU-only node, serving models IS the machine's job, so half of it
+    /// is a capability cut rather than headroom.
+    #[test]
+    fn ram_budget_auto_is_most_of_the_machine_when_there_is_no_gpu() {
+        let rc = ResourceConfig::default();
+        assert_eq!(rc.inference_ram_budget_mb(16000, false), Some(12800));
+    }
+
+    /// The regression that a flat 50% default would have shipped: an 8 GB
+    /// CPU-only node — a primary deployment target — must still admit
+    /// `llama-3.2-3b-instruct-q4-k-m`, which estimates ~4575 MB on the CPU
+    /// (4639 MB was logged for it on a real node's GPU path, and the two
+    /// estimates differ only by the 64 MB process-overhead delta). At 50% the
+    /// budget is 4096 MB and the model is refused despite such nodes serving
+    /// it today.
+    #[test]
+    fn an_8gb_cpu_only_node_still_admits_a_3b_model() {
+        let rc = ResourceConfig::default();
+        const LLAMA_3B_CPU_ESTIMATE_MB: u64 = 4575;
+
+        let cpu_only = rc.inference_ram_budget_mb(8192, false).unwrap();
+        assert!(
+            cpu_only >= LLAMA_3B_CPU_ESTIMATE_MB,
+            "budget {cpu_only} MB must still fit a 3B model at {LLAMA_3B_CPU_ESTIMATE_MB} MB"
+        );
+
+        // The flat-50% behaviour, which is still correct where a GPU does the
+        // work, is exactly what would have refused this model on a CPU-only box.
+        let with_gpu = rc.inference_ram_budget_mb(8192, true).unwrap();
+        assert!(
+            with_gpu < LLAMA_3B_CPU_ESTIMATE_MB,
+            "precondition: a flat 50% default ({with_gpu} MB) would have refused it"
+        );
     }
 
     /// A machine we could not read must not have a limit invented for it.
     #[test]
     fn ram_budget_unknown_machine() {
         let rc = ResourceConfig::default();
-        assert_eq!(rc.inference_ram_budget_mb(0), None);
+        assert_eq!(rc.inference_ram_budget_mb(0, true), None);
+        assert_eq!(rc.inference_ram_budget_mb(0, false), None);
     }
 }
 

@@ -471,14 +471,30 @@ pub fn compute_ram_budget(shared: &crate::daemon::SharedState) -> Option<u64> {
     sys.refresh_memory();
     let total_mb = sys.total_memory() / (1024 * 1024);
     let available_mb = sys.available_memory() / (1024 * 1024);
+    // "Has a GPU" here must mean "the GPU will actually run the models", not
+    // merely that one is installed. A node with `inference.gpu_layers = 0` runs
+    // everything on the CPU regardless of its hardware, so it is in exactly the
+    // CPU-only situation the higher fraction exists for. Routed through the
+    // canonical placement mapping so this cannot drift from where models are
+    // really loaded.
+    let has_gpu = shared.gpu_info.is_some()
+        && !crate::daemon::shard_loader::force_cpu_for(shared.config.inference.gpu_layers);
 
-    let by_config = shared.config.resources.inference_ram_budget_mb(total_mb)?;
-    if available_mb == 0 {
+    let configured = shared.config.resources.max_ram_mb;
+    let by_config = shared
+        .config
+        .resources
+        .inference_ram_budget_mb(total_mb, has_gpu)?;
+
+    // Clamp ONLY an explicitly configured number. The automatic value is
+    // already a fraction of this machine's own total memory, so clamping it
+    // again against *free* memory discounts it twice — and would make the
+    // ceiling depend on how much page cache happened to be warm at startup,
+    // which is neither stable nor something a user can reason about. A
+    // configured value is the only one that can exceed the machine.
+    if configured == 0 || available_mb == 0 {
         return Some(by_config);
     }
-    // Already-loaded models count as unavailable, so allow the budget to reach
-    // beyond what is free at this instant — it is a steady-state ceiling, not a
-    // point-in-time reading. What it must not do is exceed the machine.
     let by_machine = (available_mb / 100 * FREE_RAM_HEADROOM_PCT).max(total_mb / 4);
     if by_machine < by_config {
         tracing::warn!(
@@ -486,8 +502,8 @@ pub fn compute_ram_budget(shared: &crate::daemon::SharedState) -> Option<u64> {
             total_mb,
             available_mb,
             allowed_mb = by_machine,
-            "Memory budget is larger than this machine can spare — limiting it so that \
-             loading a model cannot push the system into swap"
+            "Configured memory budget is larger than this machine can spare — limiting it \
+             so that loading a model cannot push the system into swap"
         );
     }
     Some(by_config.min(by_machine))

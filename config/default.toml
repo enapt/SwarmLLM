@@ -18,7 +18,7 @@ contribution = "minimal"       # "minimal", "moderate", "maximum" — change in 
 
 [resources]
 max_gpu_vram_mb = 0            # 0 = auto (80% of detected GPU used for inference; rest stays on disk for P2P)
-max_ram_mb = 0                 # 0 = auto (50% of system RAM)
+max_ram_mb = 0                 # 0 = auto (50% of system RAM with a GPU, 80% on a CPU-only node)
 max_disk_mb = 50000            # 50GB for model storage
 max_bandwidth_mbps = 0         # 0 = unlimited
 
