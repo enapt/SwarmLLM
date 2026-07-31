@@ -51,18 +51,6 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: ""
-  # MUST equal `VULKAN_SDK_VERSION` in release.yml. This workflow writes the
-  # cache the release restores, and the Vulkan SDK path is baked into
-  # llama-cpp-sys-2's `CMakeCache.txt` inside `target/` — so warming with a
-  # different SDK than the release installs hands the release a configure
-  # pointing at an SDK that is not on its runner.
-  #
-  # This file previously said `latest` while release.yml pinned a version, and
-  # v0.3.56-alpha shipped with no Windows GPU binary as a result
-  # (`C1083: Cannot open include file: 'vulkan/vulkan_core.h'`). The version is
-  # now folded into the shared cache key in both files, so a future divergence
-  # costs a cache miss rather than a broken release.
-  VULKAN_SDK_VERSION: "1.4.357.0"
 
 jobs:
   warm:
@@ -111,129 +99,16 @@ jobs:
             vulkan: true
 
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-
-      # MUST stay byte-identical to release.yml's cache step, or the key
-      # differs and the release gets no hit. Both use `shared-key` so the
-      # job id is excluded from the key.
-      - name: Rust cache
-        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - name: GPU build environment (toolchain + cache — single definition)
+        uses: ./.github/actions/gpu-build-env
         with:
-          # Byte-identical to release.yml (incl. the `-gpuarch3` bump — see the
-          # comment there): the whole point is that the release restores the key
-          # this job warms.
-          shared-key: release-${{ matrix.target }}-${{ matrix.features }}-gpuarch3-vk${{ matrix.vulkan && env.VULKAN_SDK_VERSION || 'none' }}
-
-      - name: Install system dependencies
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libssl-dev pkg-config
-
-      - name: Install CUDA toolkit
-        if: matrix.cuda_linux
-        run: |
-          # Pinned + checksum-verified, mirroring release.yml.
-          CUDA_KEYRING_SHA256=d93190d50b98ad4699ff40f4f7af50f16a76dac3bb8da1eaaf366d47898ff8df
-          wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb
-          echo "${CUDA_KEYRING_SHA256}  cuda-keyring_1.1-1_all.deb" | sha256sum -c -
-          sudo dpkg -i cuda-keyring_1.1-1_all.deb
-          sudo apt-get update
-          sudo apt-get install -y cuda-toolkit-12-8
-          echo "/usr/local/cuda-12.8/bin" >> "$GITHUB_PATH"
-          echo "CUDA_PATH=/usr/local/cuda-12.8" >> "$GITHUB_ENV"
-
-      - name: Install mold linker
-        if: matrix.cuda_linux
-        run: |
-          sudo apt-get install -y mold
-          echo "RUSTFLAGS=-C link-arg=-fuse-ld=mold" >> "$GITHUB_ENV"
-
-      # ---- Windows GPU setup — mirrors release.yml's Windows-GPU cell so the
-      # warmed artefacts match what a release restores. See release.yml for the
-      # full rationale behind each step. ----
-
-      # Windows stays on CUDA 12.4 (Linux is on 12.8) — deliberate; see
-      # release.yml. Full sub-package set for cudarc dynamic-loading.
-      - name: Install CUDA toolkit (Windows)
-        if: matrix.cuda_windows
-        uses: Jimver/cuda-toolkit@4bd727d5619dc6fa323b1e76c3aa5dca94f5ec6d # v0.2.19
-        with:
-          cuda: '12.4.0'
-          method: 'network'
-          sub-packages: '["nvcc", "cudart", "cublas", "cublas_dev", "curand", "curand_dev", "nvrtc", "nvrtc_dev", "visual_studio_integration"]'
-
-      - name: Install Vulkan SDK
-        if: matrix.vulkan
-        uses: jakoch/install-vulkan-sdk-action@85a045da72257cc52d4b11e0d4125ab8a7b768e4 # v1
-        with:
-          # Single-sourced from VULKAN_SDK_VERSION above; must match release.yml.
-          vulkan_version: ${{ env.VULKAN_SDK_VERSION }}
-          install_runtime: true
-          cache: true
-
-      # nvcc shells out to cl.exe (MSVC) for candle-kernels host code.
-      - name: Setup MSVC (Windows GPU — nvcc needs cl.exe)
-        if: matrix.cuda_windows
-        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1
-        with:
-          arch: x64
-
-      # Make CUDA import libs (cudart.lib etc.) findable by the MSVC linker.
-      - name: Extend LIB with CUDA lib dir (Windows GPU)
-        if: matrix.cuda_windows
-        shell: pwsh
-        run: |
-          "LIB=$env:CUDA_PATH\lib\x64;$env:LIB" | Out-File -Append -FilePath $env:GITHUB_ENV -Encoding utf8
-
-      # Ninja avoids the vulkan-shaders-gen ExternalProject race the VS
-      # generator hits (see release.yml).
-      # Mirror of release.yml's guard — this workflow WRITES the cache the
-      # release restores, so a stale configure created here is what the release
-      # would inherit. Keeping the check on the writing side stops the bad
-      # artifact being produced at all, rather than only detected downstream.
-      - name: Discard a stale CMake configure (Windows GPU)
-        if: matrix.cuda_windows
-        shell: pwsh
-        run: |
-          $roots = Get-ChildItem -Path target -Recurse -Filter CMakeCache.txt -ErrorAction SilentlyContinue
-          if (-not $roots) { Write-Host "No cached CMake configure to check."; exit 0 }
-          foreach ($cache in $roots) {
-            $stale = @()
-            foreach ($line in Get-Content $cache.FullName) {
-              if ($line -match '^[^/#].*:(PATH|FILEPATH)=(.+)$') {
-                $val = $Matches[2].Trim()
-                if ($val -and $val -ne 'NOTFOUND' -and -not $val.EndsWith('-NOTFOUND')) {
-                  if (-not (Test-Path -LiteralPath $val)) { $stale += $line }
-                }
-              }
-            }
-            if ($stale.Count -gt 0) {
-              Write-Host "::warning::Discarding stale CMake configure at $($cache.FullName)"
-              $stale | Select-Object -First 10 | ForEach-Object { Write-Host "  stale: $_" }
-              Remove-Item -Recurse -Force (Split-Path $cache.FullName -Parent)
-            }
-          }
-
-      - name: Use Ninja generator (Windows GPU vulkan-shaders-gen race)
-        if: matrix.cuda_windows
-        shell: bash
-        run: echo "CMAKE_GENERATOR=Ninja" >> "$GITHUB_ENV"
-
-      # nvcc defaults to /MT; llama-cpp-sys-2 compiles /MD — force nvcc to /MD so
-      # the final link's CRT matches (see release.yml LNK2038 note).
-      - name: Force nvcc /MD on Windows GPU (CRT match with llama-cpp-sys-2)
-        if: matrix.cuda_windows
-        shell: bash
-        run: echo "NVCC_PREPEND_FLAGS=-Xcompiler /MD" >> "$GITHUB_ENV"
-
-      # Same profile, features and env as the release build, so the cached
-      # dependency artefacts are the ones a release will actually reuse.
-      # A different profile or feature set would populate a cache the
-      # release cannot use.
+          target: ${{ matrix.target }}
+          features: ${{ matrix.features }}
+          cuda-linux: ${{ matrix.cuda_linux || false }}
+          cuda-windows: ${{ matrix.cuda_windows || false }}
+          vulkan: ${{ matrix.vulkan || false }}
       - name: Build (populates the dependency cache)
         run: cargo build --locked --release ${{ matrix.features }}
         env:
