@@ -4361,7 +4361,30 @@ hole. The fix is to attribute the failure correctly, not to stop detecting it.
 
 ## A request arriving mid-eviction may return 0 tok/s (reported 2026-07-31)
 
-**Status: reported, race window identified, cause NOT confirmed.**
+**Status: CLOSED 2026-08-01.** The reporter confirmed it was an **HTTP 500**
+carrying `worker closed connection mid-generate` — not a 200 with empty
+content. That is the symptom of the idle-unload defect fixed in v0.3.58 (a
+model freed while a request was still using it), so this was a consequence of
+that bug rather than a separate one. The serious shape — an empty reply
+reported as a successful completion — is ruled out.
+
+Two things worth keeping from the exchange:
+
+- **`bench` reports `tokens_per_sec: 0.0` for ANY failed request**, confirmed by
+  the reporter against a nonexistent model id (rejected in 5 ms, nothing to do
+  with a reload). Dying mid-generation, being rejected outright, and a slow
+  reload all collapse to the same number. The error itself IS printed — but to
+  **stderr**, while the results JSON goes to stdout, so anything parsing stdout
+  sees only the zero. Do not use that field alone as a health signal.
+- The daemon side is correct: an unknown model returns 404 with the available
+  list and a dashboard hint (verified 2026-08-01).
+
+The original analysis is kept below because the reasoning about which guards
+cover which execution paths remains accurate and led to the v0.3.58 fix.
+
+---
+
+**Original entry — status at the time: reported, race window identified, cause NOT confirmed.**
 
 A tester running three back-to-back bench requests on a 6 GB CUDA node saw one
 return **0.0 tok/s**, coinciding exactly with a VRAM eviction and reload:
