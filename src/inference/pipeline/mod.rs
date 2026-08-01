@@ -45,17 +45,13 @@ const MAX_PENDING_LAYER_RESULTS: usize = 1024;
 /// failed inference, eventually exhausting `MAX_PENDING_LAYER_RESULTS`.
 /// Per gotcha #45 in `memory/MEMORY.md`.
 pub(super) struct PendingLayerResultGuard<'a> {
-    pub(super) map:
-        &'a dashmap::DashMap<uuid::Uuid, tokio::sync::oneshot::Sender<crate::types::LayerResult>>,
+    pub(super) map: &'a dashmap::DashMap<uuid::Uuid, crate::daemon::state::PendingLayerResult>,
     pub(super) id: uuid::Uuid,
     pub(super) armed: bool,
 }
 impl<'a> PendingLayerResultGuard<'a> {
     pub(super) fn new(
-        map: &'a dashmap::DashMap<
-            uuid::Uuid,
-            tokio::sync::oneshot::Sender<crate::types::LayerResult>,
-        >,
+        map: &'a dashmap::DashMap<uuid::Uuid, crate::daemon::state::PendingLayerResult>,
         id: uuid::Uuid,
     ) -> Self {
         Self {
@@ -75,9 +71,15 @@ impl<'a> PendingLayerResultGuard<'a> {
 /// because one branch needs `&mut self` access and another skips the
 /// cap check during failover. Returns `ServiceUnavailable` when the
 /// pending map is at `MAX_PENDING_LAYER_RESULTS`.
+///
+/// `awaiting` pins the waiter to the node the forward is being sent to, so a
+/// late notification about a DIFFERENT node's forward for the same
+/// `request_id` cannot resolve it. Pass `Some(node)` whenever the target is
+/// known; `None` accepts a result from any sender.
 pub(super) fn register_pending_layer_result(
-    map: &dashmap::DashMap<uuid::Uuid, tokio::sync::oneshot::Sender<crate::types::LayerResult>>,
+    map: &dashmap::DashMap<uuid::Uuid, crate::daemon::state::PendingLayerResult>,
     request_id: uuid::Uuid,
+    awaiting: Option<crate::types::NodeId>,
 ) -> Result<
     (
         tokio::sync::oneshot::Receiver<crate::types::LayerResult>,
@@ -91,7 +93,10 @@ pub(super) fn register_pending_layer_result(
         ));
     }
     let (tx, rx) = tokio::sync::oneshot::channel();
-    map.insert(request_id, tx);
+    map.insert(
+        request_id,
+        crate::daemon::state::PendingLayerResult { tx, awaiting },
+    );
     let guard = PendingLayerResultGuard::new(map, request_id);
     Ok((rx, guard))
 }
@@ -231,8 +236,11 @@ pub(super) async fn forward_verify_through_segments(
         );
 
         let result = if let Some(peer_bytes) = target_peer_bytes {
-            let (rx, mut pending_guard) =
-                register_pending_layer_result(&shared_state.pending_layer_results, request_id)?;
+            let (rx, mut pending_guard) = register_pending_layer_result(
+                &shared_state.pending_layer_results,
+                request_id,
+                Some(segment.node_id.clone()),
+            )?;
 
             if network_tx
                 .send(NetworkCommand::SendTensor {

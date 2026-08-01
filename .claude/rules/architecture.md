@@ -200,6 +200,20 @@ silently break at the wire if duplicated:
   values it sets are the contract the receiver's
   `try_assemble_chunked_forward` and `build_layer_forward_aad` both
   rely on.
+- **`SharedState::resolve_pending_layer_result`** — the ONLY way to deliver a
+  `LayerResult` into `pending_layer_results`. Never `remove(&request_id)` +
+  `tx.send(...)` from a network path. The map is keyed by `request_id`, but a
+  request that has failed over has TWO forwards outstanding: the abandoned one
+  and the standby's. Resolving by id alone lets the abandoned forward's late
+  error (from `fail_tensor_forward`, `fail_pending_forward`, or the
+  stale-forward sweep) consume the standby's waiter — which then discards the
+  standby's genuine result and surfaces the empty payload downstream as
+  `Internal: Tensor bytes too short`. Observed live 2026-08-01: a request that
+  would have completed in ~10s via failover failed after 181s (gotcha #229).
+  Waiters record the node they expect in `PendingLayerResult::awaiting`; the
+  helper checks and takes in one atomic `remove_if`. A bare `remove` is only
+  legitimate for owner-side cleanup — a coordinator dropping its OWN waiter on
+  an error path, or the health monitor's stale sweep.
 - **`daemon::dispatch::timestamp_fresh_one_sided`** — generic
   one-sided staleness check (R94). Time units must be consistent
   across `ts`/`now`/`max_age`/`skew`. Use directly for any new

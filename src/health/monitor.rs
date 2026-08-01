@@ -796,7 +796,7 @@ impl HealthMonitor {
             .shared_state
             .pending_layer_results
             .iter()
-            .filter(|entry| entry.value().is_closed())
+            .filter(|entry| entry.value().tx.is_closed())
             .map(|entry| *entry.key())
             .collect();
         if !stale_layer.is_empty() {

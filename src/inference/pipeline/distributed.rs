@@ -881,9 +881,17 @@ impl PipelineExecutor {
                     ));
                 }
                 let (tx, rx) = tokio::sync::oneshot::channel();
-                self.shared_state
-                    .pending_layer_results
-                    .insert(request_id, tx);
+                self.shared_state.pending_layer_results.insert(
+                    request_id,
+                    crate::daemon::state::PendingLayerResult {
+                        tx,
+                        // Pin to this segment's node. If this forward times out
+                        // and we fail over, the abandoned forward's late error
+                        // is attributed to THIS node and must not resolve the
+                        // standby's waiter.
+                        awaiting: Some(segment.node_id.clone()),
+                    },
+                );
                 // NOTE: the dsd.rs / speculative.rs PendingLayerResultGuard
                 // pattern (gotcha #45) is NOT applied here because
                 // `failover_segment(&mut self, ...)` mid-loop needs `&mut self`
@@ -1246,9 +1254,18 @@ impl PipelineExecutor {
                 // timeout — at MAX_PENDING_LAYER_RESULTS the pipeline starts
                 // rejecting all new requests with ServiceUnavailable.
                 let (tx, rx) = tokio::sync::oneshot::channel();
-                self.shared_state
-                    .pending_layer_results
-                    .insert(request_id, tx);
+                self.shared_state.pending_layer_results.insert(
+                    request_id,
+                    crate::daemon::state::PendingLayerResult {
+                        tx,
+                        // Pin to the standby. The forward we just gave up on is
+                        // still outstanding to the failed node; when it is
+                        // reaped, its synthetic error carries this same
+                        // `request_id` and would otherwise resolve THIS waiter,
+                        // discarding the standby's real result.
+                        awaiting: Some(backup.node_id.clone()),
+                    },
+                );
                 let mut pending_guard = super::PendingLayerResultGuard::new(
                     &self.shared_state.pending_layer_results,
                     request_id,

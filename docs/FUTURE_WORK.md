@@ -4435,119 +4435,98 @@ Do not "fix" this speculatively — the eviction path is guarded in two places
 already and adding a third guard without a reproduction risks re-introducing the
 stranded-VRAM bug those guards were written to avoid.
 
-## Multi-segment distributed inference fails: "Tensor bytes too short" (2026-08-01)
+## Multi-segment distributed inference: "Tensor bytes too short" — ROOT CAUSED and FIXED (2026-08-01)
 
-**Status: CONFIRMED and reproducible. Not diagnosed. Not fixed.**
+**Status: root cause found, fixed, pinned by tests. Two smaller findings from the
+same investigation remain open and are listed at the bottom.**
 
-Two-machine test on v0.3.59-alpha (WSL coordinator + CPU-only LXC peer, 4 ms
-apart on the same LAN):
+### What it was
 
-- **Single-peer routing works.** `llama-3.2-1b-instruct-q8-0`, which the peer
-  holds completely, returned a correct answer in 10.4 s with
-  `x-swarm-route: distributed`, `x-swarm-peers: 1`, `x-swarm-segments: 1`. The
-  scheduler correctly sent the whole request to the peer rather than splitting.
-- **A genuine pipeline split fails.** `meta-llama-3.1-8b-instruct-q4-k-m`, which
-  NEITHER node holds completely, assembled a real 3-segment pipeline and then
-  died:
+A failed-over segment's result was destroyed by the reaping of the forward it
+replaced. `pending_layer_results` is keyed by `request_id` **alone**, but a
+request that fails over has **two** forwards outstanding — the abandoned one and
+the standby's. The abandoned forward's late failure notification carried the same
+`request_id` and resolved whichever waiter was registered, which by then was the
+standby's.
 
-```
-HTTP 500 after 181 s
-  Inference error: Internal error: Tensor bytes too short
-INFO  model-worker: Model loaded model=meta-llama-3.1-8b layers="[10..32)" device=Cpu
-WARN  pipeline::distributed: Pipeline failed and failover (if eligible) was unsuccessful
-INFO  request complete route=distributed segments=3
-```
-
-The error comes from `inference/tensor_util.rs:106` — a length check on an
-inbound tensor payload. It fires **immediately after the local worker finishes
-loading its segment**, so the failure is on the first activation forward
-crossing a segment boundary, not during generation.
-
-**CORRECTED 2026-08-01 — the earlier analysis below was wrong on its central
-point, and the "reporting" fix it proposed was unnecessary.**
-
-The coordinator **already** checks `finish_reason` for `Error` and fails over,
-at `pipeline/distributed.rs:1033`, and logs the remote node's own message. The
-claim below that it never inspects `finish_reason` came from a grep truncated at
-`head -10` that cut off before that line. A fix was written against that claim,
-compiled, and reverted on discovering it was unreachable.
-
-**Re-running the reproduction with that check's log read properly, the actual
-error is:**
+From the live 3-segment run (`b2e54686`, `meta-llama-3.1-8b-instruct-q4-k-m`):
 
 ```
-Remote segment returned error ... segment=1 node=7c10ea04
-  error=OutboundFailure: Timeout while waiting for a response
-→ Pipeline assembly failed: Segment 1 failed with no standby available
+07:18:35  forward → 9684 (LAN, 4ms), 213268 bytes, timeout_secs=120
+07:20:35  segment TIMED OUT (exactly 120s) → failover to standby bf7b
+07:20:43  stale forward to 9684 reaped → LayerResult::error("Tensor forward timed out")
+07:20:43  ...delivered as bf7b's result (0 bytes)         ← THE BUG
+07:20:45  bf7b's REAL result arrives: activations_bytes=213268, finish=None,
+          pending_count=0 → dropped on the floor
+07:21:23  Inference error: Internal error: Tensor bytes too short
 ```
 
-That is a **network timeout to a peer 411 ms away over the internet**, not a
-tensor-format defect. The pipeline picked a distant peer for a segment of an 8B
-model, the forward timed out, and no standby was available for that segment.
+**The standby had succeeded.** It returned correct activations in 9.7s. Had its
+result not been pre-empted, the request would have completed via failover in
+about ten seconds instead of failing after 181.
 
-**So there are two separate observations, and only one is understood:**
+`Tensor bytes too short` was never a tensor-format or wire defect. It was the
+empty `activations` of `LayerResult::error` flowing downstream into the next
+segment's decoder, three steps removed from the actual fault.
 
-1. *This run* — a plain timeout to a far peer with no standby. Arguably correct
-   behaviour under the circumstances; the open question is whether the scheduler
-   should prefer a 4 ms LAN peer that also holds the shard over a 411 ms one, and
-   whether a segment with no standby should be scheduled to a distant peer at all.
-2. *The first run* — `Internal: Tensor bytes too short` after 181 s, with the
-   local worker holding `[10..32)`. **Still unexplained.** It may be a downstream
-   consequence of the same timeout leaving an empty buffer, but that was not
-   demonstrated, and the two runs took different routes.
+### The fix
 
-**Next step:** force the split onto the LAN peer only (4 ms, holds the same
-shards) and see whether a multi-segment pipeline completes. That separates "the
-split path is broken" from "the split path is fine and we picked a bad peer",
-which is the question that actually matters and is not yet answered.
+`pending_layer_results` values are now `PendingLayerResult { tx, awaiting }`,
+where `awaiting: Option<NodeId>` records the node the waiter expects. All
+resolution goes through one choke point,
+`SharedState::resolve_pending_layer_result(sender, result)`, which uses an atomic
+`DashMap::remove_if` so a result arriving concurrently with a failover cannot
+observe a half-swapped entry. A result attributed to any other node leaves the
+waiter intact and logs. `None` preserves accept-from-anyone for paths where the
+target is not known at registration.
 
----
+Every network-side resolution was converted: the dispatcher (which already had
+the authenticated sender), `fail_pending_forward` (now takes the target peer),
+and both `pipeline_stream.rs` reader sites. The remaining bare `remove` calls are
+owner-side cleanup — a coordinator dropping its own waiter — which is legitimate.
 
-**Superseded analysis (2026-08-01), retained for the parts that still hold:**
+Pinned by `daemon::state::pending_layer_result_tests`, including a replay of the
+run above. Verified failing without the fix.
 
-- The check that fires is `bytes.len() < 4` — so the payload is **essentially
-  empty**, not a subtly wrong size. This is not an arithmetic bug in an expected
-  length; something handed the decoder nothing.
-- `LayerResult::error(request_id, reason)` produces exactly that shape:
-  `activations: Vec::new()` **plus** `finish_reason: Some(Error(reason))`
-  carrying the real cause. So when a segment fails, the true reason is present
-  on the wire and is being dropped in favour of a decode error downstream.
-- The coordinator (`pipeline/distributed.rs`, ~line 1138) checks the returned
-  activation *length* against what it sent and fails over on mismatch — but it
-  never inspects `finish_reason` for `Error`. An empty result therefore looks
-  like a shape mismatch rather than a reported failure, which is why the log
-  says failover was attempted and the surfaced message is about tensor bytes.
-- That length check is deliberately skipped for `idx == 0 && !pre_embedded`
-  (embedding expansion legitimately changes shape), so an empty result from the
-  first segment passes straight through.
-- The failing decode is `model_worker.rs:1201` / `:1243` — the worker decoding
-  an inbound hidden-state payload. Our local segment was `[10..32)`, i.e. not
-  the first, so it expected hidden states and received an empty buffer.
+### Why the earlier analyses missed it
 
-**Two candidate fixes, and they are not the same bug:**
+Both prior passes reasoned from the *surfaced* error rather than the request
+timeline. The first blamed the wire format; the second, after finding a real
+timeout in a *different* run, concluded the scheduler had picked a bad peer and
+proposed forcing the split onto the LAN peer as the next experiment. The log
+shows that experiment had **already happened by accident**: the only remote
+segment in the failing run was on the 4 ms LAN peer. Grepping the whole
+`request_id` through the log — rather than the error string — showed the good
+result arriving two seconds late to an empty map.
 
-1. *Reporting*: check `finish_reason` for `Error` before decoding activations,
-   at every site that consumes a `LayerResult`, and propagate that reason. This
-   is almost certainly correct regardless and would have made this failure
-   self-describing instead of a misleading `Internal` error.
-2. *Root cause*: whatever made the upstream segment fail in the first place.
-   Fix (1) is what reveals it. Doing (2) blind risks changing the wire format
-   on a guess.
+### Still open (found during this investigation, NOT fixed)
 
-**What is still NOT known**, and should be established before changing anything:
+**1. The segment timeout does not account for the peer's speed.**
+`compute_segment_timeout` budgets `PREFILL_SECS_PER_LAYER = 15` per layer and
+uses `activation_bytes` only as a *boolean* prefill/decode discriminator — the
+magnitude, which is directly proportional to prompt length, is discarded. In the
+run above the CPU-only LAN peer needed >15 s/layer for 8 layers of an 8B model
+and was cut off; the GPU standby did the same work at 1.2 s/layer. So the budget
+is simultaneously too tight for CPU peers and very loose for GPU ones. This is
+the `.claude/rules/architecture.md` § "Timeouts: bound what actually varies"
+shape. Fixing it means scaling by observed per-layer latency for that peer
+(`observed_latency_ms_per_layer` already exists) and/or by activation size.
+Deliberately not guessed at here — with the failover fix in place a slow peer
+now costs one failover rather than the whole request, which removes the urgency.
 
-- Which direction the short payload travels (into the local segment from the
-  peer, or out of it), and which of the three segments is on which node.
-- Whether the payload is genuinely truncated on the wire, or the length check
-  is computing an expected size wrongly for this shape. `tensor_util.rs:106`
-  guards the header parse; `:115` guards `ndim` — only the first fired.
-- Whether it is specific to a 3-segment split, to this model's geometry, or to
-  the local segment being a middle slice (`[10..32)` of 32 layers).
-- Whether it predates v0.3.59. **Nothing today touched the tensor wire format**
-  — the day's changes were memory admission, idle-unload and CI — so this is
-  most likely pre-existing and simply never exercised, since every other test
-  this cycle ran on a single node.
+**2. The relay latency penalty does not hold its own stated invariant.**
+`RELAY_HOP_LATENCY_PENALTY_MS = 150` is documented as guaranteeing "a
+directly-connected holder always outranks a relayed one". It does not, for two
+compounding reasons: `get_peer_metrics` scores an unmeasured peer at
+`unwrap_or(100)`, and the penalty is additive. A relay-only peer we have never
+timed therefore scores 250 — better than a *measured* direct peer at 570 ms.
+Observed live: `7c10ea04` is reachable only via relay circuit, has never yielded
+a latency sample, and scores above a real direct peer. Worth deciding whether an
+unmeasurable peer should be treated as optimistically as 100 ms at all.
 
-**Reproduction:** two nodes, a model neither holds completely, request it from
-the node holding only part. Header `x-swarm-segments` confirms a real split;
-anything reporting `segments: 1` is the single-peer path and will pass.
+**3. Segment selection consults latency almost last.** In `greedy_assign` the
+`max_by` orders by local → coverage → load → latency. `load` is an integer count
+of in-flight requests, so one active request on a 4 ms LAN peer is enough to send
+the segment to a peer two orders of magnitude further away. Coverage-before-
+latency is defensible (fewer hops), but the two are incommensurable and compared
+lexicographically rather than as a cost.

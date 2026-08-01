@@ -132,6 +132,46 @@ impl Drop for ServingGuard {
     }
 }
 
+/// A coordinator waiting for one remote segment's `LayerResult`.
+///
+/// `awaiting` is the whole point of this struct. The map is keyed by
+/// `request_id` alone, but a single request can have MORE THAN ONE forward in
+/// flight over its lifetime: when a segment times out, the coordinator fails
+/// over to a standby and registers a fresh waiter under the SAME
+/// `request_id`. The abandoned forward is still outstanding, and its late
+/// failure notification (`fail_tensor_forward` → a synthetic
+/// `LayerResult::error`, or the network manager's stale-forward sweep) arrives
+/// afterwards carrying that same `request_id`.
+///
+/// Without this field the late error resolved whichever waiter happened to be
+/// registered — i.e. the standby's — and the standby's genuine result then
+/// found no waiter and was dropped. Observed live on 2026-08-01: the standby
+/// returned correct activations in 9.7s, they were discarded, and the empty
+/// error payload flowed downstream as `Internal: Tensor bytes too short` after
+/// 181s. Recording the expected sender makes the stale notification a no-op.
+///
+/// `None` means "accept from any sender" — used where the awaited node is not
+/// known at registration time (local execution, spec/DSD paths).
+pub struct PendingLayerResult {
+    pub tx: tokio::sync::oneshot::Sender<crate::types::LayerResult>,
+    pub awaiting: Option<crate::types::NodeId>,
+}
+
+impl PendingLayerResult {
+    /// May a `LayerResult` attributed to `sender` resolve this waiter?
+    ///
+    /// An unauthenticated result (`sender: None`) is accepted only by a waiter
+    /// that is not pinned to a node; pinning exists precisely so an
+    /// unattributable payload cannot satisfy it.
+    pub fn accepts(&self, sender: Option<&crate::types::NodeId>) -> bool {
+        match (&self.awaiting, sender) {
+            (None, _) => true,
+            (Some(expected), Some(actual)) => expected == actual,
+            (Some(_), None) => false,
+        }
+    }
+}
+
 pub struct SharedState {
     // Core infrastructure (accessed by nearly every subsystem)
     pub config: Config,
@@ -209,8 +249,11 @@ pub struct SharedState {
     /// Distributed streaming token routing (pipeline_id → sender).
     /// Consumer: dispatch handler + health monitor cleanup. Producer: pipeline.rs.
     pub streaming_token_txs: DashMap<uuid::Uuid, mpsc::Sender<crate::types::StreamingToken>>,
-    pub pending_layer_results:
-        DashMap<uuid::Uuid, tokio::sync::oneshot::Sender<crate::types::LayerResult>>,
+    /// Coordinator-side waiters for remote segment results, keyed by
+    /// `request_id`. The value records WHICH node the waiter expects to hear
+    /// from — see `PendingLayerResult::awaiting`. Resolve through
+    /// `resolve_pending_layer_result`, never by a bare `remove` + `send`.
+    pub pending_layer_results: DashMap<uuid::Uuid, PendingLayerResult>,
     /// R139 Tier 4K — receiver-side assembly state for STREAM-chunked
     /// activation forwards. Keyed by `request_id`. Each chunk arriving on
     /// the wire (LayerForward with `chunk_meta = Some(_)`) gets inserted at
@@ -879,6 +922,56 @@ impl SharedState {
     /// integrity invariants that ride on top of authentication (e.g., a peer
     /// authenticating each chunk individually but with internally inconsistent
     /// counts across chunks).
+    /// Deliver `result` to the coordinator waiting on `result.request_id`,
+    /// but ONLY when that waiter is expecting it from `sender`.
+    ///
+    /// This is the single choke point for resolving `pending_layer_results`.
+    /// Do not `remove` + `send` directly: a request that has failed over has a
+    /// second forward outstanding to a different node, and resolving the
+    /// current waiter with the abandoned forward's late error destroys a
+    /// perfectly good retry (see `PendingLayerResult`).
+    ///
+    /// The check and the take are one atomic `remove_if`, so a result arriving
+    /// concurrently with a failover cannot observe a half-swapped entry.
+    ///
+    /// Returns `true` when the waiter was resolved.
+    pub fn resolve_pending_layer_result(
+        &self,
+        sender: Option<&crate::types::NodeId>,
+        result: crate::types::LayerResult,
+    ) -> bool {
+        let request_id = result.request_id;
+        match self
+            .pending_layer_results
+            .remove_if(&request_id, |_, pending| pending.accepts(sender))
+        {
+            Some((_, pending)) => {
+                if pending.tx.send(result).is_err() {
+                    tracing::warn!(
+                        %request_id,
+                        "DIAG: LayerResult delivered but pipeline receiver DROPPED"
+                    );
+                }
+                true
+            }
+            None => {
+                // Either nothing is waiting (timed out / hedge loser), or a
+                // waiter is present but pinned to a different node — the
+                // stale-forward case this pinning exists to reject.
+                if let Some(entry) = self.pending_layer_results.get(&request_id) {
+                    tracing::info!(
+                        %request_id,
+                        from = ?sender.map(|n| n.to_string()),
+                        expecting = ?entry.awaiting.as_ref().map(|n| n.to_string()),
+                        "DIAG: ignoring LayerResult from a node this request is no longer \
+                         waiting on — the pipeline has already failed over"
+                    );
+                }
+                false
+            }
+        }
+    }
+
     pub fn try_assemble_chunked_forward(
         &self,
         forward: crate::types::LayerForward,
@@ -2138,5 +2231,130 @@ mod encrypted_pipeline_precedence_tests {
     fn explicit_global_on_still_applies() {
         assert!(resolve(None, true, false, false));
         assert!(resolve(None, true, true, false));
+    }
+}
+
+#[cfg(test)]
+mod pending_layer_result_tests {
+    use super::PendingLayerResult;
+    use crate::types::{LayerResult, NodeId};
+
+    fn test_state() -> std::sync::Arc<crate::daemon::SharedState> {
+        use crate::identity::Identity;
+        use crate::inference::executor::ModelExecutor;
+        use crate::storage::db::Database;
+        use tokio::sync::Mutex;
+
+        let identity = Identity::generate();
+        let temp = tempfile::tempdir().unwrap();
+        let db = Database::open(temp.path()).unwrap();
+        let executor = std::sync::Arc::new(Mutex::new(ModelExecutor::new()));
+        let (state, _, _) = crate::daemon::SharedState::new(
+            crate::config::Config::default(),
+            identity,
+            db,
+            executor,
+            None,
+        );
+        state
+    }
+
+    /// The live failure of 2026-08-01, in miniature.
+    ///
+    /// A segment forward to node A timed out, the coordinator failed over to
+    /// standby B, and A's forward was then reaped — producing a synthetic
+    /// error carrying the SAME request_id. That error used to resolve B's
+    /// waiter, so when B's real activations arrived 2s later there was no
+    /// waiter left and they were dropped. The empty payload flowed downstream
+    /// as `Internal: Tensor bytes too short`.
+    #[tokio::test]
+    async fn a_reaped_forward_does_not_resolve_the_standbys_waiter() {
+        let state = test_state();
+        let node_a = NodeId([0xAA; 32]);
+        let node_b = NodeId([0xBB; 32]);
+        let request_id = uuid::Uuid::new_v4();
+
+        // Failover has happened: the live waiter belongs to standby B.
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        state.pending_layer_results.insert(
+            request_id,
+            PendingLayerResult {
+                tx,
+                awaiting: Some(node_b.clone()),
+            },
+        );
+
+        // The abandoned forward to A is reaped and reports its failure.
+        let resolved = state.resolve_pending_layer_result(
+            Some(&node_a),
+            LayerResult::error(request_id, "Tensor forward timed out"),
+        );
+        assert!(
+            !resolved,
+            "a reaped forward to A must not resolve a waiter expecting B"
+        );
+        assert!(
+            state.pending_layer_results.contains_key(&request_id),
+            "the standby's waiter must survive the stale notification"
+        );
+
+        // B's genuine result arrives and must still be delivered.
+        let mut good = LayerResult::error(request_id, "unused");
+        good.finish_reason = None;
+        good.activations = vec![7u8; 213_268];
+        assert!(state.resolve_pending_layer_result(Some(&node_b), good));
+
+        let delivered = rx.await.expect("standby result must reach the pipeline");
+        assert_eq!(delivered.activations.len(), 213_268);
+        assert!(delivered.finish_reason.is_none());
+    }
+
+    /// The ordinary path must not regress: the node we are waiting on can
+    /// always resolve us, including with a legitimate error.
+    #[tokio::test]
+    async fn the_awaited_node_resolves_its_own_waiter() {
+        let state = test_state();
+        let node = NodeId([0xCC; 32]);
+        let request_id = uuid::Uuid::new_v4();
+
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        state.pending_layer_results.insert(
+            request_id,
+            PendingLayerResult {
+                tx,
+                awaiting: Some(node.clone()),
+            },
+        );
+
+        assert!(state.resolve_pending_layer_result(
+            Some(&node),
+            LayerResult::error(request_id, "shard missing"),
+        ));
+        assert!(rx.await.is_ok());
+        assert!(!state.pending_layer_results.contains_key(&request_id));
+    }
+
+    /// An unpinned waiter keeps the old accept-anything behaviour, so paths
+    /// that don't know their target node are unaffected.
+    #[test]
+    fn an_unpinned_waiter_accepts_any_sender() {
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        let pending = PendingLayerResult { tx, awaiting: None };
+        assert!(pending.accepts(None));
+        assert!(pending.accepts(Some(&NodeId([1u8; 32]))));
+    }
+
+    /// A pinned waiter is not satisfiable by an unattributable result —
+    /// pinning would be pointless if an unauthenticated payload could clear it.
+    #[test]
+    fn a_pinned_waiter_rejects_an_unattributed_result() {
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        let pending = PendingLayerResult {
+            tx,
+            awaiting: Some(NodeId([2u8; 32])),
+        };
+        assert!(!pending.accepts(None));
+        assert!(!pending.accepts(Some(&NodeId([3u8; 32]))));
+        assert!(pending.accepts(Some(&NodeId([2u8; 32]))));
     }
 }

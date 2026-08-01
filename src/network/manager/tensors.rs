@@ -124,6 +124,7 @@ impl NetworkManager {
                         fail_pending_forward(
                             &shared_state,
                             request_id,
+                            &peer_id,
                             format!("Encryption failed: {e}"),
                         );
                         return;
@@ -145,6 +146,7 @@ impl NetworkManager {
                     fail_pending_forward(
                         &shared_state,
                         request_id,
+                        &peer_id,
                         "Internal command queue closed",
                     );
                 }
@@ -830,19 +832,22 @@ impl NetworkManager {
     }
 }
 
-/// Drain the `pending_layer_results` oneshot for `request_id` and resolve
-/// it with a `LayerResult::error(reason)`. Used from within `tokio::spawn`
-/// closures that don't have `&mut self` access (where the
-/// `NetworkManager::fail_tensor_forward` method can't be called). Silently
-/// returns if no pending entry exists — the request may have already
-/// resolved on another path.
+/// Resolve the `pending_layer_results` waiter for `request_id` with a
+/// `LayerResult::error(reason)`. Used from within `tokio::spawn` closures that
+/// don't have `&mut self` access (where the
+/// `NetworkManager::fail_tensor_forward` method can't be called).
+///
+/// `target_peer` is the peer whose forward failed. The waiter is resolved only
+/// if it is still expecting that peer — a request that has since failed over is
+/// waiting on a standby, and must not be failed by the abandoned forward.
+/// Silently returns when nothing matches.
 pub(crate) fn fail_pending_forward(
     shared_state: &std::sync::Arc<crate::daemon::SharedState>,
     request_id: uuid::Uuid,
+    target_peer: &libp2p::PeerId,
     reason: impl Into<String>,
 ) {
     let result = crate::types::LayerResult::error(request_id, reason.into());
-    if let Some((_, tx)) = shared_state.pending_layer_results.remove(&request_id) {
-        let _ = tx.send(result);
-    }
+    let sender = crate::network::transport::peer_id_to_node_id(target_peer);
+    shared_state.resolve_pending_layer_result(sender.as_ref(), result);
 }

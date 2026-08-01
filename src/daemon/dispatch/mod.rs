@@ -281,27 +281,23 @@ pub(crate) async fn dispatch_network_messages(
                                             pending_count = shared_state.pending_layer_results.len(),
                                             "DIAG: dispatcher received LayerResult"
                                         );
-                                        if let Some((_, tx)) = shared_state
-                                            .pending_layer_results
-                                            .remove(&result.request_id)
-                                        {
-                                            if tx.send(result.clone()).is_err() {
-                                                tracing::warn!(
-                                                    request_id = %result.request_id,
-                                                    tokens = result.token_ids.len(),
-                                                    finish = ?result.finish_reason,
-                                                    "DIAG: LayerResult delivered but pipeline receiver DROPPED"
-                                                );
-                                            } else {
-                                                tracing::info!(
-                                                    request_id = %result.request_id,
-                                                    tokens = result.token_ids.len(),
-                                                    activations_bytes = result.activations.len(),
-                                                    finish = ?result.finish_reason,
-                                                    pending_remaining = shared_state.pending_layer_results.len(),
-                                                    "DIAG: LayerResult delivered to pipeline"
-                                                );
-                                            }
+                                        // Resolve via the choke point so a result
+                                        // is only accepted from the node this
+                                        // request is actually waiting on — a
+                                        // failed-over request still has the
+                                        // abandoned forward outstanding.
+                                        if shared_state.resolve_pending_layer_result(
+                                            Some(sender),
+                                            result.clone(),
+                                        ) {
+                                            tracing::info!(
+                                                request_id = %result.request_id,
+                                                tokens = result.token_ids.len(),
+                                                activations_bytes = result.activations.len(),
+                                                finish = ?result.finish_reason,
+                                                pending_remaining = shared_state.pending_layer_results.len(),
+                                                "DIAG: LayerResult delivered to pipeline"
+                                            );
                                         } else {
                                             // Hedge losers (R136 L2) and genuine timeouts both
                                             // arrive here. Hedge-loser is normal operation under

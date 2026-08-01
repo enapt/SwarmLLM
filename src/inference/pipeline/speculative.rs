@@ -124,6 +124,7 @@ impl PipelineExecutor {
             let (rx, mut prefill_guard) = super::register_pending_layer_result(
                 &self.shared_state.pending_layer_results,
                 request_id,
+                Some(segment.node_id.clone()),
             )?;
 
             let forward = LayerForward {
@@ -563,8 +564,11 @@ pub(super) async fn send_verify_batch(
     // Register oneshot for the result. Cap-checked + RAII-guarded so a
     // wait_for_result Err propagation doesn't leak the pending entry —
     // see PendingLayerResultGuard / gotcha #45.
-    let (rx, mut verify_guard) =
-        super::register_pending_layer_result(&shared_state.pending_layer_results, request_id)?;
+    let (rx, mut verify_guard) = super::register_pending_layer_result(
+        &shared_state.pending_layer_results,
+        request_id,
+        Some(segment.node_id.clone()),
+    )?;
 
     // Build the LayerForward. As of DSD Phase 4 (Item 12) the worker
     // unifies speculative and standard input paths through the first-segment

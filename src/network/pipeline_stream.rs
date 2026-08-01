@@ -127,7 +127,7 @@ impl PipelineStreamClient {
         let reader_state = shared_state.clone();
         let reader_request_id = request_id;
         let reader = tokio::spawn(async move {
-            reader_task_outbound(read_half, reader_request_id, reader_state).await
+            reader_task_outbound(read_half, reader_request_id, peer_id, reader_state).await
         });
 
         let handle = Arc::new(OutboundStreamHandle {
@@ -200,10 +200,18 @@ where
 
 /// Coordinator-side reader task: reads result frames off the stream, decodes
 /// them, and dispatches via the existing `pending_layer_results` oneshot map.
-async fn reader_task_outbound<R>(mut read: R, request_id: Uuid, shared_state: Arc<SharedState>)
-where
+async fn reader_task_outbound<R>(
+    mut read: R,
+    request_id: Uuid,
+    peer_id: PeerId,
+    shared_state: Arc<SharedState>,
+) where
     R: futures::AsyncRead + Unpin,
 {
+    // Results on this stream can only come from the peer it was opened to, so
+    // every resolve below is attributed to that peer — a waiter that has failed
+    // over to a standby is not satisfied by this stream's traffic.
+    let sender = shared_state.peer_to_node_id_from_registry(&peer_id);
     loop {
         let frame = match read_frame(&mut read).await {
             Ok(f) => f,
@@ -215,12 +223,10 @@ where
                 );
                 // Evict stale result channel so the pipeline fails fast instead
                 // of waiting for the adaptive stale-tensor cleanup.
-                if let Some((_, tx)) = shared_state.pending_layer_results.remove(&request_id) {
-                    let _ = tx.send(LayerResult::error(
-                        request_id,
-                        format!("pipeline stream closed: {e}"),
-                    ));
-                }
+                shared_state.resolve_pending_layer_result(
+                    sender.as_ref(),
+                    LayerResult::error(request_id, format!("pipeline stream closed: {e}")),
+                );
                 return;
             }
         };
@@ -238,9 +244,7 @@ where
         match protocol::decode_layer_result(&frame) {
             Ok(result) => {
                 let rid = result.request_id;
-                if let Some((_, tx)) = shared_state.pending_layer_results.remove(&rid) {
-                    let _ = tx.send(result);
-                } else {
+                if !shared_state.resolve_pending_layer_result(sender.as_ref(), result) {
                     // Common after R136 L2 hedging — when a hedge race
                     // resolves, the loser's response arrives here with no
                     // pending oneshot (the guard drop already evicted the
