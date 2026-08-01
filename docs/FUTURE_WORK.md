@@ -4518,34 +4518,100 @@ segment in the failing run was on the 4 ms LAN peer. Grepping the whole
 `request_id` through the log — rather than the error string — showed the good
 result arriving two seconds late to an empty map.
 
-### Still open (found during this investigation, NOT fixed)
+### The three follow-ups — all now resolved (2026-08-01)
 
-**1. The segment timeout does not account for the peer's speed.**
-`compute_segment_timeout` budgets `PREFILL_SECS_PER_LAYER = 15` per layer and
-uses `activation_bytes` only as a *boolean* prefill/decode discriminator — the
-magnitude, which is directly proportional to prompt length, is discarded. In the
-run above the CPU-only LAN peer needed >15 s/layer for 8 layers of an 8B model
-and was cut off; the GPU standby did the same work at 1.2 s/layer. So the budget
-is simultaneously too tight for CPU peers and very loose for GPU ones. This is
-the `.claude/rules/architecture.md` § "Timeouts: bound what actually varies"
-shape. Fixing it means scaling by observed per-layer latency for that peer
-(`observed_latency_ms_per_layer` already exists) and/or by activation size.
-Deliberately not guessed at here — with the failover fix in place a slow peer
-now costs one failover rather than the whole request, which removes the urgency.
+All three were found during the investigation above and fixed in the same
+session. Recorded here because the reasoning matters more than the diffs.
 
-**2. The relay latency penalty does not hold its own stated invariant.**
-`RELAY_HOP_LATENCY_PENALTY_MS = 150` is documented as guaranteeing "a
-directly-connected holder always outranks a relayed one". It does not, for two
-compounding reasons: `get_peer_metrics` scores an unmeasured peer at
-`unwrap_or(100)`, and the penalty is additive. A relay-only peer we have never
-timed therefore scores 250 — better than a *measured* direct peer at 570 ms.
-Observed live: `7c10ea04` is reachable only via relay circuit, has never yielded
-a latency sample, and scores above a real direct peer. Worth deciding whether an
-unmeasurable peer should be treated as optimistically as 100 ms at all.
+**1. The segment timeout ignored how fast the peer actually is. FIXED.**
 
-**3. Segment selection consults latency almost last.** In `greedy_assign` the
-`max_by` orders by local → coverage → load → latency. `load` is an integer count
-of in-flight requests, so one active request on a 4 ms LAN peer is enough to send
-the segment to a peer two orders of magnitude further away. Coverage-before-
-latency is defensible (fewer hops), but the two are incommensurable and compared
-lexicographically rather than as a cost.
+`compute_segment_timeout` budgeted a flat `PREFILL_SECS_PER_LAYER = 15` and used
+`activation_bytes` only as a *boolean* prefill/decode discriminator, discarding
+the magnitude. The same allowance therefore went to a laptop CPU and a
+datacentre GPU.
+
+There is now a measured model per peer in `daemon::state::peer_speed`, and
+`SegmentBudget::for_forward` sizes each deadline from it. Three things it gets
+right that the constant could not:
+
+- **Prefill and decode are separate coefficients.** They differ by ~2 orders of
+  magnitude on the same hardware — measured live at 1275 ms/layer prefill vs
+  18.75 ms/layer decode on one CPU peer. The single blended EMA that existed
+  before sat at 239 ms/layer and predicted neither. Prefill is normalised by
+  `layers × activation_bytes`, decode by layers alone.
+- **A cold peer gets room to load the model.** This was the actual cause of the
+  original 120s cut-off: the peer needed ~120s to load an 8B model and computed
+  the segment itself in 10s. Loading is not proportional to anything the
+  prediction models, so `COLD_MODEL_LOAD_ALLOWANCE_SECS` is *added* when
+  `(peer, model)` has no recent successful forward. Being generous is safe
+  because an unreachable peer is failed by `RR_ACK_TIMEOUT_SECS` (10s) on the
+  send path, which this deadline never influences.
+- **Units are explicit.** `ActivationUnits` distinguishes hidden-state bytes
+  (what the coefficient is measured in) from raw prompt bytes handed to the
+  first segment. Mixing them would silently corrupt the estimate, so the
+  measured path is used only when they match and falls back otherwise.
+
+`SegmentBudget` is deliberately opaque and constructible only through
+`for_forward`, so a new call site cannot invent its own deadline — the
+"helper nobody is obliged to call" failure mode from
+`.claude/rules/architecture.md` § "One invariant, N paths".
+
+Estimates are evicted after an hour of silence (`PEER_SPEED_MAX_AGE`). That also
+closes the **routing ratchet**: the estimate is only refreshed by routing to a
+peer, so a peer that once looked slow could never look fast again. Three dead
+entries for departed peers were live in the map when this was written.
+
+**2. The relay penalty did not hold its own stated invariant. FIXED.**
+
+`RELAY_HOP_LATENCY_PENALTY_MS = 150` was documented as guaranteeing "a
+directly-connected holder always outranks a relayed one". An additive penalty
+cannot guarantee an ordering. Two compounding errors: `get_peer_metrics` scored
+an unmeasured peer at `unwrap_or(100)` — *better than most real peers*, so
+knowing nothing was a bonus — and 150 ms is smaller than a real latency spread.
+A relay-only peer never timed scored 250 and beat a measured direct peer at
+570 ms. Live, that peer (`7c10ea04`) was also the one whose forward timed out
+with no standby in the `fa8cfb9d` run.
+
+Reachability is now a separate, higher-priority sort key (`ReachTier`:
+Local < DirectMeasured < DirectUnmeasured < RelayedMeasured < RelayedUnmeasured),
+so the guarantee holds for any latency values whatsoever. Relayed holders remain
+*usable* — they rank behind direct ones, which is what the tier always meant.
+The unmeasured default is now pessimistic (`UNMEASURED_PEER_LATENCY_MS = 300`).
+The 150 ms penalty survives as an honest cost adjustment *within* the relayed
+tier, since a relayed forward really does pay an extra hop.
+
+**3. Segment selection consulted latency almost last. FIXED.**
+
+`greedy_assign` ranked local → coverage → load → latency lexicographically.
+Because `load` is a whole-request integer it changed more often than it tied, so
+latency was effectively never reached: one in-flight request on a 4 ms LAN peer
+was enough to hand the segment to a peer 100x further away.
+
+Coverage, latency and load are not comparable quantities and cannot be ranked
+one after another — they have to be priced. `estimated_cost_per_layer` now
+returns `latency / covered_layers + compute_per_layer × (1 + load)`:
+
+- dividing latency by coverage is what lets a wide segment amortise a distant
+  peer, and stops a narrow one pretending it is cheap;
+- load *scales* compute instead of being a higher-priority key, so a peer
+  already serving one request is about twice as expensive — a real penalty, but
+  one a 100x latency difference can outweigh;
+- compute comes from the measured per-layer figure, falling back to advertised
+  throughput, then to a neutral default so an unrated peer is neither favoured
+  nor disqualified.
+
+Local preference and the reachability tier are still checked first, both
+deliberate: local shards cost no network at all, and the tier carries the
+guarantee above.
+
+### What is still not modelled
+
+- **Prefill is treated as linear in prompt length.** Attention is quadratic, so
+  the coefficient drifts on very long prompts. It sizes a timeout with a 3x
+  safety factor, not a promise, and a wrong guess costs one failover.
+- **Cold-load time is a constant, not a measurement.** We could time how long a
+  peer takes to load a given model and learn it per (peer, model); today it is a
+  single generous allowance.
+- **`greedy_assign` is still greedy.** It optimises each step, not the pipeline
+  as a whole. The Parallax DP path exists for globally-optimal allocation; this
+  is the fallback.
