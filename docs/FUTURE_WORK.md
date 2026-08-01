@@ -4434,3 +4434,49 @@ than "slow" is the part that does not yet add up.
 Do not "fix" this speculatively — the eviction path is guarded in two places
 already and adding a third guard without a reproduction risks re-introducing the
 stranded-VRAM bug those guards were written to avoid.
+
+## Multi-segment distributed inference fails: "Tensor bytes too short" (2026-08-01)
+
+**Status: CONFIRMED and reproducible. Not diagnosed. Not fixed.**
+
+Two-machine test on v0.3.59-alpha (WSL coordinator + CPU-only LXC peer, 4 ms
+apart on the same LAN):
+
+- **Single-peer routing works.** `llama-3.2-1b-instruct-q8-0`, which the peer
+  holds completely, returned a correct answer in 10.4 s with
+  `x-swarm-route: distributed`, `x-swarm-peers: 1`, `x-swarm-segments: 1`. The
+  scheduler correctly sent the whole request to the peer rather than splitting.
+- **A genuine pipeline split fails.** `meta-llama-3.1-8b-instruct-q4-k-m`, which
+  NEITHER node holds completely, assembled a real 3-segment pipeline and then
+  died:
+
+```
+HTTP 500 after 181 s
+  Inference error: Internal error: Tensor bytes too short
+INFO  model-worker: Model loaded model=meta-llama-3.1-8b layers="[10..32)" device=Cpu
+WARN  pipeline::distributed: Pipeline failed and failover (if eligible) was unsuccessful
+INFO  request complete route=distributed segments=3
+```
+
+The error comes from `inference/tensor_util.rs:106` — a length check on an
+inbound tensor payload. It fires **immediately after the local worker finishes
+loading its segment**, so the failure is on the first activation forward
+crossing a segment boundary, not during generation.
+
+**What is NOT yet known**, and should be established before changing anything:
+
+- Which direction the short payload travels (into the local segment from the
+  peer, or out of it), and which of the three segments is on which node.
+- Whether the payload is genuinely truncated on the wire, or the length check
+  is computing an expected size wrongly for this shape. `tensor_util.rs:106`
+  guards the header parse; `:115` guards `ndim` — only the first fired.
+- Whether it is specific to a 3-segment split, to this model's geometry, or to
+  the local segment being a middle slice (`[10..32)` of 32 layers).
+- Whether it predates v0.3.59. **Nothing today touched the tensor wire format**
+  — the day's changes were memory admission, idle-unload and CI — so this is
+  most likely pre-existing and simply never exercised, since every other test
+  this cycle ran on a single node.
+
+**Reproduction:** two nodes, a model neither holds completely, request it from
+the node holding only part. Header `x-swarm-segments` confirms a real split;
+anything reporting `segments: 1` is the single-peer path and will pass.
