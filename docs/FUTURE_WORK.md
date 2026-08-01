@@ -4463,7 +4463,47 @@ inbound tensor payload. It fires **immediately after the local worker finishes
 loading its segment**, so the failure is on the first activation forward
 crossing a segment boundary, not during generation.
 
-**Narrowed 2026-08-01 (investigation, not a fix):**
+**CORRECTED 2026-08-01 — the earlier analysis below was wrong on its central
+point, and the "reporting" fix it proposed was unnecessary.**
+
+The coordinator **already** checks `finish_reason` for `Error` and fails over,
+at `pipeline/distributed.rs:1033`, and logs the remote node's own message. The
+claim below that it never inspects `finish_reason` came from a grep truncated at
+`head -10` that cut off before that line. A fix was written against that claim,
+compiled, and reverted on discovering it was unreachable.
+
+**Re-running the reproduction with that check's log read properly, the actual
+error is:**
+
+```
+Remote segment returned error ... segment=1 node=7c10ea04
+  error=OutboundFailure: Timeout while waiting for a response
+→ Pipeline assembly failed: Segment 1 failed with no standby available
+```
+
+That is a **network timeout to a peer 411 ms away over the internet**, not a
+tensor-format defect. The pipeline picked a distant peer for a segment of an 8B
+model, the forward timed out, and no standby was available for that segment.
+
+**So there are two separate observations, and only one is understood:**
+
+1. *This run* — a plain timeout to a far peer with no standby. Arguably correct
+   behaviour under the circumstances; the open question is whether the scheduler
+   should prefer a 4 ms LAN peer that also holds the shard over a 411 ms one, and
+   whether a segment with no standby should be scheduled to a distant peer at all.
+2. *The first run* — `Internal: Tensor bytes too short` after 181 s, with the
+   local worker holding `[10..32)`. **Still unexplained.** It may be a downstream
+   consequence of the same timeout leaving an empty buffer, but that was not
+   demonstrated, and the two runs took different routes.
+
+**Next step:** force the split onto the LAN peer only (4 ms, holds the same
+shards) and see whether a multi-segment pipeline completes. That separates "the
+split path is broken" from "the split path is fine and we picked a bad peer",
+which is the question that actually matters and is not yet answered.
+
+---
+
+**Superseded analysis (2026-08-01), retained for the parts that still hold:**
 
 - The check that fires is `bytes.len() < 4` — so the payload is **essentially
   empty**, not a subtly wrong size. This is not an arithmetic bug in an expected
