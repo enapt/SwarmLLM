@@ -4615,3 +4615,44 @@ guarantee above.
 - **`greedy_assign` is still greedy.** It optimises each step, not the pipeline
   as a whole. The Parallax DP path exists for globally-optimal allocation; this
   is the fallback.
+## Embedding table on CPU: the estimate is below the transient load peak (2026-08-01)
+
+**Status: known, minor, not fixed. Documented so it is not rediscovered as a bug.**
+
+The token-embedding table is now resident at f16
+(`inference::split::loader::EMBEDDING_DTYPE`), and both footprint estimators
+charge `EMBEDDING_TABLE_BYTES_PER_ELEMENT = 2` to match.
+
+On **CUDA** that is exactly right: candle has a specialised
+`dequantize_f16` kernel, so the f16 tensor is produced directly and no f32 copy
+of the table ever exists.
+
+On **CPU** there is no such kernel. `QTensor::dequantize_f16` falls back to
+`self.dequantize(device)?.to_dtype(F16)` — i.e. it materialises the full f32
+tensor and then casts. For Gemma 2 2B that is a transient 2250 MB before
+settling at 1125 MB.
+
+Consequences, in order of how much they matter:
+
+1. **Steady state is strictly better than before** — 2 bytes/element resident
+   instead of 4. Nothing regressed for a running node.
+2. **The transient peak is unchanged from before this release** (it was 4
+   bytes/element both transiently and resident). So no node that previously
+   loaded a model can now fail to.
+3. **`estimate_worker_ram_mb` now sits below that transient peak.** A CPU node
+   whose free RAM is between the steady-state figure and the load peak could be
+   admitted and then hit the spike. `CPU_PROCESS_OVERHEAD_BYTES` errs high and
+   system RAM is usually far less contended than VRAM, so this is a narrowed
+   safety margin rather than a live failure — but it is a real narrowing.
+
+If it ever bites, the options are, cheapest first:
+
+- Charge the *peak* rather than the resident size in `estimate_worker_ram_mb`
+  only (leaving the VRAM estimator at the true f16 cost, since CUDA has no
+  spike). Costs some CPU admissions that would have succeeded.
+- Dequantize the table in row blocks on the CPU path so the peak never exceeds
+  one block, which removes the spike outright.
+
+Do NOT "fix" this by reverting the estimator to 4 bytes/element: that would
+re-refuse exactly the large-vocabulary models on modest GPUs that this release
+set out to make work, and the GPU path has no spike at all.
