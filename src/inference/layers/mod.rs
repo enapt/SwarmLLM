@@ -1713,3 +1713,78 @@ mod blocked_attention_tests {
         assert!(unbounded > 10 * ATTN_SCORE_BUDGET_ELEMS);
     }
 }
+
+/// CUDA-only probe for the memory behaviour blocking exists to fix.
+///
+/// Ignored by default — needs a real GPU. Run with:
+/// ```text
+/// CUDA_COMPUTE_CAP=86 cargo test --release --features candle-cuda \
+///   attention_survives -- --ignored --nocapture
+/// ```
+///
+/// The geometry is a pipeline segment's prefill: `handle_forward` hands the
+/// WHOLE prompt to one forward (unlike local generation, which chunked prefill
+/// already bounds to 128 positions), so `q_len` is the full prompt length.
+///
+/// **Verified on an RTX 3070 Laptop (8 GB), 2026-08-01.** Raising
+/// `ATTN_SCORE_BUDGET_ELEMS` so blocking never triggers makes this exact test
+/// fail with `DriverError(CUDA_ERROR_OUT_OF_MEMORY)` — the error a tester
+/// reported from the field. With blocking it completes. Same binary, same
+/// inputs, one constant changed: that is the causal evidence for this fix, and
+/// re-running that A/B is the way to re-establish it if the code moves.
+///
+/// Note this cannot be reproduced through a normal local request: those take
+/// `route=local`, where chunked prefill already caps `q_len` at 128. Measuring
+/// peak VRAM on a local request showed no difference (7956 MB vs 7882 MB)
+/// precisely because that path was never the vulnerable one.
+#[cfg(test)]
+mod cuda_attention_memory_probe {
+    use super::*;
+    use candle_core::{Device, Tensor};
+
+    #[test]
+    #[ignore]
+    fn attention_survives_a_prefill_that_would_otherwise_exhaust_the_card() {
+        let dev = match Device::new_cuda(0) {
+            Ok(d) => d,
+            Err(e) => {
+                eprintln!("no CUDA device ({e}) — skipping");
+                return;
+            }
+        };
+        // phi-3.5-mini's shape, at a prompt length a coding agent really sends.
+        let (heads, head_dim, n) = (32usize, 96usize, 8192usize);
+        let unblocked_bytes = heads * n * n * 4;
+        eprintln!(
+            "q_len={n} heads={heads}: one UNBLOCKED score temporary would be {:.2} GB; \
+             blocking targets {:.0} MB",
+            unblocked_bytes as f64 / 1e9,
+            (ATTN_SCORE_BUDGET_ELEMS * 4) as f64 / 1e6
+        );
+        eprintln!(
+            "chosen query block = {}",
+            attention_query_block(n, n, heads)
+        );
+
+        let mk = |s: usize, seed: f32| {
+            let cnt = heads * s * head_dim;
+            let data: Vec<f32> = (0..cnt)
+                .map(|i| ((i as f32 * 0.001 + seed).sin()) * 0.2)
+                .collect();
+            Tensor::from_vec(data, (1, heads, s, head_dim), &dev).unwrap()
+        };
+        let q = mk(n, 0.0);
+        let k = mk(n, 1.0);
+        let v = mk(n, 2.0);
+        let neg_inf = Tensor::new(f32::NEG_INFINITY, &dev).unwrap();
+
+        let out = standard_attention(&q, &k, &v, None, head_dim, heads, heads, &neg_inf, None)
+            .expect("attention must complete without exhausting device memory");
+        assert_eq!(out.dims(), &[1, heads, n, head_dim]);
+        // Force the result to be realised before we claim success.
+        let probe = out.narrow(2, 0, 1).unwrap().flatten_all().unwrap();
+        let v0 = probe.to_vec1::<f32>().unwrap()[0];
+        assert!(v0.is_finite(), "output must be finite, got {v0}");
+        eprintln!("OK — completed, first output element {v0:.6}");
+    }
+}
