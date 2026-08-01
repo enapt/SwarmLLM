@@ -1064,11 +1064,34 @@ impl NetworkManager {
                         let mut stale: Vec<(OutboundRequestId, uuid::Uuid, libp2p::PeerId)> = Vec::new();
                         for (req_id, (uuid, sent_at, target_peer, num_layers, activation_bytes)) in &self.pending_tensor_outbound {
                             let age = now.duration_since(*sent_at);
-                            // Adaptive timeout: 15s/layer for prefill, 2s/layer for decode,
-                            // clamped to [30s, 600s]. Matches pipeline.rs logic.
-                            let is_prefill = *activation_bytes > crate::inference::pipeline::PREFILL_ACTIVATION_THRESHOLD_BYTES;
-                            let per_layer = if is_prefill { 15u64 } else { 2 };
-                            let timeout_secs = ((*num_layers as u64) * per_layer).clamp(30, MAX_TENSOR_FORWARD_SECS);
+                            let _ = (num_layers, activation_bytes);
+                            // This sweep is a BACKSTOP for sends libp2p dropped
+                            // silently — not a second, competing deadline. It
+                            // must therefore never fire before the pipeline's
+                            // own `SegmentBudget`, which is the deadline that
+                            // knows how fast this peer is and whether it still
+                            // has to load the model.
+                            //
+                            // It used to recompute `layers x 15s` here and a
+                            // comment claimed it "matches pipeline.rs logic".
+                            // That stopped being true the moment the pipeline
+                            // learned to size deadlines from measured peer
+                            // speed (v0.3.60): the pipeline would allow 600s
+                            // while this reaped the same forward at 120s and
+                            // synthesised "Tensor forward timed out", so the
+                            // whole point of measuring peers was defeated for
+                            // exactly the slow peers it was built for.
+                            // Observed live on v0.3.61 — a 2000-token prefill
+                            // over 8 layers, killed at 130s against a 600s
+                            // budget, twice, and surfaced as the misleading
+                            // "Tensor bytes too short".
+                            //
+                            // `MAX_TENSOR_FORWARD_SECS` is the request_response
+                            // protocol's own timeout, so libp2p reports a real
+                            // `OutboundFailure` at that point anyway; this is
+                            // the correct ceiling and there is nothing to gain
+                            // from guessing a tighter one.
+                            let timeout_secs = MAX_TENSOR_FORWARD_SECS;
                             let is_rr_pending = self.swarm.behaviour()
                                 .request_response.is_pending_outbound(target_peer, req_id);
                             let is_connected = self.swarm.is_connected(target_peer);

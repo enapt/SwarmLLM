@@ -126,19 +126,26 @@ impl SegmentBudget {
             )
         };
 
+        // A cold load can legitimately exceed the warm ceiling, so the
+        // allowance is added on top of it rather than being clipped away by it.
+        let ceiling = Duration::from_secs(SEGMENT_TIMEOUT_MAX_SECS)
+            + Duration::from_secs(if warm {
+                0
+            } else {
+                COLD_MODEL_LOAD_ALLOWANCE_SECS
+            });
+        // ...but never beyond what the transport will hold the request open
+        // for. `RR_REQUEST_TIMEOUT_SECS` is the request_response protocol
+        // timeout: past it libp2p fails the send regardless, so a larger budget
+        // here would only wait for a result that can no longer arrive. Waiting
+        // longer than the layer beneath you is not patience, it is a hang.
+        let transport_ceiling =
+            Duration::from_secs(crate::network::behaviour::RR_REQUEST_TIMEOUT_SECS);
+
         Self {
-            duration: total.clamp(
-                Duration::from_secs(SEGMENT_TIMEOUT_MIN_SECS),
-                // A cold load can legitimately exceed the warm ceiling, so the
-                // allowance is added on top of it rather than being clipped
-                // away by it.
-                Duration::from_secs(SEGMENT_TIMEOUT_MAX_SECS)
-                    + Duration::from_secs(if warm {
-                        0
-                    } else {
-                        COLD_MODEL_LOAD_ALLOWANCE_SECS
-                    }),
-            ),
+            duration: total
+                .clamp(Duration::from_secs(SEGMENT_TIMEOUT_MIN_SECS), ceiling)
+                .min(transport_ceiling),
             basis,
         }
     }
@@ -529,6 +536,65 @@ mod segment_budget_tests {
             b.basis(),
             "default",
             "raw-prompt units must fall back rather than mis-apply the coefficient"
+        );
+    }
+
+    /// The transport reaps an outstanding forward at `RR_REQUEST_TIMEOUT_SECS`
+    /// and libp2p fails the send at the same point, so a budget larger than
+    /// that waits for a result that can no longer arrive.
+    ///
+    /// This is the regression v0.3.60 shipped: the pipeline learned to size
+    /// deadlines from measured peer speed and could allow 600s+, while the
+    /// network manager still reaped the same forward on a `layers x 15s`
+    /// formula — 120s for an 8-layer segment. A legitimately slow peer was
+    /// killed at 130s against a 600s budget, twice, and the empty result
+    /// surfaced as "Tensor bytes too short". Both sides are now bounded by the
+    /// transport, and neither recomputes the other's number.
+    #[test]
+    fn no_budget_outlives_the_transport_that_carries_it() {
+        let state = test_state();
+        let model = ModelId("m".into());
+        let transport = Duration::from_secs(crate::network::behaviour::RR_REQUEST_TIMEOUT_SECS);
+
+        // Cold + unmeasured is the largest budget this can produce.
+        let cold = SegmentBudget::for_forward(
+            &state,
+            &NodeId([9u8; 32]),
+            &model,
+            WorkKind::Prefill,
+            80,
+            4_000_000,
+            ActivationUnits::HiddenStates,
+        );
+        assert!(
+            cold.duration() <= transport,
+            "budget {:?} exceeds the transport ceiling {:?} — the forward would be \
+             reaped before this deadline and the wait could never succeed",
+            cold.duration(),
+            transport
+        );
+
+        // And a measured-but-very-slow peer likewise.
+        state.record_peer_segment_latency(
+            &NodeId([10u8; 32]),
+            &model,
+            WorkKind::Prefill,
+            600_000,
+            8,
+            213_268,
+        );
+        let slow = SegmentBudget::for_forward(
+            &state,
+            &NodeId([10u8; 32]),
+            &model,
+            WorkKind::Prefill,
+            8,
+            213_268,
+            ActivationUnits::HiddenStates,
+        );
+        assert!(
+            slow.duration() <= transport,
+            "measured-slow budget must also be capped"
         );
     }
 
