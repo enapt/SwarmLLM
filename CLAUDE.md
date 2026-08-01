@@ -196,7 +196,50 @@ All 20 build phases complete. All subsystems wired — no stubs. **1546 lib + 80
 
 Per-round history lives in `~/.claude/projects/-home-user-SwarmLLM/memory/round_log_*.md` and the CHANGELOG; `docs/ARCHITECTURE.md` is the canonical architecture. This section keeps only the current release line plus one-line prior-round pointers.
 
-### Latest — v0.3.49 / .50 / .51-alpha (2026-07-29): attribution, and a tokenizer bug still open
+### Latest — v0.3.56 → .59 (2026-07-31→08-01): memory admission, and a CI cache that shipped a broken release
+
+**v0.3.59** — a model was refused for memory that was free. Admission compared a
+new model against a budget a resident-but-idle one still held, and only a later
+background pass released it. Memory is now reclaimed from models with no work in
+flight *before* any refusal; in-flight is read from the worker pool's own
+per-request channels, the one place every execution path crosses, so no path can
+be missed. Verified on two nodes by the reporter, both directions.
+
+**v0.3.58** — a model could be freed *while answering*. Busy-ness was derived
+from `active_pipelines` (distributed path only) and `serving_models` (peer-served
+only), so **a node answering its own client locally was in neither**. Also, a
+model with no request history counted as idle for ever rather than for as long as
+it had been loaded, and the message named graphics memory on CPU-only machines.
+Same release: **`cargo test` overwrote a running node's API key** — `SharedState::new`
+resolves the key and a test built from `Config::default()` inherits the REAL
+`data_dir`. Now a no-op in test builds (gotcha #226).
+
+**v0.3.57** — restored the Windows GPU download that **v0.3.56 shipped without**.
+Root cause: `release.yml` and `cache-warm.yml` shared a cache key and had to agree
+on the Vulkan SDK by hand. They had diverged since **v0.3.46** — ten releases —
+and got away with it while `latest` kept resolving to the pinned version. The
+toolchain now lives in one composite action (`.github/actions/gpu-build-env`) both
+call and neither can override; publishing checks each platform's archive **by
+name** (a count cannot tell a complete release from one missing a platform) and
+holds an incomplete release as a draft. Gotchas #222/#223/#224.
+
+**Release process:** clearing `prerelease` does NOT move `/releases/latest` —
+set `make_latest=true` in the same call (gotcha #225).
+
+**OPEN — distributed multi-segment inference.** Single-peer routing verified
+working. A genuine 3-segment split failed twice, differently: once
+`Tensor bytes too short` (**unexplained**), once a plain timeout to a 411 ms
+internet peer with no standby. **Read `docs/FUTURE_WORK.md` § "Multi-segment
+distributed inference" before touching this** — it records a corrected analysis
+after a fix was written against a claim that turned out to be false. Next test is
+named there: force the split onto the 4 ms LAN peer to separate "split path
+broken" from "bad peer chosen".
+
+**Session hygiene:** four wrong claims in one day from truncated greps and stale
+notes (gotcha #228). `MEMORY.md` is over its 24.4 KB load limit, so part never
+reaches the session — prune before trusting it.
+
+### Superseded — v0.3.49 / .50 / .51-alpha (2026-07-29): attribution, and a tokenizer bug still open
 
 **FIXED 2026-07-29 — the SPM tokenizer defect is closed.** `spm_encode` applied
 stale entries from its merge priority queue: merging extends `left` to cover
